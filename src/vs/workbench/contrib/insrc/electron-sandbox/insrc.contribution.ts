@@ -6,9 +6,18 @@
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IInsrcDaemonService } from '../common/daemonService.js';
 import { IInsrcSessionService } from '../common/sessionService.js';
+import { IInsrcWorkspaceService } from '../common/workspaceService.js';
+import { IInsrcRepoService } from '../common/repoService.js';
+import { IInsrcAgentRunService } from '../common/agentRunService.js';
 import { InsrcDaemonServiceImpl } from './daemonServiceImpl.js';
 import { InsrcSessionServiceImpl } from './sessionServiceImpl.js';
+import { InsrcWorkspaceServiceImpl } from './workspaceServiceImpl.js';
+import { InsrcRepoServiceImpl } from './repoServiceImpl.js';
+import { InsrcAgentRunServiceImpl } from './agentRunServiceImpl.js';
 
 // Register services (desktop/Electron only)
-registerSingleton(IInsrcDaemonService, InsrcDaemonServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcDaemonService, InsrcDaemonServiceImpl, InstantiationType.Eager);
 registerSingleton(IInsrcSessionService, InsrcSessionServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcWorkspaceService, InsrcWorkspaceServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcRepoService, InsrcRepoServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcAgentRunService, InsrcAgentRunServiceImpl, InstantiationType.Delayed);

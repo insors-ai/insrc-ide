@@ -176,6 +176,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 			const wasConnected = this._connected;
 			this._connected = state === 'connected';
 			if (wasConnected !== this._connected) {
+				this.logService.info('[insrc] Daemon state changed:', state);
 				this._onDidChangeState.fire(state);
 
 				if (!this._connected) {
@@ -193,6 +194,12 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 				this.logService.warn('[insrc] Invalid JSON from daemon:', line.substring(0, 200));
 			}
 		}));
+
+		// Auto-connect on instantiation
+		this.connect().then(
+			() => this.logService.info('[insrc] Auto-connected to daemon'),
+			(err) => this.logService.warn('[insrc] Auto-connect failed, will retry on demand:', (err as Error).message),
+		);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -200,7 +207,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 	// ---------------------------------------------------------------------------
 
 	async connect(): Promise<void> {
-		await this._channel.call<void>('connect');
+		await this._channel.call<void>('connect', []);
 		this._connected = true;
 		this._onDidChangeState.fire('connected');
 	}
@@ -245,7 +252,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 			}
 
 			// Send via main process
-			this._channel.call<void>('sendMessage', JSON.stringify(req));
+			this._channel.call<void>('sendMessage', [JSON.stringify(req)]);
 		});
 	}
 
@@ -266,7 +273,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 		this._activeStreams.set(reqId, handle);
 
 		const req: IpcRequest = { id: reqId, method, params, stream: true };
-		this._channel.call<void>('sendMessage', JSON.stringify(req));
+		this._channel.call<void>('sendMessage', [JSON.stringify(req)]);
 
 		return handle;
 	}
@@ -329,7 +336,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 		}
 		this._activeStreams.clear();
 
-		this._channel.call<void>('disconnect');
+		this._channel.call<void>('disconnect', []);
 
 		super.dispose();
 	}

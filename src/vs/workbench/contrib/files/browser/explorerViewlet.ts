@@ -38,8 +38,9 @@ import { isMacintosh, isWeb } from '../../../../base/common/platform.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { isMouseEvent } from '../../../../base/browser/dom.js';
+import { FileAccess } from '../../../../base/common/network.js';
 
-const explorerViewIcon = registerIcon('explorer-view-icon', Codicon.files, localize('explorerViewIcon', 'View icon of the explorer view.'));
+const explorerViewIcon = FileAccess.asBrowserUri('vs/workbench/contrib/insrc/browser/media/insrc-28.png' as `vs/workbench/${string}`);
 const openEditorsViewIcon = registerIcon('open-editors-view-icon', Codicon.book, localize('openEditorsIcon', 'View icon of the open editors view.'));
 
 export class ExplorerViewletViewsContribution extends Disposable implements IWorkbenchContribution {
