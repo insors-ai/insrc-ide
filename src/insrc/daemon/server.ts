@@ -150,9 +150,11 @@ export class IpcServer {
     socket.on('error', onError);
 
     // Stream send function — writes IpcStreamMessage to socket
+    // Always override msg.id with the request's id so the client can correlate
     const sendStream = (msg: IpcStreamMessage): void => {
       try {
-        socket.write(JSON.stringify(msg) + '\n');
+        const out = { ...msg, id: request.id };
+        socket.write(JSON.stringify(out) + '\n');
       } catch {
         // Socket broken — abort the handler
         abortController.abort();

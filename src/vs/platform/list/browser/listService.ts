@@ -1391,7 +1391,7 @@ configurationRegistry.registerConfiguration({
 		[openModeSettingKey]: {
 			type: 'string',
 			enum: ['singleClick', 'doubleClick'],
-			default: 'singleClick',
+			default: 'doubleClick',
 			description: localize({
 				key: 'openModeModifier',
 				comment: ['`singleClick` and `doubleClick` refers to a value the setting can take and should not be localized.']

@@ -39,7 +39,7 @@ interface IpcStreamMessage {
 // ---------------------------------------------------------------------------
 
 const RPC_TIMEOUT_MS = 30_000;
-const STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
+const STREAM_INACTIVITY_TIMEOUT_MS = 600_000; // 10 minutes -- ollama on CPU can be slow
 
 // ---------------------------------------------------------------------------
 // Pending request / stream bookkeeping
@@ -127,11 +127,13 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 		const data = msg.data as Record<string, unknown> | undefined;
 		switch (msg.stream) {
 			case 'delta':
-				return { type: 'delta', content: String(data?.['content'] ?? '') };
+				// Daemon sends { text, format }, not { content }
+				return { type: 'delta', content: String(data?.['text'] ?? data?.['content'] ?? '') };
 			case 'gate':
 				return { type: 'gate', gateId: String(data?.['gateId'] ?? ''), actions: (data?.['actions'] as string[]) ?? [] };
 			case 'progress':
-				return { type: 'progress', step: String(data?.['step'] ?? ''), status: String(data?.['status'] ?? '') };
+				// Daemon sends { message }, not { step, status }
+				return { type: 'progress', step: String(data?.['step'] ?? data?.['message'] ?? ''), status: String(data?.['status'] ?? '') };
 			case 'checkpoint':
 				return { type: 'checkpoint', sessionId: String(data?.['sessionId'] ?? ''), data: data?.['data'] };
 			case 'context.set':
@@ -188,6 +190,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 		// Listen for raw messages from main process and dispatch
 		this._register(this._channel.listen<string>('onDidReceiveMessage')(line => {
 			try {
+				this.logService.debug('[insrc] raw message from daemon:', line.substring(0, 300));
 				const msg = JSON.parse(line) as IpcResponse | IpcStreamMessage;
 				this._dispatchMessage(msg);
 			} catch {
@@ -273,6 +276,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 		this._activeStreams.set(reqId, handle);
 
 		const req: IpcRequest = { id: reqId, method, params, stream: true };
+		this.logService.info('[insrc] stream() sending id=' + reqId + ' method=' + method + ' activeStreams=' + this._activeStreams.size);
 		this._channel.call<void>('sendMessage', [JSON.stringify(req)]);
 
 		return handle;
@@ -285,9 +289,12 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 	private _dispatchMessage(msg: IpcResponse | IpcStreamMessage): void {
 		if ('stream' in msg && typeof (msg as IpcStreamMessage).stream === 'string') {
 			const streamMsg = msg as IpcStreamMessage;
+			this.logService.debug('[insrc] stream msg id=' + streamMsg.id + ' stream=' + streamMsg.stream + ' activeStreams=' + this._activeStreams.size);
 			const handle = this._activeStreams.get(streamMsg.id);
 			if (handle) {
 				handle.handleMessage(streamMsg);
+			} else {
+				this.logService.warn('[insrc] no stream handle for id=' + streamMsg.id);
 			}
 			return;
 		}

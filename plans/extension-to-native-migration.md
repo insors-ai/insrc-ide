@@ -89,51 +89,82 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 
 ## Migration tiers
 
-### Tier 0: Already done
+### Tier 0: Infrastructure -- DONE
 - [x] DaemonService interface + implementation (persistent connection, multiplexed, auto-spawn detached)
 - [x] SessionService interface + implementation (stream subscription, typed events)
 - [x] Service DI registration (`insrc.contribution.ts`)
+- [x] DaemonService electron-main refactor (Node.js code in main process, IPC proxy in sandbox)
+- [x] Auto-connect on instantiation, ProxyChannel args fix
 
-### Tier 1: Foundation services (no UI)
-These are service-layer components that other UI pieces depend on.
-
+### Tier 1: Foundation services -- MOSTLY DONE
+- [x] **RepoService** - wraps `repo.*` RPCs, exposes repo list with change events
+- [x] **AgentRunService** - wraps `agent.*` RPCs, exposes run list with status events
+- [x] **WorkspaceService** - manages insrc workspace file, syncs daemon repos to workspace folders
+- [x] **ChatService** - wraps `chat.*` RPCs, streaming, gate resolution, session lifecycle
 - [ ] **ConfigService** - wraps `config.*` and `system.recommend` RPCs, exposes observable config state
-- [ ] **RepoService** - wraps `repo.*` RPCs, exposes repo list with change events
 - [ ] **KeychainService** - wraps `keys.*` RPCs (or use VS Code's `SecretStorage`)
-- [ ] **AgentService** - wraps `agent.*` RPCs, exposes run list with status events
-- [ ] **ConversationService** - wraps `conversation.*` RPCs
+- [ ] **ConversationService** - wraps `conversation.*` RPCs (stats, compact -- low priority)
 
-### Tier 2: Editor contributions (no custom views needed)
-- [ ] **Status bar** - `StatusbarEntryDescriptor`, 10-state display, subscribe to DaemonService state
-- [ ] **File decorations** - `IDecorationsProvider` for Explorer: indexed (green), stale (orange), parse error (red), ignored (dim). Tooltip: entity count + last indexed time
-- [ ] **Diff manager** - virtual document scheme, diff editor, CodeLens accept/reject/edit
-- [ ] **Annotation manager** - editor decorations, CodeLens, gutter icons
-- [ ] **Commands** - register all 24 commands as workbench contributions
-- [ ] **Keybindings** - register via `KeybindingsRegistry`
+### Tier 2: Editor contributions -- PARTIALLY DONE
+- [x] **File decorations** - `IDecorationsProvider` for Explorer: indexed/stale/error badges on repo roots
+- [x] **Commands** - 13 of 24 registered (add/remove/reindex repo, refresh, rename workspace, agent resume/discard, step provider quick pick, connect daemon)
+- [x] **Keybindings** - `Ctrl+Shift+I` (sidebar), `Ctrl+Alt+C` (chat)
+- [ ] **Status bar** - `StatusbarEntryDescriptor`, daemon/agent status indicator (quick win)
+- [ ] **Diff manager** - virtual document scheme, diff editor, CodeLens accept/reject/edit (HIGH -- blocks real agent usage)
+- [ ] **Annotation manager** - editor decorations, CodeLens, gutter icons, compile-to-chat
+- [ ] **Remaining commands** (11) - diff accept/reject/edit, daemon logs, cost display, annotation commands
 
-### Tier 3: Navigation + session management + settings
-- [ ] **Tree view** - repos, sessions (date-grouped), turns, agent runs in activity bar
-- [ ] **Step providers tree** - per-agent step bindings tree view in left sidebar, right-click → quick pick to change
-- [ ] **Step provider quick pick** - command: "insrc: Set Step Provider" → agent → step → provider. Calls `config.write` RPC
-- [ ] **Setup wizard** - custom `EditorPane` (system detect, ollama optimizations, model pull with progress, API keys)
+### Tier 3: Navigation + session management -- MOSTLY DONE
+- [x] **Explorer integration** - insrc panes registered inside Explorer ViewContainer
+- [x] **Sessions tree** - WorkbenchAsyncDataTree, date-grouped, click opens in chat
+- [x] **Runs tree** - WorkbenchAsyncDataTree, grouped by agent type
+- [x] **Step providers tree** - WorkbenchAsyncDataTree, per-agent step bindings
+- [x] **Step provider quick pick** - 3-step flow (agent -> step -> provider)
+- [x] **Workspace sync** - auto-adds daemon repos to workspace folders on connect
+- [x] **Insrc icon** - spiral galaxy SVG + PNG exports, activity bar icon
+- [ ] **Setup wizard** - custom `EditorPane` (system detect, ollama, model pull, API keys)
 
-### Tier 4: Agent views (custom panels)
-- [ ] **Brainstorm view** - idea list, discussion, convergence, spec preview (Step 4 in main plan)
+### Tier 4: Agent views (custom panels) -- NOT STARTED
+- [ ] **Brainstorm view** - idea list, discussion, convergence, spec preview
 - [ ] **Plan view** - kanban-style step tracker
 - [ ] **Test view** - test plan, per-file status, gates, report
 - [ ] **Doc view** - rendered + raw split, revision history
 
-### Tier 5: Chat panel (largest piece)
-- [ ] **Chat panel** - this is the most complex component and needs its own design
-  - Message rendering (code blocks, tables, diffs, HTML, gates, progress, errors)
-  - Monaco-based input with context banners
-  - Streaming display
-  - Gate cards as native interactive widgets
-  - File attachment
-  - Session switching
-  - Intent selector
-  - Slash commands (`/keys`)
-  - Multi-session support
+### Tier 5: Chat panel -- DONE
+- [x] **Chat view** in auxiliary bar (secondary sidebar)
+  - [x] Trusted HTML rendering (daemon sends HTML, rendered via dompurify policy)
+  - [x] User/assistant message bubbles (right/left aligned, different border-radius)
+  - [x] Streaming content display with live updates
+  - [x] Gate cards with inline action buttons + optional feedback
+  - [x] Progress indicator (step/status bar with spinner)
+  - [x] Code blocks with language header + copy button
+  - [x] Collapsible long messages (>12 lines, gradient fade + "Show more")
+  - [x] Tool call blocks (collapsible cards: name, input, output)
+  - [x] Escalation notices (provider change badges with model info)
+  - [x] File attachment (picker + chips with remove)
+  - [x] Session switching (header dropdown with recent sessions)
+  - [x] Repo selector (pill dropdown)
+  - [x] Intent selector (dropdown in input area)
+  - [x] Referenced file display (collapsible file content blocks, clickable paths)
+  - [x] Chat icon (spiral galaxy + chat bubble overlay)
+
+### Theme + visual polish -- DONE
+- [x] **insrc Light + insrc Dark** theme (pastel green palette from brand design system)
+- [x] **Curved tabs** (Chrome-style, 14px border-radius)
+- [x] **Outline/Timeline hidden** by default
+- [x] **Preview mode disabled** by default (files open permanently)
+- [x] **Animated logo** (color-cycling spiral for progress indicator)
+
+## Next priorities (recommended order)
+
+1. **Diff manager** (Tier 2) -- HIGH. Blocks real agent usage. Agent proposes code changes but user can't accept/reject them without this.
+2. **Status bar** (Tier 2) -- quick win, high visibility. Shows daemon state, active agent, indexing progress.
+3. **ConfigService** (Tier 1) -- dependency for setup wizard and advanced settings.
+4. **Annotation manager** (Tier 2) -- enables curated multi-file context for chat.
+5. **Setup wizard** (Tier 3) -- first-run experience, onboarding.
+6. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
+7. **Plan view** (Tier 4) -- agent step tracking.
+8. **KeychainService + remaining commands** -- polish.
 
 ## UI Layout - DECIDED
 

@@ -20,7 +20,9 @@ import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo } fr
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
+import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { clearNode } from '../../../../../base/browser/dom.js';
+import { createTrustedTypesPolicy } from '../../../../../base/browser/trustedTypes.js';
 
 // ---------------------------------------------------------------------------
 // SVG icon helpers (avoid innerHTML for CSP)
@@ -46,6 +48,14 @@ const CANCEL_ICON = () => createSvg('0 0 16 16', [{ d: 'M8 1a7 7 0 100 14A7 7 0 
 const ATTACH_ICON = () => createSvg('0 0 16 16', [{ d: 'M14 8.5L7.5 15a3.54 3.54 0 01-5-5L9 3.5a2.36 2.36 0 013.33 3.33L6 13.17a1.18 1.18 0 01-1.67-1.67L10.5 5.33', fill: 'none', stroke: 'currentColor', strokeWidth: '1.5' }]);
 
 // ---------------------------------------------------------------------------
+// Trusted HTML policy for rendering daemon HTML snippets
+// ---------------------------------------------------------------------------
+
+const ttPolicy = createTrustedTypesPolicy('insrcChat', {
+	createHTML: (value: string) => value,
+});
+
+// ---------------------------------------------------------------------------
 // Chat View Pane
 // ---------------------------------------------------------------------------
 
@@ -60,6 +70,8 @@ export class InsrcChatViewPane extends ViewPane {
 	private _progressText!: HTMLElement;
 	private _messageList!: HTMLElement;
 	private _gateContainer!: HTMLElement;
+	private _attachedFilesEl!: HTMLElement;
+	private _attachedFiles: string[] = [];
 	private _inputArea!: HTMLElement;
 	private _input!: HTMLTextAreaElement;
 	private _sendBtn!: HTMLButtonElement;
@@ -85,11 +97,12 @@ export class InsrcChatViewPane extends ViewPane {
 		@IInsrcRepoService private readonly repoService: IInsrcRepoService,
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
+		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleChatEvent(e)));
-		this._register(this.chatService.onDidChangeSession(() => this._updateHeader()));
+		this._register(this.chatService.onDidChangeSession(() => this._onSessionChanged()));
 		this._register(this.daemonService.onDidChangeState(() => {
 			this._updateHeader();
 			this._updateState();
@@ -111,18 +124,22 @@ export class InsrcChatViewPane extends ViewPane {
 		// Session label + dropdown arrow (clickable, toggles recent sessions dropdown)
 		const sessionWrapper = dom.append(this._header, dom.$('.insrc-chat-session-wrapper'));
 
-		this._sessionLabel = dom.append(sessionWrapper, dom.$('.insrc-chat-header-session'));
-		this._sessionLabel.title = 'Click for recent sessions';
-
 		const dropdownArrow = dom.append(sessionWrapper, dom.$('span'));
 		dropdownArrow.textContent = '\u25BE';
 		dropdownArrow.style.fontSize = '10px';
 		dropdownArrow.style.opacity = '0.5';
-		dropdownArrow.style.marginLeft = '2px';
+		dropdownArrow.style.marginRight = '2px';
+
+		this._sessionLabel = dom.append(sessionWrapper, dom.$('.insrc-chat-header-session'));
+		this._sessionLabel.title = 'Click for recent sessions';
 
 		// Session dropdown
 		this._sessionDropdown = dom.append(sessionWrapper, dom.$('.insrc-chat-session-dropdown'));
 		this._register(dom.addDisposableListener(sessionWrapper, 'click', (e: MouseEvent) => {
+			// Only toggle if clicking the label/arrow, not the dropdown items
+			if (this._sessionDropdown.contains(e.target as Node)) {
+				return;
+			}
 			e.stopPropagation();
 			this._toggleSessionDropdown();
 		}));
@@ -134,12 +151,6 @@ export class InsrcChatViewPane extends ViewPane {
 			}
 		}));
 
-		// Progress bar
-		this._progressBar = dom.append(this._container, dom.$('.insrc-chat-progress.hidden'));
-		const spinner = dom.append(this._progressBar, dom.$('.insrc-chat-progress-spinner'));
-		spinner.setAttribute('aria-hidden', 'true');
-		this._progressText = dom.append(this._progressBar, dom.$('span'));
-
 		// Empty state
 		this._emptyState = dom.append(this._container, dom.$('.insrc-chat-empty'));
 		this._emptyState.textContent = 'Start a conversation. Select a repo and type a message.';
@@ -150,6 +161,12 @@ export class InsrcChatViewPane extends ViewPane {
 
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));
+
+		// Progress bar (just above input)
+		this._progressBar = dom.append(this._container, dom.$('.insrc-chat-progress.hidden'));
+		const spinner = dom.append(this._progressBar, dom.$('.insrc-chat-progress-spinner'));
+		spinner.setAttribute('aria-hidden', 'true');
+		this._progressText = dom.append(this._progressBar, dom.$('span'));
 
 		// Input area (matches extension chat layout: rounded border, textarea + icon buttons, toolbar below)
 		this._inputArea = dom.append(this._container, dom.$('.insrc-chat-input-area'));
@@ -198,6 +215,10 @@ export class InsrcChatViewPane extends ViewPane {
 		const attachBtn = dom.append(toolbar, dom.$('button.insrc-chat-attach-btn')) as HTMLButtonElement;
 		attachBtn.title = 'Attach files';
 		attachBtn.appendChild(ATTACH_ICON());
+		this._register(dom.addDisposableListener(attachBtn, 'click', () => this._pickAttachFiles()));
+
+		// Attached files badges
+		this._attachedFilesEl = dom.append(toolbar, dom.$('.insrc-chat-attached-files'));
 
 		this._updateHeader();
 		this._updateState();
@@ -245,7 +266,7 @@ export class InsrcChatViewPane extends ViewPane {
 			if (this._streamingMessageEl) {
 				const content = this._streamingMessageEl.querySelector('.insrc-chat-message-content');
 				if (content) {
-					content.textContent = msg.content;
+					this._setTrustedHtml(content as HTMLElement, msg.content);
 				}
 			} else {
 				this._streamingMessageEl = this._createMessageEl(msg);
@@ -261,11 +282,12 @@ export class InsrcChatViewPane extends ViewPane {
 	}
 
 	private _createMessageEl(msg: ChatMessage): HTMLElement {
-		const el = dom.$(`.insrc-chat-message`);
+		const isUser = msg.role === 'user';
+		const el = dom.$(`.insrc-chat-message.msg-${msg.role}`);
 
 		const header = dom.append(el, dom.$('.insrc-chat-message-header'));
 		const role = dom.append(header, dom.$(`.insrc-chat-message-role.${msg.role}`));
-		role.textContent = msg.role;
+		role.textContent = isUser ? 'You' : 'Agent';
 
 		if (msg.timestamp) {
 			const time = dom.append(header, dom.$('.insrc-chat-message-time'));
@@ -284,9 +306,65 @@ export class InsrcChatViewPane extends ViewPane {
 		}
 
 		const content = dom.append(el, dom.$('.insrc-chat-message-content'));
-		content.textContent = msg.content;
+
+		if (isUser) {
+			// User messages are plain text
+			content.textContent = msg.content;
+		} else {
+			// Assistant messages contain HTML from the daemon -- render as trusted HTML
+			this._setTrustedHtml(content, msg.content);
+			// Wire copy buttons for code-viewer blocks
+			this._wireCopyButtons(content);
+			// Make collapsible if long
+			this._makeCollapsible(el, content);
+		}
 
 		return el;
+	}
+
+	/** Safely set innerHTML using TrustedTypes policy */
+	private _setTrustedHtml(el: HTMLElement, html: string): void {
+		if (ttPolicy) {
+			(el as any).innerHTML = ttPolicy.createHTML(html);
+		} else {
+			// Fallback: textContent only (no HTML rendering without TrustedTypes)
+			el.textContent = html;
+		}
+	}
+
+	/** Wire click handlers for code-viewer copy buttons */
+	private _wireCopyButtons(container: HTMLElement): void {
+		const copyBtns = container.querySelectorAll('.code-viewer-copy');
+		for (const btn of copyBtns) {
+			btn.addEventListener('click', () => {
+				const viewer = btn.closest('.code-viewer');
+				const pre = viewer?.querySelector('pre');
+				if (pre) {
+					navigator.clipboard.writeText(pre.textContent ?? '');
+					btn.textContent = 'Copied!';
+					setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+				}
+			});
+		}
+	}
+
+	/** Collapse assistant messages longer than ~12 lines */
+	private _makeCollapsible(msgEl: HTMLElement, contentEl: HTMLElement): void {
+		// Defer to next frame so layout is computed
+		dom.getWindow(msgEl).requestAnimationFrame(() => {
+			const lineHeight = 18; // ~1.5 line-height * 12px
+			const maxLines = 12;
+			if (contentEl.scrollHeight > lineHeight * maxLines) {
+				msgEl.classList.add('collapsed');
+
+				const toggle = dom.append(msgEl, dom.$('button.insrc-chat-msg-toggle'));
+				toggle.textContent = 'Show more';
+				toggle.addEventListener('click', () => {
+					const isCollapsed = msgEl.classList.toggle('collapsed');
+					toggle.textContent = isCollapsed ? 'Show more' : 'Show less';
+				});
+			}
+		});
 	}
 
 	private _renderGate(gate: GateInfo): void {
@@ -319,14 +397,26 @@ export class InsrcChatViewPane extends ViewPane {
 		this._scrollToBottom();
 	}
 
+	private _progressMsgEl: HTMLElement | undefined;
+
 	private _showProgress(step: string, status: string): void {
+		const label = status ? `${step}: ${status}` : step;
+
+		// Show in progress bar only (no inline duplicate)
 		this._progressBar.classList.remove('hidden');
-		this._progressText.textContent = `${step}: ${status}`;
+		this._progressText.textContent = label;
 	}
 
 	private _onStreamEnd(): void {
 		this._streamingMessageEl = undefined;
 		this._progressBar.classList.add('hidden');
+
+		// Remove inline progress message
+		if (this._progressMsgEl) {
+			this._progressMsgEl.remove();
+			this._progressMsgEl = undefined;
+		}
+
 		this._sendBtn.style.display = '';
 		this._cancelBtn.style.display = 'none';
 		this._sendBtn.disabled = false;
@@ -363,6 +453,15 @@ export class InsrcChatViewPane extends ViewPane {
 			}
 		}
 
+		// Prepend attached file paths to message
+		let fullMessage = text;
+		if (this._attachedFiles.length > 0) {
+			const refs = this._attachedFiles.map(f => `@${f}`).join(' ');
+			fullMessage = `${refs}\n${text}`;
+			this._attachedFiles = [];
+			this._renderAttachedFiles();
+		}
+
 		this._input.value = '';
 		this._autoResize();
 		this._sendBtn.style.display = 'none';
@@ -371,7 +470,7 @@ export class InsrcChatViewPane extends ViewPane {
 		this._input.disabled = true;
 
 		try {
-			await this.chatService.sendMessage(text);
+			await this.chatService.sendMessage(fullMessage);
 		} catch (err) {
 			this._renderError((err as Error).message);
 			this._onStreamEnd();
@@ -426,13 +525,8 @@ export class InsrcChatViewPane extends ViewPane {
 		}
 		this._repoLabel.insertBefore(document.createTextNode(`Repo: ${repoName} `), arrow);
 
-		// Session label (always visible, acts as dropdown trigger)
-		const sessionId = this.chatService.activeSessionId;
-		if (sessionId) {
-			this._sessionLabel.textContent = sessionId.substring(0, 8);
-		} else {
-			this._sessionLabel.textContent = 'Sessions';
-		}
+		// Session label (fixed text, acts as dropdown trigger)
+		this._sessionLabel.textContent = 'Sessions';
 	}
 
 	private _updateState(): void {
@@ -448,6 +542,81 @@ export class InsrcChatViewPane extends ViewPane {
 			this._input.placeholder = 'Type a message... (@local, @sonnet for provider)';
 			this._input.disabled = false;
 			this._sendBtn.disabled = false;
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Session changed (from sidebar click, dropdown, or new session)
+	// ---------------------------------------------------------------------------
+
+	private _onSessionChanged(): void {
+		this._updateHeader();
+
+		if (!this._messageList) {
+			return;
+		}
+
+		clearNode(this._messageList);
+		clearNode(this._gateContainer);
+		this._streamingMessageEl = undefined;
+
+		const messages = this.chatService.messages;
+		if (messages.length > 0) {
+			this._emptyState.style.display = 'none';
+			this._messageList.style.display = '';
+			for (const msg of messages) {
+				const el = this._createMessageEl(msg);
+				this._messageList.appendChild(el);
+			}
+			this._scrollToBottom();
+		} else {
+			this._emptyState.style.display = '';
+			this._messageList.style.display = 'none';
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// File attachment
+	// ---------------------------------------------------------------------------
+
+	private async _pickAttachFiles(): Promise<void> {
+		const uris = await this.fileDialogService.showOpenDialog({
+			canSelectFiles: true,
+			canSelectFolders: false,
+			canSelectMany: true,
+			title: 'Select files to attach to message',
+		});
+
+		if (!uris || uris.length === 0) {
+			return;
+		}
+
+		for (const uri of uris) {
+			const path = uri.fsPath;
+			if (!this._attachedFiles.includes(path)) {
+				this._attachedFiles.push(path);
+			}
+		}
+
+		this._renderAttachedFiles();
+	}
+
+	private _renderAttachedFiles(): void {
+		clearNode(this._attachedFilesEl);
+
+		for (const filePath of this._attachedFiles) {
+			const badge = dom.append(this._attachedFilesEl, dom.$('.insrc-chat-attached-file'));
+			const name = filePath.split('/').pop() ?? filePath;
+			badge.textContent = name;
+			badge.title = filePath;
+
+			const removeBtn = dom.append(badge, dom.$('.insrc-chat-attached-file-remove'));
+			removeBtn.textContent = '\u00D7'; // x
+			removeBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				this._attachedFiles = this._attachedFiles.filter(f => f !== filePath);
+				this._renderAttachedFiles();
+			});
 		}
 	}
 
