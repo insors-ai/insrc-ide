@@ -36,4 +36,7 @@ export interface IInsrcWorkspaceService {
 
 	/** Rename the workspace */
 	renameWorkspace(name: string): Promise<void>;
+
+	/** Patch existing workspace file to add name if missing */
+	ensureName(): Promise<void>;
 }

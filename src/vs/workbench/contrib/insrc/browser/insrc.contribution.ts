@@ -15,9 +15,16 @@ import '../common/agentRunService.js';
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';
 
+// Commands: add repo, remove repo, re-index, refresh, resume/discard runs, set step provider
+import './sidebar/insrcCommands.js';
+
 // Workspace sync: keep Explorer folders in sync with daemon repos
 import { InsrcWorkspaceSyncContribution } from './sidebar/insrcWorkspaceSync.js';
 registerWorkbenchContribution2(InsrcWorkspaceSyncContribution.ID, InsrcWorkspaceSyncContribution, WorkbenchPhase.AfterRestored);
+
+// File decorations: show repo indexing status on folder roots in Explorer
+import { InsrcFileDecorationsContribution } from './sidebar/insrcFileDecorations.js';
+registerWorkbenchContribution2(InsrcFileDecorationsContribution.ID, InsrcFileDecorationsContribution, WorkbenchPhase.AfterRestored);
 
 // TODO: Step 4 - register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
 // TODO: Step 5 - register AgentChatView

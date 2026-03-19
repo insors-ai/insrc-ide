@@ -61,6 +61,7 @@ export class InsrcWorkspaceServiceImpl extends Disposable implements IInsrcWorks
 		const exists = await this.fileService.exists(uri);
 		if (!exists) {
 			const content = JSON.stringify({
+				name: this._workspaceName,
 				folders: [],
 				settings: {
 					'insrc.workspaceName': this._workspaceName,
@@ -103,17 +104,36 @@ export class InsrcWorkspaceServiceImpl extends Disposable implements IInsrcWorks
 	async renameWorkspace(name: string): Promise<void> {
 		this._workspaceName = name;
 
-		// Write to workspace file settings
 		const uri = getWorkspaceUri();
 		try {
 			const content = await this.fileService.readFile(uri);
 			const json = JSON.parse(content.value.toString());
+			json.name = name;
 			json.settings = json.settings || {};
 			json.settings['insrc.workspaceName'] = name;
 			await this.fileService.writeFile(uri, VSBuffer.fromString(JSON.stringify(json, null, '\t')));
 			this.logService.info('[insrc] Renamed workspace to:', name);
 		} catch {
 			this.logService.warn('[insrc] Failed to write workspace name to file');
+		}
+	}
+
+	/** Patch existing workspace file to add name if missing */
+	async ensureName(): Promise<void> {
+		const uri = getWorkspaceUri();
+		try {
+			const exists = await this.fileService.exists(uri);
+			if (!exists) { return; }
+
+			const content = await this.fileService.readFile(uri);
+			const json = JSON.parse(content.value.toString());
+			if (!json.name) {
+				json.name = this._workspaceName;
+				await this.fileService.writeFile(uri, VSBuffer.fromString(JSON.stringify(json, null, '\t')));
+				this.logService.info('[insrc] Patched workspace file with name:', this._workspaceName);
+			}
+		} catch {
+			// ignore
 		}
 	}
 

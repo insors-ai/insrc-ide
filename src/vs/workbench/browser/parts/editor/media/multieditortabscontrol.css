@@ -104,8 +104,8 @@
 	height: calc(var(--editor-group-tab-height) - 4px);
 	box-sizing: border-box;
 	padding-left: 10px;
-	border-radius: 8px 8px 0 0;
-	margin: 4px 1px 0 1px;
+	border-radius: 14px 14px 0 0;
+	margin: 4px 2px 0 2px;
 }
 
 /* Tab Background Color in/active group/tab */

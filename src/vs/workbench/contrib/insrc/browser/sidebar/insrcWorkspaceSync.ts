@@ -55,8 +55,9 @@ export class InsrcWorkspaceSyncContribution extends Disposable implements IWorkb
 				return;
 			}
 
-			// Ensure workspace file exists
+			// Ensure workspace file exists and has a name
 			await this.workspaceService.ensureWorkspace();
+			await this.workspaceService.ensureName();
 
 			// Add each repo as a workspace folder if not already present
 			for (const repo of repos) {
