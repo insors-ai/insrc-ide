@@ -6,8 +6,12 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInsrcDaemonService, type IInsrcStreamHandle, type DaemonStreamMessage } from '../common/daemonService.js';
 import { IInsrcChatService, type ChatMessage, type ChatEvent, type CodeAnnotation, type GateInfo, type ProgressInfo, type ToolCallInfo, type EscalationInfo } from '../common/chatService.js';
+
+const STORAGE_KEY_REPO = 'insrc.chat.activeRepo';
+const STORAGE_KEY_SESSION = 'insrc.chat.activeSessionId';
 
 // ---------------------------------------------------------------------------
 // ChatService implementation
@@ -39,8 +43,23 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	constructor(
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@ILogService private readonly logService: ILogService,
+		@IStorageService private readonly storageService: IStorageService,
 	) {
 		super();
+
+		// Restore persisted state
+		this._activeRepo = this.storageService.get(STORAGE_KEY_REPO, StorageScope.WORKSPACE);
+		this._activeSessionId = this.storageService.get(STORAGE_KEY_SESSION, StorageScope.WORKSPACE);
+		if (this._activeRepo) {
+			this.logService.info('[insrc-chat] Restored repo:', this._activeRepo, 'session:', this._activeSessionId);
+		}
+
+		// Re-establish session when daemon connects
+		this._register(this.daemonService.onDidChangeState(state => {
+			if (state === 'connected' && this._activeRepo) {
+				this._reestablishSession();
+			}
+		}));
 	}
 
 	// ---------------------------------------------------------------------------
@@ -56,6 +75,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._activeSessionId = result.sessionId;
 		this._activeRepo = result.repo;
 		this._messages = [];
+		this._persistState();
 		this._onDidChangeSession.fire(this._activeSessionId);
 		this.logService.info('[insrc-chat] Started session:', result.sessionId);
 		return result.sessionId;
@@ -66,16 +86,45 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 			throw new Error('Not connected to daemon');
 		}
 
-		// Load history first
+		// Close current active session if any
+		if (this._activeSessionId && this._activeSessionId !== sessionId) {
+			try {
+				await this.daemonService.rpc('chat.close', { sessionId: this._activeSessionId });
+			} catch { /* ok */ }
+		}
+
+		// Restore session in daemon (re-activates persisted session with full context)
+		const result = await this.daemonService.rpc<{ error?: string; sessionId?: string; repo?: string }>('chat.restore', { sessionId });
+
+		if (result.error || !result.sessionId) {
+			// Restore failed -- fall back to fresh session
+			this.logService.warn('[insrc-chat] chat.restore failed:', result.error);
+			this._messages = await this.loadHistory(sessionId);
+
+			let repo: string | undefined = this._activeRepo;
+			if (!repo) {
+				try {
+					const sessions = await this.daemonService.rpc<Array<{ id: string; repo: string }>>('session.list', {});
+					const match = sessions.find(s => s.id === sessionId);
+					repo = match?.repo;
+				} catch { /* ignore */ }
+			}
+			if (repo) {
+				await this.startSession(repo);
+			} else {
+				this._activeSessionId = undefined;
+				this._onDidChangeSession.fire(undefined);
+			}
+			return;
+		}
+
+		// Restore succeeded -- session is now active in daemon with same ID
+		this._activeSessionId = result.sessionId;
+		this._activeRepo = result.repo;
 		this._messages = await this.loadHistory(sessionId);
-		this._activeSessionId = sessionId;
-
-		// Get session info for repo
-		const status = await this.daemonService.rpc<{ repo?: string }>('chat.status', { sessionId });
-		this._activeRepo = status.repo;
-
+		this._persistState();
 		this._onDidChangeSession.fire(this._activeSessionId);
-		this.logService.info('[insrc-chat] Resumed session:', sessionId);
+		this.logService.info('[insrc-chat] Restored session:', result.sessionId, 'repo:', result.repo);
 	}
 
 	async closeSession(): Promise<void> {
@@ -92,7 +141,49 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._activeRepo = undefined;
 		this._messages = [];
 		this._isStreaming = false;
+		this._persistState();
 		this._onDidChangeSession.fire(undefined);
+	}
+
+	private async _reestablishSession(): Promise<void> {
+		if (!this._activeSessionId && !this._activeRepo) {
+			return;
+		}
+
+		// Try to restore persisted session first
+		if (this._activeSessionId) {
+			const result = await this.daemonService.rpc<{ error?: string; sessionId?: string; repo?: string }>('chat.restore', { sessionId: this._activeSessionId });
+			if (!result.error && result.sessionId) {
+				this._activeRepo = result.repo;
+				this.logService.info('[insrc-chat] Re-established session via restore:', result.sessionId);
+				this._onDidChangeSession.fire(this._activeSessionId);
+				return;
+			}
+			this.logService.info('[insrc-chat] Persisted session could not be restored:', result.error);
+		}
+
+		// Fall back to fresh session
+		if (this._activeRepo) {
+			try {
+				await this.startSession(this._activeRepo);
+				this.logService.info('[insrc-chat] Started fresh session:', this._activeSessionId);
+			} catch (err) {
+				this.logService.warn('[insrc-chat] Failed to start session:', (err as Error).message);
+			}
+		}
+	}
+
+	private _persistState(): void {
+		if (this._activeRepo) {
+			this.storageService.store(STORAGE_KEY_REPO, this._activeRepo, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		} else {
+			this.storageService.remove(STORAGE_KEY_REPO, StorageScope.WORKSPACE);
+		}
+		if (this._activeSessionId) {
+			this.storageService.store(STORAGE_KEY_SESSION, this._activeSessionId, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		} else {
+			this.storageService.remove(STORAGE_KEY_SESSION, StorageScope.WORKSPACE);
+		}
 	}
 
 	// ---------------------------------------------------------------------------
@@ -101,7 +192,11 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 	async sendMessage(message: string, provider?: string): Promise<void> {
 		if (!this._activeSessionId) {
-			throw new Error('No active session');
+			// Auto-start a session with the first available repo
+			if (!this._activeRepo) {
+				throw new Error('No active session and no repo selected');
+			}
+			await this.startSession(this._activeRepo);
 		}
 		if (this._isStreaming) {
 			throw new Error('Already streaming');

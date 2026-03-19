@@ -134,6 +134,15 @@ export const chatStatus: RpcHandler = async (params) => {
   return status;
 };
 
+export const chatRestore: RpcHandler = async (params) => {
+  const { sessionId } = params as { sessionId: string };
+  const pool = getPool();
+  const restored = await pool.restore(sessionId);
+  if (!restored) return { error: 'session not found in DB' };
+  const active = pool.get(restored)!;
+  return { sessionId: restored, repo: active.session.repoPath };
+};
+
 // ---------------------------------------------------------------------------
 // Streaming handlers
 // ---------------------------------------------------------------------------

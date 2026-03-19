@@ -549,6 +549,58 @@ export interface SessionSummary {
  * List all sessions, optionally filtered by repo.
  * Returns newest-first, with only the fields needed for display.
  */
+// ---------------------------------------------------------------------------
+// Session restore queries
+// ---------------------------------------------------------------------------
+
+/** Get a single session record by ID. Returns null if not found. */
+export async function getSessionById(
+  db: DbClient,
+  sessionId: string,
+): Promise<SessionRecord | null> {
+  const table = await getSessionsTable(db);
+  const rows = await table.query()
+    .where(`id = '${sessionId.replace(/'/g, "''")}'`)
+    .toArray();
+  if (rows.length === 0) return null;
+  const row = rows[0]!;
+  return {
+    id: row['id'] as string,
+    repo: row['repo'] as string,
+    summary: row['summary'] as string,
+    seenEntities: JSON.parse((row['seenEntities'] as string) || '[]') as string[],
+    createdAt: row['createdAt'] as string,
+    expiresAt: row['expiresAt'] as string,
+    vector: row['vector'] as number[],
+  };
+}
+
+/** Get all turns for a specific session, ordered by idx. */
+export async function getTurnsForSession(
+  db: DbClient,
+  sessionId: string,
+): Promise<TurnRecord[]> {
+  const table = await getTurnsTable(db);
+  const rows = await table.query()
+    .where(`sessionId = '${sessionId.replace(/'/g, "''")}'`)
+    .toArray();
+  return rows
+    .map(row => ({
+      sessionId: row['sessionId'] as string,
+      idx: row['idx'] as number,
+      user: row['user'] as string,
+      assistant: row['assistant'] as string,
+      entities: JSON.parse((row['entities'] as string) || '[]') as string[],
+      vector: row['vector'] as number[],
+      repo: row['repo'] as string,
+      type: (row['type'] as ConversationEntryType) || 'turn',
+      tier: (row['tier'] as ConversationTier) || 'hot',
+      format: (row['format'] as string) || 'text',
+    }))
+    .filter(t => t.type === 'turn')
+    .sort((a, b) => a.idx - b.idx);
+}
+
 export async function listSessions(
   db: DbClient,
   repo?: string | undefined,

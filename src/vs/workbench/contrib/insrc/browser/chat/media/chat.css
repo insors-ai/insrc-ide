@@ -91,7 +91,7 @@
 .insrc-chat-progress-spinner {
 	width: 16px;
 	height: 16px;
-	background-image: url('../media/insrc-logo-animated.svg');
+	background-image: url('../../media/insrc-logo-animated.svg');
 	background-size: contain;
 	background-repeat: no-repeat;
 }

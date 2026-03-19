@@ -12,6 +12,8 @@ import { HealthMonitor, type HealthSnapshot, type ComponentState } from './fault
 export interface SessionOpts {
   repoPath: string;
   config: AgentConfig;
+  /** Optional session ID for restoring a persisted session. If omitted, a new UUID is generated. */
+  id?: string | undefined;
 }
 
 /** Cumulative cost tracking for Claude API usage. */
@@ -60,7 +62,7 @@ export class Session {
   readonly health: HealthMonitor;
 
   constructor(opts: SessionOpts) {
-    this.id = randomUUID();
+    this.id = opts.id ?? randomUUID();
     this.repoPath = opts.repoPath;
     this.config = opts.config;
     this.startedAt = Date.now();

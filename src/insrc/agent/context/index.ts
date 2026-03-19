@@ -220,6 +220,26 @@ export class ContextManager {
     }
   }
 
+  /**
+   * Restore L3a recent turns from persisted data.
+   * Called during session restore to populate the recent turns window.
+   * Turns should be in chronological order (oldest first); they are
+   * stored newest-first internally (last element = oldest).
+   */
+  restoreRecentTurns(turns: Array<{ user: string; assistant: string; entities: string[] }>): void {
+    this.recentTurns.length = 0;
+    // Take the last MAX_RECENT_TURNS turns, store newest-first
+    const recent = turns.slice(-MAX_RECENT_TURNS);
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const t = recent[i]!;
+      this.recentTurns.push({
+        userMessage: t.user,
+        assistantResponse: t.assistant,
+        entityIds: t.entities,
+      });
+    }
+  }
+
   /** Get the entity IDs from the most recent L4 fetch. */
   getLastEntityIds(): string[] {
     return this.lastEntityIds;

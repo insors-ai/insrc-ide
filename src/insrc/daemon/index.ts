@@ -27,7 +27,7 @@ import { IndexerService } from '../indexer/index.js';
 import { IpcServer } from './server.js';
 import {
   initChatHandlers, disposeChatHandlers, reloadChatConfig,
-  chatStart, chatReply, chatCancel, chatInject, chatClose, chatList, chatStatus,
+  chatStart, chatReply, chatCancel, chatInject, chatClose, chatList, chatStatus, chatRestore,
   chatSend, chatResume,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
@@ -576,6 +576,7 @@ async function main(): Promise<void> {
     'chat.close':  chatClose,
     'chat.list':   chatList,
     'chat.status': chatStatus,
+    'chat.restore': chatRestore,
   }, {
     // Streaming handlers
     'chat.send':   chatSend,

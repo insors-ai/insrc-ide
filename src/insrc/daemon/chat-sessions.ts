@@ -11,6 +11,8 @@ import { Session } from '../agent/session.js';
 import { loadConfigForRepo } from '../agent/config.js';
 import { DaemonChannel } from './channel.js';
 import { getLogger } from '../shared/logger.js';
+import { getSessionById, getTurnsForSession } from '../db/conversations.js';
+import { getDb } from '../db/client.js';
 
 const log = getLogger('chat-sessions');
 
@@ -81,6 +83,72 @@ export class ChatSessionPool {
 
     this.sessions.set(sessionId, active);
     log.info({ sessionId, repo: repoPath }, 'chat session created');
+    return sessionId;
+  }
+
+  /**
+   * Restore a persisted session from DB into the active pool.
+   * Hydrates the ContextManager with L2 summary, L3a recent turns, and L3b semantic history.
+   * Returns the sessionId if successful, null if not found in DB.
+   */
+  async restore(sessionId: string): Promise<string | null> {
+    // Already active? Just return it.
+    if (this.sessions.has(sessionId)) {
+      log.info({ sessionId }, 'session already active');
+      return sessionId;
+    }
+
+    const db = await getDb();
+
+    // 1. Look up session — try sessions table first, fall back to turns
+    const sessionRecord = await getSessionById(db, sessionId);
+    const turns = await getTurnsForSession(db, sessionId);
+
+    // Determine repo from session record or from turns
+    const repo = sessionRecord?.repo ?? (turns.length > 0 ? turns[0]!.repo : undefined);
+    if (!repo) {
+      log.warn({ sessionId }, 'session not found in DB for restore');
+      return null;
+    }
+
+    // 2. Create fresh Session with original repo and session ID
+    const config = await loadConfigForRepo(repo);
+    const session = new Session({ repoPath: repo, config, id: sessionId });
+    await session.init();
+
+    // 3. Hydrate context from DB
+    if (sessionRecord?.summary) {
+      session.contextManager.seedSummary(sessionRecord.summary);
+    }
+    if (turns.length > 0) {
+      // Restore L3a (recent turns window)
+      session.contextManager.restoreRecentTurns(
+        turns.map(t => ({ user: t.user, assistant: t.assistant, entities: t.entities })),
+      );
+
+      // Restore L3b (semantic history with embeddings)
+      session.contextManager.hydrateFromHistory(
+        turns.map(t => ({ user: t.user, assistant: t.assistant, entities: t.entities, vector: t.vector })),
+      );
+    }
+
+    session.turnIndex = turns.length;
+
+    // 4. Add to pool
+    const active: ActiveSession = {
+      id: sessionId,
+      session,
+      channel: null,
+      abortController: null,
+      agentRunning: false,
+      lastStep: null,
+      createdAt: Date.now(),
+      lastActivityAt: Date.now(),
+      injectedMessages: [],
+    };
+
+    this.sessions.set(sessionId, active);
+    log.info({ sessionId, repo: sessionRecord.repo, turns: turns.length }, 'chat session restored from DB');
     return sessionId;
   }
 
