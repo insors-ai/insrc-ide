@@ -62,9 +62,9 @@ insrc-ide/
   - Must handle full stream protocol (deltas, gates, progress, checkpoints)
   - Must decouple views from raw IPC protocol
 
-## Step 2/3 Review Fixes — BEFORE Step 4
+## Step 2/3 Review Fixes — DONE ✓ (commit 215e35b)
 
-Code review identified issues in DaemonService and SessionService that must be fixed before building views on top.
+Code review identified issues in DaemonService and SessionService. All fixes applied and pushed.
 
 ### Lifecycle decision: auto-spawn detached
 
@@ -86,7 +86,7 @@ Options 3–5 tie the daemon to VS Code's process tree — daemon dies when IDE 
 - `dispose()` closes sockets only, daemon keeps running
 - Daemon outlives the IDE like a user-space service (similar to Docker daemon, LSP servers started by editors)
 
-### Fix 1 — High: Daemon lifecycle + persistent connection (issues #3, #5, #6, #9, #10)
+### Fix 1 — High: Daemon lifecycle + persistent connection (issues #3, #5, #6, #9, #10) ✓
 
 **Problems:**
 - `ensureDaemon()`/`stopDaemon()` on the interface imply IDE owns lifecycle; `dispose()` calls `stopDaemon()` which would kill in-progress indexing
@@ -112,7 +112,7 @@ Options 3–5 tie the daemon to VS Code's process tree — daemon dies when IDE 
 - `src/vs/workbench/contrib/insrc/common/daemonService.ts`
 - `src/vs/workbench/contrib/insrc/electron-sandbox/daemonServiceImpl.ts`
 
-### Fix 2 — High: Event-based streaming + typed messages (issues #1, #4, #14, #18)
+### Fix 2 — High: Event-based streaming + typed messages (issues #1, #4, #14, #18) ✓
 
 **Problems:**
 - `stream()` returns `AsyncIterable<StreamDelta>` — views can't bind to async iterables, they need `Event<T>`
@@ -164,7 +164,7 @@ Options 3–5 tie the daemon to VS Code's process tree — daemon dies when IDE 
 - `src/vs/workbench/contrib/insrc/electron-sandbox/daemonServiceImpl.ts`
 - `src/vs/workbench/contrib/insrc/electron-sandbox/sessionServiceImpl.ts`
 
-### Fix 3 — Medium: RPC/stream timeouts + CancellationToken (issues #2, #7, #8)
+### Fix 3 — Medium: RPC/stream timeouts + CancellationToken (issues #2, #7, #8) ✓
 
 **Problem:** If the daemon hangs or a socket stays open without responding, promises hang forever. No way to cancel in-flight requests.
 
