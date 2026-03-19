@@ -34,3 +34,7 @@
 **/test/automation/out/**
 **/typings/**
 !.vscode
+src/insrc/**
+vscode-insrc/**
+design/**
+plans/**

@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat RPC — Design Document</title>
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a; --text: #e2e4ed;
+      --muted: #8b8fa8; --accent: #7c6af7; --accent2: #4fc3f7;
+      --green: #4caf7d; --yellow: #f5c842; --red: #f47c7c; --code-bg: #12151e;
+      font-family: 'Segoe UI', system-ui, sans-serif; font-size: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); line-height: 1.7; }
+    main { max-width: 920px; margin: 0 auto; padding: 2rem; }
+    h1 { font-size: 2rem; color: var(--accent); margin-bottom: 0.3rem; }
+    .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem; }
+    h2 { font-size: 1.3rem; color: var(--accent2); border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; margin: 2.5rem 0 1rem; }
+    h3 { font-size: 1.05rem; color: var(--yellow); margin: 1.5rem 0 0.5rem; }
+    h4 { font-size: 0.95rem; color: var(--text); margin: 1rem 0 0.4rem; }
+    p, ul, ol { margin-bottom: 0.8rem; }
+    ul, ol { padding-left: 1.5rem; }
+    li { margin-bottom: 0.3rem; }
+    code { font-family: 'Cascadia Code', 'Fira Code', monospace; background: var(--code-bg); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.9em; }
+    pre { background: var(--code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto; margin-bottom: 1rem; font-size: 0.85rem; line-height: 1.5; border: 1px solid var(--border); }
+    pre code { background: none; padding: 0; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 1.2rem; font-size: 0.92rem; }
+    th, td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+    th { background: var(--surface); color: var(--accent2); font-size: 0.9rem; }
+    .callout { border-left: 3px solid var(--accent2); background: var(--surface); padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; font-size: 0.93rem; }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout.decision { border-left-color: var(--green); }
+  </style>
+</head>
+<body>
+<main>
+
+<h1>Chat RPC Design</h1>
+<p class="subtitle">Streaming agent communication over daemon IPC for VS Code extension</p>
+
+<!-- ================================================================== -->
+<h2>1. Problem Statement</h2>
+
+<p>The insrc agent currently runs <strong>in-process</strong> inside the CLI REPL (<code>src/agent/index.ts</code>).
+The REPL directly calls LLM providers for streaming, renders to stdout, handles gates via readline,
+and records turns via fire-and-forget RPC. This architecture does not support external clients like
+the VS Code extension because:</p>
+
+<ul>
+  <li><strong>No chat RPC exists</strong> — the daemon has no method to accept a user message and run the agent</li>
+  <li><strong>No streaming over IPC</strong> — the current protocol is single request → single response (newline-delimited JSON)</li>
+  <li><strong>Gates are blocking</strong> — agent steps pause for user input via readline; no way to relay this to an external client</li>
+  <li><strong>Session lifecycle is in-process</strong> — Session, ContextManager, LLM providers are all instantiated inside the REPL</li>
+</ul>
+
+<div class="callout decision">
+  <strong>Goal:</strong> Enable any client (VS Code extension, web UI, future mobile app) to run agent sessions
+  via daemon RPC, with token-level streaming, gate relay, and full session lifecycle management.
+</div>
+
+<!-- ================================================================== -->
+<h2>2. Architecture Options</h2>
+
+<h3>Option A: Agent in Daemon (Streaming IPC)</h3>
+<p>Move the agent loop into the daemon process. Upgrade the IPC protocol to support
+persistent connections with multi-message streaming.</p>
+<ul>
+  <li><strong>Pro:</strong> Single process, single source of truth, clean architecture</li>
+  <li><strong>Pro:</strong> Daemon already has DB access, indexer, config store</li>
+  <li><strong>Con:</strong> Requires IPC protocol upgrade (breaking change)</li>
+  <li><strong>Con:</strong> Long-running agent occupies daemon — concurrent sessions need careful management</li>
+</ul>
+
+<h3>Option B: Agent in Client (Extension Process)</h3>
+<p>Keep the agent running in the client process (extension host). Client calls daemon
+only for search/context/persistence (same pattern as CLI REPL).</p>
+<ul>
+  <li><strong>Pro:</strong> No IPC protocol changes needed</li>
+  <li><strong>Pro:</strong> Streaming is client-local (direct provider calls)</li>
+  <li><strong>Con:</strong> Extension must bundle all agent code (~50+ files)</li>
+  <li><strong>Con:</strong> Two processes running LLM calls (daemon embedder + client agent)</li>
+  <li><strong>Con:</strong> Can't share agent state across multiple VS Code windows</li>
+</ul>
+
+<h3>Option C: Agent in Daemon (Message Queue Polling)</h3>
+<p>Agent runs in daemon. Client sends message, daemon enqueues response chunks into a
+per-session message queue. Client polls the queue for new messages.</p>
+<ul>
+  <li><strong>Pro:</strong> No IPC protocol change — uses existing request/response</li>
+  <li><strong>Pro:</strong> Multiple clients can poll the same session</li>
+  <li><strong>Con:</strong> Polling latency (100-500ms between checks)</li>
+  <li><strong>Con:</strong> Complex state management (queue lifecycle, cleanup)</li>
+</ul>
+
+<div class="callout decision">
+  <strong>Decision: Option A — Agent in Daemon with Streaming IPC.</strong>
+  The daemon is the right home for the agent because it owns DB access, config, and session state.
+  The IPC upgrade is a one-time investment that enables all future clients. Option B duplicates
+  too much logic. Option C adds latency that degrades the streaming experience.
+</div>
+
+<!-- ================================================================== -->
+<h2>3. IPC Protocol Upgrade</h2>
+
+<h3>3.1 Current Protocol</h3>
+<pre><code>Client → Server: {"id":1,"method":"search.query","params":{"text":"foo"}}\n
+Server → Client: {"id":1,"result":[...]}\n
+[socket closes]</code></pre>
+
+<p>Single request, single response, socket closes after response. No streaming, no multi-message.</p>
+
+<h3>3.2 Upgraded Protocol: Persistent Streaming</h3>
+
+<p>Add a <strong>stream mode</strong> for methods that need multi-message responses.
+Standard RPC methods continue to work unchanged (backward compatible).</p>
+
+<pre><code>// Standard RPC (unchanged)
+Client → Server: {"id":1,"method":"repo.list","params":{}}\n
+Server → Client: {"id":1,"result":[...]}\n
+
+// Streaming RPC (new)
+Client → Server: {"id":2,"method":"chat.send","params":{"sessionId":"...","message":"..."},"stream":true}\n
+Server → Client: {"id":2,"stream":"delta","data":{"text":"Hello"}}\n
+Server → Client: {"id":2,"stream":"delta","data":{"text":" world"}}\n
+Server → Client: {"id":2,"stream":"gate","data":{"gateId":"g1","title":"Apply changes?","actions":["approve","reject"]}}\n
+// Client sends gate reply as a NEW request:
+Client → Server: {"id":3,"method":"chat.reply","params":{"sessionId":"...","gateId":"g1","action":"approve"}}\n
+Server → Client: {"id":3,"result":{"ok":true}}\n
+// Streaming continues on original request id:
+Server → Client: {"id":2,"stream":"delta","data":{"text":"Changes applied."}}\n
+Server → Client: {"id":2,"stream":"done","data":{"summary":"..."}}\n
+[socket stays open for duration of streaming request]</code></pre>
+
+<h3>3.3 Message Types</h3>
+
+<table>
+  <tr><th>Direction</th><th>Type</th><th>Purpose</th></tr>
+  <tr><td>Client → Server</td><td><code>request</code></td><td>Standard RPC or streaming initiation</td></tr>
+  <tr><td>Client → Server</td><td><code>request</code> (chat.reply)</td><td>Gate reply (separate request on same or new socket)</td></tr>
+  <tr><td>Client → Server</td><td><code>request</code> (chat.cancel)</td><td>Cancel running agent</td></tr>
+  <tr><td>Server → Client</td><td><code>result</code></td><td>Standard single response</td></tr>
+  <tr><td>Server → Client</td><td><code>stream:delta</code></td><td>Token-level text delta</td></tr>
+  <tr><td>Server → Client</td><td><code>stream:progress</code></td><td>Step progress update</td></tr>
+  <tr><td>Server → Client</td><td><code>stream:gate</code></td><td>Gate requiring user action</td></tr>
+  <tr><td>Server → Client</td><td><code>stream:checkpoint</code></td><td>Step completed checkpoint</td></tr>
+  <tr><td>Server → Client</td><td><code>stream:done</code></td><td>Agent finished (final message)</td></tr>
+  <tr><td>Server → Client</td><td><code>stream:error</code></td><td>Agent error (final message)</td></tr>
+</table>
+
+<h3>3.4 Wire Format</h3>
+
+<pre><code>// Standard response (unchanged)
+interface IpcResponse {
+  id: number;
+  result?: unknown;
+  error?: string;
+}
+
+// Stream message (new)
+interface IpcStreamMessage {
+  id: number;                                    // matches original request id
+  stream: 'delta' | 'progress' | 'gate' | 'checkpoint' | 'done' | 'error';
+  data: unknown;                                 // payload varies by stream type
+}</code></pre>
+
+<h3>3.5 Server Changes (<code>src/daemon/server.ts</code>)</h3>
+
+<p>The <code>IpcServer</code> needs a new handler type for streaming methods:</p>
+
+<pre><code>// Current handler type (unchanged)
+type RpcHandler = (params: unknown) => Promise&lt;unknown&gt;;
+
+// New streaming handler type
+type StreamHandler = (
+  params: unknown,
+  send: (msg: IpcStreamMessage) => void,   // push messages to client
+  signal: AbortSignal,                      // cancellation
+) => Promise&lt;void&gt;;                        // resolves when stream ends
+
+// Handler registry
+interface RpcHandlers {
+  [method: string]: RpcHandler | StreamHandler;
+}
+
+// Differentiation: if request has `"stream": true`, use StreamHandler
+// Server keeps socket open until handler resolves or signal aborts</code></pre>
+
+<!-- ================================================================== -->
+<h2>4. Chat Session Lifecycle</h2>
+
+<h3>4.1 Session Management in Daemon</h3>
+
+<p>The daemon manages a pool of active chat sessions. Each session holds the agent's
+<code>Session</code> object (context manager, providers, turn history).</p>
+
+<pre><code>// In-memory session pool (daemon/chat-sessions.ts)
+interface ActiveSession {
+  id: string;
+  session: Session;                    // from src/agent/session.ts
+  channel: DaemonChannel;             // new Channel implementation
+  abortController: AbortController;
+  createdAt: number;
+  lastActivityAt: number;
+  agentRunning: boolean;              // true while runAgent() is in progress
+}
+
+const sessions = new Map&lt;string, ActiveSession&gt;();</code></pre>
+
+<h3>4.2 RPC Methods</h3>
+
+<table>
+  <tr><th>Method</th><th>Type</th><th>Description</th></tr>
+  <tr>
+    <td><code>chat.start</code></td>
+    <td>Standard</td>
+    <td>Create a new session. Returns <code>{ sessionId, repo }</code>. Initializes Session object, context manager, providers.</td>
+  </tr>
+  <tr>
+    <td><code>chat.send</code></td>
+    <td><strong>Streaming</strong></td>
+    <td>Send a user message. Runs classify → route → agent. Streams back deltas, progress, gates, done/error.</td>
+  </tr>
+  <tr>
+    <td><code>chat.reply</code></td>
+    <td>Standard</td>
+    <td>Reply to a gate. Unblocks the waiting agent step.</td>
+  </tr>
+  <tr>
+    <td><code>chat.cancel</code></td>
+    <td>Standard</td>
+    <td>Cancel a running agent. Triggers AbortSignal.</td>
+  </tr>
+  <tr>
+    <td><code>chat.resume</code></td>
+    <td><strong>Streaming</strong></td>
+    <td>Resume an agent from checkpoint. Streams like <code>chat.send</code>.</td>
+  </tr>
+  <tr>
+    <td><code>chat.close</code></td>
+    <td>Standard</td>
+    <td>Close a session. Persists L2 summary, cleans up resources.</td>
+  </tr>
+  <tr>
+    <td><code>chat.list</code></td>
+    <td>Standard</td>
+    <td>List active sessions with their status.</td>
+  </tr>
+</table>
+
+<h3>4.3 DaemonChannel — New Channel Implementation</h3>
+
+<p>A new <code>Channel</code> implementation that bridges the agent framework to the IPC stream.
+Replaces <code>ReplChannel</code> (terminal) for daemon-hosted agents.</p>
+
+<pre><code>// daemon/channel.ts
+class DaemonChannel implements Channel {
+  private sendFn: (msg: IpcStreamMessage) =&gt; void;
+  private gateResolvers = new Map&lt;string, (reply: ReplyPayload) =&gt; void&gt;();
+  private signal: AbortSignal;
+
+  constructor(requestId: number, sendFn: (msg: IpcStreamMessage) =&gt; void, signal: AbortSignal) {
+    this.sendFn = sendFn;
+    this.signal = signal;
+  }
+
+  // Called by agent steps via ctx.emit()
+  send(msg: AgentMessage): void {
+    switch (msg.kind) {
+      case 'emit':
+        this.sendFn({ id: this.requestId, stream: 'delta', data: msg.payload });
+        break;
+      case 'progress':
+        this.sendFn({ id: this.requestId, stream: 'progress', data: msg.payload });
+        break;
+      case 'checkpoint':
+        this.sendFn({ id: this.requestId, stream: 'checkpoint', data: msg.payload });
+        break;
+      case 'done':
+        this.sendFn({ id: this.requestId, stream: 'done', data: msg.payload });
+        break;
+      case 'error':
+        this.sendFn({ id: this.requestId, stream: 'error', data: msg.payload });
+        break;
+    }
+  }
+
+  // Called by agent steps via ctx.gate() — blocks until client sends chat.reply
+  async gate(msg: AgentMessage&lt;GatePayload&gt;): Promise&lt;ReplyPayload&gt; {
+    const gateId = msg.payload.gateId;
+    this.sendFn({ id: this.requestId, stream: 'gate', data: msg.payload });
+
+    // Block until resolveGate() is called (from chat.reply handler)
+    return new Promise&lt;ReplyPayload&gt;((resolve, reject) =&gt; {
+      this.gateResolvers.set(gateId, resolve);
+      this.signal.addEventListener('abort', () =&gt; reject(new Error('cancelled')), { once: true });
+    });
+  }
+
+  // Called by chat.reply RPC handler
+  resolveGate(gateId: string, reply: ReplyPayload): boolean {
+    const resolver = this.gateResolvers.get(gateId);
+    if (!resolver) return false;
+    this.gateResolvers.delete(gateId);
+    resolver(reply);
+    return true;
+  }
+
+  onMessage(handler: (msg: AgentMessage) =&gt; void): void {
+    // Cancel messages handled via AbortSignal, not onMessage
+  }
+}</code></pre>
+
+<!-- ================================================================== -->
+<h2>5. Message Flow: End-to-End</h2>
+
+<h3>5.1 Simple Message (No Gates)</h3>
+
+<pre><code>Extension                    Daemon                         LLM
+   │                           │                              │
+   │─── chat.send ────────────▶│                              │
+   │    {session, message,     │                              │
+   │     stream: true}         │                              │
+   │                           │── classify(message) ────────▶│
+   │                           │◀─ {intent: research} ───────│
+   │                           │                              │
+   │                           │── provider.stream(msgs) ───▶│
+   │◀── stream:progress ──────│   "Researching..."           │
+   │    {step: 'analyze'}      │                              │
+   │                           │◀─ token: "Based" ───────────│
+   │◀── stream:delta ─────────│                              │
+   │    {text: "Based"}        │◀─ token: " on" ─────────────│
+   │◀── stream:delta ─────────│                              │
+   │    {text: " on"}          │◀─ token: " the..." ─────────│
+   │◀── stream:delta ─────────│                              │
+   │    {text: " the..."}     │                              │
+   │                           │── recordTurn() ──────────────│
+   │◀── stream:done ──────────│                              │
+   │    {summary: "..."}       │                              │
+   │                           │                              │
+</code></pre>
+
+<h3>5.2 Message with Gate (Pair Agent)</h3>
+
+<pre><code>Extension                    Daemon                         LLM
+   │                           │                              │
+   │─── chat.send ────────────▶│                              │
+   │    {session, message}     │                              │
+   │                           │── classify → pair agent      │
+   │◀── stream:progress ──────│   "Analyzing..."             │
+   │◀── stream:delta ─────────│   "I'll modify foo.ts..."    │
+   │                           │                              │
+   │◀── stream:gate ──────────│   ← propose step pauses      │
+   │    {gateId: "g1",        │                              │
+   │     title: "Apply?",     │                              │
+   │     content: "diff...",  │                              │
+   │     actions: ["approve", │                              │
+   │      "reject", "edit"]}  │                              │
+   │                           │   (agent blocked on gate)    │
+   │                           │                              │
+   │─── chat.reply ───────────▶│                              │
+   │    {gateId: "g1",        │── resolveGate("g1") ────────│
+   │     action: "approve"}   │   (agent unblocked)          │
+   │◀── {ok: true} ──────────│                              │
+   │                           │                              │
+   │◀── stream:progress ──────│   "Applying changes..."      │
+   │◀── stream:delta ─────────│   "Changes applied to..."    │
+   │◀── stream:done ──────────│                              │
+   │                           │                              │
+</code></pre>
+
+<h3>5.3 Cancel</h3>
+
+<pre><code>Extension                    Daemon
+   │                           │
+   │─── chat.send ────────────▶│  (agent running)
+   │◀── stream:delta ─────────│
+   │◀── stream:delta ─────────│
+   │                           │
+   │─── chat.cancel ──────────▶│
+   │◀── {ok: true} ──────────│
+   │                           │── abortController.abort()
+   │◀── stream:error ─────────│
+   │    {error: "cancelled",  │
+   │     recoverable: true}   │
+   │                           │
+</code></pre>
+
+<!-- ================================================================== -->
+<h2>6. Streaming LLM Integration</h2>
+
+<h3>6.1 Provider Streaming Through DaemonChannel</h3>
+
+<p>The agent steps call <code>provider.stream()</code> which yields tokens. These must be
+relayed through the DaemonChannel to the client. Two approaches:</p>
+
+<h4>Approach A: Step-level streaming (simpler)</h4>
+<p>Each step that calls a provider emits the tokens via <code>ctx.emit()</code>:</p>
+
+<pre><code>// Inside a step's run() method:
+const stream = provider.stream(messages, opts);
+let fullText = '';
+for await (const delta of stream) {
+  fullText += delta;
+  ctx.emit(delta, true);  // stream: true → relayed as stream:delta
+}
+// Step uses fullText for further processing</code></pre>
+
+<p>This is the current pattern used in the REPL (writing to stdout). The change is
+minimal — <code>ctx.emit()</code> routes through DaemonChannel instead of stdout.</p>
+
+<h4>Approach B: Provider-level streaming hook (transparent)</h4>
+<p>Wrap the provider to automatically relay tokens:</p>
+
+<pre><code>function streamingProvider(provider: LLMProvider, channel: DaemonChannel): LLMProvider {
+  return {
+    ...provider,
+    async *stream(messages, opts) {
+      for await (const delta of provider.stream(messages, opts)) {
+        channel.send(createMessage(agentId, runId, 'emit', { text: delta, stream: true }));
+        yield delta;
+      }
+    },
+    // complete() remains non-streaming
+  };
+}</code></pre>
+
+<div class="callout decision">
+  <strong>Decision: Approach A (step-level).</strong> Each step already controls when to stream
+  vs batch. Some steps intentionally don't stream (e.g., tool calls, internal reasoning).
+  Approach B would leak internal LLM calls to the UI. Steps should explicitly choose what to emit.
+</div>
+
+<!-- ================================================================== -->
+<h2>7. Concurrency Model</h2>
+
+<h3>7.1 One Agent Per Session</h3>
+<p>Only one <code>chat.send</code> can be active per session at a time. If a second <code>chat.send</code>
+arrives while the agent is running, return an error:</p>
+<pre><code>{ "error": "agent already running on this session" }</code></pre>
+
+<h3>7.2 Multiple Sessions</h3>
+<p>The daemon can host multiple active sessions concurrently (different repos or contexts).
+Each session has its own <code>Session</code> object, providers, and <code>DaemonChannel</code>.
+LLM calls are naturally concurrent (Ollama handles its own queuing, Claude API is async).</p>
+
+<h3>7.3 Session Timeout</h3>
+<p>Sessions idle for &gt;30 minutes are automatically closed (persist L2 summary, release resources).
+The <code>chat.send</code> on a closed session returns an error suggesting <code>chat.start</code>.</p>
+
+<!-- ================================================================== -->
+<h2>8. Implementation Plan</h2>
+
+<h3>Phase 1: IPC Protocol Upgrade</h3>
+<p>Modify <code>src/daemon/server.ts</code> to support streaming handlers.</p>
+<ul>
+  <li>Add <code>StreamHandler</code> type alongside existing <code>RpcHandler</code></li>
+  <li>Detect <code>"stream": true</code> in request to select handler type</li>
+  <li>Keep socket open during streaming, write multiple newline-delimited messages</li>
+  <li>Add <code>AbortController</code> per streaming request</li>
+  <li>All existing handlers unchanged — backward compatible</li>
+</ul>
+
+<h3>Phase 2: DaemonChannel</h3>
+<p>Create <code>src/daemon/channel.ts</code> — new <code>Channel</code> implementation.</p>
+<ul>
+  <li>Implements <code>send()</code> → maps AgentMessage kinds to IpcStreamMessage</li>
+  <li>Implements <code>gate()</code> → sends gate message, returns Promise that blocks until <code>resolveGate()</code></li>
+  <li>Gate resolution via <code>chat.reply</code> RPC → looks up session → calls <code>channel.resolveGate()</code></li>
+</ul>
+
+<h3>Phase 3: Session Pool</h3>
+<p>Create <code>src/daemon/chat-sessions.ts</code> — manages active sessions.</p>
+<ul>
+  <li><code>createSession(repo)</code> → initializes Session, providers, returns sessionId</li>
+  <li><code>getSession(id)</code> → returns ActiveSession or null</li>
+  <li><code>closeSession(id)</code> → persists, cleans up</li>
+  <li>Idle timeout (30min) with automatic cleanup</li>
+</ul>
+
+<h3>Phase 4: Chat RPC Handlers</h3>
+<p>Add handlers in <code>src/daemon/index.ts</code>:</p>
+<ul>
+  <li><code>chat.start</code> — standard handler, creates session</li>
+  <li><code>chat.send</code> — streaming handler, runs classify → route → agent</li>
+  <li><code>chat.reply</code> — standard handler, resolves gate</li>
+  <li><code>chat.cancel</code> — standard handler, aborts agent</li>
+  <li><code>chat.close</code> — standard handler, closes session</li>
+  <li><code>chat.list</code> — standard handler, lists active sessions</li>
+</ul>
+
+<h3>Phase 5: Extension RPC Client Upgrade</h3>
+<p>Update <code>vscode-insrc/src/daemon/rpc.ts</code>:</p>
+<ul>
+  <li>Add <code>callStream(method, params, onMessage)</code> — keeps socket open, fires callback per message</li>
+  <li>Returns when <code>stream:done</code> or <code>stream:error</code> received</li>
+  <li>Supports <code>AbortSignal</code> for client-side cancellation</li>
+</ul>
+
+<h3>Phase 6: Refactor REPL to Use Chat RPC</h3>
+<p>Update <code>src/agent/index.ts</code> to optionally use daemon-hosted sessions:</p>
+<ul>
+  <li>CLI REPL can either run in-process (current) or connect to daemon via chat RPC</li>
+  <li><code>--daemon</code> flag to use daemon-hosted session (same IPC as extension)</li>
+  <li>Default: in-process (no change for existing CLI users)</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2>9. VS Code Extension Integration</h2>
+
+<p>The chat panel (<code>Segment 5</code>) uses the streaming RPC client:</p>
+
+<pre><code>// Extension sends message
+const sessionId = await rpc.call&lt;string&gt;('chat.start', { repo: currentRepo });
+
+// Streaming send
+await rpc.callStream('chat.send', { sessionId, message: userText }, (msg) =&gt; {
+  switch (msg.stream) {
+    case 'delta':
+      chatPanel.appendText(msg.data.text);        // Token-by-token render
+      break;
+    case 'progress':
+      chatPanel.showProgress(msg.data.message);    // Step indicator
+      break;
+    case 'gate':
+      chatPanel.showGate(msg.data);                // Render approve/reject UI
+      break;
+    case 'done':
+      chatPanel.finishMessage(msg.data.summary);   // Complete
+      break;
+    case 'error':
+      chatPanel.showError(msg.data.error);         // Error display
+      break;
+  }
+});
+
+// Gate reply (from user clicking approve/reject in chat panel)
+await rpc.call('chat.reply', { sessionId, gateId, action: 'approve' });
+
+// Cancel (from user clicking stop button)
+await rpc.call('chat.cancel', { sessionId });</code></pre>
+
+<!-- ================================================================== -->
+<h2>10. Files to Modify/Create</h2>
+
+<table>
+  <tr><th>File</th><th>Action</th><th>Phase</th></tr>
+  <tr><td><code>src/daemon/server.ts</code></td><td>Add StreamHandler support, persistent connections</td><td>1</td></tr>
+  <tr><td><code>src/daemon/channel.ts</code></td><td><strong>Create</strong> — DaemonChannel implements Channel</td><td>2</td></tr>
+  <tr><td><code>src/daemon/chat-sessions.ts</code></td><td><strong>Create</strong> — Session pool management</td><td>3</td></tr>
+  <tr><td><code>src/daemon/index.ts</code></td><td>Add chat.* RPC handlers</td><td>4</td></tr>
+  <tr><td><code>vscode-insrc/src/daemon/rpc.ts</code></td><td>Add callStream() method</td><td>5</td></tr>
+  <tr><td><code>src/agent/index.ts</code></td><td>Optional daemon mode via --daemon flag</td><td>6</td></tr>
+  <tr><td><code>scripts/test-chat-rpc.ts</code></td><td><strong>Create</strong> — Integration test</td><td>4</td></tr>
+</table>
+
+<!-- ================================================================== -->
+<h2>11. Testing</h2>
+
+<ol>
+  <li><strong>Unit:</strong> DaemonChannel — gate resolution, message mapping, abort handling</li>
+  <li><strong>Unit:</strong> Session pool — create, get, close, idle timeout</li>
+  <li><strong>Integration:</strong> <code>scripts/test-chat-rpc.ts</code> — start session → send message → receive streaming deltas → verify done</li>
+  <li><strong>Integration:</strong> Gate flow — send message that triggers pair agent → receive gate → send reply → verify completion</li>
+  <li><strong>Integration:</strong> Cancel — send message → cancel mid-stream → verify error with recoverable=true</li>
+  <li><strong>Integration:</strong> Concurrent sessions — two sessions on different repos, both streaming</li>
+  <li><strong>E2E:</strong> VS Code extension chat panel → type message → verify streaming response</li>
+</ol>
+
+</main>
+</body>
+</html>

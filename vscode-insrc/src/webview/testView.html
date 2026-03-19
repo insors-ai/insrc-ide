@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--vscode-font-family, system-ui, sans-serif);
+      font-size: var(--vscode-font-size, 13px);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+      padding: 16px 20px;
+      max-width: 760px;
+      margin: 0 auto;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .header h1 { font-size: 1.3em; flex: 1; }
+    .header-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 0.78em;
+      font-weight: 600;
+    }
+    .badge-running { background: var(--vscode-editorWarning-foreground, #cca700); color: #000; }
+    .badge-done { background: var(--vscode-testing-iconPassed, #4caf7d); color: #fff; }
+    .badge-failed { background: var(--vscode-errorForeground, #f44); color: #fff; }
+
+    /* Summary bar */
+    .summary-bar {
+      display: flex;
+      gap: 16px;
+      padding: 10px 14px;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.03));
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      margin-bottom: 16px;
+      font-size: 0.9em;
+    }
+    .summary-stat { text-align: center; }
+    .summary-num { font-size: 1.4em; font-weight: 600; }
+    .summary-label { color: var(--vscode-descriptionForeground); font-size: 0.82em; }
+
+    /* Test plan section */
+    .section { margin-bottom: 20px; }
+    .section-title {
+      font-weight: 600;
+      font-size: 1.05em;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Plan entry */
+    .plan-entry {
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+    .plan-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .plan-header:hover { background: rgba(255,255,255,0.03); }
+    .plan-chevron { font-size: 0.8em; transition: transform 0.15s; }
+    .plan-chevron.open { transform: rotate(90deg); }
+    .plan-name { font-weight: 500; flex: 1; }
+    .plan-priority {
+      font-size: 0.75em;
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+    }
+    .plan-body {
+      display: none;
+      padding: 8px 12px;
+      border-top: 1px solid var(--vscode-panel-border, #333);
+      font-size: 0.9em;
+    }
+    .plan-body.open { display: block; }
+    .plan-scenarios { margin: 6px 0; padding-left: 16px; }
+    .plan-scenarios li { margin-bottom: 3px; color: var(--vscode-descriptionForeground); }
+    .plan-fixtures { font-size: 0.85em; color: var(--vscode-descriptionForeground); margin-top: 6px; }
+
+    /* File progress */
+    .file-entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      font-size: 0.9em;
+    }
+    .file-entry:last-child { border-bottom: none; }
+    .file-name { flex: 1; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.9em; }
+    .file-status {
+      font-size: 0.78em;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+    }
+    .status-pending { background: var(--vscode-panel-border, #555); color: var(--vscode-foreground); }
+    .status-written { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .status-passing { background: var(--vscode-testing-iconPassed, #4caf7d); color: #fff; }
+    .status-failing { background: var(--vscode-errorForeground, #f44); color: #fff; }
+    .status-impl-bug { background: #c44; color: #fff; }
+    .status-skipped { background: var(--vscode-descriptionForeground, #888); color: #fff; }
+
+    /* Failure classification */
+    .failure-badge {
+      font-size: 0.72em;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-weight: 600;
+    }
+    .fail-test { background: #2196f3; color: #fff; }
+    .fail-impl { background: #f44336; color: #fff; }
+    .fail-setup { background: #ff9800; color: #fff; }
+
+    /* Fix loop indicator */
+    .fix-loop {
+      font-size: 0.78em;
+      color: var(--vscode-descriptionForeground);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .fix-loop-count { font-weight: 600; color: var(--vscode-foreground); }
+    .escalation-indicator {
+      font-size: 0.72em;
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: var(--vscode-editorWarning-foreground, #cca700);
+      color: #000;
+      font-weight: 600;
+    }
+
+    /* Gate actions */
+    .gate-bar {
+      display: flex;
+      gap: 8px;
+      padding: 12px 0;
+      border-top: 1px solid var(--vscode-panel-border, #333);
+      margin-top: 12px;
+    }
+    .gate-btn {
+      padding: 5px 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.88em;
+      border: none;
+    }
+    .gate-btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .gate-btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+    .gate-btn-secondary { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border, #555); }
+    .gate-btn-secondary:hover { opacity: 0.85; }
+
+    /* Impl bug gate */
+    .impl-bug-list {
+      border: 1px solid var(--vscode-errorForeground, #f44);
+      border-radius: 6px;
+      margin: 12px 0;
+      overflow: hidden;
+    }
+    .impl-bug-header {
+      padding: 8px 12px;
+      background: rgba(244, 67, 54, 0.1);
+      font-weight: 600;
+      font-size: 0.9em;
+    }
+    .impl-bug-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      font-size: 0.88em;
+    }
+    .impl-bug-item:last-child { border-bottom: none; }
+    .impl-bug-file { flex: 1; font-family: var(--vscode-editor-font-family, monospace); }
+    .impl-bug-action {
+      font-size: 0.82em;
+      padding: 2px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      border: 1px solid var(--vscode-panel-border, #555);
+      background: transparent;
+      color: var(--vscode-foreground);
+    }
+    .impl-bug-action:hover { background: rgba(255,255,255,0.05); }
+
+    /* Report */
+    .report-card {
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.03));
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      padding: 14px;
+    }
+    .report-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 0.9em; }
+    .report-label { color: var(--vscode-descriptionForeground); }
+    .report-value { font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Test Runner</h1>
+    <span class="header-badge badge-running" id="statusBadge" style="display:none">running</span>
+  </div>
+
+  <div class="summary-bar" id="summaryBar" style="display:none">
+    <div class="summary-stat"><div class="summary-num" id="totalTests">0</div><div class="summary-label">Total</div></div>
+    <div class="summary-stat"><div class="summary-num" id="passingTests" style="color:var(--vscode-testing-iconPassed,#4caf7d)">0</div><div class="summary-label">Passing</div></div>
+    <div class="summary-stat"><div class="summary-num" id="failingTests" style="color:var(--vscode-errorForeground,#f44)">0</div><div class="summary-label">Failing</div></div>
+    <div class="summary-stat"><div class="summary-num" id="implBugs" style="color:#c44">0</div><div class="summary-label">Impl Bugs</div></div>
+  </div>
+
+  <div id="content">
+    <div style="color:var(--vscode-descriptionForeground);text-align:center;padding:40px 0;">
+      Run a <code>/test</code> command in the chat panel to start.
+    </div>
+  </div>
+
+  <script>
+    // @ts-ignore
+    const vscode = acquireVsCodeApi();
+    const contentEl = document.getElementById('content');
+    const summaryBar = document.getElementById('summaryBar');
+    const statusBadge = document.getElementById('statusBadge');
+
+    let state = { plan: null, files: [], implBugs: [], report: null };
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'setPlan':
+          state.plan = msg.plan;
+          renderPlan(msg.plan);
+          break;
+        case 'setPlanGate':
+          renderPlanGate(msg.gateId, msg.actions);
+          break;
+        case 'updateFile':
+          updateFileStatus(msg.file, msg.status, msg.classification, msg.fixLoop, msg.escalated);
+          break;
+        case 'setImplBugGate':
+          renderImplBugGate(msg.bugs, msg.gateId);
+          break;
+        case 'setReport':
+          state.report = msg.report;
+          renderReport(msg.report);
+          break;
+        case 'setStatus':
+          statusBadge.style.display = '';
+          statusBadge.textContent = msg.status;
+          statusBadge.className = `header-badge badge-${msg.status}`;
+          break;
+      }
+    });
+
+    function renderPlan(plan) {
+      let html = '<div class="section"><div class="section-title">Test Plan</div>';
+      plan.entries.forEach((entry, i) => {
+        html += `<div class="plan-entry">
+          <div class="plan-header" onclick="togglePlan(${i})">
+            <span class="plan-chevron" id="plan-chev-${i}">&#9654;</span>
+            <span class="plan-name">${entry.name}</span>
+            <span class="plan-priority">${entry.priority || 'normal'}</span>
+          </div>
+          <div class="plan-body" id="plan-body-${i}">
+            <p>${entry.description || ''}</p>
+            ${entry.scenarios ? `<div>Scenarios:<ul class="plan-scenarios">${entry.scenarios.map(s => `<li>${s}</li>`).join('')}</ul></div>` : ''}
+            ${entry.fixtures ? `<div class="plan-fixtures">Fixtures: ${entry.fixtures.join(', ')}</div>` : ''}
+          </div>
+        </div>`;
+      });
+      html += '</div>';
+
+      // File progress section
+      html += '<div class="section" id="fileProgress"><div class="section-title">File Progress</div>';
+      if (plan.files) {
+        state.files = plan.files.map(f => ({ name: f, status: 'pending' }));
+        html += plan.files.map(f =>
+          `<div class="file-entry" id="file-${css(f)}">
+            <span class="file-name">${f.split('/').pop()}</span>
+            <span class="file-status status-pending">pending</span>
+          </div>`
+        ).join('');
+      }
+      html += '</div>';
+      contentEl.innerHTML = html;
+      summaryBar.style.display = 'flex';
+    }
+
+    function renderPlanGate(gateId, actions) {
+      const gateEl = document.createElement('div');
+      gateEl.className = 'gate-bar';
+      gateEl.id = `gate-${gateId}`;
+      const actionMap = actions || [
+        { name: 'approve', label: 'Approve' },
+        { name: 'approve-review', label: 'Approve with Review' },
+        { name: 'edit', label: 'Edit' },
+        { name: 'reject', label: 'Reject' },
+      ];
+      actionMap.forEach((a, i) => {
+        const btn = document.createElement('button');
+        btn.className = `gate-btn ${i === 0 ? 'gate-btn-primary' : 'gate-btn-secondary'}`;
+        btn.textContent = a.label || a.name;
+        btn.addEventListener('click', () => {
+          vscode.postMessage({ type: 'gateReply', gateId, action: a.name });
+          gateEl.remove();
+        });
+        gateEl.appendChild(btn);
+      });
+      contentEl.appendChild(gateEl);
+    }
+
+    function updateFileStatus(file, status, classification, fixLoop, escalated) {
+      const el = document.getElementById(`file-${css(file)}`);
+      if (!el) return;
+
+      const statusEl = el.querySelector('.file-status');
+      statusEl.textContent = status;
+      statusEl.className = `file-status status-${status}`;
+
+      // Remove old badges
+      el.querySelectorAll('.failure-badge, .fix-loop, .escalation-indicator').forEach(b => b.remove());
+
+      if (classification) {
+        const badge = document.createElement('span');
+        badge.className = `failure-badge fail-${classification === 'test_issue' ? 'test' : classification === 'implementation_bug' ? 'impl' : 'setup'}`;
+        badge.textContent = classification.replace('_', ' ');
+        el.appendChild(badge);
+      }
+
+      if (fixLoop && fixLoop > 0) {
+        const loop = document.createElement('span');
+        loop.className = 'fix-loop';
+        loop.innerHTML = `fix <span class="fix-loop-count">${fixLoop}</span>/3`;
+        el.appendChild(loop);
+      }
+
+      if (escalated) {
+        const esc = document.createElement('span');
+        esc.className = 'escalation-indicator';
+        esc.textContent = 'Claude';
+        el.appendChild(esc);
+      }
+
+      updateSummary();
+    }
+
+    function renderImplBugGate(bugs, gateId) {
+      const list = document.createElement('div');
+      list.className = 'impl-bug-list';
+      list.innerHTML = `<div class="impl-bug-header">Implementation Bugs (${bugs.length})</div>`;
+      bugs.forEach(bug => {
+        const item = document.createElement('div');
+        item.className = 'impl-bug-item';
+        item.innerHTML = `
+          <span class="impl-bug-file">${bug.file.split('/').pop()}</span>
+          <span style="color:var(--vscode-descriptionForeground);font-size:0.85em">${bug.error || ''}</span>
+          <button class="impl-bug-action" onclick="vscode.postMessage({type:'implBugAction',gateId:'${gateId}',file:'${bug.file}',action:'fix'})">Auto-fix</button>
+          <button class="impl-bug-action" onclick="vscode.postMessage({type:'implBugAction',gateId:'${gateId}',file:'${bug.file}',action:'skip'})">Skip</button>
+        `;
+        list.appendChild(item);
+      });
+      contentEl.appendChild(list);
+    }
+
+    function renderReport(report) {
+      statusBadge.textContent = report.allPassing ? 'done' : 'failed';
+      statusBadge.className = `header-badge ${report.allPassing ? 'badge-done' : 'badge-failed'}`;
+
+      const card = document.createElement('div');
+      card.className = 'report-card';
+      card.innerHTML = `
+        <div class="section-title">Test Report</div>
+        <div class="report-row"><span class="report-label">Total tests</span><span class="report-value">${report.total}</span></div>
+        <div class="report-row"><span class="report-label">Passing</span><span class="report-value" style="color:var(--vscode-testing-iconPassed,#4caf7d)">${report.passing}</span></div>
+        <div class="report-row"><span class="report-label">Failing</span><span class="report-value" style="color:var(--vscode-errorForeground,#f44)">${report.failing}</span></div>
+        <div class="report-row"><span class="report-label">Impl bugs</span><span class="report-value" style="color:#c44">${report.implBugs}</span></div>
+        <div class="report-row"><span class="report-label">Skipped</span><span class="report-value">${report.skipped}</span></div>
+        <div class="report-row"><span class="report-label">Duration</span><span class="report-value">${report.duration}</span></div>
+        ${report.coverage ? `<div class="report-row"><span class="report-label">Coverage</span><span class="report-value">${report.coverage}</span></div>` : ''}
+      `;
+      contentEl.appendChild(card);
+    }
+
+    function updateSummary() {
+      const statuses = document.querySelectorAll('.file-status');
+      let total = 0, passing = 0, failing = 0, implBugs = 0;
+      statuses.forEach(el => {
+        total++;
+        if (el.classList.contains('status-passing')) passing++;
+        else if (el.classList.contains('status-failing')) failing++;
+        else if (el.classList.contains('status-impl-bug')) implBugs++;
+      });
+      document.getElementById('totalTests').textContent = String(total);
+      document.getElementById('passingTests').textContent = String(passing);
+      document.getElementById('failingTests').textContent = String(failing);
+      document.getElementById('implBugs').textContent = String(implBugs);
+    }
+
+    function togglePlan(idx) {
+      const body = document.getElementById(`plan-body-${idx}`);
+      const chev = document.getElementById(`plan-chev-${idx}`);
+      if (body) body.classList.toggle('open');
+      if (chev) chev.classList.toggle('open');
+    }
+
+    function css(str) {
+      return str.replace(/[^a-z0-9]/gi, '-');
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,578 @@
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { join, extname, resolve } from 'node:path';
+import type { DbClient } from '../db/client.js';
+import type { RegisteredRepo, IndexJob, ConfigScope } from '../shared/types.js';
+import { upsertEntities } from '../db/entities.js';
+import { upsertRelations, deleteRelationsForFile } from '../db/relations.js';
+import { deleteEntitiesForFile, getEntity } from '../db/entities.js';
+import { updateRepoStatus } from '../db/repos.js';
+import { embedEntities, embedText } from './embedder.js';
+import { parseManifest } from './manifest.js';
+import { resolveRelations } from './resolver.js';
+import { getParser, supportedExtensions } from './parser/registry.js';
+import { makeEntityId } from './parser/base.js';
+// Side-effect imports — registers parsers so getParser() can find them
+import './parser/typescript.js';
+import './parser/python.js';
+import './parser/go.js';
+import './parser/artifact.js';
+import { basenameParser } from './parser/artifact.js';
+import { Watcher, IGNORE_DIRS } from './watcher.js';
+import { IndexQueue } from '../daemon/queue.js';
+import { getLogger } from '../shared/logger.js';
+import type { ConfigStore } from '../config/store.js';
+import {
+  parseConfigFrontmatter,
+  stripFrontmatter,
+} from '../config/frontmatter.js';
+import {
+  classifyConfigPath,
+  configEntryId,
+  inferNamespaceFromPath,
+  formatScope,
+  globalConfigDirs,
+  projectConfigBase,
+} from '../config/paths.js';
+
+const log = getLogger('indexer');
+
+// ---------------------------------------------------------------------------
+// File walker — git-aware (respects .gitignore)
+// ---------------------------------------------------------------------------
+
+const IGNORE_SET = new Set(IGNORE_DIRS);
+
+/**
+ * List all files in a repo, respecting .gitignore when inside a git repo.
+ *
+ * Uses `git ls-files` which correctly handles:
+ *   - nested .gitignore files
+ *   - global gitignore (~/.config/git/ignore)
+ *   - .git/info/exclude
+ *
+ * Falls back to the directory walker for non-git repos.
+ */
+function listRepoFiles(repoPath: string): string[] {
+  if (!existsSync(join(repoPath, '.git'))) {
+    log.debug({ repo: repoPath }, 'not a git repo, using directory walker');
+    return [...walkFilesLegacy(repoPath)];
+  }
+
+  try {
+    // --cached: tracked files
+    // --others: untracked files (new files not yet committed)
+    // --exclude-standard: honour .gitignore, .git/info/exclude, global gitignore
+    const stdout = execFileSync(
+      'git',
+      ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+      { cwd: repoPath, maxBuffer: 50 * 1024 * 1024, encoding: 'utf8' },
+    );
+    const files = stdout.split('\0').filter(Boolean).map(f => resolve(repoPath, f));
+    log.info({ repo: repoPath, files: files.length }, 'git ls-files');
+    return files;
+  } catch (err) {
+    log.warn({ repo: repoPath, err: String(err) }, 'git ls-files failed, falling back to directory walker');
+    return [...walkFilesLegacy(repoPath)];
+  }
+}
+
+/** Legacy directory walker — used as fallback for non-git repos. */
+function* walkFilesLegacy(dir: string): Iterable<string> {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); }
+  catch { return; }
+
+  for (const entry of entries) {
+    if (IGNORE_SET.has(entry.name)) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkFilesLegacy(full);
+    } else if (entry.isFile()) {
+      yield full;
+    }
+  }
+}
+
+function contentHash(source: string): string {
+  return createHash('sha256').update(source).digest('hex').slice(0, 16);
+}
+
+// ---------------------------------------------------------------------------
+// IndexerService
+// ---------------------------------------------------------------------------
+
+export class IndexerService {
+  private readonly db:      DbClient;
+  private readonly queue:   IndexQueue;
+  private readonly watcher: Watcher;
+  private readonly supported: Set<string>;
+  private readonly configStore: ConfigStore | null;
+
+  constructor(db: DbClient, queue: IndexQueue, watcher: Watcher, configStore?: ConfigStore | undefined) {
+    this.db          = db;
+    this.queue       = queue;
+    this.watcher     = watcher;
+    this.supported   = new Set(supportedExtensions());
+    this.configStore = configStore ?? null;
+  }
+
+  /**
+   * Called once on daemon startup.
+   * Starts watching all repos and enqueues full-index for pending ones.
+   */
+  async start(repos: RegisteredRepo[]): Promise<void> {
+    log.info({ repos: repos.length }, 'indexer starting');
+    this.watcher.onEvents(events => {
+      for (const e of events) {
+        // Check if this is a config file event
+        const configScope = classifyConfigPath(e.path);
+        if (configScope && e.path.endsWith('.md')) {
+          this.queue.enqueue({
+            kind: 'config-file',
+            filePath: e.path,
+            scope: configScope,
+            event: e.type,
+          });
+          continue;
+        }
+
+        if (this.supported.has(extname(e.path).toLowerCase()) || basenameParser.handles(e.path)) {
+          this.queue.enqueue({ kind: 'file', filePath: e.path, event: e.type });
+        }
+      }
+    });
+
+    for (const repo of repos) {
+      await this.watcher.addRepo(repo.path);
+
+      if (repo.status === 'pending' || (repo.status === 'indexing' && !repo.lastIndexed)) {
+        log.info({ repo: repo.path, status: repo.status }, 'enqueuing full index (incomplete)');
+        this.queue.enqueue({ kind: 'full', repoPath: repo.path });
+      } else if (repo.status === 'ready' && repo.lastIndexed) {
+        // Delta indexing: find files modified since last index
+        const delta = this.detectDelta(repo.path, repo.lastIndexed);
+        if (delta.length > 0) {
+          log.info({ repo: repo.path, changed: delta.length }, 'delta index on startup');
+          for (const filePath of delta) {
+            this.queue.enqueue({ kind: 'file', filePath, event: 'update' });
+          }
+          // Update lastIndexed so next startup doesn't re-scan the same files
+          await updateRepoStatus(this.db, repo.path, 'ready', new Date().toISOString());
+        } else {
+          log.info({ repo: repo.path }, 'no changes since last index');
+        }
+      }
+
+      // Watch project config dir if it exists
+      const projectConfig = projectConfigBase(repo.path);
+      if (existsSync(projectConfig)) {
+        await this.watcher.addConfigDir(projectConfig);
+      }
+    }
+
+    // Watch global config dirs and enqueue initial config index
+    if (this.configStore) {
+      for (const dir of globalConfigDirs()) {
+        if (existsSync(dir)) {
+          await this.watcher.addConfigDir(dir);
+        }
+      }
+      this.queue.enqueue({ kind: 'config-full', scope: { kind: 'global' } });
+    }
+  }
+
+  /**
+   * Detect files modified since last index using mtime comparison.
+   * Returns absolute paths of files that need re-indexing.
+   * Content-hash check in indexFile() will skip files that were
+   * touched but not actually changed (e.g. `touch` or save-without-edit).
+   */
+  private detectDelta(repoPath: string, lastIndexed: string): string[] {
+    const sinceMs = new Date(lastIndexed).getTime();
+    if (Number.isNaN(sinceMs)) return [];
+
+    const allFiles = listRepoFiles(repoPath);
+    const changed: string[] = [];
+
+    for (const filePath of allFiles) {
+      const ext = extname(filePath).toLowerCase();
+      if (!this.supported.has(ext) && !basenameParser.handles(filePath)) continue;
+
+      try {
+        const mtime = statSync(filePath).mtimeMs;
+        if (mtime > sinceMs) {
+          changed.push(filePath);
+        }
+      } catch {
+        // File may have been deleted between ls-files and stat — skip
+      }
+    }
+
+    return changed;
+  }
+
+  /** Add a repo: start watching + enqueue full index. */
+  async addRepo(repoPath: string): Promise<void> {
+    log.info({ repo: repoPath }, 'repo added, enqueuing full index');
+    await this.watcher.addRepo(repoPath);
+    this.queue.enqueue({ kind: 'full', repoPath });
+
+    // Watch project config dir if it exists
+    const projectConfig = projectConfigBase(repoPath);
+    if (existsSync(projectConfig) && this.configStore) {
+      await this.watcher.addConfigDir(projectConfig);
+      this.queue.enqueue({ kind: 'config-full', scope: { kind: 'project', repoPath } });
+    }
+  }
+
+  /** Remove a repo: stop watching. (DB cleanup handled by repos.removeRepo caller.) */
+  async removeRepo(repoPath: string): Promise<void> {
+    log.info({ repo: repoPath }, 'repo removed');
+    await this.watcher.removeRepo(repoPath);
+  }
+
+  /** Process a single IndexJob — called by the queue worker loop. */
+  async processJob(job: IndexJob): Promise<void> {
+    switch (job.kind) {
+      case 'full':           await this.fullIndex(job.repoPath);            break;
+      case 'file':           await this.fileEvent(job.filePath, job.event); break;
+      case 'reembed':        await this.reembed(job.repoPath);             break;
+      case 'config-full':    await this.configFullIndex(job.scope);         break;
+      case 'config-file':    await this.configFileEvent(job.filePath, job.scope, job.event); break;
+      case 'config-reindex': await this.configReindex(job.scope);           break;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Job handlers
+  // -------------------------------------------------------------------------
+
+  private async fullIndex(repoPath: string): Promise<void> {
+    log.info({ repo: repoPath }, 'full index started');
+    await updateRepoStatus(this.db, repoPath, 'indexing');
+
+    try {
+      let fileCount = 0;
+      let skipped = 0;
+      let total = 0;
+      const t0 = Date.now();
+
+      const files = listRepoFiles(repoPath);
+      const supported: string[] = [];
+      for (const filePath of files) {
+        const ext = extname(filePath).toLowerCase();
+        const hasParser = this.supported.has(ext) || basenameParser.handles(filePath);
+        if (hasParser) supported.push(filePath);
+      }
+      log.info({ repo: repoPath, total: files.length, supported: supported.length }, 'full index: files to process');
+
+      for (const filePath of supported) {
+        total++;
+        if (total % 50 === 0 || total === 1) {
+          log.info({ repo: repoPath, progress: `${total}/${supported.length}`, fileCount, skipped }, 'full index: progress');
+        }
+        try {
+          const indexed = await this.indexFile(filePath, repoPath, false);
+          if (indexed) fileCount++; else skipped++;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.error({ file: filePath, err: msg }, 'full index: file error (skipping)');
+          skipped++;
+        }
+      }
+
+      // Emit DEPENDS_ON edges from repo manifest
+      await this.indexManifest(repoPath);
+
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      log.info({ repo: repoPath, fileCount, skipped, elapsed: `${elapsed}s` }, 'full index complete');
+      await updateRepoStatus(this.db, repoPath, 'ready', new Date().toISOString());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ repo: repoPath, err: msg }, 'full index failed');
+      await updateRepoStatus(this.db, repoPath, 'error', undefined, msg);
+      throw err;
+    }
+  }
+
+  private async fileEvent(
+    filePath: string,
+    event:    'create' | 'update' | 'delete',
+  ): Promise<void> {
+    log.debug({ file: filePath, event }, 'file event');
+    if (event === 'delete') {
+      await deleteRelationsForFile(this.db, filePath);
+      await deleteEntitiesForFile(this.db, filePath);
+      log.info({ file: filePath }, 'file deleted from index');
+      return;
+    }
+    // create or update
+    await this.indexFile(filePath, this.repoForFile(filePath), true);
+  }
+
+  private async reembed(repoPath: string): Promise<void> {
+    // Loaded lazily to avoid a circular import with db/entities
+    const { listUnembeddedEntities, updateEmbedding } = await import('../db/entities.js');
+    const { EMBEDDING_MODEL }                          = await import('./embedder.js');
+    const { Ollama }                                   = await import('ollama');
+
+    const entities = await listUnembeddedEntities(this.db, repoPath);
+    if (entities.length === 0) {
+      log.debug({ repo: repoPath }, 'reembed: no unembedded entities');
+      return;
+    }
+
+    log.info({ repo: repoPath, count: entities.length }, 'reembed started');
+    const t0 = Date.now();
+    await embedEntities(entities, { force: true });
+
+    const ollama = new Ollama();
+    void ollama; // suppress unused warning — embedEntities uses the module-level instance
+
+    let updated = 0;
+    for (const e of entities) {
+      if (e.embedding.length > 0) {
+        await updateEmbedding(this.db, e.id, e.embedding, EMBEDDING_MODEL);
+        updated++;
+      }
+    }
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    log.info({ repo: repoPath, updated, total: entities.length, elapsed: `${elapsed}s` }, 'reembed complete');
+  }
+
+  // -------------------------------------------------------------------------
+  // Core indexing pipeline: parse → resolve → embed → upsert
+  // -------------------------------------------------------------------------
+
+  /** @returns true if the file was indexed, false if skipped (unchanged or no parser). */
+  private async indexFile(
+    filePath:   string,
+    repoPath:   string,
+    cleanFirst: boolean,
+  ): Promise<boolean> {
+    const parser = getParser(filePath) ?? (basenameParser.handles(filePath) ? basenameParser : null);
+    if (!parser) return false;
+
+    let source: string;
+    try { source = readFileSync(filePath, 'utf8'); }
+    catch { return false; } // file disappeared between event and read
+
+    const hash = contentHash(source);
+
+    // Skip if unchanged (handles editor save-without-change)
+    if (!cleanFirst) {
+      const existing = await getEntity(this.db, makeEntityId(repoPath, filePath, 'file', filePath));
+      if (existing?.hash === hash) {
+        log.debug({ file: filePath }, 'skipped (unchanged)');
+        return false;
+      }
+    } else {
+      await deleteRelationsForFile(this.db, filePath);
+      await deleteEntitiesForFile(this.db, filePath);
+    }
+
+    // Parse
+    const result = parser.parse(filePath, source, repoPath);
+
+    // Stamp hash on the File entity
+    const fileEntity = result.entities.find(e => e.kind === 'file' && e.file === filePath);
+    if (fileEntity) fileEntity.hash = hash;
+
+    // Resolve relative imports
+    const resolved = resolveRelations(result.relations, filePath, repoPath, result.entities);
+    const resolvedCount = resolved.filter(r => r.resolved).length;
+
+    // Embed entities (no-op if Ollama is unavailable)
+    await embedEntities(result.entities);
+
+    // Persist
+    await upsertEntities(this.db, result.entities);
+    await upsertRelations(this.db, resolved);
+
+    log.debug(
+      { file: filePath, entities: result.entities.length, relations: resolved.length, resolved: resolvedCount },
+      'indexed',
+    );
+    return true;
+  }
+
+  private async indexManifest(repoPath: string): Promise<void> {
+    const deps = parseManifest(repoPath);
+    if (deps.length === 0) {
+      log.debug({ repo: repoPath }, 'no manifest dependencies');
+      return;
+    }
+    log.info({ repo: repoPath, deps: deps.length }, 'indexing manifest dependencies');
+
+    const now      = new Date().toISOString();
+    const repoId   = makeEntityId(repoPath, '', 'repo', repoPath);
+
+    for (const dep of deps) {
+      const moduleId = makeEntityId('', '', 'module', dep.name);
+      await upsertEntities(this.db, [{
+        id: moduleId, kind: 'module', name: dep.name, language: 'typescript',
+        repo: '', file: '', startLine: 0, endLine: 0,
+        body: '', embedding: [], indexedAt: now,
+      }]);
+      await upsertRelations(this.db, [{
+        kind: 'DEPENDS_ON', from: repoId, to: moduleId, resolved: true,
+      }]);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Config indexing
+  // -------------------------------------------------------------------------
+
+  /** Walk config directories for a scope and index each .md file. */
+  private async configFullIndex(scope: ConfigScope): Promise<void> {
+    if (!this.configStore) return;
+    const scopeStr = formatScope(scope);
+    log.info({ scope: scopeStr }, 'config full index started');
+    const t0 = Date.now();
+
+    const dirs = scope.kind === 'global'
+      ? globalConfigDirs()
+      : [join(projectConfigBase(scope.repoPath), 'templates'),
+         join(projectConfigBase(scope.repoPath), 'feedback'),
+         join(projectConfigBase(scope.repoPath), 'conventions')];
+
+    let indexed = 0;
+    let skipped = 0;
+    for (const dir of dirs) {
+      for (const filePath of this.walkConfigDir(dir)) {
+        const result = await this.indexConfigFile(filePath, scope);
+        if (result) indexed++; else skipped++;
+      }
+    }
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    log.info({ scope: scopeStr, indexed, skipped, elapsed: `${elapsed}s` }, 'config full index complete');
+  }
+
+  /** Handle a single config file create/update/delete event. */
+  private async configFileEvent(
+    filePath: string,
+    scope: ConfigScope,
+    event: 'create' | 'update' | 'delete',
+  ): Promise<void> {
+    if (!this.configStore) return;
+    log.debug({ file: filePath, event, scope: formatScope(scope) }, 'config file event');
+
+    if (event === 'delete') {
+      // We need the namespace to compute the ID — infer from path
+      const namespace = inferNamespaceFromPath(filePath);
+      const id = configEntryId(scope, namespace, filePath);
+      await this.configStore.deleteEntry(id);
+      log.info({ file: filePath }, 'config entry deleted');
+      return;
+    }
+
+    await this.indexConfigFile(filePath, scope);
+  }
+
+  /** Drop all config entries for a scope, then re-index from scratch. */
+  private async configReindex(scope: ConfigScope): Promise<void> {
+    if (!this.configStore) return;
+    const scopeStr = formatScope(scope);
+    log.info({ scope: scopeStr }, 'config reindex: dropping entries');
+    await this.configStore.deleteByScope(scopeStr);
+    await this.configFullIndex(scope);
+  }
+
+  /**
+   * Parse, embed, and upsert a single config markdown file.
+   * Skips unchanged files (content hash check).
+   * @returns true if indexed, false if skipped.
+   */
+  private async indexConfigFile(filePath: string, scope: ConfigScope): Promise<boolean> {
+    if (!this.configStore) return false;
+    if (!filePath.endsWith('.md')) return false;
+
+    let content: string;
+    try { content = readFileSync(filePath, 'utf8'); }
+    catch { return false; }
+
+    const hash = contentHash(content);
+
+    // Parse frontmatter
+    let frontmatter;
+    try {
+      frontmatter = parseConfigFrontmatter(content);
+    } catch (err) {
+      log.warn({ file: filePath, err: String(err) }, 'config frontmatter parse failed');
+      return false;
+    }
+
+    const namespace = frontmatter.namespace ?? inferNamespaceFromPath(filePath);
+    const id = configEntryId(scope, namespace, filePath);
+
+    // Skip if unchanged
+    const existing = await this.configStore.getEntry(id);
+    if (existing?.contentHash === hash) {
+      log.debug({ file: filePath }, 'config entry skipped (unchanged)');
+      return false;
+    }
+
+    const body = stripFrontmatter(content);
+
+    // Embed the body text
+    const embedding = await embedText(body);
+
+    await this.configStore.upsertEntry({
+      id,
+      scope,
+      namespace,
+      category:    frontmatter.category,
+      language:    frontmatter.language,
+      name:        frontmatter.name,
+      filePath,
+      body,
+      tags:        frontmatter.tags,
+      updatedAt:   new Date().toISOString(),
+      contentHash: hash,
+      embedding,
+    });
+
+    log.debug({ file: filePath, namespace, category: frontmatter.category }, 'config entry indexed');
+    return true;
+  }
+
+  /** Recursively list .md files in a config directory. */
+  private walkConfigDir(dir: string): string[] {
+    const results: string[] = [];
+    if (!existsSync(dir)) return results;
+
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...this.walkConfigDir(full));
+        } else if (entry.isFile() && entry.name.endsWith('.md')) {
+          results.push(full);
+        }
+      }
+    } catch { /* ignore unreadable dirs */ }
+
+    return results;
+  }
+
+  // Infer repo root from a file path (walks up to find package.json / go.mod / .git)
+  private repoForFile(filePath: string): string {
+    let dir = filePath;
+    while (true) {
+      const parent = join(dir, '..');
+      if (parent === dir) return dir;
+      dir = parent;
+      try {
+        const entries = readdirSync(dir);
+        if (entries.some(e => ['.git', 'package.json', 'go.mod', 'pyproject.toml'].includes(e))) {
+          return dir;
+        }
+      } catch { continue; }
+    }
+  }
+}

@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--vscode-font-family, system-ui, sans-serif);
+      font-size: var(--vscode-font-size, 13px);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+      padding: 20px 24px;
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.4em; margin-bottom: 20px; }
+
+    /* Sections */
+    .section {
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.03));
+      cursor: pointer;
+      user-select: none;
+      font-weight: 600;
+    }
+    .section-header:hover { background: rgba(255,255,255,0.05); }
+    .section-chevron { font-size: 0.8em; transition: transform 0.15s; }
+    .section-chevron.open { transform: rotate(90deg); }
+    .section-body { display: none; padding: 14px; }
+    .section-body.open { display: block; }
+
+    /* Form elements */
+    .field { margin-bottom: 14px; }
+    .field:last-child { margin-bottom: 0; }
+    .field label { display: block; font-weight: 500; margin-bottom: 4px; }
+    .field-hint { font-size: 0.82em; color: var(--vscode-descriptionForeground); margin-top: 2px; }
+    .field input, .field select {
+      width: 100%;
+      padding: 5px 8px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: inherit;
+    }
+    .field input:focus, .field select:focus { border-color: var(--vscode-focusBorder, #007acc); outline: none; }
+    .field select { cursor: pointer; }
+    .field-row { display: flex; gap: 12px; }
+    .field-row .field { flex: 1; }
+
+    /* Agent step overrides table */
+    .agent-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+    .agent-table th, .agent-table td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--vscode-panel-border, #333); }
+    .agent-table th { font-weight: 600; color: var(--vscode-descriptionForeground); font-size: 0.88em; }
+    .agent-table select {
+      width: 100%;
+      padding: 2px 4px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 3px;
+      font-size: 0.92em;
+    }
+    .agent-name {
+      font-weight: 600;
+      padding: 6px 8px 2px;
+      color: var(--vscode-foreground);
+      cursor: pointer;
+    }
+    .agent-name:hover { text-decoration: underline; }
+    .agent-steps { display: none; }
+    .agent-steps.open { display: table-row-group; }
+
+    /* Config Store */
+    .config-search-row { display: flex; gap: 6px; margin-bottom: 10px; }
+    .config-search-row input { flex: 1; }
+    .config-search-row button { flex-shrink: 0; }
+    .config-tree { font-size: 0.88em; }
+    .config-ns {
+      font-weight: 600;
+      padding: 4px 0;
+      cursor: pointer;
+      user-select: none;
+    }
+    .config-ns:hover { text-decoration: underline; }
+    .config-cat { padding-left: 16px; color: var(--vscode-descriptionForeground); font-size: 0.85em; cursor: pointer; }
+    .config-cat:hover { color: var(--vscode-foreground); }
+    .config-entries { padding-left: 32px; }
+    .config-entry {
+      padding: 3px 0;
+      cursor: pointer;
+      font-size: 0.85em;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .config-entry:hover { color: var(--vscode-textLink-foreground, #3794ff); }
+    .config-entry-type {
+      font-size: 0.72em;
+      padding: 0 5px;
+      border-radius: 6px;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+    }
+    .config-detail {
+      margin-top: 10px;
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      overflow: hidden;
+      display: none;
+    }
+    .config-detail.visible { display: block; }
+    .config-detail-header {
+      padding: 6px 10px;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.03));
+      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      font-weight: 500;
+      font-size: 0.88em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .config-detail-body {
+      padding: 10px;
+      font-size: 0.88em;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    /* Buttons */
+    .btn-bar {
+      display: flex;
+      gap: 8px;
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--vscode-panel-border, #333);
+    }
+    .btn {
+      padding: 6px 18px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.92em;
+      border: none;
+    }
+    .btn-primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+    .btn-secondary { background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border, #555); }
+    .btn-secondary:hover { opacity: 0.85; }
+    .spacer { flex: 1; }
+    .save-status { font-size: 0.88em; color: var(--vscode-testing-iconPassed, #4caf7d); align-self: center; }
+  </style>
+</head>
+<body>
+  <h1><svg viewBox="0 0 128 128" width="24" height="24" style="vertical-align: middle; margin-right: 6px;"><text x="10" y="85" font-size="72" fill="#C2E484" font-family="Poppins, sans-serif" font-weight="700">{</text><text x="32" y="85" font-size="56" fill="#e2e4ed" font-family="Poppins, sans-serif" font-weight="600">in</text><text x="88" y="85" font-size="72" fill="#C2E484" font-family="Poppins, sans-serif" font-weight="700">}</text><text x="74" y="100" font-size="24" fill="#4B9988" font-family="Poppins, sans-serif" font-weight="600" font-style="italic" transform="rotate(-90 74 100)">src</text></svg> Settings</h1>
+
+  <!-- Daemon -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> Daemon
+    </div>
+    <div class="section-body">
+      <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px">
+        <div style="flex:1; min-width:120px">
+          <label>Status</label>
+          <div id="daemonStatus" style="font-weight:600; color:var(--vscode-testing-iconPassed, #4caf7d)">Checking...</div>
+        </div>
+        <div style="flex:1; min-width:120px">
+          <label>Version</label>
+          <div id="daemonVersion" style="font-size:0.9em; color:var(--vscode-descriptionForeground)">—</div>
+        </div>
+        <div style="flex:1; min-width:120px">
+          <label>Install Path</label>
+          <div id="daemonPath" style="font-size:0.82em; color:var(--vscode-descriptionForeground); word-break:break-all">—</div>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <button class="btn btn-secondary" onclick="vscode.postMessage({type:'daemonCheckUpdate'})">Check for Updates</button>
+        <button class="btn btn-secondary" onclick="vscode.postMessage({type:'daemonUpdate'})">Update Daemon</button>
+        <button class="btn btn-secondary" onclick="vscode.postMessage({type:'daemonRestart'})">Restart</button>
+        <button class="btn btn-secondary" style="color:var(--vscode-errorForeground)" onclick="vscode.postMessage({type:'daemonForceRestart'})">Force Restart</button>
+      </div>
+      <div id="daemonUpdateStatus" style="margin-top:8px; font-size:0.85em; color:var(--vscode-descriptionForeground)"></div>
+    </div>
+  </div>
+
+  <!-- Ollama -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron open">&#9654;</span> Ollama
+    </div>
+    <div class="section-body open">
+      <div class="field">
+        <label>Host</label>
+        <input id="ollamaHost" value="http://localhost:11434" />
+        <div class="field-hint">Ollama server URL</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Models -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron open">&#9654;</span> Models
+    </div>
+    <div class="section-body open">
+      <div class="field-row">
+        <div class="field">
+          <label>Local (coder)</label>
+          <select id="modelLocal"><option>loading...</option></select>
+          <div class="field-hint">Ollama model for code generation</div>
+        </div>
+        <div class="field">
+          <label>Embedding</label>
+          <select id="modelEmbedding"><option>loading...</option></select>
+          <div class="field-hint">Ollama model for vector embeddings</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Embedding Dimensions</label>
+        <input id="embeddingDim" type="number" value="2560" />
+        <div class="field-hint">Must match the embedding model's output dimensions</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Claude Tiers -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> Claude Tiers
+    </div>
+    <div class="section-body">
+      <div class="field-row">
+        <div class="field">
+          <label>Fast</label>
+          <input id="tierFast" value="claude-haiku-4-5" />
+        </div>
+        <div class="field">
+          <label>Standard</label>
+          <input id="tierStandard" value="claude-sonnet-4-6" />
+        </div>
+        <div class="field">
+          <label>Powerful</label>
+          <input id="tierPowerful" value="claude-opus-4-6" />
+        </div>
+      </div>
+      <div class="field-hint">Claude model IDs for escalation tiers</div>
+    </div>
+  </div>
+
+  <!-- Context Window -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> Context Window
+    </div>
+    <div class="section-body">
+      <div class="field-row">
+        <div class="field">
+          <label>Local context (tokens)</label>
+          <input id="ctxLocal" type="number" value="16384" />
+        </div>
+        <div class="field">
+          <label>Local max output</label>
+          <input id="ctxLocalMaxOutput" type="number" value="8192" />
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Claude context</label>
+          <input id="ctxClaude" type="number" value="200000" />
+        </div>
+        <div class="field">
+          <label>Claude max output</label>
+          <input id="ctxClaudeMaxOutput" type="number" value="8192" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- API Keys -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> API Keys
+    </div>
+    <div class="section-body">
+      <div class="field">
+        <label>Anthropic</label>
+        <input id="keyAnthropic" type="password" placeholder="sk-ant-..." />
+        <div class="field-hint">Stored in OS keychain. Leave blank to keep current.</div>
+      </div>
+      <div class="field">
+        <label>Brave Search</label>
+        <input id="keyBrave" type="password" placeholder="BSA..." />
+        <div class="field-hint">Optional. Leave blank to keep current.</div>
+      </div>
+      <div id="keysStatus" style="margin-top:8px;font-size:0.88em;color:var(--vscode-descriptionForeground)"></div>
+    </div>
+  </div>
+
+  <!-- Permissions & Routing -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> Permissions &amp; Routing
+    </div>
+    <div class="section-body">
+      <div class="field-row">
+        <div class="field">
+          <label>Permission mode</label>
+          <select id="permMode">
+            <option value="validate">Validate (prompt before tool execution)</option>
+            <option value="auto-accept">Auto-accept (execute without prompting)</option>
+            <option value="strict">Strict (require approval for all actions)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Routing mode</label>
+          <select id="routingMode">
+            <option value="static">Static (rule-based intent routing)</option>
+            <option value="auto">Auto (LLM-assessed complexity routing)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Agent Step Overrides -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> Agent Step Overrides
+    </div>
+    <div class="section-body">
+      <div class="field-hint" style="margin-bottom:10px">Override which provider (local / claude) runs each agent step. Click an agent name to expand.</div>
+      <table class="agent-table" id="agentTable">
+        <thead><tr><th>Step</th><th>Provider</th></tr></thead>
+      </table>
+    </div>
+  </div>
+
+  <!-- Config Store -->
+  <div class="section">
+    <div class="section-header" onclick="toggleSection(this)">
+      <span class="section-chevron">&#9654;</span> Config Store
+    </div>
+    <div class="section-body">
+      <div class="field-hint" style="margin-bottom:10px">Browse and search templates, feedback, and conventions stored in the vector index.</div>
+      <div class="config-search-row">
+        <input id="configSearchInput" placeholder="Search config store..." />
+        <button class="btn btn-secondary" onclick="doConfigSearch()">Search</button>
+        <button class="btn btn-secondary" onclick="doConfigBrowse()">Browse All</button>
+        <button class="btn btn-secondary" onclick="vscode.postMessage({type:'configReindex'})">Reindex</button>
+      </div>
+      <div class="config-tree" id="configTree"></div>
+      <div class="config-detail" id="configDetail">
+        <div class="config-detail-header">
+          <span id="configDetailName">—</span>
+          <span class="config-entry-type" id="configDetailType">—</span>
+          <span style="flex:1"></span>
+          <button class="btn btn-secondary" style="padding:2px 8px;font-size:0.82em" onclick="doConfigEdit()">Edit</button>
+        </div>
+        <div class="config-detail-body" id="configDetailBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="btn-bar">
+    <button class="btn btn-secondary" onclick="vscode.postMessage({type:'redetect'})">Re-detect Hardware</button>
+    <span class="spacer"></span>
+    <span class="save-status" id="saveStatus"></span>
+    <button class="btn btn-secondary" onclick="vscode.postMessage({type:'reset'})">Reset to Recommended</button>
+    <button class="btn btn-primary" id="saveBtn" onclick="doSave()">Save</button>
+  </div>
+
+  <script>
+    // @ts-ignore
+    const vscode = acquireVsCodeApi();
+
+    const AGENT_STEPS = {
+      designer: ['extract','enhance','sketch','review','detail','validate-plan'],
+      planner: ['analyze','search','draft','enhance','detail'],
+      brainstorm: ['seed','diverge','cluster','promote','update-spec'],
+      pair: ['analyze','propose','validate','summarize'],
+      delegate: ['execute','validate','report'],
+      tester: ['analyze','generate-test-plan','validate-plan','write-tests','validate-tests','review-tests','execute','fix-escalation','report'],
+      classifier: ['decompose','classify','command-extract'],
+    };
+
+    // Request config on load
+    vscode.postMessage({ type: 'loadConfig' });
+    vscode.postMessage({ type: 'loadModels' });
+    vscode.postMessage({ type: 'loadKeys' });
+    vscode.postMessage({ type: 'loadDaemonInfo' });
+
+    function toggleSection(header) {
+      const chev = header.querySelector('.section-chevron');
+      const body = header.nextElementSibling;
+      chev.classList.toggle('open');
+      body.classList.toggle('open');
+    }
+
+    function buildAgentTable(agents) {
+      const table = document.getElementById('agentTable');
+      const thead = table.querySelector('thead');
+      // Clear existing rows except header
+      table.innerHTML = '';
+      table.appendChild(thead);
+
+      for (const [agent, steps] of Object.entries(AGENT_STEPS)) {
+        // Agent name row
+        const nameRow = document.createElement('tr');
+        nameRow.innerHTML = `<td colspan="2" class="agent-name" onclick="toggleAgent('${agent}')">${agent}</td>`;
+        table.appendChild(nameRow);
+
+        // Step rows (hidden by default)
+        const tbody = document.createElement('tbody');
+        tbody.className = 'agent-steps';
+        tbody.id = `agent-${agent}`;
+
+        for (const step of steps) {
+          const agentConfig = agents?.[agent] || {};
+          const current = agentConfig[step] || 'local';
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td style="padding-left:24px">${step}</td>
+            <td><select data-agent="${agent}" data-step="${step}">
+              <option value="local" ${current === 'local' ? 'selected' : ''}>local</option>
+              <option value="claude" ${current === 'claude' ? 'selected' : ''}>claude</option>
+            </select></td>`;
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+      }
+    }
+
+    function toggleAgent(name) {
+      const tbody = document.getElementById(`agent-${name}`);
+      if (tbody) tbody.classList.toggle('open');
+    }
+
+    function populateModels(select, models, current) {
+      select.innerHTML = '';
+      const seen = new Set();
+      // Add current value first if not in list
+      if (current && !models.find(m => m.name === current)) {
+        const opt = document.createElement('option');
+        opt.value = current;
+        opt.textContent = current;
+        opt.selected = true;
+        select.appendChild(opt);
+        seen.add(current);
+      }
+      for (const m of models) {
+        if (seen.has(m.name)) continue;
+        seen.add(m.name);
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = `${m.name} (${m.parameterSize || '?'})`;
+        if (m.name === current) opt.selected = true;
+        select.appendChild(opt);
+      }
+    }
+
+    function doSave() {
+      const config = {
+        ollama: { host: document.getElementById('ollamaHost').value },
+        models: {
+          local: document.getElementById('modelLocal').value,
+          embedding: document.getElementById('modelEmbedding').value,
+          embeddingDim: parseInt(document.getElementById('embeddingDim').value) || 2560,
+          tiers: {
+            fast: document.getElementById('tierFast').value,
+            standard: document.getElementById('tierStandard').value,
+            powerful: document.getElementById('tierPowerful').value,
+          },
+          context: {
+            local: parseInt(document.getElementById('ctxLocal').value) || 16384,
+            localMaxOutput: parseInt(document.getElementById('ctxLocalMaxOutput').value) || 8192,
+            claude: parseInt(document.getElementById('ctxClaude').value) || 200000,
+            claudeMaxOutput: parseInt(document.getElementById('ctxClaudeMaxOutput').value) || 8192,
+            charsPerToken: 3,
+          },
+          agents: collectAgentOverrides(),
+        },
+        permissions: { mode: document.getElementById('permMode').value },
+        routing: { mode: document.getElementById('routingMode').value },
+      };
+
+      // Collect keys (only non-empty)
+      const keys = {};
+      const anthropic = document.getElementById('keyAnthropic').value.trim();
+      const brave = document.getElementById('keyBrave').value.trim();
+      if (anthropic) keys.anthropic = anthropic;
+      if (brave) keys.brave = brave;
+
+      vscode.postMessage({ type: 'save', config, keys });
+    }
+
+    function collectAgentOverrides() {
+      const agents = {};
+      document.querySelectorAll('.agent-table select[data-agent]').forEach(sel => {
+        const agent = sel.dataset.agent;
+        const step = sel.dataset.step;
+        if (!agents[agent]) agents[agent] = {};
+        agents[agent][step] = sel.value;
+      });
+      return agents;
+    }
+
+    // Messages from extension
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'setConfig': {
+          const c = msg.config;
+          const m = c.models || {};
+          const ctx = m.context || {};
+          const tiers = m.tiers || {};
+          document.getElementById('ollamaHost').value = c.ollama?.host || 'http://localhost:11434';
+          document.getElementById('embeddingDim').value = m.embeddingDim || 2560;
+          document.getElementById('tierFast').value = tiers.fast || 'claude-haiku-4-5';
+          document.getElementById('tierStandard').value = tiers.standard || 'claude-sonnet-4-6';
+          document.getElementById('tierPowerful').value = tiers.powerful || 'claude-opus-4-6';
+          document.getElementById('ctxLocal').value = ctx.local || 16384;
+          document.getElementById('ctxLocalMaxOutput').value = ctx.localMaxOutput || 8192;
+          document.getElementById('ctxClaude').value = ctx.claude || 200000;
+          document.getElementById('ctxClaudeMaxOutput').value = ctx.claudeMaxOutput || 8192;
+          document.getElementById('permMode').value = c.permissions?.mode || 'validate';
+          document.getElementById('routingMode').value = c.routing?.mode || 'static';
+          buildAgentTable(m.agents || {});
+          // Store current model selections for after model list loads
+          window._currentLocal = m.local;
+          window._currentEmbedding = m.embedding;
+          break;
+        }
+        case 'setModels': {
+          const localSel = document.getElementById('modelLocal');
+          const embedSel = document.getElementById('modelEmbedding');
+          populateModels(localSel, msg.models, window._currentLocal);
+          populateModels(embedSel, msg.models, window._currentEmbedding);
+          break;
+        }
+        case 'setKeys':
+          document.getElementById('keysStatus').textContent =
+            msg.keys.length > 0 ? `Stored: ${msg.keys.map(k => k.name).join(', ')}` : 'No keys stored';
+          break;
+        case 'saved':
+          document.getElementById('saveStatus').textContent = 'Saved!';
+          setTimeout(() => { document.getElementById('saveStatus').textContent = ''; }, 3000);
+          break;
+        case 'setRecommendation':
+          // Apply recommended values
+          if (msg.config?.models) {
+            document.getElementById('modelLocal').value = msg.config.models.local;
+            document.getElementById('modelEmbedding').value = msg.config.models.embedding;
+            document.getElementById('embeddingDim').value = msg.config.models.embeddingDim;
+            document.getElementById('ctxLocal').value = msg.config.models.context.local;
+            document.getElementById('ctxLocalMaxOutput').value = msg.config.models.context.localMaxOutput;
+          }
+          break;
+
+        case 'setConfigEntries':
+          renderConfigTree(msg.entries);
+          break;
+
+        case 'setConfigDetail':
+          showConfigDetail(msg.entry);
+          break;
+
+        case 'configReindexed':
+          document.getElementById('configSearchInput').placeholder = 'Reindexed! Search...';
+          break;
+
+        case 'setDaemonInfo': {
+          const d = msg.info;
+          const statusEl = document.getElementById('daemonStatus');
+          statusEl.textContent = d.running ? 'Running' : 'Stopped';
+          statusEl.style.color = d.running
+            ? 'var(--vscode-testing-iconPassed, #4caf7d)'
+            : 'var(--vscode-errorForeground, #f47c7c)';
+          document.getElementById('daemonVersion').textContent = d.version || '—';
+          document.getElementById('daemonPath').textContent = d.path || '—';
+          break;
+        }
+
+        case 'daemonUpdateResult': {
+          const el = document.getElementById('daemonUpdateStatus');
+          el.textContent = msg.message;
+          el.style.color = msg.success
+            ? 'var(--vscode-testing-iconPassed, #4caf7d)'
+            : 'var(--vscode-errorForeground, #f47c7c)';
+          break;
+        }
+      }
+    });
+
+    // Config store functions
+    function doConfigSearch() {
+      const query = document.getElementById('configSearchInput').value.trim();
+      if (query) vscode.postMessage({ type: 'configSearch', query });
+    }
+    function doConfigBrowse() {
+      vscode.postMessage({ type: 'configBrowse' });
+    }
+    function doConfigEdit() {
+      vscode.postMessage({ type: 'configEdit' });
+    }
+    document.getElementById('configSearchInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doConfigSearch();
+    });
+
+    function renderConfigTree(entries) {
+      const tree = document.getElementById('configTree');
+      if (!entries || entries.length === 0) {
+        tree.innerHTML = '<div style="color:var(--vscode-descriptionForeground);padding:8px 0;font-size:0.88em">No entries found.</div>';
+        return;
+      }
+      // Group by namespace → category
+      const groups = {};
+      entries.forEach(e => {
+        const ns = e.namespace || 'global';
+        const cat = e.category || 'other';
+        if (!groups[ns]) groups[ns] = {};
+        if (!groups[ns][cat]) groups[ns][cat] = [];
+        groups[ns][cat].push(e);
+      });
+
+      let html = '';
+      for (const [ns, cats] of Object.entries(groups)) {
+        html += `<div class="config-ns" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">${ns}</div><div>`;
+        for (const [cat, items] of Object.entries(cats)) {
+          html += `<div class="config-cat">${cat} (${items.length})</div><div class="config-entries">`;
+          items.forEach(e => {
+            html += `<div class="config-entry" onclick="vscode.postMessage({type:'configSelect',id:'${e.id}'})">
+              <span>${e.name || e.id}</span>
+              <span class="config-entry-type">${e.category || ''}</span>
+            </div>`;
+          });
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+      tree.innerHTML = html;
+    }
+
+    function showConfigDetail(entry) {
+      const detail = document.getElementById('configDetail');
+      document.getElementById('configDetailName').textContent = entry.name || entry.id;
+      document.getElementById('configDetailType').textContent = entry.category || '';
+      document.getElementById('configDetailBody').textContent = entry.content || entry.text || '(empty)';
+      detail.classList.add('visible');
+    }
+  </script>
+</body>
+</html>

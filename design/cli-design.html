@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>insrc CLI Design Document</title>
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a; --text: #e2e4ed;
+      --muted: #8b8fa8; --accent: #7c6af7; --accent2: #4fc3f7;
+      --green: #4caf7d; --yellow: #f5c842; --red: #f47c7c; --code-bg: #12151e;
+      font-family: 'Segoe UI', system-ui, sans-serif; font-size: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+    body { background: var(--bg); color: var(--text); line-height: 1.7; display: flex; }
+    nav.toc {
+      position: fixed; top: 0; left: 0; width: 250px; height: 100vh;
+      overflow-y: auto; background: var(--surface); border-right: 1px solid var(--border);
+      padding: 1.5rem 1rem; font-size: 0.82rem;
+    }
+    nav.toc h2 { font-size: 0.95rem; color: var(--accent); margin-bottom: 1rem; border: none; }
+    nav.toc a { color: var(--muted); text-decoration: none; display: block; padding: 0.25rem 0; }
+    nav.toc a:hover { color: var(--accent2); }
+    main { flex: 1; max-width: 920px; margin: 0 auto; padding: 2rem; }
+    @media (min-width: 1100px) { main { margin-left: 270px; } }
+    h1 { font-size: 2rem; color: var(--accent); margin-bottom: 0.25rem; }
+    h2 { font-size: 1.3rem; color: var(--accent2); margin: 2.5rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+    h3 { font-size: 1.05rem; color: var(--yellow); margin: 1.5rem 0 0.5rem; }
+    h4 { font-size: 0.95rem; color: var(--green); margin: 1rem 0 0.4rem; }
+    p { margin: 0.6rem 0; }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem 1.2rem; overflow-x: auto; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.82rem; line-height: 1.5; margin: 0.8rem 0; }
+    code { font-family: 'JetBrains Mono', 'Fira Code', monospace; background: var(--code-bg); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.88em; }
+    pre code { background: none; padding: 0; font-size: inherit; }
+    ul, ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+    li { margin: 0.25rem 0; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.92rem; }
+    th, td { border: 1px solid var(--border); padding: 0.5rem 0.8rem; text-align: left; }
+    th { background: var(--surface); color: var(--accent2); font-size: 0.9rem; }
+    strong { color: var(--accent2); }
+    hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+    .tag-func { color: var(--green); font-weight: 600; }
+    .tag-sys { color: var(--accent2); font-weight: 600; }
+    .tag-warn { color: var(--yellow); font-weight: 600; }
+    .tag-crit { color: var(--red); font-weight: 700; }
+    .tag-flag { color: var(--red); font-weight: 600; }
+    .tag-fixed { color: var(--green); font-weight: 600; }
+    .tag-added { color: var(--accent2); font-weight: 600; }
+    .tag-done { color: var(--green); font-size: 0.85em; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <nav class="toc">
+    <h2>insrc CLI Design</h2>
+    <a href="#overview">Overview</a>
+    <a href="#requirements-summary">Requirements Summary</a>
+    <a href="#requirement-1-the-cli-shall-support-all-core-funct">Requirement 1: The CLI shall support all core functionalities ava...</a>
+    <a href="#requirement-2-the-cli-shall-support-structured-jso">Requirement 2: The CLI shall support structured JSON output for p...</a>
+    <a href="#requirement-3-the-cli-shall-connect-to-a-locally-r">Requirement 3: The CLI shall connect to a locally running insrc d...</a>
+    <a href="#requirement-4-the-cli-shall-handle-daemon-initiali">Requirement 4: The CLI shall handle daemon initialization, includ...</a>
+    <a href="#requirement-5-the-cli-shall-support-all-claude-mod">Requirement 5: The CLI shall support all Claude model variants (H...</a>
+  </nav>
+  <main>
+    <h1>insrc CLI Design Document</h1>
+<h2 id="overview">Overview</h2>
+<p>
+Design document for the insrc CLI — equivalent functionality to the VS Code extension. 5 of 5 requirements addressed.
+</p>
+<h2 id="requirements-summary">Requirements Summary</h2>
+<li><span class="tag-func">[FUNCTIONAL]</span> The CLI shall support all core functionalities available in the VS Code plugin, including intent classification, local LLM execution, and Claude API routing — with command-line options for specifying intent (--intent), forcing Claude routing (--claude), outputting JSON (--json), and setting the working directory (--cwd) — <span class="tag-done">DONE</span></li>
+<li><span class="tag-func">[FUNCTIONAL]</span> The CLI shall support structured JSON output for programmatic consumption — <span class="tag-done">DONE</span></li>
+<li><span class="tag-sys">[SYSTEM]</span> The CLI shall connect to a locally running insrc daemon via IPC channel for all agent operations — <span class="tag-done">DONE</span></li>
+<li><span class="tag-sys">[SYSTEM]</span> The CLI shall handle daemon initialization, including installation, Ollama detection, model pulling, and first-run API key configuration — <span class="tag-done">DONE</span></li>
+<li><span class="tag-sys">[SYSTEM]</span> The CLI shall support all Claude model variants (Haiku, Sonnet, Opus) with metrics tracking, caching, and rate limiting when Claude routing is enabled — <span class="tag-done">DONE</span></li>
+<h2 id="requirement-1-the-cli-shall-support-all-core-funct">Requirement 1: The CLI shall support all core functionalities available in the VS Code plugin, including intent classification, local LLM execution, and Claude API routing — with command-line options for specifying intent (--intent), forcing Claude routing (--claude), outputting JSON (--json), and setting the working directory (--cwd)</h2>
+<h3>1. INTERFACE CONTRACTS</h3>
+<pre><code>// File: /src/cli/index.ts
+<p>
+interface AskOpts {
+  intent?: string;
+  claude?: boolean;
+  json?: boolean;
+  cwd?: string;
+}</code></pre>
+</p>
+<pre><code>// File: /src/agent/classifier/index.ts
+<p>
+interface ClassifyResult {
+  intent: Intent;
+  confidence: number;
+  reasoning: string;
+}</code></pre>
+</p>
+<pre><code>// File: /src/agent/cli.ts
+<p>
+interface OneShotOpts {
+  intent: Intent;
+  claude?: boolean;
+}</code></pre>
+</p>
+<pre><code>interface OneShotResult {
+<p>
+  output: string;
+  metadata: {
+    intent: Intent;
+    provider: &#x27;local&#x27; | &#x27;claude&#x27;;
+    timestamp: number;
+    tokensUsed?: number;
+  };
+}</code></pre>
+</p>
+<pre><code>// File: /src/cli/formatters/json-output-formatter.ts
+<p>
+interface JsonOutputFormatter {
+  format(result: OneShotResult): string;
+}</code></pre>
+</p>
+<h3>2. DATA FLOW</h3>
+<li>ENTRY: CLI receives insrc ask  [options]</li>
+<p>
+   - Arguments parsed into AskOpts structure by existing parser in /src/cli/index.ts
+</p>
+<li>INIT: WorkingDirectoryResolver validates --cwd option</li>
+<p>
+   - Calls validateCwd(cwd) from /src/cli/resolvers/working-dir-resolver.ts
+   - Sets process.cwd() or throws error if invalid
+</p>
+<li>CLASSIFICATION: If intent NOT overridden (AskOpts.intent is null):</li>
+<p>
+   - Calls classify(message) from /src/agent/classifier/index.ts
+   - Returns ClassifyResult with primary intent
+   - Extracts primaryIntent from result
+</p>
+<li>ROUTING: Routing decision logic:</li>
+<p>
+   - If AskOpts.claude=true: Use Claude routing
+   - Else if isClaudeDefault(primaryIntent, config): Use Claude routing (fallback)
+   - Else: Use local agent routing
+</p>
+<li>EXECUTION: Execute one-shot operation:</li>
+<p>
+   - Calls runOneShot(message, OneShotOpts) from /src/agent/cli.ts
+   - OneShotOpts = { intent: primaryIntent, claude?: AskOpts.claude }
+   - <span class="tag-crit">[CRITICAL]</span> Must ensure session initialization via initializeSession(cwd) before this call
+   - Returns OneShotResult with output and metadata
+</p>
+<li>FORMAT: Output formatting:</li>
+<p>
+   - If AskOpts.json=true: 
+     - Calls JsonOutputFormatter.format(OneShotResult) from /src/cli/formatters/json-output-formatter.ts
+     - Returns JSON string
+   - Else: Pretty-print to console using default formatter
+</p>
+<li>OUTPUT: Write result to stdout and exit with code 0</li>
+<h3>3. INTEGRATION POINTS</h3>
+<h4>Files and Functions:</h4>
+<ul><li>Entry Point: /src/cli/index.ts </li>
+</ul>  - Parses CLI arguments into AskOpts
+<p>
+  - Contains existing AskOpts interface definition
+  - Must integrate with new command handler logic if not already present
+</p>
+<ul><li>Intent Classification: /src/agent/classifier/index.ts</li>
+</ul>  - Function: classify(message: string): Promise
+<p>
+  - Interface: ClassifyResult
+</p>
+<ul><li>Routing Logic: /src/agent/router.ts</li>
+</ul>  - Function: isClaudeDefault(intent: Intent, config: any): boolean
+<ul><li>Agent Selection: /src/agent/orchestrator/agent-router.ts</li>
+</ul>  - Function: selectAgent(intent: Intent): Agent
+<ul><li>Local Execution: /src/agent/cli.ts</li>
+</ul>  - Function: runOneShot(message: string, opts: OneShotOpts): Promise
+<p>
+  - Interface: OneShotOpts, OneShotResult
+</p>
+<ul><li>Claude Provider: /src/agent/providers/claude.ts</li>
+</ul>  - Class: ClaudeProvider
+<p>
+  - Requires ANTHROPIC_API_KEY environment variable
+</p>
+<ul><li>Working Directory Resolver: /src/cli/resolvers/working-dir-resolver.ts</li>
+</ul>  - Function: validateCwd(cwd: string): void
+<ul><li>JSON Formatter: /src/cli/formatters/json-output-formatter.ts</li>
+</ul>  - Interface: JsonOutputFormatter
+<p>
+  - Function: format(result: OneShotResult): string
+</p>
+<h3>4. MIGRATION NOTES</h3>
+<h4>Modified Entities:</h4>
+<li>AskOpts interface in /src/cli/index.ts:</li>
+<p>
+   - Change: Added optional properties intent, claude, json, cwd
+   - Impact: No breaking changes; existing code using this interface will continue to work
+   - Migration: No action required for existing consumers
+</p>
+<li>runOneShot function in /src/agent/cli.ts:</li>
+<p>
+   - Change: Function signature now requires session initialization before execution
+   - Impact: CLI must call initializeSession(cwd) before calling runOneShot
+   - Migration: Update CLI command handler to include session setup step
+</p>
+<h4>New Entities:</h4>
+<li>JsonOutputFormatter in /src/cli/formatters/json-output-formatter.ts:</li>
+<p>
+   - Change: New formatter class for JSON output
+   - Impact: No existing code affected; new functionality only
+</p>
+<li>WorkingDirectoryResolver in /src/cli/resolvers/working-dir-resolver.ts:</li>
+<p>
+   - Change: New validation logic for --cwd option
+   - Impact: No existing code affected; new functionality only
+</p>
+<h3>5. RISKS</h3>
+<h4>Critical Risks:</h4>
+<li>Session Initialization Blocking Risk <span class="tag-flag">[FLAG]</span></li>
+<p>
+   - Issue: runOneShot() function depends on session state initialization
+   - Location: /src/agent/cli.ts:557
+   - Impact: CLI may crash silently if daemon not running or session not bootstrapped
+   - Mitigation Required: Add explicit session initialization check before calling runOneShot()
+</p>
+<li>Daemon Availability & IPC Setup <span class="tag-flag">[FLAG]</span></li>
+<p>
+   - Issue: Sketch assumes daemon is already running
+   - Location: No explicit daemon check in CLI flow
+   - Impact: CLI may fail during first-run setup or if daemon not available
+   - Mitigation Required: Add isDaemonRunning() check and ensureDaemonReady(cwd) call before execution
+</p>
+<li>Claude API Key Validation <span class="tag-flag">[FLAG]</span></li>
+<p>
+   - Issue: No explicit validation of ANTHROPIC_API_KEY when Claude routing is forced or selected
+   - Location: /src/agent/providers/claude.ts
+   - Impact: Runtime error if key missing but Claude routing is triggered
+   - Mitigation Required: Add API key validation in CLI before routing decision
+</p>
+<h4>Integration Risks:</h4>
+<li>Existing CLI Parser Logic:</li>
+<p>
+   - Issue: Need to verify /src/cli/index.ts already handles argument parsing
+   - Impact: May require creating new handler if existing logic insufficient
+   - Mitigation Required: Confirm parser capability or implement new handler structure
+</p>
+<li>Dependency on Daemon State:</li>
+<p>
+   - Issue: CLI must handle daemon startup gracefully per Requirement #4
+   - Impact: Complex error handling needed for first-run scenarios
+   - Mitigation Required: Implement robust daemon setup orchestration in CLI command handler
+</p>
+<hr/>
+<h2 id="requirement-2-the-cli-shall-support-structured-jso">Requirement 2: The CLI shall support structured JSON output for programmatic consumption</h2>
+<h3>Interface Contracts</h3>
+<h4>TypeScript Signatures</h4>
+<pre><code>// From src/cli/index.ts
+<p>
+interface AskOpts {
+  intent?: string;
+  claude?: boolean;
+  json?: boolean;
+  cwd?: string;
+}</code></pre>
+</p>
+<pre><code>interface OneShotResult {</code></pre>
+<p>
+  output: string; // JSON string when --json flag is used
+</p>
+<pre><code>metadata?: {
+<p>
+    intent: Intent;
+    provider: &#x27;local&#x27; | &#x27;claude&#x27;;
+    timestamp: number;
+    tokensUsed?: number;
+  };
+}</code></pre>
+</p>
+<pre><code>// Updated formatResult function signature
+<p>
+function formatResult(</code></pre>
+  response: string,
+  intent: Intent,
+  usedClaude: boolean,
+  json: boolean
+</p>
+<pre><code>): OneShotResult {</code></pre>
+<p>
+  // Implementation details...
+</p>
+<pre><code>}</code></pre>
+<pre><code>// From pipeline/types.ts (referenced)
+<p>
+type OutputFormat = &#x27;text&#x27; | &#x27;json&#x27;;</code></pre>
+</p>
+<h3>Data Flow</h3>
+<li>CLI Input Processing</li>
+<p>
+   - insrc ask "..." --json → parsed into AskOpts with json: true
+   - File: /src/cli/index.ts
+   - Function: main() (CLI entry point)
+</p>
+<li>Execution Path</li>
+<p>
+   - runOneShot(AskOpts) called
+   - File: /src/cli/index.ts
+   - Function: runOneShot()
+   - formatResult(response, intent, usedClaude, json: true) called
+   - File: /src/cli/index.ts
+   - Function: formatResult()
+</p>
+<li>Output Generation</li>
+<p>
+   - formatResult() returns OneShotResult with output as JSON string
+   - CLI writes result.output to stdout
+   - File: /src/cli/index.ts
+   - Function: main() (stdout write)
+</p>
+<h3>Integration Points</h3>
+<h4>Existing Codebase Integration</h4>
+<h3>Files and Functions:</h3>
+<ul><li>File: /src/cli/index.ts</li>
+</ul>  - Function: main() - CLI entry point that parses AskOpts
+<p>
+  - Function: runOneShot() - Core execution function
+  - Function: formatResult() - Output formatting (modified)
+  - Interface: AskOpts - Input parsing structure
+</p>
+<ul><li>File: /src/pipeline/types.ts</li>
+</ul>  - Type: OutputFormat - Defines output format options ('text' | 'json')
+<p>
+  - Note: Currently unused in CLI but referenced for consistency
+</p>
+<h3>Key Integration Points:</h3>
+<li>AskOpts.json flag is passed directly to formatResult()</li>
+<li>formatResult() function signature updated to accept boolean json parameter</li>
+<li>Return value of formatResult() now includes JSON string in output field</li>
+<li>CLI stdout write operation remains unchanged, but now writes structured JSON</li>
+<h3>Migration Notes</h3>
+<h4>Modified Entities</h4>
+<h3>1. formatResult() Function Signature</h3>
+<ul><li>Change: Added json: boolean parameter</li>
+<li>Impact: All calls to formatResult() must include this new parameter</li>
+<li>Migration Path: </li>
+</ul>  - Update all existing calls in /src/cli/index.ts
+<p>
+  - Add conditional logic to return JSON string when json: true
+  - Maintain backward compatibility for json: false (text output)
+</p>
+<h3>2. OneShotResult Interface</h3>
+<ul><li>Change: output field now contains JSON string when --json is used</li>
+<li>Impact: CLI consumers expecting text output must handle JSON parsing</li>
+<li>Migration Path:</li>
+</ul>  - Update any code that consumes OneShotResult.output to check if it's already a JSON string
+<p>
+  - No breaking changes for existing functionality
+</p>
+<h3>3. AskOpts Interface</h3>
+<ul><li>Change: No modification required (already includes json?: boolean)</li>
+<li>Impact: No migration needed</li>
+</ul>
+<h3>Risks and Mitigation</h3>
+<h4>High Priority Risks</h4>
+<h3>1. VS Code Plugin Consistency</h3>
+<ul><li>Risk: CLI JSON support may be inconsistent with VS Code plugin if it doesn't support JSON output</li>
+<li>Mitigation: </li>
+</ul>  - Verify that VS Code plugin also supports --json flag in its implementation
+<p>
+  - Document this requirement in both CLI and VS Code plugin documentation
+  - Consider adding a feature flag or version check to ensure consistency
+</p>
+<h3>2. Daemon Integration</h3>
+<ul><li>Risk: If daemon handles runOneShot() call, JSON formatting may happen on different process</li>
+<li>Mitigation:</li>
+</ul>  - Clarify that runOneShot() is currently CLI-based (not daemon)
+<p>
+  - If daemon integration is added later, ensure daemon returns OneShotResult with proper JSON string format
+  - Add unit tests to verify JSON serialization consistency
+</p>
+<h3>3. Setup Command JSON Support</h3>
+<ul><li>Risk: insrc setup may not support structured JSON output for scripted scenarios</li>
+<li>Mitigation:</li>
+</ul>  - Confirm if setup commands need --json support (requirement clarification needed)
+<p>
+  - If needed, extend setup command with similar JSON output capability
+</p>
+<h4>Medium Priority Risks</h4>
+<h3>4. Aggregate Pipeline Results</h3>
+<ul><li>Risk: Current formatResult handles single-shot only</li>
+<li>Mitigation:</li>
+</ul>  - Design formatResult to be generic or create parallel formatPipelineResultAsJson()
+<p>
+  - Future-proof by using consistent interface design for all output formats
+</p>
+<h3>5. Streaming vs JSON</h3>
+<ul><li>Risk: Large responses (>50KB) will cause memory/latency issues in streaming scenarios</li>
+<li>Mitigation:</li>
+</ul>  - Document that --json disables streaming mode
+<p>
+  - Serialize only final aggregated result when --json is used
+  - Add warning for large outputs when using JSON mode
+</p>
+<h3>6. OutputFormat Type Consistency</h3>
+<ul><li>Risk: Inconsistent use of boolean vs enum for JSON output flag</li>
+<li>Mitigation:</li>
+</ul>  - Unify: use OutputFormat: 'json' instead of json: boolean for consistency
+<p>
+  - Update all related interfaces and functions to use consistent type definition
+  - File: /src/pipeline/types.ts should be updated to reflect this change
+</p>
+<hr/>
+<h2 id="requirement-3-the-cli-shall-connect-to-a-locally-r">Requirement 3: The CLI shall connect to a locally running insrc daemon via IPC channel for all agent operations</h2>
+<h4>1. INTERFACE CONTRACTS</h4>
+<h3>TypeScript Signatures</h3>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/shared/types.ts</code></pre>
+<pre><code>interface IpcRequest {
+<p>
+  method: string;
+  params: any;
+  requestId: string;
+}</code></pre>
+</p>
+<pre><code>interface IpcResponse {
+<p>
+  type: &#x27;delta&#x27; | &#x27;progress&#x27; | &#x27;checkpoint&#x27; | &#x27;done&#x27; | &#x27;error&#x27;;
+  requestId: string;
+  data?: any;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}</code></pre>
+</p>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/cli/client.ts</code></pre>
+<pre><code>interface RpcOptions {
+<p>
+  retries?: number;
+  timeoutMs?: number;
+}</code></pre>
+</p>
+<p>
+/**
+ * Sends an RPC request to the daemon via IPC channel
+ * @param method - The method name to call on the daemon
+ * @param params - Parameters for the method
+ * @param options - Optional RPC configuration
+ * @returns Promise resolving to final result or rejecting on error
+ */
+</p>
+<pre><code>async function rpc(method: string, params: any, options?: RpcOptions): Promise;</code></pre>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/daemon/chat-handler.ts</code></pre>
+<pre><code>interface ChatSendParams {
+<p>
+  message: string;
+  intent?: string;
+  claude?: boolean;
+  json?: boolean;
+  cwd?: string;
+}</code></pre>
+</p>
+<p>
+/**
+ * Handles chat send operations, routing to appropriate LLM or Claude client
+ */
+</p>
+<pre><code>async function chatSend(params: ChatSendParams, channel: DaemonChannel): Promise;</code></pre>
+<h4>2. DATA FLOW</h4>
+<li>CLI Entry Point (src/cli/index.ts)</li>
+<p>
+   - Parses argv into AskOpts object
+   - Calls rpc('agent.ask', { message, ...askOpts })
+</p>
+<li>RPC Implementation (src/cli/client.ts)</li>
+<p>
+   - Constructs IpcRequest with method 'agent.ask', params from CLI, and unique requestId
+   - Connects to Unix socket at PATHS.sockFile
+   - Sends JSON-encoded request
+   - Listens for streaming IpcResponse messages until 'done' or 'error' type is received
+</p>
+<li>Daemon Server Reception (src/daemon/server.ts)</li>
+<p>
+   - Parses incoming IpcRequest from socket
+   - Routes to handler based on method (e.g., 'agent.ask' → chatSend)
+   - Creates new DaemonChannel instance for streaming response handling
+</p>
+<li>Daemon Execution (src/daemon/chat-handler.ts)</li>
+<p>
+   - Executes intent classification and LLM processing
+   - Uses DaemonChannel to emit progress/delta/checkpoint messages back to CLI
+   - On completion, emits final 'done' message with result data
+</p>
+<li>CLI Response Collection (src/cli/client.ts)</li>
+<p>
+   - Accumulates streaming messages from daemon
+   - Reconstructs structured output when --json flag is set
+   - Resolves Promise with final result on 'done' or rejects on 'error'
+</p>
+<li>CLI Output Formatting</li>
+<p>
+   - If --json: converts result to structured JSON and prints
+   - Otherwise: pretty-prints to stdout
+   - Exits with appropriate code (0 for success, non-zero for error)
+</p>
+<h4>3. INTEGRATION POINTS</h4>
+<h3>Files and Functions Involved:</h3>
+<p>
+CLI Entry Point:
+</p>
+<ul><li>File: /home/subho/work/dev/insors/insrc/src/cli/index.ts</li>
+<li>Function: main() - parses CLI arguments and calls rpc()</li>
+</ul>
+<p>
+RPC Client Implementation:
+</p>
+<ul><li>File: /home/subho/work/dev/insors/insrc/src/cli/client.ts</li>
+<li>Function: rpc(method, params) - handles IPC communication</li>
+<li>Interface: IpcRequest, IpcResponse (imported from shared types)</li>
+</ul>
+<p>
+Daemon Server:
+</p>
+<ul><li>File: /home/subho/work/dev/insors/insrc/src/daemon/server.ts</li>
+<li>Class: IpcServer - receives and routes IPC requests</li>
+<li>Method: handleRequest() - parses incoming request and dispatches to handlers</li>
+</ul>
+<p>
+Chat Handler:
+</p>
+<ul><li>File: /home/subho/work/dev/insors/insrc/src/daemon/chat-handler.ts</li>
+<li>Function: chatSend(params, channel) - main execution logic for agent.ask</li>
+<li>Class: DaemonChannel - handles streaming response messages</li>
+</ul>
+<p>
+Shared Types:
+</p>
+<ul><li>File: /home/subho/work/dev/insors/insrc/src/shared/types.ts</li>
+<li>Interfaces: IpcRequest, IpcResponse</li>
+</ul>
+<h4>4. MIGRATION NOTES</h4>
+<h3>Modified Entities:</h3>
+<li>rpc() function in src/cli/client.ts:</li>
+<p>
+   - Change: Extended to handle streaming responses instead of single request-response
+   - Impact: All existing CLI commands using rpc() will now support progress updates and structured JSON output
+   - Backward Compatibility: Fully maintained - existing code that calls rpc() with simple responses continues to work
+</p>
+<li>IpcResponse interface in src/shared/types.ts:</li>
+<p>
+   - Change: Added new message types ('delta', 'progress', 'checkpoint') to support streaming
+   - Impact: CLI and daemon components must now handle these additional response types
+   - Backward Compatibility: Maintained for existing code that only uses 'done' and 'error' types
+</p>
+<h3>Migration Steps:</h3>
+<li>Update rpc() implementation in src/cli/client.ts to collect streaming messages</li>
+<li>Ensure all CLI commands that use rpc() properly handle the new streaming behavior</li>
+<li>Verify that daemon-side handlers correctly emit the new response types</li>
+<li>Test both single-response and streaming scenarios</li>
+<h4>5. RISKS</h4>
+<h3>Critical Risks:</h3>
+<li>Streaming Response Handling Not Yet Implemented:</li>
+<p>
+   - Risk: Current rpc() function only handles single request-response calls, not streaming
+   - Mitigation: Implement streaming message collection logic in rpc() that accumulates messages until 'done' or 'error' is received
+</p>
+<li>Daemon Must Be Running:</li>
+<p>
+   - Risk: CLI commands will fail with connection errors if daemon isn't running
+   - Mitigation: Add user-friendly error handling that suggests insrc setup or insrc daemon start when socket connection fails
+</p>
+<li>Socket Path Configuration Issues:</li>
+<p>
+   - Risk: Hard-coded PATHS.sockFile may cause permission or environment-specific issues
+   - Mitigation: Implement environment variable override (INSRC_SOCK) and document socket location clearly
+</p>
+<h3>Integration Risks:</h3>
+<li>Cross-Requirement: Requirement 1 ↔ Requirement 3:</li>
+<p>
+   - Risk: CLI must preserve structured metadata from streaming messages for --json output
+   - Mitigation: Verify that IpcResponse.delta messages include sufficient context to reconstruct JSON when needed
+</p>
+<li>Cross-Requirement: Requirement 3 ↔ Requirement 5 (Claude Routing):</li>
+<p>
+   - Risk: Daemon-side chatSend handler must properly respect claude flag from IPC requests
+   - Mitigation: Confirm that chatSend in src/daemon/chat-handler.ts accepts and processes the claude parameter correctly
+</p>
+<li>Daemon Initialization Prerequisite:</li>
+<p>
+   - Risk: Requirement 3 assumes daemon is already running, but Requirement 4 (daemon initialization) isn't implemented yet
+   - Mitigation: Add clear error messages directing users to insrc setup or insrc daemon start when connection fails
+</p>
+<hr/>
+<h2 id="requirement-4-the-cli-shall-handle-daemon-initiali">Requirement 4: The CLI shall handle daemon initialization, including installation, Ollama detection, model pulling, and first-run API key configuration</h2>
+<h4>1. INTERFACE CONTRACTS</h4>
+<h3>New/Modified Entities</h3>
+<pre><code>// File: src/cli/commands/setup.ts</code></pre>
+<pre><code>interface SetupOptions {
+<p>
+  nonInteractive?: boolean;
+  ollamaInstallPath?: string;
+  modelDownloadTimeout?: number;
+}</code></pre>
+</p>
+<pre><code>interface OllamaStatus {
+<p>
+  available: boolean;
+  version?: string;
+  installPath?: string;
+  permissionError?: boolean;
+  notRunning?: boolean;
+}</code></pre>
+</p>
+<pre><code>interface ModelProgress {
+<p>
+  current: number;
+  total: number;
+  modelName: string;
+  status: &#x27;downloading&#x27; | &#x27;extracting&#x27; | &#x27;completed&#x27;;
+}</code></pre>
+</p>
+<pre><code>type SetupStep =</code></pre>
+<p>
+  | 'ollama-validation'
+  | 'model-installation'
+  | 'config-setup'
+  | 'daemon-start';
+</p>
+<pre><code>interface SetupProgress {
+<p>
+  step: SetupStep;
+  message: string;
+  progress?: ModelProgress;
+}</code></pre>
+</p>
+<p>
+// Function signatures
+</p>
+<pre><code>async function setupCommand(options: SetupOptions): Promise;
+<p>
+async function detectOllama(): Promise;
+async function isOllamaAvailable(timeoutMs: number): Promise;
+async function pullModels(onProgress: (progress: ModelProgress) =&gt; void): Promise;
+async function applyConfig(apiKey: string): Promise;
+async function ensureAgentModel(host: string, onProgress?: (progress: ModelProgress) =&gt; void): Promise;
+async function ensureEmbeddingModel(onProgress?: (progress: ModelProgress) =&gt; void): Promise;
+async function promptBraveKeySetup(): Promise;</code></pre>
+</p>
+<pre><code>// File: src/shared/system-info.ts</code></pre>
+<pre><code>interface SystemInfo {
+<p>
+  os: string;
+  arch: string;
+  nodeVersion: string;
+  ollamaStatus: OllamaStatus;
+}</code></pre>
+</p>
+<pre><code>function detectOllama(): Promise;
+<p>
+function getSystemInfo(): Promise;</code></pre>
+</p>
+<pre><code>// File: src/agent/lifecycle.ts</code></pre>
+<pre><code>interface ModelInstallationOptions {
+<p>
+  host?: string;
+  onProgress?: (progress: ModelProgress) =&gt; void;
+  timeoutMs?: number;
+}</code></pre>
+</p>
+<pre><code>async function ensureAgentModel(options: ModelInstallationOptions): Promise;
+<p>
+async function ensureEmbeddingModel(options: ModelInstallationOptions): Promise;</code></pre>
+</p>
+<pre><code>// File: src/cli/commands/daemon.ts</code></pre>
+<pre><code>interface DaemonStartOptions {
+<p>
+  logLevel?: &#x27;debug&#x27; | &#x27;info&#x27; | &#x27;warn&#x27; | &#x27;error&#x27;;
+  port?: number;
+}</code></pre>
+</p>
+<pre><code>async function cmdStart(options: DaemonStartOptions): Promise;</code></pre>
+<h4>2. DATA FLOW</h4>
+<h3>Concrete Path Through Components</h3>
+<li>User Input → setupCommand() (src/cli/commands/setup.ts:17)</li>
+<p>
+   - Parses CLI arguments and options
+   - Calls SetupOrchestrator.initialize(options)
+</p>
+<li>Ollama Validation Phase </li>
+<p>
+   - OllamaValidator.ensureAvailable() → detectOllama() (src/shared/system-info.ts:270)
+     - Returns OllamaStatus object with availability details
+     - If not available, prompts user for installation or Docker fallback
+   - isOllamaAvailable(30000) with retry logic
+     - Returns boolean indicating if Ollama is running and accessible
+</p>
+<li>Model Installation Phase</li>
+<p>
+   - ModelInstaller.installRequired(progress_callback) → pullModels()
+     - Calls ensureAgentModel(host='localhost:11434', onProgress)
+     - Calls ensureEmbeddingModel(onProgress)
+     - Handles network failures with exponential backoff
+     - Reports progress every 5-10 seconds
+</p>
+<li>Configuration Setup Phase</li>
+<p>
+   - SetupConfigManager.applyFirstRunConfig()
+     - If interactive mode: promptBraveKeySetup() → applyConfig(apiKey)
+     - If non-interactive mode: applyConfig(apiKey from env or default)
+</p>
+<li>Daemon Launch (Optional)</li>
+<p>
+   - User runs insrc daemon start
+   - cmdStart() launches daemon with logging
+   - Calls buildDaemonTransport() for IPC channel setup
+</p>
+<h3>Entity Flow Chain:</h3>
+<p>
+setupCommand() 
+  → SetupOrchestrator.initialize()
+    → OllamaValidator.ensureAvailable() 
+      → detectOllama() 
+        → isOllamaAvailable(30000)
+    → ModelInstaller.installRequired()
+      → pullModels()
+        → ensureAgentModel()
+        → ensureEmbeddingModel()
+    → SetupConfigManager.applyFirstRunConfig()
+      → promptBraveKeySetup() or applyConfig()
+  → cmdStart() (optional)
+</p>
+<h4>3. INTEGRATION POINTS</h4>
+<h3>Existing Code Integration</h3>
+<p>
+Files and Functions:
+</p>
+<ul><li>src/cli/commands/setup.ts:</li>
+</ul>  - Entry point: setupCommand() (line 17)
+<p>
+  - Implementation: pullModels() (line 155), applyConfig() (line 120)
+  - References: detectOllama(), ensureAgentModel(), ensureEmbeddingModel()
+</p>
+<ul><li>src/shared/system-info.ts:</li>
+</ul>  - Function: detectOllama() (line 270)
+<p>
+  - Function: getSystemInfo() 
+</p>
+<ul><li>src/agent/lifecycle.ts:</li>
+</ul>  - Function: ensureAgentModel() (line 12)
+<p>
+  - Function: ensureEmbeddingModel()
+</p>
+<ul><li>src/cli/commands/daemon.ts:</li>
+</ul>  - Function: cmdStart() (line 41)
+<p>
+  - Function: buildDaemonTransport() (referenced)
+</p>
+<h3>Cross-Component Dependencies:</h3>
+<ul><li>setupCommand() depends on detectOllama() and ensureAgentModel()</li>
+<li>pullModels() calls both ensureAgentModel() and ensureEmbeddingModel()</li>
+<li>applyConfig() persists configuration to local storage</li>
+<li>cmdStart() uses buildDaemonTransport() for IPC communication</li>
+</ul>
+<h4>4. MIGRATION NOTES</h4>
+<h3>Modified Entities:</h3>
+<li>detectOllama() in src/shared/system-info.ts:</li>
+<p>
+   - Change: Enhanced return type from simple boolean to structured OllamaStatus object
+   - Impact: All calling functions must be updated to handle new return structure
+   - Migration: Update all call sites to check status.available, status.version, etc.
+</p>
+<li>ensureAgentModel() in src/agent/lifecycle.ts:</li>
+<p>
+   - Change: Added optional onProgress callback parameter for progress reporting
+   - Impact: Existing calls without this parameter remain functional
+   - Migration: Add progress callback handling where needed
+</p>
+<li>ensureEmbeddingModel() in src/agent/lifecycle.ts:</li>
+<p>
+   - Change: Added optional onProgress callback parameter for progress reporting
+   - Impact: Same as above
+   - Migration: Add progress callback handling where needed
+</p>
+<li>setupCommand() in src/cli/commands/setup.ts:</li>
+<p>
+   - Change: New nonInteractive option support and enhanced error handling
+   - Impact: CLI interface extended with new flag
+   - Migration: No breaking changes, backward compatibility maintained
+</p>
+<h4>5. RISKS</h4>
+<h3>Identified Risks from Sketch Concerns:</h3>
+<li>Ollama Installation & Permissions</li>
+<p>
+   - Risk: Silent failures in detectOllama() 
+   - Mitigation: Implement explicit status checking and user guidance
+   - Handling: OllamaValidator must distinguish between "not installed", "no permission", and "not running" states
+</p>
+<li>Model Download Timeouts & Interruption</li>
+<p>
+   - Risk: Long download times causing user frustration or hanging processes
+   - Mitigation: Implement cancelable operations with SIGINT handling
+   - Handling: Add progress reporting every 5-10 seconds, retry logic (max 3 attempts), and resume capability
+</p>
+<li>Setup Hanging Due to Slow Ollama Startup</li>
+<p>
+   - Risk: Setup process hangs if Ollama startup is slow (>30s)
+   - Mitigation: Implement timeout with clear error messages
+   - Handling: isOllamaAvailable() must have configurable timeout and retry logic
+</p>
+<li>Network Failure During Model Pulling</li>
+<p>
+   - Risk: Transient network failures causing setup to fail completely
+   - Mitigation: Implement exponential backoff retry strategy
+   - Handling: ModelInstaller must support retry with appropriate delays
+</p>
+<li>Progress Reporting Inconsistency</li>
+<p>
+   - Risk: Progress updates not visible or inconsistent during long operations
+   - Mitigation: Ensure regular progress callbacks and UI updates
+   - Handling: Implement consistent progress reporting every 5-10 seconds for model downloads
+</p>
+<hr/>
+<h2 id="requirement-5-the-cli-shall-support-all-claude-mod">Requirement 5: The CLI shall support all Claude model variants (Haiku, Sonnet, Opus) with metrics tracking, caching, and rate limiting when Claude routing is enabled</h2>
+<p>
+The CLI shall support all Claude model variants (Haiku, Sonnet, Opus) with metrics tracking, caching, and rate limiting when Claude routing is enabled
+</p>
+<hr/>
+<h4>1. INTERFACE CONTRACTS</h4>
+<h3>New/Modified TypeScript Interfaces and Types</h3>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/cli/index.ts</code></pre>
+<pre><code>interface AskOpts {
+<p>
+  intent?: string;
+  claude?: boolean;
+  json?: boolean;
+  cwd?: string;</code></pre>
+  model?: 'haiku' | 'sonnet' | 'opus'; // NEW — added for model variant selection
+</p>
+<pre><code>}</code></pre>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/agent/providers/claude.ts</code></pre>
+<pre><code>interface ClaudeModel {
+<p>
+  name: string;
+  maxTokens: number;
+  contextWindow: number;
+  costPerInputToken: number;
+  costPerOutputToken: number;
+}</code></pre>
+</p>
+<pre><code>interface ClaudeProviderConfig {
+<p>
+  defaultModel: &#x27;haiku&#x27; | &#x27;sonnet&#x27; | &#x27;opus&#x27;;
+  models: Record&lt;&#x27;haiku&#x27; | &#x27;sonnet&#x27; | &#x27;opus&#x27;, ClaudeModel&gt;;
+  getModel(modelName: &#x27;haiku&#x27; | &#x27;sonnet&#x27; | &#x27;opus&#x27;): ClaudeModel;
+}</code></pre>
+</p>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/agent/smart-router.ts</code></pre>
+<pre><code>interface RouterDeps {
+<p>
+  claudeProvider: ClaudeProvider;
+  ollamaProvider: OllamaProvider;
+  cache: LRUCache;
+  rateLimiter: RateLimiter;
+  metricsTracker: MetricsTracker;
+}</code></pre>
+</p>
+<pre><code>type RouteResult = {
+<p>
+  provider: &#x27;claude&#x27; | &#x27;ollama&#x27;;
+  model?: string;
+  intent?: Intent;
+};</code></pre>
+</p>
+<pre><code>// File: /home/subho/work/dev/insors/insrc/src/agent/services/claude-client.ts</code></pre>
+<pre><code>interface ClaudeMetrics {
+<p>
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  costUsd: number;
+  cacheHit: boolean;
+  model: &#x27;haiku&#x27; | &#x27;sonnet&#x27; | &#x27;opus&#x27;;
+}</code></pre>
+</p>
+<pre><code>interface RateLimitConfig {
+<p>
+  maxTokensPerMinute: Record&lt;&#x27;haiku&#x27; | &#x27;sonnet&#x27; | &#x27;opus&#x27;, number&gt;;
+}</code></pre>
+</p>
+<hr/>
+<h4>2. DATA FLOW</h4>
+<h3>Concrete Path Through Components</h3>
+<li>CLI Entry Point</li>
+<p>
+   - insrc ask  [options] command in /home/subho/work/dev/insors/insrc/src/cli/commands/ask.ts
+   - Parses AskOpts, including new model field
+   - Instantiates ClaudeCliClient with parsed options
+</p>
+<li>Routing Decision</li>
+<p>
+   - ClaudeCliClient.route() method:
+     - Checks opts.claude flag to force Claude path
+     - If not forced, delegates to SmartRouter.route(routerDeps)
+     - Validates hasClaudeKey() before proceeding
+</p>
+<li>Model Selection</li>
+<p>
+   - selectModelVariant(opts.model || 'sonnet')
+   - Returns ClaudeModel from ClaudeProviderConfig
+</p>
+<li>Caching Layer</li>
+<p>
+   - Generates cache key using cacheKey(userQuery, intent, model) helper
+   - Checks LRUCache.get(key) before API call
+   - Stores result after successful API response
+</p>
+<li>Rate Limiting Enforcement</li>
+<p>
+   - Calls ClaudeCliClient.rateLimiter.canProceed(model)
+   - Returns 429 Too Many Requests if limit exceeded
+</p>
+<li>Metrics Tracking</li>
+<p>
+   - Records pre-call metrics (timestamp, model, intent, input tokens)
+   - Records post-call metrics (output tokens, latency, cache hit/miss, cost)
+   - Aggregates per model variant (claude-haiku-*, claude-sonnet-*, etc.)
+</p>
+<li>Execution</li>
+<p>
+   - Calls ClaudeProvider.complete(prompt, selectedModel)
+   - Catches errors (API error, rate limit, key missing)
+   - Falls back to ollamaProvider.complete() if Claude fails
+</p>
+<li>Output Formatting</li>
+<p>
+   - Formats result using existing logic in formatResult()
+   - Outputs plain text or JSON based on opts.json
+</p>
+<hr/>
+<h4>3. INTEGRATION POINTS</h4>
+<h3>Existing Codebase Integration</h3>
+<table><thead><tr><th>Component</th><th>File</th><th>Function/Class</th></tr></thead><tbody><tr><td>CLI Command Entry</td><td>/home/subho/work/dev/insors/insrc/src/cli/commands/ask.ts</td><td>ask(message, opts: AskOpts)</td></tr><tr><td>Routing Logic</td><td>/home/subho/work/dev/insors/insrc/src/agent/smart-router.ts</td><td>SmartRouter.route(routerDeps)</td></tr><tr><td>Claude Provider</td><td>/home/subho/work/dev/insors/insrc/src/agent/providers/claude.ts</td><td>ClaudeProvider, ClaudeProviderConfig</td></tr><tr><td>Caching</td><td>/home/subho/work/dev/insors/insrc/src/agent/smart-router.ts</td><td>LRUCache, cacheKey() helper</td></tr><tr><td>Rate Limiter</td><td>/home/subho/work/dev/insors/insrc/src/agent/services/rate-limiter.ts</td><td>RateLimiter class</td></tr><tr><td>Metrics Tracker</td><td>/home/subho/work/dev/insors/insrc/src/agent/services/metrics-tracker.ts</td><td>MetricsTracker class</td></tr><tr><td>Key Validation</td><td>/home/subho/work/dev/insors/insrc/src/agent/session.ts</td><td>hasClaudeKey()</td></tr></tbody></table>
+<h3>New Service File</h3>
+<ul><li>New File: /home/subho/work/dev/insors/insrc/src/agent/services/claude-client.ts</li>
+</ul>  - Exports ClaudeCliClient class
+<p>
+  - Integrates all existing components (SmartRouter, ClaudeProvider, LRUCache, RateLimiter, MetricsTracker)
+  - Implements unified routing, caching, rate limiting, and metrics tracking
+</p>
+<hr/>
+<h4>4. MIGRATION NOTES</h4>
+<h3>Modified Entities</h3>
+<table><thead><tr><th>Entity</th><th>Change Description</th><th>Impact</th></tr></thead><tbody><tr><td>AskOpts</td><td>Added optional model?: 'haiku'</td><td>'sonnet'</td><td>'opus' field</td><td>Backward compatible; CLI will default to sonnet if not specified</td></tr><tr><td>ClaudeProviderConfig</td><td>Already exists, but now used for dynamic model selection</td><td>No breaking change; only new usage pattern</td></tr><tr><td>SmartRouter.route()</td><td>No modification required; existing logic reused</td><td>No impact on other routing paths</td></tr></tbody></table>
+<h3>Migration Steps</h3>
+<li>Update CLI argument parsing in /home/subho/work/dev/insors/insrc/src/cli/commands/ask.ts to include --model option</li>
+<li>Extend AskOpts interface with new model field (already done above)</li>
+<li>Create new service file /home/subho/work/dev/insors/insrc/src/agent/services/claude-client.ts</li>
+<li>Refactor CLI command to instantiate and use ClaudeCliClient</li>
+<li>Ensure all metrics and rate limiting logic is wired into the new service</li>
+<hr/>
+<h4>5. RISKS</h4>
+<h3>Identified Risks</h3>
+<li>Model Variant Selection Misalignment</li>
+<p>
+   - Risk: If AskOpts doesn't support --model, CLI may not allow user to select Haiku/Sonnet/Opus
+   - Mitigation: Add model option to CLI parser and validate input against known variants
+</p>
+<li>Rate Limiting Granularity</li>
+<p>
+   - Risk: Per-model rate limits may be too strict or too lenient
+   - Mitigation: Use empirical data from Anthropic API documentation for initial values; allow configuration override
+</p>
+<li>Caching Invalidation</li>
+<p>
+   - Risk: Cache key generation might not account for all relevant parameters (e.g., intent, model)
+   - Mitigation: Use cacheKey() helper consistently and test with various inputs
+</p>
+<li>Fallback Behavior</li>
+<p>
+   - Risk: If Claude fails, fallback to Ollama may not be robust
+   - Mitigation: Ensure ollamaProvider.complete() is properly integrated and tested in error scenarios
+</p>
+<li>Metrics Aggregation</li>
+<p>
+   - Risk: Metrics tracking may not scale well with high-frequency calls
+   - Mitigation: Implement batched or periodic aggregation; consider sampling for performance
+</p>
+<li>Backward Compatibility</li>
+<p>
+   - Risk: Existing CLI usage without --model could break if defaults change
+   - Mitigation: Default to sonnet as per README, maintain explicit opt-in behavior
+</p>
+<hr/>
+<h4>Architecture Summary</h4>
+<p>
+Reused Entities:
+</p>
+<ul><li>[local] [insrc] function rpc — /home/subho/work/dev/insors/insrc/src/cli/client.ts:11</li>
+<li>[local] [insrc] interface IpcRequest — /home/subho/work/dev/insors/insrc/src/shared/types.ts:367</li>
+<li>[local] [insrc] interface IpcResponse — /home/subho/work/dev/insors/insrc/src/shared/types.ts:374</li>
+<li>[local] [insrc] class DaemonChannel — /home/subho/work/dev/insors/insrc/src/daemon/channel.ts:18</li>
+<li>[local] [insrc] function chatSend — /home/subho/work/dev/insors/insrc/src/daemon/chat-handler.ts:124</li>
+<li>[local] [insrc] class IpcServer — /home/subho/work/dev/insors/insrc/src/daemon/server.ts</li>
+<li>[local] [insrc] interface Channel — (referenced in local sketch)</li>
+<li>[local] -- — </li>
+<li>[local] [insrc] setupCommand — /home/subho/work/dev/insors/insrc/src/cli/commands/setup.ts:17</li>
+<li>[local] [insrc] pullModels — /home/subho/work/dev/insors/insrc/src/cli/commands/setup.ts:155</li>
+<li>[local] [insrc] applyConfig — /home/subho/work/dev/insors/insrc/src/cli/commands/setup.ts:120</li>
+<li>[local] [insrc] detectOllama — /home/subho/work/dev/insors/insrc/src/shared/system-info.ts:270</li>
+<li>[local] [insrc] ensureAgentModel — /home/subho/work/dev/insors/insrc/src/agent/lifecycle.ts:12</li>
+<li>[local] [insrc] promptBraveKeySetup — /home/subho/work/dev/insors/insrc/src/agent/index.ts:1280</li>
+<li>[local] [insrc] cmdStart — /home/subho/work/dev/insors/insrc/src/cli/commands/daemon.ts:41</li>
+<li>[local] [insrc] ensureEmbeddingModel — /home/subho/work/dev/insors/insrc/src/cli/commands/setup.ts (inferred)</li>
+<li>[local] [insrc] isOllamaAvailable — (referenced in local list)</li>
+<li>[local] [insrc] buildDaemonTransport — (referenced in local list)</li>
+</ul>
+<h4>Risks & Open Questions</h4>
+<ul><li>Req 2: ### 🔴 HIGH PRIORITY</li>
+<li>Req 2: 1. Requirement #1 vs #2 conflict (Both reference insrc ask with --json):</li>
+<li>Req 2: - Req#1: "all core functionalities available in VS Code plugin"</li>
+<li>Req 2: - Req#2: "structured JSON output for programmatic consumption"</li>
+<li>Req 2: - Risk: If vs-code plugin doesn't output JSON, CLI JSON support may be inconsistent with plugin</li>
+<li>Req 2: - Action: Verify vs-code plugin also supports JSON output (referenced in design/vscode-plugin.html but not confirmed in sketch)</li>
+<li>Req 2: 2. Requirement #3: Daemon integration (IPC channel for agent operations):</li>
+<li>Req 2: - Current sketch assumes formatResult runs in CLI process</li>
+<li>Req 2: - Concern: Is JSON formatting happening in daemon or CLI?</li>
+<li>Req 2: - Risk: If daemon-side, need to verify daemon's JSON serialization matches CLI expectations</li>
+<li>Req 2: - Action: Clarify: does runOneShot() call daemon? If yes, ensure daemon returns JSON-compatible OneShotResult</li>
+<li>Req 2: 3. Requirement #4: Daemon initialization:</li>
+<li>Req 2: - No mention of --json support during setup flow</li>
+<li>Req 2: - Risk: insrc setup may not output structured JSON for scripted scenarios</li>
+<li>Req 2: - Action: Confirm if setup commands need --json support (requirement clarification needed)</li>
+<li>Req 2: ### 🟡 MEDIUM PRIORITY</li>
+<li>Req 2: 4. Aggregate pipeline results (your concern is valid):</li>
+<li>Req 2: - Current formatResult handles single-shot only</li>
+<li>Req 2: - Risk: insrc ask is one-shot, but other commands (e.g., insrc assemble, future batch modes) need JSON output too</li>
+<li>Req 2: - Action: Design formatResult to be generic or create parallel formatPipelineResultAsJson() for future use</li>
+<li>Req 2: 5. Streaming vs. JSON:</li>
+<li>Req 2: - JSON serialization requires buffering entire response</li>
+<li>Req 2: - Risk: Large responses (>50KB) will cause memory/latency issues in streaming scenarios</li>
+<li>Req 2: - Mitigation: Document that --json disables streaming; serialize only final aggregated result</li>
+<li>Req 2: 6. OutputFormat type consistency:</li>
+<li>Req 2: - /pipeline/types.ts:90 defines OutputFormat with 'json' option</li>
+<li>Req 2: - Verify formatResult respects this type definition (not just boolean json parameter)</li>
+<li>Req 2: - Action: Unify: use OutputFormat: 'json' instead of json: boolean for consistency</li>
+<li>Req 2: --</li>
+<li>Req 3: ### <span class="tag-crit">[CRITICAL]</span></li>
+<li>Req 3: 1. Streaming Response Handling Not Yet Implemented</li>
+<li>Req 3: The current rpc() function in src/cli/client.ts only handles single request-response calls. Requirement 1 (insrc ask with progress updates) will require extending rpc() to collect streaming messages before resolving the Promise. The daemon already supports streaming via DaemonChannel (types: 'delta' | 'progress' | 'checkpoint' | 'done'), but the CLI half is incomplete.</li>
+<li>Req 3: Action: Update rpc() to listen for IpcResponse messages with type field and accumulate until 'done' or 'error' is received.</li>
+<li>Req 3: 2. Daemon Must Be Running</li>
+<li>Req 3: CLI commands will fail with "daemon not running" or socket connection error if insrc daemon is not running. Requirement 4 (daemon initialization) must be implemented in insrc setup to address this, but Requirement 3 assumes the daemon is already available.</li>
+<li>Req 3: Action: Ensure error message is user-friendly and suggests insrc setup or insrc daemon start.</li>
+<li>Req 3: 3. Socket Path Configuration</li>
+<li>Req 3: Hard-coded PATHS.sockFile path may cause issues if:</li>
+<li>Req 3: - Multiple users on same machine (socket file permissions)</li>
+<li>Req 3: - Different environments (macOS /var/tmp vs Linux /tmp)</li>
+<li>Req 3: - Non-standard daemon installation paths</li>
+<li>Req 3: Action: Consider environment variable override (e.g., INSRC_SOCK) and document socket location.</li>
+<li>Req 3: ### [INTEGRATION RISKS]</li>
+<li>Req 3: 4. Cross-Requirement: Requirement 1 ↔ Requirement 3</li>
+<li>Req 3: Requirement 1 expects insrc ask to support --json output format. Requirement 3 specifies IPC connection. The flow works, but the rpc() function must preserve structured metadata from streaming messages so CLI can reconstruct full JSON output. If daemon streams raw deltas, CLI needs to reassemble them correctly.</li>
+<li>Req 3: Action: Verify that IpcResponse.delta messages include enough context to reconstruct structured output when --json is set.</li>
+<li>Req 3: 5. Cross-Requirement: Requirement 3 ↔ Requirement 5 (Claude Routing)</li>
+<li>Req 3: When --claude flag is set in Requirement 1, the CLI calls rpc('agent.ask', { claude: true, ... }). The daemon's chatSend handler must route this to the Anthropic Claude Client. The IPC channel itself is agnostic, but the daemon-side handler (chatSend) must implement this logic. This is not a direct concern for Requirement 3, but the IPC contract must support it.</li>
+<li>Req 3: Action: Confirm chatSend handler in daemon accepts and respects claude flag from IpcRequest.params.</li>
+<li>Req 3: 6. Cross-Requirement: Requirement 4 (Daemon Initialization) Prerequisite</li>
+<li>Req 3: Requirement 3 assumes daemon is already running. Requirement 4 must provide a mechanism to start the daemon automatically or guide the user. If the CLI tries to connect and fails, it should suggest insrc setup or</li>
+<li>Req 4: ### <span class="tag-fixed">[FIXED]</span> Refined Concerns</li>
+<li>Req 4: 1. Ollama Installation & Permissions</li>
+<li>Req 4: - detectOllama() may fail silently or return "not found"</li>
+<li>Req 4: - ACTION: OllamaValidator must distinguish:</li>
+<li>Req 4: - Not installed → suggest install URL</li>
+<li>Req 4: - No permission → suggest sudo or container workaround</li>
+<li>Req 4: - Installed but not running → suggest ollama serve</li>
+<li>Req 4: - RISK: Setup hangs if Ollama startup is slow (>30s)</li>
+<li>Req 4: 2. Model Download Timeouts & Interruption</li>
+<li>Req 4: - ensureAgentModel + ensureEmbeddingModel can be slow (5–30 min for large models)</li>
+<li>Req 4: - ACTION: ModelInstaller must support:</li>
+<li>Req 4: - Cancelable operations (SIGINT handling)</li>
+<li>Req 4: - Progress reporting every 5–10s</li>
+<li>Req 4: - Retry on transient network failures (max 3 attempts)</li>
+<li>Req 4: - Resume capability (check existing model)</li></ul>
+  </main>
+</body>
+</html>

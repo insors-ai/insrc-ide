@@ -1,0 +1,2458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--vscode-font-family, system-ui, sans-serif);
+      font-size: var(--vscode-font-size, 13px);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+      flex-shrink: 0;
+    }
+    .repo-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: 1px solid var(--vscode-button-background);
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 0.85em;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .repo-pill:hover { border-color: var(--vscode-focusBorder, #007acc); }
+    .repo-pill svg { flex-shrink: 0; }
+    .header-spacer { flex: 1; }
+    .header-btn {
+      background: none;
+      border: none;
+      color: var(--vscode-icon-foreground, var(--vscode-editor-foreground));
+      cursor: pointer;
+      font-size: 1.1em;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .header-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1)); }
+
+    /* Model info popup */
+    .model-info-wrapper { position: relative; display: inline-block; }
+    .model-info-popup {
+      display: none;
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, #252526));
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+      border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #454545));
+      border-radius: 6px;
+      padding: 10px 14px;
+      min-width: 240px;
+      max-width: 320px;
+      z-index: 20;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+      font-size: 0.88em;
+      line-height: 1.6;
+    }
+    .model-info-popup.visible { display: block; }
+    .model-info-title {
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--vscode-foreground);
+      font-size: 0.92em;
+    }
+    .model-info-body { color: var(--vscode-descriptionForeground, #aaa); }
+    .model-info-body table { width: 100%; border-collapse: collapse; }
+    .model-info-body td { padding: 2px 0; }
+    .model-info-body td:first-child { font-weight: 500; color: var(--vscode-foreground); padding-right: 12px; white-space: nowrap; }
+    .model-info-body td:last-child { color: var(--vscode-descriptionForeground); word-break: break-all; }
+
+    /* Session dropdown */
+    .session-wrapper { position: relative; display: inline-block; }
+    .session-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      background: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background, #252526));
+      border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border, #454545));
+      border-radius: 6px;
+      min-width: 260px;
+      max-width: 340px;
+      max-height: 400px;
+      overflow-y: auto;
+      z-index: 20;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+      font-size: 0.88em;
+    }
+    .session-dropdown.visible { display: block; }
+    .session-dropdown-item {
+      display: flex;
+      flex-direction: column;
+      padding: 6px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(255,255,255,0.05));
+    }
+    .session-dropdown-item:last-child { border-bottom: none; }
+    .session-dropdown-item:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.05)); }
+    .session-dropdown-item.new-session {
+      font-weight: 600;
+      color: var(--vscode-foreground);
+      flex-direction: row;
+      align-items: center;
+      gap: 6px;
+    }
+    .session-dropdown-item .session-title {
+      color: var(--vscode-foreground);
+      font-size: 0.92em;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-dropdown-item .session-meta {
+      color: var(--vscode-descriptionForeground, #888);
+      font-size: 0.78em;
+    }
+    .session-dropdown-divider {
+      padding: 4px 12px;
+      font-size: 0.75em;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground, #888);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .session-dropdown-more {
+      padding: 6px 12px;
+      cursor: pointer;
+      color: var(--vscode-textLink-foreground, #4fc3f7);
+      font-size: 0.82em;
+      text-align: center;
+    }
+    .session-dropdown-more:hover { text-decoration: underline; }
+
+    /* Messages */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .msg {
+      max-width: 92%;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid #555;
+      line-height: 1.5;
+      word-wrap: break-word;
+      white-space: pre-wrap;
+    }
+    .msg-assistant.collapsed .msg-content {
+      max-height: calc(1.5em * 12);
+      overflow: hidden;
+      position: relative;
+    }
+    .msg-assistant.collapsed .msg-content::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 2.5em;
+      background: linear-gradient(transparent, var(--vscode-editorWidget-background, rgba(30,30,30,0.95)));
+      pointer-events: none;
+    }
+    .msg-toggle {
+      display: none;
+      border: none;
+      background: none;
+      color: var(--vscode-textLink-foreground, #4fc3f7);
+      cursor: pointer;
+      font-size: 0.82em;
+      padding: 4px 0;
+      font-family: inherit;
+    }
+    .msg-toggle:hover { text-decoration: underline; }
+    .msg-assistant.collapsible .msg-toggle { display: inline-block; }
+
+    .msg-user {
+      align-self: flex-end;
+      background: var(--vscode-textBlockQuote-background, #2a2d3a);
+      color: var(--vscode-editor-foreground);
+      border-radius: 8px 8px 2px 8px;
+    }
+    .msg-assistant {
+      align-self: flex-start;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.05));
+      border: 1px solid grey;
+      border-radius: 8px 8px 8px 2px;
+    }
+    .msg-assistant code {
+      font-family: var(--vscode-editor-font-family, 'Cascadia Code', monospace);
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 0.92em;
+    }
+    .msg-assistant pre {
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+      padding: 8px;
+      border-radius: 4px;
+      overflow-x: auto;
+      margin: 6px 0;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.9em;
+      white-space: pre;
+    }
+    /* Format viewer widgets */
+    .code-viewer { border: 1px solid var(--vscode-panel-border, #333); border-radius: 4px; overflow: hidden; margin: 2px 0; }
+    .code-viewer-header { display: flex; justify-content: space-between; align-items: center; padding: 3px 8px; font-size: 0.78em; color: var(--vscode-descriptionForeground, #888); background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--vscode-panel-border, #333); }
+    .code-viewer-copy { background: none; border: 1px solid var(--vscode-panel-border, #555); color: inherit; border-radius: 3px; padding: 1px 6px; cursor: pointer; font-size: 0.9em; font-family: inherit; }
+    .code-viewer-copy:hover { border-color: var(--vscode-focusBorder, #007acc); }
+    .code-viewer pre { margin: 0; padding: 8px 10px; overflow-x: auto; font-size: 0.85em; line-height: 1.5; background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2)); }
+
+    /* Tables rendered by marked inside html-inline messages */
+    .msg-assistant table { width: 100%; border-collapse: collapse; font-size: 0.88em; margin: 6px 0; }
+    .msg-assistant table th, .msg-assistant table td { padding: 4px 8px; border: 1px solid var(--vscode-panel-border, #333); text-align: left; }
+    .msg-assistant table th { background: rgba(255,255,255,0.04); font-weight: 600; }
+    .msg-assistant table tr:hover td { background: rgba(255,255,255,0.02); }
+
+    table.fmt-table { width: 100%; border-collapse: collapse; font-size: 0.88em; margin: 4px 0; }
+    table.fmt-table th, table.fmt-table td { padding: 4px 8px; border: 1px solid var(--vscode-panel-border, #333); text-align: left; }
+    table.fmt-table th { background: rgba(255,255,255,0.04); cursor: pointer; user-select: none; font-weight: 600; }
+    table.fmt-table th:hover { background: rgba(255,255,255,0.08); }
+    table.fmt-table th .sort-arrow { font-size: 0.7em; margin-left: 3px; opacity: 0.5; }
+    table.fmt-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .diff-viewer { font-family: var(--vscode-editor-font-family, 'Courier New', monospace); font-size: 0.85em; line-height: 1.5; }
+    .diff-viewer pre { margin: 0; padding: 8px 10px; overflow-x: auto; }
+    .diff-line-add { color: var(--vscode-gitDecoration-addedResourceForeground, #4caf7d); background: rgba(76,175,125,0.08); display: block; }
+    .diff-line-del { color: var(--vscode-gitDecoration-deletedResourceForeground, #f47c7c); background: rgba(244,124,124,0.08); display: block; }
+    .diff-line-hunk { color: var(--vscode-textLink-foreground, #4fc3f7); display: block; font-weight: 600; }
+    .diff-line-meta { color: var(--vscode-descriptionForeground, #888); display: block; }
+
+    .html-viewer { border: 1px solid var(--vscode-panel-border, #333); border-radius: 4px; overflow: hidden; }
+    .html-viewer iframe { width: 100%; border: none; min-height: 80px; background: #fff; }
+
+    .msg-progress {
+      align-self: flex-start;
+      color: var(--vscode-descriptionForeground, #888);
+      font-size: 0.82em;
+      padding: 2px 10px;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--vscode-editor-background, #1e1e1e) 50%, transparent);
+      border: none;
+      max-width: none;
+    }
+    .msg-progress::before { content: '⟳ '; }
+    .msg-error {
+      align-self: flex-start;
+      color: var(--vscode-errorForeground, #f44);
+      font-size: 0.9em;
+      padding: 4px 8px;
+      border-left: 3px solid var(--vscode-errorForeground, #f44);
+    }
+
+    /* Gate card */
+    .gate-card {
+      align-self: flex-start;
+      width: 100%;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.05));
+      border: 1px solid var(--vscode-focusBorder, #007acc);
+      border-radius: 8px;
+      padding: 12px;
+      margin: 4px 0;
+      position: relative;
+      min-height: calc(33vh);
+      max-height: 450px;
+      overflow-y: auto;
+      transition: max-height 0.3s ease;
+    }
+    .gate-card.gate-expanded {
+      max-height: calc(100vh - 200px);
+      overflow-y: auto;
+    }
+    .gate-expand-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.1));
+      border: 1px solid var(--vscode-panel-border, #555);
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 0.75em;
+      z-index: 5;
+    }
+    .gate-expand-btn:hover { opacity: 0.8; }
+    .gate-title {
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--vscode-foreground);
+      padding-right: 50px;
+    }
+    .gate-content {
+      font-size: 0.9em;
+      margin-bottom: 10px;
+      max-height: 300px;
+      overflow-y: auto;
+      color: var(--vscode-descriptionForeground);
+    }
+    .gate-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .gate-btn {
+      padding: 4px 14px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.9em;
+    }
+    .gate-btn-primary {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .gate-btn:hover:not(:disabled) {
+      box-shadow: 0 0 0 1px var(--vscode-focusBorder, #007fd4);
+      transform: scale(1.03);
+      transition: all 0.1s ease;
+    }
+    .gate-btn:active:not(:disabled) {
+      transform: scale(0.97);
+    }
+    .gate-btn-primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+    .gate-btn-secondary {
+      background: var(--vscode-button-secondaryBackground, transparent);
+      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      border-color: var(--vscode-panel-border, #555);
+    }
+    .gate-btn-secondary:hover:not(:disabled) { background: rgba(255,255,255,0.08); }
+    .gate-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      background: var(--vscode-button-secondaryBackground, #333) !important;
+      color: var(--vscode-disabledForeground, #666) !important;
+      border-color: var(--vscode-panel-border, #444) !important;
+      text-decoration: line-through;
+    }
+    .gate-feedback {
+      width: 100%;
+      margin-top: 8px;
+      display: none;
+    }
+    .gate-feedback textarea {
+      width: 100%;
+      min-height: 60px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 4px;
+      padding: 6px 8px;
+      font-family: inherit;
+      font-size: 0.9em;
+      resize: vertical;
+    }
+    .gate-feedback-submit {
+      margin-top: 4px;
+    }
+    /* Resolved gate states */
+    .gate-card.resolved { opacity: 0.8; }
+    .gate-card.resolved .gate-actions { display: none; }
+    .gate-card.resolved .gate-feedback { display: none; }
+    /* Gate action hints */
+    .gate-btn-hint {
+      display: block;
+      font-size: 0.75em;
+      opacity: 0.6;
+      font-weight: normal;
+      margin-top: 2px;
+    }
+    .gate-btn-with-hint {
+      text-align: left;
+      padding: 6px 14px;
+    }
+    /* QnA pinned card */
+    .qna-card {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.03));
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      padding: 0;
+      margin: 0 0 8px 0;
+      font-size: 0.82em;
+      max-height: 250px;
+      overflow-y: auto;
+    }
+    .qna-card.hidden { display: none; }
+    .qna-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      cursor: pointer;
+      user-select: none;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground);
+    }
+    .qna-header:hover { opacity: 0.8; }
+    .qna-chevron { transition: transform 0.2s; }
+    .qna-card.collapsed .qna-chevron { transform: rotate(-90deg); }
+    .qna-card.collapsed .qna-body { display: none; }
+    .qna-body {
+      padding: 0 10px 8px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .qna-entry {
+      padding: 2px 0;
+      line-height: 1.4;
+      color: var(--vscode-foreground);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .qna-entry .qna-tag {
+      font-size: 0.85em;
+      opacity: 0.5;
+      margin-right: 4px;
+    }
+    .qna-entry.qna-user { color: var(--vscode-textLink-foreground, #3794ff); }
+
+    /* Tabbed gate card */
+    .gate-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--vscode-panel-border, #333);
+      margin-bottom: 8px;
+    }
+    .gate-tab {
+      padding: 6px 16px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.88em;
+      font-weight: 500;
+    }
+    .gate-tab:hover { opacity: 0.8; }
+    .gate-tab.active {
+      color: var(--vscode-foreground);
+      border-bottom-color: var(--vscode-focusBorder, #007acc);
+    }
+    .gate-tab-panel { display: none; }
+    .gate-tab-panel.active { display: block; }
+    .gate-tab-panel-content {
+      max-height: calc(100vh - 350px);
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+    /* Item list in tabbed gates */
+    .gate-item {
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      margin-bottom: 6px;
+      overflow: hidden;
+    }
+    .gate-item.user-added {
+      border-left: 2px solid var(--vscode-testing-iconPassed, #4caf7d);
+    }
+    /* Selectable list mode */
+    .gate-selectable-list { display: flex; flex-direction: column; gap: 2px; }
+    .gate-selectable-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-radius: 4px;
+      transition: background 0.15s;
+    }
+    .gate-selectable-row:hover { background: rgba(255,255,255,0.06); }
+    .gate-selectable-row.discussed .gate-selectable-title,
+    .gate-selectable-row.approved .gate-selectable-title { opacity: 0.7; }
+    .gate-selectable-dot { font-size: 0.8em; width: 14px; text-align: center; }
+    .gate-selectable-title { flex: 1; font-size: 0.92em; }
+
+    .gate-item-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      min-height: 40px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .gate-item-header:hover { background: rgba(255,255,255,0.03); }
+    .gate-item-chevron {
+      font-size: 0.7em;
+      transition: transform 0.2s;
+      color: var(--vscode-descriptionForeground);
+    }
+    .gate-item.expanded .gate-item-chevron { transform: rotate(90deg); }
+    .gate-item-title {
+      flex: 1;
+      font-size: 0.9em;
+      font-weight: 500;
+    }
+    .gate-item-verdict {
+      font-size: 0.75em;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+    .gate-item-verdict.strong { background: #1a4d2e; color: #4ade80; }
+    .gate-item-verdict.moderate { background: #4d3d1a; color: #facc15; }
+    .gate-item-verdict.weak { background: #4d1a1a; color: #f87171; }
+    .gate-item-verdict.user { background: #1a3d4d; color: #60a5fa; }
+    .gate-item-toggles {
+      display: flex;
+      gap: 4px;
+    }
+    .gate-item-toggle {
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--vscode-panel-border, #444);
+      border-radius: 4px;
+      background: none;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      font-size: 0.85em;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .gate-item-toggle:hover { opacity: 0.8; }
+    .gate-item-toggle.selected-approve {
+      background: #1a4d2e;
+      color: #4ade80;
+      border-color: #4ade80;
+    }
+    .gate-item-toggle.selected-reject {
+      background: #4d1a1a;
+      color: #f87171;
+      border-color: #f87171;
+    }
+    .gate-item-body {
+      display: none;
+      padding: 0 10px 8px 28px;
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .gate-item.expanded .gate-item-body { display: block; }
+    .gate-item-tags {
+      display: flex;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .gate-item-tag {
+      font-size: 0.75em;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: rgba(255,255,255,0.06);
+      color: var(--vscode-descriptionForeground);
+    }
+    /* Save options tab */
+    .gate-save-options { padding: 8px 0; }
+    .gate-save-formats { display: flex; gap: 12px; margin-bottom: 10px; }
+    .gate-save-format label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+    .gate-save-path {
+      width: 100%;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.85em;
+    }
+    .gate-resolved-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 10px;
+      border-radius: 4px;
+      font-size: 0.82em;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+    .gate-resolved-badge.approved {
+      background: rgba(76, 175, 125, 0.15);
+      color: #4caf7d;
+      border: 1px solid rgba(76, 175, 125, 0.3);
+    }
+    .gate-resolved-badge.rejected {
+      background: rgba(244, 124, 124, 0.15);
+      color: #f47c7c;
+      border: 1px solid rgba(244, 124, 124, 0.3);
+    }
+    .gate-resolved-badge.edited {
+      background: rgba(245, 200, 66, 0.15);
+      color: #f5c842;
+      border: 1px solid rgba(245, 200, 66, 0.3);
+    }
+    .gate-resolved-badge.executed {
+      background: rgba(79, 195, 247, 0.15);
+      color: #4fc3f7;
+      border: 1px solid rgba(79, 195, 247, 0.3);
+    }
+
+    /* Tool call block */
+    .tool-block {
+      align-self: flex-start;
+      max-width: 95%;
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.15));
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      margin: 4px 0;
+      font-size: 0.88em;
+      overflow: hidden;
+    }
+    .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      user-select: none;
+      color: var(--vscode-descriptionForeground, #888);
+    }
+    .tool-header:hover { background: rgba(255,255,255,0.03); }
+    .tool-chevron { transition: transform 0.15s; font-size: 0.8em; }
+    .tool-chevron.open { transform: rotate(90deg); }
+    .tool-name { font-weight: 600; color: var(--vscode-foreground); }
+    .tool-summary { opacity: 0.7; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .tool-body {
+      display: none;
+      padding: 6px 10px;
+      border-top: 1px solid var(--vscode-panel-border, #333);
+      white-space: pre-wrap;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.88em;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .tool-body.open { display: block; }
+
+    /* Intent badge */
+    .intent-badge {
+      display: inline-block;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 0.75em;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    /* Escalation notice */
+    .escalation-notice {
+      align-self: flex-start;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      font-size: 0.82em;
+      color: var(--vscode-descriptionForeground, #888);
+      border-left: 2px solid var(--vscode-editorWarning-foreground, #cca700);
+      margin: 2px 0;
+    }
+    .escalation-model {
+      font-weight: 600;
+      color: var(--vscode-foreground);
+    }
+    .escalation-tokens { opacity: 0.7; }
+    .escalation-confirm {
+      margin-left: auto;
+      display: flex;
+      gap: 4px;
+    }
+    .escalation-confirm button {
+      padding: 2px 8px;
+      border-radius: 3px;
+      border: 1px solid var(--vscode-panel-border, #555);
+      background: transparent;
+      color: var(--vscode-foreground);
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+    .escalation-confirm button:hover { background: rgba(255,255,255,0.05); }
+    .escalation-confirm button.confirm { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; }
+
+    /* Slash command menu */
+    .slash-menu {
+      display: none;
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      right: 0;
+      background: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background, #252526));
+      border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-panel-border, #454545));
+      border-radius: 6px;
+      max-height: 200px;
+      overflow-y: auto;
+      z-index: 20;
+      box-shadow: 0 -4px 12px rgba(0,0,0,0.3);
+    }
+    .slash-menu.visible { display: block; }
+    .slash-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 0.9em;
+    }
+    .slash-item:hover, .slash-item.active {
+      background: var(--vscode-editorSuggestWidget-selectedBackground, var(--vscode-list-hoverBackground, rgba(255,255,255,0.05)));
+    }
+    .slash-cmd { font-weight: 600; color: var(--vscode-foreground); }
+    .slash-desc { color: var(--vscode-descriptionForeground, #888); font-size: 0.88em; }
+
+    /* Drag-drop overlay */
+    .drop-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 122, 204, 0.15);
+      border: 2px dashed var(--vscode-focusBorder, #007acc);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2em;
+      color: var(--vscode-focusBorder, #007acc);
+      pointer-events: none;
+    }
+    .drop-overlay.visible { display: flex; }
+
+    /* Input area */
+    .input-area {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 8px 12px;
+      margin: 8px 12px;
+      border: 1px solid grey;
+      border-radius: 10px;
+      background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+      flex-shrink: 0;
+      position: relative;
+      transition: border-color 0.15s ease;
+    }
+    .input-area:focus-within {
+      border-color: var(--vscode-button-background, #007acc);
+    }
+    .input-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .intent-select {
+      background: var(--vscode-dropdown-background, var(--vscode-input-background));
+      color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, #555));
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-family: inherit;
+      font-size: 0.82em;
+      cursor: pointer;
+      outline: none;
+    }
+    .intent-select:focus { border-color: var(--vscode-focusBorder, #007acc); }
+    .intent-wrapper { position: relative; display: inline-block; }
+    .intent-tooltip {
+      display: none;
+      position: absolute;
+      bottom: calc(100% + 6px);
+      left: 0;
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editorWidget-background, #252526));
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+      border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #454545));
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 0.82em;
+      white-space: nowrap;
+      z-index: 10;
+      pointer-events: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .intent-wrapper:hover .intent-tooltip { display: block; }
+    .attach-btn {
+      background: none;
+      border: none;
+      color: var(--vscode-icon-foreground, var(--vscode-editor-foreground));
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+    }
+    .attach-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.1)); }
+    .attach-btn svg { width: 16px; height: 16px; }
+    .attached-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .attached-file {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 0.78em;
+    }
+    .attached-file-remove {
+      cursor: pointer;
+      opacity: 0.7;
+      font-size: 1.1em;
+    }
+    .attached-file-remove:hover { opacity: 1; }
+    .input-row {
+      display: flex;
+      gap: 6px;
+      align-items: flex-end;
+    }
+    .input-row textarea {
+      flex: 1;
+      min-height: 36px;
+      max-height: 120px;
+      background: transparent;
+      color: var(--vscode-input-foreground);
+      border: none;
+      padding: 8px 10px;
+      font-family: inherit;
+      font-size: inherit;
+      resize: none;
+      outline: none;
+    }
+    .icon-btn {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      border: none;
+      border-radius: 6px;
+      width: 36px;
+      height: 36px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .icon-btn:hover { background: var(--vscode-button-hoverBackground); }
+    .icon-btn:disabled { opacity: 0.5; cursor: default; }
+    .icon-btn svg { width: 18px; height: 18px; }
+    .cancel-btn {
+      background: var(--vscode-errorForeground, #c44);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      width: 36px;
+      height: 36px;
+      cursor: pointer;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .cancel-btn:hover { opacity: 0.85; }
+    .cancel-btn svg { width: 16px; height: 16px; }
+
+    .typing-indicator {
+      display: none;
+      align-self: flex-start;
+      color: var(--vscode-descriptionForeground, #888);
+      font-size: 0.82em;
+      padding: 4px 12px;
+      gap: 8px;
+      align-items: center;
+    }
+    .typing-indicator.visible { display: flex; }
+    .typing-dots {
+      display: inline-flex;
+      gap: 3px;
+    }
+    .typing-dots span {
+      width: 4px; height: 4px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground, #888);
+      animation: bounce 1.2s infinite;
+    }
+    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce {
+      0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+      30% { opacity: 1; transform: translateY(-3px); }
+    }
+    .typing-status { flex: 1; }
+    .typing-elapsed { opacity: 0.6; font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <button class="repo-pill" id="repoPill" title="Click to switch repo"><svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M2 2.5A2.5 2.5 0 014.5 0h8.75a.75.75 0 01.75.75v12.5a.75.75 0 01-.75.75h-2.5a.75.75 0 010-1.5h1.75v-2h-8a1 1 0 00-.714 1.7.75.75 0 01-1.072 1.05A2.495 2.495 0 012 11.5v-9zm10.5-1h-8a1 1 0 00-1 1v6.708A2.486 2.486 0 014.5 9h8V1.5zM5 12.25v3.25a.25.25 0 00.4.2l1.45-1.087a.25.25 0 01.3 0L8.6 15.7a.25.25 0 00.4-.2v-3.25a.25.25 0 00-.25-.25h-3.5a.25.25 0 00-.25.25z"/></svg><span id="repoPillText">loading...</span></button>
+    <span class="header-spacer"></span>
+    <span class="model-info-wrapper">
+      <button class="header-btn" id="modelInfoBtn" title="Model configuration">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M7.5 1a6.5 6.5 0 100 13 6.5 6.5 0 000-13zm0 12a5.5 5.5 0 110-11 5.5 5.5 0 010 11zm.5-8.5a.5.5 0 00-1 0v.5a.5.5 0 001 0v-.5zM7 7a.5.5 0 01.5-.5h.5a.5.5 0 01.5.5v3.5a.5.5 0 01-1 0V7.5H7.5A.5.5 0 017 7z"/></svg>
+      </button>
+      <div class="model-info-popup" id="modelInfoPopup">
+        <div class="model-info-title">Model Configuration</div>
+        <div class="model-info-body" id="modelInfoBody">Loading...</div>
+      </div>
+    </span>
+    <span class="session-wrapper">
+      <button class="header-btn" id="sessionBtn" title="Sessions">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.5 2A1.5 1.5 0 000 3.5v2A1.5 1.5 0 001.5 7h13A1.5 1.5 0 0016 5.5v-2A1.5 1.5 0 0014.5 2h-13zM1 3.5a.5.5 0 01.5-.5h13a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-13a.5.5 0 01-.5-.5v-2zM1.5 9A1.5 1.5 0 000 10.5v2A1.5 1.5 0 001.5 14h13a1.5 1.5 0 001.5-1.5v-2A1.5 1.5 0 0014.5 9h-13zM1 10.5a.5.5 0 01.5-.5h13a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-13a.5.5 0 01-.5-.5v-2z"/></svg>
+      </button>
+      <div class="session-dropdown" id="sessionDropdown">
+        <div class="session-dropdown-item new-session" id="newSessionItem">
+          <span>+</span> <span>New Session</span>
+        </div>
+        <div class="session-dropdown-divider">Recent</div>
+        <div id="recentSessionsList"></div>
+        <div class="session-dropdown-more" id="moreSessionsBtn" style="display:none">Show more...</div>
+      </div>
+    </span>
+  </div>
+
+  <div class="messages" id="messages">
+    <div id="qna-card" class="qna-card collapsed hidden">
+      <div class="qna-header" id="qna-toggle">
+        <span id="qna-title">Session History (0)</span>
+        <span class="qna-chevron">▼</span>
+      </div>
+      <div class="qna-body" id="qna-body"></div>
+    </div>
+    <div class="msg msg-assistant">Ready. Type a message to start.</div>
+  </div>
+
+  <div class="typing-indicator" id="typingIndicator">
+    <span class="typing-dots"><span></span><span></span><span></span></span>
+    <span class="typing-status" id="typingStatus">Connecting...</span>
+    <span class="typing-elapsed" id="typingElapsed"></span>
+  </div>
+
+  <div class="input-area">
+    <div class="slash-menu" id="slashMenu"></div>
+    <div class="input-row">
+      <textarea id="input" placeholder="Type a message... (Ctrl+Enter to send, / for commands)" rows="1"></textarea>
+      <button class="icon-btn" id="sendBtn" title="Send (Ctrl+Enter)">
+        <svg viewBox="0 0 16 16" fill="currentColor">
+          <path d="M1.724 1.053a.5.5 0 01.553-.05l12.5 7a.5.5 0 010 .874l-12.5 7A.5.5 0 011 15.382V9.5h6a.5.5 0 000-1H1V2.618a.5.5 0 01.724-.565z"/>
+        </svg>
+      </button>
+      <button class="cancel-btn" id="cancelBtn" title="Cancel">
+        <svg viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.146 5.146a.5.5 0 01.708 0L8 7.293l2.146-2.147a.5.5 0 01.708.708L8.707 8l2.147 2.146a.5.5 0 01-.708.708L8 8.707l-2.146 2.147a.5.5 0 01-.708-.708L7.293 8 5.146 5.854a.5.5 0 010-.708z"/>
+        </svg>
+      </button>
+    </div>
+    <div class="input-toolbar">
+      <span class="intent-wrapper">
+        <span class="intent-tooltip" id="intentTooltip">Let the agent classify your intent automatically</span>
+        <select class="intent-select" id="intentSelect">
+          <option value="auto">Auto</option>
+          <option value="implement">Implement</option>
+          <option value="refactor">Refactor</option>
+          <option value="debug">Debug</option>
+          <option value="test">Test</option>
+          <option value="design">Design</option>
+          <option value="brainstorm">Brainstorm</option>
+          <option value="plan">Plan</option>
+          <option value="review">Review</option>
+          <option value="research">Research</option>
+        </select>
+      </span>
+      <button class="attach-btn" id="attachBtn" title="Attach files">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M14 8.5L7.5 15a3.54 3.54 0 01-5-5L9 3.5a2.36 2.36 0 013.33 3.33L6 13.17a1.18 1.18 0 01-1.67-1.67L10.5 5.33"/>
+        </svg>
+      </button>
+      <div class="attached-files" id="attachedFiles"></div>
+    </div>
+  </div>
+
+  <div class="drop-overlay" id="dropOverlay">Drop files to attach</div>
+
+  <script>
+    // @ts-ignore
+    const vscode = acquireVsCodeApi();
+
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('sendBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const repoPill = document.getElementById('repoPill');
+    const modelInfoBtn = document.getElementById('modelInfoBtn');
+    const modelInfoPopup = document.getElementById('modelInfoPopup');
+    const modelInfoBody = document.getElementById('modelInfoBody');
+    const sessionBtn = document.getElementById('sessionBtn');
+    const sessionDropdown = document.getElementById('sessionDropdown');
+    const newSessionItem = document.getElementById('newSessionItem');
+    const recentSessionsList = document.getElementById('recentSessionsList');
+    const moreSessionsBtn = document.getElementById('moreSessionsBtn');
+    const typingIndicator = document.getElementById('typingIndicator');
+    const intentSelect = document.getElementById('intentSelect');
+    const intentTooltip = document.getElementById('intentTooltip');
+    const attachBtn = document.getElementById('attachBtn');
+    const attachedFilesEl = document.getElementById('attachedFiles');
+    const slashMenu = document.getElementById('slashMenu');
+    const dropOverlay = document.getElementById('dropOverlay');
+
+    const intentDescriptions = {
+      auto: 'Let the agent classify your intent automatically',
+      implement: 'Write new code — functions, classes, features',
+      refactor: 'Restructure existing code without changing behavior',
+      debug: 'Find and fix bugs in existing code',
+      test: 'Generate or run tests for your code',
+      design: 'Create a detailed design document with requirements',
+      brainstorm: 'Explore ideas iteratively and build a spec',
+      plan: 'Generate an implementation plan with steps',
+      review: 'Review code for issues, style, and improvements',
+      research: 'Search the knowledge graph and explain code',
+    };
+    intentSelect.addEventListener('change', () => {
+      intentTooltip.textContent = intentDescriptions[intentSelect.value] || '';
+    });
+
+    // Slash commands
+    const slashCommands = [
+      { cmd: '/design', desc: 'Create a design document', intent: 'design' },
+      { cmd: '/plan', desc: 'Generate an implementation plan', intent: 'plan' },
+      { cmd: '/brainstorm', desc: 'Explore ideas and build a spec', intent: 'brainstorm' },
+      { cmd: '/implement', desc: 'Write new code', intent: 'implement' },
+      { cmd: '/refactor', desc: 'Restructure existing code', intent: 'refactor' },
+      { cmd: '/debug', desc: 'Find and fix bugs', intent: 'debug' },
+      { cmd: '/test', desc: 'Generate or run tests', intent: 'test' },
+      { cmd: '/review', desc: 'Review code for issues', intent: 'review' },
+      { cmd: '/research', desc: 'Search the knowledge graph', intent: 'research' },
+      { cmd: '/new', desc: 'Start a new session', intent: null },
+      { cmd: '/cancel', desc: 'Cancel running agent', intent: null },
+      { cmd: '/keys', desc: 'Manage API keys and secrets', intent: null },
+    ];
+    let slashActive = -1;
+
+    let streaming = false;
+    let currentAssistantEl = null;
+    let currentAssistantText = '';
+    let currentAssistantFormat = 'text';
+    let attachedFiles = []; // { name, path }
+
+    // Auto-resize textarea
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+      handleSlashMenu();
+    });
+
+    // Ctrl+Enter to send
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        doSend();
+      }
+    });
+
+    sendBtn.addEventListener('click', doSend);
+    cancelBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'cancel' });
+    });
+    modelInfoBtn.addEventListener('click', () => {
+      const isVisible = modelInfoPopup.classList.contains('visible');
+      modelInfoPopup.classList.toggle('visible');
+      if (!isVisible) {
+        vscode.postMessage({ type: 'getModelConfig' });
+      }
+    });
+    // Close popup on click outside
+    document.addEventListener('click', (e) => {
+      if (!modelInfoPopup.contains(e.target) && e.target !== modelInfoBtn && !modelInfoBtn.contains(e.target)) {
+        modelInfoPopup.classList.remove('visible');
+      }
+    });
+
+    repoPill.addEventListener('click', () => {
+      vscode.postMessage({ type: 'switchRepo' });
+    });
+    // Session dropdown toggle
+    sessionBtn.addEventListener('click', () => {
+      const isVisible = sessionDropdown.classList.contains('visible');
+      sessionDropdown.classList.toggle('visible');
+      if (!isVisible) {
+        vscode.postMessage({ type: 'getRecentSessions' });
+      }
+    });
+    document.addEventListener('click', (e) => {
+      if (!sessionDropdown.contains(e.target) && e.target !== sessionBtn && !sessionBtn.contains(e.target)) {
+        sessionDropdown.classList.remove('visible');
+      }
+    });
+    newSessionItem.addEventListener('click', () => {
+      sessionDropdown.classList.remove('visible');
+      vscode.postMessage({ type: 'newSession' });
+      messagesEl.innerHTML = '<div class="msg msg-assistant">New session. Type a message to start.</div>';
+      attachedFiles = [];
+      renderAttachedFiles();
+    });
+    let showingAllSessions = false;
+    moreSessionsBtn.addEventListener('click', () => {
+      showingAllSessions = true;
+      vscode.postMessage({ type: 'getRecentSessions', expanded: true });
+    });
+    attachBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'attachFile' });
+    });
+
+    // QnA card toggle
+    const qnaToggle = document.getElementById('qna-toggle');
+    if (qnaToggle) {
+      qnaToggle.addEventListener('click', () => {
+        const qnaCard = document.getElementById('qna-card');
+        if (qnaCard) qnaCard.classList.toggle('collapsed');
+      });
+    }
+
+    function doSend() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      // If streaming (agent running) and a gate is active, inject rather than send
+      const hasActiveGate = document.querySelector('.gate-card:not(.resolved)');
+      if (streaming && hasActiveGate) {
+        vscode.postMessage({ type: 'inject', text });
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+        return;
+      }
+
+      if (streaming) return;
+      const intent = intentSelect.value;
+      const files = attachedFiles.map(f => f.path);
+      vscode.postMessage({ type: 'send', text, intent: intent === 'auto' ? undefined : intent, files: files.length > 0 ? files : undefined });
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      attachedFiles = [];
+      renderAttachedFiles();
+    }
+
+    const typingStatus = document.getElementById('typingStatus');
+    const typingElapsed = document.getElementById('typingElapsed');
+    let streamStartTime = 0;
+    let elapsedTimer = null;
+
+    function setStreaming(isStreaming) {
+      streaming = isStreaming;
+      sendBtn.style.display = isStreaming ? 'none' : 'flex';
+      cancelBtn.style.display = isStreaming ? 'flex' : 'none';
+      sendBtn.disabled = isStreaming;
+      inputEl.disabled = isStreaming;
+      typingIndicator.classList.toggle('visible', isStreaming);
+
+      if (isStreaming) {
+        streamStartTime = Date.now();
+        typingStatus.textContent = 'Connecting...';
+        typingElapsed.textContent = '0s';
+        elapsedTimer = setInterval(() => {
+          const secs = Math.floor((Date.now() - streamStartTime) / 1000);
+          if (secs < 60) {
+            typingElapsed.textContent = secs + 's';
+          } else {
+            typingElapsed.textContent = Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+          }
+        }, 1000);
+      } else {
+        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+        typingElapsed.textContent = '';
+      }
+    }
+
+    function updateTypingStatus(msg) {
+      if (streaming && typingStatus) {
+        typingStatus.textContent = msg;
+      }
+    }
+
+    function renderAttachedFiles() {
+      attachedFilesEl.innerHTML = '';
+      attachedFiles.forEach((f, i) => {
+        const pill = document.createElement('span');
+        pill.className = 'attached-file';
+        pill.innerHTML = `${f.name}<span class="attached-file-remove" data-idx="${i}">&times;</span>`;
+        attachedFilesEl.appendChild(pill);
+      });
+      // Remove handler
+      attachedFilesEl.querySelectorAll('.attached-file-remove').forEach(el => {
+        el.addEventListener('click', (e) => {
+          const idx = parseInt(e.target.dataset.idx, 10);
+          attachedFiles.splice(idx, 1);
+          renderAttachedFiles();
+        });
+      });
+    }
+
+    function scrollToBottom() {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    const COLLAPSE_LINE_THRESHOLD = 12;
+
+    function makeCollapsible(el) {
+      if (!el || !el.classList.contains('msg-assistant')) return;
+
+      // Wrap existing content in a .msg-content div
+      const content = document.createElement('div');
+      content.className = 'msg-content';
+      while (el.firstChild) {
+        content.appendChild(el.firstChild);
+      }
+      el.appendChild(content);
+
+      // Count lines: <br> tags + block elements + newlines in textContent
+      const brCount = content.querySelectorAll('br').length;
+      const blockCount = content.querySelectorAll('pre, p, h1, h2, h3, h4, li, table').length;
+      const textLines = (content.textContent || '').split('\n').length;
+      const lineCount = Math.max(brCount + blockCount, textLines);
+
+      if (lineCount > COLLAPSE_LINE_THRESHOLD) {
+        el.classList.add('collapsible', 'collapsed');
+
+        const toggle = document.createElement('button');
+        toggle.className = 'msg-toggle';
+        toggle.textContent = `Show all (${lineCount} lines)`;
+        toggle.addEventListener('click', () => {
+          const isCollapsed = el.classList.contains('collapsed');
+          el.classList.toggle('collapsed');
+          toggle.textContent = isCollapsed
+            ? 'Show less'
+            : `Show all (${lineCount} lines)`;
+          scrollToBottom();
+        });
+        el.appendChild(toggle);
+      }
+    }
+
+    const COLLAPSE_LINE_THRESHOLD_CONST = 12;
+
+    // -----------------------------------------------------------------------
+    // Format detection
+    // -----------------------------------------------------------------------
+    function detectFormat(text) {
+      if (!text) return 'text';
+      const trimmed = text.trim();
+      // Diff
+      if ((trimmed.includes('--- a/') && trimmed.includes('+++ b/')) || /^@@\s+-\d+/m.test(trimmed)) return 'diff';
+      // Table (pipe-delimited with header separator)
+      const lines = trimmed.split('\n');
+      if (lines.length >= 3 && lines[0].includes('|') && /^\|?[\s\-:|]+\|?$/.test(lines[1])) return 'table';
+      // HTML
+      if (trimmed.startsWith('<!DOCTYPE') || (trimmed.startsWith('<') && /<\/[a-z]+>/i.test(trimmed) && trimmed.includes('</'))) return 'html';
+      // Default
+      return 'text';
+    }
+
+    // -----------------------------------------------------------------------
+    // Format renderers
+    // -----------------------------------------------------------------------
+    function renderFormatted(el, text, format) {
+      // Wrap content in msg-content if not already present (for collapsible)
+      let contentEl = el.querySelector('.msg-content');
+      if (!contentEl) {
+        contentEl = el;
+      }
+
+      switch (format) {
+        case 'markdown':    contentEl.innerHTML = renderMarkdownToHtml(text); break;
+        case 'html-inline': contentEl.innerHTML = text; break;
+        case 'code':        renderCodeBlock(contentEl, text); break;
+        case 'table':       renderTableView(contentEl, text); break;
+        case 'html':        renderHtmlSandbox(contentEl, text); break;
+        case 'diff':        renderDiffView(contentEl, text); break;
+        default:            contentEl.innerHTML = renderMarkdownToHtml(text); break;
+      }
+    }
+
+    function renderMarkdownToHtml(text) {
+      // Escape HTML first, then apply markdown formatting
+      let s = text
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      // Code blocks (must be before inline code)
+      s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+        return `<pre class="md-codeblock"><code>${code}</code></pre>`;
+      });
+      // Inline code
+      s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+      // Bold
+      s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      // Italic
+      s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+      // Headers (only at line start)
+      s = s.replace(/^### (.+)$/gm, '<strong style="color:var(--vscode-textLink-foreground)">$1</strong>');
+      s = s.replace(/^## (.+)$/gm, '<strong style="font-size:1.05em;color:var(--vscode-textLink-foreground)">$1</strong>');
+      s = s.replace(/^# (.+)$/gm, '<strong style="font-size:1.15em;color:var(--vscode-textLink-foreground)">$1</strong>');
+      // List items
+      s = s.replace(/^- (.+)$/gm, '• $1');
+      // Newlines
+      s = s.replace(/\n/g, '<br>');
+      return s;
+    }
+
+    // Backward compat alias
+    function formatMarkdown(text) { return renderMarkdownToHtml(text); }
+
+    function renderCodeBlock(el, text) {
+      let code = text;
+      let lang = '';
+      const fenceMatch = text.match(/^```(\w*)\n([\s\S]*?)```\s*$/);
+      if (fenceMatch) { lang = fenceMatch[1]; code = fenceMatch[2]; }
+      // Also handle $ command prefix (shell output)
+      if (!lang && code.trimStart().startsWith('$ ')) lang = 'shell';
+
+      el.innerHTML = '';
+      const viewer = document.createElement('div');
+      viewer.className = 'code-viewer';
+
+      const header = document.createElement('div');
+      header.className = 'code-viewer-header';
+      const langSpan = document.createElement('span');
+      langSpan.textContent = lang || 'output';
+      header.appendChild(langSpan);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'code-viewer-copy';
+      copyBtn.textContent = 'Copy';
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(code).then(() => {
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => copyBtn.textContent = 'Copy', 1500);
+        });
+      });
+      header.appendChild(copyBtn);
+      viewer.appendChild(header);
+
+      const pre = document.createElement('pre');
+      const codeEl = document.createElement('code');
+      codeEl.textContent = code;
+      pre.appendChild(codeEl);
+      viewer.appendChild(pre);
+
+      el.appendChild(viewer);
+    }
+
+    function renderTableView(el, text) {
+      const lines = text.split('\n').filter(l => l.trim());
+      // Need at least header + separator
+      if (lines.length < 2 || !lines[0].includes('|')) {
+        el.innerHTML = renderMarkdownToHtml(text);
+        return;
+      }
+
+      const parseRow = (line) => line.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      const headers = parseRow(lines[0]);
+      // Skip separator line (lines[1] is usually |---|---|)
+      const sepIdx = lines.findIndex((l, i) => i > 0 && /^\|?[\s\-:|]+\|?$/.test(l));
+      const dataStart = sepIdx >= 0 ? sepIdx + 1 : 1;
+      const rows = lines.slice(dataStart).map(parseRow);
+
+      let sortCol = -1, sortAsc = true;
+
+      function render() {
+        const sorted = sortCol >= 0
+          ? [...rows].sort((a, b) => {
+              const va = (a[sortCol] || '').toLowerCase();
+              const vb = (b[sortCol] || '').toLowerCase();
+              return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+            })
+          : rows;
+
+        el.innerHTML = '';
+        const table = document.createElement('table');
+        table.className = 'fmt-table';
+
+        const thead = document.createElement('thead');
+        const hrow = document.createElement('tr');
+        headers.forEach((h, i) => {
+          const th = document.createElement('th');
+          const arrow = sortCol === i ? (sortAsc ? ' ▲' : ' ▼') : '';
+          th.innerHTML = escapeHtml(h) + `<span class="sort-arrow">${arrow}</span>`;
+          th.addEventListener('click', () => {
+            if (sortCol === i) { sortAsc = !sortAsc; } else { sortCol = i; sortAsc = true; }
+            render();
+          });
+          hrow.appendChild(th);
+        });
+        thead.appendChild(hrow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        for (const row of sorted) {
+          const tr = document.createElement('tr');
+          headers.forEach((_, i) => {
+            const td = document.createElement('td');
+            td.innerHTML = escapeHtml(row[i] || '');
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        el.appendChild(table);
+      }
+
+      render();
+    }
+
+    function renderDiffView(el, text) {
+      el.innerHTML = '';
+      const viewer = document.createElement('div');
+      viewer.className = 'diff-viewer';
+      const pre = document.createElement('pre');
+
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const span = document.createElement('span');
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          span.className = 'diff-line-add';
+        } else if (line.startsWith('-') && !line.startsWith('---')) {
+          span.className = 'diff-line-del';
+        } else if (line.startsWith('@@')) {
+          span.className = 'diff-line-hunk';
+        } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+          span.className = 'diff-line-meta';
+        }
+        span.textContent = line;
+        pre.appendChild(span);
+      }
+      viewer.appendChild(pre);
+      el.appendChild(viewer);
+    }
+
+    function renderHtmlSandbox(el, text) {
+      el.innerHTML = '';
+      const viewer = document.createElement('div');
+      viewer.className = 'html-viewer';
+      const iframe = document.createElement('iframe');
+      iframe.sandbox = 'allow-same-origin';
+      iframe.srcdoc = text;
+      iframe.addEventListener('load', () => {
+        try {
+          const h = iframe.contentDocument.body.scrollHeight;
+          iframe.style.height = Math.min(h + 16, 500) + 'px';
+        } catch { iframe.style.height = '200px'; }
+      });
+      viewer.appendChild(iframe);
+      el.appendChild(viewer);
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Messages from extension
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'setRepo':
+          document.getElementById('repoPillText').textContent = msg.name || 'no repo';
+          break;
+
+        case 'clearMessages':
+          messagesEl.innerHTML = '';
+          currentAssistantEl = null;
+          currentAssistantText = '';
+          currentAssistantFormat = 'text';
+          break;
+
+        case 'setModelConfig': {
+          const c = msg.config;
+          modelInfoBody.innerHTML = `<table>
+            <tr><td>Local</td><td>${c.local || '—'}</td></tr>
+            <tr><td>Embedding</td><td>${c.embedding || '—'}</td></tr>
+            <tr><td>Context</td><td>${c.contextWindow || '—'}</td></tr>
+            <tr><td>Fast</td><td>${c.fast || '—'}</td></tr>
+            <tr><td>Standard</td><td>${c.standard || '—'}</td></tr>
+            <tr><td>Powerful</td><td>${c.powerful || '—'}</td></tr>
+          </table>`;
+          break;
+        }
+
+        case 'setRecentSessions': {
+          recentSessionsList.innerHTML = '';
+          const sessions = msg.sessions || [];
+          sessions.forEach(s => {
+            const item = document.createElement('div');
+            item.className = 'session-dropdown-item';
+            const title = document.createElement('div');
+            title.className = 'session-title';
+            title.textContent = s.summary || `Session ${(s.id || '').slice(0, 8)}`;
+            const meta = document.createElement('div');
+            meta.className = 'session-meta';
+            const date = s.createdAt ? new Date(s.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+            const time = s.createdAt ? new Date(s.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+            meta.textContent = `${date} ${time}`;
+            item.appendChild(title);
+            item.appendChild(meta);
+            item.addEventListener('click', () => {
+              sessionDropdown.classList.remove('visible');
+              vscode.postMessage({ type: 'loadSession', sessionId: s.id, repo: s.repo });
+            });
+            recentSessionsList.appendChild(item);
+          });
+          moreSessionsBtn.style.display = (msg.hasMore && !showingAllSessions) ? 'block' : 'none';
+          break;
+        }
+
+        case 'addAttachment':
+          attachedFiles.push({ name: msg.name, path: msg.path });
+          renderAttachedFiles();
+          break;
+
+        case 'addMessage': {
+          const el = document.createElement('div');
+          el.className = `msg msg-${msg.role}`;
+          if (msg.role === 'user') {
+            el.textContent = msg.content;
+          } else {
+            const fmt = msg.format || detectFormat(msg.content);
+            renderFormatted(el, msg.content, fmt);
+            makeCollapsible(el);
+          }
+          messagesEl.appendChild(el);
+          scrollToBottom();
+          break;
+        }
+
+        case 'startAssistant':
+          setStreaming(true);
+          updateTypingStatus('Working...');
+          currentAssistantEl = document.createElement('div');
+          currentAssistantEl.className = 'msg msg-assistant';
+          currentAssistantText = '';
+          currentAssistantFormat = 'text';
+          messagesEl.appendChild(currentAssistantEl);
+          scrollToBottom();
+          break;
+
+        case 'appendDelta':
+          if (currentAssistantEl) {
+            if (currentAssistantText.length === 0) {
+              updateTypingStatus('Generating response...');
+            }
+            // Replace mode: transform task replaces raw output with formatted text
+            if (msg.replace) {
+              currentAssistantText = msg.text;
+              if (msg.format) currentAssistantFormat = msg.format;
+            } else {
+              // Capture format from first delta that specifies one
+              if (msg.format && currentAssistantFormat === 'text') {
+                currentAssistantFormat = msg.format;
+              }
+              currentAssistantText += msg.text;
+            }
+            // Skip rendering empty content to avoid blank bubbles
+            if (currentAssistantText.trim()) {
+              renderFormatted(currentAssistantEl, currentAssistantText, currentAssistantFormat);
+            }
+            scrollToBottom();
+          }
+          break;
+
+        case 'showProgress': {
+          // Remove empty assistant container that was created by startAssistant
+          // but never received content (controlled pipeline doesn't stream deltas)
+          if (currentAssistantEl && !currentAssistantText.trim()) {
+            currentAssistantEl.remove();
+            currentAssistantEl = null;
+            currentAssistantText = '';
+          }
+          const pEl = document.createElement('div');
+          pEl.className = 'msg-progress';
+          pEl.textContent = msg.message;
+          messagesEl.appendChild(pEl);
+          scrollToBottom();
+          // Update typing indicator with latest status
+          updateTypingStatus(msg.message);
+          break;
+        }
+
+        case 'showGate': {
+          // Remove empty assistant container that was created by startAssistant
+          // but never received content (controlled pipeline doesn't stream deltas)
+          if (currentAssistantEl && !currentAssistantText.trim()) {
+            currentAssistantEl.remove();
+            currentAssistantEl = null;
+            currentAssistantText = '';
+          }
+          const gate = msg.gateData;
+          const card = document.createElement('div');
+          card.className = 'gate-card';
+          card.id = `gate-${gate.gateId}`;
+          card.dataset.gateId = gate.gateId;
+
+          const title = document.createElement('div');
+          title.className = 'gate-title';
+          title.textContent = gate.title || 'Action Required';
+          card.appendChild(title);
+
+          // Expand/minimize button
+          const expandBtn = document.createElement('button');
+          expandBtn.className = 'gate-expand-btn';
+          expandBtn.textContent = '▼ Expand';
+          expandBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isExpanded = card.classList.contains('gate-expanded');
+            card.classList.toggle('gate-expanded');
+            expandBtn.textContent = isExpanded ? '▼ Expand' : '▲ Minimize';
+          });
+          card.appendChild(expandBtn);
+
+          // Render tabs if present, otherwise plain content
+          if (gate.tabs && gate.tabs.length > 0) {
+            renderTabbedGate(card, gate);
+          } else if (gate.content) {
+            const content = document.createElement('div');
+            content.className = 'gate-content';
+            if (gate.format === 'html-inline' || gate.format === 'html') {
+              content.innerHTML = gate.content;
+            } else {
+              content.textContent = gate.content;
+            }
+            card.appendChild(content);
+          }
+
+          const actions = document.createElement('div');
+          actions.className = 'gate-actions';
+
+          const gateActions = gate.actions || [
+            { name: 'approve', label: 'Approve' },
+            { name: 'reject', label: 'Reject' },
+          ];
+
+          let activeFeedbackAction = null;
+
+          gateActions.forEach((action, i) => {
+            const btn = document.createElement('button');
+            const hasHint = !!action.hint;
+            btn.className = `gate-btn ${i === 0 ? 'gate-btn-primary' : 'gate-btn-secondary'}${hasHint ? ' gate-btn-with-hint' : ''}`;
+            btn.dataset.gateAction = action.name;
+
+            if (hasHint) {
+              const labelSpan = document.createElement('span');
+              labelSpan.textContent = action.label || action.name;
+              btn.appendChild(labelSpan);
+              const hintSpan = document.createElement('span');
+              hintSpan.className = 'gate-btn-hint';
+              hintSpan.textContent = action.hint;
+              btn.appendChild(hintSpan);
+            } else {
+              btn.textContent = action.label || action.name;
+            }
+
+            if (action.needsInput) {
+              btn.addEventListener('click', () => {
+                // Show per-action feedback area
+                activeFeedbackAction = action;
+                const fbDiv = card.querySelector('.gate-feedback');
+                if (fbDiv) {
+                  fbDiv.style.display = 'block';
+                  const ta = fbDiv.querySelector('textarea');
+                  // Hide textarea when Save Options tab handles input instead
+                  if (ta && action.name === 'save' && card._getSaveOptions) {
+                    ta.style.display = 'none';
+                  } else if (ta) {
+                    ta.placeholder = action.hint || 'Enter feedback...';
+                    ta.focus();
+                  }
+                }
+              });
+            } else {
+              btn.addEventListener('click', () => {
+                const feedback = collectGateData(card);
+                vscode.postMessage({
+                  type: 'gateReply',
+                  gateId: gate.gateId,
+                  action: action.name,
+                  feedback,
+                });
+                resolveGateCard(card, action.name, feedback);
+              });
+            }
+            actions.appendChild(btn);
+          });
+
+          card.appendChild(actions);
+
+          // Feedback textarea (shared, placeholder updates per action)
+          const fbDiv = document.createElement('div');
+          fbDiv.className = 'gate-feedback';
+          const fbTextarea = document.createElement('textarea');
+          fbTextarea.placeholder = 'Enter feedback...';
+          fbDiv.appendChild(fbTextarea);
+          const fbSubmit = document.createElement('button');
+          fbSubmit.className = 'gate-btn gate-btn-primary gate-feedback-submit';
+          fbSubmit.textContent = 'Submit';
+          fbSubmit.addEventListener('click', () => {
+            const targetAction = activeFeedbackAction || gateActions.find(a => a.needsInput);
+            if (targetAction) {
+              // For save actions, collect structured gate data (save options, selections)
+              // instead of raw textarea text
+              const feedback = (targetAction.name === 'save')
+                ? collectGateData(card)
+                : fbTextarea.value;
+              vscode.postMessage({
+                type: 'gateReply',
+                gateId: gate.gateId,
+                action: targetAction.name,
+                feedback,
+              });
+              resolveGateCard(card, targetAction.name, feedback);
+            }
+          });
+          fbDiv.appendChild(fbSubmit);
+          card.appendChild(fbDiv);
+
+          // Dismiss feedback area on outside click if empty
+          document.addEventListener('mousedown', (e) => {
+            if (fbDiv.style.display === 'block' && !fbDiv.contains(e.target)) {
+              const ta = fbDiv.querySelector('textarea');
+              if (ta && !ta.value.trim()) {
+                fbDiv.style.display = 'none';
+                activeFeedbackAction = null;
+              }
+            }
+          });
+
+          messagesEl.appendChild(card);
+          scrollToBottom();
+          // Keep typing indicator visible but update status to show waiting
+          updateTypingStatus('Waiting for your response...');
+          // Re-enable input so user can type feedback
+          sendBtn.style.display = 'flex';
+          cancelBtn.style.display = 'none';
+          sendBtn.disabled = false;
+          inputEl.disabled = false;
+          break;
+        }
+
+        case 'updateQnA': {
+          const qnaCard = document.getElementById('qna-card');
+          const qnaBody = document.getElementById('qna-body');
+          const qnaTitle = document.getElementById('qna-title');
+          const entries = msg.entries || [];
+          if (entries.length === 0) {
+            if (qnaCard) qnaCard.classList.add('hidden');
+            break;
+          }
+          if (qnaCard) qnaCard.classList.remove('hidden');
+          if (qnaTitle) qnaTitle.textContent = `Session History (${entries.length})`;
+          if (qnaBody) {
+            qnaBody.innerHTML = '';
+            entries.forEach(e => {
+              const div = document.createElement('div');
+              div.className = `qna-entry ${e.source === 'user' ? 'qna-user' : ''}`;
+              const tag = document.createElement('span');
+              tag.className = 'qna-tag';
+              tag.textContent = `[${e.step} r${e.round}]`;
+              div.appendChild(tag);
+              const label = e.source === 'user' ? 'User: ' : 'System: ';
+              div.appendChild(document.createTextNode(label + e.question));
+              qnaBody.appendChild(div);
+            });
+          }
+          break;
+        }
+
+        case 'finishMessage':
+          typingIndicator.classList.remove('visible');
+          // Make long assistant messages collapsible
+          if (currentAssistantEl) {
+            makeCollapsible(currentAssistantEl);
+          }
+          currentAssistantEl = null;
+          currentAssistantText = '';
+          setStreaming(false);
+          scrollToBottom();
+          break;
+
+        case 'showError': {
+          const errEl = document.createElement('div');
+          errEl.className = 'msg msg-error';
+          errEl.textContent = msg.error || 'An error occurred';
+          messagesEl.appendChild(errEl);
+          setStreaming(false);
+          scrollToBottom();
+          break;
+        }
+
+        case 'showToolBlock':
+          createToolBlock(msg.data);
+          break;
+
+        case 'showEscalation':
+          createEscalationNotice(msg.data);
+          break;
+
+        case 'showIntentBadge':
+          if (currentAssistantEl) {
+            currentAssistantEl.prepend(createIntentBadge(msg.intent));
+          }
+          // Sync intent dropdown to classified intent
+          if (msg.intent && intentSelect) {
+            const opt = intentSelect.querySelector(`option[value="${msg.intent}"]`);
+            if (opt) {
+              intentSelect.value = msg.intent;
+              intentTooltip.textContent = intentDescriptions[msg.intent] || '';
+            }
+          }
+          break;
+      }
+    });
+
+    // Focus input on load
+    // -----------------------------------------------------------------------
+    // Slash command menu
+    // -----------------------------------------------------------------------
+
+    function handleSlashMenu() {
+      const text = inputEl.value;
+      if (text.startsWith('/') && !text.includes(' ')) {
+        const query = text.toLowerCase();
+        const matches = slashCommands.filter(c => c.cmd.startsWith(query));
+        if (matches.length > 0) {
+          slashMenu.innerHTML = '';
+          matches.forEach((c, i) => {
+            const item = document.createElement('div');
+            item.className = 'slash-item' + (i === 0 ? ' active' : '');
+            item.innerHTML = `<span class="slash-cmd">${c.cmd}</span><span class="slash-desc">${c.desc}</span>`;
+            item.addEventListener('click', () => selectSlashCommand(c));
+            slashMenu.appendChild(item);
+          });
+          slashMenu.classList.add('visible');
+          slashActive = 0;
+          return;
+        }
+      }
+      slashMenu.classList.remove('visible');
+      slashActive = -1;
+    }
+
+    function selectSlashCommand(cmd) {
+      slashMenu.classList.remove('visible');
+      slashActive = -1;
+      if (cmd.cmd === '/new') {
+        vscode.postMessage({ type: 'newSession' });
+        messagesEl.innerHTML = '<div class="msg msg-assistant">New session. Type a message to start.</div>';
+        attachedFiles = []; renderAttachedFiles();
+        inputEl.value = '';
+        return;
+      }
+      if (cmd.cmd === '/cancel') {
+        vscode.postMessage({ type: 'cancel' });
+        inputEl.value = '';
+        return;
+      }
+      if (cmd.cmd === '/keys') {
+        inputEl.value = '/keys ';
+        inputEl.focus();
+        slashMenu.classList.remove('visible');
+        // Show usage hint
+        const hint = document.createElement('div');
+        hint.className = 'msg-progress';
+        hint.textContent = 'Usage: /keys list | /keys set <name> | /keys delete <name>';
+        messagesEl.appendChild(hint);
+        scrollToBottom();
+        return;
+      }
+      // Set intent and clear the slash text
+      if (cmd.intent) {
+        intentSelect.value = cmd.intent;
+        intentTooltip.textContent = intentDescriptions[cmd.intent] || '';
+      }
+      inputEl.value = '';
+      inputEl.focus();
+    }
+
+    // Arrow key navigation in slash menu
+    inputEl.addEventListener('keydown', (e) => {
+      if (!slashMenu.classList.contains('visible')) return;
+      const items = slashMenu.querySelectorAll('.slash-item');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (slashActive < items.length - 1) slashActive++;
+        items.forEach((el, i) => el.classList.toggle('active', i === slashActive));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (slashActive > 0) slashActive--;
+        items.forEach((el, i) => el.classList.toggle('active', i === slashActive));
+      } else if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        const match = slashCommands.filter(c => c.cmd.startsWith(inputEl.value.toLowerCase()));
+        if (match[slashActive]) selectSlashCommand(match[slashActive]);
+      } else if (e.key === 'Escape') {
+        slashMenu.classList.remove('visible');
+        slashActive = -1;
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Drag and drop
+    // -----------------------------------------------------------------------
+
+    document.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropOverlay.classList.add('visible');
+    });
+    document.addEventListener('dragleave', (e) => {
+      if (e.relatedTarget === null) dropOverlay.classList.remove('visible');
+    });
+    document.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropOverlay.classList.remove('visible');
+      // VS Code webview doesn't expose real file paths from drag events,
+      // so we ask the extension to handle file attachment
+      vscode.postMessage({ type: 'attachFile' });
+    });
+
+    // -----------------------------------------------------------------------
+    // Tool block + escalation + intent badge helpers
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Tabbed gate card helpers
+    // -----------------------------------------------------------------------
+
+    /** Collect structured data from tabbed gate (item selections + save options). */
+    function collectGateData(card) {
+      const data = {};
+
+      // Build unified items[] array — each item has id, selected, comment
+      if (card._itemStates && card._itemStates.size > 0) {
+        const items = [];
+        card._itemStates.forEach((status, id) => {
+          const item = { id, selected: status !== 'rejected' };
+          const comment = card._itemComments?.get(id);
+          if (comment && comment.trim()) item.comment = comment.trim();
+          const priority = card._itemPriorities?.get(id);
+          if (priority) item.priority = priority;
+          items.push(item);
+        });
+        data.items = items;
+      }
+
+      if (card._addedIdeas && card._addedIdeas.length > 0) {
+        data.addedIdeas = card._addedIdeas;
+      }
+      if (card._getSaveOptions) {
+        Object.assign(data, card._getSaveOptions());
+      }
+      return Object.keys(data).length > 0 ? JSON.stringify(data) : undefined;
+    }
+
+    function renderTabbedGate(card, gate) {
+      // Item states tracked per gate
+      const itemStates = new Map(); // id → 'approved' | 'rejected' | 'pending'
+
+      // Tab bar
+      const tabBar = document.createElement('div');
+      tabBar.className = 'gate-tabs';
+
+      const panels = [];
+      gate.tabs.forEach((tab, idx) => {
+        const btn = document.createElement('button');
+        btn.className = `gate-tab${idx === 0 ? ' active' : ''}`;
+        btn.textContent = tab.label;
+        tabBar.appendChild(btn);
+
+        const panel = document.createElement('div');
+        panel.className = `gate-tab-panel${idx === 0 ? ' active' : ''}`;
+
+        if (tab.content) {
+          const contentDiv = document.createElement('div');
+          contentDiv.className = 'gate-tab-panel-content';
+          if (tab.format === 'html') {
+            contentDiv.innerHTML = tab.content;
+          } else {
+            contentDiv.innerHTML = renderMarkdownToHtml(tab.content);
+          }
+          panel.appendChild(contentDiv);
+        }
+
+        if (tab.items && tab.items.length > 0 && tab.selectable) {
+          // --- Selectable list mode: clickable rows ---
+          const listDiv = document.createElement('div');
+          listDiv.className = 'gate-tab-panel-content gate-selectable-list';
+          tab.items.forEach(item => {
+            const row = document.createElement('div');
+            row.className = `gate-selectable-row ${item.status || 'pending'}`;
+            row.dataset.itemId = String(item.id);
+
+            const statusDot = document.createElement('span');
+            statusDot.className = 'gate-selectable-dot';
+            statusDot.textContent = item.status === 'discussed' ? '○' : item.status === 'approved' ? '○' : '●';
+            row.appendChild(statusDot);
+
+            const title = document.createElement('span');
+            title.className = 'gate-selectable-title';
+            title.textContent = item.title;
+            row.appendChild(title);
+
+            if (item.verdict) {
+              const badge = document.createElement('span');
+              badge.className = `gate-item-verdict ${item.verdict}`;
+              badge.textContent = item.verdict;
+              row.appendChild(badge);
+            }
+
+            row.addEventListener('click', () => {
+              // Send discuss action with ideaId as feedback
+              const gateId = card.dataset.gateId;
+              if (gateId) {
+                vscode.postMessage({ type: 'gateReply', gateId, action: 'discuss', feedback: String(item.id) });
+              }
+            });
+            row.style.cursor = 'pointer';
+            listDiv.appendChild(row);
+          });
+          panel.appendChild(listDiv);
+        } else if (tab.items && tab.items.length > 0) {
+          // --- Toggle mode: per-item approve/reject ---
+          const listDiv = document.createElement('div');
+          listDiv.className = 'gate-tab-panel-content';
+          tab.items.forEach(item => {
+            itemStates.set(item.id, item.status || 'pending');
+            const itemEl = document.createElement('div');
+            itemEl.className = 'gate-item';
+            itemEl.dataset.itemId = String(item.id);
+
+            // Header
+            const header = document.createElement('div');
+            header.className = 'gate-item-header';
+
+            const chevron = document.createElement('span');
+            chevron.className = 'gate-item-chevron';
+            chevron.textContent = '▶';
+            header.appendChild(chevron);
+
+            const title = document.createElement('span');
+            title.className = 'gate-item-title';
+            title.textContent = item.title;
+            header.appendChild(title);
+
+            if (item.verdict) {
+              const verdict = document.createElement('span');
+              verdict.className = `gate-item-verdict ${item.verdict}`;
+              verdict.textContent = item.verdict;
+              header.appendChild(verdict);
+            }
+
+            // Per-item toggles
+            const toggles = document.createElement('div');
+            toggles.className = 'gate-item-toggles';
+
+            const approveBtn = document.createElement('button');
+            approveBtn.className = 'gate-item-toggle';
+            approveBtn.textContent = '✓';
+            approveBtn.title = 'Approve';
+            approveBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const cur = itemStates.get(item.id);
+              itemStates.set(item.id, cur === 'approved' ? 'pending' : 'approved');
+              updateItemToggle(itemEl, itemStates.get(item.id));
+            });
+            toggles.appendChild(approveBtn);
+
+            const rejectBtn = document.createElement('button');
+            rejectBtn.className = 'gate-item-toggle';
+            rejectBtn.textContent = '✗';
+            rejectBtn.title = 'Reject';
+            rejectBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const cur = itemStates.get(item.id);
+              itemStates.set(item.id, cur === 'rejected' ? 'pending' : 'rejected');
+              updateItemToggle(itemEl, itemStates.get(item.id));
+            });
+            toggles.appendChild(rejectBtn);
+            header.appendChild(toggles);
+
+            // Expand/collapse on header click
+            header.addEventListener('click', () => {
+              itemEl.classList.toggle('expanded');
+            });
+            itemEl.appendChild(header);
+
+            // Body
+            if (item.body) {
+              const body = document.createElement('div');
+              body.className = 'gate-item-body';
+              body.innerHTML = renderMarkdownToHtml(item.body);
+              if (item.tags && item.tags.length > 0) {
+                const tagsDiv = document.createElement('div');
+                tagsDiv.className = 'gate-item-tags';
+                item.tags.forEach(t => {
+                  const tag = document.createElement('span');
+                  tag.className = 'gate-item-tag';
+                  tag.textContent = t;
+                  tagsDiv.appendChild(tag);
+                });
+                body.appendChild(tagsDiv);
+              }
+              // Per-item priority selector
+              if (item.prioritySelector) {
+                const prioDiv = document.createElement('div');
+                prioDiv.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;';
+                const prioLabel = document.createElement('span');
+                prioLabel.style.cssText = 'font-size:0.82em;color:var(--vscode-descriptionForeground);';
+                prioLabel.textContent = 'Priority:';
+                prioDiv.appendChild(prioLabel);
+                const prioSelect = document.createElement('select');
+                prioSelect.style.cssText = 'background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground);border:1px solid var(--vscode-dropdown-border,#555);border-radius:4px;padding:2px 6px;font-family:inherit;font-size:0.82em;';
+                ['medium', 'high', 'low'].forEach(val => {
+                  const opt = document.createElement('option');
+                  opt.value = val;
+                  opt.textContent = val.charAt(0).toUpperCase() + val.slice(1);
+                  prioSelect.appendChild(opt);
+                });
+                prioSelect.addEventListener('click', (e) => e.stopPropagation());
+                prioSelect.addEventListener('change', () => {
+                  if (!card._itemPriorities) card._itemPriorities = new Map();
+                  card._itemPriorities.set(item.id, prioSelect.value);
+                });
+                prioDiv.appendChild(prioSelect);
+                body.appendChild(prioDiv);
+              }
+              // Per-item comment input
+              if (item.commentable) {
+                const commentDiv = document.createElement('div');
+                commentDiv.style.marginTop = '6px';
+                const commentInput = document.createElement('textarea');
+                commentInput.className = 'gate-item-comment';
+                commentInput.placeholder = 'Leave a comment...';
+                commentInput.style.cssText = 'width:100%;min-height:32px;max-height:80px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,#555);border-radius:4px;padding:4px 6px;font-family:inherit;font-size:0.85em;resize:vertical;';
+                commentInput.addEventListener('click', (e) => e.stopPropagation());
+                // Restore previous comment if available
+                if (item.comment) {
+                  commentInput.value = item.comment;
+                  if (!card._itemComments) card._itemComments = new Map();
+                  card._itemComments.set(item.id, item.comment);
+                }
+                commentInput.addEventListener('input', () => {
+                  if (!card._itemComments) card._itemComments = new Map();
+                  card._itemComments.set(item.id, commentInput.value);
+                  updateApproveAllState(card);
+                });
+                commentDiv.appendChild(commentInput);
+                body.appendChild(commentDiv);
+              }
+
+              itemEl.appendChild(body);
+            }
+
+            listDiv.appendChild(itemEl);
+          });
+          panel.appendChild(listDiv);
+
+          // "Add Idea" button at bottom of items list (only for Ideas tabs, not Themes)
+          if (tab.label === 'Ideas') {
+            const addIdeaDiv = document.createElement('div');
+            addIdeaDiv.style.cssText = 'margin-top:8px;';
+
+            const addBtn = document.createElement('button');
+            addBtn.className = 'gate-btn gate-btn-secondary';
+            addBtn.style.cssText = 'font-size:0.82em;padding:3px 10px;';
+            addBtn.textContent = '+ Add Idea';
+
+            const addInput = document.createElement('div');
+            addInput.style.cssText = 'display:none;margin-top:6px;';
+            const addTextarea = document.createElement('textarea');
+            addTextarea.style.cssText = 'width:100%;min-height:40px;max-height:80px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border,#555);border-radius:4px;padding:4px 6px;font-family:inherit;font-size:0.85em;resize:vertical;';
+            addTextarea.placeholder = 'Describe your idea...';
+            addInput.appendChild(addTextarea);
+
+            const addSubmit = document.createElement('button');
+            addSubmit.className = 'gate-btn gate-btn-primary';
+            addSubmit.style.cssText = 'font-size:0.82em;padding:3px 10px;margin-top:4px;';
+            addSubmit.textContent = 'Add';
+            addSubmit.addEventListener('click', () => {
+              const text = addTextarea.value.trim();
+              if (!text) return;
+              if (!card._addedIdeas) card._addedIdeas = [];
+              card._addedIdeas.push(text);
+
+              // Render the new idea in the items list immediately
+              const newId = Date.now() + card._addedIdeas.length;
+              itemStates.set(newId, 'accepted');
+              const itemEl = document.createElement('div');
+              itemEl.className = 'gate-item user-added';
+              itemEl.dataset.itemId = String(newId);
+              const header = document.createElement('div');
+              header.className = 'gate-item-header';
+              const chevron = document.createElement('span');
+              chevron.className = 'gate-item-chevron';
+              chevron.textContent = '▶';
+              header.appendChild(chevron);
+              const titleSpan = document.createElement('span');
+              titleSpan.className = 'gate-item-title';
+              titleSpan.textContent = text;
+              header.appendChild(titleSpan);
+              const userTag = document.createElement('span');
+              userTag.className = 'gate-item-verdict';
+              userTag.style.cssText = 'background:rgba(76,175,125,0.15);color:var(--vscode-testing-iconPassed,#4caf7d);';
+              userTag.textContent = 'user';
+              header.appendChild(userTag);
+              header.addEventListener('click', () => itemEl.classList.toggle('expanded'));
+              itemEl.appendChild(header);
+              listDiv.appendChild(itemEl);
+              updateItemToggle(itemEl, 'accepted');
+
+              addTextarea.value = '';
+              listDiv.scrollTop = listDiv.scrollHeight;
+            });
+            addInput.appendChild(addSubmit);
+
+            addBtn.addEventListener('click', () => {
+              addInput.style.display = addInput.style.display === 'none' ? 'block' : 'none';
+            });
+
+            addIdeaDiv.appendChild(addBtn);
+            addIdeaDiv.appendChild(addInput);
+            panel.appendChild(addIdeaDiv);
+          }
+        }
+
+        if (tab.saveOptions) {
+          const saveDiv = document.createElement('div');
+          saveDiv.className = 'gate-save-options';
+
+          const formatsDiv = document.createElement('div');
+          formatsDiv.className = 'gate-save-formats';
+          let selectedFormat = tab.saveOptions.defaultFormat;
+          tab.saveOptions.formats.forEach(fmt => {
+            const label = document.createElement('label');
+            label.className = 'gate-save-format';
+            const radio = document.createElement('input');
+            radio.type = 'radio';
+            radio.name = `save-format-${gate.gateId}`;
+            radio.value = fmt;
+            if (fmt === selectedFormat) radio.checked = true;
+            radio.addEventListener('change', () => {
+              selectedFormat = fmt;
+              const ext = { markdown: '.md', html: '.html', pdf: '.pdf' }[fmt] || '.md';
+              const pathInput = saveDiv.querySelector('.gate-save-path');
+              if (pathInput) {
+                pathInput.value = pathInput.value.replace(/\.[^.]+$/, ext);
+              }
+            });
+            label.appendChild(radio);
+            label.appendChild(document.createTextNode(fmt.charAt(0).toUpperCase() + fmt.slice(1)));
+            formatsDiv.appendChild(label);
+          });
+          saveDiv.appendChild(formatsDiv);
+
+          const pathLabel = document.createElement('div');
+          pathLabel.textContent = 'Save to:';
+          pathLabel.style.fontSize = '0.85em';
+          pathLabel.style.marginBottom = '4px';
+          pathLabel.style.color = 'var(--vscode-descriptionForeground)';
+          saveDiv.appendChild(pathLabel);
+
+          const pathInput = document.createElement('input');
+          pathInput.type = 'text';
+          pathInput.className = 'gate-save-path';
+          pathInput.value = tab.saveOptions.defaultPath;
+          saveDiv.appendChild(pathInput);
+
+          panel.appendChild(saveDiv);
+
+          // Store save options accessor on the card for gate resolution
+          card._getSaveOptions = () => ({
+            format: selectedFormat,
+            path: pathInput.value,
+          });
+        }
+
+        panels.push(panel);
+
+        // Tab switching
+        btn.addEventListener('click', () => {
+          tabBar.querySelectorAll('.gate-tab').forEach(t => t.classList.remove('active'));
+          panels.forEach(p => p.classList.remove('active'));
+          btn.classList.add('active');
+          panel.classList.add('active');
+        });
+      });
+
+      card.appendChild(tabBar);
+      panels.forEach(p => card.appendChild(p));
+
+      // Store itemStates on card for gate resolution
+      card._itemStates = itemStates;
+    }
+
+    function updateItemToggle(itemEl, status) {
+      const toggles = itemEl.querySelectorAll('.gate-item-toggle');
+      toggles[0]?.classList.toggle('selected-approve', status === 'approved');
+      toggles[1]?.classList.toggle('selected-reject', status === 'rejected');
+      // Disable "Approve All" if any items are rejected or commented
+      const card = itemEl.closest('.gate-card');
+      if (card) updateApproveAllState(card);
+    }
+
+    function updateApproveAllState(card) {
+      const approveBtn = card.querySelector('[data-gate-action="approve"]');
+      if (!approveBtn) return;
+      const hasRejections = card._itemStates && [...card._itemStates.values()].some(s => s === 'rejected');
+      const hasComments = card._itemComments && [...card._itemComments.values()].some(t => t.trim());
+      if (hasRejections || hasComments) {
+        approveBtn.disabled = true;
+        approveBtn.title = 'Cannot approve all — items have rejections or comments. Use Converge or Diverge instead.';
+      } else {
+        approveBtn.disabled = false;
+        approveBtn.title = '';
+      }
+    }
+
+    function resolveGateCard(card, action, feedback) {
+      // Send reply to extension → daemon resolves the gate
+      const gateId = card.dataset.gateId;
+      if (gateId) {
+        vscode.postMessage({ type: 'gateReply', gateId, action, feedback });
+      }
+
+      card.classList.add('resolved');
+
+      // Map action names to display labels and CSS classes
+      const actionMap = {
+        approve: { label: 'Approved', css: 'approved', icon: '✓' },
+        reject: { label: 'Rejected', css: 'rejected', icon: '✗' },
+        edit: { label: 'Edited', css: 'edited', icon: '✎' },
+        execute: { label: 'Executed', css: 'executed', icon: '▶' },
+        skip: { label: 'Skipped', css: 'rejected', icon: '⏭' },
+        revise: { label: 'Revision requested', css: 'edited', icon: '✎' },
+        select: { label: 'Selected', css: 'approved', icon: '✓' },
+        reframe: { label: 'Reframed', css: 'edited', icon: '↻' },
+        focus: { label: 'Focused', css: 'edited', icon: '◎' },
+        converge: { label: 'Converging', css: 'approved', icon: '⇉' },
+        continue: { label: 'Continuing', css: 'approved', icon: '→' },
+        diverge: { label: 'Back to diverge', css: 'edited', icon: '⇇' },
+      };
+
+      const info = actionMap[action] || { label: action, css: 'approved', icon: '•' };
+
+      const badge = document.createElement('div');
+      badge.className = `gate-resolved-badge ${info.css}`;
+      badge.textContent = `${info.icon} ${info.label}`;
+
+      // Only show user-typed feedback, not structured JSON from collectGateData
+      if (feedback && !feedback.startsWith('{')) {
+        const fbText = document.createElement('span');
+        fbText.style.opacity = '0.7';
+        fbText.style.marginLeft = '8px';
+        fbText.style.fontWeight = 'normal';
+        fbText.textContent = `— "${feedback.slice(0, 80)}${feedback.length > 80 ? '...' : ''}"`;
+        badge.appendChild(fbText);
+      }
+
+      card.appendChild(badge);
+      scrollToBottom();
+    }
+
+    function createToolBlock(data) {
+      const block = document.createElement('div');
+      block.className = 'tool-block';
+      const header = document.createElement('div');
+      header.className = 'tool-header';
+      header.innerHTML = `<span class="tool-chevron">▶</span><span class="tool-name">${data.name || 'tool'}</span><span class="tool-summary">${data.input || ''}</span>`;
+      block.appendChild(header);
+      const body = document.createElement('div');
+      body.className = 'tool-body';
+      body.textContent = data.output || '';
+      block.appendChild(body);
+      header.addEventListener('click', () => {
+        const chev = header.querySelector('.tool-chevron');
+        chev.classList.toggle('open');
+        body.classList.toggle('open');
+      });
+      messagesEl.appendChild(block);
+      scrollToBottom();
+    }
+
+    function createEscalationNotice(data) {
+      const notice = document.createElement('div');
+      notice.className = 'escalation-notice';
+      notice.innerHTML = `
+        <span>Escalating to</span>
+        <span class="escalation-model">${data.model || 'Claude'}</span>
+        ${data.tokens ? `<span class="escalation-tokens">~${data.tokens} tokens</span>` : ''}
+      `;
+      if (data.confirmRequired) {
+        const btns = document.createElement('span');
+        btns.className = 'escalation-confirm';
+        btns.innerHTML = `<button class="confirm">Confirm</button><button>Cancel</button>`;
+        btns.querySelector('.confirm').addEventListener('click', () => {
+          vscode.postMessage({ type: 'gateReply', gateId: data.gateId, action: 'approve' });
+          btns.remove();
+          const badge = document.createElement('span');
+          badge.className = 'gate-resolved-badge approved';
+          badge.textContent = '✓ Confirmed';
+          badge.style.marginLeft = 'auto';
+          notice.appendChild(badge);
+        });
+        btns.querySelector('button:not(.confirm)').addEventListener('click', () => {
+          vscode.postMessage({ type: 'gateReply', gateId: data.gateId, action: 'reject' });
+          btns.remove();
+          const badge = document.createElement('span');
+          badge.className = 'gate-resolved-badge rejected';
+          badge.textContent = '✗ Declined';
+          badge.style.marginLeft = 'auto';
+          notice.appendChild(badge);
+        });
+        notice.appendChild(btns);
+      }
+      messagesEl.appendChild(notice);
+      scrollToBottom();
+    }
+
+    function createIntentBadge(intent) {
+      const badge = document.createElement('span');
+      badge.className = 'intent-badge';
+      badge.textContent = intent;
+      return badge;
+    }
+
+    inputEl.focus();
+  </script>
+</body>
+</html>

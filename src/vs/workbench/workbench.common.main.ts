@@ -192,6 +192,9 @@ import './contrib/speech/browser/speech.contribution.js';
 import './contrib/chat/browser/chat.contribution.js';
 import './contrib/inlineChat/browser/inlineChat.contribution.js';
 
+// insrc - Code Knowledge Graph agent
+import './contrib/insrc/browser/insrc.contribution.js';
+
 // Interactive
 import './contrib/interactive/browser/interactive.contribution.js';
 

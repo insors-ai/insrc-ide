@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--vscode-font-family, system-ui, sans-serif);
+      font-size: var(--vscode-font-size, 13px);
+      color: var(--vscode-editor-foreground);
+      background: var(--vscode-editor-background);
+      padding: 24px;
+      max-width: 640px;
+      margin: 0 auto;
+    }
+
+    h1 { font-size: 1.5em; margin-bottom: 4px; }
+    .subtitle { color: var(--vscode-descriptionForeground); font-size: 0.9em; margin-bottom: 24px; }
+
+    /* Step indicator */
+    .steps-bar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+    .step-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--vscode-panel-border, #555);
+    }
+    .step-dot.active { background: var(--vscode-button-background); }
+    .step-dot.done { background: var(--vscode-testing-iconPassed, #4caf7d); }
+
+    /* Step panels */
+    .step-panel { display: none; }
+    .step-panel.active { display: block; }
+
+    .section { margin-bottom: 20px; }
+    .section-title { font-weight: 600; margin-bottom: 8px; font-size: 1.05em; }
+    .section-desc { color: var(--vscode-descriptionForeground); font-size: 0.88em; margin-bottom: 12px; }
+
+    /* Info cards */
+    .info-card {
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.05));
+      border: 1px solid var(--vscode-panel-border, #333);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 10px;
+      font-size: 0.9em;
+    }
+    .info-card table { width: 100%; border-collapse: collapse; }
+    .info-card td { padding: 3px 0; }
+    .info-card td:first-child { font-weight: 500; padding-right: 16px; white-space: nowrap; }
+    .info-card td:last-child { color: var(--vscode-descriptionForeground); }
+
+    .status-icon { display: inline-block; width: 14px; text-align: center; margin-right: 4px; }
+    .ok { color: var(--vscode-testing-iconPassed, #4caf7d); }
+    .warn { color: var(--vscode-editorWarning-foreground, #cca700); }
+    .err { color: var(--vscode-errorForeground, #f44); }
+
+    /* Recommendation */
+    .rec-card {
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.05));
+      border: 1px solid var(--vscode-focusBorder, #007acc);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+    }
+    .rec-title { font-weight: 600; margin-bottom: 6px; }
+    .rec-tier {
+      display: inline-block;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 0.78em;
+      font-weight: 600;
+      margin-left: 6px;
+    }
+
+    /* Optimization cards */
+    .opt-card {
+      background: var(--vscode-editorWidget-background, rgba(255,255,255,0.05));
+      border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+      border-radius: 0 6px 6px 0;
+      padding: 8px 12px;
+      margin-bottom: 8px;
+      font-size: 0.88em;
+    }
+    .opt-card.high { border-left-color: var(--vscode-errorForeground, #f44); }
+    .opt-card.low { border-left-color: var(--vscode-descriptionForeground, #888); }
+    .opt-issue { font-weight: 500; margin-bottom: 4px; }
+    .opt-fix { color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+    .opt-cmd {
+      background: var(--vscode-textCodeBlock-background, rgba(0,0,0,0.2));
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.88em;
+      white-space: pre-wrap;
+      cursor: pointer;
+    }
+    .opt-cmd:hover { opacity: 0.85; }
+    .opt-copied { color: var(--vscode-testing-iconPassed, #4caf7d); font-size: 0.82em; margin-left: 6px; }
+
+    /* Model pull progress */
+    .pull-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .pull-name { font-weight: 500; min-width: 180px; }
+    .pull-status { font-size: 0.88em; color: var(--vscode-descriptionForeground); }
+    .pull-bar {
+      flex: 1;
+      height: 6px;
+      background: var(--vscode-panel-border, #333);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .pull-fill {
+      height: 100%;
+      background: var(--vscode-button-background);
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+
+    /* Input fields */
+    .input-group { margin-bottom: 12px; }
+    .input-group label { display: block; font-weight: 500; margin-bottom: 4px; }
+    .input-group input {
+      width: 100%;
+      padding: 6px 10px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: inherit;
+    }
+    .input-group input:focus { border-color: var(--vscode-focusBorder, #007acc); outline: none; }
+    .input-hint { font-size: 0.82em; color: var(--vscode-descriptionForeground); margin-top: 2px; }
+
+    /* Buttons */
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 20px;
+    }
+    .btn {
+      padding: 6px 18px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.92em;
+      border: none;
+    }
+    .btn-primary {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+    .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--vscode-foreground);
+      border: 1px solid var(--vscode-panel-border, #555);
+    }
+    .btn-secondary:hover { opacity: 0.85; }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .spacer { flex: 1; }
+  </style>
+</head>
+<body>
+  <h1>insrc Setup</h1>
+  <p class="subtitle">Configure your local coding agent</p>
+
+  <div class="steps-bar" id="stepsBar"></div>
+
+  <!-- Step 1: System Detection -->
+  <div class="step-panel" id="step-0">
+    <div class="section">
+      <div class="section-title">System Detection</div>
+      <div class="section-desc">Analyzing your hardware and Ollama installation...</div>
+      <div id="systemInfo">Detecting...</div>
+    </div>
+    <div class="section">
+      <div class="section-title">Recommended Configuration</div>
+      <div id="recommendation">Loading...</div>
+    </div>
+    <div class="btn-row">
+      <span class="spacer"></span>
+      <button class="btn btn-primary" id="nextFromDetect">Next</button>
+    </div>
+  </div>
+
+  <!-- Step 2: Ollama Optimizations -->
+  <div class="step-panel" id="step-1">
+    <div class="section">
+      <div class="section-title">Ollama Optimizations</div>
+      <div class="section-desc">Recommended changes to improve performance. Click a command to copy it.</div>
+      <div id="optimizations">No optimizations needed.</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="backFromOpt">Back</button>
+      <span class="spacer"></span>
+      <button class="btn btn-secondary" id="skipOpt">Skip</button>
+      <button class="btn btn-primary" id="nextFromOpt">Next</button>
+    </div>
+  </div>
+
+  <!-- Step 3: Model Pull -->
+  <div class="step-panel" id="step-2">
+    <div class="section">
+      <div class="section-title">Model Setup</div>
+      <div class="section-desc">Pull recommended models. This may take a few minutes.</div>
+      <div id="pullStatus">Checking models...</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="backFromPull">Back</button>
+      <span class="spacer"></span>
+      <button class="btn btn-secondary" id="skipPull">Skip</button>
+      <button class="btn btn-primary" id="pullModelsBtn">Pull Models</button>
+      <button class="btn btn-primary" id="nextFromPull" style="display:none">Next</button>
+    </div>
+  </div>
+
+  <!-- Step 4: API Keys -->
+  <div class="step-panel" id="step-3">
+    <div class="section">
+      <div class="section-title">API Keys (Optional)</div>
+      <div class="section-desc">Add API keys for Claude escalation and web search. These are stored securely in your OS keychain. Skip for local-only mode.</div>
+      <div class="input-group">
+        <label>Anthropic API Key</label>
+        <input type="password" id="anthropicKey" placeholder="sk-ant-..." />
+        <div class="input-hint">Required for Claude escalation. Get one at console.anthropic.com</div>
+      </div>
+      <div class="input-group">
+        <label>Brave Search API Key (optional)</label>
+        <input type="password" id="braveKey" placeholder="BSA..." />
+        <div class="input-hint">For web search in research mode. Get one at brave.com/search/api</div>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-secondary" id="backFromKeys">Back</button>
+      <span class="spacer"></span>
+      <button class="btn btn-secondary" id="skipKeys">Skip (local only)</button>
+      <button class="btn btn-primary" id="saveKeys">Save & Finish</button>
+    </div>
+  </div>
+
+  <!-- Step 5: Done -->
+  <div class="step-panel" id="step-4">
+    <div class="section" style="text-align: center; padding: 40px 0;">
+      <div style="font-size: 2em; margin-bottom: 12px;">&#10003;</div>
+      <div class="section-title">Setup Complete</div>
+      <div class="section-desc" id="doneMessage">insrc is ready. Open the chat panel to start coding.</div>
+    </div>
+    <div class="btn-row" style="justify-content: center;">
+      <button class="btn btn-primary" id="openChat">Open Chat</button>
+    </div>
+  </div>
+
+  <script>
+    // @ts-ignore
+    const vscode = acquireVsCodeApi();
+
+    const STEP_COUNT = 5;
+    let currentStep = 0;
+    let systemData = null;
+
+    // Step bar
+    const stepsBar = document.getElementById('stepsBar');
+    for (let i = 0; i < STEP_COUNT; i++) {
+      const dot = document.createElement('div');
+      dot.className = 'step-dot';
+      dot.dataset.step = String(i);
+      stepsBar.appendChild(dot);
+    }
+
+    function goToStep(idx) {
+      currentStep = idx;
+      document.querySelectorAll('.step-panel').forEach((el, i) => {
+        el.classList.toggle('active', i === idx);
+      });
+      document.querySelectorAll('.step-dot').forEach((el, i) => {
+        el.classList.toggle('active', i === idx);
+        el.classList.toggle('done', i < idx);
+      });
+    }
+    goToStep(0);
+
+    // Navigation
+    document.getElementById('nextFromDetect').addEventListener('click', () => goToStep(1));
+    document.getElementById('backFromOpt').addEventListener('click', () => goToStep(0));
+    document.getElementById('skipOpt').addEventListener('click', () => goToStep(2));
+    document.getElementById('nextFromOpt').addEventListener('click', () => goToStep(2));
+    document.getElementById('backFromPull').addEventListener('click', () => goToStep(1));
+    document.getElementById('skipPull').addEventListener('click', () => goToStep(3));
+    document.getElementById('nextFromPull').addEventListener('click', () => goToStep(3));
+    document.getElementById('backFromKeys').addEventListener('click', () => goToStep(2));
+    document.getElementById('skipKeys').addEventListener('click', () => {
+      vscode.postMessage({ type: 'applyConfig' });
+      goToStep(4);
+    });
+    document.getElementById('saveKeys').addEventListener('click', () => {
+      const anthropic = document.getElementById('anthropicKey').value.trim();
+      const brave = document.getElementById('braveKey').value.trim();
+      vscode.postMessage({ type: 'saveKeys', anthropic, brave });
+      vscode.postMessage({ type: 'applyConfig' });
+      goToStep(4);
+    });
+    document.getElementById('openChat').addEventListener('click', () => {
+      vscode.postMessage({ type: 'openChat' });
+    });
+    document.getElementById('pullModelsBtn').addEventListener('click', () => {
+      vscode.postMessage({ type: 'pullModels' });
+      document.getElementById('pullModelsBtn').disabled = true;
+      document.getElementById('pullModelsBtn').textContent = 'Pulling...';
+    });
+
+    // Request system detection on load
+    vscode.postMessage({ type: 'detect' });
+
+    // Messages from extension
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      switch (msg.type) {
+        case 'systemInfo':
+          systemData = msg;
+          renderSystemInfo(msg.system);
+          renderRecommendation(msg.recommendation);
+          renderOptimizations(msg.recommendation.ollamaOptimizations);
+          renderPullStatus(msg.recommendation);
+          break;
+        case 'pullProgress':
+          updatePullProgress(msg.model, msg.status, msg.pct);
+          break;
+        case 'pullDone':
+          document.getElementById('pullModelsBtn').style.display = 'none';
+          document.getElementById('nextFromPull').style.display = '';
+          break;
+      }
+    });
+
+    function renderSystemInfo(sys) {
+      const gpu = sys.gpu ? `${sys.gpu.name} (${Math.round(sys.gpu.vramMb / 1024)}GB)` : 'None';
+      const cuda = sys.gpu?.cuda ? `CUDA ${sys.gpu.cuda}` : '';
+      document.getElementById('systemInfo').innerHTML = `
+        <div class="info-card"><table>
+          <tr><td>CPU</td><td>${sys.cpu.model} (${sys.cpu.cores} cores)</td></tr>
+          <tr><td>RAM</td><td>${Math.round(sys.ram.totalMb / 1024)}GB</td></tr>
+          <tr><td>GPU</td><td>${gpu} ${cuda}</td></tr>
+          <tr><td>Ollama</td><td>${sys.ollama.available
+            ? `<span class="status-icon ok">&#10003;</span>v${sys.ollama.version} (${sys.ollama.models.length} models)`
+            : '<span class="status-icon err">&#10007;</span>Not installed'
+          }</td></tr>
+        </table></div>`;
+    }
+
+    function renderRecommendation(rec) {
+      document.getElementById('recommendation').innerHTML = `
+        <div class="rec-card">
+          <div class="rec-title">Recommended<span class="rec-tier">${rec.tier}</span></div>
+          <table>
+            <tr><td>Coder</td><td>${rec.coder.model} (${rec.coder.params})${rec.coder.pull ? ' — needs pull' : ''}</td></tr>
+            <tr><td>Embedding</td><td>${rec.embedding.model} (${rec.embedding.dims} dims)${rec.embedding.pull ? ' — needs pull' : ''}</td></tr>
+            <tr><td>Context</td><td>${rec.context.shape} (${rec.context.tokens.toLocaleString()} tokens)</td></tr>
+          </table>
+        </div>`;
+    }
+
+    function renderOptimizations(opts) {
+      const el = document.getElementById('optimizations');
+      if (!opts || opts.length === 0) {
+        el.innerHTML = '<div class="info-card">No optimizations needed. Your setup looks good!</div>';
+        return;
+      }
+      el.innerHTML = opts.map(o => `
+        <div class="opt-card ${o.impact}">
+          <div class="opt-issue">${o.issue}</div>
+          <div class="opt-fix">${o.fix}</div>
+          <div class="opt-cmd" onclick="copyCmd(this)">${o.command}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderPullStatus(rec) {
+      const toPull = [];
+      if (rec.coder.pull) toPull.push({ name: rec.coder.model, status: 'pending' });
+      if (rec.embedding.pull) toPull.push({ name: rec.embedding.model, status: 'pending' });
+
+      const el = document.getElementById('pullStatus');
+      if (toPull.length === 0) {
+        el.innerHTML = '<div class="info-card"><span class="status-icon ok">&#10003;</span>All recommended models are already installed.</div>';
+        document.getElementById('pullModelsBtn').style.display = 'none';
+        document.getElementById('nextFromPull').style.display = '';
+        return;
+      }
+
+      el.innerHTML = toPull.map(m => `
+        <div class="pull-item" id="pull-${m.name.replace(/[^a-z0-9]/gi, '-')}">
+          <span class="pull-name">${m.name}</span>
+          <div class="pull-bar"><div class="pull-fill" style="width: 0%"></div></div>
+          <span class="pull-status">pending</span>
+        </div>
+      `).join('');
+    }
+
+    function updatePullProgress(model, status, pct) {
+      const id = 'pull-' + model.replace(/[^a-z0-9]/gi, '-');
+      const item = document.getElementById(id);
+      if (!item) return;
+      item.querySelector('.pull-fill').style.width = `${pct}%`;
+      item.querySelector('.pull-status').textContent = status === 'done' ? 'done' : `${pct}%`;
+    }
+
+    function copyCmd(el) {
+      navigator.clipboard.writeText(el.textContent.trim());
+      let copiedEl = el.parentElement.querySelector('.opt-copied');
+      if (!copiedEl) {
+        copiedEl = document.createElement('span');
+        copiedEl.className = 'opt-copied';
+        el.after(copiedEl);
+      }
+      copiedEl.textContent = 'Copied!';
+      setTimeout(() => { copiedEl.textContent = ''; }, 2000);
+    }
+  </script>
+</body>
+</html>

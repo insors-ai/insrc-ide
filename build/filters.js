@@ -26,10 +26,19 @@ module.exports.all = [
 	'!out*/**',
 	'!test/**/out/**',
 	'!**/node_modules/**',
+	'!src/insrc/**',
+	'!vscode-insrc/**',
+	'!design/**',
+	'!plans/**',
 ];
 
 module.exports.unicodeFilter = [
 	'**',
+
+	'!src/insrc/**',
+	'!vscode-insrc/**',
+	'!design/**',
+	'!plans/**',
 
 	'!**/ThirdPartyNotices.txt',
 	'!**/ThirdPartyNotices.cli.txt',
@@ -63,6 +72,11 @@ module.exports.unicodeFilter = [
 
 module.exports.indentationFilter = [
 	'**',
+
+	'!src/insrc/**',
+	'!vscode-insrc/**',
+	'!design/**',
+	'!plans/**',
 
 	// except specific files
 	'!**/ThirdPartyNotices.txt',
@@ -138,6 +152,10 @@ module.exports.indentationFilter = [
 
 module.exports.copyrightFilter = [
 	'**',
+	'!src/insrc/**',
+	'!vscode-insrc/**',
+	'!design/**',
+	'!plans/**',
 	'!**/*.desktop',
 	'!**/*.json',
 	'!**/*.html',
@@ -180,6 +198,8 @@ module.exports.tsFormattingFilter = [
 	'src/**/*.ts',
 	'test/**/*.ts',
 	'extensions/**/*.ts',
+	'!src/insrc/**',
+	'!vscode-insrc/**',
 	'!src/vs/*/**/*.d.ts',
 	'!src/typings/**/*.d.ts',
 	'!extensions/**/*.d.ts',
