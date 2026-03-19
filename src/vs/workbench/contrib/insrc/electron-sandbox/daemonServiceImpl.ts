@@ -3,11 +3,18 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+// eslint-disable-next-line local/code-import-patterns
+import * as net from 'net';
+// eslint-disable-next-line local/code-import-patterns
+import * as cp from 'child_process';
+// eslint-disable-next-line local/code-import-patterns
+import { homedir } from 'os';
+// eslint-disable-next-line local/code-import-patterns
+import { join } from 'path';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, type Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IInsrcDaemonService, type StreamDelta } from '../common/daemonService.js';
-import { IEnvironmentService } from '../../../../platform/environment/common/environment.js';
 
 // ---------------------------------------------------------------------------
 // IPC protocol types (mirrors src/insrc/shared/types.ts)
@@ -33,10 +40,14 @@ interface IpcStreamMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+const INSRC_DIR = join(homedir(), '.insrc');
+const SOCK_FILE = join(INSRC_DIR, 'daemon.sock');
+
+// ---------------------------------------------------------------------------
 // DaemonService implementation (Electron desktop only)
-//
-// Uses dynamic require() for Node.js modules since electron-sandbox
-// has access to Node.js APIs in the desktop build.
 // ---------------------------------------------------------------------------
 
 export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonService {
@@ -44,7 +55,6 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 
 	private _nextId = 1;
 	private _connected = false;
-	private _sockFile: string;
 
 	private readonly _onDidChangeState = this._register(new Emitter<'connected' | 'disconnected'>());
 	readonly onDidChangeState: Event<'connected' | 'disconnected'> = this._onDidChangeState.event;
@@ -53,12 +63,8 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
-		@IEnvironmentService environmentService: IEnvironmentService,
 	) {
 		super();
-		const path = globalThis._VSCODE_NODE_MODULES['path'] as typeof import('path');
-		const os = globalThis._VSCODE_NODE_MODULES['os'] as typeof import('os');
-		this._sockFile = path.join(os.homedir(), '.insrc', 'daemon.sock');
 	}
 
 	// ---------------------------------------------------------------------------
@@ -66,10 +72,8 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 	// ---------------------------------------------------------------------------
 
 	async rpc<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-		const net = globalThis._VSCODE_NODE_MODULES['net'] as typeof import('net');
-
 		return new Promise<T>((resolve, reject) => {
-			const socket = net.createConnection(this._sockFile);
+			const socket = net.createConnection(SOCK_FILE);
 			let buffer = '';
 			const reqId = this._nextId++;
 
@@ -119,18 +123,17 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 	// ---------------------------------------------------------------------------
 
 	async *stream(method: string, params: Record<string, unknown>): AsyncIterable<StreamDelta> {
-		const net = globalThis._VSCODE_NODE_MODULES['net'] as typeof import('net');
-		const socket = net.createConnection(this._sockFile);
+		const socket = net.createConnection(SOCK_FILE);
 		const reqId = this._nextId++;
 
 		const pending: Array<StreamDelta | Error | null> = [];
-		let resolve: (() => void) | null = null;
+		let waitResolve: (() => void) | null = null;
 
 		const enqueue = (item: StreamDelta | Error | null): void => {
 			pending.push(item);
-			if (resolve) {
-				resolve();
-				resolve = null;
+			if (waitResolve) {
+				waitResolve();
+				waitResolve = null;
 			}
 		};
 
@@ -138,7 +141,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 			if (pending.length > 0) {
 				return Promise.resolve();
 			}
-			return new Promise<void>(r => { resolve = r; });
+			return new Promise<void>(r => { waitResolve = r; });
 		};
 
 		let buffer = '';
@@ -229,13 +232,7 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 
 		this.logService.info('[insrc] Starting daemon...');
 
-		const cp = globalThis._VSCODE_NODE_MODULES['child_process'] as typeof import('child_process');
-		const path = globalThis._VSCODE_NODE_MODULES['path'] as typeof import('path');
-		const os = globalThis._VSCODE_NODE_MODULES['os'] as typeof import('os');
-
-		// In the bundled IDE, the compiled backend is at resources/insrc/daemon/index.js
-		const insrcDir = path.join(os.homedir(), '.insrc');
-		const daemonEntry = path.join(insrcDir, 'daemon', 'index.js');
+		const daemonEntry = join(INSRC_DIR, 'daemon', 'index.js');
 
 		const child = cp.spawn(process.execPath, [daemonEntry], {
 			stdio: 'ignore',
