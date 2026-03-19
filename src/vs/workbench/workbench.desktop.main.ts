@@ -130,6 +130,9 @@ import './contrib/configExporter/electron-sandbox/configurationExportHelper.cont
 // Terminal
 import './contrib/terminal/electron-sandbox/terminal.contribution.js';
 
+// insrc - Code Knowledge Graph agent (desktop: Node.js daemon service)
+import './contrib/insrc/electron-sandbox/insrc.contribution.js';
+
 // Themes
 import './contrib/themes/browser/themes.test.contribution.js';
 import './services/themes/electron-sandbox/themes.contribution.js';

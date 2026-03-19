@@ -1,15 +1,11 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Insors AI. All rights reserved.
- *  Licensed under the MIT License.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// Service interfaces (common layer)
+// Service interfaces (common layer - browser safe)
 import '../common/daemonService.js';
 import '../common/sessionService.js';
 
-// Service implementations (registers singletons)
-import './daemonServiceImpl.js';
-
-// TODO: Step 3 - register SessionServiceImpl singleton
 // TODO: Step 4 - register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
 // TODO: Step 5 - register AgentChatView
