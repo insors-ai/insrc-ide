@@ -16,6 +16,7 @@ import { IOpenerService } from '../../../../../platform/opener/common/opener.js'
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
+import { IInsrcConfigService } from '../../common/configService.js';
 import type { IListVirtualDelegate } from '../../../../../base/browser/ui/list/list.js';
 import type { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../../base/browser/ui/tree/tree.js';
 import { WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
@@ -126,7 +127,7 @@ class StepRenderer implements ITreeRenderer<StepProviderNode, FuzzyScore, IStepT
 // -- Data source --
 
 class StepProvidersDataSource implements IAsyncDataSource<StepProvidersRoot, StepProviderNode> {
-	constructor(private readonly daemonService: IInsrcDaemonService) { }
+	constructor(private readonly configService: IInsrcConfigService) { }
 
 	hasChildren(element: StepProvidersRoot | StepProviderNode): boolean {
 		if ((element as StepProvidersRoot).kind === 'providersRoot') {
@@ -137,11 +138,8 @@ class StepProvidersDataSource implements IAsyncDataSource<StepProvidersRoot, Ste
 
 	async getChildren(element: StepProvidersRoot | StepProviderNode): Promise<StepProviderNode[]> {
 		if ((element as StepProvidersRoot).kind === 'providersRoot') {
-			if (!this.daemonService.isConnected) {
-				return [];
-			}
 			try {
-				const config = await this.daemonService.rpc<Record<string, unknown>>('config.show');
+				const config = await this.configService.showConfig();
 				const models = config?.['models'] as Record<string, unknown> | undefined;
 				const agents = (models?.['agents'] ?? {}) as Record<string, Record<string, string>>;
 
@@ -190,6 +188,7 @@ export class InsrcStepProvidersViewPane extends ViewPane {
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IHoverService hoverService: IHoverService,
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
+		@IInsrcConfigService private readonly configService: IInsrcConfigService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -211,7 +210,7 @@ export class InsrcStepProvidersViewPane extends ViewPane {
 			treeContainer,
 			new StepProvidersDelegate(),
 			[new AgentRenderer(), new StepRenderer()],
-			new StepProvidersDataSource(this.daemonService),
+			new StepProvidersDataSource(this.configService),
 			{
 				identityProvider: {
 					getId: (e: StepProviderNode) => {

@@ -100,7 +100,9 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 - [x] **RepoService** - wraps `repo.*` RPCs, exposes repo list with change events
 - [x] **AgentRunService** - wraps `agent.*` RPCs, exposes run list with status events
 - [x] **WorkspaceService** - manages insrc workspace file, syncs daemon repos to workspace folders
-- [x] **ChatService** - wraps `chat.*` RPCs, streaming, gate resolution, session lifecycle
+- [x] **ChatService** - wraps `chat.*` RPCs, streaming, gate resolution, session lifecycle, session persistence (IStorageService)
+- [x] **DiffService** - diff parsing, virtual doc scheme, CodeLens accept/reject/edit, file write on accept
+- [x] **Session resume** - daemon chat.restore RPC, ContextManager hydration (L2/L3a/L3b from DB)
 - [ ] **ConfigService** - wraps `config.*` and `system.recommend` RPCs, exposes observable config state
 - [ ] **KeychainService** - wraps `keys.*` RPCs (or use VS Code's `SecretStorage`)
 - [ ] **ConversationService** - wraps `conversation.*` RPCs (stats, compact -- low priority)
@@ -110,9 +112,12 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 - [x] **Commands** - 13 of 24 registered (add/remove/reindex repo, refresh, rename workspace, agent resume/discard, step provider quick pick, connect daemon)
 - [x] **Keybindings** - `Ctrl+Shift+I` (sidebar), `Ctrl+Alt+C` (chat)
 - [ ] **Status bar** - `StatusbarEntryDescriptor`, daemon/agent status indicator (quick win)
-- [ ] **Diff manager** - virtual document scheme, diff editor, CodeLens accept/reject/edit (HIGH -- blocks real agent usage)
+- [x] **Diff manager** - virtual document scheme (insrc-proposed), inline diff editor, CodeLens accept/reject/edit, chat gate integration
+- [x] **Diff commands** - insrc.diffAccept, insrc.diffReject, insrc.diffEdit, insrc.diffAcceptAll, insrc.diffRejectAll
+- [x] **Inline diff default** - diffEditor.renderSideBySide set to false
 - [ ] **Annotation manager** - editor decorations, CodeLens, gutter icons, compile-to-chat
-- [ ] **Remaining commands** (11) - diff accept/reject/edit, daemon logs, cost display, annotation commands
+- [ ] **Remaining commands** (6) - daemon logs, cost display, annotation commands, toggle permissions
+- [ ] **Status bar** - `StatusbarEntryDescriptor`, daemon/agent status indicator (quick win)
 
 ### Tier 3: Navigation + session management -- MOSTLY DONE
 - [x] **Explorer integration** - insrc panes registered inside Explorer ViewContainer
@@ -157,14 +162,14 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 
 ## Next priorities (recommended order)
 
-1. **Diff manager** (Tier 2) -- HIGH. Blocks real agent usage. Agent proposes code changes but user can't accept/reject them without this.
-2. **Status bar** (Tier 2) -- quick win, high visibility. Shows daemon state, active agent, indexing progress.
-3. **ConfigService** (Tier 1) -- dependency for setup wizard and advanced settings.
-4. **Annotation manager** (Tier 2) -- enables curated multi-file context for chat.
-5. **Setup wizard** (Tier 3) -- first-run experience, onboarding.
-6. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
-7. **Plan view** (Tier 4) -- agent step tracking.
-8. **KeychainService + remaining commands** -- polish.
+1. **Status bar** (Tier 2) -- quick win, high visibility. Shows daemon state, active agent, indexing progress.
+2. **ConfigService** (Tier 1) -- dependency for setup wizard and advanced settings.
+3. **Annotation manager** (Tier 2) -- enables curated multi-file context for chat.
+4. **Setup wizard** (Tier 3) -- first-run experience, onboarding.
+5. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
+6. **Plan view** (Tier 4) -- agent step tracking.
+7. **KeychainService + remaining commands** -- polish.
+8. **Test view + Doc view** (Tier 4) -- lower priority agent views.
 
 ## UI Layout - DECIDED
 

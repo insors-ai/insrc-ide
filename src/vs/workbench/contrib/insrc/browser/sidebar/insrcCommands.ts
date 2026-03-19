@@ -16,6 +16,7 @@ import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcAgentRunService } from '../../common/agentRunService.js';
 import { IInsrcWorkspaceService } from '../../common/workspaceService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
+import { IInsrcConfigService } from '../../common/configService.js';
 import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID, INSRC_STEP_PROVIDERS_VIEW_ID } from './insrcViewContainer.js';
 
 // ---------------------------------------------------------------------------
@@ -341,18 +342,18 @@ registerAction2(class extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const daemonService = accessor.get(IInsrcDaemonService);
+		const configService = accessor.get(IInsrcConfigService);
 		const quickInputService = accessor.get(IQuickInputService);
 		const notificationService = accessor.get(INotificationService);
 
-		if (!daemonService.isConnected) {
+		if (!accessor.get(IInsrcDaemonService).isConnected) {
 			notificationService.warn(localize('notConnected', 'Not connected to daemon.'));
 			return;
 		}
 
 		try {
 			// 1. Get current config
-			const config = await daemonService.rpc<Record<string, unknown>>('config.show');
+			const config = await configService.showConfig();
 			const models = config?.['models'] as Record<string, unknown> | undefined;
 			const agents = (models?.['agents'] ?? {}) as Record<string, Record<string, string>>;
 
@@ -400,10 +401,10 @@ registerAction2(class extends Action2 {
 			if (!providerPick) { return; }
 
 			// 5. Write config
-			await daemonService.rpc('config.write', {
-				path: `models.agents.${agentName}.${stepName}`,
-				value: providerPick.label,
-			});
+			await configService.setConfigValue(
+				`models.agents.${agentName}.${stepName}`,
+				providerPick.label,
+			);
 
 			notificationService.info(localize('providerSet', '{0}.{1} -> {2}', agentName, stepName, providerPick.label));
 		} catch (err) {

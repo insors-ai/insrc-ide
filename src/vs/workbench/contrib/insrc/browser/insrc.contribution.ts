@@ -13,6 +13,8 @@ import '../common/repoService.js';
 import '../common/agentRunService.js';
 import '../common/chatService.js';
 import '../common/diffService.js';
+import '../common/configService.js';
+import '../common/keychainService.js';
 
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';

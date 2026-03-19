@@ -12,7 +12,7 @@
  *  8. Handle SIGTERM / SIGINT for graceful shutdown
  */
 
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as lancedb from '@lancedb/lancedb';
 import { PATHS } from '../shared/paths.js';
 import { setLogMode, getLogger } from '../shared/logger.js';
@@ -489,6 +489,31 @@ async function main(): Promise<void> {
       } catch {
         return {};
       }
+    },
+
+    'config.write': async (params) => {
+      const { path: dotPath, value } = params as { path: string; value: unknown };
+      let config: Record<string, unknown> = {};
+      try {
+        config = JSON.parse(readFileSync(PATHS.config, 'utf-8')) as Record<string, unknown>;
+      } catch { /* start fresh */ }
+
+      // Set value at dotted path (e.g. 'models.agents.pair.propose')
+      const keys = dotPath.split('.');
+      let obj: Record<string, unknown> = config;
+      for (let i = 0; i < keys.length - 1; i++) {
+        const key = keys[i]!;
+        if (typeof obj[key] !== 'object' || obj[key] === null) {
+          obj[key] = {};
+        }
+        obj = obj[key] as Record<string, unknown>;
+      }
+      obj[keys[keys.length - 1]!] = value;
+
+      writeFileSync(PATHS.config, JSON.stringify(config, null, 2), 'utf-8');
+      await reloadChatConfig();
+      log.info({ path: dotPath, value }, 'config.write');
+      return { ok: true };
     },
 
     'config.reload': async () => {
