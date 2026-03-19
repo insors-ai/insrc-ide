@@ -8,7 +8,7 @@ import { ValidDiffEditorBaseOptions } from './editorOptions.js';
 export const diffEditorDefaultOptions = {
 	enableSplitViewResizing: true,
 	splitViewDefaultRatio: 0.5,
-	renderSideBySide: true,
+	renderSideBySide: false,
 	renderMarginRevertIcon: true,
 	renderGutterMenu: true,
 	maxComputationTime: 5000,

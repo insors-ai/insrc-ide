@@ -20,6 +20,8 @@ export interface ChatMessage {
 export interface GateInfo {
 	readonly gateId: string;
 	readonly actions: string[];
+	readonly title?: string | undefined;
+	readonly content?: string | undefined;
 	readonly prompt?: string | undefined;
 	readonly context?: unknown | undefined;
 }

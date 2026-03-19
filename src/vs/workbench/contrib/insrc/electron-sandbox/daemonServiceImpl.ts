@@ -129,8 +129,17 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 			case 'delta':
 				// Daemon sends { text, format }, not { content }
 				return { type: 'delta', content: String(data?.['text'] ?? data?.['content'] ?? '') };
-			case 'gate':
-				return { type: 'gate', gateId: String(data?.['gateId'] ?? ''), actions: (data?.['actions'] as string[]) ?? [] };
+			case 'gate': {
+				const actions = data?.['actions'];
+				const actionNames = Array.isArray(actions) ? actions.map((a: unknown) => typeof a === 'string' ? a : (a as { name?: string })?.name ?? '') : [];
+				return {
+					type: 'gate',
+					gateId: String(data?.['gateId'] ?? ''),
+					actions: actionNames,
+					title: String(data?.['title'] ?? ''),
+					content: String(data?.['content'] ?? ''),
+				};
+			}
 			case 'progress':
 				// Daemon sends { message }, not { step, status }
 				return { type: 'progress', step: String(data?.['step'] ?? data?.['message'] ?? ''), status: String(data?.['status'] ?? '') };

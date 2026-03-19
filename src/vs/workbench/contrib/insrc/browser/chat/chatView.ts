@@ -19,6 +19,9 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo } from '../../common/chatService.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
+import { IInsrcDiffService, extractDiffFromResponse, parseDiff, applyHunks } from '../../common/diffService.js';
+import { IFileService } from '../../../../../platform/files/common/files.js';
+import { URI } from '../../../../../base/common/uri.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { clearNode } from '../../../../../base/browser/dom.js';
@@ -98,6 +101,8 @@ export class InsrcChatViewPane extends ViewPane {
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
+		@IInsrcDiffService private readonly diffService: IInsrcDiffService,
+		@IFileService private readonly fileService: IFileService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -372,7 +377,13 @@ export class InsrcChatViewPane extends ViewPane {
 
 		const card = dom.append(this._gateContainer, dom.$('.insrc-chat-gate'));
 		const title = dom.append(card, dom.$('.insrc-chat-gate-title'));
-		title.textContent = gate.prompt || 'Action required';
+		title.textContent = gate.title || gate.prompt || 'Action required';
+
+		// If gate contains diff content, show it in the main editor
+		const hasDiff = gate.content && (gate.content.includes('--- a/') || gate.content.includes('+++ b/') || gate.content.includes('@@ -'));
+		if (hasDiff) {
+			this._openDiffFromGate(gate);
+		}
 
 		const actions = dom.append(card, dom.$('.insrc-chat-gate-actions'));
 		for (let i = 0; i < gate.actions.length; i++) {
@@ -386,6 +397,51 @@ export class InsrcChatViewPane extends ViewPane {
 		}
 
 		this._scrollToBottom();
+	}
+
+	private async _openDiffFromGate(gate: GateInfo): Promise<void> {
+		if (!gate.content) {
+			return;
+		}
+
+		try {
+			const rawDiff = extractDiffFromResponse(gate.content);
+			const parsedFiles = parseDiff(rawDiff);
+
+			if (parsedFiles.length === 0) {
+				return;
+			}
+
+			const repos = this.repoService.repos;
+			const basePath = repos.length > 0 ? repos[0]!.path : '';
+
+			const fileDiffs: Array<{ filePath: string; originalContent: string; proposedContent: string; diffText: string; isNew: boolean }> = [];
+
+			for (const fd of parsedFiles) {
+				const relPath = fd.isNew ? fd.newPath : fd.oldPath;
+				const filePath = relPath.startsWith('/') ? relPath : `${basePath}/${relPath}`;
+
+				let originalContent = '';
+				if (!fd.isNew) {
+					try {
+						const content = await this.fileService.readFile(URI.file(filePath));
+						originalContent = content.value.toString();
+					} catch {
+						originalContent = '';
+					}
+				}
+
+				const proposedContent = fd.isNew
+					? fd.hunks.flatMap(h => h.lines.filter(l => l.startsWith('+')).map(l => l.slice(1))).join('\n')
+					: applyHunks(originalContent, fd.hunks);
+
+				fileDiffs.push({ filePath, originalContent, proposedContent, diffText: rawDiff, isNew: fd.isNew });
+			}
+
+			await this.diffService.showDiffs(fileDiffs, gate.gateId);
+		} catch {
+			// Non-fatal: gate card still shows actions
+		}
 	}
 
 	private _renderError(error: string): void {

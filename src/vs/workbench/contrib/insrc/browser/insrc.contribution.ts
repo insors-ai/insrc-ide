@@ -12,6 +12,7 @@ import '../common/workspaceService.js';
 import '../common/repoService.js';
 import '../common/agentRunService.js';
 import '../common/chatService.js';
+import '../common/diffService.js';
 
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';
@@ -29,5 +30,9 @@ registerWorkbenchContribution2(InsrcFileDecorationsContribution.ID, InsrcFileDec
 
 // Chat: register chat panel in auxiliary bar (right sidebar)
 import './chat/chatRegistration.js';
+
+// Diff manager: CodeLens accept/reject/edit on proposed diffs, chat integration
+import { InsrcDiffContribution } from './diff/diffRegistration.js';
+registerWorkbenchContribution2(InsrcDiffContribution.ID, InsrcDiffContribution, WorkbenchPhase.AfterRestored);
 
 // TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
