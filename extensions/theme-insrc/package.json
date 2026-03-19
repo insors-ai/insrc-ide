@@ -1,0 +1,30 @@
+{
+	"name": "theme-insrc",
+	"displayName": "insrc Themes",
+	"description": "insrc color themes - Phthalo Green design system",
+	"categories": [
+		"Themes"
+	],
+	"version": "1.0.0",
+	"publisher": "insors",
+	"license": "MIT",
+	"engines": {
+		"vscode": "*"
+	},
+	"contributes": {
+		"themes": [
+			{
+				"id": "insrc Light",
+				"label": "insrc Light",
+				"uiTheme": "vs",
+				"path": "./themes/insrc-light.json"
+			},
+			{
+				"id": "insrc Dark",
+				"label": "insrc Dark",
+				"uiTheme": "vs-dark",
+				"path": "./themes/insrc-dark.json"
+			}
+		]
+	}
+}

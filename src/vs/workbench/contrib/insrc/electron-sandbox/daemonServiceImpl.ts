@@ -3,18 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// eslint-disable-next-line local/code-import-patterns
-import * as net from 'net';
-// eslint-disable-next-line local/code-import-patterns
-import * as cp from 'child_process';
-// eslint-disable-next-line local/code-import-patterns
-import { homedir } from 'os';
-// eslint-disable-next-line local/code-import-patterns
-import { join } from 'path';
 import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { Emitter, type Event } from '../../../../base/common/event.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+import type { IChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { IInsrcDaemonService, type DaemonStreamMessage, type IInsrcStreamHandle } from '../common/daemonService.js';
 
 // ---------------------------------------------------------------------------
@@ -44,17 +38,8 @@ interface IpcStreamMessage {
 // Constants
 // ---------------------------------------------------------------------------
 
-const INSRC_DIR = join(homedir(), '.insrc');
-const SOCK_FILE = join(INSRC_DIR, 'daemon.sock');
-const DAEMON_ENTRY = join(INSRC_DIR, 'daemon', 'index.js');
-
 const RPC_TIMEOUT_MS = 30_000;
 const STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
-const SPAWN_CONNECT_MAX_WAIT_MS = 10_000;
-const SPAWN_CONNECT_POLL_MS = 500;
-
-/** Reconnect backoff schedule (seconds), modeled after VS Code's PersistentConnection */
-const RECONNECT_BACKOFF_S = [0, 5, 5, 10, 10, 10, 10, 10, 30];
 
 // ---------------------------------------------------------------------------
 // Pending request / stream bookkeeping
@@ -67,7 +52,7 @@ interface PendingRpc {
 }
 
 // ---------------------------------------------------------------------------
-// InsrcStreamHandle - disposable event-based stream
+// InsrcStreamHandle -- disposable event-based stream
 // ---------------------------------------------------------------------------
 
 class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
@@ -92,7 +77,6 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 		this._resetInactivityTimer();
 	}
 
-	/** Called by the connection when a stream message arrives */
 	handleMessage(msg: IpcStreamMessage): void {
 		this._resetInactivityTimer();
 
@@ -115,7 +99,6 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 		}
 	}
 
-	/** Called when the underlying connection drops */
 	handleConnectionLost(): void {
 		this._onDidError.fire(new Error('Connection to daemon lost'));
 		this.dispose();
@@ -162,7 +145,7 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 }
 
 // ---------------------------------------------------------------------------
-// DaemonService implementation (Electron desktop only)
+// DaemonService implementation (sandbox -- proxies to main process)
 // ---------------------------------------------------------------------------
 
 export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonService {
@@ -170,78 +153,71 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 
 	private _nextId = 1;
 	private _connected = false;
-	private _socket: net.Socket | undefined;
-	private _buffer = '';
 
-	/** Pending RPC responses keyed by request id */
 	private readonly _pendingRpcs = new Map<number, PendingRpc>();
-
-	/** Active stream handles keyed by request id */
 	private readonly _activeStreams = new Map<number, InsrcStreamHandle>();
-
-	/** Reconnect state */
-	private _reconnectAttempt = 0;
-	private _reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-	private _intentionalDisconnect = false;
 
 	private readonly _onDidChangeState = this._register(new Emitter<'connected' | 'disconnected'>());
 	readonly onDidChangeState: Event<'connected' | 'disconnected'> = this._onDidChangeState.event;
+
+	private readonly _channel: IChannel;
 
 	get isConnected(): boolean { return this._connected; }
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
+		@IMainProcessService mainProcessService: IMainProcessService,
 	) {
 		super();
+		this._channel = mainProcessService.getChannel('insrcDaemon');
+
+		// Listen for state changes from main process
+		this._register(this._channel.listen<'connected' | 'disconnected'>('onDidChangeState')(state => {
+			const wasConnected = this._connected;
+			this._connected = state === 'connected';
+			if (wasConnected !== this._connected) {
+				this._onDidChangeState.fire(state);
+
+				if (!this._connected) {
+					this._handleDisconnect();
+				}
+			}
+		}));
+
+		// Listen for raw messages from main process and dispatch
+		this._register(this._channel.listen<string>('onDidReceiveMessage')(line => {
+			try {
+				const msg = JSON.parse(line) as IpcResponse | IpcStreamMessage;
+				this._dispatchMessage(msg);
+			} catch {
+				this.logService.warn('[insrc] Invalid JSON from daemon:', line.substring(0, 200));
+			}
+		}));
 	}
 
 	// ---------------------------------------------------------------------------
-	// connect() - try socket first, auto-spawn detached if not running
+	// connect() -- delegates to main process
 	// ---------------------------------------------------------------------------
 
 	async connect(): Promise<void> {
-		if (this._connected && this._socket) {
-			return;
-		}
-
-		try {
-			await this._connectToSocket();
-			return;
-		} catch {
-			// Daemon not running - spawn it
-		}
-
-		this.logService.info('[insrc] Daemon not running, spawning detached process...');
-		this._spawnDetachedDaemon();
-
-		// Poll until the socket is available
-		const deadline = Date.now() + SPAWN_CONNECT_MAX_WAIT_MS;
-		while (Date.now() < deadline) {
-			await new Promise<void>(r => setTimeout(r, SPAWN_CONNECT_POLL_MS));
-			try {
-				await this._connectToSocket();
-				this.logService.info('[insrc] Connected to daemon after spawn');
-				return;
-			} catch {
-				// Not ready yet
-			}
-		}
-
-		throw new Error('Daemon failed to start within 10 s');
+		await this._channel.call<void>('connect');
+		this._connected = true;
+		this._onDidChangeState.fire('connected');
 	}
 
 	// ---------------------------------------------------------------------------
-	// rpc() - multiplexed JSON-RPC over persistent connection
+	// rpc() -- send request via main process, dispatch response locally
 	// ---------------------------------------------------------------------------
 
 	async rpc<T = unknown>(method: string, params: Record<string, unknown> = {}, token?: CancellationToken): Promise<T> {
-		this._ensureSocket();
+		if (!this._connected) {
+			throw new Error('Not connected to daemon -- call connect() first');
+		}
 
 		const reqId = this._nextId++;
 		const req: IpcRequest = { id: reqId, method, params };
 
 		return new Promise<T>((resolve, reject) => {
-			// Timeout
 			const timer = setTimeout(() => {
 				this._pendingRpcs.delete(reqId);
 				reject(new Error(`RPC timeout: ${method} (${RPC_TIMEOUT_MS} ms)`));
@@ -253,7 +229,6 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 				timer,
 			});
 
-			// CancellationToken
 			if (token && token !== CancellationToken.None) {
 				if (token.isCancellationRequested) {
 					clearTimeout(timer);
@@ -269,16 +244,19 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 				});
 			}
 
-			this._socket!.write(JSON.stringify(req) + '\n');
+			// Send via main process
+			this._channel.call<void>('sendMessage', JSON.stringify(req));
 		});
 	}
 
 	// ---------------------------------------------------------------------------
-	// stream() - returns event-based disposable handle
+	// stream() -- returns event-based disposable handle
 	// ---------------------------------------------------------------------------
 
 	stream(method: string, params: Record<string, unknown>): IInsrcStreamHandle {
-		this._ensureSocket();
+		if (!this._connected) {
+			throw new Error('Not connected to daemon -- call connect() first');
+		}
 
 		const reqId = this._nextId++;
 		const handle = new InsrcStreamHandle(reqId, (id) => {
@@ -288,87 +266,16 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 		this._activeStreams.set(reqId, handle);
 
 		const req: IpcRequest = { id: reqId, method, params, stream: true };
-		this._socket!.write(JSON.stringify(req) + '\n');
+		this._channel.call<void>('sendMessage', JSON.stringify(req));
 
 		return handle;
 	}
 
 	// ---------------------------------------------------------------------------
-	// Socket connection management
+	// Message dispatch
 	// ---------------------------------------------------------------------------
 
-	private _connectToSocket(): Promise<void> {
-		return new Promise<void>((resolve, reject) => {
-			const socket = net.createConnection(SOCK_FILE);
-
-			const onError = (err: NodeJS.ErrnoException) => {
-				socket.removeAllListeners();
-				socket.destroy();
-				reject(err);
-			};
-
-			socket.once('error', onError);
-
-			socket.once('connect', () => {
-				socket.removeListener('error', onError);
-				this._attachSocket(socket);
-				resolve();
-			});
-		});
-	}
-
-	private _attachSocket(socket: net.Socket): void {
-		// Tear down any previous socket
-		this._detachSocket();
-
-		this._socket = socket;
-		this._buffer = '';
-		this._reconnectAttempt = 0;
-		this._setConnected(true);
-
-		socket.on('data', (chunk: Buffer) => {
-			this._buffer += chunk.toString();
-			this._processBuffer();
-		});
-
-		socket.on('error', (err: NodeJS.ErrnoException) => {
-			this.logService.warn('[insrc] Socket error:', err.message);
-			this._handleDisconnect();
-		});
-
-		socket.on('close', () => {
-			this._handleDisconnect();
-		});
-	}
-
-	private _detachSocket(): void {
-		if (this._socket) {
-			this._socket.removeAllListeners();
-			this._socket.destroy();
-			this._socket = undefined;
-			this._buffer = '';
-		}
-	}
-
-	private _processBuffer(): void {
-		const lines = this._buffer.split('\n');
-		this._buffer = lines.pop() ?? '';
-
-		for (const line of lines) {
-			if (!line.trim()) {
-				continue;
-			}
-			try {
-				const msg = JSON.parse(line) as IpcResponse | IpcStreamMessage;
-				this._dispatchMessage(msg);
-			} catch {
-				this.logService.warn('[insrc] Invalid JSON from daemon:', line.substring(0, 200));
-			}
-		}
-	}
-
 	private _dispatchMessage(msg: IpcResponse | IpcStreamMessage): void {
-		// Stream message - has `stream` field, no `result`/`error`
 		if ('stream' in msg && typeof (msg as IpcStreamMessage).stream === 'string') {
 			const streamMsg = msg as IpcStreamMessage;
 			const handle = this._activeStreams.get(streamMsg.id);
@@ -378,7 +285,6 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 			return;
 		}
 
-		// RPC response
 		const res = msg as IpcResponse;
 		const pending = this._pendingRpcs.get(res.id);
 		if (!pending) {
@@ -395,119 +301,35 @@ export class InsrcDaemonServiceImpl extends Disposable implements IInsrcDaemonSe
 		}
 	}
 
-	// ---------------------------------------------------------------------------
-	// Disconnect + reconnect
-	// ---------------------------------------------------------------------------
-
 	private _handleDisconnect(): void {
-		if (!this._connected) {
-			return; // Already handling
-		}
-
-		this._setConnected(false);
-		this._detachSocket();
-
-		// Reject all pending RPCs
 		for (const [id, pending] of this._pendingRpcs) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error('Connection to daemon lost'));
 			this._pendingRpcs.delete(id);
 		}
 
-		// Notify all active streams
 		for (const [, handle] of this._activeStreams) {
 			handle.handleConnectionLost();
 		}
-
-		if (!this._intentionalDisconnect) {
-			this._scheduleReconnect();
-		}
-	}
-
-	private _scheduleReconnect(): void {
-		if (this._reconnectTimer !== undefined) {
-			return;
-		}
-
-		const delaySec = this._reconnectAttempt < RECONNECT_BACKOFF_S.length
-			? RECONNECT_BACKOFF_S[this._reconnectAttempt]!
-			: RECONNECT_BACKOFF_S[RECONNECT_BACKOFF_S.length - 1]!;
-
-		this._reconnectAttempt++;
-		this.logService.info(`[insrc] Reconnecting in ${delaySec} s (attempt ${this._reconnectAttempt})...`);
-
-		this._reconnectTimer = setTimeout(async () => {
-			this._reconnectTimer = undefined;
-			try {
-				await this._connectToSocket();
-				this.logService.info('[insrc] Reconnected to daemon');
-			} catch {
-				this._scheduleReconnect();
-			}
-		}, delaySec * 1000);
 	}
 
 	// ---------------------------------------------------------------------------
-	// Daemon spawn (detached, survives IDE close)
-	// ---------------------------------------------------------------------------
-
-	private _spawnDetachedDaemon(): void {
-		const child = cp.spawn(process.execPath, [DAEMON_ENTRY], {
-			stdio: 'ignore',
-			detached: true,
-			env: {
-				...process.env,
-				INSRC_LOG_LEVEL: 'info',
-			},
-		});
-		child.unref();
-		this.logService.info('[insrc] Spawned detached daemon process');
-	}
-
-	// ---------------------------------------------------------------------------
-	// Helpers
-	// ---------------------------------------------------------------------------
-
-	private _ensureSocket(): void {
-		if (!this._socket || !this._connected) {
-			throw new Error('Not connected to daemon - call connect() first');
-		}
-	}
-
-	private _setConnected(connected: boolean): void {
-		if (this._connected !== connected) {
-			this._connected = connected;
-			this._onDidChangeState.fire(connected ? 'connected' : 'disconnected');
-		}
-	}
-
-	// ---------------------------------------------------------------------------
-	// Dispose - closes sockets only, daemon keeps running
+	// Dispose
 	// ---------------------------------------------------------------------------
 
 	override dispose(): void {
-		this._intentionalDisconnect = true;
-
-		if (this._reconnectTimer !== undefined) {
-			clearTimeout(this._reconnectTimer);
-			this._reconnectTimer = undefined;
-		}
-
-		// Reject pending RPCs
 		for (const [, pending] of this._pendingRpcs) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error('DaemonService disposed'));
 		}
 		this._pendingRpcs.clear();
 
-		// Dispose active streams
 		for (const [, handle] of this._activeStreams) {
 			handle.dispose();
 		}
 		this._activeStreams.clear();
 
-		this._detachSocket();
-		this._setConnected(false);
+		this._channel.call<void>('disconnect');
 
 		super.dispose();
 	}

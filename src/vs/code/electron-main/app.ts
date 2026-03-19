@@ -59,6 +59,7 @@ import { ILifecycleMainService, LifecycleMainPhase, ShutdownReason } from '../..
 import { ILoggerService, ILogService } from '../../platform/log/common/log.js';
 import { IMenubarMainService, MenubarMainService } from '../../platform/menubar/electron-main/menubarMainService.js';
 import { INativeHostMainService, NativeHostMainService } from '../../platform/native/electron-main/nativeHostMainService.js';
+import { IInsrcDaemonMainService, InsrcDaemonMainService } from '../../platform/insrc/electron-main/insrcDaemonMainService.js';
 import { IProductService } from '../../platform/product/common/productService.js';
 import { getRemoteAuthority } from '../../platform/remote/common/remoteHosts.js';
 import { SharedProcess } from '../../platform/sharedProcess/electron-main/sharedProcess.js';
@@ -1040,6 +1041,9 @@ export class CodeApplication extends Disposable {
 		// Native Host
 		services.set(INativeHostMainService, new SyncDescriptor(NativeHostMainService, undefined, false /* proxied to other processes */));
 
+		// insrc Daemon (main process -- owns socket/child_process, proxied to sandbox)
+		services.set(IInsrcDaemonMainService, new SyncDescriptor(InsrcDaemonMainService, undefined, false));
+
 		// Webview Manager
 		services.set(IWebviewManagerService, new SyncDescriptor(WebviewMainService));
 
@@ -1182,6 +1186,11 @@ export class CodeApplication extends Disposable {
 		const nativeHostChannel = ProxyChannel.fromService(this.nativeHostMainService, disposables);
 		mainProcessElectronServer.registerChannel('nativeHost', nativeHostChannel);
 		sharedProcessClient.then(client => client.registerChannel('nativeHost', nativeHostChannel));
+
+		// insrc Daemon (main process socket management, proxied to sandbox)
+		const insrcDaemonMainService = accessor.get(IInsrcDaemonMainService);
+		const insrcDaemonChannel = ProxyChannel.fromService(insrcDaemonMainService, disposables);
+		mainProcessElectronServer.registerChannel('insrcDaemon', insrcDaemonChannel);
 
 		// Workspaces
 		const workspacesChannel = ProxyChannel.fromService(accessor.get(IWorkspacesService), disposables);

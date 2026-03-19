@@ -6,6 +6,12 @@
 // Service interfaces (common layer - browser safe)
 import '../common/daemonService.js';
 import '../common/sessionService.js';
+import '../common/workspaceService.js';
+import '../common/repoService.js';
+import '../common/agentRunService.js';
+
+// Sidebar: ViewContainer + view panes
+import './sidebar/insrcViewContainer.js';
 
 // TODO: Step 4 - register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
 // TODO: Step 5 - register AgentChatView
