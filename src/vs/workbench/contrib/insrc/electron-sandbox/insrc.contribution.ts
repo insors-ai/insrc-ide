@@ -9,11 +9,13 @@ import { IInsrcSessionService } from '../common/sessionService.js';
 import { IInsrcWorkspaceService } from '../common/workspaceService.js';
 import { IInsrcRepoService } from '../common/repoService.js';
 import { IInsrcAgentRunService } from '../common/agentRunService.js';
+import { IInsrcChatService } from '../common/chatService.js';
 import { InsrcDaemonServiceImpl } from './daemonServiceImpl.js';
 import { InsrcSessionServiceImpl } from './sessionServiceImpl.js';
 import { InsrcWorkspaceServiceImpl } from './workspaceServiceImpl.js';
 import { InsrcRepoServiceImpl } from './repoServiceImpl.js';
 import { InsrcAgentRunServiceImpl } from './agentRunServiceImpl.js';
+import { InsrcChatServiceImpl } from './chatServiceImpl.js';
 
 // Register services (desktop/Electron only)
 registerSingleton(IInsrcDaemonService, InsrcDaemonServiceImpl, InstantiationType.Eager);
@@ -21,3 +23,4 @@ registerSingleton(IInsrcSessionService, InsrcSessionServiceImpl, InstantiationTy
 registerSingleton(IInsrcWorkspaceService, InsrcWorkspaceServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcRepoService, InsrcRepoServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcAgentRunService, InsrcAgentRunServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcChatService, InsrcChatServiceImpl, InstantiationType.Delayed);

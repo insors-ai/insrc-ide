@@ -16,11 +16,15 @@ import { IOpenerService } from '../../../../../platform/opener/common/opener.js'
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
+import { IInsrcChatService } from '../../common/chatService.js';
+import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import type { IListVirtualDelegate } from '../../../../../base/browser/ui/list/list.js';
 import type { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../../base/browser/ui/tree/tree.js';
-import { WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
+import { IOpenEvent, WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
 import { FuzzyScore } from '../../../../../base/common/filters.js';
 import { groupSessionsByDate, getNodeId, type SessionInfo, type SessionsTreeNode } from './sessionsTreeNodes.js';
+
+const INSRC_CHAT_VIEW_ID = 'insrc.chatView';
 
 // ---------------------------------------------------------------------------
 // Tree infrastructure
@@ -163,6 +167,8 @@ export class InsrcSessionsViewPane extends ViewPane {
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IHoverService hoverService: IHoverService,
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
+		@IInsrcChatService private readonly chatService: IInsrcChatService,
+		@IViewsService private readonly viewsService: IViewsService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -199,6 +205,13 @@ export class InsrcSessionsViewPane extends ViewPane {
 		) as WorkbenchAsyncDataTree<SessionsRoot, SessionsTreeNode, FuzzyScore>;
 		this._register(this.tree);
 
+		// Click on a session opens it in the chat panel
+		this._register(this.tree.onDidOpen((e: IOpenEvent<SessionsTreeNode | null>) => {
+			if (e.element?.kind === 'session') {
+				this._openSessionInChat(e.element.session.id);
+			}
+		}));
+
 		if (this.daemonService.isConnected) {
 			this.tree.setInput(ROOT);
 		}
@@ -207,5 +220,14 @@ export class InsrcSessionsViewPane extends ViewPane {
 	protected override layoutBody(height: number, width: number): void {
 		super.layoutBody(height, width);
 		this.tree?.layout(height, width);
+	}
+
+	private async _openSessionInChat(sessionId: string): Promise<void> {
+		try {
+			await this.chatService.resumeSession(sessionId);
+			await this.viewsService.openView(INSRC_CHAT_VIEW_ID, true);
+		} catch {
+			// ignore - chat view may not be available
+		}
 	}
 }

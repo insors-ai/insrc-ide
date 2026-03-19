@@ -11,6 +11,7 @@ import '../common/sessionService.js';
 import '../common/workspaceService.js';
 import '../common/repoService.js';
 import '../common/agentRunService.js';
+import '../common/chatService.js';
 
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';
@@ -26,5 +27,7 @@ registerWorkbenchContribution2(InsrcWorkspaceSyncContribution.ID, InsrcWorkspace
 import { InsrcFileDecorationsContribution } from './sidebar/insrcFileDecorations.js';
 registerWorkbenchContribution2(InsrcFileDecorationsContribution.ID, InsrcFileDecorationsContribution, WorkbenchPhase.AfterRestored);
 
-// TODO: Step 4 - register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
-// TODO: Step 5 - register AgentChatView
+// Chat: register chat panel in auxiliary bar (right sidebar)
+import './chat/chatRegistration.js';
+
+// TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
