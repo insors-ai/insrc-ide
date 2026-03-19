@@ -122,6 +122,25 @@ export default tseslint.config(
 			]
 		},
 	},
+	// Procix insrc files - use Procix copyright header
+	{
+		files: [
+			'src/vs/workbench/contrib/insrc/**/*.ts',
+			'src/vs/platform/insrc/**/*.ts',
+		],
+		rules: {
+			'header/header': [
+				2,
+				'block',
+				[
+					'---------------------------------------------------------------------------------------------',
+					' *  Copyright (c) Procix Software India. All rights reserved.',
+					' *  Licensed under the MIT License. See License.txt in the project root for license information.',
+					' *--------------------------------------------------------------------------------------------'
+				]
+			]
+		},
+	},
 	// TS
 	{
 		files: [

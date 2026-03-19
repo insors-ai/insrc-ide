@@ -6,7 +6,7 @@
 		"Themes"
 	],
 	"version": "1.0.0",
-	"publisher": "insors",
+	"publisher": "procix",
 	"license": "MIT",
 	"engines": {
 		"vscode": "*"

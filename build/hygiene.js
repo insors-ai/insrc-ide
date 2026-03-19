@@ -20,6 +20,13 @@ const copyrightHeaderLines = [
 	' *--------------------------------------------------------------------------------------------*/',
 ];
 
+const procixCopyrightHeaderLines = [
+	'/*---------------------------------------------------------------------------------------------',
+	' *  Copyright (c) Procix Software India. All rights reserved.',
+	' *  Licensed under the MIT License. See License.txt in the project root for license information.',
+	' *--------------------------------------------------------------------------------------------*/',
+];
+
 function hygiene(some, linting = true) {
 	const eslint = require('./gulp-eslint');
 	const gulpstylelint = require('./stylelint');
@@ -100,12 +107,16 @@ function hygiene(some, linting = true) {
 	const copyrights = es.through(function (file) {
 		const lines = file.__lines;
 
+		// Accept either Microsoft or Procix copyright header
+		let msMatch = true;
+		let procixMatch = true;
 		for (let i = 0; i < copyrightHeaderLines.length; i++) {
-			if (lines[i] !== copyrightHeaderLines[i]) {
-				console.error(file.relative + ': Missing or bad copyright statement');
-				errorCount++;
-				break;
-			}
+			if (lines[i] !== copyrightHeaderLines[i]) { msMatch = false; }
+			if (lines[i] !== procixCopyrightHeaderLines[i]) { procixMatch = false; }
+		}
+		if (!msMatch && !procixMatch) {
+			console.error(file.relative + ': Missing or bad copyright statement');
+			errorCount++;
 		}
 
 		this.emit('data', file);
