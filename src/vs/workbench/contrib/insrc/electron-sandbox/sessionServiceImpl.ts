@@ -3,12 +3,19 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { Emitter, type Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IInsrcDaemonService } from '../common/daemonService.js';
-import { IInsrcSessionService, type SessionChangeEvent, type SessionCheckpoint } from '../common/sessionService.js';
+import { IInsrcDaemonService, type IInsrcStreamHandle } from '../common/daemonService.js';
+import {
+	IInsrcSessionService,
+	type SessionChangeEvent,
+	type SessionCheckpoint,
+	type SessionDeltaEvent,
+	type SessionGateEvent,
+	type SessionProgressEvent,
+} from '../common/sessionService.js';
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -18,16 +25,36 @@ const STORAGE_KEY_PREFIX = 'insrc.session.';
 const STORAGE_INDEX_KEY = 'insrc.sessions.index';
 
 // ---------------------------------------------------------------------------
+// Per-session bookkeeping
+// ---------------------------------------------------------------------------
+
+interface ActiveSession {
+	repoPath: string;
+	state: unknown;
+	streamHandle: IInsrcStreamHandle | undefined;
+	streamDisposables: DisposableStore;
+}
+
+// ---------------------------------------------------------------------------
 // SessionService implementation
 // ---------------------------------------------------------------------------
 
 export class InsrcSessionServiceImpl extends Disposable implements IInsrcSessionService {
 	declare readonly _serviceBrand: undefined;
 
-	private readonly _sessions = new Map<string, { repoPath: string; state: unknown }>();
+	private readonly _sessions = new Map<string, ActiveSession>();
 
 	private readonly _onDidChangeSession = this._register(new Emitter<SessionChangeEvent>());
 	readonly onDidChangeSession: Event<SessionChangeEvent> = this._onDidChangeSession.event;
+
+	private readonly _onDidReceiveDelta = this._register(new Emitter<SessionDeltaEvent>());
+	readonly onDidReceiveDelta: Event<SessionDeltaEvent> = this._onDidReceiveDelta.event;
+
+	private readonly _onDidReceiveGate = this._register(new Emitter<SessionGateEvent>());
+	readonly onDidReceiveGate: Event<SessionGateEvent> = this._onDidReceiveGate.event;
+
+	private readonly _onDidProgress = this._register(new Emitter<SessionProgressEvent>());
+	readonly onDidProgress: Event<SessionProgressEvent> = this._onDidProgress.event;
 
 	constructor(
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
@@ -42,23 +69,20 @@ export class InsrcSessionServiceImpl extends Disposable implements IInsrcSession
 	// ---------------------------------------------------------------------------
 
 	async createSession(repoPath: string, message: string): Promise<string> {
-		// Create session on the daemon
 		const result = await this.daemonService.rpc<{ sessionId: string }>('chat.start', { repo: repoPath });
 		const sessionId = result.sessionId;
 
-		this._sessions.set(sessionId, { repoPath, state: null });
-		this._onDidChangeSession.fire({ sessionId, type: 'created' });
+		const session = this._createActiveSession(sessionId, repoPath);
+		this._attachStream(sessionId, session, { message });
 
+		this._onDidChangeSession.fire({ sessionId, type: 'created' });
 		this.logService.info(`[insrc] Session created: ${sessionId} for ${repoPath}`);
 
-		// Save to index
 		this._addToIndex(sessionId, repoPath);
-
 		return sessionId;
 	}
 
 	async resumeSession(sessionId: string): Promise<void> {
-		// Load checkpoint from storage
 		const raw = this.storageService.get(
 			STORAGE_KEY_PREFIX + sessionId,
 			StorageScope.WORKSPACE,
@@ -68,17 +92,33 @@ export class InsrcSessionServiceImpl extends Disposable implements IInsrcSession
 			throw new Error(`No checkpoint found for session ${sessionId}`);
 		}
 
+		let checkpoint: SessionCheckpoint;
 		try {
-			const checkpoint = JSON.parse(raw) as SessionCheckpoint;
-			this._sessions.set(sessionId, {
-				repoPath: checkpoint.repoPath,
-				state: checkpoint,
-			});
-			this._onDidChangeSession.fire({ sessionId, type: 'updated' });
-			this.logService.info(`[insrc] Session resumed: ${sessionId}`);
+			checkpoint = JSON.parse(raw) as SessionCheckpoint;
 		} catch {
 			throw new Error(`Invalid checkpoint data for session ${sessionId}`);
 		}
+
+		const session = this._createActiveSession(sessionId, checkpoint.repoPath);
+		session.state = checkpoint;
+
+		this._attachStream(sessionId, session, { resume: true });
+
+		this._onDidChangeSession.fire({ sessionId, type: 'updated' });
+		this.logService.info(`[insrc] Session resumed: ${sessionId}`);
+	}
+
+	closeSession(sessionId: string): void {
+		const session = this._sessions.get(sessionId);
+		if (!session) {
+			return;
+		}
+
+		session.streamDisposables.dispose();
+		this._sessions.delete(sessionId);
+
+		this._onDidChangeSession.fire({ sessionId, type: 'closed' });
+		this.logService.info(`[insrc] Session closed: ${sessionId}`);
 	}
 
 	// ---------------------------------------------------------------------------
@@ -99,7 +139,6 @@ export class InsrcSessionServiceImpl extends Disposable implements IInsrcSession
 			return;
 		}
 
-		// Fetch current state from daemon
 		try {
 			const status = await this.daemonService.rpc<Record<string, unknown>>('chat.status', { sessionId });
 			session.state = status;
@@ -154,7 +193,58 @@ export class InsrcSessionServiceImpl extends Disposable implements IInsrcSession
 	}
 
 	// ---------------------------------------------------------------------------
-	// Index management (tracks which sessions exist for which repos)
+	// Stream subscription
+	// ---------------------------------------------------------------------------
+
+	private _createActiveSession(sessionId: string, repoPath: string): ActiveSession {
+		// Close existing session with same id if any
+		this.closeSession(sessionId);
+
+		const session: ActiveSession = {
+			repoPath,
+			state: null,
+			streamHandle: undefined,
+			streamDisposables: new DisposableStore(),
+		};
+
+		this._sessions.set(sessionId, session);
+		return session;
+	}
+
+	private _attachStream(sessionId: string, session: ActiveSession, params: Record<string, unknown>): void {
+		const handle = this.daemonService.stream('chat.stream', { sessionId, ...params });
+		session.streamHandle = handle;
+		session.streamDisposables.add(handle);
+
+		session.streamDisposables.add(handle.onMessage((msg) => {
+			session.state = msg; // Keep latest message as state snapshot
+
+			switch (msg.type) {
+				case 'delta':
+					this._onDidReceiveDelta.fire({ sessionId, content: msg.content });
+					break;
+				case 'gate':
+					this._onDidReceiveGate.fire({ sessionId, gateId: msg.gateId, actions: msg.actions });
+					break;
+				case 'progress':
+					this._onDidProgress.fire({ sessionId, step: msg.step, status: msg.status });
+					break;
+			}
+
+			this._onDidChangeSession.fire({ sessionId, type: 'updated' });
+		}));
+
+		session.streamDisposables.add(handle.onDidEnd(() => {
+			this.logService.info(`[insrc] Stream ended for session ${sessionId}`);
+		}));
+
+		session.streamDisposables.add(handle.onDidError((err) => {
+			this.logService.warn(`[insrc] Stream error for session ${sessionId}:`, err.message);
+		}));
+	}
+
+	// ---------------------------------------------------------------------------
+	// Index management
 	// ---------------------------------------------------------------------------
 
 	private _addToIndex(sessionId: string, repoPath: string): void {
@@ -178,5 +268,17 @@ export class InsrcSessionServiceImpl extends Disposable implements IInsrcSession
 		} catch {
 			return [];
 		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Dispose
+	// ---------------------------------------------------------------------------
+
+	override dispose(): void {
+		for (const [, session] of this._sessions) {
+			session.streamDisposables.dispose();
+		}
+		this._sessions.clear();
+		super.dispose();
 	}
 }

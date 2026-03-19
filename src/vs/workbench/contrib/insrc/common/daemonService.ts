@@ -4,13 +4,35 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import type { CancellationToken } from '../../../../base/common/cancellation.js';
 import type { Event } from '../../../../base/common/event.js';
+import type { IDisposable } from '../../../../base/common/lifecycle.js';
 
-export interface StreamDelta {
-	type: string;
-	content?: string;
-	data?: Record<string, unknown>;
+// ---------------------------------------------------------------------------
+// Stream message types (discriminated union)
+// ---------------------------------------------------------------------------
+
+export type DaemonStreamMessage =
+	| { readonly type: 'delta'; readonly content: string }
+	| { readonly type: 'gate'; readonly gateId: string; readonly actions: string[] }
+	| { readonly type: 'progress'; readonly step: string; readonly status: string }
+	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
+	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }
+	| { readonly type: 'context.clear'; readonly key: string };
+
+// ---------------------------------------------------------------------------
+// Stream handle - event-based, disposable
+// ---------------------------------------------------------------------------
+
+export interface IInsrcStreamHandle extends IDisposable {
+	readonly onMessage: Event<DaemonStreamMessage>;
+	readonly onDidEnd: Event<void>;
+	readonly onDidError: Event<Error>;
 }
+
+// ---------------------------------------------------------------------------
+// DaemonService
+// ---------------------------------------------------------------------------
 
 export const IInsrcDaemonService = createDecorator<IInsrcDaemonService>('insrcDaemonService');
 
@@ -21,13 +43,21 @@ export interface IInsrcDaemonService {
 	readonly onDidChangeState: Event<'connected' | 'disconnected'>;
 	readonly isConnected: boolean;
 
-	/** JSON-RPC call */
-	rpc<T>(method: string, params?: Record<string, unknown>): Promise<T>;
+	/**
+	 * Connect to the daemon. If not running, auto-spawns a detached process
+	 * that survives IDE shutdown, then connects.
+	 */
+	connect(): Promise<void>;
 
-	/** Streaming RPC (for chat, brainstorm, etc.) */
-	stream(method: string, params: Record<string, unknown>): AsyncIterable<StreamDelta>;
+	/**
+	 * JSON-RPC call over the persistent connection.
+	 * Rejects with TimeoutError after 30 s (default) or on cancellation.
+	 */
+	rpc<T>(method: string, params?: Record<string, unknown>, token?: CancellationToken): Promise<T>;
 
-	/** Start/stop daemon lifecycle */
-	ensureDaemon(): Promise<void>;
-	stopDaemon(): Promise<void>;
+	/**
+	 * Streaming RPC - returns a disposable handle that fires events.
+	 * Caller must dispose the handle when done to free the stream slot.
+	 */
+	stream(method: string, params: Record<string, unknown>): IInsrcStreamHandle;
 }
