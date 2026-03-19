@@ -1,69 +1,121 @@
 # Sidebar Implementation Plan
 
-> insrc activity bar icon + two view panes (Repos, Step Providers) + Explorer file decorations
+> Unified Explorer with insrc icon -- file trees for all added repos + Sessions, Runs, Step Providers panes
 
 ## Architecture
+
+### Design decision: workspace-backed Explorer
+
+Instead of building a custom file tree, we leverage VS Code's native Explorer by managing an **insrc workspace file**. When a user adds a repo, it becomes a workspace folder -- the Explorer shows it automatically with full file operations, SCM integration, search, etc.
+
+The insrc activity bar replaces the Explorer icon. Additional panes (Sessions, Runs, Step Providers) are registered into the same ViewContainer below the Explorer.
+
+### Workspace lifecycle
+
+**First launch:**
+1. insrc creates `~/.insrc/insrc.code-workspace` with empty `folders` array
+2. Default workspace name: `"insrc"` (user can rename via settings)
+3. IDE opens this workspace automatically
+
+**Workspace file format:**
+```jsonc
+// ~/.insrc/insrc.code-workspace
+{
+  "folders": [
+    { "path": "/home/user/work/insrc" },
+    { "path": "/home/user/work/my-app" }
+  ],
+  "settings": {
+    "insrc.workspaceName": "My Projects"
+  }
+}
+```
+
+**Add repo flow:**
+1. User runs `insrc.addRepo` (folder picker or command palette)
+2. Calls `IWorkspaceEditingService.addFolders()` -- folder appears in Explorer immediately
+3. Calls `daemonService.rpc('repo.add', { path })` -- daemon starts indexing
+4. File decorations show indexing status on the folder
+
+**Remove repo flow:**
+1. User right-clicks repo folder -> "Remove from insrc"
+2. Calls `IWorkspaceEditingService.removeFolders()` -- folder disappears from Explorer
+3. Calls `daemonService.rpc('repo.remove', { path })` -- daemon drops index
+
+**Rename workspace:**
+- `insrc.renameWorkspace` command -> input box -> writes `insrc.workspaceName` setting
+- Workspace title in title bar reflects the custom name
 
 ### Layout
 
 ```
-┌─────────────────────────────┐
-│ [insrc icon]  INSRC         │
-├─────────────────────────────┤
-│ REPOS                    ▾  │
-│  ▾ ✓ insrc          ready   │
-│    ▾ Sessions               │
-│      ▸ Today (2)            │
-│        💬 "refactor auth"   │
-│        💬 "brainstorm cache"│
-│      ▸ Yesterday (1)        │
-│    ▾ Runs                   │
-│      ⟳ pair - propose       │
-│      ✓ brainstorm (done)    │
-│  ▸ ⟳ my-app     indexing... │
-│  ▸ ⏰ old-lib       stale   │
-│  [+ Add Repo]               │
-├─────────────────────────────┤
-│ STEP PROVIDERS            ▾  │
-│  ▸ pair                     │
-│      propose → claude:std   │
-│      review  → local        │
-│  ▸ delegate                 │
-│      execute → local        │
-│      validate → claude:pow  │
-└─────────────────────────────┘
++-----------------------------+
+| [insrc icon]  INSRC         |
++-----------------------------+
+| FILES (Explorer)          v |  <-- native Explorer, scoped to workspace folders
+|  v insrc/                   |
+|    > src/                   |
+|    > design/                |
+|      package.json        I  |  <-- decoration: indexed
+|  > my-app/                  |
++-----------------------------+
+| SESSIONS                  v |  <-- collapsed, grouped by repo
+|  v insrc                    |
+|    > Today (2)              |
+|      "refactor auth"        |
+|      "brainstorm cache"     |
+|  > my-app                   |
++-----------------------------+
+| RUNS                      v |  <-- collapsed
+|  ~ pair -- propose (insrc)  |
+|  ok brainstorm (done)       |
++-----------------------------+
+| STEP PROVIDERS            v |  <-- collapsed
+|  > pair                     |
+|      propose -> claude:std  |
+|  > delegate                 |
++-----------------------------+
 ```
 
 ### VS Code constructs
 
 | Component | Construct | Location |
 |-----------|-----------|----------|
-| Activity bar icon | `ViewContainer` | `ViewContainerLocation.Sidebar` |
-| Repos pane | `ViewPane` + `WorkbenchAsyncDataTree` | Inside ViewContainer |
-| Step Providers pane | `ViewPane` + `WorkbenchAsyncDataTree` | Inside ViewContainer |
+| Activity bar icon | `ViewContainer` (replaces Explorer icon) | `ViewContainerLocation.Sidebar` |
+| Files pane | Native `ExplorerView` re-registered into insrc container | Top pane |
+| Sessions pane | `ViewPane` + `WorkbenchAsyncDataTree` | Below Explorer |
+| Runs pane | `ViewPane` + `WorkbenchAsyncDataTree` | Below Sessions |
+| Step Providers pane | `ViewPane` + `WorkbenchAsyncDataTree` | Bottom, collapsed |
 | File decorations | `IDecorationsProvider` | Registered on `IDecorationsService` |
 
-### Tree structure (Repos pane)
+### Tree structure (Sessions pane)
+
+Sessions are grouped by repo, then by date:
 
 ```
-repo (RepoNode)                    ← collapsible, click = reveal in Explorer
-├── "Sessions" (SectionNode)       ← collapsible header
-│   ├── "Today (2)" (DateGroupNode)  ← collapsible
-│   │   ├── session (SessionNode)    ← click = open in chat + resume
-│   │   └── session (SessionNode)
-│   ├── "Yesterday (1)"
-│   └── "This week (3)"
-└── "Runs" (SectionNode)           ← collapsible header
-    ├── run (RunNode)               ← click = resume if paused
-    └── run (RunNode)
+repo (RepoNode)                    <-- collapsible, one per workspace folder
+├── "Today (2)" (DateGroupNode)    <-- collapsible
+│   ├── session (SessionNode)      <-- click = open in chat + resume
+│   └── session (SessionNode)
+├── "Yesterday (1)"
+└── "This week (3)"
 ```
 
 Sessions expand to show turns:
 ```
 session (SessionNode)
-├── turn (TurnNode)    ← leaf, shows user message preview + tier badge
+├── turn (TurnNode)    <-- leaf, shows user message preview + tier badge
 ├── turn (TurnNode)
 └── turn (TurnNode)
+```
+
+### Tree structure (Runs pane)
+
+Flat list of active/paused/crashed runs across all repos:
+
+```
+run (RunNode)          <-- shows agent + step + repo name
+run (RunNode)
 ```
 
 ### Tree structure (Step Providers pane)
@@ -82,8 +134,9 @@ All files under `src/vs/workbench/contrib/insrc/`:
 ### New service interfaces (common/)
 
 ```
-common/repoService.ts              ← IInsrcRepoService interface
-common/agentRunService.ts          ← IInsrcAgentRunService interface
+common/repoService.ts              <-- IInsrcRepoService interface
+common/agentRunService.ts          <-- IInsrcAgentRunService interface
+common/workspaceService.ts         <-- IInsrcWorkspaceService interface (workspace file management)
 ```
 
 ### New service implementations (electron-sandbox/)
@@ -91,22 +144,24 @@ common/agentRunService.ts          ← IInsrcAgentRunService interface
 ```
 electron-sandbox/repoServiceImpl.ts
 electron-sandbox/agentRunServiceImpl.ts
+electron-sandbox/workspaceServiceImpl.ts   <-- create/manage ~/.insrc/insrc.code-workspace
 ```
 
 ### New sidebar views (browser/)
 
 ```
-browser/sidebar/insrcViewContainer.ts       ← ViewContainer + activity bar registration
-browser/sidebar/reposView.ts                ← Repos ViewPane + tree data source
-browser/sidebar/reposTreeNodes.ts           ← Node types + tree item rendering
-browser/sidebar/stepProvidersView.ts        ← Step Providers ViewPane + tree data source
-browser/sidebar/insrcFileDecorations.ts     ← IDecorationsProvider for Explorer
+browser/sidebar/insrcViewContainer.ts       <-- ViewContainer + re-register ExplorerView + activity bar
+browser/sidebar/sessionsView.ts             <-- Sessions ViewPane (repo -> date groups -> sessions -> turns)
+browser/sidebar/sessionsTreeNodes.ts        <-- Session/Turn node types + rendering
+browser/sidebar/runsView.ts                 <-- Runs ViewPane (flat list of agent runs)
+browser/sidebar/stepProvidersView.ts        <-- Step Providers ViewPane + tree data source
+browser/sidebar/insrcFileDecorations.ts     <-- IDecorationsProvider for Explorer
 ```
 
 ### Modified files
 
 ```
-electron-sandbox/insrc.contribution.ts      ← register new services + import sidebar
+electron-sandbox/insrc.contribution.ts      <-- register new services + import sidebar
 ```
 
 ## Step 1: Service interfaces
@@ -137,6 +192,32 @@ interface IInsrcRepoService {
 Backed by daemon RPCs: `repo.list`, `repo.add`, `repo.remove`, `repo.reindex`.
 Caches repo list in memory, fires `onDidChangeRepos` on any mutation.
 Polls `repo.list` on a timer (or subscribes to daemon events when available).
+
+**Integration with workspace:** `addRepo()` also calls `IInsrcWorkspaceService.addFolder()` to add the path as a workspace folder. `removeRepo()` also calls `removeFolder()`.
+
+### IInsrcWorkspaceService (common/workspaceService.ts)
+
+```typescript
+interface IInsrcWorkspaceService {
+  readonly _serviceBrand: undefined;
+
+  /** Ensures ~/.insrc/insrc.code-workspace exists, creates if missing */
+  ensureWorkspace(): Promise<URI>;
+
+  /** Add a folder to the workspace file + IWorkspaceEditingService */
+  addFolder(path: string): Promise<void>;
+
+  /** Remove a folder from the workspace file + IWorkspaceEditingService */
+  removeFolder(path: string): Promise<void>;
+
+  /** Get/set the user-visible workspace name */
+  readonly workspaceName: string;
+  renameWorkspace(name: string): Promise<void>;
+}
+```
+
+Backed by: `IWorkspaceEditingService` (add/remove folders), `IFileService` (read/write workspace file).
+On first launch, creates `~/.insrc/insrc.code-workspace` and opens it via `IHostService.openWindow()`.
 
 ### IInsrcAgentRunService (common/agentRunService.ts)
 
@@ -184,6 +265,17 @@ Filters by repo path on the client side (daemon returns all runs).
 - `discardRun()`: calls `rpc('agent.discard', { id })`, fires event
 - Caches last `agent.list` result, refreshes on demand
 
+### InsrcWorkspaceServiceImpl (electron-sandbox/workspaceServiceImpl.ts)
+
+- Constructor injects `IFileService`, `IWorkspaceEditingService`, `IHostService`, `ILogService`
+- `ensureWorkspace()`:
+  1. Check if `~/.insrc/insrc.code-workspace` exists via `IFileService.exists()`
+  2. If not, write default workspace JSON with empty `folders` array
+  3. Return URI to workspace file
+- `addFolder(path)`: calls `IWorkspaceEditingService.addFolders([{ uri: URI.file(path) }])`
+- `removeFolder(path)`: calls `IWorkspaceEditingService.removeFolders([URI.file(path)])`
+- `renameWorkspace(name)`: writes `insrc.workspaceName` setting to workspace file
+
 ## Step 3: ViewContainer registration
 
 ### insrcViewContainer.ts
@@ -209,16 +301,37 @@ const VIEW_CONTAINER = Registry.as<IViewContainersRegistry>(
   },
 }, ViewContainerLocation.Sidebar);
 
-// Register views inside the container
+// Move ExplorerView into this container (re-register from workbench.view.explorer)
+// The native ExplorerView shows workspace folders -- which are the insrc repos.
 Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([
   {
-    id: 'insrc.repos',
-    name: localize2('repos', "Repos"),
-    ctorDescriptor: new SyncDescriptor(InsrcReposViewPane),
-    canToggleVisibility: true,
+    id: 'workbench.explorer.fileView',  // re-use the existing Explorer view ID
+    name: localize2('files', "Files"),
+    // ExplorerView is already registered -- we move it to this container
+    canToggleVisibility: false,
     canMoveView: false,
     order: 0,
-    weight: 70,        // takes 70% of sidebar height
+    weight: 50,
+  },
+  {
+    id: 'insrc.sessions',
+    name: localize2('sessions', "Sessions"),
+    ctorDescriptor: new SyncDescriptor(InsrcSessionsViewPane),
+    canToggleVisibility: true,
+    canMoveView: false,
+    collapsed: true,
+    order: 1,
+    weight: 20,
+  },
+  {
+    id: 'insrc.runs',
+    name: localize2('runs', "Runs"),
+    ctorDescriptor: new SyncDescriptor(InsrcRunsViewPane),
+    canToggleVisibility: true,
+    canMoveView: false,
+    collapsed: true,
+    order: 2,
+    weight: 15,
   },
   {
     id: 'insrc.stepProviders',
@@ -226,36 +339,35 @@ Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([
     ctorDescriptor: new SyncDescriptor(InsrcStepProvidersViewPane),
     canToggleVisibility: true,
     canMoveView: false,
-    collapsed: true,    // collapsed by default
-    order: 1,
-    weight: 30,
+    collapsed: true,
+    order: 3,
+    weight: 15,
   },
 ], VIEW_CONTAINER);
+
+// NOTE: Moving ExplorerView to a different container requires either:
+// a) Deregistering it from workbench.view.explorer and re-registering here
+// b) Using ViewDescriptorService.moveViews() at contribution time
+// Since we own the fork, option (a) is cleanest -- modify the Explorer's
+// registration in workbench.common.main.ts to target our container instead.
 ```
 
-## Step 4: Repos ViewPane
+## Step 4: Sessions ViewPane
 
-### reposTreeNodes.ts - Node types
+### sessionsTreeNodes.ts - Node types
 
 ```typescript
-// Discriminated union for all tree node types
-type InsrcTreeNode =
+// Discriminated union for Sessions pane tree nodes
+type SessionsTreeNode =
   | RepoTreeNode
-  | SectionTreeNode
   | DateGroupTreeNode
   | SessionTreeNode
-  | TurnTreeNode
-  | RunTreeNode;
+  | TurnTreeNode;
 
 interface RepoTreeNode {
   readonly kind: 'repo';
-  readonly info: RepoInfo;
-}
-
-interface SectionTreeNode {
-  readonly kind: 'section';
-  readonly label: 'Sessions' | 'Runs';
   readonly repoPath: string;
+  readonly repoName: string;
 }
 
 interface DateGroupTreeNode {
@@ -292,22 +404,17 @@ interface TurnInfo {
   createdAt?: string;
 }
 
-interface RunTreeNode {
-  readonly kind: 'run';
-  readonly run: AgentRunInfo;
-}
 ```
 
-### reposView.ts - ViewPane
+### sessionsView.ts - ViewPane
 
 ```typescript
-class InsrcReposViewPane extends ViewPane {
-  private tree!: WorkbenchAsyncDataTree<void, InsrcTreeNode>;
+class InsrcSessionsViewPane extends ViewPane {
+  private tree!: WorkbenchAsyncDataTree<void, SessionsTreeNode>;
 
   constructor(
     options: IViewPaneOptions,
-    @IInsrcRepoService private readonly repoService: IInsrcRepoService,
-    @IInsrcAgentRunService private readonly runService: IInsrcAgentRunService,
+    @IInsrcSessionService private readonly sessionService: IInsrcSessionService,
     @IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
     // ...standard ViewPane deps
   ) { super(options, ...); }
@@ -329,26 +436,22 @@ class InsrcReposViewPane extends ViewPane {
 ### Data source (IAsyncDataSource)
 
 ```typescript
-class InsrcTreeDataSource implements IAsyncDataSource<void, InsrcTreeNode> {
-  hasChildren(element: void | InsrcTreeNode): boolean {
+class SessionsTreeDataSource implements IAsyncDataSource<void, SessionsTreeNode> {
+  hasChildren(element: void | SessionsTreeNode): boolean {
     if (element === undefined) return true;  // root
     switch (element.kind) {
       case 'repo': return true;
-      case 'section': return true;
       case 'dateGroup': return true;
       case 'session': return true;  // has turns
       case 'turn': return false;
-      case 'run': return false;
     }
   }
 
-  async getChildren(element: void | InsrcTreeNode): Promise<InsrcTreeNode[]> {
-    // root → repos from RepoService
-    // repo → [SectionNode('Sessions'), SectionNode('Runs')]
-    // section('Sessions') → date groups from daemonService.rpc('session.list', { repo })
-    // section('Runs') → runs from AgentRunService.getRunsForRepo(repoPath)
-    // dateGroup → sessions as SessionTreeNodes
-    // session → turns from daemonService.rpc('session.history', { sessionId, limit: 30 })
+  async getChildren(element: void | SessionsTreeNode): Promise<SessionsTreeNode[]> {
+    // root -> repos from workspace folders (IWorkspaceContextService)
+    // repo -> date groups from daemonService.rpc('session.list', { repo })
+    // dateGroup -> sessions as SessionTreeNodes
+    // session -> turns from daemonService.rpc('session.history', { sessionId, limit: 30 })
   }
 }
 ```
@@ -357,28 +460,30 @@ class InsrcTreeDataSource implements IAsyncDataSource<void, InsrcTreeNode> {
 
 Maps each node kind to ThemeIcons + descriptions (ported from extension's treeView.ts):
 
+**Sessions pane renderer:**
+
 | Node | Icon | Label | Description |
 |------|------|-------|-------------|
-| repo (ready) | `pass-filled` (green) | repo name | "ready" |
-| repo (indexing) | `sync~spin` | repo name | "indexing..." |
-| repo (stale) | `clock` (orange) | repo name | "stale" |
-| repo (error) | `circle-slash` (red) | repo name | "error" |
-| section | `comment-discussion` / `rocket` | "Sessions" / "Runs" | - |
+| repo | `repo` | repo name | session count |
 | dateGroup | `calendar` | "Today (2)" | - |
 | session | `comment-discussion` | summary or session ID prefix | time (HH:MM) |
 | turn | `comment` (tier-colored) | user message preview (60 chars) | time + [tier] |
 | turn (directive) | `pin` (orange) | preview | - |
 | turn (summary) | `note` (dim) | preview | - |
-| run (active) | `sync~spin` (orange) | agent + summary | "active - step" |
-| run (paused) | `debug-pause` (orange) | agent + summary | "paused - step" |
-| run (crashed) | `error` (red) | agent + summary | "crashed" |
-| run (completed) | `pass-filled` (green) | agent + summary | "completed" |
+
+**Runs pane renderer (in runsView.ts):**
+
+| Node | Icon | Label | Description |
+|------|------|-------|-------------|
+| run (active) | insrc animated icon | agent + summary | "active -- step" (repo) |
+| run (paused) | `debug-pause` (orange) | agent + summary | "paused -- step" (repo) |
+| run (crashed) | `error` (red) | agent + summary | "crashed" (repo) |
+| run (completed) | `pass-filled` (green) | agent + summary | "completed" (repo) |
 
 ### Context menus (MenuRegistry)
 
 | Node contextValue | Actions |
 |-------------------|---------|
-| `insrc.repo` | Re-index, Remove, Open in Explorer |
 | `insrc.session` | Open in Chat, Save Checkpoint |
 | `insrc.run.paused` | Resume, Discard |
 | `insrc.run.crashed` | Resume, Discard |
@@ -388,9 +493,9 @@ Maps each node kind to ThemeIcons + descriptions (ported from extension's treeVi
 ### Welcome view (when no repos)
 
 ```typescript
-// When repos list is empty, show welcome content
-Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent('insrc.repos', {
-  content: localize('noRepos', "No repositories indexed.\n[Add Repository](command:insrc.addRepo)"),
+// When workspace has no folders, show welcome in Sessions pane
+Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeContent('insrc.sessions', {
+  content: localize('noRepos', "No repositories added.\n[Add Repository](command:insrc.addRepo)"),
   order: 0,
 });
 ```
@@ -399,13 +504,13 @@ Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViewWelcomeCon
 
 | Command ID | Title | Handler |
 |------------|-------|---------|
-| `insrc.addRepo` | "insrc: Add Repository" | Folder picker → `repoService.addRepo()` → refresh |
-| `insrc.removeRepo` | "insrc: Remove Repository" | Confirm dialog → `repoService.removeRepo()` → refresh |
-| `insrc.reindexRepo` | "insrc: Re-index Repository" | `repoService.reindexRepo()` → refresh |
-| `insrc.openRepoFolder` | "insrc: Open in Explorer" | `workspace.updateWorkspaceFolders()` + `revealInExplorer` |
+| `insrc.addRepo` | "insrc: Add Repository" | Folder picker -> `workspaceService.addFolder()` + `repoService.addRepo()` |
+| `insrc.removeRepo` | "insrc: Remove Repository" | Confirm -> `workspaceService.removeFolder()` + `repoService.removeRepo()` |
+| `insrc.reindexRepo` | "insrc: Re-index Repository" | `repoService.reindexRepo()` -> refresh |
+| `insrc.renameWorkspace` | "insrc: Rename Workspace" | Input box -> `workspaceService.renameWorkspace()` |
 | `insrc.refreshRepos` | "insrc: Refresh" | `repoService.refresh()` |
-| `insrc.agentResume` | "insrc: Resume Agent Run" | `runService.resumeRun()` → refresh |
-| `insrc.agentDiscard` | "insrc: Discard Agent Run" | Confirm → `runService.discardRun()` → refresh |
+| `insrc.agentResume` | "insrc: Resume Agent Run" | `runService.resumeRun()` -> refresh |
+| `insrc.agentDiscard` | "insrc: Discard Agent Run" | Confirm -> `runService.discardRun()` -> refresh |
 | `insrc.openSession` | "insrc: Open Session" | Opens chat sidebar + resumes session |
 
 ### Keybinding
@@ -502,18 +607,21 @@ Note: file-level decoration data requires a daemon RPC that returns per-file sta
 
 | # | Task | Files | Depends on |
 |---|------|-------|------------|
-| 1 | RepoService interface | `common/repoService.ts` | - |
-| 2 | AgentRunService interface | `common/agentRunService.ts` | - |
-| 3 | RepoService implementation | `electron-sandbox/repoServiceImpl.ts` | DaemonService |
-| 4 | AgentRunService implementation | `electron-sandbox/agentRunServiceImpl.ts` | DaemonService |
-| 5 | Service registration | `electron-sandbox/insrc.contribution.ts` | #1-4 |
-| 6 | ViewContainer + view registration | `browser/sidebar/insrcViewContainer.ts` | - |
-| 7 | Repos tree node types | `browser/sidebar/reposTreeNodes.ts` | #1, #2 |
-| 8 | Repos ViewPane | `browser/sidebar/reposView.ts` | #6, #7 |
-| 9 | Step Providers ViewPane | `browser/sidebar/stepProvidersView.ts` | #6, DaemonService |
-| 10 | Commands + context menus | `browser/sidebar/insrcCommands.ts` | #1-9 |
-| 11 | File decorations provider | `browser/sidebar/insrcFileDecorations.ts` | #1 |
-| 12 | Welcome view (no repos) | `browser/sidebar/insrcViewContainer.ts` | #6 |
+| 1 | WorkspaceService interface | `common/workspaceService.ts` | - |
+| 2 | RepoService interface | `common/repoService.ts` | - |
+| 3 | AgentRunService interface | `common/agentRunService.ts` | - |
+| 4 | WorkspaceService implementation | `electron-sandbox/workspaceServiceImpl.ts` | - |
+| 5 | RepoService implementation | `electron-sandbox/repoServiceImpl.ts` | DaemonService, #4 |
+| 6 | AgentRunService implementation | `electron-sandbox/agentRunServiceImpl.ts` | DaemonService |
+| 7 | Service registration | `electron-sandbox/insrc.contribution.ts` | #1-6 |
+| 8 | ViewContainer + Explorer re-registration | `browser/sidebar/insrcViewContainer.ts` | - |
+| 9 | Sessions tree nodes | `browser/sidebar/sessionsTreeNodes.ts` | - |
+| 10 | Sessions ViewPane | `browser/sidebar/sessionsView.ts` | #8, #9, SessionService |
+| 11 | Runs ViewPane | `browser/sidebar/runsView.ts` | #8, #6 |
+| 12 | Step Providers ViewPane | `browser/sidebar/stepProvidersView.ts` | #8, DaemonService |
+| 13 | Commands + context menus | `browser/sidebar/insrcCommands.ts` | #1-12 |
+| 14 | File decorations provider | `browser/sidebar/insrcFileDecorations.ts` | #2 |
+| 15 | Welcome view (no repos) | `browser/sidebar/insrcViewContainer.ts` | #8 |
 
 ## Progress indicator
 
