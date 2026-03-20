@@ -399,15 +399,25 @@ export class PaneCompositeBar extends Disposable {
 				hash.update(cssUrl);
 				const iconId = `activity-${id.replace(/\./g, '-')}-${hash.digest()}`;
 				const iconClass = `.monaco-workbench .${this.options.partContainerClass} .monaco-action-bar .action-label.${iconId}`;
-				classNames = [iconId, 'uri-icon'];
-				createCSSRule(iconClass, `
-				mask: ${cssUrl} no-repeat 50% 50%;
-				mask-size: ${this.options.iconSize}px;
-				-webkit-mask: ${cssUrl} no-repeat 50% 50%;
-				-webkit-mask-size: ${this.options.iconSize}px;
-				mask-origin: padding;
-				-webkit-mask-origin: padding;
-			`);
+				// Use full-color background-image for SVG/PNG icons (not mask)
+				const isColorIcon = icon.path.includes('/insrc/');
+				if (isColorIcon) {
+					classNames = [iconId, 'uri-icon', 'color-icon'];
+					createCSSRule(iconClass, `
+					background: ${cssUrl} no-repeat 50% 50%;
+					background-size: ${this.options.iconSize}px;
+				`);
+				} else {
+					classNames = [iconId, 'uri-icon'];
+					createCSSRule(iconClass, `
+					mask: ${cssUrl} no-repeat 50% 50%;
+					mask-size: ${this.options.iconSize}px;
+					-webkit-mask: ${cssUrl} no-repeat 50% 50%;
+					-webkit-mask-size: ${this.options.iconSize}px;
+					mask-origin: padding;
+					-webkit-mask-origin: padding;
+				`);
+				}
 			} else if (ThemeIcon.isThemeIcon(icon)) {
 				classNames = ThemeIcon.asClassNameArray(icon);
 			}

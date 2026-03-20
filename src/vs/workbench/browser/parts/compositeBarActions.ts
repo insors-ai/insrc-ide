@@ -193,9 +193,14 @@ export class CompositeBarActionViewItem extends BaseActionViewItem {
 		if (this.label) {
 			if (this.options.icon) {
 				const foreground = this._action.checked ? colors.activeForegroundColor : colors.inactiveForegroundColor;
-				if (this.compositeBarActionItem.iconUrl) {
-					// Apply background color to activity bar item provided with iconUrls
+				const isColorIcon = this.label.classList.contains('color-icon');
+				if (this.compositeBarActionItem.iconUrl && !isColorIcon) {
+					// Apply background color to activity bar item provided with iconUrls (mask mode)
 					this.label.style.backgroundColor = foreground ? foreground.toString() : '';
+					this.label.style.color = '';
+				} else if (isColorIcon) {
+					// Color icons use background-image directly, no tinting
+					this.label.style.backgroundColor = '';
 					this.label.style.color = '';
 				} else {
 					// Apply foreground color to activity bar items provided with codicons

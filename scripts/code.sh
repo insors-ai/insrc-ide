@@ -22,6 +22,10 @@ function code() {
 	else
 		NAME=`node -p "require('./product.json').applicationName"`
 		CODE=".build/electron/$NAME"
+		# If the renamed binary doesn't exist, symlink from the default Electron binary
+		if [ ! -f "$CODE" ] && [ -f ".build/electron/code-oss" ]; then
+			ln -s code-oss "$CODE"
+		fi
 	fi
 
 	# Get electron, compile, built-in extensions
@@ -57,13 +61,17 @@ function code-wsl()
 	export DISPLAY="$HOST_IP:0"
 
 	# in a wsl shell
-	ELECTRON="$ROOT/.build/electron/Code - OSS.exe"
+	local WIN_NAME=`node -p "require('./product.json').nameLong"`
+	ELECTRON="$ROOT/.build/electron/$WIN_NAME.exe"
+	if [ ! -f "$ELECTRON" ]; then
+		ELECTRON="$ROOT/.build/electron/Code - OSS.exe"
+	fi
 	if [ -f "$ELECTRON"  ]; then
 		local CWD=$(pwd)
 		cd $ROOT
 		export WSLENV=ELECTRON_RUN_AS_NODE/w:VSCODE_DEV/w:$WSLENV
 		local WSL_EXT_ID="ms-vscode-remote.remote-wsl"
-		local WSL_EXT_WLOC=$(echo "" | VSCODE_DEV=1 ELECTRON_RUN_AS_NODE=1 "$ROOT/.build/electron/Code - OSS.exe" "out/cli.js" --locate-extension $WSL_EXT_ID)
+		local WSL_EXT_WLOC=$(echo "" | VSCODE_DEV=1 ELECTRON_RUN_AS_NODE=1 "$ELECTRON" "out/cli.js" --locate-extension $WSL_EXT_ID)
 		cd $CWD
 		if [ -n "$WSL_EXT_WLOC" ]; then
 			# replace \r\n with \n in WSL_EXT_WLOC
