@@ -15,6 +15,7 @@ import '../common/chatService.js';
 import '../common/diffService.js';
 import '../common/configService.js';
 import '../common/keychainService.js';
+import '../common/insrcConfiguration.js';
 
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';

@@ -17,6 +17,7 @@ import { IInsrcAgentRunService } from '../../common/agentRunService.js';
 import { IInsrcWorkspaceService } from '../../common/workspaceService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcConfigService } from '../../common/configService.js';
+import { IInsrcKeychainService } from '../../common/keychainService.js';
 import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID, INSRC_STEP_PROVIDERS_VIEW_ID } from './insrcViewContainer.js';
 
 // ---------------------------------------------------------------------------
@@ -465,5 +466,111 @@ registerAction2(class extends Action2 {
 		// Runs view will refresh on next data source call
 		const repoService = accessor.get(IInsrcRepoService);
 		await repoService.refresh();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Manage API Keys
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.manageKeys',
+			title: localize2('insrc.manageKeys', 'Manage Keys'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.key,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const keychainService = accessor.get(IInsrcKeychainService);
+		const quickInputService = accessor.get(IQuickInputService);
+		const notificationService = accessor.get(INotificationService);
+		const daemonService = accessor.get(IInsrcDaemonService);
+
+		if (!daemonService.isConnected) {
+			notificationService.warn(localize('notConnected', 'Not connected to daemon.'));
+			return;
+		}
+
+		// Loop: show keys list until user cancels
+		for (; ;) {
+			const keys = await keychainService.listKeys();
+
+			const items: Array<{ label: string; description?: string; action: 'add' | 'edit' | 'delete'; keyName: string }> = [
+				{ label: '$(add) Add New Key', action: 'add', keyName: '', description: 'Store a new secret' },
+			];
+
+			for (const k of keys) {
+				items.push({
+					label: `$(key) ${k.name}`,
+					description: k.masked,
+					action: 'edit',
+					keyName: k.name,
+				});
+			}
+
+			const pick = await quickInputService.pick(items, {
+				placeHolder: keys.length > 0
+					? localize('selectKeyOrAdd', '{0} key(s) stored. Select to edit, or add new.', keys.length)
+					: localize('noKeys', 'No keys stored. Add one.'),
+			});
+
+			if (!pick) {
+				return; // user cancelled
+			}
+
+			if (pick.action === 'add') {
+				// Add new key: name then value
+				const name = await quickInputService.input({
+					placeHolder: localize('keyNamePlaceholder', 'e.g. ANTHROPIC_API_KEY, DB_PASSWORD'),
+					prompt: localize('enterKeyName', 'Key name'),
+				});
+				if (!name) { continue; }
+
+				const value = await quickInputService.input({
+					placeHolder: localize('enterValue', 'Enter secret value'),
+					prompt: name,
+					password: true,
+				});
+				if (value === undefined) { continue; }
+
+				await keychainService.setKey(name, value);
+				notificationService.info(localize('keyAdded', '{0} saved.', name));
+
+			} else {
+				// Existing key: edit or delete
+				const action = await quickInputService.pick([
+					{ label: '$(edit) Update Value', action: 'update' as const },
+					{ label: '$(trash) Delete', action: 'delete' as const },
+				], {
+					placeHolder: pick.keyName,
+				});
+
+				if (!action) { continue; }
+
+				if (action.action === 'update') {
+					const value = await quickInputService.input({
+						placeHolder: localize('enterNewValue', 'Enter new value'),
+						prompt: pick.keyName,
+						password: true,
+					});
+					if (value === undefined) { continue; }
+
+					await keychainService.setKey(pick.keyName, value);
+					notificationService.info(localize('keyUpdated', '{0} updated.', pick.keyName));
+				} else {
+					const confirm = await accessor.get(IDialogService).confirm({
+						message: localize('confirmDelete', 'Delete key "{0}"?', pick.keyName),
+					});
+					if (!confirm.confirmed) { continue; }
+
+					await keychainService.deleteKey(pick.keyName);
+					notificationService.info(localize('keyDeleted', '{0} deleted.', pick.keyName));
+				}
+			}
+		}
 	}
 });
