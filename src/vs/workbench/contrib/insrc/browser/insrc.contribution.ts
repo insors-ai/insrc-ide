@@ -42,4 +42,8 @@ registerWorkbenchContribution2(InsrcDiffContribution.ID, InsrcDiffContribution, 
 import { InsrcStatusBarContribution } from './insrcStatusBar.js';
 registerWorkbenchContribution2(InsrcStatusBarContribution.ID, InsrcStatusBarContribution, WorkbenchPhase.AfterRestored);
 
+// Annotations: code selection + notes, compile to chat context
+import { InsrcAnnotationContribution } from './annotations/annotationManager.js';
+registerWorkbenchContribution2(InsrcAnnotationContribution.ID, InsrcAnnotationContribution, WorkbenchPhase.AfterRestored);
+
 // TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)

@@ -19,6 +19,9 @@ import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcConfigService } from '../../common/configService.js';
 import { IInsrcKeychainService } from '../../common/keychainService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { URI } from '../../../../../base/common/uri.js';
+import { ITerminalService } from '../../../terminal/browser/terminal.js';
 import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID, INSRC_STEP_PROVIDERS_VIEW_ID } from './insrcViewContainer.js';
 
 // ---------------------------------------------------------------------------
@@ -594,5 +597,67 @@ registerAction2(class extends Action2 {
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const viewsService = accessor.get(IViewsService);
 		await viewsService.openView('insrc.chatView', true);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Show Daemon Logs
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.showLogs',
+			title: localize2('insrc.showLogs', 'Show Daemon Logs'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.output,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const terminalService = accessor.get(ITerminalService);
+		const instance = await terminalService.createTerminal({
+			config: {
+				name: 'insrc: Daemon Logs',
+				executable: '/bin/bash',
+				args: ['-c', 'cat /tmp/.insrc/daemon.log | npx pino-pretty --colorize && echo "--- following ---" && tail -f /tmp/.insrc/daemon.log | npx pino-pretty --colorize'],
+			},
+		});
+		terminalService.setActiveInstance(instance);
+		terminalService.revealActiveTerminal();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Toggle Permission Mode
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.togglePermissions',
+			title: localize2('insrc.togglePermissions', 'Toggle Permission Mode'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.shield,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const configService = accessor.get(IInsrcConfigService);
+		const notificationService = accessor.get(INotificationService);
+
+		try {
+			const config = await configService.showConfig();
+			const permissions = config?.['permissions'] as Record<string, unknown> | undefined;
+			const currentMode = (permissions?.['mode'] as string) ?? 'validate';
+			const newMode = currentMode === 'validate' ? 'auto-accept' : 'validate';
+
+			await configService.setConfigValue('permissions.mode', newMode);
+			notificationService.info(localize('permissionMode', 'Permission mode: {0}', newMode));
+		} catch {
+			notificationService.warn(localize('permissionFail', 'Failed to toggle permission mode.'));
+		}
 	}
 });

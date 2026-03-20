@@ -15,7 +15,6 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
-import { FileAccess } from '../../../../../base/common/network.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
@@ -112,16 +111,11 @@ class RepoRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IRepoT
 		chatBtn.style.height = '18px';
 		chatBtn.style.marginLeft = '4px';
 		chatBtn.style.borderRadius = '3px';
-		chatBtn.style.border = '1px solid var(--vscode-contrastBorder, rgba(128,128,128,0.35))';
-		chatBtn.style.background = 'var(--vscode-button-secondaryBackground, rgba(128,128,128,0.1))';
+		chatBtn.style.border = 'none';
+		chatBtn.style.background = 'none';
 
-		const chatIcon = dom.append(chatBtn, dom.$('span'));
-		chatIcon.style.width = '14px';
-		chatIcon.style.height = '14px';
-		chatIcon.style.display = 'inline-block';
-		chatIcon.style.backgroundImage = `url('${FileAccess.asBrowserUri('vs/workbench/contrib/insrc/browser/media/insrc-chat.svg' as `vs/workbench/${string}`).toString(true)}')`;
-		chatIcon.style.backgroundSize = 'contain';
-		chatIcon.style.backgroundRepeat = 'no-repeat';
+		const chatIcon = dom.append(chatBtn, dom.$('.codicon.codicon-comment-discussion'));
+		chatIcon.style.fontSize = '13px';
 
 		return { row, icon, label, chatBtn };
 	}

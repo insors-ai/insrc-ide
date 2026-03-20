@@ -107,19 +107,20 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 - [x] **KeychainService** - wraps `keys.*` RPCs, generic key manager command
 - [ ] ~~**ConversationService**~~ - deferred (power-user stats/compact only)
 
-### Tier 2: Editor contributions -- MOSTLY DONE
+### Tier 2: Editor contributions -- DONE
 - [x] **File decorations** - `IDecorationsProvider` for Explorer: indexed/stale/error badges on repo roots
-- [x] **Commands** - 19 of 24 registered (add/remove/reindex repo, refresh, rename workspace, agent resume/discard, step provider quick pick, connect daemon, manage keys, diff accept/reject/edit/acceptAll/rejectAll)
+- [x] **Commands** - 24 registered (add/remove/reindex repo, refresh, rename workspace, agent resume/discard, step provider quick pick, connect daemon, manage keys, diff accept/reject/edit/acceptAll/rejectAll, open chat, show logs, toggle permissions, add/edit/remove/send/clear annotations)
 - [x] **Keybindings** - `Ctrl+Shift+I` (sidebar), `Ctrl+Alt+C` (chat)
 - [x] **Diff manager** - virtual document scheme (insrc-proposed), inline diff editor, CodeLens accept/reject/edit, chat gate integration
 - [x] **Diff commands** - insrc.diffAccept, insrc.diffReject, insrc.diffEdit, insrc.diffAcceptAll, insrc.diffRejectAll
 - [x] **Inline diff default** - diffEditor.renderSideBySide set to false
 - [x] **Settings** - insrc.* configuration registered in VS Code settings editor (Extensions > insrc)
-- [ ] **Status bar** - daemon/agent status indicator
-- [ ] **Annotation manager** - editor decorations, CodeLens, gutter icons, compile-to-chat
-- [ ] **Remaining commands** (5) - daemon logs, cost display, annotation commands, toggle permissions
+- [x] **Status bar** - daemon/agent status with codicon indicators, rich tooltip, repo list, click to chat/connect
+- [x] **Annotation manager** - amber highlight decorations, gutter pin icons, CodeLens note preview, right-click "Add Note to Selection", compile-to-chat via sendAnnotations
+- [x] **Show Daemon Logs** - opens terminal with pino-pretty formatted live log tail
+- [x] **Toggle Permissions** - switches validate/auto-accept mode via config.write
 
-### Tier 3: Navigation + session management -- DONE
+### Tier 3: Navigation + session management -- NEARLY DONE
 - [x] **Explorer integration** - insrc panes registered inside Explorer ViewContainer
 - [x] **Sessions tree** - WorkbenchAsyncDataTree, grouped by repo then date, per-repo chat button
 - [x] **Runs tree** - WorkbenchAsyncDataTree, grouped by agent type
@@ -162,13 +163,10 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 
 ## Next priorities (recommended order)
 
-1. **Status bar** (Tier 2) -- IN PROGRESS. Daemon state, active agent, indexing progress.
-2. **Annotation manager** (Tier 2) -- curated multi-file context for chat.
-3. **Setup wizard** (Tier 3) -- first-run experience, onboarding.
-4. **Remaining commands** (5) -- daemon logs, cost display, toggle permissions.
-5. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
-6. **Plan view** (Tier 4) -- agent step tracking.
-7. **Test view + Doc view** (Tier 4) -- lower priority agent views.
+1. **Setup wizard** (Tier 3) -- first-run experience, onboarding.
+2. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
+3. **Plan view** (Tier 4) -- agent step tracking.
+4. **Test view + Doc view** (Tier 4) -- lower priority agent views.
 
 ## UI Layout - DECIDED
 
