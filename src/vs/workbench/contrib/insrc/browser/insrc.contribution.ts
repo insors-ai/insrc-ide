@@ -38,4 +38,8 @@ import './chat/chatRegistration.js';
 import { InsrcDiffContribution } from './diff/diffRegistration.js';
 registerWorkbenchContribution2(InsrcDiffContribution.ID, InsrcDiffContribution, WorkbenchPhase.AfterRestored);
 
+// Status bar: daemon/agent status indicator
+import { InsrcStatusBarContribution } from './insrcStatusBar.js';
+registerWorkbenchContribution2(InsrcStatusBarContribution.ID, InsrcStatusBarContribution, WorkbenchPhase.AfterRestored);
+
 // TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)

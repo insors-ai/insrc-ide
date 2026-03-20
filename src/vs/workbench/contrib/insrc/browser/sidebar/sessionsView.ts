@@ -49,12 +49,22 @@ class DateGroupRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, I
 	readonly templateId = 'dateGroup';
 
 	renderTemplate(container: HTMLElement): IDateGroupTemplateData {
-		const label = dom.append(container, dom.$('.insrc-session-date-group'));
+		const row = dom.append(container, dom.$('.insrc-session-date-group'));
+		row.style.display = 'flex';
+		row.style.alignItems = 'center';
+		row.style.gap = '4px';
+		row.style.padding = '0 8px';
+
+		const icon = dom.append(row, dom.$('.codicon.codicon-calendar'));
+		icon.style.fontSize = '12px';
+		icon.style.opacity = '0.6';
+
+		const label = dom.append(row, dom.$('span'));
 		label.style.fontWeight = '600';
 		label.style.fontSize = '11px';
 		label.style.textTransform = 'uppercase';
 		label.style.letterSpacing = '0.5px';
-		label.style.padding = '0 8px';
+
 		return { label };
 	}
 
@@ -69,7 +79,7 @@ class DateGroupRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, I
 
 // -- Repo renderer --
 
-interface IRepoTemplateData { row: HTMLElement; label: HTMLElement; chatBtn: HTMLElement }
+interface IRepoTemplateData { row: HTMLElement; icon: HTMLElement; label: HTMLElement; chatBtn: HTMLElement }
 
 class RepoRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IRepoTemplateData> {
 	readonly templateId = 'repo';
@@ -81,33 +91,49 @@ class RepoRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IRepoT
 		row.style.display = 'flex';
 		row.style.alignItems = 'center';
 		row.style.padding = '0 8px';
+		row.style.gap = '4px';
+
+		const icon = dom.append(row, dom.$('.codicon.codicon-repo'));
+		icon.style.fontSize = '14px';
+		icon.style.opacity = '0.8';
 
 		const label = dom.append(row, dom.$('.insrc-session-repo'));
-		label.style.fontWeight = '700';
+		label.style.fontWeight = '600';
 		label.style.fontSize = '12px';
 		label.style.flex = '1';
 
 		const chatBtn = dom.append(row, dom.$('a.insrc-repo-chat-btn'));
 		chatBtn.title = 'Open Chat';
 		chatBtn.style.cursor = 'pointer';
-		chatBtn.style.opacity = '0.7';
+		chatBtn.style.display = 'inline-flex';
+		chatBtn.style.alignItems = 'center';
+		chatBtn.style.justifyContent = 'center';
+		chatBtn.style.width = '22px';
+		chatBtn.style.height = '18px';
 		chatBtn.style.marginLeft = '4px';
-		chatBtn.style.width = '16px';
-		chatBtn.style.height = '16px';
-		chatBtn.style.display = 'inline-block';
-		chatBtn.style.backgroundImage = `url('${FileAccess.asBrowserUri('vs/workbench/contrib/insrc/browser/media/insrc-chat.svg' as `vs/workbench/${string}`).toString(true)}')`;
-		chatBtn.style.backgroundSize = 'contain';
-		chatBtn.style.backgroundRepeat = 'no-repeat';
+		chatBtn.style.borderRadius = '3px';
+		chatBtn.style.border = '1px solid var(--vscode-contrastBorder, rgba(128,128,128,0.35))';
+		chatBtn.style.background = 'var(--vscode-button-secondaryBackground, rgba(128,128,128,0.1))';
 
-		return { row, label, chatBtn };
+		const chatIcon = dom.append(chatBtn, dom.$('span'));
+		chatIcon.style.width = '14px';
+		chatIcon.style.height = '14px';
+		chatIcon.style.display = 'inline-block';
+		chatIcon.style.backgroundImage = `url('${FileAccess.asBrowserUri('vs/workbench/contrib/insrc/browser/media/insrc-chat.svg' as `vs/workbench/${string}`).toString(true)}')`;
+		chatIcon.style.backgroundSize = 'contain';
+		chatIcon.style.backgroundRepeat = 'no-repeat';
+
+		return { row, icon, label, chatBtn };
 	}
 
 	renderElement(node: ITreeNode<SessionsTreeNode, FuzzyScore>, _index: number, data: IRepoTemplateData): void {
-		if (node.element.kind === 'repo') {
-			data.label.textContent = node.element.repoName;
+		const el = node.element;
+		if (el.kind === 'repo') {
+			data.label.textContent = el.repoName;
+			const repoPath = el.repoPath;
 			data.chatBtn.onclick = (e) => {
 				e.stopPropagation();
-				this._onChatClick(node.element.repoPath);
+				this._onChatClick(repoPath);
 			};
 		}
 	}
@@ -117,7 +143,7 @@ class RepoRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IRepoT
 
 // -- Session renderer --
 
-interface ISessionTemplateData { row: HTMLElement; time: HTMLElement; summary: HTMLElement }
+interface ISessionTemplateData { row: HTMLElement; icon: HTMLElement; time: HTMLElement; summary: HTMLElement }
 
 class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISessionTemplateData> {
 	readonly templateId = 'session';
@@ -125,9 +151,15 @@ class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISe
 	renderTemplate(container: HTMLElement): ISessionTemplateData {
 		const row = dom.append(container, dom.$('.insrc-session-row'));
 		row.style.display = 'flex';
-		row.style.gap = '6px';
+		row.style.alignItems = 'center';
+		row.style.gap = '4px';
 		row.style.padding = '0 8px';
 		row.style.overflow = 'hidden';
+
+		const icon = dom.append(row, dom.$('.codicon.codicon-comment-discussion'));
+		icon.style.fontSize = '13px';
+		icon.style.opacity = '0.5';
+		icon.style.flexShrink = '0';
 
 		const time = dom.append(row, dom.$('.insrc-session-time'));
 		time.style.flexShrink = '0';
@@ -140,8 +172,9 @@ class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISe
 		summary.style.textOverflow = 'ellipsis';
 		summary.style.whiteSpace = 'nowrap';
 		summary.style.fontSize = '12px';
+		summary.style.flex = '1';
 
-		return { row, time, summary };
+		return { row, icon, time, summary };
 	}
 
 	renderElement(node: ITreeNode<SessionsTreeNode, FuzzyScore>, _index: number, data: ISessionTemplateData): void {

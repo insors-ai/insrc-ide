@@ -18,6 +18,7 @@ import { IInsrcWorkspaceService } from '../../common/workspaceService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcConfigService } from '../../common/configService.js';
 import { IInsrcKeychainService } from '../../common/keychainService.js';
+import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID, INSRC_STEP_PROVIDERS_VIEW_ID } from './insrcViewContainer.js';
 
 // ---------------------------------------------------------------------------
@@ -572,5 +573,26 @@ registerAction2(class extends Action2 {
 				}
 			}
 		}
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Open Chat
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.openChat',
+			title: localize2('insrc.openChat', 'Open Chat'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.comment,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const viewsService = accessor.get(IViewsService);
+		await viewsService.openView('insrc.chatView', true);
 	}
 });
