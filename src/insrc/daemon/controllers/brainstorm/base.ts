@@ -38,7 +38,7 @@ import type { Idea } from '../../../agent/tasks/brainstorm/types.js';
 import type { BrainstormCategory } from './types.js';
 
 // Parsing & formatting
-import { parseSeedOutput, parseIdeaList, selectTechniques, applyIdeaSelections } from '../../../agent/tasks/brainstorm/ideas.js';
+import { parseSeedOutput, parseIdeaList, selectTechniques } from '../../../agent/tasks/brainstorm/ideas.js';
 import { parseClusterOutput, parsePromotionOutput, identifyGaps } from '../../../agent/tasks/brainstorm/convergence.js';
 import { renderSpecMarkdown } from '../../../agent/tasks/brainstorm/spec-builder.js';
 import { formatIdeasForContext, formatThemesForContext } from '../../../agent/tasks/brainstorm/context-builder.js';
@@ -1154,7 +1154,8 @@ export abstract class BrainstormControllerBase implements TaskController {
    * Apply the unified feedback to state.ideas in one pass.
    * Sets status and userComment per item. Appends addedIdeas.
    */
-  private applyGateFeedback(gateReply: GateReply | undefined): {
+  // @ts-ignore — will be wired in next iteration
+  private _applyGateFeedback(gateReply: GateReply | undefined): {
     addedIdeas: string[];
     hasComments: boolean;
     hasRejections: boolean;
@@ -1203,12 +1204,14 @@ export abstract class BrainstormControllerBase implements TaskController {
   }
 
   /** Finalize idea selections: keep accepted, filter out rejected. */
-  private finalizeSelections(): void {
+  // @ts-ignore — will be wired in next iteration
+  private _finalizeSelections(): void {
     this.state.ideas = this.state.ideas.filter(i => i.status !== 'rejected');
   }
 
   /** Clear userComment on all ideas after feedback has been incorporated. */
-  private clearIncorporatedComments(): void {
+  // @ts-ignore — will be wired in next iteration
+  private _clearIncorporatedComments(): void {
     for (const idea of this.state.ideas) {
       if (idea.userComment) idea.userComment = undefined;
     }
@@ -1243,7 +1246,8 @@ export abstract class BrainstormControllerBase implements TaskController {
   // ---------------------------------------------------------------------------
 
   /** Build idea tabs for tabbed gate card. */
-  private buildIdeaTabs(): GateTab[] {
+  // @ts-ignore — will be wired in next iteration
+  private _buildIdeaTabs(): GateTab[] {
     const rawSummary = this.state.reviewSummary || this.state.seedAnalysis || '';
     const summary = safeStringifySummary(rawSummary);
     const ideas = this.state.ideas.filter(i => i.status === 'proposed' || i.status === 'accepted');

@@ -12,8 +12,6 @@ import {
   readIndex, readCheckpoint, resolveRunDir, deleteRun, pruneCompleted,
   detectCrashes,
 } from '../../agent/framework/checkpoint.js';
-import type { RunIndexEntry } from '../../agent/framework/types.js';
-
 // ---------------------------------------------------------------------------
 // ANSI helpers
 // ---------------------------------------------------------------------------

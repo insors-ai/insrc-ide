@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AgentMessage, Channel, StepContext, GateOpts, GatePayload,
-  ReplyPayload, EmitPayload, ProgressPayload, CheckpointPayload,
+  ReplyPayload, EmitPayload, ProgressPayload,
 } from './types.js';
 import type {
   AgentConfig, LLMProvider, RecordFeedbackOpts,

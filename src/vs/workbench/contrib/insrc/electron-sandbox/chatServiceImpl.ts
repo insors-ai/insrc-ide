@@ -8,7 +8,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInsrcDaemonService, type IInsrcStreamHandle, type DaemonStreamMessage } from '../common/daemonService.js';
-import { IInsrcChatService, type ChatMessage, type ChatEvent, type CodeAnnotation, type GateInfo, type ProgressInfo, type ToolCallInfo, type EscalationInfo } from '../common/chatService.js';
+import { IInsrcChatService, type ChatMessage, type ChatEvent, type CodeAnnotation, type GateInfo, type ProgressInfo } from '../common/chatService.js';
 
 const STORAGE_KEY_REPO = 'insrc.chat.activeRepo';
 const STORAGE_KEY_SESSION = 'insrc.chat.activeSessionId';

@@ -12,7 +12,7 @@
  */
 
 import type { LLMMessage, Entity } from '../../shared/types.js';
-import type { AgentStep, StepContext, StepResult } from '../framework/types.js';
+import type { AgentStep, StepResult } from '../framework/types.js';
 import {
   buildSaveGatePayload, saveArtifact, parseGateReply,
   type ArtifactConfig, type ArtifactFormat,

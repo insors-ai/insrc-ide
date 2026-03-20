@@ -16,7 +16,6 @@ import type {
   ConfigCategory,
   ConfigEntry,
   ConfigNamespace,
-  ConfigScope,
   Language,
 } from '../shared/types.js';
 import { loadConfig } from '../agent/config.js';

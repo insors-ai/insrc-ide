@@ -5,7 +5,7 @@
  * to Claude. Used by Pair agent and Delegate agent execute-step.
  */
 
-import type { LLMProvider, LLMMessage } from '../../../shared/types.js';
+import type { LLMProvider } from '../../../shared/types.js';
 import {
   parseDiff, applyDiff, extractDiffFromResponse,
 } from '../diff-utils.js';

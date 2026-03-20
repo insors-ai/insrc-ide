@@ -6,7 +6,7 @@
  * The core loop is: execute-step → advance → (more steps? → execute-step, else → report)
  */
 
-import type { AgentStep, StepContext, StepResult as FrameworkStepResult } from '../../framework/types.js';
+import type { AgentStep } from '../../framework/types.js';
 import type { LLMMessage } from '../../../shared/types.js';
 import type { DelegateState } from './agent-state.js';
 import type {
@@ -18,7 +18,7 @@ import {
 import { runAgent, type RunnerOpts } from '../../framework/runner.js';
 import { plannerAgent } from '../../planner/agent.js';
 import type { PlannerInput } from '../../planner/agent-state.js';
-import type { Plan, Step } from '../../planner/types.js';
+import type { Plan } from '../../planner/types.js';
 import { TestChannel } from '../../framework/test-channel.js';
 import { investigate } from '../shared/investigate.js';
 import { generateAndValidate, applyApprovedDiff } from '../shared/codegen.js';

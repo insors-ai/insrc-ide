@@ -11,7 +11,7 @@ import { IQuickInputService } from '../../../../../platform/quickinput/common/qu
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
-import { Categories } from '../../../../../platform/action/common/actionCommonCategories.js';
+
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcAgentRunService } from '../../common/agentRunService.js';
 import { IInsrcWorkspaceService } from '../../common/workspaceService.js';

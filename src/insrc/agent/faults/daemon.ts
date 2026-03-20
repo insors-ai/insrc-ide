@@ -109,7 +109,7 @@ export async function attemptRestart(
   log: (msg: string) => void = toLogFn(getLogger('daemon')),
 ): Promise<boolean> {
   // Check if the daemon binary exists via insrc CLI
-  const sockPath = PATHS.sockFile;
+  void PATHS.sockFile; // referenced for future use
 
   log('[daemon] Attempting auto-restart...');
 

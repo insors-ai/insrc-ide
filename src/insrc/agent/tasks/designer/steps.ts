@@ -7,15 +7,14 @@
  * The LLM logic lives in requirements.ts, sketch.ts, detail.ts, assembly.ts, context.ts.
  */
 
-import type { AgentStep, StepContext, StepResult } from '../../framework/types.js';
+import type { AgentStep } from '../../framework/types.js';
 import type { DesignerState } from './agent-state.js';
-import type { DesignerInput, RequirementTodo, ParsedRequirement } from './types.js';
+import type { DesignerInput, RequirementTodo } from './types.js';
 import {
   extractRequirements,
   enhanceRequirements,
   reExtractWithFeedback,
   parseRequirementsList,
-  formatRequirementsList,
 } from './requirements.js';
 import { writeSketch, reviewSketch, reSketchWithFeedback, formatSketch } from './sketch.js';
 import { writeDetail, reDetailWithFeedback } from './detail.js';

@@ -12,10 +12,10 @@ import { buildSignals } from './smart-router.js';
 import { ClaudeProvider } from './providers/claude.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
-import { ping as pingDaemon, sessionSave, sessionPrune, planGet, planSave, planStepUpdate, planDelete, planNextStep, planResetStale } from './tools/mcp-client.js';
+import { ping as pingDaemon, sessionSave, sessionPrune, planGet, planSave, planStepUpdate, planDelete, planResetStale } from './tools/mcp-client.js';
 import {
   classifyOllamaError, formatOllamaFault, isOllamaDown,
-  classifyDaemonError, formatDaemonFault, attemptRestart, annotateStale, isGraphPotentiallyStale,
+  classifyDaemonError, formatDaemonFault, attemptRestart, isGraphPotentiallyStale,
   type ComponentState,
 } from './faults/index.js';
 import {
@@ -42,20 +42,15 @@ import { runAgent } from './framework/runner.js';
 import { ReplChannel } from './framework/channel.js';
 import { readIndex, readCheckpoint, resolveRunDir } from './framework/checkpoint.js';
 import type { RunResult } from './framework/types.js';
-import { runImplementPipeline } from './tasks/implement.js';
-import { runRefactorPipeline } from './tasks/refactor.js';
-import { runTestPipeline } from './tasks/test.js'; // legacy — kept for fallback
 import { testerAgent } from './tasks/tester/agent.js';
 import type { TesterState } from './tasks/tester/agent-state.js';
 import type { TesterInput } from './tasks/tester/types.js';
-import { runDebugPipeline } from './tasks/debug.js';
-import { findTestFile } from './tasks/test-runner.js';
 import { runGraphQuery } from './tasks/graph.js';
 import { runResearchPipeline } from './tasks/research.js';
 // review.ts still used by designer/review.ts for context assembly helpers
 import { runDocumentPipeline } from './tasks/document.js';
 import {
-  extractFilePaths, resolveAttachment, hasEscalationAttachment,
+  extractFilePaths, resolveAttachment,
   type ResolvedAttachment,
 } from './attachments/router.js';
 import { runForcedClaudePipeline } from './attachments/forced-claude.js';

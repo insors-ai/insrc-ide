@@ -7,7 +7,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  createRunDir, resolveRunDir, writeCheckpoint, readCheckpoint,
+  createRunDir, resolveRunDir, writeCheckpoint,
   writeMeta, appendEvent, acquireLock, releaseLock, updateIndex,
   cleanOrphanedTmp, readArtifact,
 } from './checkpoint.js';

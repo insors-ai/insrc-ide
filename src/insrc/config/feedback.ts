@@ -8,10 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type {
-  ConfigNamespace,
   ConfigScope,
-  Language,
-  LLMProvider,
   RecordFeedbackOpts,
 } from '../shared/types.js';
 import { PATHS } from '../shared/paths.js';

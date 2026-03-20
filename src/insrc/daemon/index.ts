@@ -20,7 +20,7 @@ import { setLogMode, getLogger } from '../shared/logger.js';
 setLogMode('daemon');
 const log = getLogger('daemon');
 import { getDb, initDb, closeDb } from '../db/client.js';
-import { listRepos, addRepo, removeRepo, updateRepoStatus } from '../db/repos.js';
+import { listRepos, addRepo, removeRepo } from '../db/repos.js';
 import { Watcher } from '../indexer/watcher.js';
 import { IndexQueue } from './queue.js';
 import { IndexerService } from '../indexer/index.js';
@@ -31,7 +31,7 @@ import {
   chatSend, chatResume,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
-import { resolveClosure, searchEntities, findCallers, findCallees, findDefinedIn } from '../db/search.js';
+import { resolveClosure, searchEntities, findCallers, findCallees } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
 import {
   saveTurn, closeSession, saveSession, seedFromPrior, deleteSessionsForRepo, pruneConversations,
@@ -46,7 +46,6 @@ import type { RegisteredRepo, DaemonStatus, Entity, Plan, PlanStepStatus, Config
 import { basename, dirname } from 'node:path';
 import { ConfigStore } from '../config/store.js';
 import { searchConfig, resolveTemplate } from '../config/search.js';
-import { formatScope } from '../config/paths.js';
 
 // ---------------------------------------------------------------------------
 // Startup

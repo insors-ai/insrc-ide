@@ -9,7 +9,7 @@
 
 import {
   mkdirSync, writeFileSync, readFileSync, renameSync, unlinkSync,
-  existsSync, rmSync, readdirSync, openSync, writeSync, closeSync,
+  rmSync, readdirSync, openSync, writeSync, closeSync,
   constants,
 } from 'node:fs';
 import { join, dirname } from 'node:path';

@@ -15,7 +15,7 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, extname } from 'node:path';
 import { getLogger } from '../shared/logger.js';
-import { splitDocument, type DocChunk, type SplitResult } from './doc-splitter.js';
+import { splitDocument, type DocChunk } from './doc-splitter.js';
 
 const log = getLogger('file-refs');
 

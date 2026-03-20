@@ -1,5 +1,5 @@
 import { Ollama } from 'ollama';
-import type { Entity, AgentConfig } from '../shared/types.js';
+import type { Entity } from '../shared/types.js';
 import { loadConfig } from '../agent/config.js';
 
 const config = loadConfig();

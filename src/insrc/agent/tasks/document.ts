@@ -3,7 +3,6 @@ import { getLogger, toLogFn } from '../../shared/logger.js';
 import {
   parseDiff, applyDiff, extractDiffFromResponse,
 } from './diff-utils.js';
-import { mcpCall, searchByFile } from '../tools/mcp-client.js';
 import { requestReindex } from './reindex.js';
 
 // ---------------------------------------------------------------------------

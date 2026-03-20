@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import type { LLMProvider, AgentConfig } from '../../../shared/types.js';
 import type { BrainstormState } from './agent-state.js';
-import type { SpecRequirement, SpecRevision, PromotionProposal, MergeProposal } from './types.js';
+import type { SpecRequirement, SpecRevision } from './types.js';
 import { buildStepContext } from './context-builder.js';
 
 // ---------------------------------------------------------------------------

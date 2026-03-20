@@ -14,7 +14,7 @@
  */
 
 import type { DbClient } from './client.js';
-import type { TurnRecord, ConversationEntryType, ConversationTier } from './conversations.js';
+import type { TurnRecord, ConversationTier } from './conversations.js';
 import {
   getAllTurns, getAllTurnsForRepo,
   deleteTurnsByIds, addCompactedTurns,

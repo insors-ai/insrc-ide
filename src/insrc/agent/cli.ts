@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { Intent, ExplicitProvider } from '../shared/types.js';
+import type { Intent } from '../shared/types.js';
 import { loadConfigWithKeys } from './config.js';
 import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
@@ -9,9 +9,9 @@ import { shouldEscalate } from './escalation.js';
 import { ClaudeProvider } from './providers/claude.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
-import { ping as pingDaemon, planGet, planSave } from './tools/mcp-client.js';
+import { ping as pingDaemon, planSave } from './tools/mcp-client.js';
 import {
-  classifyOllamaError, formatOllamaFault, isOllamaDown,
+  classifyOllamaError, isOllamaDown,
   classifyDaemonError, formatDaemonFault,
 } from './faults/index.js';
 import {
@@ -34,17 +34,14 @@ import { runAgent } from './framework/runner.js';
 import { ReplChannel } from './framework/channel.js';
 import { TestChannel } from './framework/test-channel.js';
 import type { RunResult } from './framework/types.js';
-import { runImplementPipeline } from './tasks/implement.js';
-import { runRefactorPipeline } from './tasks/refactor.js';
 import { runTestPipeline } from './tasks/test.js';
-import { runDebugPipeline } from './tasks/debug.js';
 import { findTestFile } from './tasks/test-runner.js';
 import { runGraphQuery } from './tasks/graph.js';
 import { runResearchPipeline } from './tasks/research.js';
 // review.ts still used by designer/review.ts for context assembly helpers
 import { runDocumentPipeline } from './tasks/document.js';
 import {
-  extractFilePaths, resolveAttachment, hasEscalationAttachment,
+  extractFilePaths, resolveAttachment,
 } from './attachments/router.js';
 import { runForcedClaudePipeline } from './attachments/forced-claude.js';
 import type { Attachment, ContentBlock } from '../shared/types.js';

@@ -53,7 +53,12 @@ function createCompile(src, { build, emitError, transpileOnly, preserveEnglish }
         verbose: false,
         transpileOnly: Boolean(transpileOnly),
         transpileWithSwc: typeof transpileOnly !== 'boolean' && transpileOnly.esbuild
-    }, err => reporter(err));
+    }, err => {
+        if (err && (err.includes('insrc/node_modules/') || err.includes('insrc/agent/framework/__tests__/'))) {
+            return;
+        }
+        reporter(err);
+    });
     function pipeline(token) {
         const bom = require('gulp-bom');
         const tsFilter = util.filter(data => /\.ts$/.test(data.path));

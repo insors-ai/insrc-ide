@@ -336,9 +336,6 @@ export class TesterController implements TaskController {
 
   finalize(state: TaskStateStore): FinalizeResult {
     const report = state.get<string>(K.REPORT) ?? '';
-    const results = state.get<FileResult[]>(K.FILE_RESULTS) ?? [];
-    const passing = results.filter(r => r.status === 'passing').length;
-    const total = results.length;
 
     return {
       output: report,

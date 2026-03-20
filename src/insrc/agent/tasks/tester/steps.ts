@@ -6,7 +6,7 @@
  *   review-tests → execute-tests → impl-bug-gate → report
  */
 
-import type { AgentStep, StepContext } from '../../framework/types.js';
+import type { AgentStep } from '../../framework/types.js';
 import type { LLMMessage } from '../../../shared/types.js';
 import type { TesterState } from './agent-state.js';
 import {
@@ -15,7 +15,7 @@ import {
 } from '../shared/artifact-save.js';
 import type {
   TestPlan, TestPlanEntry, TestFileResult,
-  FailureClassification, ImplementationBug,
+  ImplementationBug,
 } from './types.js';
 import {
   parseProviderMention, resolveStepProvider, consumeOverride, applyOverride,

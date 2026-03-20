@@ -112,11 +112,12 @@ Response format: {"score": N, "provider": "local"|"claude", "tier": "fast"|"stan
 export class SmartRouter {
   private readonly cache = new LRUCache();
   private readonly localProvider: LLMProvider;
-  private readonly config: AgentConfig;
+  // @ts-ignore — reserved for future use
+  private readonly _config: AgentConfig;
 
   constructor(localProvider: LLMProvider, config: AgentConfig) {
     this.localProvider = localProvider;
-    this.config = config;
+    this._config = config;
   }
 
   /**

@@ -47,7 +47,6 @@ interface QueryMatch {
  */
 export function classifyGraphQuery(message: string): QueryMatch {
   const msg = message.trim();
-  const lower = msg.toLowerCase();
 
   // Interpretive questions — re-route to research
   if (/^why\s+/i.test(msg) || /^how\s+should/i.test(msg) || /^is\s+(this|that|it)\s+/i.test(msg)) {

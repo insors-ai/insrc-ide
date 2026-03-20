@@ -11,7 +11,6 @@ import { classify, decompose, type DecomposedAction } from '../agent/classifier/
 import { selectProvider } from '../agent/router.js';
 import { detectScope } from '../agent/classifier/scope.js';
 import { runAgent } from '../agent/framework/runner.js';
-import { executeActions, type ActionRunner } from './action-executor.js';
 import { buildTasks } from './task-builder.js';
 import { runTaskPipeline, renderMarkdown, type TaskOrchestratorDeps } from './task.js';
 import { designerAgent } from '../agent/tasks/designer/agent.js';
@@ -26,7 +25,7 @@ import { ChatSessionPool } from './chat-sessions.js';
 import { resolveFileRefs, formatFileContext, type FileRefResult } from './file-refs.js';
 import { getLogger } from '../shared/logger.js';
 import type { IpcStreamMessage, LLMMessage } from '../shared/types.js';
-import type { AgentDefinition, RunResult, ReplyPayload } from '../agent/framework/types.js';
+import type { AgentDefinition, ReplyPayload } from '../agent/framework/types.js';
 import type { AssembledContext } from '../agent/context/index.js';
 import type { PairMode, PairInput } from '../agent/tasks/pair/types.js';
 import type { DelegateInput } from '../agent/tasks/delegate/types.js';
@@ -1004,7 +1003,7 @@ async function executeWithRetry(
 // Single action runner (used by DAG executor for multi-action prompts)
 // ---------------------------------------------------------------------------
 
-async function runSingleAction(
+export async function _runSingleAction(
   active: ReturnType<ChatSessionPool['get']> & object,
   channel: DaemonChannel,
   action: DecomposedAction,

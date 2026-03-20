@@ -35,12 +35,12 @@ import { registerParser } from './registry.js';
 type SyntaxNode = import('tree-sitter').SyntaxNode;
 
 /** Get the text of the first named child with the given field name. */
-function fieldText(node: SyntaxNode, fieldName: string): string {
+export function _fieldText(node: SyntaxNode, fieldName: string): string {
   return node.childForFieldName(fieldName)?.text ?? '';
 }
 
 /** Return true if a node (or any ancestor up to `stopType`) has a parent of the given type. */
-function hasAncestor(node: SyntaxNode, ancestorType: string, stopType?: string): boolean {
+export function _hasAncestor(node: SyntaxNode, ancestorType: string, stopType?: string): boolean {
   let cur: SyntaxNode | null = node.parent;
   while (cur !== null) {
     if (cur.type === ancestorType) return true;

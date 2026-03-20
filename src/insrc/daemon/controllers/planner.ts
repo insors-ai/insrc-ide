@@ -240,7 +240,6 @@ export class PlannerController implements TaskController {
 
   finalize(state: TaskStateStore): FinalizeResult {
     const output = state.get<string>(K.SERIALIZED_OUTPUT) ?? '';
-    const planType = state.get<string>(K.INFERRED_TYPE) ?? 'generic';
 
     return {
       output,

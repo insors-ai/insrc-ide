@@ -7,7 +7,7 @@ import { SmartRouter, SmartProviderResolver } from './smart-router.js';
 import { ContextManager, initSession } from './context/index.js';
 import { embedText } from './context/semantic.js';
 import { sessionClose, sessionSeed, sessionForget, sessionHistory } from './tools/mcp-client.js';
-import { HealthMonitor, type HealthSnapshot, type ComponentState } from './faults/index.js';
+import { HealthMonitor, type HealthSnapshot } from './faults/index.js';
 
 export interface SessionOpts {
   repoPath: string;

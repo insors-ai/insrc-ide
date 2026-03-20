@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, type Event } from '../../../../base/common/event.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -56,15 +56,14 @@ interface PendingRpc {
 // ---------------------------------------------------------------------------
 
 class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
-	private readonly _store = this._register(new DisposableStore());
 
-	private readonly _onMessage = this._store.add(new Emitter<DaemonStreamMessage>());
+	private readonly _onMessage = this._register(new Emitter<DaemonStreamMessage>());
 	readonly onMessage: Event<DaemonStreamMessage> = this._onMessage.event;
 
-	private readonly _onDidEnd = this._store.add(new Emitter<void>());
+	private readonly _onDidEnd = this._register(new Emitter<void>());
 	readonly onDidEnd: Event<void> = this._onDidEnd.event;
 
-	private readonly _onDidError = this._store.add(new Emitter<Error>());
+	private readonly _onDidError = this._register(new Emitter<Error>());
 	readonly onDidError: Event<Error> = this._onDidError.event;
 
 	private _inactivityTimer: ReturnType<typeof setTimeout> | undefined;

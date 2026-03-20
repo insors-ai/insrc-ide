@@ -149,7 +149,7 @@ export async function runTests(
   const { cmd, args } = buildTestCommand(fw, testFilePath, repoPath);
 
   return new Promise<TestResult>((resolve) => {
-    const proc = execFile(cmd, args, {
+    /* const proc = */ execFile(cmd, args, {
       cwd: repoPath,
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024, // 1MB

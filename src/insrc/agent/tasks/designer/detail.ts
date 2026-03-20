@@ -1,5 +1,5 @@
 import type { LLMProvider, LLMMessage } from '../../../shared/types.js';
-import type { DesignerInput, RequirementTodo, ParsedRequirement } from './types.js';
+import type { DesignerInput, RequirementTodo } from './types.js';
 import { DETAIL_SYSTEM, DETAIL_REVIEW_SYSTEM } from './prompts.js';
 import { formatSketch } from './sketch.js';
 import { compressHistory } from './context.js';

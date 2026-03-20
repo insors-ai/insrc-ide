@@ -6,7 +6,7 @@
  * The core loop is: propose → review-gate → apply → validate → (next TODO or review-gate)
  */
 
-import type { AgentStep, StepContext, StepResult } from '../../framework/types.js';
+import type { AgentStep } from '../../framework/types.js';
 import type { LLMMessage } from '../../../shared/types.js';
 import type { PairState } from './agent-state.js';
 import type { Proposal, TodoItem, DiffEntry } from './types.js';
@@ -16,7 +16,6 @@ import {
 import { investigate } from '../shared/investigate.js';
 import { generateAndValidate, applyApprovedDiff } from '../shared/codegen.js';
 import {
-  ANALYZE_SYSTEM,
   PROPOSE_IMPLEMENT_SYSTEM,
   PROPOSE_REFACTOR_SYSTEM,
   PROPOSE_DEBUG_SYSTEM,

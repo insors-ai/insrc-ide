@@ -3,7 +3,7 @@ import { getLogger, toLogFn } from '../../shared/logger.js';
 import { mcpCall } from '../tools/mcp-client.js';
 import {
   createSearchProvider, formatSearchResults,
-  type SearchProvider, type SearchResult,
+  type SearchResult,
 } from '../search/provider.js';
 
 // ---------------------------------------------------------------------------

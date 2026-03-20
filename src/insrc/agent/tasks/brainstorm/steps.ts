@@ -8,10 +8,10 @@
  * Each gate step: parseProviderMention → applyOverride → track editRounds.
  */
 
-import type { AgentStep, StepContext, StepResult } from '../../framework/types.js';
-import type { LLMProvider, Entity } from '../../../shared/types.js';
+import type { AgentStep, StepContext } from '../../framework/types.js';
+import type { Entity } from '../../../shared/types.js';
 import type { BrainstormState } from './agent-state.js';
-import type { BrainstormInput, PromotionProposal, MergeProposal } from './types.js';
+import type { BrainstormInput } from './types.js';
 import { assertDaemonReachable } from '../../tools/context-provider.js';
 import { planSearches, type PlannedSearch } from '../designer/search-planner.js';
 import { generateSeedIdeas, generateDivergeIdeas, applyIdeaSelections } from './ideas.js';

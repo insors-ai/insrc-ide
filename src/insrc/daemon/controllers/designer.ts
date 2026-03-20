@@ -297,9 +297,6 @@ export class DesignerController implements TaskController {
 
   finalize(state: TaskStateStore): FinalizeResult {
     const output = state.get<string>(K.ASSEMBLED_OUTPUT) ?? '';
-    const todos = state.get<RequirementTodo[]>(K.TODOS) ?? [];
-    const done = todos.filter(t => t.state === 'done').length;
-    const total = todos.length;
 
     return {
       output,

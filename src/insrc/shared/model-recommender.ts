@@ -8,7 +8,7 @@
  * - Budget shape name
  */
 
-import type { SystemInfo, OllamaModel } from './system-info.js';
+import type { SystemInfo } from './system-info.js';
 
 // ---------------------------------------------------------------------------
 // Recommendation output

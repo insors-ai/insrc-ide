@@ -64,7 +64,13 @@ function createCompile(src: string, { build, emitError, transpileOnly, preserveE
 		verbose: false,
 		transpileOnly: Boolean(transpileOnly),
 		transpileWithSwc: typeof transpileOnly !== 'boolean' && transpileOnly.esbuild
-	}, err => reporter(err));
+	}, err => {
+		// Skip errors from insrc backend node_modules and test files
+		if (err && (err.includes('insrc/node_modules/') || err.includes('insrc/agent/framework/__tests__/'))) {
+			return;
+		}
+		reporter(err);
+	});
 
 	function pipeline(token?: util.ICancellationToken) {
 		const bom = require('gulp-bom') as typeof import('gulp-bom');

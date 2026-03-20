@@ -19,7 +19,7 @@ import { buildSystemContext, type SystemContextOpts } from './system.js';
 import { evictToSummary, type ConversationTurn } from './summary.js';
 import { weightedRecent, weightedRecentTurns, getEvictable, MAX_RECENT_TURNS } from './recent.js';
 import { SemanticHistory, embedText } from './semantic.js';
-import { fetchTaskContext, initSession, resetSeenCounts, type DisclosureContext } from './task.js';
+import { fetchTaskContext, resetSeenCounts, type DisclosureContext } from './task.js';
 import { fitToBudget, type RawLayers } from './overflow.js';
 
 export { type AssembledContext } from './budget.js';

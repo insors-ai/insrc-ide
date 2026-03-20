@@ -171,8 +171,6 @@ export async function investigate(
   opts?: InvestigateOpts,
 ): Promise<InvestigationResult> {
   const provider = opts?.provider ?? ctx.providers.local;
-  const maxIterations = opts?.maxToolCalls ?? 10;
-
   const tools = [...INVESTIGATE_TOOLS];
   if (opts?.extraTools) {
     tools.push(...opts.extraTools);

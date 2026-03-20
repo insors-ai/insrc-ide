@@ -2,7 +2,6 @@ import {
   TOKEN_BUDGET,
   countTokens,
   type TokenBudget,
-  type LayerContent,
   type AssembledContext,
   type DroppedInfo,
 } from './budget.js';

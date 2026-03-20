@@ -6,7 +6,7 @@
 
 import type { AgentDefinition } from '../../framework/types.js';
 import type { PairState } from './agent-state.js';
-import type { PairInput, PairMode } from './types.js';
+import type { PairInput } from './types.js';
 import {
   checkContextStep,
   analyzeStep,

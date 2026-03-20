@@ -89,7 +89,7 @@ Respond with EXACTLY one of:
  */
 export async function generateAndValidate(opts: CodegenOpts): Promise<CodegenResult> {
   const {
-    userMessage, repoPath, codeContext, generateSystem,
+    userMessage, repoPath: _repoPath, codeContext, generateSystem,
     localProvider, claudeProvider,
     maxRetries = 2,
     escalateOnFailure = true,

@@ -206,7 +206,7 @@ export class InsrcSessionsViewPane extends ViewPane {
 		this._register(this.tree);
 
 		// Click on a session opens it in the chat panel
-		this._register(this.tree.onDidOpen((e: IOpenEvent<SessionsTreeNode | null>) => {
+		this._register(this.tree.onDidOpen((e: IOpenEvent<SessionsTreeNode | undefined>) => {
 			if (e.element?.kind === 'session') {
 				this._openSessionInChat(e.element.session.id);
 			}

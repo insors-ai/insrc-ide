@@ -148,7 +148,7 @@ export class ChatSessionPool {
     };
 
     this.sessions.set(sessionId, active);
-    log.info({ sessionId, repo: sessionRecord.repo, turns: turns.length }, 'chat session restored from DB');
+    log.info({ sessionId, repo, turns: turns.length }, 'chat session restored from DB');
     return sessionId;
   }
 

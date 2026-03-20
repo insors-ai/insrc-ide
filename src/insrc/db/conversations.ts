@@ -320,7 +320,7 @@ export async function pruneConversations(db: DbClient): Promise<{ expired: numbe
       byRepo.get(repo)!.push(row as Record<string, unknown>);
     }
 
-    for (const [repo, sessions] of byRepo) {
+    for (const [, sessions] of byRepo) {
       if (sessions.length <= 20) continue;
       sessions.sort((a, b) =>
         (b['createdAt'] as string).localeCompare(a['createdAt'] as string),

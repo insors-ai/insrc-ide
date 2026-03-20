@@ -10,7 +10,6 @@ import type {
   ConfigEntry,
   ConfigSearchOpts,
   ConfigSearchResult,
-  ConfigScope,
   TemplateQuery,
 } from '../shared/types.js';
 import { formatScope } from './paths.js';

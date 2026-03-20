@@ -1,4 +1,4 @@
-import type { LLMProvider, LLMMessage, ToolCall, ToolDefinition } from '../../shared/types.js';
+import type { LLMProvider, LLMMessage, ToolCall } from '../../shared/types.js';
 import { getLogger, toLogFn } from '../../shared/logger.js';
 import {
   parseDiff, applyDiff, splitByFile, extractDiffFromResponse,
