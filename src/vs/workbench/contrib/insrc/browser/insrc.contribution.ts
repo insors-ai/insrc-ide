@@ -46,4 +46,17 @@ registerWorkbenchContribution2(InsrcStatusBarContribution.ID, InsrcStatusBarCont
 import { InsrcAnnotationContribution } from './annotations/annotationManager.js';
 registerWorkbenchContribution2(InsrcAnnotationContribution.ID, InsrcAnnotationContribution, WorkbenchPhase.AfterRestored);
 
+// Setup wizard: EditorPane for first-run onboarding
+import { Registry } from '../../../../platform/registry/common/platform.js';
+import { EditorPaneDescriptor } from '../../../browser/editor.js';
+import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
+import { EditorExtensions } from '../../../common/editor.js';
+import { SetupWizardPane } from './setup/setupWizardPane.js';
+import { SetupWizardInput } from './setup/setupWizardInput.js';
+
+Registry.as<import('../../../browser/editor.js').IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(SetupWizardPane, SetupWizardPane.ID, 'insrc Setup'),
+	[new SyncDescriptor(SetupWizardInput)],
+);
+
 // TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)

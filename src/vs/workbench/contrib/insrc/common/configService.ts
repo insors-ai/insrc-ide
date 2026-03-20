@@ -28,4 +28,13 @@ export interface IInsrcConfigService {
 
 	/** Get hardware-optimized model recommendation */
 	getRecommendation(): Promise<Record<string, unknown>>;
+
+	/** List installed Ollama models */
+	listOllamaModels(): Promise<Array<{ name: string; size: number; parameterSize?: string; quantization?: string; family?: string }>>;
+
+	/** Search Ollama model library */
+	searchOllamaModels(query: string): Promise<Array<Record<string, unknown>>>;
+
+	/** List available Claude models (API or static fallback) */
+	listClaudeModels(): Promise<Array<{ id: string; displayName: string; createdAt: string }>>;
 }

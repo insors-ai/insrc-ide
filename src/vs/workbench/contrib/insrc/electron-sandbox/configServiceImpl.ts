@@ -69,4 +69,25 @@ export class InsrcConfigServiceImpl extends Disposable implements IInsrcConfigSe
 		}
 		return this.daemonService.rpc<Record<string, unknown>>('system.recommend', {});
 	}
+
+	async listOllamaModels(): Promise<Array<{ name: string; size: number; parameterSize?: string; quantization?: string; family?: string }>> {
+		if (!this.daemonService.isConnected) {
+			return [];
+		}
+		return this.daemonService.rpc('ollama.list', {});
+	}
+
+	async searchOllamaModels(query: string): Promise<Array<Record<string, unknown>>> {
+		if (!this.daemonService.isConnected) {
+			return [];
+		}
+		return this.daemonService.rpc('ollama.search', { query });
+	}
+
+	async listClaudeModels(): Promise<Array<{ id: string; displayName: string; createdAt: string }>> {
+		if (!this.daemonService.isConnected) {
+			return [];
+		}
+		return this.daemonService.rpc('claude.models', {});
+	}
 }

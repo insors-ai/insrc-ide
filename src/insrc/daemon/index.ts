@@ -481,6 +481,61 @@ async function main(): Promise<void> {
       return { system: info, recommendation, config };
     },
 
+    // Ollama model management
+    'ollama.list': async () => {
+      const { Ollama } = await import('ollama');
+      const config = JSON.parse(readFileSync(PATHS.config, 'utf-8')) as Record<string, unknown>;
+      const ollamaConfig = (config['ollama'] ?? {}) as Record<string, unknown>;
+      const host = (ollamaConfig['host'] as string) ?? 'http://localhost:11434';
+      const ollama = new Ollama({ host });
+      const { models } = await ollama.list();
+      return models.map(m => ({
+        name: m.name,
+        size: m.size,
+        parameterSize: m.details?.parameter_size,
+        quantization: m.details?.quantization_level,
+        family: m.details?.family,
+      }));
+    },
+
+    'ollama.search': async (params) => {
+      const { query } = params as { query: string };
+      const { request } = await import('undici');
+      const { body } = await request(`https://ollama.com/search?q=${encodeURIComponent(query)}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      const data = await body.json() as Record<string, unknown>;
+      return data['models'] ?? [];
+    },
+
+    // Claude model listing
+    'claude.models': async () => {
+      const { getKey } = await import('../shared/keystore.js');
+      const key = await getKey('ANTHROPIC_API_KEY');
+      if (key) {
+        try {
+          const Anthropic = (await import('@anthropic-ai/sdk')).default;
+          const client = new Anthropic({ apiKey: key });
+          const models = await client.models.list();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return models.data.map((m: any) => ({
+            id: m.id,
+            displayName: m.display_name ?? m.id,
+            createdAt: m.created_at ?? '',
+          }));
+        } catch (err) {
+          log.warn({ error: String(err) }, 'failed to list Claude models via API');
+        }
+      }
+      // Fallback: static catalog
+      return [
+        { id: 'claude-haiku-4-5', displayName: 'Claude Haiku 4.5', createdAt: '' },
+        { id: 'claude-sonnet-4-5', displayName: 'Claude Sonnet 4.5', createdAt: '' },
+        { id: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6', createdAt: '' },
+        { id: 'claude-opus-4-6', displayName: 'Claude Opus 4.6', createdAt: '' },
+      ];
+    },
+
     'config.show': async () => {
       try {
         const raw = readFileSync(PATHS.config, 'utf-8');
@@ -605,6 +660,23 @@ async function main(): Promise<void> {
     // Streaming handlers
     'chat.send':   chatSend,
     'chat.resume': chatResume,
+    'ollama.pull': async (params, send, signal) => {
+      const { model } = params as { model: string };
+      const { Ollama } = await import('ollama');
+      const config = JSON.parse(readFileSync(PATHS.config, 'utf-8')) as Record<string, unknown>;
+      const ollamaConfig = (config['ollama'] ?? {}) as Record<string, unknown>;
+      const host = (ollamaConfig['host'] as string) ?? 'http://localhost:11434';
+      const ollama = new Ollama({ host });
+      const stream = await ollama.pull({ model, stream: true });
+      for await (const progress of stream) {
+        if (signal.aborted) break;
+        const pct = progress.completed && progress.total
+          ? Math.round((progress.completed / progress.total) * 100) : 0;
+        send({ id: 0, stream: 'progress', data: { model, status: progress.status, pct } });
+      }
+      send({ id: 0, stream: 'done', data: { model } });
+      log.info({ model }, 'ollama.pull complete');
+    },
   });
 
   // Initialize chat session pool

@@ -20,7 +20,6 @@ import { IInsrcConfigService } from '../../common/configService.js';
 import { IInsrcKeychainService } from '../../common/keychainService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
-import { URI } from '../../../../../base/common/uri.js';
 import { ITerminalService } from '../../../terminal/browser/terminal.js';
 import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID, INSRC_STEP_PROVIDERS_VIEW_ID } from './insrcViewContainer.js';
 
@@ -597,6 +596,30 @@ registerAction2(class extends Action2 {
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const viewsService = accessor.get(IViewsService);
 		await viewsService.openView('insrc.chatView', true);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Open Setup Wizard
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.openSetupWizard',
+			title: localize2('insrc.openSetupWizard', 'Setup Wizard'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.gear,
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorService = accessor.get(IEditorService);
+		// Import must be static to avoid stale accessor
+		import('../setup/setupWizardInput.js').then(({ SetupWizardInput }) => {
+			editorService.openEditor(SetupWizardInput.getInstance());
+		});
 	}
 });
 
