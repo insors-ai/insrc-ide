@@ -57,7 +57,28 @@ export interface TurnTreeNode {
 // Date grouping helper
 // ---------------------------------------------------------------------------
 
-export function groupSessionsByDate(sessions: SessionInfo[]): DateGroupTreeNode[] {
+/** Group sessions by repo, then by date within each repo */
+export function groupSessionsByRepo(sessions: SessionInfo[]): RepoTreeNode[] {
+	const byRepo = new Map<string, SessionInfo[]>();
+	for (const s of sessions) {
+		const repo = s.repo || 'unknown';
+		if (!byRepo.has(repo)) {
+			byRepo.set(repo, []);
+		}
+		byRepo.get(repo)!.push(s);
+	}
+
+	return [...byRepo.entries()].map(([repoPath, repoSessions]) => ({
+		kind: 'repo' as const,
+		repoPath,
+		repoName: repoPath.split('/').pop() || repoPath,
+	}));
+}
+
+/** Group sessions by date for a specific repo */
+export function groupSessionsByDate(sessions: SessionInfo[], repoPath: string): DateGroupTreeNode[] {
+	const repoSessions = sessions.filter(s => s.repo === repoPath);
+
 	const now = new Date();
 	const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 	const yesterday = new Date(today.getTime() - 86_400_000);
@@ -69,7 +90,7 @@ export function groupSessionsByDate(sessions: SessionInfo[]): DateGroupTreeNode[
 		groups.set(label, []);
 	}
 
-	for (const session of sessions) {
+	for (const session of repoSessions) {
 		const date = new Date(session.createdAt);
 		let label: string;
 		if (date >= today) {
@@ -86,13 +107,13 @@ export function groupSessionsByDate(sessions: SessionInfo[]): DateGroupTreeNode[
 
 	const result: DateGroupTreeNode[] = [];
 	for (const label of order) {
-		const sessions = groups.get(label)!;
-		if (sessions.length > 0) {
+		const dateSessions = groups.get(label)!;
+		if (dateSessions.length > 0) {
 			result.push({
 				kind: 'dateGroup',
-				label: `${label} (${sessions.length})`,
-				repoPath: sessions[0]!.repo,
-				sessions,
+				label: `${label} (${dateSessions.length})`,
+				repoPath,
+				sessions: dateSessions,
 			});
 		}
 	}

@@ -15,6 +15,7 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
+import { FileAccess } from '../../../../../base/common/network.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
@@ -22,7 +23,7 @@ import type { IListVirtualDelegate } from '../../../../../base/browser/ui/list/l
 import type { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../../base/browser/ui/tree/tree.js';
 import { IOpenEvent, WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
 import { FuzzyScore } from '../../../../../base/common/filters.js';
-import { groupSessionsByDate, getNodeId, type SessionInfo, type SessionsTreeNode } from './sessionsTreeNodes.js';
+import { groupSessionsByRepo, groupSessionsByDate, getNodeId, type SessionInfo, type SessionsTreeNode } from './sessionsTreeNodes.js';
 
 const INSRC_CHAT_VIEW_ID = 'insrc.chatView';
 
@@ -60,6 +61,54 @@ class DateGroupRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, I
 	renderElement(node: ITreeNode<SessionsTreeNode, FuzzyScore>, _index: number, data: IDateGroupTemplateData): void {
 		if (node.element.kind === 'dateGroup') {
 			data.label.textContent = node.element.label;
+		}
+	}
+
+	disposeTemplate(): void { }
+}
+
+// -- Repo renderer --
+
+interface IRepoTemplateData { row: HTMLElement; label: HTMLElement; chatBtn: HTMLElement }
+
+class RepoRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IRepoTemplateData> {
+	readonly templateId = 'repo';
+
+	constructor(private readonly _onChatClick: (repoPath: string) => void) { }
+
+	renderTemplate(container: HTMLElement): IRepoTemplateData {
+		const row = dom.append(container, dom.$('.insrc-session-repo-row'));
+		row.style.display = 'flex';
+		row.style.alignItems = 'center';
+		row.style.padding = '0 8px';
+
+		const label = dom.append(row, dom.$('.insrc-session-repo'));
+		label.style.fontWeight = '700';
+		label.style.fontSize = '12px';
+		label.style.flex = '1';
+
+		const chatBtn = dom.append(row, dom.$('a.insrc-repo-chat-btn'));
+		chatBtn.title = 'Open Chat';
+		chatBtn.style.cursor = 'pointer';
+		chatBtn.style.opacity = '0.7';
+		chatBtn.style.marginLeft = '4px';
+		chatBtn.style.width = '16px';
+		chatBtn.style.height = '16px';
+		chatBtn.style.display = 'inline-block';
+		chatBtn.style.backgroundImage = `url('${FileAccess.asBrowserUri('vs/workbench/contrib/insrc/browser/media/insrc-chat.svg' as `vs/workbench/${string}`).toString(true)}')`;
+		chatBtn.style.backgroundSize = 'contain';
+		chatBtn.style.backgroundRepeat = 'no-repeat';
+
+		return { row, label, chatBtn };
+	}
+
+	renderElement(node: ITreeNode<SessionsTreeNode, FuzzyScore>, _index: number, data: IRepoTemplateData): void {
+		if (node.element.kind === 'repo') {
+			data.label.textContent = node.element.repoName;
+			data.chatBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._onChatClick(node.element.repoPath);
+			};
 		}
 	}
 
@@ -110,6 +159,8 @@ class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISe
 // -- Data source --
 
 class SessionsDataSource implements IAsyncDataSource<SessionsRoot, SessionsTreeNode> {
+	private _allSessions: SessionInfo[] = [];
+
 	constructor(private readonly daemonService: IInsrcDaemonService) { }
 
 	hasChildren(element: SessionsRoot | SessionsTreeNode): boolean {
@@ -117,27 +168,47 @@ class SessionsDataSource implements IAsyncDataSource<SessionsRoot, SessionsTreeN
 			return true;
 		}
 		const node = element as SessionsTreeNode;
-		return node.kind === 'dateGroup';
+		return node.kind === 'repo' || node.kind === 'dateGroup';
 	}
 
 	async getChildren(element: SessionsRoot | SessionsTreeNode): Promise<SessionsTreeNode[]> {
 		if ((element as SessionsRoot).kind === 'root') {
-			// Fetch sessions and group by date
 			if (!this.daemonService.isConnected) {
 				return [];
 			}
 			try {
-				const sessions = await this.daemonService.rpc<SessionInfo[]>('session.list');
-				if (!sessions || sessions.length === 0) {
-					return [];
+				// Fetch sessions and repos in parallel
+				const [sessions, repos] = await Promise.all([
+					this.daemonService.rpc<SessionInfo[]>('session.list').catch(() => [] as SessionInfo[]),
+					this.daemonService.rpc<Array<{ path: string; name: string }>>('repo.list').catch(() => []),
+				]);
+				this._allSessions = sessions || [];
+
+				// Build repo nodes from sessions
+				const repoNodes = groupSessionsByRepo(this._allSessions);
+				const repoPathsWithSessions = new Set(repoNodes.map(r => r.repoPath));
+
+				// Add repos that have no sessions
+				for (const repo of repos) {
+					if (!repoPathsWithSessions.has(repo.path)) {
+						repoNodes.push({
+							kind: 'repo',
+							repoPath: repo.path,
+							repoName: repo.name || repo.path.split('/').pop() || repo.path,
+						});
+					}
 				}
-				return groupSessionsByDate(sessions);
+
+				return repoNodes;
 			} catch {
 				return [];
 			}
 		}
 
 		const node = element as SessionsTreeNode;
+		if (node.kind === 'repo') {
+			return groupSessionsByDate(this._allSessions, node.repoPath);
+		}
 		if (node.kind === 'dateGroup') {
 			return node.sessions.map(s => ({ kind: 'session' as const, session: s }));
 		}
@@ -189,7 +260,7 @@ export class InsrcSessionsViewPane extends ViewPane {
 			'InsrcSessions',
 			treeContainer,
 			new SessionsDelegate(),
-			[new DateGroupRenderer(), new SessionRenderer()],
+			[new RepoRenderer((repoPath) => this._openChatForRepo(repoPath)), new DateGroupRenderer(), new SessionRenderer()],
 			new SessionsDataSource(this.daemonService),
 			{
 				identityProvider: { getId: (e: SessionsTreeNode) => getNodeId(e) },
@@ -228,6 +299,15 @@ export class InsrcSessionsViewPane extends ViewPane {
 			await this.viewsService.openView(INSRC_CHAT_VIEW_ID, true);
 		} catch {
 			// ignore - chat view may not be available
+		}
+	}
+
+	private async _openChatForRepo(repoPath: string): Promise<void> {
+		try {
+			await this.chatService.startSession(repoPath);
+			await this.viewsService.openView(INSRC_CHAT_VIEW_ID, true);
+		} catch {
+			// ignore
 		}
 	}
 }
