@@ -737,6 +737,7 @@ async function gateTaskResult(
     format: rendered.format,
     actions,
     ...(task.gateTabs ? { tabs: task.gateTabs } : {}),
+    ...(task.structured ? { structured: task.structured } : {}),
   } });
 
   const reply = await new Promise<ReplyPayload>((resolve, reject) => {

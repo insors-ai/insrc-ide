@@ -369,6 +369,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 					actions: msg.actions,
 					title: msg.title,
 					content: msg.content,
+					context: msg.structured,
 				};
 				this._onDidReceiveEvent.fire({ type: 'gate', gate });
 				break;

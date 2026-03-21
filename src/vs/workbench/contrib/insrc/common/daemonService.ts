@@ -14,7 +14,7 @@ import type { IDisposable } from '../../../../base/common/lifecycle.js';
 
 export type DaemonStreamMessage =
 	| { readonly type: 'delta'; readonly content: string }
-	| { readonly type: 'gate'; readonly gateId: string; readonly actions: string[]; readonly title: string; readonly content: string }
+	| { readonly type: 'gate'; readonly gateId: string; readonly actions: string[]; readonly title: string; readonly content: string; readonly structured?: Record<string, unknown> }
 	| { readonly type: 'progress'; readonly step: string; readonly status: string }
 	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
 	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }

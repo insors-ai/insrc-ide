@@ -17,6 +17,7 @@ import { IInsrcAgentRunService } from '../../common/agentRunService.js';
 import { IInsrcWorkspaceService } from '../../common/workspaceService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcConfigService } from '../../common/configService.js';
+import { IInsrcChatService } from '../../common/chatService.js';
 import { IInsrcKeychainService } from '../../common/keychainService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
@@ -665,6 +666,45 @@ registerAction2(class extends Action2 {
 		import('../setup/stepProviderEditorInput.js').then(({ StepProviderEditorInput }) => {
 			editorService.openEditor(StepProviderEditorInput.getInstance());
 		});
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Open Brainstorm
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.openBrainstorm',
+			title: localize2('insrc.openBrainstorm', 'Start Brainstorm'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.lightbulb,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const chatService = accessor.get(IInsrcChatService);
+		const repoService = accessor.get(IInsrcRepoService);
+
+		// Determine repo
+		const repos = repoService.repos;
+		let repoPath = chatService.activeRepo;
+		if (!repoPath && repos.length > 0) {
+			repoPath = repos[0]!.path;
+		}
+		if (!repoPath) {
+			return;
+		}
+
+		// Start a brainstorm session
+		const sessionId = chatService.activeSessionId ?? 'new';
+
+		const { BrainstormEditorInput } = await import('../brainstorm/brainstormEditorInput.js');
+		const input = new BrainstormEditorInput(sessionId, repoPath);
+		editorService.openEditor(input);
 	}
 });
 
