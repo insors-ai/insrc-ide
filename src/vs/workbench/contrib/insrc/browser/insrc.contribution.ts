@@ -16,6 +16,7 @@ import '../common/diffService.js';
 import '../common/configService.js';
 import '../common/keychainService.js';
 import '../common/insrcConfiguration.js';
+import '../common/lspToolService.js';
 
 // Sidebar: register insrc panes into Explorer container
 import './sidebar/insrcViewContainer.js';
@@ -45,6 +46,10 @@ registerWorkbenchContribution2(InsrcStatusBarContribution.ID, InsrcStatusBarCont
 // Annotations: code selection + notes, compile to chat context
 import { InsrcAnnotationContribution } from './annotations/annotationManager.js';
 registerWorkbenchContribution2(InsrcAnnotationContribution.ID, InsrcAnnotationContribution, WorkbenchPhase.AfterRestored);
+
+// LSP tool bridge: pushes diagnostics to daemon, handles reverse LSP queries
+import { InsrcLSPToolBridge } from './lspToolBridge.js';
+registerWorkbenchContribution2(InsrcLSPToolBridge.ID, InsrcLSPToolBridge, WorkbenchPhase.AfterRestored);
 
 // Setup wizard: EditorPane for first-run onboarding
 import { Registry } from '../../../../platform/registry/common/platform.js';

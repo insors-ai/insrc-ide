@@ -65,6 +65,11 @@ async function executeBuiltin(call: ToolCall): Promise<string> {
     case 'Bash':   return builtinBash(call.input);
     case 'WebSearch': return builtinWebSearch(call.input);
     case 'WebFetch':  return builtinWebFetch(call.input);
+    case 'lsp_diagnostics': return lspDiagnostics(call.input);
+    case 'lsp_definitions': return lspDefinitions(call.input);
+    case 'lsp_references': return lspReferences(call.input);
+    case 'lsp_hover': return lspHover(call.input);
+    case 'lsp_symbols': return lspSymbols(call.input);
     default:
       throw new Error(`No builtin handler for: ${call.name}`);
   }
@@ -268,6 +273,127 @@ async function builtinWebFetch(input: Record<string, unknown>): Promise<string> 
   }
 
   return text;
+}
+
+// ---------------------------------------------------------------------------
+// LSP tools — query IDE's language services via registered callback
+// Falls back to daemon-side knowledge graph when IDE is not connected.
+// ---------------------------------------------------------------------------
+
+// Callback set by the IDE bridge when connected
+let _lspCallback: ((method: string, params: Record<string, unknown>) => Promise<unknown>) | null = null;
+
+/** Register the LSP callback (called by the daemon when IDE connects) */
+export function registerLSPCallback(cb: (method: string, params: Record<string, unknown>) => Promise<unknown>): void {
+  _lspCallback = cb;
+}
+
+async function lspDiagnostics(input: Record<string, unknown>): Promise<string> {
+  if (!_lspCallback) {
+    // Fallback: run tsc/eslint check via shell
+    const filePath = input['file_path'] as string | undefined;
+    if (filePath) {
+      try {
+        const result = await runShell(`npx tsc --noEmit --pretty false "${filePath}" 2>&1 | head -50`, 30_000);
+        return result || 'No diagnostics found.';
+      } catch {
+        return 'LSP not available and tsc check failed. Open the file in the IDE to get diagnostics.';
+      }
+    }
+    return 'LSP not available. Open files in the IDE to get diagnostics.';
+  }
+  const result = await _lspCallback('getDiagnostics', {
+    filePath: input['file_path'],
+    severity: input['severity'],
+  });
+  const diags = result as Array<Record<string, unknown>>;
+  if (!diags || diags.length === 0) return 'No diagnostics found.';
+  return diags.map(d =>
+    `${d['severity']} ${d['file']}:${d['startLine']}:${d['startColumn']}: ${d['message']}${d['code'] ? ` [${d['code']}]` : ''}`
+  ).join('\n');
+}
+
+async function lspDefinitions(input: Record<string, unknown>): Promise<string> {
+  if (!_lspCallback) {
+    // Fallback: use grep to find definition
+    const filePath = input['file_path'] as string;
+    const line = input['line'] as number;
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      const lines = content.split('\n');
+      const targetLine = lines[line - 1] ?? '';
+      // Extract word at approximate column
+      const col = (input['column'] as number) ?? 1;
+      const wordMatch = targetLine.substring(col - 1).match(/^(\w+)/);
+      const word = wordMatch?.[1] ?? '';
+      if (word) {
+        const result = await runShell(`rg --line-number "\\b(class|interface|function|const|let|var|type|export)\\s+${word}\\b" "${dirname(filePath)}" -l --max-count=5 2>/dev/null | head -10`, 10_000);
+        return result || `Could not find definition of "${word}". Try opening the file in the IDE.`;
+      }
+    } catch { /* fallthrough */ }
+    return 'LSP not available. Open the file in the IDE for go-to-definition.';
+  }
+  const result = await _lspCallback('getDefinitions', input);
+  const locs = result as Array<Record<string, unknown>>;
+  if (!locs || locs.length === 0) return 'No definition found.';
+  return locs.map(l => `${l['file']}:${l['startLine']}:${l['startColumn']}`).join('\n');
+}
+
+async function lspReferences(input: Record<string, unknown>): Promise<string> {
+  if (!_lspCallback) {
+    const filePath = input['file_path'] as string;
+    const line = input['line'] as number;
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      const lines = content.split('\n');
+      const targetLine = lines[line - 1] ?? '';
+      const col = (input['column'] as number) ?? 1;
+      const wordMatch = targetLine.substring(col - 1).match(/^(\w+)/);
+      const word = wordMatch?.[1] ?? '';
+      if (word) {
+        const result = await runShell(`rg --line-number "\\b${word}\\b" "${dirname(filePath)}" --max-count=20 2>/dev/null | head -20`, 10_000);
+        return result || `No references found for "${word}".`;
+      }
+    } catch { /* fallthrough */ }
+    return 'LSP not available. Open the file in the IDE for find-references.';
+  }
+  const result = await _lspCallback('getReferences', input);
+  const refs = result as Array<Record<string, unknown>>;
+  if (!refs || refs.length === 0) return 'No references found.';
+  return refs.map(r => `${r['file']}:${r['startLine']}:${r['startColumn']}`).join('\n');
+}
+
+async function lspHover(input: Record<string, unknown>): Promise<string> {
+  if (!_lspCallback) {
+    return 'LSP hover not available. Open the file in the IDE for type information.';
+  }
+  const result = await _lspCallback('getHover', input);
+  return (result as string) || 'No hover information available.';
+}
+
+async function lspSymbols(input: Record<string, unknown>): Promise<string> {
+  if (!_lspCallback) {
+    // Fallback: parse file for declarations
+    const filePath = input['file_path'] as string;
+    try {
+      const result = await runShell(`rg --line-number "^(export\\s+)?(class|interface|function|const|let|type|enum)\\s+\\w+" "${filePath}" 2>/dev/null | head -30`, 10_000);
+      return result || 'No symbols found.';
+    } catch { /* fallthrough */ }
+    return 'LSP not available.';
+  }
+  const result = await _lspCallback('getDocumentSymbols', input);
+  const symbols = result as Array<Record<string, unknown>>;
+  if (!symbols || symbols.length === 0) return 'No symbols found.';
+  const formatSymbol = (s: Record<string, unknown>, indent = 0): string => {
+    const prefix = '  '.repeat(indent);
+    let line = `${prefix}${s['kind']} ${s['name']} (line ${s['startLine']}-${s['endLine']})`;
+    const children = s['children'] as Array<Record<string, unknown>> | undefined;
+    if (children && children.length > 0) {
+      line += '\n' + children.map(c => formatSymbol(c, indent + 1)).join('\n');
+    }
+    return line;
+  };
+  return symbols.map(s => formatSymbol(s)).join('\n');
 }
 
 // ---------------------------------------------------------------------------

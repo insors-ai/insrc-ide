@@ -1214,6 +1214,69 @@ const SIMPLE_COMPLETION_TOOLS: ToolDefinition[] = [
       required: ['entity'],
     },
   },
+  // LSP tools (diagnostics, definitions, references, hover, symbols)
+  {
+    name: 'lsp_diagnostics',
+    description: 'Get compiler/linter diagnostics (errors, warnings) for a file. Returns severity, message, line numbers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file (optional: omit for all files)' },
+        severity: { type: 'string', description: 'Filter: "error", "warning", "info", "hint" (optional)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'lsp_definitions',
+    description: 'Go to definition: find where a symbol at a given position is defined.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+        line: { type: 'number', description: 'Line number (1-based)' },
+        column: { type: 'number', description: 'Column number (1-based)' },
+      },
+      required: ['file_path', 'line', 'column'],
+    },
+  },
+  {
+    name: 'lsp_references',
+    description: 'Find all references to a symbol at a given position.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+        line: { type: 'number', description: 'Line number (1-based)' },
+        column: { type: 'number', description: 'Column number (1-based)' },
+      },
+      required: ['file_path', 'line', 'column'],
+    },
+  },
+  {
+    name: 'lsp_hover',
+    description: 'Get type information and documentation for a symbol at a given position.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+        line: { type: 'number', description: 'Line number (1-based)' },
+        column: { type: 'number', description: 'Column number (1-based)' },
+      },
+      required: ['file_path', 'line', 'column'],
+    },
+  },
+  {
+    name: 'lsp_symbols',
+    description: 'List all symbols (functions, classes, variables) in a file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+      },
+      required: ['file_path'],
+    },
+  },
 ];
 
 async function runSimpleCompletion(
