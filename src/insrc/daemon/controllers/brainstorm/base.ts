@@ -32,7 +32,7 @@ import type {
   Task, TaskResult, TaskStateStore, TaskFormat, GateTab, GateTabItem,
 } from '../../task.js';
 import type { BrainstormState } from '../../../agent/tasks/brainstorm/agent-state.js';
-import type { Idea } from '../../../agent/tasks/brainstorm/types.js';
+import type { Idea, IdeaSource } from '../../../agent/tasks/brainstorm/types.js';
 
 // Category types
 import type { BrainstormCategory } from './types.js';
@@ -331,7 +331,7 @@ export abstract class BrainstormControllerBase implements TaskController {
     // Include user-added ideas (most likely to introduce new concepts)
     const userIdeas = this.state.ideas.filter(i => i.reviewVerdict === 'user');
     for (const idea of userIdeas) {
-      queryParts.push(idea.text.slice(0, 100));
+      queryParts.push(idea.title);
     }
     // Fallback to the original problem if nothing else
     if (queryParts.length === 0) {
@@ -405,7 +405,7 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     // Combine idea texts into a single search query (top concepts)
     const searchText = ideasToEnhance
-      .map(i => i.text.slice(0, 80))
+      .map(i => i.title)
       .join(' ')
       .slice(0, 500);
 
@@ -480,8 +480,9 @@ export abstract class BrainstormControllerBase implements TaskController {
     for (let pos = 0; pos < enhanced.length && pos < ideasToEnhance.length; pos++) {
       const enh = enhanced[pos]!;
       const original = ideasToEnhance[pos]!;
-      original.text = enh.text;
-      if (enh.codeRefs.length > 0) original.codeRefs = enh.codeRefs;
+      original.title = enh.title;
+      original.body = enh.body;
+      original.references = enh.references;
       if (enh.tags.length > 0) original.tags = enh.tags;
     }
 
@@ -551,10 +552,10 @@ export abstract class BrainstormControllerBase implements TaskController {
     const priorAccepted = this.state.ideas.filter(i => i.status === 'accepted' && i.round < this.state.round);
 
     // Build verdict map from pre-refine ideas (keyed by text prefix for fuzzy match)
-    const verdictMap = new Map<string, { verdict: 'strong' | 'moderate' | 'weak' | 'user'; source: 'llm' | 'user' }>();
+    const verdictMap = new Map<string, { verdict: 'strong' | 'moderate' | 'weak' | 'user'; source: IdeaSource }>();
     for (const idea of this.state.ideas) {
       if (idea.reviewVerdict) {
-        verdictMap.set(idea.text.slice(0, 50).toLowerCase(), {
+        verdictMap.set(idea.title.slice(0, 50).toLowerCase(), {
           verdict: idea.reviewVerdict,
           source: idea.source,
         });
@@ -565,7 +566,7 @@ export abstract class BrainstormControllerBase implements TaskController {
     const startIndex = priorAccepted.length > 0 ? Math.max(...priorAccepted.map(i => i.index)) + 1 : 1;
     for (let i = 0; i < refinedIdeas.length; i++) {
       refinedIdeas[i]!.index = startIndex + i;
-      const match = verdictMap.get(refinedIdeas[i]!.text.slice(0, 50).toLowerCase());
+      const match = verdictMap.get(refinedIdeas[i]!.title.slice(0, 50).toLowerCase());
       if (match) {
         refinedIdeas[i]!.reviewVerdict = match.verdict;
         refinedIdeas[i]!.source = match.source;
@@ -606,11 +607,11 @@ export abstract class BrainstormControllerBase implements TaskController {
       this.state.lastStep = 'idea-discuss-search';
       return [{
         index: this.taskCounter++,
-        description: `Searching codebase for "${idea.text.slice(0, 40)}..."`,
+        description: `Searching codebase for "${idea.title.slice(0, 40)}..."`,
         kind: 'rpc',
         intent: 'brainstorm',
         rpcMethod: 'search.query',
-        rpcParams: { text: idea.text.slice(0, 200), limit: 10, filter: 'code' },
+        rpcParams: { text: (idea.title + '. ' + idea.body).slice(0, 200), limit: 10, filter: 'code' },
         stateKey: 'discussSearchOutput',
       }];
     }
@@ -620,7 +621,7 @@ export abstract class BrainstormControllerBase implements TaskController {
       const rejected = this.state.ideas.filter(i => i.status === 'rejected');
       const feedbackParts: string[] = [];
       if (rejected.length > 0) {
-        feedbackParts.push(`User rejected ${rejected.length} idea(s): ${rejected.map(i => `[${i.index}] ${i.text.slice(0, 60)}`).join('; ')}`);
+        feedbackParts.push(`User rejected ${rejected.length} idea(s): ${rejected.map(i => `[${i.index}] ${i.title.slice(0, 60)}`).join('; ')}`);
       }
       if (gateReply.feedback && gateReply.feedback !== rejected[0]?.id) {
         feedbackParts.push(gateReply.feedback);
@@ -745,11 +746,12 @@ export abstract class BrainstormControllerBase implements TaskController {
         this.state.input.repoPath || 'unknown',
       );
       if (refined.length > 0) {
-        idea.text = refined[0]!.text;
+        idea.title = refined[0]!.title;
+        idea.body = refined[0]!.body;
         if (refined[0]!.tags.length > 0) idea.tags = refined[0]!.tags;
-        if (refined[0]!.codeRefs.length > 0) idea.codeRefs = refined[0]!.codeRefs;
+        if (refined[0]!.references.length > 0) idea.references = refined[0]!.references;
       }
-      this.addDiscussionMessage('assistant', `Refined: ${idea.text}`);
+      this.addDiscussionMessage('assistant', `Refined: ${idea.title}`);
     }
 
     this.state.lastStep = 'idea-discuss';
@@ -764,7 +766,7 @@ export abstract class BrainstormControllerBase implements TaskController {
   private buildDiscussionContext(idea: Idea, currentMessage: string): string {
     const parts: string[] = [
       `## Original Problem\n${this.state.input.message}`,
-      `## Idea Being Discussed\n[${idea.index}] ${idea.text}`,
+      `## Idea Being Discussed\n[${idea.index}] ${idea.title}: ${idea.body}`,
     ];
     if (idea.reviewVerdict) parts.push(`Verdict: ${idea.reviewVerdict}`);
     if (idea.reviewRationale) parts.push(`Rationale: ${idea.reviewRationale}`);
@@ -976,7 +978,7 @@ export abstract class BrainstormControllerBase implements TaskController {
     const searchText = [
       theme.name,
       theme.description,
-      ...themeIdeas.slice(0, 3).map(i => i.text.slice(0, 60)),
+      ...themeIdeas.slice(0, 3).map(i => i.title),
     ].join(' ').slice(0, 500);
 
     return {
@@ -1181,13 +1183,18 @@ export abstract class BrainstormControllerBase implements TaskController {
     }
 
     // Append user-added ideas — tagged 'user' so LLMs preserve them
-    for (const text of fb.addedIdeas) {
+    for (const userText of fb.addedIdeas) {
+      const periodIdx = userText.indexOf('.');
+      const userTitle = periodIdx > 0 && periodIdx <= 80
+        ? userText.slice(0, periodIdx + 1).trim()
+        : userText.slice(0, 80).trim();
       this.state.ideas.push({
         id: randomBytes(16).toString('hex'),
         index: this.state.nextIdeaIndex++,
-        text,
+        title: userTitle,
+        body: userText,
+        references: [],
         tags: [],
-        codeRefs: [],
         round: this.state.round,
         status: 'proposed',
         source: 'user',
@@ -1258,8 +1265,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         label: 'Ideas',
         items: ideas.map(i => ({
           id: i.id,
-          title: i.reviewTitle || `[${i.index}] ${i.text.slice(0, 80)}`,
-          body: i.reviewDescription || i.text,
+          title: i.reviewTitle || `[${i.index}] ${i.title}`,
+          body: i.reviewDescription || i.body,
           verdict: i.reviewVerdict,
           tags: i.tags,
           status: 'pending' as const,
@@ -1283,7 +1290,7 @@ export abstract class BrainstormControllerBase implements TaskController {
           const themeIdeas = t.ideaIds
             .map(id => this.state.ideas.find(i => i.id === id))
             .filter((i): i is NonNullable<typeof i> => i != null);
-          const ideaNames = themeIdeas.map(i => `[${i.index}] ${(i.reviewTitle || i.text).slice(0, 120)}`).join('\n');
+          const ideaNames = themeIdeas.map(i => `[${i.index}] ${(i.reviewTitle || i.title).slice(0, 120)}`).join('\n');
           return {
             id: idx + 1,
             title: `${t.themeId ? `${t.themeId} — ` : ''}${t.name}`,
@@ -1410,7 +1417,7 @@ export abstract class BrainstormControllerBase implements TaskController {
     // Build idea items for a selectable list (each row is clickable)
     const items: GateTabItem[] = allIdeas.map(idea => ({
       id: idea.id,
-      title: `[${idea.index}] ${idea.text.slice(0, 80)}${idea.text.length > 80 ? '...' : ''}`,
+      title: `[${idea.index}] ${idea.title}`,
       status: idea.status === 'accepted' ? 'discussed' as const : 'pending' as const,
       verdict: idea.reviewVerdict ?? undefined,
       tags: idea.tags.length > 0 ? idea.tags : undefined,
@@ -1458,12 +1465,12 @@ export abstract class BrainstormControllerBase implements TaskController {
     );
 
     const content = [
-      `## Discussing: [${idea.index}] ${idea.text}`,
+      `## Discussing: [${idea.index}] ${idea.title}: ${idea.body}`,
       '',
       ...(idea.reviewVerdict ? [`**Verdict:** ${idea.reviewVerdict}`] : []),
       ...(idea.reviewRationale ? [`**Rationale:** ${idea.reviewRationale}`] : []),
       ...(idea.tags.length > 0 ? [`**Tags:** ${idea.tags.join(', ')}`] : []),
-      ...(idea.codeRefs.length > 0 ? [`**Refs:** ${idea.codeRefs.join(', ')}`] : []),
+      ...(idea.references.length > 0 ? [`**Refs:** ${idea.references.map(r => r.label).join(', ')}`] : []),
       '',
       ...(this.state.focusedIdeaContext
         ? ['### Code Context', this.state.focusedIdeaContext, '']
@@ -1481,7 +1488,7 @@ export abstract class BrainstormControllerBase implements TaskController {
       userMessage: content,
       passThrough: true,
       requiresGate: true,
-      gateTitle: `Discuss: [${idea.index}] ${idea.text.slice(0, 50)}`,
+      gateTitle: `Discuss: [${idea.index}] ${idea.title.slice(0, 50)}`,
       gateActions: [
         { name: 'accept', label: 'Accept' },
         { name: 'reject', label: 'Reject' },
@@ -1606,7 +1613,7 @@ export abstract class BrainstormControllerBase implements TaskController {
       .filter((i): i is NonNullable<typeof i> => i != null);
 
     const ideaContext = themeIdeas.map(i =>
-      `[${i.index}] ${i.reviewTitle || i.text}\n${i.reviewDescription || ''}\nTags: ${i.tags.join(', ')}${i.codeRefs.length > 0 ? `\nRefs: ${i.codeRefs.join(', ')}` : ''}`,
+      `[${i.index}] ${i.reviewTitle || i.title}\n${i.reviewDescription || i.body}\nTags: ${i.tags.join(', ')}${i.references.length > 0 ? `\nRefs: ${i.references.map(r => r.label).join(', ')}` : ''}`,
     ).join('\n\n');
 
     const userMessage = [

@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import type { LLMProvider, AgentConfig } from '../../../shared/types.js';
 import type { BrainstormState } from './agent-state.js';
-import type { BrainstormInput, Idea, IdeaStatus } from './types.js';
+import type { BrainstormInput, Idea, IdeaRef, IdeaSource, IdeaStatus } from './types.js';
 import { buildStepContext } from './context-builder.js';
 import { SEED_SYSTEM } from './prompts.js';
 
@@ -157,29 +157,38 @@ export function parseIdeaList(
   const lines = text.split('\n');
   let currentIndex = startIndex;
 
+  const source: IdeaSource = round === 1 ? 'seed' : 'diverge';
+
   for (const line of lines) {
     const match = line.match(/^\s*\[(\d+)\]\s*(.+)$/);
     if (!match) continue;
 
     const rawText = match[2]!.trim();
-    const { text: ideaText, tags, refs } = parseIdeaParts(rawText);
+    const { title, body, tags, refs } = parseIdeaParts(rawText);
 
-    if (ideaText.length < 5) continue; // Skip empty/tiny ideas
+    if (body.length < 5) continue; // Skip empty/tiny ideas
 
     const id = createHash('sha256')
       .update(`${repoPath}:${round}:${currentIndex}`)
       .digest('hex')
       .slice(0, 32);
 
+    const references: IdeaRef[] = refs.map(r => ({
+      type: 'code' as const,
+      path: r,
+      label: r,
+    }));
+
     ideas.push({
       id,
       index: currentIndex,
-      text: ideaText,
+      title,
+      body,
       status: 'proposed',
-      source: 'llm',
+      source,
       round,
       tags,
-      codeRefs: refs,
+      references,
     });
 
     currentIndex++;
@@ -188,7 +197,7 @@ export function parseIdeaList(
   return ideas;
 }
 
-function parseIdeaParts(raw: string): { text: string; tags: string[]; refs: string[] } {
+function parseIdeaParts(raw: string): { title: string; body: string; tags: string[]; refs: string[] } {
   let text = raw;
   let tags: string[] = [];
   let refs: string[] = [];
@@ -207,7 +216,16 @@ function parseIdeaParts(raw: string): { text: string; tags: string[]; refs: stri
     text = text.slice(0, tagsMatch.index);
   }
 
-  return { text: text.trim(), tags, refs };
+  const trimmed = text.trim();
+
+  // Split: title = first sentence (up to first period or 80 chars), body = everything
+  const periodIdx = trimmed.indexOf('.');
+  const title = periodIdx > 0 && periodIdx <= 80
+    ? trimmed.slice(0, periodIdx + 1).trim()
+    : trimmed.slice(0, 80).trim();
+  const body = trimmed;
+
+  return { title, body, tags, refs };
 }
 
 // ---------------------------------------------------------------------------
@@ -282,15 +300,22 @@ export function applyIdeaSelections(
       .update(`${repoPath}:${round}:user:${idx}`)
       .digest('hex')
       .slice(0, 32);
+    const userText = line.trim();
+    const periodIdx = userText.indexOf('.');
+    const userTitle = periodIdx > 0 && periodIdx <= 80
+      ? userText.slice(0, periodIdx + 1).trim()
+      : userText.slice(0, 80).trim();
+
     newIdeas.push({
       id,
       index: idx,
-      text: line.trim(),
+      title: userTitle,
+      body: userText,
       status: 'accepted',
       source: 'user',
       round,
       tags: [],
-      codeRefs: [],
+      references: [],
     });
     idx++;
   }

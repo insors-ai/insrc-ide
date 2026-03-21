@@ -126,7 +126,7 @@ function renderThemesHTML(themes: Theme[], ideas: Idea[]): string {
     if (themeIdeas.length > 0) {
       for (const idea of themeIdeas) {
         const statusClass = idea.status;
-        parts.push(`<div class="idea-item">[${idea.index}] ${escapeHtml(idea.text)} <span class="idea-status ${statusClass}">${idea.status}</span></div>`);
+        parts.push(`<div class="idea-item">[${idea.index}] ${escapeHtml(idea.title)} <span class="idea-status ${statusClass}">${idea.status}</span></div>`);
       }
     }
     parts.push('</div>');
@@ -196,7 +196,7 @@ function renderTraceabilityHTML(requirements: SpecRequirement[], ideas: Idea[]):
     const sourceIdeas = req.sourceIdeaIds
       .map(id => ideas.find(i => i.id === id))
       .filter((i): i is Idea => !!i)
-      .map(i => `[${i.index}] ${i.text.slice(0, 40)}`)
+      .map(i => `[${i.index}] ${i.title.slice(0, 40)}`)
       .join(', ');
 
     return `<tr>
@@ -218,7 +218,7 @@ function renderParkedHTML(ideas: Idea[]): string {
   if (parked.length === 0) return '';
 
   const items = parked.map(i =>
-    `<div class="idea-item">[${i.index}] ${escapeHtml(i.text)} <span class="idea-status parked">parked</span></div>`,
+    `<div class="idea-item">[${i.index}] ${escapeHtml(i.title)} <span class="idea-status parked">parked</span></div>`,
   ).join('\n');
 
   return `<h2>Parked Ideas</h2>\n${items}`;

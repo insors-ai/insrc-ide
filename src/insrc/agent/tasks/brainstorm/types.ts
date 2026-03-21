@@ -29,24 +29,40 @@ export type IdeaStatus =
   | 'accepted'
   | 'rejected'
   | 'parked'
+  | 'skipped'
   | 'refining'
   | 'promoted'
   | 'merged';
+
+export type IdeaSource = 'seed' | 'diverge' | 'user' | 'refine';
+
+/** A structured reference attached to an idea. */
+export interface IdeaRef {
+  type: 'code' | 'doc' | 'url';
+  path: string;
+  label: string;
+  line?: number | undefined;
+  snippet?: string | undefined;
+}
 
 /** A single idea in the brainstorming pool. */
 export interface Idea {
   id: string;
   index: number;
-  text: string;
+  /** Short descriptive title (1 line). */
+  title: string;
+  /** Detailed description (markdown). */
+  body: string;
+  /** Structured code/doc references. */
+  references: IdeaRef[];
   status: IdeaStatus;
-  source: 'llm' | 'user';
+  source: IdeaSource;
   round: number;
   parentId?: string | undefined;
   promotedTo?: string | undefined;
   mergedInto?: string | undefined;
   tags: string[];
   rationale?: string | undefined;
-  codeRefs: string[];
   // Claude review annotations (populated by review step)
   reviewTitle?: string | undefined;
   reviewDescription?: string | undefined;

@@ -30,10 +30,10 @@ Then generate 5–10 initial ideas. Each idea should:
 
 First output the analysis under a ## Analysis heading.
 
-Then output ideas as a numbered list:
+Then output ideas as a numbered list. Each idea should have a clear first sentence as title followed by elaboration:
 
-[1] Idea text here — tags: tag1, tag2 — refs: entity1, entity2
-[2] Another idea — tags: tag3 — refs: entity3
+[1] Short title sentence. Detailed description and elaboration here — tags: tag1, tag2 — refs: entity1, entity2
+[2] Another title sentence. More detail about this idea — tags: tag3 — refs: entity3
 
 If there are no relevant code references, omit the refs section.`;
 
@@ -167,8 +167,10 @@ Rules:
 
 ## Output Format
 
-[N] Idea text — tags: tag1, tag2 — refs: entity1, entity2
-[N+1] Another idea — tags: tag3 — refs: entity3
+Each idea should have a clear first sentence as title followed by elaboration:
+
+[N] Short title sentence. Detailed description here — tags: tag1, tag2 — refs: entity1, entity2
+[N+1] Another title sentence. More detail — tags: tag3 — refs: entity3
 
 If there are no relevant code references, omit the refs section.`;
 

@@ -174,7 +174,7 @@ export function parsePromotionOutput(
 
       promotions.push({
         ideaId: idea.id,
-        statement: fields['statement'] ?? idea.text,
+        statement: fields['statement'] ?? (idea.title + '. ' + idea.body),
         type: normalizeType(fields['type']),
         priority: normalizePriority(fields['priority']),
         acceptanceCriteria: parseCriteriaList(lines),

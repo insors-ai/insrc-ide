@@ -211,17 +211,17 @@ export function formatIdeasForContext(ideas: Idea[]): string {
   return ideas.map(i => {
     const userTag = i.reviewVerdict === 'user' ? ' [user]' : '';
     const tags = i.tags.length > 0 ? ` — tags: ${i.tags.join(', ')}` : '';
-    const refs = i.codeRefs.length > 0 ? ` — refs: ${i.codeRefs.join(', ')}` : '';
+    const refLabels = i.references.map(r => r.label);
+    const refs = refLabels.length > 0 ? ` — refs: ${refLabels.join(', ')}` : '';
     const comment = i.userComment ? `\n  User feedback: ${i.userComment}` : '';
-    return `[${i.index}]${userTag} ${i.text}${tags}${refs}${comment}`;
+    return `[${i.index}]${userTag} ${i.title}: ${i.body.slice(0, 100)}${tags}${refs}${comment}`;
   }).join('\n');
 }
 
-/** Format ideas briefly (index + first 80 chars). */
+/** Format ideas briefly (index + title). */
 export function formatIdeasBrief(ideas: Idea[]): string {
   return ideas.map(i => {
-    const text = i.text.length > 80 ? i.text.slice(0, 80) + '...' : i.text;
-    return `[${i.index}] ${text}`;
+    return `[${i.index}] ${i.title}`;
   }).join('\n');
 }
 
