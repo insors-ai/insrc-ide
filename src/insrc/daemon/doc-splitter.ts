@@ -37,12 +37,14 @@ export interface DocChunk {
 }
 
 export interface SplitOptions {
-  /** Max tokens per chunk (default 4000 — leaves room for system prompt + output) */
+  /** Max tokens per chunk (default 4000 -- leaves room for system prompt + output) */
   maxTokensPerChunk?: number | undefined;
   /** Whether to prepend document header to each chunk (default true) */
   includeHeader?: boolean | undefined;
   /** Max tokens for the header prefix (default 500) */
   headerBudget?: number | undefined;
+  /** Overlap tokens between adjacent chunks (default: 10% of maxTokensPerChunk) */
+  overlapTokens?: number | undefined;
 }
 
 export interface SplitResult {
@@ -107,6 +109,22 @@ export function splitDocument(
     }
   }
 
+  // Add overlap between adjacent chunks
+  const overlapChars = (options?.overlapTokens ?? Math.round((options?.maxTokensPerChunk ?? 4000) * 0.1)) * CHARS_PER_TOKEN;
+  if (overlapChars > 0 && finalChunks.length > 1) {
+    for (let i = 1; i < finalChunks.length; i++) {
+      const prevContent = finalChunks[i - 1]!.content;
+      // Take the last N chars from the previous chunk as overlap prefix
+      const overlapText = prevContent.slice(-overlapChars);
+      // Find a clean boundary (newline) within the overlap
+      const newlineIdx = overlapText.indexOf('\n');
+      const cleanOverlap = newlineIdx >= 0 ? overlapText.slice(newlineIdx + 1) : overlapText;
+      if (cleanOverlap.length > 0) {
+        finalChunks[i]!.content = `[...continued]\n${cleanOverlap}\n\n${finalChunks[i]!.content}`;
+      }
+    }
+  }
+
   // Re-index
   for (let i = 0; i < finalChunks.length; i++) {
     finalChunks[i]!.index = i;
@@ -121,6 +139,7 @@ export function splitDocument(
     originalSize: result.originalSize,
     chunks: result.chunks.length,
     headerSize: result.header.length,
+    overlapChars,
   }, 'document split');
 
   return result;

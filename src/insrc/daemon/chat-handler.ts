@@ -250,7 +250,8 @@ async function runChatMessage(
   }
   const pool = getPool();
 
-  // 0. Resolve file references in the message (multi-pass for large docs)
+  // 0. Resolve file references with per-session cache
+  active.fileCache.setTurn(session.turnIndex);
   const fileRefs = await resolveFileRefs(message, {
     cwd: session.repoPath,
     maxTokens: 6000,
@@ -258,15 +259,27 @@ async function runChatMessage(
     multiPass: true,
     chunkTokens: 4000,
   });
-  const fileContext = formatFileContext(fileRefs);
-  const hasDocChunks = fileRefs.some(f => f.chunks && f.chunks.length > 0);
+  // Update cache and report per-file progress
   if (fileRefs.length > 0) {
-    const chunkCount = fileRefs.reduce((acc, f) => acc + (f.chunks?.length ?? 0), 0);
-    const msg = hasDocChunks
-      ? `Read ${fileRefs.length} file(s) — ${chunkCount} sections for multi-pass processing`
-      : `Read ${fileRefs.length} referenced file(s)`;
+    for (let fi = 0; fi < fileRefs.length; fi++) {
+      const ref = fileRefs[fi]!;
+      try {
+        const cached = active.fileCache.getOrRead(ref.path);
+        const chunkCount = cached.chunks.length || 1;
+        const fileName = ref.path.split('/').pop() ?? ref.ref;
+        send({ id: requestId, stream: 'progress', data: {
+          message: `Reading ${fi + 1}/${fileRefs.length}: ${fileName} (${chunkCount} chunk${chunkCount > 1 ? 's' : ''})`,
+        }});
+      } catch { /* skip if file disappeared */ }
+    }
+  }
+  const fileContext = formatFileContext(fileRefs);
+  if (fileRefs.length > 0) {
+    const totalChunks = fileRefs.reduce((acc, f) => acc + (f.chunks?.length ?? 1), 0);
+    const cacheStats = active.fileCache.stats();
+    const msg = `${fileRefs.length} file(s), ${totalChunks} chunk(s) (${cacheStats.files} cached)`;
     send({ id: requestId, stream: 'progress', data: { message: msg } });
-    log.info({ files: fileRefs.map(f => f.ref), chunks: chunkCount, truncated: fileRefs.some(f => f.truncated) }, 'file references resolved');
+    log.info({ files: fileRefs.map(f => f.ref), totalChunks, cached: cacheStats.files, truncated: fileRefs.some(f => f.truncated) }, 'file references resolved');
   }
 
   // Enrich the message with file content for classification and agents
@@ -288,7 +301,22 @@ async function runChatMessage(
     semantic: assembled.semantic.tokens,
     code: assembled.code.tokens,
     total: assembled.totalTokens,
+    dropped: assembled.dropped.length,
   }, 'context assembled');
+
+  // Send overflow feedback to IDE
+  if (assembled.dropped.length > 0) {
+    const droppedSummary = assembled.dropped
+      .reduce((acc, d) => {
+        const key = `${d.layer}`;
+        acc[key] = (acc[key] ?? 0) + d.tokensDropped;
+        return acc;
+      }, {} as Record<string, number>);
+    const parts = Object.entries(droppedSummary).map(([layer, tokens]) => `${layer}: ${tokens} tokens`);
+    send({ id: requestId, stream: 'progress', data: {
+      message: `Context: ${assembled.totalTokens} tokens. Dropped: ${parts.join(', ')}`,
+    }});
+  }
 
   // 1. Decompose prompt into structured actions
   send({ id: requestId, stream: 'progress', data: { message: 'Analyzing prompt...' } });

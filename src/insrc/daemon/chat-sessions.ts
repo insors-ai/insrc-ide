@@ -13,6 +13,7 @@ import { DaemonChannel } from './channel.js';
 import { getLogger } from '../shared/logger.js';
 import { getSessionById, getTurnsForSession } from '../db/conversations.js';
 import { getDb } from '../db/client.js';
+import { SessionFileCache } from './file-cache.js';
 
 const log = getLogger('chat-sessions');
 
@@ -34,6 +35,8 @@ export interface ActiveSession {
   lastActivityAt: number;
   /** Free-text messages injected by the user mid-pipeline (via chat.inject). */
   injectedMessages: string[];
+  /** Per-session file cache for referenced files. */
+  fileCache: SessionFileCache;
 }
 
 export interface SessionInfo {
@@ -79,6 +82,7 @@ export class ChatSessionPool {
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       injectedMessages: [],
+      fileCache: new SessionFileCache(),
     };
 
     this.sessions.set(sessionId, active);
@@ -145,6 +149,7 @@ export class ChatSessionPool {
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       injectedMessages: [],
+      fileCache: new SessionFileCache(),
     };
 
     this.sessions.set(sessionId, active);
