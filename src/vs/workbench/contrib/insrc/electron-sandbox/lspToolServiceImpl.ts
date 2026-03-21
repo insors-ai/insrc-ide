@@ -130,9 +130,9 @@ export class InsrcLSPToolServiceImpl extends Disposable implements IInsrcLSPTool
 					if (!defs) { continue; }
 					const locations = Array.isArray(defs) ? defs : [defs];
 					for (const loc of locations) {
-						const l = loc as unknown as Record<string, unknown>;
-						const uri = l['targetUri'] ?? l['uri'];
-						const range = l['targetRange'] ?? l['range'];
+						const l = loc as unknown as Record<string, Record<string, unknown>>;
+						const uri = (l['targetUri'] ?? l['uri']) as { fsPath: string } | undefined;
+						const range = (l['targetRange'] ?? l['range']) as { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number } | undefined;
 						if (uri && range) {
 							results.push({
 								file: uri.fsPath,
