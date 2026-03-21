@@ -152,12 +152,48 @@ export async function runToolLoop(
     workingMessages.push({ role: 'assistant', content: assistantContent });
     producedMessages.push({ role: 'assistant', content: assistantContent });
 
-    // Append tool results as user message (standard pattern for tool-use loops)
-    const resultContent = toolResults
-      .map(r => {
+    // Append tool results — large outputs spill to temp file and get SmartRead-chunked
+    const MAX_INLINE_CHARS = 12_000; // ~4K tokens inline, larger goes to temp file
+    const resultContent = (await Promise.all(toolResults
+      .map(async r => {
         const prefix = r.isError ? '[error] ' : '';
-        return `<tool_result tool_call_id="${r.toolCallId}">\n${prefix}${r.content}\n</tool_result>`;
+        let content = r.content;
+        if (content.length > MAX_INLINE_CHARS) {
+          // Spill to temp file, then SmartRead it
+          const { writeFileSync, mkdirSync } = await import('node:fs');
+          const { join } = await import('node:path');
+          const { tmpdir } = await import('node:os');
+          const tempDir = join(tmpdir(), '.insrc', 'tool-output');
+          mkdirSync(tempDir, { recursive: true });
+          const tempPath = join(tempDir, `${r.toolCallId}-${Date.now()}.txt`);
+          writeFileSync(tempPath, content, 'utf-8');
+
+          const lineCount = content.split('\n').length;
+          const sizeKB = (content.length / 1024).toFixed(1);
+          opts.onProgress?.(`Tool output large (${lineCount} lines, ${sizeKB}KB) — chunking via SmartRead`);
+
+          // Use SmartRead to extract relevant parts
+          try {
+            const { smartRead } = await import('./smart-read.js');
+            const result = await smartRead(tempPath, opts.userPrompt ?? '', 4000, undefined, opts.onProgress);
+            content = result.content;
+          } catch {
+            // Fallback: head + tail
+            const lines = content.split('\n');
+            content = [
+              `[Large output: ${lineCount} lines, ${sizeKB}KB — saved to ${tempPath}]`,
+              '',
+              ...lines.slice(0, 50),
+              '',
+              `... [${lineCount - 70} lines in temp file] ...`,
+              '',
+              ...lines.slice(-20),
+            ].join('\n');
+          }
+        }
+        return `<tool_result tool_call_id="${r.toolCallId}">\n${prefix}${content}\n</tool_result>`;
       })
+    ))
       .join('\n\n');
 
     workingMessages.push({ role: 'user', content: resultContent });

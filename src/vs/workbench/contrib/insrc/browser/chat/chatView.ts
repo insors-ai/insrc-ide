@@ -21,6 +21,7 @@ import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcDiffService, extractDiffFromResponse, parseDiff, applyHunks } from '../../common/diffService.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
+import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
@@ -103,6 +104,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
 		@IInsrcDiffService private readonly diffService: IInsrcDiffService,
 		@IFileService private readonly fileService: IFileService,
+		@IClipboardService private readonly clipboardService: IClipboardService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -331,7 +333,7 @@ export class InsrcChatViewPane extends ViewPane {
 			e.stopPropagation();
 			// Get text content (strip HTML tags for assistant messages)
 			const text = content.textContent ?? '';
-			navigator.clipboard.writeText(text).then(() => {
+			this.clipboardService.writeText(text).then(() => {
 				copyBtn.classList.remove('codicon-copy');
 				copyBtn.classList.add('codicon-check');
 				setTimeout(() => {
@@ -402,7 +404,7 @@ export class InsrcChatViewPane extends ViewPane {
 				const viewer = btn.closest('.code-viewer');
 				const pre = viewer?.querySelector('pre');
 				if (pre) {
-					navigator.clipboard.writeText(pre.textContent ?? '');
+					this.clipboardService.writeText(pre.textContent ?? '');
 					btn.textContent = 'Copied!';
 					setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
 				}

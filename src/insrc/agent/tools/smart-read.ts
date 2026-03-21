@@ -194,10 +194,19 @@ async function handleDirectory(
 function detectFormat(filePath: string, sample: string): string {
   const ext = extname(filePath).toLowerCase();
 
+  // Content-based detection first (more accurate than extension)
+  const firstLine = sample.split('\n')[0] ?? '';
+  if (firstLine.startsWith('{') && firstLine.includes('"')) return 'json-lines';
+  if (firstLine.includes('\t') && sample.split('\n').slice(0, 5).every(l => l.split('\t').length > 2)) return 'csv';
+
   // Extension-based
   if (['.json', '.jsonl', '.ndjson'].includes(ext)) return 'json';
   if (['.csv', '.tsv'].includes(ext)) return 'csv';
-  if (['.log'].includes(ext)) return 'log';
+  if (['.log'].includes(ext)) {
+    // Check if it's actually structured JSON log (pino, bunyan, winston)
+    if (/^\{.*"level"/.test(firstLine)) return 'json-lines';
+    return 'log';
+  }
   if (['.md'].includes(ext)) return 'markdown';
   if (['.yaml', '.yml'].includes(ext)) return 'yaml';
   if (['.xml', '.html', '.htm'].includes(ext)) return ext.replace('.', '');
@@ -205,10 +214,6 @@ function detectFormat(filePath: string, sample: string): string {
   if (['.sql'].includes(ext)) return 'sql';
   if (['.sh', '.bash', '.zsh'].includes(ext)) return 'shell';
 
-  // Content-based
-  const firstLine = sample.split('\n')[0] ?? '';
-  if (firstLine.startsWith('{') && firstLine.includes('"')) return 'json-lines';
-  if (firstLine.includes('\t') && sample.split('\n').slice(0, 5).every(l => l.split('\t').length > 2)) return 'csv';
   if (/^\[\d{2}:\d{2}:\d{2}\]|\d{4}-\d{2}-\d{2}T/.test(firstLine)) return 'log';
 
   return 'text';
@@ -246,7 +251,8 @@ function planStrategy(format: string, prompt: string, lineCount: number, context
       return { type: 'grep', pattern: '"level":\\s*[45]0|"level":\\s*"(error|fatal|warn)"', maxResults: 30 };
     }
     if (format === 'log') {
-      return { type: 'grep', pattern: 'ERROR|FATAL|FAIL|Exception|panic|CRITICAL', maxResults: 30 };
+      // Match error markers at line start or after timestamp, not in payload content
+      return { type: 'grep', pattern: '^.*\\b(ERROR|FATAL|FAIL|CRITICAL|panic)\\b.*$', maxResults: 30 };
     }
     return { type: 'grep', pattern: 'error|Error|ERROR|fail|FAIL|exception|Exception', maxResults: 30 };
   }
