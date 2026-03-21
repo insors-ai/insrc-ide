@@ -23,6 +23,50 @@
 	flex-shrink: 0;
 }
 
+/* -- Navigation bar -- */
+.insrc-brainstorm-nav {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	padding: 4px 16px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	flex-shrink: 0;
+	background: var(--vscode-editorWidget-background);
+}
+
+.insrc-brainstorm-nav-btn {
+	padding: 2px 6px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	font-size: 14px;
+}
+
+.insrc-brainstorm-nav-btn:hover:not(:disabled) {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.insrc-brainstorm-nav-btn:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
+.insrc-brainstorm-nav-label {
+	font-size: 0.82em;
+	color: var(--vscode-descriptionForeground);
+	min-width: 50px;
+	text-align: center;
+}
+
+/* -- Action button: reopen -- */
+.action-reopen {
+	border-color: var(--vscode-textLink-foreground, #3794ff);
+	color: var(--vscode-textLink-foreground, #3794ff);
+}
+
 .insrc-brainstorm-header-left {
 	display: flex;
 	align-items: center;

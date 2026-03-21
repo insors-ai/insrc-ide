@@ -57,11 +57,19 @@ interface BrainstormProgress {
 	pending: number;
 }
 
+interface BrainstormTheme {
+	id: string;
+	name: string;
+	description: string;
+	ideaIds: string[];
+	status: string;
+}
+
 interface StructuredGateData {
 	phase: string;
 	itemType: string;
 	itemId: string;
-	item: BrainstormIdea;
+	item: BrainstormIdea | BrainstormTheme;
 	progress: BrainstormProgress;
 }
 
@@ -93,7 +101,12 @@ export class BrainstormEditorPane extends EditorPane {
 
 	private _phase: 'waiting' | 'ideation' | 'convergence' | 'preview' = 'waiting';
 	private _ideas: BrainstormIdea[] = [];
+	private _themes: BrainstormTheme[] = [];
 	private _currentGateId: string | undefined;
+	private _currentIdeaIndex = 0;
+	private _navPrevBtn!: HTMLButtonElement;
+	private _navNextBtn!: HTMLButtonElement;
+	private _navLabel!: HTMLElement;
 
 	constructor(
 		group: IEditorGroup,
@@ -133,6 +146,23 @@ export class BrainstormEditorPane extends EditorPane {
 		this._addIdeaBtn.textContent = '+ Add Idea';
 		this._addIdeaBtn.title = 'Add your own idea';
 		this._register(dom.addDisposableListener(this._addIdeaBtn, 'click', () => this._showAddIdeaForm()));
+
+		// Navigation bar (prev/next for browsing decided ideas)
+		const navBar = dom.append(this._container, dom.$('.insrc-brainstorm-nav'));
+		this._navPrevBtn = dom.append(navBar, dom.$('button.insrc-brainstorm-nav-btn')) as HTMLButtonElement;
+		this._navPrevBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronLeft));
+		this._navPrevBtn.title = 'Previous idea';
+		this._navPrevBtn.disabled = true;
+		this._register(dom.addDisposableListener(this._navPrevBtn, 'click', () => this._navigatePrev()));
+
+		this._navLabel = dom.append(navBar, dom.$('span.insrc-brainstorm-nav-label'));
+		this._navLabel.textContent = '';
+
+		this._navNextBtn = dom.append(navBar, dom.$('button.insrc-brainstorm-nav-btn')) as HTMLButtonElement;
+		this._navNextBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.chevronRight));
+		this._navNextBtn.title = 'Next idea';
+		this._navNextBtn.disabled = true;
+		this._register(dom.addDisposableListener(this._navNextBtn, 'click', () => this._navigateNext()));
 
 		// Main content area (card + spec panel side by side)
 		const main = dom.append(this._container, dom.$('.insrc-brainstorm-main'));
@@ -191,10 +221,25 @@ export class BrainstormEditorPane extends EditorPane {
 		}));
 	}
 
-	private _handleGate(gate: { gateId: string; actions: string[]; title?: string; context?: unknown }): void {
+	private _handleGate(gate: { gateId: string; actions: string[]; title?: string; content?: string; context?: unknown }): void {
 		const structured = gate.context as StructuredGateData | undefined;
-		if (!structured || structured.phase !== 'ideation') {
-			return; // Not a brainstorm gate
+
+		if (!structured) {
+			// Non-structured gate (e.g. preview/presentation) -- show content as HTML
+			if (gate.content && (gate.title?.includes('preview') || gate.title?.includes('Preview') || gate.title?.includes('presentation'))) {
+				this._showPreview(gate.content);
+				this._currentGateId = gate.gateId;
+			}
+			return;
+		}
+
+		if (structured.phase === 'convergence') {
+			this._handleConvergenceGate(gate);
+			return;
+		}
+
+		if (structured.phase !== 'ideation') {
+			return; // Unknown phase
 		}
 
 		this._currentGateId = gate.gateId;
@@ -204,16 +249,22 @@ export class BrainstormEditorPane extends EditorPane {
 
 		const data = structured;
 
-		// Track all ideas
-		if (data.item) {
-			const existing = this._ideas.find(i => i.id === data.item.id);
-			if (!existing) {
-				this._ideas.push(data.item);
+		// Track all ideas (only for ideation phase, item is BrainstormIdea)
+		const idea = data.item as BrainstormIdea;
+		if (idea && idea.title) {
+			const existingIdx = this._ideas.findIndex(i => i.id === idea.id);
+			if (existingIdx >= 0) {
+				this._ideas[existingIdx] = idea; // Update existing
+				this._currentIdeaIndex = existingIdx;
+			} else {
+				this._ideas.push(idea);
+				this._currentIdeaIndex = this._ideas.length - 1;
 			}
+			this._updateNavButtons();
 		}
 
 		// Render the current idea card
-		this._renderIdeaCard(data.item, gate.actions, data.progress);
+		this._renderIdeaCard(idea, gate.actions, data.progress);
 	}
 
 	private _handleProgress(step: string, status: string): void {
@@ -335,11 +386,184 @@ export class BrainstormEditorPane extends EditorPane {
 	}
 
 	// ---------------------------------------------------------------------------
+	// Navigation (prev/next through decided ideas)
+	// ---------------------------------------------------------------------------
+
+	private _navigatePrev(): void {
+		if (this._currentIdeaIndex > 0) {
+			this._currentIdeaIndex--;
+			this._showIdeaAtIndex(this._currentIdeaIndex);
+		}
+	}
+
+	private _navigateNext(): void {
+		if (this._currentIdeaIndex < this._ideas.length - 1) {
+			this._currentIdeaIndex++;
+			this._showIdeaAtIndex(this._currentIdeaIndex);
+		}
+	}
+
+	private _showIdeaAtIndex(index: number): void {
+		const idea = this._ideas[index];
+		if (!idea) { return; }
+
+		this._updateNavButtons();
+
+		// Show as read-only card (no action buttons) for decided ideas
+		const isDecided = idea.status === 'accepted' || idea.status === 'rejected' || idea.status === 'parked';
+		const actions = isDecided
+			? ['reopen']  // Only reopen action for decided ideas
+			: ['approve', 'reject', 'diverge', 'skip', 'park', 'discuss'];
+
+		if (this._cardWidget) {
+			this._cardWidget.dispose();
+			this._cardWidget = undefined;
+		}
+
+		this._cardWidget = this.instantiationService.createInstance(
+			BrainstormCardWidget,
+			this._cardArea,
+			{
+				id: idea.id,
+				title: idea.title,
+				body: idea.body,
+				references: idea.references,
+				status: idea.status,
+				tags: idea.tags,
+				reviewVerdict: idea.reviewVerdict,
+				reviewRationale: idea.reviewRationale,
+			},
+			actions,
+			(action: string, feedback?: string) => {
+				if (action === 'reopen') {
+					// Reopen: change status back to proposed and re-present as active
+					idea.status = 'proposed';
+					this._showIdeaAtIndex(index);
+				} else if (this._currentGateId) {
+					this.chatService.replyToGate(this._currentGateId, action, feedback);
+				}
+			},
+			(message: string) => {
+				if (this._currentGateId) {
+					this.chatService.replyToGate(this._currentGateId, 'respond', message);
+				}
+			},
+		);
+	}
+
+	private _updateNavButtons(): void {
+		this._navPrevBtn.disabled = this._currentIdeaIndex <= 0;
+		this._navNextBtn.disabled = this._currentIdeaIndex >= this._ideas.length - 1;
+		this._navLabel.textContent = this._ideas.length > 0
+			? `${this._currentIdeaIndex + 1} / ${this._ideas.length}`
+			: '';
+	}
+
+	// ---------------------------------------------------------------------------
+	// Convergence phase (theme cards)
+	// ---------------------------------------------------------------------------
+
+	private _handleConvergenceGate(gate: { gateId: string; actions: string[]; context?: unknown }): void {
+		const structured = gate.context as StructuredGateData | undefined;
+		if (!structured || structured.itemType !== 'theme') { return; }
+
+		this._currentGateId = gate.gateId;
+		this._phase = 'convergence';
+		this._headerPhase.textContent = 'Convergence';
+		this._emptyState.classList.add('hidden');
+
+		const theme = structured.item as BrainstormTheme;
+
+		// Track themes
+		const existingIdx = this._themes.findIndex(t => t.id === theme.id);
+		if (existingIdx >= 0) {
+			this._themes[existingIdx] = theme;
+		} else {
+			this._themes.push(theme);
+		}
+
+		// Find ideas belonging to this theme
+		const themeIdeas = theme.ideaIds
+			.map(id => this._ideas.find(i => i.id === id))
+			.filter((i): i is BrainstormIdea => i !== undefined);
+
+		// Render theme as a card with merged ideas listed
+		if (this._cardWidget) {
+			this._cardWidget.dispose();
+			this._cardWidget = undefined;
+		}
+
+		const themeBody = [
+			theme.description,
+			'',
+			'**Merged Ideas:**',
+			...themeIdeas.map(i => `- ${i.title}`),
+		].join('\n');
+
+		this._cardWidget = this.instantiationService.createInstance(
+			BrainstormCardWidget,
+			this._cardArea,
+			{
+				id: theme.id,
+				title: theme.name,
+				body: themeBody,
+				references: [],
+				status: theme.status,
+				tags: [],
+			},
+			gate.actions,
+			(action: string, feedback?: string) => {
+				if (this._currentGateId) {
+					this.chatService.replyToGate(this._currentGateId, action, feedback);
+				}
+			},
+			(message: string) => {
+				if (this._currentGateId) {
+					this.chatService.replyToGate(this._currentGateId, 'respond', message);
+				}
+			},
+		);
+
+		this._updateProgress(structured.progress);
+	}
+
+	// ---------------------------------------------------------------------------
+	// Preview phase (final document)
+	// ---------------------------------------------------------------------------
+
+	private _showPreview(content: string): void {
+		this._phase = 'preview';
+		this._headerPhase.textContent = 'Preview';
+		this._emptyState.classList.add('hidden');
+
+		if (this._cardWidget) {
+			this._cardWidget.dispose();
+			this._cardWidget = undefined;
+		}
+
+		dom.clearNode(this._cardArea);
+		const previewCard = dom.append(this._cardArea, dom.$('.insrc-brainstorm-card'));
+		const previewBody = dom.append(previewCard, dom.$('.insrc-brainstorm-card-body'));
+		previewBody.innerHTML = content;
+
+		// Show in spec panel too
+		this._specContent.innerHTML = content;
+		if (!this._specVisible) {
+			this._toggleSpec();
+		}
+	}
+
+	// ---------------------------------------------------------------------------
 	// Spec panel
 	// ---------------------------------------------------------------------------
 
 	private _toggleSpec(): void {
 		this._specVisible = !this._specVisible;
 		this._specPanel.classList.toggle('hidden', !this._specVisible);
+	}
+
+	appendSpecSection(html: string): void {
+		const section = dom.append(this._specContent, dom.$('div'));
+		section.innerHTML = html;
 	}
 }

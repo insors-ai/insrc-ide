@@ -184,6 +184,9 @@ export class BrainstormCardWidget extends Disposable {
 			case 'skip': return 'Skip';
 			case 'park': return 'Park';
 			case 'discuss': return 'Discuss';
+			case 'reopen': return 'Reopen';
+			case 'split': return 'Split';
+			case 'edit': return 'Edit';
 			default: return action;
 		}
 	}
@@ -196,6 +199,9 @@ export class BrainstormCardWidget extends Disposable {
 			case 'skip': return 'Skip for now, come back later';
 			case 'park': return 'Set aside, review after all others';
 			case 'discuss': return 'Enter discussion';
+			case 'reopen': return 'Re-open this decided idea for review';
+			case 'split': return 'Break this theme into smaller themes';
+			case 'edit': return 'Edit this theme';
 			default: return '';
 		}
 	}
