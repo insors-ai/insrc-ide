@@ -11,7 +11,7 @@ import '../common/sessionService.js';
 import '../common/workspaceService.js';
 import '../common/repoService.js';
 import '../common/agentRunService.js';
-import '../common/chatService.js';
+import { IInsrcChatService } from '../common/chatService.js';
 import '../common/diffService.js';
 import '../common/configService.js';
 import '../common/keychainService.js';
@@ -81,9 +81,54 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(BrainstormEditorInput)],
 );
 
+// Brainstorm auto-open: listens for brainstorm intent and opens the EditorPane
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
+
+class BrainstormAutoOpenContribution extends Disposable {
+	static readonly ID = 'insrc.brainstormAutoOpen';
+	private _opened = false;
+
+	constructor(
+		@IInsrcChatService chatService: IInsrcChatService,
+		@IEditorService private readonly editorService: IEditorService,
+	) {
+		super();
+		this._register(chatService.onDidReceiveEvent(event => {
+			if (this._opened) { return; }
+
+			// Detect brainstorm from progress intent or structured gate
+			if (event.type === 'progress') {
+				const status = event.progress.status || event.progress.step;
+				if (status.includes('Intent: brainstorm') || status.includes('brainstorm')) {
+					this._openBrainstormPane(chatService);
+				}
+			} else if (event.type === 'gate') {
+				const ctx = event.gate.context as Record<string, unknown> | undefined;
+				if (ctx && ctx['phase'] === 'ideation') {
+					this._openBrainstormPane(chatService);
+				}
+			}
+		}));
+
+		// Reset opened flag when session changes
+		this._register(chatService.onDidChangeSession(() => {
+			this._opened = false;
+		}));
+	}
+
+	private _openBrainstormPane(chatService: IInsrcChatService): void {
+		this._opened = true;
+		const sessionId = chatService.activeSessionId ?? 'brainstorm';
+		const repoPath = chatService.activeRepo ?? '';
+		const input = new BrainstormEditorInput(sessionId, repoPath);
+		this.editorService.openEditor(input);
+	}
+}
+
+registerWorkbenchContribution2(BrainstormAutoOpenContribution.ID, BrainstormAutoOpenContribution, WorkbenchPhase.AfterRestored);
+
 // Prompt Notepad: full editor for composing large prompts
 import './notepad/promptNotepadCommands.js';
 import { PromptNotepadContribution } from './notepad/promptNotepadRegistration.js';
 registerWorkbenchContribution2(PromptNotepadContribution.ID, PromptNotepadContribution, WorkbenchPhase.AfterRestored);
-
-// TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)
