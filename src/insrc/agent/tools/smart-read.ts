@@ -28,6 +28,10 @@ interface SmartReadResult {
   metadata: string;
 }
 
+export interface SmartReadProgressCallback {
+  (message: string): void;
+}
+
 /**
  * Smart read: check file size, sample format, plan extraction, execute.
  *
@@ -35,12 +39,14 @@ interface SmartReadResult {
  * @param userPrompt The user's original question (used to plan extraction)
  * @param contextBudgetTokens Available context budget in tokens (used to calculate max chunks)
  * @param provider Optional LLM provider for planning (falls back to heuristics)
+ * @param onProgress Callback for progress updates sent to IDE
  */
 export async function smartRead(
   filePath: string,
   userPrompt: string,
   contextBudgetTokens = 4000,
   provider?: LLMProvider,
+  onProgress?: SmartReadProgressCallback,
 ): Promise<SmartReadResult> {
 
   // Step 1: stat
@@ -49,6 +55,8 @@ export async function smartRead(
   const lines = raw.split('\n');
   const lineCount = lines.length;
   const sizeKB = (fileStat.size / 1024).toFixed(1);
+
+  onProgress?.(`Reading ${filePath.split('/').pop()} (${lineCount} lines, ${sizeKB} KB)`);
 
   // Small file: return full content
   if (lineCount <= SMALL_FILE_THRESHOLD) {
@@ -73,24 +81,30 @@ export async function smartRead(
   const strategy = planStrategy(format, userPrompt, lineCount, contextBudgetTokens);
 
   log.info({ filePath, lineCount, format, strategy: strategy.type }, 'SmartRead planned');
+  onProgress?.(`Strategy: ${strategy.type} (format: ${format}, ${lineCount} lines)`);
 
   // Step 4: execute
   let extracted: string;
   switch (strategy.type) {
     case 'grep':
+      onProgress?.(`Searching for: ${strategy.pattern}`);
       extracted = await executeGrep(filePath, strategy.pattern!, strategy.maxResults ?? 50);
       break;
     case 'head-tail':
+      onProgress?.(`Reading first ${strategy.headLines ?? 50} + last ${strategy.tailLines ?? 20} lines`);
       extracted = formatHeadTail(lines, strategy.headLines ?? 50, strategy.tailLines ?? 20);
       break;
     case 'section':
+      onProgress?.(`Extracting section: ${strategy.sectionPattern}`);
       extracted = extractSection(lines, strategy.sectionPattern!);
       break;
     case 'structured':
+      onProgress?.('Running structured extraction');
       extracted = await executeStructured(filePath, strategy.command!);
       break;
     case 'chunked':
-      extracted = executeChunked(raw, filePath, strategy.keywords ?? [], strategy.maxChunks ?? 5);
+      onProgress?.(`Chunking into sections (max ${strategy.maxChunks} chunks)`);
+      extracted = executeChunked(raw, filePath, strategy.keywords ?? [], strategy.maxChunks ?? 5, onProgress);
       break;
     default:
       extracted = formatHeadTail(lines, 100, 20);
@@ -275,14 +289,17 @@ async function executeStructured(filePath: string, command: string): Promise<str
 /**
  * Chunked strategy: split file using doc-splitter, select most relevant chunks.
  */
-function executeChunked(content: string, filePath: string, keywords: string[], maxChunks: number): string {
+function executeChunked(content: string, filePath: string, keywords: string[], maxChunks: number, onProgress?: SmartReadProgressCallback): string {
   const split = splitDocument(content, filePath, { maxTokensPerChunk: 4000 });
+  onProgress?.(`Split into ${split.chunks.length} chunks`);
 
   if (split.chunks.length <= maxChunks) {
     // All chunks fit — return them all
-    const parts = split.chunks.map(c =>
-      `--- Chunk ${c.index + 1}/${c.total}: ${c.heading || 'section'} ---\n${c.content}`
-    );
+    onProgress?.(`Returning all ${split.chunks.length} chunks`);
+    const parts = split.chunks.map((c, i) => {
+      onProgress?.(`Processing chunk ${i + 1}/${split.chunks.length}: ${c.heading || 'section'}`);
+      return `--- Chunk ${c.index + 1}/${c.total}: ${c.heading || 'section'} ---\n${c.content}`;
+    });
     return `[${split.chunks.length} chunk(s), showing all]\n\n${parts.join('\n\n')}`;
   }
 
@@ -308,6 +325,7 @@ function executeChunked(content: string, filePath: string, keywords: string[], m
   // Sort by score descending, take top N
   scored.sort((a, b) => b.score - a.score);
   const selected = scored.slice(0, maxChunks);
+  onProgress?.(`Selected ${selected.length} most relevant chunks from ${split.chunks.length}`);
 
   // Re-sort by original order for coherent reading
   selected.sort((a, b) => a.chunk.index - b.chunk.index);

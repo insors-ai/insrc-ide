@@ -48,6 +48,8 @@ export interface ToolLoopOpts {
   onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
   /** User's original prompt (passed to SmartRead for intelligent extraction) */
   userPrompt?: string | undefined;
+  /** Progress callback for tool execution updates */
+  onProgress?: ((message: string) => void) | undefined;
 }
 
 export interface ToolLoopResult {
@@ -133,7 +135,10 @@ export async function runToolLoop(
       }
 
       // Execute (auto-execute or approved)
-      const execCtx: ToolExecContext = { userPrompt: opts.userPrompt };
+      const execCtx: ToolExecContext = {
+        userPrompt: opts.userPrompt,
+        onProgress: opts.onProgress,
+      };
       const result = await executeTool(call, execCtx);
       onToolResult?.(call, result);
       toolResults.push(result);

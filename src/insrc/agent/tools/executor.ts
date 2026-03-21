@@ -20,6 +20,8 @@ export interface ToolExecContext {
   userPrompt?: string | undefined;
   /** Available context budget in tokens (used by SmartRead for chunk sizing) */
   contextBudgetTokens?: number | undefined;
+  /** Progress callback sent to IDE */
+  onProgress?: ((message: string) => void) | undefined;
 }
 
 /**
@@ -72,6 +74,8 @@ async function executeBuiltin(call: ToolCall, context?: ToolExecContext): Promis
           call.input['file_path'] as string,
           context.userPrompt,
           context.contextBudgetTokens ?? 4000,
+          undefined,
+          context.onProgress,
         );
         return result.content;
       }

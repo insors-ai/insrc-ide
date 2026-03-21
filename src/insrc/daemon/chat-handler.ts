@@ -1422,6 +1422,9 @@ async function runSimpleCompletion(
           message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + (call.input['file_path'] as string).split('/').pop() : call.input?.['pattern'] ? ': ' + call.input['pattern'] : call.input?.['query'] ? ': ' + call.input['query'] : call.input?.['path'] ? ': ' + (call.input['path'] as string).split('/').pop() : ''}`,
         }});
       },
+      onProgress: (msg) => {
+        send({ id: requestId, stream: 'progress', data: { message: msg } });
+      },
     });
 
     const responseText = result.response || accumulatedText;
