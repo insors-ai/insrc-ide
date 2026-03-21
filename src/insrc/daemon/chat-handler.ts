@@ -24,7 +24,7 @@ import { DaemonChannel } from './channel.js';
 import { ChatSessionPool } from './chat-sessions.js';
 import { resolveFileRefs, formatFileContext, type FileRefResult } from './file-refs.js';
 import { getLogger } from '../shared/logger.js';
-import type { IpcStreamMessage, LLMMessage } from '../shared/types.js';
+import type { IpcStreamMessage, LLMMessage, ToolDefinition } from '../shared/types.js';
 import type { AgentDefinition, ReplyPayload } from '../agent/framework/types.js';
 import type { AssembledContext } from '../agent/context/index.js';
 import type { PairMode, PairInput } from '../agent/tasks/pair/types.js';
@@ -1137,6 +1137,85 @@ export async function _runSingleAction(
   return channel.responseText || `[${definition.id} agent completed]`;
 }
 
+// Read-only tools for simple completion (same as investigate, no write tools)
+const SIMPLE_COMPLETION_TOOLS: ToolDefinition[] = [
+  {
+    name: 'Read',
+    description: 'Read a file from disk. Returns the file contents.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file to read' },
+        offset: { type: 'number', description: 'Line number to start reading from (optional)' },
+        limit: { type: 'number', description: 'Number of lines to read (optional)' },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    name: 'Glob',
+    description: 'Search for files by glob pattern. Returns matching file paths.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Glob pattern (e.g. "src/**/*.ts")' },
+        path: { type: 'string', description: 'Base directory to search in (optional)' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'Grep',
+    description: 'Search file contents by regex pattern. Returns matching lines.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Regex pattern to search for' },
+        path: { type: 'string', description: 'File or directory to search in (optional)' },
+        glob: { type: 'string', description: 'Glob to filter files (e.g. "*.ts") (optional)' },
+        include_context: { type: 'number', description: 'Lines of context around matches (optional)' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'graph_search',
+    description: 'Vector similarity search over code entity embeddings. Returns ranked entities.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural language search query' },
+        limit: { type: 'number', description: 'Max results (default 10)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'graph_callers',
+    description: 'Return entities that call a given entity.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity: { type: 'string', description: 'Entity name or ID' },
+        hops: { type: 'number', description: 'Max hop depth (default 1)' },
+      },
+      required: ['entity'],
+    },
+  },
+  {
+    name: 'graph_callees',
+    description: 'Return entities called by a given entity.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity: { type: 'string', description: 'Entity name or ID' },
+        hops: { type: 'number', description: 'Max hop depth (default 1)' },
+      },
+      required: ['entity'],
+    },
+  },
+];
+
 async function runSimpleCompletion(
   session: Session,
   _channel: DaemonChannel,
@@ -1148,27 +1227,47 @@ async function runSimpleCompletion(
   assembled?: AssembledContext,
 ): Promise<void> {
   try {
-    // Use context manager's buildMessages if assembled context is available
+    // Build messages from assembled context
     let messages: LLMMessage[];
     if (assembled) {
       messages = session.contextManager.buildMessages(assembled, message);
       log.debug({ layers: assembled.totalTokens }, 'simple completion: using assembled context');
     } else {
-      // Fallback: build context from scratch (shouldn't happen if caller assembles)
       const queryEmbed = await session.contextManager.embedQuery(message);
       const freshAssembled = await session.contextManager.assemble(message, queryEmbed);
       messages = session.contextManager.buildMessages(freshAssembled, message);
       log.debug({ layers: freshAssembled.totalTokens }, 'simple completion: assembled fresh context');
     }
 
-    const response = await session.ollamaProvider.complete(
-      messages,
-      { maxTokens: 4096 },
-    );
+    // Use tool loop so the LLM can read files, search code, query graph
+    const { runToolLoop } = await import('../agent/tools/loop.js');
 
-    const resRendered = renderMarkdown(response.text);
+    let accumulatedText = '';
+
+    const result = await runToolLoop(messages, {
+      provider: session.ollamaProvider,
+      tools: SIMPLE_COMPLETION_TOOLS,
+      intent: 'research',
+      permissionMode: 'auto-accept',  // read-only tools, no validation needed
+      maxTokens: 4096,
+      onTextDelta: (delta) => {
+        accumulatedText += delta;
+      },
+      onToolCall: (call) => {
+        send({ id: requestId, stream: 'progress', data: {
+          message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + (call.input['file_path'] as string).split('/').pop() : call.input?.['pattern'] ? ': ' + call.input['pattern'] : call.input?.['query'] ? ': ' + call.input['query'] : ''}`,
+        }});
+      },
+    });
+
+    const responseText = result.response || accumulatedText;
+    const resRendered = renderMarkdown(responseText);
     send({ id: requestId, stream: 'delta', data: { text: resRendered.text, format: resRendered.format } });
-    send({ id: requestId, stream: 'done', data: { summary: response.text.slice(0, 100) } });
+    send({ id: requestId, stream: 'done', data: { summary: responseText.slice(0, 100) } });
+
+    if (result.iterations > 0) {
+      log.info({ toolIterations: result.iterations, hitLimit: result.hitLimit }, 'simple completion used tools');
+    }
 
     // Persist turn and update context manager
     await persistTurn(session, message, resRendered.text, resRendered.format);
