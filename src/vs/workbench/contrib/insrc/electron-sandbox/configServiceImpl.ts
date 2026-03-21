@@ -90,4 +90,11 @@ export class InsrcConfigServiceImpl extends Disposable implements IInsrcConfigSe
 		}
 		return this.daemonService.rpc('claude.models', {});
 	}
+
+	async getAgentBindings(): Promise<Record<string, Record<string, string>>> {
+		if (!this.daemonService.isConnected) {
+			return {};
+		}
+		return this.daemonService.rpc('config.agents', {});
+	}
 }

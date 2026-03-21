@@ -37,4 +37,7 @@ export interface IInsrcConfigService {
 
 	/** List available Claude models (API or static fallback) */
 	listClaudeModels(): Promise<Array<{ id: string; displayName: string; createdAt: string }>>;
+
+	/** Get all agent step bindings (defaults + config overrides) */
+	getAgentBindings(): Promise<Record<string, Record<string, string>>>;
 }

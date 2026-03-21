@@ -12,7 +12,7 @@
  *  8. Handle SIGTERM / SIGINT for graceful shutdown
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import * as lancedb from '@lancedb/lancedb';
 import { PATHS } from '../shared/paths.js';
 import { setLogMode, getLogger } from '../shared/logger.js';
@@ -67,6 +67,33 @@ async function main(): Promise<void> {
   mkdirSync(PATHS.feedback,    { recursive: true });
   mkdirSync(PATHS.conventions, { recursive: true });
   mkdirSync(PATHS.logDir,      { recursive: true });
+
+  // 2b. Ensure config.json exists with agent defaults
+  if (!existsSync(PATHS.config)) {
+    writeFileSync(PATHS.config, JSON.stringify({
+      logLevel: 'info',
+      ollama: { host: 'http://localhost:11434' },
+      models: {
+        local: 'qwen3-coder:latest',
+        embedding: 'qwen3-embedding:4b',
+        embeddingDim: 2560,
+        tiers: { fast: 'claude-haiku-4-5', standard: 'claude-sonnet-4-6', powerful: 'claude-opus-4-6' },
+        context: { local: 16384, localMaxOutput: 8192, claude: 200000, claudeMaxOutput: 8192, charsPerToken: 3 },
+      },
+      permissions: { mode: 'validate' },
+      routing: { mode: 'static' },
+    }, null, 2), 'utf-8');
+    log.info('created default config.json');
+  } else {
+    // Ensure models.agents exists in config
+    try {
+      const raw = JSON.parse(readFileSync(PATHS.config, 'utf-8')) as Record<string, unknown>;
+      const models = (raw['models'] ?? {}) as Record<string, unknown>;
+      if (!models['agents']) {
+        log.info('config.json missing models.agents, will be populated on first config.agents call');
+      }
+    } catch { /* ignore parse errors */ }
+  }
 
   // 3. Open DB
   const db = await getDb();
@@ -534,6 +561,55 @@ async function main(): Promise<void> {
         { id: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6', createdAt: '' },
         { id: 'claude-opus-4-6', displayName: 'Claude Opus 4.6', createdAt: '' },
       ];
+    },
+
+    // Return all agent step bindings (defaults + config overrides)
+    'config.agents': async () => {
+      const { pairAgent } = await import('../agent/tasks/pair/agent.js');
+      const { delegateAgent } = await import('../agent/tasks/delegate/agent.js');
+      const { plannerAgent } = await import('../agent/planner/agent.js');
+      const { designerAgent } = await import('../agent/tasks/designer/agent.js');
+      const { brainstormAgent } = await import('../agent/tasks/brainstorm/agent.js');
+      const { testerAgent } = await import('../agent/tasks/tester/agent.js');
+
+      const allAgents = [pairAgent, delegateAgent, plannerAgent, designerAgent, brainstormAgent, testerAgent];
+
+      // Read current config overrides
+      let overrides: Record<string, Record<string, string>> = {};
+      try {
+        const raw = JSON.parse(readFileSync(PATHS.config, 'utf-8')) as Record<string, unknown>;
+        const models = raw['models'] as Record<string, unknown> | undefined;
+        overrides = (models?.['agents'] ?? {}) as Record<string, Record<string, string>>;
+      } catch { /* no config */ }
+
+      // Default bindings: steps using resolveOrNull -> claude, others -> local
+      const CLAUDE_STEPS: Record<string, string[]> = {
+        pair: ['validate'],
+        delegate: ['validate'],
+        planner: ['enhance'],
+        designer: ['enhance', 'review'],
+        brainstorm: ['validate-seed', 'validate-convergence', 'review-spec'],
+        tester: ['validate-plan', 'validate-tests', 'review-tests'],
+      };
+
+      const result: Record<string, Record<string, string>> = {};
+      for (const agent of allAgents) {
+        const ns = agent.configNamespace ?? agent.id;
+        const displayId = agent.id; // Use agent.id for display (e.g. 'brainstorm' not 'common')
+        const steps = Object.keys(agent.steps);
+        const agentOverrides = overrides[ns] ?? {};
+        const claudeSteps = CLAUDE_STEPS[ns] ?? [];
+        const stepBindings: Record<string, string> = {};
+        for (const step of steps) {
+          if (typeof agentOverrides[step] === 'string') {
+            stepBindings[step] = agentOverrides[step];
+          } else {
+            stepBindings[step] = claudeSteps.includes(step) ? 'claude' : 'local';
+          }
+        }
+        result[displayId] = stepBindings;
+      }
+      return result;
     },
 
     'config.show': async () => {

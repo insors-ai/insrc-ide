@@ -120,7 +120,7 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 - [x] **Show Daemon Logs** - opens terminal with pino-pretty formatted live log tail
 - [x] **Toggle Permissions** - switches validate/auto-accept mode via config.write
 
-### Tier 3: Navigation + session management -- NEARLY DONE
+### Tier 3: Navigation + session management + setup -- DONE
 - [x] **Explorer integration** - insrc panes registered inside Explorer ViewContainer
 - [x] **Sessions tree** - WorkbenchAsyncDataTree, grouped by repo then date, per-repo chat button
 - [x] **Runs tree** - WorkbenchAsyncDataTree, grouped by agent type
@@ -128,7 +128,10 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 - [x] **Step provider quick pick** - 3-step flow (agent -> step -> provider)
 - [x] **Workspace sync** - auto-adds daemon repos to workspace folders on connect
 - [x] **Insrc icon** - spiral galaxy SVG + PNG exports, activity bar icon
-- [ ] **Setup wizard** - custom `EditorPane` (system detect, ollama, model pull, API keys)
+- [x] **Setup wizard** - 5-step EditorPane (system detect, Ollama optimizations, model pull with streaming progress, API keys, apply config)
+- [x] **Step Provider Settings** - EditorPane with accordion layout (collapsible per-agent, one expanded at a time), inline provider change, claude/local badges
+- [x] **Model management RPCs** - ollama.list, ollama.search (ollama.com), ollama.pull (streaming), claude.models (API + static fallback), config.agents (effective bindings)
+- [x] **Default config** - daemon creates config.json with agent defaults on first run, brainstorm uses own configNamespace
 
 ### Tier 4: Agent views (custom panels) -- NOT STARTED
 - [ ] **Brainstorm view** - idea list, discussion, convergence, spec preview
@@ -163,10 +166,9 @@ The extension uses the plugin API (webviews, `vscode.*` commands, TreeDataProvid
 
 ## Next priorities (recommended order)
 
-1. **Setup wizard** (Tier 3) -- first-run experience, onboarding.
-2. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
-3. **Plan view** (Tier 4) -- agent step tracking.
-4. **Test view + Doc view** (Tier 4) -- lower priority agent views.
+1. **Brainstorm view** (Tier 4) -- primary agent view, already has a detailed plan.
+2. **Plan view** (Tier 4) -- agent step tracking.
+3. **Test view + Doc view** (Tier 4) -- lower priority agent views.
 
 ## UI Layout - DECIDED
 

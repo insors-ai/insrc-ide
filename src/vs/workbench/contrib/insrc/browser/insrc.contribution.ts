@@ -53,10 +53,19 @@ import { SyncDescriptor } from '../../../../platform/instantiation/common/descri
 import { EditorExtensions } from '../../../common/editor.js';
 import { SetupWizardPane } from './setup/setupWizardPane.js';
 import { SetupWizardInput } from './setup/setupWizardInput.js';
+import { StepProviderEditorPane } from './setup/stepProviderEditorPane.js';
+import { StepProviderEditorInput } from './setup/stepProviderEditorInput.js';
 
-Registry.as<import('../../../browser/editor.js').IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+const editorPaneRegistry = Registry.as<import('../../../browser/editor.js').IEditorPaneRegistry>(EditorExtensions.EditorPane);
+
+editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(SetupWizardPane, SetupWizardPane.ID, 'insrc Setup'),
 	[new SyncDescriptor(SetupWizardInput)],
+);
+
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(StepProviderEditorPane, StepProviderEditorPane.ID, 'Step Providers'),
+	[new SyncDescriptor(StepProviderEditorInput)],
 );
 
 // TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)

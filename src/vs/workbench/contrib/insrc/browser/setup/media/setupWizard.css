@@ -65,6 +65,23 @@
 	overflow-y: auto;
 }
 
+.insrc-setup-content::-webkit-scrollbar {
+	width: 10px;
+}
+
+.insrc-setup-content::-webkit-scrollbar-thumb {
+	background: var(--vscode-scrollbarSlider-background);
+	border-radius: 5px;
+}
+
+.insrc-setup-content::-webkit-scrollbar-thumb:hover {
+	background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+.insrc-setup-content::-webkit-scrollbar-track {
+	background: transparent;
+}
+
 /* -- Info table -- */
 
 .insrc-setup-table {

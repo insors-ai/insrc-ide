@@ -332,7 +332,7 @@ registerAction2(class extends Action2 {
 	constructor() {
 		super({
 			id: 'insrc.setStepProvider',
-			title: localize2('insrc.setStepProvider', 'Set Step Provider'),
+			title: localize2('insrc.setStepProvider', 'Step Provider Settings'),
 			category: INSRC_CATEGORY,
 			f1: true,
 			icon: Codicon.settings,
@@ -342,6 +342,28 @@ registerAction2(class extends Action2 {
 				when: ContextKeyExpr.equals('view', INSRC_STEP_PROVIDERS_VIEW_ID),
 				order: 10,
 			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorService = accessor.get(IEditorService);
+		import('../setup/stepProviderEditorInput.js').then(({ StepProviderEditorInput }) => {
+			editorService.openEditor(StepProviderEditorInput.getInstance());
+		});
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Set Step Provider (quick pick flow - legacy)
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.setStepProviderQuickPick',
+			title: localize2('insrc.setStepProviderQuickPick', 'Set Step Provider (Quick Pick)'),
+			category: INSRC_CATEGORY,
+			f1: true,
 		});
 	}
 
@@ -619,6 +641,29 @@ registerAction2(class extends Action2 {
 		// Import must be static to avoid stale accessor
 		import('../setup/setupWizardInput.js').then(({ SetupWizardInput }) => {
 			editorService.openEditor(SetupWizardInput.getInstance());
+		});
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Open Step Provider Settings
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.openStepProviders',
+			title: localize2('insrc.openStepProviders', 'Step Provider Settings'),
+			category: INSRC_CATEGORY,
+			f1: true,
+			icon: Codicon.settingsGear,
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorService = accessor.get(IEditorService);
+		import('../setup/stepProviderEditorInput.js').then(({ StepProviderEditorInput }) => {
+			editorService.openEditor(StepProviderEditorInput.getInstance());
 		});
 	}
 });
