@@ -146,6 +146,10 @@ function initState(input: ControllerInput, docPrefix: string): BrainstormState {
     userRequestedContinue: false,
     lastStep: 'generate-ideas',
     qna: [],
+    reviewQueue: [],
+    currentReviewIndex: 0,
+    parkedIds: [],
+    sequentialReview: true,
   };
 }
 
@@ -279,14 +283,17 @@ export abstract class BrainstormControllerBase implements TaskController {
       // --- Idea list + per-idea discussion (Phase 3b) ---
       case 'idea-list':
         return this.afterIdeaList(gateReply);
+      case 'idea-review':
+        return this.afterSingleIdeaReview(gateReply);
+      case 'idea-diverge-single':
+        return this.afterDivergeSingle(completed);
       case 'idea-discuss-search':
         return this.afterIdeaDiscussSearch(completed);
       case 'idea-discuss':
         return this.afterIdeaDiscuss(gateReply);
       case 'idea-discuss-respond':
         return this.afterIdeaDiscussRespond(completed);
-      case 'idea-discuss-refine':
-        return this.afterIdeaDiscussRefine(completed);
+      // idea-discuss-refine merged into idea-discuss-respond (unified flow)
 
       // --- Convergence ---
       case 'converge-cluster':
@@ -580,6 +587,9 @@ export abstract class BrainstormControllerBase implements TaskController {
     this.state.ideas = [...priorAccepted, ...refinedIdeas];
     this.state.nextIdeaIndex = Math.max(...this.state.ideas.map(i => i.index), 0) + 1;
 
+    if (this.state.sequentialReview) {
+      return this.enterSequentialReview();
+    }
     this.state.lastStep = 'idea-list';
     return [this.buildIdeaListGate()];
   }
@@ -646,6 +656,247 @@ export abstract class BrainstormControllerBase implements TaskController {
     return this.handleIdeaApprove();
   }
 
+  // ---------------------------------------------------------------------------
+  // Sequential Idea Review (one-at-a-time card flow)
+  // ---------------------------------------------------------------------------
+
+  /** Enter sequential review mode — build queue from pending ideas. */
+  private enterSequentialReview(): Task[] {
+    const pending = this.state.ideas.filter(i => i.status === 'proposed');
+    this.state.reviewQueue = pending.map(i => i.id);
+    this.state.currentReviewIndex = 0;
+    this.state.parkedIds = [];
+    this.state.lastStep = 'idea-review';
+    return [this.buildSingleIdeaGate()];
+  }
+
+  /** Build a gate for a single idea card. */
+  private buildSingleIdeaGate(): Task {
+    const ideaId = this.state.reviewQueue[this.state.currentReviewIndex];
+    const idea = ideaId ? this.state.ideas.find(i => i.id === ideaId) : undefined;
+
+    if (!idea) {
+      // Queue exhausted — check parked
+      return this.resolveReviewQueue();
+    }
+
+    const accepted = this.state.ideas.filter(i => i.status === 'accepted').length;
+    const rejected = this.state.ideas.filter(i => i.status === 'rejected').length;
+    const parked = this.state.parkedIds.length;
+    const total = this.state.reviewQueue.length;
+    const current = this.state.currentReviewIndex + 1;
+
+    const refsSection = idea.references.length > 0
+      ? `\n\n**References:**\n${idea.references.map(r => `- ${r.label}`).join('\n')}`
+      : '';
+
+    const content = [
+      `## Idea ${current} of ${total} — Round ${this.state.round}`,
+      '',
+      `### ${idea.title}`,
+      '',
+      idea.body,
+      refsSection,
+      '',
+      `---`,
+      `Approved: ${accepted} | Rejected: ${rejected} | Parked: ${parked}`,
+    ].join('\n');
+
+    return {
+      index: this.taskCounter++,
+      description: `Review: ${idea.title.slice(0, 50)}`,
+      kind: 'transform',
+      intent: 'brainstorm',
+      userMessage: content,
+      passThrough: true,
+      requiresGate: true,
+      gateTitle: `Idea ${current}/${total}: ${idea.title}`,
+      gateActions: [
+        { name: 'approve', label: 'Approve' },
+        { name: 'reject', label: 'Reject' },
+        { name: 'diverge', label: 'Diverge', hint: 'Generate variations', needsInput: true },
+        { name: 'skip', label: 'Skip' },
+        { name: 'park', label: 'Park' },
+        { name: 'discuss', label: 'Discuss', needsInput: true },
+      ],
+      // Structured data for editor pane
+      structured: {
+        phase: 'ideation',
+        itemType: 'idea',
+        itemId: idea.id,
+        item: idea,
+        progress: {
+          total,
+          current,
+          approved: accepted,
+          rejected,
+          parked,
+          skipped: this.state.ideas.filter(i => i.status === 'skipped').length,
+          pending: total - current,
+        },
+      },
+      stateKey: 'ideaReviewOutput',
+    };
+  }
+
+  /** Handle action from single idea gate. */
+  private afterSingleIdeaReview(gateReply: GateReply | undefined): Task[] {
+    const ideaId = this.state.reviewQueue[this.state.currentReviewIndex];
+    const idea = ideaId ? this.state.ideas.find(i => i.id === ideaId) : undefined;
+
+    if (!idea || !gateReply) {
+      return [this.resolveReviewQueue()];
+    }
+
+    const ideaLabel = `[${idea.index}] ${idea.title}`;
+
+    switch (gateReply.action) {
+      case 'approve':
+        idea.status = 'accepted';
+        recordQnA(this.state, 'idea-review', 'user',
+          `Review idea ${ideaLabel}`,
+          `Approved${gateReply.feedback ? ': ' + gateReply.feedback : ''}`);
+        break;
+
+      case 'reject':
+        idea.status = 'rejected';
+        recordQnA(this.state, 'idea-review', 'user',
+          `Review idea ${ideaLabel}`,
+          `Rejected: ${gateReply.feedback || 'No reason given'}`);
+        break;
+
+      case 'skip':
+        idea.status = 'skipped';
+        recordQnA(this.state, 'idea-review', 'user',
+          `Review idea ${ideaLabel}`,
+          'Skipped for later');
+        break;
+
+      case 'park':
+        idea.status = 'parked';
+        this.state.parkedIds.push(idea.id);
+        recordQnA(this.state, 'idea-review', 'user',
+          `Review idea ${ideaLabel}`,
+          `Parked${gateReply.feedback ? ': ' + gateReply.feedback : ''}`);
+        break;
+
+      case 'diverge': {
+        // Generate variations of this idea — add to end of queue
+        this.state.recentFeedback = gateReply.feedback || `Diverge on: ${idea.title}`;
+        idea.status = 'accepted'; // Keep the original
+        recordQnA(this.state, 'idea-review', 'user',
+          `Review idea ${ideaLabel}`,
+          `Diverge: generate variations. ${gateReply.feedback || ''}`.trim());
+        // New ideas will be generated and added in a mini-round
+        this.state.lastStep = 'idea-diverge-single';
+        return [{
+          index: this.taskCounter++,
+          description: `Generating variations of "${idea.title.slice(0, 40)}"`,
+          kind: 'llm',
+          intent: 'brainstorm',
+          systemPrompt: this.getDivergePrompt(),
+          userMessage: [
+            `## Original Idea`,
+            `[${idea.index}] ${idea.title}: ${idea.body}`,
+            '',
+            `## Direction`,
+            gateReply.feedback || 'Generate 3-5 variations or alternatives.',
+            '',
+            `Generate variations as a numbered list: [N] Title. Description`,
+          ].join('\n'),
+          providerHint: 'local',
+          stateKey: 'divergeSingleOutput',
+        }];
+      }
+
+      case 'discuss': {
+        // Enter per-idea discussion
+        this.state.focusedIdeaId = idea.id;
+        this.state.discussionMessages = [];
+        if (gateReply.feedback) {
+          this.state.discussionMessages.push({
+            role: 'user',
+            content: gateReply.feedback,
+            timestamp: new Date().toISOString(),
+          });
+          recordQnA(this.state, 'idea-review', 'user',
+            `Discuss idea ${ideaLabel}`,
+            gateReply.feedback);
+        }
+        this.state.lastStep = 'idea-discuss-search';
+        return [{
+          index: this.taskCounter++,
+          description: `Searching codebase for "${idea.title.slice(0, 40)}"`,
+          kind: 'rpc',
+          intent: 'brainstorm',
+          rpcMethod: 'search.query',
+          rpcParams: { text: (idea.title + '. ' + idea.body).slice(0, 200), limit: 10, filter: 'code' },
+          stateKey: 'discussSearchOutput',
+        }];
+      }
+
+      default:
+        idea.status = 'accepted';
+        break;
+    }
+
+    // Advance to next idea in queue
+    this.state.currentReviewIndex++;
+    this.state.lastStep = 'idea-review';
+    return [this.buildSingleIdeaGate()];
+  }
+
+  /** Handle diverge-single output — parse new ideas, add to queue. */
+  private afterDivergeSingle(completed: TaskResult): Task[] {
+    if (completed.success && completed.output) {
+      const newIdeas = parseIdeaList(
+        completed.output,
+        this.state.round,
+        this.state.nextIdeaIndex,
+        this.state.input.repoPath || 'unknown',
+      );
+      for (const idea of newIdeas) {
+        this.state.ideas.push(idea);
+        this.state.reviewQueue.push(idea.id);
+      }
+      this.state.nextIdeaIndex += newIdeas.length;
+    }
+
+    // Continue reviewing from where we left off (advance past the diverged idea)
+    this.state.currentReviewIndex++;
+    this.state.lastStep = 'idea-review';
+    return [this.buildSingleIdeaGate()];
+  }
+
+  /** Resolve the review queue — handle parked ideas or proceed. */
+  private resolveReviewQueue(): Task {
+    // Check for parked ideas that need re-review
+    const unresolvedParked = this.state.parkedIds.filter(id => {
+      const idea = this.state.ideas.find(i => i.id === id);
+      return idea && idea.status === 'parked';
+    });
+
+    if (unresolvedParked.length > 0) {
+      // Re-enter queue with parked ideas
+      this.state.reviewQueue = unresolvedParked;
+      this.state.currentReviewIndex = 0;
+      this.state.parkedIds = [];
+      return this.buildSingleIdeaGate();
+    }
+
+    // All ideas resolved — decide next phase
+    // Accept any remaining skipped as proposed (will be auto-accepted)
+    for (const idea of this.state.ideas) {
+      if (idea.status === 'skipped') {
+        idea.status = 'proposed';
+      }
+    }
+
+    // Delegate to handleIdeaApprove which checks converge threshold
+    const tasks = this.handleIdeaApprove();
+    return tasks[0]!;
+  }
+
   /** Parse discussion search results, store context, present discussion gate. */
   private afterIdeaDiscussSearch(completed: TaskResult): Task[] {
     let codeContext = '';
@@ -680,42 +931,36 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     if (gateReply.action === 'accept') {
       idea.status = 'accepted';
+      recordQnA(this.state, 'idea-discuss', 'user',
+        `Discussion on [${idea.index}] ${idea.title}`,
+        'Accepted after discussion');
       return this.exitDiscussion();
     }
 
     if (gateReply.action === 'reject') {
       idea.status = 'rejected';
+      recordQnA(this.state, 'idea-discuss', 'user',
+        `Discussion on [${idea.index}] ${idea.title}`,
+        `Rejected: ${gateReply.feedback || 'after discussion'}`);
       return this.exitDiscussion();
     }
 
-    if (gateReply.action === 'refine') {
-      // User wants the idea refined based on discussion
-      const userMsg = gateReply.feedback ?? 'Please refine this idea based on our discussion.';
-      this.addDiscussionMessage('user', userMsg);
-
-      this.state.lastStep = 'idea-discuss-refine';
-      return [{
-        index: this.taskCounter++,
-        description: 'Refining idea based on discussion...',
-        kind: 'llm',
-        intent: 'brainstorm',
-        systemPrompt: this.getDiscussRefinePrompt(),
-        userMessage: this.buildDiscussionContext(idea, userMsg),
-        stateKey: 'discussRefineOutput',
-      }];
-    }
-
-    if (gateReply.action === 'respond') {
-      // User sent a discussion message (via inject or direct input)
+    // Unified discuss flow: user input (question or feedback) → LLM decides
+    // whether to just respond or also update the idea
+    if (gateReply.action === 'respond' || gateReply.action === 'refine') {
       const userMsg = gateReply.feedback ?? '';
       if (!userMsg) return [this.buildIdeaDiscussGate()];
 
       this.addDiscussionMessage('user', userMsg);
+      recordQnA(this.state, 'idea-discuss', 'user',
+        `Discussion on [${idea.index}] ${idea.title}`,
+        userMsg);
 
+      // Single unified LLM call — responds AND optionally updates idea
       this.state.lastStep = 'idea-discuss-respond';
       return [{
         index: this.taskCounter++,
-        description: 'Thinking about this idea...',
+        description: 'Processing your feedback...',
         kind: 'llm',
         intent: 'brainstorm',
         systemPrompt: this.getDiscussRespondPrompt(),
@@ -727,31 +972,48 @@ export abstract class BrainstormControllerBase implements TaskController {
     return this.exitDiscussion();
   }
 
-  /** After LLM responds to discussion message, re-present discussion gate. */
+  /**
+   * After unified discuss LLM call — parse response and optionally update idea.
+   *
+   * LLM returns JSON: { response: string, updatedIdea?: { title, body } }
+   * Or plain text (backward compat) — treated as response-only.
+   */
   private afterIdeaDiscussRespond(completed: TaskResult): Task[] {
-    this.addDiscussionMessage('assistant', completed.output);
-    this.state.lastStep = 'idea-discuss';
-    return [this.buildIdeaDiscussGate()];
-  }
-
-  /** After LLM refines idea, update idea text, re-present discussion gate. */
-  private afterIdeaDiscussRefine(completed: TaskResult): Task[] {
     const idea = this.state.ideas.find(i => i.id === this.state.focusedIdeaId);
-    if (idea) {
-      // Parse refined idea output — extract text/tags/refs from the single line
-      const refined = parseIdeaList(
-        completed.output,
-        this.state.round,
-        idea.index,
-        this.state.input.repoPath || 'unknown',
-      );
-      if (refined.length > 0) {
-        idea.title = refined[0]!.title;
-        idea.body = refined[0]!.body;
-        if (refined[0]!.tags.length > 0) idea.tags = refined[0]!.tags;
-        if (refined[0]!.references.length > 0) idea.references = refined[0]!.references;
+
+    let responseText = completed.output;
+    let ideaUpdated = false;
+
+    // Try to parse structured response
+    try {
+      const parsed = JSON.parse(completed.output.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+      if (parsed && typeof parsed.response === 'string') {
+        responseText = parsed.response;
+
+        // If LLM included an updated idea, apply it
+        if (parsed.updatedIdea && idea) {
+          const oldTitle = idea.title;
+          if (parsed.updatedIdea.title) idea.title = parsed.updatedIdea.title;
+          if (parsed.updatedIdea.body) idea.body = parsed.updatedIdea.body;
+          ideaUpdated = true;
+          recordQnA(this.state, 'idea-discuss-update', 'system',
+            `Idea [${idea.index}] updated from "${oldTitle}"`,
+            `Updated to: ${idea.title}`);
+        }
       }
-      this.addDiscussionMessage('assistant', `Refined: ${idea.title}`);
+    } catch {
+      // Plain text response — no idea update
+    }
+
+    this.addDiscussionMessage('assistant', responseText);
+    if (ideaUpdated && idea) {
+      this.addDiscussionMessage('assistant', `[Idea updated: ${idea.title}]`);
+    }
+
+    if (idea) {
+      recordQnA(this.state, 'idea-discuss', 'system',
+        `Discussion on [${idea.index}] ${idea.title}`,
+        responseText.slice(0, 300));
     }
 
     this.state.lastStep = 'idea-discuss';

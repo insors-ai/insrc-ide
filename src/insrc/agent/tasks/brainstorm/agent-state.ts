@@ -125,7 +125,17 @@ export interface BrainstormState extends AgentState {
   /** Fresh code context from per-theme vector search (set before each theme spec generation). */
   themeSearchContext?: string | undefined;
 
-  // Per-idea discussion (Phase 3b)
+  // Sequential idea review (one-at-a-time card flow)
+  /** Ordered list of idea IDs to review in current round. */
+  reviewQueue: string[];
+  /** Index into reviewQueue for current idea being reviewed. */
+  currentReviewIndex: number;
+  /** Idea IDs that were parked (review after all others). */
+  parkedIds: string[];
+  /** Whether we are in sequential review mode. */
+  sequentialReview: boolean;
+
+  // Per-idea discussion
   /** ID of the idea currently being discussed (null = showing idea list). */
   focusedIdeaId?: string | undefined;
   /** Code context retrieved for the focused idea. */

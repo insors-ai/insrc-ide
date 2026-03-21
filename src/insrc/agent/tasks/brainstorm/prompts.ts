@@ -182,18 +182,36 @@ export const DISCUSS_RESPOND_SYSTEM = `You are helping a user think through a sp
 
 You are given:
 - The original problem statement
-- The idea being discussed (with its review verdict and rationale)
+- The idea being discussed (title + body + references)
 - Relevant code entities from the codebase
 - The discussion history so far
 
 Your job:
-- Answer the user's question or respond to their comment about this idea
-- Be specific and concrete — reference code entities where relevant
-- If the user is probing feasibility, give honest assessment grounded in the codebase
-- If the user suggests changes, acknowledge and explain implications
-- Keep responses concise (2–4 paragraphs max)
+1. Respond to the user's question, comment, or feedback about this idea.
+2. If the user's input implies a change to the idea (suggestion, correction, refinement, additional detail), ALSO update the idea.
+3. If the user is just asking a question or making a comment that doesn't change the idea, respond only.
 
-Do NOT suggest changing to a different idea. Stay focused on the one being discussed.`;
+Output ONLY valid JSON — no markdown fences, no explanation:
+{
+  "response": "Your conversational response to the user (2-4 paragraphs, reference code where relevant)",
+  "updatedIdea": null
+}
+
+OR if the idea should be updated:
+{
+  "response": "Your response explaining what you changed and why",
+  "updatedIdea": {
+    "title": "Updated short title",
+    "body": "Updated detailed description incorporating the user's feedback"
+  }
+}
+
+Rules:
+- Be specific and concrete — reference code entities where relevant
+- If probing feasibility, give honest assessment grounded in the codebase
+- Stay focused on the idea being discussed
+- Only update the idea when the user's input clearly implies a change
+- Preserve the original intent of the idea when updating`;
 
 // ---------------------------------------------------------------------------
 // Discuss — refine an idea based on discussion

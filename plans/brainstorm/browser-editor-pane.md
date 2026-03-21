@@ -285,20 +285,25 @@ The brainstorm controller sends structured gates, not HTML:
 
 The EditorPane handles gates by updating the card's action state, not by rendering a gate card in the chat.
 
-### Discussion (Per-Idea Chat)
+### Discussion (Unified Feedback Flow)
 
-Each idea card has a mini-chat:
+Every user input on an idea card goes through one unified flow:
 
-1. User types in the feedback input area
-2. Message sent to daemon with context: `{ sessionId, ideaId, message }`
-3. Daemon's brainstorm controller routes to local LLM with:
-   - Idea content as context
-   - Code references resolved from graph
-   - Prior discussion messages
-4. LLM response streamed back via `brainstorm.discussion` message
-5. Appended to the card's discussion section
+1. User types feedback/question in the card's input area
+2. Sent to daemon: `{ sessionId, ideaId, message }`
+3. LLM receives: idea (title + body + refs) + user input + discussion history + code context
+4. **LLM decides** whether to:
+   - **Respond only** (question/clarification) -- returns `{ response, updatedIdea: null }`
+   - **Incorporate into idea** -- returns `{ response, updatedIdea: { title, body } }`
+5. If idea was updated, card re-renders with new title/body + "[Idea updated]" notice
+6. Response appended to discussion section
+7. User can type more, or take action (approve/reject/skip/park/diverge)
 
-The discussion is **transient** — cleared when moving to next idea. Only the final verdict (approve/reject) and any feedback text persist in the brainstorm state.
+Single LLM call replaces the old separate "respond" vs "refine" actions.
+
+**QnA tracking:** Every interaction is recorded -- user inputs, LLM responses, idea updates, verdicts. This feeds into subsequent LLM steps so the model has full context of user preferences and direction changes.
+
+Discussion is **transient** -- cleared when moving to next idea. QnA entries persist in the brainstorm state.
 
 ### Add Idea
 
@@ -382,60 +387,81 @@ Invalidation via pub/sub on index events.
 
 Parser extracts title from `**Title:**` line, body from `**Body:**` block, LLM-suggested reference keywords from `**References:**` line. The enhance step then resolves reference keywords to actual `IdeaRef[]` via vector search.
 
-### 2. Backward Compatibility (`text` field)
+### 2. Gate Data Format -- DONE
 
-The `text` field is used in ~30 places across the codebase. Strategy:
-- Keep `text` as a computed getter: `get text(): string { return this.title + '\n' + this.body; }`
-- Or add a `toText()` method and migrate callers incrementally
-- All new code uses `title` + `body` directly
-
-### 3. Gate Data Format (backward compat)
-
-Gates send both HTML (for chat fallback) and structured data (for editor pane):
+Gates carry `task.structured` field with typed data for the editor pane:
 
 ```typescript
-// In gateTaskResult(), add data field to gate stream message
-send({
-  id: requestId,
-  stream: 'gate',
-  data: {
-    gateId,
-    title,
-    actions,
-    content: htmlContent,           // existing: HTML for chat view
-    structured: {                    // NEW: typed data for editor pane
-      phase: 'ideation' | 'convergence' | 'preview',
-      ideas: IdeaData[],            // for ideation phase
-      currentIndex: number,
-      themes: ThemeData[],          // for convergence phase
-      preview: string,              // for preview phase
-      progress: ProgressCounts
-    }
+// On Task interface
+structured?: Record<string, unknown>;
+
+// Populated by buildSingleIdeaGate():
+structured: {
+  phase: 'ideation',
+  itemType: 'idea',
+  itemId: idea.id,
+  item: idea,              // full Idea object (title, body, references, etc.)
+  progress: {
+    total, current, approved, rejected, parked, skipped, pending
   }
-});
+}
 ```
 
-### 4. Sequential Idea Review (controller state machine)
+### 3. Sequential Idea Review -- DONE
 
-Current `idea-list` gate sends ALL ideas at once. For the editor pane:
+After refine step, controller enters sequential review mode:
 
-- After refine step, controller enters `idea-review-sequential` mode
-- Emits `brainstorm.ideas` stream message with all ideas
-- Then emits `brainstorm.focus` with first pending idea ID
-- Each gate reply (approve/reject/skip/park) triggers:
-  - Update idea status in state
-  - Emit `brainstorm.status` with updated status
-  - Emit `brainstorm.focus` with next pending idea ID
-  - If no more pending ideas: check parked → re-present parked, or proceed to converge
-- Diverge action: generates new ideas, adds to queue, emits `brainstorm.ideas` update
+- `enterSequentialReview()` builds queue from pending ideas
+- `buildSingleIdeaGate()` creates one-idea gate with structured data + 6 actions
+- `afterSingleIdeaReview()` handles each action:
+  - **approve** -- status = accepted, advance queue
+  - **reject** -- status = rejected, advance queue
+  - **skip** -- status = skipped, advance queue
+  - **park** -- status = parked, add to parkedIds, advance queue
+  - **diverge** -- generate variations via LLM, add to end of queue
+  - **discuss** -- enter unified discussion flow (see below)
+- `resolveReviewQueue()` -- when queue exhausted, re-present parked ideas, then proceed to converge
 
-State tracking additions:
+State fields:
 ```typescript
-// In BrainstormState
-reviewQueue: string[];           // ordered list of idea IDs to review
-currentReviewIndex: number;      // index into reviewQueue
-parkedIds: string[];             // parked idea IDs (review after others)
+reviewQueue: string[];           // ordered idea IDs to review
+currentReviewIndex: number;      // index into queue
+parkedIds: string[];             // parked IDs (re-present after others)
+sequentialReview: boolean;       // flag (always true in new flow)
 ```
+
+### 4. Unified Discussion Flow -- DONE
+
+Every user input on an idea goes through one LLM call that decides
+whether to just respond or also update the idea:
+
+```
+User input -> LLM receives: idea + input + history + code context
+           -> Returns JSON: { response: string, updatedIdea?: { title, body } }
+           -> If updatedIdea: update idea in state, show "[Idea updated]"
+           -> Append response to discussion
+           -> Re-present discussion gate
+```
+
+Old separate "respond" and "refine" actions merged into single unified flow.
+`DISCUSS_RESPOND_SYSTEM` prompt updated to return structured JSON.
+
+### 5. QnA Tracking -- DONE
+
+Every idea interaction recorded in `state.qna[]`:
+
+| Action | Question | Answer |
+|--------|----------|--------|
+| Approve | `Review idea [N] Title` | `Approved: feedback` |
+| Reject | `Review idea [N] Title` | `Rejected: reason` |
+| Skip | `Review idea [N] Title` | `Skipped for later` |
+| Park | `Review idea [N] Title` | `Parked: reason` |
+| Diverge | `Review idea [N] Title` | `Diverge: direction` |
+| Discuss (user) | `Discuss idea [N] Title` | user message |
+| Discuss (LLM) | `Discussion on [N] Title` | response (300 chars) |
+| Discuss (update) | `Idea [N] updated from "Old"` | `Updated to: New` |
+| Accept after discuss | `Discussion on [N] Title` | `Accepted after discussion` |
+| Reject after discuss | `Discussion on [N] Title` | `Rejected: reason` |
 
 ### 5. New RPCs
 
@@ -457,22 +483,25 @@ The spec builds incrementally during convergence. The controller already generat
 
 ## Implementation Order
 
-### Phase 0: Backend — Idea Data Model
-1. Update `Idea` interface: `text` → `title` + `body` + `references: IdeaRef[]`
-2. Update seed/diverge prompts: instruct LLM to output title/body/references separately
-3. Update `parseIdeaList()` to parse structured output
-4. Update `formatIdeasForContext()` to use title + body
-5. Backward compat: `get text()` computed getter or `toText()` helper
-6. Update enhance step: populate `references[]` with `IdeaRef` from search results
-7. Add `source` field: 'seed' | 'diverge' | 'user' | 'refine'
+### Phase 0: Backend — Idea Data Model -- DONE
+1. ~~Update `Idea` interface: `text` -> `title` + `body` + `references: IdeaRef[]`~~
+2. ~~Update seed/diverge prompts: instruct LLM to output title/body/references separately~~
+3. ~~Update `parseIdeaList()` to parse structured output~~
+4. ~~Update `formatIdeasForContext()` to use title + body~~
+5. ~~Clean break: no backward compat, all ~30 references migrated~~
+6. ~~Update enhance step: populate `references[]` with `IdeaRef` from search results~~
+7. ~~Add `source` field: 'seed' | 'diverge' | 'user' | 'refine'~~
 
-### Phase 1: Backend — Sequential Review + RPCs
-8. Add `reviewQueue`, `currentReviewIndex`, `parkedIds` to BrainstormState
-9. Add sequential review mode to controller: one gate per idea
-10. Add park/skip/reopen status transitions
-11. Parked idea re-presentation after queue exhausted
-12. Register RPCs: brainstorm.addIdea, brainstorm.discuss, brainstorm.reopen
-13. Emit structured stream messages: brainstorm.ideas, brainstorm.focus, brainstorm.status, brainstorm.progress
+### Phase 1: Backend — Sequential Review + Discussion -- DONE
+8. ~~Add `reviewQueue`, `currentReviewIndex`, `parkedIds`, `sequentialReview` to BrainstormState~~
+9. ~~Add sequential review mode: `enterSequentialReview()`, `buildSingleIdeaGate()`, `afterSingleIdeaReview()`~~
+10. ~~Add park/skip/reopen status transitions in `afterSingleIdeaReview()`~~
+11. ~~Parked idea re-presentation via `resolveReviewQueue()`~~
+12. ~~Diverge-single: `afterDivergeSingle()` generates variations, adds to queue~~
+13. ~~Unified discussion: merged respond+refine into single LLM call with JSON output~~
+14. ~~QnA tracking for every idea interaction (approve/reject/skip/park/diverge/discuss/update)~~
+15. ~~`task.structured` field on Task interface for editor pane data~~
+16. Register RPCs: brainstorm.addIdea, brainstorm.discuss, brainstorm.reopen -- PENDING (Phase 2D)
 
 ### Phase 2: Frontend — EditorPane Shell
 14. `brainstormEditorInput.ts` — URI scheme `insrc-brainstorm`

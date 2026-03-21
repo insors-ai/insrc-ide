@@ -91,6 +91,12 @@ export const brainstormAgent: AgentDefinition<BrainstormState> = {
 
       // QnA tracking
       qna: [],
+
+      // Sequential review
+      reviewQueue: [],
+      currentReviewIndex: 0,
+      parkedIds: [],
+      sequentialReview: true,
     };
   },
 

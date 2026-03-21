@@ -115,6 +115,10 @@ export interface Task {
    *  instead of the full userMessage for context retrieval. Useful when userMessage
    *  is a large composite but the search should target the user's specific input. */
   searchHint?: string | undefined;
+
+  /** Structured data for editor pane rendering (brainstorm, plan, etc.).
+   *  Sent alongside gate content so native UI can render rich cards. */
+  structured?: Record<string, unknown> | undefined;
 }
 
 /** Action definition for custom gate buttons. */
