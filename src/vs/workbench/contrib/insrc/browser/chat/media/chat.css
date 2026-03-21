@@ -185,24 +185,31 @@
 	-webkit-user-select: text;
 }
 
-/* Thin scrollbars matching VS Code style */
-.insrc-chat-messages::-webkit-scrollbar,
-.insrc-chat-session-dropdown::-webkit-scrollbar,
-.insrc-chat-input::-webkit-scrollbar {
+/* Thin scrollbars matching VS Code style -- applied globally to all chat content */
+.insrc-chat *::-webkit-scrollbar {
 	width: 6px;
+	height: 6px;
 }
 
-.insrc-chat-messages::-webkit-scrollbar-thumb,
-.insrc-chat-session-dropdown::-webkit-scrollbar-thumb,
-.insrc-chat-input::-webkit-scrollbar-thumb {
+.insrc-chat *::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.insrc-chat *::-webkit-scrollbar-thumb {
 	background: var(--vscode-scrollbarSlider-background);
 	border-radius: 3px;
 }
 
-.insrc-chat-messages::-webkit-scrollbar-thumb:hover,
-.insrc-chat-session-dropdown::-webkit-scrollbar-thumb:hover,
-.insrc-chat-input::-webkit-scrollbar-thumb:hover {
+.insrc-chat *::-webkit-scrollbar-thumb:hover {
 	background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+.insrc-chat *::-webkit-scrollbar-thumb:active {
+	background: var(--vscode-scrollbarSlider-activeBackground);
+}
+
+.insrc-chat *::-webkit-scrollbar-corner {
+	background: transparent;
 }
 
 .insrc-chat-messages::-webkit-scrollbar-track,
