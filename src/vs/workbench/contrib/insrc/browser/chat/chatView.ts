@@ -313,8 +313,8 @@ export class InsrcChatViewPane extends ViewPane {
 		const content = dom.append(el, dom.$('.insrc-chat-message-content'));
 
 		if (isUser) {
-			// User messages are plain text
-			content.textContent = msg.content;
+			// User messages: plain text with clickable file paths
+			this._renderUserMessage(content, msg.content);
 		} else {
 			// Assistant messages contain HTML from the daemon -- render as trusted HTML
 			this._setTrustedHtml(content, msg.content);
@@ -325,6 +325,46 @@ export class InsrcChatViewPane extends ViewPane {
 		}
 
 		return el;
+	}
+
+	/** Render user message with clickable file paths */
+	private _renderUserMessage(container: HTMLElement, text: string): void {
+		// Match absolute file paths and quoted paths
+		const pathPattern = /(["']?)(\/[\w./-]+\.\w{1,10})\1/g;
+		let lastIdx = 0;
+		let match: RegExpExecArray | null;
+
+		while ((match = pathPattern.exec(text)) !== null) {
+			// Text before the path
+			if (match.index > lastIdx) {
+				container.appendChild(document.createTextNode(text.substring(lastIdx, match.index)));
+			}
+
+			// Clickable file link
+			const filePath = match[2]!;
+			const link = dom.append(container, dom.$('a.insrc-chat-file-link'));
+			link.textContent = filePath.split('/').pop() ?? filePath;
+			link.title = filePath;
+			link.style.cursor = 'pointer';
+			link.style.color = 'var(--vscode-textLink-foreground)';
+			link.style.textDecoration = 'underline';
+			link.onclick = (e) => {
+				e.preventDefault();
+				this.openerService.open(URI.file(filePath));
+			};
+
+			lastIdx = match.index + match[0].length;
+		}
+
+		// Remaining text
+		if (lastIdx < text.length) {
+			container.appendChild(document.createTextNode(text.substring(lastIdx)));
+		}
+
+		// Fallback: no paths found, just plain text
+		if (lastIdx === 0) {
+			container.textContent = text;
+		}
 	}
 
 	/** Safely set innerHTML using TrustedTypes policy */
@@ -509,14 +549,22 @@ export class InsrcChatViewPane extends ViewPane {
 			}
 		}
 
-		// Prepend attached file paths to message
+		// Append file paths as absolute references (daemon reads them)
 		let fullMessage = text;
 		if (this._attachedFiles.length > 0) {
-			const refs = this._attachedFiles.map(f => `@${f}`).join(' ');
-			fullMessage = `${refs}\n${text}`;
+			// File dialog returns absolute URIs -- resolve any relative paths against active repo
+			const repo = this.chatService.activeRepo ?? '';
+			const resolvedPaths = this._attachedFiles.map(f =>
+				f.startsWith('/') ? f : (repo ? `${repo}/${f}` : f)
+			);
+			const refs = resolvedPaths.map(f => `"${f}"`).join('\n');
+			fullMessage = `${text}\n\n--- Referenced Files ---\n\n${refs}`;
 			this._attachedFiles = [];
 			this._renderAttachedFiles();
 		}
+
+		// Resolve inline relative file paths to absolute using workspace repos
+		fullMessage = this._resolveInlinePaths(fullMessage);
 
 		this._input.value = '';
 		this._autoResize();
@@ -634,6 +682,36 @@ export class InsrcChatViewPane extends ViewPane {
 	// ---------------------------------------------------------------------------
 	// File attachment
 	// ---------------------------------------------------------------------------
+
+	/**
+	 * Resolve relative file paths in the message to absolute paths.
+	 * Matches quoted paths ("src/foo.ts"), @-prefixed (@src/foo.ts),
+	 * and bare paths with known extensions (src/foo.ts).
+	 * Resolves against all registered repos, picking the first match.
+	 */
+	private _resolveInlinePaths(message: string): string {
+		const repos = this.repoService.repos;
+		if (repos.length === 0) {
+			return message;
+		}
+
+		const knownExts = /\.(ts|tsx|js|jsx|py|go|rs|yaml|yml|json|toml|sql|sh|css|html|md|xml|proto|graphql)$/;
+
+		return message.replace(
+			/(?:@|"|')?((?:\.{0,2}\/)?[\w./-]+\.\w{1,10})(?:"|')?/g,
+			(match, path: string) => {
+				// Skip absolute paths, URLs, and non-code files
+				if (path.startsWith('/') || path.startsWith('http') || !knownExts.test(path)) {
+					return match;
+				}
+				// Try resolving against each repo
+				for (const repo of repos) {
+					return `"${repo.path}/${path}"`;
+				}
+				return match;
+			}
+		);
+	}
 
 	private async _pickAttachFiles(): Promise<void> {
 		const uris = await this.fileDialogService.showOpenDialog({

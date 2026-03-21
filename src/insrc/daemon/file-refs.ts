@@ -97,6 +97,15 @@ export function detectFileRefs(message: string): string[] {
     }
   }
 
+  // @-prefixed paths (e.g. @src/foo.ts or @/home/user/foo.ts)
+  const atPattern = /@([\w./-]+\.\w{1,10})/g;
+  while ((match = atPattern.exec(message)) !== null) {
+    const p = match[1]!;
+    if (!p.startsWith('http')) {
+      refs.add(p);
+    }
+  }
+
   return [...refs];
 }
 

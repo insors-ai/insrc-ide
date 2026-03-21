@@ -313,18 +313,14 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 			byFile.get(a.file)!.push(a);
 		}
 
-		// Build formatted message
+		// Build message with file references (daemon reads file content)
 		const lines: string[] = [];
 		lines.push(`I have ${annotations.length} annotation(s) across ${byFile.size} file(s):\n`);
 		for (const [file, items] of byFile) {
-			lines.push(`**${file}:**`);
+			// Include file as a quoted path for daemon file-ref resolution
+			lines.push(`"${file}"`);
 			for (const item of items) {
-				lines.push(`- Line ${item.line}: "${item.note}"`);
-				if (item.text) {
-					lines.push('  ```');
-					lines.push('  ' + item.text.substring(0, 200));
-					lines.push('  ```');
-				}
+				lines.push(`- Line ${item.line}: ${item.note}`);
 			}
 			lines.push('');
 		}
