@@ -73,4 +73,9 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(StepProviderEditorInput)],
 );
 
+// Prompt Notepad: full editor for composing large prompts
+import './notepad/promptNotepadCommands.js';
+import { PromptNotepadContribution } from './notepad/promptNotepadRegistration.js';
+registerWorkbenchContribution2(PromptNotepadContribution.ID, PromptNotepadContribution, WorkbenchPhase.AfterRestored);
+
 // TODO: register brainstorm views (IdeaListView, DiscussionEditor, ConvergenceView)

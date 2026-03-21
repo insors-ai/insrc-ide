@@ -22,7 +22,9 @@ import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcDiffService, extractDiffFromResponse, parseDiff, applyHunks } from '../../common/diffService.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IClipboardService } from '../../../../../platform/clipboard/common/clipboardService.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { URI } from '../../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { clearNode } from '../../../../../base/browser/dom.js';
@@ -50,6 +52,7 @@ function createSvg(viewBox: string, paths: Array<{ d: string; fill?: string; str
 const SEND_ICON = () => createSvg('0 0 16 16', [{ d: 'M1.724 1.053a.5.5 0 01.553-.05l12.5 7a.5.5 0 010 .874l-12.5 7A.5.5 0 011 15.382V9.5h6a.5.5 0 000-1H1V2.618a.5.5 0 01.724-.565z', fill: 'currentColor' }]);
 const CANCEL_ICON = () => createSvg('0 0 16 16', [{ d: 'M8 1a7 7 0 100 14A7 7 0 008 1zM5.146 5.146a.5.5 0 01.708 0L8 7.293l2.146-2.147a.5.5 0 01.708.708L8.707 8l2.147 2.146a.5.5 0 01-.708.708L8 8.707l-2.146 2.147a.5.5 0 01-.708-.708L7.293 8 5.146 5.854a.5.5 0 010-.708z', fill: 'currentColor' }]);
 const ATTACH_ICON = () => createSvg('0 0 16 16', [{ d: 'M14 8.5L7.5 15a3.54 3.54 0 01-5-5L9 3.5a2.36 2.36 0 013.33 3.33L6 13.17a1.18 1.18 0 01-1.67-1.67L10.5 5.33', fill: 'none', stroke: 'currentColor', strokeWidth: '1.5' }]);
+const NOTEPAD_ICON = () => createSvg('0 0 16 16', [{ d: 'M3 1h10a1 1 0 011 1v12a1 1 0 01-1 1H3a1 1 0 01-1-1V2a1 1 0 011-1zm1 3h8M4 7h8M4 10h5', fill: 'none', stroke: 'currentColor', strokeWidth: '1.2' }]);
 
 // ---------------------------------------------------------------------------
 // Trusted HTML policy for rendering daemon HTML snippets
@@ -71,6 +74,7 @@ export class InsrcChatViewPane extends ViewPane {
 	private _sessionLabel!: HTMLElement;
 	private _sessionDropdown!: HTMLElement;
 	private _progressBar!: HTMLElement;
+	private _selectionBar!: HTMLElement;
 	private _progressText!: HTMLElement;
 	private _messageList!: HTMLElement;
 	private _gateContainer!: HTMLElement;
@@ -105,6 +109,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@IInsrcDiffService private readonly diffService: IInsrcDiffService,
 		@IFileService private readonly fileService: IFileService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
+		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -169,6 +174,20 @@ export class InsrcChatViewPane extends ViewPane {
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));
 
+		// Selection bar (floating bar when messages are selected)
+		this._selectionBar = dom.append(this._container, dom.$('.insrc-chat-selection-bar.hidden'));
+		const selCount = dom.append(this._selectionBar, dom.$('span.insrc-selection-count'));
+		selCount.textContent = '0 selected';
+		const saveSelBtn = dom.append(this._selectionBar, dom.$('button.insrc-selection-save')) as HTMLButtonElement;
+		saveSelBtn.textContent = 'Save to File';
+		this._register(dom.addDisposableListener(saveSelBtn, 'click', () => this._saveSelectedMessages()));
+		const copySelBtn = dom.append(this._selectionBar, dom.$('button.insrc-selection-copy')) as HTMLButtonElement;
+		copySelBtn.textContent = 'Copy';
+		this._register(dom.addDisposableListener(copySelBtn, 'click', () => this._copySelectedMessages()));
+		const clearSelBtn = dom.append(this._selectionBar, dom.$('button.insrc-selection-clear')) as HTMLButtonElement;
+		clearSelBtn.textContent = 'Clear';
+		this._register(dom.addDisposableListener(clearSelBtn, 'click', () => this._clearSelection()));
+
 		// Progress bar (just above input)
 		this._progressBar = dom.append(this._container, dom.$('.insrc-chat-progress.hidden'));
 		const spinner = dom.append(this._progressBar, dom.$('.insrc-chat-progress-spinner'));
@@ -223,6 +242,14 @@ export class InsrcChatViewPane extends ViewPane {
 		attachBtn.title = 'Attach files';
 		attachBtn.appendChild(ATTACH_ICON());
 		this._register(dom.addDisposableListener(attachBtn, 'click', () => this._pickAttachFiles()));
+
+		// Prompt Notepad icon button (next to attach)
+		const notepadBtn = dom.append(toolbar, dom.$('button.insrc-chat-attach-btn')) as HTMLButtonElement;
+		notepadBtn.title = 'Open Prompt Notepad';
+		notepadBtn.appendChild(NOTEPAD_ICON());
+		this._register(dom.addDisposableListener(notepadBtn, 'click', () => {
+			this.commandService.executeCommand('insrc.promptNotepad.open');
+		}));
 
 		// Attached files badges
 		this._attachedFilesEl = dom.append(toolbar, dom.$('.insrc-chat-attached-files'));
@@ -311,6 +338,12 @@ export class InsrcChatViewPane extends ViewPane {
 			badge.style.opacity = '0.5';
 			badge.style.fontSize = '10px';
 		}
+
+		// Selection checkbox (for multi-select export)
+		const checkbox = dom.append(el, dom.$('input.insrc-msg-select')) as HTMLInputElement;
+		checkbox.type = 'checkbox';
+		checkbox.title = 'Select for export';
+		this._register(dom.addDisposableListener(checkbox, 'change', () => this._updateSelectionBar()));
 
 		const content = dom.append(el, dom.$('.insrc-chat-message-content'));
 
@@ -537,6 +570,74 @@ export class InsrcChatViewPane extends ViewPane {
 		this._sendBtn.disabled = false;
 		this._input.disabled = false;
 		this._input.focus();
+	}
+
+	// ---------------------------------------------------------------------------
+	// Message selection (multi-select export)
+	// ---------------------------------------------------------------------------
+
+	private _getSelectedMessages(): Array<{ role: string; text: string }> {
+		const selected: Array<{ role: string; text: string }> = [];
+		const checkboxes = this._messageList.querySelectorAll<HTMLInputElement>('input.insrc-msg-select:checked');
+		for (const cb of checkboxes) {
+			const msgEl = cb.closest('.insrc-chat-message');
+			if (!msgEl) { continue; }
+			const role = msgEl.classList.contains('user') ? 'User' : 'Assistant';
+			const contentEl = msgEl.querySelector('.insrc-chat-message-content');
+			const text = contentEl?.textContent ?? '';
+			selected.push({ role, text });
+		}
+		return selected;
+	}
+
+	private _updateSelectionBar(): void {
+		const count = this._messageList.querySelectorAll<HTMLInputElement>('input.insrc-msg-select:checked').length;
+		const countEl = this._selectionBar.querySelector('.insrc-selection-count');
+		if (countEl) { countEl.textContent = `${count} selected`; }
+		if (count > 0) {
+			this._selectionBar.classList.remove('hidden');
+		} else {
+			this._selectionBar.classList.add('hidden');
+		}
+	}
+
+	private async _saveSelectedMessages(): Promise<void> {
+		const selected = this._getSelectedMessages();
+		if (selected.length === 0) { return; }
+
+		const markdown = selected
+			.map(m => `### ${m.role}\n\n${m.text}`)
+			.join('\n\n---\n\n');
+
+		const uri = await this.fileDialogService.showSaveDialog({
+			title: 'Save Chat Messages',
+			filters: [
+				{ name: 'Markdown', extensions: ['md'] },
+				{ name: 'Text', extensions: ['txt'] },
+			],
+		});
+		if (!uri) { return; }
+
+		await this.fileService.writeFile(uri, VSBuffer.fromString(markdown));
+		this._clearSelection();
+	}
+
+	private async _copySelectedMessages(): Promise<void> {
+		const selected = this._getSelectedMessages();
+		if (selected.length === 0) { return; }
+
+		const text = selected
+			.map(m => `${m.role}:\n${m.text}`)
+			.join('\n\n');
+
+		await this.clipboardService.writeText(text);
+		this._clearSelection();
+	}
+
+	private _clearSelection(): void {
+		const checkboxes = this._messageList.querySelectorAll<HTMLInputElement>('input.insrc-msg-select:checked');
+		for (const cb of checkboxes) { cb.checked = false; }
+		this._selectionBar.classList.add('hidden');
 	}
 
 	// ---------------------------------------------------------------------------

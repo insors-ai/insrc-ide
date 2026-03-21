@@ -70,12 +70,88 @@
 	opacity: 1;
 }
 
+/* -- Message selection checkbox ------------------------------------ */
+
+.insrc-msg-select {
+	position: absolute;
+	top: 8px;
+	right: 28px;
+	width: 14px;
+	height: 14px;
+	opacity: 0;
+	cursor: pointer;
+	z-index: 1;
+	accent-color: var(--vscode-focusBorder);
+	appearance: none;
+	border: 1.5px solid var(--vscode-descriptionForeground);
+	border-radius: 3px;
+	background: transparent;
+}
+.insrc-msg-select:checked {
+	background: var(--vscode-focusBorder);
+	border-color: var(--vscode-focusBorder);
+}
+.insrc-msg-select:checked::after {
+	content: '';
+	display: block;
+	width: 4px;
+	height: 8px;
+	border: solid var(--vscode-editor-background);
+	border-width: 0 2px 2px 0;
+	transform: rotate(45deg) translate(-1px, -1px);
+	margin: 0 auto;
+}
+.insrc-chat-message:hover .insrc-msg-select,
+.insrc-msg-select:checked {
+	opacity: 1;
+}
+.insrc-chat-message {
+	position: relative;
+}
+
+/* -- Selection bar ------------------------------------ */
+
+.insrc-chat-selection-bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 12px;
+	background: var(--vscode-editor-selectionBackground);
+	border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+	flex-shrink: 0;
+}
+.insrc-chat-selection-bar.hidden {
+	display: none;
+}
+.insrc-selection-count {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+.insrc-selection-save,
+.insrc-selection-copy,
+.insrc-selection-clear {
+	padding: 2px 8px;
+	font-size: 11px;
+	border: 1px solid var(--vscode-button-border, var(--vscode-sideBarSectionHeader-border));
+	border-radius: 4px;
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	cursor: pointer;
+}
+.insrc-selection-save:hover,
+.insrc-selection-copy:hover,
+.insrc-selection-clear:hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
 /* -- Progress bar ------------------------------------ */
 
 .insrc-chat-progress {
-	height: 20px;
-	padding: 2px 12px;
+	height: 32px;
+	padding: 4px 12px;
 	font-size: 11px;
+	font-weight: 600;
 	color: var(--vscode-descriptionForeground);
 	border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
 	flex-shrink: 0;

@@ -31,7 +31,7 @@ const log = getLogger('task');
 export type TaskFormat = 'text' | 'markdown' | 'code' | 'table' | 'html' | 'html-inline' | 'diff';
 
 /** Task kind determines how the task is executed. */
-export type TaskKind = 'shell' | 'rpc' | 'llm' | 'agent' | 'transform';
+export type TaskKind = 'shell' | 'rpc' | 'llm' | 'agent' | 'transform' | 'gate' | 'delegate';
 
 export interface Task {
   /** Unique index within the pipeline. */
@@ -87,6 +87,12 @@ export interface Task {
   persisted?: boolean | undefined;
   /** Pass-through task — return userMessage as output without calling the LLM. */
   passThrough?: boolean | undefined;
+  /** Enable tool loop for LLM tasks — LLM can call tools (Read, Grep, etc.). */
+  useToolLoop?: boolean | undefined;
+  /** Delegate target handler ID (kind=delegate). */
+  delegateTo?: string | undefined;
+  /** Input for the delegate handler (kind=delegate). */
+  delegateInput?: unknown | undefined;
 
   // -- Gate customisation --
   /** Custom gate actions. Overrides default approve/reject/edit. */
@@ -961,6 +967,13 @@ async function executeTask(
     case 'agent':
       return executeAgentTask(task, context, deps);
 
+    case 'delegate': {
+      const { executeDelegate } = await import('./delegates/registry.js');
+      const delegateId = task.delegateTo ?? '';
+      const delegateInput = (task.delegateInput ?? {}) as Record<string, unknown>;
+      return executeDelegate(delegateId, delegateInput, deps, task.index, task.description);
+    }
+
     default:
       return {
         index: task.index,
@@ -1195,11 +1208,40 @@ async function executeLlmTask(
     if (task.temperature !== undefined) {
       completeOpts.temperature = task.temperature;
     }
-    const response = await provider.complete(messages, completeOpts);
+
+    let outputText: string;
+
+    if (task.useToolLoop) {
+      // Use tool loop — LLM can call Read, Grep, Glob, etc.
+      const { runToolLoop } = await import('../agent/tools/loop.js');
+      const { getToolDefinitions } = await import('../agent/tools/registry.js');
+      const tools = getToolDefinitions({ mcpAvailable: false }); // builtin tools only
+      const result = await runToolLoop(messages, {
+        provider,
+        tools,
+        intent: task.intent,
+        permissionMode: 'auto-accept',
+        maxTokens: task.maxTokens ?? 4096,
+        userPrompt: task.userMessage ?? task.description,
+        onToolCall: (call) => {
+          deps.send({ id: deps.requestId, stream: 'progress', data: {
+            message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + String(call.input['file_path']).split('/').pop() : ''}`,
+          }});
+        },
+        onProgress: (msg) => {
+          deps.send({ id: deps.requestId, stream: 'progress', data: { message: msg } });
+        },
+      });
+      outputText = result.response;
+    } else {
+      const response = await provider.complete(messages, completeOpts);
+      outputText = response.text;
+    }
+
     return {
       index: task.index,
       description: task.description,
-      output: response.text,
+      output: outputText,
       format: task.outputFormat ?? 'markdown',
       success: true,
     };
@@ -1320,6 +1362,12 @@ async function resolveController(agentId: string): Promise<TaskController | null
     case 'debug': {
       const mod = await import('./controllers/coding.js');
       controller = new mod.CodingController();
+      break;
+    }
+    case 'research':
+    case 'code-analysis': {
+      const mod = await import('./controllers/research.js');
+      controller = new mod.ResearchController();
       break;
     }
     default:

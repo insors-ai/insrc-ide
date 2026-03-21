@@ -309,7 +309,7 @@ export type ConfigScope =
   | { kind: 'project'; repoPath: string };
 
 export type ConfigNamespace =
-  | 'tester' | 'pair' | 'delegate' | 'designer' | 'planner' | 'brainstorm' | 'common';
+  | 'tester' | 'pair' | 'delegate' | 'designer' | 'planner' | 'brainstorm' | 'common' | 'research';
 
 export type ConfigCategory = 'template' | 'feedback' | 'convention';
 

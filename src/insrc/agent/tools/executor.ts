@@ -110,6 +110,20 @@ async function builtinRead(input: Record<string, unknown>): Promise<string> {
   const filePath = input['file_path'] as string;
   if (!filePath) throw new Error('file_path is required');
 
+  const { stat: statAsync } = await import('node:fs/promises');
+  const fileStat = await statAsync(filePath);
+
+  // Directory: list contents with guidance
+  if (fileStat.isDirectory()) {
+    const { readdir } = await import('node:fs/promises');
+    const entries = await readdir(filePath, { withFileTypes: true });
+    const listing = entries.map(e => {
+      const type = e.isDirectory() ? 'dir' : 'file';
+      return `  [${type}] ${e.name}`;
+    }).join('\n');
+    return `[Directory: ${filePath}]\n${entries.length} entries:\n${listing}\n\nThis is a directory, not a file. To proceed, specify which file(s) to read. Ask the user if unclear.`;
+  }
+
   const content = await readFile(filePath, 'utf-8');
   const lines = content.split('\n');
 
@@ -249,32 +263,30 @@ async function builtinBash(input: Record<string, unknown>): Promise<string> {
 async function builtinWebSearch(input: Record<string, unknown>): Promise<string> {
   const query = input['query'] as string;
   if (!query) throw new Error('query is required');
-
-  // Uses Brave Search API if key is available
-  const braveKey = process.env['BRAVE_API_KEY'];
-  if (!braveKey) {
-    return '[WebSearch] No BRAVE_API_KEY configured. Set it in env or ~/.insrc/config.json.';
-  }
-
   const limit = typeof input['limit'] === 'number' ? input['limit'] : 5;
-  const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`;
 
-  const res = await fetch(url, {
-    headers: { 'X-Subscription-Token': braveKey, 'Accept': 'application/json' },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Brave Search returned ${res.status}: ${res.statusText}`);
+  // 1. Try Brave Search API (free, no approval needed)
+  const braveKey = process.env['BRAVE_API_KEY'];
+  if (braveKey) {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`;
+    const res = await fetch(url, {
+      headers: { 'X-Subscription-Token': braveKey, 'Accept': 'application/json' },
+    });
+    if (!res.ok) {
+      throw new Error(`Brave Search returned ${res.status}: ${res.statusText}`);
+    }
+    const data = await res.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
+    const results = data.web?.results ?? [];
+    if (results.length === 0) return 'No results found.';
+    return results
+      .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`)
+      .join('\n\n');
   }
 
-  const data = await res.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
-  const results = data.web?.results ?? [];
-
-  if (results.length === 0) return 'No results found.';
-
-  return results
-    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`)
-    .join('\n\n');
+  // No Brave key — web search via Claude is handled by the delegate system.
+  // When called from the tool loop (simple completion), just report unavailable.
+  // The research controller uses delegate tasks for web search with proper gating.
+  return '[WebSearch] No BRAVE_API_KEY configured. Web search is available via the research agent which uses Claude with approval.';
 }
 
 // --- WebFetch ---

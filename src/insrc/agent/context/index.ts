@@ -168,23 +168,27 @@ export class ContextManager {
       contextParts.push(`## Active Plan Step\n${this.activePlanStepContext}`);
     }
 
+    // L3a: Recent conversation turns (for continuity)
+    const structuredTurns = weightedRecentTurns(this.recentTurns);
+    if (structuredTurns.length > 0) {
+      // Condense recent turns into a single context block, not separate messages
+      const turnSummaries: string[] = [];
+      for (let i = structuredTurns.length - 1; i >= 0; i--) {
+        const turn = structuredTurns[i]!;
+        const assistantSnippet = turn.assistantResponse
+          ? turn.assistantResponse.replace(/<[^>]+>/g, '').slice(0, 200)
+          : '(no response)';
+        turnSummaries.push(`User: ${turn.userMessage.slice(0, 150)}\nAssistant: ${assistantSnippet}`);
+      }
+      contextParts.push(`## Recent Conversation (for continuity only -- do NOT re-execute these)\n${turnSummaries.join('\n\n')}`);
+    }
+
     if (contextParts.length > 0) {
       messages.push({ role: 'user', content: contextParts.join('\n\n') });
       messages.push({ role: 'assistant', content: 'Understood. I have the context.' });
     }
 
-    // L3a: Recent turns as structured alternating user/assistant messages
-    const structuredTurns = weightedRecentTurns(this.recentTurns);
-    // Reverse to oldest-first for natural conversation flow
-    for (let i = structuredTurns.length - 1; i >= 0; i--) {
-      const turn = structuredTurns[i]!;
-      messages.push({ role: 'user', content: turn.userMessage });
-      if (turn.assistantResponse) {
-        messages.push({ role: 'assistant', content: turn.assistantResponse });
-      }
-    }
-
-    // Current user message
+    // Current user message -- this is the ONLY thing to act on
     messages.push({ role: 'user', content: userMessage });
 
     return messages;

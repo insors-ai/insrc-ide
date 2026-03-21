@@ -24,6 +24,7 @@ import { validateToolCall, type ValidationResult } from './validator.js';
 // ---------------------------------------------------------------------------
 
 const MAX_ITERATIONS = 25;
+const MAX_NUDGES = 3;
 
 export interface ToolLoopOpts {
   /** The LLM provider to use for completions */
@@ -81,6 +82,7 @@ export async function runToolLoop(
   const producedMessages: LLMMessage[] = [];
   let finalResponse = '';
   let iterations = 0;
+  let nudgeCount = 0;
 
   while (iterations < MAX_ITERATIONS) {
     // Call LLM with tool definitions — stream text via onToken if callback provided
@@ -104,8 +106,25 @@ export async function runToolLoop(
       finalResponse += llmResponse.text;
     }
 
-    // If no tool calls, we're done
+    // If no tool calls, check if LLM described using a tool without calling it
     if (llmResponse.stopReason !== 'tool_use' || !llmResponse.toolCalls?.length) {
+      // Detect: response references an available tool action but didn't invoke it
+      // Only nudge if the response ends with unexpecuted intent (last sentence is future-tense)
+      const toolNames = tools.map(t => t.name.toLowerCase());
+      const lastSentence = finalResponse.trim().split(/[.!?\n]/).filter(s => s.trim()).pop()?.trim().toLowerCase() ?? '';
+      const referencesTool = toolNames.some(name =>
+        lastSentence.includes(name.toLowerCase())
+      ) || /\b(check|read|look at|examine|list|search|find|grep|scan)\b.*\b(file|directory|folder|log|path|content)\b/i.test(lastSentence);
+      const isFutureTense = /\b(let me|i'll|i will|i need to|i should|i can|going to)\b/i.test(lastSentence);
+
+      if (referencesTool && isFutureTense && nudgeCount < MAX_NUDGES) {
+        // LLM's final sentence describes a tool action it didn't take
+        workingMessages.push({ role: 'assistant', content: finalResponse });
+        workingMessages.push({ role: 'user', content: 'You described an action but did not call a tool. Use the available tools to perform it now.' });
+        finalResponse = '';
+        nudgeCount++;
+        continue;
+      }
       // Record assistant message
       producedMessages.push({ role: 'assistant', content: finalResponse });
       break;
@@ -139,7 +158,8 @@ export async function runToolLoop(
         userPrompt: opts.userPrompt,
         onProgress: opts.onProgress,
       };
-      const result = await executeTool(call, execCtx);
+      let result = await executeTool(call, execCtx);
+
       onToolResult?.(call, result);
       toolResults.push(result);
     }

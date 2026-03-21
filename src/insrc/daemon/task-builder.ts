@@ -20,11 +20,12 @@ import type { Task, TaskKind, TaskFormat } from './task.js';
 // ---------------------------------------------------------------------------
 
 const SHELL_INTENTS = new Set(['infra', 'deploy', 'release']);
-const AGENT_INTENTS = new Set(['implement', 'refactor', 'debug', 'test', 'design', 'plan', 'brainstorm', 'requirements']);
+const AGENT_INTENTS = new Set(['implement', 'refactor', 'debug', 'test', 'design', 'plan', 'brainstorm', 'requirements', 'research', 'code-analysis']);
 
 function resolveKind(action: DecomposedAction): TaskKind {
-  // If it depends on a prior step and is a formatting intent → transform
-  if (action.dependsOn !== undefined && ['document', 'research'].includes(action.intent)) {
+  // If it depends on a prior step and is a formatting intent -> transform
+  // Note: research is an agent intent even with dependencies (it investigates, not formats)
+  if (action.dependsOn !== undefined && action.intent === 'document') {
     return 'transform';
   }
 

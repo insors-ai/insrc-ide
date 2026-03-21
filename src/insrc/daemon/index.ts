@@ -121,6 +121,13 @@ async function main(): Promise<void> {
   writePid();
   const startedAt = Date.now();
 
+  // 6b. Register delegate handlers
+  const { registerDelegate } = await import('./delegates/registry.js');
+  const { webSearchDelegate, claudeWebSearchDelegate, braveWebSearchDelegate } = await import('./delegates/web-search.js');
+  registerDelegate(webSearchDelegate);
+  registerDelegate(claudeWebSearchDelegate);
+  registerDelegate(braveWebSearchDelegate);
+
   // 7. Start IPC server
   const server = new IpcServer({
     'repo.add': async (params) => {

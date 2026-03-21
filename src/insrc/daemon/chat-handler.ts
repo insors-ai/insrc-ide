@@ -32,6 +32,7 @@ import type { DelegateInput } from '../agent/tasks/delegate/types.js';
 import type { DesignerInput } from '../agent/tasks/designer/types.js';
 import type { PlannerInput } from '../agent/planner/agent-state.js';
 import type { BrainstormInput } from '../agent/tasks/brainstorm/types.js';
+// Research agent handled via ResearchController in controllers/research.ts
 import type { TesterInput } from '../agent/tasks/tester/types.js';
 import type { RpcHandler, StreamHandler } from './server.js';
 
@@ -341,15 +342,44 @@ async function runChatMessage(
   const decomposeProvider = session.resolver.resolve('classifier', 'decompose');
   const decomposed = await decompose(message, decomposeProvider, historyMessages);
 
-  if (decomposed.usedLLM && decomposed.actions.length > 1) {
-    // Multi-action prompt — build tasks and execute via TaskPipeline
-    log.info({ actions: decomposed.actions.length }, 'multi-action prompt detected');
-    send({ id: requestId, stream: 'progress', data: {
-      message: `Decomposed into ${decomposed.actions.length} actions: ${decomposed.actions.map(a => a.intent).join(' → ')}`,
-    } });
+  // Primary/attached processing state
+  let classifiedIntentOverride: string | undefined;
+  let classifiedMessageOverride: string | undefined;
+  let postPrimaryActions: {
+    formatActions: import('../agent/classifier/decompose.js').AttachedAction[];
+    dependActions: import('../agent/classifier/decompose.js').AttachedAction[];
+    appendActions: import('../agent/classifier/decompose.js').AttachedAction[];
+    parallelActions: import('../agent/classifier/decompose.js').AttachedAction[];
+  } | undefined;
 
-    // Update file refs with purpose tags from decomposition
-    for (const action of decomposed.actions) {
+  // Use primary/attached model if available
+  const prompt = decomposed.prompt;
+
+  if (decomposed.usedLLM && prompt && prompt.attached.length > 0) {
+    // Primary/attached decomposition
+    const augmentations = prompt.attached.filter(a => a.relation === 'augment');
+    const formatActions = prompt.attached.filter(a => a.relation === 'format');
+    const dependActions = prompt.attached.filter(a => a.relation === 'depends');
+    const appendActions = prompt.attached.filter(a => a.relation === 'append');
+    const parallelActions = prompt.attached.filter(a => a.relation === 'parallel');
+
+    // Merge augmentations into the primary message
+    let enrichedMessage = message;
+    if (augmentations.length > 0) {
+      const augContext = augmentations
+        .map(a => `- ${a.action}${a.reason ? ' (' + a.reason + ')' : ''}${a.refs?.map(r => ' @' + r.path).join('') ?? ''}`)
+        .join('\n');
+      enrichedMessage = `${message}\n\nAdditional context to incorporate:\n${augContext}`;
+      log.info({ primary: prompt.primary.intent, augmentations: augmentations.length }, 'merged augmentations into primary');
+    }
+
+    const relSummary = prompt.attached.map(a => a.relation).join(', ');
+    send({ id: requestId, stream: 'progress', data: {
+      message: `Primary: ${prompt.primary.intent} | Attached: ${relSummary}`,
+    }});
+
+    // Update file refs with purpose tags
+    for (const action of [prompt.primary, ...prompt.attached]) {
       if (action.refs) {
         for (const ref of action.refs) {
           const matchingFileRef = fileRefs.find(f => f.ref === ref.path || f.path.endsWith(ref.path));
@@ -359,6 +389,21 @@ async function runChatMessage(
         }
       }
     }
+
+    // Route primary intent with enriched message
+    // Override message for the single-intent flow below
+    classifiedIntentOverride = prompt.primary.intent;
+    classifiedMessageOverride = enrichedMessage;
+
+    // Store post-processing actions for after primary completes
+    postPrimaryActions = { formatActions, dependActions, appendActions, parallelActions };
+
+  } else if (decomposed.usedLLM && decomposed.actions.length > 1 && !prompt) {
+    // Legacy multi-action (no primary/attached) -- use old pipeline
+    log.info({ actions: decomposed.actions.length }, 'multi-action prompt (legacy)');
+    send({ id: requestId, stream: 'progress', data: {
+      message: `Decomposed into ${decomposed.actions.length} actions: ${decomposed.actions.map(a => a.intent).join(' -> ')}`,
+    }});
 
     const tasks = buildTasks(decomposed.actions, message);
     const taskDeps: TaskOrchestratorDeps = {
@@ -372,13 +417,19 @@ async function runChatMessage(
     return;
   }
 
-  // Single action or decompose failed — fall through to classic single-intent flow
-  // Use decomposed intent if available, otherwise classify
+  // Single action or decompose failed -- fall through to classic single-intent flow
+  // Use override from primary/attached processing, or decomposed intent, or classify
   let classifiedIntent: string;
   let classifiedMessage: string;
   let classifiedExplicit: import('../shared/types.js').ExplicitProvider | undefined;
 
-  if (decomposed.usedLLM && decomposed.actions.length === 1) {
+  if (classifiedIntentOverride) {
+    // Primary/attached model: use the enriched primary intent
+    classifiedIntent = classifiedIntentOverride;
+    classifiedMessage = classifiedMessageOverride ?? message;
+    classifiedExplicit = undefined;
+    log.info({ intent: classifiedIntent, attached: postPrimaryActions ? 'yes' : 'no' }, 'using primary/attached override');
+  } else if (decomposed.usedLLM && decomposed.actions.length === 1) {
     const action = decomposed.actions[0]!;
     const conf = action.confidence ?? 0;
     log.info({ intent: action.intent, confidence: conf }, 'single action from decomposer');
@@ -443,7 +494,7 @@ async function runChatMessage(
   // 5. Route through task pipeline — agent intents become agent tasks,
   //    non-agent intents become LLM tasks (simple completion)
   const isAgentIntent = ['implement', 'refactor', 'debug', 'test', 'design',
-    'plan', 'brainstorm', 'requirements'].includes(classifiedIntent);
+    'plan', 'brainstorm', 'requirements', 'research', 'code-analysis'].includes(classifiedIntent);
 
   if (isAgentIntent) {
     // Build a single agent task and run through the task pipeline
@@ -457,7 +508,10 @@ async function runChatMessage(
       persisted: true,
     };
 
-    send({ id: requestId, stream: 'progress', data: { message: `Running ${classifiedIntent} agent...` } });
+    const agentLabel = classifiedIntent === 'research' || classifiedIntent === 'code-analysis'
+      ? 'Research Agent: planning investigation...'
+      : `Running ${classifiedIntent} agent...`;
+    send({ id: requestId, stream: 'progress', data: { message: agentLabel } });
 
     const taskDeps: TaskOrchestratorDeps = {
       session, channel, send, requestId,
@@ -602,7 +656,7 @@ function selectAgent(
     }
 
     default:
-      // research, document, review, code-analysis, deploy, release, infra
+      // document, review, deploy, release, infra
       return null;
   }
 }

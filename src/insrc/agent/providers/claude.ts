@@ -22,6 +22,23 @@ export interface ClaudeProviderConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Web search result type
+// ---------------------------------------------------------------------------
+
+export interface WebSearchResult {
+  query: string;
+  results: Array<{
+    url: string;
+    title: string;
+    snippet: string;
+    content?: string | undefined;
+  }>;
+  provider: 'brave' | 'claude';
+  summary: string;
+  usage?: { inputTokens: number; outputTokens: number } | undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
 
@@ -108,8 +125,79 @@ export class ClaudeProvider implements LLMProvider {
   }
 
   async embed(_text: string): Promise<number[]> {
-    // Claude API does not provide embeddings — use Ollama for embedding
+    // Claude API does not provide embeddings -- use Ollama for embedding
     return [];
+  }
+
+  /**
+   * Web search via Anthropic server-side tool.
+   * Uses the cheapest model available for cost efficiency.
+   */
+  async webSearch(query: string, maxResults: number = 5): Promise<WebSearchResult> {
+    log.info({ query, maxResults }, 'claude web search');
+
+    try {
+      const response = await this.client.messages.create({
+        model: 'claude-haiku-4-5',
+        max_tokens: 2048,
+        tools: [{
+          type: 'web_search_20250305' as unknown as 'custom',
+          name: 'web_search',
+        } as unknown as Anthropic.Tool],
+        messages: [{
+          role: 'user',
+          content: `Search the web for: "${query}". Return the ${maxResults} most relevant results with URLs, titles, and brief summaries.`,
+        }],
+      });
+
+      // Extract text and any search result blocks
+      const results: WebSearchResult['results'] = [];
+      let summary = '';
+
+      for (const block of response.content) {
+        if (block.type === 'text') {
+          summary += block.text;
+        }
+        // Server-side tool results may appear as tool_use blocks with results
+        if (block.type === 'tool_use' && block.name === 'web_search') {
+          const input = block.input as Record<string, unknown>;
+          if (input['results'] && Array.isArray(input['results'])) {
+            for (const r of input['results'] as Array<Record<string, unknown>>) {
+              results.push({
+                url: String(r['url'] ?? ''),
+                title: String(r['title'] ?? ''),
+                snippet: String(r['snippet'] ?? r['description'] ?? ''),
+              });
+            }
+          }
+        }
+      }
+
+      // If no structured results, parse from the text response
+      if (results.length === 0 && summary.length > 0) {
+        results.push({
+          url: '',
+          title: 'Web search summary',
+          snippet: summary.slice(0, 2000),
+        });
+      }
+
+      log.info({ query, resultCount: results.length, summaryLen: summary.length }, 'claude web search complete');
+
+      return {
+        query,
+        results,
+        provider: 'claude',
+        summary,
+        usage: {
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+        },
+      };
+    } catch (err) {
+      log.error({ query, error: (err as Error).message }, 'claude web search failed');
+      throw wrapError(err);
+    }
   }
 
   async *stream(messages: LLMMessage[], opts: CompletionOpts = {}): AsyncIterable<string> {
