@@ -1394,28 +1394,21 @@ async function runSimpleCompletion(
   requestId: number,
   send: (msg: IpcStreamMessage) => void,
   _existingContext?: string,
-  assembled?: AssembledContext,
+  _assembled?: AssembledContext,
 ): Promise<void> {
   try {
-    // Build messages from assembled context
-    let messages: LLMMessage[];
-    if (assembled) {
-      messages = session.contextManager.buildMessages(assembled, message);
-      log.debug({ layers: assembled.totalTokens }, 'simple completion: using assembled context');
-    } else {
-      const queryEmbed = await session.contextManager.embedQuery(message);
-      const freshAssembled = await session.contextManager.assemble(message, queryEmbed);
-      messages = session.contextManager.buildMessages(freshAssembled, message);
-      log.debug({ layers: freshAssembled.totalTokens }, 'simple completion: assembled fresh context');
-    }
-
-    // Use tool loop so the LLM can read files, search code, query graph
+    // Use context-aware provider — context assembly + turn recording are automatic
     const { runToolLoop } = await import('../agent/tools/loop.js');
+
+    // Simple user message — context-aware provider handles L1-L5
+    const messages: LLMMessage[] = [
+      { role: 'user', content: message },
+    ];
 
     let accumulatedText = '';
 
     const result = await runToolLoop(messages, {
-      provider: session.ollamaProvider,
+      provider: session.localProvider,  // context-aware: auto-injects L1-L5
       tools: SIMPLE_COMPLETION_TOOLS,
       intent: 'research',
       permissionMode: 'auto-accept',
@@ -1440,7 +1433,8 @@ async function runSimpleCompletion(
       log.info({ toolIterations: result.iterations, hitLimit: result.hitLimit }, 'simple completion used tools');
     }
 
-    // Persist turn and update context manager
+    // Turn recording is handled by the context-aware provider
+    // Just persist to DB for cross-session history
     await persistTurn(session, message, resRendered.text, resRendered.format);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

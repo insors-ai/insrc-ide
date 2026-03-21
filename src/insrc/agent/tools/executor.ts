@@ -18,6 +18,8 @@ const DEFAULT_BASH_TIMEOUT = 120_000;
 export interface ToolExecContext {
   /** The user's original prompt (used by SmartRead for intelligent extraction) */
   userPrompt?: string | undefined;
+  /** Available context budget in tokens (used by SmartRead for chunk sizing) */
+  contextBudgetTokens?: number | undefined;
 }
 
 /**
@@ -66,7 +68,11 @@ async function executeBuiltin(call: ToolCall, context?: ToolExecContext): Promis
     case 'Read': {
       // Use SmartRead for intelligent extraction when user prompt is available
       if (context?.userPrompt && !call.input['limit']) {
-        const result = await smartRead(call.input['file_path'] as string, context.userPrompt);
+        const result = await smartRead(
+          call.input['file_path'] as string,
+          context.userPrompt,
+          context.contextBudgetTokens ?? 4000,
+        );
         return result.content;
       }
       return builtinRead(call.input);

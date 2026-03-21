@@ -16,6 +16,7 @@ import { exec } from 'node:child_process';
 import { extname } from 'node:path';
 import type { LLMProvider } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import { splitDocument } from '../../daemon/doc-splitter.js';
 
 const log = getLogger('smart-read');
 
@@ -32,11 +33,13 @@ interface SmartReadResult {
  *
  * @param filePath Absolute path to the file
  * @param userPrompt The user's original question (used to plan extraction)
+ * @param contextBudgetTokens Available context budget in tokens (used to calculate max chunks)
  * @param provider Optional LLM provider for planning (falls back to heuristics)
  */
 export async function smartRead(
   filePath: string,
   userPrompt: string,
+  contextBudgetTokens = 4000,
   provider?: LLMProvider,
 ): Promise<SmartReadResult> {
 
@@ -66,8 +69,8 @@ export async function smartRead(
 
   const format = detectFormat(filePath, sample);
 
-  // Step 3: plan — decide extraction strategy based on format + prompt
-  const strategy = planStrategy(format, userPrompt, lineCount);
+  // Step 3: plan — decide extraction strategy based on format + prompt + budget
+  const strategy = planStrategy(format, userPrompt, lineCount, contextBudgetTokens);
 
   log.info({ filePath, lineCount, format, strategy: strategy.type }, 'SmartRead planned');
 
@@ -85,6 +88,9 @@ export async function smartRead(
       break;
     case 'structured':
       extracted = await executeStructured(filePath, strategy.command!);
+      break;
+    case 'chunked':
+      extracted = executeChunked(raw, filePath, strategy.keywords ?? [], strategy.maxChunks ?? 5);
       break;
     default:
       extracted = formatHeadTail(lines, 100, 20);
@@ -128,16 +134,25 @@ function detectFormat(filePath: string, sample: string): string {
 // ---------------------------------------------------------------------------
 
 interface Strategy {
-  type: 'grep' | 'head-tail' | 'section' | 'structured';
+  type: 'grep' | 'head-tail' | 'section' | 'structured' | 'chunked';
   pattern?: string;
   maxResults?: number;
   headLines?: number;
   tailLines?: number;
   sectionPattern?: string;
   command?: string;
+  /** For chunked: max chunks to return */
+  maxChunks?: number;
+  /** For chunked: keywords to select relevant chunks */
+  keywords?: string[];
 }
 
-function planStrategy(format: string, prompt: string, lineCount: number): Strategy {
+function planStrategy(format: string, prompt: string, lineCount: number, contextBudgetTokens: number): Strategy {
+  // Calculate max chunks that fit in budget (each chunk ~4000 chars = ~1333 tokens)
+  const CHARS_PER_TOKEN = 3;
+  const TOKENS_PER_CHUNK = 1333;
+  const maxChunksByBudget = Math.max(1, Math.floor(contextBudgetTokens / TOKENS_PER_CHUNK));
+  void CHARS_PER_TOKEN; // used in doc-splitter
   const lower = prompt.toLowerCase();
 
   // Error/warning/failure searching
@@ -162,8 +177,11 @@ function planStrategy(format: string, prompt: string, lineCount: number): Strate
     return { type: 'grep', pattern: '^(export\\s+)?(function|class|interface|type|const|let|enum|struct|def)\\s+\\w+', maxResults: 40 };
   }
 
-  // Summary/overview
+  // Summary/overview — use chunked for large files, head-tail for medium
   if (/summar|overview|what is|describe|explain|structure/i.test(lower)) {
+    if (lineCount > 1000) {
+      return { type: 'chunked', maxChunks: maxChunksByBudget, keywords: extractKeywords(prompt) };
+    }
     return { type: 'head-tail', headLines: 60, tailLines: 20 };
   }
 
@@ -184,7 +202,12 @@ function planStrategy(format: string, prompt: string, lineCount: number): Strate
     return { type: 'head-tail', headLines: 30, tailLines: 5 };
   }
 
-  // Default: head + tail
+  // Large code/text files — use chunked with keyword selection
+  if (lineCount > 1000 && (format === 'code' || format === 'text' || format === 'markdown' || format === 'html')) {
+    return { type: 'chunked', maxChunks: 5, keywords: extractKeywords(prompt) };
+  }
+
+  // Default: head + tail for medium files
   return { type: 'head-tail', headLines: Math.min(100, Math.floor(lineCount * 0.3)), tailLines: 20 };
 }
 
@@ -247,4 +270,79 @@ async function executeStructured(filePath: string, command: string): Promise<str
       resolve(stdout || '(no output)');
     });
   });
+}
+
+/**
+ * Chunked strategy: split file using doc-splitter, select most relevant chunks.
+ */
+function executeChunked(content: string, filePath: string, keywords: string[], maxChunks: number): string {
+  const split = splitDocument(content, filePath, { maxTokensPerChunk: 4000 });
+
+  if (split.chunks.length <= maxChunks) {
+    // All chunks fit — return them all
+    const parts = split.chunks.map(c =>
+      `--- Chunk ${c.index + 1}/${c.total}: ${c.heading || 'section'} ---\n${c.content}`
+    );
+    return `[${split.chunks.length} chunk(s), showing all]\n\n${parts.join('\n\n')}`;
+  }
+
+  // Score chunks by keyword relevance
+  const scored = split.chunks.map((chunk) => {
+    const lower = chunk.content.toLowerCase();
+    let score = 0;
+    for (const kw of keywords) {
+      const kwLower = kw.toLowerCase();
+      // Count occurrences
+      let idx = 0;
+      while ((idx = lower.indexOf(kwLower, idx)) !== -1) {
+        score++;
+        idx += kwLower.length;
+      }
+    }
+    // Boost first chunk (usually has imports/overview) and last (usually has exports/summary)
+    if (chunk.index === 0) score += 2;
+    if (chunk.index === split.chunks.length - 1) score += 1;
+    return { chunk, score };
+  });
+
+  // Sort by score descending, take top N
+  scored.sort((a, b) => b.score - a.score);
+  const selected = scored.slice(0, maxChunks);
+
+  // Re-sort by original order for coherent reading
+  selected.sort((a, b) => a.chunk.index - b.chunk.index);
+
+  const parts = selected.map(({ chunk, score }) =>
+    `--- Chunk ${chunk.index + 1}/${split.chunks.length}: ${chunk.heading || 'section'} (relevance: ${score}) ---\n${chunk.content}`
+  );
+
+  const skipped = split.chunks.length - selected.length;
+  return `[${split.chunks.length} chunk(s), showing ${selected.length} most relevant, ${skipped} omitted]\n\n${parts.join('\n\n')}`;
+}
+
+/**
+ * Extract meaningful keywords from a user prompt for chunk scoring.
+ */
+function extractKeywords(prompt: string): string[] {
+  // Remove common stop words and extract meaningful terms
+  const stopWords = new Set([
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+    'on', 'with', 'at', 'by', 'from', 'about', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between', 'and', 'or', 'but',
+    'not', 'no', 'nor', 'so', 'if', 'then', 'than', 'too', 'very',
+    'just', 'that', 'this', 'these', 'those', 'it', 'its', 'what', 'which',
+    'who', 'whom', 'when', 'where', 'why', 'how', 'all', 'each', 'every',
+    'both', 'few', 'more', 'most', 'other', 'some', 'such', 'only', 'own',
+    'same', 'me', 'my', 'i', 'you', 'your', 'he', 'she', 'we', 'they',
+    'tell', 'show', 'find', 'read', 'check', 'look', 'see', 'get',
+    'file', 'files', 'code', 'please', 'want', 'need',
+  ]);
+
+  return prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9_\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !stopWords.has(w));
 }

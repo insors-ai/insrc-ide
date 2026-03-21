@@ -8,6 +8,7 @@ import { ContextManager, initSession } from './context/index.js';
 import { embedText } from './context/semantic.js';
 import { sessionClose, sessionSeed, sessionForget, sessionHistory } from './tools/mcp-client.js';
 import { HealthMonitor, type HealthSnapshot } from './faults/index.js';
+import { ContextAwareProvider } from './context/context-aware-provider.js';
 
 export interface SessionOpts {
   repoPath: string;
@@ -44,10 +45,16 @@ export class Session {
   /** Entity IDs seen across all turns (for session close). */
   private readonly seenEntities = new Set<string>();
 
-  /** Exposed for the router — do not use directly for LLM calls. */
+  /** Raw Ollama provider (no context injection). Use for internal calls only. */
   readonly ollamaProvider: OllamaProvider;
-  /** Exposed for the router — null when no API key is configured. */
+  /** Raw Claude provider (no context injection). Use for internal calls only. */
   readonly claudeProvider: ClaudeProvider | null;
+
+  /** Context-aware local provider (auto-injects L1-L5, auto-records turns). */
+  localProvider!: ContextAwareProvider;
+  /** Context-aware Claude provider (auto-injects L1-L5, auto-records turns). Null if no API key. */
+  claudeContextProvider: ContextAwareProvider | null = null;
+
   /** Per-agent step-level provider resolver. */
   readonly resolver: ProviderResolver;
 
@@ -103,6 +110,23 @@ export class Session {
       provider: this.ollamaProvider,
       contextWindowSize: this.config.models.context.local,
     });
+
+    // Create context-aware provider wrappers (shared context manager)
+    this.localProvider = new ContextAwareProvider(
+      this.ollamaProvider,
+      this.contextManager,
+      this.config.models.context.local,
+      { label: 'local', autoRecord: true },
+    );
+
+    if (this.claudeProvider) {
+      this.claudeContextProvider = new ContextAwareProvider(
+        this.claudeProvider,
+        this.contextManager,
+        this.config.models.context.claude,
+        { label: 'claude', autoRecord: true },
+      );
+    }
 
     // Initialize smart router if auto mode and Ollama available
     if (this.routingMode === 'auto' && await this.ollamaProvider.ping()) {
