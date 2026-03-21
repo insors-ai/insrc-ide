@@ -11,9 +11,9 @@
  *   - structured: jq/awk for JSON/CSV
  */
 
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, readdir } from 'node:fs/promises';
 import { exec } from 'node:child_process';
-import { extname } from 'node:path';
+import { extname, join } from 'node:path';
 import type { LLMProvider } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { splitDocument } from '../../daemon/doc-splitter.js';
@@ -24,7 +24,7 @@ const SMALL_FILE_THRESHOLD = 500; // lines
 
 interface SmartReadResult {
   content: string;
-  strategy: string;
+  strategy: 'full' | 'grep' | 'head-tail' | 'section' | 'structured' | 'chunked' | 'directory';
   metadata: string;
 }
 
@@ -49,8 +49,13 @@ export async function smartRead(
   onProgress?: SmartReadProgressCallback,
 ): Promise<SmartReadResult> {
 
-  // Step 1: stat
+  // Step 1: stat — detect if directory
   const fileStat = await stat(filePath);
+
+  if (fileStat.isDirectory()) {
+    return handleDirectory(filePath, userPrompt, onProgress);
+  }
+
   const raw = await readFile(filePath, 'utf-8');
   const lines = raw.split('\n');
   const lineCount = lines.length;
@@ -114,6 +119,72 @@ export async function smartRead(
   const metadata = `[File: ${filePath} | ${lineCount} lines | ${sizeKB} KB | Format: ${format} | Strategy: ${strategy.type}]`;
 
   return { content: `${metadata}\n\n${extracted}`, strategy: strategy.type, metadata };
+}
+
+// ---------------------------------------------------------------------------
+// Directory handling
+// ---------------------------------------------------------------------------
+
+async function handleDirectory(
+  dirPath: string,
+  userPrompt: string,
+  onProgress?: SmartReadProgressCallback,
+): Promise<SmartReadResult> {
+  onProgress?.(`Listing directory: ${dirPath.split('/').pop()}`);
+
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  const dirs: string[] = [];
+  const files: { name: string; size: number; ext: string }[] = [];
+
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) { continue; } // skip hidden
+    if (entry.isDirectory()) {
+      dirs.push(entry.name);
+    } else {
+      try {
+        const s = await stat(join(dirPath, entry.name));
+        files.push({ name: entry.name, size: s.size, ext: extname(entry.name) });
+      } catch { /* skip unreadable */ }
+    }
+  }
+
+  // Build directory listing
+  const lines: string[] = [];
+  lines.push(`[Directory: ${dirPath} | ${dirs.length} dirs, ${files.length} files]`);
+  lines.push('');
+
+  if (dirs.length > 0) {
+    lines.push('Directories:');
+    for (const d of dirs.sort()) {
+      lines.push(`  ${d}/`);
+    }
+    lines.push('');
+  }
+
+  if (files.length > 0) {
+    lines.push('Files:');
+    for (const f of files.sort((a, b) => a.name.localeCompare(b.name))) {
+      const sizeStr = f.size < 1024 ? `${f.size}B` : `${(f.size / 1024).toFixed(1)}KB`;
+      lines.push(`  ${f.name} (${sizeStr})`);
+    }
+    lines.push('');
+  }
+
+  // Add guidance based on user prompt
+  const lower = userPrompt.toLowerCase();
+  if (/all|every|each|entire/i.test(lower)) {
+    lines.push('To read all files, specify each file path individually or use Grep to search across them.');
+  } else {
+    lines.push('This is a directory. To read a specific file, use its full path.');
+    lines.push(`Example: Read "${join(dirPath, files[0]?.name ?? 'file.ts')}"`);
+  }
+
+  const content = lines.join('\n');
+  return {
+    content,
+    strategy: 'directory',
+    metadata: `[Directory: ${dirPath} | ${dirs.length} dirs, ${files.length} files]`,
+  };
 }
 
 // ---------------------------------------------------------------------------
