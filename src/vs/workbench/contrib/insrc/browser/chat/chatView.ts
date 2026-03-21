@@ -324,6 +324,23 @@ export class InsrcChatViewPane extends ViewPane {
 			this._makeCollapsible(el, content);
 		}
 
+		// Copy button (appears on hover)
+		const copyBtn = dom.append(el, dom.$('.insrc-msg-copy.codicon.codicon-copy'));
+		copyBtn.title = 'Copy message';
+		this._register(dom.addDisposableListener(copyBtn, 'click', (e) => {
+			e.stopPropagation();
+			// Get text content (strip HTML tags for assistant messages)
+			const text = content.textContent ?? '';
+			navigator.clipboard.writeText(text).then(() => {
+				copyBtn.classList.remove('codicon-copy');
+				copyBtn.classList.add('codicon-check');
+				setTimeout(() => {
+					copyBtn.classList.remove('codicon-check');
+					copyBtn.classList.add('codicon-copy');
+				}, 2000);
+			});
+		}));
+
 		return el;
 	}
 
