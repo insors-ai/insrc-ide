@@ -14,6 +14,7 @@ import { getLogger } from '../shared/logger.js';
 import { getSessionById, getTurnsForSession } from '../db/conversations.js';
 import { getDb } from '../db/client.js';
 import { SessionFileCache } from './file-cache.js';
+import { SessionPDFCache } from './pdf-processor.js';
 
 const log = getLogger('chat-sessions');
 
@@ -37,6 +38,8 @@ export interface ActiveSession {
   injectedMessages: string[];
   /** Per-session file cache for referenced files. */
   fileCache: SessionFileCache;
+  /** Per-session PDF cache for extracted text. */
+  pdfCache: SessionPDFCache;
 }
 
 export interface SessionInfo {
@@ -83,6 +86,7 @@ export class ChatSessionPool {
       lastActivityAt: Date.now(),
       injectedMessages: [],
       fileCache: new SessionFileCache(),
+      pdfCache: new SessionPDFCache(),
     };
 
     this.sessions.set(sessionId, active);
@@ -150,6 +154,7 @@ export class ChatSessionPool {
       lastActivityAt: Date.now(),
       injectedMessages: [],
       fileCache: new SessionFileCache(),
+      pdfCache: new SessionPDFCache(),
     };
 
     this.sessions.set(sessionId, active);

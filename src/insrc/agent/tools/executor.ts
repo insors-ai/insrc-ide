@@ -4,6 +4,7 @@ import { dirname, join, relative } from 'node:path';
 import type { ToolCall, ToolResult } from '../../shared/types.js';
 import { getTool } from './registry.js';
 import { mcpCall } from './mcp-client.js';
+import { smartRead } from './smart-read.js';
 
 // ---------------------------------------------------------------------------
 // Tool Executor — dispatches tool calls to builtin or MCP backends
@@ -14,11 +15,16 @@ import { mcpCall } from './mcp-client.js';
 
 const DEFAULT_BASH_TIMEOUT = 120_000;
 
+export interface ToolExecContext {
+  /** The user's original prompt (used by SmartRead for intelligent extraction) */
+  userPrompt?: string | undefined;
+}
+
 /**
  * Execute a single tool call and return the result.
  * Never throws — errors are returned as `{ isError: true }` results.
  */
-export async function executeTool(call: ToolCall): Promise<ToolResult> {
+export async function executeTool(call: ToolCall, context?: ToolExecContext): Promise<ToolResult> {
   const tool = getTool(call.name);
   if (!tool) {
     return {
@@ -39,7 +45,7 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
     }
 
     // Builtin tools
-    const content = await executeBuiltin(call);
+    const content = await executeBuiltin(call, context);
     return { toolCallId: call.id, content };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -55,9 +61,16 @@ export async function executeTool(call: ToolCall): Promise<ToolResult> {
 // Builtin tool implementations
 // ---------------------------------------------------------------------------
 
-async function executeBuiltin(call: ToolCall): Promise<string> {
+async function executeBuiltin(call: ToolCall, context?: ToolExecContext): Promise<string> {
   switch (call.name) {
-    case 'Read':   return builtinRead(call.input);
+    case 'Read': {
+      // Use SmartRead for intelligent extraction when user prompt is available
+      if (context?.userPrompt && !call.input['limit']) {
+        const result = await smartRead(call.input['file_path'] as string, context.userPrompt);
+        return result.content;
+      }
+      return builtinRead(call.input);
+    }
     case 'Write':  return builtinWrite(call.input);
     case 'Edit':   return builtinEdit(call.input);
     case 'Glob':   return builtinGlob(call.input);
@@ -65,6 +78,12 @@ async function executeBuiltin(call: ToolCall): Promise<string> {
     case 'Bash':   return builtinBash(call.input);
     case 'WebSearch': return builtinWebSearch(call.input);
     case 'WebFetch':  return builtinWebFetch(call.input);
+    case 'ListDirectory': return builtinListDirectory(call.input);
+    case 'FileInfo':      return builtinFileInfo(call.input);
+    case 'TreeView':      return builtinTreeView(call.input);
+    case 'Diff':          return builtinDiff(call.input);
+    case 'GitLog':        return builtinGitLog(call.input);
+    case 'GitBlame':      return builtinGitBlame(call.input);
     case 'lsp_diagnostics': return lspDiagnostics(call.input);
     case 'lsp_definitions': return lspDefinitions(call.input);
     case 'lsp_references': return lspReferences(call.input);
@@ -273,6 +292,119 @@ async function builtinWebFetch(input: Record<string, unknown>): Promise<string> 
   }
 
   return text;
+}
+
+// ---------------------------------------------------------------------------
+// ListDirectory, FileInfo, TreeView, Diff, GitLog, GitBlame
+// ---------------------------------------------------------------------------
+
+async function builtinListDirectory(input: Record<string, unknown>): Promise<string> {
+  const dirPath = input['path'] as string;
+  if (!dirPath) throw new Error('path is required');
+
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  const lines: string[] = [];
+  for (const entry of entries.slice(0, 200)) {
+    const type = entry.isDirectory() ? 'dir' : 'file';
+    lines.push(`${type}  ${entry.name}`);
+  }
+  if (entries.length > 200) lines.push(`... and ${entries.length - 200} more`);
+  return lines.join('\n') || '(empty directory)';
+}
+
+async function builtinFileInfo(input: Record<string, unknown>): Promise<string> {
+  const filePath = input['file_path'] as string;
+  if (!filePath) throw new Error('file_path is required');
+
+  const { statSync } = await import('node:fs');
+  const stat = statSync(filePath);
+  const content = await readFile(filePath, 'utf-8').catch(() => null);
+  const lineCount = content ? content.split('\n').length : 0;
+  const ext = filePath.split('.').pop() ?? '';
+  const sizeKB = (stat.size / 1024).toFixed(1);
+
+  return [
+    `Path: ${filePath}`,
+    `Size: ${stat.size} bytes (${sizeKB} KB)`,
+    `Lines: ${lineCount}`,
+    `Type: ${stat.isDirectory() ? 'directory' : ext || 'file'}`,
+    `Modified: ${stat.mtime.toISOString()}`,
+  ].join('\n');
+}
+
+async function builtinTreeView(input: Record<string, unknown>): Promise<string> {
+  const rootPath = input['path'] as string;
+  if (!rootPath) throw new Error('path is required');
+
+  const maxDepth = typeof input['depth'] === 'number' ? input['depth'] : 3;
+  const pattern = input['pattern'] as string | undefined;
+  const lines: string[] = [];
+
+  async function walk(dir: string, prefix: string, depth: number): Promise<void> {
+    if (depth > maxDepth) return;
+    const entries = await readdir(dir, { withFileTypes: true });
+    const filtered = pattern
+      ? entries.filter(e => e.isDirectory() || new RegExp(pattern.replace(/\*/g, '.*')).test(e.name))
+      : entries;
+
+    for (let i = 0; i < filtered.length && lines.length < 500; i++) {
+      const entry = filtered[i]!;
+      const isLast = i === filtered.length - 1;
+      const connector = isLast ? '└── ' : '├── ';
+      const childPrefix = isLast ? '    ' : '│   ';
+      lines.push(`${prefix}${connector}${entry.name}${entry.isDirectory() ? '/' : ''}`);
+      if (entry.isDirectory()) {
+        await walk(join(dir, entry.name), prefix + childPrefix, depth + 1);
+      }
+    }
+  }
+
+  lines.push(rootPath.split('/').pop() ?? rootPath);
+  await walk(rootPath, '', 1);
+  if (lines.length >= 500) lines.push('... (truncated at 500 entries)');
+  return lines.join('\n');
+}
+
+async function builtinDiff(input: Record<string, unknown>): Promise<string> {
+  const fileA = input['file_a'] as string;
+  if (!fileA) throw new Error('file_a is required');
+
+  const fileB = input['file_b'] as string | undefined;
+  const context = typeof input['context'] === 'number' ? input['context'] : 3;
+
+  if (fileB) {
+    // Diff two files
+    return runShell(`diff -u --label "${fileA}" --label "${fileB}" "${fileA}" "${fileB}" | head -100`, 10_000)
+      .catch(() => '(files are identical)');
+  }
+  // Git diff for a single file
+  return runShell(`git diff -U${context} -- "${fileA}" | head -200`, 10_000)
+    .catch(() => runShell(`git diff HEAD -- "${fileA}" | head -200`, 10_000))
+    .catch(() => '(no git changes)');
+}
+
+async function builtinGitLog(input: Record<string, unknown>): Promise<string> {
+  const path = input['path'] as string;
+  if (!path) throw new Error('path is required');
+
+  const limit = typeof input['limit'] === 'number' ? input['limit'] : 10;
+  const oneline = input['oneline'] !== false;
+
+  const format = oneline ? '--oneline' : '--format="%h %ad %an: %s" --date=short';
+  return runShell(`git log ${format} -${limit} -- "${path}" 2>/dev/null`, 10_000)
+    .catch(() => '(not a git repository or no history)');
+}
+
+async function builtinGitBlame(input: Record<string, unknown>): Promise<string> {
+  const filePath = input['file_path'] as string;
+  if (!filePath) throw new Error('file_path is required');
+
+  const startLine = typeof input['start_line'] === 'number' ? input['start_line'] : undefined;
+  const endLine = typeof input['end_line'] === 'number' ? input['end_line'] : undefined;
+
+  const lineRange = startLine && endLine ? `-L ${startLine},${endLine}` : startLine ? `-L ${startLine},+20` : '';
+  return runShell(`git blame --date=short ${lineRange} "${filePath}" 2>/dev/null | head -50`, 10_000)
+    .catch(() => '(not a git repository)');
 }
 
 // ---------------------------------------------------------------------------

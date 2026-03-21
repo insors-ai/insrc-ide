@@ -116,6 +116,79 @@ const BUILTIN_TOOLS: ToolDefinition[] = [
       required: ['url'],
     },
   },
+  {
+    name: 'ListDirectory',
+    description: 'List files and directories at a path. Returns names with type (file/dir).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory path to list' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'FileInfo',
+    description: 'Get file metadata: size in bytes, line count, file type, last modified time.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    name: 'TreeView',
+    description: 'Show directory tree structure with configurable depth. Useful for project layout.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Root directory path' },
+        depth: { type: 'number', description: 'Max depth (default 3)' },
+        pattern: { type: 'string', description: 'Filter pattern (e.g. "*.ts") (optional)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'Diff',
+    description: 'Show differences between two files, or git diff for a file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_a: { type: 'string', description: 'First file path (or file for git diff)' },
+        file_b: { type: 'string', description: 'Second file path (optional)' },
+        context: { type: 'number', description: 'Lines of context (default 3)' },
+      },
+      required: ['file_a'],
+    },
+  },
+  {
+    name: 'GitLog',
+    description: 'Show git commit history for a file or repo.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path or repo directory' },
+        limit: { type: 'number', description: 'Max commits (default 10)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'GitBlame',
+    description: 'Show line-by-line git blame (author, date, commit) for a file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+        start_line: { type: 'number', description: 'Start line (optional)' },
+        end_line: { type: 'number', description: 'End line (optional)' },
+      },
+      required: ['file_path'],
+    },
+  },
 ];
 
 const MCP_TOOLS: ToolDefinition[] = [

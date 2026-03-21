@@ -14,6 +14,7 @@
 
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, extname } from 'node:path';
+import { processPDF, SessionPDFCache } from './pdf-processor.js';
 import { getLogger } from '../shared/logger.js';
 import { splitDocument, type DocChunk } from './doc-splitter.js';
 
@@ -52,6 +53,12 @@ export interface ResolveOptions {
   multiPass?: boolean | undefined;
   /** Max tokens per chunk for multi-pass mode (default 4000) */
   chunkTokens?: number | undefined;
+  /** Anthropic API key for PDF vision extraction */
+  claudeApiKey?: string | undefined;
+  /** Session PDF cache */
+  pdfCache?: SessionPDFCache | undefined;
+  /** Progress callback for PDF processing */
+  onPDFProgress?: ((page: number, total: number, method: string) => void) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +86,7 @@ export function detectFileRefs(message: string): string[] {
   }
 
   // Unquoted paths with known extensions
-  const knownExts = /\.(html|md|ts|tsx|js|jsx|py|go|rs|yaml|yml|json|toml|sql|sh|css|xml|proto|graphql)$/;
+  const knownExts = /\.(html|md|ts|tsx|js|jsx|py|go|rs|yaml|yml|json|toml|sql|sh|css|xml|proto|graphql|pdf)$/;
   const pathPattern = /(?:^|\s)((?:\.{0,2}\/)?[\w./-]+\.\w{1,10})(?:\s|$|,|;)/g;
   while ((match = pathPattern.exec(message)) !== null) {
     const p = match[1]!;
@@ -144,8 +151,27 @@ export async function resolveFileRefs(
 
     const stat = statSync(absPath);
     if (stat.isDirectory()) continue;
-    if (stat.size > 5 * 1024 * 1024) {
-      log.debug({ ref, size: stat.size }, 'file too large (>5MB), skipping');
+    if (stat.size > 20 * 1024 * 1024) {
+      log.debug({ ref, size: stat.size }, 'file too large (>20MB), skipping');
+      continue;
+    }
+
+    // Handle PDF files specially
+    if (extname(absPath).toLowerCase() === '.pdf') {
+      try {
+        const pdf = await processPDF(absPath, options.claudeApiKey ?? null, options.onPDFProgress, options.pdfCache);
+        const fullText = pdf.pages.map(p => `--- Page ${p.pageNumber} ---\n${p.text}`).join('\n\n');
+        results.push({
+          ref, path: absPath,
+          content: fullText,
+          truncated: false,
+          originalSize: stat.size,
+        });
+        charsRemaining -= fullText.length;
+        log.info({ ref, pages: pdf.totalPages, chars: fullText.length }, 'PDF processed');
+      } catch (err) {
+        log.warn({ ref, error: String(err) }, 'PDF processing failed');
+      }
       continue;
     }
 

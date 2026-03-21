@@ -6,7 +6,7 @@ import type {
   ToolResult,
   ToolDefinition,
 } from '../../shared/types.js';
-import { executeTool } from './executor.js';
+import { executeTool, type ToolExecContext } from './executor.js';
 import { validateToolCall, type ValidationResult } from './validator.js';
 
 // ---------------------------------------------------------------------------
@@ -46,6 +46,8 @@ export interface ToolLoopOpts {
   maxTokens?: number | undefined;
   /** Callback when an LLM response includes usage info (for cost tracking) */
   onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
+  /** User's original prompt (passed to SmartRead for intelligent extraction) */
+  userPrompt?: string | undefined;
 }
 
 export interface ToolLoopResult {
@@ -131,7 +133,8 @@ export async function runToolLoop(
       }
 
       // Execute (auto-execute or approved)
-      const result = await executeTool(call);
+      const execCtx: ToolExecContext = { userPrompt: opts.userPrompt };
+      const result = await executeTool(call, execCtx);
       onToolResult?.(call, result);
       toolResults.push(result);
     }

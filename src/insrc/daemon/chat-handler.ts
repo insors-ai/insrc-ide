@@ -252,12 +252,22 @@ async function runChatMessage(
 
   // 0. Resolve file references with per-session cache
   active.fileCache.setTurn(session.turnIndex);
+  // Get Anthropic API key for PDF vision extraction
+  const anthropicKey = session.config.keys?.anthropic ?? null;
+
   const fileRefs = await resolveFileRefs(message, {
     cwd: session.repoPath,
     maxTokens: 6000,
     prompt: message,
     multiPass: true,
     chunkTokens: 4000,
+    claudeApiKey: anthropicKey ?? undefined,
+    pdfCache: active.pdfCache,
+    onPDFProgress: (page, total, method) => {
+      send({ id: requestId, stream: 'progress', data: {
+        message: `Processing PDF: page ${page}/${total} (${method})`,
+      }});
+    },
   });
   // Update cache and report per-file progress
   if (fileRefs.length > 0) {
@@ -1277,6 +1287,103 @@ const SIMPLE_COMPLETION_TOOLS: ToolDefinition[] = [
       required: ['file_path'],
     },
   },
+  // File system tools
+  {
+    name: 'ListDirectory',
+    description: 'List files and directories at a path. Returns names with type (file/dir).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Directory path to list' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'FileInfo',
+    description: 'Get file metadata: size in bytes, line count, file type, last modified time. Use this BEFORE reading large files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    name: 'TreeView',
+    description: 'Show directory tree structure with configurable depth.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Root directory path' },
+        depth: { type: 'number', description: 'Max depth (default 3)' },
+      },
+      required: ['path'],
+    },
+  },
+  // Git tools
+  {
+    name: 'Diff',
+    description: 'Show differences between two files, or git diff for a file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_a: { type: 'string', description: 'First file (or file for git diff)' },
+        file_b: { type: 'string', description: 'Second file (optional)' },
+      },
+      required: ['file_a'],
+    },
+  },
+  {
+    name: 'GitLog',
+    description: 'Show git commit history for a file or repo.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path or repo directory' },
+        limit: { type: 'number', description: 'Max commits (default 10)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'GitBlame',
+    description: 'Show line-by-line git blame for a file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path to the file' },
+        start_line: { type: 'number', description: 'Start line (optional)' },
+        end_line: { type: 'number', description: 'End line (optional)' },
+      },
+      required: ['file_path'],
+    },
+  },
+  // Web tools
+  {
+    name: 'WebSearch',
+    description: 'Search the web and return results.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default 5)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'WebFetch',
+    description: 'Fetch the content of a URL.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'URL to fetch' },
+      },
+      required: ['url'],
+    },
+  },
 ];
 
 async function runSimpleCompletion(
@@ -1311,14 +1418,15 @@ async function runSimpleCompletion(
       provider: session.ollamaProvider,
       tools: SIMPLE_COMPLETION_TOOLS,
       intent: 'research',
-      permissionMode: 'auto-accept',  // read-only tools, no validation needed
+      permissionMode: 'auto-accept',
       maxTokens: 4096,
+      userPrompt: message,
       onTextDelta: (delta) => {
         accumulatedText += delta;
       },
       onToolCall: (call) => {
         send({ id: requestId, stream: 'progress', data: {
-          message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + (call.input['file_path'] as string).split('/').pop() : call.input?.['pattern'] ? ': ' + call.input['pattern'] : call.input?.['query'] ? ': ' + call.input['query'] : ''}`,
+          message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + (call.input['file_path'] as string).split('/').pop() : call.input?.['pattern'] ? ': ' + call.input['pattern'] : call.input?.['query'] ? ': ' + call.input['query'] : call.input?.['path'] ? ': ' + (call.input['path'] as string).split('/').pop() : ''}`,
         }});
       },
     });
