@@ -131,12 +131,14 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 			case 'gate': {
 				const actions = data?.['actions'];
 				const actionNames = Array.isArray(actions) ? actions.map((a: unknown) => typeof a === 'string' ? a : (a as { name?: string })?.name ?? '') : [];
+				const structured = data?.['structured'] as Record<string, unknown> | undefined;
 				return {
 					type: 'gate',
 					gateId: String(data?.['gateId'] ?? ''),
 					actions: actionNames,
 					title: String(data?.['title'] ?? ''),
 					content: String(data?.['content'] ?? ''),
+					...(structured ? { structured } : {}),
 				};
 			}
 			case 'progress':

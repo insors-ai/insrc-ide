@@ -1060,6 +1060,11 @@ export abstract class BrainstormControllerBase implements TaskController {
     this.state.focusedIdeaId = undefined;
     this.state.focusedIdeaContext = undefined;
     this.state.discussionMessages = undefined;
+    if (this.state.sequentialReview) {
+      // Return to sequential review at current position
+      this.state.lastStep = 'idea-review';
+      return [this.buildSingleIdeaGate()];
+    }
     this.state.lastStep = 'idea-list';
     return [this.buildIdeaListGate()];
   }

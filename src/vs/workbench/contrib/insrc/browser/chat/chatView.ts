@@ -271,9 +271,15 @@ export class InsrcChatViewPane extends ViewPane {
 			case 'message':
 				this._renderMessage(event.message);
 				break;
-			case 'gate':
+			case 'gate': {
+				// Skip brainstorm gates -- handled by BrainstormEditorPane
+				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
+				if (gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence')) {
+					break;
+				}
 				this._renderGate(event.gate);
 				break;
+			}
 			case 'progress':
 				this._showProgress(event.progress.step, event.progress.status);
 				break;
