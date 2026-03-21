@@ -73,6 +73,14 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(StepProviderEditorInput)],
 );
 
+// Brainstorm EditorPane
+import { BrainstormEditorPane } from './brainstorm/brainstormEditorPane.js';
+import { BrainstormEditorInput } from './brainstorm/brainstormEditorInput.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormEditorPane, BrainstormEditorPane.ID, 'Brainstorm'),
+	[new SyncDescriptor(BrainstormEditorInput)],
+);
+
 // Prompt Notepad: full editor for composing large prompts
 import './notepad/promptNotepadCommands.js';
 import { PromptNotepadContribution } from './notepad/promptNotepadRegistration.js';
