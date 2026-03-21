@@ -1,79 +1,210 @@
-# Visual Studio Code - Open Source ("Code - OSS")
+# Insrc IDE
 
-[![Feature Requests](https://img.shields.io/github/issues/microsoft/vscode/feature-request.svg)](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-[![Bugs](https://img.shields.io/github/issues/microsoft/vscode/bug.svg)](https://github.com/microsoft/vscode/issues?utf8=✓&q=is%3Aissue+is%3Aopen+label%3Abug)
-[![Gitter](https://img.shields.io/badge/chat-on%20gitter-yellow.svg)](https://gitter.im/Microsoft/vscode)
+A local-first hybrid coding IDE that builds a live Code Knowledge Graph from source code. Fork of VS Code with native agent integration, graph-powered code intelligence, and local + cloud LLM support.
 
-## The Repository
+Built by [Procix Software India](https://procix.com).
 
-This repository ("`Code - OSS`") is where we (Microsoft) develop the [Visual Studio Code](https://code.visualstudio.com) product together with the community. Not only do we work on code and issues here, we also publish our [roadmap](https://github.com/microsoft/vscode/wiki/Roadmap), [monthly iteration plans](https://github.com/microsoft/vscode/wiki/Iteration-Plans), and our [endgame plans](https://github.com/microsoft/vscode/wiki/Running-the-Endgame). This source code is available to everyone under the standard [MIT license](https://github.com/microsoft/vscode/blob/main/LICENSE.txt).
+## What is Insrc?
 
-## Visual Studio Code
+Insrc is an IDE that understands your code structurally. A background daemon parses repos via tree-sitter, stores relationships in a graph database (Kuzu), and entity embeddings in a vector database (LanceDB). An interactive agent uses this knowledge graph to provide context-aware assistance powered by local LLMs (Ollama) with optional Claude escalation.
 
-<p align="center">
-  <img alt="VS Code in action" src="https://user-images.githubusercontent.com/35271042/118224532-3842c400-b438-11eb-923d-a5f66fa6785a.png">
-</p>
+## Key Features
 
-[Visual Studio Code](https://code.visualstudio.com) is a distribution of the `Code - OSS` repository with Microsoft-specific customizations released under a traditional [Microsoft product license](https://code.visualstudio.com/License/).
+### Code Knowledge Graph
+- **Automatic indexing** -- tree-sitter parsing for TypeScript, Python, Go
+- **Structural relationships** -- calls, imports, implements, extends stored in Kuzu (Cypher queries)
+- **Semantic search** -- entity embeddings via LanceDB for vector similarity + full-text search
+- **Live updates** -- file watcher re-indexes on change
 
-[Visual Studio Code](https://code.visualstudio.com) combines the simplicity of a code editor with what developers need for their core edit-build-debug cycle. It provides comprehensive code editing, navigation, and understanding support along with lightweight debugging, a rich extensibility model, and lightweight integration with existing tools.
+### Agent System
+- **Research agent** -- goal-oriented investigation with tool calling (Read, Grep, Glob, graph search, web search)
+- **Brainstorm agent** -- iterative idea generation with per-idea discussion, convergence, and spec building
+- **Pair agent** -- collaborative multi-turn coding (propose, review, apply, validate)
+- **Delegate agent** -- plan-driven autonomous execution for batch operations
+- **Planner agent** -- implementation/test/migration plan generation
+- **Designer agent** -- iterative per-requirement design with validation gates
 
-Visual Studio Code is updated monthly with new features and bug fixes. You can download it for Windows, macOS, and Linux on [Visual Studio Code's website](https://code.visualstudio.com/Download). To get the latest releases every day, install the [Insiders build](https://code.visualstudio.com/insiders).
+### Chat Panel (Auxiliary Bar)
+- Streaming responses with HTML rendering
+- Tool call blocks (collapsible, shows input/output)
+- Code blocks with language detection and copy button
+- Collapsible long messages with gradient fade
+- Gate cards for agent interactions (approve/reject/edit)
+- File attachments with path resolution across workspace repos
+- Session management with repo-scoped sessions
+- Provider mentions (@local, @haiku, @sonnet, @opus)
+- Intent selector (research, implement, refactor, debug, brainstorm, etc.)
 
-## Contributing
+### Prompt Notepad
+- Full Monaco editor for composing large prompts
+- CodeLens: Run All, Run Selection, Clear, Save as Template
+- Variable expansion: `${repo}`, `${file}`, `${selection}`, `${clipboard}`
+- Auto-save across sessions
 
-There are many ways in which you can participate in this project, for example:
+### Sidebar (Explorer Integration)
+- Repos with file decorations (indexed/indexing/stale/error badges)
+- Sessions grouped by repo with date subgroups
+- Agent runs grouped by type with status icons
+- Step provider configuration tree
+- Per-repo chat buttons
 
-* [Submit bugs and feature requests](https://github.com/microsoft/vscode/issues), and help us verify as they are checked in
-* Review [source code changes](https://github.com/microsoft/vscode/pulls)
-* Review the [documentation](https://github.com/microsoft/vscode-docs) and make pull requests for anything from typos to additional and new content
+### Diff Manager
+- Inline diff editor for agent-proposed code changes
+- Accept/Reject/Edit CodeLens on proposed files
+- Integrated with chat gate system
 
-If you are interested in fixing issues and contributing directly to the code base,
-please see the document [How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute), which covers the following:
+### Setup Wizard
+- System detection (CPU/RAM/GPU/Ollama)
+- Model management (list, pull with progress)
+- API key management (secure storage)
+- Recommended configuration
 
-* [How to build and run from source](https://github.com/microsoft/vscode/wiki/How-to-Contribute)
-* [The development workflow, including debugging and running tests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#debugging)
-* [Coding guidelines](https://github.com/microsoft/vscode/wiki/Coding-Guidelines)
-* [Submitting pull requests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests)
-* [Finding an issue to work on](https://github.com/microsoft/vscode/wiki/How-to-Contribute#where-to-contribute)
-* [Contributing to translations](https://aka.ms/vscodeloc)
+### Theme
+- **Insrc Light** and **Insrc Dark** -- pastel green palette
+- Curved Chrome-style tabs
+- Custom spiral galaxy icon (activity bar, title bar, all platforms)
 
-## Feedback
+## Architecture
 
-* Ask a question on [Stack Overflow](https://stackoverflow.com/questions/tagged/vscode)
-* [Request a new feature](CONTRIBUTING.md)
-* Upvote [popular feature requests](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-* [File an issue](https://github.com/microsoft/vscode/issues)
-* Connect with the extension author community on [GitHub Discussions](https://github.com/microsoft/vscode-discussions/discussions) or [Slack](https://aka.ms/vscode-dev-community)
-* Follow [@code](https://twitter.com/code) and let us know what you think!
+```
+src/
+  insrc/                          Backend (daemon, agent, indexer)
+    daemon/                       Background daemon (JSON-RPC over Unix socket)
+    agent/                        Agent framework + coding agents
+      tasks/research/             Research agent (goal-oriented investigation)
+      tasks/brainstorm/           Brainstorm agent (idea generation + spec)
+      tasks/pair/                 Pair coding agent
+      tasks/delegate/             Delegate coding agent
+      tools/                      Tool system (registry, executor, SmartRead)
+      context/                    5-layer context manager (L1-L5 budget system)
+      providers/                  LLM providers (Ollama, Claude)
+    indexer/                      Code parsing and knowledge graph
+    db/                           Database layer (Kuzu + LanceDB)
 
-See our [wiki](https://github.com/microsoft/vscode/wiki/Feedback-Channels) for a description of each of these channels and information on some other available community-driven channels.
+  vs/workbench/contrib/insrc/     IDE integration (VS Code workbench)
+    common/                       Service interfaces (DI decorators)
+      daemonService.ts            Daemon connection + RPC + streaming
+      sessionService.ts           Session lifecycle + events
+      chatService.ts              Chat sessions + streaming + gates
+      diffService.ts              Diff parsing + virtual docs
+      configService.ts            Config + system info
+      repoService.ts              Repo list + status
+      agentRunService.ts          Agent run tracking
+      workspaceService.ts         Workspace file management
 
-## Related Projects
+    browser/                      UI components
+      sidebar/                    Explorer panes (sessions, runs, step providers)
+      chat/                       Chat panel (auxiliary bar)
+      setup/                      Setup wizard (EditorPane)
+      notepad/                    Prompt notepad (EditorPane)
+      annotations/                Code annotation manager
+      diff/                       Diff CodeLens + content provider
 
-Many of the core components and extensions to VS Code live in their own repositories on GitHub. For example, the [node debug adapter](https://github.com/microsoft/vscode-node-debug) and the [mono debug adapter](https://github.com/microsoft/vscode-mono-debug) repositories are separate from each other. For a complete list, please visit the [Related Projects](https://github.com/microsoft/vscode/wiki/Related-Projects) page on our [wiki](https://github.com/microsoft/vscode/wiki).
+    electron-sandbox/             Service implementations (IPC proxy)
+    electron-main/                Main process services (Node.js)
 
-## Bundled Extensions
+  vs/platform/insrc/              Platform-level services
+    electron-main/                Daemon main service (net, child_process)
 
-VS Code includes a set of built-in extensions located in the [extensions](extensions) folder, including grammars and snippets for many languages. Extensions that provide rich language support (code completion, Go to Definition) for a language have the suffix `language-features`. For example, the `json` extension provides coloring for `JSON` and the `json-language-features` extension provides rich language support for `JSON`.
+extensions/theme-insrc/           Built-in theme extension (Light + Dark)
+resources/                        App icons (Linux, macOS, Windows, Web)
+plans/                            Design documents and implementation plans
+```
 
-## Development Container
+## Daemon Architecture
 
-This repository includes a Visual Studio Code Dev Containers / GitHub Codespaces development container.
+The daemon is a **detached background process** that outlives the IDE:
 
-* For [Dev Containers](https://aka.ms/vscode-remote/download/containers), use the **Dev Containers: Clone Repository in Container Volume...** command which creates a Docker volume for better disk I/O on macOS and Windows.
-  * If you already have VS Code and Docker installed, you can also click [here](https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/microsoft/vscode) to get started. This will cause VS Code to automatically install the Dev Containers extension if needed, clone the source code into a container volume, and spin up a dev container for use.
+- **Auto-spawn**: IDE connects to existing daemon; if not running, spawns detached + unref
+- **Persistent socket**: single multiplexed connection over Unix socket (`~/.insrc/daemon.sock`)
+- **Auto-reconnect**: exponential backoff on disconnect
+- **Independent lifecycle**: closing IDE does not stop the daemon; heavy indexing continues
 
-* For Codespaces, install the [GitHub Codespaces](https://marketplace.visualstudio.com/items?itemName=GitHub.codespaces) extension in VS Code, and use the **Codespaces: Create New Codespace** command.
+Communication: JSON-RPC over newline-delimited JSON, with streaming support for agent responses.
 
-Docker / the Codespace should have at least **4 Cores and 6 GB of RAM (8 GB recommended)** to run full build. See the [development container README](.devcontainer/README.md) for more information.
+## Context Management
 
-## Code of Conduct
+5-layer budget system for LLM context assembly:
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+| Layer | Purpose | Budget |
+|-------|---------|--------|
+| L1 System | System prompt | Fixed 1,000 tokens |
+| L2 Summary | Session summary (compressed history) | 4.7% of total |
+| L3a Recent | Recent conversation turns | 6.3% of total |
+| L3b Semantic | Similar past exchanges (vector search) | 6.3% of total |
+| L4 Task | Code entities from knowledge graph | 25% of total |
+| L5 Response | Reserved for LLM output | Remainder |
+
+Context is assembled per-turn with clear section headers. The `ContextAwareProvider` transparently wraps all LLM calls -- callers don't manage context manually.
+
+## SmartRead
+
+Intelligent file reading that adapts strategy based on file size and content:
+
+- **Small files** (<500 lines): read entire file
+- **Large files**: detect format (code, JSON, log, markdown), choose strategy:
+  - **grep**: search for relevant patterns
+  - **head-tail**: first + last N lines
+  - **section**: extract specific sections by heading
+  - **chunked**: semantic chunking via doc-splitter for multi-pass processing
+- **Directories**: list contents with sizes and types
+- **Tool output overflow**: large results spill to temp files, SmartRead processes them
+
+## Build and Run
+
+```bash
+# Install dependencies
+npm install
+
+# Development build (incremental, watches for changes)
+node --max-old-space-size=8192 ./node_modules/gulp/bin/gulp.js watch-client
+
+# Launch IDE
+./scripts/code.sh --disable-gpu
+
+# Start daemon (if not auto-spawned)
+npx tsx src/insrc/daemon/index.ts
+
+# Type check
+npm run compile
+
+# Hygiene (pre-commit)
+node build/hygiene.js
+```
+
+## Configuration
+
+Settings at `~/.insrc/config.json`:
+
+```jsonc
+{
+  "ollama": { "host": "http://localhost:11434" },
+  "models": {
+    "local": "qwen3-coder:latest",
+    "embedding": "qwen3-embedding:4b",
+    "tiers": {
+      "fast": "claude-haiku-4-5",
+      "standard": "claude-sonnet-4-6",
+      "powerful": "claude-opus-4-6"
+    },
+    "context": { "local": 16384, "claude": 200000 },
+    "agents": {
+      "pair": { "analyze": "local", "propose": "local", "validate": "claude" },
+      "brainstorm": { "seed": "local", "diverge": "local", "converge": "claude" }
+      // ... per-agent, per-step provider bindings
+    }
+  }
+}
+```
+
+VS Code settings: `Ctrl+,` > search "insrc" for all configurable options.
 
 ## License
 
-Copyright (c) Microsoft Corporation. All rights reserved.
+MIT License -- dual copyright:
+- Copyright (c) 2015 - present Microsoft Corporation (VS Code base)
+- Copyright (c) 2026 - present Procix Software India (Insrc extensions)
 
-Licensed under the [MIT](LICENSE.txt) license.
+See [LICENSE.txt](LICENSE.txt) for full text.
+
+For the original VS Code README, see [VSCODE-README.md](VSCODE-README.md).
