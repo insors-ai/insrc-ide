@@ -11,6 +11,7 @@ import { registerFileTools } from './file/index.js';
 import { registerShellTools } from './shell/index.js';
 import { registerSearchTools } from './search/index.js';
 import { registerGhTools } from './gh/index.js';
+import { registerSshTools } from './ssh/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
@@ -18,4 +19,5 @@ export function registerBuiltinTools(): void {
   registerShellTools();
   registerSearchTools();
   registerGhTools();
+  registerSshTools();
 }
