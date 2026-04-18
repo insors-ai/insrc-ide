@@ -7,6 +7,7 @@
  */
 
 import type { TaskResult, TaskOrchestratorDeps, TaskFormat } from '../task.js';
+import type { GateAction, ReplyPayload } from '../../agent/framework/types.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('delegate-registry');
@@ -26,8 +27,20 @@ export interface DelegateHandler {
   readonly description: string;
   /** Whether user approval is required before execution. */
   readonly requiresApproval: boolean;
-  /** Approval message shown in the gate (if requiresApproval). */
+  /** Fallback approval message when buildApprovalGate is not provided. */
   readonly approvalMessage?: string | undefined;
+  /**
+   * Build a dynamic approval gate from the current input. Runs before
+   * execute() when requiresApproval is true. Lets handlers surface the
+   * actual query / parameters to the user and offer an Edit action.
+   */
+  buildApprovalGate?(input: DelegateInput): { title: string; content: string; actions: GateAction[] };
+  /**
+   * Apply the user's edit feedback to the input before retrying the gate.
+   * Return the modified input. If omitted, edit defaults to replacing
+   * input.query with the feedback text.
+   */
+  applyEdit?(input: DelegateInput, feedback: string): DelegateInput;
   /** Execute the delegate task. */
   execute(input: DelegateInput, deps: TaskOrchestratorDeps): Promise<DelegateResult>;
 }
@@ -87,24 +100,11 @@ export async function executeDelegate(
 
   log.info({ delegateId, requiresApproval: handler.requiresApproval }, 'executing delegate');
 
-  // Approval gate if needed
+  // Approval gate loop -- supports approve / skip / edit (re-gate with edited input)
+  let effectiveInput = input;
   if (handler.requiresApproval) {
-    const gateId = `delegate-${delegateId}-${Date.now()}`;
-    const approvalMsg = handler.approvalMessage
-      ?? `The agent wants to use: ${handler.description}. Proceed?`;
-
-    // Send gate
-    deps.send({ id: deps.requestId, stream: 'gate', data: {
-      gateId,
-      title: `Approval: ${handler.description}`,
-      content: approvalMsg,
-      actions: ['Approve', 'Skip'],
-    }});
-
-    // Wait for gate reply via channel
-    const reply = await waitForGateReply(deps, gateId);
-    if (!reply || reply.action?.toLowerCase() === 'skip') {
-      log.info({ delegateId }, 'delegate skipped by user');
+    const reply = await runApprovalGate(handler, effectiveInput, deps);
+    if (!reply) {
       return {
         index: taskIndex,
         description,
@@ -113,6 +113,7 @@ export async function executeDelegate(
         success: true,
       };
     }
+    effectiveInput = reply.input;
   }
 
   // Execute
@@ -121,7 +122,7 @@ export async function executeDelegate(
       message: `Delegate: ${handler.description}...`,
     }});
 
-    const result = await handler.execute(input, deps);
+    const result = await handler.execute(effectiveInput, deps);
 
     return {
       index: taskIndex,
@@ -146,35 +147,79 @@ export async function executeDelegate(
 }
 
 // ---------------------------------------------------------------------------
-// Gate reply helper
+// Approval gate
 // ---------------------------------------------------------------------------
 
-async function waitForGateReply(
-  deps: TaskOrchestratorDeps,
-  _gateId: string,
-): Promise<{ action?: string; feedback?: string } | null> {
-  // The controlled pipeline runner handles gate replies via the channel.
-  // For delegate tasks within the pipeline, the gate reply comes through
-  // the standard gate mechanism. This is a simplified version that
-  // returns the reply from the channel's next message.
-  const { channel } = deps;
-  if (!channel) return { action: 'approve' }; // no channel = auto-approve
+const DEFAULT_APPROVAL_ACTIONS: GateAction[] = [
+  { name: 'approve', label: 'Approve' },
+  { name: 'skip', label: 'Skip' },
+];
 
-  return new Promise((resolve) => {
-    // Listen for the next gate reply on the channel
-    const timeout = setTimeout(() => resolve({ action: 'approve' }), 60_000); // 60s timeout
-    const handler = (msg: unknown) => {
-      clearTimeout(timeout);
-      const reply = msg as { action?: string; feedback?: string } | undefined;
-      resolve(reply ?? { action: 'approve' });
-    };
-    // Use channel's reply mechanism
-    if ('onReply' in channel && typeof channel.onReply === 'function') {
-      channel.onReply(handler);
-    } else {
-      // Fallback: auto-approve after showing the gate
-      clearTimeout(timeout);
-      resolve({ action: 'approve' });
+/**
+ * Drive the approve / skip / edit loop. Returns the approved input, or null
+ * if the user skipped. Uses the channel's external-gate registration so the
+ * reply flows through the standard chat.reply RPC.
+ */
+async function runApprovalGate(
+  handler: DelegateHandler,
+  input: DelegateInput,
+  deps: TaskOrchestratorDeps,
+): Promise<{ input: DelegateInput } | null> {
+  const { channel } = deps;
+  if (!channel || typeof channel.registerExternalGate !== 'function') {
+    log.warn({ delegateId: handler.id }, 'no channel registerExternalGate -- auto-approving');
+    return { input };
+  }
+
+  let current = input;
+  // Bounded loop to stop pathological edit cycles.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const gate = handler.buildApprovalGate
+      ? handler.buildApprovalGate(current)
+      : {
+          title: `Approval: ${handler.description}`,
+          content: handler.approvalMessage
+            ?? `The agent wants to use: ${handler.description}. Proceed?`,
+          actions: DEFAULT_APPROVAL_ACTIONS,
+        };
+
+    const gateId = `delegate-${handler.id}-${Date.now()}-${attempt}`;
+    deps.send({
+      id: deps.requestId,
+      stream: 'gate',
+      data: {
+        gateId,
+        title: gate.title,
+        content: gate.content,
+        actions: gate.actions,
+      },
+    });
+
+    const reply: ReplyPayload = await new Promise((resolve, reject) => {
+      channel.registerExternalGate(gateId, resolve, reject);
+    });
+
+    const action = reply.action.toLowerCase();
+    if (action === 'approve' || action === 'execute') {
+      return { input: current };
     }
-  });
+    if (action === 'skip' || action === 'reject' || action === 'cancel') {
+      log.info({ delegateId: handler.id }, 'delegate skipped by user');
+      return null;
+    }
+    if (action === 'edit' && reply.feedback) {
+      const feedback = reply.feedback.trim();
+      current = handler.applyEdit
+        ? handler.applyEdit(current, feedback)
+        : { ...current, query: feedback };
+      log.info({ delegateId: handler.id, edited: feedback.slice(0, 80) }, 'delegate input edited');
+      continue;
+    }
+    // Unknown action -- treat as skip to avoid silent execution.
+    log.warn({ delegateId: handler.id, action: reply.action }, 'unknown gate action, treating as skip');
+    return null;
+  }
+
+  log.warn({ delegateId: handler.id }, 'approval gate edit loop exceeded -- skipping');
+  return null;
 }

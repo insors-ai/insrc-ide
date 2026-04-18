@@ -86,7 +86,7 @@ async function claudeWebSearch(query: string, deps: TaskOrchestratorDeps): Promi
 export const webSearchDelegate: DelegateHandler = {
   id: 'web-search',
   description: 'Web search (Brave free tier, or Claude with approval)',
-  requiresApproval: false, // Brave is free; approval handled internally for Claude
+  requiresApproval: false, // Brave is free; Claude fallback gates itself via the registry
   async execute(input: DelegateInput, deps: TaskOrchestratorDeps): Promise<DelegateResult> {
     const query = String(input['query'] ?? '');
     const limit = typeof input['limit'] === 'number' ? input['limit'] : 5;
@@ -104,9 +104,24 @@ export const webSearchDelegate: DelegateHandler = {
       return braveResult;
     }
 
-    // Fallback to Claude (approval handled by the caller via requiresApproval on the delegate task)
-    log.info({ query, provider: 'claude' }, 'falling back to Claude web search');
-    return claudeWebSearch(query, deps);
+    // Fallback to Claude -- re-enter the registry so the approval gate fires.
+    // The 'web-search:claude' delegate is registered with requiresApproval=true
+    // and supplies its own buildApprovalGate / applyEdit hooks.
+    log.info({ query, provider: 'claude' }, 'falling back to Claude web search (with approval)');
+    const { executeDelegate } = await import('./registry.js');
+    const result = await executeDelegate(
+      'web-search:claude',
+      { query, limit },
+      deps,
+      -1,
+      'Web search via Claude',
+    );
+    return {
+      output: result.output,
+      format: result.format,
+      success: result.success,
+      error: result.error,
+    };
   },
 };
 
@@ -118,7 +133,23 @@ export const claudeWebSearchDelegate: DelegateHandler = {
   id: 'web-search:claude',
   description: 'Web search via Claude (costs apply)',
   requiresApproval: true,
-  approvalMessage: undefined, // Set dynamically per query
+  buildApprovalGate(input) {
+    const query = String(input['query'] ?? '');
+    return {
+      title: 'Approve Claude web search',
+      content:
+        `The research agent wants to search the web via Claude:\n\n> ${query}\n\n` +
+        `This uses the Anthropic API (costs apply) and sends the query to Anthropic.`,
+      actions: [
+        { name: 'approve', label: 'Approve' },
+        { name: 'skip', label: 'Skip' },
+        { name: 'edit', label: 'Edit query', needsInput: true },
+      ],
+    };
+  },
+  applyEdit(input, feedback) {
+    return { ...input, query: feedback };
+  },
   async execute(input: DelegateInput, deps: TaskOrchestratorDeps): Promise<DelegateResult> {
     const query = String(input['query'] ?? '');
     if (!query) {
