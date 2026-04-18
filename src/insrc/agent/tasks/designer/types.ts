@@ -1,7 +1,5 @@
-import type { LLMProvider } from '../../../shared/types.js';
-
 // ---------------------------------------------------------------------------
-// Designer Agent — Type Definitions
+// Designer Agent -- Type Definitions
 //
 // All types are local to the designer module. Only DesignerResult and
 // DesignerEvent are exported for REPL integration.
