@@ -19,6 +19,11 @@ import { gitAmendTool } from './amend.js';
 import { gitPushTool } from './push.js';
 import { gitPullTool } from './pull.js';
 import { gitFetchTool } from './fetch.js';
+import { gitCheckoutTool } from './checkout.js';
+import { gitMergeTool } from './merge.js';
+import { gitRebaseTool } from './rebase.js';
+import { gitStashTool } from './stash.js';
+import { gitResetTool } from './reset.js';
 
 export function registerGitTools(): void {
   registerTool(gitStatusTool);
@@ -33,4 +38,9 @@ export function registerGitTools(): void {
   registerTool(gitPushTool);
   registerTool(gitPullTool);
   registerTool(gitFetchTool);
+  registerTool(gitCheckoutTool);
+  registerTool(gitMergeTool);
+  registerTool(gitRebaseTool);
+  registerTool(gitStashTool);
+  registerTool(gitResetTool);
 }
