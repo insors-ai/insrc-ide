@@ -1,20 +1,16 @@
 /**
- * Legacy tool / delegate adapters.
+ * Legacy LLM tool adapters.
  *
  * Stage 2 of the unified-tools migration: register every existing LLM
- * builtin (agent/tools/registry.ts) and every existing delegate
- * (daemon/delegates/*.ts) as an entry in the unified registry so both
- * can be looked up through a single API.
+ * builtin (agent/tools/registry.ts) as an entry in the unified registry.
  *
- * In stage 2 the adapters are WRITE-ONLY from the unified registry's
- * perspective -- nothing calls executeTool() through them yet. Stage 3
- * points the legacy tool executor and delegate executor at this
- * registry, at which point these adapters start handling traffic.
+ * Stage 3a moved delegate adapters out of this file; `registerDelegate`
+ * now registers its own tool adapter directly when the delegate is
+ * registered (see daemon/delegates/registry.ts).
  *
- * Each adapter preserves the legacy wire format:
- *   - LLM tools return strings (the existing ToolCall/ToolResult shape)
- *   - delegates return DelegateResult with format + success
- * so stage 3 can flip the callers without changing on-the-wire semantics.
+ * Adapter preserves legacy wire format: LLM tools still return strings
+ * via the ToolCall / ToolResult shape. Stage 3b will fold the legacy
+ * LLM executor to look up here instead of maintaining its own dispatch.
  */
 
 import { getLogger } from '../../shared/logger.js';
@@ -23,36 +19,24 @@ import type { Tool, ToolDeps, ToolInput, ToolResult } from './types.js';
 import type { ToolCall } from '../../shared/types.js';
 import { executeTool as legacyExecuteLLMTool } from '../../agent/tools/executor.js';
 import { getTool as getLegacyLLMTool } from '../../agent/tools/registry.js';
-import {
-  webSearchDelegate,
-  claudeWebSearchDelegate,
-  braveWebSearchDelegate,
-} from '../delegates/web-search.js';
-import type { DelegateHandler } from '../delegates/registry.js';
 
 const log = getLogger('tools-legacy-adapters');
 
 let registered = false;
 
 /**
- * Register all legacy LLM tools + delegates with the unified registry.
+ * Register all legacy LLM tools with the unified registry.
  * Idempotent -- safe to call more than once.
  */
 export function registerLegacyAdapters(): void {
   if (registered) { return; }
   registered = true;
 
-  // LLM tool-call builtins (Read, Write, Edit, ..., lsp_*).
   for (const legacy of collectLegacyLLMTools()) {
     registerTool(buildLLMAdapter(legacy.name, legacy.description, legacy.inputSchema));
   }
 
-  // Delegates (web-search family).
-  for (const delegate of [webSearchDelegate, braveWebSearchDelegate, claudeWebSearchDelegate]) {
-    registerTool(buildDelegateAdapter(delegate));
-  }
-
-  log.info('legacy adapters registered');
+  log.info('legacy LLM adapters registered');
 }
 
 // ---------------------------------------------------------------------------
@@ -111,65 +95,3 @@ function buildLLMAdapter(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Delegate -> Tool adapter
-// ---------------------------------------------------------------------------
-
-function buildDelegateAdapter(delegate: DelegateHandler): Tool {
-  const tool: Tool = {
-    id: delegate.id,
-    description: delegate.description,
-    // Delegates never carried a JSON Schema. Stage 5 will replace these
-    // with hand-written schemas as each delegate migrates to a first-
-    // class tool.
-    inputSchema: { type: 'object', additionalProperties: true },
-    requiresApproval: delegate.requiresApproval,
-    async execute(input, deps): Promise<ToolResult> {
-      if (!deps.channel) {
-        return {
-          output: '[delegate adapter] missing channel in tool deps',
-          format: 'text',
-          success: false,
-          error: 'no channel',
-        };
-      }
-      // TaskOrchestratorDeps is a superset of ToolDeps (session, channel,
-      // send, requestId are all required on the former). Safe to forward.
-      const result = await delegate.execute(input, {
-        session: deps.session,
-        channel: deps.channel,
-        send: deps.send,
-        requestId: deps.requestId,
-      });
-      return {
-        output: result.output,
-        // Legacy TaskFormat and unified ToolFormat overlap on
-        // 'text' | 'markdown' | 'code' | 'diff' | 'table' | 'json'.
-        // Anything else coerces to 'text'.
-        format: mapLegacyFormat(result.format),
-        success: result.success,
-        ...(result.error ? { error: result.error } : {}),
-      };
-    },
-  };
-  if (delegate.buildApprovalGate) {
-    tool.buildApprovalGate = input => delegate.buildApprovalGate!(input);
-  }
-  if (delegate.applyEdit) {
-    tool.applyEdit = (input, feedback) => delegate.applyEdit!(input, feedback);
-  }
-  return tool;
-}
-
-function mapLegacyFormat(fmt: string): ToolResult['format'] {
-  switch (fmt) {
-    case 'markdown':
-    case 'code':
-    case 'diff':
-    case 'table':
-    case 'json':
-      return fmt;
-    default:
-      return 'text';
-  }
-}

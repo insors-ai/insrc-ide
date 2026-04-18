@@ -121,16 +121,18 @@ async function main(): Promise<void> {
   writePid();
   const startedAt = Date.now();
 
-  // 6b. Register delegate handlers
+  // 6b. Register delegate handlers. registerDelegate now populates the
+  //     unified tools registry (plans/tools.md stage 3a); the delegate
+  //     registry no longer owns its own map.
   const { registerDelegate } = await import('./delegates/registry.js');
   const { webSearchDelegate, claudeWebSearchDelegate, braveWebSearchDelegate } = await import('./delegates/web-search.js');
   registerDelegate(webSearchDelegate);
   registerDelegate(claudeWebSearchDelegate);
   registerDelegate(braveWebSearchDelegate);
 
-  // 6c. Register legacy LLM tools + delegates with the unified tools
-  //     registry (plans/tools.md stage 2). Dual-write only; nothing
-  //     calls through the unified path until stage 3 folds the executors.
+  // 6c. Register legacy LLM tools (Read, Bash, Grep, ...) as adapters in
+  //     the unified registry (plans/tools.md stage 2). Stage 3b will
+  //     fold the agent/tools executor to route through here.
   const { registerLegacyAdapters } = await import('./tools/legacy-adapters.js');
   registerLegacyAdapters();
 
