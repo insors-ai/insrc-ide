@@ -7,7 +7,9 @@
  */
 
 import { registerAwsTools } from './aws/index.js';
+import { registerGcpTools } from './gcp/index.js';
 
 export function registerCloudTools(): void {
   registerAwsTools();
+  registerGcpTools();
 }
