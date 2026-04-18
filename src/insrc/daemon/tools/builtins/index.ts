@@ -9,9 +9,11 @@
 import { registerGitTools } from './git/index.js';
 import { registerFileTools } from './file/index.js';
 import { registerShellTools } from './shell/index.js';
+import { registerSearchTools } from './search/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
   registerFileTools();
   registerShellTools();
+  registerSearchTools();
 }
