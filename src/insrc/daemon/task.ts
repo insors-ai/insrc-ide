@@ -1374,7 +1374,10 @@ async function resolveController(agentId: string, task?: Task): Promise<TaskCont
         case 'general':
           controller = new mod.GeneralBrainstormController();
           break;
-        // Remaining categories (design/implementation/testing) fall back to
+        case 'design':
+          controller = new mod.DesignBrainstormController();
+          break;
+        // Remaining categories (implementation/testing) fall back to
         // Requirements until their controllers land. Routing stays live so
         // each controller can be swapped in per commit.
         default:

@@ -5,6 +5,7 @@
 export { BrainstormControllerBase } from './base.js';
 export { RequirementsBrainstormController } from './requirements.js';
 export { GeneralBrainstormController } from './general.js';
+export { DesignBrainstormController } from './design.js';
 export type { BrainstormCategory } from './types.js';
 
 // Backward compat: default export is requirements (current behavior)
