@@ -24,6 +24,11 @@ import { gitMergeTool } from './merge.js';
 import { gitRebaseTool } from './rebase.js';
 import { gitStashTool } from './stash.js';
 import { gitResetTool } from './reset.js';
+import { gitRevertTool } from './revert.js';
+import { gitCherryPickTool } from './cherry-pick.js';
+import { gitTagTool } from './tag.js';
+import { gitRemoteTool } from './remote.js';
+import { gitWorktreeTool } from './worktree.js';
 
 export function registerGitTools(): void {
   registerTool(gitStatusTool);
@@ -43,4 +48,9 @@ export function registerGitTools(): void {
   registerTool(gitRebaseTool);
   registerTool(gitStashTool);
   registerTool(gitResetTool);
+  registerTool(gitRevertTool);
+  registerTool(gitCherryPickTool);
+  registerTool(gitTagTool);
+  registerTool(gitRemoteTool);
+  registerTool(gitWorktreeTool);
 }
