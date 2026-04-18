@@ -9,8 +9,18 @@
 import { registerTool } from '../../registry.js';
 import { gitStatusTool } from './status.js';
 import { gitLogTool } from './log.js';
+import { gitDiffTool } from './diff.js';
+import { gitShowTool } from './show.js';
+import { gitBlameTool } from './blame.js';
+import { gitBranchTool } from './branch.js';
+import { gitStageTool } from './stage.js';
 
 export function registerGitTools(): void {
   registerTool(gitStatusTool);
   registerTool(gitLogTool);
+  registerTool(gitDiffTool);
+  registerTool(gitShowTool);
+  registerTool(gitBlameTool);
+  registerTool(gitBranchTool);
+  registerTool(gitStageTool);
 }
