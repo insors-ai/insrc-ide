@@ -96,9 +96,10 @@ export interface Tool {
   /**
    * Build the approval gate shown to the user. The default gate is
    * generic -- tools that care should override to show query / command /
-   * diff previews.
+   * diff previews. May be async when the gate needs live repo / cluster
+   * state (e.g. git:amend checking if HEAD has already been pushed).
    */
-  buildApprovalGate?(input: ToolInput): ToolApprovalGate;
+  buildApprovalGate?(input: ToolInput): ToolApprovalGate | Promise<ToolApprovalGate>;
 
   /**
    * Apply the user's Edit feedback to input before re-gating. Default

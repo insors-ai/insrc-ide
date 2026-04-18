@@ -14,6 +14,11 @@ import { gitShowTool } from './show.js';
 import { gitBlameTool } from './blame.js';
 import { gitBranchTool } from './branch.js';
 import { gitStageTool } from './stage.js';
+import { gitCommitTool } from './commit.js';
+import { gitAmendTool } from './amend.js';
+import { gitPushTool } from './push.js';
+import { gitPullTool } from './pull.js';
+import { gitFetchTool } from './fetch.js';
 
 export function registerGitTools(): void {
   registerTool(gitStatusTool);
@@ -23,4 +28,9 @@ export function registerGitTools(): void {
   registerTool(gitBlameTool);
   registerTool(gitBranchTool);
   registerTool(gitStageTool);
+  registerTool(gitCommitTool);
+  registerTool(gitAmendTool);
+  registerTool(gitPushTool);
+  registerTool(gitPullTool);
+  registerTool(gitFetchTool);
 }

@@ -96,7 +96,7 @@ async function runApprovalGate(
   let current = input;
   for (let attempt = 0; attempt < MAX_EDIT_ROUNDS; attempt++) {
     const gate: ToolApprovalGate = tool.buildApprovalGate
-      ? tool.buildApprovalGate(current)
+      ? await tool.buildApprovalGate(current)
       : {
           title: `Approval: ${tool.description}`,
           content: `The agent wants to run ${tool.id}. Proceed?`,
