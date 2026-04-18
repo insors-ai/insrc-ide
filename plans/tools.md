@@ -372,6 +372,107 @@ structured output instead of raw logs.
 | `jira:assign` | Assign user | Yes | |
 | `jira:link` | Link issues | Yes | |
 
+### SSH / remote
+
+Run commands on a remote host. Uses the system `ssh` client so the
+user's existing `~/.ssh/config` + agent + keys just work.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `ssh:exec` | Run command on remote host | Yes (host + command shown in gate) | Uses `~/.ssh/config` aliases; `host` input can be an alias or `user@host[:port]`. |
+| `ssh:exec-detached` | Long-running remote command with streamed output | Yes | For tailing remote logs, running remote builds. |
+| `scp:upload` | Copy local file(s) to remote | Yes | |
+| `scp:download` | Copy remote file(s) to local | No | Downloads are read-only from the user's perspective, but high-risk paths (over 50 MB, `/etc`, `/var/log`) require approval. |
+| `ssh:port-forward` | Open SSH tunnel | Yes | Session-scoped; torn down when chat closes. |
+
+### HTTP / REST
+
+Generic HTTP client for API exploration when `web:fetch` is too
+narrow. `web:fetch` stays for "just give me the rendered body"; this
+category exposes headers, methods, auth, structured responses.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `http:get` | GET request with query params + headers | No | Read-only. Mocks / localhost exempt from any gating. |
+| `http:post` | POST with JSON or form body | Yes | Body + endpoint shown in gate. |
+| `http:put` | PUT | Yes | |
+| `http:patch` | PATCH | Yes | |
+| `http:delete` | DELETE | Yes (extra confirm) | |
+| `http:request` | Generic (any method + body + headers) | Yes | Escape hatch for non-standard methods (MKCOL, etc.). |
+| `http:curl-import` | Parse a `curl ...` string into a typed request | No | Lets the LLM take a user-pasted curl command and turn it into a subsequent `http:*` call. |
+
+All `http:*` tools honor a per-session allowlist: unknown hosts require
+approval, known hosts (localhost, plus a user-configurable list) run
+without a gate for GET.
+
+### Kubernetes
+
+Wraps `kubectl`. Registers only when the CLI is on PATH. All
+mutating tools respect the current kubeconfig context -- the gate
+content shows `cluster / namespace / resource` so an accidental prod
+click is obvious.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `k8s:context-list` | List contexts | No | |
+| `k8s:context-switch` | Switch active context | Yes | Warns on prod-flagged contexts. |
+| `k8s:get` | `kubectl get <kind>` | No | Pods, services, deployments, etc. |
+| `k8s:describe` | `kubectl describe <kind>/<name>` | No | |
+| `k8s:logs` | Pod logs (optionally streamed / follow) | No | |
+| `k8s:exec` | `kubectl exec` into pod | Yes | |
+| `k8s:port-forward` | Port-forward pod/svc | Yes | Session-scoped. |
+| `k8s:apply` | `kubectl apply -f` | Yes (diff preview via `kubectl diff`) | Blocks if context is prod unless `--confirm-prod` in input. |
+| `k8s:delete` | `kubectl delete` | Yes (extra confirm) | |
+| `k8s:rollout-restart` | `kubectl rollout restart` | Yes | |
+| `k8s:rollout-undo` | `kubectl rollout undo` | Yes | |
+| `k8s:top` | `kubectl top pods / nodes` | No | |
+
+### Cloud CLIs (AWS / GCP / Azure)
+
+Thin wrappers around `aws` / `gcloud` / `az`. Same allowlist-by-default
+stance as kubernetes: reads are cheap, mutations gate with the full
+command + target resource.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `aws:exec` | Run `aws ...` command | Config (risk) | Reads (get/list/describe) auto-run; writes / deletes gate. |
+| `aws:s3-ls` | List / head S3 objects | No | |
+| `aws:s3-cp` | Copy S3 object (up/down) | Yes | |
+| `aws:logs-tail` | CloudWatch Logs tail | No | |
+| `gcloud:exec` | Run `gcloud ...` command | Config (risk) | Same read-vs-write split. |
+| `gcloud:logs-tail` | Cloud Logging tail | No | |
+| `az:exec` | Run `az ...` command | Config (risk) | |
+| `az:logs-tail` | Azure Monitor log stream | No | |
+
+Each provider registers only when its CLI is detected on PATH, to
+avoid cluttering the LLM's tool list on machines without them.
+
+### Diff / patch (outside git)
+
+For proposing or applying patches to files that aren't yet committed,
+working with external patch sets, or showing changes in chat.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `diff:files` | Unified diff between two files / two strings | No | |
+| `diff:dirs` | Recursive diff between two directories | No | |
+| `patch:generate` | Build a patch from pending edits in the agent session | No | Useful when the LLM wants to hand a patch back to the user for review. |
+| `patch:apply` | Apply a patch to the working tree | Yes | 3-way apply; surfaces conflicts in gate content. |
+| `patch:reverse` | Reverse-apply | Yes | |
+
+### Notifications (Slack / Discord / email)
+
+Explicit outbound messaging. Always gated with the full rendered
+message + destination -- nobody wants the LLM paging on-call at 3 a.m.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `slack:send` | Post to a Slack channel / user | Yes | Requires `SLACK_TOKEN`. Gate shows rendered message + target. |
+| `slack:reply` | Thread reply to a message (by ts) | Yes | |
+| `slack:search` | Search messages | No | |
+| `discord:send` | Post to channel via webhook or bot token | Yes | |
+| `email:send` | Send email (SMTP or provider API) | Yes (extra confirm) | Off by default; requires explicit config. |
+
 ### MCP tools
 
 External MCP server tools keep their existing contract but flow through
