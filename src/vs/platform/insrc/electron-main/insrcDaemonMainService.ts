@@ -36,7 +36,7 @@ export interface IInsrcDaemonMainService {
 
 const INSRC_DIR = join(homedir(), '.insrc');
 const SOCK_FILE = join(INSRC_DIR, 'daemon.sock');
-const DAEMON_ENTRY = join(INSRC_DIR, 'daemon', 'index.js');
+const DAEMON_ENTRY = join(INSRC_DIR, 'daemon', 'dist', 'src', 'daemon', 'index.js');
 
 const SPAWN_CONNECT_MAX_WAIT_MS = 10_000;
 const SPAWN_CONNECT_POLL_MS = 500;
