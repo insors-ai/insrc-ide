@@ -155,7 +155,16 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 			const result = await this.daemonService.rpc<{ error?: string; sessionId?: string; repo?: string }>('chat.restore', { sessionId: this._activeSessionId });
 			if (!result.error && result.sessionId) {
 				this._activeRepo = result.repo;
-				this.logService.info('[insrc-chat] Re-established session via restore:', result.sessionId);
+				// Load persisted turns before firing the event so the view
+				// renders the conversation in its initial pass. Previously
+				// we only fired onDidChangeSession, leaving the view blank
+				// until the user typed a new message.
+				this._messages = await this.loadHistory(result.sessionId);
+				this.logService.info(
+					'[insrc-chat] Re-established session via restore:',
+					result.sessionId,
+					`(${this._messages.length} messages)`,
+				);
 				this._onDidChangeSession.fire(this._activeSessionId);
 				return;
 			}
