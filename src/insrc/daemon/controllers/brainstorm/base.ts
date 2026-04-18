@@ -1940,16 +1940,8 @@ export abstract class BrainstormControllerBase implements TaskController {
   }
 
   private buildAssembleSpecTask(): Task {
-    const sections = this.state.specSections ?? [];
-    const sectionContent = sections
-      .map(s => {
-        const heading = s.themeId ? `${s.themeId} — ${s.themeName}` : s.themeName;
-        return `## ${heading}\n\n${s.content}`;
-      })
-      .join('\n\n---\n\n');
-
     const today = new Date().toISOString().slice(0, 10);
-    const userMessage = [
+    const header = [
       `## Original Problem`,
       this.state.input.message,
       '',
@@ -1958,10 +1950,26 @@ export abstract class BrainstormControllerBase implements TaskController {
       `- Date: ${today}`,
       `- Author: ${this.state.author ?? 'Unknown'}`,
       '',
-      `## Per-Theme Spec Sections (${sections.length} themes)`,
-      '',
-      sectionContent,
-    ].join('\n');
+    ];
+
+    let body: string[];
+    if (this.skipPerThemeSpec()) {
+      // Direct assembly: themes + their member ideas, no per-theme spec sections.
+      body = this.buildDirectAssemblyContext();
+    } else {
+      const sections = this.state.specSections ?? [];
+      const sectionContent = sections
+        .map(s => {
+          const heading = s.themeId ? `${s.themeId} -- ${s.themeName}` : s.themeName;
+          return `## ${heading}\n\n${s.content}`;
+        })
+        .join('\n\n---\n\n');
+      body = [
+        `## Per-Theme Spec Sections (${sections.length} themes)`,
+        '',
+        sectionContent,
+      ];
+    }
 
     return {
       index: this.taskCounter++,
@@ -1969,10 +1977,35 @@ export abstract class BrainstormControllerBase implements TaskController {
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getAssemblePrompt(),
-      userMessage,
+      userMessage: [...header, ...body].join('\n'),
       temperature: 0.2,
       stateKey: 'assembleSpecOutput',
     };
+  }
+
+  /**
+   * User message body for direct assembly (when per-theme spec is skipped).
+   * Includes each theme with its promoted/accepted ideas inline so the
+   * assembly prompt can write a narrative summary without a prior spec pass.
+   */
+  private buildDirectAssemblyContext(): string[] {
+    const themes = this.state.themes ?? [];
+    const ideaById = new Map(this.state.ideas.map(i => [i.id, i]));
+    const parts: string[] = [`## Themes (${themes.length})`, ''];
+    for (const theme of themes) {
+      parts.push(`### ${theme.name}`);
+      parts.push(theme.description);
+      parts.push('');
+      parts.push('**Member ideas:**');
+      for (const id of theme.ideaIds) {
+        const idea = ideaById.get(id);
+        if (!idea) { continue; }
+        const status = idea.status !== 'proposed' ? ` [${idea.status}]` : '';
+        parts.push(`- **${idea.title}**${status}: ${idea.body}`);
+      }
+      parts.push('');
+    }
+    return parts;
   }
 
   // ---------------------------------------------------------------------------
