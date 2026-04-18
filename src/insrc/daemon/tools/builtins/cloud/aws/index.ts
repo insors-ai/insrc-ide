@@ -11,6 +11,10 @@ import { awsSecretsGetTool, awsSecretsPutTool } from './secretsmanager.js';
 import { awsSsmGetParameterTool, awsSsmPutParameterTool } from './ssm.js';
 import { awsCfnListTool, awsCfnDeployTool, awsCfnDeleteTool } from './cloudformation.js';
 import { awsEcrLoginTool } from './ecr.js';
+import { awsEksListTool, awsEksUpdateKubeconfigTool } from './eks.js';
+import { awsRdsDescribeTool, awsRdsStartTool, awsRdsStopTool } from './rds.js';
+import { awsLogsTailTool, awsLogsFilterTool } from './logs.js';
+import { awsIamListAttachedPoliciesTool } from './iam.js';
 
 export function registerAwsTools(): void {
   // Batch 1
@@ -36,4 +40,14 @@ export function registerAwsTools(): void {
   registerTool(awsCfnDeployTool);
   registerTool(awsCfnDeleteTool);
   registerTool(awsEcrLoginTool);
+
+  // Batch 3
+  registerTool(awsEksListTool);
+  registerTool(awsEksUpdateKubeconfigTool);
+  registerTool(awsRdsDescribeTool);
+  registerTool(awsRdsStartTool);
+  registerTool(awsRdsStopTool);
+  registerTool(awsLogsTailTool);
+  registerTool(awsLogsFilterTool);
+  registerTool(awsIamListAttachedPoliciesTool);
 }
