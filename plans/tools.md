@@ -134,32 +134,255 @@ daemon-only capabilities (session, channel, stream) to support
 approval + progress. The LLM path stays in `agent/` but imports the
 registry from `daemon/tools/`.
 
-## New system-action tools (post-migration)
+## Tools catalog (post-migration)
 
-Once the unified registry is live, the delegates the old plan called
-out (git, jira, file) get implemented **once** and are automatically
-available to both LLMs and controllers:
+Once the unified registry is live, every capability below is
+implemented **once** and surfaces to both the LLM (via tool-call) and
+controllers (via `kind: 'tool'` tasks). Tools marked as "Yes" fire the
+Approve / Skip / Edit gate before executing.
+
+Approval column:
+- **No** -- read-only, no gate
+- **Yes** -- mutating, gate fires with diff/command preview
+- **Config** -- gated behavior depends on permission mode + risk tier
+
+### Shell
 
 | Tool ID | Purpose | Approval | Notes |
 |---------|---------|----------|-------|
-| `git:status` | `git status --porcelain` | No | Read-only |
-| `git:log` | `git log` with filters | No | Read-only |
-| `git:diff` | `git diff` / `git show` | No | Read-only |
-| `git:stage` | Stage paths | Yes | Mutates index |
-| `git:commit` | Create commit | Yes (shows diff + message in gate) | Blocks on detached HEAD, blocks push |
-| `git:branch` | Create / switch branch | Yes | |
-| `jira:search` | JQL query | No | Requires `JIRA_URL` + token |
+| `shell:exec` | Run a single command | Config (risk-tier) | Replaces `Bash`. Low-risk commands (ls, cat, grep, git status) auto-run in `auto-accept` mode. Medium/high always gate. |
+| `shell:exec-detached` | Long-running command with streaming output | Yes | For dev servers, watchers. Returns a job handle; output tails via `stream: progress`. |
+| `shell:exec-pipeline` | Run a scripted sequence (bash -c with multiple stages) | Yes | For complex flows; whole script shown in gate. |
+| `shell:cwd` | Change execution cwd for subsequent calls | No | Session-scoped. |
+
+### File IO
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `file:read` | Read file contents (range-aware) | No | Replaces `Read`. Honors smart-read (entity summaries for big files). |
+| `file:write` | Write / overwrite file | Yes | Replaces `Write`. Gate shows full diff vs current. |
+| `file:edit` | Find-and-replace within a file | Yes | Replaces `Edit`. Strict match semantics. |
+| `file:multi-edit` | Multiple edits in one file | Yes | Replaces `MultiEdit`. |
+| `file:delete` | Remove file | Yes | |
+| `file:move` | Rename / move file | Yes | Refuses cross-device if not same repo. |
+| `file:copy` | Copy file | Yes | |
+| `file:mkdir` | Create directory | Yes | |
+| `file:stat` | Metadata (size, mtime, kind) | No | Lightweight, for scripting. |
+
+### Search (local filesystem)
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `search:glob` | Filename pattern (`**/*.ts`) | No | Replaces `Glob`. Sorted by mtime. |
+| `search:grep` | Content regex | No | Replaces `Grep`. ripgrep-backed. |
+| `search:list-dir` | Directory listing | No | Replaces `ListDirectory`. |
+| `search:graph` | Semantic search over indexed code entities | No | Replaces `graph_search`. LanceDB ANN. |
+| `search:graph-query` | Cypher query against code knowledge graph | No | Replaces `graph_query`. |
+| `search:recent` | Files modified in last N minutes | No | Handy for "what did I touch" flows. |
+
+### Git (code actions)
+
+Read-only git tools are ungated; anything mutating requires approval.
+Destructive commands (force push, reset --hard) additionally prompt
+with an explicit danger label in the gate content.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `git:status` | Porcelain status | No | |
+| `git:log` | Commit history (filtered) | No | |
+| `git:diff` | Unstaged / staged / commit diff | No | |
+| `git:show` | Show a commit | No | |
+| `git:blame` | Line-level authorship | No | |
+| `git:stage` | `git add` paths | Yes | |
+| `git:unstage` | `git restore --staged` | Yes | |
+| `git:commit` | Create commit (message, author) | Yes (diff + message preview) | Refuses when detached HEAD unless explicit flag. |
+| `git:amend` | Amend previous commit | Yes (warns if already pushed) | |
+| `git:branch` | List / create / switch branch | Create/switch: Yes | List: No. |
+| `git:checkout` | Checkout path / ref | Yes | Destructive -- overwrites uncommitted changes. |
+| `git:merge` | Merge ref into current | Yes | Surfaces conflict state. |
+| `git:rebase` | Rebase onto ref (no interactive) | Yes | Blocks `-i` -- not supported in automated flows. |
+| `git:stash` | Push / pop / list stash | Push/pop: Yes. List: No. | |
+| `git:push` | Push to remote | Yes (warns on force, blocks force-push to main) | Respects per-repo protected-branch config. |
+| `git:pull` | `git pull --ff-only` by default | Yes | |
+| `git:fetch` | Fetch refs | No | Network-only, no ref updates to tracking branches beyond fetch. |
+| `git:reset` | Soft / mixed / hard reset | Yes (hard adds a red confirm) | |
+| `git:revert` | Revert commit | Yes | |
+| `git:cherry-pick` | Apply commit from another ref | Yes | |
+| `git:tag` | List / create / delete tag | Create/delete: Yes | |
+| `git:remote` | List / add / remove remote | Add/remove: Yes | |
+| `git:worktree` | Add / remove worktree | Yes | |
+
+### GitHub (via `gh` CLI + REST/GraphQL)
+
+`gh` is already installed on most dev machines and handles auth. Tools
+shell out to `gh` for CLI-shaped actions and hit REST/GraphQL directly
+for bulk queries. Requires `GH_TOKEN` or `gh auth login`.
+
+#### Issues
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `gh:issue:list` | List / filter / search issues | No |
+| `gh:issue:view` | View an issue (body, comments, metadata) | No |
+| `gh:issue:create` | Open an issue (title, body, labels, assignees) | Yes |
+| `gh:issue:comment` | Add comment | Yes |
+| `gh:issue:edit` | Edit title / body / labels / assignees | Yes |
+| `gh:issue:close` | Close with optional reason | Yes |
+| `gh:issue:reopen` | Reopen | Yes |
+| `gh:issue:link` | Link to PR / other issue | Yes |
+
+#### Pull Requests
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `gh:pr:list` | List / filter PRs | No |
+| `gh:pr:view` | PR body + checks + review status | No |
+| `gh:pr:diff` | Unified diff | No |
+| `gh:pr:checks` | CI check status | No |
+| `gh:pr:files` | Changed files + per-file stats | No |
+| `gh:pr:create` | Open PR (title, body, base, draft flag) | Yes |
+| `gh:pr:edit` | Edit title / body / labels / reviewers | Yes |
+| `gh:pr:comment` | Top-level comment | Yes |
+| `gh:pr:review` | Submit review (APPROVE / REQUEST_CHANGES / COMMENT) | Yes |
+| `gh:pr:merge` | Merge (squash / rebase / merge-commit) | Yes | Respects branch-protection rules. |
+| `gh:pr:close` | Close without merge | Yes |
+| `gh:pr:ready` | Mark draft PR ready for review | Yes |
+
+#### Projects v2 (GraphQL -- classic projects are deprecated)
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `gh:project:list` | List projects in org / user | No | |
+| `gh:project:view` | View a project (columns, fields, items) | No | |
+| `gh:project:item-list` | List items in a project (filter by status/field) | No | |
+| `gh:project:item-add` | Add issue / PR / draft to project | Yes | |
+| `gh:project:item-update` | Set field values (status, priority, iteration, custom) | Yes | |
+| `gh:project:item-archive` | Archive item | Yes | |
+| `gh:project:item-delete` | Remove from project | Yes | |
+| `gh:project:field-list` | List available fields + options | No | |
+
+#### Actions / Workflows
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `gh:run:list` | Recent workflow runs | No |
+| `gh:run:view` | Run details + failed step logs | No |
+| `gh:run:rerun` | Re-run (failed jobs or all) | Yes |
+| `gh:run:cancel` | Cancel in-progress run | Yes |
+| `gh:workflow:list` | List workflows in repo | No |
+| `gh:workflow:run` | Dispatch a workflow (with inputs) | Yes |
+
+#### Releases
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `gh:release:list` | List releases | No |
+| `gh:release:view` | Release details | No |
+| `gh:release:create` | Create release (tag, title, notes, draft, prerelease) | Yes |
+| `gh:release:edit` | Edit notes / flags | Yes |
+| `gh:release:publish` | Publish a draft | Yes |
+| `gh:release:delete` | Delete release | Yes |
+
+#### Repository
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `gh:repo:view` | Repo metadata | No |
+| `gh:repo:list` | List user / org repos | No |
+| `gh:repo:create` | Create repo | Yes |
+| `gh:repo:fork` | Fork | Yes |
+| `gh:repo:delete` | Delete (dangerous) | Yes (extra confirm) |
+| `gh:repo:clone` | Clone locally | Yes |
+
+### Web
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `web:search` | Web search (Brave -> Claude fallback with approval) | Config | Replaces `WebSearch`. |
+| `web:fetch` | Fetch URL body | No | Replaces `WebFetch`. Cached on disk for the session. |
+
+### LSP / language services
+
+The IDE already exposes an LSP bridge inside the workbench; these tools
+reach into it for programmatic refactoring.
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `lsp:go-to-definition` | Resolve symbol -> file:line | No |
+| `lsp:find-references` | All references of a symbol | No |
+| `lsp:workspace-symbols` | Symbol search across repo | No |
+| `lsp:document-symbols` | Outline of one file | No |
+| `lsp:hover` | Hover info (type, docs) | No |
+| `lsp:rename` | Rename symbol (workspace edit) | Yes (diff preview) |
+| `lsp:code-actions` | List quick-fixes / refactors at position | No |
+| `lsp:apply-code-action` | Apply a code-action by ID | Yes |
+| `lsp:diagnostics` | Current errors / warnings for a file or workspace | No |
+
+### Testing / build
+
+Thin wrappers around `shell:exec` with result parsing so the LLM gets
+structured output instead of raw logs.
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `test:run` | Run detected test framework (jest/vitest/mocha/pytest/go test/cargo test) | Yes | Parses failures into `[{ file, line, message }]`. |
+| `test:focus` | Run tests matching name pattern | Yes | |
+| `build:run` | `npm run build` / `cargo build` / `go build` | Yes | |
+| `lint:run` | eslint / ruff / golangci-lint | Yes | Returns structured findings. |
+| `format:run` | prettier / black / gofmt | Yes | Dry-run preview in gate. |
+
+### Package managers
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `pkg:install` | Install dependency (auto-detect npm/pip/cargo/go) | Yes |
+| `pkg:remove` | Remove dependency | Yes |
+| `pkg:update` | Update dependency | Yes |
+| `pkg:audit` | Security / vulnerability audit | No |
+| `pkg:list` | List installed deps | No |
+| `pkg:why` | Explain why a dep is present (npm ls / cargo tree) | No |
+
+### Docker / containers (optional, register only when daemon detects docker CLI)
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `docker:ps` | List containers | No |
+| `docker:logs` | Tail container logs | No |
+| `docker:exec` | Run command inside container | Yes |
+| `docker:compose-up` | Start compose stack | Yes |
+| `docker:compose-down` | Stop compose stack | Yes |
+
+### Database / schema (opt-in via config)
+
+| Tool ID | Purpose | Approval |
+|---------|---------|----------|
+| `db:schema` | Introspect tables / columns | No |
+| `db:query` | Run SELECT | Yes (auto-approve for explicit read-only mode) |
+| `db:mutate` | Run INSERT / UPDATE / DELETE | Yes |
+
+### Jira (kept from earlier scope)
+
+| Tool ID | Purpose | Approval | Notes |
+|---------|---------|----------|-------|
+| `jira:search` | JQL query | No | Requires `JIRA_URL` + token. |
+| `jira:view` | View issue | No | |
 | `jira:create` | Create issue | Yes | |
 | `jira:comment` | Add comment | Yes | |
 | `jira:transition` | Move state | Yes | |
-| `file:write` | Write file contents | Yes (diff preview in gate) | Replaces ad-hoc `Write` in the tool-loop. |
-| `file:edit` | Range-based edit | Yes | Replaces `Edit`. |
-| `file:delete` | Remove file | Yes | |
-| `shell:exec` | Arbitrary command | Yes (risk-tier-aware) | Replaces `Bash`; risk inferred from command. |
+| `jira:assign` | Assign user | Yes | |
+| `jira:link` | Link issues | Yes | |
 
-All existing LLM tools (Read, Grep, Glob, Bash, WebSearch, WebFetch,
-ListDirectory, graph_search, graph_query, MultiEdit, ...) become
-entries in the same registry with `requiresApproval` as appropriate.
+### MCP tools
+
+External MCP server tools keep their existing contract but flow through
+the unified registry as dynamic entries. No change for MCP users.
+
+---
+
+All existing LLM tools (`Read`, `Grep`, `Glob`, `Bash`, `WebSearch`,
+`WebFetch`, `ListDirectory`, `graph_search`, `graph_query`, `MultiEdit`)
+are kept as stable aliases to their new canonical IDs for one release
+so models trained on the old schema still work.
 
 ## Migration stages
 
