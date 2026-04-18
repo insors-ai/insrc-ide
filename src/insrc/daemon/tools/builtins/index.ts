@@ -14,6 +14,7 @@ import { registerGhTools } from './gh/index.js';
 import { registerSshTools } from './ssh/index.js';
 import { registerHttpTools } from './http/index.js';
 import { registerK8sTools } from './k8s/index.js';
+import { registerCloudTools } from './cloud/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
@@ -24,4 +25,5 @@ export function registerBuiltinTools(): void {
   registerSshTools();
   registerHttpTools();
   registerK8sTools();
+  registerCloudTools();
 }
