@@ -1,16 +1,22 @@
 /**
  * HTML and Markdown templates for brainstorm output.
  *
- * Users can override the spec assembly template by placing a file at:
- *   ~/.insrc/templates/brainstorm-spec.md
+ * Users can override the spec assembly template per category by placing
+ * a file at:
+ *   ~/.insrc/templates/brainstorm-spec.md            (requirements, legacy name)
+ *   ~/.insrc/templates/brainstorm-{category}-spec.md (other categories)
+ * and the per-theme section template at:
+ *   ~/.insrc/templates/brainstorm-theme-spec.md
+ *   ~/.insrc/templates/brainstorm-{category}-theme-spec.md
  *
- * The file should contain a markdown template with placeholder sections
- * that the LLM will fill in. See BRAINSTORM_SPEC_TEMPLATE for the default.
+ * When no user override and no category-specific builtin exists, the
+ * requirements templates are used as a structural fallback.
  */
 
 import { readFileSync } from 'node:fs';
 import { PATHS } from '../../../shared/paths.js';
 import { join } from 'node:path';
+import type { BrainstormCategory } from '../../../daemon/controllers/brainstorm/types.js';
 
 // ---------------------------------------------------------------------------
 // HTML template
@@ -215,32 +221,69 @@ export const BRAINSTORM_THEME_SPEC_TEMPLATE = `| ID | Type | Priority | Requirem
 - [ ] <testable criterion 1>`;
 
 // ---------------------------------------------------------------------------
-// Template loader — user override from ~/.insrc/templates/
+// Template loader -- user override from ~/.insrc/templates/
 // ---------------------------------------------------------------------------
 
-const SPEC_TEMPLATE_FILE = 'brainstorm-spec.md';
-const THEME_TEMPLATE_FILE = 'brainstorm-theme-spec.md';
+/**
+ * Per-category builtin spec templates. Categories without an explicit
+ * entry fall back to the requirements template (structurally compatible
+ * -- same theme/acceptance/traceability layout).
+ */
+const SPEC_TEMPLATES: Partial<Record<BrainstormCategory, string>> = {
+  requirements: BRAINSTORM_SPEC_TEMPLATE,
+};
+
+const THEME_SPEC_TEMPLATES: Partial<Record<BrainstormCategory, string>> = {
+  requirements: BRAINSTORM_THEME_SPEC_TEMPLATE,
+};
 
 /**
- * Load the spec assembly template.
- * Checks ~/.insrc/templates/brainstorm-spec.md first, falls back to built-in.
+ * Register a builtin spec template for a category. Used by category
+ * controllers to ship their own defaults without touching this file's
+ * requirements-specific copy.
  */
-export function loadSpecTemplate(): string {
+export function registerSpecTemplate(category: BrainstormCategory, template: string): void {
+  SPEC_TEMPLATES[category] = template;
+}
+
+export function registerThemeSpecTemplate(category: BrainstormCategory, template: string): void {
+  THEME_SPEC_TEMPLATES[category] = template;
+}
+
+function specFileName(category: BrainstormCategory): string {
+  // Legacy filename for requirements; explicit {category} suffix for others.
+  return category === 'requirements'
+    ? 'brainstorm-spec.md'
+    : `brainstorm-${category}-spec.md`;
+}
+
+function themeSpecFileName(category: BrainstormCategory): string {
+  return category === 'requirements'
+    ? 'brainstorm-theme-spec.md'
+    : `brainstorm-${category}-theme-spec.md`;
+}
+
+/**
+ * Load the spec assembly template for a category.
+ * Order: user override in ~/.insrc/templates -> category builtin ->
+ * requirements builtin (structural fallback).
+ */
+export function loadSpecTemplate(category: BrainstormCategory = 'requirements'): string {
   try {
-    return readFileSync(join(PATHS.templates, SPEC_TEMPLATE_FILE), 'utf-8');
+    return readFileSync(join(PATHS.templates, specFileName(category)), 'utf-8');
   } catch {
-    return BRAINSTORM_SPEC_TEMPLATE;
+    return SPEC_TEMPLATES[category] ?? BRAINSTORM_SPEC_TEMPLATE;
   }
 }
 
 /**
- * Load the per-theme spec section template.
- * Checks ~/.insrc/templates/brainstorm-theme-spec.md first, falls back to built-in.
+ * Load the per-theme spec section template for a category.
+ * Same resolution order as loadSpecTemplate.
  */
-export function loadThemeSpecTemplate(): string {
+export function loadThemeSpecTemplate(category: BrainstormCategory = 'requirements'): string {
   try {
-    return readFileSync(join(PATHS.templates, THEME_TEMPLATE_FILE), 'utf-8');
+    return readFileSync(join(PATHS.templates, themeSpecFileName(category)), 'utf-8');
   } catch {
-    return BRAINSTORM_THEME_SPEC_TEMPLATE;
+    return THEME_SPEC_TEMPLATES[category] ?? BRAINSTORM_THEME_SPEC_TEMPLATE;
   }
 }

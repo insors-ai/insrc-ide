@@ -1273,7 +1273,7 @@ async function executeAgentTask(
   deps: TaskOrchestratorDeps,
 ): Promise<TaskResult> {
   const agentId = task.agentId ?? task.intent;
-  const controller = await resolveController(agentId);
+  const controller = await resolveController(agentId, task);
 
   if (!controller) {
     // No controller found — agent tasks without controllers are not yet supported
@@ -1334,8 +1334,16 @@ async function executeAgentTask(
 
 const controllerCache = new Map<string, TaskController>();
 
-async function resolveController(agentId: string): Promise<TaskController | null> {
-  if (controllerCache.has(agentId)) return controllerCache.get(agentId)!;
+async function resolveController(agentId: string, task?: Task): Promise<TaskController | null> {
+  // Brainstorm picks a sub-controller per category; cache key includes it.
+  let cacheKey = agentId;
+  if (agentId === 'brainstorm' && task) {
+    const { detectBrainstormCategory } = await import('../agent/classifier/brainstorm-category.js');
+    const cat = detectBrainstormCategory(task.userMessage ?? task.description ?? '');
+    cacheKey = `brainstorm:${cat}`;
+  }
+
+  if (controllerCache.has(cacheKey)) return controllerCache.get(cacheKey)!;
 
   let controller: TaskController | null = null;
 
@@ -1358,8 +1366,17 @@ async function resolveController(agentId: string): Promise<TaskController | null
     }
     case 'brainstorm': {
       const mod = await import('./controllers/brainstorm/index.js');
-      // TODO: resolve category from classification when more sub-controllers are added
-      controller = new mod.RequirementsBrainstormController();
+      const category = cacheKey.slice('brainstorm:'.length);
+      switch (category) {
+        case 'requirements':
+          controller = new mod.RequirementsBrainstormController();
+          break;
+        // Other categories fall back to Requirements until their controllers land.
+        // Keeps routing live so each controller can be swapped in per commit.
+        default:
+          controller = new mod.RequirementsBrainstormController();
+          break;
+      }
       break;
     }
     case 'implement':
@@ -1379,6 +1396,6 @@ async function resolveController(agentId: string): Promise<TaskController | null
       return null;
   }
 
-  if (controller) controllerCache.set(agentId, controller);
+  if (controller) controllerCache.set(cacheKey, controller);
   return controller;
 }

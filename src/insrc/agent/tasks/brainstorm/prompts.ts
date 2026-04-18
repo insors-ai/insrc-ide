@@ -8,6 +8,7 @@
  */
 
 import { loadSpecTemplate, loadThemeSpecTemplate } from './templates.js';
+import type { BrainstormCategory } from '../../../daemon/controllers/brainstorm/types.js';
 
 // ---------------------------------------------------------------------------
 // Seed
@@ -358,8 +359,8 @@ Tasks:
 `;
 
 /** Build the per-theme spec system prompt (loads user-customizable template). */
-export function buildGenerateThemeSpecSystem(): string {
-  return GENERATE_THEME_SPEC_PREAMBLE + loadThemeSpecTemplate()
+export function buildGenerateThemeSpecSystem(category: BrainstormCategory = 'requirements'): string {
+  return GENERATE_THEME_SPEC_PREAMBLE + loadThemeSpecTemplate(category)
     + '\n\nOutput ONLY the markdown table and criteria. No commentary or wrapping.';
 }
 
@@ -396,8 +397,8 @@ Each section was generated for a specific theme. Your job is to:
 `;
 
 /** Build the spec assembly system prompt (loads user-customizable template). */
-export function buildAssembleSpecSystem(): string {
-  return ASSEMBLE_SPEC_PREAMBLE + '```markdown\n' + loadSpecTemplate() + '\n```\n\n'
+export function buildAssembleSpecSystem(category: BrainstormCategory = 'requirements'): string {
+  return ASSEMBLE_SPEC_PREAMBLE + '```markdown\n' + loadSpecTemplate(category) + '\n```\n\n'
     + 'Output ONLY markdown. Do NOT output HTML tags, <!DOCTYPE>, <html>, <style>, or any HTML structure. No commentary, no wrapping fences around the whole output.';
 }
 

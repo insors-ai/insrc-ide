@@ -44,6 +44,10 @@ import { renderSpecMarkdown } from '../../../agent/tasks/brainstorm/spec-builder
 import { formatIdeasForContext, formatThemesForContext } from '../../../agent/tasks/brainstorm/context-builder.js';
 import { assembleDocument } from '../../../agent/tasks/brainstorm/assembly.js';
 import { defaultSavePath, saveArtifact } from '../../../agent/tasks/shared/artifact-save.js';
+import {
+  REFINE_IDEAS_SYSTEM, ENHANCE_IDEAS_SYSTEM,
+  DISCUSS_RESPOND_SYSTEM, DISCUSS_REFINE_SYSTEM,
+} from '../../../agent/tasks/brainstorm/prompts.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -166,10 +170,6 @@ export abstract class BrainstormControllerBase implements TaskController {
   abstract getSeedPrompt(): string;
   abstract getDivergePrompt(): string;
   abstract getReviewIdeasPrompt(): string;
-  abstract getRefineIdeasPrompt(): string;
-  abstract getEnhanceIdeasPrompt(): string;
-  abstract getDiscussRespondPrompt(): string;
-  abstract getDiscussRefinePrompt(): string;
   abstract getConvergeClusterPrompt(): string;
   abstract getConvergePromotePrompt(): string;
   abstract getThemeSpecPrompt(): string;
@@ -181,6 +181,14 @@ export abstract class BrainstormControllerBase implements TaskController {
   abstract getConvergenceLabel(): string;
   abstract getIdeaGateTitle(): string;
   abstract getConvergenceGateTitle(): string;
+
+  // ── Shared prompt defaults (override per-category only if the category
+  //    needs a different tone; the shared prompts are intentionally generic) ──
+
+  getRefineIdeasPrompt(): string    { return REFINE_IDEAS_SYSTEM; }
+  getEnhanceIdeasPrompt(): string   { return ENHANCE_IDEAS_SYSTEM; }
+  getDiscussRespondPrompt(): string { return DISCUSS_RESPOND_SYSTEM; }
+  getDiscussRefinePrompt(): string  { return DISCUSS_REFINE_SYSTEM; }
 
   /** Override to skip per-theme spec generation (e.g., general category). */
   protected skipPerThemeSpec(): boolean { return false; }
