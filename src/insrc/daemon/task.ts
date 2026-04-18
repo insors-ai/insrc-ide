@@ -30,8 +30,12 @@ const log = getLogger('task');
 
 export type TaskFormat = 'text' | 'markdown' | 'code' | 'table' | 'html' | 'html-inline' | 'diff';
 
-/** Task kind determines how the task is executed. */
-export type TaskKind = 'shell' | 'rpc' | 'llm' | 'agent' | 'transform' | 'gate' | 'delegate';
+/** Task kind determines how the task is executed.
+ *
+ * `delegate` is kept as a compat alias for `tool` during the
+ * plans/tools.md migration; stage 6 removes it.
+ */
+export type TaskKind = 'shell' | 'rpc' | 'llm' | 'agent' | 'transform' | 'gate' | 'tool' | 'delegate';
 
 export interface Task {
   /** Unique index within the pipeline. */
@@ -89,9 +93,13 @@ export interface Task {
   passThrough?: boolean | undefined;
   /** Enable tool loop for LLM tasks — LLM can call tools (Read, Grep, etc.). */
   useToolLoop?: boolean | undefined;
-  /** Delegate target handler ID (kind=delegate). */
+  /** Tool id to invoke (kind=tool). Alias of delegateTo when kind=delegate. */
+  toolId?: string | undefined;
+  /** Input for the tool (kind=tool). Alias of delegateInput when kind=delegate. */
+  toolInput?: Record<string, unknown> | undefined;
+  /** Delegate target handler ID (kind=delegate) -- legacy alias for toolId. */
   delegateTo?: string | undefined;
-  /** Input for the delegate handler (kind=delegate). */
+  /** Input for the delegate handler (kind=delegate) -- legacy alias for toolInput. */
   delegateInput?: unknown | undefined;
 
   // -- Gate customisation --
@@ -972,11 +980,29 @@ async function executeTask(
     case 'agent':
       return executeAgentTask(task, context, deps);
 
+    case 'tool':
     case 'delegate': {
-      const { executeDelegate } = await import('./delegates/registry.js');
-      const delegateId = task.delegateTo ?? '';
-      const delegateInput = (task.delegateInput ?? {}) as Record<string, unknown>;
-      return executeDelegate(delegateId, delegateInput, deps, task.index, task.description);
+      // kind: 'delegate' is kept as a compat alias during the
+      // plans/tools.md migration. Both dispatch to the unified tools
+      // executor; the legacy delegateTo / delegateInput fields fall back
+      // to toolId / toolInput when the new ones are not set.
+      const toolId = task.toolId ?? task.delegateTo ?? '';
+      const toolInput = (task.toolInput ?? task.delegateInput ?? {}) as Record<string, unknown>;
+      const { executeTool } = await import('./tools/executor.js');
+      const result = await executeTool(toolId, toolInput, {
+        session: deps.session,
+        channel: deps.channel,
+        send: deps.send,
+        requestId: deps.requestId,
+      });
+      return {
+        index: task.index,
+        description: task.description,
+        output: result.output,
+        format: result.format as TaskFormat,
+        success: result.success,
+        ...(result.error ? { error: result.error } : {}),
+      };
     }
 
     default:
