@@ -16,6 +16,7 @@ import { registerHttpTools } from './http/index.js';
 import { registerK8sTools } from './k8s/index.js';
 import { registerCloudTools } from './cloud/index.js';
 import { registerDiffTools } from './diff/index.js';
+import { registerNotifyTools } from './notify/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
@@ -28,4 +29,5 @@ export function registerBuiltinTools(): void {
   registerK8sTools();
   registerCloudTools();
   registerDiffTools();
+  registerNotifyTools();
 }
