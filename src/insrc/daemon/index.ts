@@ -136,6 +136,11 @@ async function main(): Promise<void> {
   const { registerLegacyAdapters } = await import('./tools/legacy-adapters.js');
   registerLegacyAdapters();
 
+  // 6d. Register first-class builtin tools (plans/tools.md stage 5):
+  //     git:*, gh:*, file:*, shell:*, ... -- one domain at a time.
+  const { registerBuiltinTools } = await import('./tools/builtins/index.js');
+  registerBuiltinTools();
+
   // 7. Start IPC server
   const server = new IpcServer({
     'repo.add': async (params) => {
