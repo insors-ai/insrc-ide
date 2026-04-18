@@ -54,9 +54,9 @@ function resolveFormat(action: DecomposedAction): TaskFormat | undefined {
 // Builder
 // ---------------------------------------------------------------------------
 
-const TRANSFORM_SYSTEM_PROMPT = `You are a formatting assistant. The user will provide output from a command or process.
+export const TRANSFORM_SYSTEM_PROMPT = `You are a formatting assistant. The user will provide output from a command or process.
 Your task is to format the output according to the requested format.
-Do NOT add commentary, explanation, or analysis — only format the data.
+Do NOT add commentary, explanation, or analysis -- only format the data.
 Preserve all information from the input.`;
 
 /**

@@ -8,11 +8,12 @@
 
 import { Session } from '../agent/session.js';
 import { classify, decompose, type DecomposedAction } from '../agent/classifier/index.js';
+import type { AttachedAction } from '../agent/classifier/decompose.js';
 import { selectProvider } from '../agent/router.js';
 import { detectScope } from '../agent/classifier/scope.js';
 import { runAgent } from '../agent/framework/runner.js';
-import { buildTasks } from './task-builder.js';
-import { runTaskPipeline, renderMarkdown, type TaskOrchestratorDeps } from './task.js';
+import { buildTasks, TRANSFORM_SYSTEM_PROMPT } from './task-builder.js';
+import { runTaskPipeline, renderMarkdown, type Task, type TaskFormat, type TaskOrchestratorDeps } from './task.js';
 import { designerAgent } from '../agent/tasks/designer/agent.js';
 import { resolveTemplate, parseTemplateFlags } from '../agent/tasks/designer/index.js';
 import { plannerAgent } from '../agent/planner/agent.js';
@@ -232,6 +233,109 @@ async function fetchCodeContext(message: string): Promise<string> {
     log.debug({ err: searchErr }, 'code context search failed (continuing without)');
   }
   return '';
+}
+
+// ---------------------------------------------------------------------------
+// Post-primary processing (format/depends/append/parallel attached relations)
+// ---------------------------------------------------------------------------
+
+interface PostPrimaryActions {
+  formatActions: AttachedAction[];
+  dependActions: AttachedAction[];
+  appendActions: AttachedAction[];
+  parallelActions: AttachedAction[];
+}
+
+function hasPostPrimary(post: PostPrimaryActions): boolean {
+  return post.formatActions.length > 0
+    || post.dependActions.length > 0
+    || post.appendActions.length > 0
+    || post.parallelActions.length > 0;
+}
+
+function mapOutputFormat(fmt: string | undefined): TaskFormat {
+  const f = (fmt ?? 'markdown').toLowerCase();
+  if (f === 'md' || f === 'markdown') { return 'markdown'; }
+  if (f === 'html') { return 'html'; }
+  if (f === 'json' || f === 'code') { return 'code'; }
+  if (f === 'table') { return 'table'; }
+  if (f === 'diff') { return 'diff'; }
+  return 'text';
+}
+
+async function runPostPrimary(
+  primaryOutput: string,
+  primaryFormat: TaskFormat,
+  post: PostPrimaryActions,
+  originalMessage: string,
+  deps: TaskOrchestratorDeps,
+): Promise<{ output: string; format: TaskFormat }> {
+  let output = primaryOutput;
+  let format = primaryFormat;
+
+  // Format: transforms replace primary output (chain if multiple)
+  for (const f of post.formatActions) {
+    const fmt = f.outputFormat ?? 'markdown';
+    deps.send({ id: deps.requestId, stream: 'progress', data: { message: `Formatting as ${fmt}...` } });
+    const tformTask: Task = {
+      index: 0,
+      description: `Format as ${fmt}`,
+      kind: 'transform',
+      intent: 'document',
+      outputFormat: mapOutputFormat(fmt),
+      systemPrompt: TRANSFORM_SYSTEM_PROMPT,
+      userMessage: `Format the following output as ${fmt}:\n\n${output}`,
+      risk: 'low',
+    };
+    const fr = await runTaskPipeline([tformTask], deps, { suppressDelta: true });
+    output = fr.finalOutput;
+    format = fr.finalFormat;
+  }
+
+  const sections: Array<{ title: string; body: string }> = [];
+
+  // Depends: sequential, primary output passed as prior context via userMessage
+  for (const d of post.dependActions) {
+    deps.send({ id: deps.requestId, stream: 'progress', data: { message: `Running: ${d.action}` } });
+    const contextSnippet = output.length > 4000 ? output.slice(0, 4000) + '\n...[truncated]' : output;
+    const enriched: DecomposedAction = {
+      ...d,
+      action: `${d.action}\n\nBased on this prior output:\n${contextSnippet}`,
+    };
+    const task = buildTasks([enriched], originalMessage)[0];
+    if (!task) { continue; }
+    const r = await runTaskPipeline([task], deps, { suppressDelta: true });
+    sections.push({ title: d.action, body: r.finalOutput });
+  }
+
+  // Append: sequential, independent
+  for (const a of post.appendActions) {
+    deps.send({ id: deps.requestId, stream: 'progress', data: { message: `Running: ${a.action}` } });
+    const task = buildTasks([a], originalMessage)[0];
+    if (!task) { continue; }
+    const r = await runTaskPipeline([task], deps, { suppressDelta: true });
+    sections.push({ title: a.action, body: r.finalOutput });
+  }
+
+  // Parallel: run concurrently, preserve order
+  if (post.parallelActions.length > 0) {
+    deps.send({ id: deps.requestId, stream: 'progress', data: { message: `Running ${post.parallelActions.length} parallel action(s)...` } });
+    const parResults = await Promise.all(post.parallelActions.map(async p => {
+      const task = buildTasks([p], originalMessage)[0];
+      if (!task) { return { title: p.action, body: '' }; }
+      const r = await runTaskPipeline([task], deps, { suppressDelta: true });
+      return { title: p.action, body: r.finalOutput };
+    }));
+    sections.push(...parResults);
+  }
+
+  for (const s of sections) {
+    if (s.body) {
+      output += `\n\n---\n\n### ${s.title}\n\n${s.body}`;
+    }
+  }
+
+  return { output, format };
 }
 
 // ---------------------------------------------------------------------------
@@ -518,14 +622,40 @@ async function runChatMessage(
       historyMessages: historyMessages as LLMMessage[],
       getInjectedMessages: () => pool.popInjectedMessages(active.id),
     };
-    const pipelineResult = await runTaskPipeline([agentTask], taskDeps);
+
+    const needsPostPrimary = postPrimaryActions !== undefined && hasPostPrimary(postPrimaryActions);
+    const pipelineResult = await runTaskPipeline(
+      [agentTask],
+      taskDeps,
+      needsPostPrimary ? { suppressDelta: true } : undefined,
+    );
+
+    let finalOutput = pipelineResult.finalOutput;
+    let finalFormat = pipelineResult.finalFormat;
+
+    if (needsPostPrimary && postPrimaryActions) {
+      const aggregated = await runPostPrimary(
+        finalOutput,
+        finalFormat,
+        postPrimaryActions,
+        enrichedMessage,
+        taskDeps,
+      );
+      finalOutput = aggregated.output;
+      finalFormat = aggregated.format;
+
+      const rendered = finalFormat === 'markdown'
+        ? renderMarkdown(finalOutput)
+        : { text: finalOutput, format: finalFormat };
+      send({ id: requestId, stream: 'delta', data: { text: rendered.text, format: rendered.format, replace: true } });
+    }
 
     pool.setLastStep(active.id, `done (${classifiedIntent})`);
     send({ id: requestId, stream: 'done', data: { summary: `${classifiedIntent} agent completed` } });
 
     if (!channel.aborted) {
       log.info({ sessionId: active.id, intent: classifiedIntent }, 'agent completed via task pipeline');
-      await persistTurn(session, message, pipelineResult.finalOutput, pipelineResult.finalFormat);
+      await persistTurn(session, message, finalOutput, finalFormat);
     }
     return;
   }
