@@ -1396,10 +1396,14 @@ async function resolveController(agentId: string, task?: Task): Promise<TaskCont
       controller = new mod.CodingController();
       break;
     }
-    case 'research':
-    case 'code-analysis': {
+    case 'research': {
       const mod = await import('./controllers/research.js');
       controller = new mod.ResearchController();
+      break;
+    }
+    case 'code-analysis': {
+      const mod = await import('./controllers/code-analysis.js');
+      controller = new mod.CodeAnalysisController();
       break;
     }
     default:
