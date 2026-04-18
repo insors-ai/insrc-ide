@@ -7,7 +7,9 @@
  */
 
 import { registerGitTools } from './git/index.js';
+import { registerFileTools } from './file/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
+  registerFileTools();
 }
