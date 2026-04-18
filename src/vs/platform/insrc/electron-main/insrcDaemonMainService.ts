@@ -11,6 +11,8 @@ import { createDecorator } from '../../instantiation/common/instantiation.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ILogService } from '../../log/common/log.js';
+import { IConfigurationService } from '../../configuration/common/configuration.js';
+import { ensureClonedDaemon, resolveDaemonEntry } from './insrcDaemonInstaller.js';
 
 // ---------------------------------------------------------------------------
 // IInsrcDaemonMainService -- runs in the main process with full Node.js access
@@ -36,7 +38,6 @@ export interface IInsrcDaemonMainService {
 
 const INSRC_DIR = join(homedir(), '.insrc');
 const SOCK_FILE = join(INSRC_DIR, 'daemon.sock');
-const DAEMON_ENTRY = join(INSRC_DIR, 'daemon', 'dist', 'src', 'daemon', 'index.js');
 
 const SPAWN_CONNECT_MAX_WAIT_MS = 10_000;
 const SPAWN_CONNECT_POLL_MS = 500;
@@ -69,6 +70,7 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
 	}
@@ -89,8 +91,19 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			// Daemon not running
 		}
 
+		// Resolve entry point: dev build if present, otherwise the cloned install
+		const entry = resolveDaemonEntry();
+
+		if (!entry.isDev) {
+			const autoUpdate = this.configurationService.getValue<string>('insrc.daemon.autoUpdate') !== 'never';
+			const ok = await ensureClonedDaemon(this.logService, autoUpdate);
+			if (!ok) {
+				throw new Error('Failed to install daemon -- see Output > insrc for details');
+			}
+		}
+
 		this.logService.info('[insrc] Daemon not running, spawning detached process...');
-		this._spawnDetachedDaemon();
+		this._spawnDetachedDaemon(entry.path);
 
 		const deadline = Date.now() + SPAWN_CONNECT_MAX_WAIT_MS;
 		while (Date.now() < deadline) {
@@ -241,8 +254,8 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 	// Daemon spawn (detached, survives IDE close)
 	// ---------------------------------------------------------------------------
 
-	private _spawnDetachedDaemon(): void {
-		const child = cp.spawn(process.execPath, [DAEMON_ENTRY], {
+	private _spawnDetachedDaemon(entryPath: string): void {
+		const child = cp.spawn(process.execPath, [entryPath], {
 			stdio: 'ignore',
 			detached: true,
 			env: {
@@ -251,7 +264,7 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			},
 		});
 		child.unref();
-		this.logService.info('[insrc] Spawned detached daemon process');
+		this.logService.info(`[insrc] Spawned detached daemon process: ${entryPath}`);
 	}
 
 	// ---------------------------------------------------------------------------

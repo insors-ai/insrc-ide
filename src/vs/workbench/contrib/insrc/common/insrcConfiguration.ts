@@ -113,6 +113,19 @@ configurationRegistry.registerConfiguration({
 			scope: ConfigurationScope.MACHINE,
 		},
 
+		// -- Daemon install/update --
+		'insrc.daemon.autoUpdate': {
+			type: 'string',
+			default: 'onStartup',
+			enum: ['onStartup', 'never'],
+			enumDescriptions: [
+				localize('insrc.daemon.autoUpdate.onStartup', 'Check for daemon updates each time the IDE starts.'),
+				localize('insrc.daemon.autoUpdate.never', 'Never check for daemon updates (manual via command only).'),
+			],
+			description: localize('insrc.daemon.autoUpdate', 'When to check the daemon repo for updates.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
 		// -- Routing --
 		'insrc.routing.mode': {
 			type: 'string',
