@@ -1,5 +1,5 @@
 /**
- * AWS Lambda -- invoke (batch 1). List / update come in batch 2.
+ * AWS Lambda -- invoke / list / update-code.
  */
 
 import { promises as fs } from 'node:fs';
@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, num, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -148,5 +148,164 @@ export const awsLambdaInvokeTool: Tool = {
       try { await fs.unlink(payloadPath); } catch { /* ignore */ }
       try { await fs.unlink(responsePath); } catch { /* ignore */ }
     }
+  },
+};
+
+// ---------------------------------------------------------------------------
+// cloud:aws:lambda:list  (list-functions)
+// ---------------------------------------------------------------------------
+
+interface AwsLambdaListData {
+  exitCode: number | null;
+  parsed: unknown;
+  stdout: string;
+}
+
+export const awsLambdaListTool: Tool = {
+  id: 'cloud:aws:lambda:list',
+  description: 'List Lambda functions in the account/region.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      maxItems: { type: 'number' },
+      marker: { type: 'string', description: 'Pagination marker from a previous call.' },
+      functionVersion: { type: 'string', description: 'ALL to include all versions.' },
+      ...AWS_SCHEMA,
+    },
+    additionalProperties: false,
+  },
+  requiresApproval: false,
+
+  async execute(input: ToolInput): Promise<ToolResult> {
+    const flags = awsFlags(input);
+    const argv = ['aws', 'lambda', 'list-functions'];
+    const maxItems = num(input, 'maxItems');
+    if (typeof maxItems === 'number') { argv.push('--max-items', String(maxItems)); }
+    const marker = str(input, 'marker');
+    if (marker) { argv.push('--starting-token', marker); }
+    const version = str(input, 'functionVersion');
+    if (version) { argv.push('--function-version', version); }
+    argv.push(...awsArgv(flags));
+
+    const r = await runShell(argv, { timeoutMs: 60_000 });
+    if (r.spawnError) { return fail('cloud:aws:lambda:list', `aws CLI not found: ${r.stderr.trim()}`); }
+    const ok = r.code === 0;
+    const parsed = ok ? tryParseJson(r.stdout) : null;
+    const data: AwsLambdaListData = { exitCode: r.code, parsed, stdout: r.stdout };
+    return {
+      output: [
+        ok ? `Functions on ${awsScope(flags)}.` : `**Failed (exit ${r.code})**.`,
+        r.stdout ? '\n```json\n' + r.stdout.slice(0, 8000).replace(/\n+$/, '') + (r.stdout.length > 8000 ? '\n... (truncated)' : '') + '\n```' : '',
+        r.stderr ? '\n**stderr**\n```\n' + r.stderr.replace(/\n+$/, '') + '\n```' : '',
+      ].filter(Boolean).join('\n'),
+      format: 'markdown',
+      success: ok,
+      ...(ok ? {} : { error: `exit ${r.code}` }),
+      data,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// cloud:aws:lambda:update-code
+// ---------------------------------------------------------------------------
+
+interface AwsLambdaUpdateCodeData {
+  functionName: string;
+  source: 'zipFile' | 's3' | 'imageUri';
+  exitCode: number | null;
+  parsed: unknown;
+  stdout: string;
+}
+
+export const awsLambdaUpdateCodeTool: Tool = {
+  id: 'cloud:aws:lambda:update-code',
+  description: 'Update Lambda function code from a local zip, S3 object, or container image URI.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      functionName: { type: 'string' },
+      zipPath: { type: 'string', description: 'Local .zip; mutually exclusive with s3/imageUri.' },
+      s3Bucket: { type: 'string' },
+      s3Key: { type: 'string' },
+      s3ObjectVersion: { type: 'string' },
+      imageUri: { type: 'string', description: 'Container image URI.' },
+      publish: { type: 'boolean', description: 'Publish a new version after update.' },
+      dryRun: { type: 'boolean' },
+      ...AWS_SCHEMA,
+    },
+    required: ['functionName'],
+    additionalProperties: false,
+  },
+  requiresApproval: true,
+
+  buildApprovalGate(input: ToolInput): ToolApprovalGate {
+    const flags = awsFlags(input);
+    const source = str(input, 'zipPath')
+      ? `zip \`${str(input, 'zipPath')}\``
+      : str(input, 'imageUri')
+        ? `image \`${str(input, 'imageUri')}\``
+        : str(input, 's3Bucket') && str(input, 's3Key')
+          ? `s3://${str(input, 's3Bucket')}/${str(input, 's3Key')}`
+          : '_no source supplied_';
+    return {
+      title: 'cloud:aws:lambda:update-code',
+      content: [
+        `Scope: **${awsScope(flags)}**`,
+        `Function: \`${str(input, 'functionName')}\``,
+        `Source: ${source}`,
+      ].join('\n'),
+      actions: [
+        { name: 'approve', label: 'Approve' },
+        { name: 'skip', label: 'Skip' },
+      ],
+    };
+  },
+
+  async execute(input: ToolInput): Promise<ToolResult> {
+    const fn = str(input, 'functionName');
+    if (!fn) { return fail('cloud:aws:lambda:update-code', 'functionName required'); }
+    const flags = awsFlags(input);
+    const zipPath = str(input, 'zipPath');
+    const imageUri = str(input, 'imageUri');
+    const s3Bucket = str(input, 's3Bucket');
+    const s3Key = str(input, 's3Key');
+
+    let source: AwsLambdaUpdateCodeData['source'];
+    const argv = ['aws', 'lambda', 'update-function-code', '--function-name', fn];
+    if (zipPath) {
+      source = 'zipFile';
+      argv.push('--zip-file', `fileb://${zipPath}`, '--cli-binary-format', 'raw-in-base64-out');
+    } else if (imageUri) {
+      source = 'imageUri';
+      argv.push('--image-uri', imageUri);
+    } else if (s3Bucket && s3Key) {
+      source = 's3';
+      argv.push('--s3-bucket', s3Bucket, '--s3-key', s3Key);
+      const version = str(input, 's3ObjectVersion');
+      if (version) { argv.push('--s3-object-version', version); }
+    } else {
+      return fail('cloud:aws:lambda:update-code', 'must supply zipPath or imageUri or (s3Bucket + s3Key)');
+    }
+    if (input['publish'] === true) { argv.push('--publish'); }
+    if (input['dryRun']  === true) { argv.push('--dry-run'); }
+    argv.push(...awsArgv(flags));
+
+    const r = await runShell(argv, { timeoutMs: 10 * 60_000 });
+    if (r.spawnError) { return fail('cloud:aws:lambda:update-code', `aws CLI not found: ${r.stderr.trim()}`); }
+    const ok = r.code === 0;
+    const parsed = ok ? tryParseJson(r.stdout) : null;
+    const data: AwsLambdaUpdateCodeData = { functionName: fn, source, exitCode: r.code, parsed, stdout: r.stdout };
+    return {
+      output: [
+        ok ? `Updated \`${fn}\` from ${source}.` : `**Update failed (exit ${r.code})**.`,
+        r.stdout ? '\n```json\n' + r.stdout.replace(/\n+$/, '') + '\n```' : '',
+        r.stderr ? '\n**stderr**\n```\n' + r.stderr.replace(/\n+$/, '') + '\n```' : '',
+      ].filter(Boolean).join('\n'),
+      format: 'markdown',
+      success: ok,
+      ...(ok ? {} : { error: `exit ${r.code}` }),
+      data,
+    };
   },
 };
