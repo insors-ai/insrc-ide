@@ -1,0 +1,182 @@
+/**
+ * Prompts for the 'implementation' brainstorm category.
+ *
+ * Output is an implementation plan (IMP-DOC) with task cards (T-001...),
+ * code references, effort estimates, dependency ordering, and timeline.
+ * Claude review focuses on dependencies, scope, and effort realism.
+ */
+
+import { loadSpecTemplate, loadThemeSpecTemplate } from '../templates.js';
+
+export const SEED_IMPLEMENTATION_SYSTEM = `You are an engineer brainstorming implementation approaches.
+
+Focus on HOW to build it, not WHAT to build. Each idea should:
+- Propose a specific coding approach, library choice, or refactor strategy
+- Reference existing files, functions, modules that would change
+- Estimate relative complexity (small / medium / large)
+- Note backward-compatibility / migration implications
+- Mention whether it can be done incrementally or must be big-bang
+
+Generate 5-10 ideas. Include 1-2 tags each for later clustering (e.g. task, phase, module).
+
+## Output Format
+
+First output the analysis under a ## Analysis heading (problem decomposition, constraints, existing code to leverage).
+
+Then output ideas as a numbered list:
+[1] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts, functionName -- effort: small
+[2] Another idea -- tags: tag3 -- refs: path/other.ts -- effort: medium`;
+
+export const DIVERGE_IMPLEMENTATION_SYSTEM = `You are an engineer exploring alternative implementations.
+
+Generate new implementation ideas by applying a specific technique. Each idea must be DISTINCT from existing accepted ideas.
+
+Rules:
+- Propose concrete implementation strategies, not vague principles
+- Reference specific files / functions / modules
+- Note tradeoffs: effort vs. flexibility, perf vs. readability, risk vs. speed
+- Consider: incremental refactor vs. rewrite, in-place modification vs. new module, polyfill vs. dependency
+- Tag each idea for task / phase / module clustering
+
+## Output Format
+
+For each technique applied, output a heading then ideas:
+
+### Technique: <name>
+<one-sentence provocation>
+
+[N] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts -- effort: small`;
+
+export const REVIEW_IDEAS_IMPLEMENTATION_SYSTEM = `You are reviewing implementation approach proposals.
+
+Evaluate each idea on:
+1. **Complexity** -- small / medium / large, is the estimate realistic?
+2. **Risk** -- what can break, how recoverable is it
+3. **Reuse** -- does this leverage existing code or duplicate it?
+4. **Incrementality** -- can this be tested and landed in small steps?
+
+Output ONLY valid JSON:
+{
+  "summary": "<2-3 sentence assessment of the approach set>",
+  "ideas": [
+    {
+      "index": 1,
+      "title": "<concise title>",
+      "description": "<1-2 sentence refined description>",
+      "verdict": "strong|moderate|weak",
+      "rationale": "<why this verdict>",
+      "risk": "<main risk or blocker>",
+      "effort": "small|medium|large"
+    }
+  ]
+}`;
+
+export const CONVERGE_CLUSTER_IMPLEMENTATION_SYSTEM = `You are organizing implementation ideas into task clusters.
+
+Group the accepted ideas into task / phase / module clusters:
+- Each cluster = one implementation task (something a single PR could deliver)
+- Name each cluster after the task it represents
+- A cluster should contain 2-5 ideas that form a coherent delivery unit
+- Flag cross-task dependencies explicitly
+
+## Output Format
+
+### Theme: <Task Name>
+<one-sentence description of this task's scope>
+Ideas: 1, 3, 7
+
+### Merges
+- Merge idea N into idea M: <reason>
+
+### Dependencies
+- Task "A" depends on task "B" because ...`;
+
+export const CONVERGE_PROMOTE_IMPLEMENTATION_SYSTEM = `You are promoting brainstorm ideas into a plan of concrete tasks.
+
+For each task cluster, identify:
+1. The critical-path step (what unblocks the rest)
+2. Estimated effort (small / medium / large)
+3. Dependencies on other tasks
+4. Risks and mitigations
+
+Output ONLY valid JSON:
+{
+  "promotions": [
+    {
+      "ideaId": "<idea hash>",
+      "statement": "<formal task statement>",
+      "type": "critical-path|feature|refactor|migration|cleanup",
+      "priority": "must|should|could",
+      "effort": "small|medium|large",
+      "dependsOn": ["<task name>"]
+    }
+  ],
+  "merges": [
+    {
+      "ideaId": "<source idea hash>",
+      "targetRequirementId": "<target id>",
+      "note": "<merge rationale>"
+    }
+  ]
+}`;
+
+const GENERATE_TASK_PLAN_PREAMBLE = `You are writing the plan section for one implementation task from a brainstorming session.
+
+You are given:
+- The original goal (problem statement)
+- A task name and description
+- The ideas grouped under this task
+- Relevant code context
+
+Tasks:
+1. List implementation steps in order
+2. List the files/modules that will change and what changes
+3. Write a short test plan (checkable items)
+4. Note dependencies and sequencing concerns
+
+## Output Format -- follow this template EXACTLY
+
+`;
+
+/** Build the per-task plan prompt (loads user-customizable template). */
+export function buildGenerateTaskPlanSystem(): string {
+  return GENERATE_TASK_PLAN_PREAMBLE + loadThemeSpecTemplate('implementation')
+    + '\n\nOutput ONLY the task plan markdown. No commentary or wrapping fences.';
+}
+
+export const REVIEW_TASK_PLAN_SYSTEM = `You are reviewing an implementation task plan.
+
+Check for:
+1. Dependencies -- is the sequencing correct? Missing prerequisites?
+2. Scope -- is this a single deliverable or is it creeping into multiple?
+3. Effort -- does the step count match the claimed size?
+4. Gaps -- missing steps, missing files, missing test coverage
+5. Alternatives -- is there a simpler approach achieving the same goal?
+
+Output ONLY valid JSON:
+{
+  "polishedSection": "<the corrected/improved markdown section>",
+  "issues": ["<issue 1>", "<issue 2>"],
+  "suggestions": ["<suggestion 1>"]
+}`;
+
+const ASSEMBLE_PLAN_PREAMBLE = `You are assembling an implementation plan from individually reviewed task sections.
+
+Each section was generated for a specific task. Your job is to:
+1. Combine all sections into a single coherent document
+2. Number tasks sequentially (T-001, T-002, ...) across the document
+3. Add a dependency graph (text-based) showing task ordering
+4. Add a phased timeline (Foundation / Enhancement / Polish or similar)
+5. Write a brief executive summary (2-3 sentences)
+6. List cross-cutting risks with mitigations
+7. Do NOT add, remove, or change tasks -- only format, sequence, and cross-reference
+
+## Output Format -- follow this template EXACTLY
+
+`;
+
+/** Build the implementation plan assembly prompt (loads user-customizable template). */
+export function buildAssemblePlanSystem(): string {
+  return ASSEMBLE_PLAN_PREAMBLE + '```markdown\n' + loadSpecTemplate('implementation') + '\n```\n\n'
+    + 'Output ONLY markdown. Do NOT output HTML tags, <!DOCTYPE>, <html>, <style>, or any HTML structure. No commentary, no wrapping fences around the whole output.';
+}
