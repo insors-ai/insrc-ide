@@ -128,6 +128,12 @@ async function main(): Promise<void> {
   registerDelegate(claudeWebSearchDelegate);
   registerDelegate(braveWebSearchDelegate);
 
+  // 6c. Register legacy LLM tools + delegates with the unified tools
+  //     registry (plans/tools.md stage 2). Dual-write only; nothing
+  //     calls through the unified path until stage 3 folds the executors.
+  const { registerLegacyAdapters } = await import('./tools/legacy-adapters.js');
+  registerLegacyAdapters();
+
   // 7. Start IPC server
   const server = new IpcServer({
     'repo.add': async (params) => {
