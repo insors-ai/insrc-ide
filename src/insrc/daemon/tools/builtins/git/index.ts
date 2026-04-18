@@ -8,7 +8,9 @@
 
 import { registerTool } from '../../registry.js';
 import { gitStatusTool } from './status.js';
+import { gitLogTool } from './log.js';
 
 export function registerGitTools(): void {
   registerTool(gitStatusTool);
+  registerTool(gitLogTool);
 }
