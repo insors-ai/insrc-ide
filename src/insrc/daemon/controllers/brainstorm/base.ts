@@ -563,8 +563,12 @@ export abstract class BrainstormControllerBase implements TaskController {
       this.state.input.repoPath || 'unknown',
     );
 
-    // Keep accepted ideas from prior rounds only
-    const priorAccepted = this.state.ideas.filter(i => i.status === 'accepted' && i.round < this.state.round);
+    // Keep all non-rejected ideas from prior rounds -- not just 'accepted'.
+    // Previously this filter dropped 'proposed' round-1 ideas when the user
+    // clicked Diverge without first hitting Accept Remaining.
+    const priorSurvivors = this.state.ideas.filter(
+      i => i.round < this.state.round && i.status !== 'rejected',
+    );
 
     // Build verdict map from pre-refine ideas (keyed by text prefix for fuzzy match)
     const verdictMap = new Map<string, { verdict: 'strong' | 'moderate' | 'weak' | 'user'; source: IdeaSource }>();
@@ -577,22 +581,33 @@ export abstract class BrainstormControllerBase implements TaskController {
       }
     }
 
+    // Bug 30: dedupe refinedIdeas against prior survivors by title prefix so
+    // a paraphrased round-1 idea that the local LLM re-emits as a "new"
+    // round-2 idea does not appear twice in the final output.
+    const priorTitleKeys = new Set(
+      priorSurvivors.map(i => i.title.slice(0, 60).toLowerCase().trim()),
+    );
+    const uniqueRefined = refinedIdeas.filter(i => {
+      const key = i.title.slice(0, 60).toLowerCase().trim();
+      return !priorTitleKeys.has(key);
+    });
+
     // Renumber refined ideas and carry forward verdicts
-    const startIndex = priorAccepted.length > 0 ? Math.max(...priorAccepted.map(i => i.index)) + 1 : 1;
-    for (let i = 0; i < refinedIdeas.length; i++) {
-      refinedIdeas[i]!.index = startIndex + i;
-      const match = verdictMap.get(refinedIdeas[i]!.title.slice(0, 50).toLowerCase());
+    const startIndex = priorSurvivors.length > 0 ? Math.max(...priorSurvivors.map(i => i.index)) + 1 : 1;
+    for (let i = 0; i < uniqueRefined.length; i++) {
+      uniqueRefined[i]!.index = startIndex + i;
+      const match = verdictMap.get(uniqueRefined[i]!.title.slice(0, 50).toLowerCase());
       if (match) {
-        refinedIdeas[i]!.reviewVerdict = match.verdict;
-        refinedIdeas[i]!.source = match.source;
+        uniqueRefined[i]!.reviewVerdict = match.verdict;
+        uniqueRefined[i]!.source = match.source;
       } else {
-        // New or heavily rewritten idea — survived refine so at least strong
-        refinedIdeas[i]!.reviewVerdict = 'strong';
+        // New or heavily rewritten idea -- survived refine so at least strong
+        uniqueRefined[i]!.reviewVerdict = 'strong';
       }
     }
 
-    // Unified merge — no special-casing for user ideas
-    this.state.ideas = [...priorAccepted, ...refinedIdeas];
+    // Unified merge -- no special-casing for user ideas
+    this.state.ideas = [...priorSurvivors, ...uniqueRefined];
     this.state.nextIdeaIndex = Math.max(...this.state.ideas.map(i => i.index), 0) + 1;
 
     if (this.state.sequentialReview) {
@@ -645,9 +660,25 @@ export abstract class BrainstormControllerBase implements TaskController {
         feedbackParts.push(gateReply.feedback);
       }
       this.state.recentFeedback = feedbackParts.join('\n');
-      this.state.ideas = this.state.ideas.filter(i => i.status !== 'rejected');
+
+      // Bug 31: bump user-added and commented ideas into the new round with
+      // status='proposed' so they flow through the delta pipeline
+      // (enhance -> review -> refine) instead of being stranded on the prior
+      // round's already-reviewed shelf. Other surviving ideas keep their
+      // round + status untouched.
+      const nextRound = this.state.round + 1;
+      this.state.ideas = this.state.ideas
+        .filter(i => i.status !== 'rejected')
+        .map(i => {
+          const shouldReprocess = i.source === 'user' || !!i.userComment;
+          if (shouldReprocess) {
+            return { ...i, round: nextRound, status: 'proposed' as const };
+          }
+          return i;
+        });
+
       this.state.nextIdeaIndex = Math.max(...this.state.ideas.map(i => i.index), 0) + 1;
-      this.state.round += 1;
+      this.state.round = nextRound;
       return this.startIdeationRound();
     }
 
