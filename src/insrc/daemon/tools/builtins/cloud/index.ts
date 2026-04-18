@@ -8,8 +8,10 @@
 
 import { registerAwsTools } from './aws/index.js';
 import { registerGcpTools } from './gcp/index.js';
+import { registerAzTools } from './az/index.js';
 
 export function registerCloudTools(): void {
   registerAwsTools();
   registerGcpTools();
+  registerAzTools();
 }
