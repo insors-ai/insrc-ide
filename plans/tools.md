@@ -301,10 +301,15 @@ for bulk queries. Requires `GH_TOKEN` or `gh auth login`.
 | `web:search` | Web search (Brave -> Claude fallback with approval) | Config | Replaces `WebSearch`. |
 | `web:fetch` | Fetch URL body | No | Replaces `WebFetch`. Cached on disk for the session. |
 
-### LSP / language services
+### LSP / language services  (BACKLOG)
 
-The IDE already exposes an LSP bridge inside the workbench; these tools
-reach into it for programmatic refactoring.
+Deferred: the IDE side (`IInsrcLSPToolService`) is wired and the
+bridge file (`lspToolBridge.ts`) exists, but the daemon IPC is
+one-directional today -- the daemon has no way to send requests
+*back* to the connected IDE. Building the tools requires the
+reverse-RPC plumbing first. See `plans/lsp-integration.md`.
+
+Scope when picked up:
 
 | Tool ID | Purpose | Approval |
 |---------|---------|----------|
@@ -360,7 +365,11 @@ structured output instead of raw logs.
 | `db:query` | Run SELECT | Yes (auto-approve for explicit read-only mode) |
 | `db:mutate` | Run INSERT / UPDATE / DELETE | Yes |
 
-### Jira (kept from earlier scope)
+### Jira  (BACKLOG)
+
+Deferred: non-blocking for the current system-action push. Picked
+up once a customer actually needs the hooks; scope sits here ready
+to implement.
 
 | Tool ID | Purpose | Approval | Notes |
 |---------|---------|----------|-------|
@@ -489,19 +498,45 @@ so models trained on the old schema still work.
 
 1. **Types + skeleton** (`daemon/tools/types.ts`, `daemon/tools/registry.ts`,
    `daemon/tools/executor.ts`). No migration yet -- just the new
-   interfaces.
+   interfaces. **[done]**
 2. **Dual-write**. For each existing tool / delegate, register a `Tool`
    entry alongside the legacy registration. Both paths keep working.
+   **[done]**
 3. **Fold registries**. Rewrite `executeDelegate` and the LLM tool
    executor to look up in the unified registry. Legacy interfaces become
    thin shims.
+   - 3a: `executeDelegate` fold. **[done]**
+   - 3b: LLM tool executor fold. **[in progress]**
 4. **Controllers migrate**. Replace `kind: 'delegate'` with `kind: 'tool'`
    in research / pair / delegate controllers. The old kind stays as an
-   alias for one release.
+   alias for one release. **[done]**
 5. **New tools land**. git / jira / file / shell system-action tools
-   get implemented as first-class `Tool`s.
+   get implemented as first-class `Tool`s. **[done for shipped
+   domains]** -- see below.
 6. **Remove shims**. Drop `daemon/delegates/` entirely, drop the legacy
-   LLM tool interfaces, drop `kind: 'delegate'`.
+   LLM tool interfaces, drop `kind: 'delegate'`. **[pending]**
+
+### Stage 5 -- shipped vs deferred
+
+| Domain | Status | Tool count |
+|--------|--------|------------|
+| git | done | 22 |
+| file | done | 9 |
+| shell | done | 4 |
+| search | done | 6 |
+| gh | done | 46 |
+| ssh | done | 5 |
+| http | done | 4 |
+| k8s | done | 6 |
+| cloud:aws | done | 28 |
+| cloud:gcp | done | 20 |
+| cloud:az | done | 18 |
+| diff-patch | done | 4 |
+| notifications | done | 4 |
+| test | done | 3 |
+| pkg | done | 5 |
+| lsp | **backlog** -- needs reverse-RPC | -- |
+| jira | **backlog** -- no customer asks yet | -- |
 
 Each stage is independently committable; 2 and 3 are the longest.
 
