@@ -94,6 +94,16 @@ export interface Tool {
   readonly aliases?: readonly string[];
 
   /**
+   * Flags the tool as destructive / irreversible (terminate VM, drop
+   * database, recursive rm, force push to protected branch). The
+   * executor applies a second "Are you sure?" approval gate after the
+   * normal one when `insrc.tools.destructive.requireDoubleConfirm` is
+   * on, even if the tool already verified an in-band confirmation
+   * token (confirmBucket, confirmCount, confirmService, ...).
+   */
+  readonly destructive?: boolean;
+
+  /**
    * Build the approval gate shown to the user. The default gate is
    * generic -- tools that care should override to show query / command /
    * diff previews. May be async when the gate needs live repo / cluster

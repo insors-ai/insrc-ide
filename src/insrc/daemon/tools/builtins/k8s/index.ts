@@ -337,6 +337,7 @@ export const k8sDeleteTool: Tool = {
     additionalProperties: false,
   },
   requiresApproval: true,
+  destructive: true,
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const cluster = clusterFlags(input);

@@ -43,6 +43,24 @@ export interface ToolSettings {
   destructive: {
     requireDoubleConfirm: boolean;
   };
+  /**
+   * Keychain account names (strings). The actual secret (webhook
+   * URL, SMTP password) lives in the OS keychain under the insrc
+   * service. Tools look it up via shared/keystore.getKey(ref) when a
+   * per-call argument isn't supplied.
+   */
+  notify: {
+    slack:   { defaultWebhookRef: string };
+    teams:   { defaultWebhookRef: string };
+    discord: { defaultWebhookRef: string };
+    email:   {
+      smtpHost:    string;
+      smtpPort:    number;
+      smtpUserRef: string;
+      smtpPassRef: string;
+      fromAddress: string;
+    };
+  };
 }
 
 const ALL_CATEGORIES: readonly string[] = [
@@ -60,6 +78,12 @@ function defaults(): ToolSettings {
     shell:       { defaultTimeoutMs: 120_000, detachedMaxRuntimeMs: 30 * 60_000 },
     web:         { braveApiKeySource: 'env' },
     destructive: { requireDoubleConfirm: false },
+    notify: {
+      slack:   { defaultWebhookRef: '' },
+      teams:   { defaultWebhookRef: '' },
+      discord: { defaultWebhookRef: '' },
+      email:   { smtpHost: '', smtpPort: 587, smtpUserRef: '', smtpPassRef: '', fromAddress: '' },
+    },
   };
 }
 
@@ -106,6 +130,18 @@ export function updateToolSettings(incoming: Record<string, unknown>): ToolSetti
     destructive: {
       requireDoubleConfirm: parseBool(incoming['destructive.requireDoubleConfirm'], current.destructive.requireDoubleConfirm),
     },
+    notify: {
+      slack:   { defaultWebhookRef: parseString(incoming['notify.slack.defaultWebhookRef'],   current.notify.slack.defaultWebhookRef) },
+      teams:   { defaultWebhookRef: parseString(incoming['notify.teams.defaultWebhookRef'],   current.notify.teams.defaultWebhookRef) },
+      discord: { defaultWebhookRef: parseString(incoming['notify.discord.defaultWebhookRef'], current.notify.discord.defaultWebhookRef) },
+      email:   {
+        smtpHost:    parseString(incoming['notify.email.smtpHost'],    current.notify.email.smtpHost),
+        smtpPort:    parseNumber(incoming['notify.email.smtpPort'],    current.notify.email.smtpPort, 1, 65535),
+        smtpUserRef: parseString(incoming['notify.email.smtpUserRef'], current.notify.email.smtpUserRef),
+        smtpPassRef: parseString(incoming['notify.email.smtpPassRef'], current.notify.email.smtpPassRef),
+        fromAddress: parseString(incoming['notify.email.fromAddress'], current.notify.email.fromAddress),
+      },
+    },
   };
   current = next;
   log.info({
@@ -136,6 +172,10 @@ function parseNumber(v: unknown, fallback: number, min: number, max: number): nu
 
 function parseEnum<T extends string>(v: unknown, allowed: readonly T[], fallback: T): T {
   return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+}
+
+function parseString(v: unknown, fallback: string): string {
+  return typeof v === 'string' ? v : fallback;
 }
 
 function parseStringArray(v: unknown, fallback: readonly string[]): readonly string[] {

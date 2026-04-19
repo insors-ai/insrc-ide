@@ -221,6 +221,7 @@ export const awsCfnDeleteTool: Tool = {
     additionalProperties: false,
   },
   requiresApproval: true,
+  destructive: true,
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);

@@ -55,6 +55,9 @@ registerWorkbenchContribution2(InsrcLSPToolBridge.ID, InsrcLSPToolBridge, Workbe
 import { InsrcToolSettingsBridge } from './toolSettingsBridge.js';
 registerWorkbenchContribution2(InsrcToolSettingsBridge.ID, InsrcToolSettingsBridge, WorkbenchPhase.AfterRestored);
 
+// Tool-secret palette commands (Set Brave API Key, Set Slack/Teams/Discord Webhook, etc.)
+import './toolSecretCommands.js';
+
 // Setup wizard: EditorPane for first-run onboarding
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor } from '../../../browser/editor.js';

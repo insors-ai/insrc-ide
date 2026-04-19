@@ -193,6 +193,7 @@ export const awsS3RmTool: Tool = {
     additionalProperties: false,
   },
   requiresApproval: true,
+  destructive: true,
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);

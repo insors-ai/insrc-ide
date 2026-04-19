@@ -230,6 +230,7 @@ export const awsEc2TerminateTool: Tool = {
     additionalProperties: false,
   },
   requiresApproval: true,
+  destructive: true,
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);

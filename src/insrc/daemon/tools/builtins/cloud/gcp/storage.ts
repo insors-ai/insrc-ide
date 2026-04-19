@@ -172,6 +172,7 @@ export const gcpStorageRmTool: Tool = {
     additionalProperties: false,
   },
   requiresApproval: true,
+  destructive: true,
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);

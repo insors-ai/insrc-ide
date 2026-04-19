@@ -251,5 +251,55 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.tools.destructive.requireDoubleConfirm', 'Show an additional confirmation dialog for destructive tool calls (terminate, drop, recursive delete) even after the in-band confirmation token.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+
+		// -- Tools: notify defaults (secrets stored in OS keychain, referenced by account name) --
+		'insrc.tools.notify.slack.defaultWebhookRef': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.slack.defaultWebhookRef', 'Keychain account name holding a default Slack webhook URL used by notify:slack when webhookUrl is omitted. Set the secret via the `insrc: Set Slack Webhook` command.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.teams.defaultWebhookRef': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.teams.defaultWebhookRef', 'Keychain account name holding a default Teams webhook URL.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.discord.defaultWebhookRef': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.discord.defaultWebhookRef', 'Keychain account name holding a default Discord webhook URL.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.email.smtpHost': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.email.smtpHost', 'Default SMTP host for notify:email. Per-call smtpHost still wins.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.email.smtpPort': {
+			type: 'number',
+			default: 587, minimum: 1, maximum: 65535,
+			description: localize('insrc.tools.notify.email.smtpPort', 'Default SMTP port.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.email.smtpUserRef': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.email.smtpUserRef', 'Keychain account name holding the SMTP username.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.email.smtpPassRef': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.email.smtpPassRef', 'Keychain account name holding the SMTP password.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.notify.email.fromAddress': {
+			type: 'string',
+			default: '',
+			description: localize('insrc.tools.notify.email.fromAddress', 'Default From: address for notify:email.'),
+			scope: ConfigurationScope.MACHINE,
+		},
 	},
 });

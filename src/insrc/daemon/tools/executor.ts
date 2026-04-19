@@ -65,6 +65,22 @@ export async function executeTool(
     effectiveInput = result.input;
   }
 
+  // Destructive double-confirm: show an additional gate after the
+  // normal approval flow when both the tool and the user's settings
+  // request it. The in-band confirmation token (confirmBucket /
+  // confirmCount / ...) is already checked by execute() -- this is
+  // a belt-and-suspenders UI prompt.
+  if (tool.destructive === true && getToolSettings().destructive.requireDoubleConfirm) {
+    const confirmed = await runDoubleConfirmGate(tool, effectiveInput, deps);
+    if (!confirmed) {
+      return {
+        output: `[Skipped at double-confirm] ${tool.description}`,
+        format: 'text',
+        success: true,
+      };
+    }
+  }
+
   try {
     return await tool.execute(effectiveInput, deps);
   } catch (err) {
@@ -143,4 +159,53 @@ async function runApprovalGate(
 
   log.warn({ id: tool.id }, 'approval gate edit loop exceeded -- skipping');
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Destructive double-confirm gate
+// ---------------------------------------------------------------------------
+
+async function runDoubleConfirmGate(
+  tool: Tool,
+  input: ToolInput,
+  deps: ToolDeps,
+): Promise<boolean> {
+  const { channel } = deps;
+  if (!channel || typeof channel.registerExternalGate !== 'function') {
+    log.warn({ id: tool.id }, 'no channel registerExternalGate -- auto-approving double-confirm');
+    return true;
+  }
+  const gateId = `tool-${tool.id}-doubleconfirm-${Date.now()}`;
+  deps.send({
+    id: deps.requestId,
+    stream: 'gate',
+    data: {
+      gateId,
+      title: `Confirm destructive action: ${tool.id}`,
+      content:
+        `**This tool performs an irreversible change.**\n\n` +
+        `You've already supplied the in-band confirmation, and the normal approval gate is past. ` +
+        `Because \`insrc.tools.destructive.requireDoubleConfirm\` is enabled, one more explicit ` +
+        `"Yes, do it" is required before \`${tool.id}\` runs.\n\n` +
+        `Tool description: ${tool.description}`,
+      actions: [
+        { name: 'approve', label: 'Yes, run it' },
+        { name: 'skip', label: 'Cancel' },
+      ],
+    },
+  });
+  // `input` is accepted for symmetry with runApprovalGate; the
+  // current double-confirm content doesn't vary on input. Reference
+  // it to keep the unused-parameter check quiet.
+  void input;
+  try {
+    const reply: ReplyPayload = await new Promise((resolve, reject) => {
+      channel.registerExternalGate(gateId, resolve, reject);
+    });
+    const action = reply.action.toLowerCase();
+    return action === 'approve' || action === 'execute';
+  } catch (err) {
+    log.warn({ id: tool.id, err: String(err) }, 'double-confirm gate rejected');
+    return false;
+  }
 }

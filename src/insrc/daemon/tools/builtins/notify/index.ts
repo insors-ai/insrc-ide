@@ -14,9 +14,24 @@
 import { fetch as undiciFetch } from 'undici';
 import nodemailer from 'nodemailer';
 import { registerTool } from '../../registry.js';
+import { getToolSettings } from '../../config.js';
+import { getKey } from '../../../../shared/keystore.js';
 import type {
   Tool, ToolApprovalGate, ToolInput, ToolResult,
 } from '../../types.js';
+
+/**
+ * Look up a keychain-stored secret by account name. Returns the
+ * stored value, or undefined when the ref is empty or nothing is
+ * stored under that account. notify:* tools use this to fill
+ * defaults from IDE settings without the agent having to pass them
+ * per call.
+ */
+async function resolveSecretRef(ref: string | undefined): Promise<string | undefined> {
+  if (!ref) { return undefined; }
+  const v = await getKey(ref);
+  return v ?? undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,10 +128,13 @@ export const notifySlackTool: Tool = {
       return fail('notify:slack', 'text, blocks, or attachments required');
     }
 
-    const webhookUrl = str(input, 'webhookUrl');
+    let webhookUrl = str(input, 'webhookUrl');
+    if (!webhookUrl) {
+      webhookUrl = await resolveSecretRef(getToolSettings().notify.slack.defaultWebhookRef);
+    }
     const botToken = str(input, 'botToken');
     const channel = str(input, 'channel');
-    if (!webhookUrl && !botToken) { return fail('notify:slack', 'webhookUrl or botToken required'); }
+    if (!webhookUrl && !botToken) { return fail('notify:slack', 'webhookUrl or botToken required (or set insrc.tools.notify.slack.defaultWebhookRef)'); }
     if (botToken && !channel)     { return fail('notify:slack', 'botToken requires channel'); }
 
     const payload: Record<string, unknown> = {};
@@ -180,7 +198,7 @@ interface DiscordSendData {
 
 export const notifyDiscordTool: Tool = {
   id: 'notify:discord',
-  description: 'Post a message to a Discord incoming webhook URL.',
+  description: 'Post a message to a Discord incoming webhook URL (webhookUrl optional when insrc.tools.notify.discord.defaultWebhookRef is set).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -191,7 +209,6 @@ export const notifyDiscordTool: Tool = {
       avatarUrl: { type: 'string' },
       tts: { type: 'boolean' },
     },
-    required: ['webhookUrl'],
     additionalProperties: false,
   },
   requiresApproval: true,
@@ -216,8 +233,11 @@ export const notifyDiscordTool: Tool = {
   },
 
   async execute(input: ToolInput): Promise<ToolResult> {
-    const webhookUrl = str(input, 'webhookUrl');
-    if (!webhookUrl) { return fail('notify:discord', 'webhookUrl required'); }
+    let webhookUrl = str(input, 'webhookUrl');
+    if (!webhookUrl) {
+      webhookUrl = await resolveSecretRef(getToolSettings().notify.discord.defaultWebhookRef);
+    }
+    if (!webhookUrl) { return fail('notify:discord', 'webhookUrl required (or set insrc.tools.notify.discord.defaultWebhookRef)'); }
     const content = str(input, 'content');
     const embeds = input['embeds'];
     if (content === undefined && embeds === undefined) {
@@ -271,7 +291,7 @@ interface TeamsSendData {
 
 export const notifyTeamsTool: Tool = {
   id: 'notify:teams',
-  description: 'Post to a Microsoft Teams incoming webhook. Plain text, an Adaptive Card, or a raw payload.',
+  description: 'Post to a Microsoft Teams incoming webhook (webhookUrl optional when insrc.tools.notify.teams.defaultWebhookRef is set).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -281,7 +301,6 @@ export const notifyTeamsTool: Tool = {
       adaptiveCard: { description: 'Adaptive Card JSON body (wrapped in the standard attachments envelope).' },
       rawPayload: { description: 'Raw payload passed through verbatim.' },
     },
-    required: ['webhookUrl'],
     additionalProperties: false,
   },
   requiresApproval: true,
@@ -304,8 +323,11 @@ export const notifyTeamsTool: Tool = {
   },
 
   async execute(input: ToolInput): Promise<ToolResult> {
-    const webhookUrl = str(input, 'webhookUrl');
-    if (!webhookUrl) { return fail('notify:teams', 'webhookUrl required'); }
+    let webhookUrl = str(input, 'webhookUrl');
+    if (!webhookUrl) {
+      webhookUrl = await resolveSecretRef(getToolSettings().notify.teams.defaultWebhookRef);
+    }
+    if (!webhookUrl) { return fail('notify:teams', 'webhookUrl required (or set insrc.tools.notify.teams.defaultWebhookRef)'); }
     const text = str(input, 'text');
     const title = str(input, 'title');
     const card = input['adaptiveCard'];
@@ -451,7 +473,7 @@ export const notifyEmailTool: Tool = {
       smtpPass: { type: 'string' },
       smtpRequireTls: { type: 'boolean', description: 'Require STARTTLS on 587/25.' },
     },
-    required: ['from', 'to', 'subject', 'smtpHost'],
+    required: ['to', 'subject'],
     additionalProperties: false,
   },
   requiresApproval: true,
@@ -482,12 +504,13 @@ export const notifyEmailTool: Tool = {
   },
 
   async execute(input: ToolInput): Promise<ToolResult> {
-    const from = str(input, 'from');
+    const emailDefaults = getToolSettings().notify.email;
+    const from = str(input, 'from') ?? (emailDefaults.fromAddress || undefined);
     const to = strList(input, 'to');
     const subject = str(input, 'subject');
-    const smtpHost = str(input, 'smtpHost');
+    const smtpHost = str(input, 'smtpHost') ?? (emailDefaults.smtpHost || undefined);
     if (!from || to.length === 0 || !subject || !smtpHost) {
-      return fail('notify:email', 'from, to, subject, smtpHost required');
+      return fail('notify:email', 'from, to, subject, smtpHost required (defaults via insrc.tools.notify.email.*)');
     }
     const cc = strList(input, 'cc');
     const bcc = strList(input, 'bcc');
@@ -495,13 +518,18 @@ export const notifyEmailTool: Tool = {
     const html = str(input, 'html');
     if (!text && !html) { return fail('notify:email', 'text or html body required'); }
 
+    // Resolve SMTP credentials: per-call wins, then keychain refs.
+    const smtpUser = str(input, 'smtpUser') ?? (await resolveSecretRef(emailDefaults.smtpUserRef));
+    const smtpPass = str(input, 'smtpPass') ?? (await resolveSecretRef(emailDefaults.smtpPassRef));
+    const smtpPort = num(input, 'smtpPort') ?? emailDefaults.smtpPort;
+
     const transporter = nodemailer.createTransport({
       host: smtpHost,
-      ...(num(input, 'smtpPort')            !== undefined ? { port: num(input, 'smtpPort') } : {}),
+      port: smtpPort,
       ...(bool(input, 'smtpSecure')         === true      ? { secure: true } : {}),
       ...(bool(input, 'smtpRequireTls')     === true      ? { requireTLS: true } : {}),
-      ...(str(input, 'smtpUser') && str(input, 'smtpPass')
-        ? { auth: { user: str(input, 'smtpUser')!, pass: str(input, 'smtpPass')! } }
+      ...(smtpUser && smtpPass
+        ? { auth: { user: smtpUser, pass: smtpPass } }
         : {}),
     });
 

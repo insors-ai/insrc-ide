@@ -63,6 +63,14 @@ export class InsrcToolSettingsBridge extends Disposable implements IWorkbenchCon
 			'shell.detachedMaxRuntimeMs': c.getValue('insrc.tools.shell.detachedMaxRuntimeMs'),
 			'web.braveApiKeySource': c.getValue('insrc.tools.web.braveApiKeySource'),
 			'destructive.requireDoubleConfirm': c.getValue('insrc.tools.destructive.requireDoubleConfirm'),
+			'notify.slack.defaultWebhookRef': c.getValue('insrc.tools.notify.slack.defaultWebhookRef'),
+			'notify.teams.defaultWebhookRef': c.getValue('insrc.tools.notify.teams.defaultWebhookRef'),
+			'notify.discord.defaultWebhookRef': c.getValue('insrc.tools.notify.discord.defaultWebhookRef'),
+			'notify.email.smtpHost': c.getValue('insrc.tools.notify.email.smtpHost'),
+			'notify.email.smtpPort': c.getValue('insrc.tools.notify.email.smtpPort'),
+			'notify.email.smtpUserRef': c.getValue('insrc.tools.notify.email.smtpUserRef'),
+			'notify.email.smtpPassRef': c.getValue('insrc.tools.notify.email.smtpPassRef'),
+			'notify.email.fromAddress': c.getValue('insrc.tools.notify.email.fromAddress'),
 		};
 		try {
 			await this.daemonService.rpc('tools.config.set', payload);
