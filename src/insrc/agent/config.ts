@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { PATHS } from '../shared/paths.js';
 import type { AgentConfig, AgentProviderConfigs, Intent, LLMProvider, StepBinding } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
-import { ClaudeProvider } from './providers/claude.js';
+import { buildProvider } from './providers/factory.js';
 
 const log = getLogger('config');
 
@@ -232,10 +232,7 @@ export class ProviderResolver {
       return this.local;
     }
 
-    return new ClaudeProvider({
-      model: parsed.model,
-      apiKey,
-    });
+    return buildProvider({ provider: 'claude', model: parsed.model }, this.config);
   }
 }
 

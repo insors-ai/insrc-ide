@@ -11,7 +11,7 @@
 
 import { createHash } from 'node:crypto';
 import type { AgentConfig, Intent, ExplicitProvider, LLMProvider, LLMMessage } from '../shared/types.js';
-import { ClaudeProvider } from './providers/claude.js';
+import { buildProvider } from './providers/factory.js';
 import { hasEscalationAttachment } from './attachments/router.js';
 import type { RouteResult, RouterDeps } from './router.js';
 import { selectProvider } from './router.js';
@@ -322,9 +322,10 @@ export class SmartRouter {
       };
     }
 
-    const apiKey = deps.config.keys.anthropic;
-    const model = deps.config.models.tiers[assessment.tier];
-    const provider = new ClaudeProvider({ model, apiKey });
+    const provider = buildProvider(
+      { provider: 'claude', tier: assessment.tier },
+      deps.config,
+    );
 
     return {
       provider,
@@ -396,10 +397,7 @@ export class SmartProviderResolver {
         if (this.claude) {
           const apiKey = this.config.keys.anthropic;
           if (apiKey) {
-            return new ClaudeProvider({
-              model: this.config.models.tiers[h.tier],
-              apiKey,
-            });
+            return buildProvider({ provider: 'claude', tier: h.tier }, this.config);
           }
         }
         return this.local; // Claude unavailable fallback

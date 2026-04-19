@@ -6,7 +6,7 @@ import { ensureAgentModel } from './lifecycle.js';
 import { classify } from './classifier/index.js';
 import { selectProvider } from './router.js';
 import { shouldEscalate } from './escalation.js';
-import { ClaudeProvider } from './providers/claude.js';
+import { buildProvider } from './providers/factory.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
 import { ping as pingDaemon, planSave } from './tools/mcp-client.js';
@@ -253,9 +253,8 @@ export async function runOneShot(
       const escalation = shouldEscalate(assembled, session.closureRepos);
       if (escalation.shouldEscalate && session.claudeProvider) {
         const tier = 'fast' as const;
-        const model = session.config.models.tiers[tier];
         route = {
-          provider: new ClaudeProvider({ model, apiKey: session.config.keys.anthropic }),
+          provider: buildProvider({ provider: 'claude', tier }, session.config),
           label: 'Claude Haiku (auto-escalated)',
           graphOnly: false,
           tier,

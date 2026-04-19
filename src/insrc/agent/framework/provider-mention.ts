@@ -8,9 +8,9 @@
  * Generic — shared across brainstorm, pair, delegate, and any future agents.
  */
 
-import type { LLMProvider, AgentConfig } from '../../shared/types.js';
+import type { LLMProvider, StepBinding } from '../../shared/types.js';
 import type { AgentState, StepContext } from './types.js';
-import { ClaudeProvider } from '../providers/claude.js';
+import { buildProvider } from '../providers/factory.js';
 
 // ---------------------------------------------------------------------------
 // Provider override type
@@ -108,9 +108,8 @@ export function resolveStepProvider<S extends HasProviderOverride>(
     // Claude with specific tier
     const apiKey = ctx.config.keys.anthropic ?? process.env['ANTHROPIC_API_KEY'];
     if (apiKey) {
-      const tier = override.provider.tier as keyof AgentConfig['models']['tiers'];
-      const model = ctx.config.models.tiers[tier];
-      return new ClaudeProvider({ model, apiKey });
+      const binding: StepBinding = { provider: 'claude', tier: override.provider.tier as StepBinding['tier'] };
+      return buildProvider(binding, ctx.config);
     }
     // No API key — fall through to config/default
   }

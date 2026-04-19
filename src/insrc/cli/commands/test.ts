@@ -62,11 +62,14 @@ async function cmdRun(files: string[], opts: RunOpts): Promise<void> {
     const { TestChannel } = await import('../../agent/framework/test-channel.js');
     const { OllamaProvider } = await import('../../agent/providers/ollama.js');
     const { ClaudeProvider } = await import('../../agent/providers/claude.js');
+    const { buildProvider } = await import('../../agent/providers/factory.js');
     const { loadConfig, ProviderResolver } = await import('../../agent/config.js');
 
     const config = loadConfig();
-    const ollamaProvider = new OllamaProvider(config.models.local, config.ollama.host, config.models.context.local);
-    const claudeProvider = config.keys.anthropic ? new ClaudeProvider({ apiKey: config.keys.anthropic }) : null;
+    const ollamaProvider = buildProvider({ provider: 'local' }, config) as InstanceType<typeof OllamaProvider>;
+    const claudeProvider = config.keys.anthropic
+      ? buildProvider({ provider: 'claude', tier: 'standard' }, config) as InstanceType<typeof ClaudeProvider>
+      : null;
     const resolver = new ProviderResolver(config, ollamaProvider, claudeProvider);
 
     // Build scripted replies for TestChannel
@@ -147,11 +150,14 @@ async function cmdPlan(files: string[], opts: PlanOpts): Promise<void> {
     const { TestChannel } = await import('../../agent/framework/test-channel.js');
     const { OllamaProvider } = await import('../../agent/providers/ollama.js');
     const { ClaudeProvider } = await import('../../agent/providers/claude.js');
+    const { buildProvider } = await import('../../agent/providers/factory.js');
     const { loadConfig, ProviderResolver } = await import('../../agent/config.js');
 
     const config = loadConfig();
-    const ollamaProvider = new OllamaProvider(config.models.local, config.ollama.host, config.models.context.local);
-    const claudeProvider = config.keys.anthropic ? new ClaudeProvider({ apiKey: config.keys.anthropic }) : null;
+    const ollamaProvider = buildProvider({ provider: 'local' }, config) as InstanceType<typeof OllamaProvider>;
+    const claudeProvider = config.keys.anthropic
+      ? buildProvider({ provider: 'claude', tier: 'standard' }, config) as InstanceType<typeof ClaudeProvider>
+      : null;
     const resolver = new ProviderResolver(config, ollamaProvider, claudeProvider);
 
     // Plan-only: approve plan gate then reject all subsequent to abort early

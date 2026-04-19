@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentConfig } from '../shared/types.js';
 import { OllamaProvider } from './providers/ollama.js';
 import { ClaudeProvider } from './providers/claude.js';
+import { buildProvider } from './providers/factory.js';
 import { ProviderResolver } from './config.js';
 import { SmartRouter, SmartProviderResolver } from './smart-router.js';
 import { ContextManager, initSession } from './context/index.js';
@@ -76,17 +77,10 @@ export class Session {
 
     this.permissionMode = opts.config.permissions.mode;
 
-    this.ollamaProvider = new OllamaProvider(
-      opts.config.models.local,
-      opts.config.ollama.host,
-      opts.config.models.context.local,
-    );
+    this.ollamaProvider = buildProvider({ provider: 'local' }, opts.config) as OllamaProvider;
 
     this.claudeProvider = opts.config.keys.anthropic
-      ? new ClaudeProvider({
-          model: opts.config.models.tiers.standard,
-          apiKey: opts.config.keys.anthropic,
-        })
+      ? buildProvider({ provider: 'claude', tier: 'standard' }, opts.config) as ClaudeProvider
       : null;
 
     this.resolver = new ProviderResolver(opts.config, this.ollamaProvider, this.claudeProvider);
@@ -162,17 +156,11 @@ export class Session {
     (this as { config: AgentConfig }).config = newConfig;
 
     // Rebuild providers
-    (this as { ollamaProvider: OllamaProvider }).ollamaProvider = new OllamaProvider(
-      newConfig.models.local,
-      newConfig.ollama.host,
-      newConfig.models.context.local,
-    );
+    (this as { ollamaProvider: OllamaProvider }).ollamaProvider =
+      buildProvider({ provider: 'local' }, newConfig) as OllamaProvider;
 
     (this as { claudeProvider: ClaudeProvider | null }).claudeProvider = newConfig.keys.anthropic
-      ? new ClaudeProvider({
-          model: newConfig.models.tiers.standard,
-          apiKey: newConfig.keys.anthropic,
-        })
+      ? buildProvider({ provider: 'claude', tier: 'standard' }, newConfig) as ClaudeProvider
       : null;
 
     // Rebuild resolver with new providers

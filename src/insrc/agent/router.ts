@@ -1,5 +1,6 @@
 import type { AgentConfig, Attachment, ExplicitProvider, Intent, LLMProvider } from '../shared/types.js';
-import { ClaudeProvider } from './providers/claude.js';
+import type { ClaudeProvider } from './providers/claude.js';
+import { buildProvider } from './providers/factory.js';
 import { hasEscalationAttachment } from './attachments/router.js';
 import { getLogger } from '../shared/logger.js';
 
@@ -101,8 +102,7 @@ export function selectProvider(
       return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
     }
     const tier: Tier = 'standard';
-    const model = config.models.tiers[tier];
-    const provider = new ClaudeProvider({ model, apiKey: config.keys.anthropic });
+    const provider = buildProvider({ provider: 'claude', tier }, config);
     return {
       provider,
       label: `Claude ${tierLabel(tier)} (attachment)`,
@@ -123,10 +123,7 @@ export function selectProvider(
       log.warn('Claude not available (no API key). Using local model.');
       return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
     }
-    const provider = new ClaudeProvider({
-      model: config.models.tiers.powerful,
-      apiKey: config.keys.anthropic,
-    });
+    const provider = buildProvider({ provider: 'claude', tier: 'powerful' }, config);
     return { provider, label: 'Claude Opus', graphOnly: false, tier: 'powerful' };
   }
 
@@ -137,11 +134,7 @@ export function selectProvider(
       return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
     }
     const tier = INTENT_TIER[intent] ?? 'standard';
-    const model = config.models.tiers[tier];
-    const provider = new ClaudeProvider({
-      model,
-      apiKey: config.keys.anthropic,
-    });
+    const provider = buildProvider({ provider: 'claude', tier }, config);
     return { provider, label: `Claude ${tierLabel(tier)}`, graphOnly: false, tier };
   }
 
@@ -157,11 +150,7 @@ export function selectProvider(
       return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
     }
     const tier = INTENT_TIER[intent] ?? 'standard';
-    const model = config.models.tiers[tier];
-    const provider = new ClaudeProvider({
-      model,
-      apiKey: config.keys.anthropic,
-    });
+    const provider = buildProvider({ provider: 'claude', tier }, config);
     return { provider, label: `Claude ${tierLabel(tier)}`, graphOnly: false, tier };
   }
 
