@@ -9,17 +9,30 @@ import { localize } from '../../../../nls.js';
 
 const configurationRegistry = Registry.as<IConfigurationRegistry>(Extensions.Configuration);
 
+/**
+ * Insrc settings are registered as a tree of top-level categories so
+ * the Settings UI renders them with proper nesting instead of one
+ * flat list under "Extensions". Each `registerConfiguration` call
+ * creates its own navigation node; IDs share a common prefix so
+ * related sections group together.
+ *
+ * Because we're an IDE fork (not an extension), we deliberately omit
+ * `extensionInfo` -- that promotes the tree to a first-class root
+ * entry ("Insrc") instead of burying it under Extensions.
+ */
+
+const INSRC_ORDER = 100;
+
+// ---------------------------------------------------------------------------
+// Insrc -- connection / logging (parent node)
+// ---------------------------------------------------------------------------
+
 configurationRegistry.registerConfiguration({
 	id: 'insrc',
-	title: localize('insrc', 'insrc'),
+	title: localize('insrc', 'Insrc'),
 	type: 'object',
-	order: 100,
-	extensionInfo: {
-		id: 'insrc',
-		displayName: 'insrc',
-	},
+	order: INSRC_ORDER,
 	properties: {
-		// -- Connection --
 		'insrc.ollama.host': {
 			type: 'string',
 			default: 'http://localhost:11434',
@@ -33,8 +46,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.logLevel', 'Daemon log level.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Models --
+// ---------------------------------------------------------------------------
+// Insrc > Models
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.models',
+	title: localize('insrc.models.title', 'Insrc > Models'),
+	type: 'object',
+	order: INSRC_ORDER + 1,
+	properties: {
 		'insrc.models.local': {
 			type: 'string',
 			default: 'qwen3-coder:latest',
@@ -53,8 +77,6 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.models.embeddingDim', 'Embedding vector dimensions.'),
 			scope: ConfigurationScope.MACHINE,
 		},
-
-		// -- Claude tiers --
 		'insrc.models.tiers.fast': {
 			type: 'string',
 			default: 'claude-haiku-4-5',
@@ -73,8 +95,6 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.models.tiers.powerful', 'Claude model for powerful tier (architecture, validation).'),
 			scope: ConfigurationScope.MACHINE,
 		},
-
-		// -- Context budgets --
 		'insrc.models.context.local': {
 			type: 'number',
 			default: 16384,
@@ -99,8 +119,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.models.context.claudeMaxOutput', 'Max output tokens for Claude.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Permissions --
+// ---------------------------------------------------------------------------
+// Insrc > Permissions
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.permissions',
+	title: localize('insrc.permissions.title', 'Insrc > Permissions'),
+	type: 'object',
+	order: INSRC_ORDER + 2,
+	properties: {
 		'insrc.permissions.mode': {
 			type: 'string',
 			default: 'validate',
@@ -112,8 +143,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.permissions.mode', 'Permission mode for agent actions.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Daemon install/update --
+// ---------------------------------------------------------------------------
+// Insrc > Daemon (install / update)
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.daemon',
+	title: localize('insrc.daemon.title', 'Insrc > Daemon'),
+	type: 'object',
+	order: INSRC_ORDER + 3,
+	properties: {
 		'insrc.daemon.autoUpdate': {
 			type: 'string',
 			default: 'onStartup',
@@ -137,8 +179,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.daemon.repoBranch', 'Branch of the daemon repo to clone and track.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Routing --
+// ---------------------------------------------------------------------------
+// Insrc > Routing
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.routing',
+	title: localize('insrc.routing.title', 'Insrc > Routing'),
+	type: 'object',
+	order: INSRC_ORDER + 4,
+	properties: {
 		'insrc.routing.mode': {
 			type: 'string',
 			default: 'static',
@@ -150,8 +203,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.routing.mode', 'LLM routing mode.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: category gate --
+// ---------------------------------------------------------------------------
+// Insrc > Tools (parent for the tool subsystem; top-level: category gate)
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools',
+	title: localize('insrc.tools.title', 'Insrc > Tools'),
+	type: 'object',
+	order: INSRC_ORDER + 5,
+	properties: {
 		'insrc.tools.enabledCategories': {
 			type: 'array',
 			items: { type: 'string' },
@@ -160,11 +224,22 @@ configurationRegistry.registerConfiguration({
 				'ssh', 'http', 'k8s', 'cloud', 'diff',
 				'notify', 'test', 'pkg', 'web', 'graph', 'plan',
 			],
-			description: localize('insrc.tools.enabledCategories', 'Whitelist of tool categories the agent can invoke. Tools outside this list are unregistered at daemon startup. Use to restrict the agent in compliance-sensitive projects.'),
+			description: localize('insrc.tools.enabledCategories', 'Whitelist of tool categories the agent can invoke. Tools outside this list are hidden at lookup time. Use to restrict the agent in compliance-sensitive projects.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: approval gate UX --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Approval
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.approval',
+	title: localize('insrc.tools.approval.title', 'Insrc > Tools > Approval'),
+	type: 'object',
+	order: INSRC_ORDER + 6,
+	properties: {
 		'insrc.tools.approval.defaultAction': {
 			type: 'string',
 			default: 'skip',
@@ -188,8 +263,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.tools.approval.showStructuredDiff', 'Show rendered diff/command previews in the gate. Disable for pure-text previews.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: LLM tool-call loop --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Loop (LLM tool-call loop caps)
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.loop',
+	title: localize('insrc.tools.loop.title', 'Insrc > Tools > Loop'),
+	type: 'object',
+	order: INSRC_ORDER + 7,
+	properties: {
 		'insrc.tools.loop.maxIterations': {
 			type: 'number',
 			default: 25, minimum: 1, maximum: 200,
@@ -202,8 +288,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.tools.loop.maxNudges', 'How many times the loop re-prompts the LLM if it described a tool action without calling one.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: output capture --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Output
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.output',
+	title: localize('insrc.tools.output.title', 'Insrc > Tools > Output'),
+	type: 'object',
+	order: INSRC_ORDER + 8,
+	properties: {
 		'insrc.tools.output.inlineMaxChars': {
 			type: 'number',
 			default: 12000, minimum: 1024, maximum: 1000000,
@@ -216,8 +313,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.tools.output.retainSpills', 'Keep tool-output spill files in /tmp/.insrc/tool-output after the session closes.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: shell / detached runtime caps --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Shell (shell / detached runtime caps)
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.shell',
+	title: localize('insrc.tools.shell.title', 'Insrc > Tools > Shell'),
+	type: 'object',
+	order: INSRC_ORDER + 9,
+	properties: {
 		'insrc.tools.shell.defaultTimeoutMs': {
 			type: 'number',
 			default: 120000, minimum: 1000,
@@ -230,8 +338,19 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.tools.shell.detachedMaxRuntimeMs', 'Hard cap for streaming tools (shell:exec-detached, ssh:exec-detached, k8s:logs follow, k8s:port-forward).'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: web:search secret source --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Web
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.web',
+	title: localize('insrc.tools.web.title', 'Insrc > Tools > Web'),
+	type: 'object',
+	order: INSRC_ORDER + 10,
+	properties: {
 		'insrc.tools.web.braveApiKeySource': {
 			type: 'string',
 			default: 'env',
@@ -243,16 +362,38 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.tools.web.braveApiKeySource', 'Where web:search looks for the Brave API key.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: destructive-op double-confirm --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Destructive
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.destructive',
+	title: localize('insrc.tools.destructive.title', 'Insrc > Tools > Destructive'),
+	type: 'object',
+	order: INSRC_ORDER + 11,
+	properties: {
 		'insrc.tools.destructive.requireDoubleConfirm': {
 			type: 'boolean',
 			default: false,
 			description: localize('insrc.tools.destructive.requireDoubleConfirm', 'Show an additional confirmation dialog for destructive tool calls (terminate, drop, recursive delete) even after the in-band confirmation token.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+	},
+});
 
-		// -- Tools: notify defaults (secrets stored in OS keychain, referenced by account name) --
+// ---------------------------------------------------------------------------
+// Insrc > Tools > Notifications (keychain-backed defaults)
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.tools.notify',
+	title: localize('insrc.tools.notify.title', 'Insrc > Tools > Notifications'),
+	type: 'object',
+	order: INSRC_ORDER + 12,
+	properties: {
 		'insrc.tools.notify.slack.defaultWebhookRef': {
 			type: 'string',
 			default: '',
