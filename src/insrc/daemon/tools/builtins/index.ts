@@ -18,6 +18,7 @@ import { registerCloudTools } from './cloud/index.js';
 import { registerDiffTools } from './diff/index.js';
 import { registerNotifyTools } from './notify/index.js';
 import { registerTestTools } from './test/index.js';
+import { registerPkgTools } from './pkg/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
@@ -32,4 +33,5 @@ export function registerBuiltinTools(): void {
   registerDiffTools();
   registerNotifyTools();
   registerTestTools();
+  registerPkgTools();
 }
