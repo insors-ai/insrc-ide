@@ -136,7 +136,11 @@ export function compileTask(src: string, out: string, build: boolean, options: {
 		}
 
 		const compile = createCompile(src, { build, emitError: true, transpileOnly: false, preserveEnglish: !!options.preserveEnglish });
-		const srcPipe = gulp.src(`${src}/**`, { base: `${src}` });
+		// The daemon (src/insrc) has its own package.json and tsconfig; its
+		// node_modules should not flow through the workbench compile pipeline
+		// (it includes dependencies like `bignumber.js` whose directory names
+		// end in `.js` and trip `isRuntimeJs`).
+		const srcPipe = gulp.src([`${src}/**`, `!${src}/insrc/node_modules/**`], { base: `${src}` });
 		const generator = new MonacoGenerator(false);
 		if (src === 'src') {
 			generator.execute();
