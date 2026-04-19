@@ -33,12 +33,6 @@ configurationRegistry.registerConfiguration({
 	type: 'object',
 	order: INSRC_ORDER,
 	properties: {
-		'insrc.ollama.host': {
-			type: 'string',
-			default: 'http://localhost:11434',
-			description: localize('insrc.ollama.host', 'Ollama server URL.'),
-			scope: ConfigurationScope.MACHINE,
-		},
 		'insrc.logLevel': {
 			type: 'string',
 			default: 'info',
@@ -49,78 +43,10 @@ configurationRegistry.registerConfiguration({
 	},
 });
 
-// ---------------------------------------------------------------------------
-// Insrc > Models
-// ---------------------------------------------------------------------------
-
-configurationRegistry.registerConfiguration({
-	id: 'insrc.models',
-	title: localize('insrc.models.title', 'Insrc > Models'),
-	type: 'object',
-	order: INSRC_ORDER + 1,
-	properties: {
-		'insrc.models.local': {
-			type: 'string',
-			default: 'qwen3-coder:latest',
-			description: localize('insrc.models.local', 'Local LLM model name (Ollama).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.embedding': {
-			type: 'string',
-			default: 'qwen3-embedding:0.6b',
-			description: localize('insrc.models.embedding', 'Embedding model name (Ollama).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.embeddingDim': {
-			type: 'number',
-			default: 2048,
-			description: localize('insrc.models.embeddingDim', 'Embedding vector dimensions.'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.tiers.fast': {
-			type: 'string',
-			default: 'claude-haiku-4-5',
-			description: localize('insrc.models.tiers.fast', 'Claude model for fast tier (classification, simple tasks).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.tiers.standard': {
-			type: 'string',
-			default: 'claude-sonnet-4-5',
-			description: localize('insrc.models.tiers.standard', 'Claude model for standard tier (code generation).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.tiers.powerful': {
-			type: 'string',
-			default: 'claude-sonnet-4-6',
-			description: localize('insrc.models.tiers.powerful', 'Claude model for powerful tier (architecture, validation).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.context.local': {
-			type: 'number',
-			default: 16384,
-			description: localize('insrc.models.context.local', 'Context window size for local model (tokens).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.context.localMaxOutput': {
-			type: 'number',
-			default: 8192,
-			description: localize('insrc.models.context.localMaxOutput', 'Max output tokens for local model.'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.context.claude': {
-			type: 'number',
-			default: 200000,
-			description: localize('insrc.models.context.claude', 'Context window size for Claude (tokens).'),
-			scope: ConfigurationScope.MACHINE,
-		},
-		'insrc.models.context.claudeMaxOutput': {
-			type: 'number',
-			default: 8192,
-			description: localize('insrc.models.context.claudeMaxOutput', 'Max output tokens for Claude.'),
-			scope: ConfigurationScope.MACHINE,
-		},
-	},
-});
+// Model / provider configuration is managed via the Model Providers
+// pane (command `insrc.openModelProviders`), persisted in
+// ~/.insrc/config.json, and lives outside VS Code settings.json so it
+// can support live model-list fetches and keychain-backed API keys.
 
 // ---------------------------------------------------------------------------
 // Insrc > Permissions
@@ -182,29 +108,8 @@ configurationRegistry.registerConfiguration({
 	},
 });
 
-// ---------------------------------------------------------------------------
-// Insrc > Routing
-// ---------------------------------------------------------------------------
-
-configurationRegistry.registerConfiguration({
-	id: 'insrc.routing',
-	title: localize('insrc.routing.title', 'Insrc > Routing'),
-	type: 'object',
-	order: INSRC_ORDER + 4,
-	properties: {
-		'insrc.routing.mode': {
-			type: 'string',
-			default: 'static',
-			enum: ['static', 'auto'],
-			enumDescriptions: [
-				localize('insrc.routing.static', 'Use per-step provider bindings from config.'),
-				localize('insrc.routing.auto', 'Smart router selects provider based on task complexity.'),
-			],
-			description: localize('insrc.routing.mode', 'LLM routing mode.'),
-			scope: ConfigurationScope.MACHINE,
-		},
-	},
-});
+// Routing mode is no longer user-configurable: the router is a flat
+// config-driven lookup. See plans/multi-provider-models.md.
 
 // ---------------------------------------------------------------------------
 // Insrc > Tools (parent for the tool subsystem; top-level: category gate)

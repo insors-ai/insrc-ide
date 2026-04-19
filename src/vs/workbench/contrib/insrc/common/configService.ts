@@ -40,4 +40,78 @@ export interface IInsrcConfigService {
 
 	/** Get all agent step bindings (defaults + config overrides) */
 	getAgentBindings(): Promise<Record<string, Record<string, string>>>;
+
+	// ---- Multi-provider model configuration ----
+
+	/** List live models for a given provider. Cloud providers require the key
+	 *  to be present in the keychain. Local queries Ollama's /api/tags. */
+	listProviderModels(provider: ProviderName): Promise<{ models: ProviderModel[] }>;
+
+	/** Quick round-trip to the provider API to confirm the key works. */
+	testProviderKey(provider: ProviderName): Promise<{ ok: boolean; error?: string }>;
+
+	/** Read the current `models` slice (keys excluded -- keychain is authoritative). */
+	getProvidersConfig(): Promise<ProvidersConfigDTO>;
+
+	/** Write a patch to the `models` slice. Daemon reloads in-memory
+	 *  config after the write returns. */
+	setProvidersConfig(patch: Partial<ProvidersConfigDTO>): Promise<{ ok: true; models: ProvidersConfigDTO }>;
+
+	/** Whether the daemon considers current config usable. When unusable,
+	 *  returns a `NOT_CONFIGURED` payload the IDE uses to auto-open the pane. */
+	checkProvidersConfigured(): Promise<{ ok: true } | NotConfiguredPayload>;
+}
+
+// ---------------------------------------------------------------------------
+// Shared DTOs (mirror src/insrc/daemon/providers.ts over the wire)
+// ---------------------------------------------------------------------------
+
+export type ProviderName = 'local' | 'openai' | 'anthropic' | 'gemini' | 'mistral';
+export type CloudProviderName = Exclude<ProviderName, 'local'>;
+
+export interface ProviderModel {
+	id: string;
+	description?: string;
+	maxInputTokens?: number;
+	maxOutputTokens?: number;
+	embedding?: boolean;
+}
+
+export interface ModelParams {
+	maxInputTokens: number;
+	maxOutputTokens: number;
+}
+
+export interface LocalProviderDTO {
+	host: string;
+	coreModel: string;
+	embeddingModel: string;
+	embeddingDim: number;
+	charsPerToken: number;
+	params: Record<string, ModelParams>;
+}
+
+export interface CloudProviderDTO {
+	default: string | null;
+	enabled: string[];
+	params: Record<string, ModelParams>;
+}
+
+export interface ProvidersConfigDTO {
+	activeProvider: CloudProviderName | null;
+	visionDefault: { provider: ProviderName; model: string } | null;
+	providers: {
+		local: LocalProviderDTO;
+		openai: CloudProviderDTO;
+		anthropic: CloudProviderDTO;
+		gemini: CloudProviderDTO;
+		mistral: CloudProviderDTO;
+	};
+	agents?: Record<string, Record<string, string | { provider: ProviderName; model?: string }>>;
+}
+
+export interface NotConfiguredPayload {
+	code: 'NOT_CONFIGURED';
+	missing: 'local' | 'provider' | 'both';
+	message: string;
 }

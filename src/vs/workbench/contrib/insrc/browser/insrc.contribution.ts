@@ -88,6 +88,15 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(BrainstormEditorInput)],
 );
 
+// Model Providers EditorPane + palette command + NOT_CONFIGURED auto-open
+import { ModelProvidersPane } from './models/modelProvidersPane.js';
+import { ModelProvidersInput } from './models/modelProvidersInput.js';
+import './models/modelProvidersCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(ModelProvidersPane, ModelProvidersPane.ID, 'Model Providers'),
+	[new SyncDescriptor(ModelProvidersInput)],
+);
+
 // Brainstorm auto-open: listens for brainstorm intent and opens the EditorPane
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -134,6 +143,25 @@ class BrainstormAutoOpenContribution extends Disposable {
 }
 
 registerWorkbenchContribution2(BrainstormAutoOpenContribution.ID, BrainstormAutoOpenContribution, WorkbenchPhase.AfterRestored);
+
+// Model Providers auto-open: listens for NOT_CONFIGURED from chat.start
+// and opens the pane. If 'local' or 'both' is missing, opens the Local tab;
+// 'provider' missing -> opens Anthropic by default (see pane for rationale).
+class ModelProvidersAutoOpenContribution extends Disposable {
+	static readonly ID = 'insrc.modelProvidersAutoOpen';
+
+	constructor(
+		@IInsrcChatService chatService: IInsrcChatService,
+		@IEditorService private readonly editorService: IEditorService,
+	) {
+		super();
+		this._register(chatService.onDidRequireConfig(({ missing }) => {
+			const startTab = missing === 'provider' ? 'anthropic' : 'local';
+			this.editorService.openEditor(ModelProvidersInput.getInstance(startTab));
+		}));
+	}
+}
+registerWorkbenchContribution2(ModelProvidersAutoOpenContribution.ID, ModelProvidersAutoOpenContribution, WorkbenchPhase.AfterRestored);
 
 // Prompt Notepad: full editor for composing large prompts
 import './notepad/promptNotepadCommands.js';

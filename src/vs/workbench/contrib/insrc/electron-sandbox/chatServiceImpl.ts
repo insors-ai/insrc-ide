@@ -35,6 +35,9 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	private readonly _onDidReceiveEvent = this._register(new Emitter<ChatEvent>());
 	readonly onDidReceiveEvent: Event<ChatEvent> = this._onDidReceiveEvent.event;
 
+	private readonly _onDidRequireConfig = this._register(new Emitter<{ missing: 'local' | 'provider' | 'both' }>());
+	readonly onDidRequireConfig: Event<{ missing: 'local' | 'provider' | 'both' }> = this._onDidRequireConfig.event;
+
 	get activeSessionId(): string | undefined { return this._activeSessionId; }
 	get activeRepo(): string | undefined { return this._activeRepo; }
 	get isStreaming(): boolean { return this._isStreaming; }
@@ -71,7 +74,25 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 			throw new Error('Not connected to daemon');
 		}
 
-		const result = await this.daemonService.rpc<{ sessionId: string; repo: string }>('chat.start', { repo: repoPath });
+		type StartResult =
+			| { sessionId: string; repo: string }
+			| { code: 'NOT_CONFIGURED'; missing: 'local' | 'provider' | 'both'; message: string };
+		const result = await this.daemonService.rpc<StartResult>('chat.start', { repo: repoPath });
+
+		if ('code' in result) {
+			// Fire an event so the workbench contribution can auto-open the
+			// Model Providers pane, then throw so the caller sees a normal
+			// rejected promise with the human-readable message.
+			this._onDidRequireConfig.fire({ missing: result.missing });
+			const err = new Error(result.message) as Error & {
+				code: 'NOT_CONFIGURED';
+				missing: 'local' | 'provider' | 'both';
+			};
+			err.code = 'NOT_CONFIGURED';
+			err.missing = result.missing;
+			throw err;
+		}
+
 		this._activeSessionId = result.sessionId;
 		this._activeRepo = result.repo;
 		this._messages = [];

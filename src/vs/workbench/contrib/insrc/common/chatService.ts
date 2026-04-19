@@ -77,6 +77,9 @@ export interface IInsrcChatService {
 	// Events
 	readonly onDidChangeSession: Event<string | undefined>;
 	readonly onDidReceiveEvent: Event<ChatEvent>;
+	/** Fires when chat.start returns NOT_CONFIGURED, so the IDE can
+	 *  auto-open the Model Providers pane. */
+	readonly onDidRequireConfig: Event<{ missing: 'local' | 'provider' | 'both' }>;
 
 	// Session lifecycle
 	startSession(repoPath: string): Promise<string>;

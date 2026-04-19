@@ -7,7 +7,13 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, type Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IInsrcDaemonService } from '../common/daemonService.js';
-import { IInsrcConfigService } from '../common/configService.js';
+import {
+	IInsrcConfigService,
+	type NotConfiguredPayload,
+	type ProviderModel,
+	type ProviderName,
+	type ProvidersConfigDTO,
+} from '../common/configService.js';
 
 export class InsrcConfigServiceImpl extends Disposable implements IInsrcConfigService {
 	declare readonly _serviceBrand: undefined;
@@ -96,5 +102,42 @@ export class InsrcConfigServiceImpl extends Disposable implements IInsrcConfigSe
 			return {};
 		}
 		return this.daemonService.rpc('config.agents', {});
+	}
+
+	// ---- Multi-provider model configuration ----
+
+	async listProviderModels(provider: ProviderName): Promise<{ models: ProviderModel[] }> {
+		if (!this.daemonService.isConnected) {
+			return { models: [] };
+		}
+		return this.daemonService.rpc('providers.listModels', { provider });
+	}
+
+	async testProviderKey(provider: ProviderName): Promise<{ ok: boolean; error?: string }> {
+		if (!this.daemonService.isConnected) {
+			return { ok: false, error: 'Not connected to daemon' };
+		}
+		return this.daemonService.rpc('providers.testKey', { provider });
+	}
+
+	async getProvidersConfig(): Promise<ProvidersConfigDTO> {
+		return this.daemonService.rpc('providers.getConfig', {});
+	}
+
+	async setProvidersConfig(patch: Partial<ProvidersConfigDTO>): Promise<{ ok: true; models: ProvidersConfigDTO }> {
+		const result = await this.daemonService.rpc<{ ok: true; models: ProvidersConfigDTO }>(
+			'providers.setConfig',
+			patch as unknown as Record<string, unknown>,
+		);
+		this._cachedConfig = undefined;
+		this._onDidChangeConfig.fire();
+		return result;
+	}
+
+	async checkProvidersConfigured(): Promise<{ ok: true } | NotConfiguredPayload> {
+		if (!this.daemonService.isConnected) {
+			return { code: 'NOT_CONFIGURED', missing: 'both', message: 'Daemon not connected yet.' };
+		}
+		return this.daemonService.rpc('providers.check', {});
 	}
 }
