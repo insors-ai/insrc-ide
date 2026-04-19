@@ -21,7 +21,7 @@ import type {
 import { loadConfig } from '../agent/config.js';
 import { formatScope, parseScope } from './paths.js';
 
-const { embeddingDim: EMBEDDING_DIM } = loadConfig().models;
+const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 
 // ---------------------------------------------------------------------------
 // Apache Arrow schema for the 'config_entries' table

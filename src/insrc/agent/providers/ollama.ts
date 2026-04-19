@@ -14,6 +14,7 @@ import { getLogger } from '../../shared/logger.js';
 const log = getLogger('ollama');
 
 const _defaults = loadConfig();
+const _localDefaults = _defaults.models.providers.local;
 
 export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
@@ -23,16 +24,16 @@ export class OllamaProvider implements LLMProvider {
   private readonly embeddingModel: string;
 
   constructor(
-    model = _defaults.models.local,
-    host = _defaults.ollama.host,
-    numCtx = _defaults.models.context.local,
+    model = _localDefaults.coreModel,
+    host = _localDefaults.host,
+    numCtx = _localDefaults.params[_localDefaults.coreModel]?.maxInputTokens ?? 16_384,
   ) {
     this.model = model;
     // Override undici's default headers timeout (300s) which is too short for
     // CPU-bound large-context inference that can take 5-10 minutes.
     const agent = new Agent({
-      headersTimeout: 0,   // disable — streaming returns headers with first token
-      bodyTimeout: 0,      // disable — streaming body arrives incrementally
+      headersTimeout: 0,   // disable -- streaming returns headers with first token
+      bodyTimeout: 0,      // disable -- streaming body arrives incrementally
       connectTimeout: 30_000,
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -40,7 +41,7 @@ export class OllamaProvider implements LLMProvider {
       undiciFetch(input, { ...init, dispatcher: agent })) as unknown as typeof globalThis.fetch;
     this.client = new Ollama({ host, fetch: longTimeoutFetch });
     this.numCtx = numCtx;
-    this.embeddingModel = _defaults.models.embedding;
+    this.embeddingModel = _localDefaults.embeddingModel;
   }
 
   async ping(): Promise<boolean> {

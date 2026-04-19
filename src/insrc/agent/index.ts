@@ -7,9 +7,6 @@ import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
 import { classify } from './classifier/index.js';
 import { selectProvider } from './router.js';
-import { announceRoute, announceCost, announceOpus, shouldEscalate } from './escalation.js';
-import { buildSignals } from './smart-router.js';
-import { buildProvider } from './providers/factory.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
 import { ping as pingDaemon, sessionSave, sessionPrune, planGet, planSave, planStepUpdate, planDelete, planResetStale } from './tools/mcp-client.js';
@@ -75,11 +72,11 @@ export async function startRepl(cwd?: string): Promise<void> {
 
   // 1. Check Ollama and pull agent model if needed
   try {
-    await ensureAgentModel(config.ollama.host, pct => {
+    await ensureAgentModel(config.models.providers.local.host, pct => {
       process.stdout.write(`\r[agent] pulling model... ${pct}%`);
     });
   } catch {
-    log.warn('Ollama not available — local model disabled. Use @claude prefix.');
+    log.warn('Ollama not available -- local model disabled. Use @anthropic (or another configured provider) to route cloud.');
   }
 
   // 1b. First-run Brave key setup (one-time, skippable)
@@ -121,9 +118,9 @@ export async function startRepl(cwd?: string): Promise<void> {
   log.info(`ollama: ${ollamaOk ? 'connected' : 'unavailable'}`);
   log.info(`claude: ${session.hasClaudeKey ? 'configured' : 'not configured (set ANTHROPIC_API_KEY or add to ~/.insrc/config.json)'}`);
   log.info('');
-  log.info('Type a message to chat. Prefix with @claude, @opus, @local, or /intent <name> to route.');
+  log.info('Type a message to chat. Prefix with @local or @<activeProvider>, or /intent <name> to route.');
   log.info(`permissions: ${session.permissionMode}`);
-  log.info('Commands: /status, /cost, /plan, /forget, /toggle-permissions, /auto, /exit');
+  log.info('Commands: /status, /cost, /plan, /forget, /toggle-permissions, /exit');
   log.info('');
 
   // 3. REPL loop
@@ -244,12 +241,7 @@ export async function startRepl(cwd?: string): Promise<void> {
     }
 
     if (raw === '/auto') {
-      if (!await session.ollamaAvailable) {
-        log.info('Auto routing requires Ollama. Start Ollama first.');
-      } else {
-        const mode = session.toggleRouting();
-        log.info(`routing: ${mode}`);
-      }
+      log.info('Auto routing has been removed. Configure per-step bindings via the Model Providers pane.');
       rl.prompt();
       return;
     }
@@ -290,25 +282,14 @@ export async function startRepl(cwd?: string): Promise<void> {
       signals: {},
       llmProvider: ollamaOk ? classifyProvider : undefined,
     });
-    let route = selectProvider(classified.intent, classified.explicit, {
+    const route = selectProvider(classified.intent, classified.explicit, {
       ollamaProvider: session.ollamaProvider,
-      claudeProvider: session.claudeProvider,
+      cloudProvider: session.claudeProvider,
       config: session.config,
       attachments,
     });
 
-    // Announce routing
-    announceRoute(classified.intent, route, {
-      confidence: classified.confidence,
-      explicit: classified.explicit !== undefined,
-    });
-
-    if (route.tier) {
-      announceCost(route.tier);
-    }
-    if (classified.explicit === 'opus') {
-      announceOpus();
-    }
+    log.info(`[route] ${classified.intent} -> ${route.label}`);
 
     // Code-analysis intents — no LLM call
     if (route.graphOnly) {
@@ -367,7 +348,7 @@ export async function startRepl(cwd?: string): Promise<void> {
           }
         } else {
           assistantResponse = await handlePipelineIntent(classified.intent, classified.message, codeContext, {
-            explicit: classified.explicit ?? undefined, routeProvider: route.provider, routeTier: route.tier ?? undefined,
+            explicit: classified.explicit ?? undefined, routeProvider: route.provider,
           });
         }
         if (assistantResponse) {
@@ -402,42 +383,6 @@ export async function startRepl(cwd?: string): Promise<void> {
 
     // Assemble layered context (L1–L4) with overflow enforcement
     const assembled = await ctx.assemble(classified.message, queryEmbedding);
-
-    // Smart routing or static escalation check
-    if (!classified.explicit && !route.graphOnly) {
-      if (session.smartRouter) {
-        // Smart routing: LLM-assessed complexity
-        const filePattern = /\[(?:function|method|class|interface|type|variable) .+ — (.+?):\d+-\d+\]/g;
-        const files = new Set<string>();
-        let fMatch: RegExpExecArray | null;
-        while ((fMatch = filePattern.exec(assembled.code.text)) !== null) {
-          files.add(fMatch[1]!);
-        }
-        const signals = buildSignals(
-          classified.intent, classified.message,
-          assembled.totalTokens, files.size, session.closureRepos.length,
-          attachments.length > 0,
-        );
-        route = await session.smartRouter.route(
-          classified.intent, classified.explicit, signals,
-          classified.message,
-          { ollamaProvider: session.ollamaProvider, claudeProvider: session.claudeProvider, config: session.config, attachments },
-        );
-      } else if (route.label === 'Local') {
-        // Static escalation fallback
-        const escalation = shouldEscalate(assembled, session.closureRepos);
-        if (escalation.shouldEscalate && session.claudeProvider) {
-          const tier = 'fast' as const;
-          route = {
-            provider: buildProvider({ provider: 'claude', tier }, session.config),
-            label: `Claude Haiku (auto-escalated)`,
-            graphOnly: false,
-            tier,
-          };
-          log.info(`[escalation] ${escalation.reason} → auto-escalated to Claude`);
-        }
-      }
-    }
 
     // Build LLM messages from assembled context
     const messages = ctx.buildMessages(assembled, classified.message);
@@ -552,7 +497,7 @@ export async function startRepl(cwd?: string): Promise<void> {
         const fault = classifyOllamaError(err);
         log.warn(formatOllamaFault(fault));
         if (fault.suggestClaude && session.hasClaudeKey) {
-          log.info('Retry with @claude prefix to use Claude for this turn.');
+          log.info('Retry with @anthropic (or your active cloud provider) to route this turn to cloud.');
         }
       } else {
         log.error(err instanceof Error ? err.message : String(err));
@@ -583,7 +528,7 @@ export async function startRepl(cwd?: string): Promise<void> {
     intent: string,
     message: string,
     codeContext: string,
-    opts?: { explicit?: import('../shared/types.js').ExplicitProvider | undefined; routeProvider?: import('../shared/types.js').LLMProvider; routeTier?: string | undefined },
+    opts?: { explicit?: import('../shared/types.js').ExplicitProvider | undefined; routeProvider?: import('../shared/types.js').LLMProvider },
   ): Promise<string> {
     if (intent === 'requirements' || intent === 'design') {
       const designerClaude = session.resolver.resolveOrNull('designer', 'review');
@@ -654,10 +599,7 @@ export async function startRepl(cwd?: string): Promise<void> {
       if (!reviewClaude) {
         return '[error] Review pipeline requires Claude. Set ANTHROPIC_API_KEY.';
       }
-      const isOpus = opts?.explicit === 'opus';
-      const reviewProvider = isOpus && opts?.routeTier === 'powerful' && opts?.routeProvider
-        ? opts.routeProvider
-        : reviewClaude;
+      const reviewProvider = opts?.routeProvider ?? reviewClaude;
 
       const template = resolveTemplate({ format: 'markdown' });
       const designerInput: DesignerInput = {
@@ -668,7 +610,7 @@ export async function startRepl(cwd?: string): Promise<void> {
         session: { repoPath, closureRepos: session.closureRepos },
       };
 
-      const result = await runDesignerReview(designerInput, reviewProvider, isOpus, toLogFn(log));
+      const result = await runDesignerReview(designerInput, reviewProvider, false, toLogFn(log));
       return result.output || '[error] Review pipeline produced no output.';
     }
 
@@ -698,7 +640,8 @@ export async function startRepl(cwd?: string): Promise<void> {
     }
 
     if (intent === 'research') {
-      const forceEscalate = opts?.explicit === 'claude' || opts?.explicit === 'opus';
+      const forceEscalate = opts?.explicit === 'anthropic' || opts?.explicit === 'openai'
+        || opts?.explicit === 'gemini' || opts?.explicit === 'mistral';
       log.info(`[pipeline] Running research pipeline${forceEscalate ? ' (escalated to Claude)' : ''}...`);
 
       const result = await runResearchPipeline(

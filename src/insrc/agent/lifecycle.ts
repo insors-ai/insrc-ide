@@ -14,7 +14,7 @@ export async function ensureAgentModel(
   onProgress?: (pct: number) => void,
 ): Promise<void> {
   const config = loadConfig();
-  const agentModel = config.models.local;
+  const agentModel = config.models.providers.local.coreModel;
   const ollama = new Ollama({ host });
 
   const { models } = await ollama.list();

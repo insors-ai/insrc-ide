@@ -4,7 +4,6 @@ import { OllamaProvider } from './providers/ollama.js';
 import { ClaudeProvider } from './providers/claude.js';
 import { buildProvider } from './providers/factory.js';
 import { ProviderResolver } from './config.js';
-import { SmartRouter, SmartProviderResolver } from './smart-router.js';
 import { ContextManager, initSession } from './context/index.js';
 import { embedText } from './context/semantic.js';
 import { sessionClose, sessionSeed, sessionForget, sessionHistory } from './tools/mcp-client.js';
@@ -59,13 +58,6 @@ export class Session {
   /** Per-agent step-level provider resolver. */
   readonly resolver: ProviderResolver;
 
-  /** Smart LLM router (null when auto mode disabled or Ollama unavailable). */
-  smartRouter: SmartRouter | null = null;
-  /** Smart provider resolver wrapping the base resolver (null when auto mode disabled). */
-  smartResolver: SmartProviderResolver | null = null;
-  /** Current routing mode — toggleable at runtime via /auto. */
-  routingMode: 'static' | 'auto';
-
   /** Health monitor for Ollama and daemon (Phase 12). */
   readonly health: HealthMonitor;
 
@@ -80,13 +72,12 @@ export class Session {
     this.ollamaProvider = buildProvider({ provider: 'local' }, opts.config) as OllamaProvider;
 
     this.claudeProvider = opts.config.keys.anthropic
-      ? buildProvider({ provider: 'claude', tier: 'standard' }, opts.config) as ClaudeProvider
+      ? buildProvider({ provider: 'anthropic' }, opts.config) as ClaudeProvider
       : null;
 
     this.resolver = new ProviderResolver(opts.config, this.ollamaProvider, this.claudeProvider);
-    this.routingMode = opts.config.routing?.mode ?? 'static';
 
-    // Health monitor — ping functions injected to avoid circular deps
+    // Health monitor -- ping functions injected to avoid circular deps
     this.health = new HealthMonitor({
       pingOllama: () => this.ollamaProvider.ping(),
       pingDaemon: async () => {
@@ -98,18 +89,19 @@ export class Session {
 
   async init(): Promise<void> {
     this.closureRepos = await initSession(this.repoPath);
+    const localCtx = localMaxInput(this.config);
     this.contextManager = new ContextManager({
       repoPath: this.repoPath,
       closureRepos: this.closureRepos,
       provider: this.ollamaProvider,
-      contextWindowSize: this.config.models.context.local,
+      contextWindowSize: localCtx,
     });
 
     // Create context-aware provider wrappers (shared context manager)
     this.localProvider = new ContextAwareProvider(
       this.ollamaProvider,
       this.contextManager,
-      this.config.models.context.local,
+      localCtx,
       { label: 'local', autoRecord: true },
     );
 
@@ -117,42 +109,21 @@ export class Session {
       this.claudeContextProvider = new ContextAwareProvider(
         this.claudeProvider,
         this.contextManager,
-        this.config.models.context.claude,
-        { label: 'claude', autoRecord: true },
+        anthropicMaxInput(this.config),
+        { label: 'anthropic', autoRecord: true },
       );
-    }
-
-    // Initialize smart router if auto mode and Ollama available
-    if (this.routingMode === 'auto' && await this.ollamaProvider.ping()) {
-      this.enableSmartRouting();
     }
 
     // Start periodic health checks (30s interval, unref'd)
     this.health.start();
   }
 
-  /** Enable smart routing (creates SmartRouter + SmartProviderResolver). */
-  enableSmartRouting(): void {
-    this.smartRouter = new SmartRouter(this.ollamaProvider, this.config);
-    this.smartResolver = new SmartProviderResolver(
-      this.resolver, this.config, this.ollamaProvider, this.claudeProvider,
-    );
-    this.routingMode = 'auto';
-  }
-
-  /** Disable smart routing (reverts to static). */
-  disableSmartRouting(): void {
-    this.smartRouter = null;
-    this.smartResolver = null;
-    this.routingMode = 'static';
-  }
-
   /**
-   * Hot-reload config — rebuilds providers, resolver, and routing mode
-   * without destroying session state (context manager, turn history, etc.).
+   * Hot-reload config -- rebuilds providers and resolver without destroying
+   * session state (context manager, turn history, etc.).
    */
   reloadConfig(newConfig: AgentConfig): void {
-    // Mutate readonly fields via cast — intentional for hot reload
+    // Mutate readonly fields via cast -- intentional for hot reload
     (this as { config: AgentConfig }).config = newConfig;
 
     // Rebuild providers
@@ -160,7 +131,7 @@ export class Session {
       buildProvider({ provider: 'local' }, newConfig) as OllamaProvider;
 
     (this as { claudeProvider: ClaudeProvider | null }).claudeProvider = newConfig.keys.anthropic
-      ? buildProvider({ provider: 'claude', tier: 'standard' }, newConfig) as ClaudeProvider
+      ? buildProvider({ provider: 'anthropic' }, newConfig) as ClaudeProvider
       : null;
 
     // Rebuild resolver with new providers
@@ -168,30 +139,12 @@ export class Session {
       newConfig, this.ollamaProvider, this.claudeProvider,
     );
 
-    // Update permission and routing mode
     this.permissionMode = newConfig.permissions.mode;
-    const newRoutingMode = newConfig.routing?.mode ?? 'static';
-    if (newRoutingMode === 'auto' && this.routingMode !== 'auto') {
-      this.enableSmartRouting();
-    } else if (newRoutingMode === 'static' && this.routingMode !== 'static') {
-      this.disableSmartRouting();
-    }
-
   }
 
-  /** Toggle routing mode. Returns the new mode. */
-  toggleRouting(): 'static' | 'auto' {
-    if (this.routingMode === 'auto') {
-      this.disableSmartRouting();
-    } else {
-      this.enableSmartRouting();
-    }
-    return this.routingMode;
-  }
-
-  /** Get the active resolver (smart or base depending on mode). */
-  get activeResolver(): ProviderResolver | SmartProviderResolver {
-    return this.smartResolver ?? this.resolver;
+  /** Get the active resolver. Kept for API compatibility with existing callers. */
+  get activeResolver(): ProviderResolver {
+    return this.resolver;
   }
 
   /** Track entity IDs referenced in a turn. */
@@ -266,4 +219,19 @@ export class Session {
   get hasClaudeKey(): boolean {
     return this.claudeProvider !== null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function localMaxInput(cfg: AgentConfig): number {
+  const local = cfg.models.providers.local;
+  return local.params[local.coreModel]?.maxInputTokens ?? 16_384;
+}
+
+function anthropicMaxInput(cfg: AgentConfig): number {
+  const a = cfg.models.providers.anthropic;
+  const def = a.default ?? '';
+  return a.params[def]?.maxInputTokens ?? 200_000;
 }

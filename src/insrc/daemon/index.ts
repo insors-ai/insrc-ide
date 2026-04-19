@@ -611,7 +611,7 @@ async function main(): Promise<void> {
           if (typeof agentOverrides[step] === 'string') {
             stepBindings[step] = agentOverrides[step];
           } else {
-            stepBindings[step] = claudeSteps.includes(step) ? 'claude' : 'local';
+            stepBindings[step] = claudeSteps.includes(step) ? 'anthropic' : 'local';
           }
         }
         result[displayId] = stepBindings;

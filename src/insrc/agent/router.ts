@@ -1,167 +1,173 @@
-import type { AgentConfig, Attachment, ExplicitProvider, Intent, LLMProvider } from '../shared/types.js';
-import type { ClaudeProvider } from './providers/claude.js';
+/**
+ * Per-turn provider routing.
+ *
+ * Flat lookup (no tiers, no complexity assessment, no auto-escalation):
+ *
+ *   1. Vision override:     image/PDF attachment -> `models.visionDefault`
+ *                            (or error -- handled in stage 6; for now falls
+ *                             through to step 5)
+ *   2. Explicit @mention:   caller-supplied `ExplicitProvider` wins
+ *   3. No-LLM intents:      `code-analysis` -> graphOnly
+ *   4. (reserved for future per-intent overrides; no-op today)
+ *   5. Active provider:     `providers[activeProvider].default`
+ *   6. Local fallback:      if no activeProvider configured -> ollamaProvider
+ */
+
+import type {
+  AgentConfig, Attachment, ExplicitProvider, Intent, LLMProvider, ProviderName,
+} from '../shared/types.js';
 import { buildProvider } from './providers/factory.js';
 import { hasEscalationAttachment } from './attachments/router.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('router');
 
-// ---------------------------------------------------------------------------
-// Intent → default provider mapping (from design doc)
-// ---------------------------------------------------------------------------
-
-/** Base set of intents that default to Claude (overridable via config.models.intentDefaults). */
-const CLAUDE_DEFAULT_BASE: ReadonlySet<Intent> = new Set([
-  'requirements', 'design', 'brainstorm', 'plan', 'review',
-  'deploy', 'release', 'infra',
-]);
-
-/** Check whether an intent defaults to Claude, respecting config overrides. */
-function isClaudeDefault(intent: Intent, config: AgentConfig): boolean {
-  const override = config.models.intentDefaults?.[intent];
-  if (override !== undefined) return override === 'claude';
-  return CLAUDE_DEFAULT_BASE.has(intent);
-}
-
-/** Intent that uses no LLM at all — pure structural code queries */
+/** Intent that uses no LLM at all -- pure structural code queries */
 const NO_LLM: Set<Intent> = new Set(['code-analysis']);
 
-/** All other intents default to local */
-// implement, refactor, test, debug, document, research → local
-
 // ---------------------------------------------------------------------------
-// Intent → Claude model tier for validation/enhancement
-// ---------------------------------------------------------------------------
-
-type Tier = 'fast' | 'standard' | 'powerful';
-
-const INTENT_TIER: Partial<Record<Intent, Tier>> = {
-  requirements: 'standard',
-  design:       'standard',
-  brainstorm:   'standard',
-  plan:         'standard',
-  review:       'standard',
-  research:     'standard',
-  deploy:       'standard',
-  release:      'fast',
-  infra:        'fast',
-  implement:    'fast',
-  refactor:     'fast',
-  test:         'fast',
-  debug:        'fast',
-  document:     'fast',
-};
-
-// ---------------------------------------------------------------------------
-// Router
+// Types
 // ---------------------------------------------------------------------------
 
 export interface RouteResult {
-  /** Provider to use for the primary LLM call */
   provider: LLMProvider;
-  /** Label for display (e.g. "Local", "Claude Sonnet", "Claude Opus") */
+  /** Display label for status line ("Local", "Anthropic", "OpenAI: gpt-4o", ...). */
   label: string;
-  /** Whether this is a graph-only intent (no LLM needed) */
+  /** Whether this is a graph-only intent (no LLM call needed). */
   graphOnly: boolean;
-  /** Claude model tier used (if applicable) */
-  tier?: Tier | undefined;
-  /** Whether routing was forced by attachment (image/PDF). */
+  /** Whether routing was forced by a vision attachment. */
   attachmentForced?: boolean | undefined;
 }
 
 export interface RouterDeps {
   ollamaProvider: LLMProvider;
-  claudeProvider: ClaudeProvider | null;
+  /** Cloud provider instance for the `activeProvider`, if any. May be null
+   *  if no cloud provider is configured or the key is missing. */
+  cloudProvider: LLMProvider | null;
   config: AgentConfig;
-  /** Attachments on the current task (if any). */
   attachments?: Attachment[] | undefined;
 }
 
-/**
- * Select the provider for a classified intent.
- *
- * Priority:
- *   1. Explicit @provider prefix always wins
- *   2. code-analysis intent → no LLM
- *   3. Claude-default intents (requirements, design, plan, review) → Claude
- *   4. Everything else → local (Ollama)
- *
- * Falls back to local if Claude is requested but unavailable.
- */
+// ---------------------------------------------------------------------------
+// Public
+// ---------------------------------------------------------------------------
+
 export function selectProvider(
   intent: Intent,
   explicit: ExplicitProvider | undefined,
   deps: RouterDeps,
 ): RouteResult {
-  const { ollamaProvider, claudeProvider, config, attachments } = deps;
+  const { ollamaProvider, cloudProvider, config, attachments } = deps;
 
-  // Attachment-forced escalation: image/PDF → Claude (standard tier, unless @opus)
-  if (hasEscalationAttachment(attachments) && explicit !== 'opus') {
-    if (!claudeProvider) {
-      log.warn('Claude not available for attachment processing (no API key). Using local model.');
-      return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
-    }
-    const tier: Tier = 'standard';
-    const provider = buildProvider({ provider: 'claude', tier }, config);
-    return {
-      provider,
-      label: `Claude ${tierLabel(tier)} (attachment)`,
-      graphOnly: false,
-      tier,
-      attachmentForced: true,
-    };
+  // 1. Vision override -- for now, just route to active cloud (or local if no
+  //    cloud configured). Stage 6 will look up `models.visionDefault` and
+  //    error when absent.
+  if (hasEscalationAttachment(attachments)) {
+    const vision = routeVision(config, cloudProvider, ollamaProvider);
+    return { ...vision, attachmentForced: true };
   }
 
-  // Explicit @local → always local
-  if (explicit === 'local') {
-    return { provider: ollamaProvider, label: 'Local', graphOnly: false };
+  // 2. Explicit @mention
+  if (explicit) {
+    return routeExplicit(explicit, config, cloudProvider, ollamaProvider);
   }
 
-  // Explicit @opus → Claude Opus
-  if (explicit === 'opus') {
-    if (!claudeProvider) {
-      log.warn('Claude not available (no API key). Using local model.');
-      return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
-    }
-    const provider = buildProvider({ provider: 'claude', tier: 'powerful' }, config);
-    return { provider, label: 'Claude Opus', graphOnly: false, tier: 'powerful' };
-  }
-
-  // Explicit @claude → Claude at the standard tier for this intent
-  if (explicit === 'claude') {
-    if (!claudeProvider) {
-      log.warn('Claude not available (no API key). Using local model.');
-      return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
-    }
-    const tier = INTENT_TIER[intent] ?? 'standard';
-    const provider = buildProvider({ provider: 'claude', tier }, config);
-    return { provider, label: `Claude ${tierLabel(tier)}`, graphOnly: false, tier };
-  }
-
-  // Code-analysis intent → no LLM (pure structural queries)
+  // 3. No-LLM intents (code-analysis)
   if (NO_LLM.has(intent)) {
     return { provider: ollamaProvider, label: 'Code Analysis (no LLM)', graphOnly: true };
   }
 
-  // Claude-default intents
-  if (isClaudeDefault(intent, config)) {
-    if (!claudeProvider) {
-      log.warn(`Claude not available for ${intent} — using local model.`);
-      return { provider: ollamaProvider, label: 'Local (Claude unavailable)', graphOnly: false };
-    }
-    const tier = INTENT_TIER[intent] ?? 'standard';
-    const provider = buildProvider({ provider: 'claude', tier }, config);
-    return { provider, label: `Claude ${tierLabel(tier)}`, graphOnly: false, tier };
-  }
-
-  // Default → local
-  return { provider: ollamaProvider, label: 'Local', graphOnly: false };
+  // 5. Active provider default
+  return routeActive(config, cloudProvider, ollamaProvider);
 }
 
-function tierLabel(tier: Tier): string {
-  switch (tier) {
-    case 'fast':     return 'Haiku';
-    case 'standard': return 'Sonnet';
-    case 'powerful': return 'Opus';
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function routeVision(
+  config: AgentConfig,
+  cloudProvider: LLMProvider | null,
+  ollamaProvider: LLMProvider,
+): RouteResult {
+  const vd = config.models.visionDefault;
+  if (vd) {
+    if (vd.provider === 'local') {
+      return { provider: ollamaProvider, label: `Local: ${vd.model} (attachment)`, graphOnly: false };
+    }
+    const apiKey = config.keys[vd.provider];
+    if (!apiKey) {
+      log.warn(`vision default ${vd.provider} has no API key -- falling back to active provider`);
+    } else {
+      return {
+        provider: buildProvider({ provider: vd.provider, model: vd.model }, config),
+        label: `${titleCase(vd.provider)}: ${vd.model} (attachment)`,
+        graphOnly: false,
+      };
+    }
+  }
+  // Fall back to active provider for now -- stage 6 will make this an error.
+  return routeActive(config, cloudProvider, ollamaProvider);
+}
+
+function routeExplicit(
+  explicit: ExplicitProvider,
+  config: AgentConfig,
+  cloudProvider: LLMProvider | null,
+  ollamaProvider: LLMProvider,
+): RouteResult {
+  if (explicit === 'local') {
+    return { provider: ollamaProvider, label: 'Local', graphOnly: false };
+  }
+  // Cloud provider mention -- must match activeProvider, else fall back
+  const active = config.models.activeProvider;
+  if (active !== explicit) {
+    log.warn(`@${explicit} is not the active provider (active=${active ?? 'none'}) -- falling back`);
+    return routeActive(config, cloudProvider, ollamaProvider);
+  }
+  const def = config.models.providers[explicit].default;
+  if (!def) {
+    log.warn(`@${explicit} has no default model configured -- using local`);
+    return { provider: ollamaProvider, label: 'Local (no cloud default)', graphOnly: false };
+  }
+  const apiKey = config.keys[explicit];
+  if (!apiKey) {
+    log.warn(`@${explicit} has no API key -- using local`);
+    return { provider: ollamaProvider, label: 'Local (no API key)', graphOnly: false };
+  }
+  return {
+    provider: buildProvider({ provider: explicit, model: def }, config),
+    label: `${titleCase(explicit)}: ${def}`,
+    graphOnly: false,
+  };
+}
+
+function routeActive(
+  config: AgentConfig,
+  cloudProvider: LLMProvider | null,
+  ollamaProvider: LLMProvider,
+): RouteResult {
+  const active = config.models.activeProvider;
+  if (!active || !cloudProvider) {
+    return { provider: ollamaProvider, label: 'Local', graphOnly: false };
+  }
+  const def = config.models.providers[active].default;
+  if (!def) {
+    return { provider: ollamaProvider, label: 'Local (no cloud default)', graphOnly: false };
+  }
+  return {
+    provider: cloudProvider,
+    label: `${titleCase(active)}: ${def}`,
+    graphOnly: false,
+  };
+}
+
+function titleCase(p: ProviderName): string {
+  switch (p) {
+    case 'openai':    return 'OpenAI';
+    case 'anthropic': return 'Anthropic';
+    case 'gemini':    return 'Gemini';
+    case 'mistral':   return 'Mistral';
+    case 'local':     return 'Local';
   }
 }

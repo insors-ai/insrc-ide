@@ -4,7 +4,7 @@ import type { DbClient } from './client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
 import { loadConfig } from '../agent/config.js';
 
-const { embeddingDim: EMBEDDING_DIM } = loadConfig().models;
+const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 
 // ---------------------------------------------------------------------------
 // Apache Arrow schema for the LanceDB 'entities' table.

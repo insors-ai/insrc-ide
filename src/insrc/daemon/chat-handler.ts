@@ -580,7 +580,7 @@ async function runChatMessage(
   // 2. Route to provider
   const route = selectProvider(classifiedIntent as import('../shared/types.js').Intent, classifiedExplicit, {
     ollamaProvider: session.ollamaProvider,
-    claudeProvider: session.claudeProvider,
+    cloudProvider: session.claudeProvider,
     config: session.config,
   });
 

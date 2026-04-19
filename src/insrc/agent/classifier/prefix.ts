@@ -1,4 +1,4 @@
-import type { ExplicitProvider, Intent } from '../../shared/types.js';
+import type { ExplicitProvider, Intent, ProviderName } from '../../shared/types.js';
 
 // ---------------------------------------------------------------------------
 // All recognized intents for the /intent override
@@ -10,12 +10,15 @@ const VALID_INTENTS = new Set<Intent>([
   'brainstorm', 'deploy', 'release', 'infra',
 ]);
 
+const PROVIDER_TOKENS: ReadonlyArray<ProviderName> =
+  ['local', 'openai', 'anthropic', 'gemini', 'mistral'];
+
 // ---------------------------------------------------------------------------
 // Parsed result
 // ---------------------------------------------------------------------------
 
 export interface PrefixResult {
-  /** Explicit provider override (@claude, @opus, @local) */
+  /** Explicit provider override (@local, @openai, @anthropic, @gemini, @mistral) */
   explicit?: ExplicitProvider | undefined;
   /** Explicit intent override (/intent <name>) */
   intentOverride?: Intent | undefined;
@@ -28,19 +31,17 @@ export interface PrefixResult {
  *
  * Supports:
  *   /intent <name> [@provider] <message>
- *   @claude <message>
- *   @opus <message>
  *   @local <message>
+ *   @<provider> <message>    where <provider> is openai|anthropic|gemini|mistral
  *
  * Parse order: /intent first, then @provider, then remaining is message.
- * Both can coexist: `/intent debug @claude why is this slow?`
  */
 export function parsePrefix(raw: string): PrefixResult {
   let remaining = raw.trim();
   let explicit: ExplicitProvider | undefined;
   let intentOverride: Intent | undefined;
 
-  // 1. Check for /intent <name> prefix
+  // 1. /intent <name>
   const intentMatch = remaining.match(/^\/intent\s+(\S+)\s*/);
   if (intentMatch) {
     const candidate = intentMatch[1]!.toLowerCase();
@@ -50,16 +51,14 @@ export function parsePrefix(raw: string): PrefixResult {
     }
   }
 
-  // 2. Check for @provider prefix
-  if (remaining.startsWith('@claude ')) {
-    explicit = 'claude';
-    remaining = remaining.slice(8);
-  } else if (remaining.startsWith('@opus ')) {
-    explicit = 'opus';
-    remaining = remaining.slice(6);
-  } else if (remaining.startsWith('@local ')) {
-    explicit = 'local';
-    remaining = remaining.slice(7);
+  // 2. @<provider>
+  for (const token of PROVIDER_TOKENS) {
+    const prefix = `@${token} `;
+    if (remaining.toLowerCase().startsWith(prefix)) {
+      explicit = token;
+      remaining = remaining.slice(prefix.length);
+      break;
+    }
   }
 
   return {

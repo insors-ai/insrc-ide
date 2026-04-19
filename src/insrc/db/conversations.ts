@@ -20,7 +20,7 @@ import { loadConfig } from '../agent/config.js';
 export type ConversationEntryType = 'turn' | 'directive' | 'summary' | 'merged';
 export type ConversationTier = 'hot' | 'warm' | 'cold' | 'archive';
 
-const EMBEDDING_DIM = loadConfig().models.embeddingDim;
+const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 const ZERO_VEC = new Array<number>(EMBEDDING_DIM).fill(0);
 
 const SESSIONS_SCHEMA = new Schema([

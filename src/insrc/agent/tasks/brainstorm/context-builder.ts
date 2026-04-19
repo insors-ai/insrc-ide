@@ -6,9 +6,8 @@
  * prior steps — continuity lives in agent state.
  */
 
-import type { LLMMessage, AgentConfig } from '../../../shared/types.js';
+import type { AgentConfig, LLMMessage, LLMProvider } from '../../../shared/types.js';
 import { ClaudeProvider } from '../../providers/claude.js';
-import type { LLMProvider } from '../../../shared/types.js';
 import type { BrainstormState } from './agent-state.js';
 import type { Idea, Theme, SpecRequirement } from './types.js';
 import {
@@ -70,13 +69,18 @@ export function buildStepContext(
   config: AgentConfig,
 ): LLMMessage[] {
   const isLocal = !(provider instanceof ClaudeProvider);
-  const contextWindow = isLocal
-    ? config.models.context.local
-    : config.models.context.claude;
-  const maxOutput = isLocal
-    ? config.models.context.localMaxOutput
-    : config.models.context.claudeMaxOutput;
-  const charsPerToken = config.models.context.charsPerToken;
+  const localParams = config.models.providers.local;
+  const localCore = localParams.coreModel;
+  const localCtx  = localParams.params[localCore]?.maxInputTokens  ?? 16_384;
+  const localOut  = localParams.params[localCore]?.maxOutputTokens ?? 8_192;
+  const anthropic = config.models.providers.anthropic;
+  const anthroDef = anthropic.default ?? '';
+  const anthroCtx = anthropic.params[anthroDef]?.maxInputTokens  ?? 200_000;
+  const anthroOut = anthropic.params[anthroDef]?.maxOutputTokens ?? 8_192;
+
+  const contextWindow = isLocal ? localCtx : anthroCtx;
+  const maxOutput = isLocal ? localOut : anthroOut;
+  const charsPerToken = localParams.charsPerToken;
   const charBudget = (contextWindow - maxOutput) * charsPerToken;
 
   const systemPrompt = STEP_PROMPTS[stepName] ?? SEED_SYSTEM;

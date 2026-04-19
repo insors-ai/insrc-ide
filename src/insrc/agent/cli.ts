@@ -5,8 +5,6 @@ import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
 import { classify } from './classifier/index.js';
 import { selectProvider } from './router.js';
-import { shouldEscalate } from './escalation.js';
-import { buildProvider } from './providers/factory.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
 import { ping as pingDaemon, planSave } from './tools/mcp-client.js';
@@ -115,10 +113,10 @@ export async function runOneShot(
     process.env['BRAVE_API_KEY'] = config.keys.brave;
   }
 
-  // Quiet model check — skip pull in one-shot mode
+  // Quiet model check -- skip pull in one-shot mode
   let ollamaOk = false;
   try {
-    await ensureAgentModel(config.ollama.host);
+    await ensureAgentModel(config.models.providers.local.host);
     ollamaOk = true;
   } catch (err) {
     const fault = classifyOllamaError(err);
@@ -164,7 +162,7 @@ export async function runOneShot(
   if (opts.intent) {
     classifyMessage = `/intent ${opts.intent} ${classifyInput}`;
   } else if (opts.claude) {
-    classifyMessage = `@claude ${classifyInput}`;
+    classifyMessage = `@anthropic ${classifyInput}`;
   }
 
   // Classify
@@ -173,26 +171,26 @@ export async function runOneShot(
     llmProvider: ollamaOk ? session.resolver.resolve('classifier', 'classify') : undefined,
   });
 
-  // Force --claude if flag set but no @claude prefix was used
+  // Force --claude if flag set but no @anthropic prefix was used
   let explicit = classified.explicit;
   if (opts.claude && !explicit) {
-    explicit = 'claude';
+    explicit = 'anthropic';
   }
 
   // Route provider
-  let route = selectProvider(classified.intent, explicit, {
+  const route = selectProvider(classified.intent, explicit, {
     ollamaProvider: session.ollamaProvider,
-    claudeProvider: session.claudeProvider,
+    cloudProvider: session.claudeProvider,
     config: session.config,
     attachments,
   });
 
   log(`[cli] ${classified.intent} → ${route.label}`);
 
-  // Exit code 2: Claude needed but no API key
-  const needsClaude = route.tier !== undefined || route.label.includes('Claude');
-  if (needsClaude && !session.hasClaudeKey) {
-    const errMsg = `Escalated to Claude but no ANTHROPIC_API_KEY configured.`;
+  // Exit code 2: cloud provider needed but no API key
+  const needsCloud = !route.graphOnly && route.label !== 'Local';
+  if (needsCloud && !session.hasClaudeKey) {
+    const errMsg = `Cloud provider needed but no API key configured.`;
     if (opts.json) {
       return { exitCode: 2, output: JSON.stringify({ success: false, error: errMsg, exitCode: 2 }), intent: classified.intent };
     }
@@ -208,7 +206,7 @@ export async function runOneShot(
         const queryEmbedding = await ctx.embedQuery(classified.message);
         const assembled = await ctx.assemble(classified.message, queryEmbedding);
         const response = await handlePipeline('research', classified.message, assembled.code.text, session, repoPath, ctx, !!opts.claude);
-        return formatResult(response, classified.intent, route.tier !== undefined, opts.json);
+        return formatResult(response, classified.intent, !route.graphOnly && route.label !== 'Local', opts.json);
       }
       return formatResult(graphResult.response, classified.intent, false, opts.json);
     }
@@ -241,27 +239,12 @@ export async function runOneShot(
         response = await handlePipeline(classified.intent, classified.message, codeContext, session, repoPath, ctx, !!opts.claude);
       }
 
-      return formatResult(response, classified.intent, route.tier !== undefined, opts.json);
+      return formatResult(response, classified.intent, !route.graphOnly && route.label !== 'Local', opts.json);
     }
 
     // General tool loop path (fallback for any other classified intent)
     const queryEmbedding = await ctx.embedQuery(classified.message);
     const assembled = await ctx.assemble(classified.message, queryEmbedding);
-
-    // Auto-escalation check
-    if (!explicit && !route.graphOnly && route.label === 'Local') {
-      const escalation = shouldEscalate(assembled, session.closureRepos);
-      if (escalation.shouldEscalate && session.claudeProvider) {
-        const tier = 'fast' as const;
-        route = {
-          provider: buildProvider({ provider: 'claude', tier }, session.config),
-          label: 'Claude Haiku (auto-escalated)',
-          graphOnly: false,
-          tier,
-        };
-        log(`[cli] auto-escalated: ${escalation.reason}`);
-      }
-    }
 
     const messages = ctx.buildMessages(assembled, classified.message);
 
@@ -316,7 +299,7 @@ export async function runOneShot(
       if (!opts.json) process.stdout.write('\n');
     }
 
-    return formatResult(assistantResponse, classified.intent, route.tier !== undefined, opts.json);
+    return formatResult(assistantResponse, classified.intent, !route.graphOnly && route.label !== 'Local', opts.json);
   } catch (err) {
     // Classify Ollama faults for better error messages
     if (isOllamaDown(err)) {

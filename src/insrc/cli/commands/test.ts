@@ -68,7 +68,7 @@ async function cmdRun(files: string[], opts: RunOpts): Promise<void> {
     const config = loadConfig();
     const ollamaProvider = buildProvider({ provider: 'local' }, config) as InstanceType<typeof OllamaProvider>;
     const claudeProvider = config.keys.anthropic
-      ? buildProvider({ provider: 'claude', tier: 'standard' }, config) as InstanceType<typeof ClaudeProvider>
+      ? buildProvider({ provider: 'anthropic' }, config) as InstanceType<typeof ClaudeProvider>
       : null;
     const resolver = new ProviderResolver(config, ollamaProvider, claudeProvider);
 
@@ -156,7 +156,7 @@ async function cmdPlan(files: string[], opts: PlanOpts): Promise<void> {
     const config = loadConfig();
     const ollamaProvider = buildProvider({ provider: 'local' }, config) as InstanceType<typeof OllamaProvider>;
     const claudeProvider = config.keys.anthropic
-      ? buildProvider({ provider: 'claude', tier: 'standard' }, config) as InstanceType<typeof ClaudeProvider>
+      ? buildProvider({ provider: 'anthropic' }, config) as InstanceType<typeof ClaudeProvider>
       : null;
     const resolver = new ProviderResolver(config, ollamaProvider, claudeProvider);
 

@@ -78,7 +78,12 @@ export type Intent =
   | 'release'
   | 'infra';
 
-export type ExplicitProvider = 'claude' | 'opus' | 'local';
+/** Provider identity -- the cloud providers plus Ollama-local. */
+export type CloudProviderName = 'openai' | 'anthropic' | 'gemini' | 'mistral';
+export type ProviderName = 'local' | CloudProviderName;
+
+/** Explicit @-prefix override used by CLI and classifier. */
+export type ExplicitProvider = ProviderName;
 
 // ---------------------------------------------------------------------------
 // Agent personas
@@ -126,13 +131,20 @@ export interface Attachment {
 // Agent config
 // ---------------------------------------------------------------------------
 
+/** Per-model context window parameters. */
+export interface ModelParams {
+  /** Context window size in tokens. */
+  maxInputTokens: number;
+  /** Max output tokens per call. */
+  maxOutputTokens: number;
+}
+
 /** Provider binding for a single LLM operation within an agent. */
 export interface StepBinding {
-  provider: 'local' | 'claude';
-  /** Explicit model name override (e.g. 'claude-sonnet-4-6', 'qwen3-coder:latest'). */
+  provider: ProviderName;
+  /** Explicit model name (required for cloud providers; optional for local where
+   *  there is only one coreModel anyway). */
   model?: string | undefined;
-  /** Claude tier — ignored for local provider. */
-  tier?: 'fast' | 'standard' | 'powerful' | undefined;
 }
 
 /** Per-agent step-level provider config. Keys are step names, values are bindings. */
@@ -156,52 +168,59 @@ export interface AgentProviderConfigs {
   tester?: AgentStepConfig | undefined;
 }
 
+/** Local (Ollama) provider config. One core model + one embedding model. */
+export interface LocalProviderConfig {
+  host: string;
+  coreModel: string;
+  embeddingModel: string;
+  embeddingDim: number;
+  /** Chars-per-token ratio for budget estimation (default 3). */
+  charsPerToken: number;
+  /** Per-model context window params, keyed by model name. */
+  params: Record<string, ModelParams>;
+}
+
+/** Cloud provider config. Multiple enabled models, one default. */
+export interface CloudProviderConfig {
+  /** Default model for this provider (what `@<provider>` resolves to). */
+  default: string | null;
+  /** Whitelisted models the agent may use. */
+  enabled: string[];
+  /** Per-model context window params, keyed by model name. */
+  params: Record<string, ModelParams>;
+}
+
+export interface ProvidersConfig {
+  local: LocalProviderConfig;
+  openai: CloudProviderConfig;
+  anthropic: CloudProviderConfig;
+  gemini: CloudProviderConfig;
+  mistral: CloudProviderConfig;
+}
+
+/** Global "use this when an image/PDF attachment is present" binding. */
+export type VisionDefault = { provider: ProviderName; model: string } | null;
+
 export interface AgentConfig {
-  ollama: {
-    host: string;
-  };
   models: {
-    local: string;
-    embedding: string;
-    embeddingDim: number;
-    tiers: {
-      fast: string;
-      standard: string;
-      powerful: string;
-    };
-    roles: Record<string, string>;
+    /** The single active cloud provider. `local` is always available alongside. */
+    activeProvider: CloudProviderName | null;
+    /** Vision override for turns with image/PDF attachments. */
+    visionDefault: VisionDefault;
+    providers: ProvidersConfig;
     /** Per-agent step-level provider overrides. */
     agents?: AgentProviderConfigs | undefined;
-    /** Override which intents default to Claude vs local. */
-    intentDefaults?: Partial<Record<Intent, 'local' | 'claude'>> | undefined;
-    /** Context window sizes (tokens). Auto-detected from Ollama if not set. */
-    context: ModelContextConfig;
   };
   keys: {
     anthropic?: string | undefined;
+    openai?: string | undefined;
+    gemini?: string | undefined;
+    mistral?: string | undefined;
     brave?: string | undefined;
   };
   permissions: {
     mode: 'validate' | 'auto-accept';
   };
-  routing?: {
-    /** 'static' = rule-based (default), 'auto' = LLM-assessed complexity routing. */
-    mode: 'static' | 'auto';
-  } | undefined;
-}
-
-/** Context window and output limits per provider. */
-export interface ModelContextConfig {
-  /** Local model (Ollama) context window in tokens. Default: 131072 (128K). */
-  local: number;
-  /** Local model max output tokens per call. Default: 8192. */
-  localMaxOutput: number;
-  /** Claude context window in tokens. Default: 200000 (200K). */
-  claude: number;
-  /** Claude max output tokens per call. Default: 8192. */
-  claudeMaxOutput: number;
-  /** Chars-per-token ratio for budget estimation. Default: 3. */
-  charsPerToken: number;
 }
 
 // ---------------------------------------------------------------------------
