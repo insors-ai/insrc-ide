@@ -744,6 +744,40 @@ async function main(): Promise<void> {
       return getToolSettings();
     },
 
+    // ---- Providers RPC ----
+    'providers.listModels': async (params) => {
+      const { listModelsForProvider } = await import('./providers.js');
+      const { provider } = (params ?? {}) as { provider: import('../shared/types.js').ProviderName };
+      return listModelsForProvider(provider);
+    },
+
+    'providers.testKey': async (params) => {
+      const { testProviderKey } = await import('./providers.js');
+      const { provider } = (params ?? {}) as { provider: import('../shared/types.js').ProviderName };
+      return testProviderKey(provider);
+    },
+
+    'providers.getConfig': async () => {
+      const { getProvidersConfig } = await import('./providers.js');
+      return getProvidersConfig();
+    },
+
+    'providers.setConfig': async (params) => {
+      const { setProvidersConfig } = await import('./providers.js');
+      const patch = (params ?? {}) as Partial<import('../shared/types.js').AgentConfig['models']>;
+      const result = setProvidersConfig(patch);
+      await reloadChatConfig();
+      return result;
+    },
+
+    'providers.check': async () => {
+      const { checkConfigured } = await import('./providers.js');
+      const { loadConfigWithKeys } = await import('../agent/config.js');
+      const cfg = await loadConfigWithKeys();
+      const err = checkConfigured(cfg);
+      return err ?? { ok: true };
+    },
+
     // Chat session management (standard handlers)
     'chat.start':  chatStart,
     'chat.reply':  chatReply,

@@ -72,6 +72,16 @@ function getPool(): ChatSessionPool {
 
 export const chatStart: RpcHandler = async (params) => {
   const { repo } = params as { repo: string };
+
+  // Refuse to start if provider config is unusable; return a
+  // NOT_CONFIGURED payload the IDE will translate into an
+  // auto-opened Model Providers pane.
+  const { checkConfigured } = await import('./providers.js');
+  const { loadConfigWithKeys } = await import('../agent/config.js');
+  const cfg = await loadConfigWithKeys();
+  const cfgErr = checkConfigured(cfg);
+  if (cfgErr) return cfgErr;
+
   const pool = getPool();
   const sessionId = await pool.create(repo);
   return { sessionId, repo };
