@@ -514,7 +514,7 @@ so models trained on the old schema still work.
    get implemented as first-class `Tool`s. **[done for shipped
    domains]** -- see below.
 6. **Remove shims**. Drop `daemon/delegates/` entirely, drop the legacy
-   LLM tool interfaces, drop `kind: 'delegate'`. **[pending]**
+   LLM tool interfaces, drop `kind: 'delegate'`. **[done]**
 
 ### Stage 5 -- shipped vs deferred
 
