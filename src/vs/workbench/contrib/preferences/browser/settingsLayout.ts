@@ -295,6 +295,73 @@ export const tocData: ITOCEntry<string> = {
 					settings: ['security.workspace.*']
 				}
 			]
+		},
+		{
+			id: 'insrc',
+			label: localize('insrc', "Insrc"),
+			settings: ['insrc.*'],
+			children: [
+				{
+					id: 'insrc/models',
+					label: localize('insrc.models', "Models"),
+					settings: ['insrc.models.*']
+				},
+				{
+					id: 'insrc/permissions',
+					label: localize('insrc.permissions', "Permissions"),
+					settings: ['insrc.permissions.*']
+				},
+				{
+					id: 'insrc/daemon',
+					label: localize('insrc.daemon', "Daemon"),
+					settings: ['insrc.daemon.*']
+				},
+				{
+					id: 'insrc/routing',
+					label: localize('insrc.routing', "Routing"),
+					settings: ['insrc.routing.*']
+				},
+				{
+					id: 'insrc/tools/approval',
+					label: localize('insrc.tools.approval', "Tools: Approval"),
+					settings: ['insrc.tools.approval.*']
+				},
+				{
+					id: 'insrc/tools/loop',
+					label: localize('insrc.tools.loop', "Tools: Loop"),
+					settings: ['insrc.tools.loop.*']
+				},
+				{
+					id: 'insrc/tools/output',
+					label: localize('insrc.tools.output', "Tools: Output"),
+					settings: ['insrc.tools.output.*']
+				},
+				{
+					id: 'insrc/tools/shell',
+					label: localize('insrc.tools.shell', "Tools: Shell"),
+					settings: ['insrc.tools.shell.*']
+				},
+				{
+					id: 'insrc/tools/web',
+					label: localize('insrc.tools.web', "Tools: Web"),
+					settings: ['insrc.tools.web.*']
+				},
+				{
+					id: 'insrc/tools/destructive',
+					label: localize('insrc.tools.destructive', "Tools: Destructive"),
+					settings: ['insrc.tools.destructive.*']
+				},
+				{
+					id: 'insrc/tools/notify',
+					label: localize('insrc.tools.notify', "Tools: Notifications"),
+					settings: ['insrc.tools.notify.*']
+				},
+				{
+					id: 'insrc/tools',
+					label: localize('insrc.tools', "Tools"),
+					settings: ['insrc.tools.*']
+				}
+			]
 		}
 	]
 };
