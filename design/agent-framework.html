@@ -462,6 +462,11 @@ interface StepContext {
   config:    AgentConfig;
   providers: {
     local:  LLMProvider;
+    /* Historical slot name; holds an instance of whichever cloud provider
+       (openai / anthropic / gemini / mistral) is currently `activeProvider`.
+       Null when no cloud provider is configured. Step code uses
+       `resolve(agent, step)` to get the right provider for a given step
+       instead of reading this directly. */
     claude: LLMProvider | null;
   };
   progress(msg: string, pct?: number): void;

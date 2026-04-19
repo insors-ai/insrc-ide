@@ -2,7 +2,7 @@
 
 ## Project overview
 
-**insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in Kuzu (graph DB) and entity embeddings in LanceDB (vector DB), then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and Claude.
+**insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in Kuzu (graph DB) and entity embeddings in LanceDB (vector DB), then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and a user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral).
 
 Repository: `github.com/insors-ai/insrc`
 
@@ -13,7 +13,7 @@ Repository: `github.com/insors-ai/insrc`
 - **Module system**: NodeNext (`"module": "nodenext"` in tsconfig)
 - **Databases**: Kuzu (embedded graph DB, Cypher queries), LanceDB (embedded vector DB)
 - **Parsing**: tree-sitter (TypeScript, Python, Go)
-- **LLM providers**: Ollama (local — qwen3-coder, qwen3-embedding), Anthropic Claude API (optional)
+- **LLM providers**: Ollama (local -- qwen3-coder, qwen3-embedding) + one active cloud provider (OpenAI, Anthropic, Gemini, Mistral). Managed via the Model Providers pane (command `insrc.openModelProviders`); API keys live in the OS keychain.
 - **Logging**: pino + pino-pretty (CLI) + pino-roll (file rotation)
 - **CLI framework**: commander
 - **HTTP**: undici
@@ -50,10 +50,12 @@ src/
     config.ts      AgentConfig loading from ~/.insrc/config.json
     classifier/    Intent classification (LLM-based with keyword fallback)
       scope.ts     Scope detection (single vs batch → Pair vs Delegate routing)
-    router.ts      Provider selection (local vs Claude)
-    escalation.ts  Auto-escalation to Claude based on scope signals
+    router.ts      Flat per-turn provider resolution (vision -> mention -> step binding -> active provider default)
     context/       Layered context management (L1-L5 budget system)
-    providers/     LLM provider implementations (ollama.ts, claude.ts)
+    providers/     LLM provider implementations (ollama, anthropic, openai, gemini, mistral) + factory.ts dispatch
+    attachments/
+      router.ts        Attachment detection (image, pdf, text, code) + base64 encoding
+      forced-vision.ts Single-call pipeline used when attachments route through `models.visionDefault`
     framework/     Agent framework (step-based state machine)
       types.ts     AgentDefinition, AgentStep, StepContext, Channel, gate types
       runner.ts    runAgent() — step execution, checkpointing, resume
@@ -130,9 +132,11 @@ source ~/.insors && npx tsx scripts/test-ollama-bash.ts     # ollama tool-callin
 
 ### LLM provider abstraction
 - All LLM interaction goes through the `LLMProvider` interface in `shared/types.ts`
-- Never import Ollama or Anthropic SDK directly in agent logic — use `providers/ollama.ts` or `providers/claude.ts`
-- Embedding model: `qwen3-embedding:0.6b` (2048 dims), agent model: `qwen3-coder:latest`
+- Never import provider SDKs directly in agent logic -- construct via `agent/providers/factory.ts` (`buildProvider({provider, model}, cfg)`)
+- Provider files: `ollama.ts` (local), `anthropic.ts`, `openai.ts`, `gemini.ts`, `mistral.ts`
+- Embedding model is local-only (Ollama): selected in the Model Providers pane's Local tab; `embed()` returns `[]` on every cloud provider
 - Ollama tool calling: `/no_think` is auto-prepended to system prompts when tools are provided (required for qwen3-coder structured tool calls)
+- Per-turn routing is a flat config lookup (`agent/router.ts`): vision attachment -> `models.visionDefault` (errors if unset); explicit `@mention`; per-step binding; active provider's `default`
 
 ### Entity IDs
 - Deterministic: `SHA256(repo + file + kind + name)`, hex-32
@@ -154,13 +158,13 @@ Step-based state machine for multi-turn agents. Each agent is an `AgentDefinitio
 - Steps return `{ state, next }` — next step name or `null` to finish
 - Gates (`ctx.gate()`) pause for user input with named actions
 - Checkpoints written atomically after each step (crash-safe resume)
-- Provider `@mention` overrides: `@local`, `@haiku`, `@sonnet`, `@opus`, `@sticky`, `@clear`
+- Provider `@mention` overrides: `@local` + `@<activeProvider>` (one of `@openai`, `@anthropic`, `@gemini`, `@mistral`). `@sticky @<provider>` locks the override for the session; `@clear` resets. `@<non-active-provider>` errors -- switch active provider in the Model Providers pane first.
 
 ### Coding agents
 - **Pair** (single-item): propose → review-gate → apply → validate loop. Modes: implement, refactor, debug, explore
 - **Delegate** (batch-scope): planner sub-agent → approve plan → execute steps autonomously
 - **Scope routing**: `detectScope()` classifies single vs batch → routes to Pair or Delegate
-- **Shared helpers**: `investigate()` (read-only tool exploration), `generateAndValidate()` (local gen → Claude validate → retry), `runTestsAndFix()` (test + fix loop), `autoCommit()` (git stage + commit)
+- **Shared helpers**: `investigate()` (read-only tool exploration), `generateAndValidate()` (local gen → cloud validate → retry), `runTestsAndFix()` (test + fix loop), `autoCommit()` (git stage + commit)
 
 ### Other agents
 - **Designer**: iterative per-requirement design with validation gates
@@ -182,7 +186,7 @@ Supported intents: `implement`, `refactor`, `test`, `debug`, `review`, `document
 ## Key architectural rules
 
 1. **Daemon owns all DB access** — agent/CLI communicate via IPC only
-2. **Local-first** — everything works without Claude; Claude is opt-in via `ANTHROPIC_API_KEY`
+2. **Local-first** -- Ollama is always available (embeddings are local-only). Cloud providers are opt-in: pick one via the Model Providers pane and add its API key (stored in the OS keychain)
 3. **Dependency-closure scoping** — searches span only transitive `DEPENDS_ON` closure of active repo
 4. **Graph + vector** — structural queries use Kuzu Cypher; semantic queries use LanceDB ANN/FTS
 5. **No raw file dumps** — context is always structured entity summaries + relations from the graph

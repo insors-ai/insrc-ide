@@ -6,7 +6,7 @@ Built by [Procix Software India](https://procix.com).
 
 ## What is Insrc?
 
-Insrc is an IDE that understands your code structurally. A background daemon parses repos via tree-sitter, stores relationships in a graph database (Kuzu), and entity embeddings in a vector database (LanceDB). An interactive agent uses this knowledge graph to provide context-aware assistance powered by local LLMs (Ollama) with optional Claude escalation.
+Insrc is an IDE that understands your code structurally. A background daemon parses repos via tree-sitter, stores relationships in a graph database (Kuzu), and entity embeddings in a vector database (LanceDB). An interactive agent uses this knowledge graph to provide context-aware assistance, powered by a local LLM (Ollama) alongside one user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral -- bring your own key).
 
 ## Key Features
 
@@ -32,7 +32,7 @@ Insrc is an IDE that understands your code structurally. A background daemon par
 - Gate cards for agent interactions (approve/reject/edit)
 - File attachments with path resolution across workspace repos
 - Session management with repo-scoped sessions
-- Provider mentions (@local, @haiku, @sonnet, @opus)
+- Provider mentions: `@local` + `@<activeProvider>` (e.g. `@openai`, `@anthropic`, `@gemini`, `@mistral`); `@sticky @<provider>` locks for the session; `@clear` resets
 - Intent selector (research, implement, refactor, debug, brainstorm, etc.)
 
 ### Prompt Notepad
@@ -174,30 +174,58 @@ node build/hygiene.js
 
 ## Configuration
 
-Settings at `~/.insrc/config.json`:
+Model providers are edited through the **Model Providers pane** (command
+palette > "insrc: Open Model Providers"). Pick the active cloud provider,
+paste the API key (stored in the OS keychain), check the models you want
+enabled, and set one as the default. The local tab picks the Ollama core
+model and embedding model from the list of installed models.
+
+Behind the scenes the pane writes `~/.insrc/config.json`:
 
 ```jsonc
 {
-  "ollama": { "host": "http://localhost:11434" },
   "models": {
-    "local": "qwen3-coder:latest",
-    "embedding": "qwen3-embedding:4b",
-    "tiers": {
-      "fast": "claude-haiku-4-5",
-      "standard": "claude-sonnet-4-6",
-      "powerful": "claude-opus-4-6"
+    "activeProvider": "anthropic",
+    "visionDefault": { "provider": "anthropic", "model": "claude-sonnet-4-6" },
+    "providers": {
+      "local": {
+        "host": "http://localhost:11434",
+        "coreModel": "qwen3-coder:latest",
+        "embeddingModel": "qwen3-embedding:4b",
+        "embeddingDim": 2560,
+        "charsPerToken": 3,
+        "params": {
+          "qwen3-coder:latest": { "maxInputTokens": 16384, "maxOutputTokens": 8192 }
+        }
+      },
+      "anthropic": {
+        "default": "claude-sonnet-4-6",
+        "enabled": ["claude-sonnet-4-6", "claude-haiku-4-5"],
+        "params": {
+          "claude-sonnet-4-6": { "maxInputTokens": 200000, "maxOutputTokens": 8192 }
+        }
+      },
+      "openai":  { "default": null, "enabled": [], "params": {} },
+      "gemini":  { "default": null, "enabled": [], "params": {} },
+      "mistral": { "default": null, "enabled": [], "params": {} }
     },
-    "context": { "local": 16384, "claude": 200000 },
     "agents": {
-      "pair": { "analyze": "local", "propose": "local", "validate": "claude" },
-      "brainstorm": { "seed": "local", "diverge": "local", "converge": "claude" }
-      // ... per-agent, per-step provider bindings
+      "pair":      { "propose": { "provider": "anthropic", "model": "claude-sonnet-4-6" } }
+      // per-agent, per-step {provider, model} bindings. Unbound steps fall back
+      // to providers[activeProvider].default.
     }
   }
 }
 ```
 
-VS Code settings: `Ctrl+,` > search "insrc" for all configurable options.
+Cost control is deliberately **not** surfaced in the IDE -- configure spend
+caps directly in each provider's web console (they're the authoritative
+place for rate limits and billing alerts). Switching the active provider
+clears all agent step bindings and the vision default; per-provider blocks
+are preserved so switching back later does not require re-entering anything.
+
+VS Code settings (`Ctrl+,` > "insrc") still cover non-model knobs:
+daemon auto-update source, tool approval settings, tool-category gate, etc.
 
 ## License
 
