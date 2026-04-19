@@ -121,19 +121,10 @@ async function main(): Promise<void> {
   writePid();
   const startedAt = Date.now();
 
-  // 6b. Register delegate handlers. registerDelegate now populates the
-  //     unified tools registry (plans/tools.md stage 3a); the delegate
-  //     registry no longer owns its own map.
-  const { registerDelegate } = await import('./delegates/registry.js');
-  const { webSearchDelegate, claudeWebSearchDelegate, braveWebSearchDelegate } = await import('./delegates/web-search.js');
-  registerDelegate(webSearchDelegate);
-  registerDelegate(claudeWebSearchDelegate);
-  registerDelegate(braveWebSearchDelegate);
-
-  // 6c. Register first-class builtin tools (plans/tools.md stage 5):
-  //     git:*, gh:*, file:*, shell:*, ... plus legacy LLM-name aliases
-  //     (Read, Bash, Grep, graph_search, ...) registered as aliases
-  //     onto the canonical unified ids.
+  // 6b. Register the unified tool set (plans/tools.md stage 5). Covers
+  //     git:*, gh:*, file:*, shell:*, web:*, cloud:*, ... and registers
+  //     legacy LLM-name aliases (Read, Bash, Grep, graph_search, ...)
+  //     onto the canonical unified ids in one pass.
   const { registerBuiltinTools } = await import('./tools/builtins/index.js');
   registerBuiltinTools();
 

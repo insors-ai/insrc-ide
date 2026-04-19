@@ -1,12 +1,9 @@
 /**
  * Unified tool registry.
  *
- * One place to register, look up, and list tools. Both the LLM
- * tool-call path and the controller task path read from this registry.
- *
- * During migration (stage 2-3) the legacy LLM-tools registry
- * (agent/tools/registry.ts) and the delegates registry
- * (daemon/delegates/registry.ts) become thin shims over this one.
+ * One place to register, look up, and list tools. The LLM tool-call
+ * path (agent/tools/executor.ts) and the controller task path (kind:
+ * 'tool') both read from this registry.
  */
 
 import { getLogger } from '../../shared/logger.js';

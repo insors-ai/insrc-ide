@@ -196,20 +196,13 @@ function makeEvaluateTask(index: number, userQuestion: string): Task {
 }
 
 function makeWebSearchTask(index: number, query: string): Task {
-  // plans/tools.md stage 4: emit kind: 'tool' + toolId / toolInput.
-  // Routes through the unified tools executor; approval gate + schema
-  // validation are shared with the LLM tool-call path.
-  const hasBraveKey = !!process.env['BRAVE_API_KEY'];
   return {
     index,
     description: `Web search: ${query.slice(0, 50)}`,
     kind: 'tool',
     intent: 'research',
     stateKey: K.FINDINGS,
-    // With a Brave key we can skip the approval gate; without it, the
-    // Claude-flavored tool gates per query. Both target the same
-    // underlying capability in the unified registry.
-    toolId: hasBraveKey ? 'web-search' : 'web-search:claude',
+    toolId: 'web:search',
     toolInput: { query },
   };
 }

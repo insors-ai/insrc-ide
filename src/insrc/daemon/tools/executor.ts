@@ -2,12 +2,14 @@
  * Unified tool executor.
  *
  * Runs the approval gate (when required), then the tool's execute().
- * Used by both the LLM tool-call path and the controller task path.
+ * Used by the controller task path (kind: 'tool'); the LLM tool-loop
+ * bypasses the gate layer and calls tool.execute() directly because
+ * the tool-loop's Claude/Haiku validator (agent/tools/validator.ts)
+ * handles its own permission checks.
  *
- * Approval flow matches the one formerly inside delegates/registry.ts:
- * Approve / Skip / Edit via channel.registerExternalGate(). Edit loops
- * up to MAX_EDIT_ROUNDS times before giving up to avoid pathological
- * back-and-forth.
+ * Approval flow: Approve / Skip / Edit via
+ * channel.registerExternalGate(). Edit loops up to MAX_EDIT_ROUNDS
+ * before giving up to avoid pathological back-and-forth.
  */
 
 import { getLogger } from '../../shared/logger.js';

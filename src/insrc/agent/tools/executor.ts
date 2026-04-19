@@ -1,16 +1,13 @@
 /**
- * Legacy LLM-tool executor facade.
+ * LLM tool-call executor.
  *
- * Stage 3b: every call dispatches to the unified tool registry.
- * The hardcoded switch statement that used to live here (one `case`
- * per builtin) is gone; the LLM path and the controller path now
- * share a single implementation per tool.
+ * Dispatches every LLM tool call through the unified registry.
+ * Each tool has one implementation shared between the LLM path
+ * (this file) and the controller task path (kind: 'tool').
  *
- * Approval gates live inside each tool's unified execute() and are
- * reached via the unified executeTool() in daemon/tools/executor.ts.
- * The LLM tool-loop bypasses the gate layer (calls tool.execute()
- * directly) because the caller-side validator in loop.ts already
- * handles its own permission flow via Claude/Haiku pre-checks.
+ * The LLM path bypasses the unified approval gate because the
+ * validator layer in agent/tools/validator.ts already handles
+ * permissioning via a separate Claude/Haiku pre-check.
  */
 
 import type { ToolCall, ToolResult } from '../../shared/types.js';

@@ -32,10 +32,8 @@ export type TaskFormat = 'text' | 'markdown' | 'code' | 'table' | 'html' | 'html
 
 /** Task kind determines how the task is executed.
  *
- * `delegate` is kept as a compat alias for `tool` during the
- * plans/tools.md migration; stage 6 removes it.
  */
-export type TaskKind = 'shell' | 'rpc' | 'llm' | 'agent' | 'transform' | 'gate' | 'tool' | 'delegate';
+export type TaskKind = 'shell' | 'rpc' | 'llm' | 'agent' | 'transform' | 'gate' | 'tool';
 
 export interface Task {
   /** Unique index within the pipeline. */
@@ -93,14 +91,10 @@ export interface Task {
   passThrough?: boolean | undefined;
   /** Enable tool loop for LLM tasks — LLM can call tools (Read, Grep, etc.). */
   useToolLoop?: boolean | undefined;
-  /** Tool id to invoke (kind=tool). Alias of delegateTo when kind=delegate. */
+  /** Tool id to invoke (kind=tool). */
   toolId?: string | undefined;
-  /** Input for the tool (kind=tool). Alias of delegateInput when kind=delegate. */
+  /** Input for the tool (kind=tool). */
   toolInput?: Record<string, unknown> | undefined;
-  /** Delegate target handler ID (kind=delegate) -- legacy alias for toolId. */
-  delegateTo?: string | undefined;
-  /** Input for the delegate handler (kind=delegate) -- legacy alias for toolInput. */
-  delegateInput?: unknown | undefined;
 
   // -- Gate customisation --
   /** Custom gate actions. Overrides default approve/reject/edit. */
@@ -980,14 +974,9 @@ async function executeTask(
     case 'agent':
       return executeAgentTask(task, context, deps);
 
-    case 'tool':
-    case 'delegate': {
-      // kind: 'delegate' is kept as a compat alias during the
-      // plans/tools.md migration. Both dispatch to the unified tools
-      // executor; the legacy delegateTo / delegateInput fields fall back
-      // to toolId / toolInput when the new ones are not set.
-      const toolId = task.toolId ?? task.delegateTo ?? '';
-      const toolInput = (task.toolInput ?? task.delegateInput ?? {}) as Record<string, unknown>;
+    case 'tool': {
+      const toolId = task.toolId ?? '';
+      const toolInput = task.toolInput ?? {};
       const { executeTool } = await import('./tools/executor.js');
       const result = await executeTool(toolId, toolInput, {
         session: deps.session,
