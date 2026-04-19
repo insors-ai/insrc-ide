@@ -49,6 +49,33 @@ export function getTool(name: string): Tool | undefined {
   return canonical ? byId.get(canonical) : undefined;
 }
 
+/**
+ * Register an alias for an already-registered tool. Used by the
+ * llm-aliases module to map legacy LLM tool names (Read, Grep, ...)
+ * onto canonical unified ids (file:read, search:grep) without
+ * touching the individual tool definitions.
+ */
+export function registerToolAlias(canonicalId: string, alias: string): void {
+  if (!byId.has(canonicalId)) {
+    log.warn({ canonicalId, alias }, 'registerToolAlias: canonical id not found');
+    return;
+  }
+  if (byId.has(alias)) {
+    log.warn({ alias, canonical: canonicalId }, 'alias collides with an existing tool id');
+    return;
+  }
+  const existing = aliasToId.get(alias);
+  if (existing && existing !== canonicalId) {
+    log.warn({ alias, from: existing, to: canonicalId }, 'alias reassigned');
+  }
+  aliasToId.set(alias, canonicalId);
+}
+
+/** Snapshot of alias -> canonical id bindings for introspection. */
+export function getAliases(): ReadonlyMap<string, string> {
+  return aliasToId;
+}
+
 export function listTools(): Tool[] {
   return Array.from(byId.values());
 }

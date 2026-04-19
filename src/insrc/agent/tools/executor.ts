@@ -1,35 +1,43 @@
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
-import { exec } from 'node:child_process';
-import { dirname, join, relative } from 'node:path';
+/**
+ * Legacy LLM-tool executor facade.
+ *
+ * Stage 3b: every call dispatches to the unified tool registry.
+ * The hardcoded switch statement that used to live here (one `case`
+ * per builtin) is gone; the LLM path and the controller path now
+ * share a single implementation per tool.
+ *
+ * Approval gates live inside each tool's unified execute() and are
+ * reached via the unified executeTool() in daemon/tools/executor.ts.
+ * The LLM tool-loop bypasses the gate layer (calls tool.execute()
+ * directly) because the caller-side validator in loop.ts already
+ * handles its own permission flow via Claude/Haiku pre-checks.
+ */
+
 import type { ToolCall, ToolResult } from '../../shared/types.js';
-import { getTool } from './registry.js';
-import { mcpCall } from './mcp-client.js';
-import { smartRead } from './smart-read.js';
-
-// ---------------------------------------------------------------------------
-// Tool Executor — dispatches tool calls to builtin or MCP backends
-//
-// Builtin tools: Read, Write, Edit, Glob, Grep, Bash, WebSearch, WebFetch
-// MCP tools: graph_*, plan_* → forwarded to daemon via mcpCall()
-// ---------------------------------------------------------------------------
-
-const DEFAULT_BASH_TIMEOUT = 120_000;
+import type { Session } from '../session.js';
+import { getTool as getUnifiedTool } from '../../daemon/tools/registry.js';
+import { translateAliasInput } from '../../daemon/tools/builtins/llm-aliases.js';
+import type { ToolDeps, ToolResult as UnifiedToolResult } from '../../daemon/tools/types.js';
 
 export interface ToolExecContext {
-  /** The user's original prompt (used by SmartRead for intelligent extraction) */
+  /** Session the tool is running inside. Used for repo scoping, closure, etc. */
+  session?: Session | undefined;
+  /** The user's original prompt (kept for smart-read style heuristics). */
   userPrompt?: string | undefined;
-  /** Available context budget in tokens (used by SmartRead for chunk sizing) */
+  /** Available context budget in tokens. */
   contextBudgetTokens?: number | undefined;
-  /** Progress callback sent to IDE */
+  /** Progress callback. Unified tools stream via deps.send; we adapt it here. */
   onProgress?: ((message: string) => void) | undefined;
+  /** Cancellation signal forwarded to tool.execute via deps.signal. */
+  signal?: AbortSignal | undefined;
 }
 
 /**
- * Execute a single tool call and return the result.
- * Never throws — errors are returned as `{ isError: true }` results.
+ * Execute a single LLM tool call and return the legacy ToolResult shape.
+ * Never throws -- errors surface as `{ isError: true, content }`.
  */
 export async function executeTool(call: ToolCall, context?: ToolExecContext): Promise<ToolResult> {
-  const tool = getTool(call.name);
+  const tool = getUnifiedTool(call.name);
   if (!tool) {
     return {
       toolCallId: call.id,
@@ -38,19 +46,11 @@ export async function executeTool(call: ToolCall, context?: ToolExecContext): Pr
     };
   }
 
+  const deps = buildDeps(context);
+  const translatedInput = translateAliasInput(call.name, call.input);
   try {
-    if (tool.backend === 'mcp') {
-      const result = await mcpCall(call.name, call.input);
-      return {
-        toolCallId: call.id,
-        content: result.content,
-        isError: result.isError,
-      };
-    }
-
-    // Builtin tools
-    const content = await executeBuiltin(call, context);
-    return { toolCallId: call.id, content };
+    const result = await tool.execute(translatedInput, deps);
+    return unifiedToLegacy(call.id, result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -62,512 +62,45 @@ export async function executeTool(call: ToolCall, context?: ToolExecContext): Pr
 }
 
 // ---------------------------------------------------------------------------
-// Builtin tool implementations
+// Adapters
 // ---------------------------------------------------------------------------
 
-async function executeBuiltin(call: ToolCall, context?: ToolExecContext): Promise<string> {
-  switch (call.name) {
-    case 'Read': {
-      // Use SmartRead for intelligent extraction when user prompt is available
-      if (context?.userPrompt && !call.input['limit']) {
-        const result = await smartRead(
-          call.input['file_path'] as string,
-          context.userPrompt,
-          context.contextBudgetTokens ?? 4000,
-          undefined,
-          context.onProgress,
-        );
-        return result.content;
+function buildDeps(ctx: ToolExecContext | undefined): ToolDeps {
+  // The unified ToolDeps requires `session`. When the LLM path runs
+  // in a context that does have a session (chat-handler, delegate
+  // agents), the caller plumbs it through. When it doesn't (a few
+  // test harnesses), we fabricate a minimal stand-in that satisfies
+  // tools that ignore session entirely. Tools like graph:search that
+  // actually read `session.closureRepos` will degrade gracefully
+  // because the fabricated session has an empty closure.
+  const session = ctx?.session ?? buildFakeSession();
+  const send = ctx?.onProgress
+    ? (msg: { stream?: string; data?: unknown }) => {
+        const data = msg.data as { message?: string } | undefined;
+        if (data?.message && typeof data.message === 'string') { ctx.onProgress!(data.message); }
       }
-      return builtinRead(call.input);
-    }
-    case 'Write':  return builtinWrite(call.input);
-    case 'Edit':   return builtinEdit(call.input);
-    case 'Glob':   return builtinGlob(call.input);
-    case 'Grep':   return builtinGrep(call.input);
-    case 'Bash':   return builtinBash(call.input);
-    case 'WebSearch': return builtinWebSearch(call.input);
-    case 'WebFetch':  return builtinWebFetch(call.input);
-    case 'ListDirectory': return builtinListDirectory(call.input);
-    case 'FileInfo':      return builtinFileInfo(call.input);
-    case 'TreeView':      return builtinTreeView(call.input);
-    case 'Diff':          return builtinDiff(call.input);
-    case 'GitLog':        return builtinGitLog(call.input);
-    case 'GitBlame':      return builtinGitBlame(call.input);
-    case 'lsp_diagnostics': return lspDiagnostics(call.input);
-    case 'lsp_definitions': return lspDefinitions(call.input);
-    case 'lsp_references': return lspReferences(call.input);
-    case 'lsp_hover': return lspHover(call.input);
-    case 'lsp_symbols': return lspSymbols(call.input);
-    default:
-      throw new Error(`No builtin handler for: ${call.name}`);
-  }
-}
-
-// --- Read ---
-
-async function builtinRead(input: Record<string, unknown>): Promise<string> {
-  const filePath = input['file_path'] as string;
-  if (!filePath) throw new Error('file_path is required');
-
-  const { stat: statAsync } = await import('node:fs/promises');
-  const fileStat = await statAsync(filePath);
-
-  // Directory: list contents with guidance
-  if (fileStat.isDirectory()) {
-    const { readdir } = await import('node:fs/promises');
-    const entries = await readdir(filePath, { withFileTypes: true });
-    const listing = entries.map(e => {
-      const type = e.isDirectory() ? 'dir' : 'file';
-      return `  [${type}] ${e.name}`;
-    }).join('\n');
-    return `[Directory: ${filePath}]\n${entries.length} entries:\n${listing}\n\nThis is a directory, not a file. To proceed, specify which file(s) to read. Ask the user if unclear.`;
-  }
-
-  const content = await readFile(filePath, 'utf-8');
-  const lines = content.split('\n');
-
-  const offset = typeof input['offset'] === 'number' ? input['offset'] : 0;
-  const limit = typeof input['limit'] === 'number' ? input['limit'] : lines.length;
-
-  const slice = lines.slice(offset, offset + limit);
-  return slice.map((line, i) => `${String(offset + i + 1).padStart(6)}→${line}`).join('\n');
-}
-
-// --- Write ---
-
-async function builtinWrite(input: Record<string, unknown>): Promise<string> {
-  const filePath = input['file_path'] as string;
-  const content = input['content'] as string;
-  if (!filePath) throw new Error('file_path is required');
-  if (typeof content !== 'string') throw new Error('content is required');
-
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, content, 'utf-8');
-  return `Wrote ${content.split('\n').length} lines to ${filePath}`;
-}
-
-// --- Edit ---
-
-async function builtinEdit(input: Record<string, unknown>): Promise<string> {
-  const filePath = input['file_path'] as string;
-  const oldString = input['old_string'] as string;
-  const newString = input['new_string'] as string;
-  const replaceAll = input['replace_all'] === true;
-
-  if (!filePath) throw new Error('file_path is required');
-  if (typeof oldString !== 'string') throw new Error('old_string is required');
-  if (typeof newString !== 'string') throw new Error('new_string is required');
-
-  const content = await readFile(filePath, 'utf-8');
-
-  if (!content.includes(oldString)) {
-    throw new Error('old_string not found in file');
-  }
-
-  const updated = replaceAll
-    ? content.replaceAll(oldString, newString)
-    : content.replace(oldString, newString);
-
-  await writeFile(filePath, updated, 'utf-8');
-
-  const oldLines = oldString.split('\n').length;
-  const newLines = newString.split('\n').length;
-  return `Edited ${filePath}: replaced ${oldLines} lines with ${newLines} lines`;
-}
-
-// --- Glob ---
-
-async function builtinGlob(input: Record<string, unknown>): Promise<string> {
-  const pattern = input['pattern'] as string;
-  if (!pattern) throw new Error('pattern is required');
-
-  const cwd = typeof input['path'] === 'string' ? input['path'] : process.cwd();
-
-  // Use find + shell glob matching via bash
-  // Escaping handled by single-quoting the pattern
-  const safePattern = pattern.replace(/'/g, "'\\''");
-  const safeCwd = cwd.replace(/'/g, "'\\''");
-  const output = await runShell(`find '${safeCwd}' -type f -path '*/${safePattern}' 2>/dev/null | head -500 || true`, 10_000)
-    .catch(() => '');
-
-  // If find glob doesn't work well, fall back to recursive readdir + filter
-  if (!output.trim()) {
-    // Simple fallback: list files recursively and filter by extension/name
-    const files = await listFilesRecursive(cwd, pattern);
-    if (files.length === 0) return 'No files found.';
-    return files.join('\n');
-  }
-
-  const matches = output.trim().split('\n').filter(Boolean);
-  matches.sort();
-  if (matches.length === 0) return 'No files found.';
-  return matches.map(f => relative(cwd, f) || f).join('\n');
-}
-
-async function listFilesRecursive(dir: string, pattern: string): Promise<string[]> {
-  // Convert simple glob to regex: *.ts → /\.ts$/, **/*.ts → /\.ts$/
-  const ext = pattern.replace(/\*\*?\/?/g, '');
-  const regex = ext ? new RegExp(ext.replace(/\./g, '\\.') + '$') : null;
-
-  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
-  const results: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const fullPath = join(entry.parentPath ?? dir, entry.name);
-    const relPath = relative(dir, fullPath);
-    if (!regex || regex.test(relPath)) {
-      results.push(relPath);
-    }
-  }
-  results.sort();
-  return results;
-}
-
-// --- Grep ---
-
-async function builtinGrep(input: Record<string, unknown>): Promise<string> {
-  const pattern = input['pattern'] as string;
-  if (!pattern) throw new Error('pattern is required');
-
-  const args = ['rg', '--no-heading', '--line-number'];
-
-  if (typeof input['glob'] === 'string') {
-    args.push('--glob', input['glob'] as string);
-  }
-
-  if (typeof input['include_context'] === 'number') {
-    args.push('-C', String(input['include_context']));
-  }
-
-  args.push('--', pattern);
-
-  const searchPath = typeof input['path'] === 'string' ? input['path'] : '.';
-  args.push(searchPath);
-
-  return runShell(args.join(' '), 30_000);
-}
-
-// --- Bash ---
-
-async function builtinBash(input: Record<string, unknown>): Promise<string> {
-  const command = input['command'] as string;
-  if (!command) throw new Error('command is required');
-
-  const timeout = typeof input['timeout'] === 'number' ? input['timeout'] : DEFAULT_BASH_TIMEOUT;
-  return runShell(command, timeout);
-}
-
-// --- WebSearch ---
-
-async function builtinWebSearch(input: Record<string, unknown>): Promise<string> {
-  const query = input['query'] as string;
-  if (!query) throw new Error('query is required');
-  const limit = typeof input['limit'] === 'number' ? input['limit'] : 5;
-
-  // 1. Try Brave Search API (free, no approval needed)
-  const braveKey = process.env['BRAVE_API_KEY'];
-  if (braveKey) {
-    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${limit}`;
-    const res = await fetch(url, {
-      headers: { 'X-Subscription-Token': braveKey, 'Accept': 'application/json' },
-    });
-    if (!res.ok) {
-      throw new Error(`Brave Search returned ${res.status}: ${res.statusText}`);
-    }
-    const data = await res.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
-    const results = data.web?.results ?? [];
-    if (results.length === 0) return 'No results found.';
-    return results
-      .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`)
-      .join('\n\n');
-  }
-
-  // No Brave key — web search via Claude is handled by the delegate system.
-  // When called from the tool loop (simple completion), just report unavailable.
-  // The research controller uses delegate tasks for web search with proper gating.
-  return '[WebSearch] No BRAVE_API_KEY configured. Web search is available via the research agent which uses Claude with approval.';
-}
-
-// --- WebFetch ---
-
-async function builtinWebFetch(input: Record<string, unknown>): Promise<string> {
-  const url = input['url'] as string;
-  if (!url) throw new Error('url is required');
-
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'insrc-agent/1.0' },
-    signal: AbortSignal.timeout(30_000),
-  });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  }
-
-  const contentType = res.headers.get('content-type') ?? '';
-  const text = await res.text();
-
-  // Truncate very large responses
-  const MAX_LENGTH = 50_000;
-  if (text.length > MAX_LENGTH) {
-    return `[${contentType}] (truncated to ${MAX_LENGTH} chars)\n\n${text.slice(0, MAX_LENGTH)}`;
-  }
-
-  return text;
-}
-
-// ---------------------------------------------------------------------------
-// ListDirectory, FileInfo, TreeView, Diff, GitLog, GitBlame
-// ---------------------------------------------------------------------------
-
-async function builtinListDirectory(input: Record<string, unknown>): Promise<string> {
-  const dirPath = input['path'] as string;
-  if (!dirPath) throw new Error('path is required');
-
-  const entries = await readdir(dirPath, { withFileTypes: true });
-  const lines: string[] = [];
-  for (const entry of entries.slice(0, 200)) {
-    const type = entry.isDirectory() ? 'dir' : 'file';
-    lines.push(`${type}  ${entry.name}`);
-  }
-  if (entries.length > 200) lines.push(`... and ${entries.length - 200} more`);
-  return lines.join('\n') || '(empty directory)';
-}
-
-async function builtinFileInfo(input: Record<string, unknown>): Promise<string> {
-  const filePath = input['file_path'] as string;
-  if (!filePath) throw new Error('file_path is required');
-
-  const { statSync } = await import('node:fs');
-  const stat = statSync(filePath);
-  const content = await readFile(filePath, 'utf-8').catch(() => null);
-  const lineCount = content ? content.split('\n').length : 0;
-  const ext = filePath.split('.').pop() ?? '';
-  const sizeKB = (stat.size / 1024).toFixed(1);
-
-  return [
-    `Path: ${filePath}`,
-    `Size: ${stat.size} bytes (${sizeKB} KB)`,
-    `Lines: ${lineCount}`,
-    `Type: ${stat.isDirectory() ? 'directory' : ext || 'file'}`,
-    `Modified: ${stat.mtime.toISOString()}`,
-  ].join('\n');
-}
-
-async function builtinTreeView(input: Record<string, unknown>): Promise<string> {
-  const rootPath = input['path'] as string;
-  if (!rootPath) throw new Error('path is required');
-
-  const maxDepth = typeof input['depth'] === 'number' ? input['depth'] : 3;
-  const pattern = input['pattern'] as string | undefined;
-  const lines: string[] = [];
-
-  async function walk(dir: string, prefix: string, depth: number): Promise<void> {
-    if (depth > maxDepth) return;
-    const entries = await readdir(dir, { withFileTypes: true });
-    const filtered = pattern
-      ? entries.filter(e => e.isDirectory() || new RegExp(pattern.replace(/\*/g, '.*')).test(e.name))
-      : entries;
-
-    for (let i = 0; i < filtered.length && lines.length < 500; i++) {
-      const entry = filtered[i]!;
-      const isLast = i === filtered.length - 1;
-      const connector = isLast ? '└── ' : '├── ';
-      const childPrefix = isLast ? '    ' : '│   ';
-      lines.push(`${prefix}${connector}${entry.name}${entry.isDirectory() ? '/' : ''}`);
-      if (entry.isDirectory()) {
-        await walk(join(dir, entry.name), prefix + childPrefix, depth + 1);
-      }
-    }
-  }
-
-  lines.push(rootPath.split('/').pop() ?? rootPath);
-  await walk(rootPath, '', 1);
-  if (lines.length >= 500) lines.push('... (truncated at 500 entries)');
-  return lines.join('\n');
-}
-
-async function builtinDiff(input: Record<string, unknown>): Promise<string> {
-  const fileA = input['file_a'] as string;
-  if (!fileA) throw new Error('file_a is required');
-
-  const fileB = input['file_b'] as string | undefined;
-  const context = typeof input['context'] === 'number' ? input['context'] : 3;
-
-  if (fileB) {
-    // Diff two files
-    return runShell(`diff -u --label "${fileA}" --label "${fileB}" "${fileA}" "${fileB}" | head -100`, 10_000)
-      .catch(() => '(files are identical)');
-  }
-  // Git diff for a single file
-  return runShell(`git diff -U${context} -- "${fileA}" | head -200`, 10_000)
-    .catch(() => runShell(`git diff HEAD -- "${fileA}" | head -200`, 10_000))
-    .catch(() => '(no git changes)');
-}
-
-async function builtinGitLog(input: Record<string, unknown>): Promise<string> {
-  const path = input['path'] as string;
-  if (!path) throw new Error('path is required');
-
-  const limit = typeof input['limit'] === 'number' ? input['limit'] : 10;
-  const oneline = input['oneline'] !== false;
-
-  const format = oneline ? '--oneline' : '--format="%h %ad %an: %s" --date=short';
-  return runShell(`git log ${format} -${limit} -- "${path}" 2>/dev/null`, 10_000)
-    .catch(() => '(not a git repository or no history)');
-}
-
-async function builtinGitBlame(input: Record<string, unknown>): Promise<string> {
-  const filePath = input['file_path'] as string;
-  if (!filePath) throw new Error('file_path is required');
-
-  const startLine = typeof input['start_line'] === 'number' ? input['start_line'] : undefined;
-  const endLine = typeof input['end_line'] === 'number' ? input['end_line'] : undefined;
-
-  const lineRange = startLine && endLine ? `-L ${startLine},${endLine}` : startLine ? `-L ${startLine},+20` : '';
-  return runShell(`git blame --date=short ${lineRange} "${filePath}" 2>/dev/null | head -50`, 10_000)
-    .catch(() => '(not a git repository)');
-}
-
-// ---------------------------------------------------------------------------
-// LSP tools — query IDE's language services via registered callback
-// Falls back to daemon-side knowledge graph when IDE is not connected.
-// ---------------------------------------------------------------------------
-
-// Callback set by the IDE bridge when connected
-let _lspCallback: ((method: string, params: Record<string, unknown>) => Promise<unknown>) | null = null;
-
-/** Register the LSP callback (called by the daemon when IDE connects) */
-export function registerLSPCallback(cb: (method: string, params: Record<string, unknown>) => Promise<unknown>): void {
-  _lspCallback = cb;
-}
-
-async function lspDiagnostics(input: Record<string, unknown>): Promise<string> {
-  if (!_lspCallback) {
-    // Fallback: run tsc/eslint check via shell
-    const filePath = input['file_path'] as string | undefined;
-    if (filePath) {
-      try {
-        const result = await runShell(`npx tsc --noEmit --pretty false "${filePath}" 2>&1 | head -50`, 30_000);
-        return result || 'No diagnostics found.';
-      } catch {
-        return 'LSP not available and tsc check failed. Open the file in the IDE to get diagnostics.';
-      }
-    }
-    return 'LSP not available. Open files in the IDE to get diagnostics.';
-  }
-  const result = await _lspCallback('getDiagnostics', {
-    filePath: input['file_path'],
-    severity: input['severity'],
-  });
-  const diags = result as Array<Record<string, unknown>>;
-  if (!diags || diags.length === 0) return 'No diagnostics found.';
-  return diags.map(d =>
-    `${d['severity']} ${d['file']}:${d['startLine']}:${d['startColumn']}: ${d['message']}${d['code'] ? ` [${d['code']}]` : ''}`
-  ).join('\n');
-}
-
-async function lspDefinitions(input: Record<string, unknown>): Promise<string> {
-  if (!_lspCallback) {
-    // Fallback: use grep to find definition
-    const filePath = input['file_path'] as string;
-    const line = input['line'] as number;
-    try {
-      const content = await readFile(filePath, 'utf-8');
-      const lines = content.split('\n');
-      const targetLine = lines[line - 1] ?? '';
-      // Extract word at approximate column
-      const col = (input['column'] as number) ?? 1;
-      const wordMatch = targetLine.substring(col - 1).match(/^(\w+)/);
-      const word = wordMatch?.[1] ?? '';
-      if (word) {
-        const result = await runShell(`rg --line-number "\\b(class|interface|function|const|let|var|type|export)\\s+${word}\\b" "${dirname(filePath)}" -l --max-count=5 2>/dev/null | head -10`, 10_000);
-        return result || `Could not find definition of "${word}". Try opening the file in the IDE.`;
-      }
-    } catch { /* fallthrough */ }
-    return 'LSP not available. Open the file in the IDE for go-to-definition.';
-  }
-  const result = await _lspCallback('getDefinitions', input);
-  const locs = result as Array<Record<string, unknown>>;
-  if (!locs || locs.length === 0) return 'No definition found.';
-  return locs.map(l => `${l['file']}:${l['startLine']}:${l['startColumn']}`).join('\n');
-}
-
-async function lspReferences(input: Record<string, unknown>): Promise<string> {
-  if (!_lspCallback) {
-    const filePath = input['file_path'] as string;
-    const line = input['line'] as number;
-    try {
-      const content = await readFile(filePath, 'utf-8');
-      const lines = content.split('\n');
-      const targetLine = lines[line - 1] ?? '';
-      const col = (input['column'] as number) ?? 1;
-      const wordMatch = targetLine.substring(col - 1).match(/^(\w+)/);
-      const word = wordMatch?.[1] ?? '';
-      if (word) {
-        const result = await runShell(`rg --line-number "\\b${word}\\b" "${dirname(filePath)}" --max-count=20 2>/dev/null | head -20`, 10_000);
-        return result || `No references found for "${word}".`;
-      }
-    } catch { /* fallthrough */ }
-    return 'LSP not available. Open the file in the IDE for find-references.';
-  }
-  const result = await _lspCallback('getReferences', input);
-  const refs = result as Array<Record<string, unknown>>;
-  if (!refs || refs.length === 0) return 'No references found.';
-  return refs.map(r => `${r['file']}:${r['startLine']}:${r['startColumn']}`).join('\n');
-}
-
-async function lspHover(input: Record<string, unknown>): Promise<string> {
-  if (!_lspCallback) {
-    return 'LSP hover not available. Open the file in the IDE for type information.';
-  }
-  const result = await _lspCallback('getHover', input);
-  return (result as string) || 'No hover information available.';
-}
-
-async function lspSymbols(input: Record<string, unknown>): Promise<string> {
-  if (!_lspCallback) {
-    // Fallback: parse file for declarations
-    const filePath = input['file_path'] as string;
-    try {
-      const result = await runShell(`rg --line-number "^(export\\s+)?(class|interface|function|const|let|type|enum)\\s+\\w+" "${filePath}" 2>/dev/null | head -30`, 10_000);
-      return result || 'No symbols found.';
-    } catch { /* fallthrough */ }
-    return 'LSP not available.';
-  }
-  const result = await _lspCallback('getDocumentSymbols', input);
-  const symbols = result as Array<Record<string, unknown>>;
-  if (!symbols || symbols.length === 0) return 'No symbols found.';
-  const formatSymbol = (s: Record<string, unknown>, indent = 0): string => {
-    const prefix = '  '.repeat(indent);
-    let line = `${prefix}${s['kind']} ${s['name']} (line ${s['startLine']}-${s['endLine']})`;
-    const children = s['children'] as Array<Record<string, unknown>> | undefined;
-    if (children && children.length > 0) {
-      line += '\n' + children.map(c => formatSymbol(c, indent + 1)).join('\n');
-    }
-    return line;
+    : () => { /* no-op */ };
+  return {
+    session,
+    send,
+    requestId: 0,
+    ...(ctx?.signal ? { signal: ctx.signal } : {}),
   };
-  return symbols.map(s => formatSymbol(s)).join('\n');
 }
 
-// ---------------------------------------------------------------------------
-// Shell helper
-// ---------------------------------------------------------------------------
+function buildFakeSession(): Session {
+  // We intentionally return an object that matches the shape Session
+  // consumers within tools rely on (repoPath, closureRepos). Anything
+  // else is left as a runtime-only stub; tools that depend on richer
+  // session state simply won't work from this degraded path.
+  const stub = { repoPath: '', closureRepos: [] as string[] };
+  return stub as unknown as Session;
+}
 
-function runShell(command: string, timeout: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    exec(command, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err && !stdout && !stderr) {
-        reject(new Error(err.message));
-        return;
-      }
-      // Include both stdout and stderr, plus exit code on error
-      let output = stdout;
-      if (stderr) output += (output ? '\n' : '') + stderr;
-      if (err && 'code' in err) {
-        output += `\n[exit code: ${(err as NodeJS.ErrnoException & { code: number }).code}]`;
-      }
-      resolve(output || '(no output)');
-    });
-  });
+function unifiedToLegacy(toolCallId: string, result: UnifiedToolResult): ToolResult {
+  return {
+    toolCallId,
+    content: result.output,
+    isError: !result.success,
+  };
 }

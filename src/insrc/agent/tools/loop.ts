@@ -6,6 +6,7 @@ import type {
   ToolResult,
   ToolDefinition,
 } from '../../shared/types.js';
+import type { Session } from '../session.js';
 import { executeTool, type ToolExecContext } from './executor.js';
 import { validateToolCall, type ValidationResult } from './validator.js';
 
@@ -51,6 +52,8 @@ export interface ToolLoopOpts {
   userPrompt?: string | undefined;
   /** Progress callback for tool execution updates */
   onProgress?: ((message: string) => void) | undefined;
+  /** Session used by tools that scope to the active repo (graph queries, etc.) */
+  session?: Session | undefined;
 }
 
 export interface ToolLoopResult {
@@ -157,6 +160,7 @@ export async function runToolLoop(
       const execCtx: ToolExecContext = {
         userPrompt: opts.userPrompt,
         onProgress: opts.onProgress,
+        ...(opts.session ? { session: opts.session } : {}),
       };
       let result = await executeTool(call, execCtx);
 

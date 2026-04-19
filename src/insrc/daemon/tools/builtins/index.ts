@@ -22,6 +22,7 @@ import { registerPkgTools } from './pkg/index.js';
 import { registerWebTools } from './web/index.js';
 import { registerGraphTools } from './graph/index.js';
 import { registerPlanTools } from './plan/index.js';
+import { registerLlmAliases } from './llm-aliases.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
@@ -40,4 +41,5 @@ export function registerBuiltinTools(): void {
   registerWebTools();
   registerGraphTools();
   registerPlanTools();
+  registerLlmAliases();
 }

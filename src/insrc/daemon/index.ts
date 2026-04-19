@@ -130,14 +130,10 @@ async function main(): Promise<void> {
   registerDelegate(claudeWebSearchDelegate);
   registerDelegate(braveWebSearchDelegate);
 
-  // 6c. Register legacy LLM tools (Read, Bash, Grep, ...) as adapters in
-  //     the unified registry (plans/tools.md stage 2). Stage 3b will
-  //     fold the agent/tools executor to route through here.
-  const { registerLegacyAdapters } = await import('./tools/legacy-adapters.js');
-  registerLegacyAdapters();
-
-  // 6d. Register first-class builtin tools (plans/tools.md stage 5):
-  //     git:*, gh:*, file:*, shell:*, ... -- one domain at a time.
+  // 6c. Register first-class builtin tools (plans/tools.md stage 5):
+  //     git:*, gh:*, file:*, shell:*, ... plus legacy LLM-name aliases
+  //     (Read, Bash, Grep, graph_search, ...) registered as aliases
+  //     onto the canonical unified ids.
   const { registerBuiltinTools } = await import('./tools/builtins/index.js');
   registerBuiltinTools();
 
