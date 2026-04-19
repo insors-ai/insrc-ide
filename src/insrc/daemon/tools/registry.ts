@@ -7,6 +7,7 @@
  */
 
 import { getLogger } from '../../shared/logger.js';
+import { getToolSettings } from './config.js';
 import type { Tool } from './types.js';
 
 const log = getLogger('tools-registry');
@@ -41,9 +42,19 @@ export function registerTool(tool: Tool): void {
 /** Resolve a name to a canonical Tool. Honors aliases. */
 export function getTool(name: string): Tool | undefined {
   const direct = byId.get(name);
-  if (direct) { return direct; }
-  const canonical = aliasToId.get(name);
-  return canonical ? byId.get(canonical) : undefined;
+  const tool = direct ?? (aliasToId.get(name) ? byId.get(aliasToId.get(name)!) : undefined);
+  if (!tool) { return undefined; }
+
+  // Category gate: if the current settings snapshot has the tool's
+  // category disabled, pretend the tool is unregistered. The startup
+  // registration still populates everything (defaults are all
+  // enabled); the gate fires at lookup time so IDE-pushed changes
+  // take effect without a daemon restart.
+  const category = tool.id.split(':', 1)[0] ?? '';
+  if (category && !getToolSettings().enabledCategories.includes(category)) {
+    return undefined;
+  }
+  return tool;
 }
 
 /**

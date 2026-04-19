@@ -730,6 +730,20 @@ async function main(): Promise<void> {
       return { ok: true };
     },
 
+    // Tool settings snapshot -- pushed by the IDE on connect and on
+    // settings changes. Daemon holds the snapshot in memory; tools
+    // and the tool-loop read via getToolSettings().
+    'tools.config.set': async (params) => {
+      const { updateToolSettings } = await import('./tools/config.js');
+      const next = updateToolSettings((params ?? {}) as Record<string, unknown>);
+      return { ok: true, settings: next };
+    },
+
+    'tools.config.get': async () => {
+      const { getToolSettings } = await import('./tools/config.js');
+      return getToolSettings();
+    },
+
     // Chat session management (standard handlers)
     'chat.start':  chatStart,
     'chat.reply':  chatReply,

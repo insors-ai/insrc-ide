@@ -11,6 +11,7 @@
  */
 
 import { runShell, type ShellResult } from '../../shell-helper.js';
+import { getToolSettings } from '../../config.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
 
 export interface ShellExecData {
@@ -22,6 +23,9 @@ export interface ShellExecData {
   durationMs: number;
 }
 
+// NOTE: DEFAULT_TIMEOUT_MS is a fallback constant used only when the
+// tool settings snapshot isn't available. The real default comes from
+// insrc.tools.shell.defaultTimeoutMs (pushed from the IDE).
 const DEFAULT_TIMEOUT_MS = 120_000;   // 2 min
 const MAX_TIMEOUT_MS = 600_000;       // 10 min hard cap
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;  // 1 MB
@@ -55,7 +59,8 @@ export const shellExecTool: Tool = {
     const cwd = String(input['cwd'] ?? process.cwd());
     const argv = Array.isArray(input['argv']) ? (input['argv'] as unknown[]).map(String) : [];
     const command = String(input['command'] ?? '');
-    const timeoutMs = typeof input['timeoutMs'] === 'number' ? input['timeoutMs'] : DEFAULT_TIMEOUT_MS;
+    const configDefault = getToolSettings().shell.defaultTimeoutMs;
+    const timeoutMs = typeof input['timeoutMs'] === 'number' ? input['timeoutMs'] : configDefault;
     const usesShell = argv.length === 0 && !!command;
 
     const lines: string[] = [];
@@ -99,7 +104,7 @@ export const shellExecTool: Tool = {
     const command = typeof input['command'] === 'string' ? input['command'] : '';
     const extraEnv = input['env'] && typeof input['env'] === 'object' ? input['env'] as Record<string, string> : undefined;
     const timeoutMs = Math.min(
-      typeof input['timeoutMs'] === 'number' ? input['timeoutMs'] : DEFAULT_TIMEOUT_MS,
+      typeof input['timeoutMs'] === 'number' ? input['timeoutMs'] : getToolSettings().shell.defaultTimeoutMs,
       MAX_TIMEOUT_MS,
     );
     const maxBytes = Math.min(

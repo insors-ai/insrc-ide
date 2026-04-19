@@ -15,13 +15,12 @@
 import { getLogger } from '../../shared/logger.js';
 import type { GateAction, ReplyPayload } from '../../agent/framework/types.js';
 import { getTool } from './registry.js';
+import { getToolSettings } from './config.js';
 import type {
   Tool, ToolDeps, ToolInput, ToolResult, ToolApprovalGate,
 } from './types.js';
 
 const log = getLogger('tools-executor');
-
-const MAX_EDIT_ROUNDS = 5;
 
 const DEFAULT_APPROVAL_ACTIONS: GateAction[] = [
   { name: 'approve', label: 'Approve' },
@@ -96,7 +95,8 @@ async function runApprovalGate(
   }
 
   let current = input;
-  for (let attempt = 0; attempt < MAX_EDIT_ROUNDS; attempt++) {
+  const maxRounds = getToolSettings().approval.maxEditRounds;
+  for (let attempt = 0; attempt < maxRounds; attempt++) {
     const gate: ToolApprovalGate = tool.buildApprovalGate
       ? await tool.buildApprovalGate(current)
       : {

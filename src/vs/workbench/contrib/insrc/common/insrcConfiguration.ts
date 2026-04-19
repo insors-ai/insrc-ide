@@ -150,5 +150,106 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.routing.mode', 'LLM routing mode.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+
+		// -- Tools: category gate --
+		'insrc.tools.enabledCategories': {
+			type: 'array',
+			items: { type: 'string' },
+			default: [
+				'file', 'shell', 'search', 'git', 'gh',
+				'ssh', 'http', 'k8s', 'cloud', 'diff',
+				'notify', 'test', 'pkg', 'web', 'graph', 'plan',
+			],
+			description: localize('insrc.tools.enabledCategories', 'Whitelist of tool categories the agent can invoke. Tools outside this list are unregistered at daemon startup. Use to restrict the agent in compliance-sensitive projects.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
+		// -- Tools: approval gate UX --
+		'insrc.tools.approval.defaultAction': {
+			type: 'string',
+			default: 'skip',
+			enum: ['approve', 'skip'],
+			enumDescriptions: [
+				localize('insrc.tools.approval.defaultAction.approve', 'Auto-approve when the gate times out (risky).'),
+				localize('insrc.tools.approval.defaultAction.skip', 'Auto-skip when the gate times out (safe default).'),
+			],
+			description: localize('insrc.tools.approval.defaultAction', 'Action used when an approval gate is dismissed without an explicit response.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.approval.maxEditRounds': {
+			type: 'number',
+			default: 5, minimum: 1, maximum: 20,
+			description: localize('insrc.tools.approval.maxEditRounds', 'How many times the user can edit a tool\'s input before the executor gives up.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.approval.showStructuredDiff': {
+			type: 'boolean',
+			default: true,
+			description: localize('insrc.tools.approval.showStructuredDiff', 'Show rendered diff/command previews in the gate. Disable for pure-text previews.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
+		// -- Tools: LLM tool-call loop --
+		'insrc.tools.loop.maxIterations': {
+			type: 'number',
+			default: 25, minimum: 1, maximum: 200,
+			description: localize('insrc.tools.loop.maxIterations', 'Maximum tool-call iterations per agent turn before the loop gives up.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.loop.maxNudges': {
+			type: 'number',
+			default: 3, minimum: 0, maximum: 10,
+			description: localize('insrc.tools.loop.maxNudges', 'How many times the loop re-prompts the LLM if it described a tool action without calling one.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
+		// -- Tools: output capture --
+		'insrc.tools.output.inlineMaxChars': {
+			type: 'number',
+			default: 12000, minimum: 1024, maximum: 1000000,
+			description: localize('insrc.tools.output.inlineMaxChars', 'Tool outputs under this many characters are returned inline. Larger outputs spill to a temp file and get SmartRead-chunked.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.output.retainSpills': {
+			type: 'boolean',
+			default: false,
+			description: localize('insrc.tools.output.retainSpills', 'Keep tool-output spill files in /tmp/.insrc/tool-output after the session closes.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
+		// -- Tools: shell / detached runtime caps --
+		'insrc.tools.shell.defaultTimeoutMs': {
+			type: 'number',
+			default: 120000, minimum: 1000,
+			description: localize('insrc.tools.shell.defaultTimeoutMs', 'Default timeout for one-shot shell:exec calls (ms). Per-call timeoutMs still wins.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.tools.shell.detachedMaxRuntimeMs': {
+			type: 'number',
+			default: 1800000, minimum: 1000,
+			description: localize('insrc.tools.shell.detachedMaxRuntimeMs', 'Hard cap for streaming tools (shell:exec-detached, ssh:exec-detached, k8s:logs follow, k8s:port-forward).'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
+		// -- Tools: web:search secret source --
+		'insrc.tools.web.braveApiKeySource': {
+			type: 'string',
+			default: 'env',
+			enum: ['env', 'keychain'],
+			enumDescriptions: [
+				localize('insrc.tools.web.braveApiKeySource.env', 'Read BRAVE_API_KEY from the daemon process environment.'),
+				localize('insrc.tools.web.braveApiKeySource.keychain', 'Read the key from the IDE secret store (set via the `insrc: Set Brave API Key` command).'),
+			],
+			description: localize('insrc.tools.web.braveApiKeySource', 'Where web:search looks for the Brave API key.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+
+		// -- Tools: destructive-op double-confirm --
+		'insrc.tools.destructive.requireDoubleConfirm': {
+			type: 'boolean',
+			default: false,
+			description: localize('insrc.tools.destructive.requireDoubleConfirm', 'Show an additional confirmation dialog for destructive tool calls (terminate, drop, recursive delete) even after the in-band confirmation token.'),
+			scope: ConfigurationScope.MACHINE,
+		},
 	},
 });

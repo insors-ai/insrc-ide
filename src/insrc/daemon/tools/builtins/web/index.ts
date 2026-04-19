@@ -12,6 +12,8 @@
 
 import { fetch as undiciFetch } from 'undici';
 import { registerTool } from '../../registry.js';
+import { getToolSettings } from '../../config.js';
+import { getKey } from '../../../../shared/keystore.js';
 import type { Tool, ToolInput, ToolResult } from '../../types.js';
 
 function str(input: ToolInput, key: string): string | undefined {
@@ -61,11 +63,22 @@ export const webSearchTool: Tool = {
     const query = str(input, 'query');
     if (!query) { return fail('web:search', 'query required'); }
     const limit = num(input, 'limit') ?? 5;
-    const key = process.env['BRAVE_API_KEY'];
+    const keySource = getToolSettings().web.braveApiKeySource;
+    let key: string | undefined;
+    if (keySource === 'keychain') {
+      const stored = await getKey('brave');
+      if (stored) { key = stored; }
+    }
+    if (!key) {
+      key = process.env['BRAVE_API_KEY'];
+    }
     if (!key) {
       const data: WebSearchData = { query, limit, provider: 'unavailable', results: [] };
+      const hint = keySource === 'keychain'
+        ? 'Set the key via the `insrc: Set Brave API Key` command (stores to OS keychain under account `brave`).'
+        : 'Set BRAVE_API_KEY in the daemon process environment.';
       return {
-        output: 'web:search unavailable: no BRAVE_API_KEY configured. The research agent has a Claude-backed path with approval gating.',
+        output: `web:search unavailable: no Brave API key found (source=${keySource}). ${hint}`,
         format: 'markdown', success: false, error: 'BRAVE_API_KEY missing',
         data,
       };

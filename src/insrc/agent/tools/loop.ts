@@ -9,6 +9,7 @@ import type {
 import type { Session } from '../session.js';
 import { executeTool, type ToolExecContext } from './executor.js';
 import { validateToolCall, type ValidationResult } from './validator.js';
+import { getToolSettings } from '../../daemon/tools/config.js';
 
 // ---------------------------------------------------------------------------
 // Tool Loop Runner
@@ -18,14 +19,9 @@ import { validateToolCall, type ValidationResult } from './validator.js';
 //   2. If LLM returns tool_use → validate → execute → append results → re-prompt
 //   3. Repeat until LLM returns end_turn or max iterations
 //
-// From design/agent.html:
-//   - Read-only tools auto-execute (no validation cost)
-//   - Mutating tools require Claude/Haiku validation before execution
-//   - Max 25 iterations per turn to prevent runaway loops
+// Iteration / nudge / spill thresholds live in the tool settings
+// snapshot so the IDE can tune them without a daemon rebuild.
 // ---------------------------------------------------------------------------
-
-const MAX_ITERATIONS = 25;
-const MAX_NUDGES = 3;
 
 export interface ToolLoopOpts {
   /** The LLM provider to use for completions */
@@ -87,7 +83,8 @@ export async function runToolLoop(
   let iterations = 0;
   let nudgeCount = 0;
 
-  while (iterations < MAX_ITERATIONS) {
+  const { maxIterations, maxNudges } = getToolSettings().loop;
+  while (iterations < maxIterations) {
     // Call LLM with tool definitions — stream text via onToken if callback provided
     const completionOpts: { tools: ToolDefinition[]; maxTokens?: number; onToken?: (t: string) => void } = { tools };
     if (opts.maxTokens !== undefined) completionOpts.maxTokens = opts.maxTokens;
@@ -120,7 +117,7 @@ export async function runToolLoop(
       ) || /\b(check|read|look at|examine|list|search|find|grep|scan)\b.*\b(file|directory|folder|log|path|content)\b/i.test(lastSentence);
       const isFutureTense = /\b(let me|i'll|i will|i need to|i should|i can|going to)\b/i.test(lastSentence);
 
-      if (referencesTool && isFutureTense && nudgeCount < MAX_NUDGES) {
+      if (referencesTool && isFutureTense && nudgeCount < maxNudges) {
         // LLM's final sentence describes a tool action it didn't take
         workingMessages.push({ role: 'assistant', content: finalResponse });
         workingMessages.push({ role: 'user', content: 'You described an action but did not call a tool. Use the available tools to perform it now.' });
@@ -177,12 +174,12 @@ export async function runToolLoop(
     producedMessages.push({ role: 'assistant', content: assistantContent });
 
     // Append tool results — large outputs spill to temp file and get SmartRead-chunked
-    const MAX_INLINE_CHARS = 12_000; // ~4K tokens inline, larger goes to temp file
+    const inlineMaxChars = getToolSettings().output.inlineMaxChars;
     const resultContent = (await Promise.all(toolResults
       .map(async r => {
         const prefix = r.isError ? '[error] ' : '';
         let content = r.content;
-        if (content.length > MAX_INLINE_CHARS) {
+        if (content.length > inlineMaxChars) {
           // Spill to temp file, then SmartRead it
           const { writeFileSync, mkdirSync } = await import('node:fs');
           const { join } = await import('node:path');
@@ -227,7 +224,7 @@ export async function runToolLoop(
     finalResponse = '';
   }
 
-  const hitLimit = iterations >= MAX_ITERATIONS;
+  const hitLimit = iterations >= maxIterations;
   if (hitLimit && !finalResponse) {
     finalResponse = '[max tool iterations reached]';
     producedMessages.push({ role: 'assistant', content: finalResponse });

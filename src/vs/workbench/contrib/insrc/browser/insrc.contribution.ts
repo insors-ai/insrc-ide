@@ -51,6 +51,10 @@ registerWorkbenchContribution2(InsrcAnnotationContribution.ID, InsrcAnnotationCo
 import { InsrcLSPToolBridge } from './lspToolBridge.js';
 registerWorkbenchContribution2(InsrcLSPToolBridge.ID, InsrcLSPToolBridge, WorkbenchPhase.AfterRestored);
 
+// Tool settings bridge: pushes insrc.tools.* settings to daemon on connect + change
+import { InsrcToolSettingsBridge } from './toolSettingsBridge.js';
+registerWorkbenchContribution2(InsrcToolSettingsBridge.ID, InsrcToolSettingsBridge, WorkbenchPhase.AfterRestored);
+
 // Setup wizard: EditorPane for first-run onboarding
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor } from '../../../browser/editor.js';
