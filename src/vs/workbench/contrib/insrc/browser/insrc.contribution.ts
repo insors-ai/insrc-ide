@@ -9,6 +9,12 @@ import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/
 // every insrc pane). Loaded once at contribution registration.
 import './media/insrc-shared.css';
 
+// Heroicons outline overrides for selected codicons. Unmapped codicons
+// keep the stock codicon font glyph (fallback via CSS). Regenerate
+// `insrc-icons.css` with `node scripts/build-insrc-icons.mjs` after
+// editing `scripts/insrc-icons-map.json`.
+import './media/insrc-icons.css';
+
 // Service interfaces (common layer - browser safe)
 import '../common/daemonService.js';
 import '../common/sessionService.js';
