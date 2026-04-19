@@ -10,17 +10,22 @@
  * Stage 3 will add OpenAI / Gemini / Mistral branches.
  */
 
-import type { AgentConfig, LLMProvider, ProviderName, StepBinding } from '../../shared/types.js';
-import { ClaudeProvider } from './claude.js';
+import type {
+  AgentConfig, CloudProviderName, LLMProvider, ProviderName, StepBinding,
+} from '../../shared/types.js';
+import { AnthropicProvider } from './anthropic.js';
 import { OllamaProvider } from './ollama.js';
+import { OpenAIProvider } from './openai.js';
+import { GeminiProvider } from './gemini.js';
+import { MistralProvider } from './mistral.js';
 
 export function buildProvider(binding: StepBinding, cfg: AgentConfig): LLMProvider {
   switch (binding.provider) {
-    case 'local':    return buildLocal(binding, cfg);
-    case 'anthropic':return buildAnthropic(binding, cfg);
-    case 'openai':   throw new Error('OpenAI provider not yet wired (stage 3).');
-    case 'gemini':   throw new Error('Gemini provider not yet wired (stage 3).');
-    case 'mistral':  throw new Error('Mistral provider not yet wired (stage 3).');
+    case 'local':     return buildLocal(binding, cfg);
+    case 'anthropic': return buildCloud('anthropic', binding, cfg);
+    case 'openai':    return buildCloud('openai', binding, cfg);
+    case 'gemini':    return buildCloud('gemini', binding, cfg);
+    case 'mistral':   return buildCloud('mistral', binding, cfg);
     default: {
       const unknown: never = binding.provider;
       throw new Error(`Unknown provider: ${String(unknown)}`);
@@ -36,17 +41,19 @@ function buildLocal(binding: StepBinding, cfg: AgentConfig): LLMProvider {
   return new OllamaProvider(model, local.host, numCtx);
 }
 
-function buildAnthropic(binding: StepBinding, cfg: AgentConfig): LLMProvider {
-  const anthropic = cfg.models.providers.anthropic;
-  const model = binding.model ?? anthropic.default;
+function buildCloud(name: CloudProviderName, binding: StepBinding, cfg: AgentConfig): LLMProvider {
+  const provider = cfg.models.providers[name];
+  const model = binding.model ?? provider.default;
   if (!model) {
-    throw new Error('Anthropic requested but no model specified and no default configured.');
+    throw new Error(`${name} requested but no model specified and no default configured.`);
   }
-  const apiKey = cfg.keys.anthropic;
-  return new ClaudeProvider({
-    model,
-    ...(apiKey ? { apiKey } : {}),
-  });
+  const apiKey = cfg.keys[name];
+  switch (name) {
+    case 'anthropic': return new AnthropicProvider({ model, ...(apiKey ? { apiKey } : {}) });
+    case 'openai':    return new OpenAIProvider({ model, ...(apiKey ? { apiKey } : {}) });
+    case 'gemini':    return new GeminiProvider({ model, ...(apiKey ? { apiKey } : {}) });
+    case 'mistral':   return new MistralProvider({ model, ...(apiKey ? { apiKey } : {}) });
+  }
 }
 
 // Exported so callers that want to introspect can ask the factory
@@ -56,7 +63,7 @@ function buildAnthropic(binding: StepBinding, cfg: AgentConfig): LLMProvider {
 export function providerAvailable(provider: ProviderName, cfg: AgentConfig): boolean {
   if (provider === 'local') return true;
   const cloud = cfg.models.providers[provider];
-  if (!cfg.keys[provider]) return false;
+  if (!cfg.keys[provider as CloudProviderName]) return false;
   if (cloud.enabled.length === 0) return false;
   return cloud.default !== null;
 }

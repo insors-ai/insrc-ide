@@ -61,14 +61,14 @@ async function cmdRun(files: string[], opts: RunOpts): Promise<void> {
     const { runAgent } = await import('../../agent/framework/runner.js');
     const { TestChannel } = await import('../../agent/framework/test-channel.js');
     const { OllamaProvider } = await import('../../agent/providers/ollama.js');
-    const { ClaudeProvider } = await import('../../agent/providers/claude.js');
+    const { AnthropicProvider } = await import('../../agent/providers/anthropic.js');
     const { buildProvider } = await import('../../agent/providers/factory.js');
     const { loadConfig, ProviderResolver } = await import('../../agent/config.js');
 
     const config = loadConfig();
     const ollamaProvider = buildProvider({ provider: 'local' }, config) as InstanceType<typeof OllamaProvider>;
     const claudeProvider = config.keys.anthropic
-      ? buildProvider({ provider: 'anthropic' }, config) as InstanceType<typeof ClaudeProvider>
+      ? buildProvider({ provider: 'anthropic' }, config) as InstanceType<typeof AnthropicProvider>
       : null;
     const resolver = new ProviderResolver(config, ollamaProvider, claudeProvider);
 
@@ -149,14 +149,14 @@ async function cmdPlan(files: string[], opts: PlanOpts): Promise<void> {
     const { runAgent } = await import('../../agent/framework/runner.js');
     const { TestChannel } = await import('../../agent/framework/test-channel.js');
     const { OllamaProvider } = await import('../../agent/providers/ollama.js');
-    const { ClaudeProvider } = await import('../../agent/providers/claude.js');
+    const { AnthropicProvider } = await import('../../agent/providers/anthropic.js');
     const { buildProvider } = await import('../../agent/providers/factory.js');
     const { loadConfig, ProviderResolver } = await import('../../agent/config.js');
 
     const config = loadConfig();
     const ollamaProvider = buildProvider({ provider: 'local' }, config) as InstanceType<typeof OllamaProvider>;
     const claudeProvider = config.keys.anthropic
-      ? buildProvider({ provider: 'anthropic' }, config) as InstanceType<typeof ClaudeProvider>
+      ? buildProvider({ provider: 'anthropic' }, config) as InstanceType<typeof AnthropicProvider>
       : null;
     const resolver = new ProviderResolver(config, ollamaProvider, claudeProvider);
 

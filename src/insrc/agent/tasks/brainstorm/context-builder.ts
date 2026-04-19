@@ -7,7 +7,7 @@
  */
 
 import type { AgentConfig, LLMMessage, LLMProvider } from '../../../shared/types.js';
-import { ClaudeProvider } from '../../providers/claude.js';
+import { AnthropicProvider } from '../../providers/anthropic.js';
 import type { BrainstormState } from './agent-state.js';
 import type { Idea, Theme, SpecRequirement } from './types.js';
 import {
@@ -68,7 +68,7 @@ export function buildStepContext(
   provider: LLMProvider,
   config: AgentConfig,
 ): LLMMessage[] {
-  const isLocal = !(provider instanceof ClaudeProvider);
+  const isLocal = !(provider instanceof AnthropicProvider);
   const localParams = config.models.providers.local;
   const localCore = localParams.coreModel;
   const localCtx  = localParams.params[localCore]?.maxInputTokens  ?? 16_384;

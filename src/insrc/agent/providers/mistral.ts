@@ -1,0 +1,170 @@
+/**
+ * Mistral provider -- implements `LLMProvider` against `@mistralai/mistralai`.
+ *
+ * Embeddings are intentionally unsupported here; stay local.
+ */
+
+import { Mistral } from '@mistralai/mistralai';
+import type {
+  CompletionOpts,
+  LLMMessage,
+  LLMProvider,
+  LLMResponse,
+  ToolCall,
+  ToolDefinition,
+} from '../../shared/types.js';
+import { getLogger } from '../../shared/logger.js';
+
+const log = getLogger('mistral');
+
+export interface MistralProviderConfig {
+  model?: string | undefined;
+  apiKey?: string | undefined;
+}
+
+export class MistralProvider implements LLMProvider {
+  readonly supportsTools = true;
+  private readonly client: Mistral;
+  private readonly model: string;
+
+  constructor(config: MistralProviderConfig = {}) {
+    this.model = config.model ?? 'mistral-small-latest';
+    this.client = new Mistral({
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    });
+  }
+
+  async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
+    const apiMessages = toMistralMessages(messages);
+    const tools = opts.tools ? toMistralTools(opts.tools) : undefined;
+
+    const request: Record<string, unknown> = {
+      model: this.model,
+      messages: apiMessages,
+    };
+    if (opts.maxTokens !== undefined)   request['maxTokens'] = opts.maxTokens;
+    if (opts.temperature !== undefined) request['temperature'] = opts.temperature;
+    if (tools && tools.length > 0)      request['tools'] = tools;
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await this.client.chat.complete(request as any);
+      return fromMistralResponse(response);
+    } catch (err) {
+      log.error({ err: String(err), model: this.model }, 'mistral complete failed');
+      throw err;
+    }
+  }
+
+  async *stream(messages: LLMMessage[], opts: CompletionOpts = {}): AsyncIterable<string> {
+    const apiMessages = toMistralMessages(messages);
+
+    const request: Record<string, unknown> = {
+      model: this.model,
+      messages: apiMessages,
+    };
+    if (opts.maxTokens !== undefined)   request['maxTokens'] = opts.maxTokens;
+    if (opts.temperature !== undefined) request['temperature'] = opts.temperature;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const eventStream = await this.client.chat.stream(request as any);
+    for await (const event of eventStream) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const delta = (event as any)?.data?.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta.length > 0) {
+        opts.onToken?.(delta);
+        yield delta;
+      }
+    }
+  }
+
+  async embed(_text: string): Promise<number[]> {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Translation
+// ---------------------------------------------------------------------------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toMistralMessages(messages: LLMMessage[]): any[] {
+  return messages.map(m => {
+    if (typeof m.content === 'string') {
+      return { role: m.role, content: m.content };
+    }
+    // Mistral supports text-only primarily; images/PDFs fall back to a warning.
+    const textParts: string[] = [];
+    let hadBinary = false;
+    for (const block of m.content) {
+      if (block.type === 'text') textParts.push(block.text);
+      else hadBinary = true;
+    }
+    const content = textParts.join('\n') + (hadBinary
+      ? '\n\n[Binary attachment -- not forwarded to Mistral; use a vision-capable provider or switch active provider]'
+      : '');
+    return { role: m.role, content };
+  });
+}
+
+function toMistralTools(tools: ToolDefinition[]): Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
+  return tools.map(t => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema,
+    },
+  }));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function fromMistralResponse(response: any): LLMResponse {
+  const choice = response?.choices?.[0];
+  const message = choice?.message;
+  const text = typeof message?.content === 'string'
+    ? message.content
+    : Array.isArray(message?.content)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ? (message.content as any[]).filter(b => b?.type === 'text').map(b => b.text).join('')
+      : '';
+  let toolCalls: ToolCall[] | undefined;
+  if (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    toolCalls = message.toolCalls.map((tc: any, idx: number) => ({
+      id: tc.id ?? `mistral-${Date.now()}-${idx}`,
+      name: tc.function?.name ?? '',
+      input: safeParseJson(tc.function?.arguments),
+    }));
+  }
+  const finishReason = choice?.finishReason;
+  const stopReason: LLMResponse['stopReason'] =
+    finishReason === 'tool_calls' ? 'tool_use'
+    : finishReason === 'length'   ? 'max_tokens'
+    :                               'end_turn';
+  const usage = response?.usage;
+  return {
+    text,
+    ...(toolCalls ? { toolCalls } : {}),
+    stopReason,
+    ...(usage ? {
+      usage: {
+        inputTokens: usage.promptTokens ?? 0,
+        outputTokens: usage.completionTokens ?? 0,
+      },
+    } : {}),
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeParseJson(s: any): Record<string, unknown> {
+  if (typeof s !== 'string') {
+    return (s && typeof s === 'object') ? s as Record<string, unknown> : {};
+  }
+  try {
+    const parsed = JSON.parse(s);
+    return (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}

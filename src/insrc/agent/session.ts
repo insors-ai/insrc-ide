@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentConfig } from '../shared/types.js';
 import { OllamaProvider } from './providers/ollama.js';
-import { ClaudeProvider } from './providers/claude.js';
+import { AnthropicProvider } from './providers/anthropic.js';
 import { buildProvider } from './providers/factory.js';
 import { ProviderResolver } from './config.js';
 import { ContextManager, initSession } from './context/index.js';
@@ -48,7 +48,7 @@ export class Session {
   /** Raw Ollama provider (no context injection). Use for internal calls only. */
   readonly ollamaProvider: OllamaProvider;
   /** Raw Claude provider (no context injection). Use for internal calls only. */
-  readonly claudeProvider: ClaudeProvider | null;
+  readonly claudeProvider: AnthropicProvider | null;
 
   /** Context-aware local provider (auto-injects L1-L5, auto-records turns). */
   localProvider!: ContextAwareProvider;
@@ -72,7 +72,7 @@ export class Session {
     this.ollamaProvider = buildProvider({ provider: 'local' }, opts.config) as OllamaProvider;
 
     this.claudeProvider = opts.config.keys.anthropic
-      ? buildProvider({ provider: 'anthropic' }, opts.config) as ClaudeProvider
+      ? buildProvider({ provider: 'anthropic' }, opts.config) as AnthropicProvider
       : null;
 
     this.resolver = new ProviderResolver(opts.config, this.ollamaProvider, this.claudeProvider);
@@ -130,8 +130,8 @@ export class Session {
     (this as { ollamaProvider: OllamaProvider }).ollamaProvider =
       buildProvider({ provider: 'local' }, newConfig) as OllamaProvider;
 
-    (this as { claudeProvider: ClaudeProvider | null }).claudeProvider = newConfig.keys.anthropic
-      ? buildProvider({ provider: 'anthropic' }, newConfig) as ClaudeProvider
+    (this as { claudeProvider: AnthropicProvider | null }).claudeProvider = newConfig.keys.anthropic
+      ? buildProvider({ provider: 'anthropic' }, newConfig) as AnthropicProvider
       : null;
 
     // Rebuild resolver with new providers

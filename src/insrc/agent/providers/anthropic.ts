@@ -16,7 +16,7 @@ const log = getLogger('claude');
 // Configuration
 // ---------------------------------------------------------------------------
 
-export interface ClaudeProviderConfig {
+export interface AnthropicProviderConfig {
   model?: string | undefined;
   apiKey?: string | undefined;
 }
@@ -42,12 +42,12 @@ export interface WebSearchResult {
 // Provider
 // ---------------------------------------------------------------------------
 
-export class ClaudeProvider implements LLMProvider {
+export class AnthropicProvider implements LLMProvider {
   readonly supportsTools = true;
   private readonly client: Anthropic;
   private readonly model: string;
 
-  constructor(config: ClaudeProviderConfig = {}) {
+  constructor(config: AnthropicProviderConfig = {}) {
     this.model = config.model ?? 'claude-sonnet-4-6';
     this.client = new Anthropic({
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
