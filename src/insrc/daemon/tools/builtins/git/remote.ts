@@ -106,11 +106,15 @@ export const gitRemoteTool: Tool = {
     if (r.spawnError) { return spawnFail('git:remote', r.stderr); }
     if (r.code !== 0) { return fail('git:remote', r.stderr, r.stdout, r.code); }
 
-    const data: GitRemoteData = {
-      op, name,
-      ...(op === 'add' || op === 'set-url' ? { url: str(input, 'url') } : {}),
-      ...(op === 'rename' ? { newName: str(input, 'newName') } : {}),
-    };
+    const data: GitRemoteData = { op, name };
+    if (op === 'add' || op === 'set-url') {
+      const u = str(input, 'url');
+      if (u !== undefined) { data.url = u; }
+    }
+    if (op === 'rename') {
+      const n = str(input, 'newName');
+      if (n !== undefined) { data.newName = n; }
+    }
     return { output: `git remote ${op} \`${name}\` OK.`, format: 'markdown', success: true, data };
   },
 };

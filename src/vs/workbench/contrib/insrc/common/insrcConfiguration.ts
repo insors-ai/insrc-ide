@@ -125,6 +125,18 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.daemon.autoUpdate', 'When to check the daemon repo for updates.'),
 			scope: ConfigurationScope.MACHINE,
 		},
+		'insrc.daemon.repoUrl': {
+			type: 'string',
+			default: 'https://github.com/insors-ai/insrc-ide.git',
+			description: localize('insrc.daemon.repoUrl', 'Git URL to clone the daemon source from.'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.daemon.repoBranch': {
+			type: 'string',
+			default: 'release/1.96',
+			description: localize('insrc.daemon.repoBranch', 'Branch of the daemon repo to clone and track.'),
+			scope: ConfigurationScope.MACHINE,
+		},
 
 		// -- Routing --
 		'insrc.routing.mode': {

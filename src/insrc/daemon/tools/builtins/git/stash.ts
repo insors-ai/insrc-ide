@@ -121,7 +121,9 @@ export const gitStashTool: Tool = {
     const r = await runShell(argv, { cwd, timeoutMs: 30_000 });
     if (r.spawnError) { return spawnFail('git:stash', r.stderr); }
     if (r.code !== 0) { return fail('git:stash', r.stderr, r.stdout, r.code); }
-    const data: GitStashData = { op, output: r.stdout.trim() || r.stderr.trim(), ...(str(input, 'ref') ? { affectedRef: str(input, 'ref') } : {}) };
+    const data: GitStashData = { op, output: r.stdout.trim() || r.stderr.trim() };
+    const ref = str(input, 'ref');
+    if (ref !== undefined) { data.affectedRef = ref; }
     return {
       output: `git stash ${op} OK.\n\n\`\`\`\n${data.output || '(no output)'}\n\`\`\``,
       format: 'markdown', success: true, data,

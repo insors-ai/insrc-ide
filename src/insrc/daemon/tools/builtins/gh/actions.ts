@@ -260,7 +260,10 @@ export const ghWorkflowListTool: Tool = {
       // Format: "<name>  <state>  <id>"
       const parts = line.split(/\s{2,}/);
       if (parts.length >= 3) {
-        workflows.push({ name: (parts[0] ?? '').trim(), state: (parts[1] ?? '').trim(), id: Number(parts[2] ?? '') || undefined });
+        const id = Number(parts[2] ?? '');
+        const wf: RawWorkflow = { name: (parts[0] ?? '').trim(), state: (parts[1] ?? '').trim() };
+        if (Number.isFinite(id) && id !== 0) { wf.id = id; }
+        workflows.push(wf);
       }
     }
     const lines: string[] = [`# ${workflows.length} workflow${workflows.length === 1 ? '' : 's'}`, ''];

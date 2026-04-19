@@ -99,7 +99,12 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 		// still works against the current repo.
 		const entry = resolveDaemonEntry();
 		const autoUpdate = this.configurationService.getValue<string>('insrc.daemon.autoUpdate') !== 'never';
-		const cloneOk = await ensureClonedDaemon(this.logService, autoUpdate);
+		const repoUrl = this.configurationService.getValue<string>('insrc.daemon.repoUrl');
+		const repoBranch = this.configurationService.getValue<string>('insrc.daemon.repoBranch');
+		const cloneOk = await ensureClonedDaemon(this.logService, autoUpdate, {
+			repoUrl: repoUrl ?? '',
+			repoBranch: repoBranch ?? '',
+		});
 		if (!cloneOk) {
 			if (!entry.isDev) {
 				throw new Error('Failed to install daemon -- see Output > insrc for details');

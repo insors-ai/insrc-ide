@@ -88,8 +88,17 @@ export const gitDiffTool: Tool = {
       MAX_MAX_BYTES,
     );
 
-    const { argv, mode, range } = buildDiffArgv({ staged, from, to, path, context, ignoreWhitespace });
-    const statArgv = buildStatArgv({ staged, from, to, path });
+    const diffOpts: DiffOpts = { staged, ignoreWhitespace };
+    if (from !== undefined) { diffOpts.from = from; }
+    if (to !== undefined) { diffOpts.to = to; }
+    if (path !== undefined) { diffOpts.path = path; }
+    if (context !== undefined) { diffOpts.context = context; }
+    const statOpts: DiffOpts = { staged };
+    if (from !== undefined) { statOpts.from = from; }
+    if (to !== undefined) { statOpts.to = to; }
+    if (path !== undefined) { statOpts.path = path; }
+    const { argv, mode, range } = buildDiffArgv(diffOpts);
+    const statArgv = buildStatArgv(statOpts);
 
     const [diff, stat] = await Promise.all([
       runShell(argv, { cwd, timeoutMs: 30_000, maxBytes }),
