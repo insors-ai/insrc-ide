@@ -6,23 +6,22 @@ import {
 import { requestReindex } from '../tasks/reindex.js';
 
 // ---------------------------------------------------------------------------
-// Forced-Claude Implement/Test Path
+// Forced-Vision Implement/Test Path
 //
-// When image or PDF attachments force escalation, the normal two-stage pipeline
-// (local generates diff → Claude validates) is collapsed into a single Claude call.
-//
-// Claude produces implementation + validation in one response.
-// Local model is NOT involved in the turn.
+// When image or PDF attachments are present, the turn routes through the
+// caller-supplied vision provider (resolved from `cfg.models.visionDefault`).
+// The normal two-stage local-then-cloud pipeline collapses into a single
+// vision call; the local model does not participate.
 // ---------------------------------------------------------------------------
 
-export interface ForcedClaudeResult {
+export interface ForcedVisionResult {
   /** Whether the implementation was accepted and written to disk */
   accepted: boolean;
   /** The final unified diff text */
   diff: string;
   /** Files written to disk */
   filesWritten: string[];
-  /** Response message from Claude */
+  /** Response message from the vision model */
   message: string;
 }
 
@@ -61,10 +60,11 @@ Rules:
 // ---------------------------------------------------------------------------
 
 /**
- * Run the forced-Claude pipeline when attachments force escalation.
+ * Run the forced-vision pipeline when attachments require a vision model.
  *
- * Collapses the two-stage local→Claude pipeline into a single Claude call.
- * Claude receives the attachment content blocks alongside code context.
+ * Collapses the two-stage local-then-cloud pipeline into a single call
+ * against the supplied vision provider. Receives attachment content blocks
+ * alongside code context.
  *
  * @param intent - 'implement' or 'test'
  * @param userMessage - The user's request
@@ -72,24 +72,25 @@ Rules:
  * @param codeContext - Assembled code context (entities, types, etc.)
  * @param planStepContext - Active plan step description (or empty)
  * @param contentBlocks - Multimodal content blocks from attachments
- * @param claudeProvider - Claude provider (must be available)
+ * @param visionProvider - Vision-capable LLM provider (resolved from
+ *   `cfg.models.visionDefault`; caller must build this)
  * @param log - Logger function
  */
-export async function runForcedClaudePipeline(
+export async function runForcedVisionPipeline(
   intent: 'implement' | 'test',
   userMessage: string,
   repoPath: string,
   codeContext: string,
   planStepContext: string,
   contentBlocks: ContentBlock[],
-  claudeProvider: LLMProvider,
-  log: (msg: string) => void = toLogFn(getLogger('forced-claude')),
-): Promise<ForcedClaudeResult> {
+  visionProvider: LLMProvider,
+  log: (msg: string) => void = toLogFn(getLogger('forced-vision')),
+): Promise<ForcedVisionResult> {
   const systemPrompt = intent === 'implement'
     ? FORCED_IMPLEMENT_SYSTEM
     : FORCED_TEST_SYSTEM;
 
-  log(`  [${intent}] Forced-Claude mode (attachment requires Claude)...`);
+  log(`  [${intent}] Forced-vision mode (attachment requires a vision model)...`);
 
   // Build user content: text context + attachment content blocks
   const userBlocks: ContentBlock[] = [];
@@ -109,12 +110,12 @@ export async function runForcedClaudePipeline(
     { role: 'user', content: userBlocks },
   ];
 
-  const response = await claudeProvider.complete(messages, {
+  const response = await visionProvider.complete(messages, {
     maxTokens: 6000,
     temperature: 0.2,
   });
 
-  // Extract diff from Claude's response
+  // Extract diff from the vision model's response
   const diff = extractDiffFromResponse(response.text);
 
   if (!diff || !diff.includes('---')) {
@@ -122,7 +123,7 @@ export async function runForcedClaudePipeline(
       accepted: false,
       diff: '',
       filesWritten: [],
-      message: response.text || 'Claude did not produce a valid diff.',
+      message: response.text || 'Vision model did not produce a valid diff.',
     };
   }
 
@@ -133,7 +134,7 @@ export async function runForcedClaudePipeline(
       accepted: false,
       diff,
       filesWritten: [],
-      message: 'Could not parse the diff produced by Claude.',
+      message: 'Could not parse the diff produced by the vision model.',
     };
   }
 

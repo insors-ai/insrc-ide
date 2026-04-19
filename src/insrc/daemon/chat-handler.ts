@@ -594,6 +594,13 @@ async function runChatMessage(
     config: session.config,
   });
 
+  // Router returned an error (e.g. vision default missing) -- abort the turn.
+  if (route.error) {
+    send({ id: requestId, stream: 'error', data: { message: route.error } });
+    await persistTurn(session, message, `[error] ${route.error}`);
+    return;
+  }
+
   // 3. Check for actionable intents (infra, deploy) — fallback for
   //    static pattern matches (daemon status, repo list, etc.) when decomposer didn't extract a command
   const actionResponse = await tryActionableIntent(classifiedIntent, classifiedMessage, requestId, send, session, channel, assembled);

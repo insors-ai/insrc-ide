@@ -50,7 +50,7 @@ import {
   extractFilePaths, resolveAttachment,
   type ResolvedAttachment,
 } from './attachments/router.js';
-import { runForcedClaudePipeline } from './attachments/forced-claude.js';
+import { runForcedVisionPipeline } from './attachments/forced-vision.js';
 import type { Attachment, ContentBlock } from '../shared/types.js';
 import { getLogger, toLogFn } from '../shared/logger.js';
 const log = getLogger('agent');
@@ -291,6 +291,13 @@ export async function startRepl(cwd?: string): Promise<void> {
 
     log.info(`[route] ${classified.intent} -> ${route.label}`);
 
+    // Router returned an error (e.g. vision default missing) -- abort the turn.
+    if (route.error) {
+      log.error(route.error);
+      rl.prompt();
+      return;
+    }
+
     // Code-analysis intents — no LLM call
     if (route.graphOnly) {
       try {
@@ -334,7 +341,7 @@ export async function startRepl(cwd?: string): Promise<void> {
         let assistantResponse: string;
         if (route.attachmentForced && attachmentContentBlocks.length > 0
             && (classified.intent === 'implement' || classified.intent === 'test')) {
-          const forcedResult = await runForcedClaudePipeline(
+          const forcedResult = await runForcedVisionPipeline(
             classified.intent, classified.message, repoPath, codeContext,
             ctx.getActivePlanStep(), attachmentContentBlocks,
             route.provider, toLogFn(log),

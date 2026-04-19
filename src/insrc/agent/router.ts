@@ -3,9 +3,9 @@
  *
  * Flat lookup (no tiers, no complexity assessment, no auto-escalation):
  *
- *   1. Vision override:     image/PDF attachment -> `models.visionDefault`
- *                            (or error -- handled in stage 6; for now falls
- *                             through to step 5)
+ *   1. Vision override:     image/PDF attachment -> `models.visionDefault`.
+ *                            If unset, returns RouteResult with `error`
+ *                            populated (turn aborts in the caller).
  *   2. Explicit @mention:   caller-supplied `ExplicitProvider` wins
  *   3. No-LLM intents:      `code-analysis` -> graphOnly
  *   4. (reserved for future per-intent overrides; no-op today)
@@ -30,6 +30,9 @@ const NO_LLM: Set<Intent> = new Set(['code-analysis']);
 // ---------------------------------------------------------------------------
 
 export interface RouteResult {
+  /** Provider to use. Still populated even when `error` is set (points at a
+   *  usable fallback like `ollamaProvider`) so callers can narrow without
+   *  null checks; they just must check `error` first and abort the turn. */
   provider: LLMProvider;
   /** Display label for status line ("Local", "Anthropic", "OpenAI: gpt-4o", ...). */
   label: string;
@@ -37,6 +40,8 @@ export interface RouteResult {
   graphOnly: boolean;
   /** Whether routing was forced by a vision attachment. */
   attachmentForced?: boolean | undefined;
+  /** If set, the turn cannot proceed. Message is user-facing. */
+  error?: string | undefined;
 }
 
 export interface RouterDeps {
@@ -87,27 +92,47 @@ export function selectProvider(
 
 function routeVision(
   config: AgentConfig,
-  cloudProvider: LLMProvider | null,
+  _cloudProvider: LLMProvider | null,
   ollamaProvider: LLMProvider,
 ): RouteResult {
   const vd = config.models.visionDefault;
-  if (vd) {
-    if (vd.provider === 'local') {
-      return { provider: ollamaProvider, label: `Local: ${vd.model} (attachment)`, graphOnly: false };
-    }
-    const apiKey = config.keys[vd.provider];
-    if (!apiKey) {
-      log.warn(`vision default ${vd.provider} has no API key -- falling back to active provider`);
-    } else {
-      return {
-        provider: buildProvider({ provider: vd.provider, model: vd.model }, config),
-        label: `${titleCase(vd.provider)}: ${vd.model} (attachment)`,
-        graphOnly: false,
-      };
-    }
+  if (!vd) {
+    return {
+      provider: ollamaProvider,
+      label: 'Vision default not configured',
+      graphOnly: false,
+      error:
+        'This turn includes an image or PDF attachment, but no Vision Default is configured. '
+        + 'Open the Model Providers pane (command: insrc.openModelProviders) to set a vision-capable '
+        + '(provider, model) binding, or remove the attachment.',
+    };
   }
-  // Fall back to active provider for now -- stage 6 will make this an error.
-  return routeActive(config, cloudProvider, ollamaProvider);
+
+  if (vd.provider === 'local') {
+    return {
+      provider: ollamaProvider,
+      label: `Local: ${vd.model} (attachment)`,
+      graphOnly: false,
+    };
+  }
+
+  const apiKey = config.keys[vd.provider];
+  if (!apiKey) {
+    return {
+      provider: ollamaProvider,
+      label: 'Vision default missing API key',
+      graphOnly: false,
+      error:
+        `Vision default is set to ${vd.provider}:${vd.model}, but no ${vd.provider} API key is configured. `
+        + 'Set the key in Model Providers, pick a different vision default, or remove the attachment.',
+    };
+  }
+
+  return {
+    provider: buildProvider({ provider: vd.provider, model: vd.model }, config),
+    label: `${titleCase(vd.provider)}: ${vd.model} (attachment)`,
+    graphOnly: false,
+  };
 }
 
 function routeExplicit(

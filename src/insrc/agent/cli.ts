@@ -41,7 +41,7 @@ import { runDocumentPipeline } from './tasks/document.js';
 import {
   extractFilePaths, resolveAttachment,
 } from './attachments/router.js';
-import { runForcedClaudePipeline } from './attachments/forced-claude.js';
+import { runForcedVisionPipeline } from './attachments/forced-vision.js';
 import type { Attachment, ContentBlock } from '../shared/types.js';
 
 // ---------------------------------------------------------------------------
@@ -187,6 +187,18 @@ export async function runOneShot(
 
   log(`[cli] ${classified.intent} → ${route.label}`);
 
+  // Router returned an error (e.g. missing vision default) -- abort the turn.
+  if (route.error) {
+    if (opts.json) {
+      return {
+        exitCode: 2,
+        output: JSON.stringify({ success: false, error: route.error, exitCode: 2 }),
+        intent: classified.intent,
+      };
+    }
+    return { exitCode: 2, output: route.error, intent: classified.intent };
+  }
+
   // Exit code 2: cloud provider needed but no API key
   const needsCloud = !route.graphOnly && route.label !== 'Local';
   if (needsCloud && !session.hasClaudeKey) {
@@ -223,7 +235,7 @@ export async function runOneShot(
       // Forced-Claude path for implement/test with binary attachments
       if (route.attachmentForced && attachmentContentBlocks.length > 0
           && (classified.intent === 'implement' || classified.intent === 'test')) {
-        const forcedResult = await runForcedClaudePipeline(
+        const forcedResult = await runForcedVisionPipeline(
           classified.intent, classified.message, repoPath, codeContext,
           ctx.getActivePlanStep(), attachmentContentBlocks,
           route.provider, log,
