@@ -75,9 +75,20 @@ function main() {
 		}
 		const svg = readFileSync(svgPath, 'utf8');
 		const dataUri = `url("data:image/svg+xml;utf8,${encodeSvgForDataUri(svg)}")`;
+		// The icon glyph is rendered by a dynamically-injected
+		// `.codicon-X::before { content: '\\eXXX' }` rule. We win
+		// against it with an `!important` on `content` (to drop the
+		// font character) and layer the SVG mask on the same
+		// `::before`, sized to the inherited font-size so it matches
+		// surrounding codicons' footprint.
 		blocks.push(
-			`.codicon.codicon-${codicon},\n` +
-			`.monaco-workbench .codicon.codicon-${codicon} {\n` +
+			`.monaco-workbench .codicon.codicon-${codicon}::before,\n` +
+			`.codicon.codicon-${codicon}::before {\n` +
+			`\tcontent: '' !important;\n` +
+			`\tdisplay: inline-block;\n` +
+			`\twidth: 1em;\n` +
+			`\theight: 1em;\n` +
+			`\tvertical-align: middle;\n` +
 			`\t-webkit-mask-image: ${dataUri};\n` +
 			`\tmask-image: ${dataUri};\n` +
 			`\t-webkit-mask-size: contain;\n` +
@@ -87,10 +98,6 @@ function main() {
 			`\t-webkit-mask-position: center;\n` +
 			`\tmask-position: center;\n` +
 			`\tbackground-color: currentColor;\n` +
-			`}\n` +
-			`.codicon.codicon-${codicon}::before {\n` +
-			`\tcontent: '';\n` +
-			`\tvisibility: hidden;\n` +
 			`}\n`
 		);
 	}
