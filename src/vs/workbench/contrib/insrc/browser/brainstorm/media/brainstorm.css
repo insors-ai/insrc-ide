@@ -273,8 +273,7 @@
 	font-size: 0.82em;
 	font-weight: 600;
 	color: var(--vscode-textLink-foreground);
-	background: var(--vscode-textLink-foreground);
-	background: rgba(55, 148, 255, 0.08);
+	background: color-mix(in srgb, var(--vscode-textLink-foreground) 12%, transparent);
 	border-radius: 4px;
 }
 

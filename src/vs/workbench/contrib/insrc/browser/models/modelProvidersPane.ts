@@ -474,37 +474,20 @@ export class ModelProvidersPane extends EditorPane {
 		if (dismissed) {
 			return;
 		}
-		const banner = dom.append(this._body, dom.$('div'));
-		banner.style.background = 'var(--vscode-editorWarning-background, rgba(200,150,0,0.08))';
-		banner.style.border = '1px solid var(--vscode-editorWarning-foreground, #bb8a0c)';
-		banner.style.borderRadius = '4px';
-		banner.style.padding = '10px 12px';
-		banner.style.margin = '8px 0';
-		banner.style.fontSize = '12px';
-		banner.style.display = 'flex';
-		banner.style.alignItems = 'flex-start';
-		banner.style.gap = '8px';
+		const banner = dom.append(this._body, dom.$('div.insrc-banner.insrc-banner-warning'));
 
-		const icon = dom.append(banner, dom.$('span.codicon.codicon-warning'));
-		icon.style.color = 'var(--vscode-editorWarning-foreground, #bb8a0c)';
-		icon.style.marginTop = '1px';
+		const icon = dom.append(banner, dom.$('span.codicon.codicon-warning.insrc-banner-icon'));
+		void icon;
 
-		const text = dom.append(banner, dom.$('div'));
-		text.style.flex = '1';
+		const text = dom.append(banner, dom.$('div.insrc-banner-body'));
 		const strong = dom.append(text, dom.$('strong'));
 		strong.textContent = 'Set spend limits in your provider console. ';
 		const rest = dom.append(text, dom.$('span'));
 		rest.textContent =
 			'insrc does not track token usage or enforce spend caps. Configure usage limits and alerts with your provider (billing / usage / quota settings in their web console) to avoid unexpected charges.';
 
-		const dismiss = dom.append(banner, dom.$('button'));
+		const dismiss = dom.append(banner, dom.$('button.insrc-banner-dismiss'));
 		dismiss.textContent = 'Dismiss';
-		dismiss.style.background = 'transparent';
-		dismiss.style.border = '1px solid var(--vscode-editorWarning-foreground, #bb8a0c)';
-		dismiss.style.color = 'var(--vscode-editorWarning-foreground, #bb8a0c)';
-		dismiss.style.borderRadius = '3px';
-		dismiss.style.padding = '4px 8px';
-		dismiss.style.cursor = 'pointer';
 		dismiss.onclick = () => {
 			this.storageService2.store(`${COST_BANNER_DISMISSED_KEY}.${provider}`, true, StorageScope.APPLICATION, StorageTarget.USER);
 			banner.remove();
@@ -602,22 +585,11 @@ export class ModelProvidersPane extends EditorPane {
 	// ---- Widget helpers ---------------------------------------------------
 
 	private _field(label: string, value: string, onCommit: (v: string) => void | Promise<void>): void {
-		const row = dom.append(this._body, dom.$('div'));
-		row.style.display = 'flex';
-		row.style.alignItems = 'center';
-		row.style.gap = '8px';
-		row.style.margin = '4px 0';
+		const row = dom.append(this._body, dom.$('div.insrc-field-row'));
 		const l = dom.append(row, dom.$('label'));
 		l.textContent = label;
-		l.style.width = '160px';
-		l.style.fontSize = '12px';
 		const input = dom.append(row, dom.$('input')) as HTMLInputElement;
 		input.value = value;
-		input.style.flex = '1';
-		input.style.background = 'var(--vscode-input-background)';
-		input.style.color = 'var(--vscode-input-foreground)';
-		input.style.border = '1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent))';
-		input.style.padding = '4px 6px';
 		input.onblur = () => {
 			if (input.value !== value) {
 				void onCommit(input.value);
@@ -631,21 +603,10 @@ export class ModelProvidersPane extends EditorPane {
 	}
 
 	private _select(label: string, options: string[], value: string, onChange: (v: string) => void | Promise<void>): void {
-		const row = dom.append(this._body, dom.$('div'));
-		row.style.display = 'flex';
-		row.style.alignItems = 'center';
-		row.style.gap = '8px';
-		row.style.margin = '4px 0';
+		const row = dom.append(this._body, dom.$('div.insrc-field-row'));
 		const l = dom.append(row, dom.$('label'));
 		l.textContent = label;
-		l.style.width = '160px';
-		l.style.fontSize = '12px';
 		const sel = dom.append(row, dom.$('select')) as HTMLSelectElement;
-		sel.style.flex = '1';
-		sel.style.background = 'var(--vscode-dropdown-background)';
-		sel.style.color = 'var(--vscode-dropdown-foreground)';
-		sel.style.border = '1px solid var(--vscode-dropdown-border, var(--vscode-contrastBorder, transparent))';
-		sel.style.padding = '4px 6px';
 		const seen = new Set<string>();
 		for (const opt of options) {
 			if (seen.has(opt)) {
@@ -718,22 +679,11 @@ export class ModelProvidersPane extends EditorPane {
 		handler: () => void | Promise<void>,
 		opts: { inline?: boolean; primary?: boolean } = {},
 	): HTMLButtonElement {
-		const btn = dom.append(parent, dom.$('button')) as HTMLButtonElement;
+		const cls = opts.primary ? 'insrc-btn.insrc-btn-primary' : 'insrc-btn.insrc-btn-secondary';
+		const btn = dom.append(parent, dom.$(`button.${cls}`)) as HTMLButtonElement;
 		btn.textContent = label;
-		btn.style.cursor = 'pointer';
-		btn.style.fontSize = '12px';
-		btn.style.padding = '4px 10px';
-		btn.style.borderRadius = '3px';
-		btn.style.border = '1px solid var(--vscode-button-border, transparent)';
-		if (opts.primary) {
-			btn.style.background = 'var(--vscode-button-background)';
-			btn.style.color = 'var(--vscode-button-foreground)';
-		} else {
-			btn.style.background = 'var(--vscode-button-secondaryBackground, transparent)';
-			btn.style.color = 'var(--vscode-button-secondaryForeground, var(--vscode-foreground))';
-		}
 		if (!opts.inline) {
-			btn.style.marginTop = '12px';
+			btn.classList.add('insrc-btn-block');
 		}
 		btn.onclick = () => void handler();
 		return btn;

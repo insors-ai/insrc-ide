@@ -1,0 +1,268 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Insrc shared styles.
+ *
+ * CSS custom properties + widget classes used across the insrc custom
+ * panes (chat, setup wizard, step provider editor, model providers,
+ * brainstorm, prompt notepad). Pane-specific CSS files import or
+ * assume this file is loaded and layer their own selectors on top.
+ *
+ * Loaded once from `insrc.contribution.ts`.
+ *
+ * Never hardcode colors here -- every color value resolves to a
+ * vscode theme token so the Insrc Dark / Insrc Light themes can
+ * retint without code changes.
+ */
+
+/* ---------------------------------------------------------------------------
+ * Insrc-specific design tokens
+ *
+ * Mirrors the odr-website samaanta palette's structural decisions
+ * (radii, blur amount, glow color) as CSS custom properties. Theme-
+ * specific color values come from VS Code's token system; only the
+ * structural values live here.
+ * ------------------------------------------------------------------------- */
+
+:root {
+	--insrc-radius-card: 18px;
+	--insrc-radius-chip: 999px;
+	--insrc-radius-input: 8px;
+	--insrc-radius-panel: 20px;
+
+	--insrc-blur: blur(12px);
+	--insrc-blur-heavy: blur(18px);
+
+	/* Translucent surface tint used for hero panels and toolbars.
+	 * Falls back to the editor background at ~72% opacity; the
+	 * dark theme's editor bg (#080f19) + 0.72 alpha matches the
+	 * samaanta-page .stage-shell background. */
+	--insrc-surface-translucent: color-mix(in srgb, var(--vscode-editor-background) 72%, transparent);
+
+	/* Soft glow used behind hero panels (website .stage-shell::before) */
+	--insrc-accent-glow: radial-gradient(
+		circle,
+		color-mix(in srgb, var(--vscode-focusBorder) 24%, transparent),
+		transparent 68%
+	);
+}
+
+/* ---------------------------------------------------------------------------
+ * Widget vocabulary
+ * ------------------------------------------------------------------------- */
+
+/* Card -- rounded panel with subtle border */
+.insrc-card {
+	padding: 1.35rem;
+	border-radius: var(--insrc-radius-card);
+	border: 1px solid var(--vscode-widget-border);
+	background: var(--vscode-editorWidget-background);
+}
+
+/* Chip -- pill-shaped tag/label */
+.insrc-chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 0.35rem 0.75rem;
+	border-radius: var(--insrc-radius-chip);
+	border: 1px solid var(--vscode-widget-border);
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+}
+
+.insrc-chip.accent {
+	background: color-mix(in srgb, var(--vscode-focusBorder) 16%, transparent);
+	color: var(--vscode-textLink-foreground);
+	border-color: color-mix(in srgb, var(--vscode-focusBorder) 35%, transparent);
+}
+
+/* Pill -- primary action (filled with accent) */
+.insrc-pill {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0.55rem 1rem;
+	border-radius: var(--insrc-radius-chip);
+	border: 0;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.insrc-pill:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+/* Panel / hero -- the stage-shell treatment: translucent surface with
+ * a subtle radial glow blob behind content. Used for first-page
+ * headers of the Model Providers pane, Setup Wizard, etc. */
+.insrc-panel-hero {
+	position: relative;
+	padding: 1.5rem;
+	border-radius: var(--insrc-radius-panel);
+	border: 1px solid var(--vscode-widget-border);
+	background: var(--vscode-editorWidget-background);
+	overflow: hidden;
+}
+
+.insrc-panel-hero::before {
+	content: "";
+	position: absolute;
+	inset: auto 10% -14% auto;
+	width: 72%;
+	height: 52%;
+	border-radius: 50%;
+	background: var(--insrc-accent-glow);
+	filter: var(--insrc-blur);
+	z-index: 0;
+	pointer-events: none;
+}
+
+.insrc-panel-hero > * {
+	position: relative;
+	z-index: 1;
+}
+
+/* Translucent toolbar -- used inside panes for sticky top strips */
+.insrc-toolbar-translucent {
+	background: var(--insrc-surface-translucent);
+	backdrop-filter: var(--insrc-blur);
+	-webkit-backdrop-filter: var(--insrc-blur);
+	border: 1px solid var(--vscode-widget-border);
+}
+
+/* ---------------------------------------------------------------------------
+ * Dismissible banner (warning / info) -- used for the cost-guard banner
+ * in the Model Providers pane and similar inline notices.
+ * ------------------------------------------------------------------------- */
+
+.insrc-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 10px 12px;
+	margin: 8px 0;
+	border-radius: 4px;
+	font-size: 12px;
+}
+
+.insrc-banner-warning {
+	background: var(--vscode-editorWarning-background, var(--vscode-inputValidation-warningBackground));
+	border: 1px solid var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningBorder));
+	color: var(--vscode-editorWarning-foreground, var(--vscode-inputValidation-warningForeground));
+}
+
+.insrc-banner .insrc-banner-icon {
+	margin-top: 1px;
+}
+
+.insrc-banner .insrc-banner-body {
+	flex: 1;
+}
+
+.insrc-banner .insrc-banner-dismiss {
+	background: transparent;
+	border: 1px solid currentColor;
+	color: inherit;
+	border-radius: 3px;
+	padding: 4px 8px;
+	cursor: pointer;
+}
+
+/* ---------------------------------------------------------------------------
+ * Form row -- label + control horizontal layout
+ * ------------------------------------------------------------------------- */
+
+.insrc-field-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 4px 0;
+}
+
+.insrc-field-row > label {
+	width: 160px;
+	font-size: 12px;
+	color: var(--vscode-foreground);
+}
+
+.insrc-field-row > input,
+.insrc-field-row > select {
+	flex: 1;
+	padding: 4px 6px;
+}
+
+.insrc-field-row > input {
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: var(--insrc-radius-input);
+}
+
+.insrc-field-row > select {
+	background: var(--vscode-dropdown-background);
+	color: var(--vscode-dropdown-foreground);
+	border: 1px solid var(--vscode-dropdown-border, transparent);
+	border-radius: var(--insrc-radius-input);
+}
+
+/* ---------------------------------------------------------------------------
+ * Button variants (DOM-level buttons rendered without the VS Code
+ * action registry -- used by the Model Providers pane, Setup Wizard,
+ * etc.). For VS Code-action buttons, the standard button styling
+ * already applies.
+ * ------------------------------------------------------------------------- */
+
+.insrc-btn {
+	cursor: pointer;
+	font-size: 12px;
+	padding: 4px 10px;
+	border-radius: 3px;
+	border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.insrc-btn-primary {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.insrc-btn-primary:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+.insrc-btn-secondary {
+	background: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.insrc-btn-secondary:hover {
+	background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.insrc-btn + .insrc-btn {
+	margin-left: 4px;
+}
+
+.insrc-btn-block {
+	margin-top: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Utility: muted subtle background tint (replaces hardcoded
+ * `rgba(255,255,255,0.03)` kind of values that break on light themes).
+ * ------------------------------------------------------------------------- */
+
+.insrc-subtle-bg {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.insrc-subtle-bg-soft {
+	background: var(--vscode-list-inactiveSelectionBackground);
+}

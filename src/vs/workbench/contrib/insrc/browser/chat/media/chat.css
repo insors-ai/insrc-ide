@@ -361,8 +361,8 @@
 	padding: 3px 8px;
 	font-size: 11px;
 	color: var(--vscode-descriptionForeground);
-	background: rgba(255,255,255,0.03);
-	border-bottom: 1px solid var(--vscode-panel-border, #333);
+	background: var(--vscode-list-hoverBackground);
+	border-bottom: 1px solid var(--vscode-panel-border);
 }
 
 .insrc-chat-message-content .code-viewer-copy {
@@ -395,7 +395,7 @@
 }
 
 .insrc-chat-message-content table th {
-	background: rgba(255,255,255,0.04);
+	background: var(--vscode-list-hoverBackground);
 	font-weight: 600;
 }
 

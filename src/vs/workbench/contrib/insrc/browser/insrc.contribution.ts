@@ -5,6 +5,10 @@
 
 import { WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
 
+// Insrc-shared styles (CSS variables + shared widget classes used by
+// every insrc pane). Loaded once at contribution registration.
+import './media/insrc-shared.css';
+
 // Service interfaces (common layer - browser safe)
 import '../common/daemonService.js';
 import '../common/sessionService.js';

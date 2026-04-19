@@ -911,6 +911,14 @@
 		"--zoom-factor",
 		"--test-bar-width",
 		"--widget-color",
-		"--text-link-decoration"
+		"--text-link-decoration",
+		"--insrc-radius-card",
+		"--insrc-radius-chip",
+		"--insrc-radius-input",
+		"--insrc-radius-panel",
+		"--insrc-blur",
+		"--insrc-blur-heavy",
+		"--insrc-surface-translucent",
+		"--insrc-accent-glow"
 	]
 }
