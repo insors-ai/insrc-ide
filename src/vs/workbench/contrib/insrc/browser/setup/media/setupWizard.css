@@ -31,6 +31,70 @@
 	margin: 0;
 }
 
+/* -- Hero treatment: opt-in wrapper for the page header that gets the
+ *    translucent panel + soft accent glow (samaanta `.stage-shell`). --
+ */
+.insrc-setup-hero {
+	position: relative;
+	padding: 24px;
+	margin: 0 0 16px 0;
+	border-radius: var(--insrc-radius-panel);
+	border: 1px solid var(--vscode-widget-border);
+	background: var(--vscode-editorWidget-background);
+	overflow: hidden;
+}
+
+.insrc-setup-hero::before {
+	content: "";
+	position: absolute;
+	inset: auto 10% -14% auto;
+	width: 72%;
+	height: 52%;
+	border-radius: 50%;
+	background: var(--insrc-accent-glow);
+	filter: var(--insrc-blur);
+	z-index: 0;
+	pointer-events: none;
+}
+
+.insrc-setup-hero > * {
+	position: relative;
+	z-index: 1;
+}
+
+.insrc-setup-hero .insrc-setup-header {
+	margin-bottom: 0;
+}
+
+/* -- Tab bar used by Model Providers pane -- */
+
+.insrc-setup-tabs {
+	display: flex;
+	gap: 4px;
+	padding: 0 12px;
+	border-bottom: 1px solid var(--vscode-widget-border);
+	margin-bottom: 16px;
+}
+
+.insrc-setup-tabs > button {
+	background: transparent;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	color: var(--vscode-foreground);
+	padding: 8px 14px;
+	cursor: pointer;
+	font-size: 13px;
+}
+
+.insrc-setup-tabs > button:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.insrc-setup-tabs > button.active {
+	border-bottom-color: var(--vscode-focusBorder);
+	font-weight: 600;
+}
+
 /* -- Step indicators -- */
 
 .insrc-setup-steps {

@@ -64,30 +64,19 @@ export class ModelProvidersPane extends EditorPane {
 	protected createEditor(parent: HTMLElement): void {
 		this._container = dom.append(parent, dom.$('.insrc-setup'));
 
-		// Header
-		const header = dom.append(this._container, dom.$('.insrc-setup-header'));
+		// Hero header (translucent panel + accent glow)
+		const hero = dom.append(this._container, dom.$('.insrc-setup-hero'));
+		const header = dom.append(hero, dom.$('.insrc-setup-header'));
 		const h1 = dom.append(header, dom.$('h1'));
 		h1.textContent = 'Model Providers';
 		const subtitle = dom.append(header, dom.$('p'));
 		subtitle.textContent = 'Configure API keys, pick enabled models, and set the active cloud provider. Local (Ollama) is always available alongside.';
 
 		// Tab bar
-		const tabBar = dom.append(this._container, dom.$('div'));
-		tabBar.style.display = 'flex';
-		tabBar.style.gap = '4px';
-		tabBar.style.padding = '0 12px';
-		tabBar.style.borderBottom = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.2))';
-
+		const tabBar = dom.append(this._container, dom.$('.insrc-setup-tabs'));
 		for (const tab of PROVIDER_TABS) {
 			const btn = dom.append(tabBar, dom.$('button'));
 			btn.textContent = tab.label;
-			btn.style.background = 'transparent';
-			btn.style.border = 'none';
-			btn.style.borderBottom = '2px solid transparent';
-			btn.style.color = 'var(--vscode-foreground)';
-			btn.style.padding = '8px 14px';
-			btn.style.cursor = 'pointer';
-			btn.style.fontSize = '13px';
 			btn.onclick = () => this._selectTab(tab.id);
 			this._tabButtons.set(tab.id, btn);
 		}
@@ -157,8 +146,7 @@ export class ModelProvidersPane extends EditorPane {
 	private _selectTab(tab: ProviderName): void {
 		this._activeTab = tab;
 		for (const [id, btn] of this._tabButtons) {
-			btn.style.borderBottom = id === tab ? '2px solid var(--vscode-focusBorder)' : '2px solid transparent';
-			btn.style.fontWeight = id === tab ? '600' : '400';
+			btn.classList.toggle('active', id === tab);
 		}
 		this._renderTab(tab);
 	}

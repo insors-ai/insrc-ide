@@ -154,11 +154,18 @@
 
 /* -- Idea card -- */
 .insrc-brainstorm-card {
+	position: relative;
 	background: var(--vscode-editorWidget-background);
 	border: 1px solid var(--vscode-panel-border);
-	border-radius: 8px;
+	border-radius: var(--insrc-radius-card);
 	padding: 0;
 	overflow: hidden;
+	transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.insrc-brainstorm-card:hover {
+	border-color: color-mix(in srgb, var(--vscode-focusBorder) 35%, transparent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-focusBorder) 12%, transparent);
 }
 
 .insrc-brainstorm-card-title-section {
