@@ -115,7 +115,21 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		}
 
 		// Restore session in daemon (re-activates persisted session with full context)
-		const result = await this.daemonService.rpc<{ error?: string; sessionId?: string; repo?: string }>('chat.restore', { sessionId });
+		type RestoreResult =
+			| { error?: string; sessionId?: string; repo?: string }
+			| { code: 'NOT_CONFIGURED'; missing: 'local' | 'provider' | 'both'; message: string };
+		const result = await this.daemonService.rpc<RestoreResult>('chat.restore', { sessionId });
+
+		if ('code' in result) {
+			this._onDidRequireConfig.fire({ missing: result.missing });
+			const err = new Error(result.message) as Error & {
+				code: 'NOT_CONFIGURED';
+				missing: 'local' | 'provider' | 'both';
+			};
+			err.code = 'NOT_CONFIGURED';
+			err.missing = result.missing;
+			throw err;
+		}
 
 		if (result.error || !result.sessionId) {
 			// Restore failed -- fall back to fresh session
@@ -173,7 +187,15 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 		// Try to restore persisted session first
 		if (this._activeSessionId) {
-			const result = await this.daemonService.rpc<{ error?: string; sessionId?: string; repo?: string }>('chat.restore', { sessionId: this._activeSessionId });
+			type RestoreResult =
+				| { error?: string; sessionId?: string; repo?: string }
+				| { code: 'NOT_CONFIGURED'; missing: 'local' | 'provider' | 'both'; message: string };
+			const result = await this.daemonService.rpc<RestoreResult>('chat.restore', { sessionId: this._activeSessionId });
+			if ('code' in result) {
+				this._onDidRequireConfig.fire({ missing: result.missing });
+				this.logService.warn('[insrc-chat] Cannot restore session: NOT_CONFIGURED');
+				return;
+			}
 			if (!result.error && result.sessionId) {
 				this._activeRepo = result.repo;
 				// Load persisted turns before firing the event so the view
@@ -235,7 +257,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		// Parse @mention provider override
 		let actualMessage = message;
 		let actualProvider = provider;
-		const mentionMatch = message.match(/^@(local|haiku|sonnet|opus|sticky|clear)\s+/);
+		const mentionMatch = message.match(/^@(local|openai|anthropic|gemini|mistral|sticky|clear)\s+/);
 		if (mentionMatch) {
 			actualProvider = mentionMatch[1];
 			actualMessage = message.substring(mentionMatch[0].length);

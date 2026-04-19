@@ -147,6 +147,15 @@ export const chatStatus: RpcHandler = async (params) => {
 
 export const chatRestore: RpcHandler = async (params) => {
   const { sessionId } = params as { sessionId: string };
+
+  // Gate on NOT_CONFIGURED so the IDE can auto-open Model Providers
+  // even when restoring a persisted session from a previous run.
+  const { checkConfigured } = await import('./providers.js');
+  const { loadConfigWithKeys } = await import('../agent/config.js');
+  const cfg = await loadConfigWithKeys();
+  const cfgErr = checkConfigured(cfg);
+  if (cfgErr) return cfgErr;
+
   const pool = getPool();
   const restored = await pool.restore(sessionId);
   if (!restored) return { error: 'session not found in DB' };

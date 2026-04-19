@@ -77,7 +77,9 @@ function createCompile(src: string, { build, emitError, transpileOnly, preserveE
 
 		const tsFilter = util.filter(data => /\.ts$/.test(data.path));
 		const isUtf8Test = (f: File) => /(\/|\\)test(\/|\\).*utf8/.test(f.path);
-		const isRuntimeJs = (f: File) => f.path.endsWith('.js') && !f.path.includes('fixtures');
+		// Skip directory entries (e.g. `src/insrc/node_modules/bignumber.js`
+		// whose *name* ends in `.js`) by requiring a Buffer payload.
+		const isRuntimeJs = (f: File) => f.path.endsWith('.js') && !f.path.includes('fixtures') && f.contents instanceof Buffer;
 		const isCSS = (f: File) => f.path.endsWith('.css') && !f.path.includes('fixtures');
 		const noDeclarationsFilter = util.filter(data => !(/\.d\.ts$/.test(data.path)));
 
@@ -136,11 +138,7 @@ export function compileTask(src: string, out: string, build: boolean, options: {
 		}
 
 		const compile = createCompile(src, { build, emitError: true, transpileOnly: false, preserveEnglish: !!options.preserveEnglish });
-		// The daemon (src/insrc) has its own package.json and tsconfig; its
-		// node_modules should not flow through the workbench compile pipeline
-		// (it includes dependencies like `bignumber.js` whose directory names
-		// end in `.js` and trip `isRuntimeJs`).
-		const srcPipe = gulp.src([`${src}/**`, `!${src}/insrc/node_modules/**`], { base: `${src}` });
+		const srcPipe = gulp.src(`${src}/**`, { base: `${src}` });
 		const generator = new MonacoGenerator(false);
 		if (src === 'src') {
 			generator.execute();

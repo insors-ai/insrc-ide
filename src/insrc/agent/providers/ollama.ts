@@ -13,8 +13,16 @@ import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('ollama');
 
-const _defaults = loadConfig();
-const _localDefaults = _defaults.models.providers.local;
+// Lazy defaults -- calling `loadConfig()` at module load creates a circular
+// init (config.ts imports factory.ts imports this file), so we defer until
+// an OllamaProvider is actually constructed.
+let _localDefaults: import('../../shared/types.js').LocalProviderConfig | undefined;
+function localDefaults(): import('../../shared/types.js').LocalProviderConfig {
+  if (!_localDefaults) {
+    _localDefaults = loadConfig().models.providers.local;
+  }
+  return _localDefaults;
+}
 
 export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
@@ -24,11 +32,15 @@ export class OllamaProvider implements LLMProvider {
   private readonly embeddingModel: string;
 
   constructor(
-    model = _localDefaults.coreModel,
-    host = _localDefaults.host,
-    numCtx = _localDefaults.params[_localDefaults.coreModel]?.maxInputTokens ?? 16_384,
+    model?: string,
+    host?: string,
+    numCtx?: number,
   ) {
-    this.model = model;
+    const d = localDefaults();
+    this.model = model ?? d.coreModel;
+    host = host ?? d.host;
+    this.numCtx = numCtx ?? d.params[d.coreModel]?.maxInputTokens ?? 16_384;
+    this.embeddingModel = d.embeddingModel;
     // Override undici's default headers timeout (300s) which is too short for
     // CPU-bound large-context inference that can take 5-10 minutes.
     const agent = new Agent({
@@ -40,8 +52,6 @@ export class OllamaProvider implements LLMProvider {
     const longTimeoutFetch = ((input: any, init?: any) =>
       undiciFetch(input, { ...init, dispatcher: agent })) as unknown as typeof globalThis.fetch;
     this.client = new Ollama({ host, fetch: longTimeoutFetch });
-    this.numCtx = numCtx;
-    this.embeddingModel = _localDefaults.embeddingModel;
   }
 
   async ping(): Promise<boolean> {
