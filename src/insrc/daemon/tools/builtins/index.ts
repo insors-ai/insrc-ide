@@ -19,6 +19,9 @@ import { registerDiffTools } from './diff/index.js';
 import { registerNotifyTools } from './notify/index.js';
 import { registerTestTools } from './test/index.js';
 import { registerPkgTools } from './pkg/index.js';
+import { registerWebTools } from './web/index.js';
+import { registerGraphTools } from './graph/index.js';
+import { registerPlanTools } from './plan/index.js';
 
 export function registerBuiltinTools(): void {
   registerGitTools();
@@ -34,4 +37,7 @@ export function registerBuiltinTools(): void {
   registerNotifyTools();
   registerTestTools();
   registerPkgTools();
+  registerWebTools();
+  registerGraphTools();
+  registerPlanTools();
 }
