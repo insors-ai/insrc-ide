@@ -34,7 +34,17 @@ import { createTrustedTypesPolicy } from '../../../../../base/browser/trustedTyp
 // SVG icon helpers (avoid innerHTML for CSP)
 // ---------------------------------------------------------------------------
 
-function createSvg(viewBox: string, paths: Array<{ d: string; fill?: string; stroke?: string; strokeWidth?: string }>): SVGElement {
+function createSvg(
+	viewBox: string,
+	paths: Array<{
+		d: string;
+		fill?: string;
+		stroke?: string;
+		strokeWidth?: string;
+		strokeLinecap?: string;
+		strokeLinejoin?: string;
+	}>,
+): SVGElement {
 	const ns = 'http://www.w3.org/2000/svg';
 	const svg = document.createElementNS(ns, 'svg');
 	svg.setAttribute('viewBox', viewBox);
@@ -44,15 +54,34 @@ function createSvg(viewBox: string, paths: Array<{ d: string; fill?: string; str
 		if (p.fill) { path.setAttribute('fill', p.fill); }
 		if (p.stroke) { path.setAttribute('stroke', p.stroke); }
 		if (p.strokeWidth) { path.setAttribute('stroke-width', p.strokeWidth); }
+		if (p.strokeLinecap) { path.setAttribute('stroke-linecap', p.strokeLinecap); }
+		if (p.strokeLinejoin) { path.setAttribute('stroke-linejoin', p.strokeLinejoin); }
 		svg.appendChild(path);
 	}
 	return svg;
 }
 
+// Send / cancel stay on the original hand-rolled silhouettes (they read
+// well as solid paths at 16px). Attach / notepad use Heroicons v2
+// outline (MIT, https://heroicons.com) -- path data copied verbatim
+// from media/icons/heroicons/outline/paper-clip.svg and document-text.svg.
+const HERO_OUTLINE = {
+	fill: 'none',
+	stroke: 'currentColor',
+	strokeWidth: '1.5',
+	strokeLinecap: 'round',
+	strokeLinejoin: 'round',
+} as const;
 const SEND_ICON = () => createSvg('0 0 16 16', [{ d: 'M1.724 1.053a.5.5 0 01.553-.05l12.5 7a.5.5 0 010 .874l-12.5 7A.5.5 0 011 15.382V9.5h6a.5.5 0 000-1H1V2.618a.5.5 0 01.724-.565z', fill: 'currentColor' }]);
 const CANCEL_ICON = () => createSvg('0 0 16 16', [{ d: 'M8 1a7 7 0 100 14A7 7 0 008 1zM5.146 5.146a.5.5 0 01.708 0L8 7.293l2.146-2.147a.5.5 0 01.708.708L8.707 8l2.147 2.146a.5.5 0 01-.708.708L8 8.707l-2.146 2.147a.5.5 0 01-.708-.708L7.293 8 5.146 5.854a.5.5 0 010-.708z', fill: 'currentColor' }]);
-const ATTACH_ICON = () => createSvg('0 0 16 16', [{ d: 'M14 8.5L7.5 15a3.54 3.54 0 01-5-5L9 3.5a2.36 2.36 0 013.33 3.33L6 13.17a1.18 1.18 0 01-1.67-1.67L10.5 5.33', fill: 'none', stroke: 'currentColor', strokeWidth: '1.5' }]);
-const NOTEPAD_ICON = () => createSvg('0 0 16 16', [{ d: 'M3 1h10a1 1 0 011 1v12a1 1 0 01-1 1H3a1 1 0 01-1-1V2a1 1 0 011-1zm1 3h8M4 7h8M4 10h5', fill: 'none', stroke: 'currentColor', strokeWidth: '1.2' }]);
+const ATTACH_ICON = () => createSvg('0 0 24 24', [{
+	...HERO_OUTLINE,
+	d: 'm18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.552 18.32m.009-.01-.01.01m5.699-9.941-7.81 7.81a1.5 1.5 0 0 0 2.112 2.13',
+}]);
+const NOTEPAD_ICON = () => createSvg('0 0 24 24', [{
+	...HERO_OUTLINE,
+	d: 'M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z',
+}]);
 
 // ---------------------------------------------------------------------------
 // Trusted HTML policy for rendering daemon HTML snippets
