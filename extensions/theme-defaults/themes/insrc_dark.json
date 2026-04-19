@@ -146,5 +146,144 @@
 		"welcomePage.tileHoverBackground": "#1c2740",
 		"welcomePage.progress.foreground": "#56a0ff",
 		"widget.border": "#1c2740"
+	},
+	"tokenColors": [
+		{
+			"name": "Comments",
+			"scope": [
+				"comment",
+				"punctuation.definition.comment",
+				"string.quoted.docstring"
+			],
+			"settings": {
+				"foreground": "#6b7a8f",
+				"fontStyle": "italic"
+			}
+		},
+		{
+			"name": "Strings",
+			"scope": [
+				"string",
+				"string.quoted",
+				"string.template"
+			],
+			"settings": {
+				"foreground": "#bcd4f5"
+			}
+		},
+		{
+			"name": "Numbers / constants",
+			"scope": [
+				"constant.numeric",
+				"constant.language",
+				"constant.other",
+				"variable.other.constant",
+				"variable.other.enummember"
+			],
+			"settings": {
+				"foreground": "#a0c4ff"
+			}
+		},
+		{
+			"name": "Keywords / control flow",
+			"scope": [
+				"keyword",
+				"keyword.control",
+				"keyword.other",
+				"keyword.operator.new",
+				"keyword.operator.expression",
+				"storage",
+				"storage.type",
+				"storage.modifier"
+			],
+			"settings": {
+				"foreground": "#56a0ff"
+			}
+		},
+		{
+			"name": "Types / classes",
+			"scope": [
+				"entity.name.type",
+				"entity.name.class",
+				"entity.name.interface",
+				"entity.name.namespace",
+				"support.class",
+				"support.type",
+				"storage.type.class",
+				"storage.type.interface",
+				"storage.type.enum"
+			],
+			"settings": {
+				"foreground": "#566eff"
+			}
+		},
+		{
+			"name": "Functions",
+			"scope": [
+				"entity.name.function",
+				"support.function",
+				"meta.function-call entity.name.function",
+				"meta.function entity.name.function"
+			],
+			"settings": {
+				"foreground": "#80b6ff"
+			}
+		},
+		{
+			"name": "Variables / parameters",
+			"scope": [
+				"variable",
+				"variable.parameter",
+				"variable.other",
+				"meta.definition.variable.name",
+				"support.variable",
+				"entity.name.variable"
+			],
+			"settings": {
+				"foreground": "#e3eaf6"
+			}
+		},
+		{
+			"name": "Markup headings",
+			"scope": [
+				"markup.heading",
+				"entity.name.section"
+			],
+			"settings": {
+				"foreground": "#80b6ff",
+				"fontStyle": "bold"
+			}
+		},
+		{
+			"name": "Markup bold",
+			"scope": "markup.bold",
+			"settings": {
+				"foreground": "#bcd4f5",
+				"fontStyle": "bold"
+			}
+		},
+		{
+			"name": "Markup italic",
+			"scope": "markup.italic",
+			"settings": {
+				"fontStyle": "italic"
+			}
+		},
+		{
+			"name": "Markup link",
+			"scope": [
+				"markup.underline.link",
+				"string.other.link"
+			],
+			"settings": {
+				"foreground": "#56a0ff"
+			}
+		}
+	],
+	"semanticTokenColors": {
+		"newOperator": "#56a0ff",
+		"stringLiteral": "#bcd4f5",
+		"customLiteral": "#80b6ff",
+		"numberLiteral": "#a0c4ff"
 	}
 }
