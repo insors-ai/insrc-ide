@@ -91,18 +91,23 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			// Daemon not running
 		}
 
-		// Resolve entry point: dev build if present, otherwise the cloned install
+		// Always run the clone install/update path, even in dev. The
+		// cloned copy is how real users get the daemon, and if we skip
+		// this step in dev the clone/pull/build logic rots until the
+		// next release. Dev still spawns from the dev build for fast
+		// iteration; the clone just validates that the install path
+		// still works against the current repo.
 		const entry = resolveDaemonEntry();
-
-		if (!entry.isDev) {
-			const autoUpdate = this.configurationService.getValue<string>('insrc.daemon.autoUpdate') !== 'never';
-			const ok = await ensureClonedDaemon(this.logService, autoUpdate);
-			if (!ok) {
+		const autoUpdate = this.configurationService.getValue<string>('insrc.daemon.autoUpdate') !== 'never';
+		const cloneOk = await ensureClonedDaemon(this.logService, autoUpdate);
+		if (!cloneOk) {
+			if (!entry.isDev) {
 				throw new Error('Failed to install daemon -- see Output > insrc for details');
 			}
+			this.logService.warn('[insrc] cloned-daemon install failed; continuing from dev build');
 		}
 
-		this.logService.info('[insrc] Daemon not running, spawning detached process...');
+		this.logService.info(`[insrc] Daemon not running, spawning detached (${entry.isDev ? 'dev build' : 'cloned install'})...`);
 		this._spawnDetachedDaemon(entry.path);
 
 		const deadline = Date.now() + SPAWN_CONNECT_MAX_WAIT_MS;
