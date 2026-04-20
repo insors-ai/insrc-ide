@@ -11,7 +11,7 @@
 import type { AgentStep, StepContext } from '../../framework/types.js';
 import type { Entity } from '../../../shared/types.js';
 import type { BrainstormState } from './agent-state.js';
-import type { BrainstormInput } from './types.js';
+import type { BrainstormInput, EntityIndex } from './types.js';
 import { assertDaemonReachable } from '../../tools/context-provider.js';
 import { planSearches, type PlannedSearch } from '../designer/search-planner.js';
 import { generateSeedIdeas, generateDivergeIdeas, applyIdeaSelections } from './ideas.js';
@@ -41,8 +41,9 @@ const AUTO_CONVERGE_ROUNDS = 2;
 async function executeSearches(
   searches: PlannedSearch[],
   ctx: StepContext,
-): Promise<string> {
+): Promise<{ findings: string; entityIndex: EntityIndex }> {
   const findings: string[] = [];
+  const entityIndex: EntityIndex = {};
 
   for (const s of searches) {
     const results = await ctx.rpc<Entity[]>('search.query', {
@@ -54,11 +55,19 @@ async function executeSearches(
       findings.push(`### ${s.category} (${s.query})`);
       for (const e of results) {
         findings.push(`- ${e.kind}: ${e.name} (${e.file}:${e.startLine})`);
+        // Build lookup so refs emitted by the LLM as bare names can be
+        // resolved back to real file:line locations in parseIdeaList.
+        if (e.name && e.file) {
+          entityIndex[e.name] = { path: e.file, line: e.startLine };
+        }
       }
     }
   }
 
-  return findings.length > 0 ? findings.join('\n') : '';
+  return {
+    findings: findings.length > 0 ? findings.join('\n') : '',
+    entityIndex,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +88,7 @@ export const seedStep: AgentStep<BrainstormState> = {
     const searches = await planSearches(searchRequirement, localProvider);
 
     ctx.progress(`Searching codebase (${searches.length} queries)...`);
-    const codebaseFindings = await executeSearches(searches, ctx);
+    const { findings: codebaseFindings, entityIndex } = await executeSearches(searches, ctx);
 
     // Load config context (conventions, feedback, templates)
     let configContext = await loadConfigContext(ctx, 'common', 'all', state.input.repoPath);
@@ -115,11 +124,12 @@ export const seedStep: AgentStep<BrainstormState> = {
         closureRepos: state.input.closureRepos,
       },
     };
-    const { analysis, ideas } = await generateSeedIdeas(input, codebaseFindings, provider, configContext);
+    const { analysis, ideas } = await generateSeedIdeas(input, codebaseFindings, provider, configContext, entityIndex);
 
     const newState = consumeOverride({
       ...state,
       codebaseFindings,
+      entityIndex,
       configContext: configContext || undefined,
       seedAnalysis: analysis,
       ideas,
@@ -223,7 +233,7 @@ export const divergeStep: AgentStep<BrainstormState> = {
     const provider = resolveStepProvider(ctx, state, 'diverge');
     const config = ctx.config;
 
-    const newIdeas = await generateDivergeIdeas(state, provider, config);
+    const newIdeas = await generateDivergeIdeas(state, provider, config, state.entityIndex);
     const allIdeas = [...state.ideas, ...newIdeas];
 
     const newState = consumeOverride({

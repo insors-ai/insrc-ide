@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import type { LLMProvider, AgentConfig } from '../../../shared/types.js';
 import type { BrainstormState } from './agent-state.js';
-import type { BrainstormInput, Idea, IdeaRef, IdeaSource, IdeaStatus } from './types.js';
+import type { BrainstormInput, EntityIndex, Idea, IdeaRef, IdeaSource, IdeaStatus } from './types.js';
 import { buildStepContext } from './context-builder.js';
 import { SEED_SYSTEM } from './prompts.js';
 
@@ -22,6 +22,7 @@ export async function generateSeedIdeas(
   codebaseFindings: string,
   provider: LLMProvider,
   configContext?: string,
+  entityIndex?: EntityIndex,
 ): Promise<{ analysis: string; ideas: Idea[] }> {
   const userParts = ['## Problem Statement', input.message];
 
@@ -46,12 +47,13 @@ export async function generateSeedIdeas(
     { maxTokens: 3000, temperature: 0.5 },
   );
 
-  return parseSeedOutput(response.text, input.session.repoPath);
+  return parseSeedOutput(response.text, input.session.repoPath, entityIndex);
 }
 
 export function parseSeedOutput(
   text: string,
   repoPath: string,
+  entityIndex?: EntityIndex,
 ): { analysis: string; ideas: Idea[] } {
   // Split at ## Analysis if present
   const analysisSplit = text.split(/^##\s*Analysis/im);
@@ -69,7 +71,7 @@ export function parseSeedOutput(
     ideaText = text;
   }
 
-  const ideas = parseIdeaList(ideaText, 1, 1, repoPath);
+  const ideas = parseIdeaList(ideaText, 1, 1, repoPath, entityIndex);
   return { analysis, ideas };
 }
 
@@ -111,6 +113,7 @@ export async function generateDivergeIdeas(
   state: BrainstormState,
   provider: LLMProvider,
   config: AgentConfig,
+  entityIndex?: EntityIndex,
 ): Promise<Idea[]> {
   const techniques = selectTechniques(state);
   const techniqueBlock = techniques
@@ -135,6 +138,7 @@ export async function generateDivergeIdeas(
     state.round,
     state.nextIdeaIndex,
     state.input.repoPath,
+    entityIndex,
   );
 }
 
@@ -145,12 +149,19 @@ export async function generateDivergeIdeas(
 /**
  * Parse ideas from LLM output.
  * Format: [N] Text — tags: tag1, tag2 — refs: entity1, entity2
+ *
+ * When `entityIndex` is provided, each ref name is resolved to a concrete
+ * file path (and line) via the index. Refs that don't resolve are dropped
+ * to avoid rendering broken links in the UI. When `entityIndex` is not
+ * provided, refs are dropped entirely — callers that have entity context
+ * (e.g. after a codebase search) should pass it.
  */
 export function parseIdeaList(
   text: string,
   round: number,
   startIndex: number,
   repoPath: string,
+  entityIndex?: EntityIndex,
 ): Idea[] {
   const ideas: Idea[] = [];
   // Match lines like [N] or [N] at start of line
@@ -173,11 +184,7 @@ export function parseIdeaList(
       .digest('hex')
       .slice(0, 32);
 
-    const references: IdeaRef[] = refs.map(r => ({
-      type: 'code' as const,
-      path: r,
-      label: r,
-    }));
+    const references: IdeaRef[] = resolveRefs(refs, entityIndex);
 
     ideas.push({
       id,
@@ -195,6 +202,32 @@ export function parseIdeaList(
   }
 
   return ideas;
+}
+
+/**
+ * Resolve raw ref names from LLM output into concrete IdeaRefs via the
+ * entity index. Names that don't appear in the index are dropped — we'd
+ * rather show no reference than a link that 404s on click.
+ */
+function resolveRefs(refs: string[], entityIndex: EntityIndex | undefined): IdeaRef[] {
+  if (!entityIndex) return [];
+  const out: IdeaRef[] = [];
+  for (const raw of refs) {
+    // LLMs sometimes produce `ClassName.method`, `file:line`, or stray quotes.
+    // Match on the exact name first, then fall back to the last segment.
+    const cleaned = raw.replace(/^["'`]|["'`]$/g, '').trim();
+    const direct = entityIndex[cleaned];
+    const tail = !direct ? entityIndex[cleaned.split(/[.:/]/).pop() ?? ''] : undefined;
+    const hit = direct ?? tail;
+    if (!hit) continue;
+    out.push({
+      type: 'code',
+      path: hit.path,
+      label: cleaned,
+      ...(hit.line !== undefined ? { line: hit.line } : {}),
+    });
+  }
+  return out;
 }
 
 function parseIdeaParts(raw: string): { title: string; body: string; tags: string[]; refs: string[] } {

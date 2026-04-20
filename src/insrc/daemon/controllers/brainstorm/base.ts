@@ -32,7 +32,7 @@ import type {
   Task, TaskResult, TaskStateStore, TaskFormat, GateTab, GateTabItem,
 } from '../../task.js';
 import type { BrainstormState } from '../../../agent/tasks/brainstorm/agent-state.js';
-import type { Idea, IdeaSource } from '../../../agent/tasks/brainstorm/types.js';
+import type { EntityIndex, Idea, IdeaSource } from '../../../agent/tasks/brainstorm/types.js';
 
 // Category types
 import type { BrainstormCategory } from './types.js';
@@ -195,6 +195,13 @@ export abstract class BrainstormControllerBase implements TaskController {
 
   private state!: BrainstormState;
   private taskCounter = 0;
+  /**
+   * Name → file location lookup built from codebase searches. Used to resolve
+   * LLM-emitted "refs: foo, bar" entries into clickable references. Rebuilt on
+   * every enhance-search; persists across a turn but not across resumes (the
+   * next enhance-search recomputes it).
+   */
+  private _entityIndex: EntityIndex = {};
 
   buildInitialTasks(input: ControllerInput): Task[] {
     this.state = initState(input, this.getDocPrefix());
@@ -318,6 +325,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         return this.afterGenerateThemeSpec(completed);
       case 'review-theme-spec':
         return this.afterReviewThemeSpec(completed);
+      case 'theme-spec-review':
+        return this.afterThemeSpecReview(gateReply);
       case 'assemble-spec':
         return this.afterAssembleSpec(completed);
 
@@ -440,13 +449,20 @@ export abstract class BrainstormControllerBase implements TaskController {
     let codeEntities = '';
     if (completed.success && completed.output) {
       try {
-        const entities = JSON.parse(completed.output) as Array<{ kind: string; name: string; file: string; body?: string; signature?: string }>;
+        const entities = JSON.parse(completed.output) as Array<{ kind: string; name: string; file: string; startLine?: number; body?: string; signature?: string }>;
         if (entities.length > 0) {
           const parts: string[] = [];
           for (const e of entities) {
             const sig = e.signature ? ` — ${e.signature}` : '';
             const body = e.body ? `\n${e.body.slice(0, 300)}` : '';
             parts.push(`[${e.kind}] ${e.name}${sig} (${e.file})${body}`);
+            // Index by bare name so LLM-emitted refs (which only carry the
+            // entity name, not the path) can be resolved at parse time.
+            if (e.name && e.file) {
+              this._entityIndex[e.name] = e.startLine !== undefined
+                ? { path: e.file, line: e.startLine }
+                : { path: e.file };
+            }
           }
           codeEntities = parts.join('\n\n');
         }
@@ -485,6 +501,7 @@ export abstract class BrainstormControllerBase implements TaskController {
       this.state.round,
       1,
       this.state.input.repoPath || 'unknown',
+      this._entityIndex,
     );
 
     // Match enhanced ideas back to originals by POSITION (not index — LLM renumbers from [1])
@@ -561,6 +578,7 @@ export abstract class BrainstormControllerBase implements TaskController {
       this.state.round,
       1, // renumbered from 1
       this.state.input.repoPath || 'unknown',
+      this._entityIndex,
     );
 
     // Keep all non-rejected ideas from prior rounds -- not just 'accepted'.
@@ -893,6 +911,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         this.state.round,
         this.state.nextIdeaIndex,
         this.state.input.repoPath || 'unknown',
+        this._entityIndex,
       );
       for (const idea of newIdeas) {
         this.state.ideas.push(idea);
@@ -1367,7 +1386,97 @@ export abstract class BrainstormControllerBase implements TaskController {
     }
     this.state.specSections = sections;
 
-    // Next theme or assemble
+    // Hand the polished section to the user for review before assembly. They
+    // can approve and move to the next theme, or send edit feedback that
+    // re-runs the per-theme generation with their notes appended.
+    this.state.lastStep = 'theme-spec-review';
+    return [this.buildThemeSpecReviewTask()];
+  }
+
+  /**
+   * Gate: user reviews the Claude-polished spec section for the current theme
+   * before the controller advances to the next theme (or final assembly).
+   */
+  private buildThemeSpecReviewTask(): Task {
+    const sections = this.state.specSections ?? [];
+    const section = sections[sections.length - 1];
+    const themeIdx = this.state.currentThemeIndex ?? 0;
+    const theme = this.state.themes[themeIdx];
+    const themeName = section?.themeName ?? theme?.name ?? `Theme ${themeIdx + 1}`;
+    const content = section?.content ?? '';
+
+    const remaining = (this.state.specThemeQueue ?? []).length;
+    const totalThemes = this.state.themes.length;
+    const current = totalThemes - remaining;
+
+    return {
+      index: this.taskCounter++,
+      description: `Review spec: ${themeName}`,
+      kind: 'transform',
+      intent: 'brainstorm',
+      userMessage: content,
+      passThrough: true,
+      requiresGate: true,
+      gateTitle: `Spec ${current}/${totalThemes}: ${themeName}`,
+      gateActions: [
+        { name: 'approve', label: 'Approve' },
+        { name: 'edit', label: 'Request edits', hint: '<what to change>', needsInput: true },
+      ],
+      structured: {
+        phase: 'specify',
+        itemType: 'theme-spec',
+        itemId: section?.themeId ?? String(themeIdx),
+        item: {
+          themeIndex: themeIdx,
+          themeName,
+          themeId: section?.themeId,
+          content,
+        },
+        progress: {
+          total: totalThemes,
+          current,
+          remaining,
+        },
+      },
+      cyclic: { maxRounds: MAX_EDIT_ROUNDS, retryActions: ['edit'], skipActions: [] },
+      stateKey: 'themeSpecReviewGateOutput',
+    };
+  }
+
+  private afterThemeSpecReview(gateReply: GateReply | undefined): Task[] {
+    const sections = this.state.specSections ?? [];
+    const section = sections[sections.length - 1];
+
+    // Default path (missing reply or approve) → advance.
+    if (!gateReply || gateReply.action === 'approve') {
+      return this.nextThemeSpec();
+    }
+
+    if (gateReply.action === 'edit') {
+      const themeIdx = section?.themeIndex ?? this.state.currentThemeIndex ?? 0;
+      const key = `theme-spec-${section?.themeId ?? themeIdx}`;
+      const rounds = this.state.editRounds[key] ?? 0;
+      if (rounds >= MAX_EDIT_ROUNDS) {
+        // Safety rail matches the convergence gate: stop looping after N edits
+        // and move on with whatever we have.
+        return this.nextThemeSpec();
+      }
+      this.state.editRounds[key] = rounds + 1;
+
+      // Capture feedback so the next generate call sees it. We drop the last
+      // section (the one being edited) so afterGenerateThemeSpec will push a
+      // fresh one in its place.
+      if (section) {
+        this.state.specSections = sections.slice(0, -1);
+      }
+      this.state.recentFeedback = gateReply.feedback
+        ? `Edit request for ${section?.themeName ?? 'this theme'}:\n${gateReply.feedback}`
+        : this.state.recentFeedback;
+
+      this.state.lastStep = 'generate-theme-spec';
+      return [this.buildGenerateThemeSpecTask(themeIdx)];
+    }
+
     return this.nextThemeSpec();
   }
 

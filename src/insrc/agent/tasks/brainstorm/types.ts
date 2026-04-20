@@ -45,6 +45,14 @@ export interface IdeaRef {
   snippet?: string | undefined;
 }
 
+/**
+ * Lookup from entity name (as emitted by LLMs in "refs: entityA, entityB") to
+ * a concrete file location. Built from daemon search results; used to resolve
+ * LLM-hallucinated entity names into clickable references. Refs whose name is
+ * not in this index are dropped rather than rendered as broken links.
+ */
+export type EntityIndex = Record<string, { path: string; line?: number }>;
+
 /** A single idea in the brainstorming pool. */
 export interface Idea {
   id: string;

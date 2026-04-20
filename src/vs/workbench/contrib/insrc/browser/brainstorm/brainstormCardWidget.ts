@@ -89,11 +89,12 @@ export class BrainstormCardWidget extends Disposable {
 		}
 
 		// References section
-		if (data.references.length > 0) {
+		const clickableRefs = data.references.filter(r => isOpenableRef(r));
+		if (clickableRefs.length > 0) {
 			const refsSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-refs'));
 			const refsLabel = dom.append(refsSection, dom.$('h4'));
 			refsLabel.textContent = 'References';
-			for (const ref of data.references) {
+			for (const ref of clickableRefs) {
 				const refEl = dom.append(refsSection, dom.$('a.insrc-brainstorm-ref'));
 				const icon = dom.append(refEl, dom.$('span'));
 				icon.classList.add(...ThemeIcon.asClassNameArray(
@@ -205,4 +206,15 @@ export class BrainstormCardWidget extends Disposable {
 			default: return '';
 		}
 	}
+}
+
+/**
+ * Only render references whose `path` looks like a real file path. LLM output
+ * sometimes includes bare entity names ("MyClass") that the agent couldn't
+ * resolve; opening them would navigate to `file:///.../MyClass` and fail.
+ */
+function isOpenableRef(ref: IdeaRef): boolean {
+	if (ref.type === 'url') { return true; }
+	if (!ref.path) { return false; }
+	return ref.path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(ref.path);
 }

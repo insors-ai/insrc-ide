@@ -9,6 +9,7 @@ import type { AgentState } from '../../framework/types.js';
 import type {
   Idea, Theme, SpecRequirement, SpecRevision,
   ProviderOverride, PromotionProposal, MergeProposal,
+  EntityIndex,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,13 @@ export interface BrainstormState extends AgentState {
   // Context management
   /** Daemon search results from seed phase. */
   codebaseFindings:  string;
+  /**
+   * Entity-name → file location lookup built from daemon search results. Used
+   * by parseIdeaList to resolve LLM-emitted ref names into clickable file
+   * references. Optional — legacy states may not have it, in which case refs
+   * are dropped until the next seed/diverge populates it.
+   */
+  entityIndex?:      EntityIndex | undefined;
   /** Compressed summaries of prior rounds. */
   compressedHistory: string;
   /** Initial problem decomposition from seed phase. */
