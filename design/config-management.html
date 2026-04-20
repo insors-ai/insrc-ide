@@ -218,7 +218,7 @@
 <!-- ================================================================== -->
 <h2 id="overview">1. Overview</h2>
 
-<p>insrc currently has a single flat config at <code>~/.insrc/config.json</code> loaded by <code>loadConfig()</code> in <code>src/agent/config.ts</code>. This works for LLM provider settings and model routing, but doesn't support:</p>
+<p>insrc currently has a single flat config at <code>~/.insrc/config.json</code> loaded by <code>loadConfig()</code> in <code>src/insrc/agent/config.ts</code>. That file carries LLM-provider settings (<code>models.activeProvider</code>, per-provider <code>default</code>/<code>enabled</code>/<code>params</code>, <code>visionDefault</code>, per-agent step bindings in <code>models.agents</code>) and permissions; API keys live in the OS keychain, not the file. The Model Providers pane (<code>insrc.openModelProviders</code>) is the main way users edit this slice. What's missing:</p>
 
 <ul>
   <li><strong>Project-level overrides</strong> &mdash; different repos need different test conventions, provider preferences, or agent behavior</li>
@@ -251,8 +251,9 @@
 
 <p><strong>Owns:</strong></p>
 <ul>
-  <li>LLM provider config (Ollama host, API keys, model tiers)</li>
-  <li>Default agent behavior (permission mode, routing mode)</li>
+  <li>LLM provider config (<code>models.activeProvider</code>, per-provider <code>default</code>/<code>enabled</code>/<code>params</code>, local host + core model + embedding model, global <code>visionDefault</code>); managed via the Model Providers pane</li>
+  <li>API keys for each cloud provider -- stored in the OS keychain under service <code>insrc</code> (accounts: <code>anthropic</code>, <code>openai</code>, <code>gemini</code>, <code>mistral</code>, <code>brave</code>); never written to <code>config.json</code></li>
+  <li>Default agent behavior (permission mode, per-agent step bindings in <code>models.agents</code>)</li>
   <li>Language-level templates and feedback (vitest patterns, pytest conventions, Go idioms)</li>
   <li>The config vector store (shared across all projects)</li>
 </ul>
@@ -264,7 +265,7 @@
 
 <p><strong>Owns:</strong></p>
 <ul>
-  <li>Project-specific model overrides (e.g., always use Claude for this repo's tests)</li>
+  <li>Project-specific model overrides (e.g., pin <code>models.agents.tester.review</code> to a specific cloud provider + model for this repo)</li>
   <li>Project-specific conventions (entity ID format, custom logger API, internal service URLs)</li>
   <li>Project-specific templates (test setup patterns for this repo's DB layer)</li>
   <li>Project-specific feedback (lessons learned from testing this codebase)</li>
@@ -299,7 +300,9 @@
 <h2 id="directory-layout">3. Directory Layout</h2>
 
 <pre><code>~/.insrc/                              # Global config root
-├── config.json                        # AgentConfig (existing)
+├── config.json                        # AgentConfig (models.{activeProvider, visionDefault,
+│                                      #   providers, agents}, permissions, logLevel;
+│                                      #   API keys NOT stored here -- see OS keychain)
 ├── graph/                             # Kuzu (existing)
 ├── lance/                             # LanceDB — code entities (existing)
 ├── config-store/                      # LanceDB — config vector store (NEW)
@@ -844,9 +847,9 @@ results.sort((a, b) => {
     <td>Generalized rule, not the specific instance</td>
   </tr>
   <tr>
-    <td><strong>Claude review corrections</strong></td>
+    <td><strong>Cloud-provider review corrections</strong></td>
     <td>Tester</td>
-    <td>Claude flags issues during test/code review</td>
+    <td>The review-step provider (active cloud provider's default model) flags issues during test/code review</td>
     <td>Pattern that led to successful fix (discard false positives)</td>
   </tr>
   <tr>
@@ -1275,8 +1278,8 @@ insrc config init                          # Create &lt;project&gt;/.insrc/ with
     <td>Add <code>ConfigEntry</code>, <code>ConfigScope</code>, <code>ConfigSearchOpts</code>, <code>RecordFeedbackOpts</code>, extend <code>IndexJob</code> union with <code>'config-full'</code> and <code>'config-file'</code></td>
   </tr>
   <tr>
-    <td><code>src/agent/config.ts</code></td>
-    <td>Update <code>loadConfig()</code> to merge project config from <code>&lt;repo&gt;/.insrc/config.json</code></td>
+    <td><code>src/insrc/agent/config.ts</code></td>
+    <td>Update <code>loadConfig()</code> to merge project config from <code>&lt;repo&gt;/.insrc/config.json</code>. Note: <code>loadConfig()</code> already auto-migrates the legacy pre-multi-provider schema (<code>models.tiers.*</code>, <code>models.local</code>, <code>ollama.host</code>, etc.) into the current <code>models.providers.*</code> shape; the project-merge step layers on top of that.</td>
   </tr>
   <tr>
     <td><code>src/agent/framework/types.ts</code></td>
