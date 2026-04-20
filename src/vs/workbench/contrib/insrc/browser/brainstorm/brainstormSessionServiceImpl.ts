@@ -51,6 +51,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	private _sessionId: string | undefined;
 	private _category: string | undefined;
 	private _phase: BrainstormPhase = 'waiting';
+	private _isSessionActive = false;
 	private _ideasById = new Map<string, BrainstormIdea>();
 	private _ideasOrder: string[] = [];
 	private _themesById = new Map<string, BrainstormTheme>();
@@ -81,6 +82,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	get sessionId(): string | undefined { return this._sessionId; }
 	get category(): string | undefined { return this._category; }
 	get phase(): BrainstormPhase { return this._phase; }
+	get isSessionActive(): boolean { return this._isSessionActive; }
 	get ideas(): readonly BrainstormIdea[] { return this._ideasOrder.map(id => this._ideasById.get(id)!).filter(Boolean); }
 	get themes(): readonly BrainstormTheme[] { return this._themesOrder.map(id => this._themesById.get(id)!).filter(Boolean); }
 	get specSections(): readonly BrainstormSpecSection[] { return this._specSections; }
@@ -179,9 +181,20 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	}
 
 	private _ingestProgress(step: string): void {
-		const match = step.match(/^Intent:\s*\w+\/(\w+)/);
-		if (match) {
-			this._category = match[1]!;
+		// "Intent: brainstorm/<category>" -- the classifier committed; treat
+		// the whole turn as brainstorm from here on, even before any gate
+		// shows up. This is the earliest moment we can lock the chat panel.
+		const bsMatch = step.match(/^Intent:\s*brainstorm\/(\w+)/);
+		if (bsMatch) {
+			this._category = bsMatch[1]!;
+			this._isSessionActive = true;
+			this._onDidChange.fire();
+			return;
+		}
+		// Any non-brainstorm intent in the same session ends the brainstorm lock.
+		const otherMatch = step.match(/^Intent:\s*(\w+)(?:\/|$)/);
+		if (otherMatch && otherMatch[1] !== 'brainstorm' && this._isSessionActive) {
+			this._isSessionActive = false;
 			this._onDidChange.fire();
 		}
 	}
@@ -221,6 +234,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	private _resetSession(): void {
 		this._category = undefined;
 		this._phase = 'waiting';
+		this._isSessionActive = false;
 		this._ideasById.clear();
 		this._ideasOrder = [];
 		this._themesById.clear();

@@ -156,12 +156,17 @@ export class InsrcChatViewPane extends ViewPane {
 		}));
 		this._register(this.repoService.onDidChangeRepos(() => this._updateHeader()));
 
-		// Brainstorm session lock: while the user is interacting with a
-		// brainstorm editor pane, the chat composer is dormant -- input is
-		// disabled and the send button swaps to cancel so the only way to
-		// interrupt is by cancelling the daemon stream.
+		// Brainstorm session lock: while a brainstorm session is in flight,
+		// the chat composer is dormant -- input is disabled and the send
+		// button swaps to cancel so the only way to interrupt is by
+		// cancelling the daemon stream. The lock tracks
+		// sessionService.isSessionActive which flips the moment the
+		// classifier commits to a brainstorm intent, before the first gate.
+		this._register(this.brainstormSession.onDidChange(() => {
+			this._updateBrainstormLock();
+			this._syncIntentDropdown();
+		}));
 		this._register(this.brainstormSession.onDidChangeActiveGate(() => this._updateBrainstormLock()));
-		this._register(this.brainstormSession.onDidChange(() => this._syncIntentDropdown()));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -315,13 +320,19 @@ export class InsrcChatViewPane extends ViewPane {
 				// discussion + per-idea prompts are rendered inside the card
 				// widget itself (see BrainstormCardWidget._discussionEl). Don't
 				// duplicate them in the chat panel.
-				if (this._shouldSuppressForBrainstorm()) {
+				if (this._shouldSuppressMessagesForBrainstorm()) {
 					break;
 				}
 				this._renderMessage(event.message);
 				break;
 			case 'gate': {
 				// Skip brainstorm gates -- handled by the brainstorm editor panes.
+				// The session-active flag is the primary gate; the phase check is
+				// a belt-and-suspenders fallback in case a gate arrives before the
+				// session-active progress event (unlikely but cheap to cover).
+				if (this.brainstormSession.isSessionActive) {
+					break;
+				}
 				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
 				if (gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence' || gateCtx['phase'] === 'specify' || gateCtx['phase'] === 'finalize')) {
 					break;
@@ -363,7 +374,7 @@ export class InsrcChatViewPane extends ViewPane {
 
 		// If the brainstorm pane is taking over, it already shows the
 		// category badge -- no need to echo in chat too.
-		if (this._shouldSuppressForBrainstorm()) { return; }
+		if (this._shouldSuppressMessagesForBrainstorm()) { return; }
 
 		const message: ChatMessage = {
 			role: 'assistant',
@@ -374,15 +385,23 @@ export class InsrcChatViewPane extends ViewPane {
 	}
 
 	/**
-	 * True if the current brainstorm session has an active gate the user is
-	 * acting on -- in that case the conversation lives in the brainstorm pane,
-	 * not the chat panel.
+	 * True from the moment the classifier decides "brainstorm" until the
+	 * session ends. Used to lock the chat composer: the user shouldn't be
+	 * typing a new message into chat while the brainstorm flow owns the
+	 * conversation -- and we want the lock BEFORE the first card arrives,
+	 * not only once a gate has landed.
 	 */
-	private _shouldSuppressForBrainstorm(): boolean {
-		const gate = this.brainstormSession.activeGate;
-		if (!gate) { return false; }
-		// Only gate-kinds that render their own discussion area qualify.
-		return gate.kind === 'idea' || gate.kind === 'idea-discussion';
+	private _shouldLockForBrainstorm(): boolean {
+		return this.brainstormSession.isSessionActive;
+	}
+
+	/**
+	 * Suppress assistant chat messages while brainstorm owns the session.
+	 * The entire conversation lives in the brainstorm pane -- the chat
+	 * panel should stay quiet so the user has one place to interact.
+	 */
+	private _shouldSuppressMessagesForBrainstorm(): boolean {
+		return this.brainstormSession.isSessionActive;
 	}
 
 	/**
@@ -411,7 +430,7 @@ export class InsrcChatViewPane extends ViewPane {
 	}
 
 	private _updateBrainstormLock(): void {
-		const locked = this._shouldSuppressForBrainstorm();
+		const locked = this._shouldLockForBrainstorm();
 		if (!this._sendBtn || !this._cancelBtn || !this._input) { return; }
 		if (locked) {
 			this._sendBtn.style.display = 'none';
@@ -419,6 +438,7 @@ export class InsrcChatViewPane extends ViewPane {
 			this._sendBtn.disabled = true;
 			this._input.disabled = true;
 			this._input.placeholder = 'Brainstorm in progress -- use the pane above';
+			if (this._intentSelect) { this._intentSelect.disabled = true; }
 		} else if (!this.chatService.isStreaming) {
 			// Don't fight with the streaming state; _onStreamEnd will restore
 			// when the stream ends.
@@ -427,6 +447,7 @@ export class InsrcChatViewPane extends ViewPane {
 			this._sendBtn.disabled = false;
 			this._input.disabled = false;
 			this._input.placeholder = 'Type a message... (@local, @sonnet for provider)';
+			if (this._intentSelect) { this._intentSelect.disabled = false; }
 		}
 	}
 
@@ -710,7 +731,7 @@ export class InsrcChatViewPane extends ViewPane {
 
 		// Don't re-enable input if the brainstorm pane is still driving; the
 		// brainstorm lock keeps the composer dormant until the flow completes.
-		if (this._shouldSuppressForBrainstorm()) {
+		if (this._shouldLockForBrainstorm()) {
 			this._updateBrainstormLock();
 			return;
 		}

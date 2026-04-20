@@ -104,6 +104,14 @@ export interface IInsrcBrainstormSessionService {
 	/** Brainstorm sub-intent ('general', 'design', 'requirements', ...) -- populated from Intent progress events. */
 	readonly category: string | undefined;
 	readonly phase: BrainstormPhase;
+	/**
+	 * True from the moment the classifier reports a brainstorm intent until
+	 * the session ends (new chat session opened, or presentation gate saved /
+	 * skipped). Use this for cross-cutting "am I in brainstorm?" decisions --
+	 * it flips to true BEFORE the first brainstorm gate arrives, so the chat
+	 * panel can lock immediately rather than waiting for the first card.
+	 */
+	readonly isSessionActive: boolean;
 
 	/** Accumulated across all ideation gates. Ordered by arrival. */
 	readonly ideas: readonly BrainstormIdea[];

@@ -149,10 +149,14 @@ export class BrainstormIdeasPane extends EditorPane {
 				// card visible while the backend computes themes. `skip`/`park`
 				// re-queue the idea, so they don't count as finishing.
 				if (this._wasFinalDecision(gate, action)) {
-					this._showCompletionState();
+					this._showCompletionState(gate, action);
 				}
 			},
-			message => { this.chatService.replyToGate(gate.gateId, 'respond', message); },
+			// Free-text send on the card is interpreted as "discuss this idea
+			// with the agent" -- the single-idea gate has no `respond` handler
+			// (it would silently fall through to accept), so we route through
+			// the `discuss` action which opens the idea-discussion subflow.
+			message => { this.chatService.replyToGate(gate.gateId, 'discuss', message); },
 		);
 	}
 
@@ -169,7 +173,7 @@ export class BrainstormIdeasPane extends EditorPane {
 		return total > 0 && current >= total;
 	}
 
-	private _showCompletionState(): void {
+	private _showCompletionState(gate: BrainstormGateSnapshot, action: string): void {
 		if (this._cardWidget) {
 			this._cardWidget.dispose();
 			this._cardWidget = undefined;
@@ -181,17 +185,36 @@ export class BrainstormIdeasPane extends EditorPane {
 		const titleEl = dom.append(banner, dom.$('h3.insrc-brainstorm-completion-title'));
 		titleEl.textContent = 'All ideas reviewed';
 
+		// The backend's progress counters are the source of truth, but they
+		// reflect state BEFORE the reply we just sent -- the next gate with
+		// updated numbers hasn't arrived yet. Apply the just-taken action to
+		// the appropriate bucket so the banner shows the true post-action
+		// state. (Reading from sessionService.ideas would undercount because
+		// the current idea's local status is still 'proposed' until the
+		// backend echoes the update.)
+		const p = gate.progress ?? {};
+		const base = {
+			approved: p['approved'] ?? 0,
+			rejected: p['rejected'] ?? 0,
+			parked: p['parked'] ?? 0,
+			skipped: p['skipped'] ?? 0,
+		};
+		if (action === 'approve') { base.approved += 1; }
+		else if (action === 'reject') { base.rejected += 1; }
+		else if (action === 'park') { base.parked += 1; }
+		else if (action === 'skip') { base.skipped += 1; }
+		const total = p['total'] ?? (base.approved + base.rejected + base.parked + base.skipped);
+
 		const counts = dom.append(banner, dom.$('.insrc-brainstorm-completion-counts'));
-		const byStatus = (s: string): number => this.sessionService.ideas.filter(i => i.status === s).length;
 		const pill = (label: string, n: number, modifier: string): void => {
 			const el = dom.append(counts, dom.$(`span.insrc-brainstorm-completion-pill.${modifier}`));
 			el.textContent = `${label}: ${n}`;
 		};
-		pill('Approved', byStatus('accepted'), 'approved');
-		pill('Rejected', byStatus('rejected'), 'rejected');
-		pill('Parked', byStatus('parked'), 'parked');
-		pill('Skipped', byStatus('skipped'), 'skipped');
-		pill('Total', this.sessionService.ideas.length, 'total');
+		pill('Approved', base.approved, 'approved');
+		pill('Rejected', base.rejected, 'rejected');
+		pill('Parked', base.parked, 'parked');
+		pill('Skipped', base.skipped, 'skipped');
+		pill('Total', total, 'total');
 
 		const note = dom.append(banner, dom.$('p.insrc-brainstorm-completion-note'));
 		const spinner = dom.append(note, dom.$('span.insrc-brainstorm-completion-spinner'));

@@ -5,6 +5,7 @@
 
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -33,6 +34,7 @@ export class BrainstormFlowContribution extends Disposable {
 		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
 		@IEditorService private readonly editorService: IEditorService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
 	) {
 		super();
 
@@ -58,7 +60,10 @@ export class BrainstormFlowContribution extends Disposable {
 	private _inputFor(kind: BrainstormGateKind, sessionId: string): EditorInput | undefined {
 		switch (kind) {
 			case 'idea':
-				return new BrainstormIdeasInput(sessionId);
+				// Goes through the instantiation service so the step input's
+				// close handler gets IDialogService / IInsrcChatService /
+				// IInsrcBrainstormSessionService injected.
+				return this.instantiationService.createInstance(BrainstormIdeasInput, sessionId);
 
 			// Not yet migrated -- keep using the legacy monolithic pane so the
 			// user-visible flow doesn't break mid-rewrite.
