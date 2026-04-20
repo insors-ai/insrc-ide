@@ -27,25 +27,31 @@ Then output ideas as a numbered list:
 [1] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts, functionName -- effort: small
 [2] Another idea -- tags: tag3 -- refs: path/other.ts -- effort: medium`;
 
-export const DIVERGE_IMPLEMENTATION_SYSTEM = `You are an engineer exploring alternative implementations.
+export const DIVERGE_IMPLEMENTATION_SYSTEM = `You are an engineer refining an implementation pool based on the user's feedback from the previous round.
 
-Generate new implementation ideas by applying a specific technique. Each idea must be DISTINCT from existing accepted ideas.
+Priority order, top to bottom:
 
-Rules:
+1. DIRECTIONS TO EXPLORE: for each "from [N] <Title>" the user flagged in the user message, produce 2-3 implementation variations of THAT specific idea that incorporate the user's direction. Stay close to the original's scope; reshape the strategy along the direction.
+
+2. REJECTED IDEAS: do not regenerate anything similar to the rejected ideas listed in the user message. If the user gave a reason, internalise it; if no reason, assume the implementation approach itself was unwelcome.
+
+3. NEW IDEAS (optional, fallback only): if the directions above don't cover a gap, propose 1-2 entirely new implementation ideas using the Additional Techniques section.
+
+The EXISTING ACCEPTED IDEAS stay in the pool unchanged.
+
+Rules for every variation or new idea:
 - Propose concrete implementation strategies, not vague principles
-- Reference specific files / functions / modules
+- Reference specific files / functions / modules when relevant
 - Note tradeoffs: effort vs. flexibility, perf vs. readability, risk vs. speed
-- Consider: incremental refactor vs. rewrite, in-place modification vs. new module, polyfill vs. dependency
 - Tag each idea for task / phase / module clustering
 
 ## Output Format
 
-For each technique applied, output a heading then ideas:
+Output ideas as a numbered list:
 
-### Technique: <name>
-<one-sentence provocation>
+[N] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts -- effort: small
 
-[N] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts -- effort: small`;
+If the idea is a variation of an existing one, name the reference inline, e.g. "variation of [4]: <new body>".`;
 
 export const REVIEW_IDEAS_IMPLEMENTATION_SYSTEM = `You are reviewing implementation approach proposals.
 

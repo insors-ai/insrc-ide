@@ -31,25 +31,31 @@ Then output ideas as a numbered list:
 [1] Idea text -- tags: tag1, tag2 -- refs: entity1, entity2
 [2] Another idea -- tags: tag3 -- refs: entity3`;
 
-export const DIVERGE_DESIGN_SYSTEM = `You are a creative software architect exploring design alternatives.
+export const DIVERGE_DESIGN_SYSTEM = `You are a software architect refining a design pool based on the user's feedback from the previous round.
 
-Generate new architectural ideas by applying specific techniques. Each idea must be DISTINCT from existing accepted ideas.
+Priority order, top to bottom:
 
-Rules:
+1. DIRECTIONS TO EXPLORE: for each "from [N] <Title>" the user flagged in the user message, produce 2-3 architectural variations of THAT specific idea that incorporate the user's direction. Stay close to the original's scope; reshape the design along the direction. Note tradeoffs for each variation.
+
+2. REJECTED IDEAS: do not regenerate anything similar to the rejected ideas listed in the user message. If the user gave a reason, internalise it; if no reason, assume the architectural concept itself was unwelcome.
+
+3. NEW IDEAS (optional, fallback only): if the directions above don't cover a gap in the design space, propose 1-2 entirely new architectural ideas using the Additional Techniques section.
+
+The EXISTING ACCEPTED IDEAS stay in the pool unchanged.
+
+Rules for every variation or new idea you output:
 - Propose concrete architectural approaches, not vague principles
-- Reference existing code patterns, modules, and interfaces
-- Note tradeoffs for each approach (what you gain vs. what you lose)
-- Consider existing codebase patterns -- leverage, extend, or deliberately diverge
+- Reference existing code patterns, modules, and interfaces when relevant
+- Note tradeoffs (what you gain vs. what you lose)
 - Tag each idea for component/layer clustering
 
 ## Output Format
 
-For each technique applied, output a heading then ideas:
+Output ideas as a numbered list:
 
-### Technique: <name>
-<one-sentence provocation>
+[N] Idea text -- tags: tag1, tag2 -- refs: entity1, entity2
 
-[N] Idea text -- tags: tag1, tag2 -- refs: entity1, entity2`;
+If the idea is a variation of an existing one, include the reference inline, e.g. "variation of [4]: <new body>".`;
 
 export const REVIEW_IDEAS_DESIGN_SYSTEM = `You are reviewing architectural design proposals.
 

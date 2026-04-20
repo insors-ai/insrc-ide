@@ -28,16 +28,23 @@ Encourage:
 
 Output format: JSON array of { title, body, tags }.`;
 
-export const DIVERGE_GENERAL_SYSTEM = `You are expanding an existing set of brainstorm ideas using creative techniques.
+export const DIVERGE_GENERAL_SYSTEM = `You are refining a brainstorm pool based on the user's feedback from the previous round.
 
-Given the prior round's ideas and the user's topic, produce 4-8 NEW ideas that:
-- Apply at least one creative technique (analogy transfer, inversion, constraint removal, combining two prior ideas)
-- Cover an angle the prior round missed
-- Are genuinely different, not restatements
+Priority order, top to bottom:
 
-For each new idea:
-- Title, body (1-2 sentences), tags
-- Optional: reference prior idea index(es) that inspired this one
+1. DIRECTIONS TO EXPLORE: for each "from [N] <Title>" the user flagged in the user message, produce 2-3 variations of THAT specific idea that incorporate the user's direction. Stay close to the original's scope and intent; reshape along the direction. Set inspiredBy to the original idea's index.
+
+2. REJECTED IDEAS: do not regenerate anything similar to the rejected ideas listed in the user message. If the user gave a reason, internalise it; if they gave no reason, assume the concept itself was unwelcome.
+
+3. NEW IDEAS (optional, fallback only): if the directions above don't cover a gap in the problem space, propose 1-2 entirely new ideas using the Additional Techniques section. Do not produce more than 2 new ideas without a clear gap justification. Leave inspiredBy unset for these.
+
+The EXISTING ACCEPTED IDEAS stay in the pool unchanged -- do not restate or slightly rephrase them.
+
+For each idea you output:
+- Title (1 line)
+- Body (1-2 sentences)
+- Tags
+- inspiredBy: the index of the original idea if this is a variation, omit if it's a new idea.
 
 Output format: JSON array of { title, body, tags, inspiredBy? }.`;
 

@@ -28,11 +28,19 @@ Then output ideas as a numbered list:
 [1] Scenario description -- tags: unit, error-path -- refs: path/to/file.ts::fn -- priority: must
 [2] Another scenario -- tags: e2e, performance -- refs: path/other.ts -- priority: should`;
 
-export const DIVERGE_TESTING_SYSTEM = `You are a QA engineer hunting for untested scenarios.
+export const DIVERGE_TESTING_SYSTEM = `You are a QA engineer refining a test-scenario pool based on the user's feedback from the previous round.
 
-Generate new test ideas by applying a specific technique. Each idea must be DISTINCT from existing accepted scenarios.
+Priority order, top to bottom:
 
-Techniques to apply:
+1. DIRECTIONS TO EXPLORE: for each "from [N] <Title>" the user flagged in the user message, produce 2-3 test-scenario variations of THAT specific scenario that incorporate the user's direction. Stay close to the original's surface (same subject-under-test, same API, same angle) and reshape per the direction.
+
+2. REJECTED IDEAS: do not regenerate anything similar to the rejected scenarios listed in the user message. If the user gave a reason, internalise it; if no reason, assume the scenario itself was unwelcome.
+
+3. NEW IDEAS (optional, fallback only): if the directions above don't cover a gap in coverage, propose 1-2 entirely new test scenarios using the Additional Techniques section.
+
+The EXISTING ACCEPTED SCENARIOS stay in the pool unchanged.
+
+Technique library (for new scenarios or shaping variations):
 - Boundary: empty/null/max values, unicode, large input
 - Negative: invalid inputs, malformed data, wrong order of operations
 - Concurrency: races, deadlocks, parallel mutations
@@ -40,16 +48,18 @@ Techniques to apply:
 - Security: input validation, auth/authz, injection
 - Environmental: clock skew, network partition, disk full, OOM
 
-Tag each idea with its test type. Reference specific code entities.
+Rules for every variation or new scenario:
+- Tag each idea with its test type
+- Reference specific code entities when relevant
+- Be concrete about the scenario's conditions and expected outcome
 
 ## Output Format
 
-For each technique applied, output a heading then ideas:
+Output ideas as a numbered list:
 
-### Technique: <name>
-<one-sentence provocation>
+[N] Scenario description -- tags: <type>, <angle> -- refs: path/to/file.ts
 
-[N] Scenario description -- tags: <type>, <angle> -- refs: path/to/file.ts`;
+If the scenario is a variation of an existing one, include the reference inline, e.g. "variation of [4]: <new scenario>".`;
 
 export const REVIEW_IDEAS_TESTING_SYSTEM = `You are reviewing brainstormed test scenarios.
 

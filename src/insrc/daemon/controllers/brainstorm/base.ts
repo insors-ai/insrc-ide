@@ -410,15 +410,13 @@ export abstract class BrainstormControllerBase implements TaskController {
    * Start the next ideation round. On round > 1, searches the vector store
    * first to enrich code context with terms from user feedback/ideas.
    *
-   * Resets every retained idea's `feedback[]` to empty -- per-round
-   * feedback only influences the round it was collected in, so subsequent
-   * rounds don't drown the LLM in stale signal. Historical feedback
-   * remains captured in `state.qna` for audit.
+   * NOTE: do NOT reset `idea.feedback[]` here. The round-2 generation
+   * prompt reads that feedback into its Rejected + Directions sections;
+   * if we cleared it here, those sections would always be empty.
+   * `buildGenerateIdeasTask` clears the arrays at the bottom, after the
+   * prompt has been assembled.
    */
   private startIdeationRound(): Task[] {
-    for (const i of this.state.ideas) {
-      i.feedback = [];
-    }
     if (this.state.round > 1) {
       this.state.lastStep = 'search-context';
       return [this.buildSearchContextTask()];
@@ -621,11 +619,17 @@ export abstract class BrainstormControllerBase implements TaskController {
       this._entityIndex,
     );
 
-    // Keep all non-rejected ideas from prior rounds -- not just 'accepted'.
-    // Previously this filter dropped 'proposed' round-1 ideas when the user
-    // clicked Diverge without first hitting Accept Remaining.
+    // Keep non-rejected ideas from prior rounds for carry-forward into
+    // the new pool. Rejected ideas are tracked separately so they
+    // (a) persist in state.ideas as a rejection-audit trail and
+    // (b) reserve their indices so refined ideas don't collide, and
+    // (c) can be deduped against so the LLM can't accidentally
+    //     regenerate a rejected title.
     const priorSurvivors = this.state.ideas.filter(
       i => i.round < this.state.round && i.status !== 'rejected',
+    );
+    const priorRejected = this.state.ideas.filter(
+      i => i.round < this.state.round && i.status === 'rejected',
     );
 
     // Build verdict map from pre-refine ideas (keyed by text prefix for fuzzy match)
@@ -639,19 +643,29 @@ export abstract class BrainstormControllerBase implements TaskController {
       }
     }
 
-    // Bug 30: dedupe refinedIdeas against prior survivors by title prefix so
-    // a paraphrased round-1 idea that the local LLM re-emits as a "new"
-    // round-2 idea does not appear twice in the final output.
-    const priorTitleKeys = new Set(
-      priorSurvivors.map(i => i.title.slice(0, 60).toLowerCase().trim()),
-    );
+    // Dedupe refinedIdeas against BOTH survivors and rejected prior ideas.
+    // - Survivors: prevents paraphrased duplicates of accepted/proposed
+    //   items being re-emitted by the local LLM as "new" ideas.
+    // - Rejected: prevents the regeneration of ideas the user explicitly
+    //   rejected (the bug that Phase 1 was supposed to fix).
+    const dedupKeys = new Set([
+      ...priorSurvivors.map(i => i.title.slice(0, 60).toLowerCase().trim()),
+      ...priorRejected.map(i => i.title.slice(0, 60).toLowerCase().trim()),
+    ]);
     const uniqueRefined = refinedIdeas.filter(i => {
       const key = i.title.slice(0, 60).toLowerCase().trim();
-      return !priorTitleKeys.has(key);
+      return !dedupKeys.has(key);
     });
 
-    // Renumber refined ideas and carry forward verdicts
-    const startIndex = priorSurvivors.length > 0 ? Math.max(...priorSurvivors.map(i => i.index)) + 1 : 1;
+    // Renumber refined ideas. startIndex is based on the FULL pool
+    // (survivors + rejected) so rejected indices stay reserved and
+    // refined ideas never collide with a retained-but-rejected slot.
+    const maxPriorIdx = Math.max(
+      0,
+      ...priorSurvivors.map(i => i.index),
+      ...priorRejected.map(i => i.index),
+    );
+    const startIndex = maxPriorIdx + 1;
     for (let i = 0; i < uniqueRefined.length; i++) {
       uniqueRefined[i]!.index = startIndex + i;
       const match = verdictMap.get(uniqueRefined[i]!.title.slice(0, 50).toLowerCase());
@@ -664,8 +678,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       }
     }
 
-    // Unified merge -- no special-casing for user ideas
-    this.state.ideas = [...priorSurvivors, ...uniqueRefined];
+    // Rebuild the pool: rejected (retained for dedup + audit) + survivors + new.
+    this.state.ideas = [...priorRejected, ...priorSurvivors, ...uniqueRefined];
     this.state.nextIdeaIndex = Math.max(...this.state.ideas.map(i => i.index), 0) + 1;
 
     if (this.state.sequentialReview) {
@@ -682,7 +696,20 @@ export abstract class BrainstormControllerBase implements TaskController {
   /** Handle user action from the idea list gate. */
   private afterIdeaList(gateReply: GateReply | undefined): Task[] {
     if (!gateReply || gateReply.action === 'accept-remaining') {
-      return this.handleIdeaApprove();
+      // User explicitly approved everything. Mark the remaining
+      // proposed ideas accepted, then either converge (threshold met
+      // or this was round 2+) or bump the round to generate more.
+      this.state.ideas = this.state.ideas.map(i =>
+        i.status === 'proposed' ? { ...i, status: 'accepted' as const } : i,
+      );
+      const acceptedCount = this.state.ideas.filter(i => i.status === 'accepted').length;
+      if (acceptedCount >= AUTO_CONVERGE_THRESHOLD || this.state.round >= 2) {
+        this.state.mode = 'converge';
+        this.state.lastStep = 'converge-cluster';
+        return [this.buildConvergeClusterTask()];
+      }
+      this.state.round += 1;
+      return this.startIdeationRound();
     }
 
     if (gateReply.action === 'discuss') {
@@ -1195,8 +1222,12 @@ export abstract class BrainstormControllerBase implements TaskController {
       return [this.buildConvergeClusterTask()];
     }
 
-    this.state.round += 1;
-    return this.startIdeationRound();
+    // Round 1 and below the auto-converge threshold: ask the user what
+    // they want instead of silently bumping the round. The idea-list
+    // gate's actions (accept-remaining / diverge / converge) each drive
+    // the next step explicitly.
+    this.state.lastStep = 'idea-list';
+    return [this.buildIdeaListGate()];
   }
 
   // ---------------------------------------------------------------------------
@@ -1786,42 +1817,78 @@ export abstract class BrainstormControllerBase implements TaskController {
     let userMessage = this.state.input.message;
 
     if (!isFirstRound) {
-      // Include existing accepted ideas for diverge rounds
+      // Include existing accepted ideas so the LLM knows what's already
+      // in the pool (and doesn't regenerate them).
       const accepted = this.state.ideas.filter(i => i.status === 'accepted');
       if (accepted.length > 0) {
-        userMessage += `\n\n## Existing Accepted Ideas\n${formatIdeasForContext(accepted)}`;
+        userMessage += `\n\n## Existing Accepted Ideas (keep in pool, don't restate)\n${formatIdeasForContext(accepted)}`;
       }
 
-      // Add techniques for diverge
+      // Rejected ideas: explicit do-not-regenerate signal. Each entry
+      // carries the user's reason (or the template string if none was
+      // given). The reject action records a feedback entry in
+      // idea.feedback[] -- we pull from there so templated rejections
+      // are distinguishable from reasoned ones.
+      const rejected = this.state.ideas.filter(i =>
+        i.status === 'rejected' && (i.feedback ?? []).some(f => f.action === 'reject'),
+      );
+      if (rejected.length > 0) {
+        const lines = rejected.map(i => {
+          const rej = (i.feedback ?? []).find(f => f.action === 'reject');
+          const suffix = rej?.templated
+            ? '-- user gave no reason; assume the concept itself was unwelcome'
+            : `-- reason: ${rej?.reason ?? 'unspecified'}`;
+          return `- [${i.index}] "${i.title}" ${suffix}`;
+        }).join('\n');
+        userMessage += `\n\n## Rejected Ideas (do NOT propose similar concepts)\n${lines}`;
+      }
+
+      // Directions the user wants explored: each diverge action on an
+      // idea carries a per-idea direction. For each, ask the LLM to
+      // produce variations of THAT specific idea that incorporate the
+      // direction.
+      const divergeEntries = this.state.ideas.flatMap(i =>
+        (i.feedback ?? [])
+          .filter(f => f.action === 'diverge')
+          .map(f => ({ idea: i, feedback: f })),
+      );
+      if (divergeEntries.length > 0) {
+        const lines = divergeEntries.map(({ idea, feedback }) =>
+          `- from [${idea.index}] "${idea.title}": direction: ${feedback.reason}${feedback.templated ? ' (no direction given -- explore broadly)' : ''}`,
+        ).join('\n');
+        userMessage += `\n\n## Directions to Explore (produce 2-3 variations of each, incorporating the direction)\n${lines}`;
+      }
+
+      // Techniques block is now a fallback -- only used when the
+      // directions don't cover a gap. The system prompt tells the
+      // LLM to prefer variations over net-new ideas.
       const techniques = selectTechniques(this.state);
       const techniqueBlock = techniques
         .map(t => `### ${t.name}\n${t.prompt}`)
         .join('\n\n');
-      userMessage += `\n\n## Techniques to Apply\n${techniqueBlock}`;
+      userMessage += `\n\n## Additional Techniques (use ONLY if a gap remains after the directions above)\n${techniqueBlock}`;
     }
 
-    // Synthesize a block of per-idea feedback from the current round so the
-    // LLM knows what the user liked, rejected, or diverged on. Only current-
-    // round feedback is included (decision E: reset per round); historical
-    // feedback lives in state.qna for audit only.
-    const withFeedback = this.state.ideas.filter(i => (i.feedback ?? []).length > 0);
-    if (withFeedback.length > 0) {
-      const block = withFeedback.map(i => {
-        const bullets = (i.feedback ?? [])
-          .map(f => `    ${f.action}: ${f.reason}${f.templated ? ' (default)' : ''}`)
-          .join('\n');
-        return `- [${i.index}] "${i.title}"\n${bullets}`;
-      }).join('\n');
-      userMessage += `\n\n## Prior Feedback on Earlier Ideas\n${block}`;
-    }
-
+    // Bulk-diverge path on the idea-list gate stores a single rollup
+    // critique in state.recentFeedback. Keep this for round transitions
+    // driven by that path; per-idea diverge entries above are the
+    // primary mechanism for non-bulk rounds.
     if (this.state.recentFeedback) {
-      userMessage += `\n\n## User Direction\n${this.state.recentFeedback}`;
+      userMessage += `\n\n## Overall Direction (from bulk diverge)\n${this.state.recentFeedback}`;
     }
 
     const qnaCtx = buildQnAContext(this.state);
     if (qnaCtx) {
       userMessage += `\n\n${qnaCtx}`;
+    }
+
+    // Now that the prompt has captured every feedback entry, clear the
+    // per-idea arrays so the next round starts fresh. Historical
+    // feedback remains in state.qna for audit. This is the delayed
+    // reset; doing it earlier (e.g. in startIdeationRound) would wipe
+    // the arrays before we read them.
+    for (const i of this.state.ideas) {
+      i.feedback = [];
     }
 
     return {
