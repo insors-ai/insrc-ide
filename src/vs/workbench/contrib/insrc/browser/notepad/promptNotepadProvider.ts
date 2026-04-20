@@ -40,6 +40,15 @@ export class PromptNotepadProvider extends Disposable {
 			return { model, uri };
 		}
 
+		// Another subsystem (editor restore, content provider resolution) may have
+		// already created a model at this URI. Reuse it instead of creating a duplicate.
+		const existing = this.modelService.getModel(uri);
+		if (existing && !existing.isDisposed()) {
+			this._models.set(notepadId, existing);
+			this._wireAutoSave(existing, notepadId);
+			return { model: existing, uri };
+		}
+
 		// Load persisted content
 		const savedContent = this.storageService.get(
 			STORAGE_PREFIX + notepadId,
@@ -50,23 +59,25 @@ export class PromptNotepadProvider extends Disposable {
 		// Create model with markdown language
 		const languageId = this.languageService.getLanguageIdByLanguageName('markdown') ?? 'markdown';
 		model = this.modelService.createModel(savedContent, this.languageService.createById(languageId), uri);
+		this._wireAutoSave(model, notepadId);
 
-		// Auto-save on change (debounced)
+		this._models.set(notepadId, model);
+		return { model, uri };
+	}
+
+	private _wireAutoSave(model: ITextModel, notepadId: string): void {
 		let saveTimeout: ReturnType<typeof setTimeout> | undefined;
 		this._register(model.onDidChangeContent(() => {
 			if (saveTimeout) { clearTimeout(saveTimeout); }
 			saveTimeout = setTimeout(() => {
 				this.storageService.store(
 					STORAGE_PREFIX + notepadId,
-					model!.getValue(),
+					model.getValue(),
 					StorageScope.WORKSPACE,
 					StorageTarget.MACHINE,
 				);
 			}, 500);
 		}));
-
-		this._models.set(notepadId, model);
-		return { model, uri };
 	}
 
 	/**
