@@ -1911,6 +1911,16 @@ export abstract class BrainstormControllerBase implements TaskController {
         { name: 'respond', label: 'Discuss', hint: '<your thoughts>', needsInput: true },
         { name: 'back', label: 'Back to list' },
       ],
+      // Structured payload mirrors the other brainstorm gates. Without it the
+      // chat panel can't classify this as an ideation gate and renders it as a
+      // generic gate widget -- leaking brainstorm interactions into chat.
+      structured: {
+        phase: 'ideation',
+        itemType: 'idea-discussion',
+        itemId: idea.id,
+        item: idea,
+        messages: this.state.discussionMessages ?? [],
+      },
       stateKey: 'discussGateOutput',
     };
   }
