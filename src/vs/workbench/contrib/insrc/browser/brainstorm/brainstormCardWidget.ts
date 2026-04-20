@@ -5,7 +5,7 @@
 
 import * as dom from '../../../../../base/browser/dom.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
-import { Disposable } from '../../../../../base/common/lifecycle.js';
+import { Disposable, toDisposable, type IDisposable } from '../../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -18,6 +18,11 @@ interface IdeaRef {
 	snippet?: string;
 }
 
+export interface CardDiscussionMessage {
+	role: 'user' | 'assistant';
+	content: string;
+}
+
 interface CardData {
 	id: string;
 	title: string;
@@ -27,46 +32,97 @@ interface CardData {
 	tags: string[];
 	reviewVerdict?: string;
 	reviewRationale?: string;
+	/** Prior discussion history to render under the body (optional). */
+	messages?: readonly CardDiscussionMessage[];
 }
 
-interface DiscussionMessage {
-	role: 'user' | 'assistant';
-	content: string;
-}
+/**
+ * Actions the backend emits with `needsInput: true` on the single-idea /
+ * idea-discussion gates. Clicking one of these reveals an inline prompt
+ * panel; the feedback captured there becomes gateReply.feedback.
+ *
+ * Keep this list in sync with the controller -- if the backend adds a new
+ * input-requiring action, add it here. (We can't derive this from the gate
+ * payload because daemonServiceImpl flattens actions to bare names.)
+ */
+const INPUT_REQUIRING_ACTIONS: ReadonlySet<string> = new Set([
+	'diverge', 'discuss', 'respond', 'refine', 'edit', 'split',
+]);
+
+const PROMPT_LABELS: Record<string, string> = {
+	diverge: 'What direction should we explore?',
+	discuss: 'What would you like to discuss?',
+	respond: 'Your response or follow-up question',
+	refine: 'How should this be refined?',
+	edit: 'Describe your edit',
+	split: 'How should this be split?',
+};
+
+const PROMPT_PLACEHOLDERS: Record<string, string> = {
+	diverge: 'Optional -- leave empty for default 3-5 variations',
+	discuss: 'Type your thoughts...',
+	respond: 'Type your response...',
+	refine: 'Describe the refinement...',
+	edit: 'Describe the edit...',
+	split: 'Describe the split...',
+};
+
+/**
+ * Failsafe for the submitting state. If the backend never sends a follow-up
+ * gate (daemon crash, disconnect, bug) the card re-arms itself after this
+ * window so the user isn't trapped looking at a frozen spinner.
+ */
+const SUBMITTING_TIMEOUT_MS = 15_000;
 
 export class BrainstormCardWidget extends Disposable {
 	private _container: HTMLElement;
-	private _discussionEl: HTMLElement;
-	private _inputEl: HTMLTextAreaElement;
-	private _messages: DiscussionMessage[] = [];
+	private _actionContainer!: HTMLElement;
+	private readonly _actions: readonly string[];
+	private _submittingTimer: IDisposable | undefined;
+	private _dispatched = false;
 
 	constructor(
 		parent: HTMLElement,
 		data: CardData,
-		actions: string[],
-		private readonly onAction: (action: string, feedback?: string) => void,
-		private readonly onDiscuss: (message: string) => void,
+		actions: readonly string[],
+		private readonly onAction: (action: string, feedback: string | undefined) => void,
 		@IEditorService private readonly editorService: IEditorService,
 	) {
 		super();
+		this._actions = actions.slice();
 
-		// Clear parent
 		dom.clearNode(parent);
-
 		this._container = dom.append(parent, dom.$('.insrc-brainstorm-card'));
 
-		// Title section
+		this._renderTitle(data);
+		this._renderBody(data);
+		this._renderRationale(data);
+		this._renderReferences(data);
+		this._renderDiscussion(data);
+
+		this._actionContainer = dom.append(this._container, dom.$('.insrc-brainstorm-card-actions'));
+		this._renderActions();
+	}
+
+	override dispose(): void {
+		this._clearSubmittingTimer();
+		super.dispose();
+	}
+
+	// ---------------------------------------------------------------------------
+	// Rendering -- idea content
+	// ---------------------------------------------------------------------------
+
+	private _renderTitle(data: CardData): void {
 		const titleSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-title-section'));
 		const titleEl = dom.append(titleSection, dom.$('h3.insrc-brainstorm-card-title'));
 		titleEl.textContent = data.title;
 
-		// Verdict badge
 		if (data.reviewVerdict) {
 			const badge = dom.append(titleSection, dom.$(`span.insrc-brainstorm-verdict.verdict-${data.reviewVerdict}`));
 			badge.textContent = data.reviewVerdict;
 		}
 
-		// Tags
 		if (data.tags.length > 0) {
 			const tagRow = dom.append(titleSection, dom.$('.insrc-brainstorm-tags'));
 			for (const tag of data.tags) {
@@ -74,108 +130,200 @@ export class BrainstormCardWidget extends Disposable {
 				tagEl.textContent = tag;
 			}
 		}
+	}
 
-		// Body section
+	private _renderBody(data: CardData): void {
 		const bodySection = dom.append(this._container, dom.$('.insrc-brainstorm-card-body'));
 		bodySection.textContent = data.body;
+	}
 
-		// Review rationale (if present)
-		if (data.reviewRationale) {
-			const rationaleSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-rationale'));
-			const rationaleLabel = dom.append(rationaleSection, dom.$('strong'));
-			rationaleLabel.textContent = 'Review: ';
-			const rationaleText = dom.append(rationaleSection, dom.$('span'));
-			rationaleText.textContent = data.reviewRationale;
-		}
+	private _renderRationale(data: CardData): void {
+		if (!data.reviewRationale) { return; }
+		const section = dom.append(this._container, dom.$('.insrc-brainstorm-card-rationale'));
+		const label = dom.append(section, dom.$('strong'));
+		label.textContent = 'Review: ';
+		const text = dom.append(section, dom.$('span'));
+		text.textContent = data.reviewRationale;
+	}
 
-		// References section
+	private _renderReferences(data: CardData): void {
 		const clickableRefs = data.references.filter(r => isOpenableRef(r));
-		if (clickableRefs.length > 0) {
-			const refsSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-refs'));
-			const refsLabel = dom.append(refsSection, dom.$('h4'));
-			refsLabel.textContent = 'References';
-			for (const ref of clickableRefs) {
-				const refEl = dom.append(refsSection, dom.$('a.insrc-brainstorm-ref'));
-				const icon = dom.append(refEl, dom.$('span'));
-				icon.classList.add(...ThemeIcon.asClassNameArray(
-					ref.type === 'code' ? Codicon.symbolFile :
-						ref.type === 'url' ? Codicon.link : Codicon.file
-				));
-				const label = dom.append(refEl, dom.$('span'));
-				label.textContent = ref.label;
-				this._register(dom.addDisposableListener(refEl, 'click', () => {
-					if (ref.type === 'code' || ref.type === 'doc') {
-						const uri = URI.file(ref.path);
-						this.editorService.openEditor({ resource: uri, options: { selection: ref.line ? { startLineNumber: ref.line, startColumn: 1 } : undefined } });
-					}
-				}));
-			}
-		}
+		if (clickableRefs.length === 0) { return; }
 
-		// Discussion section
-		this._discussionEl = dom.append(this._container, dom.$('.insrc-brainstorm-card-discussion'));
-
-		// Input area
-		const inputSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-input'));
-		this._inputEl = dom.append(inputSection, dom.$('textarea.insrc-brainstorm-card-textarea')) as HTMLTextAreaElement;
-		this._inputEl.placeholder = 'Ask a question or give feedback about this idea...';
-		this._inputEl.rows = 2;
-
-		const sendBtn = dom.append(inputSection, dom.$('button.insrc-brainstorm-btn.send')) as HTMLButtonElement;
-		sendBtn.classList.add(...ThemeIcon.asClassNameArray(Codicon.send));
-		sendBtn.title = 'Send';
-		this._register(dom.addDisposableListener(sendBtn, 'click', () => this._sendMessage()));
-		this._register(dom.addDisposableListener(this._inputEl, 'keydown', (e: KeyboardEvent) => {
-			if (e.key === 'Enter' && !e.shiftKey) {
-				e.preventDefault();
-				this._sendMessage();
-			}
-		}));
-
-		// Action buttons
-		const actionsSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-actions'));
-		for (const action of actions) {
-			const btn = dom.append(actionsSection, dom.$('button.insrc-brainstorm-action-btn')) as HTMLButtonElement;
-			btn.textContent = this._actionLabel(action);
-			btn.classList.add(`action-${action}`);
-			btn.title = this._actionTooltip(action);
-			this._register(dom.addDisposableListener(btn, 'click', () => {
-				this.onAction(action, undefined);
+		const refsSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-refs'));
+		const refsLabel = dom.append(refsSection, dom.$('h4'));
+		refsLabel.textContent = 'References';
+		for (const ref of clickableRefs) {
+			const refEl = dom.append(refsSection, dom.$('a.insrc-brainstorm-ref'));
+			const icon = dom.append(refEl, dom.$('span'));
+			icon.classList.add(...ThemeIcon.asClassNameArray(
+				ref.type === 'code' ? Codicon.symbolFile :
+					ref.type === 'url' ? Codicon.link : Codicon.file
+			));
+			const label = dom.append(refEl, dom.$('span'));
+			label.textContent = ref.label;
+			this._register(dom.addDisposableListener(refEl, 'click', () => {
+				if (ref.type === 'code' || ref.type === 'doc') {
+					const uri = URI.file(ref.path);
+					this.editorService.openEditor({
+						resource: uri,
+						options: {
+							selection: ref.line ? { startLineNumber: ref.line, startColumn: 1 } : undefined,
+						},
+					});
+				}
 			}));
 		}
 	}
 
-	/** Add a discussion message (from user or assistant). */
-	addMessage(role: 'user' | 'assistant', content: string): void {
-		this._messages.push({ role, content });
-		const msgEl = dom.append(this._discussionEl, dom.$(`.insrc-brainstorm-discussion-msg.msg-${role}`));
-		const labelEl = dom.append(msgEl, dom.$('strong'));
-		labelEl.textContent = role === 'user' ? 'You: ' : 'Agent: ';
-		const textEl = dom.append(msgEl, dom.$('span'));
-		textEl.textContent = content;
-		this._discussionEl.scrollTop = this._discussionEl.scrollHeight;
+	private _renderDiscussion(data: CardData): void {
+		const messages = data.messages;
+		if (!messages || messages.length === 0) { return; }
+		const section = dom.append(this._container, dom.$('.insrc-brainstorm-card-discussion'));
+		const header = dom.append(section, dom.$('h4.insrc-brainstorm-discussion-header'));
+		header.textContent = 'Discussion';
+		for (const msg of messages) {
+			const msgEl = dom.append(section, dom.$(`.insrc-brainstorm-discussion-msg.msg-${msg.role}`));
+			const labelEl = dom.append(msgEl, dom.$('strong'));
+			labelEl.textContent = msg.role === 'user' ? 'You: ' : 'Agent: ';
+			const textEl = dom.append(msgEl, dom.$('span'));
+			textEl.textContent = msg.content;
+		}
 	}
 
-	/** Update the idea title and body (after LLM incorporated feedback). */
-	updateIdea(title: string, body: string): void {
-		const titleEl = this._container.querySelector('.insrc-brainstorm-card-title');
-		if (titleEl) { titleEl.textContent = title; }
-		const bodyEl = this._container.querySelector('.insrc-brainstorm-card-body');
-		if (bodyEl) { bodyEl.textContent = body; }
+	// ---------------------------------------------------------------------------
+	// Rendering -- actions
+	// ---------------------------------------------------------------------------
 
-		// Show update notice
-		const notice = dom.append(this._discussionEl, dom.$('.insrc-brainstorm-discussion-notice'));
-		notice.textContent = `Idea updated: ${title}`;
-		this._discussionEl.scrollTop = this._discussionEl.scrollHeight;
+	private _renderActions(): void {
+		dom.clearNode(this._actionContainer);
+		this._container.classList.remove('submitting');
+
+		const singleShot: string[] = [];
+		const inputRequiring: string[] = [];
+		for (const action of this._actions) {
+			if (INPUT_REQUIRING_ACTIONS.has(action)) {
+				inputRequiring.push(action);
+			} else {
+				singleShot.push(action);
+			}
+		}
+
+		if (singleShot.length > 0) {
+			this._renderActionRow(singleShot, false);
+		}
+		if (inputRequiring.length > 0) {
+			this._renderActionRow(inputRequiring, true);
+		}
 	}
 
-	private _sendMessage(): void {
-		const msg = this._inputEl.value.trim();
-		if (!msg) { return; }
-		this._inputEl.value = '';
-		this.addMessage('user', msg);
-		this.onDiscuss(msg);
+	private _renderActionRow(actions: string[], suffixEllipsis: boolean): void {
+		const row = dom.append(this._actionContainer, dom.$('.insrc-brainstorm-action-row'));
+		for (const action of actions) {
+			const btn = dom.append(row, dom.$('button.insrc-brainstorm-action-btn')) as HTMLButtonElement;
+			btn.classList.add(`action-${action}`);
+			btn.textContent = suffixEllipsis
+				? `${this._actionLabel(action)}...`
+				: this._actionLabel(action);
+			btn.title = this._actionTooltip(action);
+			this._register(dom.addDisposableListener(btn, 'click', () => {
+				if (this._dispatched) { return; }
+				if (INPUT_REQUIRING_ACTIONS.has(action)) {
+					this._showPromptPanel(action);
+				} else {
+					this._dispatch(action, undefined);
+				}
+			}));
+		}
 	}
+
+	private _showPromptPanel(action: string): void {
+		dom.clearNode(this._actionContainer);
+
+		const panel = dom.append(this._actionContainer, dom.$('.insrc-brainstorm-prompt-panel'));
+
+		const label = dom.append(panel, dom.$('.insrc-brainstorm-prompt-label'));
+		label.textContent = PROMPT_LABELS[action] ?? 'Your input';
+
+		const textarea = dom.append(panel, dom.$('textarea.insrc-brainstorm-prompt-textarea')) as HTMLTextAreaElement;
+		textarea.rows = 3;
+		textarea.placeholder = PROMPT_PLACEHOLDERS[action] ?? 'Type your message...';
+
+		const btnRow = dom.append(panel, dom.$('.insrc-brainstorm-prompt-actions'));
+		const cancelBtn = dom.append(btnRow, dom.$('button.insrc-brainstorm-btn')) as HTMLButtonElement;
+		cancelBtn.textContent = 'Cancel';
+		const sendBtn = dom.append(btnRow, dom.$('button.insrc-brainstorm-btn.primary')) as HTMLButtonElement;
+		sendBtn.textContent = 'Send';
+
+		const submit = () => {
+			if (this._dispatched) { return; }
+			const text = textarea.value.trim();
+			this._dispatch(action, text.length > 0 ? text : undefined);
+		};
+		const cancel = () => { this._renderActions(); };
+
+		this._register(dom.addDisposableListener(cancelBtn, 'click', cancel));
+		this._register(dom.addDisposableListener(sendBtn, 'click', submit));
+		this._register(dom.addDisposableListener(textarea, 'keydown', (e: KeyboardEvent) => {
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				cancel();
+			} else if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				submit();
+			}
+		}));
+
+		// Focus on next tick so the element is in the DOM.
+		setTimeout(() => textarea.focus(), 0);
+	}
+
+	// ---------------------------------------------------------------------------
+	// Submitting state
+	// ---------------------------------------------------------------------------
+
+	private _dispatch(action: string, feedback: string | undefined): void {
+		this._dispatched = true;
+		this._enterSubmittingState();
+		this.onAction(action, feedback);
+	}
+
+	private _enterSubmittingState(): void {
+		dom.clearNode(this._actionContainer);
+		this._container.classList.add('submitting');
+
+		const el = dom.append(this._actionContainer, dom.$('.insrc-brainstorm-submitting'));
+		const spinner = dom.append(el, dom.$('span.insrc-brainstorm-submitting-spinner'));
+		spinner.classList.add(...ThemeIcon.asClassNameArray(Codicon.loading), 'codicon-modifier-spin');
+		const text = dom.append(el, dom.$('span'));
+		text.textContent = 'Waiting for next idea...';
+
+		this._clearSubmittingTimer();
+		const handle = setTimeout(() => this._onSubmittingTimeout(), SUBMITTING_TIMEOUT_MS);
+		const disposable = toDisposable(() => clearTimeout(handle));
+		this._submittingTimer = disposable;
+		this._register(disposable);
+	}
+
+	private _onSubmittingTimeout(): void {
+		this._dispatched = false;
+		this._clearSubmittingTimer();
+		dom.clearNode(this._actionContainer);
+		this._container.classList.remove('submitting');
+
+		const warn = dom.append(this._actionContainer, dom.$('.insrc-brainstorm-timeout-notice'));
+		warn.textContent = 'No response from the agent -- try again?';
+		this._renderActions();
+	}
+
+	private _clearSubmittingTimer(): void {
+		this._submittingTimer?.dispose();
+		this._submittingTimer = undefined;
+	}
+
+	// ---------------------------------------------------------------------------
+	// Labels
+	// ---------------------------------------------------------------------------
 
 	private _actionLabel(action: string): string {
 		switch (action) {
@@ -185,9 +333,13 @@ export class BrainstormCardWidget extends Disposable {
 			case 'skip': return 'Skip';
 			case 'park': return 'Park';
 			case 'discuss': return 'Discuss';
+			case 'respond': return 'Respond';
+			case 'refine': return 'Refine';
 			case 'reopen': return 'Reopen';
 			case 'split': return 'Split';
 			case 'edit': return 'Edit';
+			case 'accept': return 'Accept';
+			case 'back': return 'Back';
 			default: return action;
 		}
 	}
@@ -199,10 +351,14 @@ export class BrainstormCardWidget extends Disposable {
 			case 'diverge': return 'Generate variations of this idea';
 			case 'skip': return 'Skip for now, come back later';
 			case 'park': return 'Set aside, review after all others';
-			case 'discuss': return 'Enter discussion';
+			case 'discuss': return 'Open a focused discussion with the agent';
+			case 'respond': return 'Send a follow-up message';
+			case 'refine': return 'Refine with guidance';
 			case 'reopen': return 'Re-open this decided idea for review';
 			case 'split': return 'Break this theme into smaller themes';
 			case 'edit': return 'Edit this theme';
+			case 'accept': return 'Accept';
+			case 'back': return 'Back to the previous view';
 			default: return '';
 		}
 	}

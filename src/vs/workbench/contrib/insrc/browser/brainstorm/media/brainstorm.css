@@ -337,9 +337,15 @@
 /* -- Action buttons -- */
 .insrc-brainstorm-card-actions {
 	display: flex;
-	gap: 8px;
+	flex-direction: column;
+	gap: 6px;
 	padding: 12px 20px 16px;
 	border-top: 1px solid var(--vscode-panel-border);
+}
+
+.insrc-brainstorm-action-row {
+	display: flex;
+	gap: 8px;
 	flex-wrap: wrap;
 }
 
@@ -509,6 +515,92 @@
 	justify-content: flex-end;
 }
 
+/* -- Discussion header (rendered above past messages, when present) -- */
+.insrc-brainstorm-discussion-header {
+	font-size: 0.82em;
+	font-weight: 600;
+	margin: 0 0 6px;
+	color: var(--vscode-descriptionForeground);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+/* -- Inline prompt panel (replaces action row when an input-requiring
+ * action is clicked) -- */
+.insrc-brainstorm-prompt-panel {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	padding: 10px 12px;
+}
+
+.insrc-brainstorm-prompt-label {
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-prompt-textarea {
+	width: 100%;
+	resize: vertical;
+	min-height: 56px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: 0.9em;
+	outline: none;
+}
+
+.insrc-brainstorm-prompt-textarea:focus {
+	border-color: var(--vscode-focusBorder);
+}
+
+.insrc-brainstorm-prompt-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 6px;
+}
+
+/* -- Submitting state (post-dispatch, pre-next-gate) -- */
+.insrc-brainstorm-card.submitting .insrc-brainstorm-card-title-section,
+.insrc-brainstorm-card.submitting .insrc-brainstorm-card-body,
+.insrc-brainstorm-card.submitting .insrc-brainstorm-card-rationale,
+.insrc-brainstorm-card.submitting .insrc-brainstorm-card-refs,
+.insrc-brainstorm-card.submitting .insrc-brainstorm-card-discussion {
+	opacity: 0.55;
+	pointer-events: none;
+}
+
+.insrc-brainstorm-submitting {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	justify-content: center;
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.88em;
+	padding: 4px 0;
+}
+
+.insrc-brainstorm-submitting-spinner {
+	font-size: 14px;
+	color: var(--vscode-textLink-foreground);
+}
+
+.insrc-brainstorm-timeout-notice {
+	font-size: 0.85em;
+	color: var(--vscode-editorWarning-foreground, #cca700);
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 35%, transparent);
+	border-radius: 4px;
+}
+
 /* -- Completion (ideation -> next phase transition) -- */
 .insrc-brainstorm-completion {
 	margin: 40px auto;
@@ -579,6 +671,68 @@
 .insrc-brainstorm-completion-spinner {
 	font-size: 14px;
 	color: var(--vscode-textLink-foreground);
+}
+
+/* -- Add Idea form (IdeasPane) -- */
+.insrc-brainstorm-add-idea-form {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin: 12px auto 16px;
+	max-width: 640px;
+	padding: 16px 18px;
+	background: var(--vscode-editorWidget-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: var(--insrc-radius-card);
+}
+
+.insrc-brainstorm-add-idea-label {
+	font-size: 0.82em;
+	font-weight: 600;
+	color: var(--vscode-descriptionForeground);
+	letter-spacing: 0.02em;
+}
+
+.insrc-brainstorm-add-idea-title,
+.insrc-brainstorm-add-idea-body {
+	width: 100%;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	padding: 6px 8px;
+	font-family: inherit;
+	font-size: 0.92em;
+	outline: none;
+}
+
+.insrc-brainstorm-add-idea-title:focus,
+.insrc-brainstorm-add-idea-body:focus {
+	border-color: var(--vscode-focusBorder);
+}
+
+.insrc-brainstorm-add-idea-body {
+	resize: vertical;
+	min-height: 80px;
+}
+
+.insrc-brainstorm-add-idea-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 6px;
+}
+
+.insrc-brainstorm-add-idea-error {
+	font-size: 0.85em;
+	color: var(--vscode-errorForeground, #f44);
+	padding: 6px 8px;
+	background: color-mix(in srgb, var(--vscode-errorForeground, #f44) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-errorForeground, #f44) 35%, transparent);
+	border-radius: 4px;
+}
+
+.insrc-brainstorm-add-idea-error.hidden {
+	display: none;
 }
 
 /* -- Scrollbar -- */

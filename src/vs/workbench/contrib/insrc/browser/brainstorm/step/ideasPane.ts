@@ -17,6 +17,7 @@ import { IStorageService } from '../../../../../../platform/storage/common/stora
 import { IEditorOptions } from '../../../../../../platform/editor/common/editor.js';
 import { IInstantiationService } from '../../../../../../platform/instantiation/common/instantiation.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
+import { IInsrcDaemonService } from '../../../common/daemonService.js';
 import {
 	IInsrcBrainstormSessionService,
 	type BrainstormGateSnapshot,
@@ -37,8 +38,10 @@ export class BrainstormIdeasPane extends EditorPane {
 	private _container!: HTMLElement;
 	private _headerCategory!: HTMLElement;
 	private _headerProgress!: HTMLElement;
+	private _addIdeaBtn!: HTMLButtonElement;
 	private _cardArea!: HTMLElement;
 	private _emptyState!: HTMLElement;
+	private _addIdeaFormEl: HTMLElement | undefined;
 
 	private _cardWidget: BrainstormCardWidget | undefined;
 
@@ -50,6 +53,7 @@ export class BrainstormIdeasPane extends EditorPane {
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService private readonly sessionService: IInsrcBrainstormSessionService,
+		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 	) {
 		super(BrainstormIdeasPane.ID, group, telemetryService, themeService, storageService);
 	}
@@ -69,6 +73,16 @@ export class BrainstormIdeasPane extends EditorPane {
 		this._headerProgress = dom.append(headerLeft, dom.$('span.insrc-brainstorm-phase'));
 		this._headerProgress.textContent = '';
 
+		// Header right -- "+ Add Idea" button. Enabled only while we're in the
+		// ideation phase (the daemon's brainstorm.addIdea RPC pushes into the
+		// review queue, which is meaningless after convergence starts).
+		const headerRight = dom.append(header, dom.$('.insrc-brainstorm-header-right'));
+		this._addIdeaBtn = dom.append(headerRight, dom.$('button.insrc-brainstorm-btn.primary')) as HTMLButtonElement;
+		this._addIdeaBtn.textContent = '+ Add Idea';
+		this._addIdeaBtn.title = 'Add your own idea to the review queue';
+		this._addIdeaBtn.disabled = true;
+		this._register(dom.addDisposableListener(this._addIdeaBtn, 'click', () => this._showAddIdeaForm()));
+
 		// Card area
 		const main = dom.append(this._container, dom.$('.insrc-brainstorm-main'));
 		this._cardArea = dom.append(main, dom.$('.insrc-brainstorm-card-area'));
@@ -83,11 +97,27 @@ export class BrainstormIdeasPane extends EditorPane {
 			if (gate.kind === 'idea') {
 				this._render(gate);
 			}
+			this._updateAddIdeaState();
 		}));
 
 		this._register(this.sessionService.onDidChange(() => {
 			this._headerCategory.textContent = this.sessionService.category ?? '';
+			this._updateAddIdeaState();
 		}));
+		this._updateAddIdeaState();
+	}
+
+	private _updateAddIdeaState(): void {
+		if (!this._addIdeaBtn) { return; }
+		// Only meaningful during the ideation phase. We keep the button visible
+		// (per the design doc's resolved decision) but disable it outside that
+		// window so users don't lose the affordance between sessions.
+		const active = this.sessionService.isSessionActive
+			&& this.sessionService.phase === 'ideation';
+		this._addIdeaBtn.disabled = !active;
+		this._addIdeaBtn.title = active
+			? 'Add your own idea to the review queue'
+			: 'Add idea is only available during the ideation phase';
 	}
 
 	override async setInput(input: BrainstormIdeasInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -152,11 +182,6 @@ export class BrainstormIdeasPane extends EditorPane {
 					this._showCompletionState(gate, action);
 				}
 			},
-			// Free-text send on the card is interpreted as "discuss this idea
-			// with the agent" -- the single-idea gate has no `respond` handler
-			// (it would silently fall through to accept), so we route through
-			// the `discuss` action which opens the idea-discussion subflow.
-			message => { this.chatService.replyToGate(gate.gateId, 'discuss', message); },
 		);
 	}
 
@@ -243,5 +268,75 @@ export class BrainstormIdeasPane extends EditorPane {
 		parts.push(`skipped ${skipped}`);
 		parts.push(`pending ${pending}`);
 		this._headerProgress.textContent = parts.join(' | ');
+	}
+
+	// ---------------------------------------------------------------------------
+	// Add idea form
+	// ---------------------------------------------------------------------------
+
+	private _showAddIdeaForm(): void {
+		if (this._addIdeaFormEl) { return; }
+
+		const form = dom.append(this._cardArea, dom.$('.insrc-brainstorm-add-idea-form'));
+		this._addIdeaFormEl = form;
+
+		const titleLabel = dom.append(form, dom.$('label.insrc-brainstorm-add-idea-label'));
+		titleLabel.textContent = 'Title';
+		const titleInput = dom.append(form, dom.$('input.insrc-brainstorm-add-idea-title')) as HTMLInputElement;
+		titleInput.type = 'text';
+		titleInput.maxLength = 200;
+		titleInput.placeholder = 'Short idea title';
+
+		const bodyLabel = dom.append(form, dom.$('label.insrc-brainstorm-add-idea-label'));
+		bodyLabel.textContent = 'Body (optional)';
+		const bodyInput = dom.append(form, dom.$('textarea.insrc-brainstorm-add-idea-body')) as HTMLTextAreaElement;
+		bodyInput.rows = 4;
+		bodyInput.maxLength = 4000;
+		bodyInput.placeholder = 'Details, context, or examples';
+
+		const errorEl = dom.append(form, dom.$('.insrc-brainstorm-add-idea-error.hidden'));
+
+		const btnRow = dom.append(form, dom.$('.insrc-brainstorm-add-idea-actions'));
+		const cancelBtn = dom.append(btnRow, dom.$('button.insrc-brainstorm-btn')) as HTMLButtonElement;
+		cancelBtn.textContent = 'Cancel';
+		const submitBtn = dom.append(btnRow, dom.$('button.insrc-brainstorm-btn.primary')) as HTMLButtonElement;
+		submitBtn.textContent = 'Add idea';
+		submitBtn.disabled = true;
+
+		const revalidate = (): void => {
+			submitBtn.disabled = titleInput.value.trim().length === 0;
+		};
+		this._register(dom.addDisposableListener(titleInput, 'input', revalidate));
+
+		this._register(dom.addDisposableListener(cancelBtn, 'click', () => this._closeAddIdeaForm()));
+		this._register(dom.addDisposableListener(submitBtn, 'click', async () => {
+			const title = titleInput.value.trim();
+			const body = bodyInput.value.trim() || title;
+			if (!title) { return; }
+			submitBtn.disabled = true;
+			errorEl.classList.add('hidden');
+			try {
+				await this._submitAddIdea(title, body);
+				this._closeAddIdeaForm();
+			} catch (err) {
+				errorEl.textContent = `Couldn't add idea: ${(err as Error).message || 'unknown error'}`;
+				errorEl.classList.remove('hidden');
+				submitBtn.disabled = false;
+			}
+		}));
+
+		setTimeout(() => titleInput.focus(), 0);
+	}
+
+	private _closeAddIdeaForm(): void {
+		if (!this._addIdeaFormEl) { return; }
+		this._addIdeaFormEl.remove();
+		this._addIdeaFormEl = undefined;
+	}
+
+	private async _submitAddIdea(title: string, body: string): Promise<void> {
+		const sessionId = this.chatService.activeSessionId;
+		if (!sessionId) { throw new Error('no active session'); }
+		await this.daemonService.rpc('brainstorm.addIdea', { sessionId, title, body });
 	}
 }

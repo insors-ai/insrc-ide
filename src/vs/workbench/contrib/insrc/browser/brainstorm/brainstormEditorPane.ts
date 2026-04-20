@@ -312,16 +312,9 @@ export class BrainstormEditorPane extends EditorPane {
 				reviewRationale: idea.reviewRationale,
 			},
 			actions,
-			// Action callback
-			(action: string, feedback?: string) => {
+			(action: string, feedback: string | undefined) => {
 				if (this._currentGateId) {
 					this.chatService.replyToGate(this._currentGateId, action, feedback);
-				}
-			},
-			// Discuss callback
-			(message: string) => {
-				if (this._currentGateId) {
-					this.chatService.replyToGate(this._currentGateId, 'respond', message);
 				}
 			},
 		);
@@ -448,18 +441,13 @@ export class BrainstormEditorPane extends EditorPane {
 				reviewRationale: idea.reviewRationale,
 			},
 			actions,
-			(action: string, feedback?: string) => {
+			(action: string, feedback: string | undefined) => {
 				if (action === 'reopen') {
 					// Reopen: change status back to proposed and re-present as active
 					idea.status = 'proposed';
 					this._showIdeaAtIndex(index);
 				} else if (this._currentGateId) {
 					this.chatService.replyToGate(this._currentGateId, action, feedback);
-				}
-			},
-			(message: string) => {
-				if (this._currentGateId) {
-					this.chatService.replyToGate(this._currentGateId, 'respond', message);
 				}
 			},
 		);
@@ -526,14 +514,9 @@ export class BrainstormEditorPane extends EditorPane {
 				tags: [],
 			},
 			gate.actions,
-			(action: string, feedback?: string) => {
+			(action: string, feedback: string | undefined) => {
 				if (this._currentGateId) {
 					this.chatService.replyToGate(this._currentGateId, action, feedback);
-				}
-			},
-			(message: string) => {
-				if (this._currentGateId) {
-					this.chatService.replyToGate(this._currentGateId, 'respond', message);
 				}
 			},
 		);
