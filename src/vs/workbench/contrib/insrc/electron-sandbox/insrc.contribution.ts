@@ -14,6 +14,8 @@ import { IInsrcDiffService } from '../common/diffService.js';
 import { IInsrcConfigService } from '../common/configService.js';
 import { IInsrcKeychainService } from '../common/keychainService.js';
 import { IInsrcLSPToolService } from '../common/lspToolService.js';
+import { IInsrcBrainstormSessionService } from '../common/brainstormSessionService.js';
+import { InsrcBrainstormSessionServiceImpl } from '../browser/brainstorm/brainstormSessionServiceImpl.js';
 import { InsrcDaemonServiceImpl } from './daemonServiceImpl.js';
 import { InsrcSessionServiceImpl } from './sessionServiceImpl.js';
 import { InsrcWorkspaceServiceImpl } from './workspaceServiceImpl.js';
@@ -36,3 +38,4 @@ registerSingleton(IInsrcDiffService, InsrcDiffServiceImpl, InstantiationType.Del
 registerSingleton(IInsrcConfigService, InsrcConfigServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcKeychainService, InsrcKeychainServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcLSPToolService, InsrcLSPToolServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcBrainstormSessionService, InsrcBrainstormSessionServiceImpl, InstantiationType.Eager);

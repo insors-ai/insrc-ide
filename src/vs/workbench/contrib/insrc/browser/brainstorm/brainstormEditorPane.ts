@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import './media/brainstorm.css';
 import * as dom from '../../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
@@ -83,6 +84,7 @@ export class BrainstormEditorPane extends EditorPane {
 	private _container!: HTMLElement;
 	private _header!: HTMLElement;
 	private _headerTitle!: HTMLElement;
+	private _headerCategory!: HTMLElement;
 	private _headerPhase!: HTMLElement;
 	private _addIdeaBtn!: HTMLButtonElement;
 
@@ -130,6 +132,8 @@ export class BrainstormEditorPane extends EditorPane {
 		iconEl.classList.add(...ThemeIcon.asClassNameArray(Codicon.lightbulb));
 		this._headerTitle = dom.append(headerLeft, dom.$('h2.insrc-brainstorm-title'));
 		this._headerTitle.textContent = 'Brainstorm';
+		this._headerCategory = dom.append(headerLeft, dom.$('span.insrc-brainstorm-category'));
+		this._headerCategory.textContent = '';
 		this._headerPhase = dom.append(headerLeft, dom.$('span.insrc-brainstorm-phase'));
 		this._headerPhase.textContent = '';
 
@@ -194,6 +198,7 @@ export class BrainstormEditorPane extends EditorPane {
 	override async setInput(input: BrainstormEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		this._headerTitle.textContent = `Brainstorm`;
+		this._headerCategory.textContent = '';
 		this._phase = 'waiting';
 		this._emptyState.textContent = 'Waiting for ideas...';
 		this._emptyState.classList.remove('hidden');
@@ -268,6 +273,15 @@ export class BrainstormEditorPane extends EditorPane {
 	}
 
 	private _handleProgress(step: string, status: string): void {
+		// "Intent: brainstorm/general" messages drive the category badge, not the
+		// empty-state body. The primary intent (brainstorm) is implicit from the
+		// pane itself -- only the sub-intent is worth showing.
+		const intentMatch = step.match(/^Intent:\s*\w+\/(\w+)/);
+		if (intentMatch) {
+			this._headerCategory.textContent = intentMatch[1]!;
+			return;
+		}
+
 		if (this._phase === 'waiting' && (step.includes('brainstorm') || step.includes('seed') || step.includes('diverge') || step.includes('review'))) {
 			this._emptyState.textContent = status || step;
 		}

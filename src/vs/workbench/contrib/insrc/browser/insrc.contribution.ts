@@ -90,12 +90,21 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(StepProviderEditorInput)],
 );
 
-// Brainstorm EditorPane
+// Brainstorm EditorPane (legacy monolithic pane -- kept as fallback until
+// every per-step pane has been migrated; see BrainstormFlowContribution).
 import { BrainstormEditorPane } from './brainstorm/brainstormEditorPane.js';
 import { BrainstormEditorInput } from './brainstorm/brainstormEditorInput.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(BrainstormEditorPane, BrainstormEditorPane.ID, 'Brainstorm'),
 	[new SyncDescriptor(BrainstormEditorInput)],
+);
+
+// Brainstorm per-step panes (incremental migration).
+import { BrainstormIdeasPane } from './brainstorm/step/ideasPane.js';
+import { BrainstormIdeasInput } from './brainstorm/step/ideasInput.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormIdeasPane, BrainstormIdeasPane.ID, 'Brainstorm: Ideas'),
+	[new SyncDescriptor(BrainstormIdeasInput)],
 );
 
 // Model Providers EditorPane + palette command + NOT_CONFIGURED auto-open
@@ -107,52 +116,12 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(ModelProvidersInput)],
 );
 
-// Brainstorm auto-open: listens for brainstorm intent and opens the EditorPane
+// Brainstorm flow: routes gates to the matching per-step editor pane, falling
+// back to the legacy pane for kinds that haven't been migrated yet.
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-
-class BrainstormAutoOpenContribution extends Disposable {
-	static readonly ID = 'insrc.brainstormAutoOpen';
-	private _opened = false;
-
-	constructor(
-		@IInsrcChatService chatService: IInsrcChatService,
-		@IEditorService private readonly editorService: IEditorService,
-	) {
-		super();
-		this._register(chatService.onDidReceiveEvent(event => {
-			if (this._opened) { return; }
-
-			// Detect brainstorm from progress intent or structured gate
-			if (event.type === 'progress') {
-				const status = event.progress.status || event.progress.step;
-				if (status.includes('Intent: brainstorm') || status.includes('brainstorm')) {
-					this._openBrainstormPane(chatService);
-				}
-			} else if (event.type === 'gate') {
-				const ctx = event.gate.context as Record<string, unknown> | undefined;
-				if (ctx && ctx['phase'] === 'ideation') {
-					this._openBrainstormPane(chatService);
-				}
-			}
-		}));
-
-		// Reset opened flag when session changes
-		this._register(chatService.onDidChangeSession(() => {
-			this._opened = false;
-		}));
-	}
-
-	private _openBrainstormPane(chatService: IInsrcChatService): void {
-		this._opened = true;
-		const sessionId = chatService.activeSessionId ?? 'brainstorm';
-		const repoPath = chatService.activeRepo ?? '';
-		const input = new BrainstormEditorInput(sessionId, repoPath);
-		this.editorService.openEditor(input);
-	}
-}
-
-registerWorkbenchContribution2(BrainstormAutoOpenContribution.ID, BrainstormAutoOpenContribution, WorkbenchPhase.AfterRestored);
+import { BrainstormFlowContribution } from './brainstorm/brainstormFlowContribution.js';
+registerWorkbenchContribution2(BrainstormFlowContribution.ID, BrainstormFlowContribution, WorkbenchPhase.AfterRestored);
 
 // Model Providers auto-open: listens for NOT_CONFIGURED from chat.start
 // and opens the pane. If 'local' or 'both' is missing, opens the Local tab;
