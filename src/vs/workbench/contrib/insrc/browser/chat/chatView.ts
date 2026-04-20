@@ -17,6 +17,7 @@ import { IOpenerService } from '../../../../../platform/opener/common/opener.js'
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo } from '../../common/chatService.js';
+import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcDiffService, extractDiffFromResponse, parseDiff, applyHunks } from '../../common/diffService.js';
@@ -114,9 +115,13 @@ export class InsrcChatViewPane extends ViewPane {
 	private _sendBtn!: HTMLButtonElement;
 	private _cancelBtn!: HTMLButtonElement;
 	private _emptyState!: HTMLElement;
+	private _intentSelect!: HTMLSelectElement;
 
 	// Tracks the last assistant message element for streaming updates
 	private _streamingMessageEl: HTMLElement | undefined;
+	// Intent announcement dedupe -- reset per turn/session so we don't spam
+	// the chat panel every time the daemon re-emits "Intent: X".
+	private _lastAnnouncedIntent: string | undefined;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -139,6 +144,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@IFileService private readonly fileService: IFileService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@ICommandService private readonly commandService: ICommandService,
+		@IInsrcBrainstormSessionService private readonly brainstormSession: IInsrcBrainstormSessionService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -149,6 +155,13 @@ export class InsrcChatViewPane extends ViewPane {
 			this._updateState();
 		}));
 		this._register(this.repoService.onDidChangeRepos(() => this._updateHeader()));
+
+		// Brainstorm session lock: while the user is interacting with a
+		// brainstorm editor pane, the chat composer is dormant -- input is
+		// disabled and the send button swaps to cancel so the only way to
+		// interrupt is by cancelling the daemon stream.
+		this._register(this.brainstormSession.onDidChangeActiveGate(() => this._updateBrainstormLock()));
+		this._register(this.brainstormSession.onDidChange(() => this._syncIntentDropdown()));
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -260,9 +273,9 @@ export class InsrcChatViewPane extends ViewPane {
 		// Toolbar: intent selector + attach button
 		const toolbar = dom.append(this._inputArea, dom.$('.insrc-chat-input-toolbar'));
 
-		const intentSelect = dom.append(toolbar, dom.$('select.insrc-chat-intent-select')) as HTMLSelectElement;
+		this._intentSelect = dom.append(toolbar, dom.$('select.insrc-chat-intent-select')) as HTMLSelectElement;
 		for (const intent of ['Auto', 'Implement', 'Refactor', 'Debug', 'Test', 'Design', 'Brainstorm', 'Plan', 'Review', 'Research']) {
-			const opt = dom.append(intentSelect, dom.$('option')) as HTMLOptionElement;
+			const opt = dom.append(this._intentSelect, dom.$('option')) as HTMLOptionElement;
 			opt.value = intent.toLowerCase();
 			opt.textContent = intent;
 		}
@@ -298,18 +311,26 @@ export class InsrcChatViewPane extends ViewPane {
 	private _handleChatEvent(event: ChatEvent): void {
 		switch (event.type) {
 			case 'message':
+				// While a brainstorm pane is driving the conversation, idea
+				// discussion + per-idea prompts are rendered inside the card
+				// widget itself (see BrainstormCardWidget._discussionEl). Don't
+				// duplicate them in the chat panel.
+				if (this._shouldSuppressForBrainstorm()) {
+					break;
+				}
 				this._renderMessage(event.message);
 				break;
 			case 'gate': {
-				// Skip brainstorm gates -- handled by BrainstormEditorPane
+				// Skip brainstorm gates -- handled by the brainstorm editor panes.
 				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
-				if (gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence')) {
+				if (gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence' || gateCtx['phase'] === 'specify' || gateCtx['phase'] === 'finalize')) {
 					break;
 				}
 				this._renderGate(event.gate);
 				break;
 			}
 			case 'progress':
+				this._ingestIntentAnnouncement(event.progress.step);
 				this._showProgress(event.progress.step, event.progress.status);
 				break;
 			case 'streamEnd':
@@ -319,6 +340,93 @@ export class InsrcChatViewPane extends ViewPane {
 				this._renderError(event.error);
 				this._onStreamEnd();
 				break;
+		}
+	}
+
+	/**
+	 * Emit a synthesized assistant-style chat message when the daemon reports
+	 * a classified intent, so the user has a persistent record of what the
+	 * classifier decided (beyond the transient progress bar). Dedupes per
+	 * session -- only the first Intent announcement per turn is rendered.
+	 */
+	private _ingestIntentAnnouncement(step: string): void {
+		const match = step.match(/^Intent:\s*(.+)$/);
+		if (!match) { return; }
+		const detected = match[1]!.trim();
+		if (!detected || detected === this._lastAnnouncedIntent) { return; }
+		this._lastAnnouncedIntent = detected;
+
+		// Keep the dropdown honest. `brainstorm/<category>` lands under the
+		// top-level Brainstorm option.
+		const [primary] = detected.split('/');
+		if (primary) { this._selectIntent(primary); }
+
+		// If the brainstorm pane is taking over, it already shows the
+		// category badge -- no need to echo in chat too.
+		if (this._shouldSuppressForBrainstorm()) { return; }
+
+		const message: ChatMessage = {
+			role: 'assistant',
+			content: `Detected intent: **${detected}**. Routing accordingly.`,
+			timestamp: new Date().toISOString(),
+		};
+		this._renderMessage(message);
+	}
+
+	/**
+	 * True if the current brainstorm session has an active gate the user is
+	 * acting on -- in that case the conversation lives in the brainstorm pane,
+	 * not the chat panel.
+	 */
+	private _shouldSuppressForBrainstorm(): boolean {
+		const gate = this.brainstormSession.activeGate;
+		if (!gate) { return false; }
+		// Only gate-kinds that render their own discussion area qualify.
+		return gate.kind === 'idea' || gate.kind === 'idea-discussion';
+	}
+
+	/**
+	 * Keep the intent dropdown in sync with the classifier's decision. The
+	 * session service pulls the intent from "Intent: brainstorm/<cat>" progress
+	 * events; we also listen for generic "Intent: <kind>" so non-brainstorm
+	 * flows update the selector too.
+	 */
+	private _syncIntentDropdown(): void {
+		if (!this._intentSelect) { return; }
+		const phase = this.brainstormSession.phase;
+		if (phase !== 'waiting') {
+			this._selectIntent('brainstorm');
+		}
+	}
+
+	private _selectIntent(intent: string): void {
+		if (!this._intentSelect) { return; }
+		const value = intent.toLowerCase();
+		for (const opt of Array.from(this._intentSelect.options)) {
+			if (opt.value === value) {
+				this._intentSelect.value = value;
+				return;
+			}
+		}
+	}
+
+	private _updateBrainstormLock(): void {
+		const locked = this._shouldSuppressForBrainstorm();
+		if (!this._sendBtn || !this._cancelBtn || !this._input) { return; }
+		if (locked) {
+			this._sendBtn.style.display = 'none';
+			this._cancelBtn.style.display = '';
+			this._sendBtn.disabled = true;
+			this._input.disabled = true;
+			this._input.placeholder = 'Brainstorm in progress -- use the pane above';
+		} else if (!this.chatService.isStreaming) {
+			// Don't fight with the streaming state; _onStreamEnd will restore
+			// when the stream ends.
+			this._sendBtn.style.display = '';
+			this._cancelBtn.style.display = 'none';
+			this._sendBtn.disabled = false;
+			this._input.disabled = false;
+			this._input.placeholder = 'Type a message... (@local, @sonnet for provider)';
 		}
 	}
 
@@ -600,6 +708,13 @@ export class InsrcChatViewPane extends ViewPane {
 			this._progressMsgEl = undefined;
 		}
 
+		// Don't re-enable input if the brainstorm pane is still driving; the
+		// brainstorm lock keeps the composer dormant until the flow completes.
+		if (this._shouldSuppressForBrainstorm()) {
+			this._updateBrainstormLock();
+			return;
+		}
+
 		this._sendBtn.style.display = '';
 		this._cancelBtn.style.display = 'none';
 		this._sendBtn.disabled = false;
@@ -684,6 +799,8 @@ export class InsrcChatViewPane extends ViewPane {
 		if (!text) {
 			return;
 		}
+		// New turn -- let the next "Intent: X" progress event re-announce.
+		this._lastAnnouncedIntent = undefined;
 
 		// Auto-start session if needed
 		if (!this.chatService.activeSessionId) {
@@ -810,6 +927,7 @@ export class InsrcChatViewPane extends ViewPane {
 
 	private _onSessionChanged(): void {
 		this._updateHeader();
+		this._lastAnnouncedIntent = undefined;
 
 		if (!this._messageList) {
 			return;
