@@ -5,7 +5,7 @@
 
 import * as dom from '../../../../../base/browser/dom.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
-import { Disposable, toDisposable, type IDisposable } from '../../../../../base/common/lifecycle.js';
+import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -67,18 +67,10 @@ const PROMPT_PLACEHOLDERS: Record<string, string> = {
 	split: 'Describe the split...',
 };
 
-/**
- * Failsafe for the submitting state. If the backend never sends a follow-up
- * gate (daemon crash, disconnect, bug) the card re-arms itself after this
- * window so the user isn't trapped looking at a frozen spinner.
- */
-const SUBMITTING_TIMEOUT_MS = 15_000;
-
 export class BrainstormCardWidget extends Disposable {
 	private _container: HTMLElement;
 	private _actionContainer!: HTMLElement;
 	private readonly _actions: readonly string[];
-	private _submittingTimer: IDisposable | undefined;
 	private _dispatched = false;
 
 	constructor(
@@ -102,11 +94,6 @@ export class BrainstormCardWidget extends Disposable {
 
 		this._actionContainer = dom.append(this._container, dom.$('.insrc-brainstorm-card-actions'));
 		this._renderActions();
-	}
-
-	override dispose(): void {
-		this._clearSubmittingTimer();
-		super.dispose();
 	}
 
 	// ---------------------------------------------------------------------------
@@ -296,29 +283,10 @@ export class BrainstormCardWidget extends Disposable {
 		const spinner = dom.append(el, dom.$('span.insrc-brainstorm-submitting-spinner'));
 		spinner.classList.add(...ThemeIcon.asClassNameArray(Codicon.loading), 'codicon-modifier-spin');
 		const text = dom.append(el, dom.$('span'));
-		text.textContent = 'Waiting for next idea...';
-
-		this._clearSubmittingTimer();
-		const handle = setTimeout(() => this._onSubmittingTimeout(), SUBMITTING_TIMEOUT_MS);
-		const disposable = toDisposable(() => clearTimeout(handle));
-		this._submittingTimer = disposable;
-		this._register(disposable);
-	}
-
-	private _onSubmittingTimeout(): void {
-		this._dispatched = false;
-		this._clearSubmittingTimer();
-		dom.clearNode(this._actionContainer);
-		this._container.classList.remove('submitting');
-
-		const warn = dom.append(this._actionContainer, dom.$('.insrc-brainstorm-timeout-notice'));
-		warn.textContent = 'No response from the agent -- try again?';
-		this._renderActions();
-	}
-
-	private _clearSubmittingTimer(): void {
-		this._submittingTimer?.dispose();
-		this._submittingTimer = undefined;
+		text.textContent = 'Thinking...';
+		// No auto-timeout: LLM calls with reasoning / tool-use can take
+		// minutes. The card unlocks when the next gate arrives, or when the
+		// daemon surfaces a stream error (handled separately).
 	}
 
 	// ---------------------------------------------------------------------------
