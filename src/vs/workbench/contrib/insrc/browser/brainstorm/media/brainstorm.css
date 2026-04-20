@@ -735,6 +735,206 @@
 	display: none;
 }
 
+/* -- Shared list-view panel (IdeaList / Themes) -- */
+.insrc-brainstorm-list-panel {
+	max-width: 800px;
+	margin: 0 auto;
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.insrc-brainstorm-list {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.insrc-brainstorm-list-item {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 10px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	background: var(--vscode-editorWidget-background);
+}
+
+.insrc-brainstorm-list-status {
+	font-size: 0.72em;
+	padding: 1px 8px;
+	border-radius: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	border: 1px solid var(--vscode-panel-border);
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-list-status.status-accepted {
+	border-color: color-mix(in srgb, var(--vscode-testing-iconPassed, #4caf7d) 60%, transparent);
+	color: var(--vscode-testing-iconPassed, #4caf7d);
+}
+
+.insrc-brainstorm-list-status.status-rejected {
+	border-color: color-mix(in srgb, var(--vscode-errorForeground, #f44) 60%, transparent);
+	color: var(--vscode-errorForeground, #f44);
+}
+
+.insrc-brainstorm-list-status.status-parked {
+	border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 60%, transparent);
+	color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.insrc-brainstorm-list-title {
+	flex: 1;
+	font-size: 0.95em;
+	color: var(--vscode-editor-foreground);
+}
+
+.insrc-brainstorm-list-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	padding-top: 8px;
+	border-top: 1px solid var(--vscode-panel-border);
+}
+
+/* -- Theme card (ThemesPane) -- */
+.insrc-brainstorm-theme-card {
+	padding: 12px 14px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: var(--insrc-radius-card);
+	background: var(--vscode-editorWidget-background);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.insrc-brainstorm-theme-title {
+	margin: 0;
+	font-size: 1em;
+	font-weight: 600;
+	color: var(--vscode-editor-foreground);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.insrc-brainstorm-theme-priority {
+	font-size: 0.72em;
+	padding: 1px 8px;
+	border-radius: 10px;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+	text-transform: uppercase;
+}
+
+.insrc-brainstorm-theme-desc {
+	font-size: 0.9em;
+	color: var(--vscode-editor-foreground);
+	white-space: pre-wrap;
+}
+
+.insrc-brainstorm-theme-members {
+	font-size: 0.82em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-theme-details {
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-theme-raw {
+	white-space: pre-wrap;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.82em;
+	background: var(--vscode-textBlockQuote-background);
+	padding: 8px 10px;
+	border-radius: 4px;
+	margin: 6px 0 0;
+}
+
+/* -- Inline spec panel (ThemeDetails / Presentation) -- */
+.insrc-brainstorm-spec-panel-inline {
+	max-width: 900px;
+	margin: 16px auto;
+	padding: 20px 24px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: var(--insrc-radius-card);
+	background: var(--vscode-editorWidget-background);
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.insrc-brainstorm-spec-title {
+	margin: 0;
+	font-size: 1.1em;
+	font-weight: 600;
+}
+
+.insrc-brainstorm-spec-theme-id {
+	margin-left: 6px;
+	font-weight: 400;
+	font-size: 0.78em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-spec-body {
+	white-space: pre-wrap;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+	font-size: 0.88em;
+	padding: 12px 14px;
+	background: var(--vscode-textBlockQuote-background);
+	border-radius: 4px;
+	margin: 0;
+}
+
+.insrc-brainstorm-final-preview {
+	font-size: 0.95em;
+	line-height: 1.6;
+	color: var(--vscode-editor-foreground);
+	max-height: 60vh;
+	overflow-y: auto;
+	padding: 0 4px;
+}
+
+/* -- Save form (PresentationPane) -- */
+.insrc-brainstorm-save-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 0.88em;
+}
+
+.insrc-brainstorm-save-row > span {
+	min-width: 60px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-save-select,
+.insrc-brainstorm-save-input {
+	flex: 1;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	padding: 4px 8px;
+	font-family: inherit;
+	font-size: 0.9em;
+	outline: none;
+}
+
+.insrc-brainstorm-save-select:focus,
+.insrc-brainstorm-save-input:focus {
+	border-color: var(--vscode-focusBorder);
+}
+
 /* -- Scrollbar -- */
 .insrc-brainstorm *::-webkit-scrollbar {
 	width: 6px;

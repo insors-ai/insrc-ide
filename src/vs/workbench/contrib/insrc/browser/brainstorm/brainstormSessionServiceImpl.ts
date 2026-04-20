@@ -128,6 +128,17 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			? ctx['progress'] as Record<string, number>
 			: undefined;
 
+		// Anything structured carries that isn't one of the well-known fields
+		// (phase/itemType/itemId/item/progress) goes into `extra` so panes can
+		// read it without having to parse the raw context themselves.
+		const extra: Record<string, unknown> = {};
+		const WELL_KNOWN = new Set(['phase', 'itemType', 'itemId', 'item', 'progress']);
+		for (const key of Object.keys(ctx)) {
+			if (!WELL_KNOWN.has(key)) {
+				extra[key] = ctx[key];
+			}
+		}
+
 		const snapshot: BrainstormGateSnapshot = {
 			gateId: gate.gateId,
 			kind,
@@ -138,6 +149,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			...(gate.title !== undefined ? { title: gate.title } : {}),
 			...(gate.content !== undefined ? { content: gate.content } : {}),
 			...(progress !== undefined ? { progress } : {}),
+			...(Object.keys(extra).length > 0 ? { extra } : {}),
 		};
 
 		const phaseChanged = this._phase !== phase;

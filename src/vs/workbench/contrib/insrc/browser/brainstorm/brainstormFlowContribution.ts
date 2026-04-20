@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../../base/common/lifecycle.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IInsrcChatService } from '../../common/chatService.js';
@@ -14,16 +15,16 @@ import {
 } from '../../common/brainstormSessionService.js';
 import type { EditorInput } from '../../../../common/editor/editorInput.js';
 import { BrainstormIdeasInput } from './step/ideasInput.js';
-import { BrainstormEditorInput } from './brainstormEditorInput.js';
+import { BrainstormIdeaChatInput } from './step/ideaChatInput.js';
+import { BrainstormIdeaListInput } from './step/ideaListInput.js';
+import { BrainstormThemesInput } from './step/themesInput.js';
+import { BrainstormThemeDetailsInput } from './step/themeDetailsInput.js';
+import { BrainstormPresentationInput } from './step/presentationInput.js';
 
 /**
- * Routes brainstorm gates to the matching per-step editor pane. Replaces the
- * old BrainstormAutoOpenContribution which opened one pane and mutated it
- * through phase changes.
- *
- * Migration is incremental: kinds we've already rewritten open their new
- * pane; anything else falls through to the legacy BrainstormEditorPane so the
- * flow keeps working while panes are ported.
+ * Routes brainstorm gates to the matching per-step editor pane. Every
+ * known gate kind has its own concrete pane; unknown kinds are logged
+ * and ignored (we never want to land the user in a "mystery" pane).
  */
 export class BrainstormFlowContribution extends Disposable {
 	static readonly ID = 'insrc.brainstormFlow';
@@ -35,6 +36,7 @@ export class BrainstormFlowContribution extends Disposable {
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
 		@IEditorService private readonly editorService: IEditorService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@ILogService private readonly logService: ILogService,
 	) {
 		super();
 
@@ -45,7 +47,10 @@ export class BrainstormFlowContribution extends Disposable {
 	private _route(gate: BrainstormGateSnapshot): void {
 		const sessionId = this.chatService.activeSessionId ?? 'brainstorm';
 		const input = this._inputFor(gate.kind, sessionId);
-		if (!input) { return; }
+		if (!input) {
+			this.logService.warn(`[insrc-brainstorm] unknown gate kind "${gate.kind}" (gateId=${gate.gateId}); ignoring`);
+			return;
+		}
 
 		// Avoid re-opening the same pane every gate; we only want to switch
 		// editors when the KIND changes. Same-kind gate updates are picked up
@@ -58,22 +63,23 @@ export class BrainstormFlowContribution extends Disposable {
 	}
 
 	private _inputFor(kind: BrainstormGateKind, sessionId: string): EditorInput | undefined {
+		// Every brainstorm step input is instantiation-service-created so its
+		// close handler receives IDialogService + IInsrcChatService +
+		// IInsrcBrainstormSessionService via DI.
 		switch (kind) {
 			case 'idea':
-				// Goes through the instantiation service so the step input's
-				// close handler gets IDialogService / IInsrcChatService /
-				// IInsrcBrainstormSessionService injected.
 				return this.instantiationService.createInstance(BrainstormIdeasInput, sessionId);
-
-			// Not yet migrated -- keep using the legacy monolithic pane so the
-			// user-visible flow doesn't break mid-rewrite.
 			case 'idea-list':
+				return this.instantiationService.createInstance(BrainstormIdeaListInput, sessionId);
 			case 'idea-discussion':
+				return this.instantiationService.createInstance(BrainstormIdeaChatInput, sessionId);
 			case 'convergence-review':
+				return this.instantiationService.createInstance(BrainstormThemesInput, sessionId);
 			case 'theme-spec':
+				return this.instantiationService.createInstance(BrainstormThemeDetailsInput, sessionId);
 			case 'presentation':
-				return new BrainstormEditorInput(sessionId, this.chatService.activeRepo ?? '');
-
+				return this.instantiationService.createInstance(BrainstormPresentationInput, sessionId);
+			case 'unknown':
 			default:
 				return undefined;
 		}

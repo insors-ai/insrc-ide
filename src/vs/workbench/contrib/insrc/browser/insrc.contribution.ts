@@ -90,21 +90,43 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(StepProviderEditorInput)],
 );
 
-// Brainstorm EditorPane (legacy monolithic pane -- kept as fallback until
-// every per-step pane has been migrated; see BrainstormFlowContribution).
-import { BrainstormEditorPane } from './brainstorm/brainstormEditorPane.js';
-import { BrainstormEditorInput } from './brainstorm/brainstormEditorInput.js';
-editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(BrainstormEditorPane, BrainstormEditorPane.ID, 'Brainstorm'),
-	[new SyncDescriptor(BrainstormEditorInput)],
-);
-
-// Brainstorm per-step panes (incremental migration).
+// Brainstorm per-step panes. One pane per gate kind; the flow contribution
+// routes incoming gates to the matching input.
 import { BrainstormIdeasPane } from './brainstorm/step/ideasPane.js';
 import { BrainstormIdeasInput } from './brainstorm/step/ideasInput.js';
+import { BrainstormIdeaChatPane } from './brainstorm/step/ideaChatPane.js';
+import { BrainstormIdeaChatInput } from './brainstorm/step/ideaChatInput.js';
+import { BrainstormIdeaListPane } from './brainstorm/step/ideaListPane.js';
+import { BrainstormIdeaListInput } from './brainstorm/step/ideaListInput.js';
+import { BrainstormThemesPane } from './brainstorm/step/themesPane.js';
+import { BrainstormThemesInput } from './brainstorm/step/themesInput.js';
+import { BrainstormThemeDetailsPane } from './brainstorm/step/themeDetailsPane.js';
+import { BrainstormThemeDetailsInput } from './brainstorm/step/themeDetailsInput.js';
+import { BrainstormPresentationPane } from './brainstorm/step/presentationPane.js';
+import { BrainstormPresentationInput } from './brainstorm/step/presentationInput.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(BrainstormIdeasPane, BrainstormIdeasPane.ID, 'Brainstorm: Ideas'),
 	[new SyncDescriptor(BrainstormIdeasInput)],
+);
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormIdeaChatPane, BrainstormIdeaChatPane.ID, 'Brainstorm: Discussion'),
+	[new SyncDescriptor(BrainstormIdeaChatInput)],
+);
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormIdeaListPane, BrainstormIdeaListPane.ID, 'Brainstorm: Idea List'),
+	[new SyncDescriptor(BrainstormIdeaListInput)],
+);
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormThemesPane, BrainstormThemesPane.ID, 'Brainstorm: Themes'),
+	[new SyncDescriptor(BrainstormThemesInput)],
+);
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormThemeDetailsPane, BrainstormThemeDetailsPane.ID, 'Brainstorm: Theme Spec'),
+	[new SyncDescriptor(BrainstormThemeDetailsInput)],
+);
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormPresentationPane, BrainstormPresentationPane.ID, 'Brainstorm: Final'),
+	[new SyncDescriptor(BrainstormPresentationInput)],
 );
 
 // Model Providers EditorPane + palette command + NOT_CONFIGURED auto-open

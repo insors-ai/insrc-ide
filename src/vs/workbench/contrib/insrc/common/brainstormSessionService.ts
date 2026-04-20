@@ -81,6 +81,12 @@ export interface BrainstormGateSnapshot {
 	readonly title?: string | undefined;
 	readonly content?: string | undefined;
 	readonly progress?: Readonly<Record<string, number>> | undefined;
+	/**
+	 * Extra structured fields the gate carries beyond `item`/`progress`
+	 * (e.g. `messages` on idea-discussion, `tabs` on convergence-review).
+	 * Panes read from here when they need more than the standard fields.
+	 */
+	readonly extra?: Readonly<Record<string, unknown>> | undefined;
 }
 
 // ---------------------------------------------------------------------------
