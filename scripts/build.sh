@@ -28,13 +28,36 @@ cd "$ROOT"
 HEAP_MB="${HEAP_MB:-8192}"
 export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${HEAP_MB}"
 
+# Skip dependency install by exporting INSRC_SKIP_INSTALL=1 (useful for CI or
+# when you've just run npm install yourself and want faster iteration).
+SKIP_INSTALL="${INSRC_SKIP_INSTALL:-0}"
+
+install_if_needed() {
+	local dir="$1"
+	local label="$2"
+	if [ "$SKIP_INSTALL" = "1" ]; then
+		return
+	fi
+	# Run npm install when node_modules is missing, or when the lockfile /
+	# package.json is newer than the install marker. Cheap check; no-op on
+	# warm builds so iteration stays fast.
+	if [ ! -d "$dir/node_modules" ] \
+		|| [ "$dir/package-lock.json" -nt "$dir/node_modules/.package-lock.json" ] 2>/dev/null \
+		|| [ "$dir/package.json" -nt "$dir/node_modules/.package-lock.json" ] 2>/dev/null; then
+		echo "[insrc-build] installing $label deps"
+		( cd "$dir" && npm install --no-audit --no-fund )
+	fi
+}
+
 build_ide() {
+	install_if_needed "." "IDE"
 	echo "[insrc-build] IDE compile (heap=${HEAP_MB}MB)"
 	npm run compile
 }
 
 build_daemon() {
-	echo "[insrc-build] daemon compile (tsc → out/insrc)"
+	install_if_needed "src/insrc" "daemon"
+	echo "[insrc-build] daemon compile (tsc -> out/insrc)"
 	( cd src/insrc && npm run build )
 }
 
