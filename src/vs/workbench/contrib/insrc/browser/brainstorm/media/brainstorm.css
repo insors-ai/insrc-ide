@@ -11,6 +11,8 @@
 	overflow: hidden;
 	background: var(--vscode-editor-background);
 	color: var(--vscode-editor-foreground);
+	/* Anchor for the Redirect overlay (Item 6). */
+	position: relative;
 }
 
 /* -- Header -- */
@@ -114,6 +116,73 @@
 	gap: 6px;
 }
 
+/* -- Header action button (Redirect, etc.) -- */
+.insrc-brainstorm-header-btn {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-panel-border);
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	font-size: 0.82em;
+	font-family: inherit;
+}
+
+.insrc-brainstorm-header-btn:hover {
+	background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+}
+
+.insrc-brainstorm-redirect-label {
+	/* label text inside the redirect button */
+}
+
+/* -- Redirect overlay + picker panel -- */
+.insrc-brainstorm-redirect-overlay {
+	position: absolute;
+	inset: 0;
+	background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding-top: 60px;
+	z-index: 10;
+}
+
+.insrc-brainstorm-redirect-panel {
+	width: min(480px, 90%);
+	background: var(--vscode-editorWidget-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	box-shadow: 0 6px 24px color-mix(in srgb, black 35%, transparent);
+}
+
+.insrc-brainstorm-redirect-panel h3 {
+	margin: 0;
+	font-size: 1em;
+	font-weight: 600;
+}
+
+.insrc-brainstorm-redirect-help {
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-brainstorm-redirect-error {
+	margin-top: 8px;
+	padding: 6px 8px;
+	background: color-mix(in srgb, var(--vscode-errorForeground) 15%, transparent);
+	color: var(--vscode-errorForeground);
+	border-radius: 4px;
+	font-size: 0.85em;
+}
+
 .insrc-brainstorm-btn {
 	padding: 4px 12px;
 	border-radius: 4px;
@@ -183,6 +252,25 @@
 	box-shadow: 0 0 0 3px color-mix(in srgb, var(--vscode-focusBorder) 12%, transparent);
 }
 
+.insrc-brainstorm-card-warning {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 16px;
+	font-size: 0.9em;
+	background: color-mix(in srgb, var(--vscode-editorWarning-foreground) 15%, transparent);
+	color: var(--vscode-editorWarning-foreground);
+	border-bottom: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground) 35%, transparent);
+}
+
+.insrc-brainstorm-card-warning .codicon {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.insrc-brainstorm-card-warning-text {
+	flex: 1;
+}
+
 .insrc-brainstorm-card-title-section {
 	padding: 16px 20px 8px;
 	display: flex;
@@ -236,7 +324,24 @@
 	white-space: pre-wrap;
 }
 
-/* -- Rationale -- */
+/* -- Idea rationale (LLM-supplied motivation / tradeoff) -- */
+.insrc-brainstorm-card-idea-rationale {
+	padding: 8px 20px;
+	font-size: 0.9em;
+	color: var(--vscode-foreground);
+	border-top: 1px solid var(--vscode-panel-border);
+}
+
+/* -- Reviewer notes (Claude's description of the refined idea) -- */
+.insrc-brainstorm-card-review {
+	padding: 8px 20px;
+	font-size: 0.9em;
+	color: var(--vscode-foreground);
+	border-top: 1px solid var(--vscode-panel-border);
+	background: color-mix(in srgb, var(--vscode-editorInfo-foreground) 6%, transparent);
+}
+
+/* -- Rationale (Claude review rationale strip) -- */
 .insrc-brainstorm-card-rationale {
 	padding: 8px 20px 12px;
 	font-size: 0.85em;
@@ -270,6 +375,60 @@
 
 .insrc-brainstorm-ref:hover {
 	text-decoration: underline;
+}
+
+.insrc-brainstorm-ref.unresolved {
+	color: var(--vscode-descriptionForeground);
+	cursor: help;
+	opacity: 0.7;
+}
+
+.insrc-brainstorm-ref.unresolved:hover {
+	text-decoration: none;
+}
+
+/* -- Intent-confirm pane -- */
+.insrc-brainstorm-intent-panel {
+	padding: 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.insrc-brainstorm-intent-heading {
+	font-size: 1.15em;
+	margin: 0;
+	font-weight: 600;
+}
+
+.insrc-brainstorm-intent-confidence,
+.insrc-brainstorm-intent-reasoning {
+	font-size: 0.95em;
+	color: var(--vscode-foreground);
+}
+
+.insrc-brainstorm-intent-actions {
+	display: flex;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.insrc-brainstorm-intent-picker {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.insrc-brainstorm-intent-select {
+	padding: 6px 8px;
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border);
+	border-radius: 2px;
+	font-family: inherit;
+	font-size: 0.95em;
+	max-width: 240px;
 }
 
 /* -- Discussion -- */

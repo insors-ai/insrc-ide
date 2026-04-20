@@ -24,13 +24,20 @@ export interface BrainstormIdea {
 	readonly id: string;
 	readonly index: number;
 	readonly title: string;
+	/** Raw LLM-emitted text; UI should prefer `summary` when present. */
 	readonly body: string;
+	/** Rich multi-sentence description from the rich-format parser (Item 10). */
+	readonly summary?: string | undefined;
+	/** 1-2 sentence rationale / motivation from the rich-format parser. */
+	readonly rationale?: string | undefined;
 	readonly references: readonly BrainstormIdeaRef[];
 	readonly status: string;
 	readonly source: string;
 	readonly round: number;
 	readonly tags: readonly string[];
 	readonly reviewVerdict?: string | undefined;
+	/** Reviewer's refined description (populated by the review pass). */
+	readonly reviewDescription?: string | undefined;
 	readonly reviewRationale?: string | undefined;
 	readonly userComment?: string | undefined;
 }
@@ -55,6 +62,7 @@ export interface BrainstormSpecSection {
 
 export type BrainstormPhase =
 	| 'waiting'
+	| 'classify'
 	| 'ideation'
 	| 'convergence'
 	| 'specify'
@@ -62,6 +70,7 @@ export type BrainstormPhase =
 
 /** Which pane the flow contribution should open for the active gate. */
 export type BrainstormGateKind =
+	| 'intent-confirm'
 	| 'idea'
 	| 'idea-list'
 	| 'idea-discussion'
@@ -81,6 +90,12 @@ export interface BrainstormGateSnapshot {
 	readonly title?: string | undefined;
 	readonly content?: string | undefined;
 	readonly progress?: Readonly<Record<string, number>> | undefined;
+	/**
+	 * Transient warning / error string to surface above the card (e.g.
+	 * local LLM returned zero usable variations on diverge). Set by the
+	 * daemon in `structured.warning`, cleared when the next gate arrives.
+	 */
+	readonly warning?: string | undefined;
 	/**
 	 * Extra structured fields the gate carries beyond `item`/`progress`
 	 * (e.g. `messages` on idea-discussion, `tabs` on convergence-review).

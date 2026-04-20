@@ -9,6 +9,7 @@ import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
+import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { URI } from '../../../../../base/common/uri.js';
 
 interface IdeaRef {
@@ -28,6 +29,14 @@ interface CardData {
 	id: string;
 	title: string;
 	body: string;
+	/** Preferred primary description: 2-4 sentence rich summary from the LLM.
+	 *  When present the card renders this as the main body; `body` becomes a
+	 *  fallback for legacy ideas that predate the rich-format parse. */
+	summary?: string;
+	/** 1-2 sentences on motivation / tradeoffs (optional). */
+	rationale?: string;
+	/** Reviewer's refined description from the review pass (optional). */
+	reviewDescription?: string;
 	references: IdeaRef[];
 	status: string;
 	tags: string[];
@@ -35,6 +44,8 @@ interface CardData {
 	reviewRationale?: string;
 	/** Prior discussion history to render under the body (optional). */
 	messages?: readonly CardDiscussionMessage[];
+	/** Transient warning (e.g. LLM returned no variations) -- rendered as an amber strip above the title. */
+	warning?: string;
 }
 
 /**
@@ -81,6 +92,7 @@ export class BrainstormCardWidget extends Disposable {
 		private readonly onAction: (action: string, feedback: string | undefined) => void,
 		@IEditorService private readonly editorService: IEditorService,
 		@ILogService private readonly logService: ILogService,
+		@IOpenerService private readonly openerService: IOpenerService,
 	) {
 		super();
 		this._actions = actions.slice();
@@ -89,8 +101,11 @@ export class BrainstormCardWidget extends Disposable {
 		dom.clearNode(parent);
 		this._container = dom.append(parent, dom.$('.insrc-brainstorm-card'));
 
+		this._renderWarning(data);
 		this._renderTitle(data);
 		this._renderBody(data);
+		this._renderReviewDescription(data);
+		this._renderIdeaRationale(data);
 		this._renderRationale(data);
 		this._renderReferences(data);
 		this._renderDiscussion(data);
@@ -102,6 +117,15 @@ export class BrainstormCardWidget extends Disposable {
 	// ---------------------------------------------------------------------------
 	// Rendering -- idea content
 	// ---------------------------------------------------------------------------
+
+	private _renderWarning(data: CardData): void {
+		if (!data.warning) { return; }
+		const strip = dom.append(this._container, dom.$('.insrc-brainstorm-card-warning'));
+		const icon = dom.append(strip, dom.$('span.codicon'));
+		icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.warning));
+		const text = dom.append(strip, dom.$('span.insrc-brainstorm-card-warning-text'));
+		text.textContent = data.warning;
+	}
 
 	private _renderTitle(data: CardData): void {
 		const titleSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-title-section'));
@@ -123,8 +147,36 @@ export class BrainstormCardWidget extends Disposable {
 	}
 
 	private _renderBody(data: CardData): void {
+		// Prefer the rich-format summary; fall back to raw body for legacy
+		// ideas generated before the rich prompts landed (Item 10).
+		const primary = (data.summary && data.summary.trim().length > 0)
+			? data.summary
+			: data.body;
+		if (!primary || primary.trim().length === 0) { return; }
 		const bodySection = dom.append(this._container, dom.$('.insrc-brainstorm-card-body'));
-		bodySection.textContent = data.body;
+		bodySection.textContent = primary;
+	}
+
+	private _renderReviewDescription(data: CardData): void {
+		if (!data.reviewDescription || data.reviewDescription.trim().length === 0) { return; }
+		// Skip when reviewDescription is just a paraphrase of summary/body
+		// (common when the reviewer had nothing to add).
+		const primary = (data.summary ?? data.body ?? '').trim().toLowerCase();
+		if (primary && data.reviewDescription.trim().toLowerCase() === primary) { return; }
+		const section = dom.append(this._container, dom.$('.insrc-brainstorm-card-review'));
+		const label = dom.append(section, dom.$('strong'));
+		label.textContent = 'Reviewer notes: ';
+		const text = dom.append(section, dom.$('span'));
+		text.textContent = data.reviewDescription;
+	}
+
+	private _renderIdeaRationale(data: CardData): void {
+		if (!data.rationale || data.rationale.trim().length === 0) { return; }
+		const section = dom.append(this._container, dom.$('.insrc-brainstorm-card-idea-rationale'));
+		const label = dom.append(section, dom.$('strong'));
+		label.textContent = 'Rationale: ';
+		const text = dom.append(section, dom.$('span'));
+		text.textContent = data.rationale;
 	}
 
 	private _renderRationale(data: CardData): void {
@@ -137,22 +189,38 @@ export class BrainstormCardWidget extends Disposable {
 	}
 
 	private _renderReferences(data: CardData): void {
-		const clickableRefs = data.references.filter(r => isOpenableRef(r));
-		if (clickableRefs.length === 0) { return; }
+		if (data.references.length === 0) { return; }
 
 		const refsSection = dom.append(this._container, dom.$('.insrc-brainstorm-card-refs'));
 		const refsLabel = dom.append(refsSection, dom.$('h4'));
 		refsLabel.textContent = 'References';
-		for (const ref of clickableRefs) {
-			const refEl = dom.append(refsSection, dom.$('a.insrc-brainstorm-ref'));
+		for (const ref of data.references) {
+			const openable = isOpenableRef(ref);
+			// Unresolved refs (entity name the daemon couldn't locate) render
+			// as a greyed-out non-clickable chip with a tooltip. Prior behaviour
+			// dropped them silently, which hid the LLM's intent.
+			const tag = openable ? 'a.insrc-brainstorm-ref' : 'span.insrc-brainstorm-ref.unresolved';
+			const refEl = dom.append(refsSection, dom.$(tag));
+			if (!openable) {
+				refEl.title = `Couldn't resolve "${ref.label}" to a file or URL`;
+			}
 			const icon = dom.append(refEl, dom.$('span'));
 			icon.classList.add(...ThemeIcon.asClassNameArray(
-				ref.type === 'code' ? Codicon.symbolFile :
-					ref.type === 'url' ? Codicon.link : Codicon.file
+				!openable ? Codicon.circleSlash :
+					ref.type === 'url' ? Codicon.link :
+						ref.type === 'code' ? Codicon.symbolFile : Codicon.file
 			));
 			const label = dom.append(refEl, dom.$('span'));
 			label.textContent = ref.label;
+			if (!openable) { continue; }
 			this._register(dom.addDisposableListener(refEl, 'click', () => {
+				if (ref.type === 'url') {
+					this.openerService.open(ref.path).then(
+						undefined,
+						err => this.logService.error(`[brainstorm:card] url open failed: ${(err as Error).message}`),
+					);
+					return;
+				}
 				if (ref.type === 'code' || ref.type === 'doc') {
 					const uri = URI.file(ref.path);
 					this.editorService.openEditor({
@@ -354,7 +422,14 @@ export class BrainstormCardWidget extends Disposable {
  * resolve; opening them would navigate to `file:///.../MyClass` and fail.
  */
 function isOpenableRef(ref: IdeaRef): boolean {
-	if (ref.type === 'url') { return true; }
+	// URLs are openable when path looks like an http(s) URL.
+	if (ref.type === 'url') {
+		return !!ref.path && /^https?:\/\//i.test(ref.path);
+	}
+	// Code/doc refs need an absolute path -- the daemon's entity-index
+	// resolver emits absolute paths when it finds a match, and empty-string
+	// paths when it couldn't resolve the name (Item 9). Empty path means
+	// unresolved; the UI renders it as a non-clickable chip.
 	if (!ref.path) { return false; }
 	return ref.path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(ref.path);
 }

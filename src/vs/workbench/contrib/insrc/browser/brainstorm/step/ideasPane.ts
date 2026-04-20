@@ -26,6 +26,7 @@ import {
 } from '../../../common/brainstormSessionService.js';
 import { BrainstormCardWidget } from '../brainstormCardWidget.js';
 import { BrainstormIdeasInput } from './ideasInput.js';
+import { attachRedirectAction } from './redirectAction.js';
 
 /**
  * Per-idea review pane. Renders whichever single idea the controller is
@@ -86,6 +87,14 @@ export class BrainstormIdeasPane extends EditorPane {
 		this._addIdeaBtn.title = 'Add your own idea to the review queue';
 		this._addIdeaBtn.disabled = true;
 		this._register(dom.addDisposableListener(this._addIdeaBtn, 'click', () => this._showAddIdeaForm()));
+
+		// Item 6: Redirect action -- always available during a brainstorm turn.
+		this._register(attachRedirectAction(this._container, headerRight, {
+			chatService: this.chatService,
+			sessionService: this.sessionService,
+			logService: this.logService,
+			logTag: 'brainstorm:pane:idea',
+		}));
 
 		// Card area
 		const main = dom.append(this._container, dom.$('.insrc-brainstorm-main'));
@@ -173,11 +182,15 @@ export class BrainstormIdeasPane extends EditorPane {
 				id: idea.id,
 				title: idea.title,
 				body: idea.body,
+				...(idea.summary ? { summary: idea.summary } : {}),
+				...(idea.rationale ? { rationale: idea.rationale } : {}),
+				...(idea.reviewDescription ? { reviewDescription: idea.reviewDescription } : {}),
 				references: idea.references.map(r => ({ ...r })),
 				status: idea.status,
 				tags: [...idea.tags],
 				reviewVerdict: idea.reviewVerdict,
 				reviewRationale: idea.reviewRationale,
+				...(gate.warning ? { warning: gate.warning } : {}),
 			},
 			gate.actions.slice(),
 			(action, feedback) => {

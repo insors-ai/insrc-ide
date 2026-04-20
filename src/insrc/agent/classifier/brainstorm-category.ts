@@ -1,16 +1,22 @@
 /**
  * Brainstorm sub-category detector.
  *
- * Keyword-based heuristic -- cheap, deterministic, runs at dispatch
- * time in the daemon without a separate LLM call. If confidence is
- * low (no strong match), returns 'general'.
+ * Hybrid: LLM-first via `classifyBrainstormCategoryHybrid`, keyword
+ * fallback via `detectBrainstormCategory` (used when the local LLM
+ * provider is unavailable or its output is unparseable).
  *
- * Each category has both a primary set (high weight) and a secondary
- * set (low weight). Ties fall back to the category declaration order
- * in BrainstormCategory, which mirrors the user-facing priority.
+ * The keyword matcher scores each candidate category; a score below
+ * MIN_SCORE falls back to 'general'. Each category has a primary set
+ * (high weight) and a secondary set (low weight). Ties fall back to
+ * the declaration order in BrainstormCategory.
  */
 
+import type { LLMProvider } from '../../shared/types.js';
 import type { BrainstormCategory } from '../../daemon/controllers/brainstorm/types.js';
+import {
+  classifyBrainstormCategoryLLM,
+  type BrainstormCategoryClassification,
+} from './llm-brainstorm-category.js';
 
 interface KeywordMatcher {
   category: BrainstormCategory;
@@ -31,18 +37,18 @@ const MATCHERS: KeywordMatcher[] = [
   },
   {
     category: 'design',
-    strong: [rx('design architecture')],
-    weak: [rx('component api schema contract interface boundary module tradeoff trade-off')],
+    strong: [rx('design architecture architect architecting')],
+    weak: [rx('component api schema contract interface boundary module tradeoff trade-off endpoint service pipeline')],
   },
   {
     category: 'implementation',
-    strong: [rx('implement implementation build code')],
-    weak: [rx('approach effort estimate refactor migrate migration tasks breakdown subtask plan')],
+    strong: [rx('implement implementation build code coding')],
+    weak: [rx('approach effort estimate refactor migrate migration tasks breakdown subtask plan mvp prototype function workflow')],
   },
   {
     category: 'requirements',
-    strong: [rx('requirement requirements spec specification')],
-    weak: [rx('feature user-story acceptance criteria functional non-functional constraint')],
+    strong: [rx('requirement requirements spec specification specify')],
+    weak: [rx('feature user-story acceptance criteria functional non-functional constraint story backlog')],
   },
 ];
 
@@ -76,4 +82,37 @@ export function detectBrainstormCategory(message: string): BrainstormCategory {
   }
 
   return bestScore >= MIN_SCORE ? best : 'general';
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid entrypoint: LLM first, keyword fallback.
+// ---------------------------------------------------------------------------
+
+const LLM_MIN_CONFIDENCE = 0.6;
+
+/**
+ * Classify the brainstorm sub-category using the local LLM, falling
+ * back to keyword matching when the LLM is unavailable, returns
+ * unparseable output, or reports confidence below LLM_MIN_CONFIDENCE.
+ *
+ * When `provider` is undefined, the LLM step is skipped entirely and
+ * the keyword matcher runs directly (used during early bootstrap
+ * before a classifier provider is resolvable).
+ */
+export async function classifyBrainstormCategoryHybrid(
+  message: string,
+  provider: LLMProvider | undefined,
+): Promise<BrainstormCategoryClassification> {
+  if (provider) {
+    const llm = await classifyBrainstormCategoryLLM(message, provider);
+    if (llm && llm.confidence >= LLM_MIN_CONFIDENCE) {
+      return llm;
+    }
+  }
+  const category = detectBrainstormCategory(message);
+  return {
+    category,
+    confidence: 0.3,
+    reasoning: 'keyword fallback',
+  };
 }

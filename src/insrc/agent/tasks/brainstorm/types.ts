@@ -81,10 +81,18 @@ export interface IdeaFeedback {
 export interface Idea {
   id: string;
   index: number;
-  /** Short descriptive title (1 line). */
+  /** Short descriptive title (1 line, <= 80 chars). */
   title: string;
-  /** Detailed description (markdown). */
+  /** Raw LLM output for audit / fallback rendering. Equal to `summary` when
+   *  the rich-format parse succeeds, or the full original text in legacy
+   *  single-line mode. UI should prefer `summary` when present. */
   body: string;
+  /**
+   * 2-4 sentence description of the idea's core concept, approach, and
+   * expected outcome. Populated by the rich-format parser (Item 10);
+   * empty for legacy-format ideas where the UI falls back to `body`.
+   */
+  summary?: string | undefined;
   /** Structured code/doc references. */
   references: IdeaRef[];
   status: IdeaStatus;
@@ -94,6 +102,8 @@ export interface Idea {
   promotedTo?: string | undefined;
   mergedInto?: string | undefined;
   tags: string[];
+  /** 1-2 sentences on motivation / tradeoffs. Populated by the rich-format
+   *  parser's Rationale/Motivation section. */
   rationale?: string | undefined;
   // Claude review annotations (populated by review step)
   reviewTitle?: string | undefined;

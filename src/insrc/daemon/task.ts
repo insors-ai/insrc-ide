@@ -622,7 +622,7 @@ export async function runControlledPipeline(
 
     // Checkpoint for persisted tasks
     if (task.persisted) {
-      await checkpointState(controller.id, stateStore, allResults);
+      await checkpointState(controller.id, stateStore, allResults, deps.session?.id);
     }
 
     // If task failed or was cancelled, abort the entire pipeline
@@ -753,6 +753,7 @@ async function checkpointState(
   controllerId: string,
   stateStore: TaskStateStore,
   results: TaskResult[],
+  sessionId?: string,
 ): Promise<void> {
   try {
     const { writeFileSync, mkdirSync } = await import('node:fs');
@@ -760,9 +761,15 @@ async function checkpointState(
     const { homedir } = await import('node:os');
     const dir = join(homedir(), '.insrc', 'checkpoints');
     mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${controllerId}-${Date.now()}.json`);
+    // One checkpoint file per (controller, session) pair -- subsequent
+    // steps overwrite, so disk usage stays bounded. Fall back to
+    // timestamp when sessionId is missing so non-session pipelines
+    // still get unique files.
+    const suffix = sessionId ?? String(Date.now());
+    const file = join(dir, `${controllerId}-${suffix}.json`);
     writeFileSync(file, JSON.stringify({
       controller: controllerId,
+      sessionId: sessionId ?? null,
       state: stateStore.snapshot(),
       results: results.map(r => ({ index: r.index, description: r.description, success: r.success })),
       timestamp: new Date().toISOString(),
@@ -1288,7 +1295,7 @@ async function executeAgentTask(
   deps: TaskOrchestratorDeps,
 ): Promise<TaskResult> {
   const agentId = task.agentId ?? task.intent;
-  const controller = await resolveController(agentId, task);
+  const controller = await resolveController(agentId, task, deps);
 
   if (!controller) {
     // No controller found — agent tasks without controllers are not yet supported
@@ -1349,13 +1356,30 @@ async function executeAgentTask(
 
 const controllerCache = new Map<string, TaskController>();
 
-async function resolveController(agentId: string, task?: Task): Promise<TaskController | null> {
+async function resolveController(
+  agentId: string,
+  task?: Task,
+  deps?: TaskOrchestratorDeps,
+): Promise<TaskController | null> {
   // Brainstorm picks a sub-controller per category; cache key includes it.
   let cacheKey = agentId;
   if (agentId === 'brainstorm' && task) {
-    const { detectBrainstormCategory } = await import('../agent/classifier/brainstorm-category.js');
-    const cat = detectBrainstormCategory(task.userMessage ?? task.description ?? '');
-    cacheKey = `brainstorm:${cat}`;
+    const { classifyBrainstormCategoryHybrid } = await import('../agent/classifier/brainstorm-category.js');
+    const msg = task.userMessage ?? task.description ?? '';
+    const classifierProvider = deps?.session.resolver.resolve('classifier', 'classify');
+    const result = await classifyBrainstormCategoryHybrid(msg, classifierProvider);
+    log.info(
+      { category: result.category, confidence: result.confidence, reasoning: result.reasoning },
+      'brainstorm sub-classification',
+    );
+    if (deps) {
+      deps.send({
+        id: deps.requestId,
+        stream: 'progress',
+        data: { message: `Intent: brainstorm/${result.category} (${result.reasoning})` },
+      });
+    }
+    cacheKey = `brainstorm:${result.category}`;
   }
 
   if (controllerCache.has(cacheKey)) return controllerCache.get(cacheKey)!;

@@ -22,21 +22,37 @@ Decompose the problem into facets:
 - Constraints: what limits the solution space?
 - Ambiguities: what is unclear or underspecified?
 
-Then generate 5–10 initial ideas. Each idea should:
+Then generate 5-10 initial ideas. Each idea should:
 - Be a single, concrete suggestion (not vague)
+- Have a short title AND a detailed multi-sentence body explaining the concept, approach, and expected outcome
 - Reference existing code entities where relevant
-- Include 1–2 tags for later clustering
+- Include 1-2 tags for later clustering
 
 ## Output Format
 
 First output the analysis under a ## Analysis heading.
 
-Then output ideas as a numbered list. Each idea should have a clear first sentence as title followed by elaboration:
+Then output each idea as a labeled block starting with [N]. Labels are mandatory:
 
-[1] Short title sentence. Detailed description and elaboration here — tags: tag1, tag2 — refs: entity1, entity2
-[2] Another title sentence. More detail about this idea — tags: tag3 — refs: entity3
+[1]
+Title: <short descriptive title, <= 80 chars, no trailing period>
+Body: <2-4 sentences explaining what the idea is, how it would work, and the outcome the user should expect. Avoid restating the title; add new content.>
+Rationale: <1-2 sentences on motivation, tradeoffs, or key assumption>
+Tags: tag1, tag2
+Refs: entity1, entity2
 
-If there are no relevant code references, omit the refs section.`;
+[2]
+Title: ...
+Body: ...
+Rationale: ...
+Tags: ...
+Refs: ...
+
+Rules:
+- Body MUST be at least 2 full sentences — one-line summaries get rejected by the UI.
+- If there are no relevant code references, omit the Refs line (do not write "Refs: none").
+- Rationale is optional but preferred; omit the line entirely if you have nothing to add.
+- Do NOT wrap the output in JSON or markdown code fences.`;
 
 // ---------------------------------------------------------------------------
 // Review — Seed / Diverge ideas (Claude evaluates raw LLM output)
@@ -100,22 +116,27 @@ export const ENHANCE_IDEAS_SYSTEM = `You are grounding brainstorming ideas in ac
 
 You are given:
 - The original problem statement
-- A set of brainstorming ideas
+- A set of brainstorming ideas (with Title / Body / Tags / Refs lines)
 - Relevant code entities retrieved from the codebase
 
 Your tasks:
 1. For each idea, check if any retrieved code entities are relevant
-2. If relevant entities exist, incorporate them: add concrete code references (function names, interface names, file paths) and refine the wording to be more implementation-specific
+2. If relevant entities exist, incorporate them: add concrete code references (function names, interface names, file paths) to the Refs line and sharpen the Body to reference them by name.
 3. If no relevant entities match an idea, keep it unchanged
-4. Do NOT remove any ideas — only enhance them
+4. Do NOT remove any ideas -- only enhance them
 5. Do NOT add new ideas
+6. Preserve the [N] numbering and the labeled-block structure exactly.
 
 ## Output Format
 
-Output the enhanced ideas as a numbered list (keep original numbering):
+Output each enhanced idea as a labeled block. Keep the original numbering:
 
-[N] Enhanced idea text — tags: tag1, tag2 — refs: actualEntity1, actualEntity2
-[N+1] Another idea (unchanged if no match) — tags: tag3
+[N]
+Title: <possibly sharpened title>
+Body: <possibly sharpened body, still 2-4 sentences>
+Rationale: <carry forward if present>
+Tags: tag1, tag2
+Refs: actualEntity1, actualEntity2
 
 Preserve the original idea's core intent. Only add specificity where code entities support it.`;
 
@@ -137,10 +158,19 @@ Your tasks:
 
 ## Output Format
 
-Output ONLY the refined ideas as a numbered list (re-numbered sequentially starting from 1):
+Output ONLY the refined ideas as labeled blocks, re-numbered sequentially starting from 1:
 
-[1] Idea text — tags: tag1, tag2 — refs: entity1, entity2
-[2] Another idea — tags: tag3 — refs: entity3
+[1]
+Title: <short descriptive title>
+Body: <2-4 sentences explaining the idea>
+Rationale: <optional>
+Tags: tag1, tag2
+Refs: entity1, entity2
+
+[2]
+Title: ...
+Body: ...
+Tags: ...
 
 Do NOT include weak ideas. Do NOT add commentary or explanation.`;
 
@@ -168,12 +198,19 @@ Rules:
 
 ## Output Format
 
-Each idea should have a clear first sentence as title followed by elaboration:
+Output each idea as a labeled block starting with [N]. Numbering continues from the last existing idea (the user message tells you the next index).
 
-[N] Short title sentence. Detailed description here — tags: tag1, tag2 — refs: entity1, entity2
-[N+1] Another title sentence. More detail — tags: tag3 — refs: entity3
+[N]
+Title: <short descriptive title, <= 80 chars, no trailing period>
+Body: <2-4 sentences explaining what the idea is, how it would work, and the outcome the user should expect>
+Rationale: <1-2 sentences on motivation / tradeoffs -- optional>
+Tags: tag1, tag2
+Refs: entity1, entity2
 
-If there are no relevant code references, omit the refs section.`;
+Rules:
+- Body MUST be at least 2 full sentences.
+- If there are no relevant code references, omit the Refs line.
+- Do NOT wrap the output in JSON or markdown code fences.`;
 
 // ---------------------------------------------------------------------------
 // Discuss — respond to user's message about a focused idea
@@ -234,11 +271,16 @@ Produce an improved version of the idea that incorporates the user's feedback fr
 
 ## Output Format
 
-Output ONLY the refined idea in this format:
+Output ONLY the refined idea as a single labeled block. Keep the original [N] index:
 
-[N] Refined idea text — tags: tag1, tag2 — refs: entity1, entity2
+[N]
+Title: <short descriptive title>
+Body: <2-4 sentences explaining the refined idea>
+Rationale: <optional>
+Tags: tag1, tag2
+Refs: entity1, entity2
 
-No commentary, no explanation — just the single refined idea line.`;
+No commentary, no explanation -- just the single refined idea block.`;
 
 // ---------------------------------------------------------------------------
 // Converge — cluster

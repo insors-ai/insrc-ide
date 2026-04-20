@@ -221,6 +221,15 @@ export interface AgentConfig {
   permissions: {
     mode: 'validate' | 'auto-accept';
   };
+  classifier?: {
+    /**
+     * When true, every turn prompts the user to confirm / override the
+     * classified intent before the agent pipeline runs. Low-confidence
+     * classifications (< LOW_CONFIDENCE_THRESHOLD) always prompt
+     * regardless of this setting.
+     */
+    confirmIntent?: boolean | undefined;
+  } | undefined;
 }
 
 // ---------------------------------------------------------------------------

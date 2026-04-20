@@ -147,14 +147,21 @@ export async function generateDivergeIdeas(
 // ---------------------------------------------------------------------------
 
 /**
- * Parse ideas from LLM output.
- * Format: [N] Text — tags: tag1, tag2 — refs: entity1, entity2
+ * Parse ideas from LLM output. Supports two formats:
+ *
+ *  Rich multi-line (preferred, per Item 10):
+ *    [N] Title: <short descriptive title>
+ *        Body: <2-4 sentence description of the concept, approach, and outcome>
+ *        Rationale: <1-2 sentences on motivation / tradeoffs>   (optional)
+ *        Tags: tag1, tag2
+ *        Refs: entity1, entity2
+ *
+ *  Legacy single-line (kept for backwards-compat):
+ *    [N] Idea text -- tags: tag1, tag2 -- refs: entity1, entity2
  *
  * When `entityIndex` is provided, each ref name is resolved to a concrete
  * file path (and line) via the index. Refs that don't resolve are dropped
- * to avoid rendering broken links in the UI. When `entityIndex` is not
- * provided, refs are dropped entirely — callers that have entity context
- * (e.g. after a codebase search) should pass it.
+ * (TODO: Item 9 will change this to emit unresolved chips).
  */
 export function parseIdeaList(
   text: string,
@@ -164,20 +171,40 @@ export function parseIdeaList(
   entityIndex?: EntityIndex,
 ): Idea[] {
   const ideas: Idea[] = [];
-  // Match lines like [N] or [N] at start of line
   const lines = text.split('\n');
   let currentIndex = startIndex;
 
   const source: IdeaSource = round === 1 ? 'seed' : 'diverge';
 
+  // First, group lines into per-idea blocks keyed by the leading [N] marker.
+  // A block consists of the marker line plus all subsequent continuation
+  // lines until the next marker line (or end of input). Blank lines inside
+  // a block are preserved because they're harmless for the parser.
+  const blocks: string[] = [];
+  let current: string[] = [];
+  let inBlock = false;
   for (const line of lines) {
-    const match = line.match(/^\s*\[(\d+)\]\s*(.+)$/);
-    if (!match) continue;
+    const isMarker = /^\s*\[\d+\]\s*/.test(line);
+    if (isMarker) {
+      if (inBlock) blocks.push(current.join('\n'));
+      current = [line];
+      inBlock = true;
+    } else if (inBlock) {
+      current.push(line);
+    }
+  }
+  if (inBlock) blocks.push(current.join('\n'));
 
-    const rawText = match[2]!.trim();
-    const { title, body, tags, refs } = parseIdeaParts(rawText);
+  for (const block of blocks) {
+    const markerMatch = block.match(/^\s*\[(\d+)\]\s*([\s\S]*)$/);
+    if (!markerMatch) continue;
+    const raw = markerMatch[2]!.trim();
+    const parts = parseIdeaParts(raw);
 
-    if (body.length < 5) continue; // Skip empty/tiny ideas
+    const { title, summary, rationale, tags, refs } = parts;
+    const body = summary || title;
+
+    if (body.length < 5 && title.length < 5) continue; // Skip empty/tiny entries
 
     const id = createHash('sha256')
       .update(`${repoPath}:${round}:${currentIndex}`)
@@ -191,6 +218,8 @@ export function parseIdeaList(
       index: currentIndex,
       title,
       body,
+      ...(summary ? { summary } : {}),
+      ...(rationale ? { rationale } : {}),
       status: 'proposed',
       source,
       round,
@@ -207,59 +236,146 @@ export function parseIdeaList(
 
 /**
  * Resolve raw ref names from LLM output into concrete IdeaRefs via the
- * entity index. Names that don't appear in the index are dropped — we'd
- * rather show no reference than a link that 404s on click.
+ * entity index.
+ *
+ * - Names that resolve: emit as `type: 'code'` with a file path + optional line.
+ * - Names that look like URLs: emit as `type: 'url'` (no entity lookup needed).
+ * - Names that don't resolve: emit as `type: 'code'` with an EMPTY path so
+ *   the UI can render them as a greyed-out non-clickable chip with a
+ *   tooltip. Prior behaviour of silently dropping them hid the LLM's intent
+ *   from the user (Item 9).
  */
 function resolveRefs(refs: string[], entityIndex: EntityIndex | undefined): IdeaRef[] {
-  if (!entityIndex) return [];
   const out: IdeaRef[] = [];
   for (const raw of refs) {
-    // LLMs sometimes produce `ClassName.method`, `file:line`, or stray quotes.
-    // Match on the exact name first, then fall back to the last segment.
     const cleaned = raw.replace(/^["'`]|["'`]$/g, '').trim();
-    const direct = entityIndex[cleaned];
-    const tail = !direct ? entityIndex[cleaned.split(/[.:/]/).pop() ?? ''] : undefined;
-    const hit = direct ?? tail;
-    if (!hit) continue;
-    out.push({
-      type: 'code',
-      path: hit.path,
-      label: cleaned,
-      ...(hit.line !== undefined ? { line: hit.line } : {}),
-    });
+    if (!cleaned) continue;
+
+    // URLs bypass the entity index entirely.
+    if (/^https?:\/\//i.test(cleaned)) {
+      out.push({ type: 'url', path: cleaned, label: cleaned });
+      continue;
+    }
+
+    if (entityIndex) {
+      // LLMs sometimes produce `ClassName.method`, `file:line`, or stray
+      // qualifiers. Match on the exact name first, then fall back to the
+      // last segment.
+      const direct = entityIndex[cleaned];
+      const tail = !direct ? entityIndex[cleaned.split(/[.:/]/).pop() ?? ''] : undefined;
+      const hit = direct ?? tail;
+      if (hit) {
+        out.push({
+          type: 'code',
+          path: hit.path,
+          label: cleaned,
+          ...(hit.line !== undefined ? { line: hit.line } : {}),
+        });
+        continue;
+      }
+    }
+
+    // Unresolved entity name -- keep it so the UI can render a greyed chip
+    // "couldn't resolve this entity" rather than dropping silently.
+    out.push({ type: 'code', path: '', label: cleaned });
   }
   return out;
 }
 
-function parseIdeaParts(raw: string): { title: string; body: string; tags: string[]; refs: string[] } {
+interface IdeaParts {
+  title: string;
+  summary: string;
+  rationale: string;
+  tags: string[];
+  refs: string[];
+}
+
+/**
+ * Parse a single idea block's text content into structured parts.
+ *
+ * Handles the rich multi-line format ("Title:", "Body:", "Rationale:",
+ * "Tags:", "Refs:" lines). Falls back to the legacy single-line
+ * "text -- tags: ... -- refs: ..." format when no labels are found.
+ */
+function parseIdeaParts(raw: string): IdeaParts {
+  const KEY_RE = /^\s*(title|body|summary|description|rationale|motivation|tags?|refs?|refer(?:ences?)?)\s*:\s*(.*)$/i;
+  const lines = raw.split('\n');
+
+  // Detect rich format by scanning for any labeled line.
+  const hasLabels = lines.some(l => KEY_RE.test(l));
+
+  if (hasLabels) {
+    // Collect by label; accumulate continuation lines into the last-seen
+    // label so a multi-line Body: paragraph parses cleanly.
+    let currentKey: string | null = null;
+    const buckets: Record<string, string[]> = {};
+    for (const line of lines) {
+      const m = line.match(KEY_RE);
+      if (m) {
+        currentKey = m[1]!.toLowerCase();
+        const rest = (m[2] ?? '').trim();
+        if (!buckets[currentKey]) buckets[currentKey] = [];
+        if (rest) buckets[currentKey]!.push(rest);
+      } else if (currentKey) {
+        const trimmed = line.trim();
+        if (trimmed) buckets[currentKey]!.push(trimmed);
+      }
+    }
+    const get = (...keys: string[]): string => {
+      for (const k of keys) {
+        const arr = buckets[k];
+        if (arr && arr.length > 0) return arr.join(' ').trim();
+      }
+      return '';
+    };
+    const getList = (...keys: string[]): string[] => {
+      const joined = get(...keys);
+      return joined ? joined.split(',').map(s => s.trim()).filter(Boolean) : [];
+    };
+
+    const title = get('title');
+    const summary = get('body', 'summary', 'description');
+    const rationale = get('rationale', 'motivation');
+    const tags = getList('tags', 'tag');
+    const refs = getList('refs', 'ref', 'reference', 'references', 'refer');
+
+    // If we somehow found labels but no title, fall back to first sentence
+    // of summary (rare — keeps the parser robust to partial outputs).
+    const resolvedTitle = title || deriveTitleFromText(summary);
+    return { title: resolvedTitle, summary, rationale, tags, refs };
+  }
+
+  // Legacy format fallback: "text -- tags: ... -- refs: ..."
   let text = raw;
   let tags: string[] = [];
   let refs: string[] = [];
 
-  // Extract refs: entity1, entity2
-  const refsMatch = text.match(/\s*—\s*refs?:\s*(.+?)$/i);
+  // Match "—" (em-dash) OR "--" (double hyphen).
+  const refsMatch = text.match(/\s*(?:—|--)\s*refs?:\s*(.+?)$/i);
   if (refsMatch) {
     refs = refsMatch[1]!.split(',').map(s => s.trim()).filter(Boolean);
     text = text.slice(0, refsMatch.index);
   }
-
-  // Extract tags: tag1, tag2
-  const tagsMatch = text.match(/\s*—\s*tags?:\s*(.+?)$/i);
+  const tagsMatch = text.match(/\s*(?:—|--)\s*tags?:\s*(.+?)$/i);
   if (tagsMatch) {
     tags = tagsMatch[1]!.split(',').map(s => s.trim()).filter(Boolean);
     text = text.slice(0, tagsMatch.index);
   }
-
   const trimmed = text.trim();
+  const title = deriveTitleFromText(trimmed);
+  // In legacy format there's no separate summary, so treat the whole
+  // text as summary.
+  return { title, summary: trimmed, rationale: '', tags, refs };
+}
 
-  // Split: title = first sentence (up to first period or 80 chars), body = everything
-  const periodIdx = trimmed.indexOf('.');
-  const title = periodIdx > 0 && periodIdx <= 80
-    ? trimmed.slice(0, periodIdx + 1).trim()
-    : trimmed.slice(0, 80).trim();
-  const body = trimmed;
-
-  return { title, body, tags, refs };
+function deriveTitleFromText(text: string): string {
+  const periodIdx = text.indexOf('.');
+  if (periodIdx > 0 && periodIdx <= 80) return text.slice(0, periodIdx).trim();
+  if (text.length <= 80) return text.trim();
+  // Cut at the last word boundary within 80 chars rather than mid-word.
+  const chunk = text.slice(0, 80);
+  const lastSpace = chunk.lastIndexOf(' ');
+  return (lastSpace > 40 ? chunk.slice(0, lastSpace) : chunk).trim();
 }
 
 // ---------------------------------------------------------------------------

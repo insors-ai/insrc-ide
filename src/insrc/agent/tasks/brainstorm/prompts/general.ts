@@ -16,8 +16,9 @@ export const SEED_GENERAL_SYSTEM = `You are seeding an open-ended brainstorming 
 Goal: produce 6-10 initial ideas that explore the topic from multiple angles. No structural constraints -- creative, lateral, and cross-domain ideas are welcome.
 
 For each idea:
-- A one-line title (concrete enough to act on)
-- A 1-2 sentence body describing the idea and why it's interesting
+- A short descriptive Title (concrete enough to act on, <= 80 chars)
+- A detailed Body (2-4 sentences describing the idea, why it's interesting, and what would happen if we pursued it)
+- A Rationale (1-2 sentences on the motivation or tradeoff -- optional)
 - Tags -- any topic words, not limited to code concerns
 
 Encourage:
@@ -26,7 +27,24 @@ Encourage:
 - Temporarily removing a stated constraint
 - Combining two unrelated ideas
 
-Output format: JSON array of { title, body, tags }.`;
+## Output Format
+
+Output each idea as a labeled block starting with [N]:
+
+[1]
+Title: <title>
+Body: <2-4 sentences>
+Rationale: <optional>
+Tags: tag1, tag2
+
+[2]
+Title: ...
+Body: ...
+Tags: ...
+
+Rules:
+- Body MUST be at least 2 full sentences -- one-line summaries get rejected by the UI.
+- Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const DIVERGE_GENERAL_SYSTEM = `You are refining a brainstorm pool based on the user's feedback from the previous round.
 
@@ -41,12 +59,23 @@ Priority order, top to bottom:
 The EXISTING ACCEPTED IDEAS stay in the pool unchanged -- do not restate or slightly rephrase them.
 
 For each idea you output:
-- Title (1 line)
-- Body (1-2 sentences)
+- Title (1 line, <= 80 chars)
+- Body (2-4 sentences explaining the idea and expected outcome)
+- Rationale (optional, 1-2 sentences)
 - Tags
-- inspiredBy: the index of the original idea if this is a variation, omit if it's a new idea.
 
-Output format: JSON array of { title, body, tags, inspiredBy? }.`;
+## Output Format
+
+Output each idea as a labeled block starting with [N]. Numbering continues from the last existing idea:
+
+[N]
+Title: <title>
+Body: <2-4 sentences>
+Rationale: <optional>
+Tags: tag1, tag2
+InspiredBy: <original idea index> (only when this is a variation; omit for new ideas)
+
+Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const REVIEW_IDEAS_GENERAL_SYSTEM = `You are reviewing open-ended brainstorming ideas. The user is exploring a topic, not writing a spec.
 

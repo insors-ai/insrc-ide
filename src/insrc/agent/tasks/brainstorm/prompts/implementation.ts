@@ -23,9 +23,25 @@ Generate 5-10 ideas. Include 1-2 tags each for later clustering (e.g. task, phas
 
 First output the analysis under a ## Analysis heading (problem decomposition, constraints, existing code to leverage).
 
-Then output ideas as a numbered list:
-[1] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts, functionName -- effort: small
-[2] Another idea -- tags: tag3 -- refs: path/other.ts -- effort: medium`;
+Then output each idea as a labeled block starting with [N]:
+
+[1]
+Title: <short descriptive title, <= 80 chars>
+Body: <2-4 sentences: what to build, key implementation steps, and the outcome>
+Rationale: <1-2 sentences on effort vs. flexibility, perf vs. readability -- optional>
+Tags: tag1, tag2
+Refs: path/to/file.ts, functionName
+Effort: small|medium|large
+
+[2]
+Title: ...
+Body: ...
+Tags: ...
+
+Rules:
+- Body MUST be at least 2 full sentences.
+- Omit the Refs line entirely if no relevant entities.
+- Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const DIVERGE_IMPLEMENTATION_SYSTEM = `You are an engineer refining an implementation pool based on the user's feedback from the previous round.
 
@@ -47,11 +63,18 @@ Rules for every variation or new idea:
 
 ## Output Format
 
-Output ideas as a numbered list:
+Output each idea as a labeled block. Numbering continues from the last existing idea:
 
-[N] Idea text -- tags: tag1, tag2 -- refs: path/to/file.ts -- effort: small
+[N]
+Title: <short descriptive title>
+Body: <2-4 sentences on the implementation approach>
+Rationale: <tradeoffs -- optional>
+Tags: tag1, tag2
+Refs: path/to/file.ts
+Effort: small|medium|large
+InspiredBy: <original idea index> (only when this is a variation; omit for new ideas)
 
-If the idea is a variation of an existing one, name the reference inline, e.g. "variation of [4]: <new body>".`;
+Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const REVIEW_IDEAS_IMPLEMENTATION_SYSTEM = `You are reviewing implementation approach proposals.
 

@@ -24,6 +24,7 @@ import {
  */
 function classifyGate(itemType: string | undefined): BrainstormGateKind {
 	switch (itemType) {
+		case 'intent-confirm': return 'intent-confirm';
 		case 'idea': return 'idea';
 		case 'idea-list': return 'idea-list';
 		case 'idea-discussion': return 'idea-discussion';
@@ -36,6 +37,7 @@ function classifyGate(itemType: string | undefined): BrainstormGateKind {
 
 function normalizePhase(phase: string | undefined): BrainstormPhase {
 	switch (phase) {
+		case 'classify':
 		case 'ideation':
 		case 'convergence':
 		case 'specify':
@@ -132,11 +134,15 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			? ctx['progress'] as Record<string, number>
 			: undefined;
 
+		// Promote `warning` to a first-class field so panes don't need to
+		// dig into `extra`. Keep it out of `extra` to avoid duplication.
+		const warning = typeof ctx['warning'] === 'string' ? ctx['warning'] as string : undefined;
+
 		// Anything structured carries that isn't one of the well-known fields
-		// (phase/itemType/itemId/item/progress) goes into `extra` so panes can
+		// (phase/itemType/itemId/item/progress/warning) goes into `extra` so panes can
 		// read it without having to parse the raw context themselves.
 		const extra: Record<string, unknown> = {};
-		const WELL_KNOWN = new Set(['phase', 'itemType', 'itemId', 'item', 'progress']);
+		const WELL_KNOWN = new Set(['phase', 'itemType', 'itemId', 'item', 'progress', 'warning']);
 		for (const key of Object.keys(ctx)) {
 			if (!WELL_KNOWN.has(key)) {
 				extra[key] = ctx[key];
@@ -153,6 +159,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			...(gate.title !== undefined ? { title: gate.title } : {}),
 			...(gate.content !== undefined ? { content: gate.content } : {}),
 			...(progress !== undefined ? { progress } : {}),
+			...(warning !== undefined ? { warning } : {}),
 			...(Object.keys(extra).length > 0 ? { extra } : {}),
 		};
 
@@ -215,6 +222,17 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			this._category = bsMatch[1]!;
 			this._isSessionActive = true;
 			this.logService.info(`[brainstorm:session] activated -- category=${this._category}`);
+			this._onDidChange.fire();
+			return;
+		}
+		// Top-level "Intent: brainstorm" (before sub-classification) is also
+		// enough to activate -- the intent-confirm gate fires between the
+		// top-level classify and the sub-category resolve, so without this
+		// the confirm pane opens while the session still looks inactive.
+		const topLevel = step.match(/^Intent:\s*brainstorm\b(?!\s*\/)/);
+		if (topLevel) {
+			this._isSessionActive = true;
+			this.logService.info(`[brainstorm:session] activated -- top-level (no category yet)`);
 			this._onDidChange.fire();
 			return;
 		}
@@ -287,12 +305,15 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			index: this._asNumber(obj['index']) ?? 0,
 			title,
 			body: this._asString(obj['body']) ?? '',
+			summary: this._asString(obj['summary']),
+			rationale: this._asString(obj['rationale']),
 			references: this._parseRefs(obj['references']),
 			status: this._asString(obj['status']) ?? 'proposed',
 			source: this._asString(obj['source']) ?? 'seed',
 			round: this._asNumber(obj['round']) ?? 1,
 			tags: this._parseStringArray(obj['tags']),
 			reviewVerdict: this._asString(obj['reviewVerdict']),
+			reviewDescription: this._asString(obj['reviewDescription']),
 			reviewRationale: this._asString(obj['reviewRationale']),
 			userComment: this._asString(obj['userComment']),
 		};

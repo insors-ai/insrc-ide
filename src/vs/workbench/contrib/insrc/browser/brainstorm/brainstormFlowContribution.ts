@@ -20,6 +20,7 @@ import { BrainstormIdeaListInput } from './step/ideaListInput.js';
 import { BrainstormThemesInput } from './step/themesInput.js';
 import { BrainstormThemeDetailsInput } from './step/themeDetailsInput.js';
 import { BrainstormPresentationInput } from './step/presentationInput.js';
+import { BrainstormIntentConfirmInput } from './step/intentConfirmInput.js';
 
 /**
  * Routes brainstorm gates to the matching per-step editor pane. Every
@@ -76,6 +77,8 @@ export class BrainstormFlowContribution extends Disposable {
 		// close handler receives IDialogService + IInsrcChatService +
 		// IInsrcBrainstormSessionService via DI.
 		switch (kind) {
+			case 'intent-confirm':
+				return this.instantiationService.createInstance(BrainstormIntentConfirmInput, sessionId);
 			case 'idea':
 				return this.instantiationService.createInstance(BrainstormIdeasInput, sessionId);
 			case 'idea-list':

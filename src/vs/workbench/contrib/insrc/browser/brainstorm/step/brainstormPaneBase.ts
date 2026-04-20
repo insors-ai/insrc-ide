@@ -23,6 +23,7 @@ import {
 	type BrainstormGateSnapshot,
 } from '../../../common/brainstormSessionService.js';
 import type { BrainstormStepInputBase } from './brainstormStepInput.js';
+import { attachRedirectAction } from './redirectAction.js';
 
 /**
  * Shared skeleton for every per-gate brainstorm pane. Handles the header
@@ -78,6 +79,13 @@ export abstract class BrainstormPaneBase extends EditorPane {
 		this._headerProgress.textContent = '';
 		this._headerRight = dom.append(header, dom.$('.insrc-brainstorm-header-right'));
 
+		// Item 6: Redirect action. Every brainstorm pane gets a small header
+		// button that lets the user re-classify the current turn. Clicking
+		// opens an inline picker (intent dropdown + optional refinement
+		// textarea); submit calls chatService.redirect() which cancels the
+		// stream and re-sends with the override.
+		this._renderRedirectAction();
+
 		// Card area
 		const main = dom.append(this._container, dom.$('.insrc-brainstorm-main'));
 		this._cardArea = dom.append(main, dom.$('.insrc-brainstorm-card-area'));
@@ -95,6 +103,15 @@ export abstract class BrainstormPaneBase extends EditorPane {
 		}));
 
 		this._onCreate(this._headerRight);
+	}
+
+	private _renderRedirectAction(): void {
+		this._register(attachRedirectAction(this._container, this._headerRight, {
+			chatService: this.chatService,
+			sessionService: this.sessionService,
+			logService: this.logService,
+			logTag: this._logTag,
+		}));
 	}
 
 	/** Override in subclasses to add extra header-right content (buttons etc). */
@@ -122,6 +139,27 @@ export abstract class BrainstormPaneBase extends EditorPane {
 		this._emptyState.classList.add('hidden');
 		this._renderProgress(gate);
 		this._renderGate(gate);
+		// Item 11: surface any gate-level warning above the content. The
+		// card widget already does this for idea/idea-discussion panes; the
+		// downstream panes (convergence-review / theme-spec / presentation)
+		// render their own content so they rely on this base-class helper.
+		this._renderGateWarning(gate);
+	}
+
+	/**
+	 * Render the gate-level warning strip (Item 3 + Item 11). Default
+	 * implementation prepends an amber strip to the card area. Subclasses
+	 * whose own `_renderGate` embeds the warning (e.g. panes that delegate
+	 * to `BrainstormCardWidget`, which handles warnings internally) can
+	 * override this to a no-op to avoid double-rendering.
+	 */
+	protected _renderGateWarning(gate: BrainstormGateSnapshot): void {
+		if (!gate.warning) { return; }
+		const strip = dom.prepend(this._cardArea, dom.$('.insrc-brainstorm-card-warning'));
+		const icon = dom.append(strip, dom.$('span.codicon'));
+		icon.classList.add(...ThemeIcon.asClassNameArray(Codicon.warning));
+		const text = dom.append(strip, dom.$('span.insrc-brainstorm-card-warning-text'));
+		text.textContent = gate.warning;
 	}
 
 	protected _renderProgress(gate: BrainstormGateSnapshot): void {

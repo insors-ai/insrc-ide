@@ -27,9 +27,24 @@ Generate 5-10 design ideas. Each idea should:
 
 First output the analysis under a ## Analysis heading (problem decomposition, constraints, existing patterns in codebase).
 
-Then output ideas as a numbered list:
-[1] Idea text -- tags: tag1, tag2 -- refs: entity1, entity2
-[2] Another idea -- tags: tag3 -- refs: entity3`;
+Then output each idea as a labeled block starting with [N]:
+
+[1]
+Title: <short descriptive title, <= 80 chars>
+Body: <2-4 sentences describing the approach, data flow, and interface boundaries>
+Rationale: <1-2 sentences on the tradeoff (what you gain vs. what you lose) -- optional>
+Tags: tag1, tag2
+Refs: entity1, entity2
+
+[2]
+Title: ...
+Body: ...
+Tags: ...
+
+Rules:
+- Body MUST be at least 2 full sentences.
+- Omit the Refs line entirely if no relevant entities.
+- Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const DIVERGE_DESIGN_SYSTEM = `You are a software architect refining a design pool based on the user's feedback from the previous round.
 
@@ -51,11 +66,17 @@ Rules for every variation or new idea you output:
 
 ## Output Format
 
-Output ideas as a numbered list:
+Output each idea as a labeled block. Numbering continues from the last existing idea:
 
-[N] Idea text -- tags: tag1, tag2 -- refs: entity1, entity2
+[N]
+Title: <short descriptive title>
+Body: <2-4 sentences on the architectural approach>
+Rationale: <tradeoffs -- 1-2 sentences, optional>
+Tags: tag1, tag2
+Refs: entity1, entity2
+InspiredBy: <original idea index> (only when this is a variation; omit for new ideas)
 
-If the idea is a variation of an existing one, include the reference inline, e.g. "variation of [4]: <new body>".`;
+Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const REVIEW_IDEAS_DESIGN_SYSTEM = `You are reviewing architectural design proposals.
 

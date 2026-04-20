@@ -12,20 +12,24 @@ Related plans:
 
 ## Summary table
 
-| # | Item                                                          | Priority | Scope    |
-|---|---------------------------------------------------------------|----------|----------|
-| 0 | Discuss: agent doesn't respond to the opening prompt          | P0       | daemon   |
-| 1 | Brainstorm sub-classifier: LLM with keyword fallback          | P0       | daemon   |
-| 2 | Diverge variation placement (user doesn't see their variations)| P1      | daemon   |
-| 3 | LLM failure surfacing (diverge + discuss)                     | P1       | daemon+UI|
-| 4 | Verify discuss reply end-to-end (superseded by item 0)        | P1       | verify   |
-| A | Phase 1 feedback reset runs too early (self-inflicted)        | P0       | daemon   |
-| B | Round auto-bump skips the idea-list gate                      | P0       | daemon   |
-| C | Round-transition index reuse + rejected-idea regeneration     | P1       | daemon   |
-| D | Round-2 prompt redesign: typed feedback sections + refine-first intent | P1 | daemon |
-| 5 | Intent validation gate (pre-launch)                           | P2       | daemon+UI|
-| 6 | Mid-turn intent correction                                    | P2       | daemon+UI|
-| 7 | Phase 2 -- session resume                                     | P3       | daemon+UI|
+| # | Item                                                          | Priority | Scope    | Status |
+|---|---------------------------------------------------------------|----------|----------|--------|
+| 0 | Discuss: agent doesn't respond to the opening prompt          | P0       | daemon   | **DONE** |
+| 1 | Brainstorm sub-classifier: LLM with keyword fallback          | P0       | daemon   | **DONE** |
+| 2 | Diverge variation placement (user doesn't see their variations)| P1      | daemon   | **DONE** |
+| 3 | LLM failure surfacing (diverge + discuss)                     | P1       | daemon+UI| **DONE** |
+| 4 | Verify discuss reply end-to-end (superseded by item 0)        | P1       | verify   | deferred (manual test post-build) |
+| A | Phase 1 feedback reset runs too early (self-inflicted)        | P0       | daemon   | **DONE** |
+| B | Round auto-bump skips the idea-list gate                      | P0       | daemon   | **DONE** |
+| C | Round-transition index reuse + rejected-idea regeneration     | P1       | daemon   | **DONE** |
+| D | Round-2 prompt redesign: typed feedback sections + refine-first intent | P1 | daemon | **DONE** |
+| 5 | Intent validation gate (pre-launch)                           | P2       | daemon+UI| **DONE** (daemon gate emission in chat-handler; dedicated pane built under Item 8a; default policy updated under Item 8c; decomposer confidence threaded under Item 8d) |
+| 6 | Mid-turn intent correction                                    | P2       | daemon+UI| **DONE** (daemon `chat.redirect` RPC; `IInsrcChatService.redirect()` in browser; shared `attachRedirectAction` helper; Redirect header button on every brainstorm pane; inline picker with intent dropdown + optional refinement + error surface) |
+| 7 | Phase 2 -- session resume                                     | P3       | daemon+UI| **partial** (checkpoint per-session + `agent.resume` read; full rehydrate deferred per idea-feedback.md) |
+| 8 | Intent-confirm gate vs. "Intent" progress pill confusion      | P2       | UI       | **DONE** (8a dedicated pane + 8c brainstorm default-on + 8d decomposer confidence threaded; 8b pill hold deferred) |
+| 9 | Idea card: references show but aren't clickable / navigable   | P1       | UI       | **DONE** (9a URL opener + 9b unresolved chip; 9c discussion pane refs verified via shared card widget) |
+| 10| Idea structure + prompts: title-only cards under-explain ideas| P1       | daemon+UI| **DONE** (rich prompt format w/ Title/Body/Rationale; parseIdeaList multi-line aware; Idea.summary/rationale added; card renders summary + reviewer notes + rationale) |
+| 11| Post-ideation flow (converge / themes / spec / presentation)   | P1       | daemon+UI| **partial** (warning strip now rendered by shared base for converge / theme-spec / presentation panes; full walk-through test still pending to surface remaining gaps) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -739,9 +743,29 @@ The live trace showed round 2 producing **only one** new idea. Expected
 3. Refine LLM dropped most, returning only one idea.
 4. Dedup filter removed most as title-matches of priorSurvivors.
 
-Needs the raw Ollama response text for round 2 generate+refine to root-
-cause. Not blocking the A/B/C fixes since all three are independently
-reproducible.
+### Analysis after A/B/C/D fixes landed
+
+The pre-fix prompt pushed the LLM toward net-new ideas + techniques.
+With broken feedback (fix A not applied) the LLM had no guidance and
+likely paraphrased round-1 accepted ideas -- those paraphrases then hit
+the dedup filter and disappeared, leaving very few survivors. Net
+symptom: "round 2 produced only one idea."
+
+With the A+D fixes in place the round-2 prompt now:
+- Contains the rejected list with an explicit "do NOT propose similar"
+  instruction (fix A delivers the feedback into the prompt; fix D types
+  it as rejected).
+- Contains the diverge list with per-idea direction + "produce 2-3
+  variations" instruction (fix D).
+- Treats techniques as fallback only.
+
+Expected outcome: round-2 yield should climb from 1 to 4-8 (with at
+least 2-3 of those being `inspiredBy` a specific diverged idea).
+
+**Status:** monitor next round-2 run. If yield is still <= 2, check the
+raw Ollama response text to pick between candidates 1/2/3. Dedup
+(candidate 4) should no longer be the dominant filter because the
+prompt now steers the LLM away from paraphrase.
 
 ---
 
@@ -1025,6 +1049,304 @@ The daemon handler hydrates the new pipeline with the prior context
 Already fully planned in [idea-feedback.md section Phase 2](idea-feedback.md).
 Decisions F1/G2/H1/I2 locked. Implementation deferred until Phase 1
 (feedback capture -- already shipped) is field-tested.
+
+---
+
+## 8. Intent-confirm gate vs. "Intent" progress pill confusion (P2)
+
+### Observation (2026-04-20 live test)
+
+User reported: *"the intent classification showed up temporarily for
+approval but automatically disappeared and moved to the next step
+without user acceptance."*
+
+### Root cause
+
+There are two distinct things the UI renders during classification and
+the user mistook one for the other:
+
+1. **`Intent: <intent>` progress pill** (non-interactive).
+   [chat-handler.ts:597](../../src/insrc/daemon/chat-handler.ts#L597)
+   emits `send({ stream: 'progress', data: { message: 'Intent: ...' } })`,
+   then `resolveController` emits a second one with the sub-category
+   and reasoning. The chat panel renders each progress event as a small
+   pill that disappears when the next progress event arrives. There is
+   no approval button on a pill.
+
+2. **Intent-confirm gate** (interactive, my Item 5 addition at
+   [chat-handler.ts:614-664](../../src/insrc/daemon/chat-handler.ts#L614)).
+   Fires when `classifier.confirmIntent=true` in config OR
+   `classifiedConfidence < 0.4`. In the observed run the decomposer
+   took the primary/attached path which hard-codes
+   `classifiedConfidence = 1.0`, so `shouldPrompt=false` and no gate
+   was ever emitted. What the user saw was the pill in #1.
+
+### User expectation
+
+The pill flashing with reasoning text looks like "intent was approved
+somewhere I didn't click". Two complaints conflated:
+- "It auto-approved without me." (UX: no visible approve/reject affordance on the pill)
+- "The panel flashed and disappeared." (UX: pill animation timing)
+
+### Fix options
+
+**8a. Dedicated pane.** The Item 5 plan noted a
+`BrainstormIntentConfirmPane` was deferred. Build it so when the gate
+fires, the workbench opens a clearly-labeled pane with Proceed /
+Use-different-intent / Cancel buttons. Today the gate renders in the
+generic chat-panel widget which is visually indistinguishable from
+other gate widgets.
+
+**8b. Make the pill non-dismissible and add a "Confirm" affordance
+when the gate is enabled.** Currently pills just re-render on each
+progress event. When `classifier.confirmIntent=true`, hold the pill
+until the gate resolves.
+
+**8c. Make `classifier.confirmIntent` default to true for brainstorm
+turns specifically.** The brainstorm intent is the one most likely
+to be mis-classified sub-category-wise (design vs implementation vs
+requirements), and the user has repeatedly flagged sub-classification
+mistakes as a trust issue. Default opt-in for brainstorm only keeps
+the other 14 intents at current behavior.
+
+**8d. Primary/attached path should not hard-code confidence=1.0.**
+The decomposer output carries per-action confidence. Today
+[chat-handler.ts ~556](../../src/insrc/daemon/chat-handler.ts#L556)
+uses `action.confidence`, but the primary/attached branch at
+~549 unconditionally sets `classifiedConfidence = 1.0` as if the
+decomposition were ground truth. Thread the decomposer's confidence
+through so sub-0.4 primary intents trigger the gate.
+
+### Recommendation
+
+Ship 8a + 8c + 8d together. 8a makes the gate readable; 8c makes it
+fire for the most-contested intent by default; 8d closes the hole
+where primary/attached hides low-confidence classifications.
+
+---
+
+## 9. Idea card references show but are not clickable (P1)
+
+### Observation (2026-04-20 live test)
+
+User reported: *"refs are showing, but user can't click or navigate
+to them."*
+
+### Where "refs" are coming from
+
+Two different display paths currently render references; the user
+can see text that looks like a ref in either:
+
+- **Card `_renderReferences`** (clickable path). Filters via
+  [isOpenableRef](../../src/vs/workbench/contrib/insrc/browser/brainstorm/brainstormCardWidget.ts#L368):
+  keeps refs with absolute paths (`/...` or `C:/...`) or `type === 'url'`.
+  Click handler only opens `type === 'code' | 'doc'` via
+  `editorService.openEditor` -- **`type === 'url'` click is a no-op**,
+  which is the likely click-does-nothing case.
+- **LLM-emitted `refs:` suffix in the body / title** (non-clickable).
+  The daemon's `parseIdeaParts` pulls `refs: entity1, entity2` out of
+  the LLM line into a tag list, but any refs that fail
+  `resolveRefs` (i.e. the entity name isn't in the repo's
+  `EntityIndex`) are dropped, and the stringified refs never make it
+  into the clickable `references` array. The LLM may still write the
+  raw names into the body as prose, and those bare words look like
+  refs to a user.
+
+### Root causes
+
+**9a. `type: 'url'` refs have no click handler.** Only code/doc paths
+are routed through `openEditor`. URLs should route through
+`openerService.open()` so clicking an `https://...` ref opens the
+browser.
+
+**9b. Refs that fail entity resolution are silently dropped.** The
+user then sees an idea body that mentions `AgentRouter.dispatch` but
+no clickable link, because `entityIndex['AgentRouter.dispatch']` had
+no hit. The daemon should still emit a ref with `type: 'code'` and
+the raw name, and the UI should render it as a non-clickable
+greyed-out chip with a tooltip "couldn't resolve this entity" --
+which is less surprising than dropping it entirely.
+
+**9c. References are only rendered on the card, not on the
+idea-discussion pane.** The discussion gate carries `idea.references`
+via `structured.item`, and `ideaChatPane` passes them into the card
+widget, so that path should work. Verify on a discussion card that
+refs are rendered; if not, it's a symptom of 9a or 9b.
+
+### Fix
+
+- Extend the click handler to:
+  ```ts
+  if (ref.type === 'code' || ref.type === 'doc') { /* openEditor */ }
+  else if (ref.type === 'url') { this.openerService.open(ref.path); }
+  ```
+- Drop the "absolute path required" strictness in `isOpenableRef` for
+  refs that came from the daemon's `resolveRefs` (those already have
+  absolute paths); keep it for the fallback raw-string path.
+- Add a non-clickable chip rendering for unresolved entity names, so
+  the user at least knows the idea references them.
+
+### Verification
+
+- Approve an idea that has a code ref; click -> editor opens at that
+  file.
+- Diverge on an idea whose body mentions a type that doesn't exist in
+  the repo; the card should render that name as a greyed-out chip
+  with a tooltip, NOT as a dead blue link.
+
+---
+
+## 10. Idea structure + prompts: title-only cards under-explain ideas (P1)
+
+### Observation (2026-04-20 live test)
+
+User reported: *"the Idea structure needs to be enhanced along with
+the LLM directives to generate ideas, title/description (description
+needs to be verbose enough to explain the idea to the user, one line
+summaries as is being displayed today doesn't provide enough context)"*
+
+### Current state
+
+- `Idea.title` is one short line extracted from the first period
+  (~80 char cap) by [parseIdeaParts](../../src/insrc/agent/tasks/brainstorm/ideas.ts#L234).
+- `Idea.body` is literally the full raw line the LLM produced,
+  including the title text. On the card, `_renderBody` sets
+  `textContent = data.body`, which often just repeats the title.
+- The seed prompts ask for ideas in the form
+  `[1] Idea text -- tags: tag1 -- refs: entity1`. There's no
+  structured section for `title`, `summary`, `motivation`, or
+  `expected_outcome`. The LLM is free to cram everything into one
+  sentence.
+- Claude review produces `reviewTitle`, `reviewDescription`, and
+  `reviewRationale`, but only `reviewVerdict` and `reviewRationale`
+  are rendered in the UI (and only the latter as a "Review:" strip).
+  `reviewDescription` is NOT currently shown.
+
+### Root causes
+
+**10a. Prompt contract.** Current seed prompts across all five
+categories output a single-line idea. The card has no richer fields
+to display because the data model doesn't capture them.
+
+**10b. Data model.** `Idea` has `title` + `body` but not
+`summary`, `motivation`, or `expectedOutcome`. Adding them would let
+the card render a 2-3 paragraph description instead of the 80-char
+title.
+
+**10c. Card rendering.** Even with `reviewDescription` already in
+the model, the card doesn't render it. Low-effort fix.
+
+### Fix
+
+**10a. Update the seed/diverge prompts** for all five categories
+(`general`, `design`, `implementation`, `testing`, `requirements`).
+Change the output contract from:
+
+```
+[N] Idea text -- tags: ... -- refs: ...
+```
+
+to JSON with explicit fields:
+
+```json
+{
+  "title": "short descriptive title",
+  "summary": "2-3 sentences explaining what the idea is and why it's interesting",
+  "rationale": "1-2 sentences on the motivation / tradeoffs",
+  "tags": [...],
+  "refs": [...]
+}
+```
+
+Update `parseIdeaList` to handle JSON output. Keep a fallback
+regex-parse for line-format responses so existing behaviour doesn't
+break mid-migration.
+
+**10b. Extend `Idea`** with `summary?: string` and `rationale?: string`
+fields (`body` stays for backwards-compat + raw text audit).
+
+**10c. Update `BrainstormCardWidget`** to render `summary` under the
+title as the primary body text (larger type), then the rationale as a
+secondary paragraph. If `summary` is missing (e.g. migrated older
+ideas), fall back to `body`.
+
+**10d. Render `reviewDescription`** when present -- separate section
+"Reviewer notes" below the summary, before the rationale/references.
+
+### Verification
+
+- Generate ideas -> each card shows Title + 2-3 sentence Summary +
+  optional Rationale + optional Reviewer notes + References.
+- Regenerate with the same prompt in an older build that lacks
+  Item 10's changes -> card still renders via `body` fallback.
+
+---
+
+## 11. Post-ideation flow not yet updated / tested (P1)
+
+### Observation (2026-04-20 live test)
+
+User reported: *"the rest of the flow hasn't been updated"*
+
+In the 2026-04-20 session the user ran through ideation end-to-end
+(round 1: 8 seed ideas + 3 diverge variations + 1 discuss + 1 reject)
+and reached auto-converge. The logs show:
+
+```
+23:41:20  progress step="Clustering ideas into themes (round 1)..."
+23:42:15  progress step="Evaluating promotions..."
+23:42:42  progress step="Convergence Review (round 1)"
+```
+
+i.e. the daemon ran cluster -> promote -> convergence-review, but the
+user did not call out successful rendering of any of these downstream
+panes. The work historically focused on ideation panes (`IdeasPane`,
+`IdeaChatPane`, `IdeaListPane`); the convergence / theme-details /
+presentation panes have not been re-validated after the recent
+Items 0-D / 1-6 changes.
+
+### Known pane kinds and their routing status
+
+| Gate kind               | Pane class                   | Status   |
+|-------------------------|------------------------------|----------|
+| `idea`                  | `BrainstormIdeasPane`        | verified |
+| `idea-list`             | `BrainstormIdeaListPane`     | verified |
+| `idea-discussion`       | `BrainstormIdeaChatPane`     | verified |
+| `convergence-review`    | `BrainstormThemesPane`       | NOT verified post-Item changes |
+| `theme-spec`            | `BrainstormThemeDetailsPane` | NOT verified post-Item changes |
+| `presentation`          | `BrainstormPresentationPane` | NOT verified post-Item changes |
+
+### Known gaps to investigate
+
+**11a.** Convergence-review likely still uses the legacy
+content-plus-tabs rendering and may not surface the new `warning`
+field from Item 3 if a cluster task fails.
+
+**11b.** Theme-details pane needs a discuss / refine affordance
+equivalent to the idea cards. Current status: unknown.
+
+**11c.** Presentation pane may still expect the old
+`assembledOutput`-in-content shape rather than the new structured
+fields added during the clean-slate commit.
+
+**11d.** Per-theme spec builder walks each accepted theme; if the
+flow errors out during `theme-spec` (e.g. Ollama returns malformed
+JSON) there's no equivalent of Item 3's warning strip on the
+theme-details pane.
+
+### Required
+
+A focused follow-on test session that drives the flow through
+convergence + presentation with logs captured, then a new sub-plan
+covering all gaps surfaced. Do NOT re-use the existing Phase A0 / A
+/ B phasing -- this is its own phase (call it Phase D: post-ideation
+flow validation).
+
+### Recommendation
+
+Next test session: run a minimal brainstorm (3 seed ideas, approve
+all, force converge), step through every downstream pane, capture
+renderer + agent logs. Then file sub-issues per pane.
 
 ---
 

@@ -24,9 +24,27 @@ Generate 6-12 ideas covering a mix of scenario types. Tag each idea with its tes
 
 First output the analysis under a ## Analysis heading (what's being tested, current coverage, known weak spots).
 
-Then output ideas as a numbered list:
-[1] Scenario description -- tags: unit, error-path -- refs: path/to/file.ts::fn -- priority: must
-[2] Another scenario -- tags: e2e, performance -- refs: path/other.ts -- priority: should`;
+Then output each idea as a labeled block starting with [N]:
+
+[1]
+Title: <short scenario title, <= 80 chars>
+Body: <2-4 sentences: what scenario to test, the setup / inputs, and the expected observable outcome>
+Rationale: <1-2 sentences on why this risk matters -- optional>
+Tags: unit, error-path
+Refs: path/to/file.ts::fn
+Priority: must|should|could
+
+[2]
+Title: ...
+Body: ...
+Tags: e2e, performance
+Refs: path/other.ts
+Priority: should
+
+Rules:
+- Body MUST be at least 2 full sentences.
+- Omit the Refs line entirely if no relevant entities.
+- Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const DIVERGE_TESTING_SYSTEM = `You are a QA engineer refining a test-scenario pool based on the user's feedback from the previous round.
 
@@ -55,11 +73,18 @@ Rules for every variation or new scenario:
 
 ## Output Format
 
-Output ideas as a numbered list:
+Output each idea as a labeled block. Numbering continues from the last existing idea:
 
-[N] Scenario description -- tags: <type>, <angle> -- refs: path/to/file.ts
+[N]
+Title: <short scenario title>
+Body: <2-4 sentences on the scenario, setup, and expected outcome>
+Rationale: <optional>
+Tags: <type>, <angle>
+Refs: path/to/file.ts
+Priority: must|should|could
+InspiredBy: <original idea index> (only when this is a variation; omit for new ideas)
 
-If the scenario is a variation of an existing one, include the reference inline, e.g. "variation of [4]: <new scenario>".`;
+Do NOT wrap the output in JSON or markdown code fences.`;
 
 export const REVIEW_IDEAS_TESTING_SYSTEM = `You are reviewing brainstormed test scenarios.
 

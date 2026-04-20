@@ -27,7 +27,7 @@ import { IndexerService } from '../indexer/index.js';
 import { IpcServer } from './server.js';
 import {
   initChatHandlers, disposeChatHandlers, reloadChatConfig,
-  chatStart, chatReply, chatCancel, chatInject, chatClose, chatList, chatStatus, chatRestore,
+  chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore,
   chatSend, chatResume,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
@@ -256,8 +256,30 @@ async function main(): Promise<void> {
 
     'agent.resume': async (params) => {
       const { id } = params as { id: string };
-      // Resume is handled by chat.resume — just return the checkpoint info
-      return { ok: true, message: `Use chat.resume with sessionId=${id}` };
+      const { readdirSync, readFileSync: readFs, existsSync: existsFs } = await import('node:fs');
+      const { join } = await import('node:path');
+      const checkpointDir = join(PATHS.insrc, 'checkpoints');
+      if (!existsFs(checkpointDir)) {
+        return { ok: false, message: `No checkpoint directory` };
+      }
+      // File names are now `${controllerId}-${sessionId}.json` (see
+      // checkpointState in task.ts). Match any controller for this session.
+      const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
+      if (files.length === 0) {
+        return { ok: false, message: `No checkpoint for session ${id}` };
+      }
+      try {
+        const raw = JSON.parse(readFs(join(checkpointDir, files[0]!), 'utf-8')) as Record<string, unknown>;
+        const controllerId = raw['controller'] as string | undefined;
+        return {
+          ok: true,
+          sessionId: id,
+          ...(controllerId !== undefined ? { controllerId } : {}),
+          message: `Resume via chat.resume with sessionId=${id}`,
+        };
+      } catch (err) {
+        return { ok: false, message: `Checkpoint read failed: ${(err as Error).message}` };
+      }
     },
 
     'agent.discard': async (params) => {
@@ -783,6 +805,7 @@ async function main(): Promise<void> {
     'chat.reply':  chatReply,
     'chat.cancel': chatCancel,
     'chat.inject': chatInject,
+    'chat.redirect': chatRedirect,
     'chat.close':  chatClose,
     'chat.list':   chatList,
     'chat.status': chatStatus,

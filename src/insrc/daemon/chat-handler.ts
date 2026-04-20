@@ -125,6 +125,41 @@ export const chatInject: RpcHandler = async (params) => {
   return { ok: true };
 };
 
+/**
+ * Redirect a turn in-flight: cancels the current stream and records
+ * the user's chosen intent so the client can immediately re-issue
+ * `chat.send` with a `/intent` prefix (e.g. `/design <refined message>`).
+ * Unlike `chat.cancel`, this returns the prefix the client should use
+ * so the UI doesn't have to reconstruct it.
+ */
+export const chatRedirect: RpcHandler = async (params) => {
+  const { sessionId, intent, refinedMessage } = params as {
+    sessionId: string;
+    intent: string;
+    refinedMessage?: string;
+  };
+  const VALID_INTENTS = new Set([
+    'implement', 'refactor', 'test', 'debug', 'review', 'document',
+    'research', 'code-analysis', 'plan', 'requirements', 'design',
+    'brainstorm', 'deploy', 'release', 'infra',
+  ]);
+  if (!VALID_INTENTS.has(intent)) return { error: `unknown intent: ${intent}` };
+
+  const pool = getPool();
+  const session = pool.get(sessionId);
+  if (!session) return { error: 'session not found' };
+
+  if (session.abortController) {
+    session.abortController.abort();
+  }
+
+  const prefix = `/${intent}`;
+  const suggestedMessage = refinedMessage && refinedMessage.trim().length > 0
+    ? `${prefix} ${refinedMessage.trim()}`
+    : prefix;
+  return { ok: true, suggestedMessage };
+};
+
 export const chatClose: RpcHandler = async (params) => {
   const { sessionId } = params as { sessionId: string };
   const pool = getPool();
@@ -468,6 +503,8 @@ async function runChatMessage(
   // Primary/attached processing state
   let classifiedIntentOverride: string | undefined;
   let classifiedMessageOverride: string | undefined;
+  let classifiedConfidenceOverride: number | undefined;
+  let classifiedReasoningOverride: string | undefined;
   let postPrimaryActions: {
     formatActions: import('../agent/classifier/decompose.js').AttachedAction[];
     dependActions: import('../agent/classifier/decompose.js').AttachedAction[];
@@ -517,6 +554,8 @@ async function runChatMessage(
     // Override message for the single-intent flow below
     classifiedIntentOverride = prompt.primary.intent;
     classifiedMessageOverride = enrichedMessage;
+    classifiedConfidenceOverride = typeof prompt.primary.confidence === 'number' ? prompt.primary.confidence : undefined;
+    classifiedReasoningOverride = 'primary/attached decomposition';
 
     // Store post-processing actions for after primary completes
     postPrimaryActions = { formatActions, dependActions, appendActions, parallelActions };
@@ -545,13 +584,20 @@ async function runChatMessage(
   let classifiedIntent: string;
   let classifiedMessage: string;
   let classifiedExplicit: import('../shared/types.js').ExplicitProvider | undefined;
+  let classifiedConfidence = 1.0;
+  let classifiedReasoning = '';
 
   if (classifiedIntentOverride) {
     // Primary/attached model: use the enriched primary intent
     classifiedIntent = classifiedIntentOverride;
     classifiedMessage = classifiedMessageOverride ?? message;
     classifiedExplicit = undefined;
-    log.info({ intent: classifiedIntent, attached: postPrimaryActions ? 'yes' : 'no' }, 'using primary/attached override');
+    // Thread the decomposer's own confidence through so the intent-confirm
+    // gate (Item 5 / 8d) can trigger on low-confidence primary actions
+    // instead of silently assuming primary/attached is ground truth.
+    classifiedConfidence = classifiedConfidenceOverride ?? 1.0;
+    classifiedReasoning = classifiedReasoningOverride ?? 'primary/attached decomposition';
+    log.info({ intent: classifiedIntent, confidence: classifiedConfidence, attached: postPrimaryActions ? 'yes' : 'no' }, 'using primary/attached override');
   } else if (decomposed.usedLLM && decomposed.actions.length === 1) {
     const action = decomposed.actions[0]!;
     const conf = action.confidence ?? 0;
@@ -563,6 +609,8 @@ async function runChatMessage(
       classifiedIntent = 'research';
       classifiedMessage = message;
       classifiedExplicit = undefined;
+      classifiedConfidence = conf;
+      classifiedReasoning = `low-confidence decomposer result (${action.intent}) -> research fallback`;
     } else {
       // Single shell intent → route through task pipeline (command resolved at exec time)
       if (['infra', 'deploy', 'release'].includes(action.intent)) {
@@ -581,6 +629,8 @@ async function runChatMessage(
       classifiedIntent = action.intent;
       classifiedMessage = message;
       classifiedExplicit = undefined;
+      classifiedConfidence = conf;
+      classifiedReasoning = 'decomposer single-action';
     }
   } else {
     log.info({ message: message.slice(0, 80) }, 'classifying (fallback)');
@@ -591,10 +641,80 @@ async function runChatMessage(
     classifiedIntent = classified.intent;
     classifiedMessage = classified.message;
     classifiedExplicit = classified.explicit;
+    classifiedConfidence = classified.confidence;
+    classifiedReasoning = classified.classification.primary.reasoning || (classified.usedLLM ? 'llm classifier' : 'keyword fallback');
     log.info({ intent: classifiedIntent, confidence: classified.confidence }, 'classified');
   }
 
   send({ id: requestId, stream: 'progress', data: { message: `Intent: ${classifiedIntent}` } });
+
+  // 1b. Intent validation gate -- pre-launch confirmation.
+  // Gate policy (Item 5 / Item 8c):
+  //   - If `classifier.confirmIntent === true`: always prompt.
+  //   - Else if `classifier.confirmIntent === false` (explicit opt-out):
+  //     only prompt when confidence is below the low-confidence threshold.
+  //   - Else (unset / default): prompt for `brainstorm` turns (which are
+  //     the most contested sub-classifications per Item 8c) and any
+  //     low-confidence turn. Other high-confidence intents skip the gate.
+  {
+    const LOW_CONFIDENCE_THRESHOLD = 0.4;
+    const confirmSetting = session.config.classifier?.confirmIntent;
+    const lowConfidence = classifiedConfidence < LOW_CONFIDENCE_THRESHOLD;
+    let shouldPrompt: boolean;
+    if (confirmSetting === true) {
+      shouldPrompt = true;
+    } else if (confirmSetting === false) {
+      shouldPrompt = lowConfidence;
+    } else {
+      shouldPrompt = lowConfidence || classifiedIntent === 'brainstorm';
+    }
+    if (shouldPrompt) {
+      const gateId = `intent-confirm-${requestId}-${Date.now()}`;
+      send({ id: requestId, stream: 'gate', data: {
+        gateId,
+        title: `Confirm intent: ${classifiedIntent}`,
+        content: `**Classified as:** ${classifiedIntent}\n\n**Confidence:** ${classifiedConfidence.toFixed(2)}\n\n**Reasoning:** ${classifiedReasoning || '(none)'}`,
+        actions: [
+          { name: 'proceed', label: 'Proceed' },
+          { name: 'use-intent', label: 'Use different intent', hint: 'e.g. design, implement, test', needsInput: true },
+          { name: 'cancel', label: 'Cancel' },
+        ],
+        structured: {
+          phase: 'classify',
+          itemType: 'intent-confirm',
+          item: {
+            intent: classifiedIntent,
+            confidence: classifiedConfidence,
+            reasoning: classifiedReasoning,
+          },
+        },
+      } });
+      const reply = await new Promise<ReplyPayload>((resolve, reject) => {
+        channel.registerExternalGate(gateId, resolve, reject);
+      });
+      if (reply.action === 'cancel') {
+        send({ id: requestId, stream: 'done', data: { summary: 'cancelled' } });
+        await persistTurn(session, message, '[cancelled by user at intent-confirm gate]');
+        return;
+      }
+      if (reply.action === 'use-intent' && reply.feedback) {
+        const overrideRaw = reply.feedback.trim().toLowerCase();
+        const VALID_INTENTS = new Set([
+          'implement', 'refactor', 'test', 'debug', 'review', 'document',
+          'research', 'code-analysis', 'plan', 'requirements', 'design',
+          'brainstorm', 'deploy', 'release', 'infra',
+        ]);
+        if (VALID_INTENTS.has(overrideRaw)) {
+          classifiedIntent = overrideRaw;
+          classifiedConfidence = 1.0;
+          classifiedReasoning = 'user override';
+          send({ id: requestId, stream: 'progress', data: { message: `Intent: ${classifiedIntent} (user override)` } });
+        } else {
+          send({ id: requestId, stream: 'progress', data: { message: `Unknown intent "${overrideRaw}" -- proceeding with ${classifiedIntent}` } });
+        }
+      }
+    }
+  }
 
   // 2. Route to provider
   const route = selectProvider(classifiedIntent as import('../shared/types.js').Intent, classifiedExplicit, {

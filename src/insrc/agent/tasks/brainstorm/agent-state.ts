@@ -160,4 +160,11 @@ export interface BrainstormState extends AgentState {
   summary?:         string | undefined;
   /** Count of unique requirements (R-NNN) in assembled output. */
   requirementCount?: number | undefined;
+
+  /**
+   * Transient warning surfaced on the next gate (e.g. LLM returned 0
+   * usable ideas on diverge). Consumed and cleared by the next
+   * buildSingleIdeaGate / buildIdeaListGate.
+   */
+  pendingWarning?: string | undefined;
 }

@@ -90,6 +90,14 @@ export interface IInsrcChatService {
 	sendMessage(message: string, provider?: string | undefined): Promise<void>;
 	replyToGate(gateId: string, action: string, feedback?: string | undefined): Promise<void>;
 	cancelStream(): Promise<void>;
+	/**
+	 * Mid-turn intent correction (Item 6). Cancels the current stream and
+	 * immediately re-sends the refined user message prefixed with the chosen
+	 * intent override (`/design`, `/implement`, ...). Rejects if no session
+	 * is active or the daemon rejects the redirect. Resolves when the new
+	 * turn has been submitted.
+	 */
+	redirect(intent: string, refinedMessage?: string): Promise<void>;
 
 	// History
 	loadHistory(sessionId: string): Promise<ChatMessage[]>;

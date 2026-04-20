@@ -415,6 +415,13 @@ function mergeConfig(raw: Record<string, unknown>): { config: AgentConfig; migra
     permissions: {
       mode: permissions['mode'] === 'auto-accept' ? 'auto-accept' : 'validate',
     },
+    ...(isObject(source['classifier'])
+      ? {
+          classifier: {
+            confirmIntent: (source['classifier'] as Record<string, unknown>)['confirmIntent'] === true,
+          },
+        }
+      : {}),
   };
 
   return { config, migrated: looksLegacy };

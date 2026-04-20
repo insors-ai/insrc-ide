@@ -803,6 +803,16 @@ export abstract class BrainstormControllerBase implements TaskController {
   }
 
   /** Build a gate for a single idea card. */
+  /**
+   * Pop the pendingWarning off state so it appears on exactly one gate.
+   * Returns the string, or undefined if no warning was pending.
+   */
+  private consumePendingWarning(): string | undefined {
+    const w = this.state.pendingWarning;
+    if (w !== undefined) this.state.pendingWarning = undefined;
+    return w;
+  }
+
   private buildSingleIdeaGate(): Task {
     const ideaId = this.state.reviewQueue[this.state.currentReviewIndex];
     const idea = ideaId ? this.state.ideas.find(i => i.id === ideaId) : undefined;
@@ -834,6 +844,24 @@ export abstract class BrainstormControllerBase implements TaskController {
       `Approved: ${accepted} | Rejected: ${rejected} | Parked: ${parked}`,
     ].join('\n');
 
+    const warning = this.consumePendingWarning();
+    const structured: Record<string, unknown> = {
+      phase: 'ideation',
+      itemType: 'idea',
+      itemId: idea.id,
+      item: idea,
+      progress: {
+        total,
+        current,
+        approved: accepted,
+        rejected,
+        parked,
+        skipped: this.state.ideas.filter(i => i.status === 'skipped').length,
+        pending: total - current,
+      },
+    };
+    if (warning) structured.warning = warning;
+
     return {
       index: this.taskCounter++,
       description: `Review: ${idea.title.slice(0, 50)}`,
@@ -851,22 +879,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         { name: 'park', label: 'Park' },
         { name: 'discuss', label: 'Discuss', needsInput: true },
       ],
-      // Structured data for editor pane
-      structured: {
-        phase: 'ideation',
-        itemType: 'idea',
-        itemId: idea.id,
-        item: idea,
-        progress: {
-          total,
-          current,
-          approved: accepted,
-          rejected,
-          parked,
-          skipped: this.state.ideas.filter(i => i.status === 'skipped').length,
-          pending: total - current,
-        },
-      },
+      structured,
       stateKey: 'ideaReviewOutput',
     };
   }
@@ -983,6 +996,7 @@ export abstract class BrainstormControllerBase implements TaskController {
 
   /** Handle diverge-single output — parse new ideas, add to queue. */
   private afterDivergeSingle(completed: TaskResult): Task[] {
+    let newIdeaCount = 0;
     if (completed.success && completed.output) {
       const newIdeas = parseIdeaList(
         completed.output,
@@ -991,14 +1005,24 @@ export abstract class BrainstormControllerBase implements TaskController {
         this.state.input.repoPath || 'unknown',
         this._entityIndex,
       );
+      newIdeaCount = newIdeas.length;
       for (const idea of newIdeas) {
         this.state.ideas.push(idea);
-        this.state.reviewQueue.push(idea.id);
       }
       this.state.nextIdeaIndex += newIdeas.length;
+
+      // Splice variation IDs into reviewQueue right after the current
+      // index so the next card the user sees IS a variation of the idea
+      // they just diverged on, not an unrelated later queue entry.
+      const insertAt = this.state.currentReviewIndex + 1;
+      this.state.reviewQueue.splice(insertAt, 0, ...newIdeas.map(i => i.id));
     }
 
-    // Continue reviewing from where we left off (advance past the diverged idea)
+    if (newIdeaCount === 0) {
+      this.state.pendingWarning = 'The local LLM returned no usable variations. Try again or adjust your diverge direction.';
+    }
+
+    // Advance past the diverged idea.
     this.state.currentReviewIndex++;
     this.state.lastStep = 'idea-review';
     return [this.buildSingleIdeaGate()];
@@ -1052,6 +1076,30 @@ export abstract class BrainstormControllerBase implements TaskController {
     }
 
     this.state.focusedIdeaContext = codeContext || undefined;
+
+    // If the user already sent an opening message when they clicked Discuss,
+    // the last entry in discussionMessages is from them and no assistant
+    // reply exists yet. Chain into the LLM response task before emitting
+    // the discussion gate — otherwise the gate shows only the user's own
+    // prompt and the user has to click again just to get a reply.
+    const msgs = this.state.discussionMessages ?? [];
+    const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : undefined;
+    if (lastMsg && lastMsg.role === 'user') {
+      const idea = this.state.ideas.find(i => i.id === this.state.focusedIdeaId);
+      if (idea) {
+        this.state.lastStep = 'idea-discuss-respond';
+        return [{
+          index: this.taskCounter++,
+          description: 'Responding to your question...',
+          kind: 'llm',
+          intent: 'brainstorm',
+          systemPrompt: this.getDiscussRespondPrompt(),
+          userMessage: this.buildDiscussionContext(idea, lastMsg.content),
+          stateKey: 'discussRespondOutput',
+        }];
+      }
+    }
+
     this.state.lastStep = 'idea-discuss';
     return [this.buildIdeaDiscussGate()];
   }
@@ -1120,6 +1168,15 @@ export abstract class BrainstormControllerBase implements TaskController {
    */
   private afterIdeaDiscussRespond(completed: TaskResult): Task[] {
     const idea = this.state.ideas.find(i => i.id === this.state.focusedIdeaId);
+
+    // Surface LLM-task failure inline in the discussion history so the
+    // user sees something actionable instead of a silent no-op.
+    if (!completed.success || !completed.output || completed.output.trim().length === 0) {
+      const reason = completed.error ?? 'no output from the agent';
+      this.addDiscussionMessage('assistant', `[Error: the agent could not respond. ${reason}]`);
+      this.state.lastStep = 'idea-discuss';
+      return [this.buildIdeaDiscussGate()];
+    }
 
     let responseText = completed.output;
     let ideaUpdated = false;
@@ -1984,6 +2041,13 @@ export abstract class BrainstormControllerBase implements TaskController {
       ...(shouldAutoConverge ? ['', '*Enough ideas gathered — consider converging.*'] : []),
     ].join('\n');
 
+    const warning = this.consumePendingWarning();
+    const structured: Record<string, unknown> = {
+      phase: 'ideation',
+      itemType: 'idea-list',
+    };
+    if (warning) structured.warning = warning;
+
     return {
       index: this.taskCounter++,
       description: `${this.getIdeaGateTitle()} (round ${this.state.round})`,
@@ -2003,6 +2067,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         items,
         selectable: true,
       }],
+      structured,
       stateKey: 'ideaListOutput',
     };
   }

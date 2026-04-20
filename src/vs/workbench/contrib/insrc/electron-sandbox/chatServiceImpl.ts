@@ -320,6 +320,35 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._finishStream();
 	}
 
+	async redirect(intent: string, refinedMessage?: string): Promise<void> {
+		if (!this._activeSessionId) {
+			throw new Error('No active session to redirect');
+		}
+		const sessionId = this._activeSessionId;
+
+		const result = await this.daemonService.rpc<{
+			ok?: boolean;
+			error?: string;
+			suggestedMessage?: string;
+		}>('chat.redirect', {
+			sessionId,
+			intent,
+			...(refinedMessage ? { refinedMessage } : {}),
+		});
+
+		if (!result || result.ok === false || result.error) {
+			throw new Error(result?.error ?? 'redirect rejected by daemon');
+		}
+
+		// Daemon aborted the prior stream; wait for the current stream handle
+		// to finish so the new sendMessage doesn't race.
+		this._finishStream();
+
+		const suggested = result.suggestedMessage ?? `/${intent}${refinedMessage ? ' ' + refinedMessage : ''}`;
+		this.logService.info(`[insrc-chat] redirect -> resending with "${suggested.slice(0, 80)}"`);
+		await this.sendMessage(suggested);
+	}
+
 	// ---------------------------------------------------------------------------
 	// History
 	// ---------------------------------------------------------------------------

@@ -104,6 +104,8 @@ import { BrainstormThemeDetailsPane } from './brainstorm/step/themeDetailsPane.j
 import { BrainstormThemeDetailsInput } from './brainstorm/step/themeDetailsInput.js';
 import { BrainstormPresentationPane } from './brainstorm/step/presentationPane.js';
 import { BrainstormPresentationInput } from './brainstorm/step/presentationInput.js';
+import { BrainstormIntentConfirmPane } from './brainstorm/step/intentConfirmPane.js';
+import { BrainstormIntentConfirmInput } from './brainstorm/step/intentConfirmInput.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(BrainstormIdeasPane, BrainstormIdeasPane.ID, 'Brainstorm: Ideas'),
 	[new SyncDescriptor(BrainstormIdeasInput)],
@@ -127,6 +129,10 @@ editorPaneRegistry.registerEditorPane(
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(BrainstormPresentationPane, BrainstormPresentationPane.ID, 'Brainstorm: Final'),
 	[new SyncDescriptor(BrainstormPresentationInput)],
+);
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(BrainstormIntentConfirmPane, BrainstormIntentConfirmPane.ID, 'Brainstorm: Confirm intent'),
+	[new SyncDescriptor(BrainstormIntentConfirmInput)],
 );
 
 // Model Providers EditorPane + palette command + NOT_CONFIGURED auto-open
