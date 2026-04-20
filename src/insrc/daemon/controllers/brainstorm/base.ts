@@ -32,7 +32,8 @@ import type {
   Task, TaskResult, TaskStateStore, TaskFormat, GateTab, GateTabItem,
 } from '../../task.js';
 import type { BrainstormState } from '../../../agent/tasks/brainstorm/agent-state.js';
-import type { EntityIndex, Idea, IdeaSource } from '../../../agent/tasks/brainstorm/types.js';
+import type { EntityIndex, Idea, IdeaFeedback, IdeaSource } from '../../../agent/tasks/brainstorm/types.js';
+import { REJECT_FEEDBACK_TEMPLATE } from '../../../agent/tasks/brainstorm/types.js';
 
 // Category types
 import type { BrainstormCategory } from './types.js';
@@ -202,6 +203,37 @@ export abstract class BrainstormControllerBase implements TaskController {
    * next enhance-search recomputes it).
    */
   private _entityIndex: EntityIndex = {};
+
+  /**
+   * Record a feedback entry on an idea. Only reject / diverge / discuss
+   * actions record feedback. Empty feedback on non-reject actions is a
+   * no-op; empty feedback on reject is substituted with
+   * REJECT_FEEDBACK_TEMPLATE and marked templated so the LLM can
+   * distinguish "no reason given" from a real rejection reason.
+   */
+  private pushFeedback(
+    idea: Idea,
+    action: IdeaFeedback['action'],
+    rawReason: string | undefined,
+  ): void {
+    let reason = (rawReason ?? '').trim();
+    let templated = false;
+    if (!reason) {
+      if (action !== 'reject') {
+        return;
+      }
+      reason = REJECT_FEEDBACK_TEMPLATE;
+      templated = true;
+    }
+    if (!idea.feedback) { idea.feedback = []; }
+    idea.feedback.push({
+      action,
+      reason,
+      templated,
+      round: this.state.round,
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   buildInitialTasks(input: ControllerInput): Task[] {
     this.state = initState(input, this.getDocPrefix());
@@ -377,8 +409,16 @@ export abstract class BrainstormControllerBase implements TaskController {
   /**
    * Start the next ideation round. On round > 1, searches the vector store
    * first to enrich code context with terms from user feedback/ideas.
+   *
+   * Resets every retained idea's `feedback[]` to empty -- per-round
+   * feedback only influences the round it was collected in, so subsequent
+   * rounds don't drown the LLM in stale signal. Historical feedback
+   * remains captured in `state.qna` for audit.
    */
   private startIdeationRound(): Task[] {
+    for (const i of this.state.ideas) {
+      i.feedback = [];
+    }
     if (this.state.round > 1) {
       this.state.lastStep = 'search-context';
       return [this.buildSearchContextTask()];
@@ -670,6 +710,14 @@ export abstract class BrainstormControllerBase implements TaskController {
     if (gateReply.action === 'diverge') {
       // Remove rejected ideas, build feedback, start new round
       const rejected = this.state.ideas.filter(i => i.status === 'rejected');
+      // Per decision B: each rejected idea in the bulk-diverge flow
+      // gets a templated reject feedback entry so the next-round LLM
+      // still sees "user rejected this" signal without a concrete reason.
+      for (const r of rejected) {
+        if (!(r.feedback ?? []).some(f => f.action === 'reject')) {
+          this.pushFeedback(r, 'reject', undefined);
+        }
+      }
       const feedbackParts: string[] = [];
       if (rejected.length > 0) {
         feedbackParts.push(`User rejected ${rejected.length} idea(s): ${rejected.map(i => `[${i.index}] ${i.title.slice(0, 60)}`).join('; ')}`);
@@ -817,6 +865,7 @@ export abstract class BrainstormControllerBase implements TaskController {
 
       case 'reject':
         idea.status = 'rejected';
+        this.pushFeedback(idea, 'reject', gateReply.feedback);
         recordQnA(this.state, 'idea-review', 'user',
           `Review idea ${ideaLabel}`,
           `Rejected: ${gateReply.feedback || 'No reason given'}`);
@@ -841,6 +890,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         // Generate variations of this idea — add to end of queue
         this.state.recentFeedback = gateReply.feedback || `Diverge on: ${idea.title}`;
         idea.status = 'accepted'; // Keep the original
+        this.pushFeedback(idea, 'diverge', gateReply.feedback);
         recordQnA(this.state, 'idea-review', 'user',
           `Review idea ${ideaLabel}`,
           `Diverge: generate variations. ${gateReply.feedback || ''}`.trim());
@@ -871,6 +921,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         this.state.focusedIdeaId = idea.id;
         this.state.discussionMessages = [];
         if (gateReply.feedback) {
+          this.pushFeedback(idea, 'discuss', gateReply.feedback);
           this.state.discussionMessages.push({
             role: 'user',
             content: gateReply.feedback,
@@ -997,6 +1048,7 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     if (gateReply.action === 'reject') {
       idea.status = 'rejected';
+      this.pushFeedback(idea, 'reject', gateReply.feedback);
       recordQnA(this.state, 'idea-discuss', 'user',
         `Discussion on [${idea.index}] ${idea.title}`,
         `Rejected: ${gateReply.feedback || 'after discussion'}`);
@@ -1008,6 +1060,9 @@ export abstract class BrainstormControllerBase implements TaskController {
     if (gateReply.action === 'respond' || gateReply.action === 'refine') {
       const userMsg = gateReply.feedback ?? '';
       if (!userMsg) return [this.buildIdeaDiscussGate()];
+      // Per decision D1: every user utterance during discussion becomes
+      // its own feedback entry.
+      this.pushFeedback(idea, 'discuss', userMsg);
 
       this.addDiscussionMessage('user', userMsg);
       recordQnA(this.state, 'idea-discuss', 'user',
@@ -1614,6 +1669,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         status: 'proposed',
         source: 'user',
         reviewVerdict: 'user',
+        feedback: [],
       });
     }
 
@@ -1742,6 +1798,21 @@ export abstract class BrainstormControllerBase implements TaskController {
         .map(t => `### ${t.name}\n${t.prompt}`)
         .join('\n\n');
       userMessage += `\n\n## Techniques to Apply\n${techniqueBlock}`;
+    }
+
+    // Synthesize a block of per-idea feedback from the current round so the
+    // LLM knows what the user liked, rejected, or diverged on. Only current-
+    // round feedback is included (decision E: reset per round); historical
+    // feedback lives in state.qna for audit only.
+    const withFeedback = this.state.ideas.filter(i => (i.feedback ?? []).length > 0);
+    if (withFeedback.length > 0) {
+      const block = withFeedback.map(i => {
+        const bullets = (i.feedback ?? [])
+          .map(f => `    ${f.action}: ${f.reason}${f.templated ? ' (default)' : ''}`)
+          .join('\n');
+        return `- [${i.index}] "${i.title}"\n${bullets}`;
+      }).join('\n');
+      userMessage += `\n\n## Prior Feedback on Earlier Ideas\n${block}`;
     }
 
     if (this.state.recentFeedback) {

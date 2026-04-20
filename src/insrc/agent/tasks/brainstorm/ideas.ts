@@ -196,6 +196,7 @@ export function parseIdeaList(
       round,
       tags,
       references,
+      feedback: [],
     });
 
     currentIndex++;
@@ -349,6 +350,7 @@ export function applyIdeaSelections(
       round,
       tags: [],
       references: [],
+      feedback: [],
     });
     idx++;
   }

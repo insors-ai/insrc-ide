@@ -53,6 +53,30 @@ export interface IdeaRef {
  */
 export type EntityIndex = Record<string, { path: string; line?: number }>;
 
+/**
+ * Template reason used when the user rejects an idea without typing any
+ * feedback. Present in the idea's feedback[] array with templated=true so
+ * the LLM (and future UI) can tell a default-template rejection from one
+ * that carries a real reason.
+ */
+export const REJECT_FEEDBACK_TEMPLATE = 'Rejected without a stated reason.';
+
+/** A single piece of user feedback left on an idea during review. */
+export interface IdeaFeedback {
+  /** Which user action produced this feedback. Only reject / diverge /
+   *  discuss record feedback -- approve / park / skip never do. */
+  action: 'reject' | 'diverge' | 'discuss';
+  /** User-supplied reason, or the template string when user gave none. */
+  reason: string;
+  /** True when `reason` is the default template. Only ever set for the
+   *  reject action with empty user input. */
+  templated: boolean;
+  /** Round this feedback was given in. */
+  round: number;
+  /** ISO 8601 timestamp. */
+  timestamp: string;
+}
+
 /** A single idea in the brainstorming pool. */
 export interface Idea {
   id: string;
@@ -78,6 +102,11 @@ export interface Idea {
   reviewRationale?: string | undefined;
   /** User comment left during idea review gate. */
   userComment?: string | undefined;
+  /** Feedback entries captured this round. Reset at the start of each new
+   *  ideation round; historical feedback remains in state.qna for audit.
+   *  Optional for backwards-compat with older checkpoints that predate the
+   *  field -- readers should treat a missing array as []. */
+  feedback?: IdeaFeedback[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
