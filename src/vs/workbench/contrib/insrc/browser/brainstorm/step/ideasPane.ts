@@ -16,6 +16,7 @@ import { IThemeService } from '../../../../../../platform/theme/common/themeServ
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { IEditorOptions } from '../../../../../../platform/editor/common/editor.js';
 import { IInstantiationService } from '../../../../../../platform/instantiation/common/instantiation.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import { IInsrcDaemonService } from '../../../common/daemonService.js';
 import {
@@ -54,11 +55,14 @@ export class BrainstormIdeasPane extends EditorPane {
 		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService private readonly sessionService: IInsrcBrainstormSessionService,
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
+		@ILogService private readonly logService: ILogService,
 	) {
 		super(BrainstormIdeasPane.ID, group, telemetryService, themeService, storageService);
+		this.logService.info('[brainstorm:pane:idea] constructed');
 	}
 
 	protected createEditor(parent: HTMLElement): void {
+		this.logService.info('[brainstorm:pane:idea] createEditor');
 		this._container = dom.append(parent, dom.$('.insrc-brainstorm'));
 
 		// Header
@@ -94,6 +98,7 @@ export class BrainstormIdeasPane extends EditorPane {
 		// to something non-ideation are handled by the flow contribution, which
 		// will swap us out for a different pane.
 		this._register(this.sessionService.onDidChangeActiveGate(gate => {
+			this.logService.info(`[brainstorm:pane:idea] onDidChangeActiveGate kind=${gate.kind} matches=${gate.kind === 'idea'}`);
 			if (gate.kind === 'idea') {
 				this._render(gate);
 			}
@@ -121,8 +126,10 @@ export class BrainstormIdeasPane extends EditorPane {
 	}
 
 	override async setInput(input: BrainstormIdeasInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this.logService.info(`[brainstorm:pane:idea] setInput sessionId=${input.sessionId}`);
 		await super.setInput(input, options, context, token);
 		const gate = this.sessionService.activeGate;
+		this.logService.info(`[brainstorm:pane:idea] setInput: activeGate kind=${gate?.kind ?? '(none)'} -- ${gate?.kind === 'idea' ? 'will render' : 'waiting'}`);
 		if (gate && gate.kind === 'idea') {
 			this._render(gate);
 		}
@@ -141,9 +148,11 @@ export class BrainstormIdeasPane extends EditorPane {
 
 	private _render(gate: BrainstormGateSnapshot): void {
 		const idea = gate.item as BrainstormIdea | undefined;
+		this.logService.info(`[brainstorm:pane:idea] _render gateId=${gate.gateId} ideaId=${idea?.id?.slice(0, 8) ?? '(none)'} title="${(idea?.title ?? '').slice(0, 60)}" actions=[${gate.actions.join(',')}]`);
 		if (!idea || !idea.title) {
 			// Gate arrived without an idea payload -- surface a neutral state
 			// rather than crashing the pane.
+			this.logService.warn('[brainstorm:pane:idea] _render aborted: idea payload missing');
 			this._emptyState.textContent = 'Idea payload missing.';
 			this._emptyState.classList.remove('hidden');
 			return;
@@ -172,13 +181,18 @@ export class BrainstormIdeasPane extends EditorPane {
 			},
 			gate.actions.slice(),
 			(action, feedback) => {
-				this.chatService.replyToGate(gate.gateId, action, feedback);
+				this.logService.info(`[brainstorm:pane:idea] dispatch action=${action} feedbackLen=${feedback?.length ?? 0} gateId=${gate.gateId}`);
+				this.chatService.replyToGate(gate.gateId, action, feedback).then(
+					() => this.logService.info(`[brainstorm:pane:idea] replyToGate resolved action=${action}`),
+					err => this.logService.error(`[brainstorm:pane:idea] replyToGate failed action=${action}: ${(err as Error).message}`),
+				);
 				// `approve`/`reject` consume the slot, so when the user decides
 				// the last pending idea we've finished ideation and should give
 				// them a clear "hand-off" state rather than leaving the now-stale
 				// card visible while the backend computes themes. `skip`/`park`
 				// re-queue the idea, so they don't count as finishing.
 				if (this._wasFinalDecision(gate, action)) {
+					this.logService.info('[brainstorm:pane:idea] final decision detected, showing completion state');
 					this._showCompletionState(gate, action);
 				}
 			},

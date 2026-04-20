@@ -8,6 +8,7 @@ import { ITelemetryService } from '../../../../../../platform/telemetry/common/t
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { IInstantiationService } from '../../../../../../platform/instantiation/common/instantiation.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -40,8 +41,9 @@ export class BrainstormIdeaChatPane extends BrainstormPaneBase {
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IInsrcChatService chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
+		@ILogService logService: ILogService,
 	) {
-		super(BrainstormIdeaChatPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService);
+		super(BrainstormIdeaChatPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService, logService);
 	}
 
 	protected override get _paneTitle(): string { return 'Discussion'; }
@@ -49,13 +51,16 @@ export class BrainstormIdeaChatPane extends BrainstormPaneBase {
 
 	protected override _renderGate(gate: BrainstormGateSnapshot): void {
 		const idea = gate.item as BrainstormIdea | undefined;
+		this.logService.info(`[brainstorm:pane:idea-discussion] _renderGate gateId=${gate.gateId} ideaId=${idea?.id?.slice(0, 8) ?? '(none)'} extraKeys=[${Object.keys(gate.extra ?? {}).join(',')}]`);
 		if (!idea || !idea.title) {
+			this.logService.warn('[brainstorm:pane:idea-discussion] _renderGate aborted: idea payload missing');
 			this._emptyState.textContent = 'Discussion gate missing idea payload.';
 			this._emptyState.classList.remove('hidden');
 			return;
 		}
 
 		const messages = this._parseMessages(gate.extra?.['messages']);
+		this.logService.info(`[brainstorm:pane:idea-discussion] parsed messages count=${messages.length}`);
 
 		if (this._cardWidget) {
 			this._cardWidget.dispose();
@@ -77,7 +82,13 @@ export class BrainstormIdeaChatPane extends BrainstormPaneBase {
 				messages,
 			},
 			gate.actions.slice(),
-			(action, feedback) => { this.chatService.replyToGate(gate.gateId, action, feedback); },
+			(action, feedback) => {
+				this.logService.info(`[brainstorm:pane:idea-discussion] dispatch action=${action} feedbackLen=${feedback?.length ?? 0} gateId=${gate.gateId}`);
+				this.chatService.replyToGate(gate.gateId, action, feedback).then(
+					() => this.logService.info(`[brainstorm:pane:idea-discussion] replyToGate resolved action=${action}`),
+					err => this.logService.error(`[brainstorm:pane:idea-discussion] replyToGate failed action=${action}: ${(err as Error).message}`),
+				);
+			},
 		);
 	}
 

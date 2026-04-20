@@ -5,6 +5,7 @@
 
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcChatService, type ChatEvent } from '../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -71,10 +72,12 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 
 	constructor(
 		@IInsrcChatService chatService: IInsrcChatService,
+		@ILogService private readonly logService: ILogService,
 	) {
 		super();
 
 		this._sessionId = chatService.activeSessionId;
+		this.logService.info(`[brainstorm:session] init sessionId=${this._sessionId ?? '(none)'}`);
 		this._register(chatService.onDidChangeSession(id => this._onSessionChange(id)));
 		this._register(chatService.onDidReceiveEvent(event => this._onChatEvent(event)));
 	}
@@ -95,6 +98,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 
 	private _onSessionChange(id: string | undefined): void {
 		if (id === this._sessionId) { return; }
+		this.logService.info(`[brainstorm:session] session changed ${this._sessionId ?? '(none)'} -> ${id ?? '(none)'}`);
 		this._sessionId = id;
 		this._resetSession();
 	}
@@ -156,8 +160,17 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 		this._phase = phase;
 		this._activeGate = snapshot;
 
+		this.logService.info(
+			`[brainstorm:session] gate received kind=${kind} phase=${phase} gateId=${gate.gateId} `
+			+ `itemId=${itemId ?? '-'} actions=[${snapshot.actions.join(',')}] `
+			+ `extras=[${Object.keys(extra).join(',')}] sessionActive=${this._isSessionActive}`
+		);
+
 		this._onDidChangeActiveGate.fire(snapshot);
-		if (phaseChanged) { this._onDidChangePhase.fire(phase); }
+		if (phaseChanged) {
+			this.logService.info(`[brainstorm:session] phase changed -> ${phase}`);
+			this._onDidChangePhase.fire(phase);
+		}
 		this._onDidChange.fire();
 	}
 
@@ -193,6 +206,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	}
 
 	private _ingestProgress(step: string): void {
+		this.logService.info(`[brainstorm:session] progress step="${step}"`);
 		// "Intent: brainstorm/<category>" -- the classifier committed; treat
 		// the whole turn as brainstorm from here on, even before any gate
 		// shows up. This is the earliest moment we can lock the chat panel.
@@ -200,6 +214,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 		if (bsMatch) {
 			this._category = bsMatch[1]!;
 			this._isSessionActive = true;
+			this.logService.info(`[brainstorm:session] activated -- category=${this._category}`);
 			this._onDidChange.fire();
 			return;
 		}
@@ -207,6 +222,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 		const otherMatch = step.match(/^Intent:\s*(\w+)(?:\/|$)/);
 		if (otherMatch && otherMatch[1] !== 'brainstorm' && this._isSessionActive) {
 			this._isSessionActive = false;
+			this.logService.info(`[brainstorm:session] deactivated by intent=${otherMatch[1]}`);
 			this._onDidChange.fire();
 		}
 	}
@@ -216,17 +232,17 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	// ---------------------------------------------------------------------------
 
 	private _upsertIdea(idea: BrainstormIdea): void {
-		if (!this._ideasById.has(idea.id)) {
-			this._ideasOrder.push(idea.id);
-		}
+		const op = this._ideasById.has(idea.id) ? 'update' : 'insert';
+		if (op === 'insert') { this._ideasOrder.push(idea.id); }
 		this._ideasById.set(idea.id, idea);
+		this.logService.info(`[brainstorm:session] idea ${op} id=${idea.id.slice(0, 8)} idx=${idea.index} status=${idea.status} title="${idea.title.slice(0, 60)}"`);
 	}
 
 	private _upsertTheme(theme: BrainstormTheme): void {
-		if (!this._themesById.has(theme.id)) {
-			this._themesOrder.push(theme.id);
-		}
+		const op = this._themesById.has(theme.id) ? 'update' : 'insert';
+		if (op === 'insert') { this._themesOrder.push(theme.id); }
 		this._themesById.set(theme.id, theme);
+		this.logService.info(`[brainstorm:session] theme ${op} id=${theme.id.slice(0, 8)} name="${theme.name}" ideaCount=${theme.ideaIds.length}`);
 	}
 
 	private _upsertSpecSection(section: BrainstormSpecSection): void {
@@ -244,6 +260,7 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	}
 
 	private _resetSession(): void {
+		this.logService.info('[brainstorm:session] reset');
 		this._category = undefined;
 		this._phase = 'waiting';
 		this._isSessionActive = false;

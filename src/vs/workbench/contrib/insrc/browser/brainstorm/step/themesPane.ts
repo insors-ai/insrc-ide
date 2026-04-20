@@ -8,6 +8,7 @@ import type { IEditorGroup } from '../../../../../services/editor/common/editorG
 import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -34,14 +35,16 @@ export class BrainstormThemesPane extends BrainstormPaneBase {
 		@IStorageService storageService: IStorageService,
 		@IInsrcChatService chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
+		@ILogService logService: ILogService,
 	) {
-		super(BrainstormThemesPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService);
+		super(BrainstormThemesPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService, logService);
 	}
 
 	protected override get _paneTitle(): string { return 'Themes'; }
 	protected override get _gateKind(): BrainstormGateKind { return 'convergence-review'; }
 
 	protected override _renderGate(gate: BrainstormGateSnapshot): void {
+		this.logService.info(`[brainstorm:pane:convergence-review] _renderGate gateId=${gate.gateId} actions=[${gate.actions.join(',')}]`);
 		this._currentGateId = gate.gateId;
 		dom.clearNode(this._cardArea);
 
@@ -117,7 +120,11 @@ export class BrainstormThemesPane extends BrainstormPaneBase {
 
 	private _dispatch(action: string, feedback: string | undefined): void {
 		if (!this._currentGateId) { return; }
-		this.chatService.replyToGate(this._currentGateId, action, feedback);
+		this.logService.info(`[brainstorm:pane:convergence-review] _dispatch action=${action} feedbackLen=${feedback?.length ?? 0} gateId=${this._currentGateId}`);
+		this.chatService.replyToGate(this._currentGateId, action, feedback).then(
+			() => this.logService.info(`[brainstorm:pane:convergence-review] replyToGate resolved action=${action}`),
+			err => this.logService.error(`[brainstorm:pane:convergence-review] replyToGate failed action=${action}: ${(err as Error).message}`),
+		);
 		dom.clearNode(this._cardArea);
 		const waiting = dom.append(this._cardArea, dom.$('.insrc-brainstorm-submitting'));
 		const msg = dom.append(waiting, dom.$('span'));

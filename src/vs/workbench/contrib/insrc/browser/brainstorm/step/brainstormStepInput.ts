@@ -8,6 +8,7 @@ import { URI } from '../../../../../../base/common/uri.js';
 import { Codicon } from '../../../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../../../base/common/themables.js';
 import { IDialogService, ConfirmResult } from '../../../../../../platform/dialogs/common/dialogs.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../../common/brainstormSessionService.js';
 
@@ -28,8 +29,10 @@ export abstract class BrainstormStepInputBase extends EditorInput {
 		@IDialogService private readonly _dialogService: IDialogService,
 		@IInsrcChatService private readonly _chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService private readonly _sessionService: IInsrcBrainstormSessionService,
+		@ILogService private readonly _logService: ILogService,
 	) {
 		super();
+		this._logService.info(`[brainstorm:input] constructed sessionId=${sessionId}`);
 	}
 
 	abstract override get typeId(): string;
@@ -55,8 +58,13 @@ export abstract class BrainstormStepInputBase extends EditorInput {
 	override readonly closeHandler: IEditorCloseHandler = {
 		// Only prompt while the session is actually live; after the user has
 		// already terminated / completed the brainstorm, closing is benign.
-		showConfirm: () => this._sessionService.isSessionActive,
+		showConfirm: () => {
+			const active = this._sessionService.isSessionActive;
+			this._logService.info(`[brainstorm:input] closeHandler.showConfirm sessionActive=${active}`);
+			return active;
+		},
 		confirm: async () => {
+			this._logService.info(`[brainstorm:input] closeHandler.confirm sessionId=${this.sessionId}`);
 			const { confirmed } = await this._dialogService.confirm({
 				type: 'warning',
 				message: 'Close brainstorm and end the session?',
@@ -66,16 +74,16 @@ export abstract class BrainstormStepInputBase extends EditorInput {
 				primaryButton: 'End Session',
 				cancelButton: 'Keep Open',
 			});
+			this._logService.info(`[brainstorm:input] closeHandler.confirm result confirmed=${confirmed}`);
 			if (!confirmed) {
 				return ConfirmResult.CANCEL;
 			}
 			try {
 				await this._chatService.cancelStream();
 				await this._chatService.closeSession();
-			} catch {
-				// If the daemon is already gone we still want the pane to
-				// close; the close handler path can't meaningfully recover
-				// here, and vetoing would strand the user on a dead pane.
+				this._logService.info('[brainstorm:input] closeHandler cancelled stream + closed session');
+			} catch (err) {
+				this._logService.warn(`[brainstorm:input] closeHandler cleanup failed (non-fatal): ${(err as Error).message}`);
 			}
 			return ConfirmResult.DONT_SAVE;
 		},

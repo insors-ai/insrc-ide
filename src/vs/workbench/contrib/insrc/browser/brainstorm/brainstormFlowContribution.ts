@@ -46,9 +46,11 @@ export class BrainstormFlowContribution extends Disposable {
 
 	private _route(gate: BrainstormGateSnapshot): void {
 		const sessionId = this.chatService.activeSessionId ?? 'brainstorm';
+		this.logService.info(`[brainstorm:flow] route kind=${gate.kind} sessionId=${sessionId} lastOpenedKey=${this._lastOpenedKey ?? '(none)'}`);
+
 		const input = this._inputFor(gate.kind, sessionId);
 		if (!input) {
-			this.logService.warn(`[insrc-brainstorm] unknown gate kind "${gate.kind}" (gateId=${gate.gateId}); ignoring`);
+			this.logService.warn(`[brainstorm:flow] unknown gate kind "${gate.kind}" (gateId=${gate.gateId}); ignoring`);
 			return;
 		}
 
@@ -56,10 +58,17 @@ export class BrainstormFlowContribution extends Disposable {
 		// editors when the KIND changes. Same-kind gate updates are picked up
 		// by the pane listening to onDidChangeActiveGate directly.
 		const key = `${input.typeId}:${sessionId}`;
-		if (key === this._lastOpenedKey) { return; }
+		if (key === this._lastOpenedKey) {
+			this.logService.info(`[brainstorm:flow] same pane already open, skipping editorService.openEditor`);
+			return;
+		}
+		this.logService.info(`[brainstorm:flow] opening editor input=${input.typeId}`);
 		this._lastOpenedKey = key;
 
-		this.editorService.openEditor(input);
+		this.editorService.openEditor(input).then(
+			ed => this.logService.info(`[brainstorm:flow] openEditor resolved editor=${ed?.getId?.() ?? '(none)'}`),
+			err => this.logService.error(`[brainstorm:flow] openEditor failed: ${(err as Error).message}`),
+		);
 	}
 
 	private _inputFor(kind: BrainstormGateKind, sessionId: string): EditorInput | undefined {

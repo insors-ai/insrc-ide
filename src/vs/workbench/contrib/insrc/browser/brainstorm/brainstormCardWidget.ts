@@ -8,6 +8,7 @@ import { Codicon } from '../../../../../base/common/codicons.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
 import { URI } from '../../../../../base/common/uri.js';
 
 interface IdeaRef {
@@ -79,9 +80,11 @@ export class BrainstormCardWidget extends Disposable {
 		actions: readonly string[],
 		private readonly onAction: (action: string, feedback: string | undefined) => void,
 		@IEditorService private readonly editorService: IEditorService,
+		@ILogService private readonly logService: ILogService,
 	) {
 		super();
 		this._actions = actions.slice();
+		this.logService.info(`[brainstorm:card] constructed id=${data.id.slice(0, 8)} title="${data.title.slice(0, 60)}" actions=[${actions.join(',')}] messages=${data.messages?.length ?? 0}`);
 
 		dom.clearNode(parent);
 		this._container = dom.append(parent, dom.$('.insrc-brainstorm-card'));
@@ -214,7 +217,11 @@ export class BrainstormCardWidget extends Disposable {
 				: this._actionLabel(action);
 			btn.title = this._actionTooltip(action);
 			this._register(dom.addDisposableListener(btn, 'click', () => {
-				if (this._dispatched) { return; }
+				if (this._dispatched) {
+					this.logService.info(`[brainstorm:card] click action=${action} IGNORED (already dispatched)`);
+					return;
+				}
+				this.logService.info(`[brainstorm:card] click action=${action} needsInput=${INPUT_REQUIRING_ACTIONS.has(action)}`);
 				if (INPUT_REQUIRING_ACTIONS.has(action)) {
 					this._showPromptPanel(action);
 				} else {
@@ -225,6 +232,7 @@ export class BrainstormCardWidget extends Disposable {
 	}
 
 	private _showPromptPanel(action: string): void {
+		this.logService.info(`[brainstorm:card] prompt panel opened action=${action}`);
 		dom.clearNode(this._actionContainer);
 
 		const panel = dom.append(this._actionContainer, dom.$('.insrc-brainstorm-prompt-panel'));
@@ -243,11 +251,18 @@ export class BrainstormCardWidget extends Disposable {
 		sendBtn.textContent = 'Send';
 
 		const submit = () => {
-			if (this._dispatched) { return; }
+			if (this._dispatched) {
+				this.logService.info(`[brainstorm:card] prompt submit action=${action} IGNORED (already dispatched)`);
+				return;
+			}
 			const text = textarea.value.trim();
+			this.logService.info(`[brainstorm:card] prompt submit action=${action} textLen=${text.length}`);
 			this._dispatch(action, text.length > 0 ? text : undefined);
 		};
-		const cancel = () => { this._renderActions(); };
+		const cancel = () => {
+			this.logService.info(`[brainstorm:card] prompt cancelled action=${action}`);
+			this._renderActions();
+		};
 
 		this._register(dom.addDisposableListener(cancelBtn, 'click', cancel));
 		this._register(dom.addDisposableListener(sendBtn, 'click', submit));
@@ -270,6 +285,7 @@ export class BrainstormCardWidget extends Disposable {
 	// ---------------------------------------------------------------------------
 
 	private _dispatch(action: string, feedback: string | undefined): void {
+		this.logService.info(`[brainstorm:card] _dispatch action=${action} feedbackLen=${feedback?.length ?? 0}`);
 		this._dispatched = true;
 		this._enterSubmittingState();
 		this.onAction(action, feedback);

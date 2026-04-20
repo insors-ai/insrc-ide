@@ -15,6 +15,7 @@ import { ITelemetryService } from '../../../../../../platform/telemetry/common/t
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { IEditorOptions } from '../../../../../../platform/editor/common/editor.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -45,9 +46,13 @@ export abstract class BrainstormPaneBase extends EditorPane {
 		storageService: IStorageService,
 		protected readonly chatService: IInsrcChatService,
 		protected readonly sessionService: IInsrcBrainstormSessionService,
+		protected readonly logService: ILogService,
 	) {
 		super(id, group, telemetryService, themeService, storageService);
+		this.logService.info(`[brainstorm:pane:${id}] constructed`);
 	}
+
+	private get _logTag(): string { return `brainstorm:pane:${this._gateKind}`; }
 
 	/** Short label shown in the header. */
 	protected abstract get _paneTitle(): string;
@@ -57,6 +62,7 @@ export abstract class BrainstormPaneBase extends EditorPane {
 	protected abstract _renderGate(gate: BrainstormGateSnapshot): void;
 
 	protected createEditor(parent: HTMLElement): void {
+		this.logService.info(`[${this._logTag}] createEditor`);
 		this._container = dom.append(parent, dom.$('.insrc-brainstorm'));
 
 		// Header
@@ -79,6 +85,7 @@ export abstract class BrainstormPaneBase extends EditorPane {
 		this._emptyState.textContent = `Waiting for ${this._paneTitle.toLowerCase()}...`;
 
 		this._register(this.sessionService.onDidChangeActiveGate(gate => {
+			this.logService.info(`[${this._logTag}] onDidChangeActiveGate kind=${gate.kind} matches=${gate.kind === this._gateKind}`);
 			if (gate.kind === this._gateKind) {
 				this._safeRender(gate);
 			}
@@ -94,8 +101,10 @@ export abstract class BrainstormPaneBase extends EditorPane {
 	protected _onCreate(_headerRight: HTMLElement): void { /* no-op */ }
 
 	override async setInput(input: BrainstormStepInputBase, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this.logService.info(`[${this._logTag}] setInput sessionId=${input.sessionId}`);
 		await super.setInput(input, options, context, token);
 		const gate = this.sessionService.activeGate;
+		this.logService.info(`[${this._logTag}] setInput: activeGate kind=${gate?.kind ?? '(none)'} -- will ${gate?.kind === this._gateKind ? 'render' : 'wait'}`);
 		if (gate && gate.kind === this._gateKind) {
 			this._safeRender(gate);
 		}
@@ -109,6 +118,7 @@ export abstract class BrainstormPaneBase extends EditorPane {
 	}
 
 	private _safeRender(gate: BrainstormGateSnapshot): void {
+		this.logService.info(`[${this._logTag}] _safeRender gateId=${gate.gateId} actions=[${gate.actions.join(',')}]`);
 		this._emptyState.classList.add('hidden');
 		this._renderProgress(gate);
 		this._renderGate(gate);

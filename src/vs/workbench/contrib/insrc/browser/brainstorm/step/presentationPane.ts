@@ -9,6 +9,7 @@ import { ITelemetryService } from '../../../../../../platform/telemetry/common/t
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { createTrustedTypesPolicy } from '../../../../../../base/browser/trustedTypes.js';
+import { ILogService } from '../../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -38,14 +39,16 @@ export class BrainstormPresentationPane extends BrainstormPaneBase {
 		@IStorageService storageService: IStorageService,
 		@IInsrcChatService chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
+		@ILogService logService: ILogService,
 	) {
-		super(BrainstormPresentationPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService);
+		super(BrainstormPresentationPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService, logService);
 	}
 
 	protected override get _paneTitle(): string { return 'Final'; }
 	protected override get _gateKind(): BrainstormGateKind { return 'presentation'; }
 
 	protected override _renderGate(gate: BrainstormGateSnapshot): void {
+		this.logService.info(`[brainstorm:pane:presentation] _renderGate gateId=${gate.gateId} actions=[${gate.actions.join(',')}]`);
 		this._currentGateId = gate.gateId;
 		dom.clearNode(this._cardArea);
 
@@ -120,6 +123,10 @@ export class BrainstormPresentationPane extends BrainstormPaneBase {
 
 	private _dispatch(action: string, feedback: string | undefined): void {
 		if (!this._currentGateId) { return; }
-		this.chatService.replyToGate(this._currentGateId, action, feedback);
+		this.logService.info(`[brainstorm:pane:presentation] _dispatch action=${action} feedbackLen=${feedback?.length ?? 0} gateId=${this._currentGateId}`);
+		this.chatService.replyToGate(this._currentGateId, action, feedback).then(
+			() => this.logService.info(`[brainstorm:pane:presentation] replyToGate resolved action=${action}`),
+			err => this.logService.error(`[brainstorm:pane:presentation] replyToGate failed action=${action}: ${(err as Error).message}`),
+		);
 	}
 }
