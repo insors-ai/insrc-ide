@@ -1,29 +1,27 @@
 # Brainstorm Idea Card UX
 
-Scope: the single-idea review card used by `IdeasPane` (and transitionally by
-the legacy `BrainstormEditorPane` for idea-discussion gates). This document
-covers the layout, the interaction model for each action, the per-action
-input flow, loading / submitting state, and the "add idea" entry point.
+Scope: the single-idea review card used by `IdeasPane` and `IdeaChatPane`.
+This document covers the layout, the interaction model for each action,
+the per-action input flow, loading / submitting state, and the "add idea"
+entry point.
 
 ## Problem
 
-The current card (`BrainstormCardWidget`) has three usability defects:
+`BrainstormCardWidget` had three usability defects:
 
-1. **Input-requiring actions do nothing on click.** `Diverge` and `Discuss`
+1. **Input-requiring actions did nothing on click.** `Diverge` and `Discuss`
    are emitted by the backend as actions with `needsInput: true`. The widget
-   wires them as single-shot `onAction(name, undefined)` -- the backend
-   receives an empty feedback and either falls through to a default prompt or
-   (in the `respond` case we removed earlier) silently consumes the action.
-   Users can't tell whether the click registered.
-2. **Free-text feedback breaks the flow.** A always-visible textarea + send
-   button below the card sends `action=discuss` with whatever the user typed.
-   That action opens a different gate kind (`idea-discussion`) which falls
-   back to the legacy pane. When the user eventually returns to the idea
-   review queue, the new card appears to ignore button clicks -- the prior
-   discussion flow leaves the user unable to proceed.
-3. **No way to add an idea.** The legacy pane had a `+ Add Idea` button; the
-   new `IdeasPane` dropped it during migration. Users can't contribute their
-   own ideas into the queue.
+   wired them as single-shot `onAction(name, undefined)` -- the backend
+   received empty feedback and either fell through to a default prompt or
+   silently consumed the action. Users couldn't tell whether the click
+   registered.
+2. **Free-text feedback broke the flow.** A always-visible textarea + send
+   button below the card sent `action=discuss` with whatever the user typed.
+   That action opens a different gate kind (`idea-discussion`) -- after the
+   discussion ended users couldn't proceed because the card appeared to
+   ignore button clicks.
+3. **No way to add an idea.** Users couldn't contribute their own ideas into
+   the review queue.
 
 ## Design goals
 
@@ -36,10 +34,9 @@ The current card (`BrainstormCardWidget`) has three usability defects:
 - **Feedback fatigue protection.** After any action dispatches, the card
   enters a dimmed "submitting" state until the backend acknowledges with a
   new gate. Prevents double-clicks and "did it work?" uncertainty.
-- **Keep the card widget reusable.** Both `IdeasPane` and the legacy pane
-  render through `BrainstormCardWidget`. The redesign stays inside that
-  widget; the legacy pane inherits the improvements for free during
-  migration.
+- **Shared widget across single-idea + discussion panes.** `IdeasPane` and
+  `IdeaChatPane` both render through `BrainstormCardWidget`, so the two
+  look and behave the same -- only the actions listed on the gate differ.
 
 ## Card layout
 
