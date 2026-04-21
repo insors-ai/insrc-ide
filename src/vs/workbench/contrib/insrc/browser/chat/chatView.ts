@@ -16,7 +16,7 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
-import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo } from '../../common/chatService.js';
+import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
@@ -61,6 +61,16 @@ function createSvg(
 	}
 	return svg;
 }
+
+/**
+ * Intents offered in the chat-panel intent-confirm gate's dropdown
+ * (Item 12). Matches the daemon's VALID_INTENTS in chat-handler.ts.
+ */
+const CHAT_GATE_INTENTS: readonly string[] = [
+	'implement', 'refactor', 'test', 'debug', 'review', 'document',
+	'research', 'code-analysis', 'plan', 'requirements', 'design',
+	'brainstorm', 'deploy', 'release', 'infra',
+];
 
 // Send / cancel stay on the original hand-rolled silhouettes (they read
 // well as solid paths at 16px). Attach / notepad use Heroicons v2
@@ -330,11 +340,18 @@ export class InsrcChatViewPane extends ViewPane {
 				// The session-active flag is the primary gate; the phase check is
 				// a belt-and-suspenders fallback in case a gate arrives before the
 				// session-active progress event (unlikely but cheap to cover).
-				if (this.brainstormSession.isSessionActive) {
+				//
+				// EXCEPTION (Item 12): the `intent-confirm` gate is intentionally
+				// rendered in the chat panel itself so the user can confirm /
+				// override the classified intent inline, without being thrown into
+				// a dedicated editor pane. The daemon tags it via
+				// `structured.itemType = 'intent-confirm'`.
+				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
+				const isIntentConfirm = gateCtx && gateCtx['itemType'] === 'intent-confirm';
+				if (this.brainstormSession.isSessionActive && !isIntentConfirm) {
 					break;
 				}
-				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
-				if (gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence' || gateCtx['phase'] === 'specify' || gateCtx['phase'] === 'finalize')) {
+				if (!isIntentConfirm && gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence' || gateCtx['phase'] === 'specify' || gateCtx['phase'] === 'finalize')) {
 					break;
 				}
 				this._renderGate(event.gate);
@@ -635,20 +652,84 @@ export class InsrcChatViewPane extends ViewPane {
 		const title = dom.append(card, dom.$('.insrc-chat-gate-title'));
 		title.textContent = gate.title || gate.prompt || 'Action required';
 
-		// If gate contains diff content, show it in the main editor
+		// If gate contains diff content, show it in the main editor.
 		const hasDiff = gate.content && (gate.content.includes('--- a/') || gate.content.includes('+++ b/') || gate.content.includes('@@ -'));
 		if (hasDiff) {
 			this._openDiffFromGate(gate);
+		} else if (gate.content) {
+			// Render non-diff markdown content (e.g. intent-confirm's
+			// confidence + reasoning block) as a preformatted body so the
+			// user has context beyond the bare action buttons.
+			const body = dom.append(card, dom.$('.insrc-chat-gate-body'));
+			body.textContent = gate.content;
 		}
 
+		// Build action bar. Prefer rich action metadata (labels, hints,
+		// needsInput) when available; fall back to bare action names.
+		const details: readonly GateActionDetail[] = gate.actionDetails && gate.actionDetails.length > 0
+			? gate.actionDetails
+			: gate.actions.map(name => ({ name, label: name }));
+
+		// For actions with needsInput=true, render an input field below the
+		// action row. On click, the button reads the field and passes it as
+		// feedback. For the intent-confirm gate's `use-intent` action we
+		// render a dropdown of known intents instead of a free-text field.
+		const inputRow = dom.append(card, dom.$('.insrc-chat-gate-input-row'));
+		inputRow.style.display = 'none';
+
+		const gateCtx = gate.context as Record<string, unknown> | undefined;
+		const isIntentConfirm = gateCtx && gateCtx['itemType'] === 'intent-confirm';
+
+		let activeInput: HTMLInputElement | HTMLSelectElement | undefined;
+		const openInput = (detail: GateActionDetail): void => {
+			clearNode(inputRow);
+			inputRow.style.display = '';
+
+			if (isIntentConfirm && detail.name === 'use-intent') {
+				const label = dom.append(inputRow, dom.$('.insrc-chat-gate-input-label'));
+				label.textContent = 'Use intent:';
+				const select = dom.append(inputRow, dom.$('select.insrc-chat-gate-select')) as HTMLSelectElement;
+				for (const intent of CHAT_GATE_INTENTS) {
+					const opt = dom.append(select, dom.$('option')) as HTMLOptionElement;
+					opt.value = intent;
+					opt.textContent = intent;
+				}
+				activeInput = select;
+				setTimeout(() => select.focus(), 0);
+			} else {
+				const input = dom.append(inputRow, dom.$('input.insrc-chat-gate-input')) as HTMLInputElement;
+				input.type = 'text';
+				input.placeholder = detail.hint ?? 'Enter input...';
+				activeInput = input;
+				setTimeout(() => input.focus(), 0);
+			}
+		};
+
 		const actions = dom.append(card, dom.$('.insrc-chat-gate-actions'));
-		for (let i = 0; i < gate.actions.length; i++) {
-			const action = gate.actions[i]!;
+		for (let i = 0; i < details.length; i++) {
+			const detail = details[i]!;
 			const btn = dom.append(actions, dom.$(`.insrc-chat-gate-btn${i === 0 ? '.primary' : ''}`)) as HTMLButtonElement;
-			btn.textContent = action;
+			btn.textContent = detail.label ?? detail.name;
+			if (detail.hint && !detail.needsInput) {
+				btn.title = detail.hint;
+			}
 			this._register(dom.addDisposableListener(btn, 'click', () => {
+				if (detail.needsInput) {
+					if (!activeInput || (inputRow.style.display === 'none')) {
+						// First click on a needsInput button opens the input
+						// field; user edits, then clicks the button again to
+						// submit.
+						openInput(detail);
+						btn.textContent = detail.label ? `${detail.label} (submit)` : `${detail.name} (submit)`;
+						return;
+					}
+					const value = activeInput.value.trim();
+					clearNode(this._gateContainer);
+					this.chatService.replyToGate(gate.gateId, detail.name, value || undefined);
+					return;
+				}
 				clearNode(this._gateContainer);
-				this.chatService.replyToGate(gate.gateId, action);
+				this.chatService.replyToGate(gate.gateId, detail.name);
 			}));
 		}
 

@@ -317,6 +317,8 @@ export interface TaskOrchestratorDeps {
   stateStore?: TaskStateStore | undefined;
   /** Drain injected user messages (from chat.inject RPC). */
   getInjectedMessages?: (() => string[]) | undefined;
+  /** Drain injected user-contributed ideas (from brainstorm.addIdea RPC). */
+  getInjectedIdeas?: (() => Array<{ title: string; body: string }>) | undefined;
 }
 
 interface ShellResult {
@@ -644,6 +646,16 @@ export async function runControlledPipeline(
       if (injected.length > 0) {
         const existing = stateStore.get<string[]>('injectedMessages') ?? [];
         stateStore.set('injectedMessages', [...existing, ...injected]);
+      }
+    }
+
+    // Drain injected user ideas (from brainstorm.addIdea RPC) so the
+    // controller can splice them into the ideation queue on its next tick.
+    if (deps.getInjectedIdeas) {
+      const ideas = deps.getInjectedIdeas();
+      if (ideas.length > 0) {
+        const existing = stateStore.get<Array<{ title: string; body: string }>>('injectedIdeas') ?? [];
+        stateStore.set('injectedIdeas', [...existing, ...ideas]);
       }
     }
 

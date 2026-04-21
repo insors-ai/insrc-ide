@@ -12,9 +12,27 @@ import type { IDisposable } from '../../../../base/common/lifecycle.js';
 // Stream message types (discriminated union)
 // ---------------------------------------------------------------------------
 
+/** Full action metadata as emitted by the daemon. */
+export interface DaemonGateAction {
+	readonly name: string;
+	readonly label?: string;
+	readonly hint?: string;
+	readonly needsInput?: boolean;
+}
+
 export type DaemonStreamMessage =
 	| { readonly type: 'delta'; readonly content: string }
-	| { readonly type: 'gate'; readonly gateId: string; readonly actions: string[]; readonly title: string; readonly content: string; readonly structured?: Record<string, unknown> }
+	| {
+		readonly type: 'gate';
+		readonly gateId: string;
+		/** Flat action names for backwards-compat. */
+		readonly actions: string[];
+		/** Rich action objects with labels + hints + needsInput flags. */
+		readonly actionDetails?: DaemonGateAction[];
+		readonly title: string;
+		readonly content: string;
+		readonly structured?: Record<string, unknown>;
+	}
 	| { readonly type: 'progress'; readonly step: string; readonly status: string }
 	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
 	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }

@@ -29,7 +29,10 @@ Related plans:
 | 8 | Intent-confirm gate vs. "Intent" progress pill confusion      | P2       | UI       | **DONE** (8a dedicated pane + 8c brainstorm default-on + 8d decomposer confidence threaded; 8b pill hold deferred) |
 | 9 | Idea card: references show but aren't clickable / navigable   | P1       | UI       | **DONE** (9a URL opener + 9b unresolved chip; 9c discussion pane refs verified via shared card widget) |
 | 10| Idea structure + prompts: title-only cards under-explain ideas| P1       | daemon+UI| **DONE** (rich prompt format w/ Title/Body/Rationale; parseIdeaList multi-line aware; Idea.summary/rationale added; card renders summary + reviewer notes + rationale) |
-| 11| Post-ideation flow (converge / themes / spec / presentation)   | P1       | daemon+UI| **partial** (warning strip now rendered by shared base for converge / theme-spec / presentation panes; full walk-through test still pending to surface remaining gaps) |
+| 11| Post-ideation flow (converge / themes / spec / presentation)   | P1       | daemon+UI| **partial** (warning strip now rendered by shared base; ideation end-to-end verified on 2026-04-21 through auto-converge; convergence-review gate bug surfaced -- see Item 13) |
+| 12| Intent-confirm should render inline in chat panel, not as its own pane | P1 | UI | **DONE** (flow contribution skips dedicated routing; chat-panel gate widget now renders body + labels + needsInput input / intent-dropdown; dedicated pane + input files deleted) |
+| 13| Convergence gate emitted with unknown itemType -- routing breaks silently | P0 | daemon | **DONE** (`buildValidateConvergenceTask` emits `structured { phase: 'convergence', itemType: 'convergence-review', item.themes }`; presentation gate also got a structured payload) |
+| 14| Add Idea form fails: daemon doesn't register `brainstorm.addIdea` RPC    | P1 | daemon | **DONE** (`injectedIdeas` queue on session; `brainstorm.addIdea` RPC; `getInjectedIdeas` threaded through `TaskOrchestratorDeps`; controller drains and splices into reviewQueue at currentReviewIndex+1 so next card is the user's idea) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -1347,6 +1350,246 @@ flow validation).
 Next test session: run a minimal brainstorm (3 seed ideas, approve
 all, force converge), step through every downstream pane, capture
 renderer + agent logs. Then file sub-issues per pane.
+
+### Update (2026-04-21 test run)
+
+Ideation end-to-end verified:
+
+- Rich-format titles rendering cleanly ("Context-Aware Assignment
+  Service with Selective Caching" rather than the old "-- smart-agen"
+  truncation).
+- Bug 0 confirmed: first-render of `IdeaChatPane` showed
+  `messages count=3` (user prompt + agent response + idea-update marker).
+- Item 2 splice confirmed: diverge on idx=6 -> next card was idx=7
+  variation, not an unrelated later idea.
+- Item 1 LLM sub-classifier returned `design` with reasoning on a
+  prompt that the keyword matcher would have bucketed to `general`.
+
+Blockers surfaced (tracked as items 12 + 13 below):
+
+- The intent-confirm dedicated pane took over the editor area for a
+  simple yes/no/override prompt -- user wants this inline in the chat
+  panel. See Item 12.
+- The first convergence gate (post-auto-converge) arrived with
+  `kind=unknown phase=waiting`, so the flow contribution dropped it:
+  `[brainstorm:flow] unknown gate kind "unknown" (gateId=ctrl-22-...);
+  ignoring`. The user never saw the convergence-review pane. See
+  Item 13 -- this is P0 because it silently breaks the rest of the
+  flow.
+
+---
+
+## 12. Intent-confirm should render inline in the chat panel (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"intent confirm should be in the chat
+panel itself rather than opening a new pane"*
+
+### Current behavior
+
+Item 8a shipped a dedicated `BrainstormIntentConfirmPane` that opens
+as its own editor when the intent-confirm gate arrives. From the
+2026-04-21 log trace:
+
+```
+00:18:44.813  gate received kind=intent-confirm phase=classify ...
+00:18:44.813  [brainstorm:flow] route kind=intent-confirm ...
+00:18:44.818  [brainstorm:pane:intent-confirm] createEditor
+00:18:44.822  [brainstorm:flow] openEditor resolved editor=insrc.brainstormIntentConfirmPane
+```
+
+This is heavier than the decision warrants -- Proceed / Use-different-intent /
+Cancel fits cleanly in a chat gate widget. Opening a full-pane editor for it:
+
+- moves the user away from the chat transcript they were just looking at
+- requires the flow contribution to then swap panes again when the idea gate arrives
+- leaks brainstorm-specific UI into non-brainstorm-looking territory for what is
+  ultimately a classify-step question
+
+### Fix direction
+
+**12a. Skip the dedicated pane; render `intent-confirm` as a gate in
+the chat panel.** The generic chat-panel gate widget already renders
+gates with buttons + optional text input. Two options for handing off:
+
+- **Option A (minimal):** remove `'intent-confirm'` from the
+  brainstorm flow contribution's routing map so the gate is left for
+  the generic chat widget to handle. Keep the sub-classification
+  setup the way Item 8c does (brainstorm default-on). Delete the
+  dedicated pane and input.
+
+- **Option B (keep pane as an option):** leave the pane registered
+  but don't open it on-arrival. Add a setting
+  `classifier.confirmIntentUI: 'chat' | 'pane'` (default `'chat'`).
+  The flow contribution consults the setting. Useful only if someone
+  explicitly wants the pane form; probably YAGNI.
+
+Recommend **Option A**. Item 8a turned out to be over-engineered for
+this user's workflow.
+
+**12b. Enhance the chat-panel gate widget with an intent dropdown on
+the `use-intent` action.** The existing chat-panel gate widget
+renders `needsInput: true` actions as a plain text field. For
+`use-intent` the daemon lists 15 valid intents; a free-text field
+gives the user no hints and risks typos. Make the chat-panel gate
+widget look for a `structured.item.choices: string[]` field on the
+gate and render a dropdown when present. The daemon adds
+`choices: VALID_INTENTS` to the `use-intent` action's structured
+payload.
+
+### Implementation
+
+1. Remove `case 'intent-confirm': ...` from
+   `brainstormFlowContribution._inputFor` so the kind falls through
+   to the generic chat gate.
+2. Delete `BrainstormIntentConfirmPane` + `BrainstormIntentConfirmInput`
+   + the editorPane registration in `insrc.contribution.ts`.
+3. (Optional, nice-to-have) daemon adds `choices: VALID_INTENTS` to
+   the `use-intent` gate action so the chat-panel widget can render a
+   dropdown.
+
+### Verification
+
+- Classify a brainstorm turn -> intent-confirm gate renders in the
+  chat panel (no new editor opens).
+- Proceed -> turn continues; Cancel -> turn aborts; Use-different-intent
+  -> re-classifies with the override.
+
+---
+
+## 13. Convergence gate emitted with unknown itemType -- routing breaks silently (P0)
+
+### Observation (2026-04-21 live test)
+
+After auto-converge triggered, the daemon ran
+`Clustering ideas into themes (round 1)...` ->
+`Evaluating promotions...` -> `Convergence Review (round 1)` and
+then emitted a gate the flow contribution couldn't route:
+
+```
+00:41:43.821  gate received kind=unknown phase=waiting gateId=ctrl-22-1776712303814 itemId=- actions=[approve,edit,diverge] extras=[] sessionActive=true
+00:41:43.821  [brainstorm:flow] route kind=unknown sessionId=...
+00:41:43.822  [warning] [brainstorm:flow] unknown gate kind "unknown" (gateId=ctrl-22-...); ignoring
+00:41:43.823  [brainstorm:session] phase changed -> waiting
+```
+
+The gate was dropped, no pane opened, the user was stranded on the
+ideas pane with no indication that the convergence step had even
+started. Phase rolled back to `waiting`. Session effectively dead.
+
+### Root cause (hypothesis)
+
+The daemon-side converge-review builder in
+[base.ts](../../src/insrc/daemon/controllers/brainstorm/base.ts) emits
+a gate without setting `structured.itemType = 'convergence-review'`
+(or sets an empty / wrong value). The browser's
+`classifyGate(itemType)` defaults to `'unknown'` and the flow
+contribution logs + ignores.
+
+Needs confirmation by reading the actual convergence-review
+gate-build code path + comparing to the `itemType: 'convergence-review'`
+string the browser-side `classifyGate` expects.
+
+Related: `phase=waiting` on the gate is also wrong -- for a
+convergence-review it should be `phase=convergence`. Likely the
+same bug (structured payload not populated).
+
+### Fix
+
+1. Find the daemon-side convergence-review gate emit and ensure the
+   task carries `structured = { phase: 'convergence', itemType:
+   'convergence-review', item: {...themeList...}, ... }`.
+2. Verify themes are populated on the gate (session service needs
+   `item.themes: Theme[]` to upsert during ingest -- see
+   `_applyGateItem kind === 'convergence-review'` branch).
+3. Add defensive logging: when the flow contribution drops a gate,
+   also log the `structured` payload keys so it's clear why
+   classifyGate picked 'unknown'.
+
+### Verification
+
+- Run brainstorm through to auto-converge -> convergence-review gate
+  arrives with `kind=convergence-review phase=convergence`.
+- Flow contribution opens `BrainstormThemesPane`.
+- Themes are visible in the pane (not just the raw gate content).
+
+### Severity
+
+**P0.** Every brainstorm session that auto-converges hits this
+immediately after ideation. Without a fix the entire post-ideation
+flow is unreachable from the UI.
+
+---
+
+## 14. Add Idea form fails: daemon doesn't register `brainstorm.addIdea` RPC (P1)
+
+### Observation (2026-04-21 live test)
+
+User clicked `+ Add Idea` on `BrainstormIdeasPane`, entered a title
+and body, submitted the form. The form rendered an error row:
+
+> Couldn't add idea: unknown method: brainstorm.addIdea
+
+Screenshot captured by user.
+
+### Root cause (confirmed)
+
+- [ideasPane.ts:367](../../src/vs/workbench/contrib/insrc/browser/brainstorm/step/ideasPane.ts#L367)
+  calls `this.daemonService.rpc('brainstorm.addIdea', { sessionId, title, body })`.
+- `grep brainstorm\. src/insrc/` returns zero RPC handlers registered
+  under that prefix. The daemon never registered a
+  `brainstorm.addIdea` handler.
+- Net: the form UI is live but the wire on the other end is cut.
+
+### Fix
+
+Daemon-side:
+
+1. Add a handler in `src/insrc/daemon/chat-handler.ts` (export
+   `brainstormAddIdea: RpcHandler`) that:
+   - Resolves the session by `sessionId`.
+   - Reaches the active brainstorm controller (if the controller is
+     not the active intent, reject).
+   - Pushes a synthetic user-contributed idea into `state.ideas`
+     with `source: 'user'`, `status: 'proposed'`, and appends to
+     `state.reviewQueue`.
+   - Writes a checkpoint (via the same persistence path already used
+     by the task pipeline).
+   - Returns `{ ok: true, ideaId: <new-id> }` so the UI can show a
+     success toast or close the form.
+
+2. Register in `src/insrc/daemon/index.ts` rpc map:
+   `'brainstorm.addIdea': brainstormAddIdea`.
+
+3. Scheme: the controller needs a method like
+   `injectUserIdea(title, body)` that inserts the idea without a
+   full ideation round. Today the closest path is a user-edit action
+   on an existing idea; we need a new code path that adds a brand-new
+   idea. Matches the UI contract the ideasPane already expects.
+
+### UI follow-up
+
+- On success: close the form and let the next gate tick pick up the
+  new idea. Alternatively, emit a progress event
+  `"Idea added: <title>"` and include the new idea in the session
+  service's `ideas` list immediately.
+- On failure (other than "unknown method"): keep the current amber
+  error row in the form. Clear it on next submit attempt.
+
+### Verification
+
+- With a brainstorm turn active, click `+ Add Idea`, fill the form,
+  submit.
+- Form closes without the amber error.
+- The new idea appears in the review queue; card shows it with
+  `source: user`.
+
+### Severity
+
+**P1.** The `+ Add Idea` button is a core user-contribution path.
+Broken since the clean-slate commit that added the button but didn't
+register the RPC.
 
 ---
 

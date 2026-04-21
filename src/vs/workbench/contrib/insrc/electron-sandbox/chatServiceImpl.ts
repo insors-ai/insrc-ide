@@ -448,6 +448,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 				const gate: GateInfo = {
 					gateId: msg.gateId,
 					actions: msg.actions,
+					...(msg.actionDetails ? { actionDetails: msg.actionDetails } : {}),
 					title: msg.title,
 					content: msg.content,
 					context: msg.structured,

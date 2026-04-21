@@ -17,9 +17,23 @@ export interface ChatMessage {
 	readonly provider?: string | undefined;
 }
 
+export interface GateActionDetail {
+	readonly name: string;
+	readonly label?: string | undefined;
+	readonly hint?: string | undefined;
+	readonly needsInput?: boolean | undefined;
+}
+
 export interface GateInfo {
 	readonly gateId: string;
 	readonly actions: string[];
+	/**
+	 * Rich action metadata (label, hint, needsInput) when the daemon
+	 * provided it. Chat-panel gate renderer uses this to show proper
+	 * button labels and optional text-input fields for `needsInput`
+	 * actions. Falls back to `actions` when absent.
+	 */
+	readonly actionDetails?: readonly GateActionDetail[] | undefined;
 	readonly title?: string | undefined;
 	readonly content?: string | undefined;
 	readonly prompt?: string | undefined;

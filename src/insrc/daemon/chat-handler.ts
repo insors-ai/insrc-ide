@@ -126,6 +126,32 @@ export const chatInject: RpcHandler = async (params) => {
 };
 
 /**
+ * `brainstorm.addIdea` RPC (Item 14). Pushes a user-contributed idea into
+ * the session's injection queue. The controller picks it up on its next
+ * tick and splices it into the review queue so the next card shown is
+ * the user's idea.
+ */
+export const brainstormAddIdea: RpcHandler = async (params) => {
+  const { sessionId, title, body } = params as {
+    sessionId: string;
+    title: string;
+    body?: string;
+  };
+  if (!title || title.trim().length === 0) return { error: 'title is required' };
+
+  const pool = getPool();
+  const session = pool.get(sessionId);
+  if (!session) return { error: 'session not found' };
+  if (!session.agentRunning) return { error: 'no brainstorm agent running for this session' };
+
+  pool.pushInjectedIdea(sessionId, {
+    title: title.trim(),
+    body: (body ?? '').trim(),
+  });
+  return { ok: true };
+};
+
+/**
  * Redirect a turn in-flight: cancels the current stream and records
  * the user's chosen intent so the client can immediately re-issue
  * `chat.send` with a `/intent` prefix (e.g. `/design <refined message>`).
@@ -767,6 +793,7 @@ async function runChatMessage(
       session, channel, send, requestId,
       historyMessages: historyMessages as LLMMessage[],
       getInjectedMessages: () => pool.popInjectedMessages(active.id),
+      getInjectedIdeas: () => pool.popInjectedIdeas(active.id),
     };
 
     const needsPostPrimary = postPrimaryActions !== undefined && hasPostPrimary(postPrimaryActions);

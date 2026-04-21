@@ -268,6 +268,39 @@ export abstract class BrainstormControllerBase implements TaskController {
       store.set('injectedMessages', []);
     }
 
+    // Consume user-contributed ideas (from brainstorm.addIdea RPC -- Item 14).
+    // Splice them into state.ideas AND into the review queue right after the
+    // current index, so the next card the user sees IS their own idea.
+    const injectedIdeas = store.get<Array<{ title: string; body: string }>>('injectedIdeas') ?? [];
+    if (injectedIdeas.length > 0) {
+      const newIds: string[] = [];
+      for (const raw of injectedIdeas) {
+        const body = (raw.body ?? '').trim();
+        const title = (raw.title ?? '').slice(0, 80).trim() || 'User idea';
+        const idea: Idea = {
+          id: randomBytes(16).toString('hex'),
+          index: this.state.nextIdeaIndex++,
+          title,
+          body: body || title,
+          ...(body ? { summary: body } : {}),
+          references: [],
+          tags: [],
+          round: this.state.round,
+          status: 'proposed',
+          source: 'user',
+          reviewVerdict: 'user',
+          feedback: [],
+        };
+        this.state.ideas.push(idea);
+        newIds.push(idea.id);
+        recordQnA(this.state, step, 'user', `Added idea: ${idea.title}`, '(queued for review)');
+      }
+      // Splice into reviewQueue so the next card shown is the user's idea.
+      const insertAt = Math.max(0, this.state.currentReviewIndex + 1);
+      this.state.reviewQueue.splice(insertAt, 0, ...newIds);
+      store.set('injectedIdeas', []);
+    }
+
     // Record QnA for gate replies (user input)
     if (gateReply) {
       const feedbackText = gateReply.feedback
@@ -2199,6 +2232,12 @@ export abstract class BrainstormControllerBase implements TaskController {
       gaps.length > 0 ? gaps.join('\n') : 'No gaps identified.',
     ].join('\n');
 
+    // Item 13: emit a structured payload so the browser's
+    // brainstormSessionService can classify this gate as
+    // `kind=convergence-review phase=convergence` instead of the
+    // default `kind=unknown phase=waiting`. Without this, the flow
+    // contribution drops the gate silently and the user is stranded
+    // on the ideas pane after auto-converge.
     return {
       index: this.taskCounter++,
       description: `Convergence Review (round ${this.state.round})`,
@@ -2214,6 +2253,25 @@ export abstract class BrainstormControllerBase implements TaskController {
       ],
       gateTabs: this.buildThemeTabs(),
       cyclic: { maxRounds: MAX_EDIT_ROUNDS, retryActions: ['edit'], skipActions: ['diverge'] },
+      structured: {
+        phase: 'convergence',
+        itemType: 'convergence-review',
+        item: {
+          themes: this.state.themes.map(t => ({
+            id: t.id,
+            ...(t.themeId !== undefined ? { themeId: t.themeId } : {}),
+            name: t.name,
+            description: t.description,
+            ideaIds: [...t.ideaIds],
+            status: 'proposed',
+            ...(t.priority !== undefined ? { priority: t.priority } : {}),
+            ...(t.userComment !== undefined ? { userComment: t.userComment } : {}),
+          })),
+          promotions: this.state.pendingPromotions.length,
+          merges: this.state.pendingMerges.length,
+          gaps,
+        },
+      },
       stateKey: 'convergenceGateOutput',
     };
   }
@@ -2419,6 +2477,14 @@ export abstract class BrainstormControllerBase implements TaskController {
           },
         },
       ],
+      structured: {
+        phase: 'finalize',
+        itemType: 'presentation',
+        item: {
+          assembledOutput: this.state.assembledOutput ?? '',
+          defaultSavePath: savePath,
+        },
+      },
       stateKey: 'presentationOutput',
     };
   }

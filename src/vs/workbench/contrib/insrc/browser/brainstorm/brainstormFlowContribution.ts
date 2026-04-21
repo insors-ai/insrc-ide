@@ -20,7 +20,6 @@ import { BrainstormIdeaListInput } from './step/ideaListInput.js';
 import { BrainstormThemesInput } from './step/themesInput.js';
 import { BrainstormThemeDetailsInput } from './step/themeDetailsInput.js';
 import { BrainstormPresentationInput } from './step/presentationInput.js';
-import { BrainstormIntentConfirmInput } from './step/intentConfirmInput.js';
 
 /**
  * Routes brainstorm gates to the matching per-step editor pane. Every
@@ -48,6 +47,13 @@ export class BrainstormFlowContribution extends Disposable {
 	private _route(gate: BrainstormGateSnapshot): void {
 		const sessionId = this.chatService.activeSessionId ?? 'brainstorm';
 		this.logService.info(`[brainstorm:flow] route kind=${gate.kind} sessionId=${sessionId} lastOpenedKey=${this._lastOpenedKey ?? '(none)'}`);
+
+		// intent-confirm is intentionally handled in the chat panel (Item 12).
+		// Don't warn -- just let it fall through to the chat-view gate renderer.
+		if (gate.kind === 'intent-confirm') {
+			this.logService.info(`[brainstorm:flow] intent-confirm routed to chat panel (gateId=${gate.gateId})`);
+			return;
+		}
 
 		const input = this._inputFor(gate.kind, sessionId);
 		if (!input) {
@@ -78,7 +84,10 @@ export class BrainstormFlowContribution extends Disposable {
 		// IInsrcBrainstormSessionService via DI.
 		switch (kind) {
 			case 'intent-confirm':
-				return this.instantiationService.createInstance(BrainstormIntentConfirmInput, sessionId);
+				// Intent-confirm is rendered inline in the chat panel (Item 12).
+				// Returning undefined here tells the flow contribution to skip
+				// opening a dedicated pane; the chat-view gate handler picks it up.
+				return undefined;
 			case 'idea':
 				return this.instantiationService.createInstance(BrainstormIdeasInput, sessionId);
 			case 'idea-list':

@@ -27,7 +27,7 @@ import { IndexerService } from '../indexer/index.js';
 import { IpcServer } from './server.js';
 import {
   initChatHandlers, disposeChatHandlers, reloadChatConfig,
-  chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore,
+  chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore, brainstormAddIdea,
   chatSend, chatResume,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
@@ -806,6 +806,7 @@ async function main(): Promise<void> {
     'chat.cancel': chatCancel,
     'chat.inject': chatInject,
     'chat.redirect': chatRedirect,
+    'brainstorm.addIdea': brainstormAddIdea,
     'chat.close':  chatClose,
     'chat.list':   chatList,
     'chat.status': chatStatus,

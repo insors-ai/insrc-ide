@@ -130,12 +130,32 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 				return { type: 'delta', content: String(data?.['text'] ?? data?.['content'] ?? '') };
 			case 'gate': {
 				const actions = data?.['actions'];
-				const actionNames = Array.isArray(actions) ? actions.map((a: unknown) => typeof a === 'string' ? a : (a as { name?: string })?.name ?? '') : [];
+				const actionNames: string[] = [];
+				const actionDetails: Array<{ name: string; label?: string; hint?: string; needsInput?: boolean }> = [];
+				if (Array.isArray(actions)) {
+					for (const a of actions) {
+						if (typeof a === 'string') {
+							actionNames.push(a);
+							actionDetails.push({ name: a });
+						} else if (a && typeof a === 'object') {
+							const o = a as Record<string, unknown>;
+							const name = typeof o['name'] === 'string' ? o['name'] as string : '';
+							if (!name) { continue; }
+							actionNames.push(name);
+							const entry: { name: string; label?: string; hint?: string; needsInput?: boolean } = { name };
+							if (typeof o['label'] === 'string') { entry.label = o['label'] as string; }
+							if (typeof o['hint'] === 'string') { entry.hint = o['hint'] as string; }
+							if (o['needsInput'] === true) { entry.needsInput = true; }
+							actionDetails.push(entry);
+						}
+					}
+				}
 				const structured = data?.['structured'] as Record<string, unknown> | undefined;
 				return {
 					type: 'gate',
 					gateId: String(data?.['gateId'] ?? ''),
 					actions: actionNames,
+					actionDetails,
 					title: String(data?.['title'] ?? ''),
 					content: String(data?.['content'] ?? ''),
 					...(structured ? { structured } : {}),

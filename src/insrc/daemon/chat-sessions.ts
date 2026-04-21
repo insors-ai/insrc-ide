@@ -25,6 +25,12 @@ const CLEANUP_INTERVAL_MS = 60 * 1000;  // check every minute
 // Types
 // ---------------------------------------------------------------------------
 
+/** User-contributed idea pushed via `brainstorm.addIdea` (Item 14). */
+export interface InjectedIdea {
+  title: string;
+  body: string;
+}
+
 export interface ActiveSession {
   id: string;
   session: Session;
@@ -36,6 +42,9 @@ export interface ActiveSession {
   lastActivityAt: number;
   /** Free-text messages injected by the user mid-pipeline (via chat.inject). */
   injectedMessages: string[];
+  /** User-contributed brainstorm ideas queued for insertion at the next
+   *  controller tick (via brainstorm.addIdea). */
+  injectedIdeas: InjectedIdea[];
   /** Per-session file cache for referenced files. */
   fileCache: SessionFileCache;
   /** Per-session PDF cache for extracted text. */
@@ -85,6 +94,7 @@ export class ChatSessionPool {
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       injectedMessages: [],
+      injectedIdeas: [],
       fileCache: new SessionFileCache(),
       pdfCache: new SessionPDFCache(),
     };
@@ -153,6 +163,7 @@ export class ChatSessionPool {
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       injectedMessages: [],
+      injectedIdeas: [],
       fileCache: new SessionFileCache(),
       pdfCache: new SessionPDFCache(),
     };
@@ -216,6 +227,21 @@ export class ChatSessionPool {
     const msgs = [...s.injectedMessages];
     s.injectedMessages = [];
     return msgs;
+  }
+
+  /** Queue a user-contributed idea for insertion at the next controller tick. */
+  pushInjectedIdea(sessionId: string, idea: InjectedIdea): void {
+    const s = this.sessions.get(sessionId);
+    if (s) s.injectedIdeas.push(idea);
+  }
+
+  /** Drain and return all queued injected ideas. */
+  popInjectedIdeas(sessionId: string): InjectedIdea[] {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.injectedIdeas.length === 0) return [];
+    const ideas = [...s.injectedIdeas];
+    s.injectedIdeas = [];
+    return ideas;
   }
 
   /**

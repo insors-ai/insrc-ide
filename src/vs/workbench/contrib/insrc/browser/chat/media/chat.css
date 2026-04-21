@@ -540,6 +540,48 @@
 	color: var(--vscode-textLink-foreground);
 }
 
+/* Body markdown content (e.g. intent-confirm's confidence + reasoning). */
+.insrc-chat-gate-body {
+	font-size: 12px;
+	color: var(--vscode-foreground);
+	white-space: pre-wrap;
+	margin: 4px 0 8px;
+	line-height: 1.4;
+}
+
+.insrc-chat-gate-input-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 8px;
+}
+
+.insrc-chat-gate-input-label {
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-chat-gate-input {
+	flex: 1;
+	padding: 4px 8px;
+	font-size: 12px;
+	border: 1px solid var(--vscode-input-border);
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border-radius: 3px;
+	font-family: inherit;
+}
+
+.insrc-chat-gate-select {
+	padding: 4px 8px;
+	font-size: 12px;
+	border: 1px solid var(--vscode-input-border);
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border-radius: 3px;
+	font-family: inherit;
+}
+
 .insrc-chat-gate-actions {
 	display: flex;
 	gap: 6px;
