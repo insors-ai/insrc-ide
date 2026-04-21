@@ -10,6 +10,7 @@ import { ITelemetryService } from '../../../../../platform/telemetry/common/tele
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { IInsrcConfigService, type ProvidersConfigDTO, type ProviderName } from '../../common/configService.js';
 import type { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
@@ -96,6 +97,7 @@ export class StepProviderEditorPane extends EditorPane {
 		@IStorageService storageService: IStorageService,
 		@IInsrcConfigService private readonly configService: IInsrcConfigService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super(StepProviderEditorPane.ID, group, telemetryService, themeService, storageService);
 	}
@@ -149,11 +151,53 @@ export class StepProviderEditorPane extends EditorPane {
 		);
 
 		if (agentEntries.length === 0) {
-			const msg = dom.append(this._tableBody, dom.$('p'));
-			msg.style.padding = '24px 12px';
+			// Item 26d: actionable empty state. The old copy ("daemon seeds
+			// defaults on first use") was aspirational and misleading -- the
+			// daemon only seeds once the user picks an active cloud in the
+			// Model Providers pane. Point them there when no active cloud is
+			// set; otherwise assume a load race and nudge a reload.
+			const msg = dom.append(this._tableBody, dom.$('.insrc-sp-empty'));
+			msg.style.padding = '32px 20px';
 			msg.style.color = 'var(--vscode-descriptionForeground)';
 			msg.style.textAlign = 'center';
-			msg.textContent = 'No agent step providers configured. The daemon seeds defaults on first use.';
+			msg.style.display = 'flex';
+			msg.style.flexDirection = 'column';
+			msg.style.alignItems = 'center';
+			msg.style.gap = '10px';
+
+			const heading = dom.append(msg, dom.$('div'));
+			heading.style.fontSize = '13px';
+			heading.style.color = 'var(--vscode-foreground)';
+
+			const hint = dom.append(msg, dom.$('div'));
+			hint.style.fontSize = '12px';
+			hint.style.maxWidth = '420px';
+
+			if (providers.activeProvider) {
+				heading.textContent = 'No agent step bindings found.';
+				hint.textContent = `Active cloud is ${providers.activeProvider}, but the \`models.agents\` map is empty. This usually self-heals on daemon restart -- try reopening this pane or restarting the daemon.`;
+			} else {
+				heading.textContent = 'No active cloud provider.';
+				hint.textContent = 'Pick an active cloud provider (Anthropic, OpenAI, Gemini, or Mistral) in the Model Providers pane. Once configured, this page will populate with per-step defaults that you can customize.';
+
+				const btn = dom.append(msg, dom.$('button.insrc-sp-open-providers')) as HTMLButtonElement;
+				btn.textContent = 'Open Model Providers';
+				btn.style.marginTop = '6px';
+				btn.style.padding = '6px 14px';
+				btn.style.fontSize = '12px';
+				btn.style.background = 'var(--vscode-button-background)';
+				btn.style.color = 'var(--vscode-button-foreground)';
+				btn.style.border = 'none';
+				btn.style.borderRadius = '4px';
+				btn.style.cursor = 'pointer';
+				btn.addEventListener('click', () => {
+					// insrc.openModelProviders is the registered command id.
+					this.commandService.executeCommand('insrc.openModelProviders').then(
+						undefined,
+						(err: Error) => this.notificationService.warn(`Failed to open Model Providers: ${err.message}`),
+					);
+				});
+			}
 			return;
 		}
 

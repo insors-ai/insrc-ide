@@ -28,6 +28,7 @@ import type {
   CloudProviderName,
   ProviderName,
 } from '../shared/types.js';
+import { buildDefaultAgentBindings } from '../shared/agent-steps.js';
 
 const log = getLogger('providers');
 
@@ -220,13 +221,18 @@ export function setProvidersConfig(
   const current = loadConfig();
   const nextModels: AgentConfig['models'] = mergeModelsPatch(current.models, patch);
 
-  // Clear agents / visionDefault if activeProvider changed.
+  // Clear agents / visionDefault if activeProvider changed, then seed
+  // defaults for the new active cloud (Item 26a). Without the seed the
+  // step-settings editor would be blank until the user manually wrote
+  // every binding -- which was the bug the user surfaced on 2026-04-21.
   if (patch.activeProvider !== undefined && patch.activeProvider !== current.models.activeProvider) {
-    nextModels.agents = {};
+    nextModels.agents = buildDefaultAgentBindings(patch.activeProvider);
     nextModels.visionDefault = null;
+    const seededSteps = Object.values(nextModels.agents ?? {})
+      .reduce((sum, stepsMap) => sum + Object.keys(stepsMap ?? {}).length, 0);
     log.info(
-      { from: current.models.activeProvider, to: patch.activeProvider },
-      'active provider changed -- cleared agents bindings and visionDefault',
+      { from: current.models.activeProvider, to: patch.activeProvider, seededSteps },
+      'active provider changed -- cleared visionDefault and seeded agent bindings',
     );
   }
 

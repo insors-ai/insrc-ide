@@ -12,6 +12,7 @@ import type {
   StepBinding,
 } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
+import { buildDefaultAgentBindings } from '../shared/agent-steps.js';
 import { buildProvider } from './providers/factory.js';
 
 const log = getLogger('config');
@@ -81,12 +82,32 @@ export function loadConfig(): AgentConfig {
   try {
     const raw = JSON.parse(readFileSync(PATHS.config, 'utf8')) as Record<string, unknown>;
     const { config, migrated } = mergeConfig(raw);
-    if (migrated) {
+    let needsWrite = migrated;
+
+    // Item 26c: first-load seed. If an active cloud is set but the
+    // agents map is empty (stale config from before the seed landed --
+    // or from before Item 26a was wired), populate with defaults so the
+    // step-settings editor has something to render. Idempotent: on
+    // subsequent loads agents is non-empty and this block is a no-op.
+    const agents = config.models.agents;
+    const activeCloud = config.models.activeProvider;
+    const agentsEmpty = !agents || Object.keys(agents).length === 0;
+    if (activeCloud && agentsEmpty) {
+      config.models.agents = buildDefaultAgentBindings(activeCloud);
+      const seededSteps = Object.values(config.models.agents ?? {})
+        .reduce((sum: number, stepsMap) => sum + Object.keys(stepsMap ?? {}).length, 0);
+      log.info({ activeCloud, seededSteps }, '[config] seeded default agent bindings for stale config');
+      needsWrite = true;
+    }
+
+    if (needsWrite) {
       try {
         writeFileSync(PATHS.config, JSON.stringify(serialize(config), null, 2) + '\n', 'utf8');
-        log.info('[config] migrated config.json to new provider schema');
+        if (migrated) {
+          log.info('[config] migrated config.json to new provider schema');
+        }
       } catch (err) {
-        log.warn({ err }, 'failed to rewrite config.json after schema migration');
+        log.warn({ err }, 'failed to rewrite config.json after schema migration / seed');
       }
     }
     return config;

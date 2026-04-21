@@ -44,6 +44,7 @@ Related plans:
 | 23| Step Provider Settings still uses old Claude-focused framework            | P1 | UI | **DONE** (23a editor rebuilt w/ per-row provider+model dropdowns, orphan-binding detection; 23b `mergeAgents` runs migration on every load -- `claude:*` -> `{provider: 'anthropic'}`, unknown strings dropped, logs counts; 23c parseBinding's silent "unknown string -> local" fallback replaced with a loud log + active-provider fallback; 23d dropdown restricted to Local + active cloud; 23e editor always writes StepBinding objects) |
 | 24| Intent / sub-intent classification should persist as a chat message       | P2 | UI | **DONE** (`_ingestIntentAnnouncement` no longer suppressed during brainstorm; splits headline / subintent / reasoning into a formatted assistant message) |
 | 25| Unify chat-panel Cancel and Pane-close into a single handler              | P1 | UI | **DONE** (new `IInsrcChatService.cancelBrainstormSession(reason)` does cancel + close + streamEnd + `onRequestCloseBrainstormPanes`; flow contribution listens and closes every brainstorm editor; both UI entry points call this method with the same confirm modal) |
+| 26| Step Providers pane empty even when Model Providers is configured         | P1 | daemon+UI | **DONE** (26b shared `agent-steps.ts` catalog; 26a `setProvidersConfig` seeds via `buildDefaultAgentBindings` on active-cloud switch; 26c `loadConfig` seeds on stale-config load; 26d editor empty state now points at Model Providers with an Open button) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -2703,6 +2704,157 @@ Builds on Items 16 + 21. No new RPCs needed -- uses existing
 requested fix. Also uncovered a surprising side-effect
 (`designer aborted by user`) that suggests cancel is touching more
 than just the visible brainstorm session.
+
+### Update (2026-04-21 verification)
+
+Verified end-to-end on 2026-04-21. Pane-close path emits:
+```
+closeHandler.showConfirm sessionActive=true
+closeHandler.confirm ... confirmed=true
+controlled pipeline: gate aborted by user
+[brainstorm:flow] closing 1 brainstorm editor(s) in group 0
+brainstorm:session session changed <sid> -> (none)
+closeHandler cancelBrainstormSession resolved
+```
+
+Clean. Unified handler covers cancel + close + pane-close + session
+reset. The `designer aborted by user` log from an earlier session
+reappeared again on 2026-04-21 at 13:53:49 -- still unexplained.
+Tracked as sub-concern 25d; root cause is a separate rabbit hole
+from the UX unification Item 25 closes.
+
+---
+
+## 26. Step Providers pane shows "No agent step providers configured" even with an active cloud (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"model providers already set, not
+being picked up by the step settings. check the images"*
+
+Screenshots captured:
+1. **Step Providers pane** -- renders the empty state:
+   > No agent step providers configured. The daemon seeds defaults
+   > on first use.
+2. **Model Providers pane** -- Anthropic is the active cloud, 2
+   models enabled (claude-sonnet-4-6 default, claude-haiku-4-5 also
+   enabled), API key is marked Active.
+
+Every prerequisite for useful step bindings is in place. The step
+editor still says "no bindings configured."
+
+### Root cause
+
+The daemon comment the empty state quotes -- "The daemon seeds
+defaults on first use" -- is aspirational. There is no seed step
+today.
+
+Specifically:
+- [providers.ts:setProvidersConfig](../../src/insrc/daemon/providers.ts#L210)
+  clears `agents = {}` whenever the user switches active cloud
+  (line 225). So every time the user picks / switches the active
+  provider in Model Providers, any prior agent bindings are
+  deliberately wiped. That's the locked plan behavior -- a switched
+  cloud can't reuse its predecessor's model strings.
+- But nothing then RE-populates `agents` with defaults for the
+  newly-active cloud. The map stays empty until some code writes
+  into it. The old step-provider editor (pre-rebuild) had a "first
+  use" flow that seeded; the rebuild from Item 23a dropped it.
+- The step-editor UI lists whatever's in `providers.agents`. Empty
+  map -> empty state -> user dead-ends.
+
+### Fix
+
+**26a. Daemon-side seed.** After `setProvidersConfig` clears
+`agents`, immediately seed default bindings for the new active
+cloud:
+
+```ts
+// Pseudo-code -- real list of agents/steps comes from a shared
+// definitions table (see 26b).
+const defaults = buildDefaultAgentBindings(nextModels.activeProvider);
+nextModels.agents = defaults;
+```
+
+Where `buildDefaultAgentBindings(activeCloud)` returns a map like:
+
+```ts
+{
+  brainstorm: {
+    seed:          { provider: 'local' },
+    enhance:       { provider: 'local' },
+    review:        { provider: activeCloud },
+    refine:        { provider: activeCloud },
+    cluster:       { provider: activeCloud },
+    promote:       { provider: activeCloud },
+    'theme-spec':  { provider: 'local' },
+    'theme-spec-review': { provider: activeCloud },
+    assemble:      { provider: 'local' },
+    discuss:       { provider: activeCloud },
+    diverge:       { provider: 'local' },
+  },
+  planner: { ... },
+  pair: { ... },
+  designer: { ... },
+  // ... every agent with per-step LLM tasks
+}
+```
+
+Policy: "expensive / quality-critical" steps (review, refine,
+cluster, promote, discuss) default to the active cloud; generative
+seed / enhance / diverge / theme-spec default to local. This matches
+the current hard-coded `providerHint` choices in the brainstorm
+controller (Item 17) -- the seed just codifies them as explicit
+bindings the user can override.
+
+**26b. Shared step-definitions table.** The seed needs the same
+agent/step list the editor walks when showing rows. Extract the
+list into a shared typed constant (`src/insrc/shared/agent-steps.ts`)
+that both daemon seed AND editor consume. Single source of truth,
+no more "editor knows about `review` but seed doesn't" drift.
+
+**26c. First-load seed for stale configs.** Users who already set
+up Model Providers before this change won't trigger
+`setProvidersConfig` again. In `loadConfig`, after the migration
+pass (Item 23b) runs, if `activeProvider` is set AND `agents` is
+empty, populate with defaults and write back. Log `{ seeded: true,
+activeProvider }` so the one-time fill is visible.
+
+**26d. Step editor surfaces the right prompt when truly empty.**
+Even after 26a-c, if the user hasn't picked an active cloud, the
+editor's empty state should point to the right action:
+> "No active cloud provider. Open **Model Providers** to pick one,
+> then this page will populate."
+...instead of "The daemon seeds defaults on first use" (which is
+now misleading).
+
+### Verification
+
+1. Fresh config, no Model Providers set. Open Step Providers --
+   the pane shows the revised empty state with a link to Model
+   Providers (26d).
+2. Open Model Providers, pick Anthropic, save. Switch to Step
+   Providers -- rows populated with the default bindings (26a).
+3. Edit `brainstorm.review` from `anthropic` to `local` and save.
+   Switch to a different active cloud in Model Providers and back
+   -- the review step resets to the new active cloud's default
+   (26a's agents = {} on switch, then 26a's seed re-populates).
+4. Pre-existing config (set up under an earlier build) has
+   `activeProvider: 'anthropic'` but `agents: {}`. Restart daemon.
+   Log shows `step-bindings seeded activeProvider=anthropic`. Open
+   Step Providers -- populated (26c).
+
+### Dependencies
+
+Builds on Items 17 (per-step resolver), 23 (editor rebuild + migration).
+Item 23's migration drops poisoned bindings; Item 26's seed then
+fills the resulting blank slate.
+
+### Severity
+
+**P1.** Users who configured Model Providers and expected Step
+Settings to work end up at a dead-end empty screen. Complete loss
+of the step-settings surface for every new user.
 
 ---
 
