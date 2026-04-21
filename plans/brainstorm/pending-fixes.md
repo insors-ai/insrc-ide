@@ -25,7 +25,7 @@ Related plans:
 | D | Round-2 prompt redesign: typed feedback sections + refine-first intent | P1 | daemon | **DONE** |
 | 5 | Intent validation gate (pre-launch)                           | P2       | daemon+UI| **DONE** (daemon gate emission in chat-handler; dedicated pane built under Item 8a; default policy updated under Item 8c; decomposer confidence threaded under Item 8d) |
 | 6 | Mid-turn intent correction                                    | P2       | daemon+UI| **DONE** (daemon `chat.redirect` RPC; `IInsrcChatService.redirect()` in browser; shared `attachRedirectAction` helper; Redirect header button on every brainstorm pane; inline picker with intent dropdown + optional refinement + error surface) |
-| 7 | Phase 2 -- session resume                                     | P1       | daemon+UI| **partial** (checkpoint per-session + `agent.resume` read; full rehydrate + pending-gate re-emit + Runs sidebar wiring remaining) |
+| 7 | Phase 2 -- session resume                                     | P1       | daemon+UI| **DONE** (7a real chat.resumeFromCheckpoint + rehydrate from checkpoint; 7b controller.buildResumeTask rebuilds gate task for gate-emitting lastStep; 7c resume-confirm gate with retry/abandon for in-flight lastStep -- G2; 7d Runs sidebar resumeRun does agent.resume + chatService.resumeFromCheckpoint handshake; 7e schemaVersion-stamped checkpoints, agent.resume refuses drift -- I2. Residual: parametric in-flight retry -- refine-ideas/theme-spec -- abandon only; tracked under 7f below.) |
 | 8 | Intent-confirm gate vs. "Intent" progress pill confusion      | P2       | UI       | **DONE** (8a dedicated pane + 8c brainstorm default-on + 8d decomposer confidence threaded; 8b pill hold deferred) |
 | 9 | Idea card: references show but aren't clickable / navigable   | P1       | UI       | **DONE** (9a URL opener + 9b unresolved chip; 9c discussion pane refs verified via shared card widget) |
 | 10| Idea structure + prompts: title-only cards under-explain ideas| P1       | daemon+UI| **DONE** (rich prompt format w/ Title/Body/Rationale; parseIdeaList multi-line aware; Idea.summary/rationale added; card renders summary + reviewer notes + rationale) |
@@ -1134,6 +1134,71 @@ timeout wipes out substantial user investment. With Item 31 now
 auto-terminating sessions on stream timeout, resume becomes the
 recovery path users need. Treat 7a as a near-term blocker, not a
 nice-to-have.
+
+### Status (2026-04-21, commit `86d3c586fee`)
+
+All five subtasks shipped:
+
+- **7a** done. New `chat.resumeFromCheckpoint` stream handler in
+  [chat-handler.ts](../../src/insrc/daemon/chat-handler.ts) loads the
+  checkpoint, validates schemaVersion, ensures the session is in the
+  pool (DB restore on cold daemon), picks the right brainstorm
+  subclass from stamped `state.category`, seeds the store, and runs
+  the pipeline with a single `initialTasks` entry so `buildInitialTasks`
+  is skipped (we're not starting fresh).
+- **7b** done. `BrainstormControllerBase.buildResumeTask()` dispatches
+  on `state.lastStep`. Gate-emitting lastSteps (idea-review,
+  idea-list, idea-discuss, validate-convergence, theme-spec-review,
+  presentation) rebuild the exact gate task the user was on.
+- **7c** done. In-flight lastSteps (everything else) emit a
+  `resume-confirm` gate (inline in the chat panel, no dedicated pane
+  per Item 12's policy) with retry / abandon actions. `afterResumeConfirm`
+  rebuilds the in-flight task on retry via `rebuildInFlightTask(step)`.
+- **7d** done. [agentRunServiceImpl.resumeRun](../../src/vs/workbench/contrib/insrc/electron-sandbox/agentRunServiceImpl.ts)
+  does the two-step handshake: `agent.resume` validates, then
+  `chatService.resumeFromCheckpoint(sessionId, repo)` opens the
+  stream. Throws with the daemon's reason/message on schema-drift so
+  the Runs sidebar surfaces it.
+- **7e** done. Checkpoint body stamps `schemaVersion: CHECKPOINT_SCHEMA_VERSION`
+  (currently 1). `agent.resume` refuses mismatches upfront with
+  `{ ok: false, reason: 'schema-drift', ... }` (decision I2).
+
+### 7f. Residual: parametric in-flight retry (deferred)
+
+`rebuildInFlightTask` covers all no-param builders:
+`search-context, generate-ideas, enhance-ideas-search, review-ideas,
+converge-cluster, converge-promote, assemble-spec, finalize`.
+
+Parametric builders are NOT yet retry-able:
+- `enhance-ideas-llm` -- needs the search output from the prior step.
+- `refine-ideas` -- needs the review output string.
+- `idea-diverge-single`, `idea-discuss-search`, `idea-discuss-respond` --
+  need the focused idea context.
+- `search-theme-context`, `generate-theme-spec`, `review-theme-spec` --
+  need the theme index + prior spec section.
+
+For these, the resume-confirm gate still fires but Retry falls
+through to `markSessionComplete` (same effect as Abandon). A
+follow-up would snapshot the builder's input (review output, theme
+index, spec section) under a dedicated `state.resumeInputs` map at
+the point the in-flight step launches, so Retry can call the
+builder with the same args. Deferred -- the no-param builders cover
+most of the session's time; parametric steps are shorter and
+losing them to Abandon is acceptable for now.
+
+### Planned: future schemaVersion bump
+
+The plan guards resume against schema drift but doesn't say *when* to
+bump the constant. Rules of thumb for bumping `CHECKPOINT_SCHEMA_VERSION`
+in [task.ts](../../src/insrc/daemon/task.ts):
+
+- Removing or renaming a field on `BrainstormState` (the old
+  checkpoint can't deserialise cleanly).
+- Changing the type of a field (e.g. `lastStep: string` -> enum).
+- Changing the shape of an embedded type (`Idea`, `Theme`, etc.).
+
+Safe to leave schemaVersion alone for: adding new optional fields,
+adding new dispatch cases, renaming internal methods.
 
 ---
 
