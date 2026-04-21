@@ -242,7 +242,17 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   // Link outer signal (from IPC server socket close) to our abort
   signal.addEventListener('abort', () => abortController.abort(), { once: true });
 
-  const channel = new DaemonChannel(requestId, send, abortController);
+  // Item 16d: wrap send so every message emitted after the session is
+  // cancelled becomes a no-op. Without this the task pipeline keeps
+  // firing progress / gate events after chat.cancel, which lands on a
+  // client that already dropped its stream handle -- producing the
+  // "[insrc] no stream handle for id=<N>" warnings the user saw.
+  const guardedSend = (msg: IpcStreamMessage): void => {
+    if (abortController.signal.aborted) return;
+    send(msg);
+  };
+
+  const channel = new DaemonChannel(requestId, guardedSend, abortController);
 
   // Attach channel to session pool
   if (!pool.attachChannel(sessionId, channel, abortController)) {
@@ -250,7 +260,16 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   }
 
   try {
-    await runChatMessage(active, channel, message, requestId, send);
+    await runChatMessage(active, channel, message, requestId, guardedSend);
+  } catch (err) {
+    // Abort during any await (gate wait, LLM completion, etc.) throws
+    // through here. Log once and exit; guardedSend will have silenced
+    // any further daemon-side noise.
+    if (abortController.signal.aborted) {
+      log.info({ sessionId }, 'chat.send aborted by user');
+    } else {
+      throw err;
+    }
   } finally {
     pool.detachChannel(sessionId);
   }
@@ -267,7 +286,13 @@ export const chatResume: StreamHandler = async (params, send, signal) => {
   const abortController = new AbortController();
   signal.addEventListener('abort', () => abortController.abort(), { once: true });
 
-  const channel = new DaemonChannel(requestId, send, abortController);
+  // Same send-guard as chatSend (Item 16d).
+  const guardedSend = (msg: IpcStreamMessage): void => {
+    if (abortController.signal.aborted) return;
+    send(msg);
+  };
+
+  const channel = new DaemonChannel(requestId, guardedSend, abortController);
 
   if (!pool.attachChannel(sessionId, channel, abortController)) {
     throw new Error('agent already running on this session');
@@ -276,7 +301,13 @@ export const chatResume: StreamHandler = async (params, send, signal) => {
   try {
     // Resume uses the same runAgent with resumeFrom option
     // The checkpoint is read internally by runAgent from the run directory
-    await runChatMessage(active, channel, '', requestId, send);
+    await runChatMessage(active, channel, '', requestId, guardedSend);
+  } catch (err) {
+    if (abortController.signal.aborted) {
+      log.info({ sessionId }, 'chat.resume aborted by user');
+    } else {
+      throw err;
+    }
   } finally {
     pool.detachChannel(sessionId);
   }
@@ -597,6 +628,7 @@ async function runChatMessage(
     const taskDeps: TaskOrchestratorDeps = {
       session, channel, send, requestId,
       historyMessages: historyMessages as LLMMessage[],
+      ...(active.abortController ? { abortController: active.abortController } : {}),
     };
     const pipelineResult = await runTaskPipeline(tasks, taskDeps);
 
@@ -645,6 +677,7 @@ async function runChatMessage(
         const taskDeps: TaskOrchestratorDeps = {
           session, channel, send, requestId,
           historyMessages: historyMessages as LLMMessage[],
+          ...(active.abortController ? { abortController: active.abortController } : {}),
         };
         const pipelineResult = await runTaskPipeline(tasks, taskDeps);
         send({ id: requestId, stream: 'done', data: { summary: action.action } });
@@ -794,6 +827,7 @@ async function runChatMessage(
       historyMessages: historyMessages as LLMMessage[],
       getInjectedMessages: () => pool.popInjectedMessages(active.id),
       getInjectedIdeas: () => pool.popInjectedIdeas(active.id),
+      ...(active.abortController ? { abortController: active.abortController } : {}),
     };
 
     const needsPostPrimary = postPrimaryActions !== undefined && hasPostPrimary(postPrimaryActions);

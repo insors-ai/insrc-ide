@@ -7,7 +7,7 @@ import * as dom from '../../../../../base/browser/dom.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
-import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IEditorService, SIDE_GROUP } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { URI } from '../../../../../base/common/uri.js';
@@ -222,13 +222,18 @@ export class BrainstormCardWidget extends Disposable {
 					return;
 				}
 				if (ref.type === 'code' || ref.type === 'doc') {
+					// Item 15: open in SIDE_GROUP so the brainstorm pane stays
+					// visible. Opening in the active group (the default) replaces
+					// the brainstorm pane and strands the user with no obvious
+					// way to get back to the session.
 					const uri = URI.file(ref.path);
 					this.editorService.openEditor({
 						resource: uri,
 						options: {
 							selection: ref.line ? { startLineNumber: ref.line, startColumn: 1 } : undefined,
+							preserveFocus: false,
 						},
-					});
+					}, SIDE_GROUP);
 				}
 			}));
 		}

@@ -33,6 +33,8 @@ Related plans:
 | 12| Intent-confirm should render inline in chat panel, not as its own pane | P1 | UI | **DONE** (flow contribution skips dedicated routing; chat-panel gate widget now renders body + labels + needsInput input / intent-dropdown; dedicated pane + input files deleted) |
 | 13| Convergence gate emitted with unknown itemType -- routing breaks silently | P0 | daemon | **DONE** (`buildValidateConvergenceTask` emits `structured { phase: 'convergence', itemType: 'convergence-review', item.themes }`; presentation gate also got a structured payload) |
 | 14| Add Idea form fails: daemon doesn't register `brainstorm.addIdea` RPC    | P1 | daemon | **DONE** (`injectedIdeas` queue on session; `brainstorm.addIdea` RPC; `getInjectedIdeas` threaded through `TaskOrchestratorDeps`; controller drains and splices into reviewQueue at currentReviewIndex+1 so next card is the user's idea) |
+| 15| Clicking a ref in the idea card replaces the brainstorm pane -- user stranded | P1 | UI | **DONE** (card's code/doc ref click now uses `SIDE_GROUP`; brainstorm pane stays visible, file opens in a split) |
+| 16| Closing / stopping a brainstorm session doesn't actually stop the stream  | P1 | daemon+UI | **partial** (16a gate rejection already wired; 16c pipeline abort checks + try/catch around gateTaskResult; 16d guardedSend wrapper silences late daemon→client messages; 16b LLM provider abort-signal plumbing deferred) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -1590,6 +1592,198 @@ Daemon-side:
 **P1.** The `+ Add Idea` button is a core user-contribution path.
 Broken since the clean-slate commit that added the button but didn't
 register the RPC.
+
+---
+
+## 15. Clicking a ref in the idea card replaces the brainstorm pane -- user stranded (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"links shown in the idea card when
+clicked opens the target in the same pane as the session, can't go
+back to brainstorming anymore"*
+
+### Current behavior
+
+In [brainstormCardWidget.ts::_renderReferences](../../src/vs/workbench/contrib/insrc/browser/brainstorm/brainstormCardWidget.ts#L205)
+the click handler for `type === 'code' | 'doc'` refs calls:
+
+```ts
+this.editorService.openEditor({
+  resource: uri,
+  options: {
+    selection: ref.line ? { startLineNumber: ref.line, startColumn: 1 } : undefined,
+  },
+});
+```
+
+With no target group argument, `openEditor` defaults to the
+`ACTIVE_GROUP` (the currently-focused editor group). When the
+brainstorm pane is open in that group -- which it always is when the
+user is looking at a card -- the new file editor **replaces** the
+brainstorm pane in that slot. The card disappears. The brainstorm
+session is technically still alive in the session service, but the
+user has no UI affordance to return to it:
+
+- The editor-tabs history has the brainstorm input just one Back step
+  away, but VS Code's Ctrl+Tab / "Go Back" UX is not obvious for
+  users who don't know the shortcuts.
+- Reopening via the command palette would require the user to know
+  the input ID.
+- Closing the file editor doesn't auto-restore the brainstorm pane --
+  VS Code just shows whatever was in the group before.
+
+Net: a single ref click feels like it ends the brainstorm session
+from the user's perspective.
+
+### Root cause
+
+The click handler uses `editorService.openEditor(...)` with no
+`groupId` / `group` option, so the ref always lands in the same
+group as the brainstorm pane. The URL-type handler (Item 9a) is fine
+because `openerService.open()` launches an external browser; it's
+the code/doc file-open path that traps.
+
+### Fix
+
+**15a. Open refs in the SIDE_GROUP (split editor).** Pass
+`SIDE_GROUP` as the second argument to `openEditor`:
+
+```ts
+import { SIDE_GROUP, ACTIVE_GROUP } from '../../../../services/editor/common/editorService.js';
+
+this.editorService.openEditor({
+  resource: uri,
+  options: {
+    selection: ref.line ? { startLineNumber: ref.line, startColumn: 1 } : undefined,
+    preserveFocus: false,
+  },
+}, SIDE_GROUP);
+```
+
+This creates a split to the right of the brainstorm pane. The card
+stays visible on the left; the referenced file opens alongside. If
+the user clicks another ref on the same card, it reuses the same side
+group (VS Code behaviour -- subsequent SIDE_GROUP opens hit the same
+split).
+
+**15b. Alternative: modifier-key hint in ref tooltip.** Browsers use
+Cmd/Ctrl-click to force a new tab; add the same affordance so a
+plain click opens in-place and Cmd/Ctrl-click opens in a new group.
+Users who don't know the modifier still get the in-place trap unless
+we pair this with 15a as the default.
+
+### Recommendation
+
+Ship **15a**. The brainstorm flow owns its pane -- the user has
+clearly signalled they want to stay in it. Opening refs in a side
+group lets them inspect the code AND continue reviewing cards.
+
+### Verification
+
+- Open a brainstorm session, walk to an idea with clickable refs.
+- Click a ref -- a split opens to the right, brainstorm pane stays
+  visible.
+- Click the next idea's Approve button -- still works without
+  re-opening anything.
+
+---
+
+## 16. Closing / stopping a brainstorm session doesn't actually stop the stream (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"stopping a brainstorming session
+isn't working"*
+
+Monitor trace shows repeated warnings after the user tried to stop:
+
+```
+11:29:53.745  [warning] [insrc] no stream handle for id=20
+11:29:53.745  [warning] [insrc] no stream handle for id=20
+11:29:53.745  [warning] [insrc] no stream handle for id=20
+11:29:58.573  [warning] [insrc] no stream handle for id=20
+11:30:51.124  [warning] [insrc] no stream handle for id=20
+11:30:51.124  [warning] [insrc] no stream handle for id=20
+```
+
+This means:
+
+- The client's stream handle for request id=20 was cleaned up
+  (either a cancel or a pane close).
+- But messages keep flowing from the daemon (likely daemon-side gate
+  re-emits, progress events, or follow-up tasks) and the client
+  can't route them anywhere, so they drop with a warning.
+- The session wasn't cleanly torn down -- the daemon controller is
+  still running, still generating, still trying to drive a gate the
+  user no longer has UI for.
+
+### Prior state of close-handling
+
+Today the flow is:
+
+1. User closes the brainstorm pane via the editor close button.
+2. `BrainstormStepInputBase.closeHandler` shows the
+   "Cancel session?" confirm dialog.
+3. On confirm, it calls `chatService.cancelStream()` and
+   `chatService.closeSession(sessionId)`.
+4. `cancelStream()` RPCs `chat.cancel` which aborts the session's
+   AbortController.
+
+Where it breaks:
+
+- `chat.cancel` aborts the AbortController, but the brainstorm
+  controller's task pipeline doesn't systematically honour the abort
+  signal at every await point. Specifically:
+  - `registerExternalGate` promises don't reject on abort today;
+    they only resolve when the user clicks a gate button OR when
+    `resolveGate` is called from the reply handler. Abort doesn't
+    free them.
+  - In-flight LLM calls (`provider.complete(...)`) may not be passed
+    the abort signal; they keep streaming tokens after cancel.
+  - The controller's state store keeps running -- next gate emits
+    land on a detached stream handle.
+
+### Fix
+
+Multi-part -- each piece blocks one of the stuck edges.
+
+**16a. Reject `registerExternalGate` promises on abort.**
+`DaemonChannel.registerExternalGate` takes a resolve + reject pair.
+When the session's AbortController fires, iterate the open-gates
+map and reject each with `{ action: 'cancel', reason: 'aborted' }`.
+The controller's pipeline loop checks for this and breaks.
+
+**16b. Wire `AbortSignal` into LLM provider calls.** `provider.complete`
+accepts options; extend those to include the session's signal.
+`OllamaProvider` / `AnthropicProvider` pass it through to the
+underlying fetch/SDK so token streams stop on abort.
+
+**16c. Controller abort check.** In `runControlledPipeline`, after
+every `await`, check `deps.session.abortController.signal.aborted`
+and bail with a clean "cancelled by user" progress event + no more
+task emissions.
+
+**16d. Daemon `chat.cancel` also closes the session channel.**
+After aborting, also invalidate the session's daemon channel so any
+late `send({...})` calls from the controller are no-op, not
+"no stream handle" warnings.
+
+### Verification
+
+- Start a brainstorm session, close the pane via the X button,
+  confirm cancel.
+- No `no stream handle` warnings flood the IDE log afterwards.
+- Daemon log shows `brainstorm agent cancelled (user closed pane)`
+  within 1-2 s of the close.
+- Opening a new chat.send turn works immediately (not blocked
+  waiting for the prior session to drain).
+
+### Severity
+
+**P1.** The user explicitly said "stopping isn't working". Every
+abandoned brainstorm session today leaks daemon-side work, cloud
+LLM calls, and log noise until the daemon is restarted.
 
 ---
 

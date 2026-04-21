@@ -319,6 +319,13 @@ export interface TaskOrchestratorDeps {
   getInjectedMessages?: (() => string[]) | undefined;
   /** Drain injected user-contributed ideas (from brainstorm.addIdea RPC). */
   getInjectedIdeas?: (() => Array<{ title: string; body: string }>) | undefined;
+  /**
+   * Session-level abort controller (Item 16). The pipeline checks its
+   * signal between awaits so chat.cancel stops the controller cleanly
+   * instead of letting it keep emitting progress + gates to a client
+   * that already dropped its stream handle.
+   */
+  abortController?: AbortController | undefined;
 }
 
 interface ShellResult {
@@ -558,6 +565,14 @@ export async function runControlledPipeline(
 
   // 2. Execute tasks sequentially (controller decides next)
   while (pendingTasks.length > 0) {
+    // Item 16c: bail out of the loop as soon as the session is cancelled
+    // so we don't start any more tasks / gates. The guardedSend wrapper
+    // (Item 16d) silences any stragglers that still try to emit.
+    if (deps.abortController?.signal.aborted) {
+      log.info({ controller: controller.id }, 'controlled pipeline: aborted by user');
+      break;
+    }
+
     const task = pendingTasks.shift()!;
 
     send({ id: requestId, stream: 'progress', data: {
@@ -579,6 +594,11 @@ export async function runControlledPipeline(
       0,
     );
 
+    if (deps.abortController?.signal.aborted) {
+      log.info({ controller: controller.id, task: task.description }, 'controlled pipeline: aborted mid-task');
+      break;
+    }
+
     // Store result in state if task has a stateKey
     if (task.stateKey) {
       stateStore.set(task.stateKey, result.output);
@@ -588,7 +608,20 @@ export async function runControlledPipeline(
     // Gate the result if task requires approval
     let gateReply: GateReply | undefined;
     if (task.requiresGate && result.success) {
-      gateReply = await gateTaskResult(task, result, deps);
+      try {
+        gateReply = await gateTaskResult(task, result, deps);
+      } catch (err) {
+        // Gate rejection happens when the channel's AbortController fires
+        // (user cancelled via chat.cancel). Break out cleanly -- the
+        // guardedSend wrapper in chat-handler prevents any trailing
+        // messages from leaking to the client.
+        if (deps.abortController?.signal.aborted) {
+          log.info({ controller: controller.id, task: task.description }, 'controlled pipeline: gate aborted by user');
+          break;
+        }
+        log.error({ err, task: task.description }, 'controlled pipeline: gate failed unexpectedly');
+        throw err;
+      }
       result.gateReply = gateReply;
 
       // Handle cyclic retry
