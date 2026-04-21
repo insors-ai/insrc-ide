@@ -67,6 +67,19 @@ function makeValidateRequirementsTask(index: number): Task {
     kind: 'llm', // placeholder — gate handled by controller
     intent: 'design',
     requiresGate: true,
+    gateTitle: 'Review extracted requirements',
+    gateActions: [
+      { name: 'approve', label: 'Approve' },
+      { name: 'edit', label: 'Edit', hint: 'what to change in the requirements', needsInput: true },
+      { name: 'reject', label: 'Start over' },
+    ],
+    // Item 30: structured payload so the browser classifyGate doesn't
+    // fall through to `kind=unknown`, which caused the flow contribution
+    // to silently drop the gate and leave the controller blocked.
+    structured: {
+      phase: 'specify',
+      itemType: 'designer-validate-requirements',
+    },
     stateKey: K.ENHANCED_REQUIREMENTS,
     cyclic: {
       maxRounds: MAX_EDIT_ROUNDS,
@@ -106,6 +119,18 @@ function makeValidateSketchTask(index: number, reqIndex: number): Task {
     kind: 'llm',
     intent: 'design',
     requiresGate: true,
+    gateTitle: `Review sketch for requirement ${reqIndex}`,
+    gateActions: [
+      { name: 'approve', label: 'Approve' },
+      { name: 'edit', label: 'Edit', hint: 'what to change in the sketch', needsInput: true },
+      { name: 'skip', label: 'Skip' },
+      { name: 'reject', label: 'Reject' },
+    ],
+    structured: {
+      phase: 'specify',
+      itemType: 'designer-validate-sketch',
+      item: { reqIndex },
+    },
     stateKey: `sketch-${reqIndex}`,
     cyclic: {
       maxRounds: MAX_EDIT_ROUNDS,
@@ -134,6 +159,18 @@ function makeValidateDetailTask(index: number, reqIndex: number): Task {
     kind: 'llm',
     intent: 'design',
     requiresGate: true,
+    gateTitle: `Review detail for requirement ${reqIndex}`,
+    gateActions: [
+      { name: 'approve', label: 'Approve' },
+      { name: 'edit', label: 'Edit', hint: 'what to change in the detail', needsInput: true },
+      { name: 'skip', label: 'Skip' },
+      { name: 'reject', label: 'Reject' },
+    ],
+    structured: {
+      phase: 'specify',
+      itemType: 'designer-validate-detail',
+      item: { reqIndex },
+    },
     stateKey: `detail-${reqIndex}`,
     cyclic: {
       maxRounds: MAX_EDIT_ROUNDS,
@@ -152,6 +189,15 @@ function makeAssembleTask(index: number): Task {
     stateKey: K.ASSEMBLED_OUTPUT,
     outputFormat: 'markdown' as TaskFormat,
     requiresGate: true, // save gate
+    gateTitle: 'Save design document',
+    gateActions: [
+      { name: 'save', label: 'Save', needsInput: true, hint: 'file path' },
+      { name: 'skip', label: 'Discard' },
+    ],
+    structured: {
+      phase: 'finalize',
+      itemType: 'designer-save',
+    },
   };
 }
 

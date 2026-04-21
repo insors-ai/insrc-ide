@@ -379,9 +379,11 @@ export class InsrcChatViewPane extends ViewPane {
 				break;
 			case 'gate': {
 				// Skip brainstorm gates -- handled by the brainstorm editor panes.
-				// The session-active flag is the primary gate; the phase check is
-				// a belt-and-suspenders fallback in case a gate arrives before the
-				// session-active progress event (unlikely but cheap to cover).
+				// The session-active flag is the primary gate; the phase check
+				// below used to be a belt-and-suspenders fallback but was also
+				// incorrectly suppressing OTHER agents' gates that happened to
+				// share phase names like `specify` / `finalize`. Item 30: only
+				// suppress when a brainstorm session is actually active.
 				//
 				// EXCEPTION (Item 12): the `intent-confirm` gate is intentionally
 				// rendered in the chat panel itself so the user can confirm /
@@ -391,9 +393,6 @@ export class InsrcChatViewPane extends ViewPane {
 				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
 				const isIntentConfirm = gateCtx && gateCtx['itemType'] === 'intent-confirm';
 				if (this.brainstormSession.isSessionActive && !isIntentConfirm) {
-					break;
-				}
-				if (!isIntentConfirm && gateCtx && (gateCtx['phase'] === 'ideation' || gateCtx['phase'] === 'convergence' || gateCtx['phase'] === 'specify' || gateCtx['phase'] === 'finalize')) {
 					break;
 				}
 				this._renderGate(event.gate);

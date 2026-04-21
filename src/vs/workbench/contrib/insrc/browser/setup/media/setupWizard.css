@@ -377,3 +377,173 @@
 	content: '\2022  ';
 	color: var(--vscode-textLink-foreground);
 }
+
+/* -- Step Providers editor (Item 27) -- */
+.insrc-sp-active-banner {
+	padding: 10px 14px;
+	margin: 4px 16px 12px;
+	border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.2));
+	border-radius: 4px;
+	background: var(--vscode-editorWidget-background);
+	font-size: 12px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-sp-section {
+	border-top: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.15));
+}
+
+.insrc-sp-section:last-child {
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.15));
+}
+
+.insrc-sp-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 16px;
+	cursor: pointer;
+	user-select: none;
+	transition: background 120ms ease;
+}
+
+.insrc-sp-header:hover {
+	background: var(--vscode-list-hoverBackground);
+}
+
+.insrc-sp-header .codicon {
+	font-size: 14px;
+	color: var(--vscode-descriptionForeground);
+	transition: transform 150ms ease;
+}
+
+.insrc-sp-header .insrc-sp-agent-name {
+	font-weight: 600;
+	font-size: 13px;
+	flex: 1;
+	color: var(--vscode-foreground);
+}
+
+.insrc-sp-header .insrc-sp-step-count {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	padding: 0 6px;
+}
+
+.insrc-sp-header .insrc-sp-orphan-badge {
+	font-size: 11px;
+	color: var(--vscode-editorWarning-foreground);
+	padding: 2px 8px;
+	border-radius: 10px;
+	border: 1px solid var(--vscode-editorWarning-foreground);
+}
+
+.insrc-sp-body {
+	padding: 4px 16px 16px 40px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.insrc-sp-row {
+	display: grid;
+	grid-template-columns: 180px 140px 140px 1fr auto;
+	align-items: center;
+	gap: 10px;
+	padding: 6px 4px;
+	border-radius: 4px;
+}
+
+.insrc-sp-row:hover {
+	background: color-mix(in srgb, var(--vscode-list-hoverBackground) 50%, transparent);
+}
+
+.insrc-sp-step-name {
+	font-size: 12px;
+	color: var(--vscode-foreground);
+}
+
+.insrc-sp-provider,
+.insrc-sp-model {
+	padding: 4px 8px;
+	font-size: 12px;
+	border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border-radius: 3px;
+	font-family: inherit;
+}
+
+.insrc-sp-status {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.insrc-sp-status.orphan {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.insrc-sp-clear {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.insrc-sp-clear:hover {
+	color: var(--vscode-errorForeground);
+	border-color: var(--vscode-widget-border, rgba(128,128,128,0.25));
+	background: var(--vscode-list-hoverBackground);
+}
+
+.insrc-sp-clear .codicon {
+	font-size: 14px;
+}
+
+.insrc-sp-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+	padding: 40px 24px;
+	color: var(--vscode-descriptionForeground);
+	text-align: center;
+}
+
+.insrc-sp-empty-heading {
+	font-size: 13px;
+	color: var(--vscode-foreground);
+}
+
+.insrc-sp-empty-hint {
+	font-size: 12px;
+	max-width: 440px;
+	line-height: 1.45;
+}
+
+.insrc-sp-open-providers {
+	margin-top: 6px;
+	padding: 6px 14px;
+	font-size: 12px;
+	font-family: inherit;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: none;
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.insrc-sp-open-providers:hover {
+	background: var(--vscode-button-hoverBackground);
+}

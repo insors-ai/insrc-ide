@@ -709,24 +709,33 @@ async function runChatMessage(
 
   // 1b. Intent validation gate -- pre-launch confirmation.
   // Gate policy (Item 5 / Item 8c):
-  //   - If `classifier.confirmIntent === true`: always prompt.
-  //   - Else if `classifier.confirmIntent === false` (explicit opt-out):
-  //     only prompt when confidence is below the low-confidence threshold.
-  //   - Else (unset / default): prompt for `brainstorm` turns (which are
-  //     the most contested sub-classifications per Item 8c) and any
-  //     low-confidence turn. Other high-confidence intents skip the gate.
+  //   - `classifier.confirmIntent === false`: only prompt when confidence
+  //     is below the low-confidence threshold (explicit opt-out).
+  //   - Otherwise (true / unset / default): always prompt, regardless of
+  //     the classified intent. Item 29 -- users were losing whole turns to
+  //     mis-classifications ("Barinstorm" -> requirements) because the
+  //     gate only fired for brainstorm. Every classified intent now goes
+  //     through the user before the agent pipeline launches.
   {
     const LOW_CONFIDENCE_THRESHOLD = 0.4;
     const confirmSetting = session.config.classifier?.confirmIntent;
     const lowConfidence = classifiedConfidence < LOW_CONFIDENCE_THRESHOLD;
     let shouldPrompt: boolean;
-    if (confirmSetting === true) {
-      shouldPrompt = true;
-    } else if (confirmSetting === false) {
+    if (confirmSetting === false) {
       shouldPrompt = lowConfidence;
     } else {
-      shouldPrompt = lowConfidence || classifiedIntent === 'brainstorm';
+      // true OR unset (default) -> always prompt.
+      shouldPrompt = true;
     }
+    log.info(
+      {
+        intent: classifiedIntent,
+        confidence: classifiedConfidence,
+        confirmSetting: confirmSetting ?? 'unset',
+        gateFired: shouldPrompt,
+      },
+      'intent-confirm gate decision',
+    );
     if (shouldPrompt) {
       const gateId = `intent-confirm-${requestId}-${Date.now()}`;
       send({ id: requestId, stream: 'gate', data: {

@@ -45,6 +45,10 @@ Related plans:
 | 24| Intent / sub-intent classification should persist as a chat message       | P2 | UI | **DONE** (`_ingestIntentAnnouncement` no longer suppressed during brainstorm; splits headline / subintent / reasoning into a formatted assistant message) |
 | 25| Unify chat-panel Cancel and Pane-close into a single handler              | P1 | UI | **DONE** (new `IInsrcChatService.cancelBrainstormSession(reason)` does cancel + close + streamEnd + `onRequestCloseBrainstormPanes`; flow contribution listens and closes every brainstorm editor; both UI entry points call this method with the same confirm modal) |
 | 26| Step Providers pane empty even when Model Providers is configured         | P1 | daemon+UI | **DONE** (26b shared `agent-steps.ts` catalog; 26a `setProvidersConfig` seeds via `buildDefaultAgentBindings` on active-cloud switch; 26c `loadConfig` seeds on stale-config load; 26d editor empty state now points at Model Providers with an Open button) |
+| 27| Step Providers editor: styling + Clear-button-as-icon polish              | P2 | UI | **DONE** (CSS moved to `setupWizard.css`; inline styles stripped from rows, headers, active-banner, empty state; Clear became icon-only `trash` codicon) |
+| 28| Step Providers editor: changing provider collapses the expanded section   | P1 | UI | **DONE** (agent body opens with `display: block` + chevron rotated when `_expandedAgent === agentName` so rebuilds preserve the user's position) |
+| 29| Intent-confirm gate only fires for brainstorm -- other intents bypass user confirmation | P0 | daemon | **DONE** (policy flipped: every classification fires the gate unless `classifier.confirmIntent: false`; `gateFired` decision line logged on every classify) |
+| 30| Requirements/Designer validate gate has `kind=unknown phase=waiting` (same class as Item 13) | P0 | daemon | **DONE** (all 4 designer gate tasks now emit structured payloads with `itemType` = `designer-validate-requirements` / `-sketch` / `-detail` / `designer-save`; chatView's phase-based suppression narrowed so non-brainstorm sessions render their gates) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -2855,6 +2859,293 @@ fills the resulting blank slate.
 **P1.** Users who configured Model Providers and expected Step
 Settings to work end up at a dead-end empty screen. Complete loss
 of the step-settings surface for every new user.
+
+### Update (2026-04-21 verification)
+
+Seed verified working in the daemon log:
+```
+14:39:01  config reloaded
+14:39:01  config.write path=models.agents.brainstorm.seed value={"provider":"anthropic","model":"claude-sonnet-4-6"}
+```
+
+The editor writes the StepBinding object cleanly. The daemon
+reloads in-memory config. Item 17's resolver picks up the new
+binding on the next brainstorm turn's seed step. Seed-on-load and
+seed-on-active-cloud-switch both confirmed during interactive
+testing on 2026-04-21.
+
+---
+
+## 27. Step Providers editor: styling + Clear-button polish (P2)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"the step provider views are not
+styled properly, also the clear button should just be a icon"*
+
+### Current state
+
+The rebuilt editor (Item 23a) uses inline styles and native
+`<select>` elements. It's functional but visually rough vs. the
+rest of the insrc UI:
+- Inline styles everywhere instead of CSS classes -> no theme
+  adaptation, no hover transitions, no focus rings consistent with
+  the Model Providers pane.
+- Row grid columns (160/130/1fr/auto) don't align with any other
+  insrc settings page.
+- "Clear" button is a text button. The rest of the insrc UI uses
+  icon buttons for row-scoped actions (see IdeasPane / RunsView).
+
+### Fix
+
+**27a. Move all styles to a dedicated `.css` class sheet.**
+`stepProviderEditor.css` (new) with `.insrc-sp-*` selectors.
+`stepProviderEditorPane.ts` drops inline `.style.*` assignments in
+favour of those classes.
+
+**27b. Clear button becomes an icon button.** Replace the text
+button with a trash-can codicon button, tooltip "Clear binding".
+Use the same affordance as other icon actions in the contrib.
+
+**27c. Align row layout with the Model Providers pane.** Same
+column widths, same vertical rhythm, same selects. Aim for visual
+consistency so a user can move between the two panes without
+relearning the layout.
+
+### Severity
+
+**P2.** Cosmetic. Doesn't block functionality; waited behind the
+correctness fixes.
+
+---
+
+## 28. Step Providers editor: changing provider collapses the expanded section (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"changing the provider collapse the
+view, it sets a default mode but the user needs to navigate back
+to the element to change the model. should not collapse view"*
+
+### Current behavior
+
+The editor listens to `configService.onDidChangeConfig` -> re-runs
+`_loadTable()` -> `dom.clearNode(this._tableBody)` -> rebuilds
+from scratch. Every agent section is collapsed by default (only
+`_expandedAgent` is remembered, but the rebuild discards expansion
+state per-row). When the user changes a provider -> a write -> a
+config event -> the whole table redraws collapsed. The user's
+progression is lost.
+
+### Root cause
+
+`_loadTable()` wipes `_sections` and re-creates DOM. Nothing
+restores the previously-expanded agent.
+
+### Fix
+
+**28a. Preserve expansion state across reloads.** `_expandedAgent`
+IS stored on the instance. When `_loadTable()` re-renders, after
+building all sections re-expand whichever agent name matches
+`_expandedAgent`. Simple state capture.
+
+**28b. Skip the full re-render for in-place edits.** When the
+config change came from THIS pane's own write, the table doesn't
+need a full rebuild -- we already know which row changed. Option:
+- Track the (agent, step, new binding) locally, update that one
+  row's provider/model select, skip the onDidChangeConfig handler
+  for this change.
+- Easier: gate the handler on a "pending own write" flag. Set the
+  flag around `setConfigValue`; the incoming event fires, the
+  flag is hot, handler skips the rebuild; flag clears.
+
+**28c. Also fix the accordion's "only one at a time" rule.** The
+current `_toggleSection` collapses the previously-open section
+when a new one is opened. That's fine by itself, but compounds
+with 28a -- if the user edits in one section then expands another,
+the edit triggers a rebuild that forgets BOTH previously-expanded
+sections. Make the table support multiple expanded sections OR at
+least restore whichever was last expanded before the write.
+
+### Recommendation
+
+Ship 28a first (minimal change -- restore `_expandedAgent` on
+rebuild). If 28a alone doesn't feel right -- e.g. if the user
+reports "scroll position also jumps" -- then add 28b (skip rebuild
+on own writes).
+
+### Severity
+
+**P1.** Every provider change requires the user to click the
+agent section header twice more (find it, re-expand) to keep
+working. This makes the editor painful to use.
+
+---
+
+## 29. Intent-confirm gate only fires for brainstorm -- other intents bypass user confirmation (P0)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"it bypassed the intent confirmation"*
+and *"can't proceed with testing as it detected the wrong intent
+and moved forward without user gate"*
+
+### Reproduction
+
+1. User typed: `"Barinstorm around building a smart task assignment
+   agent..."` (typo in "Brainstorm" -> "Barinstorm").
+2. Classifier matched on keywords like "assignment", "agent", and
+   the structured bullet-list format -> picked `requirements`
+   intent with high confidence.
+3. Intent-confirm gate policy
+   ([chat-handler.ts:613-628](../../src/insrc/daemon/chat-handler.ts#L613-L628))
+   only triggers when:
+   - `classifier.confirmIntent === true` in config, OR
+   - classified intent IS brainstorm, OR
+   - confidence < 0.4.
+4. Intent was `requirements` with confidence >= 0.4 and no explicit
+   `confirmIntent: true` in config -> gate skipped -> pipeline
+   launched the requirements/designer agent immediately.
+5. User had no chance to say "no, I meant brainstorm."
+
+Log trace:
+```
+14:41:20  progress step="Intent: requirements"
+14:41:20  progress step="Running requirements agent..."
+```
+No intent-confirm gate between those two lines.
+
+### Root cause
+
+Item 8c's default-brainstorm-only rule was designed to reduce
+confirmation fatigue. It assumes non-brainstorm intents are less
+ambiguous. They aren't -- typos, stream-of-consciousness prompts,
+and similar structured inputs all mis-classify.
+
+### Fix
+
+**29a. Fire the gate on EVERY classification output.** Per user
+direction on 2026-04-21 -- confirmation is the default for every
+classified intent, no per-intent carve-outs. Any turn that reaches
+the classifier emits an intent-confirm gate before the agent
+pipeline launches. The user can opt out globally by setting
+`classifier.confirmIntent: false` in config; that setting is the
+only way to skip the gate.
+
+Policy matrix:
+
+| `classifier.confirmIntent` | Fire gate? |
+|----|----|
+| `true` (or unset -- the default) | yes, always |
+| `false` | only if confidence < 0.4 |
+
+This replaces the prior per-intent allow list. Simpler contract
+and no mis-classification can bypass the user's review.
+
+**29b. Show the gate with ALL alternatives surfaced.** Today the
+intent-confirm gate shows one intent + reasoning. For prompts that
+classify ambiguously, show the top 2-3 candidate intents with
+their confidences so the user can pick directly instead of typing
+in the "use-intent" field.
+
+**29c. Add a daemon log line when the gate is skipped.** Right now
+a bypass is invisible in the log -- users can't tell "should there
+have been a gate here?" from the trace. Log
+`{ intent, confidence, confirmSetting, gateFired: false, reason }`
+on every classification decision.
+
+### Verification
+
+- Type "Barinstorm around X" -> classifier picks `requirements`
+  (or whatever) -> intent-confirm gate fires -> user can proceed /
+  use-intent / cancel.
+- Set `classifier.confirmIntent: false` -> only low-confidence
+  turns (< 0.4) trigger the gate.
+- Ask "what does function foo do?" (research intent, high
+  confidence) -> no gate, direct research flow. (Confirms the
+  cheap-intent exception.)
+
+### Severity
+
+**P0.** User explicitly stopped testing because of this. Every
+mis-classified turn today is a non-recoverable detour -- the user
+cancels, fixes the typo, retries. Adds friction to every interaction.
+
+---
+
+## 30. Requirements / Designer validate gate has `kind=unknown phase=waiting` (P0)
+
+### Observation (2026-04-21 live test)
+
+After the misfire in Item 29, the requirements agent (designer)
+reached its validation step and tried to open the validation gate.
+Monitor trace:
+
+```
+14:42:33  progress step="Requirements Validation"
+14:42:33  gate received kind=unknown phase=waiting gateId=task-1-1776762753924 itemId=- actions=[execute,reject] extras=[] sessionActive=false
+14:42:33  [brainstorm:flow] route kind=unknown sessionId=...
+14:42:33  [brainstorm:flow] unknown gate kind "unknown" (gateId=task-1-...); ignoring
+```
+
+Same class as Item 13 (convergence gate dropped silently). The
+gate's task doesn't carry a `structured.itemType`, so
+`classifyGate` in the browser's session service defaults to
+`'unknown'` -> flow contribution logs a warning and ignores ->
+user has no UI for the validation decision -> agent silently
+blocks waiting for a gate reply that can never come.
+
+### Root cause (hypothesis)
+
+The designer agent's `buildValidateRequirementsTask` (or equivalent
+-- needs file lookup) emits a gate task without a
+`structured: { phase, itemType, item, ... }` payload. Matches the
+historic pattern Item 13 fixed for convergence-review; the same
+fix pattern applies here.
+
+### Fix
+
+**30a. Find and annotate every designer-emitted gate.** Likely
+builders:
+- `buildValidateRequirementsTask` (requirements-extraction gate).
+- `buildReviewDesignTask` (designer sketch review gate).
+- Whatever builds the `task-1-<timestamp>` gate id the log
+  captured.
+
+Each needs:
+```ts
+structured: {
+  phase: 'extract' | 'design' | 'review' | 'finalize',   // per agent stage
+  itemType: '<well-known-name>',
+  item: { ... },
+}
+```
+
+**30b. Register matching kinds in the browser session service.**
+`classifyGate` at
+[brainstormSessionServiceImpl.ts:25](../../src/vs/workbench/contrib/insrc/browser/brainstorm/brainstormSessionServiceImpl.ts#L25)
+maps itemType -> BrainstormGateKind. Add the new designer /
+requirements item types. Or -- better -- generalise the flow
+contribution so non-brainstorm agents can contribute their own
+kind -> pane map without a central switch statement.
+
+**30c. Fail loud instead of silent drop.** When the flow
+contribution gets an unknown gate kind on a non-brainstorm session,
+at minimum emit a visible error toast. Today the `warn`-level log
+is invisible to the user and the turn hangs forever.
+
+### Scope
+
+This isn't brainstorm-specific; it surfaces every time an agent
+emits a gate without structured payload. Ship the generic pattern
+with one designer case concrete (30a for requirements validate),
+leave other agents / gates for follow-up.
+
+### Severity
+
+**P0.** The current behaviour is "the turn silently hangs forever
+with no UI." Any agent that doesn't opt into the structured-gate
+contract is broken end-to-end.
 
 ---
 

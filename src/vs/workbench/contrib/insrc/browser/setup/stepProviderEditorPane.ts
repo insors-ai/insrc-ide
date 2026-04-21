@@ -5,6 +5,8 @@
 
 import './media/setupWizard.css';
 import * as dom from '../../../../../base/browser/dom.js';
+import { Codicon } from '../../../../../base/common/codicons.js';
+import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
@@ -156,22 +158,9 @@ export class StepProviderEditorPane extends EditorPane {
 			// daemon only seeds once the user picks an active cloud in the
 			// Model Providers pane. Point them there when no active cloud is
 			// set; otherwise assume a load race and nudge a reload.
-			const msg = dom.append(this._tableBody, dom.$('.insrc-sp-empty'));
-			msg.style.padding = '32px 20px';
-			msg.style.color = 'var(--vscode-descriptionForeground)';
-			msg.style.textAlign = 'center';
-			msg.style.display = 'flex';
-			msg.style.flexDirection = 'column';
-			msg.style.alignItems = 'center';
-			msg.style.gap = '10px';
-
-			const heading = dom.append(msg, dom.$('div'));
-			heading.style.fontSize = '13px';
-			heading.style.color = 'var(--vscode-foreground)';
-
-			const hint = dom.append(msg, dom.$('div'));
-			hint.style.fontSize = '12px';
-			hint.style.maxWidth = '420px';
+			const wrap = dom.append(this._tableBody, dom.$('.insrc-sp-empty'));
+			const heading = dom.append(wrap, dom.$('.insrc-sp-empty-heading'));
+			const hint = dom.append(wrap, dom.$('.insrc-sp-empty-hint'));
 
 			if (providers.activeProvider) {
 				heading.textContent = 'No agent step bindings found.';
@@ -180,16 +169,8 @@ export class StepProviderEditorPane extends EditorPane {
 				heading.textContent = 'No active cloud provider.';
 				hint.textContent = 'Pick an active cloud provider (Anthropic, OpenAI, Gemini, or Mistral) in the Model Providers pane. Once configured, this page will populate with per-step defaults that you can customize.';
 
-				const btn = dom.append(msg, dom.$('button.insrc-sp-open-providers')) as HTMLButtonElement;
+				const btn = dom.append(wrap, dom.$('button.insrc-sp-open-providers')) as HTMLButtonElement;
 				btn.textContent = 'Open Model Providers';
-				btn.style.marginTop = '6px';
-				btn.style.padding = '6px 14px';
-				btn.style.fontSize = '12px';
-				btn.style.background = 'var(--vscode-button-background)';
-				btn.style.color = 'var(--vscode-button-foreground)';
-				btn.style.border = 'none';
-				btn.style.borderRadius = '4px';
-				btn.style.cursor = 'pointer';
 				btn.addEventListener('click', () => {
 					// insrc.openModelProviders is the registered command id.
 					this.commandService.executeCommand('insrc.openModelProviders').then(
@@ -205,9 +186,6 @@ export class StepProviderEditorPane extends EditorPane {
 		// cloud provider the dropdowns default to and which one orphan
 		// warnings reference.
 		const activeBanner = dom.append(this._tableBody, dom.$('.insrc-sp-active-banner'));
-		activeBanner.style.padding = '8px 12px';
-		activeBanner.style.fontSize = '12px';
-		activeBanner.style.color = 'var(--vscode-descriptionForeground)';
 		if (providers.activeProvider) {
 			activeBanner.textContent = `Active cloud provider: ${providers.activeProvider}. Cloud bindings to other providers will be flagged as orphan.`;
 		} else {
@@ -223,32 +201,17 @@ export class StepProviderEditorPane extends EditorPane {
 		const stepEntries = Object.entries(steps);
 
 		const section = dom.append(this._tableBody, dom.$('.insrc-sp-section'));
-		section.style.borderBottom = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.15))';
 
 		// Header
 		const header = dom.append(section, dom.$('.insrc-sp-header'));
-		header.style.display = 'flex';
-		header.style.alignItems = 'center';
-		header.style.padding = '8px 12px';
-		header.style.cursor = 'pointer';
-		header.style.userSelect = 'none';
 
 		const chevron = dom.append(header, dom.$('.codicon.codicon-chevron-right'));
-		chevron.style.fontSize = '14px';
-		chevron.style.marginRight = '8px';
-		chevron.style.transition = 'transform 0.15s';
 
-		const nameEl = dom.append(header, dom.$('span'));
+		const nameEl = dom.append(header, dom.$('span.insrc-sp-agent-name'));
 		nameEl.textContent = agentName;
-		nameEl.style.fontWeight = '600';
-		nameEl.style.fontSize = '13px';
-		nameEl.style.flex = '1';
 
-		const badge = dom.append(header, dom.$('span'));
+		const badge = dom.append(header, dom.$('span.insrc-sp-step-count'));
 		badge.textContent = `${stepEntries.length} steps`;
-		badge.style.fontSize = '11px';
-		badge.style.color = 'var(--vscode-descriptionForeground)';
-		badge.style.marginRight = '8px';
 
 		// Orphan count (bindings referencing non-active cloud providers).
 		const orphanCount = stepEntries.filter(([, v]) => {
@@ -258,20 +221,21 @@ export class StepProviderEditorPane extends EditorPane {
 				&& resolved.provider !== providers.activeProvider;
 		}).length;
 		if (orphanCount > 0) {
-			const orphanBadge = dom.append(header, dom.$('span'));
+			const orphanBadge = dom.append(header, dom.$('span.insrc-sp-orphan-badge'));
 			orphanBadge.textContent = `${orphanCount} orphan`;
-			orphanBadge.style.fontSize = '11px';
-			orphanBadge.style.color = 'var(--vscode-editorWarning-foreground)';
-			orphanBadge.style.padding = '1px 6px';
-			orphanBadge.style.borderRadius = '8px';
-			orphanBadge.style.border = '1px solid var(--vscode-editorWarning-foreground)';
 			orphanBadge.title = `Step bindings reference a non-active cloud provider. Reassign in the editor below.`;
 		}
 
-		// Body
+		// Body. Item 28: preserve expansion state across rebuilds -- the
+		// config-change listener in setInput re-runs _loadTable() on every
+		// own-write, which clobbers the user's accordion position. Starting
+		// the body open when this agent was last expanded keeps their place.
 		const body = dom.append(section, dom.$('.insrc-sp-body'));
-		body.style.display = 'none';
-		body.style.padding = '0 12px 12px 34px';
+		const startExpanded = this._expandedAgent === agentName;
+		body.style.display = startExpanded ? 'block' : 'none';
+		if (startExpanded) {
+			chevron.style.transform = 'rotate(90deg)';
+		}
 
 		this._sections.set(agentName, { header, body });
 		header.onclick = () => this._toggleSection(agentName, chevron);
@@ -291,15 +255,9 @@ export class StepProviderEditorPane extends EditorPane {
 	): void {
 		const resolved = normalizeBinding(value, providers);
 		const row = dom.append(body, dom.$('.insrc-sp-row'));
-		row.style.display = 'grid';
-		row.style.gridTemplateColumns = '160px 130px 1fr auto';
-		row.style.alignItems = 'center';
-		row.style.gap = '8px';
-		row.style.padding = '6px 0';
 
-		const stepEl = dom.append(row, dom.$('span'));
+		const stepEl = dom.append(row, dom.$('span.insrc-sp-step-name'));
 		stepEl.textContent = stepName;
-		stepEl.style.fontSize = '12px';
 
 		// Provider dropdown: always offers Local + whichever cloud is active.
 		// A currently-bound non-active cloud (orphan) is also included so the
@@ -324,30 +282,22 @@ export class StepProviderEditorPane extends EditorPane {
 		this._populateModelDropdown(modelSelect, resolved.provider, resolved.model, providers);
 
 		// Status column: orphan warning OR resolved model echo.
-		const status = dom.append(row, dom.$('span'));
-		status.style.fontSize = '11px';
 		const isOrphan = resolved.provider !== 'local'
 			&& providers.activeProvider !== null
 			&& resolved.provider !== providers.activeProvider;
-		if (isOrphan) {
-			status.textContent = `orphan -- active cloud is ${providers.activeProvider}`;
-			status.style.color = 'var(--vscode-editorWarning-foreground)';
-		} else {
-			status.textContent = '';
-		}
+		const status = dom.append(row, dom.$(isOrphan ? 'span.insrc-sp-status.orphan' : 'span.insrc-sp-status'));
+		status.textContent = isOrphan
+			? `orphan -- active cloud is ${providers.activeProvider}`
+			: '';
 
-		// Clear button (only visible when the step has an explicit binding --
-		// lets the user fall back to the active-provider default).
+		// Clear button (icon-only). Falls back to the active-provider default
+		// when clicked. Item 27: matches the icon-button convention used
+		// elsewhere in the insrc UI.
 		const clearBtn = dom.append(row, dom.$('button.insrc-sp-clear')) as HTMLButtonElement;
-		clearBtn.textContent = 'Clear';
-		clearBtn.title = 'Remove this explicit binding; step will use the active-provider default.';
-		clearBtn.style.fontSize = '11px';
-		clearBtn.style.padding = '2px 8px';
-		clearBtn.style.background = 'transparent';
-		clearBtn.style.border = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.3))';
-		clearBtn.style.color = 'var(--vscode-descriptionForeground)';
-		clearBtn.style.borderRadius = '4px';
-		clearBtn.style.cursor = 'pointer';
+		clearBtn.title = 'Clear this explicit binding; step will use the active-provider default.';
+		clearBtn.setAttribute('aria-label', 'Clear binding');
+		const clearIcon = dom.append(clearBtn, dom.$('span.codicon'));
+		clearIcon.classList.add(...ThemeIcon.asClassNameArray(Codicon.trash));
 
 		providerSelect.addEventListener('change', async () => {
 			const nextProvider = providerSelect.value as ProviderName;
