@@ -27,7 +27,7 @@ import { ICommandService } from '../../../../../platform/commands/common/command
 import { URI } from '../../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
-import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IFileDialogService, IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { clearNode } from '../../../../../base/browser/dom.js';
 import { createTrustedTypesPolicy } from '../../../../../base/browser/trustedTypes.js';
 
@@ -150,6 +150,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
+		@IDialogService private readonly dialogService: IDialogService,
 		@IInsrcDiffService private readonly diffService: IInsrcDiffService,
 		@IFileService private readonly fileService: IFileService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
@@ -298,13 +299,31 @@ export class InsrcChatViewPane extends ViewPane {
 		this._cancelBtn.style.display = 'none';
 		this._register(dom.addDisposableListener(this._cancelBtn, 'click', async () => {
 			const wasBrainstorm = this.brainstormSession.isSessionActive;
+			if (wasBrainstorm) {
+				// Item 25: same confirmation dialog the pane-close handler uses,
+				// then the unified teardown path. No more divergent flows.
+				const { confirmed } = await this.dialogService.confirm({
+					type: 'warning',
+					message: 'Close brainstorm and end the session?',
+					detail: 'Closing this pane will cancel the in-progress brainstorm. '
+						+ 'The daemon stream will be terminated and any uncommitted '
+						+ 'decisions will be lost.',
+					primaryButton: 'End Session',
+					cancelButton: 'Keep Open',
+				});
+				if (!confirmed) { return; }
+				try {
+					await this.chatService.cancelBrainstormSession('user-cancel-chat-panel');
+				} catch {
+					// Cancel / close race with an already-dead stream is harmless.
+				}
+				return;
+			}
+			// Non-brainstorm turn -- just cancel the in-flight stream.
 			try {
 				await this.chatService.cancelStream();
-				if (wasBrainstorm) {
-					await this.chatService.closeSession();
-				}
 			} catch {
-				// Cancel / close race with an already-dead stream is harmless.
+				// harmless
 			}
 		}));
 
@@ -412,13 +431,31 @@ export class InsrcChatViewPane extends ViewPane {
 		const [primary] = detected.split('/');
 		if (primary) { this._selectIntent(primary); }
 
-		// If the brainstorm pane is taking over, it already shows the
-		// category badge -- no need to echo in chat too.
-		if (this._shouldSuppressMessagesForBrainstorm()) { return; }
+		// Item 24: render the classification as a persistent assistant
+		// message in the chat transcript -- even during brainstorm lock.
+		// Previously this was suppressed while brainstorm was active so the
+		// user lost the record of HOW the turn was routed once the intent
+		// pill scrolled past. The daemon's progress event carries the full
+		// "intent/<category> (reasoning)" shape, so we split it into a
+		// headline + reasoning.
+		const parenIdx = detected.indexOf(' (');
+		const headline = parenIdx > 0 ? detected.slice(0, parenIdx).trim() : detected;
+		const reasoning = parenIdx > 0 && detected.endsWith(')')
+			? detected.slice(parenIdx + 2, -1).trim()
+			: undefined;
+		const slashIdx = headline.indexOf('/');
+		const primaryIntent = slashIdx > 0 ? headline.slice(0, slashIdx) : headline;
+		const subIntent = slashIdx > 0 ? headline.slice(slashIdx + 1) : undefined;
+		const formatted = subIntent
+			? `**Detected intent:** ${primaryIntent} → ${subIntent}`
+			: `**Detected intent:** ${primaryIntent}`;
+		const content = reasoning
+			? `${formatted}\n\n_${reasoning}_`
+			: formatted;
 
 		const message: ChatMessage = {
 			role: 'assistant',
-			content: `Detected intent: **${detected}**. Routing accordingly.`,
+			content,
 			timestamp: new Date().toISOString(),
 		};
 		this._renderMessage(message);

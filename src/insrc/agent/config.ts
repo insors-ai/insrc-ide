@@ -281,8 +281,14 @@ function parseBinding(
       if (def) return { provider: binding, model: def };
       return fallbackBinding(config);
     }
-    // Unknown string -> treat as local model name
-    return { provider: 'local', model: binding };
+    // Item 23c: unknown string shorthand used to be silently treated as a
+    // local model name, which meant the step-provider editor's broken
+    // writes (`claude:fast` etc.) ran on local inference with a bogus
+    // model string. That was invisible to users. Now we log loudly and
+    // fall back to the active-provider default so at least the call
+    // reaches a real model.
+    log.warn({ binding }, 'parseBinding: unknown string shorthand -- falling back to active-provider default');
+    return fallbackBinding(config);
   }
 
   // StepBinding object
@@ -320,7 +326,68 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 function mergeAgents(raw: unknown): AgentProviderConfigs | undefined {
   if (!isObject(raw)) return undefined;
-  return raw as AgentProviderConfigs;
+  return migratePoisonedAgentBindings(raw as AgentProviderConfigs);
+}
+
+/**
+ * Item 23b: one-shot migration for poisoned step bindings.
+ *
+ * The pre-5-provider step-provider editor wrote strings like
+ * `'claude:fast' | 'claude:standard' | 'claude:powerful'` directly
+ * into `models.agents.<agent>.<step>`. None of those matched
+ * parseBinding's shorthand whitelist, so every claude-tier binding
+ * was silently misrouted to local inference with an invalid model
+ * name (see Item 23 plan).
+ *
+ * This pass:
+ *  - Converts `claude:*` strings to `{ provider: 'anthropic' }` so
+ *    the runtime uses the anthropic default (historical intent).
+ *  - Drops any other unknown string -- the runtime can't resolve
+ *    them to a real provider anyway.
+ *  - Leaves valid shorthands and StepBinding objects untouched.
+ *
+ * Runs every config load -- safe because it's idempotent and stable
+ * configs are no-ops.
+ */
+function migratePoisonedAgentBindings(agents: AgentProviderConfigs): AgentProviderConfigs {
+  const VALID_SHORTHANDS = new Set(['local', 'anthropic', 'openai', 'gemini', 'mistral']);
+  let migrated = 0;
+  let dropped = 0;
+  const out = { ...agents } as Record<string, Record<string, string | StepBinding>>;
+  for (const agent of Object.keys(out)) {
+    const steps = out[agent];
+    if (!isObject(steps)) continue;
+    const cleanedSteps: Record<string, string | StepBinding> = {};
+    for (const step of Object.keys(steps)) {
+      const v = steps[step];
+      if (typeof v !== 'string') {
+        // Already a StepBinding object -- carry over verbatim.
+        cleanedSteps[step] = v as StepBinding;
+        continue;
+      }
+      if (VALID_SHORTHANDS.has(v)) {
+        cleanedSteps[step] = v;
+        continue;
+      }
+      if (v.startsWith('claude:')) {
+        // Legacy claude-tier string from the old step editor. Map to
+        // the anthropic default since anthropic was the only historical
+        // cloud provider.
+        cleanedSteps[step] = { provider: 'anthropic' } as StepBinding;
+        migrated++;
+        continue;
+      }
+      // Unknown string -- drop the binding. The runtime's
+      // fallbackBinding (Item 23c) will resolve to the active-provider
+      // default on next lookup.
+      dropped++;
+    }
+    out[agent] = cleanedSteps;
+  }
+  if (migrated > 0 || dropped > 0) {
+    log.info({ migrated, dropped }, 'step-binding migration applied');
+  }
+  return out as AgentProviderConfigs;
 }
 
 function parseModelParams(raw: unknown, defaults: ModelParams): ModelParams {

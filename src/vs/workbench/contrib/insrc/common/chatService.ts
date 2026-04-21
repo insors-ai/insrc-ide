@@ -112,6 +112,22 @@ export interface IInsrcChatService {
 	 * turn has been submitted.
 	 */
 	redirect(intent: string, refinedMessage?: string): Promise<void>;
+	/**
+	 * Unified brainstorm cancel (Item 25). Does the full teardown every
+	 * brainstorm-exit path needs: cancel the in-flight stream, close the
+	 * daemon session, synthesize `streamEnd` so listeners drop their
+	 * progress chrome, and fire `onRequestCloseBrainstormPanes` so the
+	 * flow contribution can close any open brainstorm editor panes.
+	 * Does NOT show a confirmation dialog -- callers are expected to
+	 * have confirmed with the user already.
+	 */
+	cancelBrainstormSession(reason: string): Promise<void>;
+	/**
+	 * Fires when `cancelBrainstormSession` wants brainstorm panes to
+	 * close. The flow contribution listens and calls `editorService.closeEditors`
+	 * on every brainstorm input it knows about.
+	 */
+	readonly onRequestCloseBrainstormPanes: Event<void>;
 
 	// History
 	loadHistory(sessionId: string): Promise<ChatMessage[]>;

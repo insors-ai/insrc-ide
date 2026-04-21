@@ -41,6 +41,9 @@ Related plans:
 | 20| User-added idea still requires Approve click -- should be auto-accepted   | P1 | daemon | **DONE** (20a: injected-ideas drain sets `status: 'accepted'` and skips the reviewQueue; user ideas now go straight into the accepted pool for clustering / convergence) |
 | 21| Chat-panel Stop/Cancel button doesn't actually cancel (close-tab does)    | P1 | UI | **DONE** (Stop button handler now runs `cancelStream()` AND `closeSession()` when a brainstorm is active, matching tab-close behaviour) |
 | 22| Progress bar stays stuck on last step after session cancel / close        | P1 | UI | **DONE** (`cancelStream` + `closeSession` now fire synthetic `streamEnd` event; chatView listens to brainstorm session deactivation and hides the bar) |
+| 23| Step Provider Settings still uses old Claude-focused framework            | P1 | UI | **DONE** (23a editor rebuilt w/ per-row provider+model dropdowns, orphan-binding detection; 23b `mergeAgents` runs migration on every load -- `claude:*` -> `{provider: 'anthropic'}`, unknown strings dropped, logs counts; 23c parseBinding's silent "unknown string -> local" fallback replaced with a loud log + active-provider fallback; 23d dropdown restricted to Local + active cloud; 23e editor always writes StepBinding objects) |
+| 24| Intent / sub-intent classification should persist as a chat message       | P2 | UI | **DONE** (`_ingestIntentAnnouncement` no longer suppressed during brainstorm; splits headline / subintent / reasoning into a formatted assistant message) |
+| 25| Unify chat-panel Cancel and Pane-close into a single handler              | P1 | UI | **DONE** (new `IInsrcChatService.cancelBrainstormSession(reason)` does cancel + close + streamEnd + `onRequestCloseBrainstormPanes`; flow contribution listens and closes every brainstorm editor; both UI entry points call this method with the same confirm modal) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -2315,6 +2318,391 @@ shows up after 22a+b.
 thinks something is still running even though it isn't. Compounds
 with Item 21 (cancel button not working) -- together they make the
 "stop a brainstorm" UX feel completely unreliable.
+
+---
+
+## 23. Step Provider Settings still uses old Claude-focused framework (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"the step provider settings need to
+be updated to use the new configuration model, still using the old
+claude focused framework"*
+
+### Current state
+
+The editor at
+[stepProviderEditorPane.ts](../../src/vs/workbench/contrib/insrc/browser/setup/stepProviderEditorPane.ts)
+was written when the config had two provider tiers: local (Ollama)
+and Claude. It hard-codes a picker list:
+
+```ts
+const PROVIDERS = ['local', 'claude:fast', 'claude:standard', 'claude:powerful'];
+```
+
+and writes the selected label as a raw string into
+`models.agents.<agent>.<step>` (line 225). It reads by
+`.startsWith('claude')` for display.
+
+The new config schema (already shipped) supports five providers --
+`local`, `anthropic`, `openai`, `gemini`, `mistral` -- with a single
+active cloud provider selected in the Model Providers pane. Per-step
+bindings are typed as:
+
+```ts
+type AgentStepConfig = Record<string, string | StepBinding>;
+interface StepBinding { provider: ProviderName; model?: string; }
+```
+
+### Impact analysis -- bigger than "stale UI"
+
+Tracing the runtime consumer
+([parseBinding in config.ts:269-298](../../src/insrc/agent/config.ts#L269-L298))
+against the strings the editor actually writes reveals that the
+**editor has been silently broken end-to-end**, not just out of
+date:
+
+1. `parseBinding` accepts string form with a whitelist:
+   `'local'` → local provider, `'openai' | 'anthropic' | 'gemini' |
+   'mistral'` → that provider's default model, or a `StepBinding`
+   object.
+2. **Anything else** hits the fallback branch at line 285:
+   `return { provider: 'local', model: binding };` -- i.e. treats
+   the string as a *local* model name.
+3. The editor writes `'claude:fast'`, `'claude:standard'`,
+   `'claude:powerful'` -- none of which are in parseBinding's
+   whitelist. Every claude-tier binding the user ever set has been
+   silently routed back to the **local** provider with an invalid
+   model name.
+
+Net: the step editor wrote junk the runtime couldn't resolve. Users
+who pinned `brainstorm.review` to "claude:powerful" got local
+inference with a bogus model string. No error, no warning -- just a
+quiet misroute.
+
+The legacy "read-tolerance" suggested in the original Item 23b
+draft (migrate claude:fast-style strings to `{ provider: 'anthropic',
+model }`) isn't backwards-compat -- it's a **bug fix that has to
+run once on existing configs to delete the poisoned writes**.
+
+### Fix (widened scope)
+
+**23a. Rebuild the step-provider editor around the new schema.**
+Replace the flat picker with:
+- A provider dropdown per step row (options: Local + whichever cloud
+  provider is the current active one per Model Providers pane).
+- A model dropdown populated from that provider's
+  `providers.<name>.enabled` list.
+- Writes `models.agents.<agent>.<step>` as
+  `{ provider: '<name>', model: '<model>' }`.
+
+**23b. One-shot migration pass for poisoned writes** -- NOT a
+read-tolerance layer. In `mergeConfig` at load time:
+
+```ts
+function migratePoisonedAgentBindings(agents: AgentProviderConfigs): { migrated: number; dropped: number } {
+  const VALID_STRING_SHORTHANDS = new Set(['local', 'anthropic', 'openai', 'gemini', 'mistral']);
+  let migrated = 0, dropped = 0;
+  for (const agent of Object.keys(agents)) {
+    const steps = agents[agent];
+    if (!steps) continue;
+    for (const step of Object.keys(steps)) {
+      const v = steps[step];
+      if (typeof v !== 'string') continue;                    // StepBinding -- fine
+      if (VALID_STRING_SHORTHANDS.has(v)) continue;            // known shorthand -- fine
+      if (v.startsWith('claude:')) {
+        // claude:fast / claude:standard / claude:powerful -- legacy
+        // editor output. Migrate to anthropic default. Safe because
+        // anthropic is the only historical cloud.
+        steps[step] = { provider: 'anthropic', model: undefined } as StepBinding;
+        migrated++;
+      } else {
+        // Unknown string -- was being mis-routed to local with an
+        // invalid model. Drop the binding; runtime will fall back
+        // to active-provider default.
+        delete steps[step];
+        dropped++;
+      }
+    }
+  }
+  return { migrated, dropped };
+}
+```
+
+Log the counts on startup
+(`log.info({ migrated, dropped }, 'step-binding migration')`). If
+`migrated + dropped > 0`, write the migrated config back to disk.
+
+**23c. Tighten `parseBinding`.** The silent "unknown string ->
+local" fallback at
+[config.ts:285](../../src/insrc/agent/config.ts#L285) is the reason
+the editor's broken writes went undetected. Change the string
+branch to a strict whitelist + explicit `fallbackBinding` on
+mismatch, AND log a warning so future editor regressions are loud:
+
+```ts
+if (typeof binding === 'string') {
+  if (binding === 'local') return { provider: 'local', ... };
+  if (binding === 'anthropic' || binding === 'openai' || binding === 'gemini' || binding === 'mistral') {
+    return ...;
+  }
+  log.warn({ binding }, 'parseBinding: unknown string shorthand -- using active-provider default');
+  return fallbackBinding(config);   // no more silent mis-route to local
+}
+```
+
+**23d. Honor the active-provider constraint from the Model Providers
+pane.** The provider dropdown in the new editor should only offer
+Local + whichever cloud provider is currently active. If a binding
+references a now-inactive cloud (e.g. user switched active from
+anthropic to gemini but a step still points at anthropic), render
+the row with an amber warning "binding references anthropic -- active
+cloud is now gemini. Reassign or clear."
+
+**23e. Deprecate string shorthand for NEW writes.** The runtime
+keeps accepting `'local' | 'anthropic' | 'openai' | 'gemini' |
+'mistral'` as string shorthand (convenient in hand-edited config
+files), but the editor MUST write `StepBinding` objects for new /
+edited entries. Round-tripping through the editor normalises every
+entry to the object form. This prevents a future regression where
+someone rebuilds the editor and accidentally reintroduces string-
+writes.
+
+### Dependencies
+
+- Model Providers config schema (stable, shipped).
+- Item 17 (per-step resolver) -- already shipped. Verifying 23 end-
+  to-end requires both 17 and 23 in the same build.
+
+### Verification
+
+1. **Migration runs once and cleans a poisoned config.** Seed
+   `~/.insrc/config.json` with
+   `models.agents.brainstorm.review = 'claude:powerful'`. Start
+   the daemon. Log line: `step-binding migration migrated=1 dropped=0`.
+   Re-read the config -- the entry is now
+   `{ provider: 'anthropic', model: null }`.
+2. **Editor writes the new shape.** Open Step Settings from the
+   status-bar popup. Pick "openai / gpt-4o-mini" for
+   `brainstorm.review`. Save. `~/.insrc/config.json` shows
+   `{ provider: 'openai', model: 'gpt-4o-mini' }`.
+3. **Daemon picks up the binding.** Trigger a brainstorm review
+   step -- claude log (module: 'openai', model: 'gpt-4o-mini')
+   instead of haiku.
+4. **parseBinding no longer silently misroutes.** Write a bogus
+   string (e.g. `'weird-value'`) directly into config. Daemon log
+   shows `parseBinding: unknown string shorthand -- using
+   active-provider default` and routes to active-cloud default
+   rather than to local.
+
+### Severity
+
+**P1.** Dual bug: (a) core configuration surface that silently
+ignores 3 of 4 cloud providers, (b) existing configs contain
+poisoned entries that the runtime silently mis-routes. Users who
+think they've configured a step for Claude have instead been
+running on local inference with an invalid model string.
+
+---
+
+## 24. Intent / sub-intent classification should persist as a chat message (P2)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"P2: the intent/sub-intent detection
+should be displayed in the user chat panel, once confirmed: Chat
+message should be sent to user (no user action required)"*
+
+### Current state
+
+Classification surfaces in two transient places:
+
+1. **Intent progress pill** -- `send({ stream: 'progress', message:
+   'Intent: brainstorm/design (...)' })` at
+   [task.ts:547](../../src/insrc/daemon/task.ts) and
+   [chat-handler.ts:601](../../src/insrc/daemon/chat-handler.ts#L601).
+   The chat view displays this as a small pill at the top of the
+   composer that gets overwritten by the next progress event.
+2. **Intent-confirm gate** (Item 5 / 8) -- modal gate asking the
+   user to Proceed / Use-different-intent / Cancel. Shows
+   confidence + reasoning. But once resolved the UI is gone; the
+   chat transcript has no record of what was classified.
+
+After the user clicks Proceed, the chat panel carries on with the
+turn but there's no persistent record of "we classified this as
+brainstorm/design" in the transcript. Ten minutes later the user
+has no way to see how the turn was routed.
+
+### Desired behaviour
+
+- **On every classification** (not just when the confirm gate
+  fires): the chat panel should render an assistant-style message
+  like:
+  > **Detected intent:** brainstorm → design
+  > _User is describing the architectural shape of a task
+  > assignment system..._
+  ...that stays in the transcript as a normal message (persisted
+  with the turn).
+- **No user action required** -- the message appears automatically
+  as soon as the classifier emits the decision.
+- **When the confirm gate fires and the user clicks Proceed**, the
+  existing intent gate disappears but the persistent message stays.
+
+Today there's already a dedupe-guarded `_ingestIntentAnnouncement`
+in `chatView` that emits a transient assistant message -- but it's
+suppressed while brainstorm is active
+([chatView.ts:394](../../src/vs/workbench/contrib/insrc/browser/chat/chatView.ts#L394)):
+
+```ts
+if (this._shouldSuppressMessagesForBrainstorm()) { return; }
+```
+
+So the moment the classifier decides "brainstorm", the message gets
+swallowed. That's the regression to fix.
+
+### Fix
+
+**24a. Do not suppress the Intent-announcement message.** Even
+during brainstorm lock, the "Detected intent: brainstorm/design"
+assistant message should appear in the transcript. It's exactly
+the kind of meta-info the user wants to see.
+
+**24b. Persist the classification via the turn's chat history.**
+Today the chat panel renders the message client-side only; it's
+not stored with the conversation turn. Extend
+[session.history](../../src/insrc/daemon) to accept a
+`classification` metadata field and surface it when reloading
+history. Alternatively, just render it as a normal assistant
+message (daemon-side) so it rides the standard persistence path.
+
+**24c. Richer render -- include confidence + reasoning.** Today the
+message is a one-liner ("Detected intent: brainstorm/design.").
+Expand to:
+> **Detected intent:** brainstorm → design (confidence 0.87)
+> Reasoning: User is describing the architectural shape of a task
+> assignment system—inputs, tool integrations, decision logic flow,
+> and batch processing mode—rather than specifying what tasks to
+> assign or how to code it.
+
+### Dependencies
+
+None. Pure UI change; daemon already emits the reasoning in the
+progress event.
+
+### Severity
+
+**P2.** Nice-to-have transparency. Users can live without it today
+because the intent-confirm gate (Items 5 / 8) already shows the
+classification at decision time. But once the gate is resolved, the
+record is gone.
+
+---
+
+## 25. Unify chat-panel Cancel and Pane-close into a single handler (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"looks like the chat panel cancel is
+triggering a different flow than the Pane close. here's how the
+flow should work (one single handler for close/cancel). Popup modal
+for user confirmation to cancel, yes - handle close (stream,
+progress, pane, chat panel)"*
+
+### Current state
+
+Two independent close paths today:
+
+1. **Pane close** -- `BrainstormStepInputBase.closeHandler`
+   → shows VS Code confirm dialog -> calls `chatService.cancelStream()`
+   + `chatService.closeSession()` sequentially.
+
+2. **Chat panel Cancel button** -- `chatView` cancel handler
+   (Item 21) → calls `chatService.cancelStream()`
+   + `chatService.closeSession()` IF brainstorm is active; no
+   confirmation dialog.
+
+Even though both paths now call the same two underlying methods,
+the ORDER, the presence-of-confirmation, and the per-path
+side-effects (closeHandler writes a session-abandoned QnA entry,
+chat cancel doesn't) diverge. Observed in the log: the chat-panel
+cancel aborted the brainstorm pipeline AND then aborted a
+`controller: designer` pipeline that wasn't even expected to be
+running. The pane-close path doesn't cause that.
+
+### Desired behaviour
+
+One shared handler. Call it `cancelActiveBrainstorm(reason)`:
+
+1. Check if a brainstorm is active. If not, fall back to plain
+   `cancelStream()`.
+2. Show the confirm modal: "Cancel brainstorm? You'll lose the
+   current session."
+3. On Yes:
+   - `daemonService.rpc('chat.cancel', { sessionId })` → pipeline
+     aborts (Item 16a/c/d already wired).
+   - Clear progress chrome (Item 22 already wired).
+   - Close the brainstorm pane (via the flow contribution's
+     close-all).
+   - Close the session
+     (`daemonService.rpc('chat.close', { sessionId })`).
+   - Emit the `session-abandoned` QnA event for audit.
+4. On No: no-op.
+
+Both the pane-close X button and the chat-panel Cancel button call
+`cancelActiveBrainstorm('user-cancel')`.
+
+### Fix
+
+**25a. Extract a single method on `IInsrcChatService`:**
+`cancelBrainstormSession(reason: string): Promise<boolean>` that
+does steps 1-4 above.
+
+**25b. Wire both UI entry points to it.**
+- `BrainstormStepInputBase.closeHandler` calls it instead of
+  calling cancelStream + closeSession.
+- `chatView` cancel-btn handler calls it instead of its current
+  inline sequence.
+
+**25c. Close the brainstorm pane as part of the handler.** Today
+only the pane-close path naturally closes the pane (since the user
+clicked the pane's X). When cancel is invoked from the chat panel,
+the pane stays open -- stranded on whatever gate the session was
+last showing. The unified handler must close the pane explicitly
+(e.g. via the editor group's `closeEditor` on the brainstorm
+input).
+
+**25d. Investigate the `controller: designer aborted` log.** The
+chat-panel cancel in the observed test triggered an abort on a
+designer pipeline. That's a separate-but-related concern:
+- Either the brainstorm turn was chaining into a designer turn
+  (surprising -- brainstorm produces a spec and then maybe the user
+  expects designer as a follow-up?), OR
+- The session pool has stale controller state from a prior run.
+
+Either way, the unified cancel should handle ALL active pipelines
+on the session, not just the brainstorm one.
+
+### Dependencies
+
+Builds on Items 16 + 21. No new RPCs needed -- uses existing
+`chat.cancel` + `chat.close`.
+
+### Verification
+
+- Start a brainstorm. Click the chat panel's Cancel button ->
+  confirm modal appears -> Yes -> pane closes, chat panel unlocks,
+  progress bar clears. No daemon warnings.
+- Start a brainstorm. Click the brainstorm pane's X -> same
+  modal, same result.
+- Close behaviour is byte-identical between the two paths --
+  verified by diffing the daemon log for both scenarios.
+
+### Severity
+
+**P1.** User explicitly called out the inconsistency and the
+requested fix. Also uncovered a surprising side-effect
+(`designer aborted by user`) that suggests cancel is touching more
+than just the visible brainstorm session.
 
 ---
 

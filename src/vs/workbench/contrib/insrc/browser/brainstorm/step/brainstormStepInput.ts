@@ -79,9 +79,12 @@ export abstract class BrainstormStepInputBase extends EditorInput {
 				return ConfirmResult.CANCEL;
 			}
 			try {
-				await this._chatService.cancelStream();
-				await this._chatService.closeSession();
-				this._logService.info('[brainstorm:input] closeHandler cancelled stream + closed session');
+				// Item 25: unified cancel path -- same method the chat-panel
+				// Stop button calls, so both UI entry points produce
+				// identical daemon-side effects (cancel stream + close
+				// session + streamEnd signal + pane-close signal).
+				await this._chatService.cancelBrainstormSession('user-cancel-pane-close');
+				this._logService.info('[brainstorm:input] closeHandler cancelBrainstormSession resolved');
 			} catch (err) {
 				this._logService.warn(`[brainstorm:input] closeHandler cleanup failed (non-fatal): ${(err as Error).message}`);
 			}

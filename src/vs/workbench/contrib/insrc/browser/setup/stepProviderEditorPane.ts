@@ -9,23 +9,85 @@ import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../platform/storage/common/storage.js';
-import { IQuickInputService } from '../../../../../platform/quickinput/common/quickInput.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
-import { IInsrcConfigService } from '../../common/configService.js';
+import { IInsrcConfigService, type ProvidersConfigDTO, type ProviderName } from '../../common/configService.js';
 import type { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import type { IEditorOpenContext } from '../../../../common/editor.js';
 import type { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
 import type { StepProviderEditorInput } from './stepProviderEditorInput.js';
 
-const PROVIDERS = ['local', 'claude:fast', 'claude:standard', 'claude:powerful'];
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
+type StepBinding = { provider: ProviderName; model?: string };
+type StepValue = string | StepBinding;
+
+const CLOUD_PROVIDERS: readonly ProviderName[] = ['anthropic', 'openai', 'gemini', 'mistral'];
+
+/**
+ * Normalise whatever shape the config currently carries into a concrete
+ * `{ provider, model }` pair. Works for raw shorthand strings, full
+ * StepBinding objects, or the legacy `claude:*` strings that Item 23b's
+ * migration replaces on load (kept here as a defensive fallback for
+ * configs that never went through the migration).
+ */
+function normalizeBinding(value: StepValue | undefined, cfg: ProvidersConfigDTO): { provider: ProviderName; model: string } {
+	if (!value) {
+		return activeProviderDefault(cfg);
+	}
+	if (typeof value === 'string') {
+		if (value === 'local') {
+			return { provider: 'local', model: cfg.providers.local.coreModel };
+		}
+		if ((CLOUD_PROVIDERS as readonly string[]).includes(value)) {
+			const name = value as ProviderName;
+			if (name !== 'local') {
+				const def = cfg.providers[name].default ?? '';
+				return { provider: name, model: def };
+			}
+		}
+		// Legacy `claude:*` or anything else -> fall through to active default.
+		return activeProviderDefault(cfg);
+	}
+	// Object form.
+	const provider = value.provider;
+	if (provider === 'local') {
+		return { provider: 'local', model: value.model ?? cfg.providers.local.coreModel };
+	}
+	const def = cfg.providers[provider].default ?? '';
+	return { provider, model: value.model ?? def };
+}
+
+function activeProviderDefault(cfg: ProvidersConfigDTO): { provider: ProviderName; model: string } {
+	const active = cfg.activeProvider;
+	if (active) {
+		const def = cfg.providers[active].default ?? '';
+		return { provider: active, model: def };
+	}
+	return { provider: 'local', model: cfg.providers.local.coreModel };
+}
+
+function enabledModelsFor(provider: ProviderName, cfg: ProvidersConfigDTO): string[] {
+	if (provider === 'local') {
+		// Local has one core model; surface it as the only option.
+		return [cfg.providers.local.coreModel];
+	}
+	return [...cfg.providers[provider].enabled];
+}
+
+// ---------------------------------------------------------------------------
+// Editor pane
+// ---------------------------------------------------------------------------
 
 export class StepProviderEditorPane extends EditorPane {
 	static readonly ID = 'insrc.stepProviderEditorPane';
 
 	private _container!: HTMLElement;
 	private _tableBody!: HTMLElement;
+	private _expandedAgent: string | undefined;
+	private _sections = new Map<string, { header: HTMLElement; body: HTMLElement }>();
 
 	constructor(
 		group: IEditorGroup,
@@ -33,7 +95,6 @@ export class StepProviderEditorPane extends EditorPane {
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
 		@IInsrcConfigService private readonly configService: IInsrcConfigService,
-		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@INotificationService private readonly notificationService: INotificationService,
 	) {
 		super(StepProviderEditorPane.ID, group, telemetryService, themeService, storageService);
@@ -42,22 +103,18 @@ export class StepProviderEditorPane extends EditorPane {
 	protected createEditor(parent: HTMLElement): void {
 		this._container = dom.append(parent, dom.$('.insrc-setup'));
 
-		// Header
 		const header = dom.append(this._container, dom.$('.insrc-setup-header'));
 		const h1 = dom.append(header, dom.$('h1'));
 		h1.textContent = 'Step Providers';
 		const subtitle = dom.append(header, dom.$('p'));
-		subtitle.textContent = 'Configure which LLM provider handles each agent step. Click a provider to change it.';
+		subtitle.textContent = 'Pick a provider and model for every agent step. Options reflect your currently-active cloud provider in the Model Providers pane.';
 
-		// Accordion container (scrollable)
 		this._tableBody = dom.append(this._container, dom.$('.insrc-setup-content'));
 	}
 
 	override async setInput(input: StepProviderEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 		await this._loadTable();
-
-		// Refresh when config changes
 		this._register(this.configService.onDidChangeConfig(() => this._loadTable()));
 	}
 
@@ -68,122 +125,256 @@ export class StepProviderEditorPane extends EditorPane {
 		}
 	}
 
-	private _expandedAgent: string | undefined;
-	private _sections = new Map<string, { header: HTMLElement; body: HTMLElement }>();
-
 	private async _loadTable(): Promise<void> {
 		dom.clearNode(this._tableBody);
 		this._sections.clear();
 
-		const agents = await this.configService.getAgentBindings();
+		// Pull both the providers config (active cloud + enabled models) and
+		// the agent bindings. Fall back gracefully if either RPC fails.
+		let providers: ProvidersConfigDTO;
+		try {
+			providers = await this.configService.getProvidersConfig();
+		} catch (err) {
+			const msg = dom.append(this._tableBody, dom.$('p'));
+			msg.style.padding = '24px 12px';
+			msg.style.color = 'var(--vscode-errorForeground)';
+			msg.textContent = `Failed to load providers config: ${(err as Error).message}`;
+			return;
+		}
 
-		if (Object.keys(agents).length === 0) {
+		const rawAgents = providers.agents ?? {};
+
+		const agentEntries = Object.entries(rawAgents).filter(([, steps]) =>
+			steps && typeof steps === 'object' && Object.keys(steps).length > 0,
+		);
+
+		if (agentEntries.length === 0) {
 			const msg = dom.append(this._tableBody, dom.$('p'));
 			msg.style.padding = '24px 12px';
 			msg.style.color = 'var(--vscode-descriptionForeground)';
 			msg.style.textAlign = 'center';
-			msg.textContent = 'No agent step providers configured. Run the Setup Wizard to get started.';
+			msg.textContent = 'No agent step providers configured. The daemon seeds defaults on first use.';
 			return;
 		}
 
-		for (const [agentName, steps] of Object.entries(agents)) {
-			if (typeof steps !== 'object' || steps === null) {
-				continue;
+		// Sticky "current active cloud" banner at the top -- clarifies which
+		// cloud provider the dropdowns default to and which one orphan
+		// warnings reference.
+		const activeBanner = dom.append(this._tableBody, dom.$('.insrc-sp-active-banner'));
+		activeBanner.style.padding = '8px 12px';
+		activeBanner.style.fontSize = '12px';
+		activeBanner.style.color = 'var(--vscode-descriptionForeground)';
+		if (providers.activeProvider) {
+			activeBanner.textContent = `Active cloud provider: ${providers.activeProvider}. Cloud bindings to other providers will be flagged as orphan.`;
+		} else {
+			activeBanner.textContent = 'No active cloud provider. Every step binding runs on local until you pick one in the Model Providers pane.';
+		}
+
+		for (const [agentName, steps] of agentEntries) {
+			this._renderAgentSection(agentName, steps as Record<string, StepValue>, providers);
+		}
+	}
+
+	private _renderAgentSection(agentName: string, steps: Record<string, StepValue>, providers: ProvidersConfigDTO): void {
+		const stepEntries = Object.entries(steps);
+
+		const section = dom.append(this._tableBody, dom.$('.insrc-sp-section'));
+		section.style.borderBottom = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.15))';
+
+		// Header
+		const header = dom.append(section, dom.$('.insrc-sp-header'));
+		header.style.display = 'flex';
+		header.style.alignItems = 'center';
+		header.style.padding = '8px 12px';
+		header.style.cursor = 'pointer';
+		header.style.userSelect = 'none';
+
+		const chevron = dom.append(header, dom.$('.codicon.codicon-chevron-right'));
+		chevron.style.fontSize = '14px';
+		chevron.style.marginRight = '8px';
+		chevron.style.transition = 'transform 0.15s';
+
+		const nameEl = dom.append(header, dom.$('span'));
+		nameEl.textContent = agentName;
+		nameEl.style.fontWeight = '600';
+		nameEl.style.fontSize = '13px';
+		nameEl.style.flex = '1';
+
+		const badge = dom.append(header, dom.$('span'));
+		badge.textContent = `${stepEntries.length} steps`;
+		badge.style.fontSize = '11px';
+		badge.style.color = 'var(--vscode-descriptionForeground)';
+		badge.style.marginRight = '8px';
+
+		// Orphan count (bindings referencing non-active cloud providers).
+		const orphanCount = stepEntries.filter(([, v]) => {
+			const resolved = normalizeBinding(v, providers);
+			return resolved.provider !== 'local'
+				&& providers.activeProvider !== null
+				&& resolved.provider !== providers.activeProvider;
+		}).length;
+		if (orphanCount > 0) {
+			const orphanBadge = dom.append(header, dom.$('span'));
+			orphanBadge.textContent = `${orphanCount} orphan`;
+			orphanBadge.style.fontSize = '11px';
+			orphanBadge.style.color = 'var(--vscode-editorWarning-foreground)';
+			orphanBadge.style.padding = '1px 6px';
+			orphanBadge.style.borderRadius = '8px';
+			orphanBadge.style.border = '1px solid var(--vscode-editorWarning-foreground)';
+			orphanBadge.title = `Step bindings reference a non-active cloud provider. Reassign in the editor below.`;
+		}
+
+		// Body
+		const body = dom.append(section, dom.$('.insrc-sp-body'));
+		body.style.display = 'none';
+		body.style.padding = '0 12px 12px 34px';
+
+		this._sections.set(agentName, { header, body });
+		header.onclick = () => this._toggleSection(agentName, chevron);
+
+		// Step rows
+		for (const [stepName, value] of stepEntries) {
+			this._renderStepRow(body, agentName, stepName, value, providers);
+		}
+	}
+
+	private _renderStepRow(
+		body: HTMLElement,
+		agentName: string,
+		stepName: string,
+		value: StepValue,
+		providers: ProvidersConfigDTO,
+	): void {
+		const resolved = normalizeBinding(value, providers);
+		const row = dom.append(body, dom.$('.insrc-sp-row'));
+		row.style.display = 'grid';
+		row.style.gridTemplateColumns = '160px 130px 1fr auto';
+		row.style.alignItems = 'center';
+		row.style.gap = '8px';
+		row.style.padding = '6px 0';
+
+		const stepEl = dom.append(row, dom.$('span'));
+		stepEl.textContent = stepName;
+		stepEl.style.fontSize = '12px';
+
+		// Provider dropdown: always offers Local + whichever cloud is active.
+		// A currently-bound non-active cloud (orphan) is also included so the
+		// user can see it; picking a different provider clears the orphan.
+		const providerSelect = dom.append(row, dom.$('select.insrc-sp-provider')) as HTMLSelectElement;
+		const providerOptions: ProviderName[] = ['local'];
+		if (providers.activeProvider) {
+			providerOptions.push(providers.activeProvider);
+		}
+		if (resolved.provider !== 'local' && !providerOptions.includes(resolved.provider)) {
+			providerOptions.push(resolved.provider);
+		}
+		for (const p of providerOptions) {
+			const opt = dom.append(providerSelect, dom.$('option')) as HTMLOptionElement;
+			opt.value = p;
+			opt.textContent = p;
+			if (p === resolved.provider) { opt.selected = true; }
+		}
+
+		// Model dropdown: populated from providers[selected].enabled.
+		const modelSelect = dom.append(row, dom.$('select.insrc-sp-model')) as HTMLSelectElement;
+		this._populateModelDropdown(modelSelect, resolved.provider, resolved.model, providers);
+
+		// Status column: orphan warning OR resolved model echo.
+		const status = dom.append(row, dom.$('span'));
+		status.style.fontSize = '11px';
+		const isOrphan = resolved.provider !== 'local'
+			&& providers.activeProvider !== null
+			&& resolved.provider !== providers.activeProvider;
+		if (isOrphan) {
+			status.textContent = `orphan -- active cloud is ${providers.activeProvider}`;
+			status.style.color = 'var(--vscode-editorWarning-foreground)';
+		} else {
+			status.textContent = '';
+		}
+
+		// Clear button (only visible when the step has an explicit binding --
+		// lets the user fall back to the active-provider default).
+		const clearBtn = dom.append(row, dom.$('button.insrc-sp-clear')) as HTMLButtonElement;
+		clearBtn.textContent = 'Clear';
+		clearBtn.title = 'Remove this explicit binding; step will use the active-provider default.';
+		clearBtn.style.fontSize = '11px';
+		clearBtn.style.padding = '2px 8px';
+		clearBtn.style.background = 'transparent';
+		clearBtn.style.border = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.3))';
+		clearBtn.style.color = 'var(--vscode-descriptionForeground)';
+		clearBtn.style.borderRadius = '4px';
+		clearBtn.style.cursor = 'pointer';
+
+		providerSelect.addEventListener('change', async () => {
+			const nextProvider = providerSelect.value as ProviderName;
+			// Repopulate model dropdown for the new provider, pick its first
+			// enabled model by default.
+			const enabled = enabledModelsFor(nextProvider, providers);
+			const nextModel = enabled[0] ?? '';
+			this._populateModelDropdown(modelSelect, nextProvider, nextModel, providers);
+			await this._writeBinding(agentName, stepName, { provider: nextProvider, model: nextModel || undefined });
+		});
+
+		modelSelect.addEventListener('change', async () => {
+			const nextProvider = providerSelect.value as ProviderName;
+			const nextModel = modelSelect.value;
+			await this._writeBinding(agentName, stepName, { provider: nextProvider, model: nextModel || undefined });
+		});
+
+		clearBtn.addEventListener('click', async () => {
+			try {
+				await this.configService.setConfigValue(`models.agents.${agentName}.${stepName}`, null);
+				this.notificationService.info(`${agentName}.${stepName} binding cleared.`);
+			} catch (err) {
+				this.notificationService.warn(`Failed to clear: ${(err as Error).message}`);
 			}
+		});
+	}
 
-			const stepEntries = Object.entries(steps);
-			const claudeCount = stepEntries.filter(([, v]) => String(v).startsWith('claude')).length;
+	private _populateModelDropdown(
+		select: HTMLSelectElement,
+		provider: ProviderName,
+		selectedModel: string,
+		providers: ProvidersConfigDTO,
+	): void {
+		dom.clearNode(select);
+		const enabled = enabledModelsFor(provider, providers);
+		if (enabled.length === 0) {
+			const opt = dom.append(select, dom.$('option')) as HTMLOptionElement;
+			opt.value = '';
+			opt.textContent = '(no models enabled)';
+			opt.disabled = true;
+			opt.selected = true;
+			return;
+		}
+		// If the currently-bound model isn't in the enabled list, surface it
+		// as a disabled option tagged "(missing)" so the user sees what's
+		// actually configured.
+		const known = new Set(enabled);
+		const final = known.has(selectedModel) ? enabled : [selectedModel, ...enabled];
+		for (const m of final) {
+			if (!m) { continue; }
+			const opt = dom.append(select, dom.$('option')) as HTMLOptionElement;
+			opt.value = m;
+			opt.textContent = known.has(m) ? m : `${m} (missing)`;
+			if (m === selectedModel) { opt.selected = true; }
+		}
+	}
 
-			// Section container
-			const section = dom.append(this._tableBody, dom.$('.insrc-sp-section'));
-			section.style.borderBottom = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.15))';
-
-			// Header (clickable)
-			const header = dom.append(section, dom.$('.insrc-sp-header'));
-			header.style.display = 'flex';
-			header.style.alignItems = 'center';
-			header.style.padding = '8px 12px';
-			header.style.cursor = 'pointer';
-			header.style.userSelect = 'none';
-
-			const chevron = dom.append(header, dom.$('.codicon.codicon-chevron-right'));
-			chevron.style.fontSize = '14px';
-			chevron.style.marginRight = '8px';
-			chevron.style.transition = 'transform 0.15s';
-
-			const nameEl = dom.append(header, dom.$('span'));
-			nameEl.textContent = agentName;
-			nameEl.style.fontWeight = '600';
-			nameEl.style.fontSize = '13px';
-			nameEl.style.flex = '1';
-
-			const badge = dom.append(header, dom.$('span'));
-			badge.textContent = `${stepEntries.length} steps`;
-			badge.style.fontSize = '11px';
-			badge.style.color = 'var(--vscode-descriptionForeground)';
-			badge.style.marginRight = '8px';
-
-			if (claudeCount > 0) {
-				const claudeBadge = dom.append(header, dom.$('span'));
-				claudeBadge.textContent = `${claudeCount} claude`;
-				claudeBadge.style.fontSize = '11px';
-				claudeBadge.style.color = 'var(--vscode-textLink-foreground)';
-				claudeBadge.style.padding = '1px 6px';
-				claudeBadge.style.borderRadius = '8px';
-				claudeBadge.style.border = '1px solid var(--vscode-textLink-foreground)';
-			}
-
-			// Body (collapsed by default)
-			const body = dom.append(section, dom.$('.insrc-sp-body'));
-			body.style.display = 'none';
-			body.style.padding = '0 12px 8px 34px';
-
-			this._sections.set(agentName, { header, body });
-
-			// Click to toggle
-			header.onclick = () => this._toggleSection(agentName, chevron);
-
-			// Step rows
-			for (const [stepName, value] of stepEntries) {
-				const provider = String(value);
-
-				const row = dom.append(body, dom.$('.insrc-sp-row'));
-				row.style.display = 'flex';
-				row.style.alignItems = 'center';
-				row.style.padding = '4px 0';
-				row.style.gap = '8px';
-
-				const stepEl = dom.append(row, dom.$('span'));
-				stepEl.textContent = stepName;
-				stepEl.style.flex = '1';
-				stepEl.style.fontSize = '12px';
-
-				const providerBtn = dom.append(row, dom.$('span'));
-				providerBtn.textContent = provider;
-				providerBtn.style.cursor = 'pointer';
-				providerBtn.style.padding = '2px 8px';
-				providerBtn.style.borderRadius = '4px';
-				providerBtn.style.border = '1px solid var(--vscode-widget-border, rgba(128,128,128,0.3))';
-				providerBtn.style.fontSize = '12px';
-
-				if (provider.startsWith('claude')) {
-					providerBtn.style.color = 'var(--vscode-textLink-foreground)';
-				} else {
-					providerBtn.style.color = 'var(--vscode-testing-iconPassed, #4caf7d)';
-				}
-
-				providerBtn.onclick = (e) => {
-					e.stopPropagation();
-					this._changeProvider(agentName, stepName, provider, providerBtn);
-				};
-			}
+	private async _writeBinding(agentName: string, stepName: string, binding: StepBinding): Promise<void> {
+		// Item 23e: always write the StepBinding object shape. Keeping the
+		// runtime's string-shorthand acceptance for hand-edited configs is
+		// fine, but the editor normalises every touched entry.
+		try {
+			await this.configService.setConfigValue(`models.agents.${agentName}.${stepName}`, binding);
+			this.notificationService.info(`${agentName}.${stepName} set to ${binding.provider}${binding.model ? ` / ${binding.model}` : ''}.`);
+		} catch (err) {
+			this.notificationService.warn(`Failed to save: ${(err as Error).message}`);
 		}
 	}
 
 	private _toggleSection(agentName: string, chevron: HTMLElement): void {
 		const isExpanding = this._expandedAgent !== agentName;
-
-		// Collapse current
 		if (this._expandedAgent) {
 			const current = this._sections.get(this._expandedAgent);
 			if (current) {
@@ -194,8 +385,6 @@ export class StepProviderEditorPane extends EditorPane {
 				}
 			}
 		}
-
-		// Expand new (if different)
 		if (isExpanding) {
 			const section = this._sections.get(agentName);
 			if (section) {
@@ -205,35 +394,6 @@ export class StepProviderEditorPane extends EditorPane {
 			this._expandedAgent = agentName;
 		} else {
 			this._expandedAgent = undefined;
-		}
-	}
-
-	private async _changeProvider(agentName: string, stepName: string, currentProvider: string, labelEl: HTMLElement): Promise<void> {
-		const pick = await this.quickInputService.pick(
-			PROVIDERS.map(p => ({
-				label: p,
-				description: p === currentProvider ? '(current)' : undefined,
-			})),
-			{ placeHolder: `Provider for ${agentName}.${stepName}` }
-		);
-
-		if (!pick || pick.label === currentProvider) {
-			return;
-		}
-
-		try {
-			await this.configService.setConfigValue(`models.agents.${agentName}.${stepName}`, pick.label);
-			labelEl.textContent = pick.label;
-
-			if (pick.label.startsWith('claude')) {
-				labelEl.style.color = 'var(--vscode-textLink-foreground)';
-			} else {
-				labelEl.style.color = 'var(--vscode-testing-iconPassed, #4caf7d)';
-			}
-
-			this.notificationService.info(`${agentName}.${stepName} set to ${pick.label}`);
-		} catch (err) {
-			this.notificationService.warn(`Failed: ${(err as Error).message}`);
 		}
 	}
 }

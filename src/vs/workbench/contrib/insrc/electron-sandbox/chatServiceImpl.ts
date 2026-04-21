@@ -35,6 +35,9 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	private readonly _onDidReceiveEvent = this._register(new Emitter<ChatEvent>());
 	readonly onDidReceiveEvent: Event<ChatEvent> = this._onDidReceiveEvent.event;
 
+	private readonly _onRequestCloseBrainstormPanes = this._register(new Emitter<void>());
+	readonly onRequestCloseBrainstormPanes: Event<void> = this._onRequestCloseBrainstormPanes.event;
+
 	private readonly _onDidRequireConfig = this._register(new Emitter<{ missing: 'local' | 'provider' | 'both' }>());
 	readonly onDidRequireConfig: Event<{ missing: 'local' | 'provider' | 'both' }> = this._onDidRequireConfig.event;
 
@@ -326,6 +329,41 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		// won't emit streamEnd after an abort, so without this the
 		// chat panel's progress bar gets stuck on the last step.
 		this._onDidReceiveEvent.fire({ type: 'streamEnd' });
+	}
+
+	async cancelBrainstormSession(reason: string): Promise<void> {
+		// Unified teardown (Item 25). Called from two UI entry points:
+		//   1. The brainstorm pane's close handler (after its own confirm).
+		//   2. The chat panel's Stop button (after a dialog-service confirm).
+		// Both paths arrive here with confirmation already granted.
+		this.logService.info(`[insrc-chat] cancelBrainstormSession reason=${reason}`);
+
+		if (this._activeSessionId) {
+			try {
+				await this.daemonService.rpc('chat.cancel', { sessionId: this._activeSessionId });
+			} catch {
+				// Session may already be cancelled -- harmless race.
+			}
+			try {
+				await this.daemonService.rpc('chat.close', { sessionId: this._activeSessionId });
+			} catch {
+				// Session may already be closed -- harmless race.
+			}
+		}
+
+		this._disposeStream();
+		this._activeSessionId = undefined;
+		this._activeRepo = undefined;
+		this._messages = [];
+		this._isStreaming = false;
+		this._persistState();
+
+		// Progress bar reset + session-ended signal.
+		this._onDidReceiveEvent.fire({ type: 'streamEnd' });
+		// Ask the flow contribution to close every open brainstorm editor.
+		this._onRequestCloseBrainstormPanes.fire();
+		// Fire last so listeners see a cleaned-up session.
+		this._onDidChangeSession.fire(undefined);
 	}
 
 	async redirect(intent: string, refinedMessage?: string): Promise<void> {

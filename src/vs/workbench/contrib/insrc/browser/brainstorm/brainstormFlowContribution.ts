@@ -6,6 +6,7 @@
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IEditorGroupsService } from '../../../../services/editor/common/editorGroupsService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import {
@@ -35,6 +36,7 @@ export class BrainstormFlowContribution extends Disposable {
 		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
 		@IEditorService private readonly editorService: IEditorService,
+		@IEditorGroupsService private readonly editorGroupsService: IEditorGroupsService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ILogService private readonly logService: ILogService,
 	) {
@@ -42,6 +44,35 @@ export class BrainstormFlowContribution extends Disposable {
 
 		this._register(sessionService.onDidChangeActiveGate(gate => this._route(gate)));
 		this._register(this.chatService.onDidChangeSession(() => { this._lastOpenedKey = undefined; }));
+		// Item 25: unified cancel path. When chat service requests a close,
+		// iterate every editor and close the brainstorm step inputs. This is
+		// how the chat-panel Cancel button reaches out and shuts the pane.
+		this._register(this.chatService.onRequestCloseBrainstormPanes(() => this._closeAllBrainstormPanes()));
+	}
+
+	private _closeAllBrainstormPanes(): void {
+		// Walk every editor in every group; any BrainstormStepInputBase
+		// subclass gets closed. Uses the typeId registered on each input
+		// (`insrc.brainstormIdeasInput`, `insrc.brainstormIdeaListInput`,
+		// etc.) -- no runtime `instanceof` needed.
+		const BRAINSTORM_TYPE_IDS = new Set<string>([
+			'insrc.brainstormIdeasInput',
+			'insrc.brainstormIdeaListInput',
+			'insrc.brainstormIdeaChatInput',
+			'insrc.brainstormThemesInput',
+			'insrc.brainstormThemeDetailsInput',
+			'insrc.brainstormPresentationInput',
+		]);
+		const groups = this.editorGroupsService.groups;
+		for (const group of groups) {
+			const toClose = group.editors.filter(e => BRAINSTORM_TYPE_IDS.has(e.typeId));
+			if (toClose.length === 0) { continue; }
+			this.logService.info(`[brainstorm:flow] closing ${toClose.length} brainstorm editor(s) in group ${group.id}`);
+			for (const editor of toClose) {
+				group.closeEditor(editor, { preserveFocus: true });
+			}
+		}
+		this._lastOpenedKey = undefined;
 	}
 
 	private _route(gate: BrainstormGateSnapshot): void {
