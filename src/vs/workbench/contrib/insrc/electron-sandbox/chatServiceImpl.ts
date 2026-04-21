@@ -472,8 +472,16 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 		handle.onDidError((err: Error) => {
 			this._flushPendingContent();
-			this._finishStream();
+			// A stream error (inactivity timeout / connection lost / daemon-side
+			// error) means the session is effectively dead. Run the same full
+			// teardown as the cancel button + pane-close (cancelBrainstormSession
+			// does chat.cancel + chat.close + clears session state), but skip the
+			// confirm dialog -- there's nothing for the user to confirm, the
+			// session is already gone. Fire the error event first so the error
+			// message renders inline in the transcript before streamEnd clears
+			// the progress bar.
 			this._onDidReceiveEvent.fire({ type: 'error', error: err.message });
+			void this.cancelBrainstormSession(`stream-error:${err.message}`);
 		});
 	}
 

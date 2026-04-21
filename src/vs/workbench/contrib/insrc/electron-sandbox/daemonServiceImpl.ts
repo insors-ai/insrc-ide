@@ -39,7 +39,14 @@ interface IpcStreamMessage {
 // ---------------------------------------------------------------------------
 
 const RPC_TIMEOUT_MS = 30_000;
-const STREAM_INACTIVITY_TIMEOUT_MS = 600_000; // 10 minutes -- ollama on CPU can be slow
+// Long-running cloud agent turns (planner loops, delegate plan-execute
+// chains, large codegen validations) can genuinely stall mid-step for
+// many minutes. A 30-minute window is long enough that real work rarely
+// trips it but short enough that a truly-dead stream doesn't leave the
+// UI stuck indefinitely. On fire, the chat service tears down the full
+// session (same path as pane-close / cancel button) since a stream that
+// hasn't emitted for 30 minutes is effectively dead.
+const STREAM_INACTIVITY_TIMEOUT_MS = 1_800_000;
 
 // ---------------------------------------------------------------------------
 // Pending request / stream bookkeeping
