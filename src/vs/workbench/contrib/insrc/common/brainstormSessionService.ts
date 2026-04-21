@@ -71,6 +71,7 @@ export type BrainstormPhase =
 /** Which pane the flow contribution should open for the active gate. */
 export type BrainstormGateKind =
 	| 'intent-confirm'
+	| 'resume-confirm'
 	| 'idea'
 	| 'idea-list'
 	| 'idea-discussion'

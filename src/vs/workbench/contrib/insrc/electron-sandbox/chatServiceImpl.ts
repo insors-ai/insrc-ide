@@ -248,6 +248,35 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 	// Messaging
 	// ---------------------------------------------------------------------------
 
+	async resumeFromCheckpoint(sessionId: string, repoPath: string): Promise<void> {
+		if (!this.daemonService.isConnected) {
+			throw new Error('Not connected to daemon');
+		}
+		if (this._isStreaming) {
+			throw new Error('Already streaming');
+		}
+
+		// The daemon's chat.resumeFromCheckpoint ensures the session is
+		// in its pool (via chat-session DB restore) even if the daemon
+		// was just cold-started. On the browser side we still need our
+		// local session state hydrated so the chat panel knows which
+		// session + repo the stream belongs to. Mirror resumeSession's
+		// restore path without re-playing user-visible history -- the
+		// point of resume is to pick up mid-flow, not re-render prior
+		// turns.
+		this._activeSessionId = sessionId;
+		this._activeRepo = repoPath;
+		this._messages = [];
+		this._persistState();
+		this._onDidChangeSession.fire(sessionId);
+
+		this._isStreaming = true;
+		this._pendingContent = '';
+
+		this._streamHandle = this.daemonService.stream('chat.resumeFromCheckpoint', { sessionId });
+		this._wireStreamHandle(this._streamHandle);
+	}
+
 	async sendMessage(message: string, provider?: string): Promise<void> {
 		if (!this._activeSessionId) {
 			// Auto-start a session with the first available repo
@@ -331,23 +360,39 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._onDidReceiveEvent.fire({ type: 'streamEnd' });
 	}
 
-	async cancelBrainstormSession(reason: string): Promise<void> {
-		// Unified teardown (Item 25). Called from two UI entry points:
+	async cancelBrainstormSession(
+		reason: string,
+		opts?: { discardCheckpoint?: boolean },
+	): Promise<void> {
+		// Unified teardown (Item 25). Called from three UI entry points:
 		//   1. The brainstorm pane's close handler (after its own confirm).
 		//   2. The chat panel's Stop button (after a dialog-service confirm).
-		// Both paths arrive here with confirmation already granted.
-		this.logService.info(`[insrc-chat] cancelBrainstormSession reason=${reason}`);
+		//   3. Stream-error paths (inactivity timeout, connection lost).
+		// The first two pass `discardCheckpoint: true` (decision F1 --
+		// user explicitly ended the session, checkpoint should go).
+		// Stream errors default to `false` so the user can still recover
+		// the session via the Runs sidebar.
+		this.logService.info(`[insrc-chat] cancelBrainstormSession reason=${reason} discardCheckpoint=${opts?.discardCheckpoint === true}`);
 
-		if (this._activeSessionId) {
+		const sessionId = this._activeSessionId;
+		if (sessionId) {
 			try {
-				await this.daemonService.rpc('chat.cancel', { sessionId: this._activeSessionId });
+				await this.daemonService.rpc('chat.cancel', { sessionId });
 			} catch {
 				// Session may already be cancelled -- harmless race.
 			}
 			try {
-				await this.daemonService.rpc('chat.close', { sessionId: this._activeSessionId });
+				await this.daemonService.rpc('chat.close', { sessionId });
 			} catch {
 				// Session may already be closed -- harmless race.
+			}
+			if (opts?.discardCheckpoint === true) {
+				try {
+					await this.daemonService.rpc('agent.discard', { id: sessionId });
+				} catch {
+					// No checkpoint for this session is fine -- not every
+					// brainstorm progresses far enough to checkpoint.
+				}
 			}
 		}
 

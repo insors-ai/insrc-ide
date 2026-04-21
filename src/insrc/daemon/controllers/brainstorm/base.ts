@@ -197,6 +197,14 @@ export abstract class BrainstormControllerBase implements TaskController {
   private state!: BrainstormState;
   private taskCounter = 0;
   /**
+   * The TaskStateStore from the current `next()` invocation. Stashed so
+   * step handlers (which don't receive the store directly) can call
+   * `this.store?.markSessionComplete()` to tell the pipeline to clean
+   * up the checkpoint file on exit. Set at the top of every `next()`;
+   * do not rely on it outside the dispatch call tree.
+   */
+  private store?: TaskStateStore;
+  /**
    * Name → file location lookup built from codebase searches. Used to resolve
    * LLM-emitted "refs: foo, bar" entries into clickable references. Rebuilt on
    * every enhance-search; persists across a turn but not across resumes (the
@@ -237,6 +245,12 @@ export abstract class BrainstormControllerBase implements TaskController {
 
   buildInitialTasks(input: ControllerInput): Task[] {
     this.state = initState(input, this.getDocPrefix());
+    // Stamp the category on state so the resume handler can pick the
+    // right subclass when rehydrating from a checkpoint. Each subclass
+    // overrides `get category()`; we snapshot the value here so it
+    // travels with the checkpoint even after the controller instance
+    // is gone.
+    this.state.category = this.category;
     this.taskCounter = 1;
     return [this.buildGenerateIdeasTask()];
   }
@@ -314,6 +328,10 @@ export abstract class BrainstormControllerBase implements TaskController {
       recordQnA(this.state, step, 'system', step, completed.output.slice(0, 300));
     }
 
+    // Stash the store so dispatch handlers (afterPresentation, future
+    // afterResumeConfirm) can signal session completion without having
+    // the store threaded through every handler signature.
+    this.store = store;
     const result = this.dispatch(step, completed, gateReply);
 
     // Sync state to store for checkpointing + QnA card updates
@@ -400,6 +418,10 @@ export abstract class BrainstormControllerBase implements TaskController {
         return this.afterFinalize(completed);
       case 'presentation':
         return this.afterPresentation(gateReply);
+
+      // --- Resume (Phase 2 / Item 7) ---
+      case 'resume-confirm':
+        return this.afterResumeConfirm(gateReply);
 
       default:
         return null;
@@ -1694,7 +1716,11 @@ export abstract class BrainstormControllerBase implements TaskController {
   }
 
   private afterPresentation(gateReply: GateReply | undefined): Task[] | null {
+    // Skip = user abandoned the spec. Decision F1 / P2.7: mark the
+    // session complete so the pipeline unlinks the checkpoint file;
+    // nothing left to resume.
     if (!gateReply || gateReply.action === 'skip') {
+      this.store?.markSessionComplete();
       return null;
     }
 
@@ -1715,12 +1741,261 @@ export abstract class BrainstormControllerBase implements TaskController {
           htmlContent: format === 'html' ? (this.state.assembledOutput || undefined) : undefined,
         };
         saveArtifact(config, format, path);
-      } catch {
-        // Invalid feedback JSON — skip save
+        // Decision H1: only mark complete when the save actually
+        // resolved. If saveArtifact threw below, we keep the checkpoint
+        // so the user can retry without losing the spec.
+        this.store?.markSessionComplete();
+      } catch (err) {
+        // Invalid feedback JSON or save failure -- decision H1 says
+        // keep the checkpoint so the user can retry. Surface the error
+        // as recentFeedback and re-emit the presentation gate so the
+        // user sees why the save failed.
+        const msg = err instanceof Error ? err.message : String(err);
+        this.state.recentFeedback = `Save failed: ${msg}. Try a different path or format.`;
+        return [this.buildPresentationTask()];
       }
     }
 
     return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 2 resume (Item 7)
+  //
+  // The daemon's chat.resumeFromCheckpoint handler pre-seeds `this.state`
+  // from the checkpoint, then calls `buildResumeTask()` to get the first
+  // task to re-emit. For gate-emitting lastSteps we rebuild the exact
+  // same gate the user was looking at (via the existing build*Task
+  // methods -- they read from state, which has been restored). For
+  // in-flight lastSteps (the daemon was mid-LLM-call when it died) we
+  // emit a resume-confirm gate (decision G2) so the user picks between
+  // retry (re-run the step) and abandon (discard checkpoint, end
+  // session). Silently re-running would re-bill cloud tokens and may
+  // also re-append duplicate entries to discussion history etc.
+  // ---------------------------------------------------------------------------
+
+  /** Steps whose name indicates a gate is open awaiting user reply. */
+  private static readonly GATE_EMITTING_STEPS: ReadonlySet<string> = new Set([
+    'idea-review',
+    'idea-list',
+    'idea-discuss',
+    'validate-convergence',
+    'theme-spec-review',
+    'presentation',
+  ]);
+
+  /** True if `step` is a gate-emitting step (see GATE_EMITTING_STEPS). */
+  static isGateEmittingStep(step: string): boolean {
+    return BrainstormControllerBase.GATE_EMITTING_STEPS.has(step);
+  }
+
+  /**
+   * Hydrate `this.state` from a pre-seeded store. Called by the resume
+   * path before `buildResumeTask()` so the gate / resume-confirm
+   * builders read the same state the user was looking at before the
+   * session stopped. The regular (non-resume) path does this lazily in
+   * `next()`; we need it eager here because we're emitting a task
+   * before the pipeline calls `next()`.
+   */
+  restoreState(store: TaskStateStore): void {
+    const stored = store.get<BrainstormState>('brainstormState');
+    if (stored) {
+      this.state = stored;
+      this.store = store;
+    }
+  }
+
+  /**
+   * Build the first task to run when resuming from a checkpoint.
+   *
+   * - Gate-emitting lastStep: rebuild the matching gate task. User
+   *   lands back on the same pane + card they were looking at.
+   * - In-flight lastStep (everything else): emit a resume-confirm gate
+   *   so the user explicitly picks retry vs abandon (decision G2).
+   *
+   * Called from chat-handler after the checkpoint state has been
+   * restored into `this.state`. Does NOT mutate state.
+   */
+  buildResumeTask(): Task {
+    const step = this.state.lastStep;
+    switch (step) {
+      case 'idea-review':
+        return this.buildSingleIdeaGate();
+      case 'idea-list':
+        return this.buildIdeaListGate();
+      case 'idea-discuss':
+        return this.buildIdeaDiscussGate();
+      case 'validate-convergence':
+        return this.buildValidateConvergenceTask();
+      case 'theme-spec-review':
+        return this.buildThemeSpecReviewTask();
+      case 'presentation':
+        return this.buildPresentationTask();
+      default:
+        // In-flight or unknown step -- surface the choice to the user.
+        return this.buildResumeConfirmTask();
+    }
+  }
+
+  /**
+   * Build the resume-confirm gate task shown when the session was
+   * killed mid-LLM-call. The user sees what step was in flight and
+   * picks retry (re-run it) or abandon (close the session, delete the
+   * checkpoint). See decision G2.
+   */
+  private buildResumeConfirmTask(): Task {
+    // Remember the in-flight step so `afterResumeConfirm` can rebuild
+    // the right retry task. We stash it on state under a dedicated key
+    // (not lastStep) because state.lastStep is about to be overwritten
+    // to 'resume-confirm' so dispatch() routes replies correctly.
+    const inFlightStep = this.state.lastStep ?? 'unknown';
+    this.state.resumingFromStep = inFlightStep;
+    this.state.lastStep = 'resume-confirm';
+
+    const round = this.state.round ?? 1;
+    const accepted = this.state.ideas.filter(i => i.status === 'accepted').length;
+    const rejected = this.state.ideas.filter(i => i.status === 'rejected').length;
+    const parked = this.state.parkedIds.length;
+    const themes = this.state.themes?.length ?? 0;
+
+    // Human-readable label for the step the user was mid-execution on.
+    const stepLabel = this.resumeStepDescription(inFlightStep);
+
+    const content = [
+      `## Resume brainstorm session`,
+      '',
+      `The session was paused while **${stepLabel}**. Pick up where you left off, or end the session.`,
+      '',
+      `### Progress so far`,
+      `- Round: ${round}`,
+      `- Accepted: ${accepted}`,
+      `- Rejected: ${rejected}`,
+      `- Parked: ${parked}`,
+      ...(themes > 0 ? [`- Themes: ${themes}`] : []),
+    ].join('\n');
+
+    return {
+      index: this.taskCounter++,
+      description: `Resume brainstorm session`,
+      kind: 'transform',
+      intent: 'brainstorm',
+      userMessage: content,
+      passThrough: true,
+      requiresGate: true,
+      gateTitle: 'Resume brainstorm',
+      gateActions: [
+        { name: 'retry', label: 'Retry' },
+        { name: 'abandon', label: 'Abandon' },
+      ],
+      structured: {
+        phase: 'resume',
+        itemType: 'resume-confirm',
+        item: { lastStep: inFlightStep, stepLabel, round, accepted, rejected, parked, themes },
+      },
+    };
+  }
+
+  /**
+   * Human-readable label for a brainstorm `lastStep` value, used in the
+   * resume-confirm gate body so the user understands what was running.
+   */
+  private resumeStepDescription(step: string): string {
+    switch (step) {
+      case 'search-context': return 'searching the codebase for context';
+      case 'generate-ideas': return 'generating ideas';
+      case 'enhance-ideas-search': return 'searching to ground ideas';
+      case 'enhance-ideas-llm': return 'enhancing ideas with code context';
+      case 'review-ideas': return 'reviewing ideas';
+      case 'refine-ideas': return 'refining ideas based on review';
+      case 'converge-cluster': return 'clustering ideas into themes';
+      case 'converge-promote': return 'evaluating theme promotions';
+      case 'idea-diverge-single': return 'generating a variation of an idea';
+      case 'idea-discuss-search': return 'searching to support a discussion';
+      case 'idea-discuss-respond': return 'responding in idea discussion';
+      case 'search-theme-context': return 'searching theme context';
+      case 'generate-theme-spec': return 'writing a per-theme spec section';
+      case 'review-theme-spec': return 'reviewing a theme spec section';
+      case 'assemble-spec': return 'assembling the final spec';
+      case 'finalize': return 'finalizing output';
+      default: return `running the '${step}' step`;
+    }
+  }
+
+  /**
+   * Handle the reply to the resume-confirm gate.
+   *
+   * - `retry`: re-queue the in-flight step that was running. Returns
+   *   the next task(s) for the pipeline to execute.
+   * - `abandon`: mark the session complete (pipeline deletes the
+   *   checkpoint on exit) and return null to stop the pipeline. The
+   *   browser's teardown path fires via `agent.discard` separately;
+   *   this branch only needs the pipeline-side cleanup.
+   */
+  private afterResumeConfirm(gateReply: GateReply | undefined): Task[] | null {
+    if (!gateReply || gateReply.action === 'abandon') {
+      this.store?.markSessionComplete();
+      return null;
+    }
+    if (gateReply.action === 'retry') {
+      const inFlightStep = this.state.resumingFromStep;
+      // Restore lastStep so the retried task's completion routes
+      // through the correct `afterXxx` handler on the next dispatch.
+      if (inFlightStep) {
+        this.state.lastStep = inFlightStep;
+        this.state.resumingFromStep = undefined;
+      }
+      const retry = this.rebuildInFlightTask(inFlightStep);
+      if (retry) return [retry];
+      // Retry not supported for this step -- mark complete so the
+      // pipeline exits cleanly rather than spinning on resume-confirm.
+      this.store?.markSessionComplete();
+      return null;
+    }
+    // Unknown action -- treat as abandon to avoid silent loops.
+    this.store?.markSessionComplete();
+    return null;
+  }
+
+  /**
+   * Rebuild the task for an in-flight `lastStep` so the pipeline can
+   * re-run it from scratch. Parametric builders (generate-theme-spec,
+   * review-theme-spec) read the current theme index / spec section
+   * from state; if state is insufficient we return null and the
+   * pipeline ends cleanly (user can retry by restarting the session).
+   */
+  private rebuildInFlightTask(step: string | undefined): Task | null {
+    switch (step) {
+      case 'search-context':
+        return this.buildSearchContextTask();
+      case 'generate-ideas':
+        return this.buildGenerateIdeasTask();
+      case 'enhance-ideas-search':
+        return this.buildEnhanceIdeasSearchTask();
+      case 'review-ideas':
+        return this.buildReviewIdeasTask();
+      case 'converge-cluster':
+        return this.buildConvergeClusterTask();
+      case 'converge-promote':
+        return this.buildConvergePromoteTask();
+      case 'assemble-spec':
+        return this.buildAssembleSpecTask();
+      case 'finalize':
+        return this.buildFinalizeTask();
+      // Parametric in-flight steps: retry not supported in Phase B --
+      // the state doesn't carry enough by itself to rebuild the task
+      // (e.g. review output for refine-ideas, theme index for
+      // per-theme steps). The abandon branch handles these cleanly.
+      case 'enhance-ideas-llm':
+      case 'refine-ideas':
+      case 'idea-diverge-single':
+      case 'idea-discuss-search':
+      case 'idea-discuss-respond':
+      case 'search-theme-context':
+      case 'generate-theme-spec':
+      case 'review-theme-spec':
+      default:
+        return null;
+    }
   }
 
   // ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ import { IpcServer } from './server.js';
 import {
   initChatHandlers, disposeChatHandlers, reloadChatConfig,
   chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore, brainstormAddIdea,
-  chatSend, chatResume,
+  chatSend, chatResume, chatResumeFromCheckpoint,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees } from '../db/search.js';
@@ -258,39 +258,67 @@ async function main(): Promise<void> {
       const { id } = params as { id: string };
       const { readdirSync, readFileSync: readFs, existsSync: existsFs } = await import('node:fs');
       const { join } = await import('node:path');
+      const { CHECKPOINT_SCHEMA_VERSION } = await import('./task.js');
       const checkpointDir = join(PATHS.insrc, 'checkpoints');
       if (!existsFs(checkpointDir)) {
-        return { ok: false, message: `No checkpoint directory` };
+        return { ok: false, reason: 'no-checkpoint', message: 'No checkpoint directory' };
       }
-      // File names are now `${controllerId}-${sessionId}.json` (see
+      // File names are `${controllerId}-${sessionId}.json` (see
       // checkpointState in task.ts). Match any controller for this session.
       const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
       if (files.length === 0) {
-        return { ok: false, message: `No checkpoint for session ${id}` };
+        return { ok: false, reason: 'no-checkpoint', message: `No checkpoint for session ${id}` };
       }
       try {
         const raw = JSON.parse(readFs(join(checkpointDir, files[0]!), 'utf-8')) as Record<string, unknown>;
         const controllerId = raw['controller'] as string | undefined;
+        const schemaVersion = raw['schemaVersion'] as number | undefined;
+        // Decision I2: refuse when the checkpoint's schema doesn't match
+        // the daemon's. Client surfaces a Discard-only message; we do
+        // NOT best-effort rehydrate.
+        if (schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
+          return {
+            ok: false,
+            reason: 'schema-drift',
+            message: `Checkpoint schema ${schemaVersion ?? 'unknown'} cannot be resumed by this daemon (current ${CHECKPOINT_SCHEMA_VERSION}). Discard to continue.`,
+            ...(controllerId !== undefined ? { controllerId } : {}),
+          };
+        }
         return {
           ok: true,
           sessionId: id,
           ...(controllerId !== undefined ? { controllerId } : {}),
-          message: `Resume via chat.resume with sessionId=${id}`,
+          // The browser then opens chat.resumeFromCheckpoint to actually
+          // stream the rehydrated pipeline.
+          message: `Use chat.resumeFromCheckpoint with sessionId=${id}`,
         };
       } catch (err) {
-        return { ok: false, message: `Checkpoint read failed: ${(err as Error).message}` };
+        return { ok: false, reason: 'read-failed', message: `Checkpoint read failed: ${(err as Error).message}` };
       }
     },
 
     'agent.discard': async (params) => {
       const { id } = params as { id: string };
-      const { unlinkSync, existsSync: existsFs } = await import('node:fs');
+      const { readdirSync, unlinkSync, existsSync: existsFs } = await import('node:fs');
       const { join } = await import('node:path');
-      const checkpointPath = join(PATHS.insrc, 'checkpoints', `${id}.json`);
-      if (existsFs(checkpointPath)) {
-        unlinkSync(checkpointPath);
+      // Checkpoint files are named `${controllerId}-${sessionId}.json` (see
+      // `checkpointState` in task.ts). Match by session-id suffix so this
+      // RPC works regardless of which controller (brainstorm/designer/...)
+      // owned the session. Multiple matches are unlikely but safe to sweep.
+      const checkpointDir = join(PATHS.insrc, 'checkpoints');
+      if (!existsFs(checkpointDir)) return { ok: true, deleted: 0 };
+      const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
+      let deleted = 0;
+      for (const f of files) {
+        try {
+          unlinkSync(join(checkpointDir, f));
+          deleted++;
+        } catch {
+          // Best-effort: a stale checkpoint file is a leak, not a crash.
+        }
       }
-      return { ok: true };
+      log.info({ sessionId: id, deleted }, 'agent.discard');
+      return { ok: true, deleted };
     },
 
     'daemon.status': async () => {
@@ -815,6 +843,7 @@ async function main(): Promise<void> {
     // Streaming handlers
     'chat.send':   chatSend,
     'chat.resume': chatResume,
+    'chat.resumeFromCheckpoint': chatResumeFromCheckpoint,
     'ollama.pull': async (params, send, signal) => {
       const { model } = params as { model: string };
       const { Ollama } = await import('ollama');

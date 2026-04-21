@@ -313,7 +313,10 @@ export class InsrcChatViewPane extends ViewPane {
 				});
 				if (!confirmed) { return; }
 				try {
-					await this.chatService.cancelBrainstormSession('user-cancel-chat-panel');
+					// User explicitly ended the session from the chat panel --
+					// decision F1 says the checkpoint goes so the Runs sidebar
+					// doesn't keep listing it.
+					await this.chatService.cancelBrainstormSession('user-cancel-chat-panel', { discardCheckpoint: true });
 				} catch {
 					// Cancel / close race with an already-dead stream is harmless.
 				}

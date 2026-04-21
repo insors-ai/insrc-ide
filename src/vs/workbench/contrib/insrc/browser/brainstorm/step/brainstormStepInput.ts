@@ -83,7 +83,10 @@ export abstract class BrainstormStepInputBase extends EditorInput {
 				// Stop button calls, so both UI entry points produce
 				// identical daemon-side effects (cancel stream + close
 				// session + streamEnd signal + pane-close signal).
-				await this._chatService.cancelBrainstormSession('user-cancel-pane-close');
+				// Phase 2 / decision F1: user explicitly ended the session
+				// via the pane-close confirm, so discard the checkpoint
+				// too -- no Runs-sidebar retention.
+				await this._chatService.cancelBrainstormSession('user-cancel-pane-close', { discardCheckpoint: true });
 				this._logService.info('[brainstorm:input] closeHandler cancelBrainstormSession resolved');
 			} catch (err) {
 				this._logService.warn(`[brainstorm:input] closeHandler cleanup failed (non-fatal): ${(err as Error).message}`);

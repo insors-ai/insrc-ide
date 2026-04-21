@@ -202,6 +202,15 @@ export interface TaskStateStore {
   set<T>(key: string, value: T): void;
   has(key: string): boolean;
   snapshot(): Record<string, unknown>;
+  /**
+   * Signal to `runControlledPipeline` that this session is done and its
+   * checkpoint file should be deleted on pipeline exit. Controllers
+   * call this from terminal branches (presentation save-success, skip,
+   * resume-abandon). Idempotent.
+   */
+  markSessionComplete(): void;
+  /** Reads the completion flag set by `markSessionComplete`. */
+  isSessionComplete(): boolean;
 }
 
 /** In-memory implementation of TaskStateStore. */
@@ -211,6 +220,7 @@ export function createTaskStateStore(
   const store = new Map<string, unknown>(
     initial ? Object.entries(initial) : [],
   );
+  let sessionComplete = false;
   return {
     get<T>(key: string): T | undefined { return store.get(key) as T | undefined; },
     set<T>(key: string, value: T): void { store.set(key, value); },
@@ -220,6 +230,8 @@ export function createTaskStateStore(
       for (const [k, v] of store) obj[k] = v;
       return obj;
     },
+    markSessionComplete(): void { sessionComplete = true; },
+    isSessionComplete(): boolean { return sessionComplete; },
   };
 }
 
@@ -343,6 +355,13 @@ export interface TaskOrchestratorDeps {
    * that already dropped its stream handle.
    */
   abortController?: AbortController | undefined;
+  /**
+   * Phase 2 resume path (Item 7). When set, `runControlledPipeline`
+   * skips `controller.buildInitialTasks` and uses these tasks as the
+   * initial pending list. The caller has already seeded `stateStore`
+   * from a checkpoint. Never set by normal (non-resume) chat turns.
+   */
+  initialTasks?: Task[] | undefined;
 }
 
 interface ShellResult {
@@ -576,9 +595,19 @@ export async function runControlledPipeline(
     } });
   }
 
-  // 1. Build initial tasks
-  let pendingTasks = await controller.buildInitialTasks(input);
-  log.info({ controller: controller.id, initialTasks: pendingTasks.length }, 'controlled pipeline starting');
+  // 1. Build initial tasks -- or skip and use the resume-supplied list
+  // when `deps.initialTasks` is set (Phase 2 resume path, Item 7).
+  let pendingTasks = deps.initialTasks && deps.initialTasks.length > 0
+    ? [...deps.initialTasks]
+    : await controller.buildInitialTasks(input);
+  log.info(
+    {
+      controller: controller.id,
+      initialTasks: pendingTasks.length,
+      resumed: Boolean(deps.initialTasks && deps.initialTasks.length > 0),
+    },
+    'controlled pipeline starting',
+  );
 
   // 2. Execute tasks sequentially (controller decides next)
   while (pendingTasks.length > 0) {
@@ -743,6 +772,26 @@ export async function runControlledPipeline(
     }
   }
 
+  // Session-end cleanup (Phase 2 -- Item 7). When a controller calls
+  // `store.markSessionComplete()` from a terminal branch (presentation
+  // save-success, skip, resume-abandon), delete the checkpoint file so
+  // the Runs sidebar stops listing a session the user intentionally
+  // finished. Best-effort: a stale checkpoint is a leak, not a crash.
+  if (stateStore.isSessionComplete() && deps.session?.id) {
+    try {
+      const { unlinkSync, existsSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { homedir } = await import('node:os');
+      const file = join(homedir(), '.insrc', 'checkpoints', `${controller.id}-${deps.session.id}.json`);
+      if (existsSync(file)) {
+        unlinkSync(file);
+        log.info({ file }, 'checkpoint deleted (session complete)');
+      }
+    } catch (err) {
+      log.warn({ err }, 'checkpoint cleanup failed (non-fatal)');
+    }
+  }
+
   return {
     tasks: allResults,
     finalOutput: finalized.output,
@@ -811,6 +860,27 @@ async function gateTaskResult(
   return { action: reply.action, feedback: reply.feedback };
 }
 
+/**
+ * Checkpoint schema version. Bump whenever the checkpoint body shape or
+ * any deserialised state field changes in a way that would break an
+ * older daemon trying to resume it. `agent.resume` refuses mismatches
+ * (decision I2) and surfaces a "discard only" response.
+ */
+export const CHECKPOINT_SCHEMA_VERSION = 1;
+
+/**
+ * Shape of a persisted checkpoint on disk. Exported so resume handlers
+ * can type-check reads.
+ */
+export interface CheckpointFile {
+  readonly schemaVersion: number;
+  readonly controller: string;
+  readonly sessionId: string | null;
+  readonly state: Record<string, unknown>;
+  readonly results: Array<{ index: number; description: string; success: boolean }>;
+  readonly timestamp: string;
+}
+
 async function checkpointState(
   controllerId: string,
   stateStore: TaskStateStore,
@@ -829,13 +899,19 @@ async function checkpointState(
     // still get unique files.
     const suffix = sessionId ?? String(Date.now());
     const file = join(dir, `${controllerId}-${suffix}.json`);
-    writeFileSync(file, JSON.stringify({
+    // schemaVersion tags the checkpoint payload shape. On resume the
+    // handler refuses any mismatch (decision I2) rather than best-effort
+    // rehydrating a stale snapshot into a new BrainstormState shape.
+    // Bump CHECKPOINT_SCHEMA_VERSION whenever the state shape changes.
+    const body: CheckpointFile = {
+      schemaVersion: CHECKPOINT_SCHEMA_VERSION,
       controller: controllerId,
       sessionId: sessionId ?? null,
       state: stateStore.snapshot(),
       results: results.map(r => ({ index: r.index, description: r.description, success: r.success })),
       timestamp: new Date().toISOString(),
-    }, null, 2));
+    };
+    writeFileSync(file, JSON.stringify(body, null, 2));
     log.debug({ file }, 'checkpoint saved');
   } catch (err) {
     log.debug({ err }, 'checkpoint save failed (non-fatal)');

@@ -98,6 +98,15 @@ export interface IInsrcChatService {
 	// Session lifecycle
 	startSession(repoPath: string): Promise<string>;
 	resumeSession(sessionId: string): Promise<void>;
+	/**
+	 * Phase 2 session resume (Item 7). Opens the daemon's
+	 * `chat.resumeFromCheckpoint` stream for the given session so the
+	 * saved brainstorm rehydrates: checkpoint loaded, schemaVersion
+	 * validated, controller rebuilt, last gate (or resume-confirm gate
+	 * for in-flight steps) re-emitted. Caller should have already
+	 * verified the run via `agentRunService.resumeRun` / `agent.resume`.
+	 */
+	resumeFromCheckpoint(sessionId: string, repoPath: string): Promise<void>;
 	closeSession(): Promise<void>;
 
 	// Messaging
@@ -120,8 +129,19 @@ export interface IInsrcChatService {
 	 * flow contribution can close any open brainstorm editor panes.
 	 * Does NOT show a confirmation dialog -- callers are expected to
 	 * have confirmed with the user already.
+	 *
+	 * `opts.discardCheckpoint` controls the Phase 2 session-resume
+	 * cleanup (decision F1). User-initiated end-session flows (cancel
+	 * button + pane close) pass `true` so the daemon's checkpoint file
+	 * is deleted and the session no longer appears in the Runs sidebar.
+	 * Involuntary teardowns (stream-timeout, connection-lost) pass
+	 * `false` / undefined so the checkpoint survives and the user can
+	 * recover via the Runs sidebar.
 	 */
-	cancelBrainstormSession(reason: string): Promise<void>;
+	cancelBrainstormSession(
+		reason: string,
+		opts?: { discardCheckpoint?: boolean },
+	): Promise<void>;
 	/**
 	 * Fires when `cancelBrainstormSession` wants brainstorm panes to
 	 * close. The flow contribution listens and calls `editorService.closeEditors`

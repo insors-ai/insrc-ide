@@ -316,6 +316,180 @@ export const chatResume: StreamHandler = async (params, send, signal) => {
   }
 };
 
+/**
+ * Phase 2 session resume (Item 7). Streaming handler that:
+ *
+ *  1. Loads the session's checkpoint file from `~/.insrc/checkpoints/`.
+ *  2. Refuses with `{ type: 'error' }` if the schemaVersion mismatches
+ *     the daemon's (decision I2 -- no best-effort rehydrate).
+ *  3. Ensures the session is in the chat-session pool (restores from DB
+ *     if the daemon was just restarted and the session isn't active).
+ *  4. Picks the right brainstorm subclass using `state.category` stamped
+ *     at session start, seeds the store with the checkpoint's state, and
+ *     asks the controller for its `buildResumeTask()`.
+ *  5. Runs the pipeline with that task as the initial pending list,
+ *     skipping `buildInitialTasks` (the session is not starting fresh).
+ *
+ * Only supports brainstorm sessions today -- other agents don't write
+ * checkpoints with a category field. Non-brainstorm resume hits the
+ * fallback at end-of-function.
+ */
+export const chatResumeFromCheckpoint: StreamHandler = async (params, send, signal) => {
+  const { sessionId } = params as { sessionId: string };
+  const { readFileSync, existsSync, readdirSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { PATHS } = await import('../shared/paths.js');
+  const { CHECKPOINT_SCHEMA_VERSION, runControlledPipeline, createTaskStateStore } =
+    await import('./task.js');
+  type BrainstormControllerBase =
+    import('./controllers/brainstorm/base.js').BrainstormControllerBase;
+
+  const requestId = Date.now();
+  const abortController = new AbortController();
+  signal.addEventListener('abort', () => abortController.abort(), { once: true });
+  const guardedSend = (msg: IpcStreamMessage): void => {
+    if (abortController.signal.aborted) return;
+    send(msg);
+  };
+
+  // 1. Locate the checkpoint (filename: `<controller>-<sessionId>.json`).
+  const checkpointDir = join(PATHS.insrc, 'checkpoints');
+  if (!existsSync(checkpointDir)) {
+    send({ id: requestId, stream: 'error', data: { error: `No checkpoint directory (session ${sessionId})` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${sessionId}.json`));
+  if (files.length === 0) {
+    send({ id: requestId, stream: 'error', data: { error: `No checkpoint for session ${sessionId}` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  // 2. Parse + validate schema.
+  let raw: {
+    schemaVersion?: number;
+    controller?: string;
+    state?: { brainstormState?: unknown };
+  };
+  try {
+    raw = JSON.parse(readFileSync(join(checkpointDir, files[0]!), 'utf-8'));
+  } catch (err) {
+    send({ id: requestId, stream: 'error', data: { error: `Checkpoint read failed: ${(err as Error).message}` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (raw.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
+    // Decision I2: refuse on mismatch, force the user to discard.
+    log.warn(
+      { sessionId, checkpointSchema: raw.schemaVersion, daemonSchema: CHECKPOINT_SCHEMA_VERSION },
+      'resume refused: schema drift',
+    );
+    send({ id: requestId, stream: 'error', data: {
+      error: `schema-drift: checkpoint is schemaVersion=${raw.schemaVersion}, daemon is schemaVersion=${CHECKPOINT_SCHEMA_VERSION}. Discard the run to continue.`,
+    } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  const brainstormState = raw.state?.brainstormState as
+    | { category?: string; lastStep?: string }
+    | undefined;
+  if (raw.controller !== 'brainstorm' || !brainstormState) {
+    send({ id: requestId, stream: 'error', data: { error: `Resume only supports brainstorm sessions (got controller=${raw.controller})` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  // 3. Ensure the session is in the pool (restore from DB on cold daemon).
+  const pool = getPool();
+  let active = pool.get(sessionId);
+  if (!active) {
+    const restored = await pool.restore(sessionId);
+    if (!restored) {
+      send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} not found in DB -- cannot restore` } });
+      send({ id: requestId, stream: 'done', data: {} });
+      return;
+    }
+    active = pool.get(sessionId)!;
+  }
+  if (active.agentRunning) {
+    send({ id: requestId, stream: 'error', data: { error: 'agent already running on this session' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  const channel = new DaemonChannel(requestId, guardedSend, abortController);
+  if (!pool.attachChannel(sessionId, channel, abortController)) {
+    send({ id: requestId, stream: 'error', data: { error: 'agent already running on this session' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  try {
+    // 4. Pick the brainstorm subclass based on stamped category.
+    const category = brainstormState.category ?? 'requirements';
+    const mod = await import('./controllers/brainstorm/index.js');
+    let controller: BrainstormControllerBase;
+    switch (category) {
+      case 'design':
+        controller = new mod.DesignBrainstormController();
+        break;
+      case 'general':
+        controller = new mod.GeneralBrainstormController();
+        break;
+      case 'implementation':
+        controller = new mod.ImplementationBrainstormController();
+        break;
+      case 'testing':
+        controller = new mod.TestingBrainstormController();
+        break;
+      case 'requirements':
+      default:
+        controller = new mod.RequirementsBrainstormController();
+        break;
+    }
+
+    // 5. Seed the store + hydrate controller state + build resume task.
+    const stateStore = createTaskStateStore(raw.state as Record<string, unknown>);
+    controller.restoreState(stateStore);
+    const resumeTask = controller.buildResumeTask();
+
+    send({ id: requestId, stream: 'progress', data: {
+      message: `Resumed ${category} brainstorm at step "${brainstormState.lastStep}"`,
+    } });
+
+    // 6. Run the controlled pipeline with the resume task as the seed.
+    const controllerInput = {
+      message: '',
+      codeContext: '',
+      session: active.session,
+    };
+    await runControlledPipeline(controller, controllerInput, {
+      session: active.session,
+      channel,
+      send: guardedSend,
+      requestId,
+      stateStore,
+      initialTasks: [resumeTask],
+      getInjectedMessages: () => pool.popInjectedMessages(active!.id),
+      getInjectedIdeas: () => pool.popInjectedIdeas(active!.id),
+      ...(abortController ? { abortController } : {}),
+    });
+
+    send({ id: requestId, stream: 'done', data: { summary: 'resume complete' } });
+  } catch (err) {
+    if (abortController.signal.aborted) {
+      log.info({ sessionId }, 'chat.resumeFromCheckpoint aborted by user');
+    } else {
+      log.error({ err, sessionId }, 'chat.resumeFromCheckpoint failed');
+      send({ id: requestId, stream: 'error', data: { error: (err as Error).message } });
+      send({ id: requestId, stream: 'done', data: {} });
+    }
+  } finally {
+    pool.detachChannel(sessionId);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Code context fetching
 // ---------------------------------------------------------------------------

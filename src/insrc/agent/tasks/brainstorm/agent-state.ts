@@ -109,6 +109,21 @@ export interface BrainstormState extends AgentState {
   // Flow tracking
   /** Current step name for controller flow decisions. */
   lastStep: string;
+  /**
+   * Sub-category of the session (design / requirements / implementation
+   * / testing / general). Snapshotted here in `buildInitialTasks` so
+   * Phase 2 resume can pick the right brainstorm subclass from the
+   * checkpoint without having to reclassify the user's original message.
+   */
+  category?: string | undefined;
+  /**
+   * Phase 2 resume (Item 7). When the session was killed mid-LLM-step
+   * and we emit the resume-confirm gate, `lastStep` becomes
+   * 'resume-confirm' so dispatch routes replies to `afterResumeConfirm`.
+   * We stash the original in-flight step here so `retry` can rebuild
+   * the right task. Cleared when retry runs or abandon is picked.
+   */
+  resumingFromStep?: string | undefined;
 
   // QnA tracking
   /** Semantic QnA pairs — tracks all user interactions across the session. */

@@ -25,6 +25,7 @@ import {
 function classifyGate(itemType: string | undefined): BrainstormGateKind {
 	switch (itemType) {
 		case 'intent-confirm': return 'intent-confirm';
+		case 'resume-confirm': return 'resume-confirm';
 		case 'idea': return 'idea';
 		case 'idea-list': return 'idea-list';
 		case 'idea-discussion': return 'idea-discussion';

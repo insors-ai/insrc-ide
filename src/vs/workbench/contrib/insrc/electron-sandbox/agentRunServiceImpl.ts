@@ -7,6 +7,7 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IInsrcDaemonService } from '../common/daemonService.js';
+import { IInsrcChatService } from '../common/chatService.js';
 import { IInsrcAgentRunService, type AgentRunInfo } from '../common/agentRunService.js';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,7 @@ export class InsrcAgentRunServiceImpl extends Disposable implements IInsrcAgentR
 
 	constructor(
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
+		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
@@ -51,9 +53,39 @@ export class InsrcAgentRunServiceImpl extends Disposable implements IInsrcAgentR
 			throw new Error('Not connected to daemon');
 		}
 
-		await this.daemonService.rpc('agent.resume', { id: runId });
+		// Phase 2 session resume (Item 7). Two-step handshake:
+		//  1. agent.resume validates the checkpoint + schemaVersion. On
+		//     schema drift the daemon returns ok:false; we throw so the
+		//     Runs sidebar surfaces the error message (decision I2 -- the
+		//     only valid action then is Discard).
+		//  2. If ok, open the daemon's chat.resumeFromCheckpoint stream
+		//     via the chat service so the brainstorm controller rehydrates
+		//     and the last gate (or resume-confirm gate) re-emits into the
+		//     chat panel + pane flow.
+		type ResumeResult = {
+			ok: boolean;
+			reason?: string;
+			message?: string;
+			sessionId?: string;
+			controllerId?: string;
+		};
+		const result = await this.daemonService.rpc<ResumeResult>('agent.resume', { id: runId });
+		if (!result.ok || !result.sessionId) {
+			const reason = result.reason ?? 'unknown';
+			const message = result.message ?? 'Resume failed';
+			this.logService.warn(`[insrc] agent.resume rejected reason=${reason} id=${runId}`);
+			throw new Error(`${message} (${reason})`);
+		}
+
+		// Look up the repo for this run so the chat service's local state
+		// reflects which repo the session belongs to (chat panel's repo
+		// selector otherwise drifts after a cold-daemon resume).
+		const run = this._cachedRuns.find(r => r.id === runId);
+		const repo = run?.repo ?? '';
+		await this.chatService.resumeFromCheckpoint(result.sessionId, repo);
+
 		this._onDidChangeRuns.fire();
-		this.logService.info('[insrc] Resumed agent run:', runId);
+		this.logService.info(`[insrc] Resumed agent run id=${runId} controller=${result.controllerId ?? '(unknown)'}`);
 	}
 
 	async discardRun(runId: string): Promise<void> {

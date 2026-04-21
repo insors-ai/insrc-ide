@@ -85,6 +85,13 @@ export class BrainstormFlowContribution extends Disposable {
 			this.logService.info(`[brainstorm:flow] intent-confirm routed to chat panel (gateId=${gate.gateId})`);
 			return;
 		}
+		// resume-confirm (Item 7 / decision G2) follows the same policy --
+		// a small retry/abandon decision shouldn't claim an editor tab.
+		// Rendered inline by the chat panel's generic gate renderer.
+		if (gate.kind === 'resume-confirm') {
+			this.logService.info(`[brainstorm:flow] resume-confirm routed to chat panel (gateId=${gate.gateId})`);
+			return;
+		}
 
 		const input = this._inputFor(gate.kind, sessionId);
 		if (!input) {
@@ -118,6 +125,10 @@ export class BrainstormFlowContribution extends Disposable {
 				// Intent-confirm is rendered inline in the chat panel (Item 12).
 				// Returning undefined here tells the flow contribution to skip
 				// opening a dedicated pane; the chat-view gate handler picks it up.
+				return undefined;
+			case 'resume-confirm':
+				// Resume-confirm (Item 7) follows the same inline policy --
+				// chat-view's generic gate renderer shows retry/abandon buttons.
 				return undefined;
 			case 'idea':
 				return this.instantiationService.createInstance(BrainstormIdeasInput, sessionId);

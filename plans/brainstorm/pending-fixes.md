@@ -25,7 +25,7 @@ Related plans:
 | D | Round-2 prompt redesign: typed feedback sections + refine-first intent | P1 | daemon | **DONE** |
 | 5 | Intent validation gate (pre-launch)                           | P2       | daemon+UI| **DONE** (daemon gate emission in chat-handler; dedicated pane built under Item 8a; default policy updated under Item 8c; decomposer confidence threaded under Item 8d) |
 | 6 | Mid-turn intent correction                                    | P2       | daemon+UI| **DONE** (daemon `chat.redirect` RPC; `IInsrcChatService.redirect()` in browser; shared `attachRedirectAction` helper; Redirect header button on every brainstorm pane; inline picker with intent dropdown + optional refinement + error surface) |
-| 7 | Phase 2 -- session resume                                     | P3       | daemon+UI| **partial** (checkpoint per-session + `agent.resume` read; full rehydrate deferred per idea-feedback.md) |
+| 7 | Phase 2 -- session resume                                     | P1       | daemon+UI| **partial** (checkpoint per-session + `agent.resume` read; full rehydrate + pending-gate re-emit + Runs sidebar wiring remaining) |
 | 8 | Intent-confirm gate vs. "Intent" progress pill confusion      | P2       | UI       | **DONE** (8a dedicated pane + 8c brainstorm default-on + 8d decomposer confidence threaded; 8b pill hold deferred) |
 | 9 | Idea card: references show but aren't clickable / navigable   | P1       | UI       | **DONE** (9a URL opener + 9b unresolved chip; 9c discussion pane refs verified via shared card widget) |
 | 10| Idea structure + prompts: title-only cards under-explain ideas| P1       | daemon+UI| **DONE** (rich prompt format w/ Title/Body/Rationale; parseIdeaList multi-line aware; Idea.summary/rationale added; card renders summary + reviewer notes + rationale) |
@@ -36,7 +36,7 @@ Related plans:
 | 15| Clicking a ref in the idea card replaces the brainstorm pane -- user stranded | P1 | UI | **DONE** (card's code/doc ref click now uses `SIDE_GROUP`; brainstorm pane stays visible, file opens in a split) |
 | 16| Closing / stopping a brainstorm session doesn't actually stop the stream  | P1 | daemon+UI | **partial** (16a gate rejection already wired; 16c pipeline abort checks + try/catch around gateTaskResult; 16d guardedSend wrapper silences late daemon→client messages; 16b LLM provider abort-signal plumbing deferred) |
 | 17| Brainstorm LLM tasks ignore `models.agents.brainstorm.*` config overrides | P1 | daemon | **DONE** (Task gains `resolverAgent` + `resolverStep`; `executeLlmTask` calls `session.resolver.resolveOrNull()` before falling back to `providerHint`; all 12 brainstorm LLM tasks tagged with step names: seed/diverge/enhance/review/refine/cluster/promote/theme-spec/theme-spec-review/assemble/discuss) |
-| 18| Duplicate / near-duplicate ideas surface in the review queue              | P1 | daemon | **partial** (18a prompt-level dedup instruction added to `REFINE_IDEAS_SYSTEM`; 18b embedding-based similarity dedup deferred) |
+| 18| Duplicate / near-duplicate ideas surface in the review queue              | P1 | daemon | **partial** (18a prompt-level dedup shipped; 18b embedding-based dedup **deferred** pending 18a field-test results; 18c "similar-to" chip sits behind 18b) |
 | 19| No UX feedback after `+ Add Idea` submit -- user can't tell if it worked  | P1 | UI | **DONE** (19a inline success banner confirms "Idea X added. Auto-accepted..."; 19b daemon progress event deferred -- UI banner covers the user need) |
 | 20| User-added idea still requires Approve click -- should be auto-accepted   | P1 | daemon | **DONE** (20a: injected-ideas drain sets `status: 'accepted'` and skips the reviewQueue; user ideas now go straight into the accepted pool for clustering / convergence) |
 | 21| Chat-panel Stop/Cancel button doesn't actually cancel (close-tab does)    | P1 | UI | **DONE** (Stop button handler now runs `cancelStream()` AND `closeSession()` when a brainstorm is active, matching tab-close behaviour) |
@@ -49,6 +49,8 @@ Related plans:
 | 28| Step Providers editor: changing provider collapses the expanded section   | P1 | UI | **DONE** (agent body opens with `display: block` + chevron rotated when `_expandedAgent === agentName` so rebuilds preserve the user's position) |
 | 29| Intent-confirm gate only fires for brainstorm -- other intents bypass user confirmation | P0 | daemon | **DONE** (policy flipped: every classification fires the gate unless `classifier.confirmIntent: false`; `gateFired` decision line logged on every classify) |
 | 30| Requirements/Designer validate gate has `kind=unknown phase=waiting` (same class as Item 13) | P0 | daemon | **DONE** (all 4 designer gate tasks now emit structured payloads with `itemType` = `designer-validate-requirements` / `-sketch` / `-detail` / `designer-save`; chatView's phase-based suppression narrowed so non-brainstorm sessions render their gates) |
+| 31| Stream inactivity timeout leaves the daemon session alive + 10m window too short | P0 | UI      | **DONE** (`onDidError` now runs unified `cancelBrainstormSession` teardown, skipping the confirm dialog; `STREAM_INACTIVITY_TIMEOUT_MS` bumped 10m -> 30m to stop false-positiving on long cloud agent turns) |
+| 32| Long agent steps feel disconnected -- user waits minutes on a single progress line with no token-level presence | P1 | daemon+UI | **open** |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -385,35 +387,33 @@ Plus CSS.
 
 ## 4. Verify discuss reply end-to-end (P1)
 
-### Problem
+### Status (2026-04-21 investigation)
 
-The daemon code emits assistant replies during discussion via
-`state.discussionMessages`, and `buildIdeaDiscussGate` carries them in
-`structured.messages`. The new `BrainstormIdeaChatPane` reads
-`gate.extra.messages` and passes them to `BrainstormCardWidget.messages`.
+Effectively subsumed by Item 0 (DONE). [base.ts:1117-1140](../../src/insrc/daemon/controllers/brainstorm/base.ts#L1117-L1140)
+now chains into the LLM response task before emitting
+`buildIdeaDiscussGate()` when the last entry in
+`state.discussionMessages` is from the user. So the wiring is there
+and exercised by Item 0's auto-reply path.
 
-This wiring was written in the clean-slate commit
-`75b7c9e0844` but has NOT been exercised end-to-end yet. Per round-4
-testing, this was the "discuss shows no agent reply" symptom -- the
-fix is assumed landed but needs verification.
+What remains is a **pure manual verification** -- zero code work
+unless the test fails. Run it as part of the next brainstorm smoke
+pass and close this item.
 
-### Task
+### Manual verification steps
 
-No code change if it works. Steps:
+1. Start a brainstorm session, approve/reject a few ideas.
+2. Click **Discuss...** on an idea, type a question in the opening
+   prompt, submit.
+3. `IdeaChatPane` should show `messages count=2` on first render
+   (user prompt + agent response). No second click required.
+4. If `messages count=1`: the auto-reply chain regressed. Trace
+   `extra.messages` at `brainstormSessionServiceImpl._ingestGate`
+   and re-check [base.ts:1124 onwards](../../src/insrc/daemon/controllers/brainstorm/base.ts#L1124).
 
-1. Restart daemon (post-`91447f761ad`).
-2. Reload workbench.
-3. Start brainstorm -> approve/reject a few ideas -> click Discuss...
-   on one with a question in the prompt.
-4. After the daemon LLM replies, `IdeaChatPane` should show the
-   assistant response in the discussion section.
-5. If it doesn't: trace `extra.messages` at
-   `brainstormSessionServiceImpl._ingestGate` -> check that
-   `ideaChatPane._renderGate` passes them to `BrainstormCardWidget` --
-   the expected message shape is `{ role, content }`.
+### Remaining work
 
-If broken: fix is a single call-site; already documented in
-`flow.md` section 11.3 "Known failure modes".
+None (assuming verification passes). Close the item after one
+successful discuss turn.
 
 ---
 
@@ -1063,11 +1063,77 @@ The daemon handler hydrates the new pipeline with the prior context
 
 ---
 
-## 7. Phase 2 -- session resume (P3)
+## 7. Phase 2 -- session resume (P1)
 
 Already fully planned in [idea-feedback.md section Phase 2](idea-feedback.md).
-Decisions F1/G2/H1/I2 locked. Implementation deferred until Phase 1
-(feedback capture -- already shipped) is field-tested.
+Decisions F1/G2/H1/I2 locked.
+
+### Status (2026-04-21 investigation)
+
+**Shipped:**
+- Per-session checkpoint file layout (P2.3 goal) -- files now named
+  `${controllerId}-${sessionId}.json`, one file per session, overwritten
+  in place. See [task.ts checkpointState](../../src/insrc/daemon/task.ts#L814).
+- `agent.list` RPC returns these entries with `sessionId`,
+  `controllerId`, `createdAt`.
+- `agent.resume` RPC at
+  [daemon/index.ts:257-283](../../src/insrc/daemon/index.ts#L257-L283)
+  finds the matching checkpoint by `sessionId`, parses it, returns
+  `{ ok, sessionId, controllerId, message }`.
+- `agent.discard` RPC deletes the checkpoint file (satisfies F1 --
+  End-Session deletes checkpoint).
+
+**Not shipped:**
+
+**7a. `chat.resume` doesn't rehydrate the brainstorm controller.**
+[chatResume at chat-handler.ts:281](../../src/insrc/daemon/chat-handler.ts#L281)
+loads chat history but doesn't reconstitute the brainstorm
+controller's `BrainstormState` from the checkpoint. After resume the
+daemon has no controller in memory -- the next gate reply has nothing
+to drive. `agent.resume`'s return message literally says
+`"Resume via chat.resume with sessionId=..."` but chat.resume
+doesn't honour that contract.
+
+**7b. No re-emission of the most recent pending gate.** P2.2 goal #1
+requires that after rehydrate, the daemon re-emits the gate the
+user was on so the UI reopens the right pane. Today even if 7a
+landed, there's no reply path -- the controller's pipeline would
+advance from whatever `lastStep` the checkpoint recorded without
+re-showing the gate.
+
+**7c. G2 mid-LLM-task resume (retry / abandon choice).** When the
+checkpoint captures a session that was in the middle of an LLM call
+(not at a gate), P2.0 G2 says the user picks retry-from-last-step
+vs abandon. Nothing implements this branch today -- the checkpoint
+doesn't even record "was mid-LLM" vs "was at gate".
+
+**7d. Runs sidebar -> resumeSession(id) plumbing.** P2.2 goal #4
+requires the Runs sidebar to call `chatService.resumeSession(id)`
+which would RPC `chat.resume` and re-hook the stream. The Runs
+sidebar currently calls `agent.resume` and surfaces the message
+back to the user; it doesn't wire into the chat service.
+
+**7e. Schema-drift refusal (I2).** No check in `agent.resume` that
+the checkpoint's schema matches the current `BrainstormState`
+shape. If we ship a controller change between save and resume,
+rehydrate will silently deserialize a broken state.
+
+### Remaining work (scope)
+
+All of 7a-7e are daemon+UI. 7a is the unblocker; 7b-7e depend on
+it. Estimate: 7a alone is a day of work (controller factory that
+takes a state snapshot, plumbing through `chat.resume`). 7b-7e are
+smaller deltas on top.
+
+### Priority
+
+**P1.** The bar has shifted -- brainstorm sessions routinely run
+20-60+ minutes across convergence + theme-spec + presentation, and
+losing one to a daemon restart, pane-close misclick, or stream
+timeout wipes out substantial user investment. With Item 31 now
+auto-terminating sessions on stream timeout, resume becomes the
+recovery path users need. Treat 7a as a near-term blocker, not a
+nice-to-have.
 
 ---
 
@@ -1392,6 +1458,52 @@ Blockers surfaced (tracked as items 12 + 13 below):
   ignoring`. The user never saw the convergence-review pane. See
   Item 13 -- this is P0 because it silently breaks the rest of the
   flow.
+
+### Remaining work (2026-04-21 investigation)
+
+Items 13 + 30 fixed the structured-gate bug that was blocking
+convergence/presentation rendering. The *panes themselves* have still
+not been re-exercised with real data since those fixes landed. Each
+sub-item below is a separate mini-task:
+
+**11a. `BrainstormThemesPane` (convergence-review).** Grep confirms
+no `warning` field handling in
+[themesPane.ts](../../src/vs/workbench/contrib/insrc/browser/brainstorm/step/themesPane.ts).
+Add it -- parallel to the ideas pane's Item 3 warning strip -- so
+failed cluster/promote tasks surface as a card warning rather than
+silently missing themes.
+
+**11b. `BrainstormThemeDetailsPane` (theme-spec).** Same pattern --
+no warning strip. Also needs a Discuss/Refine affordance equivalent
+to the idea cards so the user can ask for revisions without bailing
+to a new session. Currently the pane is display-only.
+
+**11c. `BrainstormPresentationPane` (final output).** Needs manual
+verification that it renders the assembled document correctly from
+the new structured fields (post clean-slate commit). No code read
+required; just a live run through converge -> themes -> spec ->
+presentation.
+
+**11d. Theme-spec warning strip.** The theme-spec builder walks each
+accepted theme and calls an LLM per theme. If any one theme-spec
+call fails, today there's no propagation -- the final assembled
+output silently omits that theme. Wire the same `warning` field the
+ideas pane uses so the user sees "theme X: spec generation failed"
+on the theme-details card.
+
+### Required test scenario
+
+One focused brainstorm session driving the flow through every pane:
+1. 3 seed ideas -> approve all.
+2. Force converge (not auto).
+3. Step through: convergence-review pane -> theme-details for each
+   theme -> presentation.
+4. Capture renderer + agent logs.
+5. File sub-issues per pane for whatever renders wrong.
+
+Do NOT block on 11a-d landing first -- run the test session, find
+what's actually broken, then scope. Paper-plan gaps above are
+hypothesis, not confirmed bugs.
 
 ---
 
@@ -1793,11 +1905,60 @@ late `send({...})` calls from the controller are no-op, not
 - Opening a new chat.send turn works immediately (not blocked
   waiting for the prior session to drain).
 
+### Status (2026-04-21 investigation)
+
+**Shipped (16a, 16c, 16d):**
+- 16a: [channel.ts:37-44](../../src/insrc/daemon/channel.ts#L37-L44)
+  registers an `abort` listener that rejects every pending gate with
+  `new Error('connection lost')` and clears the resolver/rejector
+  maps. Pipeline's `await resolveGate(...)` breaks cleanly.
+- 16c: [task.ts:588,614,635](../../src/insrc/daemon/task.ts#L588)
+  checks `deps.abortController?.signal.aborted` before starting a
+  task, mid-task, and after gate resolution -- bails with a clean
+  "aborted by user" progress event.
+- 16d: `guardedSend` wrapper in chat-handler makes post-abort
+  `send()` calls no-op instead of surfacing "no stream handle"
+  warnings.
+
+**Still open: 16b -- LLM provider abort-signal plumbing.**
+
+Blocker confirmed: [CompletionOpts in shared/types.ts:44-50](../../src/insrc/shared/types.ts#L44-L50)
+does not have a `signal?: AbortSignal` field. None of the five
+providers (ollama, anthropic, openai, gemini, mistral) accept an
+abort signal. When the user cancels mid-turn, in-flight token
+streams keep running to completion on the provider side, burning
+cloud tokens and delaying the teardown.
+
+**16b scope:**
+
+1. Add `signal?: AbortSignal | undefined` to
+   [`CompletionOpts`](../../src/insrc/shared/types.ts#L44).
+2. Plumb `signal` through each provider's `complete()` +
+   `stream()`:
+   - **ollama**: `undici` fetch accepts `signal` natively; pass it
+     through.
+   - **anthropic** / **openai** / **gemini** / **mistral**: each
+     SDK's request options takes a signal. Check per-SDK version
+     for the right field name.
+3. `executeLlmTask` in task.ts passes `deps.session.abortController.signal`
+   into `provider.complete(..., { signal })`.
+4. On abort, providers should throw an `AbortError` -- caller catches
+   and treats it as a clean cancel, not a failure-to-retry.
+
+**16b verification:**
+- Start a long brainstorm turn (e.g. enhance with 20 ideas).
+- Mid-stream, cancel the chat panel. Daemon log shows the LLM call
+  raising `AbortError` within 100ms of the cancel, not at natural
+  completion minutes later.
+- Cloud billing dashboard shows reduced token usage on cancelled
+  turns vs today's "runs to completion regardless" baseline.
+
 ### Severity
 
-**P1.** The user explicitly said "stopping isn't working". Every
-abandoned brainstorm session today leaks daemon-side work, cloud
-LLM calls, and log noise until the daemon is restarted.
+**P1.** The user explicitly said "stopping isn't working". With
+16a/c/d shipped the UI stops responding to the stale stream, but
+16b is the last gap: daemon-side LLM work still runs to completion
+on every abandoned turn, wasting cloud tokens.
 
 ---
 
@@ -1994,6 +2155,51 @@ meaningfully reduce the complaint.
 - Round-1 refined output has zero pairs with > 0.88 cosine
   similarity on title+body embeddings.
 - User sees at most 1-2 "similar to" chips across the pool.
+
+### Status (2026-04-21 investigation)
+
+**Shipped: 18a.** Prompt-level dedup instruction added to
+`REFINE_IDEAS_SYSTEM`. Catches the easy cases where the LLM has the
+whole set in context and just needs to be told not to emit
+near-duplicates.
+
+**Deferred: 18b.** Embedding-based similarity dedup. Plan kept for
+when the cost/benefit is re-evaluated but not on the active queue.
+Requires:
+- A post-parse pass in
+  [`afterRefineIdeas`](../../src/insrc/daemon/controllers/brainstorm/base.ts)
+  that runs after the exact-title dedup.
+- For each accepted idea, embed `${title}\n${body}` via the local
+  embedding model (`embedQuery` already available from
+  `../../indexer/embedder.js`).
+- Pairwise cosine similarity; merge pairs above 0.88 (keep
+  higher-verdict / earlier idea, roll tags/refs from the drop).
+- Emit `progress step="Merged N duplicate ideas"` so the user sees
+  the work happened.
+- Cache embeddings on the `Idea` record so cross-round dedup in
+  later rounds doesn't re-embed.
+
+Cost: +1 local embedding call per refined idea per round. Trigger
+to un-defer: if 18a's prompt-level dedup proves insufficient
+across several test sessions and users keep seeing duplicate pairs.
+
+**Still open: 18c.** "Similar to idea [N]" chip on the card. For
+pairs between the soft threshold (0.75) and the hard merge
+threshold (0.88), leave both ideas in the queue but render a chip
+on the card: `similar to idea #3: "..."`. Click to navigate to the
+sibling card.
+
+Note: 18c's original spec depended on 18b's pairwise pass to compute
+similarity scores. With 18b deferred, 18c either (a) waits alongside
+18b, or (b) computes its own lightweight similarity (e.g. trigram
+Jaccard on titles) as a zero-embed alternative. If 18a proves
+enough, both stay deferred.
+
+### Remaining work (scope)
+
+No active work on 18. 18a is shipping; 18b is deferred; 18c sits
+behind 18b. Re-open when test sessions surface duplicate pairs 18a
+misses.
 
 ---
 
@@ -3146,6 +3352,189 @@ leave other agents / gates for follow-up.
 **P0.** The current behaviour is "the turn silently hangs forever
 with no UI." Any agent that doesn't opt into the structured-gate
 contract is broken end-to-end.
+
+---
+
+## 31. Stream inactivity timeout leaves the daemon session alive + 10m window too short (P0)
+
+### Observation (2026-04-21 live test)
+
+Two bugs in one:
+
+1. **Timeout window too short.** `STREAM_INACTIVITY_TIMEOUT_MS = 600_000`
+   (10 minutes) at
+   [daemonServiceImpl.ts:42](../../src/vs/workbench/contrib/insrc/electron-sandbox/daemonServiceImpl.ts#L42)
+   tripped on legitimate long-running cloud agent turns (planner loops,
+   delegate plan-execute chains, brainstorm enhance with a big idea set).
+   A 10-minute stall is normal when a step is doing one heavyweight cloud
+   call.
+
+2. **Timeout path didn't tear the session down.** When the timer fired,
+   it called `this._onDidError.fire(new Error('Stream inactivity timeout'))`
+   and disposed the *local* stream handle -- but the chat service's
+   `handle.onDidError` at
+   [chatServiceImpl.ts:473](../../src/vs/workbench/contrib/insrc/electron-sandbox/chatServiceImpl.ts#L473)
+   only ran `_finishStream()` (local cleanup) and fired an inline error
+   event. **No `chat.cancel` / `chat.close` RPCs went to the daemon.**
+   Result: daemon session stayed alive with a stalled turn, UI thought
+   stream was done, user had a half-dead session that would keep
+   surfacing stale RPC responses.
+
+### Fix
+
+Both in one commit.
+
+**31a. Bump the timeout.** `STREAM_INACTIVITY_TIMEOUT_MS` 600_000 ->
+1_800_000 (30 minutes). Comment notes why -- long cloud turns are
+legitimate; shorter windows false-positive.
+
+**31b. Teardown path on error.** `handle.onDidError` now calls
+`this.cancelBrainstormSession(` `stream-error:${err.message}` `)` --
+the same unified teardown the cancel button and brainstorm pane-close
+use (runs `chat.cancel` + `chat.close` + clears local state + fires
+`streamEnd` + `onRequestCloseBrainstormPanes` + `onDidChangeSession(undefined)`).
+Skips the confirm dialog (nothing to confirm -- session is already
+gone). Fires the inline error event first so the "Error: Stream
+inactivity timeout" still renders in the transcript before teardown
+clears the progress bar.
+
+### Verification
+
+- Stop a brainstorm mid-turn, wait 30+ min: timeout fires, session
+  closes end-to-end (chat.close RPC in daemon log, session reset in
+  UI, brainstorm panes close, progress bar clears).
+- Normal 15-minute cloud turn: no false-positive timeout.
+- Compile + build: verified 2026-04-21 via `scripts/build.sh`.
+
+### Status
+
+**DONE** (commit `d8183158c3c`, 2026-04-21). Files touched:
+`src/vs/workbench/contrib/insrc/electron-sandbox/daemonServiceImpl.ts`
+(constant + comment), `src/vs/workbench/contrib/insrc/electron-sandbox/chatServiceImpl.ts`
+(onDidError teardown).
+
+---
+
+## 32. Long agent steps feel disconnected -- no token-level presence during multi-minute waits (P1)
+
+### Observation (2026-04-21 live test)
+
+During a brainstorm session, the user waits multiple minutes between
+gate interactions while seeing only a single progress-bar line like
+`"Enhancing ideas with code context..."`. The agent is doing real
+work but the chat panel has zero presence -- no token stream, no
+per-item progress, no sense of how close the step is to completion.
+
+Monitor trace from the test session (brainstorm, design category, ~1500
+token first idea set):
+
+```
+16:24:20  progress "Generating ideas..."       (seed = Claude Sonnet 4.6)
+16:25:28  progress "Searching codebase..."     (+68s, nothing visible)
+16:25:30  progress "Enhancing ideas..."        (local Ollama)
+16:29:59  progress "Reviewing ideas..."        (+4m29s, nothing visible)
+16:30:35  progress "Refining ideas..."         (+36s, nothing visible)
+16:31:35  idea insert idx=1                    (+60s, first interaction)
+```
+
+Between 16:24:20 and 16:31:35, the user stares at a progress-bar label
+for **seven minutes** with zero per-token or per-item feedback. The
+session felt disconnected -- "is it stuck? is it working? am i close?"
+
+### Root cause
+
+Today the brainstorm controller emits one `progress` event per step
+transition (seed, enhance, review, refine, etc.) and the daemon LLM
+wrapper already receives streamed tokens but doesn't surface them.
+`chat.send` only emits `delta` events for the *final* assistant
+message of a classic chat turn. Agent-step LLM calls are treated as
+opaque synchronous computations from the client's perspective.
+
+The chat panel's progress indicator renders one line at a time;
+each new progress event overwrites the old one. The transcript
+gets nothing until the step completes and (sometimes) a gate fires.
+
+### Fix sketch
+
+Goal: restore presence without flooding the transcript. Two layers:
+
+**32a. Sub-step progress events (small / safe).** Brainstorm
+controller emits counted sub-progress inside each LLM step that
+iterates over a list -- e.g. `review` already loops per idea, emit
+`Reviewing idea 3/5: <title>`. Same for `refine` (per round + per
+idea), `theme-spec` (per theme), `enhance` (per idea enrichment).
+Changes a 4-minute silent wait into a 4-minute count-up with
+titles the user can read. Daemon-side only; no transport changes.
+
+**32b. Transient token stream into the chat panel (bigger).** The
+LLM wrapper already has streamed output. Add an optional "live
+step" channel that surfaces tokens from **every** agent step --
+generative (seed, diverge, refine, theme-spec, assemble, discuss)
+AND structured (review, cluster, promote, classify, enhance,
+theme-spec-review) -- into a transient assistant bubble in the chat
+transcript. The user's feedback was explicit: *every* step should
+show its output, not just the prose ones. Structured-JSON steps
+still stream their raw token output so the user sees presence; the
+UI doesn't try to pretty-print mid-stream.
+
+Characteristics:
+
+- Visually distinct (dimmed / italic / with a spinner indicator and
+  a step-name label like `[review]`, `[seed]`) so users can tell
+  it's not the final output and which step is speaking.
+- Replaced atomically when the step completes -- either removed, or
+  compressed to a one-line summary ("review: 5 ideas reviewed, 2
+  improved").
+- **NOT persisted** to conversation history (no `saveTurn`).
+- Multiple concurrent steps (rare but possible during diverge or
+  parallel reviewer passes) each get their own transient bubble
+  keyed by `(agent, step, iteration)`.
+
+Transport: reuse the existing `delta` event but tag it with a
+`channel: 'live-step' | 'final'` plus `step: { agent, name, iter? }`
+so the panel can route it to a transient widget vs. the persistent
+transcript, and group tokens by step. Requires:
+- Daemon: new fields on `IpcStreamMessage.data` for delta events
+  (`channel`, `step`); `executeLlmTask` wraps each LLM call with a
+  stream-emitter that pipes tokens into `send({ stream: 'delta',
+  data: { channel: 'live-step', step: { agent, name }, text } })`.
+- Browser daemonService: parse `channel` + `step` and forward.
+- Browser chatService: route live-step deltas to a separate event
+  (`onDidReceiveLiveStep(event: { step, text })`) the chat panel
+  can subscribe to; existing `onDidReceiveEvent` keeps getting only
+  the `final` channel so the persistent transcript is unchanged.
+- chatView: transient bubble widget that grows with tokens, clears
+  on step completion; one bubble per live step, step-name label in
+  the bubble header.
+
+Opt-out: a per-step `liveStream: false` flag in `AGENT_STEP_CATALOG`
+for steps where surfacing the raw output is actively noisy (none
+today -- default is stream). Leaves the escape hatch in the catalog
+for future tuning without another schema change.
+
+Out of scope for 32: persisting the live output, user-editable
+live-step content, pausing/resuming step streams, pretty-formatting
+structured JSON mid-stream.
+
+### Scope
+
+32a is self-contained per-controller work; 32b touches the transport
+layer and adds a UI widget. Ship 32a first (restores count-up
+presence) and land 32b as a follow-up if 32a doesn't fully close
+the disconnection gap.
+
+### Severity
+
+**P1.** Not a correctness bug -- the session works -- but the UX is
+jarring enough that users reported it as "very disconnected" during
+live testing. Long multi-minute waits with no presence erode trust
+and make the agent feel stuck.
+
+### Recommendation
+
+Start with 32a. Measure whether per-item count-up is enough before
+committing to the full transient-widget plumbing. Don't do both in
+the same pass.
 
 ---
 
