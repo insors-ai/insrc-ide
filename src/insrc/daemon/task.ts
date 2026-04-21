@@ -242,8 +242,12 @@ export interface TaskController {
   /** Optional sub-category (e.g., 'requirements' for brainstorm). */
   readonly category?: string | undefined;
 
-  /** Build the initial task list from input. Called once at pipeline start. */
-  buildInitialTasks(input: ControllerInput): Task[];
+  /**
+   * Build the initial task list from input. Called once at pipeline
+   * start. May be async -- e.g. the coding controller runs a scope
+   * classification LLM call up front.
+   */
+  buildInitialTasks(input: ControllerInput): Task[] | Promise<Task[]>;
 
   /**
    * Called after a task completes. Returns the next task(s) to execute,
@@ -272,6 +276,9 @@ export interface ControllerInput {
   configContext?: string | undefined;
   /** Classification result from intent classifier (passed through to controllers). */
   classification?: { intent: string; confidence: number; keywords?: string[] | undefined } | undefined;
+  /** Session reference so controllers can reach the provider resolver
+   *  (e.g. CodingController running scope classification on start). */
+  session?: import('../agent/session.js').Session | undefined;
 }
 
 export interface GateReply {
@@ -570,7 +577,7 @@ export async function runControlledPipeline(
   }
 
   // 1. Build initial tasks
-  let pendingTasks = controller.buildInitialTasks(input);
+  let pendingTasks = await controller.buildInitialTasks(input);
   log.info({ controller: controller.id, initialTasks: pendingTasks.length }, 'controlled pipeline starting');
 
   // 2. Execute tasks sequentially (controller decides next)
@@ -1402,6 +1409,7 @@ async function executeAgentTask(
   const controllerInput: ControllerInput = {
     message: userMsg,
     codeContext,
+    session: deps.session,
   };
 
   const subDeps: TaskOrchestratorDeps = {
@@ -1434,23 +1442,25 @@ async function resolveController(
 ): Promise<TaskController | null> {
   // Brainstorm picks a sub-controller per category; cache key includes it.
   let cacheKey = agentId;
-  if (agentId === 'brainstorm' && task) {
-    const { classifyBrainstormCategoryHybrid } = await import('../agent/classifier/brainstorm-category.js');
+  if (agentId === 'brainstorm' && task && deps?.session) {
+    const { classify } = await import('../agent/classify/index.js');
+    const { resolveClassifierProvider } = await import('../agent/classify/provider.js');
+    const { BRAINSTORM_CATEGORY_CLASSES } = await import('../shared/brainstorm-classes.js');
     const msg = task.userMessage ?? task.description ?? '';
-    const classifierProvider = deps?.session.resolver.resolve('classifier', 'classify');
-    const result = await classifyBrainstormCategoryHybrid(msg, classifierProvider);
+    const result = await classify(
+      { role: 'brainstorm sub-category classifier', classes: BRAINSTORM_CATEGORY_CLASSES, text: msg },
+      resolveClassifierProvider(deps.session, 'brainstorm-subcategory'),
+    );
     log.info(
-      { category: result.category, confidence: result.confidence, reasoning: result.reasoning },
+      { category: result.id, confidence: result.confidence, reasoning: result.reasoning, fallback: result.fallback },
       'brainstorm sub-classification',
     );
-    if (deps) {
-      deps.send({
-        id: deps.requestId,
-        stream: 'progress',
-        data: { message: `Intent: brainstorm/${result.category} (${result.reasoning})` },
-      });
-    }
-    cacheKey = `brainstorm:${result.category}`;
+    deps.send({
+      id: deps.requestId,
+      stream: 'progress',
+      data: { message: `Intent: brainstorm/${result.id} (${result.reasoning})` },
+    });
+    cacheKey = `brainstorm:${result.id}`;
   }
 
   if (controllerCache.has(cacheKey)) return controllerCache.get(cacheKey)!;

@@ -3,7 +3,7 @@ import type { Intent } from '../shared/types.js';
 import { loadConfigWithKeys } from './config.js';
 import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
-import { classify } from './classifier/index.js';
+import { classifyPrimaryIntent } from './classify/intent.js';
 import { selectProvider } from './router.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
@@ -27,7 +27,9 @@ import { pairAgent } from './tasks/pair/agent.js';
 import type { PairInput } from './tasks/pair/types.js';
 import { delegateAgent } from './tasks/delegate/agent.js';
 import type { DelegateInput } from './tasks/delegate/types.js';
-import { detectScope } from './classifier/scope.js';
+import { classify } from './classify/index.js';
+import { resolveClassifierProvider } from './classify/provider.js';
+import { SCOPE_CLASSES, type Scope } from '../shared/scope-classes.js';
 import { runAgent } from './framework/runner.js';
 import { ReplChannel } from './framework/channel.js';
 import { TestChannel } from './framework/test-channel.js';
@@ -165,11 +167,9 @@ export async function runOneShot(
     classifyMessage = `@anthropic ${classifyInput}`;
   }
 
-  // Classify
-  const classified = await classify(classifyMessage, {
-    signals: {},
-    llmProvider: ollamaOk ? session.resolver.resolve('classifier', 'classify') : undefined,
-  });
+  // Classify (honours /intent + @provider prefixes, uses the
+  // session's classifier provider cascade).
+  const classified = await classifyPrimaryIntent(classifyMessage, session);
 
   // Force --claude if flag set but no @anthropic prefix was used
   let explicit = classified.explicit;
@@ -444,7 +444,11 @@ async function handlePipeline(
   }
 
   if (intent === 'implement' || intent === 'refactor') {
-    const scope = detectScope(message);
+    const scopeResult = await classify(
+      { role: 'coding scope classifier', classes: SCOPE_CLASSES, text: message },
+      resolveClassifierProvider(session, 'scope'),
+    );
+    const scope: Scope = scopeResult.id as Scope;
     const mode = intent as 'implement' | 'refactor';
 
     if (scope === 'batch') {

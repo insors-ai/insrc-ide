@@ -1,4 +1,4 @@
-import type { ExplicitProvider, Intent, ProviderName } from '../../shared/types.js';
+import type { ExplicitProvider, Intent, ProviderName } from '../shared/types.js';
 
 // ---------------------------------------------------------------------------
 // All recognized intents for the /intent override

@@ -23,6 +23,9 @@ import type {
   TaskController, ControllerInput, GateReply, FinalizeResult,
   Task, TaskResult, TaskStateStore, TaskFormat,
 } from '../task.js';
+import { classify } from '../../agent/classify/index.js';
+import { resolveClassifierProvider } from '../../agent/classify/provider.js';
+import { SCOPE_CLASSES, type Scope } from '../../shared/scope-classes.js';
 
 // ---------------------------------------------------------------------------
 // State keys
@@ -247,11 +250,19 @@ export class CodingController implements TaskController {
 
   private taskCounter = 0;
 
-  buildInitialTasks(input: ControllerInput): Task[] {
+  async buildInitialTasks(input: ControllerInput): Promise<Task[]> {
     this.taskCounter = 1;
 
-    // Detect scope from the message
-    const scope = detectScopeSimple(input.message);
+    // Classify scope: single (pair) vs batch (delegate). Uses the
+    // shared classifier module; no keyword heuristics.
+    let scope: Scope = 'single';
+    if (input.session) {
+      const result = await classify(
+        { role: 'coding scope classifier', classes: SCOPE_CLASSES, text: input.message },
+        resolveClassifierProvider(input.session, 'scope'),
+      );
+      scope = result.id as Scope;
+    }
 
     if (scope === 'batch') {
       // Delegate mode — start with planner
@@ -526,19 +537,3 @@ export class CodingController implements TaskController {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Simple scope detection (mirrors classifier/scope.ts without import)
-// ---------------------------------------------------------------------------
-
-function detectScopeSimple(message: string): 'single' | 'batch' {
-  const lower = message.toLowerCase();
-  const batchPatterns = [
-    /\ball\s+(files?|modules?|components?|classes?|functions?|endpoints?|tests?|services?)\b/,
-    /\bevery\s+(file|module|component|class|function)\b/,
-    /\bacross\s+all\b/,
-    /\beach\s+(file|module|component|class)\b/,
-    /\bthroughout\s+(the\s+)?(codebase|project|repo)/,
-    /\b(project|codebase)-wide\b/,
-  ];
-  return batchPatterns.some(p => p.test(lower)) ? 'batch' : 'single';
-}

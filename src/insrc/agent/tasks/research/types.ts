@@ -2,7 +2,7 @@
  * Research agent types — goal-oriented investigation with adaptive planning.
  */
 
-import type { DecomposedAction } from '../../classifier/decompose.js';
+import type { DecomposedAction } from '../../decompose.js';
 
 // ---------------------------------------------------------------------------
 // Input

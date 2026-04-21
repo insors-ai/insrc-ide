@@ -12,7 +12,7 @@
  * at execution time using actual prior-task output and ContextManager memory.
  */
 
-import type { DecomposedAction } from '../agent/classifier/decompose.js';
+import type { DecomposedAction } from '../agent/decompose.js';
 import type { Task, TaskKind, TaskFormat } from './task.js';
 
 // ---------------------------------------------------------------------------

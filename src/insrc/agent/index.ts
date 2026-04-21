@@ -5,7 +5,7 @@ import { PATHS } from '../shared/paths.js';
 import { loadConfigWithKeys } from './config.js';
 import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
-import { classify } from './classifier/index.js';
+import { classifyPrimaryIntent } from './classify/intent.js';
 import { selectProvider } from './router.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
@@ -34,7 +34,9 @@ import type { PairInput, PairMode } from './tasks/pair/types.js';
 import { delegateAgent } from './tasks/delegate/agent.js';
 import type { DelegateState } from './tasks/delegate/agent-state.js';
 import type { DelegateInput } from './tasks/delegate/types.js';
-import { detectScope } from './classifier/scope.js';
+import { classify } from './classify/index.js';
+import { resolveClassifierProvider } from './classify/provider.js';
+import { SCOPE_CLASSES, type Scope } from '../shared/scope-classes.js';
 import { runAgent } from './framework/runner.js';
 import { ReplChannel } from './framework/channel.js';
 import { readIndex, readCheckpoint, resolveRunDir } from './framework/checkpoint.js';
@@ -276,12 +278,10 @@ export async function startRepl(cwd?: string): Promise<void> {
     // Use cleaned message (without file paths) for classification if attachments found
     const classifyInput = attachments.length > 0 ? messageWithoutPaths || raw : raw;
 
-    // Classify intent and select provider
-    const classifyProvider = session.resolver.resolve('classifier', 'classify');
-    const classified = await classify(classifyInput, {
-      signals: {},
-      llmProvider: ollamaOk ? classifyProvider : undefined,
-    });
+    // Classify intent and select provider. `classifyPrimaryIntent`
+    // honours the /intent + @provider prefixes and uses the session's
+    // classifier provider (per-step -> active cloud -> local cascade).
+    const classified = await classifyPrimaryIntent(classifyInput, session);
     const route = selectProvider(classified.intent, classified.explicit, {
       ollamaProvider: session.ollamaProvider,
       cloudProvider: session.claudeProvider,
@@ -571,24 +571,18 @@ export async function startRepl(cwd?: string): Promise<void> {
       return brainstormResult;
     }
 
-    if (intent === 'implement') {
-      const scope = detectScope(message);
+    if (intent === 'implement' || intent === 'refactor') {
+      const scopeResult = await classify(
+        { role: 'coding scope classifier', classes: SCOPE_CLASSES, text: message },
+        resolveClassifierProvider(session, 'scope'),
+      );
+      const scope: Scope = scopeResult.id as Scope;
       if (scope === 'batch') {
         log.info('[pipeline] Batch scope detected — routing to Delegate agent');
         return await runDelegateAgent(message, codeContext);
       }
-      log.info('[pipeline] Running Pair agent (implement mode)...');
-      return await runPairAgent(message, codeContext, 'implement');
-    }
-
-    if (intent === 'refactor') {
-      const scope = detectScope(message);
-      if (scope === 'batch') {
-        log.info('[pipeline] Batch scope detected — routing to Delegate agent');
-        return await runDelegateAgent(message, codeContext);
-      }
-      log.info('[pipeline] Running Pair agent (refactor mode)...');
-      return await runPairAgent(message, codeContext, 'refactor');
+      log.info(`[pipeline] Running Pair agent (${intent} mode)...`);
+      return await runPairAgent(message, codeContext, intent);
     }
 
     if (intent === 'test') {

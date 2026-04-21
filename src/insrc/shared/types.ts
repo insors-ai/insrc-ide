@@ -91,18 +91,19 @@ export type ExplicitProvider = ProviderName;
 
 export type PersonaName = 'designer' | 'planner' | 'developer' | 'tester' | 'deployer';
 
-/** Classification result from the LLM-based intent classifier. */
+/**
+ * @deprecated Use `ClassifyResult` from `shared/classify.ts` + the
+ * generic classifier module. Kept temporarily during the rewrite; will
+ * be removed once every site has migrated to the new shape. Not used
+ * by any current code path.
+ */
 export interface ClassificationResult {
-  /** Primary intent — the main thing the user wants */
   primary: {
     intent: Intent;
     confidence: number;
-    /** Verbatim text from the user message that signals this intent */
     snippet: string;
-    /** One sentence explaining the classification */
     reasoning: string;
   };
-  /** Secondary intent, if the message contains a compound request */
   secondary?: {
     intent: Intent;
     confidence: number;

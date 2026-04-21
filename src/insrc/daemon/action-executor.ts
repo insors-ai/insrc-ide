@@ -6,7 +6,7 @@
  * as context.
  */
 
-import type { DecomposedAction } from '../agent/classifier/decompose.js';
+import type { DecomposedAction } from '../agent/decompose.js';
 import type { IpcStreamMessage } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
 

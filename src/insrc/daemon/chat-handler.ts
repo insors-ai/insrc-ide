@@ -7,10 +7,13 @@
  */
 
 import { Session } from '../agent/session.js';
-import { classify, decompose, type DecomposedAction } from '../agent/classifier/index.js';
-import type { AttachedAction } from '../agent/classifier/decompose.js';
+import { decompose, type DecomposedAction } from '../agent/decompose.js';
+import { classifyPrimaryIntent } from '../agent/classify/intent.js';
+import type { AttachedAction } from '../agent/decompose.js';
 import { selectProvider } from '../agent/router.js';
-import { detectScope } from '../agent/classifier/scope.js';
+import { classify } from '../agent/classify/index.js';
+import { resolveClassifierProvider } from '../agent/classify/provider.js';
+import { SCOPE_CLASSES, type Scope } from '../shared/scope-classes.js';
 import { runAgent } from '../agent/framework/runner.js';
 import { buildTasks, TRANSFORM_SYSTEM_PROMPT } from './task-builder.js';
 import { runTaskPipeline, renderMarkdown, type Task, type TaskFormat, type TaskOrchestratorDeps } from './task.js';
@@ -563,10 +566,10 @@ async function runChatMessage(
   let classifiedConfidenceOverride: number | undefined;
   let classifiedReasoningOverride: string | undefined;
   let postPrimaryActions: {
-    formatActions: import('../agent/classifier/decompose.js').AttachedAction[];
-    dependActions: import('../agent/classifier/decompose.js').AttachedAction[];
-    appendActions: import('../agent/classifier/decompose.js').AttachedAction[];
-    parallelActions: import('../agent/classifier/decompose.js').AttachedAction[];
+    formatActions: import('../agent/decompose.js').AttachedAction[];
+    dependActions: import('../agent/decompose.js').AttachedAction[];
+    appendActions: import('../agent/decompose.js').AttachedAction[];
+    parallelActions: import('../agent/decompose.js').AttachedAction[];
   } | undefined;
 
   // Use primary/attached model if available
@@ -693,16 +696,16 @@ async function runChatMessage(
     }
   } else {
     log.info({ message: message.slice(0, 80) }, 'classifying (fallback)');
-    const classifyProvider = session.resolver.resolve('classifier', 'classify');
-    const classified = await classify(enrichedMessage, {
-      llmProvider: classifyProvider,
-    });
+    const classified = await classifyPrimaryIntent(enrichedMessage, session);
     classifiedIntent = classified.intent;
     classifiedMessage = classified.message;
     classifiedExplicit = classified.explicit;
     classifiedConfidence = classified.confidence;
-    classifiedReasoning = classified.classification.primary.reasoning || (classified.usedLLM ? 'llm classifier' : 'keyword fallback');
-    log.info({ intent: classifiedIntent, confidence: classified.confidence }, 'classified');
+    classifiedReasoning = classified.reasoning || (classified.fallback ? 'classifier fallback' : 'llm classifier');
+    log.info(
+      { intent: classifiedIntent, confidence: classified.confidence, fallback: classified.fallback },
+      'classified',
+    );
   }
 
   send({ id: requestId, stream: 'progress', data: { message: `Intent: ${classifiedIntent}` } });
@@ -889,13 +892,13 @@ interface AgentSelection {
   input: unknown;
 }
 
-function selectAgent(
+async function selectAgent(
   intent: string,
   message: string,
   session: Session,
   codeContext: string,
   fileRefs?: FileRefResult[],
-): AgentSelection | null {
+): Promise<AgentSelection | null> {
   log.debug({ repoPath: session.repoPath, intent }, 'selectAgent');
   const sessionRef = {
     repoPath: session.repoPath,
@@ -951,7 +954,11 @@ function selectAgent(
 
     case 'implement':
     case 'refactor': {
-      const scope = detectScope(message);
+      const scopeResult = await classify(
+        { role: 'coding scope classifier', classes: SCOPE_CLASSES, text: message },
+        resolveClassifierProvider(session, 'scope'),
+      );
+      const scope: Scope = (scopeResult.id as Scope);
       if (scope === 'batch') {
         const input: DelegateInput = {
           message,
@@ -1504,7 +1511,7 @@ export async function _runSingleAction(
 
   // Try to route to an agent
   const enrichedMessage = fileContext ? `${actionMessage}\n\n${fileContext}` : actionMessage;
-  const agentInfo = selectAgent(action.intent, enrichedMessage, session, codeContext, fileRefs);
+  const agentInfo = await selectAgent(action.intent, enrichedMessage, session, codeContext, fileRefs);
 
   if (!agentInfo) {
     // Simple completion for this action

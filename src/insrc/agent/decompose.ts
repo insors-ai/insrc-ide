@@ -17,8 +17,8 @@
  *   ]
  */
 
-import type { Intent, LLMProvider } from '../../shared/types.js';
-import { getLogger } from '../../shared/logger.js';
+import type { Intent, LLMProvider } from '../shared/types.js';
+import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('decompose');
 
