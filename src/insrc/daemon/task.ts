@@ -9,7 +9,7 @@
  * gating where required, and only sending the final formatted output to the user.
  */
 
-import type { IpcStreamMessage, LLMMessage } from '../shared/types.js'; // LLMProvider, AgentConfig used by executeAgentTask (future)
+import type { IpcStreamMessage, LLMMessage, LLMProvider } from '../shared/types.js';
 import type { ReplyPayload } from '../agent/framework/types.js';
 import type { DaemonChannel } from './channel.js';
 import type { Session } from '../agent/session.js';
@@ -107,6 +107,16 @@ export interface Task {
   // -- Provider --
   /** Which LLM provider to use. Defaults to local (Ollama). */
   providerHint?: 'local' | 'claude' | undefined;
+  /**
+   * Agent id for per-step provider lookup via `session.resolver` (Item 17).
+   * Distinct from `agentId` (which identifies the agent for kind=agent tasks)
+   * -- this is a string key into the `models.agents.<agent>.<step>` config
+   * map. When set, `executeLlmTask` consults the resolver and uses the
+   * matching provider in preference to `providerHint`.
+   */
+  resolverAgent?: string | undefined;
+  /** Step name for per-step provider lookup. Pairs with `resolverAgent`. */
+  resolverStep?: string | undefined;
 
   // -- LLM tuning --
   /** LLM temperature override. Creative tasks use higher values, structured tasks lower. */
@@ -1273,9 +1283,25 @@ async function executeLlmTask(
   }
 
   try {
-    const provider = task.providerHint === 'claude' && session.claudeProvider
-      ? session.claudeProvider
-      : session.ollamaProvider;
+    // Item 17: per-step provider resolution.
+    //   1. If the task carries resolverAgent + resolverStep, try
+    //      session.resolver.resolveOrNull(agent, step). A hit means the
+    //      user configured `models.agents.<agent>.<step>` in their config;
+    //      use that provider.
+    //   2. Otherwise fall back to the coarse providerHint mapping.
+    //   3. Final fallback is always the local Ollama provider.
+    let resolved: LLMProvider | null = null;
+    if (task.resolverAgent && task.resolverStep) {
+      try {
+        resolved = session.resolver.resolveOrNull(task.resolverAgent, task.resolverStep);
+      } catch {
+        resolved = null;
+      }
+    }
+    const provider: LLMProvider = resolved
+      ?? (task.providerHint === 'claude' && session.claudeProvider
+        ? session.claudeProvider
+        : session.ollamaProvider);
     const completeOpts: Record<string, unknown> = { maxTokens: task.maxTokens ?? 4096 };
     if (task.temperature !== undefined) {
       completeOpts.temperature = task.temperature;

@@ -35,6 +35,12 @@ Related plans:
 | 14| Add Idea form fails: daemon doesn't register `brainstorm.addIdea` RPC    | P1 | daemon | **DONE** (`injectedIdeas` queue on session; `brainstorm.addIdea` RPC; `getInjectedIdeas` threaded through `TaskOrchestratorDeps`; controller drains and splices into reviewQueue at currentReviewIndex+1 so next card is the user's idea) |
 | 15| Clicking a ref in the idea card replaces the brainstorm pane -- user stranded | P1 | UI | **DONE** (card's code/doc ref click now uses `SIDE_GROUP`; brainstorm pane stays visible, file opens in a split) |
 | 16| Closing / stopping a brainstorm session doesn't actually stop the stream  | P1 | daemon+UI | **partial** (16a gate rejection already wired; 16c pipeline abort checks + try/catch around gateTaskResult; 16d guardedSend wrapper silences late daemon→client messages; 16b LLM provider abort-signal plumbing deferred) |
+| 17| Brainstorm LLM tasks ignore `models.agents.brainstorm.*` config overrides | P1 | daemon | **DONE** (Task gains `resolverAgent` + `resolverStep`; `executeLlmTask` calls `session.resolver.resolveOrNull()` before falling back to `providerHint`; all 12 brainstorm LLM tasks tagged with step names: seed/diverge/enhance/review/refine/cluster/promote/theme-spec/theme-spec-review/assemble/discuss) |
+| 18| Duplicate / near-duplicate ideas surface in the review queue              | P1 | daemon | **partial** (18a prompt-level dedup instruction added to `REFINE_IDEAS_SYSTEM`; 18b embedding-based similarity dedup deferred) |
+| 19| No UX feedback after `+ Add Idea` submit -- user can't tell if it worked  | P1 | UI | **DONE** (19a inline success banner confirms "Idea X added. Auto-accepted..."; 19b daemon progress event deferred -- UI banner covers the user need) |
+| 20| User-added idea still requires Approve click -- should be auto-accepted   | P1 | daemon | **DONE** (20a: injected-ideas drain sets `status: 'accepted'` and skips the reviewQueue; user ideas now go straight into the accepted pool for clustering / convergence) |
+| 21| Chat-panel Stop/Cancel button doesn't actually cancel (close-tab does)    | P1 | UI | **DONE** (Stop button handler now runs `cancelStream()` AND `closeSession()` when a brainstorm is active, matching tab-close behaviour) |
+| 22| Progress bar stays stuck on last step after session cancel / close        | P1 | UI | **DONE** (`cancelStream` + `closeSession` now fire synthetic `streamEnd` event; chatView listens to brainstorm session deactivation and hides the bar) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -1784,6 +1790,531 @@ late `send({...})` calls from the controller are no-op, not
 **P1.** The user explicitly said "stopping isn't working". Every
 abandoned brainstorm session today leaks daemon-side work, cloud
 LLM calls, and log noise until the daemon is restarted.
+
+---
+
+## 17. Brainstorm LLM tasks ignore `models.agents.brainstorm.*` config overrides (P1)
+
+### Observation (2026-04-21)
+
+User asked whether the brainstorming flow respects per-step model
+settings. It does not.
+
+### Current behavior
+
+[executeLlmTask in task.ts:1276-1278](../../src/insrc/daemon/task.ts#L1276-L1278)
+picks the provider with:
+
+```ts
+const provider = task.providerHint === 'claude' && session.claudeProvider
+  ? session.claudeProvider
+  : session.ollamaProvider;
+```
+
+- Only two outcomes: Claude (when `task.providerHint === 'claude'`
+  AND the session has a Claude provider bound) or Ollama.
+- The `ProviderResolver` on the session (which knows about
+  `models.agents.<agent>.<step>` config overrides) is never consulted
+  for brainstorm LLM tasks.
+- Consequence: settings like `models.agents.brainstorm.seed`,
+  `models.agents.brainstorm.review`, `models.agents.brainstorm.refine`
+  in `~/.insrc/config.json` (or the Model Providers pane) are
+  silently ignored. The user can configure them but they have no
+  effect.
+
+### Other agents do it right
+
+- **Planner**
+  ([steps.ts:210](../../src/insrc/agent/planner/steps.ts#L210),
+  [steps.ts:418](../../src/insrc/agent/planner/steps.ts#L418))
+  uses `ctx.providers.resolve('planner', 'enhance')` /
+  `.resolveOrNull('planner', 'detail')`.
+- **Pair**
+  ([steps.ts:398](../../src/insrc/agent/tasks/pair/steps.ts#L398))
+  uses `ctx.providers.resolveOrNull('pair', 'validate')`.
+- **Designer** / CLI / **Classifier** all use the resolver.
+
+### Root cause
+
+The brainstorm controller was written against the task-pipeline
+abstraction, and the pipeline's LLM executor (`executeLlmTask`) never
+got wired to the resolver. Brainstorm tasks today carry only a
+coarse `providerHint: 'local' | 'claude'` which maps 1:1 to the two
+session-level providers.
+
+### Fix
+
+**17a. Extend the `Task` shape with per-step agent metadata.** Add:
+
+```ts
+export interface Task {
+  // ... existing
+  /** Agent id for per-step provider lookup. */
+  agentIdForResolver?: string;
+  /** Step name for per-step provider lookup. */
+  stepName?: string;
+}
+```
+
+(Names kept distinct from the existing `agentId` / `intent` fields
+because `agentId` already has a different meaning in executeAgentTask.)
+
+**17b. `executeLlmTask` consults the resolver first.**
+
+```ts
+const resolver = deps.session.resolver;
+const override = task.agentIdForResolver && task.stepName
+  ? resolver.resolveOrNull(task.agentIdForResolver, task.stepName)
+  : null;
+const provider = override
+  ?? (task.providerHint === 'claude' && session.claudeProvider ? session.claudeProvider : session.ollamaProvider);
+```
+
+Order: explicit per-step override > providerHint > session default.
+
+**17c. Brainstorm controller populates the new fields.** Each task
+`buildGenerateIdeasTask`, `buildEnhanceIdeasTask`,
+`buildReviewIdeasTask`, `buildRefineIdeasTask`,
+`buildConvergeClusterTask`, `buildConvergePromoteTask`,
+`buildGenerateThemeSpecTask`, `buildAssembleDocumentTask`,
+`buildDiscussRespondTask`, `buildDivergeSingleTask` sets:
+
+```ts
+agentIdForResolver: 'brainstorm',
+stepName: 'seed' | 'enhance' | 'review' | 'refine' | 'cluster' | 'promote' | 'theme-spec' | 'assemble' | 'discuss' | 'diverge',
+```
+
+(Names chosen to match the canonical step names already used by
+other agents' per-step configs.)
+
+**17d. Keep `providerHint` as fallback** so existing behaviour is
+preserved for tasks / controllers that haven't opted into the
+resolver path yet.
+
+### Verification
+
+- Set `models.agents.brainstorm.review = 'anthropic:claude-opus-4-7'`
+  in `~/.insrc/config.json`.
+- Start a brainstorm turn; observe the Claude call log -- it should
+  log `model: claude-opus-4-7` for the review step, not the default
+  haiku.
+- Remove the override; the next brainstorm uses whatever the
+  session default is.
+- Tasks without `agentIdForResolver` / `stepName` (designer,
+  planner, etc. — they already use the resolver at the call site)
+  are unaffected.
+
+### Dependencies
+
+None. Daemon-only change. No UI, no protocol.
+
+### Severity
+
+**P1.** Configuration that the Model Providers pane presents to the
+user as a working control is silently ignored. Classic "surprising
+defaults" bug that erodes trust in the config.
+
+---
+
+## 18. Duplicate / near-duplicate ideas surface in the review queue (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"in some cases duplicate/near-duplicate
+ideas are showing up, the review step should filter/combine these"*
+
+Observed in round 1 of a design brainstorm -- after refine, the queue
+contained titles with heavy overlap (e.g. "Rule-Based Assignment with
+LLM Augmentation", "Rule-Based Assignment with LLM Validation",
+"Hybrid Rule-LLM Assignment with Dynamic Constraints", "Constraint-
+Driven Assignment with LLM Override", "Contraint Engine for
+Assignment"). The user was forced to approve/reject each one even
+though two or three were substantively the same idea.
+
+### Current state
+
+Dedupe exists in a narrow band:
+- [afterRefineIdeas](../../src/insrc/daemon/controllers/brainstorm/base.ts)
+  dedups refined ideas against prior-round survivors AND rejected
+  titles via an **exact 60-char title-prefix match**
+  (`title.slice(0, 60).toLowerCase().trim()`). That only catches
+  clones, not paraphrases.
+- No dedup runs between ideas WITHIN the same refined batch. Two
+  refined titles with slightly different wording both pass.
+- No semantic dedup (embedding similarity, LLM-based grouping).
+
+### Fix
+
+**18a. Prompt-level dedup instruction in REFINE_IDEAS_SYSTEM.** Add:
+
+> Before emitting the final numbered list, check every pair of
+> ideas. If two ideas describe the same core concept (even with
+> different wording), **merge them** into a single idea that
+> captures the shared intent and note the union of their tags /
+> refs. Do not emit near-duplicates.
+
+Cheap, no infra change, catches most cases because the LLM already
+has the full idea set in context.
+
+**18b. Post-parse similarity dedup.** After `parseIdeaList` runs on
+the refine output, run a fuzzy-similarity pass on the accepted pool:
+- Embed each title + body via the local embedding model.
+- Compare pairwise cosine similarity. Above threshold (~0.88) merge
+  the pair: keep the higher-verdict one, roll tags/refs from the
+  dropped one.
+- Emit a progress event "Merged N duplicate ideas" so the user sees
+  it happened.
+
+Bigger change but catches cases 18a misses.
+
+**18c. User-level signal on the card.** When two surviving ideas
+still look similar (below the dedup threshold but above a soft
+threshold like 0.75), render a "similar to idea [N]" chip on the
+card so the user can make an informed approve/reject decision
+without having to scroll.
+
+### Recommendation
+
+Ship **18a** now (one-line prompt change) and **18b** with the
+embedding-based pass as a follow-on. **18c** only if 18a+18b don't
+meaningfully reduce the complaint.
+
+### Verification
+
+- Run a brainstorm with a prompt that historically produces
+  near-duplicates (e.g. "rule vs LLM assignment engine").
+- Round-1 refined output has zero pairs with > 0.88 cosine
+  similarity on title+body embeddings.
+- User sees at most 1-2 "similar to" chips across the pool.
+
+---
+
+## 19. No UX feedback after `+ Add Idea` submit -- user can't tell if it worked (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"no user feedback when an new idea is
+added, user has no clue if the idea was added, failed or what
+happened"*
+
+### Current behavior
+
+- User clicks `+ Add Idea` on `BrainstormIdeasPane`.
+- Form opens, user fills title + body, clicks Add.
+- `_submitAddIdea` calls `brainstorm.addIdea` RPC, await completes.
+- Form closes silently (or stays open with an error row on failure).
+- The new idea is queued on the daemon; it appears as the NEXT card
+  after the user resolves the current gate. The user sees a new card
+  **some time later** (could be minutes if the current gate is
+  waiting on an LLM call) and has no way to connect that card to
+  their earlier Add Idea click.
+
+### Root cause
+
+`_submitAddIdea` at
+[ideasPane.ts:364-368](../../src/vs/workbench/contrib/insrc/browser/brainstorm/step/ideasPane.ts#L364-L368)
+returns after the RPC resolves but doesn't surface success. The form
+closes, no toast, no inline confirmation.
+
+### Fix
+
+**19a. Inline success state in the Add Idea form.** On RPC success,
+replace the form contents with:
+
+> ✓ Idea "<title>" queued. It will appear next in your review.
+
+Auto-dismiss after 2-3 s. On failure, keep the existing amber error
+row but change the text to include a retry hint.
+
+**19b. Daemon progress event on addIdea.** `brainstormAddIdea` RPC
+handler emits a progress event on the session stream:
+
+```ts
+send({ id: activeRequestId, stream: 'progress', data: { message: `Idea queued: "${title.slice(0, 60)}"` } });
+```
+
+This makes the addition visible in the progress bar regardless of
+which pane the user is on.
+
+**19c. Upsert the idea immediately in the session service.** Today
+the session service only learns about the new idea when the next
+`idea` gate carries it. Instead, wire the RPC result back to the
+browser so `BrainstormSessionService` adds the idea to its
+observable list immediately -- the idea list gate (if open) re-
+renders with the new entry.
+
+### Recommendation
+
+Ship **19a + 19b**. 19c is only needed if we later add a "list of
+queued ideas" UI; optional.
+
+### Verification
+
+- Click `+ Add Idea`, fill title + body, submit.
+- Form shows "✓ Idea 'X' queued..." for ~2 s then closes.
+- Chat progress bar briefly shows `Idea queued: "X"`.
+- Next card-transition shows the user's idea.
+
+---
+
+## 20. User-added idea still requires Approve click -- should be auto-accepted (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"new idea shows up at the end of the
+queue for user approval again, user has added the idea so should be
+auto approved"*
+
+### Current behavior
+
+When the user adds an idea via `+ Add Idea`:
+- Controller creates the idea with `source: 'user'` and
+  `reviewVerdict: 'user'`, but `status: 'proposed'`.
+- The idea is spliced into `reviewQueue` at
+  `currentReviewIndex + 1`, so the next card shown after the
+  current gate resolves is the user's idea.
+- The card lands with the normal action row
+  (Approve / Reject / Diverge / Skip / Park / Discuss) -- forcing
+  the user to click Approve on an idea they JUST authored.
+
+From the log:
+
+```
+12:30:42  idea insert id=392c077e idx=10 status=proposed title="Contraint Engine for Assignment"
+12:30:42  gate received kind=idea ...
+12:31:33  click action=approve
+```
+
+The user waited through the gate and clicked Approve just to pass
+their own idea through.
+
+### Root cause
+
+`next()` in
+[base.ts](../../src/insrc/daemon/controllers/brainstorm/base.ts)
+(injected-ideas drain block) sets `status: 'proposed'`. The review
+flow then treats it like any other proposed idea.
+
+### Fix
+
+**20a. Skip the review gate for user-added ideas.** In the injected-
+ideas drain:
+
+```ts
+const idea: Idea = {
+  // ... existing fields
+  status: 'accepted',   // was 'proposed'
+  source: 'user',
+  reviewVerdict: 'user',
+  // ... existing
+};
+this.state.ideas.push(idea);
+// Do NOT push into reviewQueue -- the idea is already accepted.
+```
+
+With status=accepted and not queued for review, the idea simply
+joins the accepted pool and participates in downstream convergence /
+clustering alongside LLM-generated ideas.
+
+**20b. Render an inline marker in the idea list panel.** When the
+user lands on `BrainstormIdeaListPane` or the convergence review,
+user-added ideas carry a small "👤 user-added" badge so they're
+easy to spot. (The session service already exposes `source`; just
+render it when present.)
+
+**20c. Preserve the "user wanted to add this and see it considered"
+contract.** Even without a review card, the next LLM-driven step
+(cluster / promote) sees the user idea in the accepted pool. In
+round N+1 refine, the Phase 1 feedback delivers the idea's origin
+to the refine LLM: "idea [N] was user-contributed -- do not
+remove".
+
+### Recommendation
+
+Ship **20a** immediately. **20b** is a small UI polish once Item 20a
+lands. **20c** is already implicit -- the refine prompt rule for
+`reviewVerdict: 'user'` exists.
+
+### Verification
+
+- Click `+ Add Idea`, submit.
+- No review card for the user's idea appears.
+- The idea shows up in the accepted-pool list in the next
+  `idea-list` or convergence-review pane with a user-added badge.
+- Clustering / promotion runs with the user idea included.
+
+---
+
+## 21. Chat-panel Stop/Cancel button doesn't actually cancel (close-tab does) (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"the stop/cancel button in the chat
+panel does not work. user has to close the brainstorming tab to
+cancel. both should function identically"*
+
+### Current behavior
+
+Two cancel paths exist:
+1. **Brainstorm tab close** -- `BrainstormStepInputBase.closeHandler`
+   → `chatService.cancelStream()` → daemon `chat.cancel` RPC →
+   abortController fires → pipeline cleanup (Items 16a/c/d verified
+   working on 2026-04-21).
+2. **Chat panel Stop button** -- this is the round-icon button on
+   the chat view composer while a stream is in flight. Supposed to
+   call the same `chatService.cancelStream()`.
+
+Path 2 is not actually cancelling the brainstorm's daemon-side work.
+The button either no-ops or only abandons the client's view of the
+stream without asking the daemon to stop.
+
+### Root cause (hypothesis -- needs log-trace confirmation)
+
+The chat panel's stop button most likely calls `cancelStream()` but
+the brainstorm session's active requestId differs from the chat
+panel's tracked stream id. When the cancel RPC goes out it
+references a stream that's already "done" from the chat panel's
+perspective (because the first brainstorm gate arrived and the view
+considered the initial send finished), while the brainstorm
+controller keeps running under the same session id.
+
+OR: the chat panel's stop button is gated on `isStreaming` state
+that flips false as soon as a gate is rendered -- so the button
+disappears or becomes a no-op while gates are in flight.
+
+Needs:
+- Repro with logging.
+- Trace `chatView`'s stop-button click handler.
+- Compare to the brainstorm tab's close-handler path (which we know
+  works after Item 16).
+
+### Fix
+
+**21a. Single source of truth for "is the session working?".**
+Drive the chat-panel stop button visibility + click action from
+`brainstormSessionService.isSessionActive` OR a new "session is
+working" flag on `IInsrcChatService` that stays true for the full
+brainstorm lifecycle, not just while streaming deltas.
+
+**21b. Cancel calls the same RPC path.** The chat-panel stop button
+calls `chatService.cancelStream()` which goes through
+`chat.cancel` → `abortController.abort()` → Items 16a/c/d fire.
+Today's brainstorm tab close uses the same path, so once the
+chat-panel stop is pointed at `cancelStream()` unconditionally
+(not gated on local streaming state), both paths converge.
+
+**21c. Post-cancel session close.** Brainstorm tab-close path
+today also calls `chatService.closeSession()`. Chat-panel stop
+should do the same: cancel AND close, so the session goes back to
+`(none)` and the user can start a fresh brainstorm.
+
+### Verification
+
+- Start brainstorm, progress bar shows "Generating ideas...".
+- Click chat panel Stop button.
+- Daemon log shows `controlled pipeline: aborted by user`.
+- Brainstorm pane closes or shows a cancelled state.
+- No `no stream handle for id=N` warnings.
+- Same subsequent behaviour as tab-close.
+
+### Severity
+
+**P1.** User explicitly called out the inconsistency. Two cancel
+UIs with different behaviour is a trust issue -- user can't
+predict what the Stop button does.
+
+---
+
+## 22. Progress bar stays stuck on last step after session cancel / close (P1)
+
+### Observation (2026-04-21 live test)
+
+User feedback (direct quote): *"the progress is not getting reset on
+cancel. check the attached image"*
+
+Screenshot shows the chat composer with a persistent progress
+indicator above it: `◦ Clustering ideas into themes (round 1)...`.
+The user had already closed the brainstorm pane / cancelled the
+session. The progress indicator never cleared.
+
+### Current behavior
+
+- Daemon emits progress events continuously during a turn:
+  `send({ stream: 'progress', data: { message: '...' } })`.
+- Chat view listens, updates `this._progressBar` and
+  `this._progressText` via `_showProgress(step, status)`.
+- On cancel / close:
+  - Daemon pipeline aborts (Item 16 verified working).
+  - `guardedSend` drops any further progress messages from the
+    daemon side (Item 16d).
+  - BUT: the last progress event already rendered on the bar stays
+    visible. Nothing clears `_progressBar` / `_progressText`.
+- `_onStreamEnd` exists and presumably hides the progress bar, but
+  it's triggered by a `streamEnd` event from the daemon. On cancel,
+  the daemon never emits `streamEnd` (it's short-circuited by the
+  abort), so the client's stream-end handler never fires, so the
+  bar never hides.
+
+### Root cause
+
+Cancel / close terminates the stream handle on the browser side
+immediately, but the chat view's progress indicator is only cleared
+when:
+- The daemon emits a fresh `streamEnd` event (doesn't happen on
+  abort), OR
+- A new chat.send starts and clobbers the text (only happens when
+  the user sends another message).
+
+There's no "session ended / cancelled" signal on the browser side
+that clears the progress chrome.
+
+### Fix
+
+**22a. Clear progress on `cancelStream()`.** In
+[chatServiceImpl.cancelStream](../../src/vs/workbench/contrib/insrc/electron-sandbox/chatServiceImpl.ts),
+after `_finishStream()` fires, also emit a synthetic
+`streamEnd` event on the event channel so the chat view's
+`_onStreamEnd` path clears the progress bar. Alternatively, call a
+new `chatService.resetProgress()` that the chat view listens to.
+
+**22b. Clear progress on session close.** Same as 22a but triggered
+when `closeSession(sessionId)` is called (brainstorm tab close
+path).
+
+**22c. Clear progress when brainstorm session ends.** The browser's
+`IInsrcBrainstormSessionService.onDidChange` fires when
+`isSessionActive` flips false. `chatView` already listens; make the
+handler also clear the progress indicator.
+
+**22d. Defensive auto-clear.** If the chat view hasn't received any
+event (delta / progress / gate) for N seconds and `isStreaming`
+is false, clear the progress bar. Catches race conditions where
+22a/b/c don't fire.
+
+### Recommendation
+
+Ship **22a + 22b** -- they close the "user clicked cancel" and
+"user closed the brainstorm tab" paths which cover ~all observed
+cases. **22c** is a small safety net. **22d** is a belt-and-
+suspenders fallback; defer unless a new "stuck progress" report
+shows up after 22a+b.
+
+### Verification
+
+- Start brainstorm, let it reach `Clustering ideas into themes
+  (round 1)...`
+- Click Cancel (either chat-panel Stop button after Item 21 fix OR
+  brainstorm tab close).
+- Progress bar disappears within ~1 s.
+- Send a new chat message -- no stale progress text leaks into the
+  new turn.
+
+### Severity
+
+**P1.** Visual artifact that makes the UI look broken -- the user
+thinks something is still running even though it isn't. Compounds
+with Item 21 (cancel button not working) -- together they make the
+"stop a brainstorm" UX feel completely unreliable.
 
 ---
 

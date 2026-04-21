@@ -155,6 +155,7 @@ Your tasks:
 2. KEEP "strong" ideas unchanged — copy them exactly as-is
 3. REWRITE "moderate" ideas — incorporate the reviewer's rationale to strengthen them. Make them more specific, concrete, and relevant to the original problem. Keep the same intent but improve clarity and feasibility.
 4. KEEP "user" ideas — these were contributed by the user. You may expand or clarify them but never remove or fundamentally change them. Preserve the user's core intent.
+5. DEDUPLICATE — before emitting the final list, check every pair of ideas. If two ideas describe the same core concept (even with different wording, e.g. "Rule-Based Assignment with LLM Validation" and "Rule-Based Assignment with LLM Augmentation"), MERGE them into a single idea that captures the shared intent. Take the union of their tags and refs. Never emit near-duplicates — the user shouldn't have to approve / reject the same concept twice.
 
 ## Output Format
 

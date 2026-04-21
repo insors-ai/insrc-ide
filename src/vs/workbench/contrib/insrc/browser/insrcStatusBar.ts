@@ -124,7 +124,11 @@ export class InsrcStatusBarContribution extends Disposable implements IWorkbench
 		if (state === 'disconnected') {
 			md.appendMarkdown(`[$(debug-start) Connect](command:insrc.connectDaemon)`);
 		} else {
-			md.appendMarkdown(`[$(comment) Chat](command:insrc.openChat) · [$(gear) Settings](command:workbench.action.openSettings?%5B%22insrc%22%5D)`);
+			md.appendMarkdown(
+				`[$(comment) Chat](command:insrc.openChat) · `
+				+ `[$(server-process) Step Settings](command:insrc.openStepProviders) · `
+				+ `[$(gear) Settings](command:workbench.action.openSettings?%5B%22insrc%22%5D)`
+			);
 		}
 
 		return md;

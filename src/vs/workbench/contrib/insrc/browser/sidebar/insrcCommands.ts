@@ -21,7 +21,7 @@ import { IInsrcKeychainService } from '../../common/keychainService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ITerminalService } from '../../../terminal/browser/terminal.js';
-import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID, INSRC_STEP_PROVIDERS_VIEW_ID } from './insrcViewContainer.js';
+import { INSRC_SESSIONS_VIEW_ID, INSRC_RUNS_VIEW_ID } from './insrcViewContainer.js';
 
 // ---------------------------------------------------------------------------
 // Category
@@ -336,12 +336,9 @@ registerAction2(class extends Action2 {
 			category: INSRC_CATEGORY,
 			f1: true,
 			icon: Codicon.settings,
-			menu: {
-				id: MenuId.ViewTitle,
-				group: 'navigation',
-				when: ContextKeyExpr.equals('view', INSRC_STEP_PROVIDERS_VIEW_ID),
-				order: 10,
-			},
+			// Step Providers view was removed from the Explorer; this command
+			// is now invoked from the status-bar "insrc" popup and the command
+			// palette (f1). No ViewTitle menu binding.
 		});
 	}
 

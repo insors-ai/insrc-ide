@@ -894,6 +894,30 @@
 	display: none;
 }
 
+.insrc-brainstorm-add-idea-success {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 12px 14px;
+	background: color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 10%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 45%, transparent);
+	border-radius: 4px;
+	color: var(--vscode-foreground);
+	font-size: 0.9em;
+}
+
+.insrc-brainstorm-add-idea-success-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	background: var(--vscode-editorInfo-foreground, #3794ff);
+	color: var(--vscode-editor-background);
+	font-weight: 700;
+}
+
 /* -- Shared list-view panel (IdeaList / Themes) -- */
 .insrc-brainstorm-list-panel {
 	max-width: 800px;

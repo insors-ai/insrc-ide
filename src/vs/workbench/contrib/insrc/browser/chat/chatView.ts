@@ -175,6 +175,14 @@ export class InsrcChatViewPane extends ViewPane {
 		this._register(this.brainstormSession.onDidChange(() => {
 			this._updateBrainstormLock();
 			this._syncIntentDropdown();
+			// Item 22: when the brainstorm session flips from active to
+			// inactive (user cancelled / closed / session ended), clear the
+			// progress chrome so the "Clustering ideas into themes..." style
+			// text doesn't linger after the flow is gone.
+			if (!this.brainstormSession.isSessionActive && !this._progressBar.classList.contains('hidden')) {
+				this._progressBar.classList.add('hidden');
+				this._progressText.textContent = '';
+			}
 		}));
 		this._register(this.brainstormSession.onDidChangeActiveGate(() => this._updateBrainstormLock()));
 	}
@@ -278,12 +286,27 @@ export class InsrcChatViewPane extends ViewPane {
 		this._sendBtn.appendChild(SEND_ICON());
 		this._register(dom.addDisposableListener(this._sendBtn, 'click', () => this._send()));
 
-		// Cancel button (circle-X icon)
+		// Cancel button (circle-X icon). Behaviour depends on what's running:
+		//   - Mid brainstorm session: cancel stream AND close the brainstorm
+		//     session so the UI unlocks (same as closing the brainstorm tab).
+		//     This is Item 21 -- the chat-panel Stop button used to only
+		//     cancel the stream, leaving the composer locked.
+		//   - Plain chat stream: just cancel the stream.
 		this._cancelBtn = dom.append(inputRow, dom.$('button.insrc-chat-cancel-btn')) as HTMLButtonElement;
 		this._cancelBtn.title = 'Cancel';
 		this._cancelBtn.appendChild(CANCEL_ICON());
 		this._cancelBtn.style.display = 'none';
-		this._register(dom.addDisposableListener(this._cancelBtn, 'click', () => this.chatService.cancelStream()));
+		this._register(dom.addDisposableListener(this._cancelBtn, 'click', async () => {
+			const wasBrainstorm = this.brainstormSession.isSessionActive;
+			try {
+				await this.chatService.cancelStream();
+				if (wasBrainstorm) {
+					await this.chatService.closeSession();
+				}
+			} catch {
+				// Cancel / close race with an already-dead stream is harmless.
+			}
+		}));
 
 		// Toolbar: intent selector + attach button
 		const toolbar = dom.append(this._inputArea, dom.$('.insrc-chat-input-toolbar'));

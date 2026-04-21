@@ -177,6 +177,9 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._messages = [];
 		this._isStreaming = false;
 		this._persistState();
+		// Item 22: synthesize streamEnd so in-flight UI chrome (progress
+		// bar, inline progress messages) clears when the session ends.
+		this._onDidReceiveEvent.fire({ type: 'streamEnd' });
 		this._onDidChangeSession.fire(undefined);
 	}
 
@@ -318,6 +321,11 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		}
 
 		this._finishStream();
+		// Item 22: emit a synthetic streamEnd so listeners (chat panel,
+		// progress indicator) clear their in-flight state. The daemon
+		// won't emit streamEnd after an abort, so without this the
+		// chat panel's progress bar gets stuck on the last step.
+		this._onDidReceiveEvent.fire({ type: 'streamEnd' });
 	}
 
 	async redirect(intent: string, refinedMessage?: string): Promise<void> {

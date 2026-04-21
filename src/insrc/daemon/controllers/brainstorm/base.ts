@@ -269,11 +269,12 @@ export abstract class BrainstormControllerBase implements TaskController {
     }
 
     // Consume user-contributed ideas (from brainstorm.addIdea RPC -- Item 14).
-    // Splice them into state.ideas AND into the review queue right after the
-    // current index, so the next card the user sees IS their own idea.
+    // Item 20: user-authored ideas are auto-accepted -- the user explicitly
+    // added them, asking them to Approve their own idea is nuisance. They go
+    // straight into the accepted pool and participate in downstream
+    // clustering / convergence without a review card.
     const injectedIdeas = store.get<Array<{ title: string; body: string }>>('injectedIdeas') ?? [];
     if (injectedIdeas.length > 0) {
-      const newIds: string[] = [];
       for (const raw of injectedIdeas) {
         const body = (raw.body ?? '').trim();
         const title = (raw.title ?? '').slice(0, 80).trim() || 'User idea';
@@ -286,18 +287,17 @@ export abstract class BrainstormControllerBase implements TaskController {
           references: [],
           tags: [],
           round: this.state.round,
-          status: 'proposed',
+          status: 'accepted',
           source: 'user',
           reviewVerdict: 'user',
           feedback: [],
         };
         this.state.ideas.push(idea);
-        newIds.push(idea.id);
-        recordQnA(this.state, step, 'user', `Added idea: ${idea.title}`, '(queued for review)');
+        recordQnA(this.state, step, 'user', `Added idea: ${idea.title}`, '(auto-accepted as user-contributed)');
       }
-      // Splice into reviewQueue so the next card shown is the user's idea.
-      const insertAt = Math.max(0, this.state.currentReviewIndex + 1);
-      this.state.reviewQueue.splice(insertAt, 0, ...newIds);
+      // Do NOT splice into reviewQueue -- status=accepted means this idea is
+      // already in the pool. The user will see it in the next idea-list /
+      // convergence-review pane with a user-contributed badge (Item 20b, UI).
       store.set('injectedIdeas', []);
     }
 
@@ -560,6 +560,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       intent: 'brainstorm',
       systemPrompt: this.getEnhanceIdeasPrompt(),
       userMessage: `## Original Problem\n${this.state.input.message}\n\n## Ideas to Enhance\n${ideaList}\n\n## Relevant Code Entities\n${codeEntities}`,
+      resolverAgent: 'brainstorm',
+      resolverStep: 'enhance',
       stateKey: 'enhanceLlmOutput',
     }];
   }
@@ -985,6 +987,8 @@ export abstract class BrainstormControllerBase implements TaskController {
             `Generate variations as a numbered list: [N] Title. Description`,
           ].join('\n'),
           providerHint: 'local',
+          resolverAgent: 'brainstorm',
+          resolverStep: 'diverge',
           stateKey: 'divergeSingleOutput',
         }];
       }
@@ -1128,6 +1132,8 @@ export abstract class BrainstormControllerBase implements TaskController {
           intent: 'brainstorm',
           systemPrompt: this.getDiscussRespondPrompt(),
           userMessage: this.buildDiscussionContext(idea, lastMsg.content),
+          resolverAgent: 'brainstorm',
+          resolverStep: 'discuss',
           stateKey: 'discussRespondOutput',
         }];
       }
@@ -1186,6 +1192,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         intent: 'brainstorm',
         systemPrompt: this.getDiscussRespondPrompt(),
         userMessage: this.buildDiscussionContext(idea, userMsg),
+        resolverAgent: 'brainstorm',
+        resolverStep: 'discuss',
         stateKey: 'discussRespondOutput',
       }];
     }
@@ -1993,6 +2001,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       temperature: isFirstRound ? 0.7 : 0.5,
       // On re-run cycles, focus the L3b search on user's new input, not the full composite
       searchHint: (!isFirstRound && this.state.recentFeedback) ? this.state.recentFeedback : undefined,
+      resolverAgent: 'brainstorm',
+      resolverStep: isFirstRound ? 'seed' : 'diverge',
       stateKey: 'generateIdeasOutput',
     };
   }
@@ -2024,6 +2034,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       systemPrompt: this.getReviewIdeasPrompt(),
       userMessage: `## Original Problem\n${this.state.input.message}\n\n## Ideas to Review\n${ideaList}${approvedSection}`,
       providerHint: 'claude',
+      resolverAgent: 'brainstorm',
+      resolverStep: 'review',
       stateKey: 'reviewIdeasOutput',
     };
   }
@@ -2043,6 +2055,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       intent: 'brainstorm',
       systemPrompt: this.getRefineIdeasPrompt(),
       userMessage: `## Original Problem\n${this.state.input.message}\n\n## Ideas with Review Verdicts\n${ideaList}\n\n## Claude Review\n${reviewOutput}`,
+      resolverAgent: 'brainstorm',
+      resolverStep: 'refine',
       stateKey: 'refineIdeasOutput',
     };
   }
@@ -2185,6 +2199,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       systemPrompt: this.getConvergeClusterPrompt(),
       userMessage,
       temperature: 0.3,
+      resolverAgent: 'brainstorm',
+      resolverStep: 'cluster',
       stateKey: 'clusterOutput',
     };
   }
@@ -2207,6 +2223,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       userMessage,
       temperature: 0.3,
       providerHint: 'claude',
+      resolverAgent: 'brainstorm',
+      resolverStep: 'promote',
       stateKey: 'promoteOutput',
     };
   }
@@ -2328,6 +2346,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       systemPrompt: this.getThemeSpecPrompt(),
       userMessage,
       temperature: 0.3,
+      resolverAgent: 'brainstorm',
+      resolverStep: 'theme-spec',
       stateKey: 'themeSpecOutput',
     };
   }
@@ -2346,6 +2366,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       temperature: 0.3,
       maxTokens: 8192,
       providerHint: 'claude',
+      resolverAgent: 'brainstorm',
+      resolverStep: 'theme-spec-review',
       stateKey: 'themeSpecReviewOutput',
     };
   }
@@ -2390,6 +2412,8 @@ export abstract class BrainstormControllerBase implements TaskController {
       systemPrompt: this.getAssemblePrompt(),
       userMessage: [...header, ...body].join('\n'),
       temperature: 0.2,
+      resolverAgent: 'brainstorm',
+      resolverStep: 'assemble',
       stateKey: 'assembleSpecOutput',
     };
   }

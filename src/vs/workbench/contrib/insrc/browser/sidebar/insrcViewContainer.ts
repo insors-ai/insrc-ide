@@ -10,7 +10,6 @@ import { Extensions as ViewContainerExtensions, IViewsRegistry } from '../../../
 import { VIEW_CONTAINER } from '../../../files/browser/explorerViewlet.js';
 import { InsrcSessionsViewPane } from './sessionsView.js';
 import { InsrcRunsViewPane } from './runsView.js';
-import { InsrcStepProvidersViewPane } from './stepProvidersView.js';
 
 // ---------------------------------------------------------------------------
 // View IDs
@@ -18,13 +17,15 @@ import { InsrcStepProvidersViewPane } from './stepProvidersView.js';
 
 export const INSRC_SESSIONS_VIEW_ID = 'insrc.sessions';
 export const INSRC_RUNS_VIEW_ID = 'insrc.runs';
-export const INSRC_STEP_PROVIDERS_VIEW_ID = 'insrc.stepProviders';
 
 // ---------------------------------------------------------------------------
 // Register insrc panes inside the Explorer container
 // ---------------------------------------------------------------------------
 // The Explorer already shows workspace folders (file trees).
-// We add Sessions, Runs, and Step Providers as collapsible panes below it.
+// We add Sessions and Runs as collapsible panes below it. Step Providers
+// moved out of the explorer into the status-bar popup ("insrc" at the
+// bottom-left); it opens the dedicated editor on demand via the
+// `insrc.openStepProviders` command.
 // ---------------------------------------------------------------------------
 
 const viewsRegistry = Registry.as<IViewsRegistry>(ViewContainerExtensions.ViewsRegistry);
@@ -47,16 +48,6 @@ viewsRegistry.registerViews([
 		canToggleVisibility: true,
 		canMoveView: false,
 		order: 101,
-		weight: 15,
-		collapsed: true,
-	},
-	{
-		id: INSRC_STEP_PROVIDERS_VIEW_ID,
-		name: localize2('stepProviders', 'Step Providers'),
-		ctorDescriptor: new SyncDescriptor(InsrcStepProvidersViewPane),
-		canToggleVisibility: true,
-		canMoveView: false,
-		order: 102,
 		weight: 15,
 		collapsed: true,
 	},

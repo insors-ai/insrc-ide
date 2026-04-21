@@ -344,7 +344,9 @@ export class BrainstormIdeasPane extends EditorPane {
 			errorEl.classList.add('hidden');
 			try {
 				await this._submitAddIdea(title, body);
-				this._closeAddIdeaForm();
+				// Item 19: explicit success feedback before closing the form so
+				// the user sees their action was accepted.
+				this._showAddIdeaSuccess(form, title);
 			} catch (err) {
 				errorEl.textContent = `Couldn't add idea: ${(err as Error).message || 'unknown error'}`;
 				errorEl.classList.remove('hidden');
@@ -359,6 +361,18 @@ export class BrainstormIdeasPane extends EditorPane {
 		if (!this._addIdeaFormEl) { return; }
 		this._addIdeaFormEl.remove();
 		this._addIdeaFormEl = undefined;
+	}
+
+	private _showAddIdeaSuccess(form: HTMLElement, title: string): void {
+		// Replace the form contents with a transient success banner so the
+		// user gets unambiguous confirmation that their idea was accepted.
+		dom.clearNode(form);
+		const banner = dom.append(form, dom.$('.insrc-brainstorm-add-idea-success'));
+		const icon = dom.append(banner, dom.$('span.insrc-brainstorm-add-idea-success-icon'));
+		icon.textContent = '\u2713';
+		const text = dom.append(banner, dom.$('span'));
+		text.textContent = `Idea "${title.slice(0, 60)}" added. It's been auto-accepted and will appear in the next stage.`;
+		setTimeout(() => this._closeAddIdeaForm(), 2200);
 	}
 
 	private async _submitAddIdea(title: string, body: string): Promise<void> {
