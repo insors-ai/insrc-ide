@@ -927,6 +927,12 @@ export abstract class BrainstormControllerBase implements TaskController {
       userMessage: content,
       passThrough: true,
       requiresGate: true,
+      // Phase 2 / Item 7: persist after every gate task so user
+      // actions (approve/reject/diverge/discuss/park) and the LLM work
+      // that produced the idea are both survivable across daemon
+      // restart. Without this flag the pipeline only checkpoints at
+      // finalize, which is too late for any mid-flow interruption.
+      persisted: true,
       gateTitle: `Idea ${current}/${total}: ${idea.title}`,
       gateActions: [
         { name: 'approve', label: 'Approve' },
@@ -1623,6 +1629,10 @@ export abstract class BrainstormControllerBase implements TaskController {
       userMessage: content,
       passThrough: true,
       requiresGate: true,
+      // Phase 2 / Item 7: persist so per-theme spec sections survive
+      // across daemon restart -- re-running theme-spec generation is
+      // expensive (Claude cluster + code search per theme).
+      persisted: true,
       gateTitle: `Spec ${current}/${totalThemes}: ${themeName}`,
       gateActions: [
         { name: 'approve', label: 'Approve' },
@@ -2378,6 +2388,10 @@ export abstract class BrainstormControllerBase implements TaskController {
       userMessage: content,
       passThrough: true,
       requiresGate: true,
+      // Phase 2 / Item 7: persist so a mid-round daemon restart doesn't
+      // lose the user's per-idea approve/reject decisions captured in
+      // state.ideas[].status + state.ideas[].feedback.
+      persisted: true,
       gateTitle: `${this.getIdeaGateTitle()} (Round ${this.state.round})`,
       gateActions: [
         { name: 'accept-remaining', label: 'Accept remaining' },
@@ -2428,6 +2442,9 @@ export abstract class BrainstormControllerBase implements TaskController {
       userMessage: content,
       passThrough: true,
       requiresGate: true,
+      // Phase 2 / Item 7: persist so the discussion history in
+      // state.discussionMessages survives across resume.
+      persisted: true,
       gateTitle: `Discuss: [${idea.index}] ${idea.title.slice(0, 50)}`,
       gateActions: [
         { name: 'accept', label: 'Accept' },
@@ -2538,6 +2555,9 @@ export abstract class BrainstormControllerBase implements TaskController {
       intent: 'brainstorm',
       userMessage: content,
       requiresGate: true,
+      // Phase 2 / Item 7: persist so state.themes + state.pendingPromotions
+      // are survivable once the convergence LLM work has run.
+      persisted: true,
       gateTitle: this.getConvergenceGateTitle(),
       gateActions: [
         { name: 'approve', label: 'Approve' },
@@ -2760,6 +2780,12 @@ export abstract class BrainstormControllerBase implements TaskController {
       passThrough: true,
       userMessage: this.state.assembledOutput || '',
       requiresGate: true,
+      // Phase 2 / Item 7 + decision H1: keep the checkpoint around
+      // through the presentation gate so save-failure retries don't
+      // lose the assembled spec. The afterPresentation handler is
+      // responsible for calling store.markSessionComplete() on
+      // save-success + skip; the pipeline deletes the file on exit.
+      persisted: true,
       gateTitle: 'Brainstorm Complete',
       gateActions: [
         { name: 'save', label: 'Save', needsInput: true, hint: 'Review Save Options tab, then submit' },
