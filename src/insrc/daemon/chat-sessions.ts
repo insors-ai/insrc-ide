@@ -81,7 +81,13 @@ export class ChatSessionPool {
     const sessionId = randomUUID();
     const config = await loadConfigForRepo(repoPath);
 
-    const session = new Session({ repoPath, config });
+    // Pass the pool's session id into Session so `session.id` matches the
+    // browser-facing ActiveSession.id. Without this the Session constructor
+    // generates its own separate UUID and any downstream consumer that keys
+    // on `session.id` (checkpoint filenames -- Item 7) diverges from what
+    // the client knows the session as. `restore()` already threads the id
+    // through this way; create() was the gap.
+    const session = new Session({ repoPath, config, id: sessionId });
     await session.init();
 
     const active: ActiveSession = {
