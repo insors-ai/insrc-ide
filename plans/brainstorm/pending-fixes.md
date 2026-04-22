@@ -51,6 +51,28 @@ Related plans:
 | 30| Requirements/Designer validate gate has `kind=unknown phase=waiting` (same class as Item 13) | P0 | daemon | **DONE** (all 4 designer gate tasks now emit structured payloads with `itemType` = `designer-validate-requirements` / `-sketch` / `-detail` / `designer-save`; chatView's phase-based suppression narrowed so non-brainstorm sessions render their gates) |
 | 31| Stream inactivity timeout leaves the daemon session alive + 10m window too short | P0 | UI      | **DONE** (`onDidError` now runs unified `cancelBrainstormSession` teardown, skipping the confirm dialog; `STREAM_INACTIVITY_TIMEOUT_MS` bumped 10m -> 30m to stop false-positiving on long cloud agent turns) |
 | 32| Long agent steps feel disconnected -- user waits minutes on a single progress line with no token-level presence | P1 | daemon+UI | **open** |
+| 33| Runs sidebar shows regular chat sessions (should only show agent pipelines)              | P1 | UI      | **DONE** (`agent.list` excludes `agent='chat'` rows -- plain chat belongs in the Sessions sidebar; commit `4f1742d6426`) |
+| 34| Runs sidebar missing per-row play button (user had to invoke via Command Palette)       | P1 | UI      | **DONE** (inline ▶ + ✖ buttons on every row; confirm dialog for discard; auto-refresh on `onDidChangeRuns`; commits `a872e1d4682`, `4f1742d6426`) |
+| 35| Resume lands on the last-approved idea instead of the next unreviewed one               | P0 | daemon  | **DONE** (checkpoint was written before `controller.next()` advanced state; moved to after `next()` so the saved snapshot reflects the user's latest action; commit `4f1742d6426`) |
+| 36| Discarding the chat panel's active session leaves `_activeSessionId` stale               | P1 | UI      | **DONE** (`discardRun` calls `cancelBrainstormSession` locally before the RPC when `runId === activeSessionId`; commit `4f1742d6426`) |
+| 37| Idea-list pane clears immediately on converge -- blank screen until themes ready        | P2 | UI      | **DONE** (ideaListPane pins a progress strip + dims the existing panel instead of wiping `_cardArea` on converge; buttons disabled; commit `ae662195f53`) |
+| 38| Idea-list shows fewer ideas than the actual accepted + user-added count                 | P1 | daemon+UI | **DONE** (daemon `buildIdeaListGate` now emits `structured.item.ideas` with the full non-rejected pool; browser `_applyGateItem` adds an `idea-list` branch that upserts every idea into the session service. User-added ideas (auto-accepted, never fire a per-idea gate) now propagate to the browser's `ideas` map so the pane renders them) |
+| 39| Themes view (`BrainstormThemesPane`) blank on convergence-review -- superseded by 37/46/47/44 | P1 | UI | **superseded** (2026-04-22 live test: the pane DOES render all themes correctly once it opens. The "blank screen" the user observed earlier was actually Item 37 -- idea-list pane clearing on Converge before the themes gate arrived. Remaining themes-pane issues split into Items 44 (HTML not rendered), 46 (ideaCount=0), 47 (clears on Approve)) |
+| 40| Idea-list gate shows "Accept remaining" even when reviewQueue is exhausted              | P2 | daemon  | **DONE** (`buildIdeaListGate` omits `accept-remaining` when `pending.length === 0`; commit `ae662195f53`) |
+| 41| LanceDB `.update()` calls passed raw string values without SQL quoting                   | P0 | daemon  | **DONE** (new `sqlStr()` helper in db/conversations.ts wraps every string value with single-quote-escaped literals; applied to `saveSession`, `closeSession`, `setSessionAgent`, `setSessionStatus`, `bumpSessionActivity`. Symptom: "No field named brainstorm" errors when stamping agent; commit `4f1742d6426`) |
+| 42| Play-button visibility check missed `active` status + status icon collided with play glyph | P1 | UI    | **DONE** (play button shown for `active`/`paused`/`crashed`; `active` status icon changed from ▶ to ● so the status indicator is visually distinct from the resume action; commit `4f1742d6426`) |
+| 43| Resume-confirm gate suppressed by chatView's brainstorm-session filter                  | P0 | UI      | **DONE** (extended inline-in-chat allowlist to include `resume-confirm` alongside `intent-confirm`; commit `ffacb1058ae`) |
+| 44| Chat panel / themes pane render rendered HTML as literal text                            | P1 | UI      | **DONE** (chatView gate body + themesPane details use trusted-types innerHTML; CSS allowlist extended for `insrcBrainstormThemes`; commit `dd63e097c9c`) |
+| 45| Retry from resume-confirm doesn't reopen the right brainstorm pane                       | P1 | UI      | **DONE** (daemon prepends an `OpenPane:<kind>` passThrough task on Retry; browser's brainstorm session service fires `onRequestOpenPane`; flow contribution opens the pane preemptively; chatView suppresses the marker from progress pills; commit `8ac1ab1cc16`) |
+| 46| Themes pane: ideaCount always 0 despite `ideaIds: [3, 7]`                                | P1 | UI      | **DONE** (`_parseStringArray` now coerces numbers to strings so `theme.ideaIds` from daemon populates correctly; commit `cc7a0fb947b`) |
+| 47| Themes pane clears on Approve -- blank during multi-minute theme-spec phase              | P2 | UI      | **DONE** (dim + progress strip pattern per Item 37; commit `5cb642ae397`) |
+| 48| Theme-spec pane clears between theme approvals -- blank during generation + review       | P2 | UI      | **DONE** (same dim + progress strip pattern, action-aware copy; commit `5cb642ae397`) |
+| 49| Theme-spec markdown content rendered as raw text / JSON                                  | P0 | daemon+UI | **DONE** (daemon: `afterReviewThemeSpec` layered polished-section extraction with strict JSON / regex / markdown-sniff fallbacks; pane: uses `gate.content` via trusted-types for proper markdown rendering; commit `983a3ca9ca8`) |
+| 50| Theme-details pane blank during assemble-spec phase                                      | P2 | UI      | **DONE** (dim + progress strip kept across the inter-theme and assemble-spec waits; commit `5cb642ae397`) |
+| 51| Presentation pane crashes with TrustedTypes error                                        | P0 | UI      | **DONE** (CSP trusted-types allowlist extended with `insrcBrainstormPresentation` + sibling brainstorm policies; pane fallback renders as `<pre>` when policy unavailable; commit `2aa87b1e4e0`; verified end-to-end on 2026-04-22 -- resume landed on presentation gate, pane rendered without crash) |
+| 52| Markdown panes don't properly render code snippets (no syntax highlighting / styling)    | P1 | UI      | **partial** (theme-details pane migrated to VS Code's `MarkdownRenderer` via injected `IInstantiationService`; renders `gate.item.content` raw markdown so code fences get the editor's tokenizer-based syntax highlighting. Presentation pane keeps HTML rendering -- `assembledOutput` is a full HTML template, not markdown -- but gets new CSS for `<pre><code>` (monospace font + background). CSS also added for the rendered-markdown tree inside theme-details) |
+| 53| Post-save handoff: brainstorm should propose transfer to the relevant downstream agent   | P1 | daemon+UI | **DONE** (daemon: `afterPresentation` save-success routes to a new `handoff-proposal` gate; `buildHandoffProposalTask` picks actions per category -- `design`/`requirements` -> Designer, `implementation` -> coding agent, `testing` -> Tester, `general` -> finish-only. Gate is inline-in-chat (like resume-confirm). UI: chatView handles `continue-*` actions by lifting the brainstorm lock via new `markBrainstormFinished()` + pre-filling the composer with a draft `/<intent> Continue from the brainstorm spec we just saved (<path>).` for the user to review/edit) |
+| 54| Presentation save failed silently / re-emitted gate without surfacing reason             | P1 | daemon+UI | **DONE** (`afterPresentation` now sets `state.pendingWarning` instead of `recentFeedback` on save failure; `buildPresentationTask` consumes `pendingWarning` via `consumePendingWarning()` and promotes it to `structured.warning`. The presentation pane's base class already renders `gate.warning` as a shared amber strip above the card) |
 
 Items A, B, C were identified during a live trace on 2026-04-20 -- all
 three were reproducible in a single brainstorm session and all three are
@@ -3605,6 +3627,149 @@ and make the agent feel stuck.
 Start with 32a. Measure whether per-item count-up is enough before
 committing to the full transient-widget plumbing. Don't do both in
 the same pass.
+
+---
+
+## 37. Idea-list pane clears immediately on converge (P2)
+
+### Observation (2026-04-22 live test)
+
+User feedback: *"idea list should not disappear from the pane on
+converge. wait till the themes are returned and only then clear
+the idea list."*
+
+After the user clicks **Converge** on the idea-list gate, the pane
+immediately empties. The pipeline then runs cluster (~8s) +
+evaluate-promotions (~20s) + validate-convergence (~5s) -- roughly
+30 seconds during which the user stares at a blank pane before the
+convergence-review gate arrives and themes render.
+
+### Fix sketch
+
+Keep the idea-list rendered until the NEW gate (`convergence-review`)
+replaces it. Options:
+- **A**: In `BrainstormIdeaListPane`, on `_dispatch('converge')`,
+  lock the rendered content into a "in transition" state rather
+  than clearing. Only clear when `onDidChangeActiveGate` fires
+  with a different kind.
+- **B**: Flow contribution holds the prior pane open until the new
+  pane's editor is opened (cross-fade).
+
+A is simpler; B is cleaner but requires flow-contribution refactor.
+Start with A.
+
+### Severity
+
+**P2.** Not a correctness bug -- functionality proceeds normally --
+but the UX gap reinforces Item 32's "disconnected" complaint
+specifically at the high-friction handoff from ideation to
+convergence.
+
+---
+
+## 38. Idea-list shows fewer ideas than approved + user-added count (P1)
+
+### Observation (2026-04-22 live test)
+
+User approved 5 ideas in round 1 (indices 1-5) and rejected 1
+(index 6). User also added 1 idea via Add Idea earlier in the
+session. Idea-list gate only displayed 4 ideas.
+
+Expected: 6 items (5 reviewed + 1 user-added = 6 non-rejected, or
+5 accepted + 1 user-added = 6 accepted).
+
+### Root cause (hypothesis)
+
+[buildIdeaListGate in base.ts](../../src/insrc/daemon/controllers/brainstorm/base.ts)
+filters by `status !== 'rejected'` and maps to `items`. Possible
+hypotheses:
+- User-added ideas injected via `brainstorm.addIdea` may not get
+  `status='accepted'` set before the list render, so they fall
+  through an implicit filter.
+- `reviewQueue` and `ideas` arrays may diverge, and the idea-list
+  builder uses one but not the other.
+- Dedupe (Item 18a prompt-level) may have merged two ideas into
+  one during refine, losing the count.
+
+### Fix
+
+Investigate `buildIdeaListGate` + trace the 4 items actually
+rendered vs the 6 expected. Check:
+- `state.ideas` length
+- `state.ideas[].status` for each
+- Whether injected-ideas path (Item 14) leaves ideas in a status
+  that passes the filter
+- Whether the browser pane's own filter strips anything
+
+### Severity
+
+**P1.** User loses visibility of their own actions -- they approved
+5 and a card is missing from the summary. Also silently drops
+user-added ideas which is a trust-breaking data-loss symptom.
+
+---
+
+## 39. Themes view blank after convergence (P1)
+
+### Observation (2026-04-22 live test)
+
+User feedback: *"themes view has not been fixed. nothing is
+showing on the screen, will get back to this later."*
+
+Convergence-review gate fires (backend emits the structured
+payload correctly per Item 13). Flow contribution routes to
+`BrainstormThemesPane`. Pane opens but renders nothing -- user
+sees an empty editor.
+
+Related to [Item 11a](#11-post-ideation-flow-not-yet-updated--tested-p1)
+(post-ideation pane re-validation) but specifically surfaces as
+"blank screen on the themes view". Item 11a catalogued warning
+strip not being rendered; this is more fundamental -- the pane
+itself doesn't render the themes data.
+
+### Fix
+
+Needs a focused investigation in
+[themesPane.ts](../../src/vs/workbench/contrib/insrc/browser/brainstorm/step/themesPane.ts):
+- Does `_render(gate)` read `gate.extra.themes` or
+  `gate.structured.item.themes`?
+- Backend emits `structured: { phase: 'convergence', itemType:
+  'convergence-review', item: { themes: [...] } }` per
+  [buildValidateConvergenceTask](../../src/insrc/daemon/controllers/brainstorm/base.ts).
+- Check that `BrainstormSessionServiceImpl._applyGateItem`
+  unpacks the themes into the expected shape for the pane.
+
+### Severity
+
+**P1.** Blocks the entire post-ideation flow. Once ideas converge
+the user needs themes + promotion proposals to proceed; a blank
+pane means the session dead-ends.
+
+---
+
+## 40. Idea-list gate shows "Accept remaining" with nothing to accept (P2)
+
+### Observation (2026-04-22 live test)
+
+User feedback: *"there is no remaining, what is to Accept
+Remaining?"*
+
+When the reviewQueue is exhausted (user has reviewed all cards in
+the current round), the idea-list gate still renders an
+**Accept remaining** button. Clicking it is a no-op -- there's
+nothing to accept.
+
+### Fix
+
+In [buildIdeaListGate](../../src/insrc/daemon/controllers/brainstorm/base.ts),
+compute `pending.length === 0` and omit the `accept-remaining`
+entry from `gateActions` when zero. Leave `diverge` + `converge`
+as the only options.
+
+### Severity
+
+**P2.** Pure UX polish. The button is inert, not harmful, but
+having dead buttons on screen erodes trust.
 
 ---
 

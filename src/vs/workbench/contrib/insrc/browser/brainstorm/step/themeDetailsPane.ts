@@ -8,8 +8,8 @@ import type { IEditorGroup } from '../../../../../services/editor/common/editorG
 import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
+import { IInstantiationService } from '../../../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../../../platform/log/common/log.js';
-import { createTrustedTypesPolicy } from '../../../../../../base/browser/trustedTypes.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -17,6 +17,8 @@ import {
 	type BrainstormGateSnapshot,
 } from '../../../common/brainstormSessionService.js';
 import { BrainstormPaneBase } from './brainstormPaneBase.js';
+import { MarkdownRenderer } from '../../../../../../editor/browser/widget/markdownRenderer/browser/markdownRenderer.js';
+import { MarkdownString } from '../../../../../../base/common/htmlContent.js';
 
 interface ThemeSpecItem {
 	themeIndex: number;
@@ -24,14 +26,6 @@ interface ThemeSpecItem {
 	themeId?: string;
 	content: string;
 }
-
-// Item 49: gate.content is daemon-rendered HTML (from renderMarkdown).
-// Using a trusted-types policy lets us assign it to innerHTML so
-// markdown formatting renders instead of showing raw text. Policy name
-// must match the workbench CSP allowlist (workbench.html).
-const ttPolicy = createTrustedTypesPolicy('insrcBrainstormThemeSpec', {
-	createHTML: (value: string) => value,
-});
 
 /**
  * Theme-spec review pane. One gate per theme: user approves the polished
@@ -42,17 +36,26 @@ export class BrainstormThemeDetailsPane extends BrainstormPaneBase {
 	static readonly ID = 'insrc.brainstormThemeDetailsPane';
 
 	private _currentGateId: string | undefined;
+	private _markdownRenderer: MarkdownRenderer | undefined;
 
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IThemeService themeService: IThemeService,
 		@IStorageService storageService: IStorageService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IInsrcChatService chatService: IInsrcChatService,
 		@IInsrcBrainstormSessionService sessionService: IInsrcBrainstormSessionService,
 		@ILogService logService: ILogService,
 	) {
 		super(BrainstormThemeDetailsPane.ID, group, telemetryService, themeService, storageService, chatService, sessionService, logService);
+	}
+
+	private _getMarkdownRenderer(): MarkdownRenderer {
+		if (!this._markdownRenderer) {
+			this._markdownRenderer = this._register(this.instantiationService.createInstance(MarkdownRenderer, {}));
+		}
+		return this._markdownRenderer;
 	}
 
 	protected override get _paneTitle(): string { return 'Theme Spec'; }
@@ -79,18 +82,20 @@ export class BrainstormThemeDetailsPane extends BrainstormPaneBase {
 			id.textContent = ` (${section.themeId})`;
 		}
 
-		// Prefer the daemon-rendered HTML (gate.content) so markdown
-		// formats as headings / lists / code blocks instead of raw
-		// text (Item 49). Fall back to section.content (raw markdown)
-		// as pre-formatted text when the trusted-types policy isn't
-		// allowed by the CSP.
-		const body = dom.append(panel, dom.$('.insrc-brainstorm-spec-body'));
-		const renderedHtml = gate.content || '';
-		if (renderedHtml && ttPolicy) {
-			body.innerHTML = ttPolicy.createHTML(renderedHtml) as unknown as string;
+		// Item 52: render raw markdown via VS Code's MarkdownRenderer so
+		// code fences get the editor's tokenizer-based syntax highlighting
+		// and proper monospace / background styling. Fallback to daemon-
+		// rendered HTML (gate.content) if for some reason the structured
+		// payload didn't carry raw content.
+		const body = dom.append(panel, dom.$('.insrc-brainstorm-spec-body.rendered-markdown-host'));
+		const rawMarkdown = section.content;
+		if (rawMarkdown) {
+			const renderer = this._getMarkdownRenderer();
+			const rendered = renderer.render(new MarkdownString(rawMarkdown));
+			body.appendChild(rendered.element);
 		} else {
 			const pre = dom.append(body, dom.$('pre.insrc-brainstorm-spec-body-fallback'));
-			pre.textContent = section.content;
+			pre.textContent = gate.content ?? '';
 		}
 
 		// Actions

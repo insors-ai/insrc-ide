@@ -32,6 +32,7 @@ function classifyGate(itemType: string | undefined): BrainstormGateKind {
 		case 'convergence-review': return 'convergence-review';
 		case 'theme-spec': return 'theme-spec';
 		case 'presentation': return 'presentation';
+		case 'handoff-proposal': return 'handoff-proposal';
 		default: return 'unknown';
 	}
 }
@@ -97,6 +98,21 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	get category(): string | undefined { return this._category; }
 	get phase(): BrainstormPhase { return this._phase; }
 	get isSessionActive(): boolean { return this._isSessionActive; }
+
+	/**
+	 * Item 53: called by the chat panel after the user resolves the
+	 * post-save handoff-proposal gate. Flips the session-active flag
+	 * off so the composer unlocks for the next turn; leaves accumulated
+	 * state (ideas, themes, final document) in place in case the user
+	 * opens the Runs sidebar to look at history.
+	 */
+	markBrainstormFinished(): void {
+		if (!this._isSessionActive) { return; }
+		this.logService.info('[brainstorm:session] marked finished (handoff-proposal resolved)');
+		this._isSessionActive = false;
+		this._activeGate = undefined;
+		this._onDidChange.fire();
+	}
 	get ideas(): readonly BrainstormIdea[] { return this._ideasOrder.map(id => this._ideasById.get(id)!).filter(Boolean); }
 	get themes(): readonly BrainstormTheme[] { return this._themesOrder.map(id => this._themesById.get(id)!).filter(Boolean); }
 	get specSections(): readonly BrainstormSpecSection[] { return this._specSections; }
@@ -198,6 +214,19 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 			const idea = this._parseIdea(obj);
 			if (idea) {
 				this._upsertIdea(idea);
+			}
+		} else if (kind === 'idea-list') {
+			// Item 38: idea-list gate carries the full non-rejected idea
+			// pool under `item.ideas`. User-added ideas (auto-accepted per
+			// Item 20) never fire a per-idea gate, so without this branch
+			// the pane renders only the ideas that went through review --
+			// dropping the user's own contributions silently.
+			const ideas = Array.isArray(obj['ideas']) ? obj['ideas'] as unknown[] : [];
+			for (const raw of ideas) {
+				if (raw && typeof raw === 'object') {
+					const idea = this._parseIdea(raw as Record<string, unknown>);
+					if (idea) { this._upsertIdea(idea); }
+				}
 			}
 		} else if (kind === 'convergence-review') {
 			// Convergence gate may carry either a single theme (per-theme review)

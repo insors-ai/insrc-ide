@@ -400,7 +400,7 @@ export class InsrcChatViewPane extends ViewPane {
 				//   - intent-confirm (Item 12): classifier confirmation.
 				//   - resume-confirm (Item 7 / Phase C): retry / abandon
 				//     choice after resume from mid-LLM checkpoint.
-				const inlineInChat = gateItemType === 'intent-confirm' || gateItemType === 'resume-confirm';
+				const inlineInChat = gateItemType === 'intent-confirm' || gateItemType === 'resume-confirm' || gateItemType === 'handoff-proposal';
 				if (this.brainstormSession.isSessionActive && !inlineInChat) {
 					break;
 				}
@@ -811,10 +811,52 @@ export class InsrcChatViewPane extends ViewPane {
 				}
 				clearNode(this._gateContainer);
 				this.chatService.replyToGate(gate.gateId, detail.name);
+				// Item 53: post-save handoff. When the user picks an
+				// action on the handoff-proposal gate, lift the
+				// brainstorm lock so the composer re-enables for the
+				// next turn; for "Continue with X" also pre-fill the
+				// composer with a draft `/<intent>` message.
+				const isHandoffProposal = (gate.context as Record<string, unknown> | undefined)?.['itemType'] === 'handoff-proposal';
+				if (isHandoffProposal) {
+					this.brainstormSession.markBrainstormFinished();
+					if (detail.name.startsWith('continue-')) {
+						this._stageHandoffPrompt(detail.name, gate);
+					}
+				}
 			}));
 		}
 
 		this._scrollToBottom();
+	}
+
+	/**
+	 * Item 53 (post-save handoff): after the user accepts the
+	 * handoff-proposal gate, pre-fill the composer with a draft message
+	 * like `/design Continue from the brainstorm spec we just saved
+	 * (path/to/spec.md).` so they can review + send it to the downstream
+	 * agent without retyping.
+	 *
+	 * `actionName` is `continue-<intent>` (e.g. `continue-design`); the
+	 * intent suffix maps directly onto the slash-command the decomposer
+	 * already understands.
+	 */
+	private _stageHandoffPrompt(actionName: string, gate: GateInfo): void {
+		const intent = actionName.slice('continue-'.length);
+		if (!intent) { return; }
+		const ctx = gate.context as Record<string, unknown> | undefined;
+		const item = ctx?.['item'] as Record<string, unknown> | undefined;
+		const savedPath = typeof item?.['savedPath'] === 'string' ? item!['savedPath'] as string : '';
+		const suffix = savedPath ? ` we just saved (${savedPath})` : ' we just saved';
+		const draft = `/${intent} Continue from the brainstorm spec${suffix}.`;
+		this._input.value = draft;
+		// Bump the textarea height so the draft doesn't stay single-row +
+		// clipped; mirror what _onInputEvent normally does.
+		this._input.style.height = 'auto';
+		this._input.style.height = Math.min(this._input.scrollHeight, 120) + 'px';
+		setTimeout(() => {
+			this._input.focus();
+			this._input.setSelectionRange(this._input.value.length, this._input.value.length);
+		}, 0);
 	}
 
 	private async _openDiffFromGate(gate: GateInfo): Promise<void> {

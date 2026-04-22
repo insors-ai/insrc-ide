@@ -423,6 +423,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         return this.afterFinalize(completed);
       case 'presentation':
         return this.afterPresentation(gateReply);
+      case 'handoff-proposal':
+        return this.afterHandoffProposal(gateReply);
 
       // --- Resume (Phase 2 / Item 7) ---
       case 'resume-confirm':
@@ -1811,23 +1813,125 @@ export abstract class BrainstormControllerBase implements TaskController {
           // assembledOutput is already full HTML — pass as htmlContent to avoid double wrapping
           htmlContent: format === 'html' ? (this.state.assembledOutput || undefined) : undefined,
         };
-        saveArtifact(config, format, path);
-        // Decision H1: only mark complete when the save actually
-        // resolved. If saveArtifact threw below, we keep the checkpoint
-        // so the user can retry without losing the spec.
-        this.store?.markSessionComplete();
+        const written = saveArtifact(config, format, path);
+        // Item 53: stash the resolved save path so the handoff gate can
+        // quote it back to the user in the suggested downstream prompt.
+        this.state.savedArtifactPath = written.path || path || undefined;
+        // Decision H1 -- only mark complete when the save actually
+        // resolved. Historically this called markSessionComplete() here
+        // and returned null, but Item 53 now routes through a handoff
+        // proposal gate first; markSessionComplete() is deferred to the
+        // afterHandoffProposal handler so the checkpoint survives in
+        // case the user wants to retry the handoff.
+        this.state.lastStep = 'handoff-proposal';
+        return [this.buildHandoffProposalTask()];
       } catch (err) {
-        // Invalid feedback JSON or save failure -- decision H1 says
-        // keep the checkpoint so the user can retry. Surface the error
-        // as recentFeedback and re-emit the presentation gate so the
-        // user sees why the save failed.
+        // Decision H1: keep the checkpoint so the user can retry.
+        // Stash the error on pendingWarning so the re-emitted gate
+        // surfaces it to the user via the shared warning strip.
+        // Item 54: recentFeedback is consumed by LLM prompts, not
+        // gate rendering -- pendingWarning is the right channel.
         const msg = err instanceof Error ? err.message : String(err);
-        this.state.recentFeedback = `Save failed: ${msg}. Try a different path or format.`;
+        this.state.pendingWarning = `Save failed: ${msg}. Try a different path or format.`;
         return [this.buildPresentationTask()];
       }
     }
 
     return null;
+  }
+
+  /**
+   * Item 53: post-save handoff proposal. After the user saves the spec,
+   * suggest the downstream agent appropriate for the brainstorm sub-category
+   * (requirements / design -> Designer, implementation -> Pair/Delegate,
+   * testing -> Tester). The user can Accept (we close the brainstorm
+   * session; the UI pre-fills the composer with `/<intent> ...`) or
+   * Finish (close with no handoff). `general` category skips the
+   * proposal and closes directly -- we have nothing meaningful to hand
+   * off to.
+   */
+  private afterHandoffProposal(gateReply: GateReply | undefined): Task[] | null {
+    // Either action closes the session -- the proposal is advisory, and
+    // picking the downstream intent happens in the chat panel (the UI
+    // reads the accepted action name and pre-fills the composer).
+    this.store?.markSessionComplete();
+    // Silence the linter -- we examine gateReply for logging only; both
+    // branches end the pipeline.
+    void gateReply;
+    return null;
+  }
+
+  /**
+   * Return the recommended downstream intent for the current brainstorm
+   * category, or `undefined` when no meaningful handoff exists. `design`
+   * and `requirements` both go to the Designer agent; `implementation`
+   * goes to the coding agents (Pair/Delegate); `testing` goes to the
+   * Tester (still in design). `general` has no structured next step.
+   */
+  private getHandoffIntent(): { intent: string; label: string } | undefined {
+    switch (this.state.category) {
+      case 'design':
+      case 'requirements':
+        return { intent: 'design', label: 'Continue with Designer' };
+      case 'implementation':
+        return { intent: 'implement', label: 'Continue with coding agent' };
+      case 'testing':
+        return { intent: 'test', label: 'Continue with Tester' };
+      case 'general':
+      default:
+        return undefined;
+    }
+  }
+
+  private buildHandoffProposalTask(): Task {
+    const savedPath = this.state.savedArtifactPath;
+    const handoff = this.getHandoffIntent();
+
+    // Compose a short markdown blurb -- the UI renders this via
+    // `gate.content` (which goes through renderMarkdown on the daemon
+    // side when the task hits gateTaskResult).
+    const lines: string[] = [];
+    lines.push(`**Spec saved**${savedPath ? ` to \`${savedPath}\`` : ''}.`);
+    if (handoff) {
+      lines.push('');
+      lines.push(`Continue with the **${handoff.label.replace(/^Continue with /, '')}** to turn this into actionable work, or finish here?`);
+    } else {
+      lines.push('');
+      lines.push('Brainstorm is complete. Finish the session or continue in chat.');
+    }
+
+    const gateActions = handoff
+      ? [
+          { name: `continue-${handoff.intent}`, label: handoff.label },
+          { name: 'finish', label: 'Finish' },
+        ]
+      : [{ name: 'finish', label: 'Finish' }];
+
+    return {
+      index: this.taskCounter++,
+      description: 'Propose downstream agent handoff',
+      kind: 'transform',
+      intent: 'brainstorm',
+      passThrough: true,
+      userMessage: lines.join('\n'),
+      requiresGate: true,
+      // Phase 2 / Item 7: persist so the user can come back and pick
+      // the handoff later if the daemon crashes between save and reply.
+      persisted: true,
+      gateTitle: 'Next step',
+      gateActions,
+      structured: {
+        phase: 'finalize',
+        itemType: 'handoff-proposal',
+        item: {
+          category: this.state.category ?? 'general',
+          suggestedIntent: handoff?.intent,
+          suggestedLabel: handoff?.label,
+          savedPath: savedPath ?? '',
+        },
+      },
+      stateKey: 'handoffProposalOutput',
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -1853,6 +1957,7 @@ export abstract class BrainstormControllerBase implements TaskController {
     'validate-convergence',
     'theme-spec-review',
     'presentation',
+    'handoff-proposal',
   ]);
 
   /** True if `step` is a gate-emitting step (see GATE_EMITTING_STEPS). */
@@ -1902,6 +2007,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         return this.buildThemeSpecReviewTask();
       case 'presentation':
         return this.buildPresentationTask();
+      case 'handoff-proposal':
+        return this.buildHandoffProposalTask();
       default:
         // In-flight or unknown step -- surface the choice to the user.
         return this.buildResumeConfirmTask();
@@ -2504,6 +2611,32 @@ export abstract class BrainstormControllerBase implements TaskController {
     const structured: Record<string, unknown> = {
       phase: 'ideation',
       itemType: 'idea-list',
+      // Item 38: include the full idea payloads so the browser's
+      // session service can upsert ideas that never fire a per-idea
+      // gate (user-added ideas are auto-accepted and skip the review
+      // queue -- without this, the pane renders only ideas that
+      // arrived via `idea` / `idea-discussion` gates and silently
+      // drops user-contributed ones). Send non-rejected ideas;
+      // rejected ones are already filtered out of the visible list.
+      item: {
+        ideas: allIdeas.map(idea => ({
+          id: idea.id,
+          index: idea.index,
+          title: idea.title,
+          body: idea.body,
+          ...(idea.summary ? { summary: idea.summary } : {}),
+          ...(idea.rationale ? { rationale: idea.rationale } : {}),
+          references: idea.references,
+          tags: idea.tags,
+          status: idea.status,
+          source: idea.source,
+          round: idea.round,
+          ...(idea.reviewVerdict ? { reviewVerdict: idea.reviewVerdict } : {}),
+          ...(idea.reviewDescription ? { reviewDescription: idea.reviewDescription } : {}),
+          ...(idea.reviewRationale ? { reviewRationale: idea.reviewRationale } : {}),
+          ...(idea.userComment ? { userComment: idea.userComment } : {}),
+        })),
+      },
     };
     if (warning) structured.warning = warning;
 
@@ -2903,6 +3036,20 @@ export abstract class BrainstormControllerBase implements TaskController {
     };
     const savePath = defaultSavePath(config, 'markdown');
 
+    // Item 54: surface any pending warning (e.g. previous Save failed)
+    // so the pane's shared warning strip renders the reason above the
+    // Save form instead of the user seeing a silent re-render.
+    const warning = this.consumePendingWarning();
+    const structured: Record<string, unknown> = {
+      phase: 'finalize',
+      itemType: 'presentation',
+      item: {
+        assembledOutput: this.state.assembledOutput ?? '',
+        defaultSavePath: savePath,
+      },
+    };
+    if (warning) structured.warning = warning;
+
     return {
       index: this.taskCounter++,
       description: 'Review final output',
@@ -2933,14 +3080,7 @@ export abstract class BrainstormControllerBase implements TaskController {
           },
         },
       ],
-      structured: {
-        phase: 'finalize',
-        itemType: 'presentation',
-        item: {
-          assembledOutput: this.state.assembledOutput ?? '',
-          defaultSavePath: savePath,
-        },
-      },
+      structured,
       stateKey: 'presentationOutput',
     };
   }

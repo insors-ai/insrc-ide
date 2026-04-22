@@ -78,6 +78,7 @@ export type BrainstormGateKind =
 	| 'convergence-review'
 	| 'theme-spec'
 	| 'presentation'
+	| 'handoff-proposal'
 	| 'unknown';
 
 export interface BrainstormGateSnapshot {
@@ -160,4 +161,15 @@ export interface IInsrcBrainstormSessionService {
 	 * the retried LLM step runs in the background.
 	 */
 	readonly onRequestOpenPane: Event<BrainstormGateKind>;
+
+	/**
+	 * Item 53: lift the brainstorm lock after the post-save
+	 * handoff-proposal gate has been resolved. The chat session stays
+	 * open (the user may want to keep chatting in the same thread);
+	 * only the "brainstorm owns this session" flag flips off so the
+	 * composer unlocks and panes stop re-opening.
+	 *
+	 * No-op when no session is active.
+	 */
+	markBrainstormFinished(): void;
 }

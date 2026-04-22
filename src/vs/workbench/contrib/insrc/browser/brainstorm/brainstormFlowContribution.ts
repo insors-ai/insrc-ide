@@ -57,7 +57,7 @@ export class BrainstormFlowContribution extends Disposable {
 	private _routePaneHint(kind: BrainstormGateKind): void {
 		const sessionId = this.chatService.activeSessionId ?? 'brainstorm';
 		this.logService.info(`[brainstorm:flow] pane-hint kind=${kind} sessionId=${sessionId}`);
-		if (kind === 'intent-confirm' || kind === 'resume-confirm') {
+		if (kind === 'intent-confirm' || kind === 'resume-confirm' || kind === 'handoff-proposal') {
 			// These are chat-panel inline gates -- no editor pane to open.
 			return;
 		}
@@ -120,6 +120,13 @@ export class BrainstormFlowContribution extends Disposable {
 			this.logService.info(`[brainstorm:flow] resume-confirm routed to chat panel (gateId=${gate.gateId})`);
 			return;
 		}
+		// handoff-proposal (Item 53) closes out the brainstorm session --
+		// rendered inline so the user isn't bounced into yet another pane
+		// just to pick "continue with Designer" vs "finish".
+		if (gate.kind === 'handoff-proposal') {
+			this.logService.info(`[brainstorm:flow] handoff-proposal routed to chat panel (gateId=${gate.gateId})`);
+			return;
+		}
 
 		const input = this._inputFor(gate.kind, sessionId);
 		if (!input) {
@@ -157,6 +164,9 @@ export class BrainstormFlowContribution extends Disposable {
 			case 'resume-confirm':
 				// Resume-confirm (Item 7) follows the same inline policy --
 				// chat-view's generic gate renderer shows retry/abandon buttons.
+				return undefined;
+			case 'handoff-proposal':
+				// Handoff proposal (Item 53) -- same inline-in-chat policy.
 				return undefined;
 			case 'idea':
 				return this.instantiationService.createInstance(BrainstormIdeasInput, sessionId);

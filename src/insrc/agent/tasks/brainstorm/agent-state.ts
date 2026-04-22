@@ -182,4 +182,11 @@ export interface BrainstormState extends AgentState {
    * buildSingleIdeaGate / buildIdeaListGate.
    */
   pendingWarning?: string | undefined;
+
+  /**
+   * Filesystem path written by the presentation-save step. Stashed so
+   * the post-save handoff-proposal gate (Item 53) can reference it in
+   * the prompt it suggests for the downstream agent.
+   */
+  savedArtifactPath?: string | undefined;
 }
