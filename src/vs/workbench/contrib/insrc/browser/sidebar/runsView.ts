@@ -46,7 +46,7 @@ interface RunNode {
 type RunsTreeNode = AgentGroupNode | RunNode;
 
 const STATUS_ICON: Record<string, string> = {
-	active: '\u25B6',       // play triangle
+	active: '\u25CF',      // solid circle (was play triangle; collided with resume btn)
 	paused: '\u275A\u275A', // double bar
 	crashed: '\u2716',      // heavy X
 	completed: '\u2714',    // check
@@ -255,7 +255,13 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 
 		// Show the play button only for resumable statuses. Matches the
 		// filter in the `insrc.agentResume` command's quick-pick list.
-		data.playBtn.style.display = (statusStr === 'paused' || statusStr === 'crashed') ? '' : 'none';
+		// Play button: visible for any status where resume would do
+		// useful work (active, paused, crashed). Hidden only for
+		// terminal states (completed, discarded). An 'active' session
+		// with a checkpoint is resumable too -- the daemon may have
+		// died mid-run and the DB row never transitioned to 'paused'.
+		const resumable = statusStr === 'active' || statusStr === 'paused' || statusStr === 'crashed';
+		data.playBtn.style.display = resumable ? '' : 'none';
 	}
 
 	disposeTemplate(): void { }

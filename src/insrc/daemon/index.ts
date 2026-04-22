@@ -221,11 +221,18 @@ async function main(): Promise<void> {
       // the lastStep label for the sidebar. Sessions without a live
       // checkpoint (status='completed') are filtered out -- they're
       // not resumable. Discarded sessions are filtered likewise.
+      //
+      // agent='chat' rows are excluded -- plain chat sessions belong in
+      // the dedicated Sessions sidebar, not Runs. Runs is for agent
+      // pipelines (brainstorm, designer, planner, ...). A session only
+      // earns an agent stamp after classification picks a controller;
+      // everything else stays 'chat' and stays out of this list.
       const { listSessionRecords } = await import('../db/conversations.js');
       const { existsSync, readFileSync: readFs } = await import('node:fs');
       const { join } = await import('node:path');
 
-      const sessions = await listSessionRecords(db, { statuses: ['active', 'paused'] });
+      const all = await listSessionRecords(db, { statuses: ['active', 'paused'] });
+      const sessions = all.filter(s => s.agent && s.agent !== 'chat');
       const checkpointDir = join(PATHS.insrc, 'checkpoints');
 
       const runs: Array<{

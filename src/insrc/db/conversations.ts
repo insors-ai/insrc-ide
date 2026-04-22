@@ -14,6 +14,22 @@ import { loadConfig } from '../agent/config.js';
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// LanceDB SQL quoting helper
+// ---------------------------------------------------------------------------
+
+/**
+ * LanceDB's `Table.update()` treats each value in the updates object as
+ * a SQL expression, NOT a bind parameter. A raw string like 'brainstorm'
+ * gets parsed as a field reference and throws "No field named brainstorm".
+ * Every string we assign has to arrive double-quoted with internal
+ * single-quotes escaped. Use this helper for string columns and leave
+ * numeric / vector columns untouched.
+ */
+function sqlStr(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+// ---------------------------------------------------------------------------
 // Entry types and tiers for compaction
 // ---------------------------------------------------------------------------
 
@@ -216,13 +232,13 @@ export async function closeSession(
   if (existing.length > 0) {
     await sessionsTable.update(
       {
-        summary:        session.summary,
-        seenEntities:   JSON.stringify(session.seenEntities),
-        expiresAt,
-        status:         'completed',
-        lastActivityAt: now,
+        summary:        sqlStr(session.summary),
+        seenEntities:   sqlStr(JSON.stringify(session.seenEntities)),
+        expiresAt:      sqlStr(expiresAt),
+        status:         sqlStr('completed'),
+        lastActivityAt: sqlStr(now),
       },
-      { where: `id = '${session.id.replace(/'/g, "''")}'` },
+      { where: `id = ${sqlStr(session.id)}` },
     );
   } else {
     await sessionsTable.add([{
@@ -273,13 +289,13 @@ export async function saveSession(
     // them too; the dedicated setters below are the preferred entry
     // for those fields so a no-op callsite doesn't accidentally wipe).
     const updates: Record<string, string> = {
-      summary:        session.summary,
-      lastActivityAt: now,
+      summary:        sqlStr(session.summary),
+      lastActivityAt: sqlStr(now),
     };
-    if (session.agent !== undefined)    updates['agent']    = session.agent;
-    if (session.category !== undefined) updates['category'] = session.category;
-    if (session.status !== undefined)   updates['status']   = session.status;
-    await sessionsTable.update(updates, { where: `id = '${session.id}'` });
+    if (session.agent !== undefined)    updates['agent']    = sqlStr(session.agent);
+    if (session.category !== undefined) updates['category'] = sqlStr(session.category);
+    if (session.status !== undefined)   updates['status']   = sqlStr(session.status);
+    await sessionsTable.update(updates, { where: `id = ${sqlStr(session.id)}` });
   } else {
     // Create new
     await sessionsTable.add([{
@@ -311,11 +327,11 @@ export async function setSessionAgent(
 ): Promise<void> {
   const sessionsTable = await getSessionsTable(db);
   const updates: Record<string, string> = {
-    agent,
-    lastActivityAt: new Date().toISOString(),
+    agent:          sqlStr(agent),
+    lastActivityAt: sqlStr(new Date().toISOString()),
   };
-  if (category !== undefined) updates['category'] = category;
-  await sessionsTable.update(updates, { where: `id = '${id}'` });
+  if (category !== undefined) updates['category'] = sqlStr(category);
+  await sessionsTable.update(updates, { where: `id = ${sqlStr(id)}` });
 }
 
 /**
@@ -331,8 +347,8 @@ export async function setSessionStatus(
 ): Promise<void> {
   const sessionsTable = await getSessionsTable(db);
   await sessionsTable.update(
-    { status, lastActivityAt: new Date().toISOString() },
-    { where: `id = '${id}'` },
+    { status: sqlStr(status), lastActivityAt: sqlStr(new Date().toISOString()) },
+    { where: `id = ${sqlStr(id)}` },
   );
 }
 
@@ -340,8 +356,8 @@ export async function setSessionStatus(
 export async function bumpSessionActivity(db: DbClient, id: string): Promise<void> {
   const sessionsTable = await getSessionsTable(db);
   await sessionsTable.update(
-    { lastActivityAt: new Date().toISOString() },
-    { where: `id = '${id}'` },
+    { lastActivityAt: sqlStr(new Date().toISOString()) },
+    { where: `id = ${sqlStr(id)}` },
   );
 }
 

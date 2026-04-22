@@ -701,11 +701,6 @@ export async function runControlledPipeline(
 
     allResults.push(result);
 
-    // Checkpoint for persisted tasks
-    if (task.persisted) {
-      await checkpointState(controller.id, stateStore, allResults, deps.session?.id);
-    }
-
     // If task failed or was cancelled, abort the entire pipeline
     if (!result.success) {
       const wasCancelled = result.error === 'cancelled';
@@ -738,13 +733,25 @@ export async function runControlledPipeline(
       }
     }
 
-    // Ask controller what's next
+    // Ask controller what's next. `next()` mutates `this.state` based on
+    // the gate reply (e.g. afterSingleIdeaReview advances
+    // currentReviewIndex and flips ideas[i].status='accepted') and then
+    // syncs state back to the store. Checkpointing has to happen AFTER
+    // this call, otherwise the persisted snapshot would reflect the
+    // state as of gate emission -- i.e. the user's last action would
+    // not be visible on resume. plans/session-lifecycle.md Phase 1 fix.
     const nextTasks = controller.next(result, gateReply, stateStore);
 
     // Emit QnA updates if controller stored them
     const qna = stateStore.get<unknown[]>('brainstormQnA');
     if (qna && qna.length > 0) {
       send({ id: requestId, stream: 'qna.update', data: { entries: qna } });
+    }
+
+    // Checkpoint for persisted tasks -- AFTER controller.next() so the
+    // snapshot includes the user's last action.
+    if (task.persisted) {
+      await checkpointState(controller.id, stateStore, allResults, deps.session?.id);
     }
 
     if (nextTasks === null) {

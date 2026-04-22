@@ -93,11 +93,28 @@ export class InsrcAgentRunServiceImpl extends Disposable implements IInsrcAgentR
 			throw new Error('Not connected to daemon');
 		}
 
+		// If the discarded run is the chat panel's currently-active
+		// session, tear down the local state too -- otherwise the next
+		// chat.send would hit the daemon with a sessionId that no
+		// longer exists and fail with stream-error. Stream-error fires
+		// cancelBrainstormSession correctly but the UX is confusing
+		// (user just discarded, then sees "session not found" errors).
+		// Run the teardown BEFORE the daemon RPC so the session-end
+		// path doesn't race with our own discard.
+		const wasActive = this.chatService.activeSessionId === runId;
+		if (wasActive) {
+			try {
+				await this.chatService.cancelBrainstormSession('user-discard-active', { discardCheckpoint: false });
+			} catch {
+				// Best-effort: the discard RPC below still purges DB + checkpoint.
+			}
+		}
+
 		await this.daemonService.rpc('agent.discard', { id: runId });
 
 		// Remove from cache
 		this._cachedRuns = this._cachedRuns.filter(r => r.id !== runId);
 		this._onDidChangeRuns.fire();
-		this.logService.info('[insrc] Discarded agent run:', runId);
+		this.logService.info(`[insrc] Discarded agent run: ${runId} wasActive=${wasActive}`);
 	}
 }
