@@ -5,7 +5,7 @@
  * final documents as Markdown, HTML, or PDF (if tools installed).
  */
 
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { getLogger } from '../../../shared/logger.js';
@@ -174,12 +174,12 @@ export function saveArtifact(
       finalPath = pdfPath;
 
       // Clean up temp HTML
-      try { require('node:fs').unlinkSync(htmlPath); } catch { /* keep if PDF failed */ }
+      try { unlinkSync(htmlPath); } catch { /* keep if PDF failed */ }
       break;
     }
   }
 
-  const size = require('node:fs').statSync(finalPath).size;
+  const size = statSync(finalPath).size;
   log.info({ path: finalPath, format, size }, 'artifact saved');
 
   return { format, path: finalPath, size };

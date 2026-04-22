@@ -814,11 +814,14 @@ export class InsrcChatViewPane extends ViewPane {
 				// Item 53: post-save handoff. When the user picks an
 				// action on the handoff-proposal gate, lift the
 				// brainstorm lock so the composer re-enables for the
-				// next turn; for "Continue with X" also pre-fill the
-				// composer with a draft `/<intent>` message.
+				// next turn and close the brainstorm pane so the user
+				// lands back on the chat panel. For "Continue with X"
+				// also pre-fill the composer with a draft `/<intent>`
+				// message.
 				const isHandoffProposal = (gate.context as Record<string, unknown> | undefined)?.['itemType'] === 'handoff-proposal';
 				if (isHandoffProposal) {
 					this.brainstormSession.markBrainstormFinished();
+					this.chatService.closeBrainstormPanes();
 					if (detail.name.startsWith('continue-')) {
 						this._stageHandoffPrompt(detail.name, gate);
 					}

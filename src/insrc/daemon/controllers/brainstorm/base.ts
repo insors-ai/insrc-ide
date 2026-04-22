@@ -49,6 +49,9 @@ import {
   REFINE_IDEAS_SYSTEM, ENHANCE_IDEAS_SYSTEM,
   DISCUSS_RESPOND_SYSTEM, DISCUSS_REFINE_SYSTEM,
 } from '../../../agent/tasks/brainstorm/prompts.js';
+import { getLogger } from '../../../shared/logger.js';
+
+const log = getLogger('brainstorm-controller');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1798,6 +1801,7 @@ export abstract class BrainstormControllerBase implements TaskController {
     }
 
     if (gateReply.action === 'save' && gateReply.feedback) {
+      log.info({ feedbackLen: gateReply.feedback.length }, 'afterPresentation: save action received');
       try {
         const opts = JSON.parse(gateReply.feedback);
         const format = opts.format || 'markdown';
@@ -1813,7 +1817,9 @@ export abstract class BrainstormControllerBase implements TaskController {
           // assembledOutput is already full HTML — pass as htmlContent to avoid double wrapping
           htmlContent: format === 'html' ? (this.state.assembledOutput || undefined) : undefined,
         };
+        log.info({ format, path, repoPath, mdContentLen: mdContent.length }, 'afterPresentation: calling saveArtifact');
         const written = saveArtifact(config, format, path);
+        log.info({ writtenPath: written.path, size: written.size }, 'afterPresentation: saveArtifact returned');
         // Item 53: stash the resolved save path so the handoff gate can
         // quote it back to the user in the suggested downstream prompt.
         this.state.savedArtifactPath = written.path || path || undefined;
@@ -1824,6 +1830,7 @@ export abstract class BrainstormControllerBase implements TaskController {
         // afterHandoffProposal handler so the checkpoint survives in
         // case the user wants to retry the handoff.
         this.state.lastStep = 'handoff-proposal';
+        log.info({ category: this.state.category }, 'afterPresentation: emitting handoff-proposal gate');
         return [this.buildHandoffProposalTask()];
       } catch (err) {
         // Decision H1: keep the checkpoint so the user can retry.
@@ -1832,6 +1839,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         // Item 54: recentFeedback is consumed by LLM prompts, not
         // gate rendering -- pendingWarning is the right channel.
         const msg = err instanceof Error ? err.message : String(err);
+        const stack = err instanceof Error ? err.stack : undefined;
+        log.error({ err: msg, stack, feedback: gateReply.feedback }, 'afterPresentation: save failed, re-emitting presentation gate with warning');
         this.state.pendingWarning = `Save failed: ${msg}. Try a different path or format.`;
         return [this.buildPresentationTask()];
       }

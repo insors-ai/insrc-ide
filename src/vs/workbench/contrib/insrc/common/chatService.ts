@@ -149,6 +149,15 @@ export interface IInsrcChatService {
 	 */
 	readonly onRequestCloseBrainstormPanes: Event<void>;
 
+	/**
+	 * Item 53: close every open brainstorm pane without tearing down the
+	 * chat session. Used after the post-save handoff-proposal gate is
+	 * resolved -- the brainstorm pane should go away so the user can see
+	 * the chat panel, but the session stays connected for the downstream
+	 * agent handoff or follow-up chat.
+	 */
+	closeBrainstormPanes(): void;
+
 	// History
 	loadHistory(sessionId: string): Promise<ChatMessage[]>;
 

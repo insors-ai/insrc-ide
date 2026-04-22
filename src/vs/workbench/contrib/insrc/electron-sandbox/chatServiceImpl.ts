@@ -415,6 +415,10 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._onDidChangeSession.fire(undefined);
 	}
 
+	closeBrainstormPanes(): void {
+		this._onRequestCloseBrainstormPanes.fire();
+	}
+
 	async redirect(intent: string, refinedMessage?: string): Promise<void> {
 		if (!this._activeSessionId) {
 			throw new Error('No active session to redirect');
