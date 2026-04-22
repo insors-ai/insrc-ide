@@ -11,7 +11,7 @@ import { Session } from '../agent/session.js';
 import { loadConfigForRepo } from '../agent/config.js';
 import { DaemonChannel } from './channel.js';
 import { getLogger } from '../shared/logger.js';
-import { getSessionById, getTurnsForSession } from '../db/conversations.js';
+import { getSessionById, getTurnsForSession, saveSession } from '../db/conversations.js';
 import { getDb } from '../db/client.js';
 import { SessionFileCache } from './file-cache.js';
 import { SessionPDFCache } from './pdf-processor.js';
@@ -90,6 +90,27 @@ export class ChatSessionPool {
     const session = new Session({ repoPath, config, id: sessionId });
     await session.init();
 
+    // Persist the session row immediately (plans/session-lifecycle.md
+    // Phase 1). Writing at create time means Resume + agent.list never
+    // need to fall back to parsing the checkpoint for repo / agent --
+    // the DB row is authoritative from the start. Status begins as
+    // 'active'; the pipeline transitions it to 'paused' on checkpoint
+    // and 'completed' on finalize.
+    try {
+      const db = await getDb();
+      await saveSession(db, {
+        id:      sessionId,
+        repo:    repoPath,
+        summary: '',
+        agent:   'chat',
+        status:  'active',
+      });
+    } catch (err) {
+      // Non-fatal: the pool-side state still works. Log loudly because
+      // a failed DB write here breaks Resume for this session.
+      log.error({ err, sessionId }, 'failed to persist session row on create');
+    }
+
     const active: ActiveSession = {
       id: sessionId,
       session,
@@ -107,6 +128,49 @@ export class ChatSessionPool {
 
     this.sessions.set(sessionId, active);
     log.info({ sessionId, repo: repoPath }, 'chat session created');
+    return sessionId;
+  }
+
+  /**
+   * Phase 2 session resume (Item 7). Ensures an ActiveSession exists in
+   * the pool for the given `sessionId`, preferring a DB-backed restore
+   * but falling back to a fresh in-pool entry when the DB has no
+   * record. This fallback matters for brainstorm sessions that never
+   * completed a turn: they write checkpoint files but never
+   * `saveSession`/`saveTurn`, so post-IDE-restart the DB lookup would
+   * fail and resume would bail.
+   *
+   * Returns the sessionId on success, null only if *neither* path
+   * works (missing repoPath in both DB and checkpoint state).
+   */
+  async restoreOrCreate(sessionId: string, fallbackRepoPath?: string): Promise<string | null> {
+    const restored = await this.restore(sessionId);
+    if (restored) return restored;
+    if (!fallbackRepoPath) {
+      log.warn({ sessionId }, 'restoreOrCreate: DB miss and no fallback repoPath');
+      return null;
+    }
+
+    const config = await loadConfigForRepo(fallbackRepoPath);
+    const session = new Session({ repoPath: fallbackRepoPath, config, id: sessionId });
+    await session.init();
+
+    const active: ActiveSession = {
+      id: sessionId,
+      session,
+      channel: null,
+      abortController: null,
+      agentRunning: false,
+      lastStep: null,
+      createdAt: Date.now(),
+      lastActivityAt: Date.now(),
+      injectedMessages: [],
+      injectedIdeas: [],
+      fileCache: new SessionFileCache(),
+      pdfCache: new SessionPDFCache(),
+    };
+    this.sessions.set(sessionId, active);
+    log.info({ sessionId, repo: fallbackRepoPath }, 'chat session created from checkpoint (no DB record)');
     return sessionId;
   }
 

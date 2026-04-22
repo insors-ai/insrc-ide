@@ -24,12 +24,23 @@ const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 const ZERO_VEC = new Array<number>(EMBEDDING_DIM).fill(0);
 
 const SESSIONS_SCHEMA = new Schema([
-  new Field('id',           new Utf8(), false),
-  new Field('repo',         new Utf8(), false),
-  new Field('summary',      new Utf8(), false),
-  new Field('seenEntities', new Utf8(), false), // JSON-encoded string[]
-  new Field('createdAt',    new Utf8(), false),
-  new Field('expiresAt',    new Utf8(), false),
+  new Field('id',             new Utf8(), false),
+  new Field('repo',           new Utf8(), false),
+  new Field('summary',        new Utf8(), false),
+  new Field('seenEntities',   new Utf8(), false), // JSON-encoded string[]
+  new Field('createdAt',      new Utf8(), false),
+  new Field('expiresAt',      new Utf8(), false),
+  // Session lifecycle metadata (plans/session-lifecycle.md Phase 1).
+  // `agent` + `category` identify which controller owns the session
+  // so Resume + Runs sidebar don't need to parse checkpoint state.
+  // `status` transitions active -> paused (checkpoint written) ->
+  // completed (pipeline finished) or discarded (explicit user action).
+  // `lastActivityAt` bumps on every checkpoint / turn so the sidebar
+  // can sort by recency.
+  new Field('agent',          new Utf8(), false),
+  new Field('category',       new Utf8(), false),
+  new Field('status',         new Utf8(), false),
+  new Field('lastActivityAt', new Utf8(), false),
   new Field('vector', new FixedSizeList(EMBEDDING_DIM, new Field('item', new Float32(), true)), false),
 ]);
 
@@ -62,6 +73,19 @@ async function getSessionsTable(db: DbClient): Promise<Table> {
   const names = await db.lance.tableNames();
   if (names.includes('conversation_sessions')) {
     _sessionsTable = await db.lance.openTable('conversation_sessions');
+    // Migrate: add session-lifecycle columns if absent (matches the
+    // `format` migration on the turns table). Safe on repeat startup --
+    // addColumns no-ops when the column already exists.
+    const schema = await _sessionsTable.schema();
+    const have = new Set(schema.fields.map((f: { name: string }) => f.name));
+    const additions: Array<{ name: string; valueSql: string }> = [];
+    if (!have.has('agent'))          additions.push({ name: 'agent',          valueSql: "''" });
+    if (!have.has('category'))       additions.push({ name: 'category',       valueSql: "''" });
+    if (!have.has('status'))         additions.push({ name: 'status',         valueSql: "'completed'" });
+    if (!have.has('lastActivityAt')) additions.push({ name: 'lastActivityAt', valueSql: "''" });
+    if (additions.length > 0) {
+      await _sessionsTable.addColumns(additions);
+    }
   } else {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     _sessionsTable = await (db.lance as any).createEmptyTable('conversation_sessions', SESSIONS_SCHEMA);
@@ -91,6 +115,9 @@ async function getTurnsTable(db: DbClient): Promise<Table> {
 // Session record type
 // ---------------------------------------------------------------------------
 
+/** Lifecycle states for `sessions.status`. */
+export type SessionStatus = 'active' | 'paused' | 'completed' | 'discarded';
+
 export interface SessionRecord {
   id: string;
   repo: string;
@@ -98,6 +125,14 @@ export interface SessionRecord {
   seenEntities: string[];
   createdAt: string;
   expiresAt: string;
+  /** Controller that owns this session (brainstorm / designer / planner / chat). */
+  agent: string;
+  /** Sub-category for agents that have them (design / requirements / ...). */
+  category: string;
+  /** Lifecycle status. */
+  status: SessionStatus;
+  /** ISO timestamp -- last time state was bumped (checkpoint write, turn save). */
+  lastActivityAt: string;
   vector: number[];
 }
 
@@ -162,15 +197,38 @@ export async function closeSession(
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString(); // 30 days
 
-  await sessionsTable.add([{
-    id:           session.id,
-    repo:         session.repo,
-    summary:      session.summary,
-    seenEntities: JSON.stringify(session.seenEntities),
-    createdAt:    now,
-    expiresAt:    expiresAt,
-    vector:       summaryVector.length === EMBEDDING_DIM ? summaryVector : ZERO_VEC,
-  }]);
+  // Upsert semantics -- the session row was likely written at chat.start
+  // (plans/session-lifecycle.md Phase 1), so we need to update summary +
+  // seenEntities + vector + status rather than add a duplicate.
+  const existing = await sessionsTable.query()
+    .filter(`id = '${session.id.replace(/'/g, "''")}'`)
+    .toArray();
+  if (existing.length > 0) {
+    await sessionsTable.update(
+      {
+        summary:        session.summary,
+        seenEntities:   JSON.stringify(session.seenEntities),
+        expiresAt,
+        status:         'completed',
+        lastActivityAt: now,
+      },
+      { where: `id = '${session.id.replace(/'/g, "''")}'` },
+    );
+  } else {
+    await sessionsTable.add([{
+      id:             session.id,
+      repo:           session.repo,
+      summary:        session.summary,
+      seenEntities:   JSON.stringify(session.seenEntities),
+      createdAt:      now,
+      expiresAt:      expiresAt,
+      agent:          'chat',
+      category:       '',
+      status:         'completed',
+      lastActivityAt: now,
+      vector:         summaryVector.length === EMBEDDING_DIM ? summaryVector : ZERO_VEC,
+    }]);
+  }
 
   // Raw turns are retained — compaction manages lifecycle
 }
@@ -181,7 +239,14 @@ export async function closeSession(
  */
 export async function saveSession(
   db: DbClient,
-  session: { id: string; repo: string; summary: string },
+  session: {
+    id: string;
+    repo: string;
+    summary: string;
+    agent?: string;
+    category?: string;
+    status?: SessionStatus;
+  },
   vector?: number[] | undefined,
 ): Promise<void> {
   const sessionsTable = await getSessionsTable(db);
@@ -194,23 +259,80 @@ export async function saveSession(
     .toArray();
 
   if (existing.length > 0) {
-    // Update summary — LanceDB update takes (updates, options)
-    await sessionsTable.update(
-      { summary: session.summary },
-      { where: `id = '${session.id}'` },
-    );
+    // Update summary (callers that pass agent/category/status update
+    // them too; the dedicated setters below are the preferred entry
+    // for those fields so a no-op callsite doesn't accidentally wipe).
+    const updates: Record<string, string> = {
+      summary:        session.summary,
+      lastActivityAt: now,
+    };
+    if (session.agent !== undefined)    updates['agent']    = session.agent;
+    if (session.category !== undefined) updates['category'] = session.category;
+    if (session.status !== undefined)   updates['status']   = session.status;
+    await sessionsTable.update(updates, { where: `id = '${session.id}'` });
   } else {
     // Create new
     await sessionsTable.add([{
-      id:           session.id,
-      repo:         session.repo,
-      summary:      session.summary,
-      seenEntities: '[]',
-      createdAt:    now,
+      id:             session.id,
+      repo:           session.repo,
+      summary:        session.summary,
+      seenEntities:   '[]',
+      createdAt:      now,
       expiresAt,
-      vector:       vector && vector.length === EMBEDDING_DIM ? vector : ZERO_VEC,
+      agent:          session.agent ?? 'chat',
+      category:       session.category ?? '',
+      status:         session.status ?? 'active',
+      lastActivityAt: now,
+      vector:         vector && vector.length === EMBEDDING_DIM ? vector : ZERO_VEC,
     }]);
   }
+}
+
+/**
+ * Stamp the session's controller id and sub-category. Called after
+ * classifier + sub-classifier resolve (e.g. from `resolveController`
+ * when brainstorm is picked). No-op if the row doesn't exist yet.
+ */
+export async function setSessionAgent(
+  db: DbClient,
+  id: string,
+  agent: string,
+  category?: string,
+): Promise<void> {
+  const sessionsTable = await getSessionsTable(db);
+  const updates: Record<string, string> = {
+    agent,
+    lastActivityAt: new Date().toISOString(),
+  };
+  if (category !== undefined) updates['category'] = category;
+  await sessionsTable.update(updates, { where: `id = '${id}'` });
+}
+
+/**
+ * Update the session's lifecycle status. Emitted from:
+ *  - Pipeline: `paused` on checkpoint write, `completed` on clean exit.
+ *  - Discard: `discarded` before the row is removed.
+ *  - Resume: `active` when the pipeline restarts.
+ */
+export async function setSessionStatus(
+  db: DbClient,
+  id: string,
+  status: SessionStatus,
+): Promise<void> {
+  const sessionsTable = await getSessionsTable(db);
+  await sessionsTable.update(
+    { status, lastActivityAt: new Date().toISOString() },
+    { where: `id = '${id}'` },
+  );
+}
+
+/** Bump `lastActivityAt` without touching other fields. */
+export async function bumpSessionActivity(db: DbClient, id: string): Promise<void> {
+  const sessionsTable = await getSessionsTable(db);
+  await sessionsTable.update(
+    { lastActivityAt: new Date().toISOString() },
+    { where: `id = '${id}'` },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -524,13 +646,17 @@ function rowToSessionRecord(row: Record<string, unknown>): SessionRecord {
   } catch { /* ignore */ }
 
   return {
-    id:           row['id']        as string,
-    repo:         row['repo']      as string,
-    summary:      row['summary']   as string,
+    id:             row['id']             as string,
+    repo:           row['repo']           as string,
+    summary:        row['summary']        as string,
     seenEntities,
-    createdAt:    row['createdAt'] as string,
-    expiresAt:    row['expiresAt'] as string,
-    vector:       (row['vector']   as number[]) ?? [],
+    createdAt:      row['createdAt']      as string,
+    expiresAt:      row['expiresAt']      as string,
+    agent:          (row['agent']          as string | undefined) ?? 'chat',
+    category:       (row['category']       as string | undefined) ?? '',
+    status:         ((row['status']        as string | undefined) ?? 'completed') as SessionStatus,
+    lastActivityAt: (row['lastActivityAt'] as string | undefined) ?? (row['createdAt'] as string),
+    vector:         (row['vector']         as number[]) ?? [],
   };
 }
 
@@ -571,6 +697,10 @@ export async function getSessionById(
     seenEntities: JSON.parse((row['seenEntities'] as string) || '[]') as string[],
     createdAt: row['createdAt'] as string,
     expiresAt: row['expiresAt'] as string,
+    agent:          (row['agent']          as string | undefined) ?? 'chat',
+    category:       (row['category']       as string | undefined) ?? '',
+    status:         ((row['status']        as string | undefined) ?? 'completed') as SessionStatus,
+    lastActivityAt: (row['lastActivityAt'] as string | undefined) ?? (row['createdAt'] as string),
     vector: row['vector'] as number[],
   };
 }

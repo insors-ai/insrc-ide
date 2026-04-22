@@ -256,24 +256,39 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 			throw new Error('Already streaming');
 		}
 
-		// The daemon's chat.resumeFromCheckpoint ensures the session is
-		// in its pool (via chat-session DB restore) even if the daemon
-		// was just cold-started. On the browser side we still need our
-		// local session state hydrated so the chat panel knows which
-		// session + repo the stream belongs to. Mirror resumeSession's
-		// restore path without re-playing user-visible history -- the
-		// point of resume is to pick up mid-flow, not re-render prior
-		// turns.
+		// Fall back to the chat service's active repo when the caller
+		// didn't have a repo hint (legacy checkpoints where agent.list's
+		// brainstormState.input.repoPath is empty). The user must have
+		// the matching repo open to resume anyway, so the active repo is
+		// a reasonable proxy.
+		const effectiveRepo = repoPath && repoPath !== '' ? repoPath : (this._activeRepo ?? '');
+
+		// The daemon's chatResumeFromCheckpoint handler calls
+		// pool.restoreOrCreate internally, which covers both the DB-backed
+		// and checkpoint-only fallback paths. We don't need to prime via
+		// chat.restore from the browser -- for brainstorm sessions that
+		// never completed a turn it would just fail with "session not
+		// found in DB" and surface a misleading error in the daemon log.
+
+		// Rebuild the browser-side session state so the chat panel knows
+		// which session + repo the stream belongs to. Unlike a fresh
+		// turn, we also load prior transcript history here -- the user
+		// is coming back to an existing session and expects to see what
+		// was said before the pause, not a blank chat.
 		this._activeSessionId = sessionId;
-		this._activeRepo = repoPath;
-		this._messages = [];
+		this._activeRepo = effectiveRepo;
+		this._messages = await this.loadHistory(sessionId);
 		this._persistState();
 		this._onDidChangeSession.fire(sessionId);
 
 		this._isStreaming = true;
 		this._pendingContent = '';
 
-		this._streamHandle = this.daemonService.stream('chat.resumeFromCheckpoint', { sessionId });
+		// Pass repoPath so the daemon's fallback DB-miss path has a source
+		// for the Session object even when state.brainstormState.input.repoPath
+		// was not stamped correctly (legacy checkpoints written before the
+		// initState fix).
+		this._streamHandle = this.daemonService.stream('chat.resumeFromCheckpoint', { sessionId, repoPath: effectiveRepo });
 		this._wireStreamHandle(this._streamHandle);
 	}
 

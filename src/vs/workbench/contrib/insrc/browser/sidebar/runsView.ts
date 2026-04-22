@@ -16,11 +16,13 @@ import { IOpenerService } from '../../../../../platform/opener/common/opener.js'
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
+import { IInsrcAgentRunService, type AgentRunInfo } from '../../common/agentRunService.js';
+import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import type { IListVirtualDelegate } from '../../../../../base/browser/ui/list/list.js';
 import type { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../../base/browser/ui/tree/tree.js';
 import { WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
 import { FuzzyScore } from '../../../../../base/common/filters.js';
-import type { AgentRunInfo } from '../../common/agentRunService.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
 
 // ---------------------------------------------------------------------------
 // Tree infrastructure
@@ -50,12 +52,19 @@ const STATUS_ICON: Record<string, string> = {
 };
 
 function getAgentType(run: AgentRunInfo): string {
-	// Parse from ID prefix (e.g. "brainstorm-1773761128644" -> "brainstorm")
+	// Prefer the daemon-reported `agent` field -- the old prefix heuristic
+	// assumed ids like "brainstorm-1773761128644" (controller dashes sessionId),
+	// but Item 7 switched session ids to UUIDs (e.g. "3466c2dd-fc40-...") which
+	// don't start with the agent type. Fall back to the heuristic for legacy
+	// timestamp-based ids still on disk.
+	if (run.agent && run.agent !== 'unknown') {
+		return run.agent;
+	}
 	const dashIdx = run.id.indexOf('-');
-	if (dashIdx > 0) {
+	if (dashIdx > 0 && !/^[0-9a-f]{8}$/i.test(run.id.substring(0, dashIdx))) {
 		return run.id.substring(0, dashIdx);
 	}
-	return run.agent || 'unknown';
+	return 'unknown';
 }
 
 class RunsDelegate implements IListVirtualDelegate<RunsTreeNode> {
@@ -100,10 +109,24 @@ class AgentGroupRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IAge
 
 // -- Run renderer --
 
-interface IRunTemplateData { icon: HTMLElement; label: HTMLElement; status: HTMLElement }
+interface IRunTemplateData {
+	icon: HTMLElement;
+	label: HTMLElement;
+	status: HTMLElement;
+	playBtn: HTMLButtonElement;
+	/** Mutable ref to the current row's run so the play-click handler
+	 *  (registered once) reads the right id post-virtualization. */
+	currentRun: { value: AgentRunInfo | undefined };
+}
 
 class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplateData> {
 	readonly templateId = 'run';
+
+	constructor(
+		private readonly runService: IInsrcAgentRunService,
+		private readonly notificationService: INotificationService,
+		private readonly logService: ILogService,
+	) { }
 
 	renderTemplate(container: HTMLElement): IRunTemplateData {
 		const row = dom.append(container, dom.$('.insrc-run-row'));
@@ -130,12 +153,44 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 		status.style.opacity = '0.6';
 		status.style.fontSize = '11px';
 
-		return { icon, label, status };
+		// Inline play button (Item 7 follow-up). Visibility toggled per
+		// row in renderElement -- only paused / crashed runs show it.
+		// The click handler reads from currentRun ref because the tree
+		// virtualises templates across rows; a naive closure over
+		// renderElement's `run` would race with scrolling.
+		const playBtn = dom.append(row, dom.$('button.insrc-run-play-btn')) as HTMLButtonElement;
+		playBtn.style.flexShrink = '0';
+		playBtn.style.background = 'transparent';
+		playBtn.style.border = 'none';
+		playBtn.style.color = 'var(--vscode-testing-iconPassed)';
+		playBtn.style.cursor = 'pointer';
+		playBtn.style.padding = '0 4px';
+		playBtn.style.fontSize = '12px';
+		playBtn.style.display = 'none';
+		playBtn.title = 'Resume this run';
+		playBtn.textContent = '\u25B6';
+
+		const currentRun: { value: AgentRunInfo | undefined } = { value: undefined };
+		playBtn.addEventListener('click', async (e) => {
+			e.stopPropagation();
+			const run = currentRun.value;
+			if (!run) { return; }
+			try {
+				await this.runService.resumeRun(run.id);
+				this.notificationService.info(`Resumed: ${run.id}`);
+			} catch (err) {
+				this.logService.warn(`[insrc:runs] resume failed: ${(err as Error).message}`);
+				this.notificationService.error(`Failed to resume: ${(err as Error).message}`);
+			}
+		});
+
+		return { icon, label, status, playBtn, currentRun };
 	}
 
 	renderElement(node: ITreeNode<RunsTreeNode, FuzzyScore>, _index: number, data: IRunTemplateData): void {
 		if (node.element.kind !== 'run') { return; }
 		const run = node.element.run;
+		data.currentRun.value = run;
 		const statusStr = run.status || 'unknown';
 		data.icon.textContent = STATUS_ICON[statusStr] ?? '?';
 
@@ -150,12 +205,18 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 			data.icon.style.color = 'var(--vscode-descriptionForeground)';
 		}
 
-		// Agent name from ID prefix (e.g. "brainstorm-1773761128644" -> "brainstorm")
-		const agentName = run.id.split('-')[0] || run.agent || 'unknown';
+		// Reuse the same resolution as the group header so the row label
+		// matches the parent group. Post-Item 7 ids are UUIDs; the prefix
+		// split only works for legacy timestamp-based ids.
+		const agentName = getAgentType(run);
 		const step = run.step ? ` \u2014 ${run.step}` : '';
 		data.label.textContent = `${agentName}${step}`;
 
 		data.status.textContent = `[${statusStr}]`;
+
+		// Show the play button only for resumable statuses. Matches the
+		// filter in the `insrc.agentResume` command's quick-pick list.
+		data.playBtn.style.display = (statusStr === 'paused' || statusStr === 'crashed') ? '' : 'none';
 	}
 
 	disposeTemplate(): void { }
@@ -232,6 +293,9 @@ export class InsrcRunsViewPane extends ViewPane {
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IHoverService hoverService: IHoverService,
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
+		@IInsrcAgentRunService private readonly runService: IInsrcAgentRunService,
+		@INotificationService private readonly notificationService: INotificationService,
+		@ILogService private readonly logService: ILogService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -252,7 +316,7 @@ export class InsrcRunsViewPane extends ViewPane {
 			'InsrcRuns',
 			treeContainer,
 			new RunsDelegate(),
-			[new AgentGroupRenderer(), new RunRenderer()],
+			[new AgentGroupRenderer(), new RunRenderer(this.runService, this.notificationService, this.logService)],
 			new RunsDataSource(this.daemonService),
 			{
 				identityProvider: {

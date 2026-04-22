@@ -127,8 +127,13 @@ function initState(input: ControllerInput, docPrefix: string): BrainstormState {
     input: {
       message: input.message,
       codeContext: input.codeContext,
-      repoPath: '',
-      closureRepos: [],
+      // Pull from the live session when available -- matters for Phase 2
+      // resume (Item 7), which keys the fallback DB-miss path on this
+      // field. The previous hardcoded empty string meant every
+      // checkpointed brainstorm session was unrecoverable after a cold
+      // daemon restart.
+      repoPath: input.session?.repoPath ?? '',
+      closureRepos: input.session?.closureRepos ?? [],
       classification: input.classification,
     },
     docId: `${docPrefix}-${randomBytes(4).toString('hex')}`,

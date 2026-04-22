@@ -335,7 +335,7 @@ export const chatResume: StreamHandler = async (params, send, signal) => {
  * fallback at end-of-function.
  */
 export const chatResumeFromCheckpoint: StreamHandler = async (params, send, signal) => {
-  const { sessionId } = params as { sessionId: string };
+  const { sessionId, repoPath: hintedRepoPath } = params as { sessionId: string; repoPath?: string };
   const { readFileSync, existsSync, readdirSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { PATHS } = await import('../shared/paths.js');
@@ -392,7 +392,7 @@ export const chatResumeFromCheckpoint: StreamHandler = async (params, send, sign
     return;
   }
   const brainstormState = raw.state?.brainstormState as
-    | { category?: string; lastStep?: string }
+    | { category?: string; lastStep?: string; input?: { repoPath?: string } }
     | undefined;
   if (raw.controller !== 'brainstorm' || !brainstormState) {
     send({ id: requestId, stream: 'error', data: { error: `Resume only supports brainstorm sessions (got controller=${raw.controller})` } });
@@ -404,9 +404,20 @@ export const chatResumeFromCheckpoint: StreamHandler = async (params, send, sign
   const pool = getPool();
   let active = pool.get(sessionId);
   if (!active) {
-    const restored = await pool.restore(sessionId);
+    // Brainstorm sessions that never completed a turn aren't written to
+    // the Kuzu sessions table -- they only exist as checkpoint files.
+    // `restoreOrCreate` falls back to a fresh session with the known id
+    // using the repoPath. Source priority:
+    //   1. Checkpoint's state.brainstormState.input.repoPath (new sessions
+    //      after the initState fix).
+    //   2. `repoPath` passed in the RPC params by the browser, which
+    //      knows the active repo from its own state (covers legacy
+    //      checkpoints written before the initState fix, e.g. the one
+    //      we're currently smoke-testing).
+    const fallbackRepo = brainstormState.input?.repoPath || hintedRepoPath;
+    const restored = await pool.restoreOrCreate(sessionId, fallbackRepo);
     if (!restored) {
-      send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} not found in DB -- cannot restore` } });
+      send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} not found in DB and no repoPath available -- cannot restore` } });
       send({ id: requestId, stream: 'done', data: {} });
       return;
     }
@@ -454,6 +465,13 @@ export const chatResumeFromCheckpoint: StreamHandler = async (params, send, sign
     controller.restoreState(stateStore);
     const resumeTask = controller.buildResumeTask();
 
+    // Emit `Intent: brainstorm/<category>` so the browser's brainstorm
+    // session service activates -- without this it stays in the default
+    // inactive state and the flow contribution drops gate events.
+    // Parallels the emission resolveController() does on a fresh turn.
+    send({ id: requestId, stream: 'progress', data: {
+      message: `Intent: brainstorm/${category} (resumed)`,
+    } });
     send({ id: requestId, stream: 'progress', data: {
       message: `Resumed ${category} brainstorm at step "${brainstormState.lastStep}"`,
     } });

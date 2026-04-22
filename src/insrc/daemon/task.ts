@@ -772,11 +772,15 @@ export async function runControlledPipeline(
     }
   }
 
-  // Session-end cleanup (Phase 2 -- Item 7). When a controller calls
-  // `store.markSessionComplete()` from a terminal branch (presentation
-  // save-success, skip, resume-abandon), delete the checkpoint file so
-  // the Runs sidebar stops listing a session the user intentionally
-  // finished. Best-effort: a stale checkpoint is a leak, not a crash.
+  // Session-end cleanup (Phase 2 -- Item 7 + plans/session-lifecycle.md
+  // Phase 1). When a controller calls `store.markSessionComplete()`
+  // from a terminal branch (presentation save-success, skip,
+  // resume-abandon):
+  //   1. Delete the checkpoint file so the Runs sidebar stops listing
+  //      a session the user intentionally finished.
+  //   2. Transition the DB row's status to 'completed' so agent.list
+  //      (which queries the DB) no longer surfaces it.
+  // Best-effort: a stale checkpoint or status is a leak, not a crash.
   if (stateStore.isSessionComplete() && deps.session?.id) {
     try {
       const { unlinkSync, existsSync } = await import('node:fs');
@@ -789,6 +793,13 @@ export async function runControlledPipeline(
       }
     } catch (err) {
       log.warn({ err }, 'checkpoint cleanup failed (non-fatal)');
+    }
+    try {
+      const { setSessionStatus } = await import('../db/conversations.js');
+      const { getDb } = await import('../db/client.js');
+      await setSessionStatus(await getDb(), deps.session.id, 'completed');
+    } catch (err) {
+      log.warn({ err }, 'session status update to completed failed (non-fatal)');
     }
   }
 
@@ -912,6 +923,21 @@ async function checkpointState(
       timestamp: new Date().toISOString(),
     };
     writeFileSync(file, JSON.stringify(body, null, 2));
+
+    // Reflect the checkpoint write on the session row so agent.list
+    // can show the latest lastActivityAt and the row's status tracks
+    // the on-disk state. plans/session-lifecycle.md Phase 1. Skipped
+    // when sessionId is missing (non-session pipelines).
+    if (sessionId) {
+      try {
+        const { setSessionStatus } = await import('../db/conversations.js');
+        const { getDb } = await import('../db/client.js');
+        await setSessionStatus(await getDb(), sessionId, 'paused');
+      } catch {
+        // Best-effort. Checkpoint write already succeeded; a stale
+        // status row is a minor annoyance, not a blocker.
+      }
+    }
     log.debug({ file }, 'checkpoint saved');
   } catch (err) {
     log.debug({ err }, 'checkpoint save failed (non-fatal)');
@@ -1537,6 +1563,20 @@ async function resolveController(
       data: { message: `Intent: brainstorm/${result.id} (${result.reasoning})` },
     });
     cacheKey = `brainstorm:${result.id}`;
+
+    // Stamp the session row with agent + category so Resume + Runs
+    // sidebar know which controller owns this session without having
+    // to peek at the checkpoint body. plans/session-lifecycle.md
+    // Phase 1. Best-effort: failure logged but doesn't block the turn.
+    if (deps.session?.id) {
+      try {
+        const { setSessionAgent } = await import('../db/conversations.js');
+        const { getDb } = await import('../db/client.js');
+        await setSessionAgent(await getDb(), deps.session.id, 'brainstorm', result.id);
+      } catch (err) {
+        log.warn({ err, sessionId: deps.session.id }, 'failed to stamp session agent');
+      }
+    }
   }
 
   if (controllerCache.has(cacheKey)) return controllerCache.get(cacheKey)!;

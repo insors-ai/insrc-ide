@@ -231,18 +231,34 @@ async function main(): Promise<void> {
           if (!file.endsWith('.json')) continue;
           try {
             const raw = JSON.parse(readFs(join(checkpointDir, file), 'utf-8')) as Record<string, unknown>;
+            // Field mapping matches the CheckpointFile shape written by
+            // `checkpointState` in task.ts:
+            //   `raw.controller` holds the agent id (brainstorm/designer/...)
+            //   `raw.sessionId` holds the session UUID
+            //   `raw.timestamp` is the ISO mtime
+            //   `raw.state.brainstormState` holds the controller's live state
+            //     (for brainstorm runs; other controllers have their own key)
+            // A missing field is tolerated and falls back so malformed old
+            // checkpoints still appear in the list rather than vanishing.
+            const state = (raw['state'] as Record<string, unknown> | undefined) ?? {};
+            const brainstormState = state['brainstormState'] as
+              | { lastStep?: string; summary?: string; input?: { repoPath?: string }; category?: string }
+              | undefined;
+            const derivedAgent = (raw['controller'] as string)
+              ?? (raw['agent'] as string)
+              ?? (file.startsWith('brainstorm-') ? 'brainstorm' : 'unknown');
             const entry: {
               id: string; agent: string; status: string;
               step?: string; repo?: string; createdAt: string; summary?: string;
             } = {
               id: (raw['sessionId'] as string) ?? file.replace('.json', ''),
-              agent: (raw['agent'] as string) ?? 'unknown',
+              agent: derivedAgent,
               status: (raw['status'] as string) ?? 'paused',
-              createdAt: (raw['createdAt'] as string) ?? '',
+              createdAt: (raw['timestamp'] as string) ?? (raw['createdAt'] as string) ?? '',
             };
-            const stepVal = raw['lastStep'] as string | undefined;
-            const repoVal = raw['repo'] as string | undefined;
-            const summaryVal = raw['summary'] as string | undefined;
+            const stepVal = brainstormState?.lastStep ?? (raw['lastStep'] as string | undefined);
+            const repoVal = brainstormState?.input?.repoPath ?? (raw['repo'] as string | undefined);
+            const summaryVal = brainstormState?.summary ?? (raw['summary'] as string | undefined);
             if (stepVal !== undefined) entry.step = stepVal;
             if (repoVal !== undefined) entry.repo = repoVal;
             if (summaryVal !== undefined) entry.summary = summaryVal;
