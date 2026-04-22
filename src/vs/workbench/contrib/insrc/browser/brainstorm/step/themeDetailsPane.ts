@@ -136,9 +136,23 @@ export class BrainstormThemeDetailsPane extends BrainstormPaneBase {
 			() => this.logService.info(`[brainstorm:pane:theme-spec] replyToGate resolved action=${action}`),
 			err => this.logService.error(`[brainstorm:pane:theme-spec] replyToGate failed action=${action}: ${(err as Error).message}`),
 		);
-		dom.clearNode(this._cardArea);
-		const waiting = dom.append(this._cardArea, dom.$('.insrc-brainstorm-submitting'));
-		const msg = dom.append(waiting, dom.$('span'));
-		msg.textContent = 'Submitting...';
+		// Items 48 + 50: keep the current theme spec visible during the
+		// inter-theme wait (search + generate + review for the NEXT
+		// theme, ~100s each) and during the final assemble-spec phase
+		// (~11min with no gate). Same pattern as Item 37. The pane will
+		// be replaced naturally when the next theme-spec gate fires or
+		// when the presentation gate opens the final-output pane.
+		const existingPanel = this._cardArea.querySelector('.insrc-brainstorm-spec-panel-inline') as HTMLElement | null;
+		if (existingPanel) {
+			existingPanel.classList.add('insrc-brainstorm-submitting-dim');
+			existingPanel.querySelectorAll('button').forEach(btn => { (btn as HTMLButtonElement).disabled = true; });
+		}
+		const working = dom.prepend(this._cardArea, dom.$('.insrc-brainstorm-submitting-strip'));
+		const msg = dom.append(working, dom.$('span'));
+		msg.textContent = action === 'approve'
+			? 'Approved. Working on the next theme (or assembling the final doc)...'
+			: action === 'edit'
+				? 'Regenerating this theme spec with your feedback...'
+				: 'Submitting...';
 	}
 }

@@ -141,10 +141,26 @@ export class BrainstormThemesPane extends BrainstormPaneBase {
 			() => this.logService.info(`[brainstorm:pane:convergence-review] replyToGate resolved action=${action}`),
 			err => this.logService.error(`[brainstorm:pane:convergence-review] replyToGate failed action=${action}: ${(err as Error).message}`),
 		);
-		dom.clearNode(this._cardArea);
-		const waiting = dom.append(this._cardArea, dom.$('.insrc-brainstorm-submitting'));
-		const msg = dom.append(waiting, dom.$('span'));
-		msg.textContent = 'Submitting...';
+		// Item 47: keep the theme list rendered while the pipeline runs
+		// theme-spec generation for each theme (~100s per theme, total
+		// many minutes for the whole round). Same pattern as Item 37 on
+		// idea-list: dim the existing panel + disable buttons + pin a
+		// progress strip. The theme-spec gate opens a different pane
+		// (theme-details) which replaces this editor when ready.
+		const existingPanel = this._cardArea.querySelector('.insrc-brainstorm-list-panel') as HTMLElement | null;
+		if (existingPanel) {
+			existingPanel.classList.add('insrc-brainstorm-submitting-dim');
+			existingPanel.querySelectorAll('button').forEach(btn => { (btn as HTMLButtonElement).disabled = true; });
+		}
+		const working = dom.prepend(this._cardArea, dom.$('.insrc-brainstorm-submitting-strip'));
+		const msg = dom.append(working, dom.$('span'));
+		msg.textContent = action === 'approve'
+			? 'Generating per-theme spec sections...'
+			: action === 'edit'
+				? 'Re-clustering themes with feedback...'
+				: action === 'diverge'
+					? 'Generating more ideas...'
+					: 'Submitting...';
 	}
 
 	private _label(action: string): string {
