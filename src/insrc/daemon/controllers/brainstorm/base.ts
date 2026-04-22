@@ -587,7 +587,10 @@ export abstract class BrainstormControllerBase implements TaskController {
     this.state.lastStep = 'enhance-ideas-llm';
     return [{
       index: this.taskCounter++,
-      description: 'Enhancing ideas with code context...',
+      // Item 32a: count-in-description gives presence during the bulk
+      // enhance call (single local-LLM pass over the whole list, can
+      // take 1-5min depending on size).
+      description: `Enhancing ${ideasToEnhance.length} idea${ideasToEnhance.length === 1 ? '' : 's'} with code context (local LLM)...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getEnhanceIdeasPrompt(),
@@ -1528,9 +1531,13 @@ export abstract class BrainstormControllerBase implements TaskController {
       ...themeIdeas.slice(0, 3).map(i => i.title),
     ].join(' ').slice(0, 500);
 
+    // Item 32a: match the generate-spec description's N/M position hint
+    // so the theme search + generate pair reads as one block.
+    const totalThemes = this.state.themes.length;
+    const position = `${themeIdx + 1}/${totalThemes}`;
     return {
       index: this.taskCounter++,
-      description: `Searching codebase for ${theme.name}...`,
+      description: `Searching codebase (${position}) for ${theme.name}...`,
       kind: 'rpc',
       intent: 'brainstorm',
       rpcMethod: 'search.query',
@@ -1689,7 +1696,9 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     return {
       index: this.taskCounter++,
-      description: `Review spec: ${themeName}`,
+      // Item 32a: keep the position hint on the task description so it
+      // matches the gateTitle formatting below ("Spec 3/7: Foo").
+      description: `Review spec (${current}/${totalThemes}): ${themeName}`,
       kind: 'transform',
       intent: 'brainstorm',
       userMessage: content,
@@ -2556,7 +2565,10 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     return {
       index: this.taskCounter++,
-      description: 'Reviewing ideas with Claude...',
+      // Item 32a: Claude review is the single longest step in round 1
+      // (4-5min on bigger idea sets). Count hints at "how big" so the
+      // wait feels bounded.
+      description: `Reviewing ${ideasToReview.length} idea${ideasToReview.length === 1 ? '' : 's'} with Claude...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getReviewIdeasPrompt(),
@@ -2578,7 +2590,10 @@ export abstract class BrainstormControllerBase implements TaskController {
     const ideaList = formatIdeasForContext(ideasToRefine);
     return {
       index: this.taskCounter++,
-      description: 'Refining ideas based on review...',
+      // Item 32a: idea count gives the user a sense of step size --
+      // "Refining 8 ideas" reads as bounded, whereas "Refining ideas"
+      // could be anything from 1 to 50.
+      description: `Refining ${ideasToRefine.length} idea${ideasToRefine.length === 1 ? '' : 's'} based on review...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getRefineIdeasPrompt(),
@@ -2758,7 +2773,10 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     return {
       index: this.taskCounter++,
-      description: `Clustering ideas into themes (round ${this.state.round})...`,
+      // Item 32a: show how many ideas are being clustered. Round label
+      // stays so Convergence runs in later rounds (refinement) don't
+      // look identical to the round-1 cluster.
+      description: `Clustering ${accepted.length} idea${accepted.length === 1 ? '' : 's'} into themes (round ${this.state.round})...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getConvergeClusterPrompt(),
@@ -2781,7 +2799,7 @@ export abstract class BrainstormControllerBase implements TaskController {
 
     return {
       index: this.taskCounter++,
-      description: 'Evaluating promotions...',
+      description: `Evaluating promotions across ${this.state.themes.length} theme${this.state.themes.length === 1 ? '' : 's'}...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getConvergePromotePrompt(),
@@ -2906,9 +2924,16 @@ export abstract class BrainstormControllerBase implements TaskController {
         : []),
     ].join('\n');
 
+    // Item 32a: expose theme position as N/M so multi-theme runs
+    // (often 5-8 themes, ~100s each) don't feel like an open-ended
+    // wait. Matches how the theme-spec-review gate prefixes its
+    // gateTitle.
+    const totalThemes = this.state.themes.length;
+    const position = `${themeIdx + 1}/${totalThemes}`;
+
     return {
       index: this.taskCounter++,
-      description: `Generating spec: ${theme.name}...`,
+      description: `Generating spec (${position}): ${theme.name}...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getThemeSpecPrompt(),
@@ -2923,10 +2948,14 @@ export abstract class BrainstormControllerBase implements TaskController {
   private buildReviewThemeSpecTask(specSection: string, themeIdx: number): Task {
     const theme = this.state.themes[themeIdx];
     const themeName = theme?.name ?? `Theme ${themeIdx + 1}`;
+    // Item 32a: same N/M prefix as the generate task so the pair reads
+    // as one per-theme block.
+    const totalThemes = this.state.themes.length;
+    const position = `${themeIdx + 1}/${totalThemes}`;
 
     return {
       index: this.taskCounter++,
-      description: `Claude reviewing: ${themeName}...`,
+      description: `Claude reviewing (${position}): ${themeName}...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getReviewThemeSpecPrompt(),
@@ -2972,9 +3001,17 @@ export abstract class BrainstormControllerBase implements TaskController {
       ];
     }
 
+    // Item 32a: assemble is the single longest step at the end
+    // (~10min on big specs) with zero visible movement. Surfacing
+    // "stitching N sections into a unified spec" at least tells the
+    // user the step size.
+    const sectionCount = this.skipPerThemeSpec()
+      ? (this.state.themes?.length ?? 0)
+      : (this.state.specSections?.length ?? 0);
+    const sectionNoun = this.skipPerThemeSpec() ? 'theme' : 'spec section';
     return {
       index: this.taskCounter++,
-      description: 'Assembling final spec...',
+      description: `Assembling final spec from ${sectionCount} ${sectionNoun}${sectionCount === 1 ? '' : 's'}...`,
       kind: 'llm',
       intent: 'brainstorm',
       systemPrompt: this.getAssemblePrompt(),
