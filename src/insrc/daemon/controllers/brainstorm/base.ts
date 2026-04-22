@@ -2398,8 +2398,12 @@ export abstract class BrainstormControllerBase implements TaskController {
       // state.ideas[].status + state.ideas[].feedback.
       persisted: true,
       gateTitle: `${this.getIdeaGateTitle()} (Round ${this.state.round})`,
+      // Item 40: only expose 'accept-remaining' when there's actually
+      // something pending. When the reviewQueue is exhausted (user
+      // went through every card) the button would be a no-op, which
+      // confuses users who expect each visible action to do something.
       gateActions: [
-        { name: 'accept-remaining', label: 'Accept remaining' },
+        ...(pending.length > 0 ? [{ name: 'accept-remaining', label: 'Accept remaining' }] : []),
         { name: 'diverge', label: 'Diverge', hint: '<optional direction>' },
         { name: 'converge', label: 'Converge now' },
       ],

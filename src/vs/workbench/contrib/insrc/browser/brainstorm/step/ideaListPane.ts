@@ -115,10 +115,25 @@ export class BrainstormIdeaListPane extends BrainstormPaneBase {
 			() => this.logService.info(`[brainstorm:pane:idea-list] replyToGate resolved action=${action}`),
 			err => this.logService.error(`[brainstorm:pane:idea-list] replyToGate failed action=${action}: ${(err as Error).message}`),
 		);
-		dom.clearNode(this._cardArea);
-		const waiting = dom.append(this._cardArea, dom.$('.insrc-brainstorm-submitting'));
-		const msg = dom.append(waiting, dom.$('span'));
-		msg.textContent = 'Submitting...';
+		// Item 37: keep the idea list rendered while the pipeline runs
+		// cluster + promote + validate (~30s on converge). Clearing the
+		// pane immediately leaves the user staring at a blank screen.
+		// Instead, pin a transient "Working..." strip at the top and
+		// dim the existing panel. The convergence-review gate opens a
+		// different pane (themes) which replaces this editor when ready.
+		const existingPanel = this._cardArea.querySelector('.insrc-brainstorm-list-panel') as HTMLElement | null;
+		if (existingPanel) {
+			existingPanel.classList.add('insrc-brainstorm-submitting-dim');
+			// Disable all action buttons so repeated clicks can't fire.
+			existingPanel.querySelectorAll('button').forEach(btn => { (btn as HTMLButtonElement).disabled = true; });
+		}
+		const working = dom.prepend(this._cardArea, dom.$('.insrc-brainstorm-submitting-strip'));
+		const msg = dom.append(working, dom.$('span'));
+		msg.textContent = action === 'converge'
+			? 'Clustering ideas into themes...'
+			: action === 'diverge'
+				? 'Generating more ideas...'
+				: 'Submitting...';
 	}
 
 	private _label(action: string): string {

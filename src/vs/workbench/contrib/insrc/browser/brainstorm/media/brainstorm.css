@@ -750,6 +750,30 @@
 	color: var(--vscode-textLink-foreground);
 }
 
+/* Item 37: when a pane action is in-flight but we want to keep the
+ * existing content visible (e.g. idea-list on Converge while cluster +
+ * promote run). Only dims the inner panel so a top-of-pane progress
+ * strip stays readable. Fades back to normal when the next pane opens.
+ */
+.insrc-brainstorm-submitting-dim {
+	opacity: 0.55;
+	transition: opacity 150ms ease;
+	pointer-events: none;
+}
+
+.insrc-brainstorm-submitting-strip {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	background: color-mix(in srgb, var(--vscode-textLink-foreground) 8%, transparent);
+	border: 1px solid color-mix(in srgb, var(--vscode-textLink-foreground) 30%, transparent);
+	border-radius: 4px;
+	color: var(--vscode-textLink-foreground);
+	font-size: 0.88em;
+}
+
 .insrc-brainstorm-timeout-notice {
 	font-size: 0.85em;
 	color: var(--vscode-editorWarning-foreground, #cca700);
