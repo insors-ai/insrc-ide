@@ -1585,20 +1585,76 @@ export abstract class BrainstormControllerBase implements TaskController {
     const sections = this.state.specSections ?? [];
     const lastSection = sections[sections.length - 1];
     if (lastSection) {
-      // Claude may return a polished markdown version or JSON with polishedSection
+      // Claude's review prompt asks for a JSON `{ polishedSection: "..." }`
+      // envelope, but in practice the output can arrive in several shapes:
+      //
+      //  1. Strict JSON: {"polishedSection": "## Header\n..."}
+      //  2. JSON fenced in ```json ... ``` (common with Claude)
+      //  3. Relaxed "JS-object" syntax with unquoted keys or trailing
+      //     commas (Claude occasionally slips into this)
+      //  4. Plain markdown prose (no envelope at all)
+      //
+      // We try (1)/(2) via `stripFences + JSON.parse`. On failure, try
+      // to regex-extract the `polishedSection` string from (3). If both
+      // fail and the output looks like markdown (4), use it raw. If
+      // NONE of those work, keep the generate-step content rather than
+      // letting the user see a JSON-wrapped blob (Item 49).
+      const raw = completed.output;
+      const stripped = stripFences(raw);
+      let polished: string | undefined;
+
       try {
-        const review = JSON.parse(stripFences(completed.output));
-        if (review.polishedSection) {
-          lastSection.content = review.polishedSection;
+        const review = JSON.parse(stripped);
+        if (review && typeof review === 'object' && typeof review.polishedSection === 'string') {
+          polished = review.polishedSection;
         }
-        // Otherwise keep the original markdown from the generate step
       } catch {
-        // Non-JSON output — if it looks like markdown (contains |, #, or -), use it as replacement
-        const trimmed = completed.output.trim();
-        if (trimmed.includes('|') || trimmed.startsWith('#') || trimmed.startsWith('-')) {
-          lastSection.content = trimmed;
+        // Fall through to regex extraction below.
+      }
+
+      if (!polished) {
+        // Regex fallback for JS-object-style output: match a
+        // `polishedSection` key followed by a quoted string, handling
+        // both escape-preserved and literal-newline body variants.
+        const match = stripped.match(/polishedSection\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/s);
+        if (match) {
+          const rawPolished = match[1] ?? match[2] ?? '';
+          // Unescape common JSON escapes that regex doesn't resolve.
+          polished = rawPolished
+            .replace(/\\n/g, '\n')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"')
+            .replace(/\\'/g, "'")
+            .replace(/\\\\/g, '\\');
         }
       }
+
+      if (!polished) {
+        // No envelope found -- check if the raw output itself is
+        // clean markdown (no JSON-fence, no braces, starts with a
+        // markdown sigil). If so, use it; otherwise keep whatever
+        // afterGenerateThemeSpec wrote so the user at least sees the
+        // unpolished-but-real spec.
+        const trimmed = raw.trim();
+        const looksLikeJsonWrapper = trimmed.startsWith('```json')
+          || trimmed.startsWith('```typescript')
+          || (trimmed.startsWith('{') && trimmed.includes('polishedSection'));
+        const looksLikeMarkdown = !looksLikeJsonWrapper && (
+          trimmed.startsWith('#')
+          || trimmed.startsWith('-')
+          || trimmed.startsWith('|')
+          || trimmed.startsWith('```')
+        );
+        if (looksLikeMarkdown) {
+          polished = trimmed;
+        }
+      }
+
+      if (polished) {
+        lastSection.content = polished;
+      }
+      // else: leave lastSection.content as the generate-step output
+      // (unpolished but at least readable).
       lastSection.reviewed = true;
     }
     this.state.specSections = sections;

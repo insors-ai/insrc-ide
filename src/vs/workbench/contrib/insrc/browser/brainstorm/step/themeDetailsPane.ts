@@ -9,6 +9,7 @@ import { ITelemetryService } from '../../../../../../platform/telemetry/common/t
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { ILogService } from '../../../../../../platform/log/common/log.js';
+import { createTrustedTypesPolicy } from '../../../../../../base/browser/trustedTypes.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -23,6 +24,14 @@ interface ThemeSpecItem {
 	themeId?: string;
 	content: string;
 }
+
+// Item 49: gate.content is daemon-rendered HTML (from renderMarkdown).
+// Using a trusted-types policy lets us assign it to innerHTML so
+// markdown formatting renders instead of showing raw text. Policy name
+// must match the workbench CSP allowlist (workbench.html).
+const ttPolicy = createTrustedTypesPolicy('insrcBrainstormThemeSpec', {
+	createHTML: (value: string) => value,
+});
 
 /**
  * Theme-spec review pane. One gate per theme: user approves the polished
@@ -70,8 +79,19 @@ export class BrainstormThemeDetailsPane extends BrainstormPaneBase {
 			id.textContent = ` (${section.themeId})`;
 		}
 
-		const body = dom.append(panel, dom.$('pre.insrc-brainstorm-spec-body'));
-		body.textContent = section.content;
+		// Prefer the daemon-rendered HTML (gate.content) so markdown
+		// formats as headings / lists / code blocks instead of raw
+		// text (Item 49). Fall back to section.content (raw markdown)
+		// as pre-formatted text when the trusted-types policy isn't
+		// allowed by the CSP.
+		const body = dom.append(panel, dom.$('.insrc-brainstorm-spec-body'));
+		const renderedHtml = gate.content || '';
+		if (renderedHtml && ttPolicy) {
+			body.innerHTML = ttPolicy.createHTML(renderedHtml) as unknown as string;
+		} else {
+			const pre = dom.append(body, dom.$('pre.insrc-brainstorm-spec-body-fallback'));
+			pre.textContent = section.content;
+		}
 
 		// Actions
 		const actions = dom.append(panel, dom.$('.insrc-brainstorm-list-actions'));
