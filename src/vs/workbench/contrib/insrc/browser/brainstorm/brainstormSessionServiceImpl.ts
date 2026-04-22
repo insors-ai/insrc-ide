@@ -373,7 +373,20 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 
 	private _parseStringArray(value: unknown): string[] {
 		if (!Array.isArray(value)) { return []; }
-		return value.filter((v): v is string => typeof v === 'string');
+		// Coerce numbers to strings too -- daemon sometimes sends
+		// integer idea indices in `theme.ideaIds` (Claude's clustering
+		// output references ideas by index, not by UUID). Filtering
+		// those out as non-strings was giving every theme ideaCount=0
+		// despite the card text showing "linked ideas: 3, 7" (Item 46).
+		const out: string[] = [];
+		for (const v of value) {
+			if (typeof v === 'string') {
+				out.push(v);
+			} else if (typeof v === 'number' && Number.isFinite(v)) {
+				out.push(String(v));
+			}
+		}
+		return out;
 	}
 
 	private _asString(value: unknown): string | undefined {
