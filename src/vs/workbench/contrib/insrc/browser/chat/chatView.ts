@@ -394,8 +394,14 @@ export class InsrcChatViewPane extends ViewPane {
 				// a dedicated editor pane. The daemon tags it via
 				// `structured.itemType = 'intent-confirm'`.
 				const gateCtx = event.gate.context as Record<string, unknown> | undefined;
-				const isIntentConfirm = gateCtx && gateCtx['itemType'] === 'intent-confirm';
-				if (this.brainstormSession.isSessionActive && !isIntentConfirm) {
+				const gateItemType = gateCtx?.['itemType'] as string | undefined;
+				// Gate kinds that always render inline in the chat panel,
+				// regardless of whether a brainstorm session is active:
+				//   - intent-confirm (Item 12): classifier confirmation.
+				//   - resume-confirm (Item 7 / Phase C): retry / abandon
+				//     choice after resume from mid-LLM checkpoint.
+				const inlineInChat = gateItemType === 'intent-confirm' || gateItemType === 'resume-confirm';
+				if (this.brainstormSession.isSessionActive && !inlineInChat) {
 					break;
 				}
 				this._renderGate(event.gate);
