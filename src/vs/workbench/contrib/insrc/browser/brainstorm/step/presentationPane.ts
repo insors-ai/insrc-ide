@@ -61,7 +61,20 @@ export class BrainstormPresentationPane extends BrainstormPaneBase {
 		const content = gate.content ?? this.sessionService.finalDocument ?? '';
 		// Gate content is HTML-rendered markdown from the daemon. Use trusted
 		// types so CSP passes; the content comes from our own pipeline.
-		preview.innerHTML = ttPolicy ? (ttPolicy.createHTML(content) as unknown as string) : content;
+		// Item 51: if the policy isn't allowed by the CSP (name missing
+		// from workbench.html's trusted-types allowlist) ttPolicy is
+		// undefined. Do NOT fall back to raw innerHTML -- CSP rejects it
+		// and the whole pane crashes with "This document requires
+		// 'TrustedHTML' assignment" + falls back to errorEditor. Render
+		// as preformatted text instead so the user at least sees the
+		// assembled spec.
+		if (ttPolicy) {
+			preview.innerHTML = ttPolicy.createHTML(content) as unknown as string;
+		} else {
+			this.logService.warn(`[brainstorm:pane:presentation] ttPolicy unavailable; rendering as plain text`);
+			const pre = dom.append(preview, dom.$('pre.insrc-brainstorm-final-preview-fallback'));
+			pre.textContent = content;
+		}
 
 		const actions = dom.append(panel, dom.$('.insrc-brainstorm-list-actions'));
 		for (const action of gate.actions) {
