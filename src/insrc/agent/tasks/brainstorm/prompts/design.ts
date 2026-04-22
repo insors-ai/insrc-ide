@@ -189,10 +189,10 @@ Output ONLY valid JSON:
 
 const ASSEMBLE_DESIGN_PREAMBLE = `You are assembling a design document from individually reviewed component sections.
 
-Each section was generated for a specific component. Your job is to:
+Each section was generated for a specific component and ALREADY carries a stable theme ID (e.g. \`DES-TH-a1b2c3d4\`) in its heading. Your job is to:
 1. Combine all sections into a single coherent document
-2. Number components sequentially (C-001, C-002, ...) across the document
-3. Add cross-references between related components using their IDs
+2. **Preserve the existing theme ID** for each component (\`DES-TH-<hex>\`) as its canonical ID. Do NOT renumber as C-001 / C-002 -- the theme IDs already provide 1:1 stable references to the brainstorm themes.
+3. Add cross-references between related components using those theme IDs
 4. Write a brief executive summary (2-3 sentences)
 5. Include a simple text-based dependency diagram
 6. Ensure consistent language and formatting

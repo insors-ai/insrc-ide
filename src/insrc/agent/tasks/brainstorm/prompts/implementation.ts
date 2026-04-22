@@ -191,10 +191,10 @@ Output ONLY valid JSON:
 
 const ASSEMBLE_PLAN_PREAMBLE = `You are assembling an implementation plan from individually reviewed task sections.
 
-Each section was generated for a specific task. Your job is to:
+Each section was generated for a specific task and ALREADY carries a stable theme ID (e.g. \`IMP-TH-a1b2c3d4\`) in its heading. Your job is to:
 1. Combine all sections into a single coherent document
-2. Number tasks sequentially (T-001, T-002, ...) across the document
-3. Add a dependency graph (text-based) showing task ordering
+2. **Preserve the existing theme ID** for each task (\`IMP-TH-<hex>\`) as its canonical ID. Do NOT renumber as T-001 / T-002 -- the theme IDs already provide 1:1 stable references to the brainstorm themes.
+3. Add a dependency graph (text-based) showing task ordering, referencing tasks by their theme ID
 4. Add a phased timeline (Foundation / Enhancement / Polish or similar)
 5. Write a brief executive summary (2-3 sentences)
 6. List cross-cutting risks with mitigations

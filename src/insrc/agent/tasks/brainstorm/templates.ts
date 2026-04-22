@@ -71,6 +71,17 @@ export const BRAINSTORM_HTML_TEMPLATE = `<!DOCTYPE html>
     .trace-table th { background: var(--card); color: var(--muted); text-transform: uppercase; font-size: 0.75rem; }
     .revision-log { font-size: 0.85rem; color: var(--muted); }
     .revision-log li { margin: 0.3rem 0; }
+    /* Item 57: fenced code blocks + inline code from polishedSpec markdown.
+       Constrained to .container so this doesn't bleed into the IDE shell
+       when the HTML is injected via innerHTML. */
+    .container pre { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 0.75rem 0; font-size: 0.85rem; line-height: 1.45; color: var(--fg); }
+    .container pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.9em; color: inherit; background: transparent; padding: 0; }
+    .container :not(pre) > code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.9em; background: rgba(255,255,255,0.06); color: var(--accent); padding: 1px 5px; border-radius: 3px; }
+    .container ul, .container ol { margin: 0.5rem 0 0.75rem 1.5rem; }
+    .container li { margin: 0.25rem 0; }
+    .container p { margin: 0.5rem 0; }
+    .container hr { border: 0; border-top: 1px solid var(--border); margin: 1.2rem 0; }
+    .container blockquote { border-left: 3px solid var(--accent); padding: 0.25rem 0 0.25rem 0.75rem; margin: 0.75rem 0; color: var(--muted); background: rgba(122,162,247,0.06); }
   </style>
 </head>
 <body>

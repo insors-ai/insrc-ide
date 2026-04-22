@@ -198,10 +198,10 @@ Output ONLY valid JSON:
 
 const ASSEMBLE_STRATEGY_PREAMBLE = `You are assembling a test strategy document from individually reviewed group sections.
 
-Each section was generated for a specific test group. Your job is to:
+Each section was generated for a specific test group and ALREADY carries a stable theme ID (e.g. \`TST-TH-a1b2c3d4\`) in its heading. Your job is to:
 1. Combine all sections into a single coherent strategy document
-2. Number groups sequentially (G-001, G-002, ...)
-3. Add a coverage matrix mapping functions/modules to group IDs
+2. **Preserve the existing theme ID** for each group (\`TST-TH-<hex>\`) as its canonical ID. Do NOT renumber as G-001 / G-002 -- the theme IDs already provide 1:1 stable references to the brainstorm themes.
+3. Add a coverage matrix mapping functions/modules to the theme IDs
 4. Add a coverage targets table if current vs target is known
 5. Write a brief executive summary (2-3 sentences)
 6. List cross-cutting risks (flaky, environmental) with mitigations
