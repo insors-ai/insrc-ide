@@ -48,6 +48,7 @@ import { defaultSavePath, saveArtifact } from '../../../agent/tasks/shared/artif
 import {
   REFINE_IDEAS_SYSTEM, ENHANCE_IDEAS_SYSTEM,
   DISCUSS_RESPOND_SYSTEM, DISCUSS_REFINE_SYSTEM,
+  REFINE_THEME_SPEC_SYSTEM,
 } from '../../../agent/tasks/brainstorm/prompts.js';
 import { getLogger } from '../../../shared/logger.js';
 
@@ -198,6 +199,7 @@ export abstract class BrainstormControllerBase implements TaskController {
   getEnhanceIdeasPrompt(): string   { return ENHANCE_IDEAS_SYSTEM; }
   getDiscussRespondPrompt(): string { return DISCUSS_RESPOND_SYSTEM; }
   getDiscussRefinePrompt(): string  { return DISCUSS_REFINE_SYSTEM; }
+  getRefineThemeSpecPrompt(): string { return REFINE_THEME_SPEC_SYSTEM; }
 
   /** Override to skip per-theme spec generation (e.g., general category). */
   protected skipPerThemeSpec(): boolean { return false; }
@@ -416,6 +418,8 @@ export abstract class BrainstormControllerBase implements TaskController {
         return this.afterGenerateThemeSpec(completed);
       case 'review-theme-spec':
         return this.afterReviewThemeSpec(completed);
+      case 'refine-theme-spec':
+        return this.afterRefineThemeSpec(completed);
       case 'theme-spec-review':
         return this.afterThemeSpecReview(gateReply);
       case 'assemble-spec':
@@ -1375,6 +1379,16 @@ export abstract class BrainstormControllerBase implements TaskController {
 
   private afterConvergeCluster(completed: TaskResult): Task[] {
     const { themes } = parseClusterOutput(completed.output, this.state);
+    // Diagnostic: parseClusterOutput relies on the LLM emitting
+    // "Ideas: 1, 3, 7" lines; if the LLM wandered off-format, each
+    // theme comes back with `ideaIds: []` and the UI renders
+    // ideaCount=0 even though ideas were clustered logically.
+    log.info({
+      clusterOutputLen: completed.output.length,
+      clusterOutputHead: completed.output.slice(0, 500),
+      themes: themes.map(t => ({ name: t.name, ideaIdCount: t.ideaIds.length })),
+      acceptedIdeaCount: this.state.ideas.filter(i => i.status === 'accepted').length,
+    }, 'afterConvergeCluster: parsed themes -- check ideaIdCount');
     // Assign unique IDs to each theme
     for (const theme of themes) {
       theme.themeId = `${this.getThemePrefix()}-${randomBytes(4).toString('hex')}`;
@@ -1621,12 +1635,25 @@ export abstract class BrainstormControllerBase implements TaskController {
       const raw = completed.output;
       const stripped = stripFences(raw);
       let polished: string | undefined;
+      let issues: string[] | undefined;
+      let suggestions: string[] | undefined;
+
+      const captureReviewFields = (review: unknown): void => {
+        if (!review || typeof review !== 'object') { return; }
+        const r = review as Record<string, unknown>;
+        if (typeof r['polishedSection'] === 'string') {
+          polished = r['polishedSection'] as string;
+        }
+        if (Array.isArray(r['issues'])) {
+          issues = (r['issues'] as unknown[]).filter(x => typeof x === 'string') as string[];
+        }
+        if (Array.isArray(r['suggestions'])) {
+          suggestions = (r['suggestions'] as unknown[]).filter(x => typeof x === 'string') as string[];
+        }
+      };
 
       try {
-        const review = JSON.parse(stripped);
-        if (review && typeof review === 'object' && typeof review.polishedSection === 'string') {
-          polished = review.polishedSection;
-        }
+        captureReviewFields(JSON.parse(stripped));
       } catch {
         // Fall through to regex extraction below.
       }
@@ -1653,10 +1680,7 @@ export abstract class BrainstormControllerBase implements TaskController {
               if (depth === 0) {
                 const slice = stripped.slice(braceStart, i + 1);
                 try {
-                  const review = JSON.parse(slice);
-                  if (review && typeof review === 'object' && typeof review.polishedSection === 'string') {
-                    polished = review.polishedSection;
-                  }
+                  captureReviewFields(JSON.parse(slice));
                 } catch {
                   // still malformed (e.g. trailing commas, unquoted keys)
                 }
@@ -1665,6 +1689,21 @@ export abstract class BrainstormControllerBase implements TaskController {
             }
           }
         }
+      }
+
+      if (issues && issues.length > 0) {
+        log.info({
+          themeName: lastSection.themeName,
+          issueCount: issues.length,
+          issues,
+        }, 'afterReviewThemeSpec: Claude flagged issues');
+      }
+      if (suggestions && suggestions.length > 0) {
+        log.info({
+          themeName: lastSection.themeName,
+          suggestionCount: suggestions.length,
+          suggestions,
+        }, 'afterReviewThemeSpec: Claude suggested improvements');
       }
 
       if (!polished) {
@@ -1711,24 +1750,80 @@ export abstract class BrainstormControllerBase implements TaskController {
           polishedLen: polished.length,
           polishedHead: polished.slice(0, 160),
           delta: polished.length - lastSection.content.length,
-        }, 'afterReviewThemeSpec: polishedSection extracted, updating section content');
-        lastSection.content = polished;
+          issueCount: issues?.length ?? 0,
+          suggestionCount: suggestions?.length ?? 0,
+        }, 'afterReviewThemeSpec: polishedSection extracted');
       } else {
         log.warn({
           themeName: lastSection.themeName,
           rawLen: completed.output.length,
           rawHead: completed.output.slice(0, 400),
-        }, 'afterReviewThemeSpec: could NOT extract polishedSection -- pane will show unreviewed generate output');
+        }, 'afterReviewThemeSpec: could NOT extract polishedSection -- skipping local refine, pane will show unreviewed generate output');
       }
-      // else: leave lastSection.content as the generate-step output
-      // (unpolished but at least readable).
       lastSection.reviewed = true;
+
+      // Phase 4.5: mirror the ideation pipeline (`local generate -> Claude
+      // review -> local refine`). Instead of overwriting the section
+      // with Claude's polishedSection directly, stash the full review
+      // on state and hand the baton to the local LLM, which produces
+      // the final version incorporating Claude's polished rewrite +
+      // issues + suggestions. Falls back to the old behaviour when the
+      // review couldn't be parsed (nothing to refine with).
+      if (polished) {
+        this.state.lastThemeReview = {
+          polishedSection: polished,
+          issues: issues ?? [],
+          suggestions: suggestions ?? [],
+        };
+        this.state.specSections = sections;
+        const themeIdx = lastSection.themeIndex;
+        this.state.lastStep = 'refine-theme-spec';
+        return [this.buildRefineThemeSpecTask(themeIdx)];
+      }
     }
     this.state.specSections = sections;
 
-    // Hand the polished section to the user for review before assembly. They
-    // can approve and move to the next theme, or send edit feedback that
-    // re-runs the per-theme generation with their notes appended.
+    // Review parse failed -- skip refine, show the unreviewed generate
+    // output so the user isn't stuck staring at nothing. They can still
+    // pick edit to force another pass.
+    this.state.lastStep = 'theme-spec-review';
+    return [this.buildThemeSpecReviewTask()];
+  }
+
+  private afterRefineThemeSpec(completed: TaskResult): Task[] {
+    const sections = this.state.specSections ?? [];
+    const lastSection = sections[sections.length - 1];
+    if (lastSection && completed.success) {
+      const refined = completed.output.trim();
+      if (refined.length > 0) {
+        log.info({
+          themeName: lastSection.themeName,
+          refinedLen: refined.length,
+          priorLen: lastSection.content.length,
+          delta: refined.length - lastSection.content.length,
+        }, 'afterRefineThemeSpec: local LLM produced refined version, updating section content');
+        lastSection.content = refined;
+      } else {
+        log.warn({
+          themeName: lastSection.themeName,
+        }, 'afterRefineThemeSpec: local LLM returned empty refine -- falling back to Claude polishedSection');
+        if (this.state.lastThemeReview?.polishedSection) {
+          lastSection.content = this.state.lastThemeReview.polishedSection;
+        }
+      }
+    } else if (lastSection && this.state.lastThemeReview?.polishedSection) {
+      // Refine task itself failed (e.g. local LLM crashed). Fall back
+      // to Claude's polishedSection so the pipeline still advances.
+      log.warn({
+        themeName: lastSection.themeName,
+        error: completed.error,
+      }, 'afterRefineThemeSpec: local LLM refine failed -- using Claude polishedSection as fallback');
+      lastSection.content = this.state.lastThemeReview.polishedSection;
+    }
+    this.state.specSections = sections;
+    this.state.lastThemeReview = undefined;
+
+    // Now show the final version to the user.
     this.state.lastStep = 'theme-spec-review';
     return [this.buildThemeSpecReviewTask()];
   }
@@ -2337,6 +2432,17 @@ export abstract class BrainstormControllerBase implements TaskController {
           return null;
         }
         return this.buildReviewThemeSpecTask(lastSection.content, themeIdx);
+      }
+      case 'refine-theme-spec': {
+        // Phase 4.5 refine: needs Claude's review output, which
+        // afterReviewThemeSpec stashed on state.lastThemeReview. Still
+        // rebuildable across daemon restarts because that field is
+        // persisted in the checkpoint.
+        const themeIdx = this.state.currentThemeIndex ?? 0;
+        if (!this.state.lastThemeReview) {
+          return null;
+        }
+        return this.buildRefineThemeSpecTask(themeIdx);
       }
 
       // Still-parametric steps (Item 7f / 16b): the immediate prior task's
@@ -3065,6 +3171,71 @@ export abstract class BrainstormControllerBase implements TaskController {
       resolverAgent: 'brainstorm',
       resolverStep: 'theme-spec-review',
       stateKey: 'themeSpecReviewOutput',
+    };
+  }
+
+  /**
+   * Phase 4.5 local-LLM refine pass. Mirrors the ideation `refine`
+   * step: takes the local-generated draft + Claude's review bundle
+   * (polishedSection, issues, suggestions) and asks the local model
+   * to produce the FINAL section markdown. Output becomes
+   * `specSections[last].content`; Claude's rewrite is used as a
+   * reference, not as the canonical output.
+   */
+  private buildRefineThemeSpecTask(themeIdx: number): Task {
+    const theme = this.state.themes[themeIdx];
+    const themeName = theme?.name ?? `Theme ${themeIdx + 1}`;
+    const sections = this.state.specSections ?? [];
+    const lastSection = sections[sections.length - 1];
+    const draft = lastSection?.content ?? '';
+
+    const review = this.state.lastThemeReview;
+    const polishedSection = review?.polishedSection ?? '';
+    const issues = review?.issues ?? [];
+    const suggestions = review?.suggestions ?? [];
+
+    const issuesBlock = issues.length > 0
+      ? issues.map((it, i) => `${i + 1}. ${it}`).join('\n')
+      : '(none)';
+    const suggestionsBlock = suggestions.length > 0
+      ? suggestions.map((it, i) => `${i + 1}. ${it}`).join('\n')
+      : '(none)';
+
+    const userMessage = [
+      `## Original Problem`,
+      this.state.input.message,
+      '',
+      `## Theme: ${theme?.themeId ?? ''} -- ${themeName}`,
+      theme?.description ?? '',
+      '',
+      `## Your Draft`,
+      draft,
+      '',
+      `## Reviewer's Rewrite (reference)`,
+      polishedSection,
+      '',
+      `## Reviewer Issues`,
+      issuesBlock,
+      '',
+      `## Reviewer Suggestions`,
+      suggestionsBlock,
+    ].join('\n');
+
+    const totalThemes = this.state.themes.length;
+    const position = `${themeIdx + 1}/${totalThemes}`;
+
+    return {
+      index: this.taskCounter++,
+      description: `Refining spec (${position}): ${themeName}...`,
+      kind: 'llm',
+      intent: 'brainstorm',
+      systemPrompt: this.getRefineThemeSpecPrompt(),
+      userMessage,
+      temperature: 0.2,
+      maxTokens: 8192,
+      resolverAgent: 'brainstorm',
+      resolverStep: 'theme-spec-refine',
+      stateKey: 'themeSpecRefineOutput',
     };
   }
 

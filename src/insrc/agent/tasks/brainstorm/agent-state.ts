@@ -148,6 +148,19 @@ export interface BrainstormState extends AgentState {
   /** Fresh code context from per-theme vector search (set before each theme spec generation). */
   themeSearchContext?: string | undefined;
 
+  /**
+   * Claude's most recent theme-spec review output, preserved for the
+   * local-LLM refine pass (Phase 4.5). Mirrors the ideation pattern
+   * `local generate -> Claude review -> local refine`. Set by
+   * `afterReviewThemeSpec`, consumed by `buildRefineThemeSpecTask`,
+   * cleared by `afterRefineThemeSpec`.
+   */
+  lastThemeReview?: {
+    polishedSection: string;
+    issues: string[];
+    suggestions: string[];
+  } | undefined;
+
   // Sequential idea review (one-at-a-time card flow)
   /** Ordered list of idea IDs to review in current round. */
   reviewQueue: string[];

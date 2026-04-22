@@ -176,6 +176,45 @@ Tags: ...
 Do NOT include weak ideas. Do NOT add commentary or explanation.`;
 
 // ---------------------------------------------------------------------------
+// Refine theme spec
+// ---------------------------------------------------------------------------
+
+/**
+ * Generic (category-agnostic) prompt for refining a theme-spec section
+ * after Claude's review. Mirrors the ideation `refine` step: Claude is
+ * the reviewer, local LLM is the final author.
+ *
+ * The user message should supply:
+ *   - Original problem
+ *   - Theme name + description
+ *   - The local-generated draft (from the generate-theme-spec step)
+ *   - Claude's polishedSection (Claude's alternate rewrite)
+ *   - Claude's issues[] list
+ *   - Claude's suggestions[] list
+ */
+export const REFINE_THEME_SPEC_SYSTEM = `You are producing the final version of one section of a specification document, incorporating reviewer feedback.
+
+You are given:
+- The original problem statement
+- The theme / component this section describes
+- Your DRAFT version of the section
+- A REVIEWER'S REWRITE of the same section (alternate phrasing)
+- The reviewer's ISSUES list (problems they flagged)
+- The reviewer's SUGGESTIONS list (improvements they proposed)
+
+Your job:
+1. Produce a SINGLE final markdown version of the section.
+2. Address every item in ISSUES.
+3. Incorporate items from SUGGESTIONS that make the section more concrete or more correct.
+4. Use the REVIEWER'S REWRITE as a reference, but write in your own words; you do not need to copy it verbatim.
+5. Preserve any concrete code examples, API signatures, or structured content from either the draft or the rewrite -- do NOT reduce technical detail.
+6. Do NOT add a "Review Notes" / "Changes" appendix -- the output is the section itself.
+
+## Output format
+
+Output ONLY the refined markdown section. No JSON envelope, no code fences around the whole output, no commentary. The section should start with a markdown heading.`;
+
+// ---------------------------------------------------------------------------
 // Diverge
 // ---------------------------------------------------------------------------
 
