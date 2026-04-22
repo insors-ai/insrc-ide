@@ -1597,6 +1597,13 @@ export abstract class BrainstormControllerBase implements TaskController {
     const sections = this.state.specSections ?? [];
     const lastSection = sections[sections.length - 1];
     if (lastSection) {
+      log.info({
+        themeIndex: lastSection.themeIndex,
+        themeName: lastSection.themeName,
+        rawLen: completed.output.length,
+        rawHead: completed.output.slice(0, 200),
+        rawTail: completed.output.slice(-200),
+      }, 'afterReviewThemeSpec: Claude review output arrived');
       // Claude's review prompt asks for a JSON `{ polishedSection: "..." }`
       // envelope, but in practice the output can arrive in several shapes:
       //
@@ -1622,6 +1629,42 @@ export abstract class BrainstormControllerBase implements TaskController {
         }
       } catch {
         // Fall through to regex extraction below.
+      }
+
+      // Strategy 1b: Claude often wraps the JSON in prose commentary
+      // ("Here is the reviewed section: { ... }. Hope this helps!").
+      // Find the first balanced `{...}` substring and try JSON.parse
+      // on it.
+      if (!polished) {
+        const braceStart = stripped.indexOf('{');
+        if (braceStart >= 0) {
+          let depth = 0;
+          let inStr = false;
+          let escape = false;
+          for (let i = braceStart; i < stripped.length; i++) {
+            const ch = stripped[i];
+            if (escape) { escape = false; continue; }
+            if (ch === '\\') { escape = true; continue; }
+            if (ch === '"') { inStr = !inStr; continue; }
+            if (inStr) { continue; }
+            if (ch === '{') { depth++; }
+            else if (ch === '}') {
+              depth--;
+              if (depth === 0) {
+                const slice = stripped.slice(braceStart, i + 1);
+                try {
+                  const review = JSON.parse(slice);
+                  if (review && typeof review === 'object' && typeof review.polishedSection === 'string') {
+                    polished = review.polishedSection;
+                  }
+                } catch {
+                  // still malformed (e.g. trailing commas, unquoted keys)
+                }
+                break;
+              }
+            }
+          }
+        }
       }
 
       if (!polished) {
@@ -1663,7 +1706,19 @@ export abstract class BrainstormControllerBase implements TaskController {
       }
 
       if (polished) {
+        log.info({
+          themeName: lastSection.themeName,
+          polishedLen: polished.length,
+          polishedHead: polished.slice(0, 160),
+          delta: polished.length - lastSection.content.length,
+        }, 'afterReviewThemeSpec: polishedSection extracted, updating section content');
         lastSection.content = polished;
+      } else {
+        log.warn({
+          themeName: lastSection.themeName,
+          rawLen: completed.output.length,
+          rawHead: completed.output.slice(0, 400),
+        }, 'afterReviewThemeSpec: could NOT extract polishedSection -- pane will show unreviewed generate output');
       }
       // else: leave lastSection.content as the generate-step output
       // (unpolished but at least readable).
@@ -2916,6 +2971,13 @@ export abstract class BrainstormControllerBase implements TaskController {
       theme.description,
       ...(theme.userComment ? [`\n**User Comment:** ${theme.userComment}`] : []),
       ...(theme.priority ? [`**Priority:** ${theme.priority}`] : []),
+      // `afterThemeSpecReview` stashes user edit feedback in
+      // `state.recentFeedback` before re-running generate. Surface it
+      // to the prompt so the LLM actually addresses the user's ask
+      // instead of regenerating blind.
+      ...(this.state.recentFeedback
+        ? ['', '## User Edit Feedback', this.state.recentFeedback]
+        : []),
       '',
       `## Ideas for This Theme`,
       ideaContext,
