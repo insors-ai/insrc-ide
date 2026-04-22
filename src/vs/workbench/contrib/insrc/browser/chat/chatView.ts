@@ -408,6 +408,13 @@ export class InsrcChatViewPane extends ViewPane {
 				break;
 			}
 			case 'progress':
+				// Item 45: OpenPane:<kind> markers are internal signals
+				// for the flow contribution, not user-facing progress
+				// steps. Swallow them so the chat panel doesn't render
+				// the raw marker as a pill.
+				if (event.progress.step.startsWith('OpenPane:')) {
+					break;
+				}
 				this._ingestIntentAnnouncement(event.progress.step);
 				this._showProgress(event.progress.step, event.progress.status);
 				break;

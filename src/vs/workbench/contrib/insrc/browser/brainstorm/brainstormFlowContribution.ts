@@ -48,6 +48,34 @@ export class BrainstormFlowContribution extends Disposable {
 		// iterate every editor and close the brainstorm step inputs. This is
 		// how the chat-panel Cancel button reaches out and shuts the pane.
 		this._register(this.chatService.onRequestCloseBrainstormPanes(() => this._closeAllBrainstormPanes()));
+		// Item 45: daemon-hinted pane open (no gate). Currently fires only
+		// from the resume-confirm Retry branch so the user sees the pane
+		// they were on while the retried LLM step runs.
+		this._register(sessionService.onRequestOpenPane(kind => this._routePaneHint(kind)));
+	}
+
+	private _routePaneHint(kind: BrainstormGateKind): void {
+		const sessionId = this.chatService.activeSessionId ?? 'brainstorm';
+		this.logService.info(`[brainstorm:flow] pane-hint kind=${kind} sessionId=${sessionId}`);
+		if (kind === 'intent-confirm' || kind === 'resume-confirm') {
+			// These are chat-panel inline gates -- no editor pane to open.
+			return;
+		}
+		const input = this._inputFor(kind, sessionId);
+		if (!input) {
+			this.logService.warn(`[brainstorm:flow] pane-hint: no input for kind "${kind}"; ignoring`);
+			return;
+		}
+		const key = `${input.typeId}:${sessionId}`;
+		if (key === this._lastOpenedKey) {
+			this.logService.info(`[brainstorm:flow] pane-hint: same pane already open (${key})`);
+			return;
+		}
+		this._lastOpenedKey = key;
+		this.editorService.openEditor(input).then(
+			ed => this.logService.info(`[brainstorm:flow] pane-hint openEditor resolved=${ed?.getId?.() ?? '(none)'}`),
+			err => this.logService.error(`[brainstorm:flow] pane-hint openEditor failed: ${(err as Error).message}`),
+		);
 	}
 
 	private _closeAllBrainstormPanes(): void {

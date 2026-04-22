@@ -2016,7 +2016,29 @@ export abstract class BrainstormControllerBase implements TaskController {
         this.state.resumingFromStep = undefined;
       }
       const retry = this.rebuildInFlightTask(inFlightStep);
-      if (retry) return [retry];
+      if (retry) {
+        // Item 45: before the retry task runs, hint the browser to
+        // reopen the pane the user was on. The retry task itself is
+        // an LLM call that may take minutes and emits no gate until
+        // it completes; without this hint the user stares at the
+        // chat panel's resolved resume-confirm card the whole time.
+        // We prepend a no-op passThrough task whose description is
+        // parsed by the browser's progress handler (see
+        // brainstormSessionServiceImpl + brainstormFlowContribution).
+        const paneKind = this.paneForStep(inFlightStep);
+        if (paneKind) {
+          const hintTask: Task = {
+            index: this.taskCounter++,
+            description: `OpenPane:${paneKind}`,
+            kind: 'transform',
+            intent: 'brainstorm',
+            passThrough: true,
+            userMessage: '',
+          };
+          return [hintTask, retry];
+        }
+        return [retry];
+      }
       // Retry not supported for this step -- mark complete so the
       // pipeline exits cleanly rather than spinning on resume-confirm.
       this.store?.markSessionComplete();
@@ -2025,6 +2047,50 @@ export abstract class BrainstormControllerBase implements TaskController {
     // Unknown action -- treat as abandon to avoid silent loops.
     this.store?.markSessionComplete();
     return null;
+  }
+
+  /**
+   * Item 45: map an in-flight step to the brainstorm pane the user
+   * was on when the session paused. Returned string matches the
+   * browser's `BrainstormGateKind` vocabulary so the flow
+   * contribution can open the matching editor pane preemptively on
+   * Retry. Returns undefined for steps with no natural pane (e.g.
+   * assemble-spec is a silent long-running task with no prior pane).
+   */
+  private paneForStep(step: string | undefined): string | undefined {
+    switch (step) {
+      // Ideation-round LLM steps -- the user was browsing idea cards.
+      case 'search-context':
+      case 'generate-ideas':
+      case 'enhance-ideas-search':
+      case 'enhance-ideas-llm':
+      case 'review-ideas':
+      case 'refine-ideas':
+      case 'idea-diverge-single':
+        return 'idea';
+      // Idea discussion LLM steps -- user was in the discussion pane.
+      case 'idea-discuss-search':
+      case 'idea-discuss-respond':
+        return 'idea-discussion';
+      // Convergence LLM steps -- user had just clicked Converge on
+      // the idea-list, so the idea-list pane was the last one open.
+      case 'converge-cluster':
+      case 'converge-promote':
+        return 'idea-list';
+      // Per-theme spec generation -- user was on the themes pane
+      // (just approved the convergence-review gate) or transitioned
+      // into the theme-details pane for an earlier theme.
+      case 'search-theme-context':
+      case 'generate-theme-spec':
+      case 'review-theme-spec':
+        return 'theme-spec';
+      // Final assembly + finalize have no prior pane content worth
+      // showing; the presentation pane will open when its gate fires.
+      case 'assemble-spec':
+      case 'finalize':
+      default:
+        return undefined;
+    }
   }
 
   /**

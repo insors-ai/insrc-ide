@@ -153,4 +153,11 @@ export interface IInsrcBrainstormSessionService {
 	readonly onDidChangeActiveGate: Event<BrainstormGateSnapshot>;
 	/** Fires when the phase changes. */
 	readonly onDidChangePhase: Event<BrainstormPhase>;
+	/**
+	 * Item 45: fires when the daemon hints a specific pane should open,
+	 * independent of a gate arriving. Used by the Retry path on the
+	 * resume-confirm gate so the user sees the pane they were on while
+	 * the retried LLM step runs in the background.
+	 */
+	readonly onRequestOpenPane: Event<BrainstormGateKind>;
 }

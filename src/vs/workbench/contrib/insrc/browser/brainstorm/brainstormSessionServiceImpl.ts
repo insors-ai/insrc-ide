@@ -73,6 +73,14 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 	private readonly _onDidChangePhase = this._register(new Emitter<BrainstormPhase>());
 	readonly onDidChangePhase: Event<BrainstormPhase> = this._onDidChangePhase.event;
 
+	// Item 45: fired when the daemon emits an `OpenPane:<kind>` progress
+	// hint (currently only from the resume-confirm Retry path). The flow
+	// contribution listens and opens the matching editor pane so the
+	// user has a visible pane during the in-flight LLM step that
+	// follows, rather than being stuck on the chat panel.
+	private readonly _onRequestOpenPane = this._register(new Emitter<BrainstormGateKind>());
+	readonly onRequestOpenPane: Event<BrainstormGateKind> = this._onRequestOpenPane.event;
+
 	constructor(
 		@IInsrcChatService chatService: IInsrcChatService,
 		@ILogService private readonly logService: ILogService,
@@ -215,6 +223,18 @@ export class InsrcBrainstormSessionServiceImpl extends Disposable implements IIn
 
 	private _ingestProgress(step: string): void {
 		this.logService.info(`[brainstorm:session] progress step="${step}"`);
+		// Item 45: daemon can piggyback a pane-open hint onto the progress
+		// stream via `OpenPane:<kind>` so Retry from the resume-confirm
+		// gate reopens the user's prior pane before the retried LLM call
+		// starts. Fire a dedicated event + swallow the step so the chat
+		// panel doesn't render the raw marker as a progress pill.
+		const openMatch = step.match(/^OpenPane:([a-z-]+)$/);
+		if (openMatch) {
+			const kind = openMatch[1] as BrainstormGateKind;
+			this.logService.info(`[brainstorm:session] progress hint: open pane kind=${kind}`);
+			this._onRequestOpenPane.fire(kind);
+			return;
+		}
 		// "Intent: brainstorm/<category>" -- the classifier committed; treat
 		// the whole turn as brainstorm from here on, even before any gate
 		// shows up. This is the earliest moment we can lock the chat panel.
