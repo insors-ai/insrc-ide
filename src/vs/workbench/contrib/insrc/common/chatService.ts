@@ -57,10 +57,23 @@ export interface EscalationInfo {
 	readonly reason: string;
 }
 
+/**
+ * Item 32b: transient token chunk from an agent step's LLM call.
+ * Rendered in a dimmed "live step" bubble that's replaced with the
+ * final output (or removed) when `done: true` arrives.
+ */
+export interface LiveStepInfo {
+	readonly agent: string;
+	readonly step: string;
+	readonly text: string;
+	readonly done?: boolean | undefined;
+}
+
 export type ChatEvent =
 	| { type: 'message'; message: ChatMessage }
 	| { type: 'gate'; gate: GateInfo }
 	| { type: 'progress'; progress: ProgressInfo }
+	| { type: 'liveStep'; liveStep: LiveStepInfo }
 	| { type: 'tool'; tool: ToolCallInfo }
 	| { type: 'escalation'; escalation: EscalationInfo }
 	| { type: 'streamEnd' }

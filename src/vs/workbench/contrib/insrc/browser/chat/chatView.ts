@@ -16,7 +16,7 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
-import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail } from '../../common/chatService.js';
+import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
@@ -133,6 +133,11 @@ export class InsrcChatViewPane extends ViewPane {
 	// Intent announcement dedupe -- reset per turn/session so we don't spam
 	// the chat panel every time the daemon re-emits "Intent: X".
 	private _lastAnnouncedIntent: string | undefined;
+
+	// Item 32b: active live-step bubbles keyed by `<agent>:<step>`. Each
+	// bubble accumulates tokens from one LLM call and is removed when
+	// the daemon emits the matching `{ done: true }` event.
+	private _liveStepBubbles = new Map<string, { el: HTMLElement; body: HTMLElement; text: string }>();
 
 	constructor(
 		options: IViewPaneOptions,
@@ -423,6 +428,12 @@ export class InsrcChatViewPane extends ViewPane {
 				}
 				this._ingestIntentAnnouncement(event.progress.step);
 				this._showProgress(event.progress.step, event.progress.status);
+				break;
+			case 'liveStep':
+				// Item 32b: surface LLM token stream as a transient
+				// dimmed bubble in the transcript so the user sees
+				// presence during multi-minute agent steps.
+				this._handleLiveStep(event.liveStep);
 				break;
 			case 'streamEnd':
 				this._onStreamEnd();
@@ -943,6 +954,47 @@ export class InsrcChatViewPane extends ViewPane {
 		this._progressText.textContent = label;
 	}
 
+	/**
+	 * Item 32b: handle an incoming live-step token chunk. Creates a
+	 * transient dimmed bubble in the transcript on the first chunk for a
+	 * given `(agent, step)` pair, appends subsequent chunks, and removes
+	 * the bubble when `done: true` arrives. Bubbles are NOT persisted
+	 * to conversation history -- they're purely presence indicators.
+	 */
+	private _handleLiveStep(info: LiveStepInfo): void {
+		const key = `${info.agent}:${info.step}`;
+		let bubble = this._liveStepBubbles.get(key);
+		if (info.done) {
+			if (bubble) {
+				bubble.el.remove();
+				this._liveStepBubbles.delete(key);
+			}
+			return;
+		}
+		if (!bubble) {
+			const el = dom.append(this._messageList, dom.$('.insrc-chat-message.live-step'));
+			const header = dom.append(el, dom.$('.insrc-chat-message-header'));
+			const label = dom.append(header, dom.$('span.insrc-chat-live-step-label'));
+			label.textContent = `[${info.agent}/${info.step}]`;
+			const body = dom.append(el, dom.$('.insrc-chat-message-content.insrc-chat-live-step-body'));
+			bubble = { el, body, text: '' };
+			this._liveStepBubbles.set(key, bubble);
+			this._emptyState.style.display = 'none';
+			this._messageList.style.display = '';
+		}
+		bubble.text += info.text;
+		bubble.body.textContent = bubble.text;
+		this._scrollToBottom();
+	}
+
+	/** Clear every open live-step bubble -- called on streamEnd / error. */
+	private _clearLiveStepBubbles(): void {
+		for (const bubble of this._liveStepBubbles.values()) {
+			bubble.el.remove();
+		}
+		this._liveStepBubbles.clear();
+	}
+
 	private _onStreamEnd(): void {
 		this._streamingMessageEl = undefined;
 		this._progressBar.classList.add('hidden');
@@ -951,6 +1003,10 @@ export class InsrcChatViewPane extends ViewPane {
 			this._intentBadge.textContent = '';
 			this._intentBadge.classList.add('hidden');
 		}
+		// Item 32b: drop any orphan live-step bubbles left over from an
+		// LLM step that ended without emitting its `done` event (abort,
+		// connection lost, etc.).
+		this._clearLiveStepBubbles();
 
 		// Remove inline progress message
 		if (this._progressMsgEl) {

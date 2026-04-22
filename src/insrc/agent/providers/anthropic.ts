@@ -74,6 +74,60 @@ export class AnthropicProvider implements LLMProvider {
     }, 'claude request');
 
     try {
+      // Item 32b: when the caller supplies an `onToken` callback, use
+      // the streaming Messages API and emit each text_delta as it
+      // arrives. Falls back to the non-streaming create() path when no
+      // callback is set to avoid forcing SSE overhead on every caller.
+      // `finalMessage()` still resolves a complete Anthropic.Message so
+      // we get the same shape for toolCalls / usage / stop_reason.
+      if (opts.onToken) {
+        const stream = this.client.messages.stream({
+          model:      this.model,
+          max_tokens: opts.maxTokens ?? 8_192,
+          ...(system ? { system } : {}),
+          ...(tools && tools.length > 0 ? { tools } : {}),
+          messages:   apiMessages,
+        });
+
+        for await (const event of stream) {
+          if (
+            event.type === 'content_block_delta' &&
+            event.delta.type === 'text_delta'
+          ) {
+            opts.onToken(event.delta.text);
+          }
+        }
+
+        const response = await stream.finalMessage();
+
+        const text = response.content
+          .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+          .map(b => b.text)
+          .join('');
+
+        const toolCalls = response.content
+          .filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
+          .map((b): ToolCall => ({
+            id:    b.id,
+            name:  b.name,
+            input: b.input as Record<string, unknown>,
+          }));
+
+        return {
+          text,
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+          stopReason: response.stop_reason === 'tool_use'
+            ? 'tool_use'
+            : response.stop_reason === 'max_tokens'
+              ? 'max_tokens'
+              : 'end_turn',
+          usage: {
+            inputTokens: response.usage.input_tokens,
+            outputTokens: response.usage.output_tokens,
+          },
+        };
+      }
+
       const response = await this.client.messages.create({
         model:      this.model,
         max_tokens: opts.maxTokens ?? 8_192,

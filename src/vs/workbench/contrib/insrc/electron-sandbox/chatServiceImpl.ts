@@ -573,6 +573,20 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 				this._onDidReceiveEvent.fire({ type: 'progress', progress });
 				break;
 			}
+			case 'liveStep': {
+				// Item 32b: forward the token chunk to any listener (chat
+				// panel renders a transient bubble keyed by agent+step).
+				this._onDidReceiveEvent.fire({
+					type: 'liveStep',
+					liveStep: {
+						agent: msg.agent,
+						step: msg.step,
+						text: msg.text,
+						...(msg.done === true ? { done: true } : {}),
+					},
+				});
+				break;
+			}
 			case 'context.set':
 			case 'context.clear':
 			case 'checkpoint':

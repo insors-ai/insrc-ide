@@ -36,7 +36,20 @@ export type DaemonStreamMessage =
 	| { readonly type: 'progress'; readonly step: string; readonly status: string }
 	| { readonly type: 'checkpoint'; readonly sessionId: string; readonly data: unknown }
 	| { readonly type: 'context.set'; readonly key: string; readonly value: unknown }
-	| { readonly type: 'context.clear'; readonly key: string };
+	| { readonly type: 'context.clear'; readonly key: string }
+	/**
+	 * Item 32b: live-step token stream. Emitted by the daemon's
+	 * `executeLlmTask` whenever an LLM step produces output; `done: true`
+	 * signals the step finished so the UI can collapse the transient
+	 * bubble. Keyed by `(agent, step)` on the UI side.
+	 */
+	| {
+		readonly type: 'liveStep';
+		readonly agent: string;
+		readonly step: string;
+		readonly text: string;
+		readonly done?: boolean;
+	};
 
 // ---------------------------------------------------------------------------
 // Stream handle - event-based, disposable

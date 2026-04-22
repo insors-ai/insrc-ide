@@ -1425,31 +1425,60 @@ async function executeLlmTask(
 
     let outputText: string;
 
-    if (task.useToolLoop) {
-      // Use tool loop — LLM can call Read, Grep, Glob, etc.
-      const { runToolLoop } = await import('../agent/tools/loop.js');
-      const { getToolDefinitions } = await import('../agent/tools/registry.js');
-      const tools = getToolDefinitions({ mcpAvailable: false }); // builtin tools only
-      const result = await runToolLoop(messages, {
-        provider,
-        tools,
-        intent: task.intent,
-        permissionMode: 'auto-accept',
-        maxTokens: task.maxTokens ?? 4096,
-        userPrompt: task.userMessage ?? task.description,
-        onToolCall: (call) => {
-          deps.send({ id: deps.requestId, stream: 'progress', data: {
-            message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + String(call.input['file_path']).split('/').pop() : ''}`,
-          }});
-        },
-        onProgress: (msg) => {
-          deps.send({ id: deps.requestId, stream: 'progress', data: { message: msg } });
-        },
-      });
-      outputText = result.response;
-    } else {
-      const response = await provider.complete(messages, completeOpts);
-      outputText = response.text;
+    // Item 32b: stream LLM output tokens to the client as live-step
+    // deltas so the user sees presence during long single-call steps
+    // (local LLM enhance/refine, Claude review/theme-spec). Only emit
+    // when the task has a resolver step label -- tasks without one
+    // tend to be internal plumbing the user shouldn't see. done=true
+    // is emitted via `finally` so the UI always collapses the bubble
+    // even when the provider throws mid-stream.
+    const liveStepAgent = task.resolverAgent;
+    const liveStepName = task.resolverStep;
+    const emitLiveStep = (text: string, done: boolean): void => {
+      if (!liveStepAgent || !liveStepName) { return; }
+      deps.send({ id: deps.requestId, stream: 'liveStep', data: {
+        agent: liveStepAgent,
+        step: liveStepName,
+        text,
+        ...(done ? { done: true } : {}),
+      } });
+    };
+
+    try {
+      if (task.useToolLoop) {
+        // Use tool loop — LLM can call Read, Grep, Glob, etc.
+        const { runToolLoop } = await import('../agent/tools/loop.js');
+        const { getToolDefinitions } = await import('../agent/tools/registry.js');
+        const tools = getToolDefinitions({ mcpAvailable: false }); // builtin tools only
+        const result = await runToolLoop(messages, {
+          provider,
+          tools,
+          intent: task.intent,
+          permissionMode: 'auto-accept',
+          maxTokens: task.maxTokens ?? 4096,
+          userPrompt: task.userMessage ?? task.description,
+          onToolCall: (call) => {
+            deps.send({ id: deps.requestId, stream: 'progress', data: {
+              message: `Using ${call.name}${call.input?.['file_path'] ? ': ' + String(call.input['file_path']).split('/').pop() : ''}`,
+            }});
+          },
+          onProgress: (msg) => {
+            deps.send({ id: deps.requestId, stream: 'progress', data: { message: msg } });
+          },
+        });
+        outputText = result.response;
+      } else {
+        if (liveStepAgent && liveStepName) {
+          completeOpts['onToken'] = (token: string) => emitLiveStep(token, false);
+        }
+        const response = await provider.complete(messages, completeOpts);
+        outputText = response.text;
+      }
+    } finally {
+      // Always close out the bubble so the UI doesn't leave a dimmed
+      // mid-stream widget hanging around. Empty text + done is enough
+      // for the client to compress / remove the bubble.
+      emitLiveStep('', true);
     }
 
     return {

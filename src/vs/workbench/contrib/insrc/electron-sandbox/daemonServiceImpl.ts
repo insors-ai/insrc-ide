@@ -171,6 +171,17 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 			case 'progress':
 				// Daemon sends { message }, not { step, status }
 				return { type: 'progress', step: String(data?.['step'] ?? data?.['message'] ?? ''), status: String(data?.['status'] ?? '') };
+			case 'liveStep':
+				// Item 32b: forward agent/step metadata so the chat panel can
+				// key transient bubbles by (agent, step) and collapse them
+				// when `done: true` arrives.
+				return {
+					type: 'liveStep',
+					agent: String(data?.['agent'] ?? ''),
+					step: String(data?.['step'] ?? ''),
+					text: String(data?.['text'] ?? ''),
+					...(data?.['done'] === true ? { done: true } : {}),
+				};
 			case 'checkpoint':
 				return { type: 'checkpoint', sessionId: String(data?.['sessionId'] ?? ''), data: data?.['data'] };
 			case 'context.set':
