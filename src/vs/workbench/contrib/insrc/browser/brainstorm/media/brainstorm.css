@@ -1109,7 +1109,7 @@
 	margin: 0;
 }
 
-/* Item 52: MarkdownRenderer emits `.rendered-markdown` with <pre><code> blocks. Add styling so code reads as code. */
+/* Items 52+56: MarkdownRenderer emits fenced code as `<div class="code" data-code="ID">` placeholder, replaced with tokenized span. */
 .insrc-brainstorm-spec-body .rendered-markdown > *:first-child {
 	margin-top: 0;
 }
@@ -1118,23 +1118,38 @@
 	margin-bottom: 0;
 }
 
-.insrc-brainstorm-spec-body .rendered-markdown pre {
+/* Fenced block: `.code` is the placeholder, async-filled with tokenized span. */
+.insrc-brainstorm-spec-body .rendered-markdown .code {
+	display: block;
 	background: var(--vscode-textCodeBlock-background);
 	border-radius: 4px;
 	padding: 10px 12px;
 	overflow-x: auto;
 	margin: 8px 0;
+	font-family: var(--monaco-monospace-font);
+	font-size: 0.9em;
+	line-height: 1.45;
+	white-space: pre;
 }
 
+.insrc-brainstorm-spec-body .rendered-markdown .code > span {
+	display: block;
+	white-space: pre;
+}
+
+/* Inline codespan (single backticks). */
 .insrc-brainstorm-spec-body .rendered-markdown code {
 	font-family: var(--monaco-monospace-font);
 	font-size: 0.9em;
-}
-
-.insrc-brainstorm-spec-body .rendered-markdown :not(pre) > code {
 	background: var(--vscode-textCodeBlock-background);
 	padding: 1px 4px;
 	border-radius: 3px;
+}
+
+/* Inline `<code>` inside `.code` -- undo the inline treatment. */
+.insrc-brainstorm-spec-body .rendered-markdown .code code {
+	background: transparent;
+	padding: 0;
 }
 
 .insrc-brainstorm-final-preview {

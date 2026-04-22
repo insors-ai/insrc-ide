@@ -344,30 +344,54 @@
 	white-space: pre-wrap;
 }
 
-/* Item 32b: live-step bubble -- dimmed + italic while tokens stream. */
-.insrc-chat-message.live-step {
-	opacity: 0.55;
-	font-style: italic;
-	border-left: 2px dashed var(--vscode-descriptionForeground);
-	padding-left: 8px;
-	margin-left: -10px;
+/* Items 32b+55: live-step activity console -- boxed, spinner header, auto-scrolling monospace body. */
+.insrc-chat-live-console {
+	margin: 6px 12px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 6px;
+	background: var(--vscode-editorWidget-background);
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
 }
 
-.insrc-chat-live-step-label {
+.insrc-chat-live-console-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	background: var(--vscode-panelSectionHeader-background, var(--vscode-sideBarSectionHeader-background));
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.insrc-chat-live-console-spinner {
+	width: 14px;
+	height: 14px;
+	background-image: url('../../media/insrc-logo-animated.svg');
+	background-size: contain;
+	background-repeat: no-repeat;
+	flex-shrink: 0;
+}
+
+.insrc-chat-live-console-label {
 	font-family: var(--monaco-monospace-font);
-	font-size: 10px;
+	font-size: 11px;
 	font-weight: 600;
 	text-transform: uppercase;
-	letter-spacing: 0.04em;
+	letter-spacing: 0.06em;
 	color: var(--vscode-descriptionForeground);
 }
 
-.insrc-chat-live-step-body {
+.insrc-chat-live-console-body {
 	font-family: var(--monaco-monospace-font);
-	font-size: 0.85em;
+	font-size: 0.82em;
+	line-height: 1.4;
 	white-space: pre-wrap;
-	max-height: 180px;
+	color: var(--vscode-editor-foreground);
+	padding: 8px 10px;
+	max-height: 200px;
 	overflow-y: auto;
+	scroll-behavior: smooth;
 }
 
 /* Assistant messages render HTML -- no pre-wrap */

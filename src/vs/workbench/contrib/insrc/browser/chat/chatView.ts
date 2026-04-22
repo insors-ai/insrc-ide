@@ -955,11 +955,13 @@ export class InsrcChatViewPane extends ViewPane {
 	}
 
 	/**
-	 * Item 32b: handle an incoming live-step token chunk. Creates a
-	 * transient dimmed bubble in the transcript on the first chunk for a
-	 * given `(agent, step)` pair, appends subsequent chunks, and removes
-	 * the bubble when `done: true` arrives. Bubbles are NOT persisted
-	 * to conversation history -- they're purely presence indicators.
+	 * Items 32b + 55: handle an incoming live-step token chunk. First
+	 * chunk for a given `(agent, step)` pair creates a dedicated
+	 * "activity console" bubble -- distinct DOM + styling from regular
+	 * chat messages so the user reads it as a live indicator, not an
+	 * answer. Subsequent chunks append to the body and auto-scroll the
+	 * bubble's internal overflow. `done: true` removes the bubble --
+	 * it was presence-only, never persisted.
 	 */
 	private _handleLiveStep(info: LiveStepInfo): void {
 		const key = `${info.agent}:${info.step}`;
@@ -972,11 +974,16 @@ export class InsrcChatViewPane extends ViewPane {
 			return;
 		}
 		if (!bubble) {
-			const el = dom.append(this._messageList, dom.$('.insrc-chat-message.live-step'));
-			const header = dom.append(el, dom.$('.insrc-chat-message-header'));
-			const label = dom.append(header, dom.$('span.insrc-chat-live-step-label'));
-			label.textContent = `[${info.agent}/${info.step}]`;
-			const body = dom.append(el, dom.$('.insrc-chat-message-content.insrc-chat-live-step-body'));
+			// Activity-console shell: dedicated class (NOT `.insrc-chat-message`)
+			// so chat-bubble styling doesn't bleed in. Structure is
+			// header(spinner + label) / body(scrolling monospace text).
+			const el = dom.append(this._messageList, dom.$('.insrc-chat-live-console'));
+			const header = dom.append(el, dom.$('.insrc-chat-live-console-header'));
+			const spinner = dom.append(header, dom.$('.insrc-chat-live-console-spinner'));
+			spinner.setAttribute('aria-hidden', 'true');
+			const label = dom.append(header, dom.$('span.insrc-chat-live-console-label'));
+			label.textContent = `${info.agent} / ${info.step}`;
+			const body = dom.append(el, dom.$('.insrc-chat-live-console-body'));
 			bubble = { el, body, text: '' };
 			this._liveStepBubbles.set(key, bubble);
 			this._emptyState.style.display = 'none';
@@ -984,6 +991,9 @@ export class InsrcChatViewPane extends ViewPane {
 		}
 		bubble.text += info.text;
 		bubble.body.textContent = bubble.text;
+		// Item 55: auto-scroll the bubble's INNER overflow to keep the
+		// most recent tokens visible without the user having to scroll.
+		bubble.body.scrollTop = bubble.body.scrollHeight;
 		this._scrollToBottom();
 	}
 
