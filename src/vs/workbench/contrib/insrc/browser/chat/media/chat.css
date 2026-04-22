@@ -172,6 +172,30 @@
 	background-repeat: no-repeat;
 }
 
+.insrc-chat-progress-text {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Item 8b: sticky intent badge pinned to the right of the progress bar. */
+.insrc-chat-progress-intent {
+	flex-shrink: 0;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
+.insrc-chat-progress-intent.hidden {
+	display: none;
+}
+
 /* -- Message list ------------------------------------ */
 
 .insrc-chat-messages {

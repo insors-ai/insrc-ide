@@ -116,6 +116,7 @@ export class InsrcChatViewPane extends ViewPane {
 	private _progressBar!: HTMLElement;
 	private _selectionBar!: HTMLElement;
 	private _progressText!: HTMLElement;
+	private _intentBadge!: HTMLElement;
 	private _messageList!: HTMLElement;
 	private _gateContainer!: HTMLElement;
 	private _attachedFilesEl!: HTMLElement;
@@ -258,7 +259,12 @@ export class InsrcChatViewPane extends ViewPane {
 		this._progressBar = dom.append(this._container, dom.$('.insrc-chat-progress.hidden'));
 		const spinner = dom.append(this._progressBar, dom.$('.insrc-chat-progress-spinner'));
 		spinner.setAttribute('aria-hidden', 'true');
-		this._progressText = dom.append(this._progressBar, dom.$('span'));
+		this._progressText = dom.append(this._progressBar, dom.$('span.insrc-chat-progress-text'));
+		// Item 8b: sticky intent badge. Rendered as a separate span inside
+		// the progress bar so it stays visible even when the progress
+		// text cycles through subsequent steps. Cleared on streamEnd /
+		// session reset. Hidden by default (display:none via CSS class).
+		this._intentBadge = dom.append(this._progressBar, dom.$('span.insrc-chat-progress-intent.hidden'));
 
 		// Input area (matches extension chat layout: rounded border, textarea + icon buttons, toolbar below)
 		this._inputArea = dom.append(this._container, dom.$('.insrc-chat-input-area'));
@@ -440,6 +446,17 @@ export class InsrcChatViewPane extends ViewPane {
 		const detected = match[1]!.trim();
 		if (!detected || detected === this._lastAnnouncedIntent) { return; }
 		this._lastAnnouncedIntent = detected;
+
+		// Item 8b: pin the detected intent on the progress bar as a sticky
+		// badge so it stays visible while the agent grinds through
+		// downstream steps. Cleared on streamEnd (see `_onStreamEnd`) and
+		// when the session resets.
+		if (this._intentBadge) {
+			const parenIdxForBadge = detected.indexOf(' (');
+			const shortLabel = parenIdxForBadge > 0 ? detected.slice(0, parenIdxForBadge).trim() : detected;
+			this._intentBadge.textContent = shortLabel;
+			this._intentBadge.classList.remove('hidden');
+		}
 
 		// Keep the dropdown honest. `brainstorm/<category>` lands under the
 		// top-level Brainstorm option.
@@ -929,6 +946,11 @@ export class InsrcChatViewPane extends ViewPane {
 	private _onStreamEnd(): void {
 		this._streamingMessageEl = undefined;
 		this._progressBar.classList.add('hidden');
+		// Item 8b: drop the sticky intent badge when the turn ends.
+		if (this._intentBadge) {
+			this._intentBadge.textContent = '';
+			this._intentBadge.classList.add('hidden');
+		}
 
 		// Remove inline progress message
 		if (this._progressMsgEl) {

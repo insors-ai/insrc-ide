@@ -409,10 +409,15 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 
 		// Progress bar reset + session-ended signal.
 		this._onDidReceiveEvent.fire({ type: 'streamEnd' });
+		// Fire session-change FIRST so listeners (notably the brainstorm
+		// session service) flip `isSessionActive` off before the flow
+		// contribution closes the panes -- otherwise the pane's
+		// closeHandler.showConfirm() still sees an active session and
+		// pops its "Close brainstorm and end the session?" dialog on a
+		// teardown that's already in progress.
+		this._onDidChangeSession.fire(undefined);
 		// Ask the flow contribution to close every open brainstorm editor.
 		this._onRequestCloseBrainstormPanes.fire();
-		// Fire last so listeners see a cleaned-up session.
-		this._onDidChangeSession.fire(undefined);
 	}
 
 	closeBrainstormPanes(): void {

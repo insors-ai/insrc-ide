@@ -28,6 +28,14 @@ export class InsrcAgentRunServiceImpl extends Disposable implements IInsrcAgentR
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
+		// Auto-refresh the Runs sidebar whenever the chat service's
+		// active session changes -- creation (user starts a brainstorm),
+		// resume (agent.resume RPC from Runs sidebar), and close all
+		// route through onDidChangeSession. Without this listener a
+		// newly-started run doesn't appear in the sidebar until the user
+		// triggers another mutation (discard / resume), which made it
+		// look like new sessions were silently dropped.
+		this._register(this.chatService.onDidChangeSession(() => this._onDidChangeRuns.fire()));
 	}
 
 	async getRuns(repoPath?: string): Promise<readonly AgentRunInfo[]> {
