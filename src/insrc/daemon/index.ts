@@ -283,22 +283,48 @@ async function main(): Promise<void> {
 
     'agent.resume': async (params) => {
       const { id } = params as { id: string };
-      const { readdirSync, readFileSync: readFs, existsSync: existsFs } = await import('node:fs');
+      const { readFileSync: readFs, existsSync: existsFs } = await import('node:fs');
       const { join } = await import('node:path');
       const { CHECKPOINT_SCHEMA_VERSION } = await import('./task.js');
-      const checkpointDir = join(PATHS.insrc, 'checkpoints');
-      if (!existsFs(checkpointDir)) {
-        return { ok: false, reason: 'no-checkpoint', message: 'No checkpoint directory' };
+      const { getSessionById } = await import('../db/conversations.js');
+
+      // Phase 3 + Phase 6 (plans/session-lifecycle.md): validate both
+      // the DB row and the checkpoint before handing off to
+      // chat.resumeFromCheckpoint. Returning a structured reason code
+      // here means the Runs sidebar surfaces a clear error before a
+      // stream is opened (otherwise the user sees a cancelBrainstormSession
+      // bounce that's hard to interpret).
+      const row = await getSessionById(db, id);
+      if (!row) {
+        return {
+          ok: false,
+          reason: 'no-session-row',
+          message: `Session ${id} has no DB row. Discard to clean up any orphan checkpoint.`,
+        };
       }
-      // File names are `${controllerId}-${sessionId}.json` (see
-      // checkpointState in task.ts). Match any controller for this session.
-      const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
-      if (files.length === 0) {
-        return { ok: false, reason: 'no-checkpoint', message: `No checkpoint for session ${id}` };
+      if (row.status === 'discarded' || row.status === 'completed') {
+        return {
+          ok: false,
+          reason: 'terminal-status',
+          message: `Session ${id} is ${row.status}; nothing to resume.`,
+          controllerId: row.agent,
+        };
+      }
+
+      // Checkpoint filename matches `${row.agent}-${id}.json`. Legacy
+      // files with a different controller prefix aren't resumable under
+      // Phase 3's DB-authoritative rules -- user should Discard.
+      const checkpointFile = join(PATHS.insrc, 'checkpoints', `${row.agent}-${id}.json`);
+      if (!existsFs(checkpointFile)) {
+        return {
+          ok: false,
+          reason: 'no-checkpoint',
+          message: `No checkpoint file for session ${id}. Discard to clean up.`,
+          controllerId: row.agent,
+        };
       }
       try {
-        const raw = JSON.parse(readFs(join(checkpointDir, files[0]!), 'utf-8')) as Record<string, unknown>;
-        const controllerId = raw['controller'] as string | undefined;
+        const raw = JSON.parse(readFs(checkpointFile, 'utf-8')) as Record<string, unknown>;
         const schemaVersion = raw['schemaVersion'] as number | undefined;
         // Decision I2: refuse when the checkpoint's schema doesn't match
         // the daemon's. Client surfaces a Discard-only message; we do
@@ -308,13 +334,13 @@ async function main(): Promise<void> {
             ok: false,
             reason: 'schema-drift',
             message: `Checkpoint schema ${schemaVersion ?? 'unknown'} cannot be resumed by this daemon (current ${CHECKPOINT_SCHEMA_VERSION}). Discard to continue.`,
-            ...(controllerId !== undefined ? { controllerId } : {}),
+            controllerId: row.agent,
           };
         }
         return {
           ok: true,
           sessionId: id,
-          ...(controllerId !== undefined ? { controllerId } : {}),
+          controllerId: row.agent,
           // The browser then opens chat.resumeFromCheckpoint to actually
           // stream the rehydrated pipeline.
           message: `Use chat.resumeFromCheckpoint with sessionId=${id}`,

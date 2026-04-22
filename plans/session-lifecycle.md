@@ -15,6 +15,21 @@ Related plans:
 - [chat-implementation.md](chat-implementation.md) -- original chat
   RPC surface; session DB schema is defined there.
 
+## Status
+
+| Phase | Scope                                    | Status |
+|-------|------------------------------------------|--------|
+| 1     | Atomic DB persistence on chat.start      | **DONE** (commit `a872e1d4682`) |
+| 2     | agent.list reads from DB                 | **DONE** (commit `d40e17c82b7`) |
+| 3     | chat.resumeFromCheckpoint DB+checkpoint join | **DONE** (commit `d40e17c82b7`) |
+| 4     | agent.discard full purge                 | **DONE** (commit `d40e17c82b7`) |
+| 5     | Trash button on Runs sidebar             | **DONE** (commit `d40e17c82b7`) |
+| 6     | Remove Item 7 stopgap code               | **DONE** (absorbed into Phase 3) |
+
+All six phases shipped. Legacy checkpoints (pre-Phase-1, no DB row)
+error cleanly on resume with a "Discard to clean up" message; the
+user runs Discard from the sidebar trash button and moves on.
+
 ---
 
 ## Goals

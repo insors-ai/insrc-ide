@@ -178,6 +178,16 @@ export async function saveTurn(db: DbClient, turn: TurnRecord): Promise<void> {
     format:      turn.format ?? 'text',
     vector:      turn.vector.length === EMBEDDING_DIM ? turn.vector : ZERO_VEC,
   }]);
+
+  // Bump the session's lastActivityAt so the Runs sidebar sorts live
+  // chat sessions to the top even when they haven't checkpointed
+  // (plans/session-lifecycle.md Phase 1). Best-effort -- missing
+  // session row just means this is a legacy pre-Phase-1 turn write.
+  try {
+    await bumpSessionActivity(db, turn.sessionId);
+  } catch {
+    // ignore
+  }
 }
 
 // ---------------------------------------------------------------------------

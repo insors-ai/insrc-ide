@@ -1135,9 +1135,14 @@ auto-terminating sessions on stream timeout, resume becomes the
 recovery path users need. Treat 7a as a near-term blocker, not a
 nice-to-have.
 
-### Status (2026-04-21, commit `86d3c586fee`)
+### Status (2026-04-21, commit `86d3c586fee`; refactored 2026-04-22)
 
-All five subtasks shipped:
+All five subtasks shipped; the fallback chain they introduced was
+superseded by [../session-lifecycle.md](../session-lifecycle.md).
+Item 7's resume plumbing now reads session metadata from the DB
+instead of parsing checkpoint state, and `agent.discard` purges
+DB rows + turns + checkpoint + pool entry together. See the
+session-lifecycle plan for the refactored architecture.
 
 - **7a** done. New `chat.resumeFromCheckpoint` stream handler in
   [chat-handler.ts](../../src/insrc/daemon/chat-handler.ts) loads the
