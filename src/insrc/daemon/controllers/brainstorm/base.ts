@@ -2099,7 +2099,20 @@ export abstract class BrainstormControllerBase implements TaskController {
     // the right retry task. We stash it on state under a dedicated key
     // (not lastStep) because state.lastStep is about to be overwritten
     // to 'resume-confirm' so dispatch() routes replies correctly.
-    const inFlightStep = this.state.lastStep ?? 'unknown';
+    //
+    // If state.lastStep is ALREADY 'resume-confirm' (user aborted while
+    // the resume-confirm gate was open, then resumed again), prefer the
+    // previously-stashed `resumingFromStep` so we don't lose the ORIGINAL
+    // in-flight step label across repeated resumes.
+    const rawLast = this.state.lastStep ?? 'unknown';
+    const inFlightStep = rawLast === 'resume-confirm'
+      ? (this.state.resumingFromStep ?? 'unknown')
+      : rawLast;
+    log.info({
+      rawLastStep: rawLast,
+      priorResumingFromStep: this.state.resumingFromStep ?? null,
+      resolvedInFlightStep: inFlightStep,
+    }, 'buildResumeConfirmTask: resolving in-flight step for retry');
     this.state.resumingFromStep = inFlightStep;
     this.state.lastStep = 'resume-confirm';
 
@@ -2196,6 +2209,10 @@ export abstract class BrainstormControllerBase implements TaskController {
         this.state.resumingFromStep = undefined;
       }
       const retry = this.rebuildInFlightTask(inFlightStep);
+      log.info({
+        inFlightStep: inFlightStep ?? null,
+        retryRebuilt: retry !== null,
+      }, 'afterResumeConfirm: retry path');
       if (retry) {
         // Item 45: before the retry task runs, hint the browser to
         // reopen the pane the user was on. The retry task itself is
@@ -2298,18 +2315,38 @@ export abstract class BrainstormControllerBase implements TaskController {
         return this.buildAssembleSpecTask();
       case 'finalize':
         return this.buildFinalizeTask();
-      // Parametric in-flight steps: retry not supported in Phase B --
-      // the state doesn't carry enough by itself to rebuild the task
-      // (e.g. review output for refine-ideas, theme index for
-      // per-theme steps). The abandon branch handles these cleanly.
+
+      // Per-theme steps: themeIndex + specSections are persisted on state,
+      // so we can rebuild each one without the prior task's output.
+      case 'search-theme-context': {
+        const themeIdx = this.state.currentThemeIndex ?? 0;
+        return this.buildSearchThemeContextTask(themeIdx);
+      }
+      case 'generate-theme-spec': {
+        const themeIdx = this.state.currentThemeIndex ?? 0;
+        return this.buildGenerateThemeSpecTask(themeIdx);
+      }
+      case 'review-theme-spec': {
+        // review-theme-spec wants the generate-step content to re-send
+        // to Claude. afterGenerateThemeSpec pushed it onto specSections,
+        // so pull the last section back out.
+        const themeIdx = this.state.currentThemeIndex ?? 0;
+        const sections = this.state.specSections ?? [];
+        const lastSection = sections[sections.length - 1];
+        if (!lastSection) {
+          return null;
+        }
+        return this.buildReviewThemeSpecTask(lastSection.content, themeIdx);
+      }
+
+      // Still-parametric steps (Item 7f / 16b): the immediate prior task's
+      // output isn't persisted on state so retry can't fully reconstruct.
+      // Abandon is the only safe action here.
       case 'enhance-ideas-llm':
       case 'refine-ideas':
       case 'idea-diverge-single':
       case 'idea-discuss-search':
       case 'idea-discuss-respond':
-      case 'search-theme-context':
-      case 'generate-theme-spec':
-      case 'review-theme-spec':
       default:
         return null;
     }
