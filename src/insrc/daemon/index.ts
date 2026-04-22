@@ -215,59 +215,70 @@ async function main(): Promise<void> {
     },
 
     'agent.list': async () => {
-      // List agent runs from checkpoint files
-      const { readdirSync, readFileSync: readFs, existsSync: existsFs } = await import('node:fs');
+      // Phase 2 of plans/session-lifecycle.md: the DB is authoritative
+      // for session identity + metadata (agent/category/status/repo).
+      // Checkpoint presence is a secondary signal used only to peek at
+      // the lastStep label for the sidebar. Sessions without a live
+      // checkpoint (status='completed') are filtered out -- they're
+      // not resumable. Discarded sessions are filtered likewise.
+      const { listSessionRecords } = await import('../db/conversations.js');
+      const { existsSync, readFileSync: readFs } = await import('node:fs');
       const { join } = await import('node:path');
+
+      const sessions = await listSessionRecords(db, { statuses: ['active', 'paused'] });
       const checkpointDir = join(PATHS.insrc, 'checkpoints');
-      if (!existsFs(checkpointDir)) return [];
 
       const runs: Array<{
         id: string; agent: string; status: string;
         step?: string; repo?: string; createdAt: string; summary?: string;
       }> = [];
 
-      try {
-        for (const file of readdirSync(checkpointDir)) {
-          if (!file.endsWith('.json')) continue;
-          try {
-            const raw = JSON.parse(readFs(join(checkpointDir, file), 'utf-8')) as Record<string, unknown>;
-            // Field mapping matches the CheckpointFile shape written by
-            // `checkpointState` in task.ts:
-            //   `raw.controller` holds the agent id (brainstorm/designer/...)
-            //   `raw.sessionId` holds the session UUID
-            //   `raw.timestamp` is the ISO mtime
-            //   `raw.state.brainstormState` holds the controller's live state
-            //     (for brainstorm runs; other controllers have their own key)
-            // A missing field is tolerated and falls back so malformed old
-            // checkpoints still appear in the list rather than vanishing.
-            const state = (raw['state'] as Record<string, unknown> | undefined) ?? {};
-            const brainstormState = state['brainstormState'] as
-              | { lastStep?: string; summary?: string; input?: { repoPath?: string }; category?: string }
-              | undefined;
-            const derivedAgent = (raw['controller'] as string)
-              ?? (raw['agent'] as string)
-              ?? (file.startsWith('brainstorm-') ? 'brainstorm' : 'unknown');
-            const entry: {
-              id: string; agent: string; status: string;
-              step?: string; repo?: string; createdAt: string; summary?: string;
-            } = {
-              id: (raw['sessionId'] as string) ?? file.replace('.json', ''),
-              agent: derivedAgent,
-              status: (raw['status'] as string) ?? 'paused',
-              createdAt: (raw['timestamp'] as string) ?? (raw['createdAt'] as string) ?? '',
-            };
-            const stepVal = brainstormState?.lastStep ?? (raw['lastStep'] as string | undefined);
-            const repoVal = brainstormState?.input?.repoPath ?? (raw['repo'] as string | undefined);
-            const summaryVal = brainstormState?.summary ?? (raw['summary'] as string | undefined);
-            if (stepVal !== undefined) entry.step = stepVal;
-            if (repoVal !== undefined) entry.repo = repoVal;
-            if (summaryVal !== undefined) entry.summary = summaryVal;
-            runs.push(entry);
-          } catch { /* skip corrupt checkpoint */ }
-        }
-      } catch { /* dir read failed */ }
+      for (const s of sessions) {
+        const file = join(checkpointDir, `${s.agent}-${s.id}.json`);
+        const hasCheckpoint = existsSync(file);
 
-      return runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        // Peek only the lastStep field; don't pay a full JSON parse
+        // cost for the whole checkpoint just to render a label.
+        let step: string | undefined;
+        if (hasCheckpoint) {
+          try {
+            const raw = JSON.parse(readFs(file, 'utf-8')) as {
+              state?: { brainstormState?: { lastStep?: string } };
+            };
+            step = raw.state?.brainstormState?.lastStep;
+          } catch {
+            // Corrupt / in-flight write; no step, still show the row.
+          }
+        }
+
+        // Status mapping:
+        //   'active'  -> DB says session in flight, checkpoint may or
+        //                may not exist yet (covers the window between
+        //                chat.start and the first persisted task).
+        //   'paused'  -> checkpoint present, pipeline exited, awaiting
+        //                resume. Resumable.
+        // When a checkpoint is missing for a 'paused' session, the
+        // checkpoint was manually removed or never flushed -- surface
+        // as 'crashed' so the user knows discard is the only option.
+        let reportedStatus: string = s.status;
+        if (s.status === 'paused' && !hasCheckpoint) reportedStatus = 'crashed';
+
+        const entry: {
+          id: string; agent: string; status: string;
+          step?: string; repo?: string; createdAt: string; summary?: string;
+        } = {
+          id: s.id,
+          agent: s.agent || 'unknown',
+          status: reportedStatus,
+          createdAt: s.lastActivityAt || s.createdAt,
+        };
+        if (step !== undefined) entry.step = step;
+        if (s.repo) entry.repo = s.repo;
+        if (s.summary) entry.summary = s.summary;
+        runs.push(entry);
+      }
+
+      return runs;
     },
 
     'agent.resume': async (params) => {
@@ -315,26 +326,57 @@ async function main(): Promise<void> {
 
     'agent.discard': async (params) => {
       const { id } = params as { id: string };
+      // Phase 4 discard (plans/session-lifecycle.md). Purges every
+      // trace of the session so the Runs sidebar stops listing it:
+      //   1. Checkpoint file(s) under ~/.insrc/checkpoints/
+      //   2. DB sessions row + all associated turns.
+      //   3. In-memory pool entry (aborts any in-flight agent).
+      // Best-effort per step -- a missing checkpoint / DB row is fine;
+      // continue purging the other artifacts.
       const { readdirSync, unlinkSync, existsSync: existsFs } = await import('node:fs');
       const { join } = await import('node:path');
-      // Checkpoint files are named `${controllerId}-${sessionId}.json` (see
-      // `checkpointState` in task.ts). Match by session-id suffix so this
-      // RPC works regardless of which controller (brainstorm/designer/...)
-      // owned the session. Multiple matches are unlikely but safe to sweep.
+      const { deleteSession } = await import('../db/conversations.js');
+      const { dropSessionFromPool } = await import('./chat-handler.js');
+
+      // 1. Checkpoint files (match by session-id suffix -- works
+      //    regardless of which controller owned the session).
+      let checkpointsDeleted = 0;
       const checkpointDir = join(PATHS.insrc, 'checkpoints');
-      if (!existsFs(checkpointDir)) return { ok: true, deleted: 0 };
-      const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
-      let deleted = 0;
-      for (const f of files) {
-        try {
-          unlinkSync(join(checkpointDir, f));
-          deleted++;
-        } catch {
-          // Best-effort: a stale checkpoint file is a leak, not a crash.
+      if (existsFs(checkpointDir)) {
+        const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
+        for (const f of files) {
+          try {
+            unlinkSync(join(checkpointDir, f));
+            checkpointsDeleted++;
+          } catch {
+            // Best-effort.
+          }
         }
       }
-      log.info({ sessionId: id, deleted }, 'agent.discard');
-      return { ok: true, deleted };
+
+      // 2. DB session row + turns.
+      let sessionRows = 0;
+      let turnRows = 0;
+      try {
+        const result = await deleteSession(db, id);
+        sessionRows = result.sessionRows;
+        turnRows = result.turnRows;
+      } catch (err) {
+        log.warn({ err, sessionId: id }, 'agent.discard: DB delete failed');
+      }
+
+      // 3. In-memory pool entry (aborts in-flight agent if any).
+      try {
+        dropSessionFromPool(id);
+      } catch (err) {
+        log.warn({ err, sessionId: id }, 'agent.discard: pool.drop failed');
+      }
+
+      log.info(
+        { sessionId: id, checkpointsDeleted, sessionRows, turnRows },
+        'agent.discard',
+      );
+      return { ok: true, checkpointsDeleted, sessionRows, turnRows };
     },
 
     'daemon.status': async () => {

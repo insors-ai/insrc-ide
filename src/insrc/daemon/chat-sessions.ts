@@ -132,49 +132,6 @@ export class ChatSessionPool {
   }
 
   /**
-   * Phase 2 session resume (Item 7). Ensures an ActiveSession exists in
-   * the pool for the given `sessionId`, preferring a DB-backed restore
-   * but falling back to a fresh in-pool entry when the DB has no
-   * record. This fallback matters for brainstorm sessions that never
-   * completed a turn: they write checkpoint files but never
-   * `saveSession`/`saveTurn`, so post-IDE-restart the DB lookup would
-   * fail and resume would bail.
-   *
-   * Returns the sessionId on success, null only if *neither* path
-   * works (missing repoPath in both DB and checkpoint state).
-   */
-  async restoreOrCreate(sessionId: string, fallbackRepoPath?: string): Promise<string | null> {
-    const restored = await this.restore(sessionId);
-    if (restored) return restored;
-    if (!fallbackRepoPath) {
-      log.warn({ sessionId }, 'restoreOrCreate: DB miss and no fallback repoPath');
-      return null;
-    }
-
-    const config = await loadConfigForRepo(fallbackRepoPath);
-    const session = new Session({ repoPath: fallbackRepoPath, config, id: sessionId });
-    await session.init();
-
-    const active: ActiveSession = {
-      id: sessionId,
-      session,
-      channel: null,
-      abortController: null,
-      agentRunning: false,
-      lastStep: null,
-      createdAt: Date.now(),
-      lastActivityAt: Date.now(),
-      injectedMessages: [],
-      injectedIdeas: [],
-      fileCache: new SessionFileCache(),
-      pdfCache: new SessionPDFCache(),
-    };
-    this.sessions.set(sessionId, active);
-    log.info({ sessionId, repo: fallbackRepoPath }, 'chat session created from checkpoint (no DB record)');
-    return sessionId;
-  }
-
-  /**
    * Restore a persisted session from DB into the active pool.
    * Hydrates the ContextManager with L2 summary, L3a recent turns, and L3b semantic history.
    * Returns the sessionId if successful, null if not found in DB.
@@ -278,6 +235,22 @@ export class ChatSessionPool {
     s.abortController = null;
     s.agentRunning = false;
     s.lastActivityAt = Date.now();
+  }
+
+  /**
+   * Phase 4 discard (plans/session-lifecycle.md). Aborts any in-flight
+   * agent and evicts the session from the pool. Callers (`agent.discard`
+   * RPC) additionally purge the DB + checkpoint file -- this method is
+   * just the in-memory cleanup.
+   */
+  drop(sessionId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    if (s.abortController && !s.abortController.signal.aborted) {
+      s.abortController.abort();
+    }
+    this.sessions.delete(sessionId);
+    log.info({ sessionId }, 'chat session dropped');
   }
 
   /**

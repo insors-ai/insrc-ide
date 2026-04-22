@@ -335,6 +335,36 @@ export async function bumpSessionActivity(db: DbClient, id: string): Promise<voi
   );
 }
 
+/**
+ * Phase 4 hard delete (plans/session-lifecycle.md). Removes the
+ * session row, all turns with the matching sessionId, and returns
+ * counts so `agent.discard` can log what was cleaned up.
+ *
+ * Kept separate from `setSessionStatus('discarded', id)` because
+ * discard is permanent -- the caller should only reach here after
+ * the user confirmed "permanently delete this run" in the UI.
+ */
+export async function deleteSession(
+  db: DbClient,
+  sessionId: string,
+): Promise<{ sessionRows: number; turnRows: number }> {
+  const safeId = sessionId.replace(/'/g, "''");
+  const sessionsTable = await getSessionsTable(db);
+  const turnsTable = await getTurnsTable(db);
+
+  const sessionRows = (await sessionsTable.query().filter(`id = '${safeId}'`).toArray()).length;
+  if (sessionRows > 0) {
+    await sessionsTable.delete(`id = '${safeId}'`);
+  }
+
+  const turnRows = (await turnsTable.query().filter(`sessionId = '${safeId}'`).toArray()).length;
+  if (turnRows > 0) {
+    await turnsTable.delete(`sessionId = '${safeId}'`);
+  }
+
+  return { sessionRows, turnRows };
+}
+
 // ---------------------------------------------------------------------------
 // Cross-session seeding
 // ---------------------------------------------------------------------------
@@ -747,6 +777,31 @@ export async function listSessions(
     }))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   return sessions;
+}
+
+/**
+ * Return full SessionRecord rows, optionally filtered by repo and/or
+ * status. Used by `agent.list` (plans/session-lifecycle.md Phase 2)
+ * so the Runs sidebar can key on the DB-authoritative agent + status
+ * + lastActivityAt fields without parsing checkpoint files.
+ */
+export async function listSessionRecords(
+  db: DbClient,
+  opts?: { repo?: string; statuses?: SessionStatus[] },
+): Promise<SessionRecord[]> {
+  const table = await getSessionsTable(db);
+  const rows = await table.query().toArray();
+  const statusSet = opts?.statuses ? new Set<string>(opts.statuses) : undefined;
+  const out = rows
+    .filter(row => !opts?.repo || (row['repo'] as string) === opts.repo)
+    .filter(row => {
+      if (!statusSet) return true;
+      const rowStatus = (row['status'] as string | undefined) ?? 'completed';
+      return statusSet.has(rowStatus);
+    })
+    .map(row => rowToSessionRecord(row))
+    .sort((a, b) => (b.lastActivityAt || b.createdAt).localeCompare(a.lastActivityAt || a.createdAt));
+  return out;
 }
 
 /** Reset module-level table caches (for testing). */

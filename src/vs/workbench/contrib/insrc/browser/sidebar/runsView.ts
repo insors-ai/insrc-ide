@@ -18,6 +18,7 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcAgentRunService, type AgentRunInfo } from '../../common/agentRunService.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import type { IListVirtualDelegate } from '../../../../../base/browser/ui/list/list.js';
 import type { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../../base/browser/ui/tree/tree.js';
 import { WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
@@ -114,8 +115,9 @@ interface IRunTemplateData {
 	label: HTMLElement;
 	status: HTMLElement;
 	playBtn: HTMLButtonElement;
-	/** Mutable ref to the current row's run so the play-click handler
-	 *  (registered once) reads the right id post-virtualization. */
+	discardBtn: HTMLButtonElement;
+	/** Mutable ref to the current row's run so click handlers (registered
+	 *  once per template) read the right id post-virtualization. */
 	currentRun: { value: AgentRunInfo | undefined };
 }
 
@@ -125,6 +127,7 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 	constructor(
 		private readonly runService: IInsrcAgentRunService,
 		private readonly notificationService: INotificationService,
+		private readonly dialogService: IDialogService,
 		private readonly logService: ILogService,
 	) { }
 
@@ -170,6 +173,21 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 		playBtn.title = 'Resume this run';
 		playBtn.textContent = '\u25B6';
 
+		// Inline discard button (plans/session-lifecycle.md Phase 5).
+		// Permanent: DB row, turns, summary, checkpoint all go. Always
+		// preceded by a confirm dialog; shown on every row regardless
+		// of status so completed runs can be cleaned up too.
+		const discardBtn = dom.append(row, dom.$('button.insrc-run-discard-btn')) as HTMLButtonElement;
+		discardBtn.style.flexShrink = '0';
+		discardBtn.style.background = 'transparent';
+		discardBtn.style.border = 'none';
+		discardBtn.style.color = 'var(--vscode-errorForeground)';
+		discardBtn.style.cursor = 'pointer';
+		discardBtn.style.padding = '0 4px';
+		discardBtn.style.fontSize = '12px';
+		discardBtn.title = 'Discard this run (permanent)';
+		discardBtn.textContent = '\u2716';
+
 		const currentRun: { value: AgentRunInfo | undefined } = { value: undefined };
 		playBtn.addEventListener('click', async (e) => {
 			e.stopPropagation();
@@ -183,8 +201,29 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 				this.notificationService.error(`Failed to resume: ${(err as Error).message}`);
 			}
 		});
+		discardBtn.addEventListener('click', async (e) => {
+			e.stopPropagation();
+			const run = currentRun.value;
+			if (!run) { return; }
+			const agentLabel = run.agent || 'run';
+			const { confirmed } = await this.dialogService.confirm({
+				type: 'warning',
+				message: `Discard ${agentLabel} run?`,
+				detail: `This permanently deletes the session's history, checkpoint, and summary. The run will disappear from this sidebar and cannot be recovered.`,
+				primaryButton: 'Discard',
+				cancelButton: 'Cancel',
+			});
+			if (!confirmed) { return; }
+			try {
+				await this.runService.discardRun(run.id);
+				this.notificationService.info(`Discarded: ${run.id}`);
+			} catch (err) {
+				this.logService.warn(`[insrc:runs] discard failed: ${(err as Error).message}`);
+				this.notificationService.error(`Failed to discard: ${(err as Error).message}`);
+			}
+		});
 
-		return { icon, label, status, playBtn, currentRun };
+		return { icon, label, status, playBtn, discardBtn, currentRun };
 	}
 
 	renderElement(node: ITreeNode<RunsTreeNode, FuzzyScore>, _index: number, data: IRunTemplateData): void {
@@ -295,6 +334,7 @@ export class InsrcRunsViewPane extends ViewPane {
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@IInsrcAgentRunService private readonly runService: IInsrcAgentRunService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@IDialogService private readonly dialogService: IDialogService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
@@ -316,7 +356,7 @@ export class InsrcRunsViewPane extends ViewPane {
 			'InsrcRuns',
 			treeContainer,
 			new RunsDelegate(),
-			[new AgentGroupRenderer(), new RunRenderer(this.runService, this.notificationService, this.logService)],
+			[new AgentGroupRenderer(), new RunRenderer(this.runService, this.notificationService, this.dialogService, this.logService)],
 			new RunsDataSource(this.daemonService),
 			{
 				identityProvider: {
@@ -339,6 +379,15 @@ export class InsrcRunsViewPane extends ViewPane {
 		if (this.daemonService.isConnected) {
 			this.tree.setInput(RUNS_ROOT);
 		}
+
+		// Re-render after resume / discard / external mutation so the
+		// sidebar reflects the new state without requiring the user to
+		// reopen the view.
+		this._register(this.runService.onDidChangeRuns(() => {
+			if (this.daemonService.isConnected && this.tree) {
+				this.tree.updateChildren(RUNS_ROOT).catch(() => { /* view closed */ });
+			}
+		}));
 	}
 
 	protected override layoutBody(height: number, width: number): void {
