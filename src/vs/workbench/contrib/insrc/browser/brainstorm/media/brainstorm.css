@@ -1118,8 +1118,8 @@
 	margin-bottom: 0;
 }
 
-/* Fenced block: `.code` is the placeholder, async-filled with tokenized span. */
-.insrc-brainstorm-spec-body .rendered-markdown .code {
+/* Fenced code block. MarkdownRenderer emits `<div class="code" data-code="ID">` but DOMPurify strips `class` from non-SPAN elements -- target `[data-code]` instead, which survives sanitization. */
+.insrc-brainstorm-spec-body .rendered-markdown div[data-code] {
 	display: block;
 	background: var(--vscode-textCodeBlock-background);
 	border-radius: 4px;
@@ -1132,7 +1132,7 @@
 	white-space: pre;
 }
 
-.insrc-brainstorm-spec-body .rendered-markdown .code > span {
+.insrc-brainstorm-spec-body .rendered-markdown div[data-code] > span {
 	display: block;
 	white-space: pre;
 }
@@ -1146,8 +1146,8 @@
 	border-radius: 3px;
 }
 
-/* Inline `<code>` inside `.code` -- undo the inline treatment. */
-.insrc-brainstorm-spec-body .rendered-markdown .code code {
+/* Inline `<code>` inside a fenced block -- undo the inline treatment. */
+.insrc-brainstorm-spec-body .rendered-markdown div[data-code] code {
 	background: transparent;
 	padding: 0;
 }
