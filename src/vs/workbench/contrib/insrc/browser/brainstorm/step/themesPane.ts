@@ -9,6 +9,7 @@ import { ITelemetryService } from '../../../../../../platform/telemetry/common/t
 import { IThemeService } from '../../../../../../platform/theme/common/themeService.js';
 import { IStorageService } from '../../../../../../platform/storage/common/storage.js';
 import { ILogService } from '../../../../../../platform/log/common/log.js';
+import { createTrustedTypesPolicy } from '../../../../../../base/browser/trustedTypes.js';
 import { IInsrcChatService } from '../../../common/chatService.js';
 import {
 	IInsrcBrainstormSessionService,
@@ -16,6 +17,14 @@ import {
 	type BrainstormGateSnapshot,
 } from '../../../common/brainstormSessionService.js';
 import { BrainstormPaneBase } from './brainstormPaneBase.js';
+
+// Item 44: daemon sends `gate.content` as rendered HTML (from
+// renderMarkdown), so the "Promotions, merges and gaps" block has to
+// go through a trusted-types policy; otherwise CSP makes us fall back
+// to textContent and the user sees raw <ol>/<li>/<p> tags.
+const ttPolicy = createTrustedTypesPolicy('insrcBrainstormThemes', {
+	createHTML: (value: string) => value,
+});
 
 /**
  * Convergence review pane. Shows the clustered themes (from the session
@@ -70,13 +79,20 @@ export class BrainstormThemesPane extends BrainstormPaneBase {
 			}
 		}
 
-		// Raw gate content (promotions / merges / gaps) as pre-formatted block
+		// Gate content is daemon-rendered HTML (promotions / merges /
+		// gaps summary). Render via trusted types so markdown formats
+		// (Item 44); fall back to preformatted text if CSP blocks.
 		if (gate.content) {
 			const details = dom.append(panel, dom.$('details.insrc-brainstorm-theme-details'));
 			const summary = dom.append(details, dom.$('summary'));
 			summary.textContent = 'Promotions, merges and gaps';
-			const pre = dom.append(details, dom.$('pre.insrc-brainstorm-theme-raw'));
-			pre.textContent = gate.content;
+			if (ttPolicy) {
+				const body = dom.append(details, dom.$('.insrc-brainstorm-theme-raw'));
+				(body as HTMLElement).innerHTML = ttPolicy.createHTML(gate.content) as unknown as string;
+			} else {
+				const pre = dom.append(details, dom.$('pre.insrc-brainstorm-theme-raw'));
+				pre.textContent = gate.content;
+			}
 		}
 
 		// Actions

@@ -725,11 +725,17 @@ export class InsrcChatViewPane extends ViewPane {
 		if (hasDiff) {
 			this._openDiffFromGate(gate);
 		} else if (gate.content) {
-			// Render non-diff markdown content (e.g. intent-confirm's
-			// confidence + reasoning block) as a preformatted body so the
-			// user has context beyond the bare action buttons.
+			// gate.content is daemon-rendered HTML (from renderMarkdown at
+			// gateTaskResult). Use trusted types so markdown formats as
+			// headings / lists / code blocks instead of showing raw <h2>
+			// <p> <ul> tags as literal text (Item 44 -- resume-confirm
+			// gate + any other gate that lands inline in the chat panel).
 			const body = dom.append(card, dom.$('.insrc-chat-gate-body'));
-			body.textContent = gate.content;
+			if (ttPolicy) {
+				(body as HTMLElement).innerHTML = ttPolicy.createHTML(gate.content) as unknown as string;
+			} else {
+				body.textContent = gate.content;
+			}
 		}
 
 		// Build action bar. Prefer rich action metadata (labels, hints,
