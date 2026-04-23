@@ -460,8 +460,21 @@ export class InsrcChatViewPane extends ViewPane {
 		const match = step.match(/^Intent:\s*(.+)$/);
 		if (!match) { return; }
 		const detected = match[1]!.trim();
-		if (!detected || detected === this._lastAnnouncedIntent) { return; }
-		this._lastAnnouncedIntent = detected;
+		if (!detected) { return; }
+		// Dedup on just the primary/sub intent (not the full string) so
+		// the plain secondary emission ("Intent: brainstorm/general"
+		// from pipeline activation) doesn't fire a duplicate persistent
+		// chat message after the detailed one ("Intent: brainstorm/
+		// general [Quadruple-XL] (reasoning)"). We key off the headline
+		// portion before the `[...]` scope tag + before the `(reasoning)`.
+		const parenForDedup = detected.indexOf(' (');
+		const bracketForDedup = detected.indexOf(' [');
+		const dedupEnd = [parenForDedup, bracketForDedup]
+			.filter(i => i > 0)
+			.reduce((a, b) => Math.min(a, b), detected.length);
+		const dedupKey = detected.slice(0, dedupEnd).trim();
+		if (dedupKey === this._lastAnnouncedIntent) { return; }
+		this._lastAnnouncedIntent = dedupKey;
 
 		// Split the progress string into intent / scope / reasoning parts.
 		// Format emitted by the daemon:

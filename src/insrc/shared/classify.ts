@@ -52,19 +52,19 @@ export const SCOPE_META: Readonly<Record<ScopeSize, ScopeMeta>> = {
     description: 'a feature or module-sized piece of work (multi-session)',
   },
   XL: {
-    label: 'Extra-Large',
+    label: 'Very Large',
     description: 'subsystem-scale change spanning several modules',
   },
   XXL: {
-    label: 'Double-XL',
+    label: 'Very Very Large',
     description: 'multi-subsystem change (e.g. auth + storage + UI)',
   },
   XXXL: {
-    label: 'Triple-XL',
+    label: 'Extremely Large',
     description: 'cross-cutting architectural change',
   },
   XXXXL: {
-    label: 'Quadruple-XL',
+    label: 'Gigantic',
     description: 'major rewrite or new product direction',
   },
 };
