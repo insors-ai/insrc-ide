@@ -107,6 +107,31 @@ export interface TodoList {
 }
 
 // ---------------------------------------------------------------------------
+// withTodo types (Phase 9d)
+// ---------------------------------------------------------------------------
+
+export interface TodoSnapshot {
+	readonly sourceRef: string;
+	readonly title: string;
+	readonly description?: string | undefined;
+	readonly tags?: readonly string[] | undefined;
+	readonly meta?: Readonly<Record<string, unknown>> | undefined;
+}
+
+export interface TodoInvocationResponseItem {
+	readonly sourceRef: string;
+	readonly status: TodoItemStatus;
+	readonly blockedReason?: string | undefined;
+	readonly targetListId?: string | undefined;
+	readonly targetItemId?: string | undefined;
+	readonly note?: string | undefined;
+}
+
+export interface TodoInvocationResult {
+	readonly items: readonly TodoInvocationResponseItem[];
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -151,7 +176,77 @@ export interface IInsrcTodosService {
 		opts?: { includeArchived?: boolean },
 	): Promise<readonly TodoList[]>;
 
-	// -- Comments (Phase 5d, the one user -> agent write channel) ----------
+	// -- User-owned list / item writes (Phase 9) ---------------------------
+	// Used by the prompt notepad's "My TODOs" section. The daemon enforces
+	// `owner === 'user'` on every mutation path; the todos pane never
+	// invokes these.
+
+	createUserList(opts: {
+		sessionId: string;
+		title: string;
+		description?: string;
+		body?: string;
+		parentListId?: string;
+	}): Promise<TodoList>;
+
+	updateListFields(listId: string, patch: {
+		title?: string;
+		description?: string;
+		body?: string;
+		status?: 'active' | 'completed' | 'archived';
+	}): Promise<TodoList>;
+
+	archiveList(listId: string): Promise<TodoList>;
+	unarchiveList(listId: string): Promise<TodoList>;
+
+	addItem(listId: string, opts: {
+		title: string;
+		description?: string;
+		tags?: readonly string[];
+		meta?: Readonly<Record<string, unknown>>;
+		insertAfterItemId?: string;
+	}): Promise<TodoItem>;
+
+	updateItem(itemId: string, patch: {
+		title?: string;
+		description?: string;
+		status?: 'pending' | 'in_progress' | 'blocked' | 'completed' | 'cancelled';
+		blockedReason?: string;
+		tags?: readonly string[];
+		meta?: Readonly<Record<string, unknown>>;
+	}): Promise<TodoItem>;
+
+	reorderItem(itemId: string, insertAfterItemId: string | null): Promise<TodoItem>;
+	removeItem(itemId: string): Promise<void>;
+	clearCompleted(listId: string): Promise<TodoList>;
+
+	/**
+	 * Hand the list off to another owner (agent family or `'user'`).
+	 * Caller must currently own the list. Permanent ownership flip.
+	 */
+	transferList(listId: string, to: TodoOwner, reason: string): Promise<TodoList>;
+
+	/** Move a list under a different parent (same session). `null` = root. */
+	reparentList(listId: string, newParentListId: string | null): Promise<TodoList>;
+
+	// -- withTodo (Phase 9d) -----------------------------------------------
+
+	/**
+	 * Forward a set of user-owned item snapshots to a target agent
+	 * family. Kicks off an agent run whose `input.todos` is the
+	 * snapshot array; the returned `TodoInvocationResult` reports
+	 * per-snapshot disposition using the same `TodoItemStatus`
+	 * vocabulary as the framework. The caller is responsible for
+	 * applying each response item's `status` to its source item
+	 * (typically via `updateItem(sourceId, { status })`).
+	 */
+	forwardToAgent(opts: {
+		targetFamily: TodoOwner;
+		sessionId: string;
+		items: readonly TodoSnapshot[];
+	}): Promise<TodoInvocationResult>;
+
+	// -- Comments (Phase 5d) ----------------------------------------------
 
 	/**
 	 * Post a comment on a readable item. Author is always `'user'`

@@ -18,12 +18,15 @@ unifies that pattern into one framework the agents consume.
 
 - [session-lifecycle.md](session-lifecycle.md) -- defines the session
   row this framework attaches to.
-- [prompt-notepad.md](prompt-notepad.md) -- user-owned scratch surface
-  for composing prompts. This plan and the notepad **stay cleanly
-  separated**: agents own todos (read-only to the user), the user
-  owns the notepad (read-only to agents). Both share the editor-pane
-  scaffolding and Monaco plumbing (Phase 8 consolidates the shared
-  bits so we don't duplicate the pane infra).
+- [prompt-notepad.md](prompt-notepad.md) -- user's surface for
+  composing prompts **and for creating / editing user-owned TODO
+  lists** (Phase 9). The notepad writes to the same todo tables
+  the agents do; lists with `owner === 'user'` render in the
+  notepad, lists with any other owner render in the todos pane.
+  Agents never see user-owned lists in their reads -- the user
+  must explicitly `transfer` a list or `forwardToAgent` snapshots
+  to bring them into agent view. Phase 8 consolidates the shared
+  pane-infra between the two surfaces.
 - [brainstorm/pending-fixes.md](brainstorm/pending-fixes.md) -- Items
   53 (handoff) and 54 (save-error surface) both would have been
   simpler with a shared TODO primitive carrying the post-handoff
@@ -46,6 +49,7 @@ unifies that pattern into one framework the agents consume.
 | 6     | Migration proof: port the delegate variant's plan list first  | pending |
 | 7     | Broader family adoption (brainstorm / designer / planner)     | pending |
 | 8     | Factor shared pane-scaffolding + markdown widget with notepad | pending |
+| 9     | User-owned TODOs in notepad + `withTodo` sub-agent invocation | pending |
 
 ---
 
@@ -77,35 +81,55 @@ unifies that pattern into one framework the agents consume.
    session id, age, status, or source (AND'ed filters). Default
    retention drops archived lists after 90 days; user can override.
    No schema-level append-only accumulation.
-8. **Ownership is explicit, family-scoped, and agent-only.** Every
-   list is owned by an **agent family** (`'brainstorm'`,
+8. **Ownership is explicit and enumerable.** Every list is owned by
+   exactly one of: an **agent family** (`'brainstorm'`,
    `'implementation'`, `'designer'`, `'research'`, `'debugging'`,
-   `'deployment'`, ...) or `'system'` (daemon maintenance).
-   Ownership lives at the family level, never the variant level:
-   `'implementation'` covers both pair and delegate (which are
-   scope-driven runtime variants, not owners in their own right);
-   `'brainstorm'` covers its sub-categories the same way. The
-   canonical set of families is the `AgentFamily` union exported
-   by `shared/agent-registry.ts` (Phase 0).
-   Only the current owner family can mutate the list. Other
-   families on the session can read. The **user cannot own or
-   edit lists in this framework** -- the todos pane is a
-   read-only review surface for agent-generated work.
-   User-authored scratch content lives in the prompt notepad
-   ([plans/prompt-notepad.md](prompt-notepad.md)), which stays
-   independent and agent-read-only by the same symmetric rule.
-   A list can be transferred from one family-owner to another via
-   an explicit handoff API -- transfer is the only way to change
-   an owner, and the new owner accepts full write authority from
-   that point on.
-9. **User feedback flows one way through comments.** The user
-   can't mutate list/item state, but can **append comments** on
-   any agent-owned item. Comments are append-only, owner is
-   `'user'`, and the agent reads them on its next turn to decide
-   what to do (rewrite the item, skip it, acknowledge, etc.).
-   This is the only structured user → agent signal inside the
-   framework; "agent asks user to do something" goes through the
-   existing chat-gate mechanism, not todos.
+   `'deployment'`, ...), the special `'user'` owner, or `'system'`
+   (daemon maintenance). Ownership lives at the family level for
+   agent-owned lists, never the variant level: `'implementation'`
+   covers both pair and delegate (scope-driven runtime variants,
+   not owners); `'brainstorm'` covers its sub-categories the same
+   way. The canonical set of owners is the `TodoOwner` union
+   exported by `shared/todos.ts` (= `AgentFamily | 'user'`, with
+   `'system'` already inside `AgentFamily`).
+
+   Only the current owner can mutate the list. Writable surfaces
+   are split by ownership:
+
+   - **Agent-owned lists**: mutated by the owning family's
+     controllers via `deps.todos` (Phase 3). The **todos pane is
+     a read-only review surface** for agent-authored work -- no
+     edit / reorder / transfer affordances. Users can only
+     **comment** on items on agent-owned lists (see Goal 9).
+   - **User-owned lists**: mutated by the user via the existing
+     **prompt notepad** (see the notepad section below). Agents
+     cannot see user-owned lists in their reads; the user must
+     explicitly forward items via `withTodo` (see Goal 11) or
+     transfer a whole list via the standard `transfer` RPC.
+
+   A list can be handed off from one owner to another via
+   `transfer` -- that's the only way to flip ownership. Transfer
+   is permanent: the new owner accepts full write authority, the
+   prior owner loses write access (but keeps read access + the
+   audit trail in `list.transfers`). Transfer applies to both
+   user→agent handoffs and agent→agent handoffs.
+9. **User feedback on agent-owned lists flows through comments.**
+   The user can't mutate state on lists they don't own, but can
+   **append comments** on any agent-owned item. Comments are
+   append-only, author is `'user'`, and the owning agent reads
+   them on its next turn to decide what to do (rewrite the item,
+   skip it, acknowledge, etc.). Comments are the only structured
+   user→agent signal *on agent-owned lists*; "agent asks user to
+   do something" goes through the existing chat-gate mechanism,
+   not todos.
+
+   Two other user→agent signals exist alongside comments:
+
+   - **`transfer`** -- user hands off an entire list to an agent
+     family (permanent ownership flip; see Goal 8).
+   - **`withTodo`** -- user forwards one or more snapshots of
+     user-owned items to an agent, which spawns a new agent run;
+     per-item status comes back asynchronously (see Goal 11).
 10. **Lists can form a parent-child tree.** A list may have a
    `parentListId` pointing to another list in the same session.
    This lets an agent family model hierarchical work (planner
@@ -117,6 +141,42 @@ unifies that pattern into one framework the agents consume.
    handoff can transfer a child without affecting its parent.
    The tree is strictly within a single session (`sessionId`
    matches parent + child) and forbidden from forming cycles.
+
+11. **`withTodo` -- sub-agent invocation with snapshot items.**
+   When the user (or another agent) wants a specific agent to
+   act on a set of items without handing off a whole list, they
+   call the `withTodo` primitive:
+
+   ```
+   todos.forwardToAgent -> {
+     targetFamily: AgentFamily,
+     items:        readonly TodoSnapshot[],  // title + description + meta, no ids
+     sessionId:    string,
+   } -> TodoInvocationResult
+   ```
+
+   - Kicks off a **new agent run** on the target family, with
+     `input.todos = items`.
+   - Receiving agent runs normally; its steps may consume the
+     snapshots, decide **per item** whether to copy into its
+     own list or handle inline.
+   - Each snapshot crosses the boundary **detached** -- no
+     source id, no back-reference. The receiver can't read the
+     source list (if the caller was `'user'`, that list is
+     invisible to agents anyway).
+   - The run emits a `TodoInvocationResult` with one
+     `TodoInvocationResponseItem` per snapshot, keyed by
+     `sourceRef` (correlation id the caller supplied), carrying
+     a `status: TodoItemStatus` and optional target ids + note.
+   - The caller uses each response item's `status` to update
+     its own source item (e.g. user's item flips to
+     `in_progress` when the agent accepts it, `completed`
+     when the agent finishes).
+
+   `withTodo` is orthogonal to `transfer`: transfer hands off
+   an entire list with ownership flipping permanently; withTodo
+   kicks off an agent task and reports back without changing
+   ownership of anything on the caller's side.
 
 ## Non-goals
 
@@ -188,28 +248,28 @@ export interface TodoComment {
 }
 
 /**
- * Owners of a TODO list. Lists are agent-authored work; the user
- * does NOT own lists in this framework (user scratch belongs to
- * the prompt notepad -- see Related plans).
+ * Owners of a TODO list.
  *
- * Ownership is at the agent-FAMILY level. Variants (pair/delegate
- * under `'implementation'`; the five brainstorm sub-categories)
- * are private to the controller and never surface as owners.
+ * - **Agent families** (`AgentFamily` from `shared/agent-registry.ts`):
+ *   `'chat' | 'implementation' | 'brainstorm' | 'designer' |
+ *    'planner' | 'tester' | 'research' | 'debugging' |
+ *    'deployment' | 'system'`. Ownership is at the FAMILY level;
+ *   variants (pair/delegate under `'implementation'`; the five
+ *   brainstorm sub-categories) are private to the controller and
+ *   never surface as owners.
+ * - **`'user'`**: the user owns the list, edited via the prompt
+ *   notepad. Agents cannot read user-owned lists in their normal
+ *   session queries; the user must explicitly `transfer` a list
+ *   or `forwardToAgent` snapshots to bring them into an agent's
+ *   view.
  *
- * The full set of owners is the `AgentFamily` union from
- * `shared/agent-registry.ts` (Phase 0):
- * `'chat' | 'implementation' | 'brainstorm' | 'designer' |
- *  'planner' | 'tester' | 'research' | 'debugging' |
- *  'deployment' | 'system'`.
- *
- * - Only the current owner family can write when one of its
- *   controllers is active on the session.
- * - `'system'` is reserved for framework-generated lists (e.g. a
- *   daemon-maintained "sessions with expiring checkpoints" list if
- *   that ever becomes useful). No one but the daemon writes to these.
+ * Only the current owner can write. `'system'` is reserved for
+ * framework-generated lists (e.g. a daemon-maintained "sessions
+ * with expiring checkpoints" list if that ever becomes useful);
+ * no one but the daemon writes to these.
  */
 import type { AgentFamily } from './agent-registry.js';
-export type TodoOwner = AgentFamily;
+export type TodoOwner = AgentFamily | 'user';
 
 export interface TodoList {
   readonly id: string;            // ULID, globally unique
@@ -253,6 +313,52 @@ export interface TodoTransfer {
    *  `initiator` records that. Defaults to the `from` owner. */
   readonly initiator?: TodoOwner | undefined;
 }
+
+// ---------------------------------------------------------------------------
+// withTodo primitive -- snapshot forwarding + per-item response.
+// Goal 11. Used by `todos.forwardToAgent`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Detached copy of a TodoItem sent to a sub-agent via `withTodo`.
+ * Deliberately no `id` or `listId` -- the receiving agent never
+ * links back to the source. The caller supplies `sourceRef` so it
+ * can correlate the response item to the source TodoItem in its
+ * own list.
+ */
+export interface TodoSnapshot {
+  readonly sourceRef: string;     // caller-chosen correlation key
+  readonly title: string;
+  readonly description?: string | undefined;
+  readonly tags?: readonly string[] | undefined;
+  readonly meta?: Readonly<Record<string, unknown>> | undefined;
+}
+
+/**
+ * One entry per snapshot in the `withTodo` response. Uses the same
+ * `TodoItemStatus` vocabulary as the framework -- the caller
+ * applies this status to the source item (`updateItem(sourceId,
+ * { status })`), so the user's list reflects how the sub-agent
+ * disposed of each forwarded item.
+ */
+export interface TodoInvocationResponseItem {
+  readonly sourceRef: string;
+  readonly status: TodoItemStatus;
+  /** Required when `status === 'blocked'`. Mirrors the item's
+   *  blockedReason field on the caller's side. */
+  readonly blockedReason?: string | undefined;
+  /** Populated when the agent persisted a copy into its own list
+   *  (i.e. the agent decided to "own" the item). The caller can
+   *  link back to the agent's target in the UI. */
+  readonly targetListId?: string | undefined;
+  readonly targetItemId?: string | undefined;
+  /** Optional free-text context from the agent. */
+  readonly note?: string | undefined;
+}
+
+export interface TodoInvocationResult {
+  readonly items: readonly TodoInvocationResponseItem[];
+}
 ```
 
 ## Ownership + authorization
@@ -266,48 +372,64 @@ its entry point:
   sub-categories) never appear as owners -- the `deps.todos`
   wrapper maps them to their family id at call time.
 - Calls originating from the browser via `IInsrcTodosService` (user
-  action in the UI) carry the caller identity `'user'`.
+  action in the UI -- notepad or todos pane) carry the caller
+  identity `'user'`.
 - Calls originating inside the daemon's own background maintenance
   (retention job, `agent.discard` sweep) carry `'system'`.
 
-The daemon enforces write authority at the RPC boundary:
+The daemon enforces write + read authority at the RPC boundary.
+Reads are gated, not just writes, because user-owned lists are
+private to the user:
 
-| Caller    | Can read              | Can write lists                         | Can comment |
-|-----------|-----------------------|-----------------------------------------|-------------|
-| `'user'`  | every list in session | **no lists** (pane is read-only review) | yes -- any item on any readable list (add/edit/delete own comments) |
-| agent X   | every list in session | lists with `owner === X`                | yes -- `ackComment` on comments on items in lists it owns |
-| `'system'`| every list            | no lists (only `todos.cleanup` retention) | no |
+| Caller    | Can read                                 | Can write lists                 | Can comment |
+|-----------|------------------------------------------|---------------------------------|-------------|
+| `'user'`  | every list in session                    | lists with `owner === 'user'` (notepad UI) | yes -- any item on any readable list |
+| agent X   | every list **except** `owner === 'user'` | lists with `owner === X`        | yes -- `ackComment` on comments on items in lists it owns |
+| `'system'`| every list                               | no lists (only `todos.cleanup`) | no |
 
-Write-permission violations return `{ error: 'owner_mismatch', list: TodoList }`
-so the caller can surface a useful message and the UI can refresh.
+Write-permission violations return `{ error: 'owner_mismatch', list: TodoList }`.
+Read-permission violations simply omit the forbidden lists from
+the result (so agents naturally never see user-owned lists).
 
-User list-mutation calls from the browser service are rejected
-outright -- the UI doesn't expose list-mutation affordances on
-any list since the pane is review-only. **Comment calls are the
-sole exception**: the user can append / edit / delete comments
-on any readable item; those RPCs are exposed on the browser
-service and land on the agent's next turn.
+The todos **pane** (Phase 5a) remains read-only even though the
+user has write capability -- edit affordances live in the **prompt
+notepad** (the user's scratch / punchlist surface). The pane's
+purpose is "review what agents are doing", not "manage my own
+todos". Different surfaces, same data model, same database.
 
-### Transfer
+**Comment calls** are unrestricted by ownership: the user can
+append / edit / delete comments on any readable item; agents can
+`ackComment` on items on their own lists.
 
-Transfers are the only way to change an owner. The current owner
-calls:
+### Transfer (handoff / handover)
+
+Transfers flip list ownership permanently. Use transfer when a
+piece of work is done on one owner's side and another owner
+takes it over wholesale (e.g. user hands a punchlist to an
+implementation agent; planner hands its plan to implementation;
+implementation hands an unresolved list back to the user). The
+current owner calls:
 
 ```
 todos.transfer -> {
   listId: string,
-  to: TodoOwner,     // '<agent family>' | 'system'  (never 'user')
+  to: TodoOwner,     // 'user' | '<agent family>' | 'system'
   reason: string,    // free-text; required. Shows in the UI history.
 } -> TodoList
 ```
 
 Rules:
-- Caller must be the current `owner` family (family-to-family
-  transfers only -- the user cannot own a list, so no
-  user-initiated transfers either).
-- `to` must be an entry in the canonical `AgentFamily` union
-  exported by `shared/agent-registry.ts`, or `'system'`.
-  Transfer to an unknown family is rejected.
+- Caller must be the current `owner`. User-owned lists can be
+  transferred by the user via the notepad UI; agent-owned lists
+  by the owning agent's controller; user can also receive lists
+  back from agents.
+- `to` must be a valid `TodoOwner` (`AgentFamily | 'user'`).
+  Transfer to an unknown owner is rejected.
+
+**Transfer vs `withTodo`:** use `transfer` when the target
+should take over the work; use `withTodo` (Goal 11) when the
+caller stays owner of the source list and just wants a sub-agent
+to act on some items and report back.
 - **The target family does NOT need to be currently running on
   the session.** Transfer to a dormant family is valid: the list
   simply sits waiting for the next session turn that spins up
@@ -352,6 +474,20 @@ hint clears when the target agent next activates.
   delegate (batch scope) based on classification; ownership
   stays at the family level throughout the handoff and
   execution.
+- **User punchlist → implementation takeover**: user drafts a
+  list of items in the notepad (owner = `'user'`), then clicks
+  "Hand off to implementation" in the list's kebab menu. Fires
+  `todos.transfer(listId, 'implementation', ...)`; the list
+  flips permanently, agent owns it, user sees it read-only in
+  the todos pane going forward.
+- **User → sub-agent invocation via `withTodo`**: user selects
+  one or more items from a user-owned list and picks a target
+  family (e.g. `'research'`). Fires
+  `todos.forwardToAgent({ targetFamily: 'research', items })`,
+  which spawns a research agent run. User's source list stays
+  owned by `'user'`; per-item status flips via
+  `TodoInvocationResponseItem` updates once the agent reports
+  back.
 - **Agent completes + hands to system**: when an agent finishes
   its work, it either archives the list itself or transfers to
   `'system'`, which keeps the list queryable for retention /
@@ -584,6 +720,9 @@ todos.addComment        -> { itemId, body } -> TodoComment
 todos.editComment       -> { commentId, body } -> TodoComment
 todos.deleteComment     -> { commentId } -> { ok: true }
 todos.ackComment        -> { commentId } -> TodoComment
+
+todos.forwardToAgent    -> { targetFamily: AgentFamily, sessionId, items: TodoSnapshot[] }
+                        -> TodoInvocationResult    (see Goal 11)
 ```
 
 **Authorization** (see Ownership section above): every mutation
@@ -903,22 +1042,48 @@ Three paths:
    true` hint; the UI contribution opens the pane so the user
    sees the new list immediately.
 
-### Clean split with the prompt notepad
+### Notepad = user-owned todos surface
 
 The prompt notepad ([plans/prompt-notepad.md](prompt-notepad.md))
-and this todos framework stay **separate panes with separate
-semantics**. An earlier draft of this plan explored absorbing
-the notepad into user-owned todo lists; that was reversed once
-the todos pane became read-only. The split now is:
+is **where the user creates and edits their own TODO lists**.
+The notepad hosts user-owned items; the todos pane hosts
+agent-owned items. Same data model (`TodoList` + `TodoItem` +
+`TodoComment`), same LanceDB tables, same state machine --
+the surface you edit them in differs by owner.
 
-| Pane           | Owner      | Read/write       | Purpose                           |
-|----------------|------------|------------------|-----------------------------------|
-| Todos pane     | agents     | read-only to user | Review what agents are doing      |
-| Prompt notepad | user       | read/write for user | Compose prompts, draft notes     |
+| Surface | Owner | Read/write for user | Agent visibility |
+|---|---|---|---|
+| Todos pane | agents | **read-only** (comments only) | agents see everything they own (and across families) |
+| Prompt notepad | `'user'` | **read/write** | **invisible to agents** -- must be forwarded via `transfer` or `withTodo` |
 
-Each surface has a single, clear audience and no identity
-confusion. "Can I edit this?" is answered by which pane you're
-in, not by ownership flags within a pane.
+Each surface has one audience. "Can I edit this?" is answered
+by which surface you're in, not by ownership flags inside a
+single pane: the todos pane is stateless about edits (it never
+writes), the notepad is stateless about agent work (it never
+shows it).
+
+#### How user-owned TODOs reach an agent
+
+Two explicit mechanisms, both user-triggered from the notepad:
+
+1. **Transfer (full handoff).** List-level kebab menu action
+   "Hand off to <agent family>" calls `todos.transfer(listId,
+   targetFamily, reason)`. Ownership flips permanently; the
+   list disappears from the notepad (because the notepad only
+   shows user-owned lists) and appears in the agent's todos
+   pane. Best for punchlists the user wants the agent to take
+   over wholesale.
+2. **withTodo (sub-agent invocation).** Multi-select items +
+   "Forward selected to <agent family>" button in the notepad.
+   Calls `todos.forwardToAgent({ targetFamily, sessionId,
+   items: snapshots })`. A new agent run starts with the
+   snapshots as input; the user keeps their list; per-item
+   status flows back as `TodoInvocationResponseItem` entries
+   which the notepad applies to the source items via
+   `updateItem(sourceId, { status })`.
+
+Best for tasks the user wants an agent to help with while
+keeping editorial control of the list on the user's side.
 
 #### Shared infrastructure (Phase 8)
 
@@ -1398,7 +1563,7 @@ surface in Phase 4.
 ### Phase 8 -- Factor shared scaffolding with the prompt notepad
 
 Consolidate the infrastructure the todos pane and the prompt
-notepad both need, without merging their data models or commands:
+notepad both need, without merging their behaviour:
 
 - Extract `browser/shared/workspacePaneBase.ts` with the
   `EditorInput` + `EditorPane` boilerplate (match-by-sessionId,
@@ -1410,9 +1575,65 @@ notepad both need, without merging their data models or commands:
   the read-only variant.
 - Share a single palette-variable module so the two panes stay
   visually consistent without cross-linking their DOM classes.
-- Data models stay separate: notepad continues writing to its
-  own store (IStorageService or a notepad table); todos writes
-  to the todos tables. No cross-table joins.
+- **Data model note**: after Phase 9, both surfaces share the
+  same todos tables (list / items / comments). The notepad just
+  filters to `owner === 'user'`, the pane filters to
+  `owner !== 'user'`. No separate notepad table.
+
+### Phase 9 -- User-owned TODOs in the notepad + `withTodo` invocation
+
+Lands the user-side of the framework:
+
+- **Registry**: add `'user'` to `TodoOwner`
+  (= `AgentFamily | 'user'` in `shared/todos.ts`).
+- **Daemon RPC**: relax `guardListMutation` + `guardListCreation`
+  in [todos-rpc.ts](../src/insrc/daemon/todos-rpc.ts) so callers
+  with `caller: 'user'` can create, update, add items to,
+  archive, and transfer lists where `owner === 'user'`. Agent-
+  owned lists stay locked to their family.
+- **Read-visibility filter**: `listForSession` + any broad read
+  path filter out `owner === 'user'` when the caller is an
+  agent family. `'system'` sees everything; `'user'` sees
+  everything. Applied both at the RPC layer and inside
+  `TodosApi.listForSession` so `deps.todos` reads are safe.
+- **Browser service**: expose list / item write methods on
+  `IInsrcTodosService` (`createList`, `addItem`, `updateItem`,
+  `archive`, `transfer`, etc. -- the full set Phase 5d left out).
+  Todos pane stays read-only regardless; the methods are used
+  only from the notepad UI.
+- **Notepad UI**: extend the existing
+  [browser/notepad/](../src/vs/workbench/contrib/insrc/browser/notepad/)
+  surface with a "My TODOs" section that lists the user's
+  `owner === 'user'` lists for the active session and lets
+  the user create / edit / reorder / archive / delete items.
+  Compose alongside (not replacing) the existing markdown
+  prompt composer.
+- **withTodo primitive**:
+  - New daemon RPC `todos.forwardToAgent({ targetFamily,
+    sessionId, items: TodoSnapshot[] })` in
+    [todos-rpc.ts](../src/insrc/daemon/todos-rpc.ts).
+  - Spawns a fresh `runAgent` call with `input.todos = items`
+    (snapshots, no source ids). Handled by the target
+    family's AgentDefinition; its steps consume `ctx.todos`
+    + `input.todos` and emit a `TodoInvocationResult` in the
+    run result.
+  - `AgentDefinition` gains a conventional entry point: if
+    `input.todos` is a non-empty `TodoSnapshot[]`, the agent
+    routes to its `withTodo` handling step. For this phase, a
+    single convention (the planner agent is the simplest
+    first consumer): reads the snapshots, creates an agent-
+    owned list tracking its work, emits per-snapshot
+    `TodoInvocationResponseItem` entries as it processes.
+  - Browser `IInsrcTodosService.forwardToAgent(...)` wraps
+    the RPC; the notepad's `Forward selected to <agent>`
+    button calls it and applies the response statuses via
+    `updateItem` on the source items.
+- **Plan doc**: this phase replaces any residual "user cannot
+  own lists" / "user-only surface is the todos pane comments"
+  language that Phases 0-8 left behind.
+
+Build gates after each sub-chunk (registry + RPC relaxation,
+browser service, notepad UI, withTodo pipeline).
 
 ---
 

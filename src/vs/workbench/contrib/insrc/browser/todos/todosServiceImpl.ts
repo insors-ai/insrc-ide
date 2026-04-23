@@ -11,7 +11,11 @@ import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcTodosService,
 	type TodoComment,
+	type TodoInvocationResult,
+	type TodoItem,
 	type TodoList,
+	type TodoOwner,
+	type TodoSnapshot,
 	type TodoStreamEventKind,
 } from '../../common/todosService.js';
 
@@ -102,6 +106,121 @@ export class InsrcTodosServiceImpl extends Disposable implements IInsrcTodosServ
 		}
 	}
 
+	// -- User-owned list / item writes (Phase 9) --------------------------
+
+	async createUserList(opts: {
+		sessionId: string;
+		title: string;
+		description?: string;
+		body?: string;
+		parentListId?: string;
+	}): Promise<TodoList> {
+		const params: Record<string, unknown> = {
+			caller: 'user',
+			sessionId: opts.sessionId,
+			title: opts.title,
+			owner: 'user',
+		};
+		if (opts.description !== undefined) { params['description'] = opts.description; }
+		if (opts.body !== undefined) { params['body'] = opts.body; }
+		if (opts.parentListId !== undefined) { params['parentListId'] = opts.parentListId; }
+		return this._callListRpc('todos.create', params);
+	}
+
+	async updateListFields(listId: string, patch: {
+		title?: string;
+		description?: string;
+		body?: string;
+		status?: 'active' | 'completed' | 'archived';
+	}): Promise<TodoList> {
+		return this._callListRpc('todos.update', { caller: 'user', listId, patch });
+	}
+
+	async archiveList(listId: string): Promise<TodoList> {
+		return this._callListRpc('todos.archive', { caller: 'user', listId });
+	}
+
+	async unarchiveList(listId: string): Promise<TodoList> {
+		return this._callListRpc('todos.unarchive', { caller: 'user', listId });
+	}
+
+	async addItem(listId: string, opts: {
+		title: string;
+		description?: string;
+		tags?: readonly string[];
+		meta?: Readonly<Record<string, unknown>>;
+		insertAfterItemId?: string;
+	}): Promise<TodoItem> {
+		const params: Record<string, unknown> = {
+			caller: 'user',
+			listId,
+			title: opts.title,
+		};
+		if (opts.description !== undefined) { params['description'] = opts.description; }
+		if (opts.tags !== undefined) { params['tags'] = opts.tags; }
+		if (opts.meta !== undefined) { params['meta'] = opts.meta; }
+		if (opts.insertAfterItemId !== undefined) { params['insertAfterItemId'] = opts.insertAfterItemId; }
+		return this._callItemRpc('todos.addItem', params);
+	}
+
+	async updateItem(itemId: string, patch: {
+		title?: string;
+		description?: string;
+		status?: 'pending' | 'in_progress' | 'blocked' | 'completed' | 'cancelled';
+		blockedReason?: string;
+		tags?: readonly string[];
+		meta?: Readonly<Record<string, unknown>>;
+	}): Promise<TodoItem> {
+		return this._callItemRpc('todos.updateItem', { caller: 'user', itemId, patch });
+	}
+
+	async reorderItem(itemId: string, insertAfterItemId: string | null): Promise<TodoItem> {
+		return this._callItemRpc('todos.reorderItem', { caller: 'user', itemId, insertAfterItemId });
+	}
+
+	async removeItem(itemId: string): Promise<void> {
+		const result = await this.daemonService.rpc<{ ok: true } | { error: string; reason?: string }>(
+			'todos.removeItem', { caller: 'user', itemId },
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+	}
+
+	async clearCompleted(listId: string): Promise<TodoList> {
+		return this._callListRpc('todos.clearCompleted', { caller: 'user', listId });
+	}
+
+	async transferList(listId: string, to: TodoOwner, reason: string): Promise<TodoList> {
+		return this._callListRpc('todos.transfer', { caller: 'user', listId, to, reason });
+	}
+
+	async reparentList(listId: string, newParentListId: string | null): Promise<TodoList> {
+		return this._callListRpc('todos.reparent', { caller: 'user', listId, newParentListId });
+	}
+
+	async forwardToAgent(opts: {
+		targetFamily: TodoOwner;
+		sessionId: string;
+		items: readonly TodoSnapshot[];
+	}): Promise<TodoInvocationResult> {
+		const result = await this.daemonService.rpc<TodoInvocationResult | { error: string; reason?: string }>(
+			'todos.forwardToAgent',
+			{
+				caller: 'user',
+				targetFamily: opts.targetFamily,
+				sessionId: opts.sessionId,
+				items: opts.items,
+			},
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+		return result as TodoInvocationResult;
+	}
+
+	// -- Comments ---------------------------------------------------------
+
 	async addComment(itemId: string, body: string): Promise<TodoComment> {
 		return this._callCommentRpc('todos.addComment', { itemId, body });
 	}
@@ -132,6 +251,26 @@ export class InsrcTodosServiceImpl extends Disposable implements IInsrcTodosServ
 			throw new Error(this._formatRpcError(result));
 		}
 		return result as TodoComment;
+	}
+
+	private async _callListRpc(method: string, params: Record<string, unknown>): Promise<TodoList> {
+		const result = await this.daemonService.rpc<TodoList | { error: string; reason?: string; list?: TodoList }>(
+			method, params,
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+		return result as TodoList;
+	}
+
+	private async _callItemRpc(method: string, params: Record<string, unknown>): Promise<TodoItem> {
+		const result = await this.daemonService.rpc<TodoItem | { error: string; reason?: string; list?: TodoList }>(
+			method, params,
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+		return result as TodoItem;
 	}
 
 	private _formatRpcError(result: { error: string; reason?: string }): string {

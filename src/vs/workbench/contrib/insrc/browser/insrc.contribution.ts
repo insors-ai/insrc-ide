@@ -149,6 +149,17 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(TodosEditorInput)],
 );
 
+// Notepad "My TODOs" pane (plans/todo-framework.md Phase 9). Writable
+// surface for user-owned todo lists; agents never see these unless
+// the user explicitly transfers a list or forwards items via withTodo.
+import { NotepadTodosEditorPane } from './notepad/notepadTodosPane.js';
+import { NotepadTodosEditorInput } from './notepad/notepadTodosInput.js';
+import './notepad/notepadTodosCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(NotepadTodosEditorPane, NotepadTodosEditorPane.ID, 'My TODOs'),
+	[new SyncDescriptor(NotepadTodosEditorInput)],
+);
+
 // Brainstorm flow: routes gates to the matching per-step editor pane, falling
 // back to the legacy pane for kinds that haven't been migrated yet.
 import { IEditorService } from '../../../services/editor/common/editorService.js';

@@ -39,8 +39,10 @@ import { EventEmitter } from 'node:events';
 import type { IpcStreamMessage } from '../shared/types.js';
 import type { DbClient } from '../db/client.js';
 import type {
-  TodoCleanupQuery, TodoComment, TodoItem, TodoItemStatus, TodoList,
-  TodoListStatus, TodoOwner, TodoStreamEvent, TodoStreamEventKind,
+  TodoCleanupQuery, TodoComment, TodoInvocationResponseItem,
+  TodoInvocationResult, TodoItem, TodoItemStatus, TodoList,
+  TodoListStatus, TodoOwner, TodoSnapshot, TodoStreamEvent,
+  TodoStreamEventKind,
 } from '../shared/todos.js';
 import { TODO_LIMITS, betweenOrderKeys } from '../shared/todos.js';
 import { isAgentFamily } from '../shared/agent-registry.js';
@@ -202,13 +204,12 @@ async function guardListMutation(
   if (list === null) {
     return { list: null, error: { error: 'invalid_ids', reason: `list '${listId}' does not exist` } };
   }
-  if (caller === 'user') {
-    return { list: null, error: { error: 'user_cannot_write_lists' } };
-  }
   if (caller === 'system') {
     // `system` is allowed to cleanup but not to mutate list contents.
     return { list: null, error: { error: 'system_cannot_write_lists' } };
   }
+  // `'user'` writes user-owned lists; agent families write their own.
+  // Any mismatch returns owner_mismatch.
   if (list.owner !== caller) {
     return { list: null, error: { error: 'owner_mismatch', list } };
   }
@@ -219,18 +220,19 @@ async function guardListCreation(
   caller: TodoCaller,
   requestedOwner: TodoOwner,
 ): Promise<{ ok: true } | { ok: false; error: TodosRpcError }> {
-  if (caller === 'user') {
-    return { ok: false, error: { error: 'user_cannot_write_lists' } };
-  }
   if (caller === 'system' && requestedOwner !== 'system') {
     // `system` may seed system-owned lists only.
     return { ok: false, error: { error: 'invalid_owner', reason: `system may only create system-owned lists` } };
   }
-  if (!isAgentFamily(requestedOwner)) {
-    return { ok: false, error: { error: 'invalid_owner', reason: `unknown family '${requestedOwner}'` } };
-  }
+  // User can only create user-owned lists; agent families only lists
+  // they own; system only system-owned (handled above).
   if (caller !== 'system' && requestedOwner !== caller) {
     return { ok: false, error: { error: 'invalid_owner', reason: `caller '${caller}' may not seed lists owned by '${requestedOwner}'` } };
+  }
+  // Owner must be a valid TodoOwner (agent family or 'user').
+  const { isValidTodoOwner } = await import('../shared/todos.js');
+  if (!isValidTodoOwner(requestedOwner)) {
+    return { ok: false, error: { error: 'invalid_owner', reason: `unknown owner '${requestedOwner}'` } };
   }
   return { ok: true };
 }
@@ -240,6 +242,7 @@ async function guardListCreation(
 // ---------------------------------------------------------------------------
 
 export async function listForSession(db: DbClient, params: unknown): Promise<readonly TodoList[]> {
+  const caller = resolveCaller(params);
   const { sessionId, includeArchived } =
     (params ?? {}) as { sessionId?: string; includeArchived?: boolean };
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -247,7 +250,13 @@ export async function listForSession(db: DbClient, params: unknown): Promise<rea
   }
   const opts: { includeArchived?: boolean } = {};
   if (includeArchived !== undefined) opts.includeArchived = includeArchived;
-  return todos.listListsBySession(db, sessionId, opts);
+  const all = await todos.listListsBySession(db, sessionId, opts);
+  // Agent families never see user-owned lists (Phase 9). 'user' and
+  // 'system' see everything.
+  if (caller !== 'user' && caller !== 'system') {
+    return all.filter(list => list.owner !== 'user');
+  }
+  return all;
 }
 
 // ---------------------------------------------------------------------------
@@ -995,6 +1004,93 @@ export async function ackComment(
   const updated = await todos.updateComment(db, commentId, { agentAcknowledged: true });
   emit('commentUpdated', list);
   return updated;
+}
+
+// ---------------------------------------------------------------------------
+// RPC: forwardToAgent (withTodo primitive, plans/todo-framework.md Phase 9d)
+// ---------------------------------------------------------------------------
+
+/**
+ * Forward a set of user-owned TODO snapshots to a target agent
+ * family. Kicks off (or will kick off, once per-family consumers
+ * land) an agent run whose `input.todos` is the snapshot array.
+ *
+ * **This phase lands the RPC + types + wire format only.** No
+ * existing agent consumes `input.todos` yet; every forward
+ * currently returns a placeholder response that flips each
+ * source item to `in_progress` with a note indicating the agent
+ * hasn't implemented a withTodo handler. Real per-family handlers
+ * (planner first, per the plan) land in follow-up work.
+ *
+ * Ownership constraint: only `'user'` callers may forward. Agent-
+ * to-agent forwarding is reserved for a future phase once the
+ * user path is stable.
+ */
+export async function forwardToAgent(
+  _db: DbClient,
+  params: unknown,
+): Promise<TodoInvocationResult | TodosRpcError> {
+  const caller = resolveCaller(params);
+  const p = (params ?? {}) as Record<string, unknown>;
+  const targetFamily = p['targetFamily'];
+  const sessionId = p['sessionId'];
+  const itemsRaw = p['items'];
+
+  if (typeof targetFamily !== 'string' || !isAgentFamily(targetFamily)) {
+    return { error: 'invalid_owner', reason: `unknown target family '${String(targetFamily)}'` };
+  }
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    return { error: 'invalid_ids', reason: 'sessionId is required' };
+  }
+  if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) {
+    return { error: 'invalid_ids', reason: 'items array is required (at least one TodoSnapshot)' };
+  }
+
+  if (caller !== 'user') {
+    return { error: 'invalid_owner', reason: 'only user callers may forwardToAgent at this phase' };
+  }
+
+  // Validate + normalize each snapshot.
+  const snapshots: TodoSnapshot[] = [];
+  for (const raw of itemsRaw) {
+    if (raw === null || typeof raw !== 'object') {
+      return { error: 'invalid_ids', reason: 'each item must be a TodoSnapshot object' };
+    }
+    const r = raw as Record<string, unknown>;
+    const sourceRef = r['sourceRef'];
+    const title = r['title'];
+    if (typeof sourceRef !== 'string' || sourceRef.length === 0) {
+      return { error: 'invalid_ids', reason: 'each item requires sourceRef' };
+    }
+    if (typeof title !== 'string' || title.length === 0) {
+      return { error: 'invalid_ids', reason: 'each item requires title' };
+    }
+    const snap: TodoSnapshot = {
+      sourceRef,
+      title,
+      ...(typeof r['description'] === 'string' ? { description: r['description'] as string } : {}),
+      ...(Array.isArray(r['tags'])
+        ? { tags: (r['tags'] as unknown[]).filter(t => typeof t === 'string') as string[] }
+        : {}),
+      ...(r['meta'] !== undefined && typeof r['meta'] === 'object' && r['meta'] !== null
+        ? { meta: r['meta'] as Record<string, unknown> }
+        : {}),
+    };
+    snapshots.push(snap);
+  }
+
+  log.info(
+    { targetFamily, sessionId, snapshotCount: snapshots.length },
+    'todos.forwardToAgent: Phase 9d stub -- returning in_progress placeholders (no withTodo consumers wired yet)',
+  );
+
+  const responseItems: TodoInvocationResponseItem[] = snapshots.map(snap => ({
+    sourceRef: snap.sourceRef,
+    status: 'in_progress' satisfies TodoItemStatus,
+    note: `Forwarded to '${targetFamily}'. No withTodo handler wired yet; the agent will pick this up once its consumer ships.`,
+  }));
+
+  return { items: responseItems };
 }
 
 // ---------------------------------------------------------------------------

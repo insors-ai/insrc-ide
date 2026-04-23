@@ -26,7 +26,7 @@ import type {
   TodoTransfer,
 } from '../shared/todos.js';
 import { canTransitionItem, canTransitionList } from '../shared/todos.js';
-import { isAgentFamily } from '../shared/agent-registry.js';
+import { isValidTodoOwner } from '../shared/todos.js';
 
 // ---------------------------------------------------------------------------
 // LanceDB SQL quoting helper -- same as conversations.ts. `table.update()`
@@ -254,11 +254,11 @@ export interface InsertListOpts {
  * that already exists in the same session).
  */
 export async function insertList(db: DbClient, opts: InsertListOpts): Promise<TodoList> {
-  if (!isAgentFamily(opts.owner)) {
-    throw new Error(`insertList: unknown owner family '${opts.owner}'`);
+  if (!isValidTodoOwner(opts.owner)) {
+    throw new Error(`insertList: unknown owner '${opts.owner}'`);
   }
-  if (!isAgentFamily(opts.source)) {
-    throw new Error(`insertList: unknown source family '${opts.source}'`);
+  if (!isValidTodoOwner(opts.source)) {
+    throw new Error(`insertList: unknown source '${opts.source}'`);
   }
 
   if (opts.parentListId !== undefined) {
@@ -717,8 +717,8 @@ export async function transferList(
   now: string,
   initiator?: TodoOwner,
 ): Promise<TodoList> {
-  if (!isAgentFamily(to)) {
-    throw new Error(`transferList: unknown target family '${to}'`);
+  if (!isValidTodoOwner(to)) {
+    throw new Error(`transferList: unknown target owner '${to}'`);
   }
   const existing = await getList(db, listId, { withItems: false });
   if (existing === null) {

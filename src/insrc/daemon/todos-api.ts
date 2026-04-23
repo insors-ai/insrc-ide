@@ -69,21 +69,32 @@ class TodosApiImpl implements TodosApi {
 
   // -- Reads ----------------------------------------------------------------
 
-  listForSession(
+  async listForSession(
     sessionId: string,
     opts: { includeArchived?: boolean } = {},
   ): Promise<readonly TodoList[]> {
     const listOpts: { includeArchived?: boolean } = {};
-    if (opts.includeArchived !== undefined) listOpts.includeArchived = opts.includeArchived;
-    return todos.listListsBySession(this.db, sessionId, listOpts);
+    if (opts.includeArchived !== undefined) { listOpts.includeArchived = opts.includeArchived; }
+    const all = await todos.listListsBySession(this.db, sessionId, listOpts);
+    // Agent families never see user-owned lists (plans/todo-framework.md
+    // Phase 9). Filter them out unconditionally -- every TodosApi
+    // instance is scoped to an AgentFamily (assertion in makeTodosApi).
+    return all.filter(list => list.owner !== 'user');
   }
 
-  getList(listId: string): Promise<TodoList | null> {
-    return todos.getList(this.db, listId);
+  async getList(listId: string): Promise<TodoList | null> {
+    const list = await todos.getList(this.db, listId);
+    if (list === null || list.owner === 'user') { return null; }
+    return list;
   }
 
-  getItem(itemId: string): Promise<TodoItem | null> {
-    return todos.getItem(this.db, itemId);
+  async getItem(itemId: string): Promise<TodoItem | null> {
+    const item = await todos.getItem(this.db, itemId);
+    if (item === null) { return null; }
+    // Hide items belonging to user-owned lists.
+    const list = await todos.getList(this.db, item.listId, { withItems: false, withComments: false });
+    if (list === null || list.owner === 'user') { return null; }
+    return item;
   }
 
   // -- List writes ----------------------------------------------------------

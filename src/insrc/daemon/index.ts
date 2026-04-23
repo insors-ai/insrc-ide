@@ -986,6 +986,7 @@ async function main(): Promise<void> {
     'todos.editComment':    (params) => todosRpc.editComment(db, params),
     'todos.deleteComment':  (params) => todosRpc.deleteCommentRpc(db, params),
     'todos.ackComment':     (params) => todosRpc.ackComment(db, params),
+    'todos.forwardToAgent': (params) => todosRpc.forwardToAgent(db, params),
   }, {
     // Streaming handlers
     'chat.send':   chatSend,

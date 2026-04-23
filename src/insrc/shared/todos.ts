@@ -18,6 +18,7 @@
  */
 
 import type { AgentFamily } from './agent-registry.js';
+import { isAgentFamily } from './agent-registry.js';
 
 // ---------------------------------------------------------------------------
 // Status enums + transition tables
@@ -80,11 +81,18 @@ export function canTransitionList(from: TodoListStatus, to: TodoListStatus): boo
 // ---------------------------------------------------------------------------
 
 /**
- * Owner of a TODO list. Equals `AgentFamily` from the registry -- no
- * variant names are legal owners. See plans/todo-framework.md for
- * the authorization rules.
+ * Owner of a TODO list: either an agent family (from the registry)
+ * or the special `'user'` owner (user-authored lists edited via the
+ * prompt notepad). Agents never see user-owned lists in their normal
+ * reads -- the user must explicitly `transfer` a list or
+ * `forwardToAgent` snapshots to bring them into agent view.
  */
-export type TodoOwner = AgentFamily;
+export type TodoOwner = AgentFamily | 'user';
+
+/** True if the given string is a valid TodoOwner (agent family or `'user'`). */
+export function isValidTodoOwner(id: string): id is TodoOwner {
+  return id === 'user' || isAgentFamily(id);
+}
 
 // ---------------------------------------------------------------------------
 // Comment (Phase 5d; type declared now for stable item shape)
@@ -144,6 +152,48 @@ export interface TodoTransfer {
    *  post-save handoff-proposal flow), `initiator` records that.
    *  Defaults to `from`. */
   readonly initiator?: TodoOwner | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// withTodo primitive (plans/todo-framework.md Goal 11 / Phase 9d)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detached copy of a TodoItem sent to a sub-agent via `withTodo` /
+ * `todos.forwardToAgent`. Deliberately no `id` / `listId` so the
+ * receiving agent can't link back to the source. The caller
+ * supplies `sourceRef` to correlate the response to its own source
+ * item when the result lands.
+ */
+export interface TodoSnapshot {
+  readonly sourceRef: string;
+  readonly title: string;
+  readonly description?: string | undefined;
+  readonly tags?: readonly string[] | undefined;
+  readonly meta?: Readonly<Record<string, unknown>> | undefined;
+}
+
+/**
+ * One entry per snapshot in the `withTodo` response. Uses the
+ * shared `TodoItemStatus` vocabulary -- the caller maps the
+ * response status onto the source item (`updateItem(sourceId,
+ * { status, blockedReason? })`) so the user's list reflects how
+ * the sub-agent disposed of each forwarded item.
+ */
+export interface TodoInvocationResponseItem {
+  readonly sourceRef: string;
+  readonly status: TodoItemStatus;
+  /** Required when `status === 'blocked'`. */
+  readonly blockedReason?: string | undefined;
+  /** Populated when the agent persisted a copy into its own list. */
+  readonly targetListId?: string | undefined;
+  readonly targetItemId?: string | undefined;
+  /** Optional free-text context from the agent. */
+  readonly note?: string | undefined;
+}
+
+export interface TodoInvocationResult {
+  readonly items: readonly TodoInvocationResponseItem[];
 }
 
 // ---------------------------------------------------------------------------
