@@ -1751,6 +1751,20 @@ export async function _runSingleAction(
     return cliRpc<T>(method, params ?? {});
   };
 
+  // Construct a TodosApi scoped to the agent's family, if the
+  // definition's `id` matches a registered family. Agents whose id
+  // isn't in the registry (none currently, but future code-analysis-
+  // only runners) get no `ctx.todos`.
+  let todosApi: import('../shared/todos.js').TodosApi | undefined;
+  {
+    const { isAgentFamily } = await import('../shared/agent-registry.js');
+    if (isAgentFamily(definition.id)) {
+      const { getDb } = await import('../db/client.js');
+      const { makeTodosApi } = await import('./todos-api.js');
+      todosApi = makeTodosApi(await getDb(), definition.id);
+    }
+  }
+
   await runAgent({
     definition: definition as AgentDefinition,
     channel,
@@ -1763,6 +1777,7 @@ export async function _runSingleAction(
       resolveOrNull: (agent: string, step: string) => session.resolver.resolveOrNull(agent, step),
     },
     rpcFn,
+    ...(todosApi ? { todos: todosApi, sessionId: active.id } : {}),
   });
 
   pool.setLastStep(active.id, `done (${definition.id})`);

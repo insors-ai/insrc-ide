@@ -63,4 +63,18 @@ export interface DelegateState extends AgentState, HasProviderOverride {
   editRounds: Record<string, number>;
   /** Current focus / feedback for retries. */
   currentFocus?: string | undefined;
+
+  // Todos framework mirror (plans/todo-framework.md Phase 6).
+  // Populated on plan approval and kept in lockstep with the bespoke
+  // `plan.steps[*].status` state so the browser UI (editor pane +
+  // inline chat widget + runs sidebar pill) surfaces progress live.
+  // The bespoke state still drives the controller's branching; these
+  // fields are the UI-facing mirror.
+  /** Id of the todos list created on plan approval. Undefined when
+   *  no chat session is in scope (CLI dry runs). */
+  todosListId?: string | undefined;
+  /** One entry per plan step, indexed identically to `plan.steps`.
+   *  Each entry is the id of the TodoItem tracking that step's
+   *  status in the todos framework. */
+  todosItemIds?: readonly string[] | undefined;
 }

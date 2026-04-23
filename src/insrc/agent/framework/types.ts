@@ -10,6 +10,7 @@ import type {
   ConfigNamespace, ConfigSearchOpts, ConfigSearchResult,
   TemplateQuery, ConfigEntry,
 } from '../../shared/types.js';
+import type { TodosApi } from '../../shared/todos.js';
 
 // ---------------------------------------------------------------------------
 // Message envelope
@@ -169,6 +170,21 @@ export interface StepContext {
   resolveTemplate?: ((opts: TemplateQuery) => Promise<ConfigEntry | null>) | undefined;
   /** AbortSignal — set when a cancel message is received. */
   signal: AbortSignal;
+  /**
+   * TodosApi bound to the agent's family id (plans/todo-framework.md
+   * Phase 3 / 6). Constructed in the daemon-side runAgent call site
+   * and threaded through by the runner. Undefined for callers that
+   * don't provide one -- agents should treat it as optional and
+   * skip gracefully when absent.
+   */
+  todos?: TodosApi | undefined;
+  /**
+   * Id of the chat session this run belongs to. Paired with `todos`
+   * so agent steps can create session-scoped todo lists without
+   * needing an extra parameter on their input. Undefined when the
+   * run is not attached to a chat session (CLI dry runs, tests).
+   */
+  sessionId?: string | undefined;
 }
 
 export interface GateOpts {

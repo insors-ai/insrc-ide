@@ -135,8 +135,16 @@ export const approvePlanGateStep: AgentStep<DelegateState> = {
     let newState = override ? applyOverride(state, override) : state;
 
     switch (reply.action) {
-      case 'approve':
-        return { state: newState, next: 'execute-step' };
+      case 'approve': {
+        // Mirror the approved plan into the todos framework (plans/
+        // todo-framework.md Phase 6). Best-effort: a todos failure
+        // leaves the agent running without a UI mirror.
+        const todosRef = await createTodosForPlan(ctx, plan);
+        const approvedState: DelegateState = todosRef
+          ? { ...newState, todosListId: todosRef.listId, todosItemIds: todosRef.itemIds }
+          : newState;
+        return { state: approvedState, next: 'execute-step' };
+      }
 
       case 'edit': {
         if (ctx.recordFeedback && (cleanFeedback || reply.feedback)) {
@@ -184,6 +192,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
 
     // Mark as in_progress
     const updatedPlan = updateStepStatus(plan, state.currentStepIndex, 'in_progress');
+    await syncTodoItemStatus(ctx, state, state.currentStepIndex, 'in_progress');
 
     // Investigation phase
     ctx.progress('  Investigating relevant code...');
@@ -256,6 +265,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
       };
 
       const failedPlan = updateStepStatus(updatedPlan, state.currentStepIndex, 'failed');
+      await syncTodoItemStatus(ctx, state, state.currentStepIndex, 'failed', stepResult.error);
 
       return {
         state: {
@@ -284,6 +294,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
       };
 
       const failedPlan = updateStepStatus(updatedPlan, state.currentStepIndex, 'failed');
+      await syncTodoItemStatus(ctx, state, state.currentStepIndex, 'failed', stepResult.error);
       return {
         state: {
           ...state,
@@ -302,6 +313,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
     };
 
     const donePlan = updateStepStatus(updatedPlan, state.currentStepIndex, 'done');
+    await syncTodoItemStatus(ctx, state, state.currentStepIndex, 'done');
 
     let newState = consumeOverride({
       ...state,
@@ -344,6 +356,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
               error: `Tests failed: ${testResult.output.slice(0, 200)}`,
             };
             const failedPlan = updateStepStatus(donePlan, state.currentStepIndex, 'failed');
+            await syncTodoItemStatus(ctx, state, state.currentStepIndex, 'failed', failedResult.error);
             return {
               state: {
                 ...newState,
@@ -541,6 +554,7 @@ export const failureGateStep: AgentStep<DelegateState> = {
 
       case 'skip': {
         const skippedPlan = updateStepStatus(plan, state.currentStepIndex, 'skipped');
+        await syncTodoItemStatus(ctx, state, state.currentStepIndex, 'skipped');
         const skipResult: StepResult = {
           status: 'skipped',
           filesChanged: [],
@@ -691,6 +705,90 @@ function updateStepStatus(
       i === stepIndex ? { ...s, status } : s,
     ),
   };
+}
+
+/**
+ * Mirror a DelegatePlanStep status change onto the todos framework
+ * (plans/todo-framework.md Phase 6). Fire-and-forget: failures are
+ * logged and swallowed so a todos hiccup can never break the
+ * controller's branching -- the bespoke `plan.steps[*].status`
+ * field remains the source of truth for `next()` routing; this
+ * helper just keeps the UI in sync.
+ *
+ * `pending` is a no-op: on retry the bespoke state resets to
+ * `pending` but the todos state can stay `blocked` (the next
+ * execute-step will transition it to `in_progress` anyway).
+ */
+async function syncTodoItemStatus(
+  ctx: import('../../framework/types.js').StepContext,
+  state: DelegateState,
+  stepIndex: number,
+  target: DelegatePlanStep['status'],
+  blockedReason?: string,
+): Promise<void> {
+  const todos = ctx.todos;
+  const itemIds = state.todosItemIds;
+  if (todos === undefined || itemIds === undefined) { return; }
+  const itemId = itemIds[stepIndex];
+  if (itemId === undefined) { return; }
+  try {
+    switch (target) {
+      case 'in_progress':
+        await todos.markInProgress(itemId);
+        return;
+      case 'done':
+        await todos.markComplete(itemId);
+        return;
+      case 'failed':
+        await todos.markBlocked(itemId, blockedReason ?? 'step failed');
+        return;
+      case 'skipped':
+        await todos.markCancelled(itemId);
+        return;
+      case 'pending':
+        // Retry path -- deliberate no-op. Re-execute will transition
+        // from blocked -> in_progress via the state machine.
+        return;
+    }
+  } catch (err) {
+    ctx.progress(`(todos) failed to sync item status for step ${stepIndex + 1}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Create a todos list mirroring the approved plan. Called from
+ * approve-plan-gate on the `approve` branch. Returns the new list
+ * id + one item id per plan step (indexed identically). Fire-and-
+ * forget failure: if todos creation errors, we return `undefined`
+ * so the controller keeps running without a mirror.
+ */
+async function createTodosForPlan(
+  ctx: import('../../framework/types.js').StepContext,
+  plan: DelegatePlan,
+): Promise<{ listId: string; itemIds: string[] } | undefined> {
+  const todos = ctx.todos;
+  const sessionId = ctx.sessionId;
+  if (todos === undefined || sessionId === undefined) { return undefined; }
+  try {
+    const list = await todos.createList({
+      sessionId,
+      title: plan.title || 'Delegate execution plan',
+      description: 'Plan-step progress mirror owned by the implementation family (delegate variant).',
+    });
+    const itemIds: string[] = [];
+    for (const step of plan.steps) {
+      const item = await todos.addItem(list.id, {
+        title: step.title,
+        description: step.description,
+        meta: { planStepIndex: step.index },
+      });
+      itemIds.push(item.id);
+    }
+    return { listId: list.id, itemIds };
+  } catch (err) {
+    ctx.progress(`(todos) failed to create plan mirror: ${(err as Error).message}`);
+    return undefined;
+  }
 }
 
 /** Format the plan for the approval gate. */

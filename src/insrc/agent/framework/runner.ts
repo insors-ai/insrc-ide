@@ -18,6 +18,7 @@ import type {
   DonePayload, ErrorPayload, CheckpointPayload, CancelPayload,
 } from './types.js';
 import type { AgentConfig, LLMProvider } from '../../shared/types.js';
+import type { TodosApi } from '../../shared/todos.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('agent-runner');
@@ -34,6 +35,12 @@ export interface RunnerOpts {
   providers:  { local: LLMProvider; claude: LLMProvider | null; resolve: (agent: string, step: string) => LLMProvider; resolveOrNull: (agent: string, step: string) => LLMProvider | null };
   /** Optional RPC function for daemon IPC. */
   rpcFn?:     (<T>(method: string, params?: unknown) => Promise<T>) | undefined;
+  /** Optional TodosApi scoped to the agent's family (plans/todo-framework.md
+   *  Phase 3 / 6). Threaded into every StepContext so steps can
+   *  record plan progress via `ctx.todos`. */
+  todos?:     TodosApi | undefined;
+  /** Optional chat session id; paired with `todos`. */
+  sessionId?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +61,7 @@ export class AgentCancelledError extends Error {
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
-  const { definition, channel, options, config, providers, rpcFn } = opts;
+  const { definition, channel, options, config, providers, rpcFn, todos, sessionId } = opts;
 
   // -----------------------------------------------------------------------
   // Initialise or resume
@@ -171,6 +178,8 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
     providers,
     abortController,
     rpcFn,
+    todos,
+    sessionId,
   });
 
   // -----------------------------------------------------------------------

@@ -13,6 +13,7 @@ import type {
 } from '../../shared/types.js';
 import { recordFeedback as recordFeedbackImpl } from '../../config/feedback.js';
 import { writeArtifact as writeArtifactFile, readArtifact as readArtifactFile } from './checkpoint.js';
+import type { TodosApi } from '../../shared/todos.js';
 
 // ---------------------------------------------------------------------------
 // ID generation
@@ -63,10 +64,14 @@ export interface StepContextOpts {
   abortController: AbortController;
   /** Optional RPC function for daemon IPC. */
   rpcFn?:          (<T>(method: string, params?: unknown) => Promise<T>) | undefined;
+  /** Optional TodosApi scoped to this agent's family. */
+  todos?:          TodosApi | undefined;
+  /** Optional chat session id (paired with todos). */
+  sessionId?:      string | undefined;
 }
 
 export function buildStepContext(opts: StepContextOpts): StepContext {
-  const { channel, runId, agentId, agentVariant, runDir, config, providers, abortController, rpcFn } = opts;
+  const { channel, runId, agentId, agentVariant, runDir, config, providers, abortController, rpcFn, todos, sessionId } = opts;
 
   return {
     channel,
@@ -76,6 +81,8 @@ export function buildStepContext(opts: StepContextOpts): StepContext {
     config,
     providers,
     signal: abortController.signal,
+    todos,
+    sessionId,
 
     progress(msg: string, pct?: number): void {
       const payload: ProgressPayload = { message: msg, pct };

@@ -24,73 +24,17 @@
 import { randomBytes } from 'node:crypto';
 import type { DbClient } from '../db/client.js';
 import type {
-  TodoComment, TodoItem, TodoList, TodoOwner, TodoStreamEventKind,
+  AddTodoItemOpts, CreateTodoListOpts,
+  TodoComment, TodoItem, TodoList, TodoOwner, TodosApi, TodoStreamEventKind,
 } from '../shared/todos.js';
 import { isAgentFamily } from '../shared/agent-registry.js';
 import * as todos from '../db/todos.js';
 import { emitTodosEvent } from './todos-rpc.js';
 
-// ---------------------------------------------------------------------------
-// Public surface
-// ---------------------------------------------------------------------------
-
-export interface CreateListOpts {
-  readonly sessionId: string;
-  readonly title: string;
-  readonly description?: string | undefined;
-  readonly body?: string | undefined;
-  readonly parentListId?: string | undefined;
-}
-
-export interface AddItemOpts {
-  readonly title: string;
-  readonly description?: string | undefined;
-  readonly tags?: readonly string[] | undefined;
-  readonly meta?: Readonly<Record<string, unknown>> | undefined;
-  /** If set, inserts immediately after the given item. Defaults to append. */
-  readonly insertAfterItemId?: string | undefined;
-}
-
-export interface TodosApi {
-  /** The family that mutations through this instance are attributed to. */
-  readonly caller: TodoOwner;
-
-  // -- Reads (no caller restriction) -----------------------------------------
-  listForSession(sessionId: string, opts?: { includeArchived?: boolean }): Promise<readonly TodoList[]>;
-  getList(listId: string): Promise<TodoList | null>;
-  getItem(itemId: string): Promise<TodoItem | null>;
-
-  // -- List writes -----------------------------------------------------------
-  createList(opts: CreateListOpts): Promise<TodoList>;
-  updateListTitle(listId: string, title: string): Promise<TodoList>;
-  updateListBody(listId: string, body: string): Promise<TodoList>;
-  archive(listId: string): Promise<TodoList>;
-  unarchive(listId: string): Promise<TodoList>;
-  /** Hand ownership to another family. Caller must currently own the list. */
-  transfer(listId: string, to: TodoOwner, reason: string): Promise<TodoList>;
-  /** Move a list under a different parent (or to root with `null`). */
-  reparent(listId: string, newParentListId: string | null): Promise<TodoList>;
-
-  // -- Item writes -----------------------------------------------------------
-  addItem(listId: string, opts: AddItemOpts): Promise<TodoItem>;
-  markInProgress(itemId: string): Promise<TodoItem>;
-  markComplete(itemId: string): Promise<TodoItem>;
-  markBlocked(itemId: string, reason: string): Promise<TodoItem>;
-  markCancelled(itemId: string): Promise<TodoItem>;
-  updateItemTitle(itemId: string, title: string): Promise<TodoItem>;
-  updateItemDescription(itemId: string, description: string): Promise<TodoItem>;
-  removeItem(itemId: string): Promise<void>;
-
-  // -- Comments --
-  listCommentsForItem(itemId: string): Promise<readonly TodoComment[]>;
-  /**
-   * Mark a user-authored comment as acknowledged. Caller must own the
-   * parent list. Used by agents to signal "I've processed this comment"
-   * after handling it on a turn -- the UI shows unacked comments with
-   * a visual cue until this runs.
-   */
-  ackComment(commentId: string): Promise<TodoComment>;
-}
+// Re-export for call sites that already reference the daemon-local aliases.
+export type CreateListOpts = CreateTodoListOpts;
+export type AddItemOpts = AddTodoItemOpts;
+export type { TodosApi };
 
 // ---------------------------------------------------------------------------
 // Factory

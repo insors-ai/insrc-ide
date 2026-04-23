@@ -256,3 +256,60 @@ export interface TodoStreamEvent {
    *  their cache without a round-trip. */
   readonly list: TodoList;
 }
+
+// ---------------------------------------------------------------------------
+// TodosApi -- interface only, declared here so the agent framework
+// (under agent/framework/) can reference it without importing
+// daemon-side modules. The concrete implementation lives in
+// `daemon/todos-api.ts` and emits stream events on the in-process bus.
+// ---------------------------------------------------------------------------
+
+export interface CreateTodoListOpts {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly description?: string | undefined;
+  readonly body?: string | undefined;
+  readonly parentListId?: string | undefined;
+}
+
+export interface AddTodoItemOpts {
+  readonly title: string;
+  readonly description?: string | undefined;
+  readonly tags?: readonly string[] | undefined;
+  readonly meta?: Readonly<Record<string, unknown>> | undefined;
+  /** If set, inserts immediately after the given item. Defaults to append. */
+  readonly insertAfterItemId?: string | undefined;
+}
+
+export interface TodosApi {
+  /** The family that mutations through this instance are attributed to. */
+  readonly caller: TodoOwner;
+
+  // -- Reads ----
+  listForSession(sessionId: string, opts?: { includeArchived?: boolean }): Promise<readonly TodoList[]>;
+  getList(listId: string): Promise<TodoList | null>;
+  getItem(itemId: string): Promise<TodoItem | null>;
+  listCommentsForItem(itemId: string): Promise<readonly TodoComment[]>;
+
+  // -- List writes ----
+  createList(opts: CreateTodoListOpts): Promise<TodoList>;
+  updateListTitle(listId: string, title: string): Promise<TodoList>;
+  updateListBody(listId: string, body: string): Promise<TodoList>;
+  archive(listId: string): Promise<TodoList>;
+  unarchive(listId: string): Promise<TodoList>;
+  transfer(listId: string, to: TodoOwner, reason: string): Promise<TodoList>;
+  reparent(listId: string, newParentListId: string | null): Promise<TodoList>;
+
+  // -- Item writes ----
+  addItem(listId: string, opts: AddTodoItemOpts): Promise<TodoItem>;
+  markInProgress(itemId: string): Promise<TodoItem>;
+  markComplete(itemId: string): Promise<TodoItem>;
+  markBlocked(itemId: string, reason: string): Promise<TodoItem>;
+  markCancelled(itemId: string): Promise<TodoItem>;
+  updateItemTitle(itemId: string, title: string): Promise<TodoItem>;
+  updateItemDescription(itemId: string, description: string): Promise<TodoItem>;
+  removeItem(itemId: string): Promise<void>;
+
+  // -- Comments ----
+  ackComment(commentId: string): Promise<TodoComment>;
+}
