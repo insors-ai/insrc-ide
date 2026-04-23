@@ -14,8 +14,11 @@
  */
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
-import type { ClassifyInput, ClassifyResult } from '../../shared/classify.js';
+import type { ClassifyInput, ClassifyResult, ScopeSize } from '../../shared/classify.js';
 import { getLogger } from '../../shared/logger.js';
+
+const VALID_SCOPES: readonly ScopeSize[] = ['S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'XXXXL'];
+const VALID_SCOPES_SET = new Set<string>(VALID_SCOPES);
 
 const log = getLogger('classify');
 
@@ -66,19 +69,29 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
     .join('\n');
 
   const systemLines = [
-    `You are a ${role}. Given the text below, pick EXACTLY ONE class that best describes it.`,
+    `You are a ${role}. Given the text below, pick EXACTLY ONE class that best describes it AND estimate the scope of the work being asked for.`,
     '',
     '## Classes',
     classList,
     '',
+    '## Scope (size of the work)',
+    '- `S`     -- one small, localized change (minutes of work)',
+    '- `M`     -- a few related changes in one module (single session)',
+    '- `L`     -- a feature or module-sized piece of work (multi-session)',
+    '- `XL`    -- subsystem-scale change spanning several modules',
+    '- `XXL`   -- multi-subsystem change (e.g. auth + storage + UI)',
+    '- `XXXL`  -- cross-cutting architectural change',
+    '- `XXXXL` -- major rewrite or new product direction',
+    '',
     'Rules:',
     '- Pick the single best-fit class.',
     '- `id` MUST be one of the listed class ids verbatim.',
+    '- `scope` MUST be one of S / M / L / XL / XXL / XXXL / XXXXL -- pick the smallest tier the work could plausibly fit into.',
     '- Confidence: 0.9+ for clear matches, 0.7-0.9 reasonable, below 0.7 a guess.',
     '- Return ONLY valid JSON (no markdown fences, no prose).',
     '',
     'Schema:',
-    '{ "id": "<class id>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>" }',
+    '{ "id": "<class id>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "scope": "<S|M|L|XL|XXL|XXXL|XXXXL>" }',
   ];
 
   const userLines: string[] = [];
@@ -118,7 +131,12 @@ function parseResponse(rawText: string, input: ClassifyInput): ClassifyResult | 
   const confidence = Math.max(0, Math.min(1, confRaw));
   const reasoning = typeof obj['reasoning'] === 'string' ? obj['reasoning'] as string : '';
 
-  return { id, confidence, reasoning, fallback: false };
+  // Scope is mandatory per the schema but we tolerate omission / unknown
+  // values by falling back to 'M' (a reasonable "normal" default).
+  const scopeRaw = typeof obj['scope'] === 'string' ? (obj['scope'] as string).trim().toUpperCase() : '';
+  const scope: ScopeSize = VALID_SCOPES_SET.has(scopeRaw) ? (scopeRaw as ScopeSize) : 'M';
+
+  return { id, confidence, reasoning, scope, fallback: false };
 }
 
 function stripFences(text: string): string {
@@ -134,6 +152,7 @@ function fallbackResult(input: ClassifyInput, reason: string): ClassifyResult {
     id: input.classes[0]!.id,
     confidence: 0,
     reasoning: reason,
+    scope: 'M',
     fallback: true,
   };
 }

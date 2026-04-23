@@ -196,6 +196,24 @@
 	display: none;
 }
 
+/* Scope badge: distinct palette from the intent badge so the eye reads them as two facets of the same announcement. */
+.insrc-chat-progress-scope {
+	flex-shrink: 0;
+	padding: 2px 8px;
+	border-radius: 10px;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	background: var(--vscode-activityBarBadge-background, var(--vscode-badge-background));
+	color: var(--vscode-activityBarBadge-foreground, var(--vscode-badge-foreground));
+	opacity: 0.85;
+}
+
+.insrc-chat-progress-scope.hidden {
+	display: none;
+}
+
 /* -- Message list ------------------------------------ */
 
 .insrc-chat-messages {

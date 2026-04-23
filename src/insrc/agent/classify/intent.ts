@@ -14,6 +14,7 @@
 
 import type { ExplicitProvider, Intent } from '../../shared/types.js';
 import type { Session } from '../session.js';
+import type { ScopeSize } from '../../shared/classify.js';
 import { parsePrefix } from '../prefix.js';
 import { classify } from './index.js';
 import { resolveClassifierProvider } from './provider.js';
@@ -30,6 +31,12 @@ export interface IntentClassifyResult {
   readonly message: string;
   /** One-sentence reasoning from the LLM. Empty for prefix overrides. */
   readonly reasoning: string;
+  /**
+   * Scope / size estimate produced alongside the class. 'M' for prefix
+   * overrides (no LLM call -- callers can re-classify if they need a
+   * real scope) and fallback paths.
+   */
+  readonly scope: ScopeSize;
   /** True when the classifier errored and fell back to classes[0]. */
   readonly fallback: boolean;
 }
@@ -57,6 +64,7 @@ export async function classifyPrimaryIntent(
       explicit: prefix.explicit,
       message: prefix.message,
       reasoning: 'explicit /intent override',
+      scope: 'M',
       fallback: false,
     };
   }
@@ -76,6 +84,7 @@ export async function classifyPrimaryIntent(
     explicit: prefix.explicit,
     message: prefix.message,
     reasoning: result.reasoning,
+    scope: result.scope,
     fallback: result.fallback,
   };
 }

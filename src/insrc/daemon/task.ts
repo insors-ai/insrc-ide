@@ -1589,14 +1589,16 @@ async function resolveController(
       { role: 'brainstorm sub-category classifier', classes: BRAINSTORM_CATEGORY_CLASSES, text: msg },
       resolveClassifierProvider(deps.session, 'brainstorm-subcategory'),
     );
+    const { SCOPE_META } = await import('../shared/classify.js');
+    const scopeLabel = SCOPE_META[result.scope].label;
     log.info(
-      { category: result.id, confidence: result.confidence, reasoning: result.reasoning, fallback: result.fallback },
+      { category: result.id, confidence: result.confidence, scope: result.scope, scopeLabel, reasoning: result.reasoning, fallback: result.fallback },
       'brainstorm sub-classification',
     );
     deps.send({
       id: deps.requestId,
       stream: 'progress',
-      data: { message: `Intent: brainstorm/${result.id} (${result.reasoning})` },
+      data: { message: `Intent: brainstorm/${result.id} [${scopeLabel}] (${result.reasoning})` },
     });
     cacheKey = `brainstorm:${result.id}`;
 

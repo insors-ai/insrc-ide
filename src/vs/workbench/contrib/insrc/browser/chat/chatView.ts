@@ -117,6 +117,7 @@ export class InsrcChatViewPane extends ViewPane {
 	private _selectionBar!: HTMLElement;
 	private _progressText!: HTMLElement;
 	private _intentBadge!: HTMLElement;
+	private _scopeBadge!: HTMLElement;
 	private _messageList!: HTMLElement;
 	private _gateContainer!: HTMLElement;
 	private _attachedFilesEl!: HTMLElement;
@@ -270,6 +271,10 @@ export class InsrcChatViewPane extends ViewPane {
 		// text cycles through subsequent steps. Cleared on streamEnd /
 		// session reset. Hidden by default (display:none via CSS class).
 		this._intentBadge = dom.append(this._progressBar, dom.$('span.insrc-chat-progress-intent.hidden'));
+		// Scope badge -- classifier's size estimate (S / M / L / ...)
+		// shown alongside the intent so the user can see the agent's
+		// read of how big the work is.
+		this._scopeBadge = dom.append(this._progressBar, dom.$('span.insrc-chat-progress-scope.hidden'));
 
 		// Input area (matches extension chat layout: rounded border, textarea + icon buttons, toolbar below)
 		this._inputArea = dom.append(this._container, dom.$('.insrc-chat-input-area'));
@@ -458,40 +463,59 @@ export class InsrcChatViewPane extends ViewPane {
 		if (!detected || detected === this._lastAnnouncedIntent) { return; }
 		this._lastAnnouncedIntent = detected;
 
+		// Split the progress string into intent / scope / reasoning parts.
+		// Format emitted by the daemon:
+		//   "brainstorm/design [Large] (The text focuses on ...)"
+		// Scope tag + parenthetical reasoning are both optional.
+		const parenIdx = detected.indexOf(' (');
+		const headlineRaw = parenIdx > 0 ? detected.slice(0, parenIdx).trim() : detected;
+		const reasoning = parenIdx > 0 && detected.endsWith(')')
+			? detected.slice(parenIdx + 2, -1).trim()
+			: undefined;
+		const scopeMatch = headlineRaw.match(/\s*\[([^\]]+)\]\s*$/);
+		const scopeLabel = scopeMatch ? scopeMatch[1]!.trim() : undefined;
+		const headline = scopeMatch ? headlineRaw.slice(0, scopeMatch.index).trim() : headlineRaw;
+
 		// Item 8b: pin the detected intent on the progress bar as a sticky
 		// badge so it stays visible while the agent grinds through
 		// downstream steps. Cleared on streamEnd (see `_onStreamEnd`) and
 		// when the session resets.
 		if (this._intentBadge) {
-			const parenIdxForBadge = detected.indexOf(' (');
-			const shortLabel = parenIdxForBadge > 0 ? detected.slice(0, parenIdxForBadge).trim() : detected;
-			this._intentBadge.textContent = shortLabel;
+			this._intentBadge.textContent = headline;
 			this._intentBadge.classList.remove('hidden');
+		}
+		// Dedicated scope badge alongside the intent badge so the size
+		// estimate is readable without being crammed into brackets in
+		// the intent text.
+		if (this._scopeBadge) {
+			if (scopeLabel) {
+				this._scopeBadge.textContent = scopeLabel;
+				this._scopeBadge.classList.remove('hidden');
+			} else {
+				this._scopeBadge.textContent = '';
+				this._scopeBadge.classList.add('hidden');
+			}
 		}
 
 		// Keep the dropdown honest. `brainstorm/<category>` lands under the
 		// top-level Brainstorm option.
-		const [primary] = detected.split('/');
+		const [primary] = headline.split('/');
 		if (primary) { this._selectIntent(primary); }
 
 		// Item 24: render the classification as a persistent assistant
 		// message in the chat transcript -- even during brainstorm lock.
 		// Previously this was suppressed while brainstorm was active so the
 		// user lost the record of HOW the turn was routed once the intent
-		// pill scrolled past. The daemon's progress event carries the full
-		// "intent/<category> (reasoning)" shape, so we split it into a
-		// headline + reasoning.
-		const parenIdx = detected.indexOf(' (');
-		const headline = parenIdx > 0 ? detected.slice(0, parenIdx).trim() : detected;
-		const reasoning = parenIdx > 0 && detected.endsWith(')')
-			? detected.slice(parenIdx + 2, -1).trim()
-			: undefined;
+		// pill scrolled past.
 		const slashIdx = headline.indexOf('/');
 		const primaryIntent = slashIdx > 0 ? headline.slice(0, slashIdx) : headline;
 		const subIntent = slashIdx > 0 ? headline.slice(slashIdx + 1) : undefined;
-		const formatted = subIntent
+		const intentLine = subIntent
 			? `**Detected intent:** ${primaryIntent} → ${subIntent}`
 			: `**Detected intent:** ${primaryIntent}`;
+		const formatted = scopeLabel
+			? `${intentLine}  ·  **Scope:** ${scopeLabel}`
+			: intentLine;
 		const content = reasoning
 			? `${formatted}\n\n_${reasoning}_`
 			: formatted;
@@ -1012,6 +1036,10 @@ export class InsrcChatViewPane extends ViewPane {
 		if (this._intentBadge) {
 			this._intentBadge.textContent = '';
 			this._intentBadge.classList.add('hidden');
+		}
+		if (this._scopeBadge) {
+			this._scopeBadge.textContent = '';
+			this._scopeBadge.classList.add('hidden');
 		}
 		// Item 32b: drop any orphan live-step bubbles left over from an
 		// LLM step that ended without emitting its `done` event (abort,
