@@ -419,7 +419,7 @@ export interface IpcResponse {
   error?:  string;
 }
 
-export type IpcStreamKind = 'delta' | 'progress' | 'gate' | 'checkpoint' | 'done' | 'error' | 'qna.update' | 'liveStep';
+export type IpcStreamKind = 'delta' | 'progress' | 'gate' | 'checkpoint' | 'done' | 'error' | 'qna.update' | 'liveStep' | 'todos';
 
 export interface IpcStreamMessage {
   id:     number;

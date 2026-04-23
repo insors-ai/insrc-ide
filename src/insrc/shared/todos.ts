@@ -10,10 +10,11 @@
  * 'implementation'; brainstorm sub-categories) never surface here --
  * they are private runtime detail inside their family's controller.
  *
- * Lists, items, and comments are all identified by ULIDs. Items live
- * inside a list; comments live on an item. Lists are always keyed to
- * a session id and die with the session (see session-lifecycle.md
- * Phase 4 discard path).
+ * Lists, items, and comments are all identified by globally-unique
+ * hex-32 ids (`randomBytes(16).toString('hex')`, matching the
+ * existing repo convention). Items live inside a list; comments live
+ * on an item. Lists are always keyed to a session id and die with
+ * the session (see session-lifecycle.md Phase 4 discard path).
  */
 
 import type { AgentFamily } from './agent-registry.js';
@@ -90,7 +91,7 @@ export type TodoOwner = AgentFamily;
 // ---------------------------------------------------------------------------
 
 export interface TodoComment {
-  readonly id: string;            // ULID
+  readonly id: string;            // hex-32 id
   readonly itemId: string;        // parent item id
   /** Author. Currently `'user'` for user-authored comments; a future
    *  reviewer-agent phase may set this to an `AgentFamily` value. */
@@ -108,7 +109,7 @@ export interface TodoComment {
 // ---------------------------------------------------------------------------
 
 export interface TodoItem {
-  readonly id: string;            // ULID, globally unique
+  readonly id: string;            // hex-32 id, globally unique (randomBytes(16).toString('hex'))
   readonly listId: string;        // parent list
   readonly title: string;         // one-line imperative
   readonly description?: string | undefined;

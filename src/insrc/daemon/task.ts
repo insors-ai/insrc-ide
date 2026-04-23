@@ -362,6 +362,15 @@ export interface TaskOrchestratorDeps {
    * from a checkpoint. Never set by normal (non-resume) chat turns.
    */
   initialTasks?: Task[] | undefined;
+  /**
+   * Todos framework wrapper (plans/todo-framework.md Phase 3).
+   * Populated inside `runControlledPipeline` once a controller has
+   * been resolved -- the instance is bound to the controller's
+   * family id so every mutation auto-stamps the correct owner.
+   * Chat-handler callsites leave this unset; consumers inside the
+   * controlled pipeline receive a ready instance via subDeps.
+   */
+  todos?: import('./todos-api.js').TodosApi | undefined;
 }
 
 interface ShellResult {
@@ -587,6 +596,23 @@ export async function runControlledPipeline(
   const { send, requestId } = deps;
   const stateStore = deps.stateStore ?? createTaskStateStore();
   const allResults: TaskResult[] = [];
+
+  // Todos framework hook (plans/todo-framework.md Phase 3). If the
+  // caller didn't already construct a `deps.todos`, build one scoped
+  // to the controller's family id. Controllers whose `id` isn't a
+  // registered agent family (e.g. `code-analysis`) skip this -- they
+  // just don't get a `deps.todos`; that's fine until they ever need
+  // to create a list. Stream events from any mutation land on the
+  // same in-process bus the RPC layer feeds, so UI subscribers see
+  // every change whether it originated from the browser or here.
+  if (deps.todos === undefined) {
+    const { isAgentFamily } = await import('../shared/agent-registry.js');
+    if (isAgentFamily(controller.id)) {
+      const { getDb } = await import('../db/client.js');
+      const { makeTodosApi } = await import('./todos-api.js');
+      deps.todos = makeTodosApi(await getDb(), controller.id);
+    }
+  }
 
   // Emit category-qualified intent (e.g., "Intent: brainstorm/requirements")
   if (controller.category) {

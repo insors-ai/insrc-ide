@@ -46,6 +46,7 @@ import type { RegisteredRepo, DaemonStatus, Entity, Plan, PlanStepStatus, Config
 import { basename, dirname } from 'node:path';
 import { ConfigStore } from '../config/store.js';
 import { searchConfig, resolveTemplate } from '../config/search.js';
+import * as todosRpc from './todos-rpc.js';
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -373,8 +374,10 @@ async function main(): Promise<void> {
       // Phase 4 discard (plans/session-lifecycle.md). Purges every
       // trace of the session so the Runs sidebar stops listing it:
       //   1. Checkpoint file(s) under ~/.insrc/checkpoints/
-      //   2. DB sessions row + all associated turns.
-      //   3. In-memory pool entry (aborts any in-flight agent).
+      //   2. Todos framework lists/items/comments for this session
+      //      (plans/todo-framework.md Phase 2b).
+      //   3. DB sessions row + all associated turns.
+      //   4. In-memory pool entry (aborts any in-flight agent).
       // Best-effort per step -- a missing checkpoint / DB row is fine;
       // continue purging the other artifacts.
       const { readdirSync, unlinkSync, existsSync: existsFs } = await import('node:fs');
@@ -398,7 +401,27 @@ async function main(): Promise<void> {
         }
       }
 
-      // 2. DB session row + turns.
+      // 2. Todos framework purge. `caller: 'system'` authorises the
+      //    broad cleanup; `sessionIds: [id]` scopes it so the
+      //    retention safety rail doesn't reject.
+      let todosListsDeleted = 0;
+      let todosItemsDeleted = 0;
+      try {
+        const cleanupResult = await todosRpc.cleanup(db, {
+          caller: 'system',
+          sessionIds: [id],
+        });
+        if (!('error' in cleanupResult)) {
+          todosListsDeleted = cleanupResult.deletedListCount;
+          todosItemsDeleted = cleanupResult.deletedItemCount;
+        } else {
+          log.warn({ err: cleanupResult, sessionId: id }, 'agent.discard: todos cleanup rejected');
+        }
+      } catch (err) {
+        log.warn({ err, sessionId: id }, 'agent.discard: todos cleanup failed');
+      }
+
+      // 3. DB session row + turns.
       let sessionRows = 0;
       let turnRows = 0;
       try {
@@ -409,7 +432,7 @@ async function main(): Promise<void> {
         log.warn({ err, sessionId: id }, 'agent.discard: DB delete failed');
       }
 
-      // 3. In-memory pool entry (aborts in-flight agent if any).
+      // 4. In-memory pool entry (aborts in-flight agent if any).
       try {
         dropSessionFromPool(id);
       } catch (err) {
@@ -417,10 +440,10 @@ async function main(): Promise<void> {
       }
 
       log.info(
-        { sessionId: id, checkpointsDeleted, sessionRows, turnRows },
+        { sessionId: id, checkpointsDeleted, todosListsDeleted, todosItemsDeleted, sessionRows, turnRows },
         'agent.discard',
       );
-      return { ok: true, checkpointsDeleted, sessionRows, turnRows };
+      return { ok: true, checkpointsDeleted, todosListsDeleted, todosItemsDeleted, sessionRows, turnRows };
     },
 
     'daemon.status': async () => {
@@ -941,11 +964,30 @@ async function main(): Promise<void> {
     'chat.list':   chatList,
     'chat.status': chatStatus,
     'chat.restore': chatRestore,
+
+    // Todos framework (plans/todo-framework.md). Standard RPCs --
+    // caller authorization happens inside each handler, stream
+    // events land on the in-process bus and get flushed via
+    // 'todos.subscribe' below.
+    'todos.listForSession': (params) => todosRpc.listForSession(db, params),
+    'todos.create':         (params) => todosRpc.create(db, params),
+    'todos.update':         (params) => todosRpc.update(db, params),
+    'todos.archive':        (params) => todosRpc.archive(db, params),
+    'todos.unarchive':      (params) => todosRpc.unarchive(db, params),
+    'todos.transfer':       (params) => todosRpc.transfer(db, params),
+    'todos.reparent':       (params) => todosRpc.reparent(db, params),
+    'todos.addItem':        (params) => todosRpc.addItem(db, params),
+    'todos.updateItem':     (params) => todosRpc.updateItem(db, params),
+    'todos.reorderItem':    (params) => todosRpc.reorderItem(db, params),
+    'todos.removeItem':     (params) => todosRpc.removeItem(db, params),
+    'todos.clearCompleted': (params) => todosRpc.clearCompleted(db, params),
+    'todos.cleanup':        (params) => todosRpc.cleanup(db, params),
   }, {
     // Streaming handlers
     'chat.send':   chatSend,
     'chat.resume': chatResume,
     'chat.resumeFromCheckpoint': chatResumeFromCheckpoint,
+    'todos.subscribe': todosRpc.subscribe,
     'ollama.pull': async (params, send, signal) => {
       const { model } = params as { model: string };
       const { Ollama } = await import('ollama');
@@ -990,6 +1032,11 @@ async function main(): Promise<void> {
     }
   }, PRUNE_INTERVAL);
 
+  // 8b. Todos retention sweep (plans/todo-framework.md Phase 2).
+  // Fires once at boot and every 24 h; drops archived todo lists
+  // untouched for 90 days.
+  const stopTodosRetention = todosRpc.scheduleTodosRetention(db);
+
   // 9. Graceful shutdown on signals
   // TODO: shutdown hangs — `daemon stop` CLI times out after 5s and the old process
   // keeps the Kuzu DB lock, preventing restart. Root cause: queueDone never resolves
@@ -1000,6 +1047,7 @@ async function main(): Promise<void> {
   function shutdown(): void {
     log.info('shutting down...');
     clearInterval(pruneTimer);
+    stopTodosRetention();
     queue.stop();
     void disposeChatHandlers();
     void watcher.close();

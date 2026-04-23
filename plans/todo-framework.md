@@ -1230,22 +1230,34 @@ agent-run tests.
 
 ### Phase 2 -- Daemon RPC + stream events
 
-- `todos.*` methods in daemon `index.ts` (list / create / update /
-  archive / addItem / updateItem / reorderItem / removeItem /
-  clearCompleted / transfer / **reparent** / **cleanup**).
-- `cleanup` filter validation (reject age-only queries; enforce
-  "at least one scope filter").
-- Stream event wiring via the existing `DaemonChannel`, including
-  batched `'listDeleted'` events from `cleanup`.
-- `todos-api.ts` wrapper.
-- Wired onto `TaskOrchestratorDeps`.
-- Daily retention job registered at daemon boot (archived + >90d
-  older-than-updatedAt).
-- Pass-through smoke test: start a session, create a list via RPC,
-  verify the row lands in Lance, verify the stream event fires.
-  Separate test: seed old archived lists, run cleanup with
-  `olderThanDays: 90, statuses: ['archived']`, verify deletion +
-  events.
+- `todos.*` methods in [daemon/todos-rpc.ts](../src/insrc/daemon/todos-rpc.ts)
+  and registered in [daemon/index.ts](../src/insrc/daemon/index.ts)
+  (`listForSession`, `create`, `update`, `archive`, `unarchive`,
+  `transfer`, `reparent`, `addItem`, `updateItem`, `reorderItem`,
+  `removeItem`, `clearCompleted`, `cleanup`). Owner-authorization
+  happens inside each handler based on an explicit `caller` param
+  (default `'user'`).
+- `cleanup` filter validation -- reject unbounded /
+  delete-everything queries; age-only queries require at least one
+  of `sessionIds` / `statuses` / `sources` alongside them. Non-system
+  callers may only filter by `sessionIds` (the agent.discard shape).
+- Stream events flow through an in-process bus (`EventEmitter`)
+  inside `todos-rpc.ts`. The `todos.subscribe` streaming RPC holds
+  a socket open and flushes every event with
+  `IpcStreamMessage.stream === 'todos'`. Subscribers see full
+  `TodoStreamEvent` objects (`kind` + full list snapshot).
+  `cleanup` emits one `listDeleted` per deleted list so UI caches
+  can prune cleanly.
+- Daily retention job scheduled at daemon boot via
+  `scheduleTodosRetention(db)` -- drops archived lists untouched
+  for >90 days (`statuses: ['archived'], olderThanDays: 90`).
+  Retention days overridable by the future `cleanup.todos.retentionDays`
+  config field (not wired yet).
+
+The `todos-api.ts` wrapper (direct in-process access for controllers
+via `deps.todos`) and `TaskOrchestratorDeps.todos` plumbing land in
+Phase 3. Browser service (`IInsrcTodosService`) consumes the RPC
+surface in Phase 4.
 
 ### Phase 2b -- `agent.discard` integration
 

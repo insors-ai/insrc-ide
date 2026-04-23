@@ -463,6 +463,53 @@ async function listCommentsByItems(
   return by;
 }
 
+/**
+ * List every list across all sessions, optionally filtered by status /
+ * source / updatedAt cutoff. Used by the retention sweep + any other
+ * daemon-side maintenance that walks the full table. Prefer
+ * `listListsBySession` when you can -- this one table-scans.
+ */
+export async function listAllLists(
+  db: DbClient,
+  filter: {
+    readonly statuses?: readonly TodoListStatus[];
+    readonly sources?: readonly TodoOwner[];
+    /** ISO timestamp -- return lists whose `updatedAt < updatedBefore`. */
+    readonly updatedBefore?: string;
+  } = {},
+): Promise<readonly TodoList[]> {
+  const table = await getListsTable(db);
+
+  // Push status / source filters into the WHERE clause; filter by
+  // updatedBefore in-memory (LanceDB string comparison on ISO works,
+  // but staying in-memory is simpler + covers the '' sentinel edge
+  // cases if we ever add them).
+  const whereParts: string[] = [];
+  if (filter.statuses !== undefined && filter.statuses.length > 0) {
+    whereParts.push(`status IN (${filter.statuses.map(sqlStr).join(', ')})`);
+  }
+  if (filter.sources !== undefined && filter.sources.length > 0) {
+    whereParts.push(`source IN (${filter.sources.map(sqlStr).join(', ')})`);
+  }
+  const query = whereParts.length > 0
+    ? table.query().where(whereParts.join(' AND '))
+    : table.query();
+  const rows = await query.toArray();
+  const typed = (rows as Record<string, unknown>[]).filter(r => {
+    if (filter.updatedBefore !== undefined && (r['updatedAt'] as string) >= filter.updatedBefore) {
+      return false;
+    }
+    return true;
+  });
+
+  const out: TodoList[] = [];
+  for (const row of typed) {
+    const items = await listItems(db, row['id'] as string, false);
+    out.push(listRowToDomain(row, items));
+  }
+  return out;
+}
+
 /** List every list in a session, ordered root-first then by creation time. */
 export async function listListsBySession(
   db: DbClient,
