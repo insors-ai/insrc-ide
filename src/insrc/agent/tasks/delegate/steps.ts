@@ -142,7 +142,7 @@ export const approvePlanGateStep: AgentStep<DelegateState> = {
         if (ctx.recordFeedback && (cleanFeedback || reply.feedback)) {
           ctx.recordFeedback({
             content: `User edited delegate plan: ${cleanFeedback || reply.feedback}`,
-            namespace: 'delegate',
+            namespace: 'implementation',
             language: 'all',
             repoPath: state.input.repoPath,
             provider: ctx.providers.local,
@@ -187,7 +187,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
 
     // Investigation phase
     ctx.progress('  Investigating relevant code...');
-    const provider = resolveStepProvider(ctx, state, 'delegate', 'execute');
+    const provider = resolveStepProvider(ctx, state, 'implementation', 'execute');
     const investigation = await investigate(
       `For plan step "${planStep.title}": ${planStep.description}\n\nContext: ${state.input.codeContext}`,
       ctx,
@@ -196,7 +196,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
 
     // Code generation
     ctx.progress('  Generating code...');
-    const claudeProvider = ctx.providers.resolveOrNull('delegate', 'validate');
+    const claudeProvider = ctx.providers.resolveOrNull('implementation', 'validate');
 
     const extraContext: string[] = [];
     if (investigation.summary) extraContext.push(`Investigation:\n${investigation.summary}`);
@@ -205,14 +205,14 @@ export const executeStepStep: AgentStep<DelegateState> = {
     // Load config context (reuse from state if already loaded)
     let configContext = state.configContext;
     if (!configContext) {
-      configContext = await loadConfigContext(ctx, 'delegate', 'all', state.input.repoPath) || undefined;
+      configContext = await loadConfigContext(ctx, 'implementation', 'all', state.input.repoPath) || undefined;
 
-      // Search for delegate-specific feedback
+      // Search for delegate-variant feedback
       if (ctx.searchConfig) {
         try {
           const delegateFeedback = await ctx.searchConfig({
             query: 'delegate execution step validation feedback',
-            namespace: ['delegate', 'common'],
+            namespace: ['implementation', 'common'],
             category: 'feedback',
             limit: 3,
             boostProject: true,
@@ -317,7 +317,7 @@ export const executeStepStep: AgentStep<DelegateState> = {
       const testFiles = findTestFilesForChanges(applyResult.filesWritten);
       if (testFiles.length > 0) {
         ctx.progress('  Running tests...');
-        const claudeProv = ctx.providers.resolveOrNull('delegate', 'validate');
+        const claudeProv = ctx.providers.resolveOrNull('implementation', 'validate');
         for (const testFile of testFiles) {
           const testResult = await runTestsAndFix({
             testFilePath: testFile,
@@ -482,7 +482,7 @@ export const failureGateStep: AgentStep<DelegateState> = {
         if (ctx.recordFeedback && (cleanFeedback || reply.feedback)) {
           ctx.recordFeedback({
             content: `Delegate step failed, user retried: ${cleanFeedback || reply.feedback}`,
-            namespace: 'delegate',
+            namespace: 'implementation',
             language: 'all',
             repoPath: state.input.repoPath,
             provider: ctx.providers.local,
@@ -506,7 +506,7 @@ export const failureGateStep: AgentStep<DelegateState> = {
         if (ctx.recordFeedback && (cleanFeedback || reply.feedback)) {
           ctx.recordFeedback({
             content: `Delegate step failed, user edited step: ${cleanFeedback || reply.feedback}`,
-            namespace: 'delegate',
+            namespace: 'implementation',
             language: 'all',
             repoPath: state.input.repoPath,
             provider: ctx.providers.local,
@@ -572,7 +572,7 @@ export const reportStep: AgentStep<DelegateState> = {
     ctx.progress('Generating execution report...');
 
     const plan = state.plan;
-    const provider = resolveStepProvider(ctx, state, 'delegate', 'report');
+    const provider = resolveStepProvider(ctx, state, 'implementation', 'report');
 
     // Final commit if pending
     if (state.pendingCommitFiles.length > 0) {

@@ -22,9 +22,10 @@ import {
 // ---------------------------------------------------------------------------
 
 export const pairAgent: AgentDefinition<PairState> = {
-  id: 'pair',
+  id: 'implementation',
+  variant: 'pair',
   version: 1,
-  configNamespace: 'pair',
+  configNamespace: 'implementation',
   firstStep: 'check-context',
 
   steps: {

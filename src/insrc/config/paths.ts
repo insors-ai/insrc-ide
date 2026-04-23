@@ -48,8 +48,13 @@ export function projectConfigBase(repoPath: string): string {
  *          `~/.insrc/conventions/naming.md`           → `'common'`
  */
 export function inferNamespaceFromPath(filePath: string): ConfigNamespace {
+  // Mirror the ConfigNamespace union. Variants (pair / delegate under
+  // 'implementation'; brainstorm sub-categories) are NOT valid directory
+  // names -- they live inside the family's folder as variant-prefixed
+  // filenames (e.g. `pair-analyze.md` under `implementation/`).
   const KNOWN: Set<string> = new Set([
-    'tester', 'pair', 'delegate', 'designer', 'planner', 'common',
+    'implementation', 'brainstorm', 'designer', 'planner',
+    'tester', 'research', 'debugging', 'deployment', 'common',
   ]);
 
   // Walk path segments looking for a known namespace after a category dir

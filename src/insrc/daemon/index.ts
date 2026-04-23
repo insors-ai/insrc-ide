@@ -95,9 +95,20 @@ async function main(): Promise<void> {
     } catch { /* ignore parse errors */ }
   }
 
+  // 2c. One-shot Phase 0 agent-family rename migration (idempotent).
+  // Rewrites any persisted `agentId: 'pair' | 'delegate'` to the new
+  // `{ agentId: 'implementation', agentVariant: <prior> }` shape and
+  // moves `~/.insrc/<category>/pair|delegate/` dirs under
+  // `.../implementation/`. Runs before DB init so downstream loaders
+  // see a consistent view.
+  const { migrateAgentFamilyRename } = await import('./agent-family-migration.js');
+  migrateAgentFamilyRename();
+
   // 3. Open DB
   const db = await getDb();
   await initDb(db);
+  const { initTodosTables } = await import('../db/todos.js');
+  await initTodosTables(db);
   log.info('database ready');
 
   // 4. Bootstrap embedding model (async, non-blocking)

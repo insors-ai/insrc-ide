@@ -337,8 +337,21 @@ export type ConfigScope =
   | { kind: 'global' }
   | { kind: 'project'; repoPath: string };
 
+/**
+ * Config namespaces for template / feedback / convention storage.
+ *
+ * Mirrors the family-level ids from `shared/agent-registry.ts` (minus
+ * `'chat'` and `'system'`, which have no user-authored config assets),
+ * plus the cross-family `'common'` bucket. Variants (pair / delegate
+ * under `'implementation'`; brainstorm sub-categories) are internal
+ * to their family and never appear here -- config assets live in the
+ * family's namespace directory and may use variant-prefixed filenames
+ * (e.g. `pair-analyze.md` under `implementation/`) for internal
+ * disambiguation.
+ */
 export type ConfigNamespace =
-  | 'tester' | 'pair' | 'delegate' | 'designer' | 'planner' | 'brainstorm' | 'common' | 'research';
+  | 'implementation' | 'brainstorm' | 'designer' | 'planner'
+  | 'tester' | 'research' | 'debugging' | 'deployment' | 'common';
 
 export type ConfigCategory = 'template' | 'feedback' | 'convention';
 

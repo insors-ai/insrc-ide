@@ -892,9 +892,12 @@ export async function startRepl(cwd?: string): Promise<void> {
     codeContext: string,
     mode: PairMode,
   ): Promise<string> {
-    // Check for active/crashed runs for this repo
+    // Check for active/crashed runs for this repo. Ownership is at the
+    // 'implementation' family; pair is the single-scope variant stored
+    // on `agentVariant`.
     const activeRuns = readIndex().filter(
-      e => e.agentId === 'pair' && e.repo === repoPath &&
+      e => e.agentId === 'implementation' && e.agentVariant === 'pair' &&
+        e.repo === repoPath &&
         (e.status === 'running' || e.status === 'paused' || e.status === 'crashed'),
     );
 
@@ -979,9 +982,12 @@ export async function startRepl(cwd?: string): Promise<void> {
     message: string,
     codeContext: string,
   ): Promise<string> {
-    // Check for active/crashed runs for this repo
+    // Check for active/crashed runs for this repo. Ownership is at the
+    // 'implementation' family; delegate is the batch-scope variant
+    // stored on `agentVariant`.
     const activeRuns = readIndex().filter(
-      e => e.agentId === 'delegate' && e.repo === repoPath &&
+      e => e.agentId === 'implementation' && e.agentVariant === 'delegate' &&
+        e.repo === repoPath &&
         (e.status === 'running' || e.status === 'paused' || e.status === 'crashed'),
     );
 

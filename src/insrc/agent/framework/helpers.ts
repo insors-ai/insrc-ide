@@ -32,10 +32,12 @@ export function createMessage<T>(
   kind: string,
   payload: T,
   replyTo?: string,
+  agentVariant?: string,
 ): AgentMessage<T> {
   return {
     id: randomUUID(),
     agentId,
+    agentVariant,
     runId,
     kind,
     payload,
@@ -52,6 +54,9 @@ export interface StepContextOpts {
   channel:         Channel;
   runId:           string;
   agentId:         string;
+  /** Optional family variant (e.g. `'pair'` / `'delegate'` under
+   *  `'implementation'`). Passed through from the AgentDefinition. */
+  agentVariant?:   string | undefined;
   runDir:          string;
   config:          AgentConfig;
   providers:       { local: LLMProvider; claude: LLMProvider | null; resolve: (agent: string, step: string) => LLMProvider; resolveOrNull: (agent: string, step: string) => LLMProvider | null };
@@ -61,7 +66,7 @@ export interface StepContextOpts {
 }
 
 export function buildStepContext(opts: StepContextOpts): StepContext {
-  const { channel, runId, agentId, runDir, config, providers, abortController, rpcFn } = opts;
+  const { channel, runId, agentId, agentVariant, runDir, config, providers, abortController, rpcFn } = opts;
 
   return {
     channel,
@@ -74,19 +79,19 @@ export function buildStepContext(opts: StepContextOpts): StepContext {
 
     progress(msg: string, pct?: number): void {
       const payload: ProgressPayload = { message: msg, pct };
-      channel.send(createMessage(agentId, runId, 'progress', payload));
+      channel.send(createMessage(agentId, runId, 'progress', payload, undefined, agentVariant));
     },
 
     async gate(gateOpts: GateOpts): Promise<ReplyPayload> {
       const gateId = randomUUID();
       const payload: GatePayload = { gateId, ...gateOpts };
-      const msg = createMessage<GatePayload>(agentId, runId, 'gate', payload);
+      const msg = createMessage<GatePayload>(agentId, runId, 'gate', payload, undefined, agentVariant);
       return channel.gate(msg);
     },
 
     emit(text: string, stream?: boolean): void {
       const payload: EmitPayload = { text, stream };
-      channel.send(createMessage(agentId, runId, 'emit', payload));
+      channel.send(createMessage(agentId, runId, 'emit', payload, undefined, agentVariant));
     },
 
     async rpc<T = unknown>(method: string, params?: unknown): Promise<T | null> {

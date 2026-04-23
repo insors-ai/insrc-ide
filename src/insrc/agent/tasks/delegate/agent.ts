@@ -21,9 +21,10 @@ import {
 // ---------------------------------------------------------------------------
 
 export const delegateAgent: AgentDefinition<DelegateState> = {
-  id: 'delegate',
+  id: 'implementation',
+  variant: 'delegate',
   version: 1,
-  configNamespace: 'delegate',
+  configNamespace: 'implementation',
   firstStep: 'invoke-planner',
 
   steps: {

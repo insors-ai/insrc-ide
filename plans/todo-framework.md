@@ -2,16 +2,17 @@
 
 A first-class TODO primitive that rides on top of chat sessions. Every
 session can own zero or more TODO lists; every list owns an ordered
-sequence of items. Agents (pair, delegate, designer, brainstorm) can
-create and mutate lists, the user can view + tick items in the UI, and
-both sides see the same state because it's persisted on the session
-row, not scattered across agent-specific state blobs.
+sequence of items. Agent families (implementation, brainstorm, designer,
+planner, tester, research, debugging, deployment, ...) can create and
+mutate lists, the user can view them in the UI, and both sides see the
+same state because it's persisted on the session row, not scattered
+across agent-specific state blobs.
 
-Today each agent invents its own progress bookkeeping (delegate plans,
-brainstorm review queues, designer validate gates, etc.). None of it
-is uniformly visible to the user, resumable across daemon restarts,
-or reusable by the next agent in a handoff chain. This plan unifies
-that pattern into one framework the agents consume.
+Today each agent invents its own progress bookkeeping (delegate plan
+steps, brainstorm review queues, designer validate gates, etc.). None
+of it is uniformly visible to the user, resumable across daemon
+restarts, or reusable by the next agent in a handoff chain. This plan
+unifies that pattern into one framework the agents consume.
 
 ## Related plans
 
@@ -21,7 +22,7 @@ that pattern into one framework the agents consume.
   for composing prompts. This plan and the notepad **stay cleanly
   separated**: agents own todos (read-only to the user), the user
   owns the notepad (read-only to agents). Both share the editor-pane
-  scaffolding and Monaco plumbing (Phase 7 consolidates the shared
+  scaffolding and Monaco plumbing (Phase 8 consolidates the shared
   bits so we don't duplicate the pane infra).
 - [brainstorm/pending-fixes.md](brainstorm/pending-fixes.md) -- Items
   53 (handoff) and 54 (save-error surface) both would have been
@@ -30,20 +31,21 @@ that pattern into one framework the agents consume.
 
 ## Status
 
-| Phase | Scope                                                      | Status |
-|-------|------------------------------------------------------------|--------|
-| 0     | Central agent registry (prerequisite)                      | pending |
-| 1     | Data model + shared types + DB schema                      | pending |
-| 2     | Daemon RPC surface (todos.list/create/update/archive)      | pending |
-| 2b    | `agent.discard` integration                                | pending |
-| 3     | Agent hooks (read/mutate todos from any controller)        | pending |
-| 4     | Browser service + event stream                             | pending |
-| 5a    | Todos editor pane (EditorInput + EditorPane, per session)  | pending |
-| 5b    | Inline chat todos widget (agent-owned lists in transcript) | pending |
-| 5c    | Runs sidebar badge (pending-item count, click-to-open)     | pending |
-| 5d    | Comments: append-only user annotations on agent items      | pending |
-| 6     | Migration: port one agent (delegate plan list) as proof    | pending |
-| 7     | Factor shared pane-scaffolding + markdown widget with notepad | pending |
+| Phase | Scope                                                         | Status |
+|-------|---------------------------------------------------------------|--------|
+| 0     | Central agent-family registry (prerequisite, replaces variant refs) | pending |
+| 1     | Data model + shared types + DB schema                         | pending |
+| 2     | Daemon RPC surface (todos.list/create/update/archive)         | pending |
+| 2b    | `agent.discard` integration                                   | pending |
+| 3     | Agent hooks (read/mutate todos from any controller)           | pending |
+| 4     | Browser service + event stream                                | pending |
+| 5a    | Todos editor pane (EditorInput + EditorPane, per session)     | pending |
+| 5b    | Inline chat todos widget (agent-owned lists in transcript)    | pending |
+| 5c    | Runs sidebar badge (pending-item count, click-to-open)        | pending |
+| 5d    | Comments: append-only user annotations on agent items         | pending |
+| 6     | Migration proof: port the delegate variant's plan list first  | pending |
+| 7     | Broader family adoption (brainstorm / designer / planner)     | pending |
+| 8     | Factor shared pane-scaffolding + markdown widget with notepad | pending |
 
 ---
 
@@ -63,10 +65,10 @@ that pattern into one framework the agents consume.
 4. **Observable.** Every mutation fires an event the UI can subscribe
    to; no polling. The browser-side session service exposes a live
    view keyed by sessionId.
-5. **Agent-agnostic.** A single module owns the persistence + state
-   transitions. Any agent (brainstorm, delegate, designer, future
-   ones) can read + mutate via the same API without inventing its
-   own list format.
+5. **Family-agnostic.** A single module owns the persistence + state
+   transitions. Any agent family (brainstorm, implementation,
+   designer, ..., future ones) can read + mutate via the same API
+   without inventing its own list format.
 6. **Resume-safe.** State survives daemon restart. Inclusion in the
    session checkpoint is considered but rejected -- see the
    persistence section; lists go straight to LanceDB so they're
@@ -75,17 +77,24 @@ that pattern into one framework the agents consume.
    session id, age, status, or source (AND'ed filters). Default
    retention drops archived lists after 90 days; user can override.
    No schema-level append-only accumulation.
-8. **Ownership is explicit and agent-only.** Every list is owned
-   by an agent (`'brainstorm'`, `'delegate'`, `'pair'`, ...) or
-   `'system'` (daemon maintenance). Only the current owner can
-   mutate the list. Other agents on the session can read. The
-   **user cannot own or edit lists in this framework** -- the
-   todos pane is a read-only review surface for agent-generated
-   work. User-authored scratch content lives in the prompt
-   notepad ([plans/prompt-notepad.md](prompt-notepad.md)), which
-   stays independent and agent-read-only by the same symmetric
-   rule.
-   A list can be transferred from one agent-owner to another via
+8. **Ownership is explicit, family-scoped, and agent-only.** Every
+   list is owned by an **agent family** (`'brainstorm'`,
+   `'implementation'`, `'designer'`, `'research'`, `'debugging'`,
+   `'deployment'`, ...) or `'system'` (daemon maintenance).
+   Ownership lives at the family level, never the variant level:
+   `'implementation'` covers both pair and delegate (which are
+   scope-driven runtime variants, not owners in their own right);
+   `'brainstorm'` covers its sub-categories the same way. The
+   canonical set of families is the `AgentFamily` union exported
+   by `shared/agent-registry.ts` (Phase 0).
+   Only the current owner family can mutate the list. Other
+   families on the session can read. The **user cannot own or
+   edit lists in this framework** -- the todos pane is a
+   read-only review surface for agent-generated work.
+   User-authored scratch content lives in the prompt notepad
+   ([plans/prompt-notepad.md](prompt-notepad.md)), which stays
+   independent and agent-read-only by the same symmetric rule.
+   A list can be transferred from one family-owner to another via
    an explicit handoff API -- transfer is the only way to change
    an owner, and the new owner accepts full write authority from
    that point on.
@@ -99,15 +108,15 @@ that pattern into one framework the agents consume.
    existing chat-gate mechanism, not todos.
 10. **Lists can form a parent-child tree.** A list may have a
    `parentListId` pointing to another list in the same session.
-   This lets an agent model hierarchical work (planner emits a
-   top-level plan; the delegate that picks it up creates one
-   child list per plan step to track execution sub-tasks; a
-   brainstorm theme-spec session spawns a child list per theme).
-   Ownership is per-list, so children can have different owners
-   than their parent -- a handoff can transfer a child without
-   affecting its parent. The tree is strictly within a single
-   session (`sessionId` matches parent + child) and forbidden
-   from forming cycles.
+   This lets an agent family model hierarchical work (planner
+   emits a top-level plan; the implementation family picks it
+   up and creates one child list per plan step to track
+   execution sub-tasks; a brainstorm theme-spec session spawns
+   a child list per theme). Ownership is per-list, so children
+   can have different owner families than their parent -- a
+   handoff can transfer a child without affecting its parent.
+   The tree is strictly within a single session (`sessionId`
+   matches parent + child) and forbidden from forming cycles.
 
 ## Non-goals
 
@@ -183,15 +192,24 @@ export interface TodoComment {
  * does NOT own lists in this framework (user scratch belongs to
  * the prompt notepad -- see Related plans).
  *
- * - Any string matching an entry in the controller registry is an
- *   agent id: `'brainstorm'`, `'delegate'`, `'pair'`, `'designer'`,
- *   `'planner'`, `'tester'`, etc. Only that agent can write when
- *   it's the session's active controller.
+ * Ownership is at the agent-FAMILY level. Variants (pair/delegate
+ * under `'implementation'`; the five brainstorm sub-categories)
+ * are private to the controller and never surface as owners.
+ *
+ * The full set of owners is the `AgentFamily` union from
+ * `shared/agent-registry.ts` (Phase 0):
+ * `'chat' | 'implementation' | 'brainstorm' | 'designer' |
+ *  'planner' | 'tester' | 'research' | 'debugging' |
+ *  'deployment' | 'system'`.
+ *
+ * - Only the current owner family can write when one of its
+ *   controllers is active on the session.
  * - `'system'` is reserved for framework-generated lists (e.g. a
  *   daemon-maintained "sessions with expiring checkpoints" list if
  *   that ever becomes useful). No one but the daemon writes to these.
  */
-export type TodoOwner = 'system' | string;
+import type { AgentFamily } from './agent-registry.js';
+export type TodoOwner = AgentFamily;
 
 export interface TodoList {
   readonly id: string;            // ULID, globally unique
@@ -243,7 +261,10 @@ Every mutation RPC takes an implicit caller identity derived from
 its entry point:
 
 - Calls originating from a `TaskController` via `deps.todos` inherit
-  the controller's `agent` id (`'brainstorm'`, `'delegate'`, etc.).
+  the controller's **family** (`'brainstorm'`, `'implementation'`,
+  `'designer'`, ...). Variants (pair/delegate, brainstorm
+  sub-categories) never appear as owners -- the `deps.todos`
+  wrapper maps them to their family id at call time.
 - Calls originating from the browser via `IInsrcTodosService` (user
   action in the UI) carry the caller identity `'user'`.
 - Calls originating inside the daemon's own background maintenance
@@ -275,26 +296,27 @@ calls:
 ```
 todos.transfer -> {
   listId: string,
-  to: TodoOwner,     // 'user' | '<agent id>'
+  to: TodoOwner,     // '<agent family>' | 'system'  (never 'user')
   reason: string,    // free-text; required. Shows in the UI history.
 } -> TodoList
 ```
 
 Rules:
-- Caller must be the current `owner` (agent-to-agent transfers
-  only -- the user cannot own a list, so no user-initiated
-  transfers either).
-- `to` must be an agent id that exists in the canonical agent
-  registry (any controller the daemon knows how to load), or
-  `'system'`. Transfer to an unknown agent id is rejected.
-- **The target agent does NOT need to be currently running on the
-  session.** Transfer to a dormant agent is valid: the list
+- Caller must be the current `owner` family (family-to-family
+  transfers only -- the user cannot own a list, so no
+  user-initiated transfers either).
+- `to` must be an entry in the canonical `AgentFamily` union
+  exported by `shared/agent-registry.ts`, or `'system'`.
+  Transfer to an unknown family is rejected.
+- **The target family does NOT need to be currently running on
+  the session.** Transfer to a dormant family is valid: the list
   simply sits waiting for the next session turn that spins up
-  that agent. When agent X activates for any reason on this
-  session (classified intent, user `/intent` override, handoff
-  proposal), it sees pending lists owned by it and can resume
-  work. Lists stuck with a dormant owner that never activates on
-  this session are eventually archived by the retention job.
+  one of that family's controllers. When family X activates for
+  any reason on this session (classified intent, user `/intent`
+  override, handoff proposal), its controller sees pending lists
+  owned by X and can resume work. Lists stuck with a dormant
+  owner that never activates on this session are eventually
+  archived by the retention job.
 - Appends a `TodoTransfer` record to `list.transfers` with `from =
   previous owner`, `to`, `reason`, `at = now`. Atomic with the
   owner field update.
@@ -322,10 +344,14 @@ hint clears when the target agent next activates.
   finishing. The Designer agent picks up write authority; the
   user watches the handoff happen via the inline chat widget +
   the todos pane.
-- **Delegate picks up planner output**: the Planner publishes a
-  plan-step list while it owns the session; the Delegate agent
-  calls `todos.transfer(listId, 'delegate', 'plan execution
-  takeover')` at session start.
+- **Planner → Implementation handoff**: the Planner publishes a
+  plan-step list while it owns the session; the implementation
+  agent calls `todos.transfer(listId, 'implementation', 'plan
+  execution takeover')` at session start. Internally, the
+  implementation controller picks pair (single scope) or
+  delegate (batch scope) based on classification; ownership
+  stays at the family level throughout the handoff and
+  execution.
 - **Agent completes + hands to system**: when an agent finishes
   its work, it either archives the list itself or transfers to
   `'system'`, which keeps the list queryable for retention /
@@ -358,18 +384,20 @@ that larger piece of work".
 Each list in the tree has its own `owner`; parent and child
 ownership are **independent**. Typical patterns:
 
-- **Same-owner subtree**: delegate owns a top-level plan list
-  plus one child-per-step that it authors as work progresses.
-  All nodes have `owner: 'delegate'`.
+- **Same-owner subtree**: the implementation family owns a
+  top-level plan list plus one child-per-step that it authors as
+  work progresses. All nodes have `owner: 'implementation'`.
+  Internally the family may be running pair or delegate on any
+  given turn; ownership doesn't flip.
 - **Cross-owner handoff**: planner owns the top-level plan
-  (`owner: 'planner'`); delegate creates child execution lists
-  under that plan (`owner: 'delegate'`). Transferring the root
-  plan to `'planner'` doesn't affect delegate's children --
-  each node keeps its own writers.
+  (`owner: 'planner'`); the implementation family creates child
+  execution lists under that plan (`owner: 'implementation'`).
+  Transferring the root plan back to `'planner'` doesn't affect
+  the implementation children -- each node keeps its own writer.
 - **User-visible boundary**: the pane renders the whole tree
-  regardless of owner mix; ownership badges appear per-node so
-  the user sees where one agent's authority ends and another's
-  begins.
+  regardless of owner mix; family ownership badges appear
+  per-node so the user sees where one family's authority ends
+  and another's begins.
 
 ### Cascade behavior
 
@@ -673,9 +701,11 @@ export interface TodosApi {
 ```
 
 `deps.todos.createList` automatically stamps `owner` with the
-caller controller's id (brainstorm / delegate / designer / ...),
-so agents don't have to repeat themselves. Explicit `owner`
-override is allowed only for `'system'` callers.
+caller controller's **family** (`brainstorm` / `implementation` /
+`designer` / ...), not its variant -- pair and delegate both
+stamp `owner: 'implementation'`; brainstorm sub-categories all
+stamp `owner: 'brainstorm'`. Explicit `owner` override is
+allowed only for `'system'` callers.
 
 Plumbed onto `TaskOrchestratorDeps` so every controller can call
 `deps.todos.createList({ title: 'Review ideas', source: 'brainstorm', ... })`
@@ -683,13 +713,16 @@ without a direct DB import.
 
 ### Migration -- Phase 6 proof
 
-Port the Delegate agent's plan-step list ([plans/delegate-plan-framework.md]
-if we have one; else `agent/tasks/delegate/agent.ts`) to this
-framework. Delegate's plan is the cleanest existing shape: ordered
-list of steps with status (pending -> in-progress -> done) and a
-known UI widget. Porting it validates the framework handles the
-hardest case we have today; other agents follow once the pattern
-is proven.
+Port the delegate variant of the `implementation` family
+([`agent/tasks/delegate/agent.ts`](../src/insrc/agent/tasks/delegate/agent.ts))
+as the reference migration. The list is owned by the family
+(`owner: 'implementation'`); the delegate variant is an
+internal runtime detail, not a separate owner. Delegate's plan
+is the cleanest existing shape -- ordered list of steps with
+status (pending → in-progress → done) and a known UI widget --
+so porting it validates the framework handles the hardest case
+today. Other families follow in Phase 7 once the pattern is
+proven.
 
 ---
 
@@ -800,7 +833,7 @@ Key design choices:
 │    ↓ children (2): Implement key/invalidation · Migration tasks │
 │    [⋮ copy as markdown · view history · focus agent]            │
 │                                                                 │
-│  ▼ [delegate]  Implement key/invalidation      1 pending · 💬1  │
+│  ▼ [implementation]  Implement key/invalidation  1 pending · 💬1│
 │    ↑ parent: Caching layer design plan [jump]                   │
 │    [done]      content-hash helper                              │
 │    [done]      epoch counter on index commit                    │
@@ -809,7 +842,7 @@ Key design choices:
 │               vector search; strict for Cypher"                 │
 │      + Add comment                                              │
 │                                                                 │
-│  ▶ [delegate]  Migration tasks                       complete   │
+│  ▶ [implementation]  Migration tasks                 complete   │
 │    ↑ parent: Caching layer design plan [jump]                   │
 │                                                                 │
 │  ▶ [brainstorm] Cache layer spec -- design session   complete   │
@@ -887,7 +920,7 @@ Each surface has a single, clear audience and no identity
 confusion. "Can I edit this?" is answered by which pane you're
 in, not by ownership flags within a pane.
 
-#### Shared infrastructure (Phase 7)
+#### Shared infrastructure (Phase 8)
 
 Keeping them separate doesn't mean duplicating everything. Phase
 7 consolidates the bits they genuinely share:
@@ -900,7 +933,7 @@ Keeping them separate doesn't mean duplicating everything. Phase
 - **Markdown widget.** Whatever renderer / editor Monaco config
   the notepad uses for its composition surface should be the
   same module the todos pane uses to render `body` + item
-  descriptions. Phase 7 extracts `browser/shared/markdownWidget.ts`.
+  descriptions. Phase 8 extracts `browser/shared/markdownWidget.ts`.
 - **Styling tokens.** One palette definition shared by both
   panes so they visually belong to the same product family
   without hard-linking their DOM trees.
@@ -977,8 +1010,8 @@ Suppression rules:
 
 ```
 ─── assistant ─────────────────────────────────────────────────
- [delegate] Implement refine-theme-spec                    ▼
- owner: delegate  ·  4 items  ·  1 pending  ·  [Open todos]
+ [implementation] Implement refine-theme-spec              ▼
+ owner: implementation  ·  4 items  ·  1 pending  ·  [Open todos]
  ↑ parent: Caching layer design plan                [jump]
  ──────────────────────────────────────────────────────────────
    ✓   parse Claude review JSON
@@ -1056,34 +1089,128 @@ pane.
 
 ## Rollout phases
 
-### Phase 0 -- Prerequisite: central agent registry
+### Phase 0 -- Prerequisite: central agent-family registry
 
-Today agent ids live in four scattered places: the intent classes
-(`INTENT_CLASSES`), the step-provider catalog (Item 26 /
-`agent-steps.ts`), the resolver fallback map, and ad-hoc strings
-inside each controller's constructor. The todos framework needs a
-**canonical registry** so `todos.transfer` can validate a target
-agent id against a single authoritative source.
+Today agent ids live in six scattered places, and the vocabulary
+mixes two distinct taxonomies (family vs variant) with no
+disambiguation. This phase introduces a single **AgentFamily**
+registry, replaces every variant-level reference in the codebase
+with its family id, and reserves variants as private runtime
+detail inside each family's controller(s).
 
-Scope:
-- New `src/insrc/shared/agent-registry.ts` module exporting:
-  ```ts
-  export type AgentId =
-    | 'chat' | 'brainstorm' | 'delegate' | 'pair'
-    | 'designer' | 'planner' | 'tester';
-  export const AGENT_REGISTRY: Readonly<Record<AgentId, AgentMeta>> = { ... };
-  ```
-  where `AgentMeta` carries display name, icon, controller-class
-  path (lazy-loaded), and category (`'coding' | 'research' |
-  'spec' | 'infra'`).
-- Replace the scattered string lists with imports from the
-  registry in the four existing call sites (intent classes,
-  step catalog seeder, resolver default, controller factory).
-- No behavior change visible to the user -- this is a pure
-  refactor. Validated by existing intent / classifier tests.
+#### Canonical families
 
-Blocks Phase 2 (`todos.transfer` validation) and Phase 3 (agent
-helper's `createList` uses the registry to stamp `owner`).
+Ten families. The registry is the single source of truth; any new
+family name must be added here first before it can be referenced
+anywhere else.
+
+```ts
+// src/insrc/shared/agent-registry.ts
+export type AgentFamily =
+  | 'chat'
+  | 'implementation'  // variants: pair (single), delegate (batch)
+  | 'brainstorm'      // variants: requirements/general/design/implementation/testing
+  | 'designer'
+  | 'planner'
+  | 'tester'
+  | 'research'
+  | 'debugging'
+  | 'deployment'
+  | 'system';
+
+export interface AgentFamilyMeta {
+  readonly id: AgentFamily;
+  readonly displayName: string;
+  readonly category: 'coding' | 'spec' | 'exec' | 'infra' | 'meta';
+  /** Icon hint for UI. Codicon name or empty for text-only badge. */
+  readonly icon?: string;
+  /** Human-readable one-liner used in pane hints / transfer
+   *  history rows. */
+  readonly description: string;
+}
+
+export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = { ... };
+```
+
+#### Scope: rename variants to families, no legacy references
+
+Every variant reference in the codebase migrates to the family id.
+The six affected sites:
+
+1. **`shared/agent-steps.ts`** -- `AGENT_STEP_CATALOG` entry for
+   `'pair'` renamed to `'implementation'`; delegate steps folded
+   into the same entry. Variant info lives on individual steps
+   via a new `variant?: 'pair' | 'delegate'` field if a step is
+   variant-specific.
+2. **`config/paths.ts`** + **`config/frontmatter.ts`** -- the
+   config-directory whitelist drops `'pair'` / `'delegate'` and
+   gains `'implementation'` (plus the new families: `'research'`,
+   `'debugging'`, `'deployment'`). Daemon-boot migration merges
+   any existing `~/.insrc/pair/` + `~/.insrc/delegate/` contents
+   into `~/.insrc/implementation/` (idempotent).
+3. **`daemon/task.ts` -- `resolveController()` switch** -- keyed
+   on the task's intent (not agent id), so this layer stays
+   intent-driven. But the `TaskController.id` it constructs gets
+   family-level stamping (see site 5).
+4. **`agent/tasks/shared/artifact-save.ts`** -- agent-id keyed
+   map (`'designer' | 'planner' | 'tester-plan' | 'tester-report'
+   | 'brainstorm'`) stays as-is; none of its entries are
+   variant-level, so no change needed beyond validation that the
+   keys match `AgentFamily` members (plus `'tester-plan'` /
+   `'tester-report'` which are artifact sub-types, not families).
+5. **`agent/tasks/*/agent.ts` -- per-agent `AgentDefinition.id`
+   constants** -- `tasks/pair/agent.ts` and `tasks/delegate/
+   agent.ts` both change their `id` to `'implementation'`, plus
+   gain a new `variant: 'pair' | 'delegate'` field for internal
+   disambiguation. The framework keys persistence, live-step
+   routing, etc. off `(id, variant)` instead of `id` alone.
+6. **`agent/index.ts` -- run-registry filters** -- filters like
+   `e.agentId === 'pair'` / `'delegate'` become
+   `e.agentId === 'implementation'` (plus variant check where
+   needed). On daemon boot, persisted rows with
+   `agentId: 'pair' | 'delegate'` are migrated in-place to
+   `{ agentId: 'implementation', variant: 'pair' | 'delegate' }`.
+
+#### Prompt file names stay variant-level (b-pragmatic)
+
+System prompt file names (`pair-analyze.md`, `pair-propose-${mode}.md`,
+`pair-validate.md`, ...) are **prompt assets**, not agent ids.
+They remain variant-named and live under the family's config
+directory. Renaming them would churn user customizations for no
+semantic gain. Similarly, internal controller state keys
+(`PAIR_MODE: 'implement' | 'refactor' | 'debug' | 'explore'`)
+are runtime implementation details and stay as-is.
+
+#### Migrations (daemon-boot, idempotent)
+
+- **Session rows**: scan `conversation_sessions` / run registry
+  for `agentId IN ('pair', 'delegate')`; rewrite to
+  `{ agentId: 'implementation', variant: <prior> }`. One-shot,
+  no-op on second run.
+- **Config directories**: if `~/.insrc/pair/` or
+  `~/.insrc/delegate/` exists, copy their contents into
+  `~/.insrc/implementation/` (no overwrite on conflict --
+  log and skip), then remove the old directories. One-shot.
+
+#### Variant disambiguation helper
+
+A small helper `resolveVariant(family: AgentFamily, ctx):
+Variant | undefined` handles the two places ownership is at the
+family level but behavior differs per variant (scope routing,
+prompt loading). Keeps variant logic internal to each family's
+controller module rather than leaking into the framework.
+
+#### Blocks
+
+- Phase 1 (`TodoOwner = AgentFamily` imports the registry).
+- Phase 2 (`todos.transfer` target validation walks
+  `AGENT_REGISTRY`).
+- Phase 3 (`deps.todos` wrapper stamps caller's family id, never
+  variant).
+
+No user-visible behavior change; a functional refactor with
+migration. Validated by the existing intent / classifier /
+agent-run tests.
 
 ### Phase 1 -- Types + schema (daemon-only, no UI)
 
@@ -1128,12 +1255,24 @@ helper's `createList` uses the registry to stamp `owner`).
   on completed sessions, and the dispose path. One discard, zero
   leftover rows.
 
-### Phase 3 -- Browser service
+### Phase 3 -- Agent hooks (read/mutate todos from any controller)
 
-- `IInsrcTodosService` + impl in `electron-sandbox/todosServiceImpl.ts`.
-- Session-change and stream-event wiring.
-- Still headless -- no rendered UI. Verified via the developer
-  console.
+- `daemon/todos-api.ts` -- thin `TodosApi` wrapper over the
+  LanceDB layer (see "Agent integration" above), exposed on
+  `TaskOrchestratorDeps.todos` so every `TaskController` can
+  call `deps.todos.createList(...)`, `addItem`, `markComplete`,
+  etc., without a direct DB import.
+- Caller identity auto-stamped from the controller's family id
+  (Phase 0 registry). Variants never leak into the `owner` /
+  `source` fields; pair and delegate controllers both stamp
+  `'implementation'`.
+- `todos.transfer` / `todos.reparent` / `todos.addItem` /
+  `todos.updateItem` accessible from controller code via the
+  same wrapper, with automatic authorization stamping.
+- Still headless -- no rendered UI surface in this phase;
+  validated by daemon-side integration tests that spin up a
+  controller, mutate via `deps.todos`, and verify rows + stream
+  events.
 
 ### Phase 4 -- Browser service
 
@@ -1183,13 +1322,6 @@ helper's `createList` uses the registry to stamp `owner`).
 - Click opens the todos editor pane for that run.
 - Pill updates live via `onDidChange` from the todos service.
 
-### Phase 5 -- Delegate migration (proof)
-
-- Port the delegate agent's plan list into the framework.
-- Remove the bespoke in-memory plan tracking.
-- Verify the plan-step UX (progress indicator on the current step)
-  still works via the generic todos pane.
-
 ### Phase 5d -- Comments
 
 - `TodoComment` type in `shared/todos.ts` + item `comments`
@@ -1215,15 +1347,30 @@ helper's `createList` uses the registry to stamp `owner`).
   render with a subtle border / "unacked" label until the agent
   processes them.
 
-### Phase 6 -- Broader agent adoption
+### Phase 6 -- Migration proof (delegate variant's plan list)
+
+- Port the delegate variant's (of the `implementation` family)
+  plan-step list into the framework. List `owner` is
+  `'implementation'`; variant info (`'delegate'`) lives in the
+  controller, not on the list.
+- Remove the bespoke in-memory plan tracking inside the delegate
+  codepath.
+- Verify the plan-step UX (progress indicator on the current
+  step) still works via the generic todos pane.
+- This is the reference migration: it proves the framework
+  handles the hardest existing shape (ordered steps with status
+  + a UI widget). Other families follow in Phase 7.
+
+### Phase 7 -- Broader family adoption
 
 - Brainstorm: surface the review queue / theme-spec queue as TODO
   lists.
 - Designer: validate gates become TODO items.
-- Planner: its output lands directly into a TODO list the delegate
-  can consume as input (handoff flow per Item 53).
+- Planner: its output lands directly into a TODO list the
+  `implementation` family can consume as input (handoff flow per
+  Item 53).
 
-### Phase 7 -- Factor shared scaffolding with the prompt notepad
+### Phase 8 -- Factor shared scaffolding with the prompt notepad
 
 Consolidate the infrastructure the todos pane and the prompt
 notepad both need, without merging their data models or commands:

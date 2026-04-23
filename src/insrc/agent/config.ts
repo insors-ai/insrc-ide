@@ -216,7 +216,7 @@ async function migrateKeysToKeychain(raw: Record<string, unknown>): Promise<void
 /**
  * Resolves LLM providers for agent steps based on config.
  *
- * Each agent has named steps (e.g. 'pair'/'propose', 'designer'/'review').
+ * Each agent has named steps (e.g. 'implementation'/'propose', 'designer'/'review').
  * Steps can be bound to any configured provider via
  * `config.models.agents[agent][step]`. Unbound steps fall back to the
  * `activeProvider`'s default (cloud) or local if no active provider.

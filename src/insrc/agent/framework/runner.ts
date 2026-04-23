@@ -116,6 +116,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
     // Write metadata
     const meta: RunMeta = {
       agentId: definition.id,
+      agentVariant: definition.variant,
       version: definition.version,
       repo: options.repo ?? '',
       createdAt,
@@ -164,6 +165,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
     channel,
     runId,
     agentId: definition.id,
+    agentVariant: definition.variant,
     runDir,
     config,
     providers,
@@ -178,6 +180,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
   const indexEntry: RunIndexEntry = {
     runId,
     agentId: definition.id,
+    agentVariant: definition.variant,
     repo: options.repo ?? '',
     status: 'running',
     updatedAt: new Date().toISOString(),
@@ -231,6 +234,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
       const checkpoint: Checkpoint = {
         runId,
         agentId: definition.id,
+        agentVariant: definition.variant,
         version: definition.version,
         stepName: result.next ?? currentStep,
         stepIndex: stepIndex + 1,
@@ -253,7 +257,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
 
       // Send checkpoint message
       const cpPayload: CheckpointPayload = { stepIndex, label: currentStep };
-      channel.send(createMessage(definition.id, runId, 'checkpoint', cpPayload));
+      channel.send(createMessage(definition.id, runId, 'checkpoint', cpPayload, undefined, definition.variant));
 
       // Update index
       indexEntry.updatedAt = new Date().toISOString();
@@ -279,12 +283,13 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
     }, 'agent completed');
 
     const donePayload: DonePayload = { result: state, summary };
-    channel.send(createMessage(definition.id, runId, 'done', donePayload));
+    channel.send(createMessage(definition.id, runId, 'done', donePayload, undefined, definition.variant));
 
     // Final checkpoint with completed status
     const finalCheckpoint: Checkpoint = {
       runId,
       agentId: definition.id,
+      agentVariant: definition.variant,
       version: definition.version,
       stepName: 'done',
       stepIndex,
@@ -328,6 +333,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
     const errorCheckpoint: Checkpoint = {
       runId,
       agentId: definition.id,
+      agentVariant: definition.variant,
       version: definition.version,
       stepName: currentStep ?? 'unknown',
       stepIndex,
@@ -348,7 +354,7 @@ export async function runAgent(opts: RunnerOpts): Promise<RunResult> {
       error: errorMsg,
       recoverable: isCancelled,
     };
-    channel.send(createMessage(definition.id, runId, 'error', errPayload));
+    channel.send(createMessage(definition.id, runId, 'error', errPayload, undefined, definition.variant));
 
     appendEvent(runDir, {
       kind: 'error',

@@ -35,8 +35,14 @@ export interface ConfigFrontmatter {
 // ---------------------------------------------------------------------------
 
 const VALID_CATEGORIES = new Set<string>(['template', 'feedback', 'convention']);
+// Mirror the ConfigNamespace union -- family-level only. Variants
+// (pair/delegate under 'implementation'; brainstorm sub-categories) are
+// internal to their family and must not appear as frontmatter `namespace`
+// values. Variant info is encoded in filenames (e.g. `pair-analyze.md`
+// inside the `implementation` namespace directory) instead.
 const VALID_NAMESPACES = new Set<string>([
-  'tester', 'pair', 'delegate', 'designer', 'planner', 'common',
+  'implementation', 'brainstorm', 'designer', 'planner',
+  'tester', 'research', 'debugging', 'deployment', 'common',
 ]);
 const VALID_LANGUAGES = new Set<string>([
   'python', 'go', 'typescript', 'javascript',

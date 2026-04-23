@@ -83,7 +83,7 @@ export const analyzeStep: AgentStep<PairState> = {
     ctx.progress('Investigating codebase...');
 
     const query = buildAnalyzeQuery(state);
-    const provider = resolveStepProvider(ctx, state, 'pair', 'analyze');
+    const provider = resolveStepProvider(ctx, state, 'implementation', 'analyze');
 
     const result = await investigate(query, ctx, {
       provider,
@@ -109,7 +109,7 @@ export const proposeStep: AgentStep<PairState> = {
   async run(state, ctx) {
     ctx.progress(`Generating proposal (${state.mode} mode)...`);
 
-    const provider = resolveStepProvider(ctx, state, 'pair', 'propose');
+    const provider = resolveStepProvider(ctx, state, 'implementation', 'propose');
     const systemPrompt = getProposalSystemPrompt(state.mode);
 
     // Build context
@@ -137,14 +137,14 @@ export const proposeStep: AgentStep<PairState> = {
     // Load config context (reuse from state if already loaded, otherwise load fresh)
     let configContext = state.configContext;
     if (!configContext) {
-      configContext = await loadConfigContext(ctx, 'pair', 'all', state.input.repoPath) || undefined;
+      configContext = await loadConfigContext(ctx, 'implementation', 'all', state.input.repoPath) || undefined;
 
-      // Search for pair-specific feedback from prior sessions
+      // Search for pair-variant feedback from prior sessions
       if (ctx.searchConfig) {
         try {
           const pairFeedback = await ctx.searchConfig({
             query: `pair ${state.mode} code generation validation feedback`,
-            namespace: ['pair', 'common'],
+            namespace: ['implementation', 'common'],
             category: 'feedback',
             limit: 3,
             boostProject: true,
@@ -242,7 +242,7 @@ export const reviewGateStep: AgentStep<PairState> = {
         if (ctx.recordFeedback && (cleanFeedback || reply.feedback)) {
           ctx.recordFeedback({
             content: `User edited pair ${state.mode} proposal: ${cleanFeedback || reply.feedback}`,
-            namespace: 'pair',
+            namespace: 'implementation',
             language: 'all',
             repoPath: state.input.repoPath,
             provider: ctx.providers.local,
@@ -280,7 +280,7 @@ export const reviewGateStep: AgentStep<PairState> = {
         if (ctx.recordFeedback && (cleanFeedback || reply.feedback)) {
           ctx.recordFeedback({
             content: `User rejected pair ${state.mode} proposal: ${cleanFeedback || reply.feedback}`,
-            namespace: 'pair',
+            namespace: 'implementation',
             language: 'all',
             repoPath: state.input.repoPath,
             provider: ctx.providers.local,
@@ -395,7 +395,7 @@ export const validateStep: AgentStep<PairState> = {
       return { state, next: nextAfterValidation(state) };
     }
 
-    const claudeProvider = ctx.providers.resolveOrNull('pair', 'validate');
+    const claudeProvider = ctx.providers.resolveOrNull('implementation', 'validate');
     if (!claudeProvider) {
       ctx.progress('No Claude provider — skipping validation.');
       return { state, next: nextAfterValidation(state) };
@@ -468,7 +468,7 @@ export const summarizeStep: AgentStep<PairState> = {
   async run(state, ctx) {
     ctx.progress('Summarising session...');
 
-    const provider = resolveStepProvider(ctx, state, 'pair', 'summarize');
+    const provider = resolveStepProvider(ctx, state, 'implementation', 'summarize');
 
     const parts: string[] = [];
     parts.push(`Mode: ${state.mode}`);

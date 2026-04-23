@@ -246,7 +246,10 @@ function makeDelegateReportTask(index: number): Task {
 // ---------------------------------------------------------------------------
 
 export class CodingController implements TaskController {
-  readonly id = 'coding';
+  // Family id from shared/agent-registry.ts. The controller dispatches
+  // between pair (single scope) and delegate (batch scope) variants
+  // internally; ownership stays at the family level.
+  readonly id = 'implementation';
 
   private taskCounter = 0;
 

@@ -77,9 +77,18 @@ export const AGENT_STEP_CATALOG: readonly AgentDefinition[] = [
 		],
 	},
 	{
-		agent: 'pair',
+		// The `implementation` family covers both the pair variant (single
+		// scope) and the delegate variant (batch scope). Both variants
+		// share this step catalog -- provider bindings apply uniformly
+		// regardless of which variant is active on a given turn.
+		agent: 'implementation',
 		steps: [
-			{ step: 'validate', defaultTier: 'cloud', description: 'Validate proposed change against tests / style' },
+			{ step: 'analyze',   defaultTier: 'local', description: 'Investigate codebase before proposing changes' },
+			{ step: 'propose',   defaultTier: 'local', description: 'Generate a change proposal (diff or plan step)' },
+			{ step: 'execute',   defaultTier: 'local', description: 'Investigate + generate code for a plan step (delegate)' },
+			{ step: 'validate',  defaultTier: 'cloud', description: 'Validate proposed change against tests / style' },
+			{ step: 'summarize', defaultTier: 'local', description: 'Summarise the completed session (pair)' },
+			{ step: 'report',    defaultTier: 'local', description: 'Write final execution report (delegate)' },
 		],
 	},
 	{

@@ -18,6 +18,10 @@ import type {
 export interface AgentMessage<T = unknown> {
   id:        string;
   agentId:   string;
+  /** Variant of the agent family when multiple definitions share `agentId`.
+   *  E.g. `'pair'` or `'delegate'` under the `'implementation'` family.
+   *  Absent when the family has no variants. */
+  agentVariant?: string | undefined;
   runId:     string;
   kind:      string;
   payload:   T;
@@ -180,8 +184,17 @@ export interface GateOpts {
 // ---------------------------------------------------------------------------
 
 export interface AgentDefinition<S extends AgentState = AgentState> {
-  /** Unique agent type ID, e.g. 'designer', 'coder'. */
+  /** Agent family id (AgentFamily from `shared/agent-registry.ts`). E.g.
+   *  `'implementation'`, `'designer'`, `'brainstorm'`. Multiple definitions
+   *  may share an `id` when the family has variants (see `variant`). */
   id:      string;
+  /** Optional variant discriminator within a family. E.g. `'pair'` or
+   *  `'delegate'` under the `'implementation'` family. Undefined for
+   *  single-variant families. The pair `(id, variant)` is what uniquely
+   *  identifies a definition at runtime; variant is written to
+   *  checkpoints / run-index entries / messages so persistence and
+   *  filters can distinguish the variant later. */
+  variant?: string | undefined;
   /** State schema version. Incremented when state shape changes. */
   version: number;
   /** Config namespace for loading templates/conventions/feedback. */
@@ -211,6 +224,8 @@ export interface CompletedStep {
 export interface Checkpoint {
   runId:          string;
   agentId:        string;
+  /** Variant within the family when applicable (see AgentDefinition.variant). */
+  agentVariant?:  string | undefined;
   version:        number;
   stepName:       string;
   stepIndex:      number;
@@ -224,6 +239,8 @@ export interface Checkpoint {
 
 export interface RunMeta {
   agentId:   string;
+  /** Variant within the family when applicable. */
+  agentVariant?: string | undefined;
   version:   number;
   repo:      string;
   createdAt: string;
@@ -233,6 +250,8 @@ export interface RunMeta {
 export interface RunIndexEntry {
   runId:     string;
   agentId:   string;
+  /** Variant within the family when applicable. */
+  agentVariant?: string | undefined;
   repo:      string;
   status:    RunStatus;
   updatedAt: string;
