@@ -49,7 +49,25 @@ export type DaemonStreamMessage =
 		readonly step: string;
 		readonly text: string;
 		readonly done?: boolean;
+	}
+	/**
+	 * Todos framework stream event (plans/todo-framework.md Phase 2).
+	 * Emitted by every list / item mutation -- the browser-side
+	 * `IInsrcTodosService` subscribes to `todos.subscribe` and
+	 * dispatches on `kind` to update its cache. `list` carries the
+	 * full snapshot so subscribers don't need a follow-up read.
+	 */
+	| {
+		readonly type: 'todos';
+		readonly kind: TodoStreamEventKind;
+		readonly list: unknown;  // TodoList -- typed loosely to avoid coupling boundaries
 	};
+
+/** Kinds emitted on the todos stream. Mirrors daemon-side TodoStreamEventKind. */
+export type TodoStreamEventKind =
+	| 'listCreated' | 'listUpdated' | 'listArchived' | 'listDeleted'
+	| 'itemCreated' | 'itemUpdated' | 'itemRemoved'
+	| 'commentAdded' | 'commentUpdated' | 'commentRemoved';
 
 // ---------------------------------------------------------------------------
 // Stream handle - event-based, disposable

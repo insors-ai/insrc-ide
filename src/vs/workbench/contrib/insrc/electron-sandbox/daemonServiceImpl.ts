@@ -188,6 +188,21 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 				return { type: 'context.set', key: String(data?.['key'] ?? ''), value: data?.['value'] };
 			case 'context.clear':
 				return { type: 'context.clear', key: String(data?.['key'] ?? '') };
+			case 'todos': {
+				const kindRaw = data?.['kind'];
+				const list = data?.['list'];
+				if (typeof kindRaw !== 'string') {
+					return undefined;
+				}
+				switch (kindRaw) {
+					case 'listCreated': case 'listUpdated': case 'listArchived': case 'listDeleted':
+					case 'itemCreated': case 'itemUpdated': case 'itemRemoved':
+					case 'commentAdded': case 'commentUpdated': case 'commentRemoved':
+						return { type: 'todos', kind: kindRaw, list };
+					default:
+						return undefined;
+				}
+			}
 			default:
 				return undefined;
 		}
