@@ -18,6 +18,10 @@ import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
+import { IInsrcTodosService } from '../../common/todosService.js';
+import { ChatTodosWidget } from './chatTodosWidget.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcDiffService, extractDiffFromResponse, parseDiff, applyHunks } from '../../common/diffService.js';
@@ -163,6 +167,9 @@ export class InsrcChatViewPane extends ViewPane {
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IInsrcBrainstormSessionService private readonly brainstormSession: IInsrcBrainstormSessionService,
+		@IInsrcTodosService private readonly _todosService: IInsrcTodosService,
+		@IEditorService private readonly _editorService: IEditorService,
+		@ILogService private readonly _logService: ILogService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -243,6 +250,14 @@ export class InsrcChatViewPane extends ViewPane {
 		// Message list
 		this._messageList = dom.append(this._container, dom.$('.insrc-chat-messages'));
 		this._messageList.style.display = 'none';
+
+		// Inline todos widget (plans/todo-framework.md Phase 5b). Mounts
+		// inside the transcript so agent-authored TODO lists surface
+		// alongside the chat messages. Subscribes to IInsrcTodosService
+		// directly; chatView doesn't need to route 'todos' events through
+		// the main event handler.
+		const todosWidget = this._register(new ChatTodosWidget(this._todosService, this._editorService, this._logService));
+		todosWidget.mount(this._messageList);
 
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));

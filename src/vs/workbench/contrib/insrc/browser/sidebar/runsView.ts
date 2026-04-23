@@ -24,6 +24,9 @@ import type { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../../
 import { WorkbenchAsyncDataTree } from '../../../../../platform/list/browser/listService.js';
 import { FuzzyScore } from '../../../../../base/common/filters.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
+import { IInsrcTodosService } from '../../common/todosService.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { TodosEditorInput } from '../todos/todosInput.js';
 
 // ---------------------------------------------------------------------------
 // Tree infrastructure
@@ -114,6 +117,7 @@ interface IRunTemplateData {
 	icon: HTMLElement;
 	label: HTMLElement;
 	status: HTMLElement;
+	todosPill: HTMLElement;
 	playBtn: HTMLButtonElement;
 	discardBtn: HTMLButtonElement;
 	/** Mutable ref to the current row's run so click handlers (registered
@@ -129,6 +133,8 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 		private readonly notificationService: INotificationService,
 		private readonly dialogService: IDialogService,
 		private readonly logService: ILogService,
+		private readonly todosService: IInsrcTodosService,
+		private readonly editorService: IEditorService,
 	) { }
 
 	renderTemplate(container: HTMLElement): IRunTemplateData {
@@ -155,6 +161,20 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 		status.style.flexShrink = '0';
 		status.style.opacity = '0.6';
 		status.style.fontSize = '11px';
+
+		// Todos pending-count pill (plans/todo-framework.md Phase 5c).
+		// Visible only when the run has at least one non-terminal todo
+		// item. Click opens the todos editor pane for that session.
+		const todosPill = dom.append(row, dom.$('span.insrc-run-todos-pill'));
+		todosPill.style.flexShrink = '0';
+		todosPill.style.fontSize = '10px';
+		todosPill.style.padding = '1px 5px';
+		todosPill.style.borderRadius = '8px';
+		todosPill.style.backgroundColor = 'var(--vscode-badge-background)';
+		todosPill.style.color = 'var(--vscode-badge-foreground)';
+		todosPill.style.cursor = 'pointer';
+		todosPill.style.display = 'none';
+		todosPill.title = 'Open todos for this session';
 
 		// Inline play button (Item 7 follow-up). Visibility toggled per
 		// row in renderElement -- only paused / crashed runs show it.
@@ -189,6 +209,18 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 		discardBtn.textContent = '\u2716';
 
 		const currentRun: { value: AgentRunInfo | undefined } = { value: undefined };
+
+		todosPill.addEventListener('click', async (e) => {
+			e.stopPropagation();
+			const run = currentRun.value;
+			if (!run) { return; }
+			try {
+				await this.editorService.openEditor(new TodosEditorInput(run.id));
+			} catch (err) {
+				this.logService.warn(`[insrc:runs] open todos pane failed: ${(err as Error).message}`);
+			}
+		});
+
 		playBtn.addEventListener('click', async (e) => {
 			e.stopPropagation();
 			const run = currentRun.value;
@@ -223,7 +255,7 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 			}
 		});
 
-		return { icon, label, status, playBtn, discardBtn, currentRun };
+		return { icon, label, status, todosPill, playBtn, discardBtn, currentRun };
 	}
 
 	renderElement(node: ITreeNode<RunsTreeNode, FuzzyScore>, _index: number, data: IRunTemplateData): void {
@@ -262,6 +294,35 @@ class RunRenderer implements ITreeRenderer<RunsTreeNode, FuzzyScore, IRunTemplat
 		// died mid-run and the DB row never transitioned to 'paused'.
 		const resumable = statusStr === 'active' || statusStr === 'paused' || statusStr === 'crashed';
 		data.playBtn.style.display = resumable ? '' : 'none';
+
+		// Todos pill (Phase 5c). Fetch pending-item count for this
+		// session asynchronously; the tree virtualises templates so we
+		// check `data.currentRun` still points at the same run before
+		// applying the update -- otherwise a slow fetch would stamp
+		// the wrong count into a scrolled row.
+		data.todosPill.style.display = 'none';
+		data.todosPill.textContent = '';
+		const fetchedForRunId = run.id;
+		void this.todosService.listsForSession(run.id)
+			.then(lists => {
+				if (data.currentRun.value?.id !== fetchedForRunId) { return; }
+				let pending = 0;
+				for (const list of lists) {
+					if (list.status !== 'active') { continue; }
+					for (const item of list.items) {
+						if (item.status !== 'completed' && item.status !== 'cancelled') {
+							pending++;
+						}
+					}
+				}
+				if (pending > 0) {
+					data.todosPill.textContent = String(pending);
+					data.todosPill.style.display = '';
+				}
+			})
+			.catch(() => {
+				// Silent: the pill is best-effort, a failure just leaves it hidden.
+			});
 	}
 
 	disposeTemplate(): void { }
@@ -342,6 +403,8 @@ export class InsrcRunsViewPane extends ViewPane {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IDialogService private readonly dialogService: IDialogService,
 		@ILogService private readonly logService: ILogService,
+		@IInsrcTodosService private readonly _todosService: IInsrcTodosService,
+		@IEditorService private readonly _editorService: IEditorService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -362,7 +425,7 @@ export class InsrcRunsViewPane extends ViewPane {
 			'InsrcRuns',
 			treeContainer,
 			new RunsDelegate(),
-			[new AgentGroupRenderer(), new RunRenderer(this.runService, this.notificationService, this.dialogService, this.logService)],
+			[new AgentGroupRenderer(), new RunRenderer(this.runService, this.notificationService, this.dialogService, this.logService, this._todosService, this._editorService)],
 			new RunsDataSource(this.daemonService),
 			{
 				identityProvider: {

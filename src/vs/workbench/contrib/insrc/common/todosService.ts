@@ -150,4 +150,20 @@ export interface IInsrcTodosService {
 		sessionId: string,
 		opts?: { includeArchived?: boolean },
 	): Promise<readonly TodoList[]>;
+
+	// -- Comments (Phase 5d, the one user -> agent write channel) ----------
+
+	/**
+	 * Post a comment on a readable item. Author is always `'user'`
+	 * from the browser side. Resolves to the persisted comment on
+	 * success; rejects with the daemon's structured error on failure
+	 * (e.g. `invalid_ids`, `field_too_large`).
+	 */
+	addComment(itemId: string, body: string): Promise<TodoComment>;
+
+	/** Edit a previously-authored comment. Author-only; daemon enforces. */
+	editComment(commentId: string, body: string): Promise<TodoComment>;
+
+	/** Delete a previously-authored comment. Author-only. */
+	deleteComment(commentId: string): Promise<void>;
 }

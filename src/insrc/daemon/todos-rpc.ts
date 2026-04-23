@@ -39,8 +39,8 @@ import { EventEmitter } from 'node:events';
 import type { IpcStreamMessage } from '../shared/types.js';
 import type { DbClient } from '../db/client.js';
 import type {
-  TodoCleanupQuery, TodoItem, TodoItemStatus, TodoList, TodoListStatus,
-  TodoOwner, TodoStreamEvent, TodoStreamEventKind,
+  TodoCleanupQuery, TodoComment, TodoItem, TodoItemStatus, TodoList,
+  TodoListStatus, TodoOwner, TodoStreamEvent, TodoStreamEventKind,
 } from '../shared/todos.js';
 import { TODO_LIMITS, betweenOrderKeys } from '../shared/todos.js';
 import { isAgentFamily } from '../shared/agent-registry.js';
@@ -850,6 +850,151 @@ async function executeCleanup(
     deletedItemCount,
     dryRun: false,
   };
+}
+
+// ---------------------------------------------------------------------------
+// RPC: comments (Phase 5d)
+// ---------------------------------------------------------------------------
+
+interface CommentAuthorError {
+  readonly error: 'comment_author_mismatch';
+}
+
+interface CommentNotOwnerError {
+  readonly error: 'comment_ack_not_owner';
+}
+
+type CommentRpcError = TodosRpcError | CommentAuthorError | CommentNotOwnerError;
+
+/**
+ * Resolve the parent list of an item id. Returns `null` when the item
+ * doesn't exist. Used to scope comment mutations to a readable list
+ * and to emit stream events keyed by list id.
+ */
+async function loadListForItem(
+  db: DbClient,
+  itemId: string,
+): Promise<TodoList | null> {
+  const item = await todos.getItem(db, itemId);
+  if (item === null) { return null; }
+  return todos.getList(db, item.listId);
+}
+
+export async function addComment(
+  db: DbClient,
+  params: unknown,
+): Promise<TodoComment | CommentRpcError> {
+  const caller = resolveCaller(params);
+  const p = (params ?? {}) as Record<string, unknown>;
+  const itemId = p['itemId'];
+  const body = p['body'];
+  if (typeof itemId !== 'string' || typeof body !== 'string') {
+    return { error: 'invalid_ids', reason: 'itemId and body are required' };
+  }
+  const tooLarge = enforceBodyLimit(body, 'body', TODO_LIMITS.MAX_COMMENT_BODY_BYTES);
+  if (tooLarge !== null) { return tooLarge; }
+
+  const list = await loadListForItem(db, itemId);
+  if (list === null) {
+    return { error: 'invalid_ids', reason: `item '${itemId}' does not exist` };
+  }
+
+  // `addComment` is the one channel open to the user -- authorisation
+  // is just "can this caller read the list", which everyone on the
+  // session can. Unknown callers default to 'user' via resolveCaller.
+  const author: TodoOwner | 'user' = caller;
+  const nowTs = nowIso();
+  const id = generateId();
+  const comment = await todos.insertComment(db, {
+    id,
+    itemId,
+    author,
+    body,
+    createdAt: nowTs,
+  });
+
+  const refreshed = await todos.getList(db, list.id);
+  if (refreshed !== null) { emit('commentAdded', refreshed); }
+  return comment;
+}
+
+export async function editComment(
+  db: DbClient,
+  params: unknown,
+): Promise<TodoComment | CommentRpcError> {
+  const caller = resolveCaller(params);
+  const p = (params ?? {}) as Record<string, unknown>;
+  const commentId = p['commentId'];
+  const body = p['body'];
+  if (typeof commentId !== 'string' || typeof body !== 'string') {
+    return { error: 'invalid_ids', reason: 'commentId and body are required' };
+  }
+  const tooLarge = enforceBodyLimit(body, 'body', TODO_LIMITS.MAX_COMMENT_BODY_BYTES);
+  if (tooLarge !== null) { return tooLarge; }
+
+  const existing = await todos.getComment(db, commentId);
+  if (existing === null) {
+    return { error: 'invalid_ids', reason: `comment '${commentId}' does not exist` };
+  }
+  if (existing.author !== caller) {
+    return { error: 'comment_author_mismatch' };
+  }
+
+  const nowTs = nowIso();
+  const updated = await todos.updateComment(db, commentId, { body, editedAt: nowTs });
+  const list = await loadListForItem(db, existing.itemId);
+  if (list !== null) { emit('commentUpdated', list); }
+  return updated;
+}
+
+export async function deleteCommentRpc(
+  db: DbClient,
+  params: unknown,
+): Promise<{ ok: true } | CommentRpcError> {
+  const caller = resolveCaller(params);
+  const p = (params ?? {}) as Record<string, unknown>;
+  const commentId = p['commentId'];
+  if (typeof commentId !== 'string') {
+    return { error: 'invalid_ids', reason: 'commentId is required' };
+  }
+  const existing = await todos.getComment(db, commentId);
+  if (existing === null) {
+    return { error: 'invalid_ids', reason: `comment '${commentId}' does not exist` };
+  }
+  if (existing.author !== caller) {
+    return { error: 'comment_author_mismatch' };
+  }
+  await todos.deleteComment(db, commentId);
+  const list = await loadListForItem(db, existing.itemId);
+  if (list !== null) { emit('commentRemoved', list); }
+  return { ok: true };
+}
+
+export async function ackComment(
+  db: DbClient,
+  params: unknown,
+): Promise<TodoComment | CommentRpcError> {
+  const caller = resolveCaller(params);
+  const p = (params ?? {}) as Record<string, unknown>;
+  const commentId = p['commentId'];
+  if (typeof commentId !== 'string') {
+    return { error: 'invalid_ids', reason: 'commentId is required' };
+  }
+  const existing = await todos.getComment(db, commentId);
+  if (existing === null) {
+    return { error: 'invalid_ids', reason: `comment '${commentId}' does not exist` };
+  }
+  const list = await loadListForItem(db, existing.itemId);
+  if (list === null) {
+    return { error: 'invalid_ids', reason: `parent list for comment '${commentId}' vanished` };
+  }
+  // Only the current list owner may ack. 'user' and 'system' cannot.
+  if (caller === 'user' || caller === 'system' || list.owner !== caller) {
+    return { error: 'comment_ack_not_owner' };
+  }
+  const updated = await todos.updateComment(db, commentId, { agentAcknowledged: true });
+  emit('commentUpdated', list);
+  return updated;
 }
 
 // ---------------------------------------------------------------------------

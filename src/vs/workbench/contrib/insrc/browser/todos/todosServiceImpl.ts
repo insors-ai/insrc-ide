@@ -10,6 +10,7 @@ import { IInsrcDaemonService, type DaemonStreamMessage, type IInsrcStreamHandle 
 import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcTodosService,
+	type TodoComment,
 	type TodoList,
 	type TodoStreamEventKind,
 } from '../../common/todosService.js';
@@ -101,9 +102,42 @@ export class InsrcTodosServiceImpl extends Disposable implements IInsrcTodosServ
 		}
 	}
 
+	async addComment(itemId: string, body: string): Promise<TodoComment> {
+		return this._callCommentRpc('todos.addComment', { itemId, body });
+	}
+
+	async editComment(commentId: string, body: string): Promise<TodoComment> {
+		return this._callCommentRpc('todos.editComment', { commentId, body });
+	}
+
+	async deleteComment(commentId: string): Promise<void> {
+		const result = await this.daemonService.rpc<{ ok: true } | { error: string; reason?: string }>(
+			'todos.deleteComment', { commentId },
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+	}
+
 	override dispose(): void {
 		this._closeStream();
 		super.dispose();
+	}
+
+	private async _callCommentRpc(method: string, params: Record<string, unknown>): Promise<TodoComment> {
+		const result = await this.daemonService.rpc<TodoComment | { error: string; reason?: string }>(
+			method, params,
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+		return result as TodoComment;
+	}
+
+	private _formatRpcError(result: { error: string; reason?: string }): string {
+		return result.reason !== undefined
+			? `${result.error}: ${result.reason}`
+			: result.error;
 	}
 
 	// -- Internal ------------------------------------------------------------

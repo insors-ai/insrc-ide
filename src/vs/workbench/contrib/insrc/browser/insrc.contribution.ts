@@ -138,6 +138,17 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(ModelProvidersInput)],
 );
 
+// Todos editor pane (plans/todo-framework.md Phase 5a). Read-only review
+// surface for agent-authored todo lists. One pane instance per chat
+// session; opens via the `insrc.todos.open` command.
+import { TodosEditorPane } from './todos/todosPane.js';
+import { TodosEditorInput } from './todos/todosInput.js';
+import './todos/todosCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(TodosEditorPane, TodosEditorPane.ID, 'Todos'),
+	[new SyncDescriptor(TodosEditorInput)],
+);
+
 // Brainstorm flow: routes gates to the matching per-step editor pane, falling
 // back to the legacy pane for kinds that haven't been migrated yet.
 import { IEditorService } from '../../../services/editor/common/editorService.js';

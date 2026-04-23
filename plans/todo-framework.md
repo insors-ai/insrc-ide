@@ -1300,14 +1300,27 @@ surface in Phase 4.
 
 - `TodosEditorInput` + `TodosEditorPane` + `TodosListWidget`
   under `browser/todos/`. Same scaffolding as the brainstorm
-  step panes.
+  step panes; pane subscribes to `IInsrcTodosService` and
+  re-renders on `onDidChange` / `onDidChangeList` /
+  `onDidRemoveList`.
 - Registered in `insrc.contribution.ts` with an `insrc-todos`
-  URI scheme.
-- Opens via `insrc.openTodos` command + chat-panel header
-  button + `suggestOpenUI` hint from the daemon.
-- Full edit / reorder / transfer / archive affordances.
-- Owner-enforced read-only styling: agent-owned lists render
-  greyed with "Request transfer" affordance; no stealth edits.
+  URI scheme. Keyed by sessionId so the editor group dedupes
+  duplicate opens.
+- Opens via `insrc.todos.open` command (active-session scope).
+  `suggestOpenUI` daemon hint and chat-panel header button
+  wiring are follow-up work, not required for the read-only
+  surface itself.
+- **Read-only throughout.** No `+ Add item`, no drag handles,
+  no status-cycle on click, no title editors, no archive /
+  transfer / reparent affordances. The kebab menu on each list
+  card surfaces only read-only actions: copy-as-markdown,
+  view-transfer-history, focus-agent-in-chat. Matches the
+  "agents own todos, user reviews them" split documented in
+  the UI rendering section.
+- Each list card is collapsible (chevron in the header).
+  Default-collapsed: every item terminal OR `system`-owned.
+  Default-expanded: agent-owned list with non-terminal items.
+  Collapse state persists per-list in `storageService`.
 - Styled from the activity-console palette.
 
 ### Phase 5b -- Inline chat todos widget

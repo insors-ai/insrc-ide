@@ -1,0 +1,428 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Todos editor pane (plans/todo-framework.md Phase 5a). Read-only
+ * review surface -- no edit/reorder/transfer affordances; visual
+ * language borrows the activity-console palette so the pane reads
+ * as an "agent work surface" rather than a generic form. */
+
+.insrc-todos {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	overflow: hidden;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+}
+
+.insrc-todos-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 16px;
+	border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	background-color: var(--vscode-editorWidget-background);
+	flex: 0 0 auto;
+}
+
+.insrc-todos-header-left {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.insrc-todos-header-icon {
+	display: inline-flex;
+	width: 16px;
+	height: 16px;
+	flex: 0 0 auto;
+	color: var(--vscode-foreground);
+	opacity: 0.85;
+}
+
+.insrc-todos-title {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.2;
+}
+
+.insrc-todos-subtitle {
+	font-size: 11px;
+	opacity: 0.65;
+	font-style: italic;
+}
+
+.insrc-todos-count {
+	font-size: 11px;
+	opacity: 0.7;
+	white-space: nowrap;
+}
+
+.insrc-todos-main {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: 16px;
+}
+
+.insrc-todos-lists {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.insrc-todos-empty {
+	text-align: center;
+	padding: 32px 16px;
+	opacity: 0.6;
+	font-style: italic;
+}
+
+.insrc-todos-empty.hidden {
+	display: none;
+}
+
+/* -- Card ---------------------------------------------------------------- */
+
+.insrc-todos-card {
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	background-color: var(--vscode-editorWidget-background);
+	overflow: hidden;
+}
+
+.insrc-todos-card.status-archived {
+	opacity: 0.55;
+}
+
+.insrc-todos-card-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	cursor: pointer;
+	user-select: none;
+	background-color: var(--vscode-editorWidget-background);
+	border-bottom: 1px solid transparent;
+}
+
+.insrc-todos-card:not(.collapsed) > .insrc-todos-card-header {
+	border-bottom-color: var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.insrc-todos-card-header:hover {
+	background-color: var(--vscode-list-hoverBackground);
+}
+
+.insrc-todos-card-header:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.insrc-todos-chevron {
+	display: inline-flex;
+	width: 16px;
+	height: 16px;
+	flex: 0 0 auto;
+	opacity: 0.75;
+}
+
+.insrc-todos-owner-badge {
+	display: inline-block;
+	padding: 1px 6px;
+	font-size: 11px;
+	font-weight: 500;
+	border-radius: 3px;
+	background-color: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+	white-space: nowrap;
+	flex: 0 0 auto;
+}
+
+.insrc-todos-card-title {
+	font-size: 13px;
+	font-weight: 500;
+	flex: 1 1 auto;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.insrc-todos-card-meta {
+	font-size: 11px;
+	opacity: 0.7;
+	flex: 0 0 auto;
+	white-space: nowrap;
+}
+
+/* -- Card body ----------------------------------------------------------- */
+
+.insrc-todos-card-body {
+	padding: 8px 12px 12px 32px;  /* left indent lines up past the chevron */
+}
+
+.insrc-todos-card-body.hidden {
+	display: none;
+}
+
+.insrc-todos-card-narrative {
+	font-size: 12px;
+	opacity: 0.85;
+	margin-bottom: 8px;
+	line-height: 1.4;
+	white-space: pre-wrap;
+}
+
+.insrc-todos-parent-link {
+	padding: 4px 12px 0 32px;
+	font-size: 11px;
+	opacity: 0.75;
+	cursor: pointer;
+}
+
+.insrc-todos-parent-link:hover {
+	text-decoration: underline;
+}
+
+.insrc-todos-parent-link.missing {
+	opacity: 0.45;
+	cursor: default;
+	font-style: italic;
+}
+
+.insrc-todos-children-link {
+	margin-top: 8px;
+	font-size: 11px;
+	opacity: 0.8;
+}
+
+.insrc-todos-child-link {
+	color: var(--vscode-textLink-foreground);
+	cursor: pointer;
+}
+
+.insrc-todos-child-link:hover {
+	text-decoration: underline;
+}
+
+/* -- Items --------------------------------------------------------------- */
+
+.insrc-todos-items {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.insrc-todos-items-empty {
+	font-size: 12px;
+	opacity: 0.55;
+	font-style: italic;
+}
+
+.insrc-todos-item {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 4px 0;
+	font-size: 12px;
+	line-height: 1.35;
+}
+
+.insrc-todos-item-icon {
+	display: inline-flex;
+	width: 14px;
+	height: 14px;
+	flex: 0 0 auto;
+	margin-top: 2px;
+	opacity: 0.8;
+}
+
+.insrc-todos-item.item-status-completed .insrc-todos-item-icon,
+.insrc-todos-item.item-status-completed .insrc-todos-item-title {
+	opacity: 0.55;
+}
+
+.insrc-todos-item.item-status-completed .insrc-todos-item-title {
+	text-decoration: line-through;
+}
+
+.insrc-todos-item.item-status-cancelled .insrc-todos-item-title {
+	opacity: 0.5;
+	text-decoration: line-through;
+}
+
+.insrc-todos-item.item-status-blocked .insrc-todos-item-icon {
+	color: var(--vscode-editorWarning-foreground);
+	opacity: 1;
+}
+
+.insrc-todos-item.item-status-in_progress .insrc-todos-item-icon {
+	color: var(--vscode-editorInfo-foreground);
+	opacity: 1;
+}
+
+.insrc-todos-item-title {
+	flex: 1 1 auto;
+}
+
+.insrc-todos-item-blocked-reason {
+	font-size: 11px;
+	color: var(--vscode-editorWarning-foreground);
+	opacity: 0.9;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 40%;
+}
+
+.insrc-todos-item-description {
+	width: 100%;
+	padding-left: 22px;
+	font-size: 11px;
+	opacity: 0.75;
+	line-height: 1.4;
+	white-space: pre-wrap;
+}
+
+/* -- Comments (Phase 5d) ------------------------------------------------- */
+
+.insrc-todos-item-comment-count {
+	font-size: 11px;
+	opacity: 0.7;
+	flex: 0 0 auto;
+	padding: 0 4px;
+	border-radius: 3px;
+}
+
+.insrc-todos-item-comment-count.unacked {
+	color: var(--vscode-editorInfo-foreground);
+	opacity: 1;
+}
+
+.insrc-todos-item-comments {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 4px 0 0 22px;
+}
+
+.insrc-todos-comment {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	font-size: 11px;
+	line-height: 1.4;
+	padding: 3px 6px;
+	border-left: 2px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	background-color: var(--vscode-textBlockQuote-background, transparent);
+}
+
+.insrc-todos-comment.unacked {
+	border-left-color: var(--vscode-editorInfo-foreground);
+}
+
+.insrc-todos-comment-author {
+	flex: 0 0 auto;
+	opacity: 0.7;
+	font-style: italic;
+}
+
+.insrc-todos-comment-body {
+	flex: 1 1 auto;
+	white-space: pre-wrap;
+}
+
+.insrc-todos-comment-actions {
+	display: flex;
+	gap: 4px;
+	flex: 0 0 auto;
+}
+
+.insrc-todos-comment-delete {
+	background: transparent;
+	border: none;
+	color: var(--vscode-errorForeground);
+	font-size: 10px;
+	cursor: pointer;
+	padding: 0;
+	opacity: 0;
+	transition: opacity 0.15s;
+}
+
+.insrc-todos-comment:hover .insrc-todos-comment-delete {
+	opacity: 0.8;
+}
+
+.insrc-todos-comment-add {
+	align-self: flex-start;
+	background: transparent;
+	border: none;
+	color: var(--vscode-textLink-foreground);
+	font-size: 11px;
+	cursor: pointer;
+	padding: 2px 0;
+	opacity: 0.85;
+}
+
+.insrc-todos-comment-add:hover {
+	opacity: 1;
+	text-decoration: underline;
+}
+
+.insrc-todos-comment-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	width: 100%;
+	padding: 4px 0;
+}
+
+.insrc-todos-comment-textarea {
+	font-family: inherit;
+	font-size: 12px;
+	padding: 6px 8px;
+	background-color: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
+	border-radius: 3px;
+	resize: vertical;
+}
+
+.insrc-todos-comment-editor-actions {
+	display: flex;
+	gap: 6px;
+	justify-content: flex-end;
+}
+
+.insrc-todos-comment-submit,
+.insrc-todos-comment-cancel {
+	font-size: 11px;
+	padding: 3px 10px;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+.insrc-todos-comment-submit {
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.insrc-todos-comment-submit:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}
+
+.insrc-todos-comment-cancel {
+	background-color: transparent;
+	color: var(--vscode-foreground);
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.insrc-todos-comment-cancel:hover {
+	background-color: var(--vscode-list-hoverBackground);
+}

@@ -81,8 +81,15 @@ export interface TodosApi {
   updateItemDescription(itemId: string, description: string): Promise<TodoItem>;
   removeItem(itemId: string): Promise<void>;
 
-  // -- Comment reads --
+  // -- Comments --
   listCommentsForItem(itemId: string): Promise<readonly TodoComment[]>;
+  /**
+   * Mark a user-authored comment as acknowledged. Caller must own the
+   * parent list. Used by agents to signal "I've processed this comment"
+   * after handling it on a turn -- the UI shows unacked comments with
+   * a visual cue until this runs.
+   */
+  ackComment(commentId: string): Promise<TodoComment>;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,15 +284,22 @@ class TodosApiImpl implements TodosApi {
   // -- Comment reads --------------------------------------------------------
 
   async listCommentsForItem(itemId: string): Promise<readonly TodoComment[]> {
-    // Fetched by reading the item with-comments via its parent list.
-    // A dedicated per-item accessor would avoid the list round-trip;
-    // deferred until Phase 5d expands the comment surface.
-    const item = await todos.getItem(this.db, itemId);
-    if (item === null) return [];
-    const list = await todos.getList(this.db, item.listId, { withItems: true, withComments: true });
-    if (list === null) return [];
-    const enriched = list.items.find(it => it.id === itemId);
-    return enriched?.comments ?? [];
+    return todos.listCommentsForItem(this.db, itemId);
+  }
+
+  async ackComment(commentId: string): Promise<TodoComment> {
+    const existing = await todos.getComment(this.db, commentId);
+    if (existing === null) {
+      throw new Error(`ackComment: comment '${commentId}' does not exist`);
+    }
+    const item = await todos.getItem(this.db, existing.itemId);
+    if (item === null) {
+      throw new Error(`ackComment: parent item '${existing.itemId}' vanished`);
+    }
+    await this.assertOwnership(item.listId);
+    const updated = await todos.updateComment(this.db, commentId, { agentAcknowledged: true });
+    await this.emitItemEvent(item.listId, 'commentUpdated');
+    return updated;
   }
 
   // -- Private helpers ------------------------------------------------------

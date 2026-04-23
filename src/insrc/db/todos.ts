@@ -378,7 +378,10 @@ export async function insertComment(db: DbClient, opts: InsertCommentOpts): Prom
 export interface GetListOpts {
   /** Include items on the returned list. Default true. */
   readonly withItems?: boolean;
-  /** Include comments on each included item. Default false. */
+  /** Include comments on each included item. Default true -- the RPC
+   *  layer + browser UI always want comments attached, and the cost is
+   *  low (typically 0 rows). Pass `false` explicitly when only the
+   *  list shape is needed (e.g. ownership checks). */
   readonly withComments?: boolean;
 }
 
@@ -392,9 +395,10 @@ export async function getList(
   if (rows.length === 0) return null;
   const row = rows[0] as Record<string, unknown>;
 
+  const includeComments = opts.withComments !== false;
   const items = opts.withItems === false
     ? []
-    : await listItems(db, listId, opts.withComments === true);
+    : await listItems(db, listId, includeComments);
   return listRowToDomain(row, items);
 }
 
@@ -504,7 +508,7 @@ export async function listAllLists(
 
   const out: TodoList[] = [];
   for (const row of typed) {
-    const items = await listItems(db, row['id'] as string, false);
+    const items = await listItems(db, row['id'] as string, true);
     out.push(listRowToDomain(row, items));
   }
   return out;
@@ -534,7 +538,10 @@ export async function listListsBySession(
 
   const out: TodoList[] = [];
   for (const row of typed) {
-    const items = await listItems(db, row['id'] as string, false);
+    // Include comments so browser UI (editor pane + chat widget) can
+    // render the counter + inline comment list without a follow-up
+    // fetch per item.
+    const items = await listItems(db, row['id'] as string, true);
     out.push(listRowToDomain(row, items));
   }
   return out;
@@ -778,6 +785,63 @@ export async function reparentList(
 // ---------------------------------------------------------------------------
 // Delete helpers (used by cleanup + agent.discard -- see Phase 2 / 2b)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Comment helpers (Phase 5d)
+// ---------------------------------------------------------------------------
+
+export interface UpdateCommentFields {
+	readonly body?: string | undefined;
+	readonly agentAcknowledged?: boolean | undefined;
+	/** Caller supplies the editedAt timestamp (bumped on body change). */
+	readonly editedAt?: string | undefined;
+}
+
+/** Update a comment row. Returns the refreshed comment. */
+export async function updateComment(
+	db: DbClient,
+	commentId: string,
+	fields: UpdateCommentFields,
+): Promise<TodoComment> {
+	const existing = await getComment(db, commentId);
+	if (existing === null) {
+		throw new Error(`updateComment: comment '${commentId}' does not exist`);
+	}
+	const updates: Record<string, string> = {};
+	if (fields.body !== undefined) { updates['body'] = sqlStr(fields.body); }
+	if (fields.editedAt !== undefined) { updates['editedAt'] = sqlStr(fields.editedAt); }
+	if (fields.agentAcknowledged !== undefined) {
+		updates['agentAcknowledged'] = fields.agentAcknowledged ? 'true' : 'false';
+	}
+	if (Object.keys(updates).length === 0) { return existing; }
+
+	const table = await getCommentsTable(db);
+	await table.update({ where: `id = ${sqlStr(commentId)}`, values: updates });
+
+	const refreshed = await getComment(db, commentId);
+	if (refreshed === null) {
+		throw new Error(`updateComment: comment '${commentId}' vanished during update`);
+	}
+	return refreshed;
+}
+
+export async function deleteComment(db: DbClient, commentId: string): Promise<void> {
+	const table = await getCommentsTable(db);
+	await table.delete(`id = ${sqlStr(commentId)}`);
+}
+
+/** List every comment on a given item, sorted by createdAt ascending. */
+export async function listCommentsForItem(
+	db: DbClient,
+	itemId: string,
+): Promise<readonly TodoComment[]> {
+	const table = await getCommentsTable(db);
+	const rows = await table.query().where(`itemId = ${sqlStr(itemId)}`).toArray();
+	const typed = (rows as Record<string, unknown>[])
+		.map(commentRowToDomain)
+		.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+	return typed;
+}
 
 export async function deleteItem(db: DbClient, itemId: string): Promise<void> {
   const table = await getItemsTable(db);

@@ -982,6 +982,10 @@ async function main(): Promise<void> {
     'todos.removeItem':     (params) => todosRpc.removeItem(db, params),
     'todos.clearCompleted': (params) => todosRpc.clearCompleted(db, params),
     'todos.cleanup':        (params) => todosRpc.cleanup(db, params),
+    'todos.addComment':     (params) => todosRpc.addComment(db, params),
+    'todos.editComment':    (params) => todosRpc.editComment(db, params),
+    'todos.deleteComment':  (params) => todosRpc.deleteCommentRpc(db, params),
+    'todos.ackComment':     (params) => todosRpc.ackComment(db, params),
   }, {
     // Streaming handlers
     'chat.send':   chatSend,
