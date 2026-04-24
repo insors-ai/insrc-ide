@@ -207,6 +207,18 @@ export abstract class BrainstormControllerBase implements TaskController {
   private state!: BrainstormState;
   private taskCounter = 0;
   /**
+   * Injected by `runControlledPipeline` via `attachDeps()` (plans/
+   * todo-framework.md Phase 7). Used to mirror the review queue +
+   * theme-spec queue into 'brainstorm'-owned todo lists; undefined
+   * when the pipeline didn't supply deps (e.g. some test paths).
+   */
+  private _deps?: import('../../task.js').TaskOrchestratorDeps;
+  /** Cached id of the brainstorm-owned review-queue list. Set on
+   *  first mirror; reused so updates stay in place. */
+  private _reviewQueueListId?: string;
+  /** Cached id of the brainstorm-owned theme-spec list. Same shape. */
+  private _themeListId?: string;
+  /**
    * The TaskStateStore from the current `next()` invocation. Stashed so
    * step handlers (which don't receive the store directly) can call
    * `this.store?.markSessionComplete()` to tell the pipeline to clean
@@ -873,7 +885,89 @@ export abstract class BrainstormControllerBase implements TaskController {
     this.state.currentReviewIndex = 0;
     this.state.parkedIds = [];
     this.state.lastStep = 'idea-review';
+    // Mirror the review queue into a brainstorm-owned todos list
+    // (plans/todo-framework.md Phase 7 -- brainstorm consumer).
+    void this._mirrorReviewQueueToTodos(pending);
     return [this.buildSingleIdeaGate()];
+  }
+
+  /**
+   * Optional injection hook (TaskController.attachDeps). Stores
+   * deps so todos-mirror methods can call `deps.todos.*` without
+   * receiving deps on every method.
+   */
+  attachDeps(deps: import('../../task.js').TaskOrchestratorDeps): void {
+    this._deps = deps;
+  }
+
+  /**
+   * Best-effort mirror of the review queue. Idempotent on the
+   * brainstorm-owned list id: a second call for the same session
+   * adds new ideas to the existing list rather than creating a
+   * duplicate. Failures log via the channel and never throw.
+   */
+  private async _mirrorReviewQueueToTodos(
+    ideas: readonly { id: string; title: string; description?: string | undefined }[],
+  ): Promise<void> {
+    const todos = this._deps?.todos;
+    const sessionId = this._deps?.session?.id;
+    if (todos === undefined || sessionId === undefined || ideas.length === 0) {
+      return;
+    }
+    try {
+      if (this._reviewQueueListId === undefined) {
+        const list = await todos.createList({
+          sessionId,
+          title: `Brainstorm review queue (${this.category})`,
+          description: `Ideas pending user review in the brainstorm/${this.category} flow.`,
+        });
+        this._reviewQueueListId = list.id;
+      }
+      for (const idea of ideas) {
+        await todos.addItem(this._reviewQueueListId, {
+          title: idea.title.slice(0, 80),
+          description: idea.description,
+          meta: { brainstormIdeaId: idea.id },
+        });
+      }
+    } catch (err) {
+      log.warn({ err }, `(todos) failed to mirror review queue: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Best-effort mirror of the converged theme list. One TodoItem
+   * per theme; meta carries the theme id and the contributing idea
+   * ids so a future per-theme status sync can correlate items back
+   * to `state.themes[]`.
+   */
+  private async _mirrorThemesToTodos(
+    themes: readonly { id?: string; name: string; description?: string }[],
+  ): Promise<void> {
+    const todos = this._deps?.todos;
+    const sessionId = this._deps?.session?.id;
+    if (todos === undefined || sessionId === undefined || themes.length === 0) {
+      return;
+    }
+    try {
+      if (this._themeListId === undefined) {
+        const list = await todos.createList({
+          sessionId,
+          title: `Brainstorm themes (${this.category})`,
+          description: `Convergence output: ideas grouped into themes that will become spec sections in the brainstorm/${this.category} flow.`,
+        });
+        this._themeListId = list.id;
+      }
+      for (const theme of themes) {
+        await todos.addItem(this._themeListId, {
+          title: theme.name,
+          description: theme.description,
+          meta: { brainstormThemeId: theme.id ?? null },
+        });
+      }
+    } catch (err) {
+      log.warn({ err }, `(todos) failed to mirror themes: ${(err as Error).message}`);
+    }
   }
 
   /** Build a gate for a single idea card. */
@@ -1401,6 +1495,10 @@ export abstract class BrainstormControllerBase implements TaskController {
       action: 'added',
       detail: `${themes.length} themes identified: ${themes.map(t => t.name).join(', ')}`,
     });
+
+    // Mirror the theme list into a brainstorm-owned todos list
+    // (plans/todo-framework.md Phase 7).
+    void this._mirrorThemesToTodos(themes);
 
     this.state.lastStep = 'converge-promote';
     return [this.buildConvergePromoteTask()];

@@ -279,6 +279,17 @@ export interface TaskController {
    * from accumulated state.
    */
   finalize(state: TaskStateStore): FinalizeResult;
+
+  /**
+   * Optional injection hook (plans/todo-framework.md Phase 7).
+   * `runControlledPipeline` calls this once after resolving the
+   * controller and after `deps.todos` is constructed -- before the
+   * first `buildInitialTasks` call. Controllers that need to mirror
+   * state into the todos framework (brainstorm, future ones) can
+   * stash the reference here. Optional so existing controllers stay
+   * untouched.
+   */
+  attachDeps?(deps: TaskOrchestratorDeps): void;
 }
 
 export interface ControllerInput {
@@ -613,6 +624,11 @@ export async function runControlledPipeline(
       deps.todos = makeTodosApi(await getDb(), controller.id);
     }
   }
+
+  // Hand the resolved deps to the controller (plans/todo-framework.md
+  // Phase 7). Optional hook: controllers that need to mirror state
+  // into the todos framework implement attachDeps; the rest don't.
+  controller.attachDeps?.(deps);
 
   // Emit category-qualified intent (e.g., "Intent: brainstorm/requirements")
   if (controller.category) {
