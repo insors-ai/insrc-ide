@@ -112,7 +112,14 @@ function compileTask(src, out, build, options = {}) {
             throw new Error('compilation requires 4GB of RAM');
         }
         const compile = createCompile(src, { build, emitError: true, transpileOnly: false, preserveEnglish: !!options.preserveEnglish });
-        const srcPipe = gulp.src(`${src}/**`, { base: `${src}` });
+        // The daemon (src/insrc) has its own package.json and tsconfig;
+        // its node_modules + tests should not flow through the workbench
+        // compile pipeline.
+        const srcPipe = gulp.src([
+            `${src}/**`,
+            `!${src}/insrc/node_modules/**`,
+            `!${src}/insrc/**/__tests__/**`,
+        ], { base: `${src}` });
         const generator = new MonacoGenerator(false);
         if (src === 'src') {
             generator.execute();

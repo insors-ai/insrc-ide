@@ -138,7 +138,18 @@ export function compileTask(src: string, out: string, build: boolean, options: {
 		}
 
 		const compile = createCompile(src, { build, emitError: true, transpileOnly: false, preserveEnglish: !!options.preserveEnglish });
-		const srcPipe = gulp.src(`${src}/**`, { base: `${src}` });
+		// The daemon (src/insrc) has its own package.json and tsconfig; its
+		// node_modules + tests should not flow through the workbench
+		// compile pipeline (node_modules includes dependencies like
+		// `bignumber.js` whose directory names end in `.js` and trip
+		// `isRuntimeJs`, and @azure/* packages that ship .d.ts files
+		// referencing missing .d.ts.map sibling files; tests use stricter
+		// daemon-only TS options not met by the workbench compiler).
+		const srcPipe = gulp.src([
+			`${src}/**`,
+			`!${src}/insrc/node_modules/**`,
+			`!${src}/insrc/**/__tests__/**`,
+		], { base: `${src}` });
 		const generator = new MonacoGenerator(false);
 		if (src === 'src') {
 			generator.execute();
