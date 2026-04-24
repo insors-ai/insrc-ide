@@ -51,18 +51,13 @@ SKIP_INSTALL="${INSRC_SKIP_INSTALL:-0}"
 install_if_needed() {
 	local dir="$1"
 	local label="$2"
+	local extra_flags="${3:-}"
 	if [ "$SKIP_INSTALL" = "1" ]; then
 		return
 	fi
-	# Run npm install when node_modules is missing, or when the lockfile /
-	# package.json is newer than the install marker. Cheap check; no-op on
-	# warm builds so iteration stays fast.
-	if [ ! -d "$dir/node_modules" ] \
-		|| [ "$dir/package-lock.json" -nt "$dir/node_modules/.package-lock.json" ] 2>/dev/null \
-		|| [ "$dir/package.json" -nt "$dir/node_modules/.package-lock.json" ] 2>/dev/null; then
-		echo "[insrc-build] installing $label deps"
-		( cd "$dir" && npm install --no-audit --no-fund )
-	fi
+	echo "[insrc-build] installing $label deps"
+	# shellcheck disable=SC2086
+	( cd "$dir" && npm install --no-audit --no-fund $extra_flags )
 }
 
 build_ide() {
@@ -72,7 +67,7 @@ build_ide() {
 }
 
 build_daemon() {
-	install_if_needed "src/insrc" "daemon"
+	install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
 	echo "[insrc-build] daemon compile (tsc -> out/insrc)"
 	( cd src/insrc && npm run build )
 }
@@ -82,6 +77,7 @@ shift || true
 
 case "$cmd" in
 	all|""|compile)
+		install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
 		build_ide
 		build_daemon
 		;;
@@ -98,6 +94,7 @@ case "$cmd" in
 	clean)
 		echo "[insrc-build] clean"
 		rm -rf out out-build
+		install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
 		build_ide
 		build_daemon
 		;;
