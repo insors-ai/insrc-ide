@@ -54,6 +54,18 @@ export interface ArtifactRenderedHtml {
 	readonly standalone: string;
 }
 
+/**
+ * One entry in an artifact's revision history. Mirrors the daemon's
+ * `ArtifactRevisionRecord` shape -- we only read these on the
+ * browser side (the Artifacts pane surfaces count + tooltip from
+ * them).
+ */
+export interface ArtifactRevisionRecord {
+	readonly at: string;
+	readonly edits: string;
+	readonly source: string;
+}
+
 export interface ArtifactItemMeta {
 	readonly kind: ArtifactKind;
 	readonly source: string;
@@ -62,6 +74,10 @@ export interface ArtifactItemMeta {
 	readonly metadata: Readonly<Record<string, string>>;
 	readonly warnings: readonly string[];
 	readonly confidence: ArtifactConfidence;
+	/** Last-N prior sources kept on regenerate
+	 *  (plans/artifact-tasks.md section 2.1). May be absent on items
+	 *  generated before revision tracking landed. */
+	readonly revisions?: readonly ArtifactRevisionRecord[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
