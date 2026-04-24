@@ -43,6 +43,32 @@ export interface ResetUserTemplateResult {
 	readonly removedPath: string | null;
 }
 
+/**
+ * Offline-bundle status + operations
+ * (plans/artifact-tasks.md section 3.3).
+ */
+
+export interface OfflineBundleStatus {
+	readonly version: string;
+	readonly scriptUrl: string;
+	readonly cachePath: string;
+	readonly present: boolean;
+	readonly valid: boolean;
+	readonly sizeBytes?: number;
+}
+
+export interface DownloadOfflineBundleResult {
+	readonly version: string;
+	readonly cachePath: string;
+	readonly sizeBytes: number;
+	readonly alreadyPresent: boolean;
+}
+
+export interface RemoveOfflineBundleResult {
+	readonly version: string;
+	readonly removedPath: string | null;
+}
+
 export interface IInsrcArtifactsService {
 	readonly _serviceBrand: undefined;
 
@@ -61,6 +87,19 @@ export interface IInsrcArtifactsService {
 	 * exists. Returns the path removed (or null).
 	 */
 	resetUserTemplate(kind: ArtifactKind): Promise<ResetUserTemplateResult>;
+
+	/** Status of the cached Mermaid bundle used for offline standalone
+	 *  rendering. */
+	getOfflineBundleStatus(): Promise<OfflineBundleStatus>;
+
+	/** Fetch the pinned Mermaid bundle from the CDN, verify its SRI
+	 *  hash, and cache it locally. Idempotent; re-uses the existing
+	 *  cache when still valid. */
+	downloadOfflineBundle(): Promise<DownloadOfflineBundleResult>;
+
+	/** Delete the cached bundle so subsequent renders fall back to
+	 *  the CDN. */
+	removeOfflineBundle(): Promise<RemoveOfflineBundleResult>;
 }
 
 export const IInsrcArtifactsService = createDecorator<IInsrcArtifactsService>('insrcArtifactsService');

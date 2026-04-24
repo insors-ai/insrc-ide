@@ -213,6 +213,123 @@ registerAction2(class extends Action2 {
 });
 
 // ---------------------------------------------------------------------------
+// insrc.downloadArtifactsOfflineBundle
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the pinned Mermaid bundle from the CDN into the local cache
+ * so future standalone-mode artifacts render with no network
+ * (plans/artifact-tasks.md section 3.3). SRI-verified during download.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.downloadArtifactsOfflineBundle',
+			title: localize2('insrc.downloadArtifactsOfflineBundle', 'Download Artifacts Offline Bundle'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const artifactsService = accessor.get(IInsrcArtifactsService);
+		const notificationService = accessor.get(INotificationService);
+		try {
+			const result = await artifactsService.downloadOfflineBundle();
+			const mb = (result.sizeBytes / (1024 * 1024)).toFixed(2);
+			if (result.alreadyPresent) {
+				notificationService.notify({
+					severity: Severity.Info,
+					message: `Mermaid ${result.version} offline bundle already cached (${mb} MB at ${result.cachePath}).`,
+				});
+			} else {
+				notificationService.notify({
+					severity: Severity.Info,
+					message: `Mermaid ${result.version} offline bundle downloaded (${mb} MB -> ${result.cachePath}). ` +
+						'Standalone artifacts will now render without network.',
+				});
+			}
+		} catch (err) {
+			notificationService.error(`Download offline bundle failed: ${(err as Error).message}`);
+		}
+	}
+});
+
+// ---------------------------------------------------------------------------
+// insrc.removeArtifactsOfflineBundle
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.removeArtifactsOfflineBundle',
+			title: localize2('insrc.removeArtifactsOfflineBundle', 'Remove Artifacts Offline Bundle'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const artifactsService = accessor.get(IInsrcArtifactsService);
+		const notificationService = accessor.get(INotificationService);
+		try {
+			const result = await artifactsService.removeOfflineBundle();
+			if (result.removedPath === null) {
+				notificationService.notify({
+					severity: Severity.Info,
+					message: `No Mermaid ${result.version} offline bundle to remove.`,
+				});
+			} else {
+				notificationService.notify({
+					severity: Severity.Info,
+					message: `Removed Mermaid ${result.version} offline bundle (${result.removedPath}). ` +
+						'Standalone artifacts will fall back to the CDN.',
+				});
+			}
+		} catch (err) {
+			notificationService.error(`Remove offline bundle failed: ${(err as Error).message}`);
+		}
+	}
+});
+
+// ---------------------------------------------------------------------------
+// insrc.artifactsOfflineBundleStatus
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.artifactsOfflineBundleStatus',
+			title: localize2('insrc.artifactsOfflineBundleStatus', 'Artifacts Offline Bundle Status'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const artifactsService = accessor.get(IInsrcArtifactsService);
+		const notificationService = accessor.get(INotificationService);
+		try {
+			const status = await artifactsService.getOfflineBundleStatus();
+			const parts: string[] = [`Mermaid ${status.version}`];
+			if (status.present && status.valid) {
+				const mb = status.sizeBytes !== undefined
+					? (status.sizeBytes / (1024 * 1024)).toFixed(2)
+					: '?';
+				parts.push(`cached at ${status.cachePath} (${mb} MB). Standalone artifacts render offline.`);
+			} else if (status.present && !status.valid) {
+				parts.push(`cache present at ${status.cachePath} but SRI mismatched -- run "Download Artifacts Offline Bundle" to refresh.`);
+			} else {
+				parts.push('not cached. Standalone artifacts fall back to the CDN. Run "Download Artifacts Offline Bundle" to cache.');
+			}
+			notificationService.notify({ severity: Severity.Info, message: parts.join(' -- ') });
+		} catch (err) {
+			notificationService.error(`Offline bundle status check failed: ${(err as Error).message}`);
+		}
+	}
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

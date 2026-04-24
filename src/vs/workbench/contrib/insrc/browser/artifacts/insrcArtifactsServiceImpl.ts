@@ -8,7 +8,10 @@ import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import {
 	IInsrcArtifactsService,
+	type DownloadOfflineBundleResult,
 	type EnsureUserTemplateResult,
+	type OfflineBundleStatus,
+	type RemoveOfflineBundleResult,
 	type ResetUserTemplateResult,
 	type TemplateInfo,
 } from '../../common/artifactsService.js';
@@ -61,6 +64,36 @@ export class InsrcArtifactsServiceImpl extends Disposable implements IInsrcArtif
 		);
 		if (result !== null && typeof result === 'object' && 'error' in result) {
 			throw new Error(`artifacts.resetUserTemplate: ${(result as { error: string }).error}`);
+		}
+		return result;
+	}
+
+	async getOfflineBundleStatus(): Promise<OfflineBundleStatus> {
+		const result = await this.daemonService.rpc<OfflineBundleStatus | { error: string }>(
+			'artifacts.getOfflineBundleStatus', {},
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(`artifacts.getOfflineBundleStatus: ${(result as { error: string }).error}`);
+		}
+		return result;
+	}
+
+	async downloadOfflineBundle(): Promise<DownloadOfflineBundleResult> {
+		const result = await this.daemonService.rpc<DownloadOfflineBundleResult | { error: string }>(
+			'artifacts.downloadOfflineBundle', {},
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(`artifacts.downloadOfflineBundle: ${(result as { error: string }).error}`);
+		}
+		return result;
+	}
+
+	async removeOfflineBundle(): Promise<RemoveOfflineBundleResult> {
+		const result = await this.daemonService.rpc<RemoveOfflineBundleResult | { error: string }>(
+			'artifacts.removeOfflineBundle', {},
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(`artifacts.removeOfflineBundle: ${(result as { error: string }).error}`);
 		}
 		return result;
 	}
