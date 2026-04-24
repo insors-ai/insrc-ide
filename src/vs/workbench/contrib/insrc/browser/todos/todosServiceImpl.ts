@@ -144,6 +144,15 @@ export class InsrcTodosServiceImpl extends Disposable implements IInsrcTodosServ
 		return this._callListRpc('todos.unarchive', { caller: 'user', listId });
 	}
 
+	async deleteList(listId: string): Promise<void> {
+		const result = await this.daemonService.rpc<{ ok: true } | { error: string; reason?: string }>(
+			'todos.deleteList', { caller: 'user', listId },
+		);
+		if (result !== null && typeof result === 'object' && 'error' in result) {
+			throw new Error(this._formatRpcError(result));
+		}
+	}
+
 	async addItem(listId: string, opts: {
 		title: string;
 		description?: string;

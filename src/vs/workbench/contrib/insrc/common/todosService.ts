@@ -199,6 +199,14 @@ export interface IInsrcTodosService {
 	archiveList(listId: string): Promise<TodoList>;
 	unarchiveList(listId: string): Promise<TodoList>;
 
+	/**
+	 * Permanently delete a list and every item + comment it owns.
+	 * Caller must own the list. Distinct from `archiveList` which
+	 * keeps the list queryable; `deleteList` drops the rows and
+	 * emits a `listDeleted` stream event so caches prune cleanly.
+	 */
+	deleteList(listId: string): Promise<void>;
+
 	addItem(listId: string, opts: {
 		title: string;
 		description?: string;

@@ -18,6 +18,7 @@ import { IThemeService } from '../../../../../platform/theme/common/themeService
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { CodeEditorWidget, type ICodeEditorWidgetOptions } from '../../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
 import type { IEditorOptions as IMonacoEditorOptions } from '../../../../../editor/common/config/editorOptions.js';
@@ -90,6 +91,7 @@ export class NotepadEditorPane extends EditorPane {
 		@IInsrcTodosService private readonly todosService: IInsrcTodosService,
 		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@IDialogService private readonly dialogService: IDialogService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super(NotepadEditorPane.ID, group, telemetryService, themeService, _storage);
@@ -133,7 +135,7 @@ export class NotepadEditorPane extends EditorPane {
 
 		this._draftBody = dom.append(main, dom.$('.insrc-notepad-draft-body'));
 		this._editorContainer = dom.append(this._draftBody, dom.$('.insrc-notepad-editor-container'));
-		this._draftBody.style.display = 'block';
+		this._draftBody.style.display = 'flex';
 
 		this._todosBody = dom.append(main, dom.$('.insrc-notepad-todos-body'));
 		this._todosListsArea = dom.append(this._todosBody, dom.$('.insrc-notepad-todos-lists'));
@@ -257,8 +259,17 @@ export class NotepadEditorPane extends EditorPane {
 	private _refreshTabClasses(): void {
 		this._draftTabBtn.classList.toggle('active', this._activeTab === 'draft');
 		this._todosTabBtn.classList.toggle('active', this._activeTab === 'todos');
-		this._draftBody.style.display = this._activeTab === 'draft' ? 'block' : 'none';
+		// Use `flex` (not `block`) when visible so the inner flex layout
+		// propagates height to the Monaco container; otherwise Monaco
+		// collapses to ~0 height and only the codelens strip renders.
+		this._draftBody.style.display = this._activeTab === 'draft' ? 'flex' : 'none';
 		this._todosBody.style.display = this._activeTab === 'todos' ? 'block' : 'none';
+		if (this._activeTab === 'draft') {
+			// Microtask + a rAF fallback: Monaco reads its container's
+			// computed size when layout() runs, which requires a paint
+			// cycle after the display flip.
+			queueMicrotask(() => this._codeEditor?.layout());
+		}
 	}
 
 	// -- Quick-add affordance -----------------------------------------------
@@ -342,6 +353,23 @@ export class NotepadEditorPane extends EditorPane {
 			void this._call(() => list.status === 'archived'
 				? this.todosService.unarchiveList(list.id)
 				: this.todosService.archiveList(list.id));
+		});
+
+		const deleteBtn = dom.append(actions, dom.$('button.insrc-notepad-todos-card-action')) as HTMLButtonElement;
+		deleteBtn.textContent = 'Delete';
+		deleteBtn.title = 'Permanently delete this list and all its items.';
+		deleteBtn.addEventListener('click', async () => {
+			const { confirmed } = await this.dialogService.confirm({
+				type: 'warning',
+				message: `Delete "${list.title}"?`,
+				detail: 'The list and all its items are removed permanently. Items that have been forwarded to agents are unaffected on the agent\'s side.',
+				primaryButton: 'Delete',
+				cancelButton: 'Cancel',
+			});
+			if (!confirmed) {
+				return;
+			}
+			await this._call(() => this.todosService.deleteList(list.id));
 		});
 
 		const body = dom.append(card, dom.$('.insrc-notepad-todos-card-body'));
