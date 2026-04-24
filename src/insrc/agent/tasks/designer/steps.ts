@@ -247,6 +247,37 @@ export const parseRequirementsStep: AgentStep<DesignerState> = {
     ctx.progress(`${todos.length} requirements → starting per-requirement design...`);
     ctx.writeArtifact('requirements.md', state.enhancedRequirements);
 
+    // Mirror parsed requirements into a designer-owned todos list
+    // (plans/todo-framework.md Phase 7 -- designer consumer). Each
+    // requirement becomes a TodoItem; the requirement index lives in
+    // meta so a future per-step status-sync can correlate items back
+    // to designer's `state.todos[]` array. Best-effort: failure logs
+    // and the designer keeps running. Per-requirement status sync
+    // (sketch -> in_progress, done -> completed, skipped -> cancelled)
+    // is a follow-up; for now items remain `pending` after creation.
+    if (ctx.todos !== undefined && ctx.sessionId !== undefined && todos.length > 0) {
+      try {
+        const list = await ctx.todos.createList({
+          sessionId: ctx.sessionId,
+          title: 'Design requirements',
+          description: `${todos.length} requirements extracted from the user's input. Each progresses through sketch / review / detail in the designer agent.`,
+        });
+        for (const todo of todos) {
+          await ctx.todos.addItem(list.id, {
+            title: `${todo.index}. ${todo.statement.slice(0, 80)}${todo.statement.length > 80 ? '...' : ''}`,
+            description: todo.statement,
+            meta: {
+              requirementIndex: todo.index,
+              requirementType: todo.type,
+              requirementRefs: todo.references,
+            },
+          });
+        }
+      } catch (err) {
+        ctx.progress(`(todos) failed to mirror requirements: ${(err as Error).message}`);
+      }
+    }
+
     return {
       state: { ...state, parsedRequirements: parsed, todos, currentTodoIndex: 0 },
       next: 'pick-next-requirement',
