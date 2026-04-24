@@ -215,6 +215,17 @@
 	flex: 0 0 auto;
 }
 
+.insrc-notepad-todos-item-forwarded {
+	font-size: 10px;
+	padding: 1px 6px;
+	border-radius: 8px;
+	background-color: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+	white-space: nowrap;
+	flex: 0 0 auto;
+	cursor: help;
+}
+
 .insrc-notepad-todos-item-remove {
 	background: transparent;
 	border: none;

@@ -450,6 +450,21 @@ export class NotepadEditorPane extends EditorPane {
 			void this._call(() => this.todosService.updateItem(item.id, { title: next }));
 		});
 
+		// Last-forwarded badge (from item.meta.lastForwardedTo). Small
+		// visual hint so the user remembers which agent each item was
+		// last sent to; hover reveals the full forward history.
+		const lastForwardedTo = typeof item.meta?.['lastForwardedTo'] === 'string'
+			? (item.meta['lastForwardedTo'] as string) : undefined;
+		if (lastForwardedTo !== undefined) {
+			const badge = dom.append(row, dom.$('span.insrc-notepad-todos-item-forwarded')) as HTMLSpanElement;
+			// allow-any-unicode-next-line
+			badge.textContent = `↪ ${lastForwardedTo}`;  // ↪
+			const history = this._extractForwardHistory(item.meta);
+			badge.title = history.length > 0
+				? `Forward history:\n${history.map(h => `  ${h.at}  ->  ${h.target}`).join('\n')}`
+				: `Last forwarded to ${lastForwardedTo}`;
+		}
+
 		const remove = dom.append(row, dom.$('button.insrc-notepad-todos-item-remove')) as HTMLButtonElement;
 		remove.textContent = 'Remove';
 		remove.addEventListener('click', () => {
@@ -507,8 +522,30 @@ export class NotepadEditorPane extends EditorPane {
 				sessionId,
 				items: snapshots,
 			});
+			const forwardedAt = new Date().toISOString();
+			// Index the source items by id so we can stamp the existing
+			// meta (forwardHistory append) alongside the status update.
+			const sourceById = new Map<string, TodoItem>();
+			for (const it of items) {
+				sourceById.set(it.id, it);
+			}
 			for (const resp of result.items) {
-				const patch: { status: typeof resp.status; blockedReason?: string } = { status: resp.status };
+				const source = sourceById.get(resp.sourceRef);
+				const history = this._extractForwardHistory(source?.meta);
+				history.push({ target: String(target), at: forwardedAt });
+				// Keep only the most recent 8 forwards per item -- old
+				// entries are interesting mostly for the tail.
+				const trimmed = history.slice(-8);
+				const mergedMeta: Record<string, unknown> = {
+					...(source?.meta ?? {}),
+					lastForwardedTo: target,
+					lastForwardedAt: forwardedAt,
+					forwardHistory: trimmed,
+				};
+				const patch: { status: typeof resp.status; blockedReason?: string; meta: Record<string, unknown> } = {
+					status: resp.status,
+					meta: mergedMeta,
+				};
 				if (resp.blockedReason !== undefined) {
 					patch.blockedReason = resp.blockedReason;
 				}
@@ -522,6 +559,34 @@ export class NotepadEditorPane extends EditorPane {
 		} catch (err) {
 			this.notificationService.error(`Failed to forward: ${(err as Error).message}`);
 		}
+	}
+
+	/**
+	 * Extract the previously-stashed `forwardHistory` array from an
+	 * item's `meta`. Defensively tolerates missing / malformed entries
+	 * so old items (from before this field landed) don't crash the
+	 * update path.
+	 */
+	private _extractForwardHistory(meta: Readonly<Record<string, unknown>> | undefined): Array<{ target: string; at: string }> {
+		if (meta === undefined) {
+			return [];
+		}
+		const raw = meta['forwardHistory'];
+		if (!Array.isArray(raw)) {
+			return [];
+		}
+		const out: Array<{ target: string; at: string }> = [];
+		for (const entry of raw) {
+			if (entry !== null && typeof entry === 'object') {
+				const e = entry as Record<string, unknown>;
+				const target = typeof e['target'] === 'string' ? (e['target'] as string) : undefined;
+				const at = typeof e['at'] === 'string' ? (e['at'] as string) : undefined;
+				if (target !== undefined && at !== undefined) {
+					out.push({ target, at });
+				}
+			}
+		}
+		return out;
 	}
 
 	// -- Service event handlers ---------------------------------------------
