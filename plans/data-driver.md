@@ -65,7 +65,7 @@ and in the code-analyzer design doc's
 | 0     | Foundations: config schema, driver registry, family interfaces, keychain integration | done (225e10ec68a) |
 | 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers compiled + registered; Prisma schema.prisma fast path + live-DB integration tests still open. |
 | 2     | Setup UX: palette commands, Model Providers-style pane, connection tester           | todo |
-| 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | todo |
+| 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | in-progress -- 9 tools landed, browser `IInsrcDbConnectionsService.list()` shipped, `db.sql.explain` deferred to phase 3.2. |
 | 4     | Guardrails: raw-query rejection, row/time caps, PII masking, namespace scoping      | partial -- caps + raw-query denylist + namespace scoping landed in the drivers (phase 1); PII masking + per-repo opt-in short-circuit still todo. |
 | 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB                  | todo |
 
@@ -607,23 +607,23 @@ driver module + a registry line; the tool surface does not grow.
 ### Phase 3 -- Tool surface
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `db.list_connections`                      | todo   |       |
-| `db.sql.describe` / `sample`               | todo   |       |
-| `db.sql.explain`                           | todo   | Phase 3.2 follow-up |
-| `db.kv.scan` / `get` / `sample_shape`      | todo   |       |
-| `db.file.describe` / `sample` / `sample_shape` | todo | |
-| `FAMILY_MISMATCH` error shape + retry hint | todo   |       |
-| `IInsrcDbConnectionsService` browser-side  | todo   |       |
+| `db:list_connections`                      | done (uncommitted) | Tool ids use the existing `category:action` colon pattern (`db:sql:describe`, etc.); the plan's `db.sql.describe` prose is purely naming. |
+| `db:sql:describe` / `db:sql:sample`        | done (uncommitted) | Structured `where` objects only; limit clamped at 50; column names validated against describe() cache before query compile. |
+| `db:sql:explain`                           | todo   | Phase 3.2 follow-up |
+| `db:kv:scan` / `db:kv:get` / `db:kv:sample_shape` | done (uncommitted) | Honors `namespace.allow` via kv-common; scan cap 500, sample_shape cap 50. |
+| `db:file:describe` / `db:file:sample` / `db:file:sample_shape` | done (uncommitted) | File driver methods are optional; tools surface clean "UNSUPPORTED" errors when a kind doesn't implement one (e.g. single-doc json rejects describe). |
+| `FAMILY_MISMATCH` error shape + retry hint | done (uncommitted) | `acquireDriver` rejects with `FAMILY_MISMATCH: Connection X is kv; use db:kv:* instead` so the LLM retries with the right namespace. |
+| `IInsrcDbConnectionsService` browser-side  | done (uncommitted) | Phase 3 ships `list()` only; add/edit/remove/test land with phase-2 setup UX. Backed by `db.listConnections` daemon RPC. |
 
 ### Phase 4 -- Guardrails
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Raw-SQL regex guard                        | todo   |       |
-| Row / time caps (enforced in shared)       | todo   |       |
+| Raw-SQL regex guard                        | done (Phase 1) | `looksLikeMutation` + DML/DDL denylist in rdbms-common. |
+| Row / time caps (enforced in shared)       | done (Phase 1) | 50 rows + 5s RDBMS; 500 keys + 50 values + 5s KV; 50 rows + 5s file. |
 | PII masking (hash substitution)            | todo   |       |
-| KV namespace scoping                       | todo   |       |
-| Per-repo opt-in short-circuit              | todo   |       |
-| Guardrail tests (injection, fs escape)     | todo   |       |
+| KV namespace scoping                       | done (Phase 1) | `assertNamespaceAllowed` in kv-common. |
+| Per-repo opt-in short-circuit              | done (Phase 3) | Tools short-circuit to `NO_CONNECTIONS_CONFIGURED` when the repo has no entries in `db-connections.json`. |
+| Guardrail tests (injection, fs escape)     | partial | rdbms-common injection tests + pool fs-escape test landed; PII masking tests + full-matrix fuzz still todo. |
 
 ### Phase 5 -- Extended drivers
 | Item                                       | Status | Notes |

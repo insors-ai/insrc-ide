@@ -1011,6 +1011,10 @@ async function main(): Promise<void> {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.resetUserTemplateRpc(params);
 		},
+		'db.listConnections': async (params) => {
+			const mod = await import('./db-rpc.js');
+			return mod.listConnectionsRpc(params as { repoRoot?: unknown });
+		},
 		'artifacts.getOfflineBundleStatus': async () => {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.getOfflineBundleStatusRpc();

@@ -20,6 +20,8 @@ import { IInsrcTodosService } from '../common/todosService.js';
 import { InsrcTodosServiceImpl } from '../browser/todos/todosServiceImpl.js';
 import { IInsrcArtifactsService } from '../common/artifactsService.js';
 import { InsrcArtifactsServiceImpl } from '../browser/artifacts/insrcArtifactsServiceImpl.js';
+import { IInsrcDbConnectionsService } from '../common/dbConnectionsService.js';
+import { InsrcDbConnectionsServiceImpl } from '../browser/dbDrivers/insrcDbConnectionsServiceImpl.js';
 import { InsrcDaemonServiceImpl } from './daemonServiceImpl.js';
 import { InsrcSessionServiceImpl } from './sessionServiceImpl.js';
 import { InsrcWorkspaceServiceImpl } from './workspaceServiceImpl.js';
@@ -45,3 +47,4 @@ registerSingleton(IInsrcLSPToolService, InsrcLSPToolServiceImpl, InstantiationTy
 registerSingleton(IInsrcBrainstormSessionService, InsrcBrainstormSessionServiceImpl, InstantiationType.Eager);
 registerSingleton(IInsrcTodosService, InsrcTodosServiceImpl, InstantiationType.Eager);
 registerSingleton(IInsrcArtifactsService, InsrcArtifactsServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcDbConnectionsService, InsrcDbConnectionsServiceImpl, InstantiationType.Delayed);

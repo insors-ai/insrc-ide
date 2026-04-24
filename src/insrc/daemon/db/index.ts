@@ -34,6 +34,13 @@ export {
 
 export { DriverPool } from './pool.js';
 
+export {
+	_resetCacheForTests,
+	acquirePool,
+	closeAll,
+	reloadAll,
+} from './pool-cache.js';
+
 export type {
 	BaseDriver,
 	ColumnDescription,

@@ -111,7 +111,7 @@ describe('inferShape', () => {
 		assert.equal(byPath.get('name')?.nullable, false);
 		assert.equal(byPath.get('name')?.frequency, 1);
 
-		assert.deepEqual(byPath.get('age')?.types.sort(), ['null', 'number']);
+		assert.deepEqual([...(byPath.get('age')?.types ?? [])].sort(), ['null', 'number']);
 		assert.equal(byPath.get('age')?.nullable, true);
 
 		assert.equal(byPath.get('nick')?.frequency, 1 / 3);
