@@ -30,7 +30,7 @@ decisions into concrete file-level work.
 | 0     | Prerequisites: Mermaid dep pinned, asset pipeline, shared types scaffolding  | done -- Mermaid CDN SRI + metadata shipped, shared types + asset pipeline done. No `npm install mermaid` needed: iframe-srcdoc widget renders artifacts inside a sandboxed document that loads Mermaid from the pinned CDN URL (SRI-verified). |
 | 1     | Core tools + five bundled kinds + chat widget                                | done -- daemon-side + browser-side complete: templates, loader, binder, sanitiser, wireframe renderer + LLM synthesis, kind registry, shared Mermaid helper, **all 5 kinds runnable with structured-source branches** (Prisma / Kuzu / compose / k8s / LLM wireframe spec), 5 tool registrations with per-kind schemas + category bootstrap, chat widget with iframe-sandboxed rendering, `ToolDeps.todos` + caller-family routing landed, unit tests + smoke script written (`node:test` based, no new deps). `IInsrcArtifactsService` + slash commands dropped by design. |
 | 2     | Iteration: regenerate tool, Artifacts Pane, template-override commands       | done -- `artifact:regenerate` + `artifact:list_templates` tools, `TodosApi.updateItemMeta` extension, `persistence.appendRevision` with last-5 eviction, Artifacts editor pane (durable) + `insrc.artifacts.open` command, template-override palette commands (edit / reset / list) backed by a new `IInsrcArtifactsService` + three daemon RPCs. Tests: 78/78 unit + 11/11 smoke (all green), IDE compile + precommit clean. |
-| 3     | Deeper data sources: live DB ER, Terraform deployment, offline mode          | todo |
+| 3     | Deeper data sources: live DB ER, Terraform deployment, offline mode          | partial -- Terraform plan parser + offline mode (SRI-verified download-on-demand) done; live-DB ER stays blocked on code-analyzer phase 3. |
 | 4     | Advanced: React introspection, CFG-based flow, plugin contract               | todo |
 
 **Legend** for per-task status cells further down: `todo` (not
@@ -781,8 +781,8 @@ are worth addressing before or alongside the remaining phase-1 work.
 | Item                                      | Status | Notes |
 |-------------------------------------------|--------|-------|
 | Live DB ER via `db.sql.*`                 | todo   | blocks on code-analyzer phase 3 |
-| Terraform plan parser                     | todo   |       |
-| Offline mode                              | todo   |       |
+| Terraform plan parser                     | done (uncommitted) | `kinds/terraform-source.ts` parses `terraform show -json` output: walks `planned_values.root_module` + `child_modules` recursively, extracts managed resources and `depends_on` edges, assigns Mermaid node shapes from a SHAPE_CATALOG (aws_instance / aws_lb / aws_db_instance / kubernetes_deployment / gcp / azurerm families + generic fallback rect). Emits `flowchart LR`. Auto-detected in `parseDeploymentSource` via a JSON fast-path (`trimmed.startsWith('{')` -> `tryParseTerraformPlan`) before the YAML branch, so the deployment tool dispatches Compose / k8s / Terraform by content shape with no user flag. |
+| Offline mode                              | done (uncommitted) | Cache-file-presence detection (no config flag): `agent/tasks/artifacts/offline-bundle.ts` + `template-binder.ts` inline the cached Mermaid bundle into standalone HTML when `~/.insrc/cache/artifacts/mermaid-<version>.min.js` exists and its SHA-384 matches the pinned SRI in `mermaid-cdn.json`. Three daemon RPCs (`artifacts.getOfflineBundleStatus`, `.downloadOfflineBundle`, `.removeOfflineBundle`) + three palette commands (`insrc.downloadArtifactsOfflineBundle`, `insrc.removeArtifactsOfflineBundle`, `insrc.artifactsOfflineBundleStatus`) wire it end-to-end. Download uses `undici` + SRI verify before writing. Falls back to CDN when the cache is missing or tampered. |
 
 ### Phase 4
 | Item                                      | Status | Notes |
