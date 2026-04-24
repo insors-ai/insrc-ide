@@ -1,0 +1,2023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Code Analyzer Agent — Design Document</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e4ed;
+      --muted: #8b8fa8;
+      --accent: #7c6af7;
+      --accent2: #4fc3f7;
+      --green: #4caf7d;
+      --yellow: #f5c842;
+      --red: #f47c7c;
+      --code-bg: #12151e;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      margin: 0;
+      padding: 0;
+      display: flex;
+    }
+
+    nav.toc {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 260px;
+      height: 100vh;
+      overflow-y: auto;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      padding: 1.5rem 1rem;
+      font-size: 0.82rem;
+    }
+
+    nav.toc h2 {
+      font-size: 0.9rem;
+      color: var(--accent2);
+      border: none;
+      margin: 0 0 0.75rem;
+      padding: 0;
+    }
+
+    nav.toc ol {
+      list-style: none;
+      padding: 0;
+      counter-reset: toc;
+    }
+
+    nav.toc > ol > li { counter-increment: toc; margin: 0.35rem 0; }
+    nav.toc > ol > li::before { content: counter(toc) ". "; color: var(--muted); }
+    nav.toc > ol > li > ol { padding-left: 1rem; counter-reset: subtoc; }
+    nav.toc > ol > li > ol > li { counter-increment: subtoc; margin: 0.2rem 0; font-size: 0.78rem; }
+    nav.toc > ol > li > ol > li::before { content: counter(toc) "." counter(subtoc) " "; color: var(--muted); }
+    nav.toc a { color: var(--text); text-decoration: none; }
+    nav.toc a:hover { color: var(--accent); }
+
+    main {
+      flex: 1;
+      min-width: 0;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    @media (min-width: 1100px) {
+      main { margin-left: 280px; }
+    }
+
+    h1 { font-size: 2rem; color: var(--accent); margin-bottom: 0.5rem; }
+    .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 2rem; }
+
+    h2 {
+      font-size: 1.3rem;
+      color: var(--accent2);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.3rem;
+      margin-top: 2.5rem;
+      margin-bottom: 1rem;
+    }
+
+    h3 {
+      font-size: 1.05rem;
+      color: var(--yellow);
+      margin-top: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    p, ul, ol { margin-bottom: 1rem; }
+    ul, ol { padding-left: 1.5rem; }
+    li { margin-bottom: 0.3rem; }
+
+    code {
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      background: var(--code-bg);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+
+    pre {
+      background: var(--code-bg);
+      padding: 1rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin-bottom: 1rem;
+      font-size: 0.88rem;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+    }
+    pre code { background: none; padding: 0; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 1.2rem;
+      font-size: 0.92rem;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: var(--surface); color: var(--accent2); font-size: 0.9rem; }
+
+    .callout {
+      border-left: 3px solid var(--accent2);
+      background: var(--surface);
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+      border-radius: 0 6px 6px 0;
+      font-size: 0.93rem;
+    }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout.info { border-left-color: var(--accent2); }
+    .callout.decision { border-left-color: var(--green); }
+    .callout.open { border-left-color: var(--red); }
+
+    .tag {
+      display: inline-block;
+      font-size: 0.75rem;
+      padding: 0.1rem 0.5rem;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+    .tag.local { background: #1a3a2a; color: var(--green); }
+    .tag.cloud { background: #2a1a3a; color: var(--accent); }
+    .tag.gate  { background: #3a2a1a; color: var(--yellow); }
+    .tag.rpc   { background: #1a2a3a; color: var(--accent2); }
+
+    .flow-diagram {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1.2rem;
+      margin: 1rem 0;
+      font-family: 'Cascadia Code', monospace;
+      font-size: 0.85rem;
+      line-height: 1.6;
+      white-space: pre;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#goals">Goals &amp; Non-Goals</a></li>
+    <li><a href="#family">Family &amp; Variant</a></li>
+    <li><a href="#architecture">Architecture</a>
+      <ol>
+        <li><a href="#arch-three-parts">Three-Part Split</a></li>
+        <li><a href="#arch-todo-backbone">TODO Framework as Backbone</a></li>
+        <li><a href="#arch-relation">Relation to Brainstorm</a></li>
+        <li><a href="#arch-existing">Relation to Existing Controller</a></li>
+      </ol>
+    </li>
+    <li><a href="#todo-integration">TODO Framework Integration</a>
+      <ol>
+        <li><a href="#todo-list-shape">List &amp; Item Shape</a></li>
+        <li><a href="#todo-lifecycle">Item Lifecycle</a></li>
+        <li><a href="#todo-comments">Comments as Feedback Channel</a></li>
+        <li><a href="#todo-hierarchy">Hierarchy &amp; Follow-Ups</a></li>
+      </ol>
+    </li>
+    <li><a href="#orchestrator">Orchestrator</a>
+      <ol>
+        <li><a href="#orch-flow">Step Flow</a></li>
+        <li><a href="#orch-decide">Decision Loop</a></li>
+        <li><a href="#orch-termination">Termination</a></li>
+        <li><a href="#orch-prompts">Prompts</a></li>
+      </ol>
+    </li>
+    <li><a href="#analyzer">Analyzer</a>
+      <ol>
+        <li><a href="#analyzer-contract">Task Contract</a></li>
+        <li><a href="#analyzer-tools">Read-Only Tools</a></li>
+        <li><a href="#analyzer-scope">Scope &amp; Access Gate</a></li>
+        <li><a href="#analyzer-loop">Tool Loop</a></li>
+        <li><a href="#analyzer-citations">Citations</a></li>
+      </ol>
+    </li>
+    <li><a href="#state">Controller State</a></li>
+    <li><a href="#gates">Gates</a></li>
+    <li><a href="#surfaces">UI Surfaces</a>
+      <ol>
+        <li><a href="#surface-todos">Todos Pane &amp; Inline Widget</a></li>
+        <li><a href="#surface-report">Analysis Report Pane</a></li>
+        <li><a href="#surface-feedback">Feedback Paths</a></li>
+      </ol>
+    </li>
+    <li><a href="#intent">Intent Routing</a></li>
+    <li><a href="#llm-routing">LLM Routing</a></li>
+    <li><a href="#db-driver">DB Driver Extension (Phase 3)</a></li>
+    <li><a href="#caching">Caching &amp; Resume</a></li>
+    <li><a href="#failure">Failure Modes</a></li>
+    <li><a href="#phasing">Phasing</a></li>
+    <li><a href="#open">Open Questions</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<h1>Code Analyzer Agent</h1>
+<p class="subtitle">Cloud-orchestrated, local-analyzed, read-only code understanding with a live analysis surface.</p>
+
+<!-- ================================================================== -->
+<h2 id="overview">1. Overview</h2>
+
+<p>
+  The <strong>Code Analyzer</strong> is a read-only agent that produces a structured, cited
+  Markdown report answering a user's question about a codebase. It handles everything from focused
+  questions ("where is <code>UserService.refresh</code> called from?") to broad audits
+  ("summarise the auth flow and call out gaps"). It never writes code.
+</p>
+
+<p>
+  Internally the agent is <strong>two LLMs cooperating</strong>:
+</p>
+
+<ul>
+  <li>An <strong>Orchestrator</strong> on the active cloud provider decomposes the request into
+    a task list, reviews each analyzer response, decides the next task, and finally assembles the
+    full report.</li>
+  <li>An <strong>Analyzer</strong> on the local Ollama model answers one unit task at a time by
+    querying Kuzu / LanceDB, reading relevant code, and returning a cited finding.</li>
+</ul>
+
+<p>
+  The agent rides on the <strong>session-scoped TODO framework</strong>
+  (<code>plans/todo-framework.md</code>): the orchestrator's plan is a <code>TodoList</code>, each
+  analyzer task is a <code>TodoItem</code>, and the existing todos editor pane + inline chat
+  todos widget give the user live progress. A dedicated <strong>Analysis Report Pane</strong>
+  renders the final synthesised Markdown and lets the user highlight a section and send it back
+  to the chat panel as a quoted follow-up.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="goals">2. Goals &amp; Non-Goals</h2>
+
+<h3>Goals</h3>
+<ul>
+  <li><strong>Decomposed analysis.</strong> Break a broad request into focused sub-questions so
+    the local model never has to carry the whole problem at once.</li>
+  <li><strong>Cited answers.</strong> Every finding names a file / line range / entity id that
+    came from the graph or vector store, not free-text speculation.</li>
+  <li><strong>Local-heavy, cloud-thin.</strong> Analyzer work (which reads a lot of code and does
+    most of the token consumption) runs locally. Cloud is used for planning and final synthesis
+    only.</li>
+  <li><strong>Progress-visible.</strong> User sees the plan, sees tasks complete one by one in the
+    Analysis Pane, and can steer (add a task, edit the plan, ask a follow-up) mid-flight.</li>
+  <li><strong>Resumable.</strong> Crash / VS Code restart / model switch mid-analysis preserves
+    completed analyzer results.</li>
+</ul>
+
+<h3>Non-Goals</h3>
+<ul>
+  <li><strong>Code changes.</strong> The analyzer never emits diffs. If a finding implies a fix,
+    the user moves it to the coding agent separately.</li>
+  <li><strong>Unbounded autonomy.</strong> The orchestrator runs a capped number of iterations; we
+    do not let a cloud LLM chase its own findings indefinitely.</li>
+  <li><strong>Web / external research.</strong> That's the Research controller's job. Code
+    analyzer scope is the active repo + its dependency closure.</li>
+  <li><strong>Multi-repo federation.</strong> Only the active repo graph and its transitive
+    <code>DEPENDS_ON</code> closure are in scope (architectural rule #3 in
+    <code>CLAUDE.md</code>).</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="family">3. Family &amp; Variant</h2>
+
+<div class="callout decision">
+  <strong>Decision:</strong> The code analyzer is a <strong>variant of the <code>research</code>
+  family</strong>, not a new agent family. TodoList ownership stamps <code>owner: 'research'</code>;
+  the <code>code-analysis</code> vs free-form <code>research</code> distinction is an internal
+  variant, following the <code>pair</code>/<code>delegate</code> pattern under
+  <code>implementation</code>.
+</div>
+
+<p>
+  Why <code>research</code>, not a new family:
+</p>
+
+<ul>
+  <li>The registry row for <code>research</code>
+    (<code>src/insrc/shared/agent-registry.ts</code>) already reads:
+    <em>"Read-only exploration of code and docs; answers informational questions without mutating
+    anything."</em> That is exactly the analyzer's mandate.</li>
+  <li>Adding a new family means registry churn + exhaustiveness-check migrations + config-dir
+    layout + frontmatter whitelist changes. The framework explicitly says ownership lives at the
+    family level; variants are private.</li>
+  <li>The existing <code>ResearchController</code> (free-form web-capable investigation) and the
+    new code-analysis pipeline can coexist as sibling variants under one family, selected by
+    intent at classification time.</li>
+</ul>
+
+<p>
+  Variant disambiguation uses the same pattern as <code>implementation</code>: the controller's
+  <code>variant: 'code-analysis' | 'free-form'</code> field distinguishes the pipelines;
+  prompt assets live in <code>~/.insrc/research/</code> under variant-named files
+  (<code>code-analysis-plan.md</code>, <code>code-analysis-review.md</code>,
+  <code>code-analysis-analyzer.md</code>, ...). Ownership in the todos framework stays at
+  <code>'research'</code> across variants.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">4. Architecture</h2>
+
+<h3 id="arch-three-parts">4.1 Three-Part Split</h3>
+
+<table>
+  <tr>
+    <th></th>
+    <th>Orchestrator</th>
+    <th>Analyzer</th>
+    <th>Analysis Pane</th>
+  </tr>
+  <tr>
+    <td><strong>Runs on</strong></td>
+    <td>Cloud LLM (active provider)</td>
+    <td>Local LLM (Ollama, qwen3-coder)</td>
+    <td>VS Code renderer</td>
+  </tr>
+  <tr>
+    <td><strong>Job</strong></td>
+    <td>Plan, decide, synthesise</td>
+    <td>Locate code, read it, answer one task</td>
+    <td>Show plan + progress + report; accept feedback</td>
+  </tr>
+  <tr>
+    <td><strong>Tools</strong></td>
+    <td>None (pure reasoning over analyzer results)</td>
+    <td>Graph, vector, read-file, list-dir, grep</td>
+    <td>n/a</td>
+  </tr>
+  <tr>
+    <td><strong>Writes code?</strong></td>
+    <td>No</td>
+    <td>No</td>
+    <td>No</td>
+  </tr>
+  <tr>
+    <td><strong>Owns state</strong></td>
+    <td>Outer loop + final report</td>
+    <td>Per-task tool loop only</td>
+    <td>UI-only view state</td>
+  </tr>
+  <tr>
+    <td><strong>Plan storage</strong></td>
+    <td colspan="2"><strong>TODO framework</strong> — one <code>TodoList</code> owned by the
+      <code>research</code> family, one <code>TodoItem</code> per analysis task.</td>
+    <td>Reads list + items live via <code>IInsrcTodosService</code></td>
+  </tr>
+</table>
+
+<div class="flow-diagram">
+  user request
+       |
+       v
+  [Orchestrator.plan]                                (cloud LLM, no tools)
+       |                                              emits AnalysisTask[]
+       v
+  deps.todos.createList({ owner: 'research', ... })  todos pane opens
+  one addItem() per task                             inline widget renders
+       |
+       v
+  [plan-review gate] --edit/approve-->               (plan-edit updates items
+       |                                              via deps.todos.addItem /
+       |                                              updateItem)
+       v
+  for each pending item in list:
+       |
+       +--> deps.todos.markInProgress(itemId)
+       |
+       +--> ack user comments on completed items     (ackComment)
+       |
+       +--> [Analyzer.run(task)]                     (local LLM + tools)
+       |         |
+       |         v
+       |    graph/vector search -> read files
+       |    -> structured AnalyzerResult
+       |         |
+       |         v
+       +--> [Orchestrator.review]                    (cloud LLM, no tools)
+                 |
+                 v
+       decision: accept | retry-with-hint | add-follow-up | done
+                 |
+                 +--> on accept:   updateItem(meta = { answer, findings,
+                 |                                     citations, confidence });
+                 |                 markComplete(itemId);
+                 +--> on retry:    markInProgress + re-queue with hint
+                 +--> on follow-up: addItem({ origin: 'follow-up' })
+                 +--> on done:     break
+                 ...
+       v
+  [Orchestrator.synthesise]                          (cloud LLM)
+       |
+       v
+  final Markdown report -> AnalysisReportPane opens (read-only editor)
+       |
+       v
+  [present gate]  -- save / copy / send-to-chat / discard
+</div>
+
+<h3 id="arch-todo-backbone">4.2 TODO Framework as Backbone</h3>
+
+<p>
+  The TODO framework (<code>plans/todo-framework.md</code>) is load-bearing: it owns plan
+  storage, item state machines, persistence (LanceDB tables), live event streams
+  (<code>listCreated</code>, <code>itemCreated</code>, <code>itemUpdated</code>, ...), the
+  comment channel for user feedback, and the editor pane + inline chat widget that render all
+  of this. The analyzer controller leans on <code>deps.todos</code> for everything except
+  LLM task execution and final-report rendering.
+</p>
+
+<table>
+  <tr>
+    <th>Analyzer concern</th>
+    <th>TODO framework capability</th>
+  </tr>
+  <tr>
+    <td>Plan persistence across daemon restart</td>
+    <td>LanceDB tables owned by the framework (Phase 1)</td>
+  </tr>
+  <tr>
+    <td>Task lifecycle (pending &rarr; running &rarr; done / blocked)</td>
+    <td><code>TodoItemStatus</code> state machine +
+      <code>markInProgress</code>/<code>markComplete</code>/<code>markBlocked</code></td>
+  </tr>
+  <tr>
+    <td>Structured payload per task (question, findings, citations)</td>
+    <td><code>TodoItem.meta: Readonly&lt;Record&lt;string, unknown&gt;&gt;</code>
+      (framework-opaque, JSON-serialisable)</td>
+  </tr>
+  <tr>
+    <td>Follow-up tasks appended mid-flight</td>
+    <td><code>deps.todos.addItem(listId, { ..., meta: { origin: 'follow-up' } })</code></td>
+  </tr>
+  <tr>
+    <td>Live plan + progress UI</td>
+    <td>Todos editor pane (Phase 5a) + inline chat todos widget (Phase 5b)</td>
+  </tr>
+  <tr>
+    <td>User feedback on individual tasks / findings</td>
+    <td>Per-item comments (Phase 5d) with <code>agentAcknowledged</code> + <code>ackComment</code></td>
+  </tr>
+  <tr>
+    <td>Hierarchy (a top-level analysis spawning focused sub-analyses)</td>
+    <td><code>parentListId</code> — rendered flat with cross-references</td>
+  </tr>
+  <tr>
+    <td>Session cleanup when user discards a chat session</td>
+    <td><code>agent.discard</code> purge path (Phase 2b)</td>
+  </tr>
+</table>
+
+<div class="callout info">
+  <strong>What we do NOT build:</strong> our own task state machine, our own plan persistence,
+  our own live-progress pane, our own per-task comment storage. Every one of those already
+  exists as framework infrastructure. Reinventing any of them duplicates code and drifts from
+  the canonical UX agents share.
+</div>
+
+<h3 id="arch-relation">4.3 Relation to Brainstorm</h3>
+
+<p>
+  The code analyzer adopts the brainstorm controller pattern end to end:
+</p>
+
+<ul>
+  <li><strong>Controller shape.</strong> Implements the same <code>TaskController</code> interface
+    (<code>buildInitialTasks</code> / <code>next</code> / <code>finalize</code>) used by
+    <code>BrainstormControllerBase</code>.</li>
+  <li><strong>Task kinds.</strong> Uses the same <code>kind: 'llm' | 'rpc' | 'gate'</code> envelope
+    so the daemon's <code>runControlledPipeline</code> drives it without modification.</li>
+  <li><strong>Pane pattern.</strong> Dedicated <code>AnalysisPaneInput</code> + <code>AnalysisPane</code>
+    extending <code>InsrcEditorPaneBase</code>, rendered through a reusable
+    <code>AnalysisCardWidget</code> modelled on <code>BrainstormCardWidget</code>.</li>
+  <li><strong>Gate semantics.</strong> <code>replyToGate(gateId, action, feedback)</code> ferries
+    plan edits and per-finding comments back to the controller, exactly like brainstorm's
+    discuss / diverge / edit actions.</li>
+</ul>
+
+<p>
+  The one place the analyzer diverges from brainstorm: there is no "ideation round → convergence"
+  loop. Analysis tasks are a flat queue and the orchestrator is free to append to it at any review
+  step. This maps closer to brainstorm's per-theme spec queue
+  (<code>specThemeQueue</code> / <code>nextThemeSpec</code>) than to its idea generation loop.
+</p>
+
+<h3 id="arch-existing">4.4 Relation to Existing Controller</h3>
+
+<div class="callout decision">
+  <strong>Decision:</strong> The legacy <code>CodeAnalysisController</code>
+  (<code>src/insrc/daemon/controllers/code-analysis.ts</code>) is <strong>deprecated and
+  scheduled for removal</strong>. It ships as the default until the new orchestrator/analyzer
+  pipeline is stable in phase 1, then is deleted in the phase-2 cleanup. No settings toggle,
+  no "quick mode" kept around — we do not want two overlapping code-analysis pipelines long
+  term.
+</div>
+
+<p>
+  Assets we port out of the legacy controller before deletion:
+</p>
+<ul>
+  <li>The <code>Finding</code> / <code>FindingSeverity</code> / <code>CodeAnalysisConcern</code>
+    types in <code>src/insrc/agent/tasks/code-analysis/types.ts</code> — extended with an explicit
+    <code>citations: CodeCitation[]</code> field and moved to the new module layout.</li>
+  <li><code>parseReport</code> / <code>formatReport</code> in the existing controller — ported
+    verbatim as the finding-formatting primitives the orchestrator calls during synthesis.</li>
+  <li>The existing draft / review prompts in
+    <code>src/insrc/agent/tasks/code-analysis/prompts.ts</code> — cannibalised into the new
+    planning / review / analyzer prompts; the originals are deleted alongside the controller.</li>
+</ul>
+
+<p>
+  Once the new pipeline is the default, the classifier's <code>code-analysis</code> intent routes
+  straight to the orchestrator controller and the old file is removed in the same PR.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="todo-integration">5. TODO Framework Integration</h2>
+
+<h3 id="todo-list-shape">5.1 List &amp; Item Shape</h3>
+
+<p>
+  One <code>TodoList</code> is created per analysis run. The <code>meta</code> bag on each
+  <code>TodoItem</code> carries the analyzer-specific payload without extending the framework
+  schema:
+</p>
+
+<pre><code>// The list created on Orchestrator.plan
+const list: TodoList = {
+  id:          ulid(),
+  sessionId,
+  owner:       'research',              // stamped by deps.todos
+  source:      'research',
+  status:      'active',
+  title:       'Code Analysis: <slug-of-request>',
+  description: userRequest,             // full original ask
+  body:        undefined,               // set by synthesise() to the final MD
+  transfers:   [],
+  items:       [ /* one per task */ ],
+  // parentListId: only set for sub-analyses spawned via follow-up-as-sub-list
+};
+
+// Each item's meta keeps the per-task payload
+interface AnalysisItemMeta {
+  kind:        'locate' | 'describe' | 'trace'
+             | 'compare' | 'inspect-schema' | 'free-form';
+  scope?:      { entityIds?: string[]; paths?: string[]; packages?: string[] };
+  origin:      'plan' | 'follow-up';
+  retryCount:  number;
+  hint?:       string;                // last retryHint, if any
+
+  // populated on completion
+  answer?:     string;
+  findings?:   Finding[];
+  citations?:  CodeCitation[];
+  confidence?: 'high' | 'medium' | 'low';
+  toolCalls?:  ToolCallSummary[];
+  truncated?:  boolean;
+}</code></pre>
+
+<p>
+  <code>TodoItem.title</code> is the short task label shown on the todos pane row
+  (e.g. <em>"Trace callers of <code>verifyToken()</code>"</em>); <code>TodoItem.description</code>
+  is the full question the analyzer receives.
+</p>
+
+<h3 id="todo-lifecycle">5.2 Item Lifecycle</h3>
+
+<table>
+  <tr>
+    <th>Framework state</th>
+    <th>Analyzer semantic</th>
+    <th>Transition trigger</th>
+  </tr>
+  <tr>
+    <td><code>pending</code></td>
+    <td>In plan, not started</td>
+    <td>Created by <code>deps.todos.addItem</code> during planning or follow-up</td>
+  </tr>
+  <tr>
+    <td><code>in_progress</code></td>
+    <td>Analyzer tool loop running</td>
+    <td><code>deps.todos.markInProgress(itemId)</code> immediately before
+      <code>analyzer.run()</code></td>
+  </tr>
+  <tr>
+    <td><code>completed</code></td>
+    <td>Reviewer accepted the analyzer result</td>
+    <td><code>updateItem(meta)</code> then <code>markComplete(itemId)</code> on reviewer
+      <code>accept</code></td>
+  </tr>
+  <tr>
+    <td><code>blocked</code></td>
+    <td>Retry cap exceeded AND analyzer produced no usable output</td>
+    <td><code>markBlocked(itemId, reason)</code> with reason describing the failure</td>
+  </tr>
+  <tr>
+    <td><code>cancelled</code></td>
+    <td>User cancelled the analysis mid-flight (see gate <code>cancel</code>), or the orchestrator
+      hit the <code>maxTasks</code> cap and dropped remaining items</td>
+    <td>New helper <code>deps.todos.cancel(itemId, reason)</code> (proposed framework addition —
+      see §15 open questions)</td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>Proposed framework addition:</strong> the existing <code>TodosApi</code> surfaces
+  <code>markInProgress</code> / <code>markComplete</code> / <code>markBlocked</code> but no
+  <code>cancel</code> or generic <code>updateItem(meta)</code>. The analyzer needs both:
+  <code>updateItem</code> to stash per-task payload on completion, and <code>cancel</code> for
+  <code>maxTasks</code>-cap truncation. See §15 Q7 — this is a framework PR we bundle with
+  phase 1.
+</div>
+
+<h3 id="todo-comments">5.3 Feedback Channel: Batched Annotations &rarr; Chat</h3>
+
+<div class="callout decision">
+  <strong>Decision:</strong> User feedback on an analysis does <strong>not</strong> flow into the
+  current run via framework comments. Instead, the user annotates sections on the Analysis Report
+  Pane, accumulates multiple annotations, and <strong>sends the batch as a single chat
+  message</strong>. That chat message kicks off whatever new turn the user wants (a follow-up
+  analysis, a coding task, a question). The current analysis run never waits for user input.
+</div>
+
+<p>
+  Why not use the framework's per-item comment channel here:
+</p>
+
+<ul>
+  <li><strong>One channel, not two.</strong> Splitting feedback between "comments on todo items"
+    and "send section to chat" fragments the user's mental model. Keeping all feedback as chat
+    messages means the user always knows where their words go.</li>
+  <li><strong>Annotation across sections.</strong> Analysis feedback often needs to reference
+    several findings at once ("points #2 and #5 contradict each other"). Framework comments are
+    per-item; a single chat message can quote multiple annotations.</li>
+  <li><strong>Keeps the analyzer run linear.</strong> The orchestrator doesn't need to poll for
+    comments, the reviewer prompt doesn't need an "unacked comments" section, and retries don't
+    fork on mid-flight user input.</li>
+</ul>
+
+<p>
+  What the framework's comment infrastructure IS still used for: <em>nothing on code-analysis
+  lists</em>. The todos pane renders code-analysis lists read-only without the <code>+ Add
+  comment</code> affordance — the pane suppresses the comment row for lists with
+  <code>meta.suppressComments: true</code> (a small extension to the pane's list widget). All
+  feedback lives on the Analysis Report Pane.
+</p>
+
+<p>
+  Annotation + batch semantics are specified in §10.3 (Feedback Paths).
+</p>
+
+<h3 id="todo-hierarchy">5.4 Hierarchy &amp; Follow-Ups</h3>
+
+<p>
+  Two hierarchy patterns the analyzer uses:
+</p>
+
+<ol>
+  <li><strong>Flat follow-ups (default).</strong> <code>add-follow-up</code> reviewer decisions
+    call <code>deps.todos.addItem</code> on the <em>same</em> list, with
+    <code>meta.origin = 'follow-up'</code> so the pane can badge them. This keeps scroll-back
+    linear.</li>
+  <li><strong>Scoped sub-list (when a follow-up explodes into &ge; 3 tasks).</strong> The
+    orchestrator creates a child list via
+    <code>deps.todos.createList({ parentListId: rootListId, ... })</code> and seeds it with the
+    batch. The pane renders root + child as sibling flat cards with
+    <code>↑ parent:</code> / <code>↓ children:</code> cross-reference links, same as
+    brainstorm's per-theme spec breakout.</li>
+</ol>
+
+<p>
+  Sub-list spawning is the mechanism for a user's "drill into finding #3" ask: a comment on
+  finding #3 triggers the reviewer to spawn a child list focused on that area.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="orchestrator">6. Orchestrator</h2>
+
+<h3 id="orch-flow">6.1 Step Flow</h3>
+
+<div class="flow-diagram">
+  plan                 (cloud LLM, no tools)
+    |  -> deps.todos.createList(...) + addItem() per task
+    |  -> todos pane + inline chat widget auto-open showing the plan
+    v
+  plan-size check
+    |
+    +-- |plan| <= 16   --> auto-proceed (read-only, no gate)
+    +-- |plan| >  16   --> [plan-size-approval] gate
+                             |   approve    -> proceed with full plan
+                             |   trim-to-16 -> drop tail, keep first 16
+                             |   cancel     -> abort run
+                             v
+  run-task             (one task at a time)
+    |  -> markInProgress(itemId) before analyzer.run()
+    v
+  review-finding       (cloud LLM, no tools)
+    |
+    +-- accept        --> updateItem(meta); markComplete(itemId); advance
+    +-- retry         --> updateItem(meta.retryCount++, meta.hint); keep in_progress
+    +-- add-follow-up --> addItem(..., meta.origin = 'follow-up'); advance
+    +-- done          --> cancel remaining pending items; jump to synthesise
+    v
+  (loop until list has no pending items OR caps hit;
+   user may click "Stop analysis" on the pane to fire mid-flight-cancel gate)
+    v
+  synthesise           (cloud LLM, no tools -- composes report)
+    |  -> updateList(body = markdown)
+    v
+  AnalysisReportPane opens with the rendered markdown
+    v
+  present       gate   (save / copy / send-to-chat / discard)
+    |  -> on save: artifact-save to docs/analysis/&lt;slug&gt;.md
+    |  -> on discard: list.transfer('system') for audit retention
+</div>
+
+<div class="callout decision">
+  <strong>Decision:</strong> Plans with <strong>&le; 16 tasks auto-approve</strong>. Read-only
+  work doesn't warrant blocking on approval. Plans <strong>&gt; 16 tasks</strong> raise a
+  <code>plan-size-approval</code> gate — a plan that big usually means the decomposition went
+  wider than the user expected, and we want a chance to trim before paying the cloud-token cost
+  of that many review steps. The user sees the plan appear live in the todos pane and inline
+  chat widget either way, and can steer via the <em>Stop analysis</em> button mid-flight.
+</div>
+
+<table>
+  <tr>
+    <th>Step</th>
+    <th>Kind</th>
+    <th>Description</th>
+  </tr>
+  <tr>
+    <td><code>plan</code></td>
+    <td><span class="tag cloud">llm</span></td>
+    <td>Produces <code>AnalysisTask[]</code> from the user request + active-repo context summary
+      (repo name, top-level packages, search hint). No tool calls. On success, creates the
+      <code>TodoList</code> and seeds one <code>TodoItem</code> per task. Token budget ~1500.</td>
+  </tr>
+  <tr>
+    <td><code>plan-size-approval</code></td>
+    <td><span class="tag gate">gate</span></td>
+    <td><em>Conditional.</em> Fires only when the plan has &gt; 16 tasks. Actions:
+      <code>approve</code> (run all), <code>trim-to-16</code> (drop the tail and run the
+      first 16 — remaining items are marked <code>cancelled</code>), <code>cancel</code>
+      (abort the run, list &rarr; <code>system</code>).</td>
+  </tr>
+  <tr>
+    <td><code>run-task[i]</code></td>
+    <td><span class="tag rpc">rpc</span></td>
+    <td>Invokes the Analyzer sub-pipeline (§7). Marks the current item
+      <code>in_progress</code> first, then stores the <code>AnalyzerResult</code> on
+      <code>item.meta</code>.</td>
+  </tr>
+  <tr>
+    <td><code>review-finding[i]</code></td>
+    <td><span class="tag cloud">llm</span></td>
+    <td>Cloud LLM reads the analyzer output + accumulated cumulative context and decides one of:
+      <code>accept</code>, <code>retry-with-hint</code>, <code>add-follow-up</code>,
+      <code>done</code>. Structured JSON output. Does not consult user comments (feedback flows
+      through chat, §5.3).</td>
+  </tr>
+  <tr>
+    <td><code>mid-flight-cancel</code></td>
+    <td><span class="tag gate">gate</span></td>
+    <td><em>Optional.</em> Emitted only when the user clicks "Stop analysis" on the todos pane or
+      the Analysis Report Pane. Actions: <code>cancel</code> (drop remaining pending items and
+      jump to <code>synthesise</code> with what we have), <code>abort</code> (discard entirely —
+      <code>list.transfer('system')</code>).</td>
+  </tr>
+  <tr>
+    <td><code>synthesise</code></td>
+    <td><span class="tag cloud">llm</span></td>
+    <td>Composes the final Markdown: merges accepted findings, groups by concern, preserves all
+      citations, writes the top-level summary. Token budget ~4000. Writes to
+      <code>list.body</code>.</td>
+  </tr>
+  <tr>
+    <td><code>present</code></td>
+    <td><span class="tag gate">gate</span></td>
+    <td>Final gate. Actions: <code>save</code> (to <code>docs/analysis/&lt;slug&gt;.md</code> via
+      <code>artifact-save.ts</code>), <code>copy</code>, <code>send-to-chat</code>,
+      <code>discard</code>.</td>
+  </tr>
+</table>
+
+<h3 id="orch-decide">6.2 Decision Loop</h3>
+
+<p>
+  After each analyzer task completes, <code>review-finding</code> returns a decision record:
+</p>
+
+<pre><code>{
+  "decision": "accept" | "retry-with-hint" | "add-follow-up" | "done",
+  "rationale": "one-line reason",
+  "retryHint"?: "string (only if retry-with-hint)",
+  "followUps"?: [ { "question": "...", "scope": "..." } ]   // 0..2 items
+}</code></pre>
+
+<p>
+  Interpretation:
+</p>
+
+<ul>
+  <li><strong>accept</strong> — <code>updateItem(meta = &lt;AnalyzerResult&gt;)</code> then
+    <code>markComplete(itemId)</code>. Advance to next pending item.</li>
+  <li><strong>retry-with-hint</strong> — re-queue the same item with
+    <code>updateItem(meta.retryCount++, meta.hint = retryHint)</code> (e.g. "focus on the
+    callers in <code>payments/</code>, not tests"). Item stays <code>in_progress</code>. Per-task
+    retry counter caps at 2; if exceeded, accept-with-<code>confidence: 'low'</code>.</li>
+  <li><strong>add-follow-up</strong> — <code>addItem()</code> on the current list with
+    <code>meta.origin = 'follow-up'</code> for each of 1–2 follow-up questions. The todos pane
+    auto-renders the new rows via the framework's <code>itemCreated</code> event.</li>
+  <li><strong>done</strong> — cancel remaining pending items via <code>cancel(itemId, 'reviewer
+    marked analysis complete')</code>; jump to <code>synthesise</code>.</li>
+</ul>
+
+<h3 id="orch-termination">6.3 Termination</h3>
+
+<p>
+  Termination conditions, whichever fires first:
+</p>
+
+<ol>
+  <li>Plan queue is empty and no pending follow-ups.</li>
+  <li>Reviewer decides <code>done</code>.</li>
+  <li><strong>Soft cap at 16 tasks.</strong> Initial plans &gt; 16 trigger the
+    <code>plan-size-approval</code> gate (§9); follow-ups that push total planned tasks past 16
+    are silently capped — further <code>add-follow-up</code> decisions are dropped with a
+    <code>follow-ups-skipped</code> note on the offending item.</li>
+  <li><strong>Hard caps:</strong> <code>maxTasks = 24</code> (absolute ceiling even after
+    plan-size-approval) and <code>maxFollowUps = 8</code>. When either is hit, remaining tasks
+    are <code>cancelled</code> and a <code>truncated: true</code> marker is set on the final
+    report.</li>
+</ol>
+
+<div class="callout warn">
+  The caps exist because cloud-provider token costs scale with the review step running on every
+  analyzer result. An analyzer result is typically 200–800 tokens plus evidence; 16 reviews at
+  2k input tokens each is already ~32k tokens for a single analysis. The soft cap + approval
+  gate gives the user a chance to trim before paying for a wider-than-expected decomposition;
+  the hard cap is a backstop against runaway follow-ups.
+</div>
+
+<h3 id="orch-prompts">6.4 Prompts</h3>
+
+<p>
+  Three prompts, all in <code>src/insrc/agent/tasks/code-analysis/prompts.ts</code>:
+</p>
+
+<ul>
+  <li><code>buildOrchestratorPlanPrompt(request, repoSummary, concerns)</code> — produces
+    <code>AnalysisTask[]</code> as strict JSON.</li>
+  <li><code>buildOrchestratorReviewPrompt(task, result, accumulatedFindings)</code>
+    — produces the decision record above.</li>
+  <li><code>buildOrchestratorSynthesisPrompt(request, findings, plan)</code> — produces the final
+    Markdown report.</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="analyzer">7. Analyzer</h2>
+
+<h3 id="analyzer-contract">7.1 Task Contract</h3>
+
+<p>
+  The analyzer is invoked by the orchestrator per <code>TodoItem</code>. The orchestrator
+  reconstructs an <code>AnalysisTask</code> from <code>item.title</code> + <code>item.description</code>
+  + <code>item.meta</code> and calls <code>analyzer.run(task, state)</code>. One task, one
+  structured result.
+</p>
+
+<pre><code>interface AnalysisTask {
+  itemId: string;                    // TodoItem.id -- analyzer never invents ids
+  kind:                              // from item.meta.kind
+    | 'locate'                       // find entities matching a description
+    | 'describe'                     // summarise an entity / file / package
+    | 'trace'                        // trace callers / callees / data flow
+    | 'compare'                      // two entities, two versions, two impls
+    | 'inspect-schema'               // (phase 3) DB schema / sample-rows
+    | 'free-form';                   // fallback
+  question: string;                  // from item.description
+  scope?: {
+    entityIds?: string[];
+    paths?: string[];
+    packages?: string[];
+  };
+  hint?: string;                     // from item.meta.hint on retries
+  origin: 'plan' | 'follow-up';      // from item.meta.origin
+  retryCount: number;                // from item.meta.retryCount
+}
+
+interface AnalyzerResult {
+  itemId: string;                    // matches task.itemId
+  answer: string;                    // concise prose, 1-3 paragraphs
+  findings: Finding[];               // 0..N structured items
+  citations: CodeCitation[];         // every claim must tie back here
+  confidence: 'high' | 'medium' | 'low';
+  toolCalls: ToolCallSummary[];      // for trace logs / debugging
+  truncated?: boolean;               // analyzer hit its own budget
+}
+
+interface CodeCitation {
+  entityId?: string;                 // if graph-resolved
+  path: string;
+  lineStart?: number;
+  lineEnd?: number;
+  snippet?: string;                  // &le; 200 chars
+}</code></pre>
+
+<h3 id="analyzer-tools">7.2 Read-Only Tools</h3>
+
+<p>
+  The analyzer is given a <strong>closed</strong> tool set. The tool registry rejects anything
+  outside this list even if the local model hallucinates a name.
+</p>
+
+<table>
+  <tr>
+    <th>Tool</th>
+    <th>Purpose</th>
+    <th>Notes</th>
+  </tr>
+  <tr>
+    <td><code>graph.search</code></td>
+    <td>Kuzu lookup by name / kind / relation</td>
+    <td>Already exposed via daemon RPC. Results capped at 50 entities.</td>
+  </tr>
+  <tr>
+    <td><code>graph.neighbours</code></td>
+    <td>Given <code>entityId</code>, return <code>CALLS</code> / <code>IMPORTS</code> /
+      <code>EXTENDS</code> neighbours</td>
+    <td>Bounded traversal depth (default 2).</td>
+  </tr>
+  <tr>
+    <td><code>vector.search</code></td>
+    <td>LanceDB ANN lookup for semantic matches</td>
+    <td>Returns <code>entityId</code> + cosine score.</td>
+  </tr>
+  <tr>
+    <td><code>text.grep</code></td>
+    <td>ripgrep over target paths</td>
+    <td>Result cap 200 lines. Out-of-repo paths trigger the access gate (see below).</td>
+  </tr>
+  <tr>
+    <td><code>fs.read</code></td>
+    <td>Read a file or byte range</td>
+    <td>Max 512 KB per call, max 2 MB cumulative per task. Out-of-repo paths trigger the access
+      gate.</td>
+  </tr>
+  <tr>
+    <td><code>fs.list</code></td>
+    <td>List directory children</td>
+    <td>Out-of-repo paths trigger the access gate.</td>
+  </tr>
+  <tr>
+    <td><code>entity.summary</code></td>
+    <td>Canonical entity summary from the daemon context builder</td>
+    <td>Prefer over raw <code>fs.read</code> when the entity id is known.</td>
+  </tr>
+  <tr>
+    <td><code>db.describe</code> / <code>db.sample</code></td>
+    <td><em>Phase 3</em> DB driver (see §13)</td>
+    <td>Disabled by default; opt-in per-repo.</td>
+  </tr>
+</table>
+
+<p><strong>Explicitly excluded:</strong> shell exec, file writes, network fetch, git mutation.</p>
+
+<h3 id="analyzer-scope">7.3 Scope &amp; Out-of-Repo Access Gate</h3>
+
+<div class="callout decision">
+  <strong>Decision:</strong> Scope is <strong>not pre-constrained</strong> to the dependency
+  closure. The analyzer may traverse to any path it decides is relevant, including paths
+  outside the active repo. <strong>Approval is requested per parent directory</strong>: the
+  analyzer names the directory under which it expects to read, and <strong>once granted, every
+  file under that directory (recursively) is approved for the rest of the session</strong>.
+</div>
+
+<p>
+  Gate mechanics:
+</p>
+
+<ul>
+  <li>The daemon tracks an <strong>approved-directory set</strong> per session. The active repo
+    root and every directory under it are implicitly approved.</li>
+  <li><strong>Analyzer requests at directory granularity, not file granularity.</strong> When
+    the analyzer wants to read <code>/home/user/other-repo/src/foo.ts</code>, the tool call
+    carries <code>{ grant_path: '/home/user/other-repo', reason: '...' }</code>. The prompt
+    contract teaches the model to pick the narrowest parent that plausibly covers the reads it
+    intends to do — usually a repo root, sometimes a sub-package.</li>
+  <li>If <code>grant_path</code> or any of its ancestors is already in the approved set, the
+    call proceeds without a gate.</li>
+  <li>Otherwise the daemon suspends the tool call and fires a <code>fs-access</code> gate on
+    the chat panel / todos pane naming the requesting item, the directory, and the analyzer's
+    reason.</li>
+  <li>Actions:
+    <ul>
+      <li><code>approve</code> — adds <code>grant_path</code> (and recursively all descendants)
+        to the approved set for this session.</li>
+      <li><code>approve-broader</code> (with a prompted parent path) — user escalates the grant
+        to a higher ancestor, useful when they can tell the analyzer will need several
+        sub-directories of a larger tree.</li>
+      <li><code>deny</code> — analyzer gets <code>PermissionDenied</code> and continues with
+        what it has.</li>
+    </ul>
+  </li>
+  <li>Because approvals cascade to descendants, <strong>the expected case is one gate per
+    out-of-repo root</strong>, not one per file or per sub-dir. The open question about
+    batching co-temporal gates is moot — parent-grant semantics replace the batching need.</li>
+  <li>Approvals are session-scoped and <strong>not persisted</strong> across sessions. A new
+    chat session re-asks.</li>
+</ul>
+
+<p>
+  Why session-scoped and not persistent: an approval persisted to disk is an easy path to
+  accidental exfiltration a user wouldn't notice (e.g. an agent in a later session silently
+  reading <code>~/work/other-client-repo/</code> because an earlier session approved it). Asking
+  again per session is a small tax for a meaningful audit property.
+</p>
+
+<div class="callout warn">
+  The gate blocks the tool call synchronously. While waiting for the user, the todo item stays
+  <code>in_progress</code> and the todos pane shows a <em>⏸ waiting for directory approval</em>
+  sub-row. If the user dismisses VS Code without answering, the gate times out after 5 minutes
+  and defaults to <code>deny</code>; the analyzer continues with what it has.
+</div>
+
+<h3 id="analyzer-loop">7.4 Tool Loop</h3>
+
+<p>
+  Each analyzer task runs a bounded tool-calling loop on the local model:
+</p>
+
+<ol>
+  <li>System prompt is prepended with <code>/no_think</code> (required for qwen3-coder structured
+    tool calls — CLAUDE.md note).</li>
+  <li>User message contains the task JSON + any <code>hint</code> + the first-pass entity
+    candidates retrieved from <code>vector.search</code> on <code>task.question</code>.</li>
+  <li>Model emits tool calls; daemon executes them; results fed back.</li>
+  <li>Loop terminates on: model emits a final answer, hard cap of 8 tool calls, or 60 s wall
+    clock.</li>
+  <li>Final model turn produces the <code>AnalyzerResult</code> JSON.</li>
+</ol>
+
+<p>
+  Implementation reuses the existing investigate-style tool loop (the daemon's tool registry +
+  executor + validator) — we add an <code>AnalyzerToolContext</code> wrapper that enforces the
+  closed tool list and token caps.
+</p>
+
+<h3 id="analyzer-citations">7.5 Citations</h3>
+
+<div class="callout info">
+  <strong>Invariant:</strong> every claim in <code>answer</code> or every <code>Finding</code>
+  must resolve to at least one <code>CodeCitation</code>. The analyzer's output JSON is rejected
+  and retried (once) if any finding has <code>citations.length === 0</code>. After the retry, a
+  missing-citation result is accepted but auto-downgraded to <code>confidence: 'low'</code>.
+</div>
+
+<p>
+  Citations feed back into the orchestrator's synthesis step, which preserves every unique
+  <code>(path, lineStart, lineEnd)</code> tuple as a clickable link in the Markdown output.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="state">8. Controller State</h2>
+
+<p>
+  With the TODO framework owning the plan, item lifecycles, persistence, and comments, the
+  controller's own state shrinks to the pieces the framework doesn't model:
+</p>
+
+<pre><code>interface CodeAnalysisState {
+  request:     string;                 // original user message, for prompt rehydration
+  repoSummary: RepoSummary;            // cached repo context the planner used
+
+  listId:      string;                 // primary TodoList id -- source of truth for plan/progress
+  childListIds: string[];              // any sub-lists spawned for large follow-up batches
+
+  currentItemId?: string;              // the item in_progress right now
+  truncated:    boolean;               // set when maxTasks / maxFollowUps cap hit
+  cancelled:    boolean;               // set when user issued mid-flight cancel
+
+  // Access-gate state (§7.3). Session-scoped, not persisted across sessions.
+  approvedDirs: string[];              // absolute paths approved for this session
+
+  // Final report -- also mirrored to `list.body` for the framework's view.
+  finalReport?: string;
+  reportUri?:   string;                // URI of the ephemeral AnalysisReportPane tab
+  presentedAt?: number;
+}</code></pre>
+
+<p>
+  Items, comments, follow-ups, transfer history, and inline chat rendering all live in the
+  framework. The controller never keeps a parallel copy.
+</p>
+
+<p>
+  Persistence: the shrunken state goes through the same <code>TaskStateStore</code> the brainstorm
+  controllers use. Resume on daemon restart rehydrates <code>listId</code> + loads the list from
+  the framework's LanceDB tables; any in-flight item is reset from <code>in_progress</code> to
+  <code>pending</code> and re-executed.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="gates">9. Gates</h2>
+
+<table>
+  <tr>
+    <th>Gate id</th>
+    <th>Phase</th>
+    <th>Actions</th>
+    <th>Trigger</th>
+  </tr>
+  <tr>
+    <td><code>plan-size-approval</code></td>
+    <td>planning</td>
+    <td><code>approve</code> (run all), <code>trim-to-16</code> (keep first 16, cancel rest),
+      <code>cancel</code> (abort)</td>
+    <td>Fires only when <code>|plan| &gt; 16</code> after <code>plan</code> completes. Default
+      after 5-min timeout = <code>cancel</code>.</td>
+  </tr>
+  <tr>
+    <td><code>fs-access</code></td>
+    <td>execution</td>
+    <td><code>approve</code> (grant the requested parent dir, recursive),
+      <code>approve-broader</code> (user picks a higher ancestor),
+      <code>deny</code></td>
+    <td>Fires on first read under any out-of-repo directory not yet covered by an existing
+      grant. Cascades recursively, so usually one gate per out-of-repo root. Default after
+      5-min timeout = <code>deny</code>.</td>
+  </tr>
+  <tr>
+    <td><code>mid-flight-cancel</code> <em>(optional)</em></td>
+    <td>execution</td>
+    <td><code>cancel</code> (jump to synthesise with current findings),
+      <code>abort</code> (discard run entirely)</td>
+    <td>Emitted only when the user clicks <em>Stop analysis</em>.</td>
+  </tr>
+  <tr>
+    <td><code>present</code></td>
+    <td>finalize</td>
+    <td><code>save</code> (path), <code>copy</code>,
+      <code>send-to-chat</code> (with optional selection),
+      <code>discard</code></td>
+    <td>Always, once <code>synthesise</code> completes.</td>
+  </tr>
+</table>
+
+<div class="callout decision">
+  <strong>Plans &le; 16 tasks auto-proceed.</strong> Read-only work with a modestly sized plan
+  doesn't need an approval click. The plan-size gate only fires when decomposition produces a
+  plan big enough to be worth paying attention to.
+</div>
+
+<p>
+  Comments on tasks do not fire a gate — they flow through the framework's comment channel
+  (§5.3) and are consumed by the reviewer at the top of its next turn.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="surfaces">10. UI Surfaces</h2>
+
+<p>
+  Two surfaces cooperate — one reused, one new:
+</p>
+
+<ol>
+  <li><strong>Todos editor pane + inline chat todos widget</strong> (reused) — render the
+    live plan and per-task progress as the orchestrator runs.</li>
+  <li><strong>Analysis Report Pane</strong> (new, ephemeral) — renders the final synthesised
+    Markdown and hosts the annotate-and-batch-send-to-chat feedback flow.</li>
+</ol>
+
+<div class="callout decision">
+  <strong>Only one analysis at a time.</strong> A session may have only one active code-analysis
+  run. Starting a new analysis while one is already running is rejected with a user-visible
+  notification "an analysis is in progress — cancel it first". Consequences: the Analysis Report
+  Pane is a single editor tab (not one-per-analysis), and the controller tracks a session-level
+  <code>activeAnalysisListId</code>.
+</div>
+
+<h3 id="surface-todos">10.1 Todos Pane &amp; Inline Chat Widget</h3>
+
+<p>
+  These are the existing framework surfaces (<code>plans/todo-framework.md</code> Phase 5a/5b).
+  No new code beyond registering code-analysis lists as consumers. From the user's perspective:
+</p>
+
+<ul>
+  <li>When <code>plan</code> completes, a <code>listCreated</code> event fires with
+    <code>suggestOpenUI: true</code>. The todos pane auto-opens (if not already open) focused on
+    the new list; the inline chat widget renders a card in the current chat session.</li>
+  <li>As tasks flip <code>pending &rarr; in_progress &rarr; completed</code>, both surfaces
+    update in place via <code>itemUpdated</code> events. No polling.</li>
+  <li>Each item row shows: status icon, short title, origin badge (<code>plan</code> vs
+    <code>follow-up</code>), confidence badge (once completed), and a compact citation count.
+    Expanding an item reveals the full question, the analyzer's prose answer, and the citation
+    list with clickable file links.</li>
+  <li>Lists are <strong>read-only</strong> in the pane — no add-comment affordance (suppressed
+    for code-analysis lists, §5.3), no edit, no reorder. The kebab menu still offers
+    copy-as-markdown and view-transfer-history.</li>
+</ul>
+
+<p>
+  Inline widget suppression rules: once <code>synthesise</code> completes, the inline card auto-
+  collapses to a one-line header with a <em>Open report</em> action that focuses the Analysis
+  Report Pane.
+</p>
+
+<h3 id="surface-report">10.2 Analysis Report Pane</h3>
+
+<div class="callout decision">
+  <strong>Ephemeral per session.</strong> The Analysis Report Pane does not persist across
+  workbench reloads. Closing or reloading the window discards the pane; the report content is
+  still preserved on <code>TodoList.body</code> and can be re-rendered by reopening the pane from
+  the todos-pane <em>Open report</em> action. Save-to-file (via <code>present</code> gate) is the
+  persistence path users take if they want the report durable.
+</div>
+
+<div class="flow-diagram">
+  +-- AnalysisReportPane (ephemeral, single tab per session) ---+
+  |  Code Analysis: &lt;request slug&gt;           [Send 3 to chat ▼] |
+  |  run status: 12 tasks complete  ·  truncated: no            |
+  |  --------------------------------------------------------   |
+  |                                                             |
+  |  # Summary                                                  |
+  |  ...                                                        |
+  |                                                             |
+  |  ## Findings                                                |
+  |   ### auth entry points                                     |
+  |      [info] src/http/auth.ts:42 -- ...                      |
+  |       🔖 annotation #1: "is this still used?"  [remove]     |
+  |                                                             |
+  |      [warn] src/http/legacyAuth.ts:18 -- ...                |
+  |       🔖 annotation #2: "bypass must go"      [remove]      |
+  |                                                             |
+  |   ### SessionStore interface                                |
+  |      - ...                                                  |
+  |       🔖 annotation #3: "look at cache layer too" [remove]  |
+  |                                                             |
+  |  --------------------------------------------------------   |
+  |  Pending annotations: 3                                     |
+  |  [ Send all to chat ]  [ Clear annotations ]                |
+  |                                                             |
+  |  --- or, at present gate ---                                |
+  |  [ Save... ]  [ Copy ]  [ Discard ]                         |
+  +-------------------------------------------------------------+
+</div>
+
+<p>
+  The pane is a VS Code editor (not a webview in the sidebar). Its <code>EditorInput</code>
+  resource URI is <code>insrc-analysis-report:///session/&lt;sessionId&gt;</code>. Because there
+  is at most one analysis per session (§10 intro), opening the same input focuses the existing
+  tab (<code>matches()</code> returns true on a <code>sessionId</code> match).
+</p>
+
+<h4>Rendering</h4>
+
+<ul>
+  <li>The report body (<code>list.body</code>) is rendered via the existing
+    <code>MarkdownWidget</code>
+    (<code>src/vs/workbench/contrib/insrc/browser/shared/markdownWidget.ts</code>).</li>
+  <li>Path citations use the same <code>#L42-L60</code> anchor scheme the IDE already uses in
+    chat output — clicking opens the file at the range.</li>
+  <li>The status line under the title subscribes to the todos service and reflects
+    <code>completed / total</code> counts even while the user is on this tab.</li>
+</ul>
+
+<h3 id="surface-feedback">10.3 Feedback Paths</h3>
+
+<p>
+  One affordance: <strong>select a region, annotate, keep annotating, batch-send</strong>.
+  Implementation:
+</p>
+
+<ol>
+  <li>User selects any prose span (heading, paragraph, bullet, finding row) on the report pane. A
+    floating <em>Annotate</em> button appears anchored to the selection, plus
+    <em>Quote to chat now</em> for one-shot sends.</li>
+  <li>Clicking <em>Annotate</em> opens a small composer (same widget pattern as brainstorm's
+    input panel) with the selected text pre-quoted above the textbox. User writes a comment;
+    <em>Save</em> adds the annotation to the pane's pending-annotations list. The selection
+    receives a 🔖 marker inline.</li>
+  <li>The status bar at the bottom of the pane shows <code>Pending annotations: N</code> and the
+    actions <em>Send all to chat</em> and <em>Clear annotations</em>. <em>Send all to chat</em>
+    becomes active when <code>N &gt;= 1</code>.</li>
+  <li>Clicking <em>Send all to chat</em> composes a single chat message and posts it via
+    <code>chatService.submit(message, { from: 'code-analysis-pane' })</code>:
+    <pre><code>> From Code Analysis: &lt;request slug&gt;
+>
+> [1] auth entry points:
+>   > src/http/auth.ts:42 -- ...
+>   is this still used?
+>
+> [2] auth entry points:
+>   > src/http/legacyAuth.ts:18 -- ...
+>   bypass must go
+>
+> [3] SessionStore interface:
+>   > (selected span quoted here)
+>   look at cache layer too</code></pre>
+    The pane then clears its pending-annotations list (kept annotations persist until the next
+    <em>Send</em>, not across window reloads).</li>
+  <li>The chat message enters the chat panel as a normal user turn. The classifier treats it
+    like any message and routes appropriately — usually a follow-up analysis, sometimes a coding
+    task, sometimes a question. The in-flight analysis run (if any) is not interrupted; if the
+    user wants to stop the current analysis first they use the <em>Stop analysis</em> control on
+    the todos pane.</li>
+</ol>
+
+<p>
+  <strong>Quote to chat now</strong> is the shortcut path: one-click send of the selected span as
+  a quoted chat message, no annotation composer. Useful when the user doesn't want to
+  wait-and-batch.
+</p>
+
+<div class="callout info">
+  Annotations are stored on the pane instance's DOM state, not on the framework or on disk. A
+  window reload loses any unsent annotations — by design, because we don't want stale annotations
+  from a prior session coming back to haunt a later <em>Send to chat</em>.
+</div>
+
+<h3 id="surface-infra">10.4 Reused Infrastructure &amp; New Files</h3>
+
+<table>
+  <tr>
+    <th>Concern</th>
+    <th>Source</th>
+  </tr>
+  <tr>
+    <td>Todos pane + inline widget</td>
+    <td>Framework Phase 5a/5b — no new pane code for progress rendering</td>
+  </tr>
+  <tr>
+    <td>Todos read-only enforcement (no comments on code-analysis lists)</td>
+    <td>Small extension to <code>todosListWidget</code> — honours
+      <code>list.meta.suppressComments: true</code></td>
+  </tr>
+  <tr>
+    <td>Editor pane lifecycle (for Analysis Report Pane)</td>
+    <td><code>InsrcEditorPaneBase</code> in
+      <code>…/browser/shared/workspacePaneBase.ts</code></td>
+  </tr>
+  <tr>
+    <td>Markdown rendering</td>
+    <td><code>MarkdownWidget</code> in <code>…/shared/markdownWidget.ts</code></td>
+  </tr>
+  <tr>
+    <td>Gate button rows</td>
+    <td>Lift pattern from <code>brainstormCardWidget.ts</code> into a thin
+      <code>AnalysisGateWidget</code> (used only for <code>fs-access</code>,
+      <code>mid-flight-cancel</code>, and <code>present</code>)</td>
+  </tr>
+  <tr>
+    <td>Chat submission</td>
+    <td><code>IInsrcChatService.submit</code></td>
+  </tr>
+</table>
+
+<p>New files (indicative):</p>
+
+<ul>
+  <li><code>src/vs/workbench/contrib/insrc/browser/code-analysis/analysisReportInput.ts</code></li>
+  <li><code>src/vs/workbench/contrib/insrc/browser/code-analysis/analysisReportPane.ts</code></li>
+  <li><code>src/vs/workbench/contrib/insrc/browser/code-analysis/annotationManager.ts</code>
+    — pending-annotation state + send-to-chat composer</li>
+  <li><code>src/vs/workbench/contrib/insrc/browser/code-analysis/analysisGateWidget.ts</code>
+    — fs-access / mid-flight-cancel / present gate rendering</li>
+  <li><code>src/insrc/daemon/controllers/code-analysis-orchestrator.ts</code>
+    — replaces the deprecated controller on wire-up</li>
+  <li><code>src/insrc/agent/tasks/code-analysis/orchestrator-prompts.ts</code></li>
+  <li><code>src/insrc/agent/tasks/code-analysis/analyzer.ts</code>
+    — tool loop + result parsing</li>
+  <li><code>src/insrc/agent/tasks/code-analysis/access-gate.ts</code>
+    — session-scoped approved-dirs registry used by fs.* tool handlers</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="intent">11. Intent Routing</h2>
+
+<p>
+  The classifier's <code>code-analysis</code> intent already exists and currently maps to the
+  (now deprecated) single-pass controller. After phase 1 ships, the routing change is a one-line
+  swap: <code>code-analysis</code> &rarr; new orchestrator controller. No classifier / keyword
+  changes, no taxonomy change.
+</p>
+
+<p>
+  Once phase 2 stabilises and the deprecated controller is deleted (§4.4), nothing in intent
+  routing mentions the legacy pipeline.
+</p>
+
+<!-- ================================================================== -->
+<h2 id="llm-routing">12. LLM Routing</h2>
+
+<table>
+  <tr>
+    <th>Step</th>
+    <th>Default</th>
+    <th>Config key</th>
+    <th>Mention override</th>
+  </tr>
+  <tr>
+    <td>Orchestrator: plan</td>
+    <td><span class="tag cloud">cloud default</span></td>
+    <td><code>codeAnalysis.planner</code></td>
+    <td><code>@anthropic</code> / <code>@openai</code> / <code>@local</code></td>
+  </tr>
+  <tr>
+    <td>Orchestrator: review-finding</td>
+    <td><span class="tag cloud">cloud default</span></td>
+    <td><code>codeAnalysis.reviewer</code></td>
+    <td>same</td>
+  </tr>
+  <tr>
+    <td>Orchestrator: synthesise</td>
+    <td><span class="tag cloud">cloud default</span></td>
+    <td><code>codeAnalysis.synthesiser</code></td>
+    <td>same</td>
+  </tr>
+  <tr>
+    <td>Analyzer: task loop</td>
+    <td><span class="tag local">ollama qwen3-coder</span></td>
+    <td><code>codeAnalysis.analyzer</code></td>
+    <td><code>@&lt;provider&gt;</code> forces a cloud model to run the tool loop</td>
+  </tr>
+</table>
+
+<p>
+  Following the flat per-turn resolution described in <code>agent/router.ts</code>: vision
+  attachment &rarr; <code>models.visionDefault</code>; explicit <code>@mention</code>; per-step
+  binding; active provider default. The code analyzer does not invent a new routing rule — it
+  registers bindings into the existing config map.
+</p>
+
+<div class="callout info">
+  The analyzer step is the one most worth overriding via <code>@mention</code>. If a user wants a
+  higher-fidelity local-only run, <code>@local</code> on both sides is the ergonomic path. If they
+  want cloud-grade reasoning on the leaves, <code>@anthropic</code> applied mid-session targets
+  just that step.
+</div>
+
+<!-- ================================================================== -->
+<h2 id="db-driver">13. DB Driver Extension (Phase 3)</h2>
+
+<p>
+  Answering "does the code match the schema?" or "what shape is the data in
+  <code>users.metadata</code>?" requires reading live DB state. We scope this as a
+  <strong>tool plugin</strong>, not a new agent surface, so the analyzer calls it exactly the
+  same way it calls <code>graph.search</code> or <code>fs.read</code>.
+</p>
+
+<h3>13.1 Per-Repo Connection Setup</h3>
+
+<p>
+  Each repo can configure <strong>one or more DB connections</strong>, across two families:
+</p>
+
+<ul>
+  <li><strong>RDBMS</strong> — tabular, schema-first stores reachable over a SQL-ish protocol:
+    Postgres, MySQL, SQLite, MSSQL, Oracle, CockroachDB, SingleStore, ClickHouse, etc.</li>
+  <li><strong>KV</strong> — key-value / document stores with no uniform schema: Redis / Valkey /
+    KeyDB, DynamoDB, etcd, Memcached, etc. MongoDB sits between the two — its collections are
+    schema-less documents, so it lives under the KV family for the analyzer's purposes even
+    though it has richer query semantics than a pure KV.</li>
+</ul>
+
+<p>
+  The expected setup is <em>development / local / staging</em> — the databases a developer
+  already has open in a tab while writing code (local Postgres from <code>docker-compose</code>,
+  a sqlite test DB, a local Redis, maybe a staging MongoDB). Pointing at production is
+  supported but not the default audience; we do not design safety assuming prod.
+</p>
+
+<p>
+  The <code>kind</code> field is an <strong>open string</strong>, not a closed union — any
+  driver registered in the daemon can be referenced. Drivers declare their own <code>kind</code>
+  + <code>family</code> when registering; unknown kinds reject at config-validate time. This
+  lets new stores land without a schema migration.
+</p>
+
+<pre><code>// ~/.insrc/&lt;repo&gt;/db-connections.json -- per-repo, not in the repo source
+{
+  "connections": [
+    {
+      "id":     "primary",                        // unique within the repo
+      "kind":   "mysql",                          // open string -- see registered drivers
+      "family": "rdbms",                          // optional; inferred from kind on load
+      "label":  "Local (docker-compose)",
+      "url":    "mysql://app:app@localhost:3306/app",
+      "schemaSource": {                           // optional -- SQL-only
+        "type": "prisma",
+        "path": "prisma/schema.prisma"            // path inside the repo
+      }
+    },
+    {
+      "id":    "cache",
+      "kind":  "redis",
+      "label": "Local redis",
+      "url":   "redis://localhost:6379",
+      "namespace": { "allow": ["cache:*", "session:*"] }   // optional scan-scope restriction
+    },
+    {
+      "id":    "ddb",
+      "kind":  "dynamodb",
+      "label": "Staging DynamoDB",
+      "region": "us-east-1",
+      "profile": "insrc-ro"                       // AWS credential profile
+    },
+    {
+      "id":    "sessions",
+      "kind":  "mongodb",
+      "family": "kv",                             // mongodb lives in the kv family
+      "label": "Session store",
+      "url":   "mongodb://readonly@mongo.host:27017/sessions"
+    }
+  ]
+}</code></pre>
+
+<p>
+  Omitting <code>schemaSource</code> defaults to live introspection; it applies to RDBMS
+  connections only and KV drivers silently ignore it.
+</p>
+
+<h4>Setup UX</h4>
+
+<ul>
+  <li>Command palette: <code>insrc.addDbConnection</code> walks through kind &rarr; URL &rarr;
+    label &rarr; optional Prisma schema path (defaults off; user sets
+    <code>schemaSource: 'prisma'</code> explicitly if they want it). URL secrets go to the OS
+    keychain (same mechanism as cloud-provider API keys); only a reference lives in the JSON.</li>
+  <li>Command palette: <code>insrc.removeDbConnection</code>, <code>insrc.editDbConnection</code>
+    for maintenance.</li>
+  <li>The Analysis Report Pane's empty-state (before any run) shows a footer
+    <em>DB: N connections configured</em> with a gear icon that opens the same setup flow.</li>
+  <li>On save, the daemon opens a test connection and runs a driver-equivalent
+    <code>SELECT 1</code>. If it fails, we surface the error; we don't probe for write permissions
+    (see §13.5 — that level of hardening is overkill for dev/local DBs).</li>
+</ul>
+
+<h3>13.2 Library Choice: Direct Drivers per Kind</h3>
+
+<div class="callout decision">
+  <strong>Decision:</strong> Use <strong>direct drivers per DB kind</strong> — the idiomatic
+  npm package for each store — behind two family-level interfaces
+  (<code>RdbmsDriver</code>, <code>KvDriver</code>). No single abstraction library (Prisma,
+  Knex, Kysely, Drizzle) is adopted runtime-wide. When a repo has a <code>schema.prisma</code>,
+  the RDBMS driver optionally reuses it for introspection; that's the extent of Prisma's
+  involvement.
+</div>
+
+<p>
+  Driver mapping (phase 3 ships a subset; the registry accepts any kind):
+</p>
+
+<table>
+  <tr>
+    <th>Family</th>
+    <th>Kind</th>
+    <th>npm driver</th>
+    <th>Phase</th>
+  </tr>
+  <tr><td rowspan="5">RDBMS</td><td>postgres</td><td><code>pg</code></td><td>3</td></tr>
+  <tr><td>mysql / mariadb</td><td><code>mysql2</code></td><td>3</td></tr>
+  <tr><td>sqlite</td><td><code>better-sqlite3</code></td><td>3</td></tr>
+  <tr><td>mssql</td><td><code>tedious</code></td><td>4</td></tr>
+  <tr><td>clickhouse / oracle / cockroachdb / ...</td><td>(community)</td><td>4+</td></tr>
+  <tr><td rowspan="5">KV</td><td>redis / valkey / keydb</td><td><code>ioredis</code></td><td>3</td></tr>
+  <tr><td>mongodb</td><td><code>mongodb</code></td><td>3</td></tr>
+  <tr><td>dynamodb</td><td><code>@aws-sdk/client-dynamodb</code></td><td>4</td></tr>
+  <tr><td>etcd</td><td><code>etcd3</code></td><td>4</td></tr>
+  <tr><td>memcached / others</td><td>(community)</td><td>4+</td></tr>
+</table>
+
+<p>
+  Why not a single abstraction library:
+</p>
+
+<ul>
+  <li><strong>Two families, two shapes.</strong> RDBMS and KV operations don't meaningfully
+    share an API — <code>sample(table, where)</code> and <code>scan(pattern)</code> are
+    different problems. A unifying layer would either be the lowest common denominator (too
+    thin to justify) or a leaky abstraction.</li>
+  <li><strong>Runtime weight.</strong> Heavy ORMs (Prisma, Drizzle) bundle query engines or
+    generation steps per connection. For three operations per kind (describe, sample,
+    explain / scan, get, sampleShape), hand-written driver modules are smaller and easier to
+    audit.</li>
+  <li><strong>Operational safety at driver level.</strong> Each driver module rejects write
+    statements for its own kind — we never need to trust a shared query-builder with the
+    no-DDL/DML guarantee.</li>
+  <li><strong>Heterogeneous KV semantics.</strong> Redis, DynamoDB, and etcd disagree on what
+    a "key" means (plain strings vs. partition+sort pairs vs. hierarchical paths). Any uniform
+    abstraction either flattens these into something lossy or adds per-kind shims anyway.</li>
+</ul>
+
+<p>
+  Why optionally reuse <code>schema.prisma</code> when present (RDBMS only):
+</p>
+
+<ul>
+  <li>Introspection is tedious across RDBMS dialects (<code>information_schema</code>,
+    <code>sqlite_master</code>, MS-SQL catalog views, etc.). A repo that already maintains a
+    Prisma schema has a clean canonical model the driver can parse with
+    <code>@prisma/internals</code> (schema parser only — no client, no generated code, no
+    engine binary).</li>
+  <li>The parsed schema gives typed column lists to validate the LLM's <code>where</code>
+    clauses against before query time.</li>
+  <li><strong>Not relevant to KV.</strong> Prisma's model is relational; KV drivers ignore
+    <code>schemaSource</code> entirely.</li>
+</ul>
+
+<h3>13.3 Driver Contracts</h3>
+
+<p>A thin base for registration + lifecycle, two family interfaces for operations:</p>
+
+<pre><code>interface BaseDriver {
+  readonly id:     string;            // connection id from config
+  readonly kind:   string;            // open -- "postgres", "redis", "dynamodb", ...
+  readonly family: 'rdbms' | 'kv';
+  close(): Promise&lt;void&gt;;             // cleanly close pool on shutdown / reconfig
+}
+
+// ---- RDBMS family ----
+interface RdbmsDriver extends BaseDriver {
+  family: 'rdbms';
+
+  /** Schema for a table / view. Consults `config.schemaSource`:
+   *  - 'introspect' -> live catalog query
+   *  - 'prisma'     -> parse schema.prisma once, cache in-memory */
+  describe(target: string): Promise&lt;SchemaDescription&gt;;
+
+  /** Row sample. Limit clamped &le; 50, wall-clock &le; 5s.
+   *  `where` is a parametrised filter; raw SQL never flows from the LLM. */
+  sample(target: string, opts: {
+    limit: number;
+    where?: { column: string; op: '=' | '!=' | 'in' | 'is null'; value?: unknown }[];
+  }): Promise&lt;SampleResult&gt;;
+
+  /** Optional. Runs EXPLAIN on an AST-validated query. */
+  explain?(queryAst: QueryAst): Promise&lt;PlanResult&gt;;
+}
+
+// ---- KV family ----
+interface KvDriver extends BaseDriver {
+  family: 'kv';
+
+  /** List keys matching a pattern / prefix. Limit clamped &le; 500.
+   *  For stores without patterns (DynamoDB), opts is interpreted as a
+   *  partition-key scan. */
+  scan(opts: { pattern?: string; prefix?: string; limit: number }): Promise&lt;KeyList&gt;;
+
+  /** Get the value at a specific key. For composite-key stores
+   *  (DynamoDB sort key, MongoDB collection+id), the key is an object. */
+  get(key: string | Record&lt;string, unknown&gt;): Promise&lt;KvValue&gt;;
+
+  /** Infer the shape of values under a pattern/prefix: sample N values,
+   *  summarise as a type tree (field names, observed types, nullability).
+   *  Replaces "describe" for schema-less stores. */
+  sampleShape(opts: {
+    pattern?: string; prefix?: string; limit: number;
+  }): Promise&lt;ShapeReport&gt;;
+}</code></pre>
+
+<div class="callout info">
+  Driver registration is a small extensibility seam: drivers self-register with the daemon on
+  boot (<code>registerDriver({ kind, family, factory })</code>), and connections in
+  <code>db-connections.json</code> with unknown <code>kind</code> reject at load time. Adding a
+  new store type is a driver module + one registry call, no core schema change.
+</div>
+
+<h3>13.4 Tool Surface</h3>
+
+<p>
+  Split by family under <code>db.*</code>. The analyzer discovers capabilities from
+  <code>db.list_connections()</code> and picks the right namespace for each call:
+</p>
+
+<ul>
+  <li><code>db.list_connections()</code> &rarr; <code>{ id, kind, family, label }[]</code>.
+    Shared across families.</li>
+  <li><strong>RDBMS namespace:</strong>
+    <ul>
+      <li><code>db.sql.describe(connectionId, target)</code></li>
+      <li><code>db.sql.sample(connectionId, target, limit, where?)</code> — row sample,
+        <code>limit &le; 50</code>; optional PII masking per connection (§13.5).</li>
+      <li><code>db.sql.explain(connectionId, queryAst)</code> — optional impact-analysis
+        tool.</li>
+    </ul>
+  </li>
+  <li><strong>KV namespace:</strong>
+    <ul>
+      <li><code>db.kv.scan(connectionId, { pattern | prefix, limit })</code> — key listing,
+        <code>limit &le; 500</code>. Patterns restricted to the connection's
+        <code>namespace.allow</code> list if configured.</li>
+      <li><code>db.kv.get(connectionId, key)</code> — single-value read.</li>
+      <li><code>db.kv.sample_shape(connectionId, { pattern | prefix, limit })</code> —
+        infers field structure for JSON/document values.</li>
+    </ul>
+  </li>
+</ul>
+
+<p>
+  Mismatched calls (calling <code>db.sql.*</code> on a KV connection, or vice versa) reject with
+  a clear error the analyzer sees and retries with the right tool.
+</p>
+
+<h3>13.5 Operational Rules</h3>
+
+<p>
+  Ergonomic guardrails — they stop a stray analyzer from flooding a developer's local DB, not
+  a hardened prod-safety model. The expected target is dev/staging.
+</p>
+
+<ul>
+  <li><strong>No raw queries.</strong> Tool inputs are structured (<code>target</code>,
+    <code>where</code>-objects, key objects, <code>queryAst</code>) — never raw SQL or raw
+    commands from the LLM. Correctness guarantee against accidental DDL/DML or
+    <code>FLUSHDB</code>-shaped mistakes, not security-grade enforcement.</li>
+  <li><strong>Result + timeout caps per family.</strong> RDBMS: 50 rows, 5 s.
+    KV: 500 keys for <code>scan</code>, 50 values for <code>sample_shape</code>, 5 s across
+    the board. Applied driver-side.</li>
+  <li><strong>KV namespace scoping.</strong> A connection's optional
+    <code>namespace.allow</code> patterns restrict <code>scan</code> / <code>sample_shape</code>
+    to whitelisted prefixes — useful on shared Redis instances where the analyzer shouldn't
+    roam across unrelated apps' keyspaces.</li>
+  <li><strong>Optional PII masking.</strong> Per-connection <code>pii</code> array (RDBMS uses
+    <code>"table.column"</code>; KV uses <code>"key-pattern:field-path"</code>) triggers
+    hashing in result values. Omitted = no masking. Users pointing at prod set this; local-DB
+    users typically don't bother.</li>
+  <li><strong>Out-of-repo file reads still gated.</strong> If a connection's
+    <code>schema.prisma</code> path resolves outside the active repo, the fs-access gate
+    (§7.3) fires on first read.</li>
+  <li><strong>Opt-in per repo.</strong> Disabled unless at least one connection is configured
+    — there's nothing for the analyzer to call otherwise.</li>
+</ul>
+
+<div class="callout info">
+  <strong>Why phase 3, not v1:</strong> not safety — the hygiene above is adequate for
+  dev/local targets. Phasing is a scope choice: the orchestrator/analyzer loop is the core
+  value, and we want it running cleanly before adding a new tool surface with its own setup
+  UX, family-split namespace, per-kind driver modules, and schema-parser plumbing.
+</div>
+
+<!-- ================================================================== -->
+<h2 id="caching">14. Caching &amp; Resume</h2>
+
+<ul>
+  <li><strong>Per-task cache.</strong> Key =
+    <code>SHA256(task.question + normalized-scope + repo-rev)</code>. On a hit, the orchestrator
+    skips the analyzer call and reuses the cached <code>AnalyzerResult</code>
+    (<code>updateItem(meta = cached)</code> then <code>markComplete</code>). Cache lives under
+    <code>~/.insrc/cache/code-analysis/</code>, LRU-evicted at 200 entries.</li>
+  <li><strong>Invalidation.</strong> Repo revision is taken from the indexer's last
+    "repo snapshot id". On re-index, entries simply miss on the new rev — no active purge. A
+    manual <code>codeAnalysis.clearCache</code> command is exposed.</li>
+  <li><strong>Resume after daemon restart.</strong> The controller's
+    <code>TaskStateStore</code> retains <code>listId</code>; on resume, the framework's LanceDB
+    tables rehydrate the list and items. Any item marked <code>in_progress</code> at crash time
+    is reset to <code>pending</code> and re-executed on resume. The Analysis Report Pane is
+    ephemeral (§10.2) — if the run finished before crash, the user can reopen it from the
+    todos-pane <em>Open report</em> action, which reads <code>list.body</code>.</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="failure">15. Failure Modes</h2>
+
+<table>
+  <tr>
+    <th>Failure</th>
+    <th>Handling</th>
+  </tr>
+  <tr>
+    <td>Cloud provider unavailable (auth / network)</td>
+    <td><code>plan</code> / <code>review</code> / <code>synthesise</code> fall back to the local
+      model with a warning banner in the todos pane and Analysis Report Pane. Final report is
+      flagged <code>provenance: 'local-only'</code>.</td>
+  </tr>
+  <tr>
+    <td>Analyzer produces malformed JSON</td>
+    <td>One retry with a strict-JSON reminder. On second failure, accept the answer as-is with
+      <code>confidence: 'low'</code> and no structured findings;
+      <code>markComplete</code> with a <code>meta.warning</code> string.</td>
+  </tr>
+  <tr>
+    <td>Analyzer cites a file that has since moved</td>
+    <td>Daemon path-resolves against the current repo tree. Unresolved citations are kept in
+      the report but annotated <em>(file not found — possibly renamed)</em>.</td>
+  </tr>
+  <tr>
+    <td>Analyzer tool call returns empty</td>
+    <td>Analyzer widens scope via <code>graph.search</code> before giving up; if still empty,
+      the result reports <code>confidence: 'low'</code> with an explicit "no evidence found"
+      answer.</td>
+  </tr>
+  <tr>
+    <td>User closes the todos pane or Analysis Report Pane mid-run</td>
+    <td>Pipeline continues in the background. The inline chat widget still receives updates;
+      a completion toast surfaces when <code>synthesise</code> finishes, with a
+      <em>Open report</em> action to reopen the (ephemeral) report pane.</td>
+  </tr>
+  <tr>
+    <td>User closes VS Code mid-run</td>
+    <td>Daemon keeps running; the controller's state (including <code>listId</code>) is
+      persisted. On next open the todos pane auto-restores the list; if synthesise never
+      completed, the orchestrator picks up from the last pending item.</td>
+  </tr>
+  <tr>
+    <td>Orchestrator reviewer keeps saying <code>retry-with-hint</code></td>
+    <td>Per-task retry cap = 2. Plan-level <code>maxTasks</code> cap = 20.</td>
+  </tr>
+  <tr>
+    <td>User starts a second analysis while one is running</td>
+    <td>Rejected at <code>plan</code> step with a notification "an analysis is in progress —
+      cancel or wait" (§10 single-pane invariant). The new request is NOT auto-queued.</td>
+  </tr>
+  <tr>
+    <td>User dismisses the <code>fs-access</code> gate by closing VS Code</td>
+    <td>Gate times out after 5 min &rarr; <code>deny</code>. Analyzer receives a
+      <code>PermissionDenied</code> error for that path and continues without it.</td>
+  </tr>
+</table>
+
+<!-- ================================================================== -->
+<h2 id="phasing">16. Phasing</h2>
+
+<ol>
+  <li><strong>Phase 0 — Framework additions.</strong>
+    <ul>
+      <li>Extend <code>TodosApi</code> with <code>updateItem(itemId, { meta })</code> and
+        <code>cancel(itemId, reason)</code> (proposed in §5.2).</li>
+      <li>Extend <code>todosListWidget</code> to honour
+        <code>list.meta.suppressComments: true</code> (suppresses the <code>+ Add comment</code>
+        affordance).</li>
+    </ul>
+  </li>
+  <li><strong>Phase 1 — Core loop.</strong>
+    <ul>
+      <li>New <code>CodeAnalysisOrchestratorController</code> wired under the
+        <code>research</code> family, variant <code>code-analysis</code>.</li>
+      <li>Analyzer tool loop using the existing tool registry (graph + vector + fs + grep +
+        entity.summary).</li>
+      <li>Citations invariant + JSON schema for <code>AnalyzerResult</code>.</li>
+      <li><code>fs-access</code> gate for out-of-repo paths (§7.3) with session-scoped approvals.</li>
+      <li><code>present</code> gate for final save / copy / discard.</li>
+      <li>Todos pane + inline chat widget render the plan + progress (zero new pane code).</li>
+      <li>Classifier swaps <code>code-analysis</code> intent routing to the new controller; the
+        legacy <code>CodeAnalysisController</code> is retained for rollback in this phase only.</li>
+    </ul>
+  </li>
+  <li><strong>Phase 2 — Analysis Report Pane + feedback + legacy removal.</strong>
+    <ul>
+      <li><code>AnalysisReportPane</code> (ephemeral, single per session) renders
+        <code>list.body</code> via <code>MarkdownWidget</code>.</li>
+      <li>Annotate + batch <em>Send all to chat</em> flow (§10.3).</li>
+      <li><em>Quote to chat now</em> single-shot path.</li>
+      <li><code>mid-flight-cancel</code> gate via <em>Stop analysis</em> on the pane.</li>
+      <li>Per-task caching with rev-keyed invalidation.</li>
+      <li><strong>Delete the legacy <code>CodeAnalysisController</code></strong> and its prompt
+        files; classifier routing has no fallback after this phase.</li>
+    </ul>
+  </li>
+  <li><strong>Phase 3 — DB driver.</strong>
+    <ul>
+      <li>Per-repo <code>db-connections.json</code> + command-palette setup flow.</li>
+      <li>Unified <code>DbDriver</code> interface; Postgres + SQLite reference drivers.</li>
+      <li>Optional Prisma schema reuse via <code>@prisma/internals</code> (parse only, no
+        client).</li>
+      <li><code>db.*</code> tool surface wired into the analyzer tool registry.</li>
+      <li>Repo-level opt-in config + PII masking + read-only credential validation.</li>
+    </ul>
+  </li>
+  <li><strong>Phase 4 — Polish.</strong>
+    <ul>
+      <li>Export to file-in-repo (<code>docs/analysis/&lt;slug&gt;.md</code>) via the existing
+        artifact-save helper.</li>
+      <li>"Re-run with new repo rev" one-click action on a past analysis.</li>
+      <li>Diff-vs-previous-run mode (did audit findings change after the last commit?).</li>
+      <li>MongoDB + MySQL drivers behind the Phase 3 contract.</li>
+    </ul>
+  </li>
+</ol>
+
+<!-- ================================================================== -->
+<h2 id="open">17. Open Questions</h2>
+
+<p>
+  Earlier open questions have been resolved by decisions embedded in the doc:
+</p>
+
+<table>
+  <tr>
+    <th>Question</th>
+    <th>Resolution</th>
+  </tr>
+  <tr>
+    <td>Plan approval default</td>
+    <td><strong>Size-gated.</strong> Plans &le; 16 tasks auto-proceed; plans &gt; 16 fire the
+      <code>plan-size-approval</code> gate. Read-only work doesn't warrant friction at modest
+      sizes, but oversized decompositions get a chance to be trimmed before paying the cloud-
+      token cost. (§6.1, §9)</td>
+  </tr>
+  <tr>
+    <td>Legacy <code>CodeAnalysisController</code> coexistence</td>
+    <td><strong>Deprecate and remove</strong> in phase 2; no settings toggle (§4.4, §16).</td>
+  </tr>
+  <tr>
+    <td>Analysis Report Pane persistence</td>
+    <td><strong>Ephemeral.</strong> Window reload discards the tab; body persists on
+      <code>list.body</code> and can be re-rendered (§10.2).</td>
+  </tr>
+  <tr>
+    <td>Scope constraint to dependency closure</td>
+    <td><strong>No pre-constraint.</strong> Analyzer may traverse anywhere; out-of-repo dirs
+      trigger a one-time <code>fs-access</code> gate per session (§7.3).</td>
+  </tr>
+  <tr>
+    <td>Concurrent analyses per session</td>
+    <td><strong>One at a time.</strong> Second request is rejected with a notification
+      (§10).</td>
+  </tr>
+  <tr>
+    <td>Comment storage / flow</td>
+    <td><strong>Chat messages only.</strong> User annotates sections, batches multiple
+      annotations, sends them to chat as a single message (§5.3, §10.3). Framework comments are
+      suppressed on code-analysis lists.</td>
+  </tr>
+  <tr>
+    <td>DB abstraction library choice</td>
+    <td><strong>Direct drivers</strong> under a unified <code>DbDriver</code> interface;
+      <strong>optionally reuse</strong> a repo's <code>schema.prisma</code> for introspection
+      when present. Not Prisma runtime. (§13.2)</td>
+  </tr>
+  <tr>
+    <td>DB data safety model</td>
+    <td><strong>Dev/local-DB assumption.</strong> Ergonomic guardrails (read-only at protocol
+      level, row caps, timeouts, optional PII masking) — not prod-grade enforcement. Users who
+      point at prod opt into the <code>pii</code> config themselves. (§13.5)</td>
+  </tr>
+  <tr>
+    <td>Prisma schema auto-detection at setup</td>
+    <td><strong>No.</strong> Always default <code>schemaSource: 'introspect'</code>. Live
+      introspection already covers what the analyzer needs; auto-defaulting to a
+      <code>schema.prisma</code> risks silently stale column lists when the file and DB drift.
+      Users who want Prisma as source-of-truth opt in explicitly during
+      <code>insrc.addDbConnection</code>. (§13.1)</td>
+  </tr>
+  <tr>
+    <td>Plan size limit + approval</td>
+    <td><strong>Soft cap 16, hard cap 24.</strong> Plans with &le; 16 tasks auto-proceed.
+      Plans with &gt; 16 tasks fire the <code>plan-size-approval</code> gate (approve /
+      trim-to-16 / cancel). Follow-ups that would push total past 16 are silently dropped;
+      <code>maxTasks = 24</code> is the absolute ceiling. (§6.3, §9)</td>
+  </tr>
+  <tr>
+    <td><code>fs-access</code> granularity — batch vs. per-directory</td>
+    <td><strong>Per-parent-directory, cascading.</strong> The analyzer requests approval for the
+      parent directory under which it plans to read; grant covers every descendant recursively
+      for the rest of the session. In practice this is one gate per out-of-repo root, so the
+      batching question is moot. (§7.3)</td>
+  </tr>
+  <tr>
+    <td>Stricter <code>maxTasks</code> when analyzer is cloud-backed (<code>@mention</code>
+      override)</td>
+    <td><strong>No.</strong> Single cap applies regardless of which model runs the analyzer.
+      If a user has opted into <code>@anthropic</code> / <code>@openai</code> on the analyzer
+      step they've accepted the token cost; the 16/24 cap is already the right ceiling. (§6.3)</td>
+  </tr>
+  <tr>
+    <td>Analysis Report Pane on cold start</td>
+    <td><strong>Not on VS Code start — only on chat-session reopen.</strong> Opening the
+      workbench does nothing; activating a chat session that has a completed analysis reopens
+      the Report Pane (rendered from <code>list.body</code>). Keeps startup quiet while making
+      the report discoverable in the same motion the user already uses to resume their work.
+      (§10.2)</td>
+  </tr>
+</table>
+
+</main>
+</body>
+</html>
