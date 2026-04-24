@@ -63,10 +63,17 @@ unifies that pattern into one framework the agents consume.
   completed, theme-reviewed -> completed, requirement done ->
   completed, plan step done -> completed) needs a per-item id map
   on each agent's state + helper at each transition. Pattern
-  already established by delegate's Phase 6 mirror.
-- Proper `todos.deleteList` RPC -- the unified notepad's "Delete"
-  button currently archives as a stand-in.
-- "Last forwarded to X" hint on items (UX gap; meta-driven badge).
+  already established by delegate's Phase 6 mirror (which does
+  sync per step).
+
+**Landed follow-ups (for reference):**
+- `todos.deleteList` proper RPC + Delete button on notepad cards
+  (commit `8c2210246e2`). Replaced the earlier archive-as-delete
+  stand-in.
+- "Last forwarded to X" item hint -- per-item `meta.lastForwardedTo`
+  / `lastForwardedAt` / `forwardHistory` stamped after every
+  withTodo forward; notepad renders a compact pill + tooltip
+  (commit `0193fc6ba8a`).
 
 ---
 
