@@ -5,18 +5,13 @@
 
 import './media/todos.css';
 import * as dom from '../../../../../base/browser/dom.js';
-import { type IDisposable } from '../../../../../base/common/lifecycle.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
-import { CancellationToken } from '../../../../../base/common/cancellation.js';
-import type { IEditorOpenContext } from '../../../../common/editor.js';
 import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
-import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
-import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import {
@@ -30,6 +25,7 @@ import { TodosEditorInput } from './todosInput.js';
 import {
 	defaultCollapsedForList, formatListMeta, iconForItemStatus,
 } from '../shared/todosViewHelpers.js';
+import { InsrcEditorPaneBase } from '../shared/workspacePaneBase.js';
 
 // ---------------------------------------------------------------------------
 // TodosEditorPane
@@ -41,11 +37,10 @@ import {
  * the active session. Mutations happen agent-side only; this pane
  * never writes.
  */
-export class TodosEditorPane extends EditorPane {
+export class TodosEditorPane extends InsrcEditorPaneBase<TodosEditorInput> {
 	static readonly ID = 'insrc.todosPane';
 	private static readonly COLLAPSE_KEY_PREFIX = 'insrc.todos.collapse:';
 
-	private _container!: HTMLElement;
 	private _headerSubtitle!: HTMLElement;
 	private _headerCount!: HTMLElement;
 	private _listsArea!: HTMLElement;
@@ -57,8 +52,6 @@ export class TodosEditorPane extends EditorPane {
 	/** Per-session collapse overrides; persisted on toggle. */
 	private _collapsed = new Set<string>();
 	private _expanded = new Set<string>();
-
-	private _serviceListeners: IDisposable[] = [];
 
 	constructor(
 		group: IEditorGroup,
@@ -93,37 +86,19 @@ export class TodosEditorPane extends EditorPane {
 		this._emptyState.textContent = 'No todo lists for this session yet. Agents create lists as they work.';
 	}
 
-	override async setInput(input: TodosEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
-		await super.setInput(input, options, context, token);
+	protected override onSetInput(input: TodosEditorInput): void {
 		this._sessionId = input.sessionId;
-		this._detachServiceListeners();
-		this._serviceListeners.push(
-			this.todosService.onDidChange(() => this._render()),
-			this.todosService.onDidChangeList(list => this._onListChanged(list)),
-			this.todosService.onDidRemoveList(id => this._onListRemoved(id)),
-		);
+		this.registerServiceListener(this.todosService.onDidChange(() => this._render()));
+		this.registerServiceListener(this.todosService.onDidChangeList(list => this._onListChanged(list)));
+		this.registerServiceListener(this.todosService.onDidRemoveList(id => this._onListRemoved(id)));
 		this._loadCollapseState();
 		this._render();
 	}
 
-	override clearInput(): void {
-		this._detachServiceListeners();
+	protected override onClearInput(): void {
 		this._sessionId = undefined;
 		this._collapsed.clear();
 		this._expanded.clear();
-		super.clearInput();
-	}
-
-	layout(dimension: dom.Dimension): void {
-		if (this._container) {
-			this._container.style.width = `${dimension.width}px`;
-			this._container.style.height = `${dimension.height}px`;
-		}
-	}
-
-	override dispose(): void {
-		this._detachServiceListeners();
-		super.dispose();
 	}
 
 	// -- Rendering -----------------------------------------------------------
@@ -541,17 +516,6 @@ export class TodosEditorPane extends EditorPane {
 			return [];
 		}
 		return this.todosService.lists.filter(list => list.sessionId === this._sessionId);
-	}
-
-	private _detachServiceListeners(): void {
-		for (const l of this._serviceListeners) {
-			try {
-				l.dispose();
-			} catch {
-				// ignore
-			}
-		}
-		this._serviceListeners = [];
 	}
 }
 

@@ -48,7 +48,7 @@ unifies that pattern into one framework the agents consume.
 | 5d    | Comments: append-only user annotations on agent items                  | done (`66547d52e98`) |
 | 6     | Migration proof: port the delegate variant's plan list first           | done (`ab919c5580f`) |
 | 7     | Broader family adoption (brainstorm / designer / planner)              | done (planner `a42ab4b0013` + designer `dbc48582719` + brainstorm `32c3901868b`) |
-| 8     | Factor shared view helpers (icon / status / meta / forward targets)    | done (`browser/shared/todosViewHelpers.ts`; workspacePaneBase + markdownWidget deferred -- see Phase 8 section for rationale) |
+| 8     | Factor shared scaffolding (view helpers + EditorPane base + markdown widget) | done (`browser/shared/todosViewHelpers.ts` + `workspacePaneBase.ts` + `markdownWidget.ts`) |
 | 9     | User-owned TODOs in notepad + `withTodo` sub-agent invocation          | done (`ce5ed510690` + `0b8f5dac19f` + unified-notepad pane follow-up) |
 
 **Pending follow-ups (not formal phases):**
@@ -1578,51 +1578,56 @@ surface in Phase 4.
 
 ### Phase 8 -- Factor shared scaffolding across todos surfaces
 
-Consolidate what is genuinely duplicated between the read-only
-todos pane, the unified notepad pane (Draft + TODOs), and the
-inline chat widget. The plan's original call for a
-`workspacePaneBase.ts` + a shared Monaco `markdownWidget.ts`
-proved misaligned with the actual shape of the panes and is
-explicitly deferred -- see "Deferred" below.
+Consolidate what is duplicated between the read-only todos pane,
+the unified notepad pane (Draft + TODOs), and the inline chat
+widget. Three extractions landed:
 
-**Landed (`browser/shared/todosViewHelpers.ts`):**
+**1. `browser/shared/todosViewHelpers.ts` -- pure helpers:**
 
-- `iconForItemStatus(status)` -- codicon for each `TodoItemStatus`;
-  previously duplicated in all three surfaces.
-- `nextStatus(current)` -- click-to-cycle status progression used
-  by editable surfaces (notepad pane).
+- `iconForItemStatus(status)` -- codicon for each `TodoItemStatus`.
+- `nextStatus(current)` -- click-to-cycle status progression for
+  editable surfaces (notepad pane).
 - `isTerminalItem(status)` -- `completed` / `cancelled`.
-- `defaultCollapsedForList(list)` -- collapse choice for read-only
-  surfaces (todos pane). System-owned or all-terminal lists start
-  collapsed.
+- `defaultCollapsedForList(list)` -- collapse choice for
+  read-only surfaces (todos pane). System-owned or all-terminal
+  lists start collapsed.
 - `formatListMeta(list)` -- "N items · K pending · archived/
-  complete" label used in every card header.
+  complete" card header label.
 - `FORWARD_TARGET_FAMILIES` -- agent families the notepad's
   forward dropdown lists.
 
 All three surfaces (todos pane, notepad pane, chat widget) were
 refactored to consume these helpers.
 
+**2. `browser/shared/workspacePaneBase.ts` -- EditorPane base:**
+
+`InsrcEditorPaneBase<TInput extends EditorInput>` absorbs the
+`setInput` / `clearInput` / `dispose` / `layout` boilerplate
+every insrc pane was hand-rolling: a `_serviceListeners:
+IDisposable[]` buffer, detach-on-teardown, container size
+propagation in `layout()`. Subclasses implement `onSetInput` /
+`onClearInput` / `onLayout` hooks and call
+`registerServiceListener(d)` for subscriptions. Both
+`TodosEditorPane` and `NotepadEditorPane` extend it; the chat
+widget (not an EditorPane) continues to manage its own lifecycle
+via Disposable.
+
+**3. `browser/shared/markdownWidget.ts` -- Monaco embedding helper:**
+
+`createMarkdownEditor(instantiationService, container, opts?)`
+wraps `CodeEditorWidget` construction with defaults biased for
+prose composition (no line numbers, no folding, no minimap,
+wrap on, `automaticLayout: true`). Notepad's Draft tab
+consumes it; future consumers (e.g. a markdown description
+editor on the agent todos pane) inherit the same look +
+keybindings without duplicating the options block.
+`DEFAULT_MARKDOWN_EDITOR_OPTIONS` is exported for callers that
+need to inspect or extend the defaults.
+
 **Data model note**: both surfaces share the same todos tables
 (list / items / comments). The notepad filters to
 `owner === 'user'`, the read-only pane filters to
 `owner !== 'user'`. No separate notepad table.
-
-**Deferred** (plan premises that didn't match reality):
-
-- `browser/shared/workspacePaneBase.ts` -- the EditorInput +
-  EditorPane boilerplate was called out as shared, but the three
-  surfaces' match-keys diverge (notepad by notepadId, todos pane
-  by sessionId, chat widget not an EditorPane at all). A shared
-  base would be shallow enough not to justify the indirection.
-- `browser/shared/markdownWidget.ts` -- only the notepad pane
-  uses Monaco today (for the Draft tab). The todos pane renders
-  item descriptions as plain text; the chat widget doesn't render
-  markdown. A shared Monaco widget would have a single consumer.
-
-Both remain candidates if a third Monaco-embedding pane appears
-or if the EditorPane shells grow enough shared boilerplate to
-warrant it.
 
 ### Phase 9 -- User-owned TODOs in the notepad + `withTodo` invocation
 

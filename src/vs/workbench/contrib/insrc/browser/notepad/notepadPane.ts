@@ -6,22 +6,16 @@
 import './media/notepadTodos.css';
 import './media/notepad.css';
 import * as dom from '../../../../../base/browser/dom.js';
-import type { IDisposable } from '../../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
-import { CancellationToken } from '../../../../../base/common/cancellation.js';
-import type { IEditorOpenContext } from '../../../../common/editor.js';
 import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
-import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
-import { IEditorOptions } from '../../../../../platform/editor/common/editor.js';
 import { INotificationService } from '../../../../../platform/notification/common/notification.js';
 import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
-import { CodeEditorWidget, type ICodeEditorWidgetOptions } from '../../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
-import type { IEditorOptions as IMonacoEditorOptions } from '../../../../../editor/common/config/editorOptions.js';
+import type { CodeEditorWidget } from '../../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcTodosService,
@@ -34,6 +28,8 @@ import { PromptNotepadProvider } from './promptNotepadProvider.js';
 import {
 	FORWARD_TARGET_FAMILIES, formatListMeta, iconForItemStatus, nextStatus,
 } from '../shared/todosViewHelpers.js';
+import { InsrcEditorPaneBase } from '../shared/workspacePaneBase.js';
+import { createMarkdownEditor } from '../shared/markdownWidget.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -61,10 +57,9 @@ type Tab = 'draft' | 'todos';
  * exists yet), and the notepad title. The previous standalone "My TODOs"
  * pane is retired in favour of this unified surface.
  */
-export class NotepadEditorPane extends EditorPane {
+export class NotepadEditorPane extends InsrcEditorPaneBase<NotepadEditorInput> {
 	static readonly ID = 'insrc.notepadPane';
 
-	private _container!: HTMLElement;
 	private _draftBody!: HTMLElement;
 	private _todosBody!: HTMLElement;
 	private _editorContainer!: HTMLElement;
@@ -79,7 +74,6 @@ export class NotepadEditorPane extends EditorPane {
 	private _notepadId: string | undefined;
 	private _provider: PromptNotepadProvider | undefined;
 
-	private _serviceListeners: IDisposable[] = [];
 	private _selectedItemIds = new Map<string, Set<string>>();
 
 	constructor(
@@ -149,35 +143,13 @@ export class NotepadEditorPane extends EditorPane {
 	}
 
 	private _buildCodeEditor(): void {
-		const editorOptions: IMonacoEditorOptions = {
-			fontFamily: 'var(--monaco-monospace-font, monospace)',
-			lineNumbers: 'off',
-			folding: false,
-			minimap: { enabled: false },
-			scrollBeyondLastLine: false,
-			renderLineHighlight: 'none',
-			wordWrap: 'on',
-			automaticLayout: true,
-			glyphMargin: false,
-		};
-		const widgetOptions: ICodeEditorWidgetOptions = {
-			isSimpleWidget: false,
-		};
-		this._codeEditor = this.instantiationService.createInstance(
-			CodeEditorWidget,
+		this._codeEditor = createMarkdownEditor(
+			this.instantiationService,
 			this._editorContainer,
-			editorOptions,
-			widgetOptions,
 		);
 	}
 
-	override async setInput(
-		input: NotepadEditorInput,
-		options: IEditorOptions | undefined,
-		context: IEditorOpenContext,
-		token: CancellationToken,
-	): Promise<void> {
-		await super.setInput(input, options, context, token);
+	protected override onSetInput(input: NotepadEditorInput): void {
 		this._notepadId = input.notepadId;
 
 		// Attach the existing PromptNotepadProvider's text model to the
@@ -187,17 +159,15 @@ export class NotepadEditorPane extends EditorPane {
 			this._codeEditor.setModel(model);
 		}
 
-		// Wire TODOs subscription + initial render.
-		this._detachServiceListeners();
-		this._serviceListeners.push(
-			this.todosService.onDidChange(() => this._renderTodos()),
-			this.todosService.onDidChangeList(list => this._onListChanged(list)),
-			this.todosService.onDidRemoveList(id => this._onListRemoved(id)),
-			this.chatService.onDidChangeSession(() => {
-				this._selectedItemIds.clear();
-				this._renderTodos();
-			}),
-		);
+		// Wire TODOs subscription + chat-session watcher for re-render
+		// on session change.
+		this.registerServiceListener(this.todosService.onDidChange(() => this._renderTodos()));
+		this.registerServiceListener(this.todosService.onDidChangeList(list => this._onListChanged(list)));
+		this.registerServiceListener(this.todosService.onDidRemoveList(id => this._onListRemoved(id)));
+		this.registerServiceListener(this.chatService.onDidChangeSession(() => {
+			this._selectedItemIds.clear();
+			this._renderTodos();
+		}));
 
 		// Restore the previously-active tab for this notepad.
 		const stored = this._storage.get(ACTIVE_TAB_KEY_PREFIX + input.notepadId, StorageScope.PROFILE);
@@ -208,26 +178,22 @@ export class NotepadEditorPane extends EditorPane {
 		this._renderTodos();
 	}
 
-	override clearInput(): void {
-		this._detachServiceListeners();
+	protected override onClearInput(): void {
 		this._notepadId = undefined;
 		this._selectedItemIds.clear();
 		if (this._codeEditor !== undefined) {
 			this._codeEditor.setModel(null);
 		}
-		super.clearInput();
 	}
 
-	layout(dimension: dom.Dimension): void {
-		if (this._container !== undefined) {
-			this._container.style.width = `${dimension.width}px`;
-			this._container.style.height = `${dimension.height}px`;
-		}
+	protected override onLayout(_dimension: dom.Dimension): void {
+		// Monaco needs an explicit layout tick whenever its container
+		// resizes; super sets width/height on the outer container and
+		// our editor-container inherits via the flex chain.
 		this._codeEditor?.layout();
 	}
 
 	override dispose(): void {
-		this._detachServiceListeners();
 		if (this._codeEditor !== undefined) {
 			this._codeEditor.dispose();
 			this._codeEditor = undefined;
@@ -613,16 +579,5 @@ export class NotepadEditorPane extends EditorPane {
 			this.logService.warn(`[notepad] op failed: ${(err as Error).message}`);
 			return undefined;
 		}
-	}
-
-	private _detachServiceListeners(): void {
-		for (const d of this._serviceListeners) {
-			try {
-				d.dispose();
-			} catch {
-				// ignore
-			}
-		}
-		this._serviceListeners = [];
 	}
 }
