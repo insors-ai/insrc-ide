@@ -36,6 +36,8 @@
     "typescript": "^5.9.0"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test:artifacts": "tsx --test agent/tasks/artifacts/__tests__/*.test.ts",
+    "test:artifacts:smoke": "tsx agent/tasks/artifacts/__tests__/smoke.ts"
   }
 }

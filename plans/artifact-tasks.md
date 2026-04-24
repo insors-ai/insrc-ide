@@ -374,7 +374,7 @@ an implementation sketch for that revisit.
   embedded + standalone.
 - Template lint test: a malicious template with `onclick` is
   rejected at load time.
-- Smoke test: `source ~/.insors && npx tsx scripts/test-artifacts-smoke.ts`
+- Smoke test: `npm run test:artifacts:smoke --prefix src/insrc`
   invokes each of the five tools against fixture inputs and
   confirms `renderedHtml.embedded` parses as valid HTML (use a
   lightweight html parser).
@@ -603,7 +603,7 @@ tool.
 
        npm run test:artifacts --prefix src/insrc
 
-2. **Smoke script** at `scripts/test-artifacts-smoke.ts`: exercises
+2. **Smoke script** at `src/insrc/agent/tasks/artifacts/__tests__/smoke.ts`: exercises
    the full three-stage pipeline per kind against fixtures + a mock
    LLM provider. No Kuzu DB required. Run:
 
@@ -763,7 +763,7 @@ are worth addressing before or alongside the remaining phase-1 work.
 | `common/insrcArtifacts.ts` browser types  | done (uncommitted) | Mirrors the daemon-side `ArtifactItemMeta` subset the workbench needs (`kind`, `renderedHtml`, `metadata`, `warnings`, `confidence`). Ships `isArtifactItem`, `isArtifactItemMeta`, `isArtifactList` guards + `ARTIFACTS_LIST_TITLE` constant. Duplication matches the pattern already used between `src/insrc/shared/todos.ts` and `browser/common/todosService.ts` -- the wire format is the contract. |
 | IDE build + precommit                     | done (uncommitted) | `npm run precommit` (`build/hygiene.js`) clean. `scripts/build.sh ide` full compile green: `Finished compilation with 0 errors` across `compile-src`, `compile-extensions`, and `compile-client`. |
 | Unit + golden tests per kind              | done (uncommitted) | 7 `.test.ts` files under `src/insrc/agent/tasks/artifacts/__tests__/` covering sanitise, wireframe SVG renderer, template binder + loader (with tmp-dir lint fixtures), Prisma regex parser, docker-compose + k8s YAML parsers, and wireframe kind's four-branch fallback chain with a mock LLM provider. Uses Node's built-in `node:test` module -- no vitest dep added. `npm run test:artifacts --prefix src/insrc` runs them. |
-| Smoke script                              | done (uncommitted) | `scripts/test-artifacts-smoke.ts`: 11 cases exercising the full pipeline per kind (wireframe with caller-supplied spec / LLM mock / no-provider scaffold; sequence scaffold; flow process + code scaffolds; ER Prisma auto-detect + scaffold; deployment docker-compose + k8s + scaffold). Validates `source`, `embedded`/`standalone` HTML markers, and Mermaid grammar. `npm run test:artifacts:smoke --prefix src/insrc` runs it. |
+| Smoke script                              | done (uncommitted) | `src/insrc/agent/tasks/artifacts/__tests__/smoke.ts`: 11 cases exercising the full pipeline per kind (wireframe with caller-supplied spec / LLM mock / no-provider scaffold; sequence scaffold; flow process + code scaffolds; ER Prisma auto-detect + scaffold; deployment docker-compose + k8s + scaffold). Validates `source`, `embedded`/`standalone` HTML markers, and Mermaid grammar. `npm run test:artifacts:smoke --prefix src/insrc` runs it. Lives under `__tests__/` so the daemon tsconfig excludes it from the build + workbench hygiene leaves it alone. |
 | Build verified via `scripts/build.sh`     | done (uncommitted) | `scripts/build.sh daemon` + `scripts/build.sh ide` both pass clean; `out/insrc/` has all compiled modules + asset copy confirmed. |
 
 ### Phase 2
