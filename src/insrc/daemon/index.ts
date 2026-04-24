@@ -988,6 +988,23 @@ async function main(): Promise<void> {
 		'todos.deleteComment': (params) => todosRpc.deleteCommentRpc(db, params),
 		'todos.ackComment': (params) => todosRpc.ackComment(db, params),
 		'todos.forwardToAgent': (params) => todosRpc.forwardToAgent(db, params),
+
+		// Artifact template commands (plans/artifact-tasks.md §2.3).
+		// Standard RPCs backing the workbench palette commands --
+		// listTemplates / edit / reset -- so the workbench doesn't
+		// need to know the daemon's install path.
+		'artifacts.listTemplates': async (params) => {
+			const mod = await import('./artifacts-rpc.js');
+			return mod.listTemplatesRpc(params);
+		},
+		'artifacts.ensureUserTemplate': async (params) => {
+			const mod = await import('./artifacts-rpc.js');
+			return mod.ensureUserTemplateRpc(params);
+		},
+		'artifacts.resetUserTemplate': async (params) => {
+			const mod = await import('./artifacts-rpc.js');
+			return mod.resetUserTemplateRpc(params);
+		},
 	}, {
 		// Streaming handlers
 		'chat.send': chatSend,

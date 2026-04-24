@@ -155,6 +155,9 @@ editorPaneRegistry.registerEditorPane(
 import { ArtifactsEditorPane } from './artifacts/artifactsPane.js';
 import { ArtifactsEditorInput } from './artifacts/artifactsInput.js';
 import './artifacts/artifactsCommands.js';
+// Template-override commands (plans/artifact-tasks.md section 2.3).
+// Three palette actions hanging off the IInsrcArtifactsService.
+import './artifacts/templateCommands.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(ArtifactsEditorPane, ArtifactsEditorPane.ID, 'Artifacts'),
 	[new SyncDescriptor(ArtifactsEditorInput)],
