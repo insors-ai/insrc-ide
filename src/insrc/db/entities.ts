@@ -191,6 +191,47 @@ export async function getEntity(db: DbClient, id: string): Promise<Entity | null
 }
 
 /**
+ * Find entities by name + kind filter. Intended for structured
+ * lookups (e.g. the artifact:er kind resolving user-supplied table
+ * names into Entity rows) where the caller knows the exact name but
+ * not the id. Returns all matches up to `limit`. Optional `repo`
+ * narrows the search to a single repo root.
+ *
+ * Uses a plain LanceDB filter -- no vector search, no embeddings
+ * required.
+ */
+export async function findEntitiesByName(
+  db: DbClient,
+  names: readonly string[],
+  opts: { readonly kinds?: readonly EntityKind[] | undefined; readonly repo?: string | undefined; readonly limit?: number | undefined } = {},
+): Promise<Entity[]> {
+  if (names.length === 0) { return []; }
+  const table = await getEntitiesTable(db);
+  if (table === null) { return []; }
+
+  const safeNames = names.map(n => n.replace(/'/g, "''"));
+  const nameFilter = safeNames.map(n => `'${n}'`).join(', ');
+  const conditions: string[] = [`name IN (${nameFilter})`];
+
+  if (opts.kinds !== undefined && opts.kinds.length > 0) {
+    const safeKinds = opts.kinds.map(k => k.replace(/'/g, "''"));
+    const kindFilter = safeKinds.map(k => `'${k}'`).join(', ');
+    conditions.push(`kind IN (${kindFilter})`);
+  }
+  if (opts.repo !== undefined) {
+    const safeRepo = opts.repo.replace(/'/g, "''");
+    conditions.push(`repo = '${safeRepo}'`);
+  }
+
+  const limit = opts.limit !== undefined ? opts.limit : 50;
+  const rows = await table.query()
+    .where(conditions.join(' AND '))
+    .limit(limit)
+    .toArray();
+  return rows.map(r => rowToEntity(r as Record<string, unknown>));
+}
+
+/**
  * List all entities belonging to a repo.
  */
 export async function listEntitiesForRepo(db: DbClient, repo: string): Promise<Entity[]> {

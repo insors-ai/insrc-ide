@@ -67,6 +67,7 @@ const ALL_CATEGORIES: readonly string[] = [
   'file', 'shell', 'search', 'git', 'gh',
   'ssh', 'http', 'k8s', 'cloud', 'diff',
   'notify', 'test', 'pkg', 'web', 'graph', 'plan',
+  'artifact',
 ];
 
 function defaults(): ToolSettings {

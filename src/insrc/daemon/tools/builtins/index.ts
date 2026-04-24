@@ -26,6 +26,7 @@ import { registerPkgTools } from './pkg/index.js';
 import { registerWebTools } from './web/index.js';
 import { registerGraphTools } from './graph/index.js';
 import { registerPlanTools } from './plan/index.js';
+import { registerArtifactTools } from './artifact/index.js';
 import { registerLlmAliases } from './llm-aliases.js';
 
 const log = getLogger('tools-builtins');
@@ -45,8 +46,9 @@ const CATEGORIES: Readonly<Record<string, () => void>> = {
   test:   registerTestTools,
   pkg:    registerPkgTools,
   web:    registerWebTools,
-  graph:  registerGraphTools,
-  plan:   registerPlanTools,
+  graph:    registerGraphTools,
+  plan:     registerPlanTools,
+  artifact: registerArtifactTools,
 };
 
 export function registerBuiltinTools(): void {

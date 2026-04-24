@@ -70,6 +70,15 @@ build_daemon() {
 	install_if_needed "src/insrc" "daemon" "--legacy-peer-deps"
 	echo "[insrc-build] daemon compile (tsc -> out/insrc)"
 	( cd src/insrc && npm run build )
+	# tsc only emits .ts -> .js; non-code assets (HTML templates, JSON
+	# metadata, etc.) need to be mirrored into out/insrc so the daemon
+	# can read them at runtime via paths relative to import.meta.url.
+	if [ -d "src/insrc/assets" ]; then
+		echo "[insrc-build] copying daemon assets"
+		mkdir -p out/insrc/assets
+		# -a preserves timestamps so incremental builds stay cheap.
+		cp -a src/insrc/assets/. out/insrc/assets/
+	fi
 }
 
 cmd="${1:-all}"

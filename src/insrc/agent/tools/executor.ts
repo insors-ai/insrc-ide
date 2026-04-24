@@ -15,6 +15,9 @@ import type { Session } from '../session.js';
 import { getTool as getUnifiedTool } from '../../daemon/tools/registry.js';
 import { translateAliasInput } from '../../daemon/tools/builtins/llm-aliases.js';
 import type { ToolDeps, ToolResult as UnifiedToolResult } from '../../daemon/tools/types.js';
+import { getDb } from '../../db/client.js';
+import { makeTodosApi } from '../../daemon/todos-api.js';
+import type { TodosApi } from '../../shared/todos.js';
 
 export interface ToolExecContext {
   /** Session the tool is running inside. Used for repo scoping, closure, etc. */
@@ -43,7 +46,7 @@ export async function executeTool(call: ToolCall, context?: ToolExecContext): Pr
     };
   }
 
-  const deps = buildDeps(context);
+  const deps = await buildDeps(context);
   const translatedInput = translateAliasInput(call.name, call.input);
   try {
     const result = await tool.execute(translatedInput, deps);
@@ -62,7 +65,7 @@ export async function executeTool(call: ToolCall, context?: ToolExecContext): Pr
 // Adapters
 // ---------------------------------------------------------------------------
 
-function buildDeps(ctx: ToolExecContext | undefined): ToolDeps {
+async function buildDeps(ctx: ToolExecContext | undefined): Promise<ToolDeps> {
   // The unified ToolDeps requires `session`. When the LLM path runs
   // in a context that does have a session (chat-handler, delegate
   // agents), the caller plumbs it through. When it doesn't (a few
@@ -77,11 +80,31 @@ function buildDeps(ctx: ToolExecContext | undefined): ToolDeps {
         if (data?.message && typeof data.message === 'string') { ctx.onProgress!(data.message); }
       }
     : () => { /* no-op */ };
+
+  // Pre-build a TodosApi scoped to `'chat'`. The LLM tool-loop isn't
+  // tied to a specific agent family -- it's the generic chat turn's
+  // tool-call path -- so 'chat' is the right owner for any TODO items
+  // tools write here. Agent controllers run tools through the
+  // controller task path (daemon/task.ts) where a family-scoped
+  // TodosApi is already plumbed through.
+  let todos: TodosApi | undefined;
+  if (ctx?.session !== undefined) {
+    try {
+      const db = await getDb();
+      todos = makeTodosApi(db, 'chat');
+    } catch {
+      // DB unavailable (tests, degraded mode) -- tools that need
+      // `todos` will fall through to their own handling.
+      todos = undefined;
+    }
+  }
+
   return {
     session,
     send,
     requestId: 0,
     ...(ctx?.signal ? { signal: ctx.signal } : {}),
+    ...(todos !== undefined ? { todos } : {}),
   };
 }
 

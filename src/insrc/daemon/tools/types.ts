@@ -14,6 +14,7 @@ import type { Session } from '../../agent/session.js';
 import type { IpcStreamMessage } from '../../shared/types.js';
 import type { DaemonChannel } from '../channel.js';
 import type { GateAction } from '../../agent/framework/types.js';
+import type { TodosApi } from '../../shared/todos.js';
 
 // ---------------------------------------------------------------------------
 // Tool contract
@@ -57,6 +58,16 @@ export interface ToolDeps {
    * Defaults to a non-aborting signal when the caller does not supply one.
    */
   signal?: AbortSignal | undefined;
+  /**
+   * Pre-built TodosApi scoped to the calling agent's family (or
+   * `'chat'` for LLM tool-loop turns without an active controller).
+   * Tools that persist to TODO-framework storage should read through
+   * this rather than constructing their own instance -- the caller
+   * owns `caller` attribution, not the tool. Optional for backward
+   * compatibility with existing tool call sites that don't know
+   * about it; new tools should assume it's present in production.
+   */
+  todos?: TodosApi | undefined;
 }
 
 export interface ToolApprovalGate {

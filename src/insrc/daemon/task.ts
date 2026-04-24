@@ -1203,6 +1203,10 @@ async function executeTask(
         channel: deps.channel,
         send: deps.send,
         requestId: deps.requestId,
+        // Propagate the controller's family-scoped TodosApi so tools
+        // that write TODO items (e.g. artifact:*) attribute their
+        // writes to the caller family instead of a hardcoded default.
+        ...(deps.todos !== undefined ? { todos: deps.todos } : {}),
       });
       return {
         index: task.index,
