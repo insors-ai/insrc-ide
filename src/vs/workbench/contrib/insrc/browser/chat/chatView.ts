@@ -20,6 +20,7 @@ import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, typ
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
+import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
@@ -258,6 +259,14 @@ export class InsrcChatViewPane extends ViewPane {
 		// the main event handler.
 		const todosWidget = this._register(new ChatTodosWidget(this._todosService, this._editorService, this._logService));
 		todosWidget.mount(this._messageList);
+
+		// Inline artifact widget (plans/artifact-tasks.md section 1.6). Renders
+		// artifact items (Mermaid diagrams, wireframe SVG) into sandboxed
+		// iframes per-card. Partitions the todos stream with
+		// chatTodosWidget via `isArtifactList` so each list shows up in
+		// exactly one surface.
+		const artifactWidget = this._register(new ChatArtifactWidget(this._todosService, this.clipboardService, this._logService));
+		artifactWidget.mount(this._messageList);
 
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));

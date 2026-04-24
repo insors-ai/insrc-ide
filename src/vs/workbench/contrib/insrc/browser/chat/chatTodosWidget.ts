@@ -15,6 +15,7 @@ import {
 	type TodoItem,
 	type TodoList,
 } from '../../common/todosService.js';
+import { isArtifactList } from '../../common/insrcArtifacts.js';
 import { TodosEditorInput } from '../todos/todosInput.js';
 
 /**
@@ -98,6 +99,12 @@ export class ChatTodosWidget extends Disposable {
 		// System-owned lists live only in the editor pane -- the inline
 		// surface is for agent-authored work the user should notice.
 		if (list.owner === 'system') {
+			return false;
+		}
+		// Artifact lists are rendered by `chatArtifactWidget` instead
+		// (plans/artifact-tasks.md section 1.6). The two widgets partition the
+		// todos stream so every list shows up exactly once.
+		if (isArtifactList(list)) {
 			return false;
 		}
 		return true;

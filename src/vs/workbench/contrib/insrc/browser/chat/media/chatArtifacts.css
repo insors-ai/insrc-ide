@@ -1,0 +1,113 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Inline chat widget for artifact items
+ * (plans/artifact-tasks.md section 1.6). Each artifact renders inside a
+ * sandboxed iframe carrying the standalone-mode HTML the daemon's
+ * template binder produced. The host card provides a title / kind
+ * badge / actions row + a provenance footer. */
+
+.insrc-chat-artifacts {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-top: 8px;
+}
+
+.insrc-chat-artifact-card {
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	background-color: var(--vscode-editorWidget-background);
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+
+.insrc-chat-artifact-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	background-color: var(--vscode-editorWidget-background);
+	border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.insrc-chat-artifact-kind {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	padding: 2px 6px;
+	border-radius: 3px;
+	background-color: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
+.insrc-chat-artifact-title {
+	flex: 1 1 auto;
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.insrc-chat-artifact-meta {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-chat-artifact-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.insrc-chat-artifact-action {
+	font-size: 11px;
+	padding: 2px 8px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 3px;
+	background-color: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-button-secondaryForeground, inherit);
+	cursor: pointer;
+}
+
+.insrc-chat-artifact-action:hover {
+	background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+.insrc-chat-artifact-body {
+	background-color: var(--vscode-editor-background);
+}
+
+.insrc-chat-artifact-iframe {
+	width: 100%;
+	min-height: 240px;
+	max-height: 600px;
+	border: 0;
+	display: block;
+	background-color: transparent;
+}
+
+.insrc-chat-artifact-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 4px 10px;
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	border-top: 1px dashed var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.insrc-chat-artifact-warnings {
+	display: none;
+	cursor: help;
+	color: var(--vscode-notificationsWarningIcon-foreground, var(--vscode-editorWarning-foreground));
+}
+
+.insrc-chat-artifact-warnings.insrc-chat-artifact-warnings-visible {
+	display: inline-block;
+}
