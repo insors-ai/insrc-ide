@@ -431,10 +431,14 @@ export async function parseK8sSource(
 // ---------------------------------------------------------------------------
 
 /**
- * Sniff the YAML to pick a parser. Compose files have a top-level
- * `services:` key; k8s manifests have `apiVersion` + `kind`. Returns
- * null when neither pattern matches (caller falls back to default
- * scaffold with a warning).
+ * Sniff the file to pick a parser. Tries in order:
+ *   1. Terraform plan JSON -- `terraform_version` + `planned_values`
+ *      (phase 3; see `terraform-source.ts`)
+ *   2. k8s manifests -- `apiVersion` + `kind` on the first doc
+ *   3. docker-compose -- `services:` on the first doc
+ *
+ * Returns null when nothing matches (caller falls back to the
+ * default scaffold with a warning).
  */
 export async function parseDeploymentSource(
 	fromFile: string,
@@ -446,6 +450,16 @@ export async function parseDeploymentSource(
 		text = await readFile(abs, 'utf8');
 	} catch {
 		return null;
+	}
+	// Terraform plan JSON check happens first -- a JSON file is never
+	// going to be valid compose / k8s YAML, and the detection is
+	// cheap. Imported lazily so the compose/k8s-only path doesn't pay
+	// for it.
+	const trimmed = text.trimStart();
+	if (trimmed.startsWith('{')) {
+		const { tryParseTerraformPlan } = await import('./terraform-source.js');
+		const tf = await tryParseTerraformPlan(fromFile, repoRoot);
+		if (tf !== null) { return tf; }
 	}
 	// k8s manifests are often multi-doc; try that first and fall back
 	// to compose if no recognised resources are found.

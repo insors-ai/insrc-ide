@@ -1005,6 +1005,18 @@ async function main(): Promise<void> {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.resetUserTemplateRpc(params);
 		},
+		'artifacts.getOfflineBundleStatus': async () => {
+			const mod = await import('./artifacts-rpc.js');
+			return mod.getOfflineBundleStatusRpc();
+		},
+		'artifacts.downloadOfflineBundle': async () => {
+			const mod = await import('./artifacts-rpc.js');
+			return mod.downloadOfflineBundleRpc();
+		},
+		'artifacts.removeOfflineBundle': async () => {
+			const mod = await import('./artifacts-rpc.js');
+			return mod.removeOfflineBundleRpc();
+		},
 	}, {
 		// Streaming handlers
 		'chat.send': chatSend,

@@ -29,6 +29,7 @@ import type {
 } from '../../../shared/artifacts.js';
 import { loadRendererSnippet, loadTemplate } from './template-loader.js';
 import { escapeMermaidSource, sanitiseSlotValue } from './sanitise.js';
+import { readVerifiedOfflineBundle } from './offline-bundle.js';
 
 const log = getLogger('artifact-binder');
 
@@ -144,6 +145,18 @@ async function buildStandaloneRendererScript(
 		loadRendererSnippet(),
 		getMermaidCdnMeta(),
 	]);
+
+	// Offline path: when the user has downloaded + cached the Mermaid
+	// bundle, inline it instead of pointing at the CDN. The snippet
+	// stays self-contained and renders with no network. SRI mismatch
+	// or missing cache falls through to the CDN path.
+	const offlineBundle = await readVerifiedOfflineBundle(cdn);
+	if (offlineBundle !== null) {
+		log.debug({ version: cdn.version, bytes: offlineBundle.length }, 'using offline mermaid bundle');
+		const inlineScriptTag = `<script>${offlineBundle}</script>`;
+		return snippet.split('@@MERMAID_SCRIPT_TAG@@').join(inlineScriptTag);
+	}
+
 	const scriptTag =
 		`<script src="${cdn.scriptUrl}" integrity="${cdn.integrity}" crossorigin="${cdn.crossorigin}"></script>`;
 	return snippet.split('@@MERMAID_SCRIPT_TAG@@').join(scriptTag);
