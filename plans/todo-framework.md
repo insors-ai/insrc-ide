@@ -474,20 +474,17 @@ hint clears when the target agent next activates.
   delegate (batch scope) based on classification; ownership
   stays at the family level throughout the handoff and
   execution.
-- **User punchlist → implementation takeover**: user drafts a
-  list of items in the notepad (owner = `'user'`), then clicks
-  "Hand off to implementation" in the list's kebab menu. Fires
-  `todos.transfer(listId, 'implementation', ...)`; the list
-  flips permanently, agent owns it, user sees it read-only in
-  the todos pane going forward.
 - **User → sub-agent invocation via `withTodo`**: user selects
   one or more items from a user-owned list and picks a target
   family (e.g. `'research'`). Fires
   `todos.forwardToAgent({ targetFamily: 'research', items })`,
-  which spawns a research agent run. User's source list stays
-  owned by `'user'`; per-item status flips via
-  `TodoInvocationResponseItem` updates once the agent reports
-  back.
+  which spawns a target-family agent run with the items as
+  detached snapshots. **The user's list does not change
+  ownership; items stay in the notepad.** Per-item status flips
+  via `TodoInvocationResponseItem` updates once the agent
+  reports back (e.g. `in_progress` while the agent works,
+  `completed` or `blocked` once it finishes). This is the only
+  user→agent path from the notepad.
 - **Agent completes + hands to system**: when an agent finishes
   its work, it either archives the list itself or transfers to
   `'system'`, which keeps the list queryable for retention /
@@ -1064,26 +1061,28 @@ shows it).
 
 #### How user-owned TODOs reach an agent
 
-Two explicit mechanisms, both user-triggered from the notepad:
+**Only one mechanism from the notepad: `withTodo` forwarding.**
+User items never leave the user's list. The notepad's
+`Forward selected` and `Forward all` buttons call
+`todos.forwardToAgent({ targetFamily, sessionId, items:
+snapshots })`, which spawns a fresh agent run on the chosen
+family with detached item snapshots as input. The user's
+source items stay in place; per-item status flows back as
+`TodoInvocationResponseItem` entries which the notepad
+applies via `updateItem(sourceId, { status })`. So a user can
+watch items march through `pending` → `in_progress` →
+`completed` (or land on `blocked`) from the agent's side
+while keeping full editorial control.
 
-1. **Transfer (full handoff).** List-level kebab menu action
-   "Hand off to <agent family>" calls `todos.transfer(listId,
-   targetFamily, reason)`. Ownership flips permanently; the
-   list disappears from the notepad (because the notepad only
-   shows user-owned lists) and appears in the agent's todos
-   pane. Best for punchlists the user wants the agent to take
-   over wholesale.
-2. **withTodo (sub-agent invocation).** Multi-select items +
-   "Forward selected to <agent family>" button in the notepad.
-   Calls `todos.forwardToAgent({ targetFamily, sessionId,
-   items: snapshots })`. A new agent run starts with the
-   snapshots as input; the user keeps their list; per-item
-   status flows back as `TodoInvocationResponseItem` entries
-   which the notepad applies to the source items via
-   `updateItem(sourceId, { status })`.
-
-Best for tasks the user wants an agent to help with while
-keeping editorial control of the list on the user's side.
+**Why no user→agent transfer from the notepad:** transfer
+flips ownership permanently, which makes the list disappear
+from the user's view. The user's items are a personal
+punchlist; they should always be visible and editable by the
+user regardless of whether agents have been invoked on them.
+Transfer remains a valid primitive at the API level (used
+between agents for handoff / handover -- e.g. planner →
+implementation) but no notepad affordance exposes it for
+user-owned lists.
 
 #### Shared infrastructure (Phase 8)
 

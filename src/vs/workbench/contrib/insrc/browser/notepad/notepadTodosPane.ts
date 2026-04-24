@@ -239,30 +239,21 @@ export class NotepadTodosEditorPane extends EditorPane {
 		}
 
 		const forwardBtn = dom.append(toolbar, dom.$('button.insrc-notepad-todos-forward-selected')) as HTMLButtonElement;
-		forwardBtn.textContent = 'Forward selected (withTodo)';
-		forwardBtn.title = 'Spawn a new agent run with the selected items as snapshots; the result updates each source item\'s status.';
+		forwardBtn.textContent = 'Forward selected';
+		forwardBtn.title = 'Send the selected items to the chosen agent as snapshots (withTodo). Your items stay in this list; their statuses update when the agent responds.';
 		forwardBtn.disabled = (this._selectedItemIds.get(list.id)?.size ?? 0) === 0;
 		forwardBtn.addEventListener('click', () => {
 			const target = targetSelect.value as TodoOwner;
 			void this._forwardSelected(list, target);
 		});
 
-		const handoffBtn = dom.append(toolbar, dom.$('button.insrc-notepad-todos-handoff-list')) as HTMLButtonElement;
-		handoffBtn.textContent = 'Hand off list';
-		handoffBtn.title = 'Transfer this list to the selected agent family. Ownership flips permanently.';
-		handoffBtn.addEventListener('click', async () => {
+		const forwardAllBtn = dom.append(toolbar, dom.$('button.insrc-notepad-todos-forward-all')) as HTMLButtonElement;
+		forwardAllBtn.textContent = 'Forward all';
+		forwardAllBtn.title = 'Send every non-terminal item in this list to the chosen agent (withTodo). Your items stay here.';
+		forwardAllBtn.disabled = list.items.every(it => it.status === 'completed' || it.status === 'cancelled');
+		forwardAllBtn.addEventListener('click', () => {
 			const target = targetSelect.value as TodoOwner;
-			const { confirmed } = await this.dialogService.confirm({
-				type: 'warning',
-				message: `Hand off this list to ${target}?`,
-				detail: `Ownership flips permanently. You'll be able to read the list in the Todos pane but won't be able to edit it.`,
-				primaryButton: 'Hand off',
-				cancelButton: 'Cancel',
-			});
-			if (!confirmed) {
-				return;
-			}
-			await this._call(() => this.todosService.transferList(list.id, target, `user handoff from notepad`));
+			void this._forwardAll(list, target);
 		});
 
 		return card;
@@ -335,20 +326,41 @@ export class NotepadTodosEditorPane extends EditorPane {
 	// -- Actions -------------------------------------------------------------
 
 	private async _forwardSelected(list: TodoList, target: TodoOwner): Promise<void> {
-		if (this._sessionId === undefined) {
-			return;
-		}
 		const selectedIds = this._selectedItemIds.get(list.id);
 		if (selectedIds === undefined || selectedIds.size === 0) {
 			return;
 		}
 		const items = list.items.filter(it => selectedIds.has(it.id));
-		if (items.length === 0) {
+		await this._forwardItems(list, items, target);
+		this._selectedItemIds.set(list.id, new Set());
+	}
+
+	private async _forwardAll(list: TodoList, target: TodoOwner): Promise<void> {
+		const items = list.items.filter(
+			it => it.status !== 'completed' && it.status !== 'cancelled',
+		);
+		await this._forwardItems(list, items, target);
+	}
+
+	/**
+	 * Shared implementation for Forward-selected + Forward-all. The user's
+	 * items stay in this list unconditionally -- we never transfer or
+	 * remove them. The agent's response flips each source item's status
+	 * (via `updateItem(sourceId, { status, blockedReason? })`) so the
+	 * notepad reflects how the sub-agent disposed of each snapshot.
+	 */
+	private async _forwardItems(
+		list: TodoList,
+		items: readonly TodoItem[],
+		target: TodoOwner,
+	): Promise<void> {
+		if (this._sessionId === undefined || items.length === 0) {
 			return;
 		}
 
-		// Build snapshots. `sourceRef` is the source item id so we can
-		// apply the response statuses back onto the user's originals.
+		// Build detached snapshots (no source id / list id cross the
+		// boundary). `sourceRef` = source item id so we can correlate the
+		// response back to the user's original item.
 		const snapshots = items.map(it => {
 			const snap: { sourceRef: string; title: string; description?: string; tags?: readonly string[]; meta?: Readonly<Record<string, unknown>> } = {
 				sourceRef: it.id,
@@ -387,9 +399,7 @@ export class NotepadTodosEditorPane extends EditorPane {
 					this.logService.warn(`[notepad-todos] failed to apply response status for ${sourceId}: ${(err as Error).message}`);
 				}
 			}
-			// Clear the selection and re-render to reflect the new statuses.
-			this._selectedItemIds.set(list.id, new Set());
-			this.notificationService.info(`Forwarded ${items.length} item(s) to ${target}.`);
+			this.notificationService.info(`Forwarded ${items.length} item(s) to ${target}. Your list stays as-is; statuses are updated from the agent's response.`);
 		} catch (err) {
 			this.notificationService.error(`Failed to forward: ${(err as Error).message}`);
 		}

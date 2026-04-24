@@ -273,19 +273,19 @@
 }
 
 .insrc-notepad-todos-forward-selected,
-.insrc-notepad-todos-handoff-list {
+.insrc-notepad-todos-forward-all {
 	background-color: transparent;
 	color: var(--vscode-foreground);
 	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
 }
 
 .insrc-notepad-todos-forward-selected:hover,
-.insrc-notepad-todos-handoff-list:hover {
+.insrc-notepad-todos-forward-all:hover {
 	background-color: var(--vscode-list-hoverBackground);
 }
 
 .insrc-notepad-todos-forward-selected:disabled,
-.insrc-notepad-todos-handoff-list:disabled {
+.insrc-notepad-todos-forward-all:disabled {
 	opacity: 0.5;
 	cursor: default;
 }
