@@ -18,12 +18,16 @@
  * when a tool asks for a connection by id.
  */
 
+import { access } from 'node:fs/promises';
+import { constants as fsConst } from 'node:fs';
+import { isAbsolute, relative, resolve } from 'node:path';
+
 import { getLogger } from '../../shared/logger.js';
 import type {
 	ConnectionConfig,
 	Driver,
 } from '../../shared/db-driver.js';
-import { getFactory } from './registry.js';
+import { familyOf, getFactory } from './registry.js';
 import { resolveSecrets } from './secrets.js';
 import { loadConnections } from './config.js';
 
@@ -144,7 +148,8 @@ export class DriverPool {
 				`(connection '${entry.config.id}')`,
 			);
 		}
-		const resolvedConfig = await resolveConfigSecrets(entry.config);
+		const withSecrets = await resolveConfigSecrets(entry.config);
+		const resolvedConfig = await resolveConfigPath(withSecrets, this.repoPath);
 		log.debug(
 			{ id: entry.config.id, kind: entry.config.kind },
 			'building driver',
@@ -185,7 +190,7 @@ export class DriverPool {
 }
 
 // ---------------------------------------------------------------------------
-// Secret resolution on config copy
+// Pre-build config transforms: secret resolution + file-path resolution
 // ---------------------------------------------------------------------------
 
 async function resolveConfigSecrets(
@@ -196,6 +201,32 @@ async function resolveConfigSecrets(
 	}
 	const url = await resolveSecrets(config.url);
 	return { ...config, url };
+}
+
+/**
+ * For file-family connections, convert the (repo-relative) `path`
+ * into an absolute path. Rejects paths that escape the repo root --
+ * Phase 1 applies this unconditionally; the fs-access gate
+ * (analyzer design §7.3) will relax this later.
+ */
+async function resolveConfigPath(
+	config: ConnectionConfig,
+	repoRoot: string,
+): Promise<ConnectionConfig> {
+	if (familyOf(config.kind) !== 'file') { return config; }
+	if (config.path === undefined) {
+		throw new Error(`data-driver: file connection '${config.id}' missing path`);
+	}
+	const abs = isAbsolute(config.path) ? config.path : resolve(repoRoot, config.path);
+	const rel = relative(repoRoot, abs);
+	if (rel.startsWith('..') || isAbsolute(rel)) {
+		throw new Error(
+			`data-driver: file connection '${config.id}' path '${config.path}' ` +
+			`resolves outside the repo root`,
+		);
+	}
+	await access(abs, fsConst.R_OK);
+	return { ...config, path: abs };
 }
 
 // ---------------------------------------------------------------------------

@@ -140,6 +140,12 @@ async function main(): Promise<void> {
 	const { registerBuiltinTools } = await import('./tools/builtins/index.js');
 	registerBuiltinTools();
 
+	// 6c. Register data-driver kinds (plans/data-driver.md phase 1).
+	//     Drivers self-register at import time; pulling the barrel
+	//     once is the bootstrap.
+	const { registerBuiltinDataDrivers } = await import('./db/drivers/index.js');
+	registerBuiltinDataDrivers();
+
 	// 7. Start IPC server
 	const server = new IpcServer({
 		'repo.add': async (params) => {
