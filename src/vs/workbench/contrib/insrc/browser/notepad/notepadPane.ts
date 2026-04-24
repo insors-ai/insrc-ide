@@ -7,7 +7,6 @@ import './media/notepadTodos.css';
 import './media/notepad.css';
 import * as dom from '../../../../../base/browser/dom.js';
 import type { IDisposable } from '../../../../../base/common/lifecycle.js';
-import { Codicon } from '../../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import type { IEditorOpenContext } from '../../../../common/editor.js';
@@ -26,46 +25,22 @@ import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcTodosService,
 	type TodoItem,
-	type TodoItemStatus,
 	type TodoList,
 	type TodoOwner,
 } from '../../common/todosService.js';
 import { NotepadEditorInput } from './notepadInput.js';
 import { PromptNotepadProvider } from './promptNotepadProvider.js';
+import {
+	FORWARD_TARGET_FAMILIES, formatListMeta, iconForItemStatus, nextStatus,
+} from '../shared/todosViewHelpers.js';
 
 // ---------------------------------------------------------------------------
-// Constants + helpers
+// Constants
 // ---------------------------------------------------------------------------
 
 const ACTIVE_TAB_KEY_PREFIX = 'insrc.notepad.activeTab:';
 
 type Tab = 'draft' | 'todos';
-
-/** Agent families the user can forward TODO snapshots to. */
-const FORWARD_TARGET_FAMILIES: readonly TodoOwner[] = [
-	'chat', 'implementation', 'brainstorm', 'designer',
-	'planner', 'tester', 'research', 'debugging', 'deployment',
-];
-
-function iconForItemStatus(status: TodoItemStatus): ThemeIcon {
-	switch (status) {
-		case 'pending': return Codicon.circleLargeOutline;
-		case 'in_progress': return Codicon.play;
-		case 'blocked': return Codicon.warning;
-		case 'completed': return Codicon.check;
-		case 'cancelled': return Codicon.close;
-	}
-}
-
-function nextStatus(current: TodoItemStatus): TodoItemStatus {
-	switch (current) {
-		case 'pending': return 'in_progress';
-		case 'in_progress': return 'completed';
-		case 'completed': return 'pending';
-		case 'blocked': return 'in_progress';
-		case 'cancelled': return 'pending';
-	}
-}
 
 // ---------------------------------------------------------------------------
 // NotepadEditorPane
@@ -457,18 +432,7 @@ export class NotepadEditorPane extends EditorPane {
 	}
 
 	private _metaText(list: TodoList): string {
-		const total = list.items.length;
-		const pending = list.items.filter(it => it.status !== 'completed' && it.status !== 'cancelled').length;
-		const parts: string[] = [`${total} item${total === 1 ? '' : 's'}`];
-		if (pending > 0) {
-			parts.push(`${pending} pending`);
-		}
-		if (list.status === 'archived') {
-			parts.push('archived');
-		} else if (list.status === 'completed') {
-			parts.push('complete');
-		}
-		return parts.join(' · ');
+		return formatListMeta(list);
 	}
 
 	// -- Forwarding (withTodo) ----------------------------------------------

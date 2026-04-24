@@ -13,7 +13,6 @@ import { IEditorService } from '../../../../services/editor/common/editorService
 import {
 	IInsrcTodosService,
 	type TodoItem,
-	type TodoItemStatus,
 	type TodoList,
 } from '../../common/todosService.js';
 import { TodosEditorInput } from '../todos/todosInput.js';
@@ -31,13 +30,10 @@ import { TodosEditorInput } from '../todos/todosInput.js';
  * just instantiates it once and hands over a parent DOM node.
  */
 
-const ITEM_ICON: Readonly<Record<TodoItemStatus, ThemeIcon>> = {
-	pending: Codicon.circleLargeOutline,
-	in_progress: Codicon.play,
-	blocked: Codicon.warning,
-	completed: Codicon.check,
-	cancelled: Codicon.close,
-};
+// Icon + meta-line helpers come from the shared view helpers so the
+// chat widget stays consistent with the todos pane + notepad pane
+// (plans/todo-framework.md Phase 8).
+import { formatListMeta, iconForItemStatus } from '../shared/todosViewHelpers.js';
 
 interface CardHandles {
 	readonly root: HTMLElement;
@@ -229,7 +225,7 @@ export class ChatTodosWidget extends Disposable {
 		const row = dom.$('.insrc-chat-todos-item', { 'data-item-id': item.id });
 		row.classList.add(`item-status-${item.status}`);
 		const icon = dom.append(row, dom.$('span.insrc-chat-todos-item-icon'));
-		icon.classList.add(...ThemeIcon.asClassNameArray(ITEM_ICON[item.status]));
+		icon.classList.add(...ThemeIcon.asClassNameArray(iconForItemStatus(item.status)));
 		const title = dom.append(row, dom.$('span.insrc-chat-todos-item-title'));
 		title.textContent = item.title;
 		if (item.status === 'blocked' && item.blockedReason !== undefined && item.blockedReason.length > 0) {
@@ -256,18 +252,7 @@ export class ChatTodosWidget extends Disposable {
 	}
 
 	private _metaText(list: TodoList): string {
-		const total = list.items.length;
-		const pending = list.items.filter(it => it.status !== 'completed' && it.status !== 'cancelled').length;
-		const parts: string[] = [`${total} item${total === 1 ? '' : 's'}`];
-		if (pending > 0) {
-			parts.push(`${pending} pending`);
-		}
-		if (list.status === 'archived') {
-			parts.push('archived');
-		} else if (list.status === 'completed') {
-			parts.push('complete');
-		}
-		return parts.join(' · ');
+		return formatListMeta(list);
 	}
 
 	private _toggle(_listId: string, handles: CardHandles): void {

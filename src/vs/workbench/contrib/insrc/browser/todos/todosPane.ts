@@ -23,39 +23,13 @@ import {
 	IInsrcTodosService,
 	type TodoComment,
 	type TodoItem,
-	type TodoItemStatus,
 	type TodoList,
 	type TodoOwner,
 } from '../../common/todosService.js';
 import { TodosEditorInput } from './todosInput.js';
-
-// ---------------------------------------------------------------------------
-// Icons + helpers
-// ---------------------------------------------------------------------------
-
-function iconForItemStatus(status: TodoItemStatus): ThemeIcon {
-	switch (status) {
-		case 'pending': return Codicon.circleLargeOutline;
-		case 'in_progress': return Codicon.play;
-		case 'blocked': return Codicon.warning;
-		case 'completed': return Codicon.check;
-		case 'cancelled': return Codicon.close;
-	}
-}
-
-function isTerminalItem(status: TodoItemStatus): boolean {
-	return status === 'completed' || status === 'cancelled';
-}
-
-function defaultCollapsedForList(list: TodoList): boolean {
-	if (list.owner === 'system') {
-		return true;
-	}
-	if (list.items.length === 0) {
-		return false;
-	}
-	return list.items.every(it => isTerminalItem(it.status));
-}
+import {
+	defaultCollapsedForList, formatListMeta, iconForItemStatus,
+} from '../shared/todosViewHelpers.js';
 
 // ---------------------------------------------------------------------------
 // TodosEditorPane
@@ -422,19 +396,7 @@ export class TodosEditorPane extends EditorPane {
 	}
 
 	private _metaLine(list: TodoList): string {
-		const pending = list.items.filter(it => !isTerminalItem(it.status)).length;
-		const total = list.items.length;
-		const parts: string[] = [];
-		parts.push(`${total} item${total === 1 ? '' : 's'}`);
-		if (pending > 0) {
-			parts.push(`${pending} pending`);
-		}
-		if (list.status === 'archived') {
-			parts.push('archived');
-		} else if (list.status === 'completed') {
-			parts.push('complete');
-		}
-		return parts.join(' · ');
+		return formatListMeta(list);
 	}
 
 	private _renderOwner(owner: TodoOwner): string {
