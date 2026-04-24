@@ -20,6 +20,7 @@ import { ICodeEditor } from '../../../../../editor/browser/editorBrowser.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
+import { NotepadEditorInput } from './notepadInput.js';
 
 let notepadProvider: PromptNotepadProvider | undefined;
 
@@ -104,8 +105,11 @@ registerAction2(class extends Action2 {
 	async run(accessor: ServicesAccessor): Promise<void> {
 		if (!notepadProvider) { return; }
 		const editorService = accessor.get(IEditorService);
-		const { uri } = notepadProvider.getOrCreateModel('1');
-		await editorService.openEditor({ resource: uri, options: { pinned: true } });
+		// Open the unified Notepad pane (Draft + TODOs tabs in one surface).
+		// The underlying text model is still served by PromptNotepadProvider
+		// via the insrc-prompt: scheme; the custom pane attaches it to an
+		// embedded Monaco editor for the Draft tab.
+		await editorService.openEditor(new NotepadEditorInput('1'));
 	}
 });
 
@@ -296,9 +300,9 @@ registerAction2(class extends Action2 {
 		try {
 			const content = await daemonService.rpc<string>('template.load', { name: pick.label });
 			if (content) {
-				const { model, uri } = notepadProvider.getOrCreateModel('1');
+				const { model } = notepadProvider.getOrCreateModel('1');
 				model.setValue(content);
-				await editorService.openEditor({ resource: uri, options: { pinned: true } });
+				await editorService.openEditor(new NotepadEditorInput('1'));
 			}
 		} catch {
 			notificationService.error('Failed to load template.');

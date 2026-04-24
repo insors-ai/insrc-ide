@@ -149,15 +149,15 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(TodosEditorInput)],
 );
 
-// Notepad "My TODOs" pane (plans/todo-framework.md Phase 9). Writable
-// surface for user-owned todo lists; agents never see these unless
-// the user explicitly transfers a list or forwards items via withTodo.
-import { NotepadTodosEditorPane } from './notepad/notepadTodosPane.js';
-import { NotepadTodosEditorInput } from './notepad/notepadTodosInput.js';
-import './notepad/notepadTodosCommands.js';
+// Unified Notepad pane (plans/todo-framework.md Phase 9 follow-up).
+// One pane, two tabs: Draft (Monaco markdown editor) + TODOs (user-
+// owned structured lists). Agents never see user-owned lists unless
+// the user explicitly forwards items via withTodo.
+import { NotepadEditorPane } from './notepad/notepadPane.js';
+import { NotepadEditorInput } from './notepad/notepadInput.js';
 editorPaneRegistry.registerEditorPane(
-	EditorPaneDescriptor.create(NotepadTodosEditorPane, NotepadTodosEditorPane.ID, 'My TODOs'),
-	[new SyncDescriptor(NotepadTodosEditorInput)],
+	EditorPaneDescriptor.create(NotepadEditorPane, NotepadEditorPane.ID, 'Prompt Notepad'),
+	[new SyncDescriptor(NotepadEditorInput)],
 );
 
 // Brainstorm flow: routes gates to the matching per-step editor pane, falling

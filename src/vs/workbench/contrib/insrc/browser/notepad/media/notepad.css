@@ -1,0 +1,122 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* Unified prompt notepad pane (plans/todo-framework.md Phase 9
+ * follow-up). One pane, two tabs: Draft (Monaco markdown editor)
+ * and TODOs (user-owned structured lists). */
+
+.insrc-notepad {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	overflow: hidden;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+}
+
+.insrc-notepad-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 16px;
+	border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	background-color: var(--vscode-editorWidget-background);
+	flex: 0 0 auto;
+}
+
+.insrc-notepad-header-left {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+.insrc-notepad-title {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.insrc-notepad-tabs {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	overflow: hidden;
+}
+
+.insrc-notepad-tab {
+	background-color: transparent;
+	color: var(--vscode-foreground);
+	border: none;
+	padding: 4px 12px;
+	font-size: 12px;
+	cursor: pointer;
+	font-family: inherit;
+}
+
+.insrc-notepad-tab:hover {
+	background-color: var(--vscode-list-hoverBackground);
+}
+
+.insrc-notepad-tab.active {
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.insrc-notepad-header-right {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.insrc-notepad-add-todo {
+	padding: 4px 10px;
+	font-size: 12px;
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 3px;
+	cursor: pointer;
+	font-family: inherit;
+}
+
+.insrc-notepad-add-todo:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}
+
+.insrc-notepad-main {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	position: relative;
+}
+
+.insrc-notepad-draft-body {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+.insrc-notepad-editor-container {
+	flex: 1 1 auto;
+	overflow: hidden;
+}
+
+.insrc-notepad-todos-body {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	padding: 16px;
+}
+
+/* Lists area reuses the pre-existing notepadTodos.css rules for
+ * .insrc-notepad-todos-lists / .insrc-notepad-todos-card /
+ * .insrc-notepad-todos-item / .insrc-notepad-todos-empty etc. */

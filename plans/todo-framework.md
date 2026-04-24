@@ -34,22 +34,32 @@ unifies that pattern into one framework the agents consume.
 
 ## Status
 
-| Phase | Scope                                                         | Status |
-|-------|---------------------------------------------------------------|--------|
-| 0     | Central agent-family registry (prerequisite, replaces variant refs) | pending |
-| 1     | Data model + shared types + DB schema                         | pending |
-| 2     | Daemon RPC surface (todos.list/create/update/archive)         | pending |
-| 2b    | `agent.discard` integration                                   | pending |
-| 3     | Agent hooks (read/mutate todos from any controller)           | pending |
-| 4     | Browser service + event stream                                | pending |
-| 5a    | Todos editor pane (EditorInput + EditorPane, per session)     | pending |
-| 5b    | Inline chat todos widget (agent-owned lists in transcript)    | pending |
-| 5c    | Runs sidebar badge (pending-item count, click-to-open)        | pending |
-| 5d    | Comments: append-only user annotations on agent items         | pending |
-| 6     | Migration proof: port the delegate variant's plan list first  | pending |
-| 7     | Broader family adoption (brainstorm / designer / planner)     | pending |
-| 8     | Factor shared pane-scaffolding + markdown widget with notepad | pending |
-| 9     | User-owned TODOs in notepad + `withTodo` sub-agent invocation | pending |
+| Phase | Scope                                                                  | Status |
+|-------|------------------------------------------------------------------------|--------|
+| 0     | Central agent-family registry (prerequisite, replaces variant refs)    | done (`11b338dab98`) |
+| 1     | Data model + shared types + DB schema                                  | done (`11b338dab98`) |
+| 2     | Daemon RPC surface (todos.list/create/update/archive)                  | done (`5fa4e5c3e0c`) |
+| 2b    | `agent.discard` integration                                            | done (`5fa4e5c3e0c`) |
+| 3     | Agent hooks (read/mutate todos from any controller)                    | done (`5fa4e5c3e0c`) |
+| 4     | Browser service + event stream                                         | done (`a3896790a20`) |
+| 5a    | Todos editor pane (EditorInput + EditorPane, per session)              | done (`66547d52e98`) |
+| 5b    | Inline chat todos widget (agent-owned lists in transcript)             | done (`66547d52e98`) |
+| 5c    | Runs sidebar badge (pending-item count, click-to-open)                 | done (`66547d52e98`) |
+| 5d    | Comments: append-only user annotations on agent items                  | done (`66547d52e98`) |
+| 6     | Migration proof: port the delegate variant's plan list first           | done (`ab919c5580f`) |
+| 7     | Broader family adoption (brainstorm / designer / planner)              | pending |
+| 8     | Factor shared pane-scaffolding + markdown widget with notepad          | pending |
+| 9     | User-owned TODOs in notepad + `withTodo` sub-agent invocation          | done (`ce5ed510690` + `0b8f5dac19f` + unified-notepad pane follow-up) |
+
+**Pending follow-ups (not formal phases):**
+- Per-family `withTodo` consumers -- Phase 9 landed the RPC + types
+  + browser wiring; every `todos.forwardToAgent` currently returns
+  a stub `in_progress` response. Each family needs its own handler
+  reading `input.todos`. Plan body says planner is the first
+  consumer.
+- Proper `todos.deleteList` RPC -- the unified notepad's "Delete"
+  button currently archives as a stand-in.
+- "Last forwarded to X" hint on items (UX gap; meta-driven badge).
 
 ---
 

@@ -15,6 +15,7 @@ import type { ITextModel } from '../../../../../editor/common/model.js';
 import { PromptNotepadProvider } from './promptNotepadProvider.js';
 import { PromptNotepadCodeLensProvider } from './promptNotepadCodeLens.js';
 import { setNotepadProvider } from './promptNotepadCommands.js';
+import { NotepadEditorPane } from './notepadPane.js';
 
 const SCHEME = 'insrc-prompt';
 
@@ -67,6 +68,9 @@ export class PromptNotepadContribution extends Disposable implements IWorkbenchC
 		// Create the notepad provider
 		const provider = this._register(instantiationService.createInstance(PromptNotepadProvider));
 		setNotepadProvider(provider);
+		// Hand the provider to the unified NotepadEditorPane so it can
+		// attach the existing text model to its embedded Monaco editor.
+		NotepadEditorPane.setProvider(provider);
 
 		// Register in-memory file system provider (makes editor writable)
 		const fsProvider = new NotepadFileSystemProvider();
