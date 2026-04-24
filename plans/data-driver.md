@@ -62,12 +62,12 @@ and in the code-analyzer design doc's
 
 | Phase | Scope                                                                   | Status |
 |-------|-------------------------------------------------------------------------|--------|
-| 0     | Foundations: config schema, driver registry, family interfaces, keychain integration | todo |
-| 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | todo |
+| 0     | Foundations: config schema, driver registry, family interfaces, keychain integration | done (225e10ec68a) |
+| 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers compiled + registered; Prisma schema.prisma fast path + live-DB integration tests still open. |
 | 2     | Setup UX: palette commands, Model Providers-style pane, connection tester           | todo |
 | 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | todo |
-| 4     | Guardrails: raw-query rejection, row/time caps, PII masking, namespace scoping      | todo |
-| 5     | Extended drivers: MSSQL, Oracle, DynamoDB, etcd, ClickHouse, Parquet, TSV           | todo |
+| 4     | Guardrails: raw-query rejection, row/time caps, PII masking, namespace scoping      | partial -- caps + raw-query denylist + namespace scoping landed in the drivers (phase 1); PII masking + per-repo opt-in short-circuit still todo. |
+| 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB                  | todo |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
 (with commit sha or "uncommitted"), `partial` with deferred scope
@@ -564,35 +564,35 @@ driver module + a registry line; the tool surface does not grow.
 ### Phase 0 -- Foundations
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `db-connections.json` schema + loader      | todo   |       |
-| Driver registry (`registerDriver`)         | todo   |       |
-| `BaseDriver` + family interfaces           | todo   |       |
-| Keystore integration (`${secret:...}`)     | todo   |       |
-| Connection lifecycle (pool, idle-close)    | todo   |       |
+| `db-connections.json` schema + loader      | done (225e10ec68a) | `daemon/db/config.ts`. Per-repo at `~/.insrc/repos/<repoId>/db-connections.json`; repoId = sha256 of repo path matching the indexer's `repo` entity id. |
+| Driver registry (`registerDriver`)         | done (225e10ec68a) | `daemon/db/registry.ts`. Module singleton; re-registration logs a warning + replaces (useful for tests). |
+| `BaseDriver` + family interfaces           | done (225e10ec68a) | `shared/db-driver.ts` -- RdbmsDriver / KvDriver / FileDriver + result shapes. Shared with the browser pane. |
+| Keystore integration (`${secret:...}`)     | done (225e10ec68a) | `daemon/db/secrets.ts`. `extractUrlPassword` + `resolveSecrets` round-trip; re-uses the existing `keytar`-backed keystore. |
+| Connection lifecycle (pool, idle-close)    | done (225e10ec68a) | `daemon/db/pool.ts`. Per-repo `DriverPool`; 10-minute idle close; in-flight build promise so concurrent first-calls share one build. |
 
 ### Phase 1 -- Core drivers
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Postgres driver (`pg`)                     | todo   |       |
-| MySQL driver (`mysql2`)                    | todo   |       |
-| SQLite driver (`better-sqlite3`)           | todo   |       |
-| MSSQL driver (`tedious` + `tarn`)          | todo   |       |
-| Oracle driver (`oracledb`)                 | todo   | Instant Client detection in setup UX |
-| RDBMS shared helpers + prisma fast path    | todo   |       |
-| Redis driver (`ioredis`)                   | todo   |       |
-| MongoDB driver (`mongodb`)                 | todo   |       |
-| Cassandra driver (`cassandra-driver`)      | todo   | Multi-part PK handling in `get` / `scan` |
-| NATS KV driver (`@nats-io/kv`)             | todo   | Subject-wildcard scan patterns |
-| KV shared helpers (namespace + caps)       | todo   |       |
-| CSV driver (`csv-parse`)                   | todo   |       |
-| JSONL driver (stdlib stream)               | todo   |       |
-| JSON single-doc driver (stdlib)            | todo   |       |
-| Excel driver (`exceljs`)                   | todo   | Per-sheet `target` dispatch |
-| Avro driver (`avsc`)                       | todo   | Header schema -> zero-cost describe |
-| Arrow / Feather driver (`apache-arrow`)    | todo   | IPC stream + file, memory-mapped reads |
-| BSON driver (`bson`)                       | todo   | `mongodump` doc-stream layout |
-| Fixed-width driver (hand-rolled)           | todo   | `options.columns` spec required |
-| Per-driver unit + docker tests             | todo   |       |
+| Postgres driver (`pg`)                     | done (0b558c339d2) | `drivers/pg.ts`. Pool(max=3). Introspection: `information_schema.columns` + `pg_index` (PK) + constraint_column_usage (FK). |
+| MySQL driver (`mysql2`)                    | done (4ddc3afbf01) | `drivers/mysql.ts`. Covers `mysql` + `mariadb`. `information_schema.columns` + `KEY_COLUMN_USAGE` for PK + FK. |
+| SQLite driver (`better-sqlite3`)           | done (4ddc3afbf01) | `drivers/sqlite.ts`. Read-only (`readonly:true` + `pragma query_only=ON`). Introspection via PRAGMA `table_info` + `foreign_key_list`. |
+| MSSQL driver (`tedious` + `tarn`)          | done (8015a3c3ed3) | `drivers/mssql.ts`. SQL auth via URL. Pooling via `tarn`. Introspection: `sys.columns` + `sys.indexes`. TOP N sampling via MSSQL dialect. |
+| Oracle driver (`oracledb`)                 | done (8015a3c3ed3) | `drivers/oracle.ts`. Thin mode (default 6.x; no Instant Client for 12c+). Introspection: `ALL_TAB_COLUMNS` + `ALL_CONSTRAINTS` + `ALL_CONS_COLUMNS`. `FETCH FIRST N ROWS ONLY`. |
+| RDBMS shared helpers + prisma fast path    | partial (0b558c339d2) | `drivers/rdbms-common.ts` has dialect quoting + parametrised where-compile + DML/DDL denylist + withTimeout wrapper. **Prisma schema.prisma branch still todo** -- wiring to the artifact-kinds regex parser is a follow-up. |
+| Redis driver (`ioredis`)                   | done (0b558c339d2) | `drivers/redis.ts`. Covers `redis` + `valkey` + `keydb`. Non-blocking SCAN MATCH; JSON auto-decode for GET values. |
+| MongoDB driver (`mongodb`)                 | done (4ddc3afbf01) | `drivers/mongodb.ts`. KV-family. Keys are `{db, collection, _id}`; target via `prefix="<db>.<collection>"`. |
+| Cassandra driver (`cassandra-driver`)      | done (8015a3c3ed3) | `drivers/cassandra.ts`. Multi-part PKs resolved via `system_schema.columns`; scan selects only PK cols with LIMIT, no ALLOW FILTERING. Config needs options.contactPoints + options.localDataCenter. |
+| NATS KV driver (`@nats-io/kv`)             | done (8015a3c3ed3) | `drivers/nats.ts`. JetStream KV bucket only. Connect via `@nats-io/transport-node`. Subject-wildcard scan patterns; UTF-8 + JSON value decode. |
+| KV shared helpers (namespace + caps)       | done (0b558c339d2) | `drivers/kv-common.ts`. Namespace whitelist enforcement + scan/sample-shape clamps + inferShape (nested objects, arrays, binary detection). |
+| CSV driver (`csv-parse`)                   | done (0b558c339d2) | `drivers/csv.ts`. Streaming reader with early-exit on limit. Header required; type inference from first 100 rows. TSV registers with delimiter='\t'. |
+| JSONL driver (stdlib stream)               | done (4ddc3afbf01) | `drivers/jsonl.ts`. Covers `jsonl` + `ndjson`. node:readline streaming; typed line-number error on malformed JSON. |
+| JSON single-doc driver (stdlib)            | done (4ddc3afbf01) | `drivers/json.ts`. Dual-mode: array-of-objects -> rdbms-shape; object -> kv-shape (get with JSON pointer). |
+| Excel driver (`exceljs`)                   | done (8015a3c3ed3) | `drivers/xlsx.ts`. Per-sheet `target` dispatch; reads header row for column names; in-memory filter (exceljs streaming+filter doesn't mix). |
+| Avro driver (`avsc`)                       | done (8015a3c3ed3) | `drivers/avro.ts`. Header-schema driven `describe` (zero-cost); union types collapse to non-null branch; streamed decode for sample. |
+| Arrow / Feather driver (`apache-arrow`)    | done (8015a3c3ed3) | `drivers/arrow.ts`. Covers `.arrow` + `.feather`. Schema from IPC footer; sample materializes up to N rows + applies WHERE in memory. |
+| BSON driver (`bson`)                       | done (8015a3c3ed3) | `drivers/bson.ts`. Length-prefixed doc stream (mongodump layout); describe samples first 100 docs + merges fields. |
+| Fixed-width driver (hand-rolled)           | done (8015a3c3ed3) | `drivers/fixed-width.ts`. No lib dep; requires `options.columns: {name, start, length, type}[]`. Type coercion + encoding + skipFirstLine options. |
+| Per-driver unit + docker tests             | partial (0b558c339d2, 4ddc3afbf01) | Unit tests landed for rdbms-common + kv-common + csv + jsonl + json + sqlite (end-to-end via pool). Live-DB integration tests against docker-compose'd Postgres / MySQL / MSSQL / Oracle / Redis / MongoDB / Cassandra / NATS still **todo**. |
 
 ### Phase 2 -- Setup UX
 | Item                                       | Status | Notes |
