@@ -47,7 +47,7 @@ unifies that pattern into one framework the agents consume.
 | 5c    | Runs sidebar badge (pending-item count, click-to-open)                 | done (`66547d52e98`) |
 | 5d    | Comments: append-only user annotations on agent items                  | done (`66547d52e98`) |
 | 6     | Migration proof: port the delegate variant's plan list first           | done (`ab919c5580f`) |
-| 7     | Broader family adoption (brainstorm / designer / planner)              | pending |
+| 7     | Broader family adoption (brainstorm / designer / planner)              | done (planner `a42ab4b0013` + designer `dbc48582719` + brainstorm `32c3901868b`) |
 | 8     | Factor shared pane-scaffolding + markdown widget with notepad          | pending |
 | 9     | User-owned TODOs in notepad + `withTodo` sub-agent invocation          | done (`ce5ed510690` + `0b8f5dac19f` + unified-notepad pane follow-up) |
 
@@ -57,6 +57,13 @@ unifies that pattern into one framework the agents consume.
   a stub `in_progress` response. Each family needs its own handler
   reading `input.todos`. Plan body says planner is the first
   consumer.
+- Per-step status sync for Phase 7 mirrors -- planner / designer /
+  brainstorm currently create their items at queue-population time
+  and leave them as `pending`. Status sync (idea accepted ->
+  completed, theme-reviewed -> completed, requirement done ->
+  completed, plan step done -> completed) needs a per-item id map
+  on each agent's state + helper at each transition. Pattern
+  already established by delegate's Phase 6 mirror.
 - Proper `todos.deleteList` RPC -- the unified notepad's "Delete"
   button currently archives as a stand-in.
 - "Last forwarded to X" hint on items (UX gap; meta-driven badge).
