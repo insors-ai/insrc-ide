@@ -1,0 +1,248 @@
+/**
+ * MSSQL driver (kind: `mssql`).
+ *
+ * Uses `tedious` + `tarn` for pooling. Introspection via `sys.columns`
+ * + `sys.types` + `sys.indexes`; sample emits `SELECT TOP N` via the
+ * MSSQL dialect in rdbms-common.
+ *
+ * SQL auth via URL (`mssql://user:pass@host/db`). Integrated / Azure
+ * AD auth would need explicit config on `options` and is deferred
+ * past phase 1.
+ */
+
+import { Connection, TYPES } from 'tedious';
+import type { ConnectionConfiguration, Request as MssqlRequest } from 'tedious';
+import { Pool } from 'tarn';
+
+interface ColumnValue {
+	readonly metadata: { readonly colName: string };
+	readonly value: unknown;
+}
+
+import { getLogger } from '../../../shared/logger.js';
+import type {
+	ColumnDescription,
+	ConnectionConfig,
+	RdbmsDriver,
+	SampleOpts,
+	SampleResult,
+	SchemaDescription,
+} from '../../../shared/db-driver.js';
+import { registerDriver } from '../registry.js';
+import {
+	MSSQL_DIALECT,
+	SAMPLE_TIMEOUT_MS,
+	buildSampleSql,
+	quoteTarget,
+	withTimeout,
+} from './rdbms-common.js';
+
+const log = getLogger('db-mssql');
+
+interface MssqlParams {
+	readonly host: string;
+	readonly port: number;
+	readonly user: string;
+	readonly password: string;
+	readonly database: string;
+}
+
+function parseUrl(url: string): MssqlParams {
+	const u = new URL(url);
+	return {
+		host: u.hostname,
+		port: u.port === '' ? 1433 : Number(u.port),
+		user: decodeURIComponent(u.username),
+		password: decodeURIComponent(u.password),
+		database: u.pathname === '' || u.pathname === '/' ? '' : u.pathname.slice(1),
+	};
+}
+
+function buildConnectionConfig(p: MssqlParams): ConnectionConfiguration {
+	return {
+		server: p.host,
+		authentication: {
+			type: 'default',
+			options: { userName: p.user, password: p.password },
+		},
+		options: {
+			port: p.port,
+			database: p.database,
+			encrypt: true,
+			trustServerCertificate: true,
+			connectTimeout: SAMPLE_TIMEOUT_MS,
+		},
+	};
+}
+
+class MssqlDriver implements RdbmsDriver {
+	readonly family = 'rdbms' as const;
+	readonly kind = 'mssql';
+
+	private readonly pool: Pool<Connection>;
+	private readonly schemaCache = new Map<string, SchemaDescription>();
+
+	constructor(readonly id: string, url: string) {
+		const cfg = buildConnectionConfig(parseUrl(url));
+		this.pool = new Pool<Connection>({
+			create: () => new Promise((resolveConn, rejectConn) => {
+				const conn = new Connection(cfg);
+				conn.on('connect', (err) => {
+					if (err !== undefined && err !== null) { rejectConn(err); return; }
+					resolveConn(conn);
+				});
+				conn.connect();
+			}),
+			destroy: (conn) => {
+				conn.close();
+				return Promise.resolve();
+			},
+			validate: (conn) => !conn.closed,
+			min: 0,
+			max: 3,
+			idleTimeoutMillis: 30_000,
+		});
+	}
+
+	async describe(target: string): Promise<SchemaDescription> {
+		const cached = this.schemaCache.get(target);
+		if (cached !== undefined) { return cached; }
+
+		const { schema, table } = splitTarget(target);
+		const columns = await this.fetchColumns(schema, table);
+		if (columns.length === 0) { throw new Error(`data-driver: table '${target}' not found`); }
+
+		const pk = await this.fetchPrimaryKey(schema, table);
+		for (const col of columns) {
+			if (pk.has(col.name)) { (col as { primaryKey?: boolean }).primaryKey = true; }
+		}
+
+		const result: SchemaDescription = { target, columns, source: 'introspect' };
+		this.schemaCache.set(target, result);
+		return result;
+	}
+
+	async sample(target: string, opts: SampleOpts): Promise<SampleResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const { text, values } = buildSampleSql(target, opts, cols, MSSQL_DIALECT);
+		log.debug({ id: this.id, text }, 'sample query');
+		const rows = await withTimeout(
+			this.run(text, values),
+			SAMPLE_TIMEOUT_MS,
+		);
+		const limit = Math.min(opts.limit, 50);
+		return {
+			target,
+			columns: cols,
+			rows: rows as readonly Readonly<Record<string, unknown>>[],
+			truncated: rows.length >= limit,
+		};
+	}
+
+	async close(): Promise<void> {
+		await this.pool.destroy();
+	}
+
+	// -------------------------------------------------------------------------
+
+	private async fetchColumns(
+		schema: string | null,
+		table: string,
+	): Promise<ColumnDescription[]> {
+		const sql = `
+			SELECT c.name AS col_name,
+			       t.name AS col_type,
+			       c.is_nullable AS is_nullable
+			FROM sys.columns c
+			JOIN sys.tables tb ON tb.object_id = c.object_id
+			JOIN sys.schemas sc ON sc.schema_id = tb.schema_id
+			JOIN sys.types  t ON t.user_type_id = c.user_type_id
+			WHERE tb.name = @p1 AND sc.name = COALESCE(@p2, SCHEMA_NAME())
+			ORDER BY c.column_id
+		`;
+		const rows = await this.run(sql, [table, schema]);
+		return rows.map((r) => ({
+			name: r['col_name'] as string,
+			type: r['col_type'] as string,
+			nullable: r['is_nullable'] === true || r['is_nullable'] === 1,
+		}));
+	}
+
+	private async fetchPrimaryKey(
+		schema: string | null,
+		table: string,
+	): Promise<Set<string>> {
+		const sql = `
+			SELECT c.name AS col_name
+			FROM sys.indexes i
+			JOIN sys.tables tb ON tb.object_id = i.object_id
+			JOIN sys.schemas sc ON sc.schema_id = tb.schema_id
+			JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+			JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+			WHERE i.is_primary_key = 1
+			  AND tb.name = @p1 AND sc.name = COALESCE(@p2, SCHEMA_NAME())
+		`;
+		const rows = await this.run(sql, [table, schema]);
+		return new Set(rows.map(r => r['col_name'] as string));
+	}
+
+	private async run(
+		sql: string,
+		params: readonly unknown[],
+	): Promise<Record<string, unknown>[]> {
+		const conn = await this.pool.acquire().promise;
+		try {
+			const { Request } = await import('tedious');
+			return await new Promise<Record<string, unknown>[]>((resolveRows, rejectRows) => {
+				const out: Record<string, unknown>[] = [];
+				const req: MssqlRequest = new Request(sql, (err) => {
+					if (err !== undefined && err !== null) { rejectRows(err); return; }
+					resolveRows(out);
+				});
+				for (let i = 0; i < params.length; i++) {
+					req.addParameter(`p${i + 1}`, bestType(params[i]), params[i] as never);
+				}
+				req.on('row', (columns: ColumnValue[]) => {
+					const row: Record<string, unknown> = {};
+					for (const c of columns) { row[c.metadata.colName] = c.value; }
+					out.push(row);
+				});
+				conn.execSql(req);
+			});
+		} finally {
+			this.pool.release(conn);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+
+function bestType(value: unknown): (typeof TYPES)[keyof typeof TYPES] {
+	if (value === null || value === undefined) { return TYPES.NVarChar; }
+	if (typeof value === 'number') {
+		return Number.isInteger(value) ? TYPES.Int : TYPES.Float;
+	}
+	if (typeof value === 'boolean') { return TYPES.Bit; }
+	return TYPES.NVarChar;
+}
+
+function splitTarget(target: string): { schema: string | null; table: string } {
+	quoteTarget(target, MSSQL_DIALECT);
+	if (target.includes('.')) {
+		const [schema, table] = target.split('.');
+		return { schema: schema ?? null, table: table ?? target };
+	}
+	return { schema: null, table: target };
+}
+
+registerDriver({
+	kind: 'mssql',
+	family: 'rdbms',
+	factory: async (config: ConnectionConfig) => {
+		if (config.url === undefined) {
+			throw new Error(`data-driver: mssql connection '${config.id}' missing url`);
+		}
+		return new MssqlDriver(config.id, config.url);
+	},
+});
