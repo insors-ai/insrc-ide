@@ -26,6 +26,8 @@ import type {
 } from '../../../../shared/artifacts.js';
 import { dispatch, type KindRunOpts } from '../../../../agent/tasks/artifacts/registry.js';
 import { persistArtifact } from '../../../../agent/tasks/artifacts/persistence.js';
+import { regenerateArtifact } from '../../../../agent/tasks/artifacts/regenerate.js';
+import { listTemplates } from '../../../../agent/tasks/artifacts/template-loader.js';
 
 const log = getLogger('tools-artifact');
 
@@ -262,6 +264,113 @@ const deploymentTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// artifact:regenerate -- iterative LLM-driven edit of an existing artifact
+// ---------------------------------------------------------------------------
+
+const REGENERATE_SCHEMA = {
+	type: 'object',
+	additionalProperties: false,
+	required: ['artifactId', 'edits'],
+	properties: {
+		artifactId: {
+			type: 'string',
+			description: 'The id of a prior artifact produced on this session (the `id` field on the ArtifactResult returned by any artifact:<kind> call).',
+		},
+		edits: {
+			type: 'string',
+			description: 'Natural-language edit request. Examples: "make it vertical instead of horizontal", "drop the Redis node", "add a retry loop between Service and Datastore".',
+		},
+	},
+} as const;
+
+const regenerateTool: Tool = {
+	id: 'artifact:regenerate',
+	description:
+		'Iteratively edit an existing artifact. Re-runs the LLM against the prior source + the user\'s edit request, ' +
+		'pushes the prior source onto the item\'s revision history (keep last 5), and emits the new rendered snippet. ' +
+		'Same kind as the original -- use this when the user wants to refine the previous diagram rather than generate a new one from the data source.',
+	inputSchema: REGENERATE_SCHEMA,
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const toolId = this.id;
+		const artifactId = typeof input['artifactId'] === 'string' ? input['artifactId'] : '';
+		const edits = typeof input['edits'] === 'string' ? input['edits'] : '';
+		if (artifactId === '' || edits === '') {
+			return fail(toolId, `artifact:regenerate requires non-empty 'artifactId' + 'edits'`);
+		}
+		if (deps.todos === undefined) {
+			return fail(
+				toolId,
+				'TodosApi missing from ToolDeps; cannot regenerate -- daemon wiring bug.',
+			);
+		}
+		try {
+			const result = await regenerateArtifact({
+				sessionId: deps.session.id,
+				artifactId,
+				edits,
+				api: deps.todos,
+				provider: deps.session.ollamaProvider,
+				repoRoot: deps.session.repoPath,
+			});
+			log.info({
+				artifactId,
+				newArtifactId: result.artifact.id,
+				kind: result.artifact.kind,
+				revisions: result.revisionCount,
+				sessionId: deps.session.id,
+			}, 'artifact regenerated');
+			return {
+				output:
+					`artifact '${result.artifact.kind}' regenerated: ` +
+					`id=${result.artifact.id}, revisions=${result.revisionCount}, edits="${edits.slice(0, 80)}"`,
+				format: 'markdown',
+				success: true,
+				data: result.artifact,
+			};
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			log.warn({ artifactId, err: msg }, 'artifact:regenerate failed');
+			return fail(toolId, msg);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
+// artifact:list_templates -- thin wrapper around the template loader
+// ---------------------------------------------------------------------------
+
+const LIST_TEMPLATES_SCHEMA = {
+	type: 'object',
+	additionalProperties: false,
+	properties: {},
+} as const;
+
+const listTemplatesTool: Tool = {
+	id: 'artifact:list_templates',
+	description:
+		'List the template resolution status for every artifact kind ' +
+		'(repo override / user override / bundled). Useful for agents that want to report ' +
+		'which templates a user has customised, or for a disambiguation prompt.',
+	inputSchema: LIST_TEMPLATES_SCHEMA,
+	async execute(_input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const opts = deps.session.repoPath !== undefined && deps.session.repoPath !== ''
+			? { repoRoot: deps.session.repoPath }
+			: {};
+		const infos = await listTemplates(opts);
+		const lines: string[] = ['| kind | layer | path |', '|---|---|---|'];
+		for (const info of infos) {
+			lines.push(`| ${info.kind} | ${info.layer} | ${info.path} |`);
+		}
+		return {
+			output: lines.join('\n'),
+			format: 'markdown',
+			success: true,
+			data: infos,
+		};
+	},
+};
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -271,4 +380,6 @@ export function registerArtifactTools(): void {
 	registerTool(sequenceTool);
 	registerTool(flowTool);
 	registerTool(deploymentTool);
+	registerTool(regenerateTool);
+	registerTool(listTemplatesTool);
 }

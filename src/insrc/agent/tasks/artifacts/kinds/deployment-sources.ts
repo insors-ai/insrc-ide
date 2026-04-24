@@ -14,11 +14,20 @@
  * Terraform is deferred to phase 3.
  */
 
+import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
-// Types supplied by the ambient declaration in `js-yaml.d.ts` next
-// to this file; see that file for the scope of what we type.
-import * as yaml from 'js-yaml';
+
+// `js-yaml` ships no type declarations in the daemon's transitive
+// install. We'd rather not pull in `@types/js-yaml` for two calls,
+// and the ambient `.d.ts` next to this file works under the daemon
+// tsconfig but not under the IDE's secondary compile pass. Load
+// through `createRequire` so the type system doesn't look up the
+// module at all; the runtime still resolves correctly.
+const yaml = createRequire(import.meta.url)('js-yaml') as {
+	load(input: string): unknown;
+	loadAll(input: string): unknown[];
+};
 
 // ---------------------------------------------------------------------------
 // Shared utilities
@@ -307,6 +316,11 @@ function parseK8sResource(doc: unknown): K8sResource | null {
 		}
 	}
 
+	// `stringArray` is defined above as a helper reserved for a
+	// future label-value parsing pass; mark as intentionally unused
+	// so strict tsc doesn't flag it.
+	void stringArray;
+
 	return {
 		kind,
 		name,
@@ -316,7 +330,6 @@ function parseK8sResource(doc: unknown): K8sResource | null {
 		backends: Array.from(new Set(backends)),
 		configRefs: Array.from(new Set(configRefs)),
 	};
-	void stringArray; // (reserved for future label-value parsing; prevents unused-import)
 }
 
 function k8sNodeShape(kind: string): [string, string] {

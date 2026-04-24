@@ -358,6 +358,12 @@ export interface TodosApi {
   markCancelled(itemId: string): Promise<TodoItem>;
   updateItemTitle(itemId: string, title: string): Promise<TodoItem>;
   updateItemDescription(itemId: string, description: string): Promise<TodoItem>;
+  /** Replace the item's opaque `meta` bag wholesale. Used by callers
+   *  that round-trip structured state through `meta` (artifact
+   *  regenerate, plans/artifact-tasks.md §2.1) and need to mutate
+   *  it without going through a dedicated per-field setter. Emits
+   *  the normal `itemUpdated` stream event on success. */
+  updateItemMeta(itemId: string, meta: Readonly<Record<string, unknown>>): Promise<TodoItem>;
   removeItem(itemId: string): Promise<void>;
 
   // -- Comments ----

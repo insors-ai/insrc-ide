@@ -230,6 +230,16 @@ class TodosApiImpl implements TodosApi {
     return updated;
   }
 
+  async updateItemMeta(
+    itemId: string,
+    meta: Readonly<Record<string, unknown>>,
+  ): Promise<TodoItem> {
+    const listId = await this.assertItemOwnership(itemId);
+    const updated = await todos.updateItem(this.db, itemId, { meta }, nowIso());
+    await this.emitItemEvent(listId, 'itemUpdated');
+    return updated;
+  }
+
   async removeItem(itemId: string): Promise<void> {
     const listId = await this.assertItemOwnership(itemId);
     await todos.deleteItem(this.db, itemId);

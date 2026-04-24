@@ -276,13 +276,12 @@ async function main(): Promise<void> {
 	console.log('insrc artifact smoke');
 	console.log('====================');
 
-	let results: CaseResult[];
+	let results: CaseResult[] = [];
 	try {
 		results = await runCases();
 	} catch (err) {
 		console.error('smoke-script crashed:', (err as Error).stack ?? err);
 		process.exit(2);
-		return;
 	}
 
 	let failures = 0;

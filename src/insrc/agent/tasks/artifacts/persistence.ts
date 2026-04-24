@@ -196,3 +196,75 @@ export async function findByArtifactId(
 	}
 	return null;
 }
+
+// ---------------------------------------------------------------------------
+// Regenerate -- append revision + swap in new render
+// ---------------------------------------------------------------------------
+
+/**
+ * Last-N revisions kept on an artifact item. Older entries are
+ * evicted as new regenerations happen. See plans/artifact-tasks.md
+ * §2.1 -- 5 is the ceiling.
+ */
+export const MAX_REVISIONS = 5;
+
+/**
+ * Apply a regenerated ArtifactResult to an existing TodoItem: push
+ * the prior source onto `meta.revisions` (with the user's edit text
+ * + timestamp), install the new source + rendered HTML, and
+ * `updateItemMeta` via the framework so the todos stream emits an
+ * `itemUpdated` event that both the chat widget and the (phase-2)
+ * Artifacts Pane consume in place.
+ *
+ * Returns the refreshed TodoItem. Throws when the item's meta
+ * doesn't satisfy the artifact shape.
+ */
+export async function appendRevision(
+	api: TodosApi,
+	itemId: string,
+	opts: {
+		readonly edits: string;
+		readonly newResult: ArtifactResult;
+	},
+): Promise<TodoItem> {
+	const priorItem = await api.getItem(itemId);
+	if (priorItem === null) {
+		throw new Error(`appendRevision: item '${itemId}' not found`);
+	}
+	const priorMeta = priorItem.meta as unknown as ArtifactItemMeta | undefined;
+	if (
+		priorMeta === undefined
+		|| typeof priorMeta !== 'object'
+		|| typeof priorMeta.source !== 'string'
+	) {
+		throw new Error(`appendRevision: item '${itemId}' has no artifact meta`);
+	}
+
+	const newRevision = {
+		at: new Date().toISOString(),
+		edits: opts.edits,
+		source: priorMeta.source,
+	};
+	const revisions = [...(priorMeta.revisions ?? []), newRevision]
+		.slice(-MAX_REVISIONS);
+
+	const nextMeta: ArtifactItemMeta = {
+		kind: opts.newResult.kind,
+		source: opts.newResult.source,
+		renderedHtml: opts.newResult.renderedHtml,
+		...(opts.newResult.title !== undefined ? { title: opts.newResult.title } : {}),
+		metadata: opts.newResult.metadata,
+		warnings: opts.newResult.warnings,
+		confidence: opts.newResult.confidence,
+		revisions,
+	};
+
+	log.info({
+		itemId,
+		kind: opts.newResult.kind,
+		revisionCount: revisions.length,
+		edits: opts.edits.slice(0, 80),
+	}, 'artifact regenerated');
+
+	return api.updateItemMeta(itemId, nextMeta as unknown as Readonly<Record<string, unknown>>);
+}
