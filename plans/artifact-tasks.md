@@ -612,9 +612,9 @@ half of this UX (e.g. "use the user-overridden ER template").
 ### 3.5 Blocks
 
 - Phase 4 -- unrelated to phase 3 but sequenced after it for scope
-  control. §4.1 (React introspection) may pick up a prerequisite on
-  the indexer retaining JSX subtrees for component-shaped functions
-  -- verify before phase 4 starts.
+  control. No further phase-4 prereqs on phase-3 work; §4.1's
+  earlier indexer-prereq concern was resolved (read files on
+  demand instead of extending the graph schema).
 
 ---
 
@@ -684,16 +684,32 @@ branch shows when.
 - New libraries land via in-tree JSON dictionaries (one per library)
   -- same model as §4.3's "PR to add a kind." No runtime loading.
 
-**Indexer dependency** *(verify before committing)*:
-- The walker needs JSX tag name + import source per element,
-  attribute values for `className` / `style` / `sx`, and child
-  structure (full subtree).
-- Static walking only; no type info, no prop-type resolution, no
-  runtime evaluation.
-- If the existing tree-sitter pass doesn't retain JSX subtrees
-  alongside entity-level extracts, this picks up an indexer
-  dependency: re-emit subtree blobs for component-shaped functions.
-  **Confirm at start of phase 4 -- may add prerequisite work.**
+**Source-of-truth: read the file on demand, do not extend the
+indexer.** The indexer is a knowledge graph (entities +
+relations), not a code-content cache. For JSX subtree walking the
+flow is:
+
+1. Look up the component entity in Kuzu by name (via the existing
+   `findEntitiesByName` helper, the same one ER and call-graph
+   already use).
+2. Resolve its `file` + byte range from the entity record.
+3. Read the file off disk and run a fresh tree-sitter pass scoped
+   to the component's byte range -- the same `typescript.ts`
+   parser the indexer uses, just invoked on a single function /
+   class body instead of the whole repo.
+4. Walk the resulting CST with the three-layer classifier above.
+
+No indexer changes. No graph schema changes. No "retain JSX
+subtree blobs" work item. The indexer's job stays "where is X
+defined + what does X relate to"; subtree analysis is a content
+operation that belongs in the artifact runner.
+
+Caveat: when a component imports primitives from another in-tree
+file (`<Header/>` defined in `./components/Header.tsx`), the
+recursive descent in step 4 follows the import via the indexer
+(import edge -> file path) and re-parses the imported file the
+same way. Bounded depth (e.g. 3 levels) prevents runaway recursion
+on deeply nested design-system component trees.
 
 **Output**: a `WireframeSpec` matching the phase-1 free-text path's
 shape, so the existing SVG renderer handles it unchanged.
@@ -711,13 +727,71 @@ under `agent/tasks/artifacts/kinds/wireframe-classifiers/`.
 
 ### 4.2 CFG-based flow diagrams
 
-- `kinds/flow.ts`'s code-flow branch upgrades from "read the
-  function body + LLM" to "walk Kuzu `BRANCHES` edges" when the
-  parser emits them.
-- Requires the indexer to populate `BRANCHES` relations on control
-  flow -- may be its own prior work; tracked in the indexer plan.
-- Falls back to the phase-1 LLM path when `BRANCHES` isn't
-  available for a function.
+`kinds/flow.ts`'s code-flow branch upgrades from "phase-1 call-graph
+approximation" to a real intra-function control-flow walk -- on
+demand, off the source file. Mirrors §4.1's "indexer is a graph,
+not a content cache" principle: control-flow data isn't cross-
+entity-queryable in the way the graph schema serves, and a fresh
+tree-sitter parse of one function body is cheap (~ms).
+
+**Flow** (per call):
+
+1. Look up the target function entity in Kuzu by name (existing
+   `findEntitiesByName`).
+2. Resolve file + byte range from the entity record.
+3. Read the file off disk and run a scoped tree-sitter pass on the
+   function body using the same `typescript.ts` / `python.ts` /
+   `go.ts` parser the indexer uses.
+4. Walk the body's CST and emit a Mermaid `flowchart TD` from a
+   small fixed set of structural nodes (no full SSA, no basic-
+   block analysis -- this is "AST-shaped flowchart", not a real
+   compiler CFG).
+
+**Recognised CST nodes** (per language):
+
+- **Branches**: `if` / `else if` / `else`, `switch` / `case` /
+  `default`, `match` (Python 3.10+), Go `switch` / `select`.
+- **Loops**: `for`, `while`, `do-while`, Python `for ... else`,
+  Go `for { }` infinite, range loops.
+- **Exception flow**: `try` / `catch` / `finally`, Python `except`
+  / `else` / `finally`, Go `defer` (rendered as a fan-out edge
+  to the deferred call from the surrounding scope).
+- **Terminators**: `return`, `break`, `continue`, `throw` /
+  `raise` / `panic`. Each becomes a labelled exit node.
+- **Function calls** are rendered as plain rectangles -- no
+  cross-function descent here; cross-function flow is what
+  `sequence` and `flow:process` cover.
+
+**Rendering rules**:
+
+- Mermaid `flowchart TD`. Entry node stylised the same way as
+  phase 1's call-graph rendering.
+- Branch labels carry the predicate text (truncated to ~40 chars)
+  -- e.g. `--|user.isAdmin|-->`.
+- Multi-arm switches collapse onto a single diamond node with one
+  arrow per case label.
+- Loops render as a back-edge from body-tail to the loop header.
+- `try` blocks group into a subgraph so the catch path is visually
+  distinct.
+
+**Per-language v1 coverage**: TypeScript / TSX, Python, Go --
+matches the indexer's existing language set. Adding a language
+later is a new walker entry in the kind module + per-language
+node-name dictionary; same shape as §4.4 callflow's per-format
+dictionaries.
+
+**Caps + failure modes**:
+
+- 200-node cap per function (Mermaid gets unreadable beyond that).
+  Functions over the cap fall through to the phase-1 LLM
+  approximation with a `(truncated)` note.
+- Tree-sitter parse error -> fall through to the phase-1 LLM
+  approximation; emit a `metadata.warnings` entry.
+- Function entity resolves but file is missing on disk -> typed
+  error pointing at the entity's `file` field.
+
+**No indexer changes.** No `BRANCHES` relation. No graph schema
+extension. The runner re-parses what it needs, when it needs it.
 
 ### 4.3 Stable in-tree kind-extension contract
 
@@ -1094,7 +1168,7 @@ are worth addressing before or alongside the remaining phase-1 work.
 ### Phase 4
 | Item                                      | Status | Notes |
 |-------------------------------------------|--------|-------|
-| React introspection for wireframes        | todo   | Layout-sketch fidelity (not faithful render). Three-layer JSX classifier (layout container / semantic element / unknown), v1 library set: native HTML + MUI + Chakra + AntD + shadcn + Tailwind. Per-library classifier dictionaries land in JSON under `kinds/wireframe-classifiers/`. **Prereq check**: indexer must retain JSX subtrees for component-shaped functions; verify before starting. Companion design doc: `design/artifacts/react-introspection.html`. |
-| CFG-based flow                            | todo   | blocks on indexer `BRANCHES` |
+| React introspection for wireframes        | todo   | Layout-sketch fidelity (not faithful render). Three-layer JSX classifier (layout container / semantic element / unknown), v1 library set: native HTML + MUI + Chakra + AntD + shadcn + Tailwind. Per-library classifier dictionaries land in JSON under `kinds/wireframe-classifiers/`. **No indexer extension needed**: the runner looks up the component's file + byte range via the existing `findEntitiesByName`, then re-parses the JSX subtree on demand with the same `typescript.ts` tree-sitter pass. Companion design doc: `design/artifacts/react-introspection.html`. |
+| CFG-based flow                            | todo   | On-demand AST walk, not graph-resident `BRANCHES` edges. Recognised nodes: branches (if/switch/match), loops (for/while), exception flow (try/catch/finally, Go defer), terminators (return/break/continue/throw). Mermaid `flowchart TD`. v1 languages: TS/TSX, Python, Go (mirrors indexer language set). 200-node cap per function; falls through to phase-1 LLM approximation on overflow or parse error. **No indexer changes.** |
 | In-tree kind-extension contract           | todo   | Formalise `ArtifactKindRegistration<TOpts, TSource>` in `shared/artifacts.ts` + write a contributor README. No runtime plugin loader; new kinds land via PR. |
 | Cross-service callflow kind (`callflow`)  | todo   | New 6th artifact kind for distributed call traces. Source priority: OTLP JSON (primary) -> Jaeger JSON -> Zipkin v2 JSON -> free-text. Default rendering Mermaid `sequenceDiagram` (services as participants, spans as messages with duration); optional `layout: 'flowchart'` for topology view. Drops INTERNAL spans by default, caps 20 services / 50 spans, errors render as `--x` with note. File-only input in v1; live OTLP collector queries deferred. Companion design doc: `design/artifacts/callflow.html`. **No indexer dependency.** |
