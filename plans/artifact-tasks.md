@@ -974,6 +974,219 @@ format).
 
 ---
 
+## Companion design docs (pending)
+
+Two HTML design docs sit alongside `design/artifacts/index.html` to
+capture per-library / per-format dictionaries that the kind modules
+reference. The dictionaries themselves are **also** kept as JSON
+under `agent/tasks/artifacts/kinds/wireframe-classifiers/` and
+`agent/tasks/artifacts/kinds/callflow-formats/` so the runtime can
+read them; the design docs cover the *why* (mapping rationale,
+edge cases, vendor quirks) the JSON can't carry.
+
+Both docs follow the existing `design/artifacts/index.html` style:
+HTML with embedded CSS, dark theme, anchored sections, code
+blocks for shape examples. No JavaScript, no external assets.
+
+### A. `design/artifacts/react-introspection.html`
+
+**Purpose**: per-library classifier dictionaries for §4.1's
+JSX-to-WireframeSpec walker. Maps tag names + import sources to
+wireframe primitives (rows / cells / element kinds), explains the
+heuristic decisions, and gives contributors a recipe for adding a
+new design system.
+
+**Scope split** (doc vs code):
+- **In the doc**: the *catalog* of recognised tags per library,
+  the rationale for each mapping, edge cases (re-exported
+  primitives, polymorphic `as` props, Tailwind utility-class
+  tokens), conditional / list rendering rules.
+- **In code** (`kinds/wireframe.ts` once §4.1 lands): the walker
+  itself; pure JSON config under
+  `kinds/wireframe-classifiers/<library>.json` carrying the
+  literal tag → primitive map.
+
+**Section outline**:
+
+1. **Mission + fidelity target** -- restated from plan §4.1 so the
+   doc reads standalone. Layout sketch, not faithful render.
+2. **Three-layer JSX node classification** -- the core algorithm
+   sketch (layout container / semantic element / unknown).
+3. **Library catalog** -- one section per supported library:
+   - **Native HTML** -- `<header>`/`<main>`/`<aside>`/`<footer>`/
+     `<nav>` regions, `<button>`/`<input>`/`<form>`/`<textarea>`/
+     `<select>` element kinds, `<table>`/`<ul>`/`<ol>`/`<dl>` list
+     primitives, `<a>`/`<img>` link/image kinds.
+   - **MUI** (`@mui/material`) -- `Stack`, `Grid`, `Box`,
+     `Container`, `Paper`, `AppBar` for layout; `Button`,
+     `TextField`, `Select`, `Autocomplete`, `IconButton`, `Avatar`,
+     `Card` for elements. `sx` prop layout extraction conventions.
+   - **Chakra UI** (`@chakra-ui/react`) -- `HStack`/`VStack`/`Stack`,
+     `SimpleGrid`/`Grid`, `Box`/`Flex`/`Center`, plus `Button`,
+     `Input`, `Select`, `Textarea`, `IconButton`. `as` polymorphism
+     handling.
+   - **Ant Design** (`antd`) -- `Layout`, `Layout.Sider`,
+     `Layout.Header`, `Layout.Content`, `Row`/`Col`, `Space`;
+     `Button`, `Input`, `Form`, `Table`, `Card`.
+   - **shadcn/ui** (`@/components/ui/*` and friends) -- treat as a
+     proxy layer over Radix; the catalog covers `Button`, `Input`,
+     `Card`, `Dialog`, `Sheet`, `Tabs`, `Form` field wrappers.
+     Note re-export aliasing (paths vary per repo; classifier
+     dictionaries match the `@/components/ui/<file>` slug rather
+     than node_modules path).
+   - **Tailwind utilities** -- a separate dictionary keyed on
+     `className` tokens, recognising `flex`/`grid`/`grid-cols-N`/
+     `flex-row`/`flex-col`/`w-*`/`h-*` for layout. Non-layout
+     utilities (color / padding / border / typography) are
+     ignored.
+4. **Conditional rendering** -- `cond && <X/>` / ternary / early
+   returns. Render *all* branches with `(alt)` markers. Rationale
+   why this beats picking a winner (honest about uncertainty,
+   captures full visual surface area).
+5. **List rendering** -- `.map(item => <X/>)` pattern detection;
+   N=3 placeholder children of the mapped child kind. Rare-case
+   handling for non-`.map()` iteration shapes (e.g. `forEach`,
+   `Array.from`).
+6. **Style hint extraction** -- table of recognised props /
+   classes that affect layout (`flexDirection`,
+   `gridTemplateColumns`, explicit `width`/`height`); everything
+   else explicitly ignored. Rationale for the cutoff.
+7. **Indexer interaction** -- the file-lookup-then-on-demand-parse
+   flow (find entity in Kuzu -> read file -> tree-sitter scoped
+   pass). No graph schema changes, no JSX subtree retention.
+   Bounded recursive descent depth (default 3) for in-tree
+   imports.
+8. **Failure modes + fallback** -- when no recognisable structure
+   exists (purely custom primitives, no in-tree subtree). Always
+   returns *something*; never errors.
+9. **Adding a new library** -- contributor recipe:
+   - Drop a new `<library>.json` under
+     `kinds/wireframe-classifiers/`.
+   - Optionally add a parser hook in `kinds/wireframe.ts` if the
+     library has unusual props (`as` polymorphism, theme-token
+     resolution).
+   - Add a section to this design doc with mapping rationale.
+   - Add fixture-driven tests under
+     `__tests__/wireframe-<library>.test.ts`.
+
+**Authoring trigger**: write this doc *before* §4.1 implementation
+starts. The mapping decisions for v1 (which libraries, which tags)
+shape the JSON dictionaries the runtime consumes.
+
+### B. `design/artifacts/callflow.html`
+
+**Purpose**: per-format parser dictionaries + rendering decisions
+for §4.4's distributed-trace artifact. Captures the field-by-field
+mapping each format → canonical span shape, the auto-detection
+rules, and the layout-selection heuristics.
+
+**Scope split** (doc vs code):
+- **In the doc**: format-specific field mapping tables, span-kind
+  enum mappings (across all three sources), the multiple ways each
+  format flags errors, layout selection rationale (`sequence` vs
+  `flowchart`), edge-aggregation rules for the topology view.
+- **In code** (`kinds/callflow-formats/*.ts`): the parsers; the
+  shape sniffers (`isOtlp`/`isJaeger`/`isZipkin`); the layouts in
+  `kinds/callflow.ts`.
+
+**Section outline**:
+
+1. **Use cases** -- restate from plan §4.4 (analyzer report-pane
+   embedding, brainstorm spec building, runbook docs).
+2. **Canonical span shape (IR)** -- field-by-field documentation
+   of `CanonicalSpan` + `CanonicalTrace`. Every parser normalises
+   into this; the renderer consumes it without caring about the
+   input format.
+3. **OpenTelemetry / OTLP** -- format spec reference + field
+   mapping table:
+   - `resourceSpans[].resource.attributes[]` -> `service.name`
+     resolution (with fallback to `'unknown'`).
+   - `scopeSpans[].spans[].traceId` / `.spanId` /
+     `.parentSpanId` -> ids.
+   - `.kind` (0-5 enum) -> `CanonicalSpanKind` (UNSPECIFIED 0
+     and INTERNAL 1 collapse to INTERNAL per spec).
+   - `.startTimeUnixNano` / `.endTimeUnixNano` (string or number)
+     -> `startMicros` / `durationMicros`. BigInt division to stay
+     in safe-integer range up to ~285 years from epoch.
+   - `.status.code` (0/1/2) -> UNSET/OK/ERROR;
+     `.status.message` -> `statusMessage`.
+4. **Jaeger** -- field mapping table:
+   - `data[].traceID` -> trace bucket key.
+   - `data[].spans[].traceID` / `.spanID` -> ids;
+     `.references[refType=CHILD_OF].spanID` -> `parentSpanId`.
+   - Service name: embedded `process.serviceName` first, lookup-
+     table `data[].processes[processID].serviceName` second.
+   - `tags[key=span.kind].value` (string) -> kind enum.
+   - Error signals (in order of precedence):
+     - `tags[key=error].value === true` (or string `'true'`)
+     - `tags[key=otel.status_code].value === 'ERROR'`
+   - `tags[key=otel.status_description].value` -> `statusMessage`.
+   - `startTime` (microseconds since epoch) + `duration`
+     (microseconds) used directly.
+5. **Zipkin v2** -- field mapping table:
+   - Top-level array; group by `traceId`.
+   - `id` / `parentId` -> ids.
+   - `kind` field as canonical string;
+     `null` / undefined -> INTERNAL (Zipkin convention).
+   - `localEndpoint.serviceName` -> service name.
+   - `tags['error']` -> ERROR status; non-`'true'` value
+     preserved as `statusMessage`.
+   - `timestamp` + `duration` (both microseconds) used directly.
+6. **Auto-detection ordering** -- the mutual-exclusivity rules
+   the auto-detection switch relies on:
+   - OTLP: top-level `.resourceSpans` is an array.
+   - Jaeger: top-level `.data` is an array of objects with
+     `.spans` arrays.
+   - Zipkin v2: top-level value is an array, first element has
+     `.traceId` + `.id` + (`.localEndpoint` or `.kind`).
+7. **Span-kind enum cross-reference** -- a single table mapping
+   each format's kind representation to the canonical enum, so
+   contributors adding a new format have a clear template.
+8. **Layout selection rules** -- when to pick `sequence` vs
+   `flowchart`:
+   - **Sequence**: timeline view, services as columns, spans as
+     time-ordered messages with duration. Good when the trace
+     has < ~30 spans and the order matters.
+   - **Flowchart**: topology view, services as nodes, calls
+     aggregated into edges. Good when the trace has lots of
+     repeated calls (microservice meshes; mid-burst windows)
+     and the timeline reads as noise.
+   - **Default**: `sequence` (matches what most users expect).
+9. **Edge-aggregation rules (flowchart)** -- self-loops within a
+   service skipped; calls aggregated by `(fromService,
+   toService)` with count badge; error counts surface separately;
+   first 2 operation names included as edge label samples;
+   dotted edge when any aggregated span errored, solid otherwise.
+10. **Caps + truncation** -- `SERVICE_CAP=20`, `SPAN_CAP=50`,
+    file-read timeout 5s. Truncation is order-preserving (drop
+    spans on services beyond cap by first-appearance order; drop
+    excess spans by start-time order).
+11. **Vendor-specific exports out of scope** -- Datadog /
+    Honeycomb / New Relic exports vary too much in shape. Users
+    are expected to normalise to OTLP first (commonly via
+    `otelcol` or vendor-specific OTLP exporters).
+12. **Adding a new format** -- contributor recipe:
+    - Drop a new `kinds/callflow-formats/<format>.ts` exporting
+      `is<Format>(parsed)` + `parse<Format>(parsed)`. Both
+      normalise into `CanonicalSpan` / `CanonicalTrace`.
+    - Add a row to the `autoDetectAndParse` switch in
+      `kinds/callflow.ts`, ordered after the more-specific
+      sniffers.
+    - Add a row to the `CallflowSourceFormat` union in
+      `callflow-formats/types.ts`.
+    - Add a section to this design doc covering the format's
+      field mapping + error-flagging conventions.
+    - Add fixture-driven tests under
+      `__tests__/callflow-<format>.test.ts`.
+
+**Authoring trigger**: write this doc opportunistically. The code
+is already canonical for the three v1 formats; the doc is mostly
+useful when a contributor wants to add a new format or
+understand the historical decision shape (e.g. why Jaeger has two
+process-resolution paths).
+
+---
+
 ## Testing strategy (overall)
 
 1. **Unit tests** per module, colocated under
