@@ -126,6 +126,7 @@ class PostgresDriver implements RdbmsDriver {
 			truncated: res.rowCount === opts.limit && opts.limit < SAMPLE_LIMIT
 				? false
 				: res.rowCount === Math.min(opts.limit, SAMPLE_LIMIT),
+			metadata: { samplingMethod: 'first' },
 		};
 	}
 

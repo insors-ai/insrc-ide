@@ -14,7 +14,7 @@
  * is wrapped behind a small `ParquetReader` shape.
  */
 
-import { ParquetReader } from 'parquetjs-lite';
+import { ParquetReader, type ParquetSchemaField } from 'parquetjs-lite';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
@@ -43,11 +43,13 @@ class ParquetDriver implements FileDriver {
 		const reader = await ParquetReader.openFile(this.path);
 		try {
 			const schema = reader.getSchema();
-			const columns: ColumnDescription[] = Object.entries(schema.fields).map(([name, f]) => ({
-				name,
-				type: f.type ?? 'unknown',
-				nullable: f.optional === true || f.repeated === true,
-			}));
+			const columns: ColumnDescription[] = Object.entries(schema.fields).map(
+				([name, f]: [string, ParquetSchemaField]) => ({
+					name,
+					type: f.type ?? 'unknown',
+					nullable: f.optional === true || f.repeated === true,
+				}),
+			);
 			this.schemaCache = { target: this.path, columns, source: 'header' };
 			return this.schemaCache;
 		} finally {
@@ -81,7 +83,13 @@ class ParquetDriver implements FileDriver {
 			await reader.close();
 		}
 		log.debug({ path: this.path, out: rows.length }, 'parquet sample');
-		return { target: this.path, columns: cols, rows, truncated: rows.length >= limit };
+		return {
+			target: this.path,
+			columns: cols,
+			rows,
+			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
+		};
 	}
 
 	async close(): Promise<void> { /* no persistent resources */ }

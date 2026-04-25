@@ -29,8 +29,8 @@ import {
 	assertNamespaceAllowed,
 	clampSampleShapeLimit,
 	clampScanLimit,
-	inferShape,
 } from './kv-common.js';
+import { inferShape } from './shape-common.js';
 
 const log = getLogger('db-cassandra');
 

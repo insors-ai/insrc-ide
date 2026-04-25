@@ -80,7 +80,13 @@ class ArrowDriver implements FileDriver {
 			}
 		}
 		log.debug({ path: this.path, out: rows.length }, 'arrow sample');
-		return { target: this.path, columns: cols, rows, truncated: rows.length >= limit };
+		return {
+			target: this.path,
+			columns: cols,
+			rows,
+			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
+		};
 	}
 
 	async close(): Promise<void> { this.tableCache = null; }

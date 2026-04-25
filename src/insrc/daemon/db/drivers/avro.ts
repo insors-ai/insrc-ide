@@ -81,7 +81,13 @@ class AvroDriver implements FileDriver {
 		});
 
 		log.debug({ path: this.path, out: rows.length }, 'avro sample');
-		return { target: this.path, columns: cols, rows, truncated: rows.length >= limit };
+		return {
+			target: this.path,
+			columns: cols,
+			rows,
+			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
+		};
 	}
 
 	async close(): Promise<void> { /* no persistent resources */ }

@@ -100,6 +100,7 @@ class MysqlDriver implements RdbmsDriver {
 			columns: fields.map(f => f.name),
 			rows: rows as readonly Readonly<Record<string, unknown>>[],
 			truncated: Array.isArray(rows) && rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
 		};
 	}
 

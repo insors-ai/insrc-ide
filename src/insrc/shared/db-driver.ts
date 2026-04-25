@@ -81,12 +81,65 @@ export interface SchemaDescription {
 	readonly source: 'introspect' | 'prisma' | 'header' | 'inferred';
 }
 
+/**
+ * How a sample was actually produced. Set by the driver; informs the
+ * caller about the bias profile of the result independently of what
+ * `strategy` was requested. See `plans/data-driver.md` §7.2.
+ */
+export type SamplingMethod =
+	/** Deterministic top-N (today's only behaviour). */
+	| 'first'
+	/** True uniform random over rows -- e.g. Postgres `ORDER BY random()`,
+	 *  reservoir over a streamed file. */
+	| 'row-uniform'
+	/** Page / block sampled -- biased toward dense pages. ClickHouse
+	 *  `SAMPLE 0.0X`, Postgres `TABLESAMPLE BERNOULLI`. */
+	| 'page-uniform'
+	/** Cassandra K-anchor scattered random. K independent token
+	 *  anchors, M token-adjacent rows per anchor. */
+	| 'token-multi-anchor'
+	/** File random-index seek -- Parquet, Arrow, fixed-width. */
+	| 'index-direct'
+	/** Engine-native opaque sampler -- MongoDB `$sample`, DynamoDB
+	 *  `Scan` + shuffle. */
+	| 'engine-native';
+
+export interface SampleResultMetadata {
+	/** Always set -- honest signal about how the rows were produced. */
+	readonly samplingMethod: SamplingMethod;
+	/** Echoed when the caller passed `seed`. */
+	readonly seed?: number;
+	/** Present when the caller passed `seed`; signals whether the
+	 *  underlying engine honoured it. Drivers that can't seed return
+	 *  `false` here so tests / reproducibility checks can detect it. */
+	readonly seedHonored?: boolean;
+	/** Set when the requested strategy was downgraded at driver-init
+	 *  time (Cassandra ByteOrderedPartitioner, ClickHouse no-`SAMPLE BY`)
+	 *  -- distinct from per-call timeout, which surfaces as an error. */
+	readonly fallbackFrom?: SampleStrategy;
+	readonly fallbackReason?: string;
+	/** Sample returned fewer rows than `limit` (source size, empty
+	 *  token range, etc.) -- distinct from `truncated`, which means
+	 *  more rows existed than were returned. */
+	readonly shortResult?: boolean;
+
+	// Multi-anchor specifics (Cassandra `token-multi-anchor`).
+	readonly anchors?: number;
+	readonly rowsPerAnchor?: number;
+
+	// File-format extras populated by binary-format drivers.
+	readonly fileSize?: number;
+	readonly rowCountHint?: number | `>=${number}`;
+	readonly schemaSource?: 'header' | 'sample' | 'config';
+}
+
 export interface SampleResult {
 	readonly target: string;
 	readonly columns: readonly string[];
 	readonly rows: readonly Readonly<Record<string, unknown>>[];
 	readonly rowCountHint?: number | `>=${number}`;
 	readonly truncated: boolean;
+	readonly metadata: SampleResultMetadata;
 }
 
 export interface WhereClause {
@@ -95,9 +148,19 @@ export interface WhereClause {
 	readonly value?: unknown;
 }
 
+export type SampleStrategy = 'first' | 'random' | 'stratified';
+
 export interface SampleOpts {
 	readonly limit: number;
 	readonly where?: readonly WhereClause[];
+	/** Defaults to `'first'` (existing behaviour). `'stratified'`
+	 *  requires `stratifyBy` to be set. */
+	readonly strategy?: SampleStrategy;
+	/** Required when `strategy === 'stratified'`; rejected otherwise. */
+	readonly stratifyBy?: string;
+	/** Optional. Per-engine honouring varies (see §7.6) -- drivers that
+	 *  can't seed echo it back via `metadata.seedHonored = false`. */
+	readonly seed?: number;
 }
 
 export interface ScanOpts {

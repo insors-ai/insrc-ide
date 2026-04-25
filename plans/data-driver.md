@@ -69,6 +69,7 @@ and in the code-analyzer design doc's
 | 4     | Guardrails: raw-query rejection, row/time caps, namespace scoping, opt-in           | done -- caps + raw-query denylist + KV namespace scoping landed in phase 1, per-repo opt-in short-circuit landed in phase 3. PII masking explicitly dropped (target is dev/staging, not prod). |
 | 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB, Memcached       | done -- 6 new kinds shipped (cockroachdb, clickhouse, dynamodb, etcd, memcached, parquet); valkey / keydb / tsv had already shipped in phase 1. 23 distinct driver kinds total. |
 | 6     | Schema indexing: graph-resident `db_table` / `db_column` entities + ORM-aware linking | todo |
+| 7     | Sampling extensions: `random` / `stratified` row strategies + RDBMS JSON shape inspection | todo |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
 (with commit sha or "uncommitted"), `partial` with deferred scope
@@ -624,6 +625,306 @@ graph rows -- negligible against the existing code-entity volume.
 | ORM-model parser extensions                | todo   |       |
 | SQL-string heuristic linker                | todo   |       |
 | Re-index trigger from `db.saveConnection`  | todo   |       |
+
+---
+
+## Phase 7 -- Sampling extensions (random / stratified rows + RDBMS JSON shape)
+
+So far `sample()` always returns the first N rows, and `sampleShape()`
+exists only on KV. Phase 7 extends both, in two tracks:
+
+- **Track B** (lands first) -- adds JSON-shape inspection on RDBMS
+  columns. The genuinely-missing capability for analyzers exploring
+  nested schemas.
+- **Track A** (lands second) -- adds `random` and `stratified`
+  row-selection strategies across families. Track B's underlying row
+  pull picks up these strategies for free once Track A lands.
+
+### 7.1 SampleOpts extension
+
+```typescript
+type SampleStrategy = 'first' | 'random' | 'stratified';
+
+interface SampleOpts {
+  readonly limit:       number;
+  readonly where?:      readonly WhereClause[];
+  readonly strategy?:   SampleStrategy;     // default 'first' (today's behavior)
+  readonly stratifyBy?: string;             // required when strategy='stratified'
+  readonly seed?:       number;             // optional; per-engine honoring (see 7.6)
+}
+```
+
+`strategy` defaults to `'first'` so existing callers see no change.
+`stratifyBy` is required when `strategy === 'stratified'` and rejected
+otherwise.
+
+### 7.2 SampleResult.metadata -- formalise the shape
+
+`metadata` has been growing ad-hoc (`fileSize`, `rowCountHint`,
+`schemaSource`). Phase 7 formalises it in `shared/db-driver.ts`:
+
+```typescript
+type SamplingMethod =
+  | 'first'              // deterministic top-N
+  | 'row-uniform'        // true uniform random (Postgres ORDER BY random(), reservoir)
+  | 'page-uniform'       // page-sampled (ClickHouse SAMPLE clause)
+  | 'token-multi-anchor' // Cassandra K-anchor scattered
+  | 'index-direct'       // file random-index seek (Parquet, Arrow, fixed-width)
+  | 'engine-native';     // MongoDB $sample, etc.
+
+interface SampleResultMetadata {
+  // existing
+  fileSize?:       number;
+  rowCountHint?:   number | string;     // exact or '>=<N>'
+  schemaSource?:   'header' | 'sample' | 'config';
+
+  // new in phase 7
+  samplingMethod:  SamplingMethod;
+  seed?:           number;              // echoed when input had one
+  seedHonored?:    boolean;             // present when input had a seed
+  fallbackFrom?:   SampleStrategy;      // present when strategy was downgraded
+  fallbackReason?: string;              // human-readable
+  shortResult?:    boolean;             // sample returned < limit
+  anchors?:        number;              // multi-anchor only
+  rowsPerAnchor?:  number;              // multi-anchor only
+}
+```
+
+The honest-output principle: callers see what they actually got, not
+what they asked for.
+
+### 7.3 Track B -- `RdbmsDriver.sampleShape`
+
+```typescript
+interface RdbmsDriver extends BaseDriver {
+  // ... existing ...
+  sampleShape?(target: string, opts: {
+    readonly column:     string;
+    readonly limit:      number;
+    readonly where?:     readonly WhereClause[];
+    readonly strategy?:  'first' | 'random';   // stratified handled via stratifyBy below
+    readonly stratifyBy?: string;              // optional; returns StratifiedShapeReport when set
+    readonly seed?:      number;
+  }): Promise<ShapeReport | StratifiedShapeReport>;
+}
+```
+
+**JSON column detection** -- only inspect when the column is provably
+JSON. **No heuristic auto-detection** on bare `nvarchar` / `VARCHAR2` /
+`text` columns.
+
+| Engine                  | Acceptable column declarations                                              |
+|-------------------------|-----------------------------------------------------------------------------|
+| postgres / cockroachdb  | `data_type IN ('json', 'jsonb')`                                            |
+| mysql                   | `data_type = 'json'`                                                        |
+| clickhouse              | `JSON` / `Object('json')` types                                             |
+| oracle                  | native `JSON` type (21c+) **or** `IS JSON` check constraint on the column   |
+| mssql                   | native `JSON` type **or** `CHECK (ISJSON(col)=1)` constraint on the column  |
+| sqlite                  | rejected -- JSON content stored as TEXT with no clear declaration           |
+
+Anything else rejects with `TYPE_NOT_INSPECTABLE`.
+
+**Implementation** -- in-process after fetch:
+
+1. Pull the column for N rows via existing `sample()` path (with
+   `where`, `strategy`, `seed`).
+2. For each value: parse-if-string, recursively walk via `inferShape`
+   (lifted to neutral location -- see 7.8).
+3. Merge into a single recursive `ShapeReport`.
+4. **No JSON path drill-down in v1**. Caller navigates the recursive
+   tree client-side. Engine-pushdown (`metadata->'subkey'`) deferred
+   until a real ask.
+
+**Empty-result handling**:
+
+```typescript
+{
+  sampleSize: 0,
+  fields:     [],
+  metadata: {
+    samplingMethod: '...',
+    rowsExamined:   50,
+    note: 'all-null' | 'all-empty' | 'parse-failed',
+  }
+}
+```
+
+Three discrete `note` values; `parse-failed` exceeding 50% of non-null
+values also emits a daemon-side `WARN` log (data-integrity signal worth
+not burying).
+
+**Stratified shape sampling** is the highest-value form of Track B --
+"does the JSON shape vary by region / tenant / account_type?" surfaces
+regional schema drift, GDPR-driven field variations, multi-tenant
+differences. Output:
+
+```typescript
+interface StratifiedShapeReport {
+  stratifyBy:      string;
+  totalSampleSize: number;
+  strata: Array<{
+    value:       string | number | null;
+    sampleSize:  number;
+    shape:       ShapeReport;     // recursive, full-depth
+  }>;
+}
+```
+
+Per-stratum `ShapeReport` (not merged) so callers can immediately diff:
+"us-east has {a,b,c}; eu-west has {a,b,d}".
+
+Tool: **`db:sql:sample_shape`** --
+`{ connectionId, target, column, limit, where?, strategy?, stratifyBy?, seed? }`.
+
+### 7.4 Track A -- `strategy: 'random'` per family
+
+| Family / kind                | Approach                                                                                                                                                                                                                  | `samplingMethod`             |
+|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------|
+| postgres / cockroachdb       | `BEGIN; SELECT setseed($s); SELECT ... ORDER BY random() LIMIT N; COMMIT` (transaction-local `setseed`)                                                                                                                   | `row-uniform`                |
+| mysql / mariadb              | `ORDER BY RAND([seed]) LIMIT N`                                                                                                                                                                                            | `row-uniform`                |
+| sqlite                       | `ORDER BY random() LIMIT N` (seed not honored)                                                                                                                                                                             | `row-uniform`                |
+| mssql                        | `SELECT TOP N ... ORDER BY NEWID()` (seed not honored)                                                                                                                                                                     | `row-uniform`                |
+| oracle                       | `DBMS_RANDOM.SEED(s); SELECT ... ORDER BY DBMS_RANDOM.VALUE FETCH FIRST N ROWS ONLY`                                                                                                                                        | `row-uniform`                |
+| clickhouse                   | Detect `system.tables.sampling_key` per-table (cached). If non-empty: `SAMPLE 0.0X LIMIT N` (`page-uniform`). Else: `ORDER BY rand() LIMIT N` (`row-uniform`).                                                              | per path                     |
+| cassandra                    | Detect `system.local.partitioner`. **Murmur3 / Random**: K-anchor scatter (K=min(N,10), parallel `WHERE token(pk) >= ?` queries, dedupe by PK, trim to N). **ByteOrderedPartitioner**: auto-fall to `first` with metadata. | `token-multi-anchor` / `first` |
+| mongodb                      | aggregation `[{$match: where}, {$sample: {size: N}}]` -- engine-native, seed not honored                                                                                                                                   | `engine-native`              |
+| dynamodb                     | `Scan` + client-side shuffle                                                                                                                                                                                               | `engine-native`              |
+| redis / valkey / keydb       | `SCAN` with N×3 overshoot, Fisher-Yates shuffle, pick N                                                                                                                                                                    | `row-uniform`                |
+| etcd / nats                  | prefix-list + shuffle                                                                                                                                                                                                      | `row-uniform`                |
+| memcached                    | UNSUPPORTED (no scan)                                                                                                                                                                                                      | n/a                          |
+| csv / jsonl / xlsx / avro / bson | reservoir sampling (Algorithm R, `mulberry32(seed)` when seeded)                                                                                                                                                       | `row-uniform`                |
+| parquet                      | **index-direct** -- read row count from footer, generate N distinct random row indices, seek-and-read                                                                                                                       | `index-direct`               |
+| arrow / feather              | **index-direct** -- record-batch indexed via footer                                                                                                                                                                        | `index-direct`               |
+| fixed-width                  | **index-direct** -- row count = `(file_size - header) / row_length`, seek per index                                                                                                                                       | `index-direct`               |
+| json single-doc              | n/a (no rows)                                                                                                                                                                                                              | n/a                          |
+
+**Cassandra K-anchor specifics**:
+
+- K defaults to `min(N, 10)`; M = `ceil(N/K)`.
+- Anchors generated client-side: unseeded via
+  `crypto.getRandomValues(new BigInt64Array(1))[0]`; seeded via
+  `splitmix64(BigInt(seed) XOR BigInt(anchorIdx))`.
+- K independent queries run in parallel (`Promise.all`); cost ≈ max
+  single-query RTT, not K × RTT.
+- Wraparound disabled per-anchor (accept short results, mark
+  `shortResult: true`).
+- Dedupe by primary key before trimming to N.
+
+**ClickHouse SAMPLE detection** is cached per (connection, table) at
+first sample call.
+
+### 7.5 Track A -- `strategy: 'stratified'`
+
+Scope: **RDBMS + MongoDB only**. KV (cassandra / dynamodb / etcd / nats
+/ redis) and file kinds reject with `UNSUPPORTED`.
+
+**SQL shape** (window function), per-dialect rand expression:
+
+```sql
+WITH ranked AS (
+  SELECT *,
+         ROW_NUMBER() OVER (PARTITION BY <stratifyBy> ORDER BY <rand-expr>) AS rn
+  FROM <target>
+  WHERE <where-clauses>
+)
+SELECT * FROM ranked WHERE rn <= <limit>;
+```
+
+Per-dialect `<rand-expr>`: postgres / cockroachdb / sqlite `random()`;
+mysql `RAND([seed])`; mssql `NEWID()`; oracle `DBMS_RANDOM.VALUE`;
+clickhouse `rand()` (no SAMPLE form for stratified -- always row path).
+
+**MongoDB shape** -- `$facet` with per-bucket `$sample` (so the engine
+honors per-stratum sampling). Pipeline shape TBD during implementation;
+either `$group` + `$slice` over `$shuffle` or `$facet` with
+distinct-value enumeration. Both paths satisfy the contract.
+
+**Cap rule** -- on **total rows fetched**, not on stratum count alone:
+
+1. Pre-check `SELECT COUNT(DISTINCT <stratifyBy>) FROM <target> WHERE <where>`
+   (cheap if the column is indexed).
+2. Reject with `TOO_MANY_STRATA: <count> distinct values, max <cap> with limit=<N>; narrow WHERE first`
+   when:
+   - `count × limit > 500` (total rows ceiling), **or**
+   - `count > 200` (hard distinct-strata ceiling, prevents the
+     COUNT(DISTINCT) check itself from blowing up).
+3. Otherwise run the main query.
+
+Output: per-stratum `SampleResult[]` for `sample`,
+`StratifiedShapeReport` for `sampleShape`.
+
+### 7.6 Seed support -- per-engine honoring
+
+| Engine / kind                            | Honored | Mechanism                                                                  |
+|------------------------------------------|---------|----------------------------------------------------------------------------|
+| postgres / cockroachdb                   | ✓       | `BEGIN; SELECT setseed(s); ...; COMMIT` (transaction-local)                |
+| mysql / mariadb                          | ✓       | `RAND(s)`                                                                   |
+| oracle                                   | ✓       | `DBMS_RANDOM.SEED(s); DBMS_RANDOM.VALUE`                                    |
+| clickhouse SAMPLE path                   | ✓       | `SAMPLE 0.0X OFFSET s` -- deterministic offset, not strict seed             |
+| clickhouse rand path                     | ✗       | `rand()` not seedable                                                       |
+| sqlite                                   | ✗       | `random()` not seedable                                                     |
+| mssql                                    | ✗       | `NEWID()` not seedable; `RAND(s)` doesn't compose with `ORDER BY`           |
+| cassandra (K-anchor)                     | ✓       | client-side `splitmix64(seed XOR anchorIdx)`                                |
+| mongodb                                  | ✗       | `$sample` not seedable                                                      |
+| redis / etcd / nats / dynamodb           | ✓       | client-side `mulberry32(seed)` for shuffle                                  |
+| reservoir / index-direct file kinds      | ✓       | client-side `mulberry32(seed)`                                              |
+
+Drivers that don't honor the seed still echo it in `metadata.seed` with
+`seedHonored: false` so the caller can detect.
+
+### 7.7 Timeout contract -- hard timeout + retry hint
+
+Random / stratified queries on large tables can hit the 5s wall-clock
+cap. **No auto-fallback at sample time** -- predictable beats clever.
+Error shape:
+
+```typescript
+{
+  code: 'SAMPLING_TIMEOUT',
+  message: 'Query exceeded 5000ms wall-clock cap (strategy=random on a large table).',
+  retryHint: {
+    strategy: 'first',
+    note: 'Returns deterministic first-N rows; biased but cheap.',
+  }
+}
+```
+
+Distinguish from the **driver-init-time** fallbacks (Cassandra BOP and
+ClickHouse no-`SAMPLE BY`): those auto-fall *before* the call runs and
+surface via metadata, not as errors -- because the limitation is an
+engine-property, not a data-property. Per-call timeout fallback would be
+a silent semantic swap; the caller gets a stable contract instead.
+
+### 7.8 Prep work (lands before Track B)
+
+- Lift `inferShape` from `daemon/db/drivers/kv-common.ts` to
+  `daemon/db/drivers/shape-common.ts`. KV common imports the new
+  location; no behavior change.
+- Add `SampleResultMetadata` (incl. `samplingMethod`) to
+  `shared/db-driver.ts`. All existing drivers populate
+  `samplingMethod: 'first'` -- single-line change per driver.
+
+### 7.9 Status
+
+| Item                                                                                           | Status | Notes |
+|------------------------------------------------------------------------------------------------|--------|-------|
+| Prep -- lift `inferShape` to shape-common                                                       | todo   |       |
+| Prep -- formalise `SampleResultMetadata` + `samplingMethod` field                              | todo   |       |
+| Track B -- `RdbmsDriver.sampleShape` interface                                                  | todo   |       |
+| Track B -- JSON column detection (postgres / mysql / cockroachdb / clickhouse / oracle / mssql) | todo   |       |
+| Track B -- in-process recursive `inferShape` after fetch                                        | todo   |       |
+| Track B -- empty-result handling (`note: 'all-null' / 'all-empty' / 'parse-failed'`)            | todo   |       |
+| Track B -- `db:sql:sample_shape` tool                                                           | todo   |       |
+| Track A -- `random` on RDBMS (postgres / mysql / sqlite / mssql / oracle / cockroach / clickhouse SAMPLE-detect) | todo | |
+| Track A -- `random` on cassandra (K-anchor + BOP fallback)                                      | todo   |       |
+| Track A -- `random` on KV (mongo / dynamo / redis / etcd / nats; memcached UNSUPPORTED)         | todo   |       |
+| Track A -- `random` on file (csv / jsonl / xlsx / avro / bson reservoir; parquet / arrow / fixed-width index-direct) | todo | |
+| Track A -- `stratified` per-dialect SQL + mongo aggregation                                     | todo   |       |
+| Track A -- `TOO_MANY_STRATA` cap + `COUNT(DISTINCT)` precheck                                   | todo   |       |
+| Stratified `sampleShape` output (`StratifiedShapeReport`)                                       | todo   |       |
+| Seed honoring matrix + `seedHonored` metadata                                                   | todo   |       |
+| Timeout contract -- structured `retryHint` on `SAMPLING_TIMEOUT`                                | todo   |       |
+| Tests -- new sampling behaviour + JSON shape detection + injection-fuzz extension to new SQL    | todo   |       |
 
 ---
 

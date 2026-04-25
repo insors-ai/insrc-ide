@@ -86,7 +86,13 @@ class XlsxDriver implements FileDriver {
 			}
 		}
 		log.debug({ path: this.path, sheet, out: out.length }, 'xlsx sample');
-		return { target: sheet, columns: cols, rows: out, truncated: out.length >= limit };
+		return {
+			target: sheet,
+			columns: cols,
+			rows: out,
+			truncated: out.length >= limit,
+			metadata: { samplingMethod: 'first' },
+		};
 	}
 
 	async close(): Promise<void> { /* no persistent resources */ }

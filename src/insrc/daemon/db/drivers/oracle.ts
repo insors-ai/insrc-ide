@@ -111,6 +111,7 @@ class OracleDriver implements RdbmsDriver {
 				columns: cols,
 				rows,
 				truncated: rows.length >= limit,
+				metadata: { samplingMethod: 'first' },
 			};
 		} finally {
 			await conn.close();

@@ -27,7 +27,7 @@ import type {
 	ShapeReport,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
-import { inferShape } from './kv-common.js';
+import { inferShape } from './shape-common.js';
 import {
 	FILE_DESCRIBE_SAMPLE_ROWS,
 	clampFileLimit,
@@ -98,7 +98,13 @@ class JsonDriver implements FileDriver {
 			}
 		}
 		log.debug({ path: this.path, out: rows.length }, 'json sample');
-		return { target: this.path, columns: cols, rows, truncated: rows.length >= limit };
+		return {
+			target: this.path,
+			columns: cols,
+			rows,
+			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
+		};
 	}
 
 	async get(path: string): Promise<KvValue> {

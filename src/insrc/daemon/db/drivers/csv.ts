@@ -115,6 +115,7 @@ class CsvDriver implements FileDriver {
 			columns: colNames,
 			rows,
 			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
 		};
 	}
 

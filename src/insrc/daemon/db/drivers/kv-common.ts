@@ -6,14 +6,16 @@
  * its own idiomatic client; shared concerns here:
  *   - scan pattern / prefix validation against the connection's
  *     `namespace.allow` whitelist (if configured);
- *   - limit + wall-clock caps;
- *   - shape inference for sampleShape output.
+ *   - limit + wall-clock caps.
+ *
+ * Shape inference (`inferShape`) lives in `./shape-common.js` -- it
+ * is now reused by RDBMS JSON-column inspection and file-format shape
+ * sampling.
  */
 
 import type {
 	ConnectionConfig,
 	ScanOpts,
-	ShapeReport,
 } from '../../../shared/db-driver.js';
 
 export const SCAN_LIMIT = 500;
@@ -83,75 +85,3 @@ export function clampSampleShapeLimit(n: number): number {
 	return Math.min(Math.max(1, Math.floor(n)), SAMPLE_SHAPE_LIMIT);
 }
 
-// ---------------------------------------------------------------------------
-// Shape inference
-// ---------------------------------------------------------------------------
-
-interface FieldAcc {
-	types: Set<string>;
-	nullCount: number;
-	totalCount: number;
-}
-
-/**
- * Walk a batch of sampled values + emit a ShapeReport. Handles nested
- * objects by dot-joining paths (`addresses.0.city`). Arrays collapse
- * element-level paths onto `[]` to avoid path explosion on variable
- * arrays.
- */
-export function inferShape(values: readonly unknown[]): ShapeReport {
-	const acc = new Map<string, FieldAcc>();
-
-	for (const v of values) {
-		walk(v, '', acc);
-	}
-
-	const fields = Array.from(acc.entries()).map(([path, a]) => ({
-		path,
-		types: Array.from(a.types).sort(),
-		nullable: a.nullCount > 0,
-		frequency: a.totalCount / values.length,
-	}));
-	fields.sort((a, b) => a.path.localeCompare(b.path));
-
-	return { sampleSize: values.length, fields };
-}
-
-function walk(node: unknown, path: string, acc: Map<string, FieldAcc>): void {
-	if (path !== '') { bump(acc, path, typeName(node), node === null); }
-
-	if (node === null || typeof node !== 'object') { return; }
-
-	if (Array.isArray(node)) {
-		const childPath = path === '' ? '[]' : `${path}.[]`;
-		for (const item of node) { walk(item, childPath, acc); }
-		return;
-	}
-
-	for (const [k, v] of Object.entries(node)) {
-		walk(v, path === '' ? k : `${path}.${k}`, acc);
-	}
-}
-
-function bump(
-	acc: Map<string, FieldAcc>,
-	path: string,
-	type: string,
-	isNull: boolean,
-): void {
-	let a = acc.get(path);
-	if (a === undefined) {
-		a = { types: new Set(), nullCount: 0, totalCount: 0 };
-		acc.set(path, a);
-	}
-	a.types.add(type);
-	if (isNull) { a.nullCount++; }
-	a.totalCount++;
-}
-
-function typeName(value: unknown): string {
-	if (value === null) { return 'null'; }
-	if (Array.isArray(value)) { return 'array'; }
-	if (value instanceof Uint8Array) { return 'binary'; }
-	return typeof value;
-}

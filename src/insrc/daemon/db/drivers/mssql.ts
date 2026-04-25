@@ -147,6 +147,7 @@ class MssqlDriver implements RdbmsDriver {
 			columns: cols,
 			rows: rows as readonly Readonly<Record<string, unknown>>[],
 			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
 		};
 	}
 

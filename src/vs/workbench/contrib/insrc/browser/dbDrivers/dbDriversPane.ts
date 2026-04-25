@@ -5,7 +5,6 @@
 
 import '../setup/media/setupWizard.css';
 import * as dom from '../../../../../base/browser/dom.js';
-import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { EditorPane } from '../../../../browser/parts/editor/editorPane.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
@@ -39,7 +38,6 @@ export class DbDriversPane extends EditorPane {
 
 	private _container!: HTMLElement;
 	private _body!: HTMLElement;
-	private readonly _store = new DisposableStore();
 	private _expandedRepos = new Set<string>();
 
 	constructor(

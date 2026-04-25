@@ -100,6 +100,7 @@ class ClickHouseDriver implements RdbmsDriver {
 			columns: cols,
 			rows,
 			truncated: rows.length >= limit,
+			metadata: { samplingMethod: 'first' },
 		};
 	}
 

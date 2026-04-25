@@ -41,12 +41,11 @@ import type {
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
-	SCAN_TIMEOUT_MS,
 	assertNamespaceAllowed,
 	clampSampleShapeLimit,
 	clampScanLimit,
-	inferShape,
 } from './kv-common.js';
+import { inferShape } from './shape-common.js';
 
 const log = getLogger('db-dynamodb');
 
