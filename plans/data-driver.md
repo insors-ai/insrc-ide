@@ -63,9 +63,9 @@ and in the code-analyzer design doc's
 | Phase | Scope                                                                   | Status |
 |-------|-------------------------------------------------------------------------|--------|
 | 0     | Foundations: config schema, driver registry, family interfaces, keychain integration | done (225e10ec68a) |
-| 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers compiled + registered; Prisma schema.prisma fast path + live-DB integration tests still open. |
+| 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers + Prisma fast path + integration tests for postgres / mysql / redis / mongodb landed. mssql / oracle / cassandra / nats integration tests still open (heavier images / niche-er deployments). |
 | 2     | Setup UX: palette commands, Data Sources pane, connection tester                    | done (uncommitted) |
-| 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | in-progress -- 9 tools landed, browser `IInsrcDbConnectionsService.list()` shipped, `db.sql.explain` deferred to phase 3.2. |
+| 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | done -- 10 tools landed (incl. db:sql:explain across all 5 RDBMS dialects). Browser service has list / save / remove / test (Phase 2). |
 | 4     | Guardrails: raw-query rejection, row/time caps, namespace scoping, opt-in           | done -- caps + raw-query denylist + KV namespace scoping landed in phase 1, per-repo opt-in short-circuit landed in phase 3. PII masking explicitly dropped (target is dev/staging, not prod). |
 | 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB                  | todo |
 | 6     | Schema indexing: graph-resident `db_table` / `db_column` entities + ORM-aware linking | todo |
@@ -712,7 +712,7 @@ graph rows -- negligible against the existing code-entity volume.
 | SQLite driver (`better-sqlite3`)           | done (4ddc3afbf01) | `drivers/sqlite.ts`. Read-only (`readonly:true` + `pragma query_only=ON`). Introspection via PRAGMA `table_info` + `foreign_key_list`. |
 | MSSQL driver (`tedious` + `tarn`)          | done (8015a3c3ed3) | `drivers/mssql.ts`. SQL auth via URL. Pooling via `tarn`. Introspection: `sys.columns` + `sys.indexes`. TOP N sampling via MSSQL dialect. |
 | Oracle driver (`oracledb`)                 | done (8015a3c3ed3) | `drivers/oracle.ts`. Thin mode (default 6.x; no Instant Client for 12c+). Introspection: `ALL_TAB_COLUMNS` + `ALL_CONSTRAINTS` + `ALL_CONS_COLUMNS`. `FETCH FIRST N ROWS ONLY`. |
-| RDBMS shared helpers + prisma fast path    | partial (0b558c339d2) | `drivers/rdbms-common.ts` has dialect quoting + parametrised where-compile + DML/DDL denylist + withTimeout wrapper. **Prisma schema.prisma branch still todo** -- wiring to the artifact-kinds regex parser is a follow-up. |
+| RDBMS shared helpers + prisma fast path    | done (5c008229c7d) | `drivers/rdbms-common.ts` has dialect quoting + parametrised where-compile + DML/DDL denylist + withTimeout wrapper. Prisma fast path lifted the regex parser from `agent/tasks/artifacts/kinds/er-sources.ts` into `shared/prisma-schema.ts` + new `drivers/rdbms-prisma.ts` helper; each RDBMS driver short-circuits describe() through it when `schemaSource.type === 'prisma'`. mtime-keyed cache so editing the prisma file picks up without a daemon restart. |
 | Redis driver (`ioredis`)                   | done (0b558c339d2) | `drivers/redis.ts`. Covers `redis` + `valkey` + `keydb`. Non-blocking SCAN MATCH; JSON auto-decode for GET values. |
 | MongoDB driver (`mongodb`)                 | done (4ddc3afbf01) | `drivers/mongodb.ts`. KV-family. Keys are `{db, collection, _id}`; target via `prefix="<db>.<collection>"`. |
 | Cassandra driver (`cassandra-driver`)      | done (8015a3c3ed3) | `drivers/cassandra.ts`. Multi-part PKs resolved via `system_schema.columns`; scan selects only PK cols with LIMIT, no ALLOW FILTERING. Config needs options.contactPoints + options.localDataCenter. |
@@ -726,7 +726,7 @@ graph rows -- negligible against the existing code-entity volume.
 | Arrow / Feather driver (`apache-arrow`)    | done (8015a3c3ed3) | `drivers/arrow.ts`. Covers `.arrow` + `.feather`. Schema from IPC footer; sample materializes up to N rows + applies WHERE in memory. |
 | BSON driver (`bson`)                       | done (8015a3c3ed3) | `drivers/bson.ts`. Length-prefixed doc stream (mongodump layout); describe samples first 100 docs + merges fields. |
 | Fixed-width driver (hand-rolled)           | done (8015a3c3ed3) | `drivers/fixed-width.ts`. No lib dep; requires `options.columns: {name, start, length, type}[]`. Type coercion + encoding + skipFirstLine options. |
-| Per-driver unit + docker tests             | partial (0b558c339d2, 4ddc3afbf01) | Unit tests landed for rdbms-common + kv-common + csv + jsonl + json + sqlite (end-to-end via pool). Live-DB integration tests against docker-compose'd Postgres / MySQL / MSSQL / Oracle / Redis / MongoDB / Cassandra / NATS still **todo**. |
+| Per-driver unit + docker tests             | partial | Unit tests for rdbms-common + kv-common + rdbms-injection-fuzz + rdbms-prisma + csv + jsonl + json + sqlite. Integration tests (gated by `INSRC_DB_TESTS=1`) shipped for postgres / mysql / redis / mongodb with a docker-compose fixture at `test/fixtures/db-driver/`. Heavier services (mssql / oracle / cassandra / nats) still **todo** -- their images are large + their setup is finicky enough to deserve their own pass. |
 
 ### Phase 2 -- Setup UX
 | Item                                       | Status | Notes |
@@ -743,7 +743,7 @@ graph rows -- negligible against the existing code-entity volume.
 |--------------------------------------------|--------|-------|
 | `db:list_connections`                      | done (uncommitted) | Tool ids use the existing `category:action` colon pattern (`db:sql:describe`, etc.); the plan's `db.sql.describe` prose is purely naming. |
 | `db:sql:describe` / `db:sql:sample`        | done (uncommitted) | Structured `where` objects only; limit clamped at 50; column names validated against describe() cache before query compile. |
-| `db:sql:explain`                           | todo   | Phase 3.2 follow-up |
+| `db:sql:explain`                           | done (56de3cf4dc2) | Per-dialect: postgres `EXPLAIN (FORMAT TEXT)`; mysql `EXPLAIN`; sqlite `EXPLAIN QUERY PLAN`; mssql `SET SHOWPLAN_TEXT ON` two-statement; oracle `EXPLAIN PLAN FOR` + `DBMS_XPLAN.DISPLAY`. Same WHERE / target safety envelope as sample. |
 | `db:kv:scan` / `db:kv:get` / `db:kv:sample_shape` | done (uncommitted) | Honors `namespace.allow` via kv-common; scan cap 500, sample_shape cap 50. |
 | `db:file:describe` / `db:file:sample` / `db:file:sample_shape` | done (uncommitted) | File driver methods are optional; tools surface clean "UNSUPPORTED" errors when a kind doesn't implement one (e.g. single-doc json rejects describe). |
 | `FAMILY_MISMATCH` error shape + retry hint | done (uncommitted) | `acquireDriver` rejects with `FAMILY_MISMATCH: Connection X is kv; use db:kv:* instead` so the LLM retries with the right namespace. |
@@ -757,7 +757,7 @@ graph rows -- negligible against the existing code-entity volume.
 | PII masking (hash substitution)            | dropped | Target audience is dev / local / staging, not prod; hashing isn't a real security boundary anyway. See §4.3 for rationale. The `pii` field on `ConnectionConfig` stays so a future revisit is non-breaking. |
 | KV namespace scoping                       | done (Phase 1) | `assertNamespaceAllowed` in kv-common. |
 | Per-repo opt-in short-circuit              | done (Phase 3) | Tools short-circuit to `NO_CONNECTIONS_CONFIGURED` when the repo has no entries in `db-connections.json`. |
-| Guardrail tests (injection, fs escape)     | partial | rdbms-common injection tests + pool fs-escape test landed; full-matrix injection fuzz still todo. |
+| Guardrail tests (injection, fs escape)     | done (bef9116617a / 1d6f1920282) | Full-matrix fuzz at `__tests__/rdbms-injection-fuzz.test.ts` covers target identifiers (Bobby-Tables variants × 5 dialects), column-name validation, value parametrisation (incl. NUL / 50KB / Date), IN-array edge cases, IS NULL placeholder accounting, plus 18 mutation shapes + 7 benign SELECTs through `looksLikeMutation`. Pool fs-escape coverage stays in csv-driver.test.ts. |
 
 ### Phase 5 -- Extended drivers
 | Item                                       | Status | Notes |
