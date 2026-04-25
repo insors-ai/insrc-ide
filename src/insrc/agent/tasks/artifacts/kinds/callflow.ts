@@ -35,7 +35,9 @@ import {
 	truncate,
 	type MermaidCommonInput,
 } from './shared-mermaid.js';
+import { isJaeger, parseJaeger } from './callflow-formats/jaeger.js';
 import { isOtlp, parseOtlp } from './callflow-formats/otlp.js';
+import { isZipkin, parseZipkin } from './callflow-formats/zipkin.js';
 import type {
 	CallflowSourceFormat,
 	CanonicalSpan,
@@ -71,13 +73,18 @@ function autoDetectAndParse(parsed: unknown): ParseResult {
 	if (isOtlp(parsed)) {
 		return { format: 'otlp', traces: parseOtlp(parsed) };
 	}
-	// Jaeger + Zipkin parsers land in a follow-up. Until then a JSON
-	// blob that doesn't match OTLP fails over to free-text fallback in
-	// the runner.
+	if (isJaeger(parsed)) {
+		return { format: 'jaeger', traces: parseJaeger(parsed) };
+	}
+	if (isZipkin(parsed)) {
+		return { format: 'zipkin', traces: parseZipkin(parsed) };
+	}
 	throw new Error(
-		'Callflow: unrecognised trace JSON shape. v1 supports OTLP ' +
-		'(`resourceSpans` envelope) only; Jaeger + Zipkin land in the ' +
-		'follow-up.',
+		'Callflow: unrecognised trace JSON shape. Supported formats: ' +
+		'OpenTelemetry / OTLP (`resourceSpans` envelope), ' +
+		'Jaeger (`data[].spans[]` envelope), ' +
+		'Zipkin v2 (flat span array with `traceId` + `id` + `localEndpoint`). ' +
+		'Vendor-specific exports (Datadog / Honeycomb / New Relic) -- normalise to OTLP first.',
 	);
 }
 
@@ -260,6 +267,87 @@ function renderSequenceDiagram(prep: PreparedTrace): SequenceRenderResult {
 }
 
 // ---------------------------------------------------------------------------
+// Mermaid flowchart-layout renderer (topology view)
+// ---------------------------------------------------------------------------
+
+/**
+ * Topology-only render: each service is a node; each cross-service
+ * call (parent.serviceName -> span.serviceName) becomes an edge with
+ * a count badge. Useful when a trace has dozens of repeated calls
+ * and the timeline reads as noise -- the topology shows who-talks-
+ * to-whom without the time axis.
+ *
+ * Edges are aggregated: ten `auth -> orders` calls render as one
+ * edge labelled `×10`. Errors on any span across an edge bump the
+ * edge's error count, rendered after the call count.
+ */
+function renderFlowchartDiagram(prep: PreparedTrace): SequenceRenderResult {
+	const { trace } = prep;
+
+	const spanById = new Map<string, CanonicalSpan>();
+	for (const s of trace.spans) { spanById.set(s.spanId, s); }
+
+	const aliases = new Map<string, string>();
+	const orderedServices: string[] = [];
+	for (const s of trace.spans) {
+		if (!aliases.has(s.serviceName)) {
+			participantAlias(s.serviceName, aliases);
+			orderedServices.push(s.serviceName);
+		}
+	}
+
+	interface EdgeAcc {
+		readonly from: string;
+		readonly to: string;
+		count: number;
+		errors: number;
+		readonly samples: string[];   // operation names, capped
+	}
+	const edges = new Map<string, EdgeAcc>();
+	for (const span of trace.spans) {
+		const parent = span.parentSpanId !== undefined
+			? spanById.get(span.parentSpanId) : undefined;
+		const fromService = parent?.serviceName ?? span.serviceName;
+		const toService = span.serviceName;
+		// Self-loops within a single service are noise in the topology
+		// view; skip them.
+		if (fromService === toService && parent !== undefined) { continue; }
+		const key = `${fromService}->${toService}`;
+		let acc = edges.get(key);
+		if (acc === undefined) {
+			acc = { from: fromService, to: toService, count: 0, errors: 0, samples: [] };
+			edges.set(key, acc);
+		}
+		acc.count++;
+		if (span.status === 'ERROR') { acc.errors++; }
+		if (acc.samples.length < 3) { acc.samples.push(span.operationName); }
+	}
+
+	const lines: string[] = ['flowchart LR'];
+	for (const svc of orderedServices) {
+		const alias = aliases.get(svc)!;
+		lines.push(`  ${alias}["${escapeLabel(svc)}"]`);
+	}
+
+	for (const edge of edges.values()) {
+		const fromAlias = aliases.get(edge.from);
+		const toAlias = aliases.get(edge.to);
+		if (fromAlias === undefined || toAlias === undefined) { continue; }
+		const sampleStr = edge.samples.slice(0, 2).join(' / ');
+		const countStr = edge.count > 1 ? ` ×${edge.count}` : '';
+		const errStr = edge.errors > 0 ? ` (${edge.errors} err)` : '';
+		const arrow = edge.errors > 0 ? '-.->' : '-->';
+		lines.push(`  ${fromAlias} ${arrow}|${escapeLabel(sampleStr)}${countStr}${errStr}| ${toAlias}`);
+	}
+
+	return {
+		mermaid: lines.join('\n'),
+		serviceCount: orderedServices.length,
+		spanCount: trace.spans.length,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Free-text fallback scaffold
 // ---------------------------------------------------------------------------
 
@@ -295,13 +383,7 @@ export async function runCallflow(opts: RunCallflowOpts): Promise<ArtifactResult
 	let confidence: 'high' | 'medium' | 'low';
 	let metaExtra = '';
 
-	if (input.layout === 'flowchart') {
-		warnings.push(
-			'Callflow `layout: \'flowchart\'` is not yet implemented in v1; ' +
-			'rendering as `sequence` instead. The flowchart layout will land ' +
-			'in the follow-up that adds Jaeger + Zipkin parsers.',
-		);
-	}
+	const layout = input.layout === 'flowchart' ? 'flowchart' : 'sequence';
 
 	if (input.source !== undefined && input.source.trim() !== '') {
 		mermaidSource = input.source;
@@ -313,9 +395,11 @@ export async function runCallflow(opts: RunCallflowOpts): Promise<ArtifactResult
 			traceJson, input, warnings,
 		);
 		if (prepared !== null) {
-			const rendered = renderSequenceDiagram(prepared.prep);
+			const rendered = layout === 'flowchart'
+				? renderFlowchartDiagram(prepared.prep)
+				: renderSequenceDiagram(prepared.prep);
 			mermaidSource = rendered.mermaid;
-			provenance = `${prepared.format} trace · ${rendered.serviceCount}/${SERVICE_CAP} services · ${rendered.spanCount}/${SPAN_CAP} spans`;
+			provenance = `${prepared.format} trace · ${layout} layout · ${rendered.serviceCount}/${SERVICE_CAP} services · ${rendered.spanCount}/${SPAN_CAP} spans`;
 			confidence = 'high';
 			metaExtra = ` · trace ${truncate(prepared.prep.trace.traceId, 12)}`;
 			if (prepared.prep.droppedInternal > 0) {

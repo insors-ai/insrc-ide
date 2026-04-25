@@ -14,7 +14,9 @@
 import { describe, it } from 'node:test';
 import { strict as assert } from 'node:assert';
 
+import { isJaeger, parseJaeger } from '../kinds/callflow-formats/jaeger.js';
 import { isOtlp, parseOtlp } from '../kinds/callflow-formats/otlp.js';
+import { isZipkin, parseZipkin } from '../kinds/callflow-formats/zipkin.js';
 import type {
 	CanonicalSpan,
 	CanonicalTrace,
@@ -273,5 +275,230 @@ describe('parseOtlp - end-to-end shape', () => {
 		const span = parseOtlp(env)[0]?.spans[0] as CanonicalSpan;
 		assert.equal(span.status, 'ERROR');
 		assert.equal(span.statusMessage, 'card declined');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isJaeger / parseJaeger
+// ---------------------------------------------------------------------------
+
+describe('isJaeger', () => {
+	it('returns true for the Jaeger envelope', () => {
+		assert.equal(isJaeger({ data: [{ traceID: 't', spans: [] }] }), true);
+		assert.equal(isJaeger({ data: [] }), true);
+	});
+
+	it('returns false for non-Jaeger shapes', () => {
+		assert.equal(isJaeger(null), false);
+		assert.equal(isJaeger({}), false);
+		assert.equal(isJaeger({ resourceSpans: [] }), false);   // OTLP
+		assert.equal(isJaeger([]), false);                       // Zipkin
+		assert.equal(isJaeger({ data: [{ noSpansField: true }] }), false);
+	});
+});
+
+describe('parseJaeger', () => {
+	it('reads service name from embedded process', () => {
+		const env = {
+			data: [{
+				traceID: 't1',
+				spans: [{
+					traceID: 't1', spanID: 's1',
+					operationName: 'GET /users',
+					startTime: 1_000_000, duration: 50_000,
+					tags: [{ key: 'span.kind', type: 'string', value: 'server' }],
+					process: { serviceName: 'auth' },
+				}],
+			}],
+		};
+		const trace = parseJaeger(env)[0];
+		assert.ok(trace !== undefined);
+		assert.equal(trace.spans[0]?.serviceName, 'auth');
+		assert.equal(trace.spans[0]?.kind, 'SERVER');
+		assert.equal(trace.spans[0]?.operationName, 'GET /users');
+		assert.equal(trace.spans[0]?.startMicros, 1_000_000);
+		assert.equal(trace.spans[0]?.durationMicros, 50_000);
+	});
+
+	it('reads service name from the lookup-table form', () => {
+		const env = {
+			data: [{
+				traceID: 't1',
+				processes: { p1: { serviceName: 'orders' } },
+				spans: [{
+					traceID: 't1', spanID: 's1',
+					operationName: 'op',
+					startTime: 0, duration: 1000,
+					tags: [{ key: 'span.kind', type: 'string', value: 'client' }],
+					processID: 'p1',
+				}],
+			}],
+		};
+		const trace = parseJaeger(env)[0];
+		assert.equal(trace?.spans[0]?.serviceName, 'orders');
+		assert.equal(trace?.spans[0]?.kind, 'CLIENT');
+	});
+
+	it('walks references[CHILD_OF] for parent span id', () => {
+		const env = {
+			data: [{
+				traceID: 't',
+				spans: [
+					{
+						traceID: 't', spanID: 'child', operationName: 'inner',
+						startTime: 100, duration: 500,
+						process: { serviceName: 'svc' },
+						references: [{ refType: 'CHILD_OF', traceID: 't', spanID: 'parent' }],
+					},
+					{
+						traceID: 't', spanID: 'parent', operationName: 'outer',
+						startTime: 0, duration: 1000,
+						process: { serviceName: 'svc' },
+					},
+				],
+			}],
+		};
+		const trace = parseJaeger(env)[0];
+		const child = trace?.spans.find(s => s.spanId === 'child');
+		assert.equal(child?.parentSpanId, 'parent');
+	});
+
+	it('classifies spans as ERROR via the boolean error tag', () => {
+		const env = {
+			data: [{
+				traceID: 't',
+				spans: [{
+					traceID: 't', spanID: 's', operationName: 'op',
+					startTime: 0, duration: 100,
+					tags: [{ key: 'error', type: 'bool', value: true }],
+					process: { serviceName: 'svc' },
+				}],
+			}],
+		};
+		const trace = parseJaeger(env)[0];
+		assert.equal(trace?.spans[0]?.status, 'ERROR');
+	});
+
+	it('classifies spans as ERROR via otel.status_code = ERROR', () => {
+		const env = {
+			data: [{
+				traceID: 't',
+				spans: [{
+					traceID: 't', spanID: 's', operationName: 'op',
+					startTime: 0, duration: 100,
+					tags: [
+						{ key: 'otel.status_code', type: 'string', value: 'ERROR' },
+						{ key: 'otel.status_description', type: 'string', value: 'timeout' },
+					],
+					process: { serviceName: 'svc' },
+				}],
+			}],
+		};
+		const span = parseJaeger(env)[0]?.spans[0];
+		assert.equal(span?.status, 'ERROR');
+		assert.equal(span?.statusMessage, 'timeout');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// isZipkin / parseZipkin
+// ---------------------------------------------------------------------------
+
+describe('isZipkin', () => {
+	it('returns true for v2 flat-array shape with traceId + id + localEndpoint', () => {
+		assert.equal(isZipkin([{ traceId: 't', id: 's', localEndpoint: { serviceName: 'a' } }]), true);
+		assert.equal(isZipkin([{ traceId: 't', id: 's', kind: 'CLIENT' }]), true);
+		assert.equal(isZipkin([]), true);                  // empty zipkin export
+	});
+
+	it('returns false for non-Zipkin shapes', () => {
+		assert.equal(isZipkin(null), false);
+		assert.equal(isZipkin({}), false);
+		assert.equal(isZipkin({ resourceSpans: [] }), false);
+		assert.equal(isZipkin({ data: [] }), false);
+		// Array, but spans don't carry the disambiguators.
+		assert.equal(isZipkin([{ unrelated: true }]), false);
+	});
+});
+
+describe('parseZipkin', () => {
+	it('groups by traceId, sorts by timestamp', () => {
+		const spans = [
+			{ traceId: 'a', id: 's2', name: 'b',
+				timestamp: 200, duration: 100, kind: 'SERVER',
+				localEndpoint: { serviceName: 'svc' } },
+			{ traceId: 'a', id: 's1', name: 'a',
+				timestamp: 100, duration: 100, kind: 'CLIENT',
+				localEndpoint: { serviceName: 'svc' } },
+			{ traceId: 'b', id: 's3', name: 'c',
+				timestamp: 50, duration: 50, kind: 'CLIENT',
+				localEndpoint: { serviceName: 'svc' } },
+		];
+		const traces = parseZipkin(spans);
+		assert.equal(traces.length, 2);
+		const a = traces.find(t => t.traceId === 'a');
+		assert.deepEqual(a?.spans.map(s => s.spanId), ['s1', 's2']);
+	});
+
+	it('treats null / undefined kind as INTERNAL', () => {
+		const spans = [
+			{ traceId: 't', id: 's1', name: 'op',
+				timestamp: 0, duration: 100, kind: null,
+				localEndpoint: { serviceName: 'a' } },
+			{ traceId: 't', id: 's2', name: 'op',
+				timestamp: 0, duration: 100,
+				localEndpoint: { serviceName: 'a' } },
+		];
+		const trace = parseZipkin(spans)[0];
+		assert.equal(trace?.spans[0]?.kind, 'INTERNAL');
+		assert.equal(trace?.spans[1]?.kind, 'INTERNAL');
+	});
+
+	it('classifies spans with the error tag as ERROR', () => {
+		const spans = [
+			{ traceId: 't', id: 's', name: 'op',
+				timestamp: 0, duration: 100, kind: 'SERVER',
+				localEndpoint: { serviceName: 'a' },
+				tags: { error: 'true' } },
+			{ traceId: 't', id: 's2', name: 'op',
+				timestamp: 0, duration: 100, kind: 'SERVER',
+				localEndpoint: { serviceName: 'a' },
+				tags: { error: 'connection refused' } },
+		];
+		const trace = parseZipkin(spans)[0];
+		assert.equal(trace?.spans[0]?.status, 'ERROR');
+		// Free-form error message preserved as statusMessage.
+		assert.equal(trace?.spans[1]?.status, 'ERROR');
+		assert.equal(trace?.spans[1]?.statusMessage, 'connection refused');
+	});
+
+	it('preserves parentId as parentSpanId', () => {
+		const spans = [
+			{ traceId: 't', id: 'child', parentId: 'parent', name: 'op',
+				timestamp: 100, duration: 50, kind: 'CLIENT',
+				localEndpoint: { serviceName: 'svc' } },
+			{ traceId: 't', id: 'parent', name: 'op',
+				timestamp: 0, duration: 200, kind: 'SERVER',
+				localEndpoint: { serviceName: 'svc' } },
+		];
+		const trace = parseZipkin(spans)[0];
+		const child = trace?.spans.find(s => s.spanId === 'child');
+		assert.equal(child?.parentSpanId, 'parent');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Format auto-detection ordering
+// ---------------------------------------------------------------------------
+
+describe('format detection ordering', () => {
+	it('OTLP / Jaeger / Zipkin shapes are mutually exclusive', () => {
+		const otlp = { resourceSpans: [] };
+		const jaeger = { data: [{ traceID: 't', spans: [] }] };
+		const zipkin = [{ traceId: 't', id: 's', kind: 'CLIENT', localEndpoint: { serviceName: 'a' } }];
+
+		assert.equal(isOtlp(otlp) && !isJaeger(otlp) && !isZipkin(otlp), true);
+		assert.equal(!isOtlp(jaeger) && isJaeger(jaeger) && !isZipkin(jaeger), true);
+		assert.equal(!isOtlp(zipkin) && !isJaeger(zipkin) && isZipkin(zipkin), true);
 	});
 });
