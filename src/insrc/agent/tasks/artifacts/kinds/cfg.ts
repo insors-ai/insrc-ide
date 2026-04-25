@@ -1,0 +1,569 @@
+/**
+ * On-demand control-flow walk for the `flow:code` artifact branch.
+ *
+ * Plan §4.2: rather than retain a graph-resident `BRANCHES` relation,
+ * the kind reads the function entity's `body` (already captured by the
+ * indexer at extract time) and runs a fresh tree-sitter parse scoped
+ * to the body. The walker recognises a small fixed set of structural
+ * CST nodes and emits a Mermaid `flowchart TD`. This is "AST-shaped
+ * flowchart", not a real compiler CFG -- no SSA, no basic-block
+ * analysis, no flow-path enumeration.
+ *
+ * v1 covers TypeScript / TSX / JavaScript via tree-sitter-typescript.
+ * Python and Go will land as follow-up walkers (per-language node
+ * names differ).
+ *
+ * Caps: 200 step-tree nodes per function. Overflow throws so the
+ * caller can fall through to the phase-1 LLM approximation with a
+ * `(truncated)` annotation.
+ */
+
+import { createRequire } from 'node:module';
+const _require = createRequire(import.meta.url);
+
+const Parser     = _require('tree-sitter')            as typeof import('tree-sitter');
+const TSGrammars = _require('tree-sitter-typescript') as { typescript: unknown; tsx: unknown };
+const JSGrammar  = _require('tree-sitter-javascript') as unknown;
+
+import type { Entity, Language } from '../../../../shared/types.js';
+
+type SyntaxNode = import('tree-sitter').SyntaxNode;
+
+/** Cap on step-tree node count. Beyond this the walker throws. */
+export const CFG_NODE_CAP = 200;
+
+const PREDICATE_TRUNC = 40;
+
+// ---------------------------------------------------------------------------
+// Step tree -- the intermediate representation between AST walk + Mermaid
+// ---------------------------------------------------------------------------
+
+export type CfgStep =
+	| { readonly kind: 'enter'; readonly label: string }
+	| { readonly kind: 'stmt'; readonly label: string }
+	| { readonly kind: 'call'; readonly callee: string }
+	| { readonly kind: 'return'; readonly label: string }
+	| { readonly kind: 'break' }
+	| { readonly kind: 'continue' }
+	| { readonly kind: 'throw'; readonly label: string }
+	| {
+		readonly kind: 'branch';
+		readonly predicate: string;
+		readonly consequent: readonly CfgStep[];
+		readonly alternative: readonly CfgStep[] | null;
+	}
+	| {
+		readonly kind: 'loop';
+		readonly loopKind: 'for' | 'for-in' | 'for-of' | 'while' | 'do-while';
+		readonly predicate: string;
+		readonly body: readonly CfgStep[];
+	}
+	| {
+		readonly kind: 'switch';
+		readonly subject: string;
+		readonly cases: readonly {
+			readonly label: string;
+			readonly body: readonly CfgStep[];
+		}[];
+	}
+	| {
+		readonly kind: 'try';
+		readonly tryBody: readonly CfgStep[];
+		readonly catchBody: readonly CfgStep[] | null;
+		readonly finallyBody: readonly CfgStep[] | null;
+	};
+
+export interface CfgWalkResult {
+	readonly steps: readonly CfgStep[];
+	readonly nodeCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// TypeScript / JavaScript walker
+// ---------------------------------------------------------------------------
+
+interface WalkCtx {
+	count: number;
+}
+
+function bump(ctx: WalkCtx): void {
+	ctx.count++;
+	if (ctx.count > CFG_NODE_CAP) {
+		throw new Error(
+			`cfg: function exceeds ${CFG_NODE_CAP}-node cap; caller should fall through`,
+		);
+	}
+}
+
+function trunc(s: string, n = PREDICATE_TRUNC): string {
+	const flat = s.replace(/\s+/g, ' ').trim();
+	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
+}
+
+function pickLanguageGrammar(language: Language, file: string): unknown {
+	if (language === 'typescript') {
+		return file.endsWith('.tsx') ? TSGrammars.tsx : TSGrammars.typescript;
+	}
+	if (language === 'javascript') { return JSGrammar; }
+	throw new Error(`cfg: language '${language}' not yet supported`);
+}
+
+/**
+ * Find the function/method body node inside a parsed tree-sitter root.
+ * The entity.body string is the function declaration itself, so the
+ * tree's root will typically be `program` -> `function_declaration` ->
+ * `statement_block`. Return the statement-block node so the walker
+ * iterates the body's top-level statements.
+ */
+function findBodyBlock(root: SyntaxNode): SyntaxNode | null {
+	let cur: SyntaxNode | null = root;
+	const queue: SyntaxNode[] = [root];
+	while (queue.length > 0) {
+		cur = queue.shift() ?? null;
+		if (cur === null) { break; }
+		if (
+			cur.type === 'function_declaration'
+			|| cur.type === 'method_definition'
+			|| cur.type === 'arrow_function'
+			|| cur.type === 'function'
+			|| cur.type === 'function_expression'
+			|| cur.type === 'generator_function'
+			|| cur.type === 'generator_function_declaration'
+		) {
+			const body = cur.childForFieldName('body');
+			if (body !== null) { return body; }
+		}
+		for (let i = 0; i < cur.namedChildCount; i++) {
+			const child = cur.namedChild(i);
+			if (child !== null) { queue.push(child); }
+		}
+	}
+	return null;
+}
+
+function walkBlock(block: SyntaxNode, ctx: WalkCtx): CfgStep[] {
+	const out: CfgStep[] = [];
+	for (let i = 0; i < block.namedChildCount; i++) {
+		const stmt = block.namedChild(i);
+		if (stmt === null) { continue; }
+		const step = walkStatement(stmt, ctx);
+		if (step === null) { continue; }
+		if (Array.isArray(step)) { out.push(...step); }
+		else { out.push(step); }
+	}
+	return out;
+}
+
+function walkStatement(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
+	switch (node.type) {
+		case 'if_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			const consequence = node.childForFieldName('consequence');
+			const alternative = node.childForFieldName('alternative');
+			return {
+				kind: 'branch',
+				predicate: trunc(condition),
+				consequent: walkBranch(consequence, ctx),
+				alternative: alternative === null ? null : walkBranch(alternative, ctx),
+			};
+		}
+		case 'switch_statement': {
+			bump(ctx);
+			const subject = node.childForFieldName('value')?.text ?? 'subject';
+			const cases: { label: string; body: CfgStep[] }[] = [];
+			const caseBlock = node.childForFieldName('body');
+			if (caseBlock !== null) {
+				for (let i = 0; i < caseBlock.namedChildCount; i++) {
+					const c = caseBlock.namedChild(i);
+					if (c === null) { continue; }
+					if (c.type === 'switch_case' || c.type === 'switch_default') {
+						bump(ctx);
+						const label = c.type === 'switch_default'
+							? 'default'
+							: trunc(c.childForFieldName('value')?.text ?? 'case');
+						const caseBody: CfgStep[] = [];
+						for (let j = 0; j < c.namedChildCount; j++) {
+							const child = c.namedChild(j);
+							if (child === null || child === c.childForFieldName('value')) { continue; }
+							const sub = walkStatement(child, ctx);
+							if (sub === null) { continue; }
+							if (Array.isArray(sub)) { caseBody.push(...sub); }
+							else { caseBody.push(sub); }
+						}
+						cases.push({ label, body: caseBody });
+					}
+				}
+			}
+			return { kind: 'switch', subject: trunc(subject), cases };
+		}
+		case 'for_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text
+				?? node.childForFieldName('initializer')?.text
+				?? 'for';
+			const body = node.childForFieldName('body');
+			return {
+				kind: 'loop', loopKind: 'for', predicate: trunc(condition),
+				body: walkBranch(body, ctx),
+			};
+		}
+		case 'for_in_statement': {
+			bump(ctx);
+			const left = node.childForFieldName('left')?.text ?? 'item';
+			const right = node.childForFieldName('right')?.text ?? 'iter';
+			const opNode = node.children.find(
+				c => c.type === 'in' || c.type === 'of',
+			);
+			const op = opNode?.type === 'of' ? 'of' : 'in';
+			return {
+				kind: 'loop', loopKind: op === 'of' ? 'for-of' : 'for-in',
+				predicate: trunc(`${left} ${op} ${right}`),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'while_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			return {
+				kind: 'loop', loopKind: 'while', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'do_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			return {
+				kind: 'loop', loopKind: 'do-while', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'try_statement': {
+			bump(ctx);
+			const tryBlock = node.childForFieldName('body');
+			const handler = node.children.find(c => c.type === 'catch_clause');
+			const finally_ = node.children.find(c => c.type === 'finally_clause');
+			return {
+				kind: 'try',
+				tryBody: walkBranch(tryBlock, ctx),
+				catchBody: handler === undefined ? null : walkBranch(
+					handler.childForFieldName('body') ?? handler, ctx,
+				),
+				finallyBody: finally_ === undefined ? null : walkBranch(
+					finally_.childForFieldName('body') ?? finally_, ctx,
+				),
+			};
+		}
+		case 'return_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text;
+			return { kind: 'return', label: arg !== undefined ? trunc(`return ${arg}`) : 'return' };
+		}
+		case 'break_statement': {
+			bump(ctx);
+			return { kind: 'break' };
+		}
+		case 'continue_statement': {
+			bump(ctx);
+			return { kind: 'continue' };
+		}
+		case 'throw_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text ?? '';
+			return { kind: 'throw', label: trunc(`throw ${arg}`) };
+		}
+		case 'expression_statement': {
+			// Render only call expressions (`foo(...)`, `obj.method(...)`)
+			// as their own step; everything else (assignments, member
+			// expressions, etc.) collapses into the implicit straight-
+			// line flow.
+			const expr = node.namedChild(0);
+			if (expr === null) { return null; }
+			if (expr.type === 'call_expression' || expr.type === 'await_expression') {
+				bump(ctx);
+				return { kind: 'call', callee: trunc(expr.text) };
+			}
+			return null;
+		}
+		case 'statement_block':
+		case 'block': {
+			// Bare nested block -- inline its contents.
+			return walkBlock(node, ctx);
+		}
+		default:
+			return null;
+	}
+}
+
+/**
+ * Walk a branch / loop body, which may be either a `statement_block`
+ * (in `{ ... }`) or a single statement (no braces). Either way,
+ * return a flat list of steps.
+ */
+function walkBranch(node: SyntaxNode | null, ctx: WalkCtx): CfgStep[] {
+	if (node === null) { return []; }
+	if (node.type === 'statement_block' || node.type === 'block') {
+		return walkBlock(node, ctx);
+	}
+	const single = walkStatement(node, ctx);
+	if (single === null) { return []; }
+	return Array.isArray(single) ? single : [single];
+}
+
+// ---------------------------------------------------------------------------
+// Public entry: function body -> step tree
+// ---------------------------------------------------------------------------
+
+export interface CfgFromEntityResult extends CfgWalkResult {
+	readonly entryLabel: string;
+	readonly language: Language;
+}
+
+/**
+ * Run the walker against a code entity (function / method). The
+ * entity's `body` carries the full source already (extracted at index
+ * time -- see indexer/parser/typescript.ts). Throws when the language
+ * isn't supported, the entity isn't a function-shaped entity, or the
+ * body exceeds the 200-node cap.
+ */
+export function walkCfgFromEntity(entity: Entity): CfgFromEntityResult {
+	if (entity.kind !== 'function' && entity.kind !== 'method') {
+		throw new Error(
+			`cfg: entity '${entity.name}' is a ${entity.kind}, not a function or method`,
+		);
+	}
+	if (entity.language !== 'typescript' && entity.language !== 'javascript') {
+		throw new Error(
+			`cfg: language '${entity.language}' not yet supported (TS / JS in v1; Python + Go to follow)`,
+		);
+	}
+	if (entity.body === '') {
+		throw new Error(`cfg: entity '${entity.name}' has empty body`);
+	}
+
+	const grammar = pickLanguageGrammar(entity.language, entity.file);
+	const parser = new Parser();
+	(parser as { setLanguage(l: unknown): void }).setLanguage(grammar);
+	const tree = (parser as {
+		parse(s: string): { rootNode: SyntaxNode };
+	}).parse(entity.body);
+
+	const block = findBodyBlock(tree.rootNode);
+	if (block === null) {
+		throw new Error(`cfg: could not locate function body in '${entity.name}'`);
+	}
+
+	const ctx: WalkCtx = { count: 0 };
+	const steps = walkBlock(block, ctx);
+
+	return {
+		steps,
+		nodeCount: ctx.count,
+		entryLabel: entity.name,
+		language: entity.language,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Mermaid rendering
+// ---------------------------------------------------------------------------
+
+/** Mermaid node ids must match `[A-Za-z_][A-Za-z0-9_]*`. */
+function nodeId(prefix: string, seen: Set<string>): string {
+	let i = 1;
+	let id = `${prefix}_${i}`;
+	while (seen.has(id)) { i++; id = `${prefix}_${i}`; }
+	seen.add(id);
+	return id;
+}
+
+/** Sanitise a label for a Mermaid `["..."]` slot. */
+function nodeLabel(raw: string): string {
+	return raw.replace(/[[\]"`]/g, '').replace(/\|/g, '/').trim();
+}
+
+/**
+ * Linearise the step tree into a Mermaid `flowchart TD`. Branches
+ * re-converge to whichever node comes after them (the renderer
+ * threads `nextId` through the recursion so each terminal step
+ * points at the right successor).
+ */
+export function renderCfgMermaid(result: CfgFromEntityResult): string {
+	const lines: string[] = ['flowchart TD'];
+	const seen = new Set<string>();
+
+	const enterId = nodeId('Enter', seen);
+	lines.push(`  ${enterId}([${nodeLabel(result.entryLabel)}])`);
+
+	const exitId = nodeId('Exit', seen);
+
+	const lastId = renderSteps(result.steps, enterId, exitId, lines, seen);
+	if (lastId !== null) {
+		lines.push(`  ${lastId} --> ${exitId}`);
+	}
+
+	lines.push(`  ${exitId}([end])`);
+	return lines.join('\n');
+}
+
+/**
+ * Render a sequential list of steps. Returns the id of the last
+ * "fall-through" node -- callers chain a `--> <next>` from it.
+ * Returns null if the sequence ends with a terminator (return,
+ * throw) and so has no fall-through.
+ */
+function renderSteps(
+	steps: readonly CfgStep[],
+	prevId: string,
+	exitId: string,
+	lines: string[],
+	seen: Set<string>,
+): string | null {
+	let cursor: string | null = prevId;
+	for (const step of steps) {
+		if (cursor === null) { break; }
+		cursor = renderStep(step, cursor, exitId, lines, seen);
+	}
+	return cursor;
+}
+
+function renderStep(
+	step: CfgStep,
+	prevId: string,
+	exitId: string,
+	lines: string[],
+	seen: Set<string>,
+): string | null {
+	switch (step.kind) {
+		case 'enter':
+		case 'stmt': {
+			const id = nodeId('Stmt', seen);
+			lines.push(`  ${id}["${nodeLabel(step.label)}"]`);
+			lines.push(`  ${prevId} --> ${id}`);
+			return id;
+		}
+		case 'call': {
+			const id = nodeId('Call', seen);
+			lines.push(`  ${id}["${nodeLabel(step.callee)}"]`);
+			lines.push(`  ${prevId} --> ${id}`);
+			return id;
+		}
+		case 'return': {
+			const id = nodeId('Return', seen);
+			lines.push(`  ${id}([${nodeLabel(step.label)}])`);
+			lines.push(`  ${prevId} --> ${id}`);
+			lines.push(`  ${id} --> ${exitId}`);
+			return null;     // terminator: no fall-through
+		}
+		case 'break': {
+			const id = nodeId('Break', seen);
+			lines.push(`  ${id}([break])`);
+			lines.push(`  ${prevId} --> ${id}`);
+			return null;
+		}
+		case 'continue': {
+			const id = nodeId('Continue', seen);
+			lines.push(`  ${id}([continue])`);
+			lines.push(`  ${prevId} --> ${id}`);
+			return null;
+		}
+		case 'throw': {
+			const id = nodeId('Throw', seen);
+			lines.push(`  ${id}([${nodeLabel(step.label)}])`);
+			lines.push(`  ${prevId} --> ${id}`);
+			lines.push(`  ${id} --> ${exitId}`);
+			return null;
+		}
+		case 'branch': {
+			const decisionId = nodeId('If', seen);
+			lines.push(`  ${decisionId}{${nodeLabel(step.predicate)}}`);
+			lines.push(`  ${prevId} --> ${decisionId}`);
+
+			const trueTail = renderSteps(step.consequent, decisionId, exitId, lines, seen);
+			let falseTail: string | null;
+			if (step.alternative === null) {
+				// Empty else: implicit edge from decision to next.
+				falseTail = decisionId;
+			} else {
+				falseTail = renderSteps(step.alternative, decisionId, exitId, lines, seen);
+			}
+
+			// If both branches terminate (return/throw), the branch as a
+			// whole has no fall-through.
+			if (trueTail === null && falseTail === null) { return null; }
+
+			// Re-converge into a join node so the next step has a single
+			// predecessor.
+			const joinId = nodeId('Join', seen);
+			lines.push(`  ${joinId}[ ]`);
+			lines.push(`  ${joinId}@{ shape: framed-circle }`);
+			if (trueTail !== null) { lines.push(`  ${trueTail} -->|true| ${joinId}`); }
+			if (falseTail !== null) { lines.push(`  ${falseTail} -->|false| ${joinId}`); }
+			return joinId;
+		}
+		case 'switch': {
+			const switchId = nodeId('Switch', seen);
+			lines.push(`  ${switchId}{${nodeLabel(step.subject)}}`);
+			lines.push(`  ${prevId} --> ${switchId}`);
+
+			const tails: string[] = [];
+			for (const c of step.cases) {
+				const caseHead = nodeId('Case', seen);
+				lines.push(`  ${caseHead}[${nodeLabel(c.label)}]`);
+				lines.push(`  ${switchId} --> ${caseHead}`);
+				const tail = renderSteps(c.body, caseHead, exitId, lines, seen);
+				if (tail !== null) { tails.push(tail); }
+			}
+			if (tails.length === 0) { return null; }
+			const joinId = nodeId('SwitchJoin', seen);
+			lines.push(`  ${joinId}[ ]`);
+			for (const t of tails) { lines.push(`  ${t} --> ${joinId}`); }
+			return joinId;
+		}
+		case 'loop': {
+			const headId = nodeId('Loop', seen);
+			lines.push(`  ${headId}{${nodeLabel(`${step.loopKind} ${step.predicate}`)}}`);
+			lines.push(`  ${prevId} --> ${headId}`);
+
+			const bodyTail = renderSteps(step.body, headId, exitId, lines, seen);
+			if (bodyTail !== null) {
+				lines.push(`  ${bodyTail} --> ${headId}`);
+			}
+			return headId;
+		}
+		case 'try': {
+			const tryHeadId = nodeId('Try', seen);
+			lines.push(`  ${tryHeadId}[try]`);
+			lines.push(`  ${prevId} --> ${tryHeadId}`);
+
+			const tryTail = renderSteps(step.tryBody, tryHeadId, exitId, lines, seen);
+
+			let catchTail: string | null = null;
+			if (step.catchBody !== null) {
+				const catchHeadId = nodeId('Catch', seen);
+				lines.push(`  ${catchHeadId}[catch]`);
+				lines.push(`  ${tryHeadId} -.->|throw| ${catchHeadId}`);
+				catchTail = renderSteps(step.catchBody, catchHeadId, exitId, lines, seen);
+			}
+
+			let finalEntry: string | null = null;
+			if (step.finallyBody !== null) {
+				const finallyHeadId = nodeId('Finally', seen);
+				lines.push(`  ${finallyHeadId}[finally]`);
+				if (tryTail !== null) { lines.push(`  ${tryTail} --> ${finallyHeadId}`); }
+				if (catchTail !== null) { lines.push(`  ${catchTail} --> ${finallyHeadId}`); }
+				finalEntry = renderSteps(step.finallyBody, finallyHeadId, exitId, lines, seen);
+			} else {
+				// Without finally: re-converge directly.
+				if (tryTail === null && catchTail === null) { return null; }
+				const joinId = nodeId('TryJoin', seen);
+				lines.push(`  ${joinId}[ ]`);
+				if (tryTail !== null) { lines.push(`  ${tryTail} --> ${joinId}`); }
+				if (catchTail !== null) { lines.push(`  ${catchTail} --> ${joinId}`); }
+				return joinId;
+			}
+
+			return finalEntry;
+		}
+	}
+}
