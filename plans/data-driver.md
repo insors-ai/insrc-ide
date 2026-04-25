@@ -66,7 +66,7 @@ and in the code-analyzer design doc's
 | 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers compiled + registered; Prisma schema.prisma fast path + live-DB integration tests still open. |
 | 2     | Setup UX: palette commands, Data Sources pane, connection tester                    | done (uncommitted) |
 | 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | in-progress -- 9 tools landed, browser `IInsrcDbConnectionsService.list()` shipped, `db.sql.explain` deferred to phase 3.2. |
-| 4     | Guardrails: raw-query rejection, row/time caps, PII masking, namespace scoping      | partial -- caps + raw-query denylist + namespace scoping landed in the drivers (phase 1); PII masking + per-repo opt-in short-circuit still todo. |
+| 4     | Guardrails: raw-query rejection, row/time caps, namespace scoping, opt-in           | done -- caps + raw-query denylist + KV namespace scoping landed in phase 1, per-repo opt-in short-circuit landed in phase 3. PII masking explicitly dropped (target is dev/staging, not prod). |
 | 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB                  | todo |
 | 6     | Schema indexing: graph-resident `db_table` / `db_column` entities + ORM-aware linking | todo |
 
@@ -447,17 +447,26 @@ phase 4 wires the cross-cutting pieces.
   natively accept `AbortSignal` wrap their client call in
   `Promise.race` + a cleanup step (`.close()` / `.abort()`).
 
-### 4.3 PII masking
+### 4.3 PII masking -- **dropped from scope**
 
-- Per-connection `pii` array in the config:
-  - RDBMS: `"<table>.<column>"` patterns.
-  - KV / JSON: `"<key-pattern>:<field-path>"` patterns.
-  - File: `"<column>"` (file drivers don't have multiple tables).
-- On result assembly: matched fields are replaced with
-  `"sha256:<hex10>"` of the original value. Never the clear value,
-  not even in logs.
-- Configured via the setup UX (Phase 2) -- tick boxes per column
-  after a successful `describe`.
+Originally specified as a per-connection `pii` array that would
+hash-substitute matched fields in tool results. **Not shipping**
+because the data driver's expected target is dev / local / staging
+DBs (see [design §13.5][design-13-5] and the mission preamble at
+the top of this plan); the `pii` toggle was a prod-safety nudge
+for a use case we explicitly don't optimise for.
+
+If a user does point at prod, they own the choice -- the same way
+they would when opening a `psql` shell. We don't pretend hashing
+is a security boundary; if real prod safety is wanted later it
+needs design-level work (audit logs, append-only access journal,
+read-only enforcement at the SQL grant level), not a string-
+matcher.
+
+Reflected: the `pii` field stays on the `ConnectionConfig`
+TypeScript shape so a future revisit is non-breaking, but no
+driver consumes it. The setup UX does not surface a PII column
+picker.
 
 ### 4.4 Namespace scoping (KV)
 
@@ -599,10 +608,11 @@ graph rows -- negligible against the existing code-entity volume.
   MongoDB collections all introduce a "tenant" axis. For phase 6
   we treat the keyspace/schema as the qualifier on `db_table.name`
   (`public.users`) and call it done.
-- **PII propagation.** A `db_column` flagged `pii` (carried from
-  the connection config's `pii` array) should propagate to every
-  code entity with a `READS_COLUMN` edge. Probably a downstream
-  feature on top of Phase 4's PII masking, not phase 6 itself.
+- **PII propagation.** With Phase 4's PII masking dropped, the
+  `pii` array on `ConnectionConfig` is currently inert. If a
+  future phase revives it (e.g. as a query-time warning rather
+  than a hash-substitute), this is where graph-resident
+  propagation would slot in.
 
 ### 6.6 Status
 
@@ -744,10 +754,10 @@ graph rows -- negligible against the existing code-entity volume.
 |--------------------------------------------|--------|-------|
 | Raw-SQL regex guard                        | done (Phase 1) | `looksLikeMutation` + DML/DDL denylist in rdbms-common. |
 | Row / time caps (enforced in shared)       | done (Phase 1) | 50 rows + 5s RDBMS; 500 keys + 50 values + 5s KV; 50 rows + 5s file. |
-| PII masking (hash substitution)            | todo   |       |
+| PII masking (hash substitution)            | dropped | Target audience is dev / local / staging, not prod; hashing isn't a real security boundary anyway. See §4.3 for rationale. The `pii` field on `ConnectionConfig` stays so a future revisit is non-breaking. |
 | KV namespace scoping                       | done (Phase 1) | `assertNamespaceAllowed` in kv-common. |
 | Per-repo opt-in short-circuit              | done (Phase 3) | Tools short-circuit to `NO_CONNECTIONS_CONFIGURED` when the repo has no entries in `db-connections.json`. |
-| Guardrail tests (injection, fs escape)     | partial | rdbms-common injection tests + pool fs-escape test landed; PII masking tests + full-matrix fuzz still todo. |
+| Guardrail tests (injection, fs escape)     | partial | rdbms-common injection tests + pool fs-escape test landed; full-matrix injection fuzz still todo. |
 
 ### Phase 5 -- Extended drivers
 | Item                                       | Status | Notes |
