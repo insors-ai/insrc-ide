@@ -21,9 +21,10 @@
 import { createRequire } from 'node:module';
 const _require = createRequire(import.meta.url);
 
-const Parser     = _require('tree-sitter')            as typeof import('tree-sitter');
-const TSGrammars = _require('tree-sitter-typescript') as { typescript: unknown; tsx: unknown };
-const JSGrammar  = _require('tree-sitter-javascript') as unknown;
+const Parser        = _require('tree-sitter')            as typeof import('tree-sitter');
+const TSGrammars    = _require('tree-sitter-typescript') as { typescript: unknown; tsx: unknown };
+const JSGrammar     = _require('tree-sitter-javascript') as unknown;
+const PythonGrammar = _require('tree-sitter-python')     as unknown;
 
 import type { Entity, Language } from '../../../../shared/types.js';
 
@@ -82,8 +83,11 @@ export interface CfgWalkResult {
 // TypeScript / JavaScript walker
 // ---------------------------------------------------------------------------
 
+type WalkLang = 'typescript' | 'javascript' | 'python';
+
 interface WalkCtx {
 	count: number;
+	lang: WalkLang;
 }
 
 function bump(ctx: WalkCtx): void {
@@ -105,6 +109,7 @@ function pickLanguageGrammar(language: Language, file: string): unknown {
 		return file.endsWith('.tsx') ? TSGrammars.tsx : TSGrammars.typescript;
 	}
 	if (language === 'javascript') { return JSGrammar; }
+	if (language === 'python') { return PythonGrammar; }
 	throw new Error(`cfg: language '${language}' not yet supported`);
 }
 
@@ -112,24 +117,29 @@ function pickLanguageGrammar(language: Language, file: string): unknown {
  * Find the function/method body node inside a parsed tree-sitter root.
  * The entity.body string is the function declaration itself, so the
  * tree's root will typically be `program` -> `function_declaration` ->
- * `statement_block`. Return the statement-block node so the walker
- * iterates the body's top-level statements.
+ * `statement_block` (TS/JS) or `module` -> `function_definition` ->
+ * `block` (Python). Return the body block so the walker iterates its
+ * top-level statements.
  */
-function findBodyBlock(root: SyntaxNode): SyntaxNode | null {
+function findBodyBlock(root: SyntaxNode, lang: WalkLang): SyntaxNode | null {
+	const fnTypes = lang === 'python'
+		? new Set(['function_definition'])
+		: new Set([
+			'function_declaration',
+			'method_definition',
+			'arrow_function',
+			'function',
+			'function_expression',
+			'generator_function',
+			'generator_function_declaration',
+		]);
+
 	let cur: SyntaxNode | null = root;
 	const queue: SyntaxNode[] = [root];
 	while (queue.length > 0) {
 		cur = queue.shift() ?? null;
 		if (cur === null) { break; }
-		if (
-			cur.type === 'function_declaration'
-			|| cur.type === 'method_definition'
-			|| cur.type === 'arrow_function'
-			|| cur.type === 'function'
-			|| cur.type === 'function_expression'
-			|| cur.type === 'generator_function'
-			|| cur.type === 'generator_function_declaration'
-		) {
+		if (fnTypes.has(cur.type)) {
 			const body = cur.childForFieldName('body');
 			if (body !== null) { return body; }
 		}
@@ -155,6 +165,11 @@ function walkBlock(block: SyntaxNode, ctx: WalkCtx): CfgStep[] {
 }
 
 function walkStatement(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
+	if (ctx.lang === 'python') { return walkStatementPython(node, ctx); }
+	return walkStatementTs(node, ctx);
+}
+
+function walkStatementTs(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
 	switch (node.type) {
 		case 'if_statement': {
 			bump(ctx);
@@ -295,10 +310,180 @@ function walkStatement(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | nu
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Python walker (tree-sitter-python node names)
+// ---------------------------------------------------------------------------
+
+function walkStatementPython(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
+	switch (node.type) {
+		case 'if_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			const consequence = node.childForFieldName('consequence');
+			// Python `else_clause` (with `body` field) or chained `elif`
+			// rendered as a sub-`if_statement` inside the alternative.
+			const altNode = node.childForFieldName('alternative');
+			let alternative: CfgStep[] | null = null;
+			if (altNode !== null) {
+				if (altNode.type === 'else_clause') {
+					const body = altNode.childForFieldName('body');
+					alternative = walkBranch(body, ctx);
+				} else if (altNode.type === 'elif_clause') {
+					// Chained `elif`: render as a single nested branch in
+					// the alternative.
+					const nested = walkStatementPython(altNode, ctx);
+					alternative = Array.isArray(nested) ? nested : (nested === null ? [] : [nested]);
+				} else {
+					alternative = walkBranch(altNode, ctx);
+				}
+			}
+			return {
+				kind: 'branch',
+				predicate: trunc(condition),
+				consequent: walkBranch(consequence, ctx),
+				alternative,
+			};
+		}
+		case 'elif_clause': {
+			// Treat as a branch: condition + body + (optional) further
+			// alternative inside the parent's chain. The parent
+			// if_statement passes us in via the alternative slot.
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			const body = node.childForFieldName('body');
+			// elif_clause does NOT carry an alternative field directly
+			// in tree-sitter-python; chained elifs / else are siblings.
+			return {
+				kind: 'branch',
+				predicate: trunc(condition),
+				consequent: walkBranch(body, ctx),
+				alternative: null,
+			};
+		}
+		case 'match_statement': {
+			bump(ctx);
+			const subject = node.childForFieldName('subject')?.text ?? 'subject';
+			const cases: { label: string; body: CfgStep[] }[] = [];
+			const body = node.childForFieldName('body');
+			if (body !== null) {
+				for (let i = 0; i < body.namedChildCount; i++) {
+					const c = body.namedChild(i);
+					if (c === null || c.type !== 'case_clause') { continue; }
+					bump(ctx);
+					const pattern = c.children.find(n => n.type !== 'block')?.text ?? 'case';
+					const caseBody = c.childForFieldName('consequence') ?? c.children.find(n => n.type === 'block') ?? null;
+					cases.push({
+						label: trunc(pattern),
+						body: caseBody === null ? [] : walkBlock(caseBody, ctx),
+					});
+				}
+			}
+			return { kind: 'switch', subject: trunc(subject), cases };
+		}
+		case 'for_statement': {
+			bump(ctx);
+			const left = node.childForFieldName('left')?.text ?? 'item';
+			const right = node.childForFieldName('right')?.text ?? 'iter';
+			return {
+				kind: 'loop', loopKind: 'for-of',
+				predicate: trunc(`${left} in ${right}`),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'while_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			return {
+				kind: 'loop', loopKind: 'while', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'try_statement': {
+			bump(ctx);
+			const tryBody = node.childForFieldName('body');
+			const exceptClauses = node.children.filter(c => c.type === 'except_clause');
+			const finallyClause = node.children.find(c => c.type === 'finally_clause');
+
+			// Multiple `except` clauses collapse into a single catch body
+			// containing each as an inner branch.
+			let catchBody: CfgStep[] | null = null;
+			if (exceptClauses.length > 0) {
+				catchBody = [];
+				for (const ec of exceptClauses) {
+					bump(ctx);
+					const exType = ec.children.find(n => n.type !== 'block')?.text ?? 'Exception';
+					const ecBody = ec.children.find(n => n.type === 'block');
+					catchBody.push({
+						kind: 'branch',
+						predicate: trunc(`except ${exType}`),
+						consequent: ecBody === undefined ? [] : walkBlock(ecBody, ctx),
+						alternative: null,
+					});
+				}
+			}
+
+			let finallyBody: CfgStep[] | null = null;
+			if (finallyClause !== undefined) {
+				const fb = finallyClause.children.find(n => n.type === 'block');
+				finallyBody = fb === undefined ? [] : walkBlock(fb, ctx);
+			}
+
+			return {
+				kind: 'try',
+				tryBody: tryBody === null ? [] : walkBlock(tryBody, ctx),
+				catchBody,
+				finallyBody,
+			};
+		}
+		case 'return_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text;
+			return { kind: 'return', label: arg !== undefined ? trunc(`return ${arg}`) : 'return' };
+		}
+		case 'break_statement': {
+			bump(ctx);
+			return { kind: 'break' };
+		}
+		case 'continue_statement': {
+			bump(ctx);
+			return { kind: 'continue' };
+		}
+		case 'raise_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text ?? '';
+			return { kind: 'throw', label: trunc(`raise ${arg}`) };
+		}
+		case 'with_statement': {
+			// Python `with` is a context-manager block. Inline its body
+			// statements rather than render a dedicated step (the manager
+			// itself doesn't shape control flow visibly enough to warrant
+			// a node).
+			const body = node.childForFieldName('body');
+			return body === null ? null : walkBlock(body, ctx);
+		}
+		case 'expression_statement': {
+			// Render only call expressions; everything else collapses
+			// into the implicit straight-line flow.
+			const expr = node.namedChild(0);
+			if (expr === null) { return null; }
+			if (expr.type === 'call' || expr.type === 'await') {
+				bump(ctx);
+				return { kind: 'call', callee: trunc(expr.text) };
+			}
+			return null;
+		}
+		case 'block': {
+			return walkBlock(node, ctx);
+		}
+		default:
+			return null;
+	}
+}
+
 /**
  * Walk a branch / loop body, which may be either a `statement_block`
- * (in `{ ... }`) or a single statement (no braces). Either way,
- * return a flat list of steps.
+ * (in `{ ... }`), Python `block`, or a single statement (no braces).
+ * Either way, return a flat list of steps.
  */
 function walkBranch(node: SyntaxNode | null, ctx: WalkCtx): CfgStep[] {
 	if (node === null) { return []; }
@@ -332,9 +517,13 @@ export function walkCfgFromEntity(entity: Entity): CfgFromEntityResult {
 			`cfg: entity '${entity.name}' is a ${entity.kind}, not a function or method`,
 		);
 	}
-	if (entity.language !== 'typescript' && entity.language !== 'javascript') {
+	if (
+		entity.language !== 'typescript'
+		&& entity.language !== 'javascript'
+		&& entity.language !== 'python'
+	) {
 		throw new Error(
-			`cfg: language '${entity.language}' not yet supported (TS / JS in v1; Python + Go to follow)`,
+			`cfg: language '${entity.language}' not yet supported (TS / JS / Python in v1; Go to follow)`,
 		);
 	}
 	if (entity.body === '') {
@@ -348,12 +537,13 @@ export function walkCfgFromEntity(entity: Entity): CfgFromEntityResult {
 		parse(s: string): { rootNode: SyntaxNode };
 	}).parse(entity.body);
 
-	const block = findBodyBlock(tree.rootNode);
+	const lang: WalkLang = entity.language;
+	const block = findBodyBlock(tree.rootNode, lang);
 	if (block === null) {
 		throw new Error(`cfg: could not locate function body in '${entity.name}'`);
 	}
 
-	const ctx: WalkCtx = { count: 0 };
+	const ctx: WalkCtx = { count: 0, lang };
 	const steps = walkBlock(block, ctx);
 
 	return {

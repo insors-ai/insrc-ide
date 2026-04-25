@@ -232,15 +232,15 @@ describe('walkCfgFromEntity - failure modes', () => {
 
 	it('rejects unsupported languages', () => {
 		const ent: Entity = {
-			id: 'id-py',
+			id: 'id-go',
 			kind: 'function',
 			name: 'foo',
-			language: 'python',
+			language: 'go',
 			repo: '/repo',
-			file: '/repo/src/foo.py',
+			file: '/repo/src/foo.go',
 			startLine: 1,
 			endLine: 1,
-			body: 'def foo(): pass',
+			body: 'func foo() {}',
 			embedding: [],
 			indexedAt: '2026-04-25T00:00:00Z',
 		};
@@ -266,6 +266,207 @@ describe('walkCfgFromEntity - failure modes', () => {
 // ---------------------------------------------------------------------------
 // Renderer -- Mermaid output
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Python walker
+// ---------------------------------------------------------------------------
+
+function pyEntity(name: string, body: string): Entity {
+	return {
+		id: `id-${name}`,
+		kind: 'function',
+		name,
+		language: 'python',
+		repo: '/repo',
+		file: '/repo/src/file.py',
+		startLine: 1,
+		endLine: 1,
+		body,
+		embedding: [],
+		indexedAt: '2026-04-25T00:00:00Z',
+	};
+}
+
+describe('walkCfgFromEntity - Python step tree', () => {
+	it('handles a straight-line def with calls + return', () => {
+		const ent = pyEntity('foo', `
+def foo(user):
+    audit(user)
+    notify(user)
+    return done()
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.entryLabel, 'foo');
+		assert.equal(result.steps.length, 3);
+		assert.equal(result.steps[0]?.kind, 'call');
+		assert.equal(result.steps[1]?.kind, 'call');
+		assert.equal(result.steps[2]?.kind, 'return');
+	});
+
+	it('captures if/else as a branch with else_clause', () => {
+		const ent = pyEntity('foo', `
+def foo(user):
+    if user.is_admin:
+        return admin_path()
+    else:
+        return user_path()
+`);
+		const result = walkCfgFromEntity(ent);
+		const branch = result.steps[0];
+		assert.equal(branch?.kind, 'branch');
+		if (branch?.kind !== 'branch') { return; }
+		assert.match(branch.predicate, /user\.is_admin/);
+		assert.equal(branch.consequent[0]?.kind, 'return');
+		assert.notEqual(branch.alternative, null);
+		assert.equal(branch.alternative?.[0]?.kind, 'return');
+	});
+
+	it('captures bare-if (no else) with null alternative', () => {
+		const ent = pyEntity('foo', `
+def foo(user):
+    if user.is_admin:
+        audit('admin')
+    return done()
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'branch');
+		if (result.steps[0]?.kind === 'branch') {
+			assert.equal(result.steps[0].alternative, null);
+		}
+	});
+
+	it('captures elif chains in the alternative slot', () => {
+		const ent = pyEntity('foo', `
+def foo(state):
+    if state == 'a':
+        return 1
+    elif state == 'b':
+        return 2
+    else:
+        return 0
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'branch');
+		if (result.steps[0]?.kind !== 'branch') { return; }
+		// Alternative is a chained branch (the `elif`).
+		const alt = result.steps[0].alternative;
+		assert.notEqual(alt, null);
+		assert.equal(alt?.[0]?.kind, 'branch');
+	});
+
+	it('captures for loops with body steps', () => {
+		const ent = pyEntity('foo', `
+def foo(items):
+    for item in items:
+        process(item)
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'loop');
+		if (result.steps[0]?.kind === 'loop') {
+			assert.equal(result.steps[0].loopKind, 'for-of');
+			assert.equal(result.steps[0].body[0]?.kind, 'call');
+		}
+	});
+
+	it('captures while loops', () => {
+		const ent = pyEntity('foo', `
+def foo():
+    while cond():
+        work()
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'loop');
+		if (result.steps[0]?.kind === 'loop') {
+			assert.equal(result.steps[0].loopKind, 'while');
+		}
+	});
+
+	it('captures try/except/finally', () => {
+		const ent = pyEntity('foo', `
+def foo():
+    try:
+        risky()
+    except ValueError:
+        handle_value()
+    except KeyError:
+        handle_key()
+    finally:
+        cleanup()
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'try');
+		if (result.steps[0]?.kind !== 'try') { return; }
+		assert.equal(result.steps[0].tryBody[0]?.kind, 'call');
+		// Two except clauses collapse into a catch body of two
+		// branches.
+		assert.notEqual(result.steps[0].catchBody, null);
+		assert.equal(result.steps[0].catchBody?.length, 2);
+		assert.equal(result.steps[0].catchBody?.[0]?.kind, 'branch');
+		assert.notEqual(result.steps[0].finallyBody, null);
+	});
+
+	it('captures match (Python 3.10+) as a switch step', () => {
+		const ent = pyEntity('foo', `
+def foo(state):
+    match state:
+        case 'a':
+            return 1
+        case 'b':
+            return 2
+        case _:
+            return 0
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'switch');
+		if (result.steps[0]?.kind === 'switch') {
+			assert.equal(result.steps[0].cases.length, 3);
+		}
+	});
+
+	it('captures raise / break / continue terminators', () => {
+		const ent = pyEntity('foo', `
+def foo(items):
+    for item in items:
+        if not item:
+            continue
+        if item.bad:
+            break
+        if item.fatal:
+            raise RuntimeError('nope')
+        process(item)
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'loop');
+		if (result.steps[0]?.kind !== 'loop') { return; }
+		const loopBody = result.steps[0].body;
+		assert.equal(loopBody[0]?.kind, 'branch');
+		if (loopBody[0]?.kind === 'branch') {
+			assert.equal(loopBody[0].consequent[0]?.kind, 'continue');
+		}
+		assert.equal(loopBody[1]?.kind, 'branch');
+		if (loopBody[1]?.kind === 'branch') {
+			assert.equal(loopBody[1].consequent[0]?.kind, 'break');
+		}
+		assert.equal(loopBody[2]?.kind, 'branch');
+		if (loopBody[2]?.kind === 'branch') {
+			assert.equal(loopBody[2].consequent[0]?.kind, 'throw');
+		}
+	});
+
+	it('inlines `with` block contents (no dedicated step)', () => {
+		const ent = pyEntity('foo', `
+def foo():
+    with open('f') as fh:
+        do(fh)
+        finalise(fh)
+`);
+		const result = walkCfgFromEntity(ent);
+		// `with` body's two calls land at top level.
+		assert.equal(result.steps.length, 2);
+		assert.equal(result.steps[0]?.kind, 'call');
+		assert.equal(result.steps[1]?.kind, 'call');
+	});
+});
 
 describe('renderCfgMermaid - shape', () => {
 	it('emits a flowchart TD header + Enter / end nodes', () => {
