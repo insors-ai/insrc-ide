@@ -134,7 +134,15 @@ const WIREFRAME_SCHEMA = {
 		},
 		spec: {
 			type: 'object',
-			description: 'Pre-built WireframeSpec JSON. When supplied, the tool renders it directly; otherwise a default scaffold is generated from the description (phase-1 MVP -- LLM-driven spec synthesis lands later).',
+			description: 'Pre-built WireframeSpec JSON. When supplied, the tool renders it directly.',
+		},
+		component: {
+			type: 'string',
+			description: 'Function / component entity name to introspect (§4.1). When set, the tool looks up the function in the code graph, reads its body, and walks the JSX subtree to derive a layout-sketch WireframeSpec. Falls through to LLM / scaffold on any failure.',
+		},
+		depth: {
+			type: 'number',
+			description: 'Recursive descent depth for in-tree custom components encountered while walking. Default 3, max 6.',
 		},
 	},
 } as const;

@@ -213,6 +213,16 @@ export interface DeploymentOptions extends ArtifactOptsCommon {
 
 export interface WireframeOptions extends ArtifactOptsCommon {
 	readonly layout?: WireframeLayout | undefined;
+	/** Function / component entity name to introspect. When set, the
+	 *  kind tries the React-introspection branch (§4.1): looks up the
+	 *  function entity in Kuzu, reads its body, and walks the JSX
+	 *  subtree to derive a low-fi `WireframeSpec`. Falls through to
+	 *  free-text / LLM / default scaffold on any failure. */
+	readonly component?: string | undefined;
+	/** Recursive descent depth for in-tree custom components encountered
+	 *  during walking. Each level reads the imported component's source
+	 *  file and recurses into its JSX. Default 3. */
+	readonly depth?: number | undefined;
 }
 
 export type CallflowLayout = 'sequence' | 'flowchart';

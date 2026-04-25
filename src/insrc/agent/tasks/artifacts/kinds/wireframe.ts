@@ -3,14 +3,17 @@
  *
  * Source priority (first match wins):
  *   1. Caller-supplied `spec` -- rendered verbatim.
- *   2. Free-text `description` + LLM stage-2 (local Ollama by
+ *   2. `component` -- name of an in-tree React component. The
+ *      walker (§4.1) looks the function up in Kuzu, reads its
+ *      source body, and runs a fresh tree-sitter pass to derive
+ *      a low-fi `WireframeSpec` from the JSX. Recursive descent
+ *      into in-tree imports up to `depth` (default 3). Falls
+ *      through on lookup / parse failure.
+ *   3. Free-text `description` + LLM stage-2 (local Ollama by
  *      default) -- LLM emits a WireframeSpec JSON that the
  *      deterministic SVG renderer then paints.
- *   3. Free-text `description` only (no provider, or LLM failed) --
+ *   4. Free-text `description` only (no provider, or LLM failed) --
  *      deterministic default layout scaffold.
- *
- * No graph / DB / fs reads -- the wireframe kind never reaches out
- * to code. Design §4.5.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -24,8 +27,10 @@ import type {
 	WireframeSpec,
 } from '../../../../shared/artifacts.js';
 import type { LLMProvider } from '../../../../shared/types.js';
+import { getDb } from '../../../../db/client.js';
 import { bindTemplate } from '../template-binder.js';
 import { renderWireframe } from '../wireframe/render.js';
+import { introspectComponent } from './wireframe-introspect.js';
 
 const log = getLogger('artifact-kind-wireframe');
 
@@ -261,6 +266,50 @@ async function synthesiseSpec(
 }
 
 // ---------------------------------------------------------------------------
+// React-component introspection branch (§4.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Try the on-demand React introspection branch. Returns null on
+ * any failure (graph DB unavailable, entity not found, wrong
+ * language, parse failure) so the caller falls through to the
+ * LLM / scaffold paths. Records warnings on each fallthrough so
+ * the user sees the reason.
+ */
+async function tryIntrospect(
+	componentName: string,
+	depth: number | undefined,
+	repoRoot: string | undefined,
+	warnings: string[],
+): Promise<{
+	spec: WireframeSpec;
+	entity: { name: string; language: string };
+	note?: string | undefined;
+} | null> {
+	const db = await getDb().catch(() => null);
+	if (db === null) {
+		warnings.push('React introspection skipped: graph DB unavailable. Falling through to LLM / scaffold.');
+		return null;
+	}
+	try {
+		const result = await introspectComponent({
+			componentName,
+			db,
+			...(repoRoot !== undefined ? { repoPath: repoRoot } : {}),
+			...(depth !== undefined ? { depth } : {}),
+		});
+		return {
+			spec: result.spec,
+			entity: { name: result.entity.name, language: result.entity.language },
+			...(result.note !== undefined ? { note: result.note } : {}),
+		};
+	} catch (err) {
+		warnings.push(`React introspection failed: ${(err as Error).message}. Falling through to LLM / scaffold.`);
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -289,6 +338,36 @@ export async function runWireframe(opts: RunWireframeOpts): Promise<ArtifactResu
 		spec = input.spec;
 		provenance = 'caller-supplied spec';
 		confidence = 'high';
+	} else if (input.component !== undefined && input.component.trim() !== '') {
+		const introspected = await tryIntrospect(input.component, input.depth, opts.repoRoot, warnings);
+		if (introspected !== null) {
+			spec = introspected.spec;
+			provenance = `React introspection on '${introspected.entity.name}' (${introspected.entity.language})`;
+			confidence = 'high';
+			if (introspected.note !== undefined) { warnings.push(introspected.note); }
+		} else {
+			// Introspection failed -- fall through to LLM / scaffold.
+			if (
+				opts.provider !== undefined
+				&& input.description !== undefined
+				&& input.description.trim() !== ''
+			) {
+				const synthesised = await synthesiseSpec(opts.provider, input.description, layout);
+				if (synthesised !== null) {
+					spec = synthesised;
+					provenance = 'LLM synthesis from description (introspection fallback)';
+					confidence = 'medium';
+				} else {
+					spec = defaultSpec(layout, input.description);
+					provenance = 'default layout (introspection + LLM both failed)';
+					confidence = 'low';
+				}
+			} else {
+				spec = defaultSpec(layout, input.description ?? input.component);
+				provenance = 'default layout (introspection failed; no LLM provider)';
+				confidence = 'low';
+			}
+		}
 	} else if (
 		opts.provider !== undefined
 		&& input.description !== undefined
