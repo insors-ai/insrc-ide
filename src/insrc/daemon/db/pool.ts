@@ -208,25 +208,52 @@ async function resolveConfigSecrets(
  * into an absolute path. Rejects paths that escape the repo root --
  * Phase 1 applies this unconditionally; the fs-access gate
  * (analyzer design §7.3) will relax this later.
+ *
+ * Also resolves `schemaSource.path` (the prisma fast-path source
+ * for RDBMS describe()) into an absolute path against the repo
+ * root. Same containment rule.
  */
 async function resolveConfigPath(
 	config: ConnectionConfig,
 	repoRoot: string,
 ): Promise<ConnectionConfig> {
-	if (familyOf(config.kind) !== 'file') { return config; }
-	if (config.path === undefined) {
-		throw new Error(`data-driver: file connection '${config.id}' missing path`);
+	const family = familyOf(config.kind);
+	let next: ConnectionConfig = config;
+
+	if (family === 'file') {
+		if (config.path === undefined) {
+			throw new Error(`data-driver: file connection '${config.id}' missing path`);
+		}
+		const abs = await resolveAndCheckRepoPath(config.id, config.path, repoRoot, 'path');
+		next = { ...next, path: abs };
 	}
-	const abs = isAbsolute(config.path) ? config.path : resolve(repoRoot, config.path);
+
+	if (config.schemaSource !== undefined) {
+		const abs = await resolveAndCheckRepoPath(
+			config.id, config.schemaSource.path, repoRoot, 'schemaSource.path',
+		);
+		next = { ...next, schemaSource: { type: config.schemaSource.type, path: abs } };
+	}
+
+	return next;
+}
+
+async function resolveAndCheckRepoPath(
+	connId: string,
+	givenPath: string,
+	repoRoot: string,
+	field: string,
+): Promise<string> {
+	const abs = isAbsolute(givenPath) ? givenPath : resolve(repoRoot, givenPath);
 	const rel = relative(repoRoot, abs);
 	if (rel.startsWith('..') || isAbsolute(rel)) {
 		throw new Error(
-			`data-driver: file connection '${config.id}' path '${config.path}' ` +
+			`data-driver: connection '${connId}' ${field} '${givenPath}' ` +
 			`resolves outside the repo root`,
 		);
 	}
 	await access(abs, fsConst.R_OK);
-	return { ...config, path: abs };
+	return abs;
 }
 
 // ---------------------------------------------------------------------------

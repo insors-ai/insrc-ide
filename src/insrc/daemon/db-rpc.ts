@@ -228,20 +228,22 @@ export async function testConnectionRpc(params: {
 	const repoRoot = typeof params.repoRoot === 'string' ? params.repoRoot : '';
 	if (repoRoot === '') { return { error: 'repoRoot is required' }; }
 
-	let cfg = parseSaveInput(params.config);
-	if (typeof cfg === 'string') { return { error: cfg }; }
+	const parsed = parseSaveInput(params.config);
+	if (typeof parsed === 'string') { return { error: parsed }; }
 
 	// Two flows merge here: the pane has the full plaintext config
 	// (test-before-save), or the palette only has { id, kind, family }
 	// (test-persisted). For the latter we hydrate from
 	// db-connections.json before validating.
+	let cfg: SaveConnectionInput = parsed;
 	const hasUrl = cfg.url !== undefined && cfg.url !== '';
 	const hasPath = cfg.path !== undefined && cfg.path !== '';
 	if (!hasUrl && !hasPath) {
 		const existing = await loadConnections(repoRoot)
 			.then(r => r.resolved)
 			.catch(() => [] as readonly ConnectionConfig[]);
-		const match = existing.find(c => c.id === cfg.id);
+		const lookupId = cfg.id;
+		const match = existing.find(c => c.id === lookupId);
 		if (match === undefined) {
 			return { error: `No persisted connection '${cfg.id}' for repoRoot ${repoRoot}` };
 		}

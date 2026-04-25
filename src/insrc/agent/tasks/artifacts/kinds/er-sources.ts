@@ -20,6 +20,10 @@ import type { DbClient } from '../../../../db/client.js';
 import { getDb } from '../../../../db/client.js';
 import { findEntitiesByName, getEntity } from '../../../../db/entities.js';
 import type { Entity } from '../../../../shared/types.js';
+import {
+	parsePrismaSchema,
+	type PrismaModel,
+} from '../../../../shared/prisma-schema.js';
 
 const log = getLogger('artifact-kind-er-sources');
 void log;
@@ -52,73 +56,9 @@ function escapeErComment(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Prisma schema parser (regex-based)
+// Prisma schema rendering (parser lives in shared/prisma-schema.ts so the
+// data-driver describe() fast path can reuse it)
 // ---------------------------------------------------------------------------
-
-interface PrismaField {
-	readonly name: string;
-	readonly type: string;
-	readonly isId: boolean;
-	readonly isUnique: boolean;
-	readonly isList: boolean;
-	readonly isOptional: boolean;
-	readonly relationTo?: string | undefined;     // target model name (scalar ref)
-}
-
-interface PrismaModel {
-	readonly name: string;
-	readonly fields: readonly PrismaField[];
-}
-
-const MODEL_BLOCK_RE = /\bmodel\s+([A-Za-z_][A-Za-z0-9_]*)\s*{([^}]*)}/g;
-const FIELD_LINE_RE = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s+([^\s@/]+)(\s+@[^\n]*)?\s*$/;
-
-function parsePrismaSchema(text: string): readonly PrismaModel[] {
-	const models: PrismaModel[] = [];
-	MODEL_BLOCK_RE.lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = MODEL_BLOCK_RE.exec(text)) !== null) {
-		const modelName = m[1];
-		const body = m[2];
-		if (modelName === undefined || body === undefined) { continue; }
-		const fields: PrismaField[] = [];
-		for (const rawLine of body.split('\n')) {
-			const line = rawLine.replace(/\/\/.*$/, '').trim();
-			if (line === '' || line.startsWith('@@')) { continue; }
-			const match = FIELD_LINE_RE.exec(line);
-			if (match === null) { continue; }
-			const name = match[1];
-			let type = match[2];
-			const attrs = match[3] ?? '';
-			if (name === undefined || type === undefined) { continue; }
-			const isList = type.endsWith('[]');
-			if (isList) { type = type.slice(0, -2); }
-			const isOptional = type.endsWith('?');
-			if (isOptional) { type = type.slice(0, -1); }
-			const isId = /@id\b/.test(attrs);
-			const isUnique = /@unique\b/.test(attrs);
-			// A relation field references another model by type -- detect by
-			// capitalisation (Prisma convention: models are PascalCase, scalars
-			// are primitives like `String` / `Int` / `DateTime`).
-			const PRIMITIVE_TYPES = new Set([
-				'String', 'Int', 'BigInt', 'Float', 'Decimal', 'Boolean',
-				'DateTime', 'Date', 'Time', 'Json', 'Bytes',
-			]);
-			const isPrimitive = PRIMITIVE_TYPES.has(type);
-			const relationTo = !isPrimitive && /^[A-Z]/.test(type) ? type : undefined;
-			const field: PrismaField = {
-				name, type,
-				isId, isUnique, isList, isOptional,
-				...(relationTo !== undefined ? { relationTo } : {}),
-			};
-			fields.push(field);
-		}
-		if (fields.length > 0) {
-			models.push({ name: modelName, fields });
-		}
-	}
-	return models;
-}
 
 function renderPrismaMermaid(models: readonly PrismaModel[]): string {
 	const lines: string[] = ['erDiagram'];

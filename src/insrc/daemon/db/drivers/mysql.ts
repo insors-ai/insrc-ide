@@ -27,6 +27,7 @@ import {
 	quoteTarget,
 	withTimeout,
 } from './rdbms-common.js';
+import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-mysql');
 
@@ -38,9 +39,11 @@ class MysqlDriver implements RdbmsDriver {
 
 	private readonly pool: Pool;
 	private readonly schemaCache = new Map<string, SchemaDescription>();
+	private readonly prismaPath: string | undefined;
 
-	constructor(readonly id: string, kind: 'mysql' | 'mariadb', url: string) {
+	constructor(readonly id: string, kind: 'mysql' | 'mariadb', url: string, prismaPath?: string) {
 		this.kind = kind;
+		this.prismaPath = prismaPath;
 		const opts = parseUrlToPoolOptions(url);
 		this.pool = createPool({
 			...opts,
@@ -52,6 +55,12 @@ class MysqlDriver implements RdbmsDriver {
 	async describe(target: string): Promise<SchemaDescription> {
 		const cached = this.schemaCache.get(target);
 		if (cached !== undefined) { return cached; }
+
+		if (this.prismaPath !== undefined) {
+			const result = await prismaSchemaDescription(target, this.prismaPath);
+			this.schemaCache.set(target, result);
+			return result;
+		}
 
 		const { schema, table } = splitTarget(target);
 		const columns = await this.fetchColumns(schema, table);
@@ -188,7 +197,8 @@ function makeFactory(kind: 'mysql' | 'mariadb') {
 		if (config.url === undefined) {
 			throw new Error(`data-driver: ${kind} connection '${config.id}' missing url`);
 		}
-		return new MysqlDriver(config.id, kind, config.url);
+		const prismaPath = config.schemaSource?.type === 'prisma' ? config.schemaSource.path : undefined;
+		return new MysqlDriver(config.id, kind, config.url, prismaPath);
 	};
 }
 

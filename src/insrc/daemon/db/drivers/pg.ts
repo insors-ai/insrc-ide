@@ -28,6 +28,7 @@ import {
 	quoteTarget,
 	withTimeout,
 } from './rdbms-common.js';
+import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const { Pool } = pgMod;
 
@@ -49,8 +50,10 @@ class PostgresDriver implements RdbmsDriver {
 	 *  information_schema on every sample(). Config changes reload
 	 *  the pool, so cache lifetime = pool lifetime. */
 	private readonly schemaCache = new Map<string, SchemaDescription>();
+	private readonly prismaPath: string | undefined;
 
-	constructor(readonly id: string, url: string) {
+	constructor(readonly id: string, url: string, prismaPath?: string) {
+		this.prismaPath = prismaPath;
 		this.pool = new Pool({
 			connectionString: url,
 			max: POOL_MAX,
@@ -65,6 +68,15 @@ class PostgresDriver implements RdbmsDriver {
 	async describe(target: string): Promise<SchemaDescription> {
 		const cached = this.schemaCache.get(target);
 		if (cached !== undefined) { return cached; }
+
+		// Prisma fast path: when schemaSource is configured, the parsed
+		// schema is the source of truth for describe(). sample() still
+		// hits the live DB.
+		if (this.prismaPath !== undefined) {
+			const result = await prismaSchemaDescription(target, this.prismaPath);
+			this.schemaCache.set(target, result);
+			return result;
+		}
 
 		const { schema, table } = splitTarget(target);
 		const columns = await this.fetchColumns(schema, table);
@@ -214,6 +226,9 @@ registerDriver({
 		if (config.url === undefined) {
 			throw new Error(`data-driver: postgres connection '${config.id}' missing url`);
 		}
-		return new PostgresDriver(config.id, config.url);
+		const prismaPath = config.schemaSource?.type === 'prisma'
+			? config.schemaSource.path
+			: undefined;
+		return new PostgresDriver(config.id, config.url, prismaPath);
 	},
 });

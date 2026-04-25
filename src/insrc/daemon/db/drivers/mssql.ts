@@ -36,6 +36,7 @@ import {
 	quoteTarget,
 	withTimeout,
 } from './rdbms-common.js';
+import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-mssql');
 
@@ -81,8 +82,10 @@ class MssqlDriver implements RdbmsDriver {
 
 	private readonly pool: Pool<Connection>;
 	private readonly schemaCache = new Map<string, SchemaDescription>();
+	private readonly prismaPath: string | undefined;
 
-	constructor(readonly id: string, url: string) {
+	constructor(readonly id: string, url: string, prismaPath?: string) {
+		this.prismaPath = prismaPath;
 		const cfg = buildConnectionConfig(parseUrl(url));
 		this.pool = new Pool<Connection>({
 			create: () => new Promise((resolveConn, rejectConn) => {
@@ -107,6 +110,12 @@ class MssqlDriver implements RdbmsDriver {
 	async describe(target: string): Promise<SchemaDescription> {
 		const cached = this.schemaCache.get(target);
 		if (cached !== undefined) { return cached; }
+
+		if (this.prismaPath !== undefined) {
+			const result = await prismaSchemaDescription(target, this.prismaPath);
+			this.schemaCache.set(target, result);
+			return result;
+		}
 
 		const { schema, table } = splitTarget(target);
 		const columns = await this.fetchColumns(schema, table);
@@ -243,6 +252,7 @@ registerDriver({
 		if (config.url === undefined) {
 			throw new Error(`data-driver: mssql connection '${config.id}' missing url`);
 		}
-		return new MssqlDriver(config.id, config.url);
+		const prismaPath = config.schemaSource?.type === 'prisma' ? config.schemaSource.path : undefined;
+		return new MssqlDriver(config.id, config.url, prismaPath);
 	},
 });

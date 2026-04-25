@@ -29,6 +29,7 @@ import {
 	buildSampleSql,
 	quoteTarget,
 } from './rdbms-common.js';
+import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-oracle');
 
@@ -55,14 +56,22 @@ class OracleDriver implements RdbmsDriver {
 
 	private readonly poolPromise: Promise<oracledb.Pool>;
 	private readonly schemaCache = new Map<string, SchemaDescription>();
+	private readonly prismaPath: string | undefined;
 
-	constructor(readonly id: string, url: string) {
+	constructor(readonly id: string, url: string, prismaPath?: string) {
 		this.poolPromise = oracledb.createPool(parseUrl(url));
+		this.prismaPath = prismaPath;
 	}
 
 	async describe(target: string): Promise<SchemaDescription> {
 		const cached = this.schemaCache.get(target);
 		if (cached !== undefined) { return cached; }
+
+		if (this.prismaPath !== undefined) {
+			const result = await prismaSchemaDescription(target, this.prismaPath);
+			this.schemaCache.set(target, result);
+			return result;
+		}
 
 		const { owner, table } = splitTarget(target);
 		const columns = await this.fetchColumns(owner, table);
@@ -183,6 +192,7 @@ registerDriver({
 		if (config.url === undefined) {
 			throw new Error(`data-driver: oracle connection '${config.id}' missing url`);
 		}
-		return new OracleDriver(config.id, config.url);
+		const prismaPath = config.schemaSource?.type === 'prisma' ? config.schemaSource.path : undefined;
+		return new OracleDriver(config.id, config.url, prismaPath);
 	},
 });

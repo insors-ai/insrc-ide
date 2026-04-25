@@ -27,6 +27,7 @@ import {
 	buildSampleSql,
 	quoteTarget,
 } from './rdbms-common.js';
+import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-sqlite');
 
@@ -36,15 +37,23 @@ class SqliteDriver implements RdbmsDriver {
 
 	private readonly db: Database.Database;
 	private readonly schemaCache = new Map<string, SchemaDescription>();
+	private readonly prismaPath: string | undefined;
 
-	constructor(readonly id: string, filename: string) {
+	constructor(readonly id: string, filename: string, prismaPath?: string) {
 		this.db = new Database(filename, { readonly: true, fileMustExist: true });
 		this.db.pragma('query_only = ON');
+		this.prismaPath = prismaPath;
 	}
 
 	async describe(target: string): Promise<SchemaDescription> {
 		const cached = this.schemaCache.get(target);
 		if (cached !== undefined) { return cached; }
+
+		if (this.prismaPath !== undefined) {
+			const result = await prismaSchemaDescription(target, this.prismaPath);
+			this.schemaCache.set(target, result);
+			return result;
+		}
 
 		quoteTarget(target, SQLITE_DIALECT);
 		// `PRAGMA table_info(X)` requires an unquoted identifier; we've
@@ -118,5 +127,8 @@ function pathOf(config: ConnectionConfig): string {
 registerDriver({
 	kind: 'sqlite',
 	family: 'rdbms',
-	factory: async (config: ConnectionConfig) => new SqliteDriver(config.id, pathOf(config)),
+	factory: async (config: ConnectionConfig) => {
+		const prismaPath = config.schemaSource?.type === 'prisma' ? config.schemaSource.path : undefined;
+		return new SqliteDriver(config.id, pathOf(config), prismaPath);
+	},
 });
