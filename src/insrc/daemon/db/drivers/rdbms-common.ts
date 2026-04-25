@@ -68,6 +68,19 @@ export const ORACLE_DIALECT: Dialect = {
 	limitClause: (n) => `FETCH FIRST ${n} ROWS ONLY`,
 };
 
+/**
+ * ClickHouse uses backtick identifier quoting (like MySQL) and a
+ * named-typed placeholder syntax `{p1:String}`. The driver passes
+ * the typed value via `query_params`. We declare every placeholder
+ * as `:String` since ClickHouse implicit-casts to the column type
+ * for predicates -- avoids per-value type inference here.
+ */
+export const CLICKHOUSE_DIALECT: Dialect = {
+	quoteIdent: (p) => `\`${p.replace(/`/g, '``')}\``,
+	placeholder: (i) => `{p${i}:String}`,
+	limitClause: (n) => `LIMIT ${n}`,
+};
+
 // ---------------------------------------------------------------------------
 // Target parsing
 // ---------------------------------------------------------------------------

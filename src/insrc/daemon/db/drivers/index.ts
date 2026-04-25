@@ -7,30 +7,37 @@
  * Phase 1 Round 2: MySQL/MariaDB, SQLite, MongoDB, JSONL/NDJSON, JSON.
  * Phase 1 Round 3: MSSQL, Oracle, Cassandra, NATS (JetStream KV),
  *   Excel, Avro, Arrow/Feather, BSON, fixed-width.
+ * Phase 5:        CockroachDB (pg-compatible), ClickHouse, DynamoDB,
+ *   etcd, Memcached (limited), Parquet.
  *
- * All 17 kinds of phase 1 land via this barrel.
+ * 23 distinct kinds total (17 phase 1 + 6 phase 5).
  */
 
 // RDBMS
-import './pg.js';
-import './mysql.js';
+import './pg.js';            // postgres + cockroachdb
+import './mysql.js';         // mysql + mariadb
 import './sqlite.js';
 import './mssql.js';
 import './oracle.js';
+import './clickhouse.js';
 // KV
-import './redis.js';
+import './redis.js';         // redis + valkey + keydb
 import './mongodb.js';
 import './cassandra.js';
 import './nats.js';
+import './dynamodb.js';
+import './etcd.js';
+import './memcached.js';
 // File
-import './csv.js';
-import './jsonl.js';
+import './csv.js';           // csv + tsv
+import './jsonl.js';         // jsonl + ndjson
 import './json.js';
 import './xlsx.js';
 import './avro.js';
-import './arrow.js';
+import './arrow.js';         // arrow + feather
 import './bson.js';
 import './fixed-width.js';
+import './parquet.js';
 
 import { listRegisteredKinds } from '../registry.js';
 import { getLogger } from '../../../shared/logger.js';

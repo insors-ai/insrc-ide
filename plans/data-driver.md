@@ -67,7 +67,7 @@ and in the code-analyzer design doc's
 | 2     | Setup UX: palette commands, Data Sources pane, connection tester                    | done (uncommitted) |
 | 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | done -- 10 tools landed (incl. db:sql:explain across all 5 RDBMS dialects). Browser service has list / save / remove / test (Phase 2). |
 | 4     | Guardrails: raw-query rejection, row/time caps, namespace scoping, opt-in           | done -- caps + raw-query denylist + KV namespace scoping landed in phase 1, per-repo opt-in short-circuit landed in phase 3. PII masking explicitly dropped (target is dev/staging, not prod). |
-| 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB                  | todo |
+| 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB, Memcached       | done -- 6 new kinds shipped (cockroachdb, clickhouse, dynamodb, etcd, memcached, parquet); valkey / keydb / tsv had already shipped in phase 1. 23 distinct driver kinds total. |
 | 6     | Schema indexing: graph-resident `db_table` / `db_column` entities + ORM-aware linking | todo |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
@@ -490,16 +490,16 @@ picker.
 Ships after phase 3 proves the core surface. Each kind is a single
 driver module + a registry line; the tool surface does not grow.
 
-| Kind               | npm driver                      | Family | Why deferred |
-|--------------------|---------------------------------|--------|--------------|
-| cockroachdb        | `pg`                            | rdbms  | Wire-compatible with Postgres; trivial once phase 1 ships. |
-| clickhouse         | `@clickhouse/client`            | rdbms  | Column types diverge from standard SQL; needs type-mapping work. |
-| dynamodb           | `@aws-sdk/client-dynamodb`      | kv     | Partition+sort key model; namespace scoping needs rethinking. |
-| etcd               | `etcd3`                         | kv     | Hierarchical paths instead of patterns. |
-| valkey / keydb     | `ioredis`                       | kv     | Protocol-compatible with Redis; trivial. |
-| memcached          | `memjs`                         | kv     | No SCAN; listing requires `stats items` walking. |
-| tsv                | `csv-parse` (`delimiter: '\t'`) | file   | Sibling of csv; drops out naturally. |
-| parquet            | `parquetjs` or `duckdb-async`   | file   | Columnar binary format; picks up Parquet metadata natively. |
+| Kind               | npm driver                      | Family | Status |
+|--------------------|---------------------------------|--------|--------|
+| cockroachdb        | `pg` (re-uses Postgres driver)  | rdbms  | done -- registered alongside `postgres` via the same factory; CockroachDB speaks the Postgres wire protocol. |
+| clickhouse         | `@clickhouse/client`            | rdbms  | done -- new `drivers/clickhouse.ts`. New `CLICKHOUSE_DIALECT` (backtick idents + `{pN:String}` typed placeholders); introspection via `system.columns`; sort-key columns marked `primaryKey: true` for parity. `EXPLAIN` supported via the same flow. |
+| dynamodb           | `@aws-sdk/client-dynamodb`      | kv     | done -- new `drivers/dynamodb.ts`. `DescribeTable` cached per-table; keys are `{ table, <pk>, [<sortKey>] }`; scan projects just key attrs; full attribute-value marshalling for nested types (S/N/BOOL/NULL/B/SS/NS/L/M). |
+| etcd               | `etcd3`                         | kv     | done -- new `drivers/etcd.ts`. `prefix`-only scans (no glob); JSON auto-decode on get; deps `etcd3` v3 client. |
+| valkey / keydb     | `ioredis`                       | kv     | done in phase 1 -- already registered as `valkey` + `keydb` kinds against the same Redis factory. |
+| memcached          | `memjs`                         | kv     | done (limited) -- new `drivers/memcached.ts`. Get-only surface; scan + sample_shape reject with UNSUPPORTED since memcached has no native SCAN and `stats cachedump` walking is deprecated + commonly disabled. |
+| tsv                | `csv-parse` (`delimiter: '\t'`) | file   | done in phase 1 -- already registered as `tsv` kind against the CSV factory with delimiter='\t'. |
+| parquet            | `parquetjs-lite`                | file   | done -- new `drivers/parquet.ts` + ambient module declaration (parquetjs-lite ships no types). Header-driven describe (zero-cost); cursor-streamed sample with in-process WHERE filter. |
 
 ---
 

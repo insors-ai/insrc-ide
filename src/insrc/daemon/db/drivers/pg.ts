@@ -236,16 +236,22 @@ function splitTarget(target: string): { schema: string | null; table: string } {
 // Self-registration
 // ---------------------------------------------------------------------------
 
-registerDriver({
-	kind: 'postgres',
-	family: 'rdbms',
-	factory: async (config: ConnectionConfig) => {
+// CockroachDB is wire-compatible with the Postgres protocol -- the
+// same `pg` client + driver implementation works against both. We
+// expose it as its own `kind` so users / agents see it explicitly
+// in db:list_connections + db:list_driver_kinds, but factory +
+// behaviour are identical.
+function postgresFactory(connKind: 'postgres' | 'cockroachdb') {
+	return async (config: ConnectionConfig) => {
 		if (config.url === undefined) {
-			throw new Error(`data-driver: postgres connection '${config.id}' missing url`);
+			throw new Error(`data-driver: ${connKind} connection '${config.id}' missing url`);
 		}
 		const prismaPath = config.schemaSource?.type === 'prisma'
 			? config.schemaSource.path
 			: undefined;
 		return new PostgresDriver(config.id, config.url, prismaPath);
-	},
-});
+	};
+}
+
+registerDriver({ kind: 'postgres',    family: 'rdbms', factory: postgresFactory('postgres') });
+registerDriver({ kind: 'cockroachdb', family: 'rdbms', factory: postgresFactory('cockroachdb') });
