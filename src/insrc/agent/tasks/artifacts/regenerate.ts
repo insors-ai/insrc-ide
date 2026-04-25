@@ -44,6 +44,7 @@ const MERMAID_GRAMMAR: Readonly<Record<Exclude<ArtifactKind, 'wireframe'>, strin
 	sequence: 'sequenceDiagram',
 	flow: 'flowchart (TD / LR / TB variant)',
 	deployment: 'flowchart (deployment-styled; LR variant typical)',
+	callflow: 'sequenceDiagram (services as participants, spans as duration-labelled messages)',
 };
 
 function buildMermaidEditPrompt(

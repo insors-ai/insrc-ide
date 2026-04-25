@@ -217,6 +217,41 @@ const DEPLOYMENT_SCHEMA = {
 	},
 } as const;
 
+const CALLFLOW_SCHEMA = {
+	type: 'object',
+	additionalProperties: false,
+	properties: {
+		...COMMON_PROPS,
+		...SOURCE_PROP,
+		tracePath: {
+			type: 'string',
+			description: 'Absolute or repo-relative path to a JSON trace export. v1 supports OpenTelemetry / OTLP JSON (Jaeger + Zipkin land in a follow-up).',
+		},
+		traceJson: {
+			type: 'string',
+			description: 'Inline trace JSON. Same format as `tracePath` content; useful when the caller already has the trace string in memory.',
+		},
+		traceId: {
+			type: 'string',
+			description: 'When the input carries multiple traces, pick one by id. Defaults to the first trace when omitted.',
+		},
+		serviceFilter: {
+			type: 'array',
+			items: { type: 'string' },
+			description: 'Render only spans whose `service.name` is in this list. When omitted, every service is included up to the 20-service cap.',
+		},
+		showInternal: {
+			type: 'boolean',
+			description: 'Include INTERNAL / UNKNOWN-kind spans. Default false -- only cross-service / client / server / producer / consumer spans render, since INTERNAL spans typically swamp the diagram.',
+		},
+		layout: {
+			type: 'string',
+			enum: ['sequence', 'flowchart'],
+			description: 'Default `sequence`. The `flowchart` layout is recognised but not yet implemented in v1; falls back to `sequence` with a warning.',
+		},
+	},
+} as const;
+
 // ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
@@ -263,6 +298,20 @@ const deploymentTool: Tool = {
 	inputSchema: DEPLOYMENT_SCHEMA,
 	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
 		return runKind('deployment', input, deps, this.id);
+	},
+};
+
+const callflowTool: Tool = {
+	id: 'artifact:callflow',
+	description:
+		'Generate a cross-service callflow diagram from a distributed trace ' +
+		'(OpenTelemetry / OTLP JSON in v1; Jaeger + Zipkin in a follow-up). ' +
+		'Renders services as participants and spans as duration-labelled messages in a Mermaid sequenceDiagram. ' +
+		'Accepts an OTLP JSON file via `tracePath`, an inline JSON string via `traceJson`, or falls back to a free-text scaffold. ' +
+		'Caps: 20 services, 50 spans, 5s parse.',
+	inputSchema: CALLFLOW_SCHEMA,
+	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		return runKind('callflow', input, deps, this.id);
 	},
 };
 
@@ -437,6 +486,7 @@ export function registerArtifactTools(): void {
 	registerTool(sequenceTool);
 	registerTool(flowTool);
 	registerTool(deploymentTool);
+	registerTool(callflowTool);
 	registerTool(regenerateTool);
 	registerTool(listTemplatesTool);
 	registerTool(listArtifactsTool);

@@ -33,7 +33,8 @@ export type ArtifactKind =
 	| 'sequence'
 	| 'flow'
 	| 'deployment'
-	| 'wireframe';
+	| 'wireframe'
+	| 'callflow';
 
 export const ARTIFACT_KINDS: readonly ArtifactKind[] = [
 	'er',
@@ -41,6 +42,7 @@ export const ARTIFACT_KINDS: readonly ArtifactKind[] = [
 	'flow',
 	'deployment',
 	'wireframe',
+	'callflow',
 ];
 
 export function isArtifactKind(value: string): value is ArtifactKind {
@@ -213,12 +215,39 @@ export interface WireframeOptions extends ArtifactOptsCommon {
 	readonly layout?: WireframeLayout | undefined;
 }
 
+export type CallflowLayout = 'sequence' | 'flowchart';
+
+export interface CallflowOptions extends ArtifactOptsCommon {
+	/** Path (absolute or repo-relative) to a JSON file holding a
+	 *  trace export. Mutually optional with `traceJson`; one is
+	 *  required unless the free-text fallback is desired. */
+	readonly tracePath?: string | undefined;
+	/** Inline JSON string. Same content shape as a trace export
+	 *  file. Useful for callers that already have the trace in
+	 *  memory and don't want to write to disk. */
+	readonly traceJson?: string | undefined;
+	/** When the input carries multiple traces, pick one. Falls
+	 *  back to the first trace when omitted + only one is present. */
+	readonly traceId?: string | undefined;
+	/** Include only spans whose `service.name` is in this list. */
+	readonly serviceFilter?: readonly string[] | undefined;
+	/** Include INTERNAL-kind spans. Default false -- only cross-
+	 *  service / client / server / producer / consumer spans are
+	 *  rendered, since INTERNAL spans typically swamp the diagram. */
+	readonly showInternal?: boolean | undefined;
+	/** Layout for the rendered diagram. v1 ships `'sequence'`
+	 *  (Mermaid sequenceDiagram). `'flowchart'` lands in the
+	 *  follow-up that adds the topology view. */
+	readonly layout?: CallflowLayout | undefined;
+}
+
 export type ArtifactOpts =
 	| ({ readonly kind: 'er' } & ErOptions)
 	| ({ readonly kind: 'sequence' } & SequenceOptions)
 	| ({ readonly kind: 'flow' } & FlowOptions)
 	| ({ readonly kind: 'deployment' } & DeploymentOptions)
-	| ({ readonly kind: 'wireframe' } & WireframeOptions);
+	| ({ readonly kind: 'wireframe' } & WireframeOptions)
+	| ({ readonly kind: 'callflow' } & CallflowOptions);
 
 // ---------------------------------------------------------------------------
 // CDN metadata for standalone-mode rendering

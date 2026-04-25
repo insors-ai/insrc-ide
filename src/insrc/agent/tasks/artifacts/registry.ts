@@ -21,6 +21,7 @@ import type {
 	ArtifactOpts,
 } from '../../../shared/artifacts.js';
 import type { LLMProvider } from '../../../shared/types.js';
+import { runCallflow, type CallflowInput } from './kinds/callflow.js';
 import { runDeployment, type DeploymentInput } from './kinds/deployment.js';
 import { runEr, type ErInput } from './kinds/er.js';
 import { runFlow, type FlowInput } from './kinds/flow.js';
@@ -98,6 +99,10 @@ const REGISTRATIONS: readonly ArtifactKindRegistration<never>[] = [
 	{
 		id: 'deployment',
 		run: (opts => runDeployment({ ...opts, input: opts.input as DeploymentInput })) as KindRunner,
+	},
+	{
+		id: 'callflow',
+		run: (opts => runCallflow({ ...opts, input: opts.input as CallflowInput })) as KindRunner,
 	},
 ] as readonly ArtifactKindRegistration<never>[];
 
