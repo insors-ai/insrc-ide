@@ -1,16 +1,19 @@
 /**
  * ER diagram artifact kind.
  *
- * Source priority (first match wins):
+ * Source priority (first match wins; failures soft-fall through):
  *   1. Caller-supplied Mermaid `source` -- rendered verbatim.
- *   2. `schemaPath` / description matching a Prisma schema layout --
- *      hand-rolled regex parser emits an `erDiagram` with entity
- *      blocks + relation edges. No @prisma/internals dep.
- *   3. `tables` or `entityIds` against the Kuzu entity graph -- picks
- *      up class / interface / type entities + their REFERENCES edges.
- *   4. Free-text `description` + optional `tables` -- default scaffold.
- *
- * Live-DB ER (`db.sql.describe`) is phase 3.
+ *   2. Live DB via `db:sql:describe` -- when `connection` is set
+ *      and `tables` is non-empty. Per-table describe() composed
+ *      into an `erDiagram` with FK relationship lines. Probe /
+ *      describe failure falls through.
+ *   3. Prisma `schema.prisma` parse -- hand-rolled regex parser
+ *      emits an `erDiagram` with entity blocks + relation edges.
+ *      No @prisma/internals dep.
+ *   4. `tables` or `entityIds` against the Kuzu entity graph --
+ *      picks up class / interface / type entities + their
+ *      REFERENCES edges.
+ *   5. Free-text `description` + optional `tables` -- default scaffold.
  */
 
 import { existsSync } from 'node:fs';
@@ -27,7 +30,11 @@ import {
 	truncate,
 	type MermaidCommonInput,
 } from './shared-mermaid.js';
-import { parseKuzuEntitiesSource, parsePrismaSource } from './er-sources.js';
+import {
+	parseKuzuEntitiesSource,
+	parseLiveDbSource,
+	parsePrismaSource,
+} from './er-sources.js';
 
 const log = getLogger('artifact-kind-er');
 
@@ -101,67 +108,94 @@ export async function runEr(opts: RunErOpts): Promise<ArtifactResult> {
 		mermaidSource = input.source;
 		provenance = 'caller-supplied Mermaid source';
 		confidence = 'high';
-	} else if (input.connection !== undefined && input.connection.trim() !== '') {
-		// Live-DB branch reserved for phase 3 -- warn and fall through.
-		warnings.push(
-			`Live DB introspection for connection '${input.connection}' is phase 3; ` +
-			'returned a free-text scaffold instead.',
-		);
-		mermaidSource = defaultSource(input.description ?? '', input.tables);
-		provenance = 'free-text (default scaffold)';
-		confidence = 'low';
-	} else {
-		// 2. Prisma schema.
-		const prismaPath = opts.repoRoot !== undefined ? findPrismaSchema(opts.repoRoot) : null;
-		const prismaHint = input.description !== undefined && /\bprisma\b/i.test(input.description);
-		if (prismaPath !== null && (prismaHint || input.tables === undefined)) {
-			const prismaResult = await parsePrismaSource(
-				isAbsolute(prismaPath) ? prismaPath : resolve(opts.repoRoot ?? process.cwd(), prismaPath),
-				opts.repoRoot,
-			).catch(err => {
-				warnings.push(
-					`Prisma schema parse failed: ${(err as Error).message}. ` +
-					'Falling through to Kuzu / scaffold.',
-				);
-				return null;
-			});
-			if (prismaResult !== null) {
-				mermaidSource = prismaResult.mermaidSource;
-				provenance = prismaResult.provenance;
-				confidence = 'high';
-				metaLineSuffix = ` · ${prismaResult.entityCount} model${prismaResult.entityCount === 1 ? '' : 's'}`;
-				return finalise();
-			}
-		}
-
-		// 3. Kuzu entity-graph traversal.
-		if ((input.entityIds !== undefined && input.entityIds.length > 0)
-			|| (input.tables !== undefined && input.tables.length > 0)) {
-			const kuzuResult = await parseKuzuEntitiesSource({
-				...(input.entityIds !== undefined ? { entityIds: input.entityIds } : {}),
-				...(input.tables !== undefined ? { names: input.tables } : {}),
-				...(opts.repoRoot !== undefined ? { repoPath: opts.repoRoot } : {}),
-			}).catch(err => {
-				warnings.push(
-					`Kuzu entity-graph traversal failed: ${(err as Error).message}. ` +
-					'Falling through to scaffold.',
-				);
-				return null;
-			});
-			if (kuzuResult !== null) {
-				mermaidSource = kuzuResult.mermaidSource;
-				provenance = kuzuResult.provenance;
-				confidence = 'medium';
-				metaLineSuffix = ` · ${kuzuResult.entityCount} entit${kuzuResult.entityCount === 1 ? 'y' : 'ies'}`;
-				return finalise();
-			}
-		}
-
-		// 4. Default scaffold.
-		mermaidSource = defaultSource(input.description ?? '', input.tables);
-		provenance = 'free-text (default scaffold)';
-		confidence = 'low';
+		return finalise();
 	}
+
+	// 2. Live DB via the data-driver pool. Only when both `connection`
+	// and `tables` are explicitly set. Probe / describe failure soft-
+	// falls through to the Prisma / Kuzu / scaffold chain.
+	if (
+		input.connection !== undefined && input.connection.trim() !== ''
+		&& input.tables !== undefined && input.tables.length > 0
+		&& opts.repoRoot !== undefined
+	) {
+		const liveResult = await parseLiveDbSource({
+			connection: input.connection.trim(),
+			tables: input.tables,
+			repoRoot: opts.repoRoot,
+		}).catch(err => {
+			warnings.push(
+				`Live DB ER for connection '${input.connection}' failed: ${(err as Error).message}. ` +
+				'Falling through to Prisma / Kuzu / scaffold.',
+			);
+			return null;
+		});
+		if (liveResult !== null) {
+			mermaidSource = liveResult.mermaidSource;
+			provenance = liveResult.provenance;
+			confidence = 'high';
+			metaLineSuffix = ` · ${liveResult.entityCount} table${liveResult.entityCount === 1 ? '' : 's'}`;
+			return finalise();
+		}
+	} else if (input.connection !== undefined && input.connection.trim() !== '') {
+		// `connection` set but `tables` empty (or repoRoot missing) --
+		// surface the prereq so the LLM knows to retry with tables.
+		warnings.push(
+			`Live DB ER needs an explicit \`tables\` list (no \`db:sql:list_tables\` exists). ` +
+			'Falling through to Prisma / Kuzu / scaffold.',
+		);
+	}
+
+	// 3. Prisma schema.
+	const prismaPath = opts.repoRoot !== undefined ? findPrismaSchema(opts.repoRoot) : null;
+	const prismaHint = input.description !== undefined && /\bprisma\b/i.test(input.description);
+	if (prismaPath !== null && (prismaHint || input.tables === undefined)) {
+		const prismaResult = await parsePrismaSource(
+			isAbsolute(prismaPath) ? prismaPath : resolve(opts.repoRoot ?? process.cwd(), prismaPath),
+			opts.repoRoot,
+		).catch(err => {
+			warnings.push(
+				`Prisma schema parse failed: ${(err as Error).message}. ` +
+				'Falling through to Kuzu / scaffold.',
+			);
+			return null;
+		});
+		if (prismaResult !== null) {
+			mermaidSource = prismaResult.mermaidSource;
+			provenance = prismaResult.provenance;
+			confidence = 'high';
+			metaLineSuffix = ` · ${prismaResult.entityCount} model${prismaResult.entityCount === 1 ? '' : 's'}`;
+			return finalise();
+		}
+	}
+
+	// 4. Kuzu entity-graph traversal.
+	if ((input.entityIds !== undefined && input.entityIds.length > 0)
+		|| (input.tables !== undefined && input.tables.length > 0)) {
+		const kuzuResult = await parseKuzuEntitiesSource({
+			...(input.entityIds !== undefined ? { entityIds: input.entityIds } : {}),
+			...(input.tables !== undefined ? { names: input.tables } : {}),
+			...(opts.repoRoot !== undefined ? { repoPath: opts.repoRoot } : {}),
+		}).catch(err => {
+			warnings.push(
+				`Kuzu entity-graph traversal failed: ${(err as Error).message}. ` +
+				'Falling through to scaffold.',
+			);
+			return null;
+		});
+		if (kuzuResult !== null) {
+			mermaidSource = kuzuResult.mermaidSource;
+			provenance = kuzuResult.provenance;
+			confidence = 'medium';
+			metaLineSuffix = ` · ${kuzuResult.entityCount} entit${kuzuResult.entityCount === 1 ? 'y' : 'ies'}`;
+			return finalise();
+		}
+	}
+
+	// 5. Default scaffold.
+	mermaidSource = defaultSource(input.description ?? '', input.tables);
+	provenance = 'free-text (default scaffold)';
+	confidence = 'low';
 
 	return finalise();
 

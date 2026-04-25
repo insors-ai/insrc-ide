@@ -550,16 +550,24 @@ half of this UX (e.g. "use the user-overridden ER template").
   the user names a connection by label) and assemble the
   `SchemaDescription` list into a Mermaid `erDiagram`. Foreign keys
   on the `SchemaDescription` columns become the relationship lines.
-- Connection selection: `opts.connection` carries the connection id
-  (the same id surfaced by `db:list_connections`). When omitted and
-  the repo has a single configured connection, default to it; when
-  omitted with multiple connections, surface a typed error (LLM is
-  expected to call `db:list_connections` and re-invoke).
-- Provenance metadata: `metadata.provenance = "live DB: <connectionId>"`,
-  `metadata.source = "db:sql:describe"`.
+- Connection selection: **explicit-only via `opts.connection`** (the
+  id surfaced by `db:list_connections`). No auto-default-to-single,
+  because the kind has no signal that the user actually wants a
+  live-DB pull -- a default would hit the DB on every ER request in a
+  repo with a single connection configured. The LLM is expected to
+  call `db:list_connections` first and pass the chosen id explicitly.
+- `opts.tables` is required whenever `connection` is set (there is no
+  `db:sql:list_tables` tool, and dumping the entire schema is
+  hostile). When `connection` is set without `tables`, the branch
+  surfaces a warning + falls through to Prisma / Kuzu / scaffold.
+- Provenance metadata: `metadata.provenance = "live DB: <connectionId> · N/M tables"`,
+  with the failed-table list appended when partial success.
 - Failure modes: when the connection probe fails (host down,
-  credentials expired) the branch falls through to the existing
-  Kuzu / Prisma / free-text priority chain rather than erroring.
+  credentials expired, family mismatch) the branch falls through to
+  the existing Prisma / Kuzu / free-text priority chain rather than
+  erroring. Partial success (some tables describe, some fail) returns
+  the successful subset and surfaces the failures via warnings; it
+  doesn't fall through.
 
 ### 3.2 Terraform deployment
 
