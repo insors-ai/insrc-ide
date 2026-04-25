@@ -25,7 +25,10 @@ import type {
 	ArtifactResult,
 } from '../../../../shared/artifacts.js';
 import { dispatch, type KindRunOpts } from '../../../../agent/tasks/artifacts/registry.js';
-import { persistArtifact } from '../../../../agent/tasks/artifacts/persistence.js';
+import {
+	listSessionArtifacts,
+	persistArtifact,
+} from '../../../../agent/tasks/artifacts/persistence.js';
 import { regenerateArtifact } from '../../../../agent/tasks/artifacts/regenerate.js';
 import { listTemplates } from '../../../../agent/tasks/artifacts/template-loader.js';
 
@@ -371,6 +374,60 @@ const listTemplatesTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// artifact:list -- enumerate session artifacts for the NL regenerate UX
+// ---------------------------------------------------------------------------
+
+const LIST_ARTIFACTS_SCHEMA = {
+	type: 'object',
+	additionalProperties: false,
+	properties: {},
+} as const;
+
+const listArtifactsTool: Tool = {
+	id: 'artifact:list',
+	description:
+		'List the artifacts produced on the current session, newest first (cap 50). ' +
+		'Each entry carries `artifactId`, `kind`, `title`, `createdAt`, `updatedAt`, and ' +
+		'`revisionsCount` -- useful for an LLM turn that needs to resolve a user reference ' +
+		'like "regenerate the user/orders ER" to a concrete `artifactId` before calling ' +
+		'`artifact:regenerate`.',
+	inputSchema: LIST_ARTIFACTS_SCHEMA,
+	async execute(_input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		if (deps.todos === undefined) {
+			return fail(
+				'artifact:list',
+				'TodosApi missing from ToolDeps; cannot enumerate artifacts. This is a daemon wiring bug -- ' +
+				'the tool executor (daemon/task.ts or agent/tools/executor.ts) should supply `deps.todos`.',
+			);
+		}
+		const summaries = await listSessionArtifacts(deps.todos, deps.session.id);
+		if (summaries.length === 0) {
+			return {
+				output: 'No artifacts on this session yet.',
+				format: 'markdown',
+				success: true,
+				data: summaries,
+			};
+		}
+		const lines: string[] = [
+			'| artifactId | kind | title | createdAt | revisions |',
+			'|---|---|---|---|---|',
+		];
+		for (const a of summaries) {
+			lines.push(
+				`| ${a.artifactId} | ${a.kind} | ${a.title} | ${a.createdAt} | ${a.revisionsCount} |`,
+			);
+		}
+		return {
+			output: lines.join('\n'),
+			format: 'markdown',
+			success: true,
+			data: summaries,
+		};
+	},
+};
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -382,4 +439,5 @@ export function registerArtifactTools(): void {
 	registerTool(deploymentTool);
 	registerTool(regenerateTool);
 	registerTool(listTemplatesTool);
+	registerTool(listArtifactsTool);
 }

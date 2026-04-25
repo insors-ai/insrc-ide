@@ -21,6 +21,7 @@ import { getLogger } from '../../../shared/logger.js';
 import type { TodoItem, TodoList, TodosApi } from '../../../shared/todos.js';
 import type {
 	ArtifactItemMeta,
+	ArtifactKind,
 	ArtifactResult,
 } from '../../../shared/artifacts.js';
 
@@ -168,6 +169,90 @@ export async function persistArtifact(
 		itemId: completed.id,
 	}, 'artifact persisted');
 	return { list, item: completed };
+}
+
+// ---------------------------------------------------------------------------
+// Listing -- used by artifact:list (phase 2) for the NL regenerate UX
+// ---------------------------------------------------------------------------
+
+const ARTIFACT_ID_RE = /^\[artifact:([^\]]+)\]/;
+
+/** Default + max number of artifacts returned by `listSessionArtifacts`. */
+export const MAX_LIST_ARTIFACTS = 50;
+
+export interface ArtifactSummary {
+	readonly artifactId: string;
+	readonly itemId: string;
+	readonly kind: ArtifactKind;
+	readonly title: string;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly revisionsCount: number;
+}
+
+function clampListLimit(n: number | undefined): number {
+	if (n === undefined) { return MAX_LIST_ARTIFACTS; }
+	if (!Number.isFinite(n) || n < 1) { return 1; }
+	return Math.min(Math.floor(n), MAX_LIST_ARTIFACTS);
+}
+
+/**
+ * Enumerate the session's artifacts, newest first. Returns at most
+ * `opts.limit` (default + cap: `MAX_LIST_ARTIFACTS`). Empty array
+ * when the Artifacts list doesn't exist yet (no artifacts produced
+ * this session).
+ *
+ * Used by the `artifact:list` tool so an LLM turn can resolve
+ * artifact ids by name/kind/recency before calling
+ * `artifact:regenerate({ artifactId, edits })` -- phase 2's NL
+ * regenerate UX needs an artifact-discovery surface
+ * (`artifact:list_templates` lists templates, not artifacts).
+ */
+export async function listSessionArtifacts(
+	api: TodosApi,
+	sessionId: string,
+	opts: { readonly limit?: number } = {},
+): Promise<ArtifactSummary[]> {
+	const list = await findArtifactsList(api, sessionId);
+	if (list === null) { return []; }
+
+	const limit = clampListLimit(opts.limit);
+	const out: ArtifactSummary[] = [];
+
+	for (const item of list.items) {
+		const meta = item.meta as unknown as ArtifactItemMeta | undefined;
+		if (
+			meta === undefined
+			|| typeof meta !== 'object'
+			|| typeof meta.kind !== 'string'
+		) {
+			continue;
+		}
+		if (typeof item.description !== 'string') { continue; }
+		const match = ARTIFACT_ID_RE.exec(item.description);
+		if (match === null) { continue; }
+		const artifactId = match[1];
+		if (artifactId === undefined || artifactId === '') { continue; }
+
+		out.push({
+			artifactId,
+			itemId: item.id,
+			kind: meta.kind,
+			title: item.title,
+			createdAt: item.createdAt,
+			updatedAt: item.updatedAt,
+			revisionsCount: meta.revisions?.length ?? 0,
+		});
+	}
+
+	// Newest-first by createdAt. Tie-break by itemId for determinism
+	// (item ids are random, but deterministic given the test input).
+	out.sort((a, b) => {
+		const cmp = b.createdAt.localeCompare(a.createdAt);
+		return cmp !== 0 ? cmp : b.itemId.localeCompare(a.itemId);
+	});
+
+	return out.slice(0, limit);
 }
 
 // ---------------------------------------------------------------------------
