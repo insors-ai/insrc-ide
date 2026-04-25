@@ -1015,6 +1015,22 @@ async function main(): Promise<void> {
 			const mod = await import('./db-rpc.js');
 			return mod.listConnectionsRpc(params as { repoRoot?: unknown });
 		},
+		'db.listDriverKinds': async () => {
+			const mod = await import('./db-rpc.js');
+			return mod.listDriverKindsRpc();
+		},
+		'db.saveConnection': async (params) => {
+			const mod = await import('./db-rpc.js');
+			return mod.saveConnectionRpc(params as { repoRoot?: unknown; config?: unknown });
+		},
+		'db.deleteConnection': async (params) => {
+			const mod = await import('./db-rpc.js');
+			return mod.deleteConnectionRpc(params as { repoRoot?: unknown; id?: unknown });
+		},
+		'db.testConnection': async (params) => {
+			const mod = await import('./db-rpc.js');
+			return mod.testConnectionRpc(params as { repoRoot?: unknown; config?: unknown });
+		},
 		'artifacts.getOfflineBundleStatus': async () => {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.getOfflineBundleStatusRpc();

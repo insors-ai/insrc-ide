@@ -138,6 +138,16 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(ModelProvidersInput)],
 );
 
+// Data Sources EditorPane (per-repo db connections) -- plans/data-driver.md phase 2
+import { DbDriversPane } from './dbDrivers/dbDriversPane.js';
+import { DbDriversInput } from './dbDrivers/dbDriversInput.js';
+import './dbDrivers/dbDriversCommands.js';
+import './dbDrivers/dbConnectionCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(DbDriversPane, DbDriversPane.ID, 'Data Sources'),
+	[new SyncDescriptor(DbDriversInput)],
+);
+
 // Todos editor pane (plans/todo-framework.md Phase 5a). Read-only review
 // surface for agent-authored todo lists. One pane instance per chat
 // session; opens via the `insrc.todos.open` command.

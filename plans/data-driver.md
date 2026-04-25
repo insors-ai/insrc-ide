@@ -64,10 +64,11 @@ and in the code-analyzer design doc's
 |-------|-------------------------------------------------------------------------|--------|
 | 0     | Foundations: config schema, driver registry, family interfaces, keychain integration | done (225e10ec68a) |
 | 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers compiled + registered; Prisma schema.prisma fast path + live-DB integration tests still open. |
-| 2     | Setup UX: palette commands, Model Providers-style pane, connection tester           | todo |
+| 2     | Setup UX: palette commands, Data Sources pane, connection tester                    | done (uncommitted) |
 | 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | in-progress -- 9 tools landed, browser `IInsrcDbConnectionsService.list()` shipped, `db.sql.explain` deferred to phase 3.2. |
 | 4     | Guardrails: raw-query rejection, row/time caps, PII masking, namespace scoping      | partial -- caps + raw-query denylist + namespace scoping landed in the drivers (phase 1); PII masking + per-repo opt-in short-circuit still todo. |
 | 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB                  | todo |
+| 6     | Schema indexing: graph-resident `db_table` / `db_column` entities + ORM-aware linking | todo |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
 (with commit sha or "uncommitted"), `partial` with deferred scope
@@ -493,6 +494,129 @@ driver module + a registry line; the tool surface does not grow.
 
 ---
 
+## Phase 6 -- Schema indexing (graph-resident DB schemas)
+
+So far the data driver fetches schema **on demand** per tool call.
+That's the right shape for sample / get / where-filter use cases,
+but it leaves a class of analyzer questions awkward to answer:
+
+- "Which functions read from `users.email`?"
+- "Show every code path that writes to a column flagged `pii`."
+- "Find schema drift: prisma model fields that have no matching
+  column on the live DB."
+
+These need DB schemas to live in the same Kuzu graph as code
+entities, with edges joining the two worlds. Phase 6 lifts schemas
+into the graph so cross-cutting queries become a Cypher away.
+
+### 6.1 Graph extensions
+
+Add to `EntityKind` (currently code-only -- see
+[`shared/types.ts`][types.ts]):
+- `db_table`        -- one per RDBMS table / KV collection / file dataset
+- `db_column`       -- one per RDBMS column (KV / file map onto inferred
+                       fields the same way; family-tagged on the entity)
+- `db_namespace`    -- optional, for KV stores with `namespace.allow`
+
+Add to `RelationKind`:
+- `FK_TO`           -- column -> column foreign key
+- `BELONGS_TO`      -- column -> table containment (mirrors how `class`
+                       members relate to `class` today)
+- `READS_COLUMN`    -- function/method -> column
+- `WRITES_COLUMN`   -- function/method -> column
+
+Stable IDs follow the existing convention -- `SHA256(repo + connId
++ kind + name)` keeps the entity id deterministic across re-indexes
+even when table layouts shift internally.
+
+[types.ts]: ../src/insrc/shared/types.ts
+
+### 6.2 Indexer hook
+
+A new step at the end of the per-repo index pass walks every
+configured connection in `db-connections.json` and persists its
+schema:
+
+```
+for each connection in loadConnections(repoRoot):
+    if family == 'rdbms':
+        for each table from describe-walk:
+            upsert db_table + db_column entities
+            emit FK_TO edges from constraint metadata
+    elif family == 'kv':
+        sample_shape on the connection's namespace prefixes
+        upsert db_namespace + db_column entities (one column per
+        observed top-level field)
+    elif family == 'file':
+        describe -> upsert db_table + db_column
+```
+
+Re-runs on `db.saveConnection` / `db.deleteConnection` (the pool
+already calls `reloadAll()` on save; we extend it to also kick the
+indexer's per-repo pass for the affected `repoRoot`).
+
+Skipped automatically when a connection's test probe fails -- the
+schema-indexer treats unreachable databases as soft errors so the
+overall index doesn't fail just because the user's local Postgres
+is down.
+
+### 6.3 Code-side discovery (joining the two worlds)
+
+The graph is only useful if code entities link to db ones. Three
+sources of those links, in increasing fidelity:
+
+1. **ORM model declarations.** Extend the tree-sitter parsers to
+   recognise Prisma model blocks, Drizzle table builders,
+   SQLAlchemy `Column` calls, Django model fields, ActiveRecord
+   `t.string`, etc. Each model field becomes a `BELONGS_TO`-edged
+   `db_column` entity *and* a `class`-style code entity, so a
+   single column can be queried from either side.
+2. **Raw query strings.** Pattern-match SQL string literals in
+   source for `FROM <table>` / `INSERT INTO <table>` /
+   `UPDATE <table>` -- emit `READS_COLUMN` / `WRITES_COLUMN` on the
+   columns named in the projection / SET clause when statically
+   resolvable. Best-effort; not a parser, just heuristics.
+3. **Runtime traces** (out of scope; flagged for a later phase) --
+   instrument the user's test runs and observe which functions
+   actually touch which tables. High-fidelity but invasive.
+
+Phases 1 + 2 land here; phase 3 is its own discussion.
+
+### 6.4 Storage + cost
+
+Per-table entity cost: ~1 `db_table` + N `db_column` rows in
+LanceDB + their `BELONGS_TO` / `FK_TO` edges in Kuzu. A typical
+mid-size schema (50 tables, ~500 columns total) adds roughly 1000
+graph rows -- negligible against the existing code-entity volume.
+
+### 6.5 Open questions
+
+- **Versioning.** When a column is dropped, the `db_column` entity
+  should disappear from the graph but its references from code
+  (`READS_COLUMN`) might still resolve to a now-stale id. Probably
+  re-emit-then-prune on each index pass, same as code.
+- **Multi-tenancy.** Cassandra keyspaces, Postgres schemas,
+  MongoDB collections all introduce a "tenant" axis. For phase 6
+  we treat the keyspace/schema as the qualifier on `db_table.name`
+  (`public.users`) and call it done.
+- **PII propagation.** A `db_column` flagged `pii` (carried from
+  the connection config's `pii` array) should propagate to every
+  code entity with a `READS_COLUMN` edge. Probably a downstream
+  feature on top of Phase 4's PII masking, not phase 6 itself.
+
+### 6.6 Status
+
+| Item                                       | Status | Notes |
+|--------------------------------------------|--------|-------|
+| `EntityKind` + `RelationKind` extensions   | todo   |       |
+| Indexer schema-walker (per family)         | todo   |       |
+| Reload-on-save / reload-on-delete hook     | todo   |       |
+| ORM-model parser extensions                | todo   |       |
+| SQL-string heuristic linker                | todo   |       |
+| Re-index trigger from `db.saveConnection`  | todo   |       |
+
+---
+
 ## Testing strategy
 
 ### Per-driver
@@ -597,12 +721,12 @@ driver module + a registry line; the tool surface does not grow.
 ### Phase 2 -- Setup UX
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `insrc.addDbConnection`                    | todo   |       |
-| `insrc.editDbConnection`                   | todo   |       |
-| `insrc.removeDbConnection`                 | todo   |       |
-| `insrc.testDbConnection`                   | todo   |       |
-| Data Sources section in Model Providers    | todo   |       |
-| `db.testConnection` daemon RPC             | todo   |       |
+| `insrc.addDbConnection`                    | done (uncommitted) | Repo picker (skipped when only one registered) -> kind picker -> id -> URL/path -> label. URL passwords redacted to keychain by daemon before persistence. |
+| `insrc.editDbConnection`                   | done (uncommitted) | Same flow, prepopulated; upserts on `id`. Accepts optional `{repoRoot, id}` args from the pane to skip the pickers. |
+| `insrc.removeDbConnection`                 | done (uncommitted) | Confirm dialog, then deletes the JSON entry + clears its keychain secret. |
+| `insrc.testDbConnection`                   | done (uncommitted) | Builds a transient driver via the registry factory; closes immediately. Hydrates url/path from db-connections.json when only `{id}` is given (palette flow). |
+| Data Sources pane (accordion of repos)     | done (uncommitted) | **Standalone** pane (not a tab in Model Providers, since data sources are per-repo and providers are global). `<details>`/`<summary>` accordion with [+ Add connection] button + per-row Test/Edit/Remove actions delegating to the palette commands with `{repoRoot, id}` preset. Opens via `insrc.openDataSources`. |
+| `db.testConnection` daemon RPC             | done (uncommitted) | Plus `db.saveConnection`, `db.deleteConnection`, `db.listDriverKinds` for the kind picker. Shape on `daemon/db-rpc.ts`. |
 
 ### Phase 3 -- Tool surface
 | Item                                       | Status | Notes |
