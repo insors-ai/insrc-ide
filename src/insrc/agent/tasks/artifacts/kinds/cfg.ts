@@ -25,6 +25,7 @@ const Parser        = _require('tree-sitter')            as typeof import('tree-
 const TSGrammars    = _require('tree-sitter-typescript') as { typescript: unknown; tsx: unknown };
 const JSGrammar     = _require('tree-sitter-javascript') as unknown;
 const PythonGrammar = _require('tree-sitter-python')     as unknown;
+const GoGrammar     = _require('tree-sitter-go')         as unknown;
 
 import type { Entity, Language } from '../../../../shared/types.js';
 
@@ -83,7 +84,7 @@ export interface CfgWalkResult {
 // TypeScript / JavaScript walker
 // ---------------------------------------------------------------------------
 
-type WalkLang = 'typescript' | 'javascript' | 'python';
+type WalkLang = 'typescript' | 'javascript' | 'python' | 'go';
 
 interface WalkCtx {
 	count: number;
@@ -110,6 +111,7 @@ function pickLanguageGrammar(language: Language, file: string): unknown {
 	}
 	if (language === 'javascript') { return JSGrammar; }
 	if (language === 'python') { return PythonGrammar; }
+	if (language === 'go') { return GoGrammar; }
 	throw new Error(`cfg: language '${language}' not yet supported`);
 }
 
@@ -124,15 +126,17 @@ function pickLanguageGrammar(language: Language, file: string): unknown {
 function findBodyBlock(root: SyntaxNode, lang: WalkLang): SyntaxNode | null {
 	const fnTypes = lang === 'python'
 		? new Set(['function_definition'])
-		: new Set([
-			'function_declaration',
-			'method_definition',
-			'arrow_function',
-			'function',
-			'function_expression',
-			'generator_function',
-			'generator_function_declaration',
-		]);
+		: lang === 'go'
+			? new Set(['function_declaration', 'method_declaration'])
+			: new Set([
+				'function_declaration',
+				'method_definition',
+				'arrow_function',
+				'function',
+				'function_expression',
+				'generator_function',
+				'generator_function_declaration',
+			]);
 
 	let cur: SyntaxNode | null = root;
 	const queue: SyntaxNode[] = [root];
@@ -166,6 +170,7 @@ function walkBlock(block: SyntaxNode, ctx: WalkCtx): CfgStep[] {
 
 function walkStatement(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
 	if (ctx.lang === 'python') { return walkStatementPython(node, ctx); }
+	if (ctx.lang === 'go') { return walkStatementGo(node, ctx); }
 	return walkStatementTs(node, ctx);
 }
 
@@ -480,6 +485,198 @@ function walkStatementPython(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Go walker (tree-sitter-go node names)
+// ---------------------------------------------------------------------------
+
+function walkStatementGo(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
+	switch (node.type) {
+		case 'if_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			const consequence = node.childForFieldName('consequence');
+			const altNode = node.childForFieldName('alternative');
+			let alternative: CfgStep[] | null = null;
+			if (altNode !== null) {
+				if (altNode.type === 'if_statement') {
+					// Chained `else if`: render as a nested branch in
+					// the alternative slot.
+					const nested = walkStatementGo(altNode, ctx);
+					alternative = Array.isArray(nested) ? nested : (nested === null ? [] : [nested]);
+				} else {
+					// `else { ... }` or `else single_stmt`.
+					alternative = walkBranch(altNode, ctx);
+				}
+			}
+			return {
+				kind: 'branch',
+				predicate: trunc(condition),
+				consequent: walkBranch(consequence, ctx),
+				alternative,
+			};
+		}
+		case 'for_statement': {
+			bump(ctx);
+			// Three Go for variants:
+			//   1. `for cond { }`             -> while-like
+			//   2. `for init; cond; post { }` -> C-style
+			//   3. `for x := range xs { }`    -> range
+			//   4. `for { }`                  -> infinite
+			const rangeClause = node.children.find(c => c.type === 'range_clause');
+			const forClause = node.children.find(c => c.type === 'for_clause');
+			let predicate = 'for';
+			if (rangeClause !== undefined) {
+				const left = rangeClause.children.find(c => c.type !== 'range')?.text ?? '_';
+				const right = rangeClause.childForFieldName('right')?.text ?? 'iter';
+				predicate = `${left} := range ${right}`;
+			} else if (forClause !== undefined) {
+				const cond = forClause.childForFieldName('condition')?.text;
+				if (typeof cond === 'string' && cond !== '') { predicate = cond; }
+			} else {
+				// Bare `for cond { }` -- the condition (if present) is
+				// the first non-block child.
+				const condChild = node.children.find(
+					c => c.type !== 'for' && c.type !== 'block',
+				);
+				if (condChild !== undefined) { predicate = condChild.text; }
+			}
+			return {
+				kind: 'loop',
+				loopKind: rangeClause !== undefined ? 'for-of' : (forClause !== undefined ? 'for' : 'while'),
+				predicate: trunc(predicate),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'expression_switch_statement':
+		case 'type_switch_statement': {
+			bump(ctx);
+			const subject = node.children.find(
+				c => c.type !== 'switch' && c.type !== '{' && c.type !== '}'
+					&& c.type !== 'expression_case' && c.type !== 'default_case'
+					&& c.type !== 'type_case' && c.type !== 'type_switch_header',
+			);
+			const subjectText = subject !== undefined ? subject.text : 'subject';
+			const cases: { label: string; body: CfgStep[] }[] = [];
+			for (let i = 0; i < node.namedChildCount; i++) {
+				const c = node.namedChild(i);
+				if (c === null) { continue; }
+				if (c.type === 'expression_case' || c.type === 'type_case' || c.type === 'default_case') {
+					bump(ctx);
+					const label = c.type === 'default_case'
+						? 'default'
+						: trunc(
+							c.children.find(
+								n => n.type !== 'case' && n.type !== ':' && n.type !== ',',
+							)?.text ?? 'case',
+						);
+					const caseBody: CfgStep[] = [];
+					for (let j = 0; j < c.namedChildCount; j++) {
+						const cc = c.namedChild(j);
+						if (cc === null) { continue; }
+						if (cc.type === 'expression_list' || cc.type === 'type_case_clause') { continue; }
+						const sub = walkStatement(cc, ctx);
+						if (sub === null) { continue; }
+						if (Array.isArray(sub)) { caseBody.push(...sub); }
+						else { caseBody.push(sub); }
+					}
+					cases.push({ label, body: caseBody });
+				}
+			}
+			return { kind: 'switch', subject: trunc(subjectText), cases };
+		}
+		case 'select_statement': {
+			bump(ctx);
+			const cases: { label: string; body: CfgStep[] }[] = [];
+			for (let i = 0; i < node.namedChildCount; i++) {
+				const c = node.namedChild(i);
+				if (c === null || c.type !== 'communication_case') { continue; }
+				bump(ctx);
+				const comm = c.children.find(n => n.type !== 'case' && n.type !== ':');
+				const label = trunc(comm !== undefined ? comm.text : 'case');
+				const caseBody: CfgStep[] = [];
+				for (let j = 0; j < c.namedChildCount; j++) {
+					const cc = c.namedChild(j);
+					if (cc === null) { continue; }
+					const sub = walkStatement(cc, ctx);
+					if (sub === null) { continue; }
+					if (Array.isArray(sub)) { caseBody.push(...sub); }
+					else { caseBody.push(sub); }
+				}
+				cases.push({ label, body: caseBody });
+			}
+			return { kind: 'switch', subject: 'select', cases };
+		}
+		case 'defer_statement': {
+			// Render as a regular call step labelled `defer X`. The
+			// fan-out-to-deferred-call rendering the plan sketched
+			// would need post-processing; this simpler form preserves
+			// the sketch fidelity target.
+			bump(ctx);
+			const inner = node.namedChild(0);
+			const callee = inner !== null ? `defer ${inner.text}` : 'defer';
+			return { kind: 'call', callee: trunc(callee) };
+		}
+		case 'go_statement': {
+			// `go foo()` -- render as a regular call step. Goroutine
+			// concurrency isn't a control-flow construct in the
+			// sketch-fidelity sense.
+			bump(ctx);
+			const inner = node.namedChild(0);
+			const callee = inner !== null ? `go ${inner.text}` : 'go';
+			return { kind: 'call', callee: trunc(callee) };
+		}
+		case 'return_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text;
+			return { kind: 'return', label: arg !== undefined ? trunc(`return ${arg}`) : 'return' };
+		}
+		case 'break_statement': {
+			bump(ctx);
+			return { kind: 'break' };
+		}
+		case 'continue_statement': {
+			bump(ctx);
+			return { kind: 'continue' };
+		}
+		case 'goto_statement': {
+			// Rare but legal; render as a continue-like terminator.
+			bump(ctx);
+			return { kind: 'continue' };
+		}
+		case 'expression_statement': {
+			const expr = node.namedChild(0);
+			if (expr === null) { return null; }
+			if (expr.type === 'call_expression') {
+				bump(ctx);
+				// Special-case `panic(...)` -> throw step. Recognised
+				// by the callee being a bare identifier `panic`.
+				const fn = expr.childForFieldName('function');
+				if (fn !== null && fn.text === 'panic') {
+					return { kind: 'throw', label: trunc(`panic ${expr.text}`) };
+				}
+				return { kind: 'call', callee: trunc(expr.text) };
+			}
+			return null;
+		}
+		case 'block': {
+			return walkBlock(node, ctx);
+		}
+		case 'short_var_declaration':
+		case 'var_declaration':
+		case 'assignment_statement':
+		case 'inc_statement':
+		case 'dec_statement':
+		case 'send_statement':
+			// Plain statements collapse into the implicit straight-line
+			// flow; only their containing call expressions (if any)
+			// would be worth rendering, but we deliberately skip them
+			// to avoid noise.
+			return null;
+		default:
+			return null;
+	}
+}
+
 /**
  * Walk a branch / loop body, which may be either a `statement_block`
  * (in `{ ... }`), Python `block`, or a single statement (no braces).
@@ -521,9 +718,10 @@ export function walkCfgFromEntity(entity: Entity): CfgFromEntityResult {
 		entity.language !== 'typescript'
 		&& entity.language !== 'javascript'
 		&& entity.language !== 'python'
+		&& entity.language !== 'go'
 	) {
 		throw new Error(
-			`cfg: language '${entity.language}' not yet supported (TS / JS / Python in v1; Go to follow)`,
+			`cfg: language '${entity.language}' not yet supported`,
 		);
 	}
 	if (entity.body === '') {

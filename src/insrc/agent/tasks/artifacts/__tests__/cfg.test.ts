@@ -231,16 +231,19 @@ describe('walkCfgFromEntity - failure modes', () => {
 	});
 
 	it('rejects unsupported languages', () => {
+		// All four indexer-supported languages (TS/JS/Python/Go) are
+		// now wired into the walker. Use an unrecognised language to
+		// exercise the rejection path.
 		const ent: Entity = {
-			id: 'id-go',
+			id: 'id-rs',
 			kind: 'function',
 			name: 'foo',
-			language: 'go',
+			language: 'rust' as Entity['language'],
 			repo: '/repo',
-			file: '/repo/src/foo.go',
+			file: '/repo/src/foo.rs',
 			startLine: 1,
 			endLine: 1,
-			body: 'func foo() {}',
+			body: 'fn foo() {}',
 			embedding: [],
 			indexedAt: '2026-04-25T00:00:00Z',
 		};
@@ -465,6 +468,227 @@ def foo():
 		assert.equal(result.steps.length, 2);
 		assert.equal(result.steps[0]?.kind, 'call');
 		assert.equal(result.steps[1]?.kind, 'call');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Go walker
+// ---------------------------------------------------------------------------
+
+function goEntity(name: string, body: string): Entity {
+	return {
+		id: `id-${name}`,
+		kind: 'function',
+		name,
+		language: 'go',
+		repo: '/repo',
+		file: '/repo/src/file.go',
+		startLine: 1,
+		endLine: 1,
+		body,
+		embedding: [],
+		indexedAt: '2026-04-25T00:00:00Z',
+	};
+}
+
+describe('walkCfgFromEntity - Go step tree', () => {
+	it('handles a straight-line func with calls + return', () => {
+		const ent = goEntity('Foo', `
+func Foo(user User) error {
+	audit(user)
+	notify(user)
+	return done()
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.entryLabel, 'Foo');
+		assert.equal(result.steps.length, 3);
+		assert.equal(result.steps[0]?.kind, 'call');
+		assert.equal(result.steps[1]?.kind, 'call');
+		assert.equal(result.steps[2]?.kind, 'return');
+	});
+
+	it('captures if/else as a branch', () => {
+		const ent = goEntity('Foo', `
+func Foo(u User) error {
+	if u.IsAdmin {
+		return adminPath()
+	} else {
+		return userPath()
+	}
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'branch');
+		if (result.steps[0]?.kind !== 'branch') { return; }
+		assert.match(result.steps[0].predicate, /u\.IsAdmin/);
+		assert.equal(result.steps[0].consequent[0]?.kind, 'return');
+		assert.notEqual(result.steps[0].alternative, null);
+	});
+
+	it('captures `else if` chains in the alternative slot', () => {
+		const ent = goEntity('Foo', `
+func Foo(state string) int {
+	if state == "a" {
+		return 1
+	} else if state == "b" {
+		return 2
+	} else {
+		return 0
+	}
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'branch');
+		if (result.steps[0]?.kind !== 'branch') { return; }
+		assert.notEqual(result.steps[0].alternative, null);
+		// Alternative is a chained branch (the inner else-if).
+		assert.equal(result.steps[0].alternative?.[0]?.kind, 'branch');
+	});
+
+	it('captures all three for-statement variants', () => {
+		// 1. for cond { } -- while-like
+		const ent1 = goEntity('Foo', `
+func Foo() {
+	for cond() {
+		work()
+	}
+}
+`);
+		const r1 = walkCfgFromEntity(ent1);
+		assert.equal(r1.steps[0]?.kind, 'loop');
+		if (r1.steps[0]?.kind === 'loop') {
+			assert.equal(r1.steps[0].loopKind, 'while');
+		}
+
+		// 2. for init; cond; post { } -- C-style
+		const ent2 = goEntity('Foo', `
+func Foo(items []string) {
+	for i := 0; i < len(items); i++ {
+		process(items[i])
+	}
+}
+`);
+		const r2 = walkCfgFromEntity(ent2);
+		assert.equal(r2.steps[0]?.kind, 'loop');
+		if (r2.steps[0]?.kind === 'loop') {
+			assert.equal(r2.steps[0].loopKind, 'for');
+		}
+
+		// 3. for x := range xs { } -- range
+		const ent3 = goEntity('Foo', `
+func Foo(items []string) {
+	for _, item := range items {
+		process(item)
+	}
+}
+`);
+		const r3 = walkCfgFromEntity(ent3);
+		assert.equal(r3.steps[0]?.kind, 'loop');
+		if (r3.steps[0]?.kind === 'loop') {
+			assert.equal(r3.steps[0].loopKind, 'for-of');
+		}
+	});
+
+	it('captures expression switch', () => {
+		const ent = goEntity('Foo', `
+func Foo(state string) int {
+	switch state {
+	case "a":
+		return 1
+	case "b":
+		return 2
+	default:
+		return 0
+	}
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'switch');
+		if (result.steps[0]?.kind === 'switch') {
+			assert.equal(result.steps[0].cases.length, 3);
+			assert.equal(result.steps[0].cases[2]?.label, 'default');
+		}
+	});
+
+	it('captures select as a switch step', () => {
+		const ent = goEntity('Foo', `
+func Foo(ch chan int) {
+	select {
+	case v := <-ch:
+		handle(v)
+	default:
+		nothing()
+	}
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'switch');
+		if (result.steps[0]?.kind === 'switch') {
+			assert.equal(result.steps[0].subject, 'select');
+		}
+	});
+
+	it('renders defer + go as call steps with prefixes', () => {
+		const ent = goEntity('Foo', `
+func Foo() {
+	defer cleanup()
+	go background()
+	work()
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps.length, 3);
+		assert.equal(result.steps[0]?.kind, 'call');
+		if (result.steps[0]?.kind === 'call') {
+			assert.match(result.steps[0].callee, /^defer /);
+		}
+		assert.equal(result.steps[1]?.kind, 'call');
+		if (result.steps[1]?.kind === 'call') {
+			assert.match(result.steps[1].callee, /^go /);
+		}
+	});
+
+	it('special-cases panic() as a throw step', () => {
+		const ent = goEntity('Foo', `
+func Foo(x int) {
+	if x < 0 {
+		panic("negative")
+	}
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'branch');
+		if (result.steps[0]?.kind !== 'branch') { return; }
+		assert.equal(result.steps[0].consequent[0]?.kind, 'throw');
+	});
+
+	it('renders break / continue / goto inside a for body', () => {
+		const ent = goEntity('Foo', `
+func Foo(items []int) {
+	for _, item := range items {
+		if item < 0 {
+			continue
+		}
+		if item > 100 {
+			break
+		}
+		process(item)
+	}
+}
+`);
+		const result = walkCfgFromEntity(ent);
+		assert.equal(result.steps[0]?.kind, 'loop');
+		if (result.steps[0]?.kind !== 'loop') { return; }
+		const loopBody = result.steps[0].body;
+		assert.equal(loopBody[0]?.kind, 'branch');
+		if (loopBody[0]?.kind === 'branch') {
+			assert.equal(loopBody[0].consequent[0]?.kind, 'continue');
+		}
+		assert.equal(loopBody[1]?.kind, 'branch');
+		if (loopBody[1]?.kind === 'branch') {
+			assert.equal(loopBody[1].consequent[0]?.kind, 'break');
+		}
 	});
 });
 
