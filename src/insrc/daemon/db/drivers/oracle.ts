@@ -29,6 +29,7 @@ import {
 	buildSampleSql,
 	quoteTarget,
 } from './rdbms-common.js';
+import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-oracle');
@@ -111,6 +112,32 @@ class OracleDriver implements RdbmsDriver {
 				rows,
 				truncated: rows.length >= limit,
 			};
+		} finally {
+			await conn.close();
+		}
+	}
+
+	async explain(queryAst: QueryAst): Promise<PlanResult> {
+		const schema = await this.describe(queryAst.target);
+		const cols = schema.columns.map(c => c.name);
+		const opts = queryAst.where !== undefined
+			? { limit: 50, where: queryAst.where }
+			: { limit: 50 };
+		const { text, values } = buildSampleSql(queryAst.target, opts, cols, ORACLE_DIALECT);
+		log.debug({ id: this.id, text }, 'explain query');
+		const pool = await this.poolPromise;
+		const conn = await pool.getConnection();
+		try {
+			// Two-statement flow: EXPLAIN PLAN populates PLAN_TABLE,
+			// DBMS_XPLAN.DISPLAY reads it back as text rows.
+			await conn.execute(`EXPLAIN PLAN FOR ${text}`, values as unknown[]);
+			const res = await conn.execute<Record<string, unknown>>(
+				`SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL, 'BASIC'))`,
+				[],
+				{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+			);
+			const lines = (res.rows ?? []).map(r => String(r['PLAN_TABLE_OUTPUT'] ?? ''));
+			return { plan: lines.join('\n') };
 		} finally {
 			await conn.close();
 		}

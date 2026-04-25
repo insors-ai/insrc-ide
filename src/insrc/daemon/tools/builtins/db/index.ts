@@ -210,6 +210,62 @@ const sqlDescribeTool: Tool = {
 	},
 };
 
+const sqlExplainTool: Tool = {
+	id: 'db:sql:explain',
+	description:
+		'Run EXPLAIN against a SELECT-shaped query on an RDBMS connection. ' +
+		'Returns the dialect-native plan as a string. Same WHERE / target ' +
+		'safety envelope as db:sql:sample (no raw SQL; column names ' +
+		'validated against describe()). Limit clamped at 50.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'queryAst'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			queryAst: {
+				type: 'object',
+				required: ['kind', 'target'],
+				additionalProperties: false,
+				properties: {
+					kind: { type: 'string', enum: ['select'] },
+					target: { type: 'string' },
+					where: WHERE_SCHEMA,
+				},
+			},
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') { return fail(this.id, 'connectionId is required'); }
+		const rawAst = input['queryAst'];
+		if (rawAst === null || typeof rawAst !== 'object') {
+			return fail(this.id, 'queryAst must be an object');
+		}
+		const ast = rawAst as Record<string, unknown>;
+		if (ast['kind'] !== 'select' || typeof ast['target'] !== 'string' || ast['target'] === '') {
+			return fail(this.id, 'queryAst.kind must be "select" and target must be a non-empty string');
+		}
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) { return driver; }
+		const rdbms = driver as RdbmsDriver;
+		if (rdbms.explain === undefined) {
+			return fail(this.id, `Connection '${connectionId}' (${rdbms.kind}) does not implement explain`, 'UNSUPPORTED');
+		}
+		try {
+			const opts = buildSampleOpts({ ...input, ...ast });
+			const result = await rdbms.explain({
+				kind: 'select',
+				target: ast['target'],
+				...(opts.where !== undefined ? { where: opts.where } : {}),
+			});
+			return ok('```\n' + result.plan + '\n```', result, 'markdown');
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
 const sqlSampleTool: Tool = {
 	id: 'db:sql:sample',
 	description:
@@ -566,11 +622,12 @@ export function registerDbTools(): void {
 	registerTool(listConnectionsTool);
 	registerTool(sqlDescribeTool);
 	registerTool(sqlSampleTool);
+	registerTool(sqlExplainTool);
 	registerTool(kvScanTool);
 	registerTool(kvGetTool);
 	registerTool(kvSampleShapeTool);
 	registerTool(fileDescribeTool);
 	registerTool(fileSampleTool);
 	registerTool(fileSampleShapeTool);
-	log.debug({ count: 9 }, 'data-driver tools registered');
+	log.debug({ count: 10 }, 'data-driver tools registered');
 }

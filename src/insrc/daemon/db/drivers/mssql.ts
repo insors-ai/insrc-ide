@@ -36,6 +36,7 @@ import {
 	quoteTarget,
 	withTimeout,
 } from './rdbms-common.js';
+import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-mssql');
@@ -147,6 +148,27 @@ class MssqlDriver implements RdbmsDriver {
 			rows: rows as readonly Readonly<Record<string, unknown>>[],
 			truncated: rows.length >= limit,
 		};
+	}
+
+	async explain(queryAst: QueryAst): Promise<PlanResult> {
+		const schema = await this.describe(queryAst.target);
+		const cols = schema.columns.map(c => c.name);
+		const opts = queryAst.where !== undefined
+			? { limit: 50, where: queryAst.where }
+			: { limit: 50 };
+		const { text, values } = buildSampleSql(queryAst.target, opts, cols, MSSQL_DIALECT);
+		log.debug({ id: this.id, text }, 'explain query');
+		// MSSQL EXPLAIN equivalent: SHOWPLAN_TEXT ON makes the next
+		// SELECT return the plan as text rows instead of executing.
+		// Run as a session-scoped pair so the SELECT doesn't pollute
+		// downstream calls.
+		await this.run('SET SHOWPLAN_TEXT ON', []);
+		try {
+			const rows = await withTimeout(this.run(text, values), SAMPLE_TIMEOUT_MS);
+			return { plan: rows.map(r => String(r['StmtText'] ?? '')).join('\n') };
+		} finally {
+			await this.run('SET SHOWPLAN_TEXT OFF', []).catch(() => { /* best-effort */ });
+		}
 	}
 
 	async close(): Promise<void> {

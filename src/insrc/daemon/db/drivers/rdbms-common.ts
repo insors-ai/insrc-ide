@@ -188,6 +188,45 @@ export function looksLikeMutation(sql: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Explain SQL assembly
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an EXPLAIN-shaped query for a SELECT against `target`. Each
+ * dialect has its own prefix:
+ *   - postgres: EXPLAIN (FORMAT TEXT)
+ *   - mysql:    EXPLAIN
+ *   - sqlite:   EXPLAIN QUERY PLAN
+ *   - mssql:    handled out-of-band (driver runs SET SHOWPLAN_TEXT
+ *               ON + the original SELECT)
+ *   - oracle:   handled out-of-band (driver runs EXPLAIN PLAN FOR
+ *               + DBMS_XPLAN.DISPLAY())
+ *
+ * For the two out-of-band dialects this helper still produces the
+ * inner SELECT; the driver wraps it. Same DML/DDL denylist applies
+ * via buildSampleSql.
+ */
+export function buildExplainSql(
+	target: string,
+	opts: SampleOpts,
+	columns: readonly string[],
+	dialect: Dialect,
+): { readonly text: string; readonly values: readonly unknown[] } {
+	const inner = buildSampleSql(target, opts, columns, dialect);
+	if (dialect === POSTGRES_DIALECT) {
+		return { text: `EXPLAIN (FORMAT TEXT) ${inner.text}`, values: inner.values };
+	}
+	if (dialect === MYSQL_DIALECT) {
+		return { text: `EXPLAIN ${inner.text}`, values: inner.values };
+	}
+	if (dialect === SQLITE_DIALECT) {
+		return { text: `EXPLAIN QUERY PLAN ${inner.text}`, values: inner.values };
+	}
+	// MSSQL + Oracle are handled by their drivers.
+	return inner;
+}
+
+// ---------------------------------------------------------------------------
 // Wall-clock timeout wrapper
 // ---------------------------------------------------------------------------
 

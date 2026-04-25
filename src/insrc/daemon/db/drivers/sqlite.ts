@@ -24,9 +24,11 @@ import type {
 import { registerDriver } from '../registry.js';
 import {
 	SQLITE_DIALECT,
+	buildExplainSql,
 	buildSampleSql,
 	quoteTarget,
 } from './rdbms-common.js';
+import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-sqlite');
@@ -98,6 +100,18 @@ class SqliteDriver implements RdbmsDriver {
 			rows,
 			truncated: rows.length >= limit,
 		};
+	}
+
+	async explain(queryAst: QueryAst): Promise<PlanResult> {
+		const schema = await this.describe(queryAst.target);
+		const cols = schema.columns.map(c => c.name);
+		const opts = queryAst.where !== undefined
+			? { limit: 50, where: queryAst.where }
+			: { limit: 50 };
+		const { text, values } = buildExplainSql(queryAst.target, opts, cols, SQLITE_DIALECT);
+		log.debug({ id: this.id, text }, 'explain query');
+		const rows = this.db.prepare(text).all(...values as unknown[]) as Record<string, unknown>[];
+		return { plan: rows.map(r => JSON.stringify(r)).join('\n') };
 	}
 
 	async close(): Promise<void> {

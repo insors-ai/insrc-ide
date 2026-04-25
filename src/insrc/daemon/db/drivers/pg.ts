@@ -24,10 +24,12 @@ import {
 	POSTGRES_DIALECT,
 	SAMPLE_LIMIT,
 	SAMPLE_TIMEOUT_MS,
+	buildExplainSql,
 	buildSampleSql,
 	quoteTarget,
 	withTimeout,
 } from './rdbms-common.js';
+import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const { Pool } = pgMod;
@@ -125,6 +127,21 @@ class PostgresDriver implements RdbmsDriver {
 				? false
 				: res.rowCount === Math.min(opts.limit, SAMPLE_LIMIT),
 		};
+	}
+
+	async explain(queryAst: QueryAst): Promise<PlanResult> {
+		const schema = await this.describe(queryAst.target);
+		const cols = schema.columns.map(c => c.name);
+		const opts = queryAst.where !== undefined
+			? { limit: SAMPLE_LIMIT, where: queryAst.where }
+			: { limit: SAMPLE_LIMIT };
+		const { text, values } = buildExplainSql(queryAst.target, opts, cols, POSTGRES_DIALECT);
+		log.debug({ id: this.id, text }, 'explain query');
+		const res = await withTimeout(
+			this.pool.query(text, values as unknown[]),
+			SAMPLE_TIMEOUT_MS,
+		);
+		return { plan: res.rows.map((r: Record<string, unknown>) => String(r['QUERY PLAN'] ?? '')).join('\n') };
 	}
 
 	async close(): Promise<void> {
