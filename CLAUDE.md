@@ -12,7 +12,7 @@ Repository: `github.com/insors-ai/insrc`
 - **Runtime**: Node.js 20+, executed with `tsx` during development
 - **Module system**: NodeNext (`"module": "nodenext"` in tsconfig)
 - **Databases**: Kuzu (embedded graph DB, Cypher queries), LanceDB (embedded vector DB)
-- **Parsing**: tree-sitter (TypeScript, Python, Go)
+- **Parsing**: tree-sitter (TypeScript, Python, Go, Java, Scala)
 - **LLM providers**: Ollama (local -- qwen3-coder, qwen3-embedding) + one active cloud provider (OpenAI, Anthropic, Gemini, Mistral). Managed via the Model Providers pane (command `insrc.openModelProviders`); API keys live in the OS keychain.
 - **Logging**: pino + pino-pretty (CLI) + pino-roll (file rotation)
 - **CLI framework**: commander
@@ -27,7 +27,7 @@ src/
     paths.ts       ~/.insrc/ directory layout constants
     logger.ts      pino-based logging (daemon vs CLI mode)
   indexer/         Code parsing and knowledge graph construction
-    parser/        tree-sitter parsers (typescript.ts, python.ts, go.ts, base.ts, artifact.ts)
+    parser/        tree-sitter parsers (typescript.ts, python.ts, go.ts, java.ts, scala.ts, base.ts, artifact.ts)
     manifest.ts    Dependency manifest parsing (package.json, go.mod, etc.)
     resolver.ts    Import resolution
     embedder.ts    Ollama embedding generation

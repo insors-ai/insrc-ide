@@ -45,7 +45,7 @@ const VALID_NAMESPACES = new Set<string>([
   'tester', 'research', 'debugging', 'deployment', 'common',
 ]);
 const VALID_LANGUAGES = new Set<string>([
-  'python', 'go', 'typescript', 'javascript',
+  'python', 'go', 'typescript', 'javascript', 'java', 'scala',
   'markdown', 'html', 'css', 'yaml', 'json', 'toml', 'shell',
   'sql', 'proto', 'graphql', 'dockerfile', 'config', 'all',
 ]);

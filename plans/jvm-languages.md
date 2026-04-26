@@ -40,7 +40,7 @@ parsing covers both at once.
 | 2     | Scala parser: entities + relations + tests; Scala 2 + 3 cross-version handling   | done (uncommitted) |
 | 3     | Manifests: pom.xml / build.gradle(.kts) / build.sbt / build.sc                      | done (uncommitted) -- import resolution descoped to a future cross-file pass (see §3.4) |
 | 4     | CFG walkers in `kinds/cfg.ts` so `flow:code` artifacts work for Java + Scala     | done (uncommitted) |
-| 5     | Cross-cutting integration: language-hint heuristics, fixtures, doc updates       | todo   |
+| 5     | Cross-cutting integration: language-hint heuristics, fixtures, doc updates       | partial -- doc updates + literal-union sweep done; JVM end-to-end smoke fixtures deferred (per the project's no-tests-without-approval rule + unit tests already cover the surface). |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
 (with commit sha or "uncommitted"), `partial` with deferred scope
@@ -784,10 +784,10 @@ check rejects the call cleanly with the existing error message.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Indexer side-effect imports                | todo   |       |
-| Sweep for hard-coded language unions       | todo   |       |
-| `CLAUDE.md` doc refresh                    | todo   |       |
-| `README.md` doc refresh                    | todo   |       |
-| Code-analyzer design refresh (if needed)   | todo   |       |
-| JVM smoke fixtures                         | todo   |       |
-| End-to-end `flow:code` smoke               | todo   |       |
+| Indexer side-effect imports                | done (Phases 1+2) | `import './parser/java.js'` + `import './parser/scala.js'` landed in indexer/index.ts during phases 1 + 2 alongside the parser modules themselves. |
+| Sweep for hard-coded language unions       | done (uncommitted) | Two hits found beyond cfg.ts: `config/frontmatter.ts` (`VALID_LANGUAGES` set used to validate frontmatter `language:` fields) extended with `'java'` + `'scala'`. The wireframe-introspection branch's hard-coded TS/JS check stays as designed -- React introspection requires JSX, which neither Java nor Scala has. |
+| `CLAUDE.md` doc refresh                    | done (uncommitted) | Tech-stack line + project-structure parser list both extended. |
+| `README.md` doc refresh                    | done (uncommitted) | "Automatic indexing" feature line extended. |
+| Code-analyzer design refresh (if needed)   | not needed | grep showed no language-list mentions in `design/` outside the plan itself. |
+| JVM smoke fixtures                         | deferred | A docker-compose'd Maven multi-module + SBT project would exercise the full indexer end-to-end. Unit tests already cover the parser + manifest + CFG surface (105 cases across phases 1-4). Smoke fixtures land when the analyzer adds a Java / Scala-flavored finding that needs end-to-end coverage. |
+| End-to-end `flow:code` smoke               | deferred | Same as above -- bundled with the JVM fixture work. |

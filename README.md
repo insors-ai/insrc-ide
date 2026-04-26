@@ -11,7 +11,7 @@ Insrc is an IDE that understands your code structurally. A background daemon par
 ## Key Features
 
 ### Code Knowledge Graph
-- **Automatic indexing** -- tree-sitter parsing for TypeScript, Python, Go
+- **Automatic indexing** -- tree-sitter parsing for TypeScript, Python, Go, Java, Scala
 - **Structural relationships** -- calls, imports, implements, extends stored in Kuzu (Cypher queries)
 - **Semantic search** -- entity embeddings via LanceDB for vector similarity + full-text search
 - **Live updates** -- file watcher re-indexes on change
