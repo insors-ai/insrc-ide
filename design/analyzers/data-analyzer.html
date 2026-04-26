@@ -284,6 +284,76 @@
   Cross-agent enrichment via registered tools is opt-in (see <a href="#cross-agent">§13</a>).
 </p>
 
+<h3 id="overview-flows">1.1 Two Entry Flows</h3>
+
+<p>
+  The Data Analyzer accepts two entry shapes. Both share the same run-task / review /
+  synthesise core; they differ only in whether the plan step is needed.
+</p>
+
+<div class="callout decision">
+  <strong>Decision:</strong> The synthesise step runs on the <strong>local LLM</strong>, not
+  the cloud. The cloud is the heavy reasoner for plan + per-task review (where it sees
+  minimal context per call); the local model writes the final Markdown report from accepted
+  findings it already has in hand. Keeps cloud token cost focused on decisions, not prose
+  generation.
+</div>
+
+<table>
+  <tr>
+    <th>Step</th>
+    <th>Flow 1 -- direct user question</th>
+    <th>Flow 2 -- tasks pre-decomposed (called from another agent)</th>
+  </tr>
+  <tr>
+    <td><strong>Plan</strong></td>
+    <td><span class="tag cloud">cloud LLM</span> decomposes the user's request into
+      <code>DataAnalysisTask[]</code></td>
+    <td>Skipped -- the caller hands over <code>DataAnalysisTask[]</code> directly</td>
+  </tr>
+  <tr>
+    <td><strong>Run-task</strong> (per task)</td>
+    <td colspan="2"><span class="tag local">local LLM</span> executes one task, calls
+      read-only tools (<code>data:*</code> + cross-agent <code>code:*</code> /
+      <code>deploy:*</code>), emits a structured <code>DataAnalyzerResult</code></td>
+  </tr>
+  <tr>
+    <td><strong>Review</strong> (per task)</td>
+    <td colspan="2"><span class="tag cloud">cloud LLM</span> reviews the analyzer output;
+      decides <code>accept</code> / <code>retry-with-hint</code> / <code>add-follow-up</code>
+      / <code>done</code></td>
+  </tr>
+  <tr>
+    <td><strong>Synthesise</strong></td>
+    <td colspan="2"><span class="tag local">local LLM</span> composes the final Markdown
+      report from accepted findings + citations</td>
+  </tr>
+  <tr>
+    <td><strong>Output</strong></td>
+    <td>Final report rendered in the Analysis Report Pane;
+      <code>present</code> gate fires for save / copy / send-to-chat</td>
+    <td>Final report returned to the caller as a structured
+      <code>{ report, findings, citations, confidence }</code> object; no
+      <code>present</code> gate (caller decides what to do with it)</td>
+  </tr>
+</table>
+
+<p>
+  <strong>Flow 1</strong> is what the user reaches via <code>/data-analyze</code> or the
+  classifier's <code>data-analysis</code> intent. Cloud LLM does the up-front decomposition
+  because the user's prompt is unstructured.
+</p>
+
+<p>
+  <strong>Flow 2</strong> is what another agent reaches when it wants this analyzer to
+  handle a specific scope it has already framed. The caller dispatches via the cross-agent
+  <code>data:analyze</code> tool (see <a href="#cross-agent">§13.5</a>) with a prepared
+  task list. The analyzer skips plan, runs the tasks, reviews each, synthesises, and returns
+  the result inline -- the caller's run-task LLM gets a tool result back, just like any
+  other cross-agent call. Single-hop depth cap still applies. Connection-approval gates
+  still fire on Flow 2's first use of any registered connection per session.
+</p>
+
 <!-- ================================================================== -->
 <h2 id="goals">2. Goals &amp; Non-Goals</h2>
 
@@ -435,17 +505,19 @@
 </table>
 
 <div class="flow-diagram">
-  user request
-       |
-       v
-  [Orchestrator.plan]                                (cloud LLM, no tools)
-       |                                              emits AnalysisTask[]
-       v
-  deps.todos.createList({ owner: 'data-analyzer' })  todos pane opens
-  one addItem() per task                             inline widget renders
-       |
-       v
-  [plan-review gate] --edit/approve-->
+  Flow 1 entry: user request               Flow 2 entry: caller-supplied DataAnalysisTask[]
+       |                                              |
+       v                                              |
+  [Orchestrator.plan]      (cloud LLM, no tools)      |
+       |                    emits DataAnalysisTask[]  |
+       +----------------------------+-----------------+
+                                    |
+                                    v
+  deps.todos.createList({ owner: 'data-analyzer' })   todos pane opens (Flow 1 only)
+  one addItem() per task                              inline widget renders (Flow 1 only)
+                                    |
+                                    v
+  [plan-review gate -- Flow 1 only] --edit/approve-->
        |
        v
   for each pending item in list:
@@ -455,6 +527,7 @@
        +--> [Analyzer.run(task)]                     (local LLM + data:* tools)
        |         |
        |         +-- pick connection from data:list-connections
+       |         +-- [connection-approval] gate on first use per session
        |         +-- describe / sample / scan / sample-shape / lineage / drift
        |         +-- (optional) cross-agent: code:callers on a query helper,
        |             deploy:env-diff on a connection's url-from-env
@@ -465,23 +538,12 @@
                  |
                  v
        decision: accept | retry-with-hint | add-follow-up | done
-                 |
-                 +--> on accept:   updateItem(meta = { answer, findings,
-                 |                                     citations, confidence });
-                 |                 markComplete(itemId);
-                 +--> on retry:    markInProgress + re-queue with hint
-                 +--> on follow-up: addItem({ origin: 'follow-up' })
-                 +--> on done:     break
-                 ...
        v
-  [Orchestrator.synthesise]                          (cloud LLM)
+  [Orchestrator.synthesise]                          (local LLM, no tools)
        |
-       v
-  final Markdown report -> AnalysisReportPane opens
-       |
-       v
-  [present gate]  -- save / copy / send-to-chat / discard
-                     save -> docs/data-analysis/&lt;slug&gt;.md
+       +-- Flow 1: render to AnalysisReportPane -> [present gate]
+       |          save -> docs/data-analysis/&lt;slug&gt;.md
+       +-- Flow 2: return { report, findings, citations, confidence } to caller
 </div>
 
 <h3 id="arch-todo-backbone">4.2 TODO Framework as Backbone</h3>
@@ -782,9 +844,12 @@ interface DataAnalysisItemMeta {
   </tr>
   <tr>
     <td><code>synthesise</code></td>
-    <td><span class="tag cloud">llm</span></td>
-    <td>Composes the final Markdown: groups findings by table / collection / connection,
-      preserves all citations, writes the top-level summary. Token budget ~4000.</td>
+    <td><span class="tag local">llm</span></td>
+    <td>Composes the final Markdown on the <strong>local model</strong>: groups findings by
+      table / collection / connection, preserves all citations, writes the top-level summary.
+      Token budget ~4000. Writes to <code>list.body</code> on Flow 1; returns the structured
+      result to the caller on Flow 2 (see <a href="#cross-agent">§13.5</a>). Local-only
+      synthesis keeps cloud cost focused on per-task review decisions.</td>
   </tr>
   <tr>
     <td><code>present</code></td>
@@ -1355,9 +1420,10 @@ type DataCitation = RdbmsCitation | KvCitation | FileCitation;</code></pre>
   </tr>
   <tr>
     <td>Orchestrator: synthesise</td>
-    <td><span class="tag cloud">cloud default</span></td>
+    <td><span class="tag local">ollama qwen3-coder</span></td>
     <td><code>dataAnalysis.synthesiser</code></td>
-    <td>same</td>
+    <td><code>@anthropic</code> / <code>@openai</code> upgrades to cloud when the user wants
+      a cloud-grade write-up</td>
   </tr>
   <tr>
     <td>Analyzer: task loop</td>
@@ -1478,6 +1544,85 @@ type DataCitation = RdbmsCitation | KvCitation | FileCitation;</code></pre>
   sibling.
 </p>
 
+<h3 id="cross-flow2">13.5 Flow 2 -- Plan-Level Delegation via <code>data:analyze</code></h3>
+
+<p>
+  Tool-call cross-agent (<a href="#cross-agent">§13.1</a>) is right when the calling agent
+  needs a single targeted lookup -- "describe table X", "list connections". When the calling
+  agent has framed a multi-task investigation that's wholly inside this analyzer's domain,
+  it dispatches via <code>data:analyze</code>: a single tool call that hands over a pre-built
+  task list and gets back a synthesised report.
+</p>
+
+<pre><code>// Tool surface registered by the Data Analyzer family
+//
+// Caller hands over an already-decomposed task list; the Data Analyzer
+// skips its plan step (Flow 2 entry), runs the tasks (firing
+// connection-approval gates as needed), reviews each, synthesises a
+// report on the local model, and returns the result inline.
+{
+  name: 'data:analyze',
+  input: {
+    tasks: DataAnalysisTask[];   // pre-decomposed, no plan step
+    callerContext?: {
+      agent: 'code-analyzer' | 'deployment-analyzer' | string;
+    };
+  },
+  output: {
+    report:     string;          // Markdown, synthesised by the local LLM
+    findings:   DataFinding[];
+    citations:  DataCitation[];
+    confidence: 'high' | 'medium' | 'low';
+    truncated?: boolean;
+    blockedTasks?: { itemId: string; reason: 'connection-denied'
+                                          | 'pii-gate-denied' }[];
+  },
+}</code></pre>
+
+<div class="callout decision">
+  <strong>Decision:</strong> Flow 2 is a single tool call from the caller's perspective. The
+  Data Analyzer's run-task / review / synthesise loop runs to completion before the call
+  returns. Connection-approval and sample-review gates still fire -- the caller waits on
+  them through the tool call, since the user is the right party to grant DB access in any
+  case.
+</div>
+
+<p>
+  Why a separate tool from the per-capability ones (<code>data:describe-table</code>,
+  <code>data:lineage</code>, ...):
+</p>
+
+<ul>
+  <li><strong>Different cost shape.</strong> A <code>data:analyze</code> call with a
+    multi-table audit can take 60+ seconds; <code>data:describe-table</code> is one
+    introspection call.</li>
+  <li><strong>Different return shape.</strong> Per-capability tools return raw schema /
+    sample data; <code>data:analyze</code> returns a synthesised Markdown report with
+    citations.</li>
+  <li><strong>Connection-approval is gated once per session, not per call.</strong> A
+    Flow 2 entry that touches three tables on the same connection fires the approval gate
+    once and reuses the approval for the rest of the call. A caller that fired three
+    separate <code>data:describe-table</code> calls would still hit the gate once (same
+    session-scoped state); but the bookkeeping is cleaner with a single Flow 2 dispatch.</li>
+  <li><strong>Single-hop cap still applies.</strong> Flow 2's tasks themselves can call
+    cross-agent tools, but recursion is capped at depth 1 regardless of which entry flow
+    opened the chain.</li>
+</ul>
+
+<p>
+  Caps inside Flow 2: the caller-supplied task list is subject to the same 16/24 soft/hard
+  cap. Lists &gt; 16 don't fire the plan-size-approval gate (no user is in the loop) -- the
+  Data Analyzer trims to 16 silently and sets <code>truncated: true</code> in the return
+  value. <code>blockedTasks</code> reports any tasks that hit a connection-approval-denied
+  or PII-gate-denied path so the caller can decide whether to re-dispatch with a different
+  scope.
+</p>
+
+<p>
+  Flow 2 has no <code>present</code> gate -- the caller folds the returned report into its
+  own synthesise output as a "Schema findings (data-analyzer)" subsection.
+</p>
+
 <!-- ================================================================== -->
 <h2 id="caching">14. Caching &amp; Resume</h2>
 
@@ -1507,9 +1652,9 @@ type DataCitation = RdbmsCitation | KvCitation | FileCitation;</code></pre>
   </tr>
   <tr>
     <td>Cloud provider unavailable (auth / network)</td>
-    <td><code>plan</code> / <code>review</code> / <code>synthesise</code> fall back to the
-      local model with a warning banner. Final report flagged
-      <code>provenance: 'local-only'</code>.</td>
+    <td><code>plan</code> + per-task <code>review</code> fall back to the local model with a
+      warning banner. <code>synthesise</code> already runs local by default so it's
+      unaffected. Final report flagged <code>provenance: 'local-only'</code>.</td>
   </tr>
   <tr>
     <td>Connection unreachable (DB host down, auth failed)</td>
