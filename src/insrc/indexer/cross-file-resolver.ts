@@ -60,19 +60,34 @@ export async function runCrossFileResolver(
 
   const entities = await listEntitiesForRepo(opts.db, opts.repoRoot);
   const index    = buildEntityIndex(entities);
+  log.info(
+    { repo: opts.repoRoot, entities: entities.length },
+    'cross-file resolver starting',
+  );
 
   // Pass 1: rewire module-stub IMPORTS to file-target IMPORTS for in-tree
   // matches. INHERITS resolution below relies on these to compute scope.
+  const tPass1 = Date.now();
   const importsRewired = await rewireModuleStubImports(opts, index);
+  log.info(
+    { repo: opts.repoRoot, importsRewired, elapsedMs: Date.now() - tPass1 },
+    'cross-file Pass 1 (IMPORTS rewire) complete',
+  );
 
-  // Pass 2: walk UnresolvedRelation rows for INHERITS / IMPLEMENTS.
+  // Pass 2: walk UnresolvedRelation rows for INHERITS / IMPLEMENTS / CALLS.
   const unresolved = await listUnresolvedRelations(
     opts.db, opts.repoRoot, opts.scopeFile,
   );
+  log.info(
+    { repo: opts.repoRoot, rows: unresolved.length },
+    'cross-file Pass 2 (relation resolution) starting',
+  );
+  const tPass2 = Date.now();
 
   let resolved        = 0;
   let ambiguous       = 0;
   let stillUnresolved = 0;
+  let processed       = 0;
   for (const row of unresolved) {
     let result: 'resolved' | 'ambiguous' | 'unresolved';
     if (row.kind === 'INHERITS' || row.kind === 'IMPLEMENTS') {
@@ -81,16 +96,32 @@ export async function runCrossFileResolver(
       result = await resolveCall(opts, row, index);
     } else {
       // Everything else stays unresolved.
+      processed++;
       continue;
     }
     if      (result === 'resolved')  resolved++;
     else if (result === 'ambiguous') ambiguous++;
     else                             stillUnresolved++;
+    processed++;
+    // Log every 100 rows (or every 25 once a row count is known to be
+    // small) so a stall here is visible from the outside without
+    // re-instrumenting per debugging trip.
+    if (processed % 100 === 0) {
+      log.info(
+        { repo: opts.repoRoot, processed, total: unresolved.length, resolved, ambiguous },
+        'cross-file Pass 2 progress',
+      );
+    }
   }
 
   const elapsedMs = Date.now() - t0;
   log.info(
-    { repo: opts.repoRoot, importsRewired, resolved, ambiguous, stillUnresolved, elapsedMs },
+    {
+      repo: opts.repoRoot,
+      importsRewired, resolved, ambiguous, stillUnresolved,
+      pass2ElapsedMs: Date.now() - tPass2,
+      elapsedMs,
+    },
     'cross-file resolver pass complete',
   );
   return { importsRewired, resolved, ambiguous, stillUnresolved, elapsedMs };
