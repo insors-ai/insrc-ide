@@ -430,6 +430,24 @@
   <code>analyzer.md</code>, <code>synthesise.md</code> prompts.
 </p>
 
+<div class="callout info">
+  <strong>Naming convention.</strong> Three suffixes appear by purpose; they are not
+  interchangeable:
+  <ul>
+    <li><code>code-analyzer</code> -- family id, prompt-asset directory, browser folder
+      (<code>~/.insrc/code-analyzer/</code>, <code>browser/code-analyzer/</code>...).</li>
+    <li><code>code-analysis</code> -- classifier intent, run artefacts, daemon controller
+      module (<code>docs/code-analysis/</code>,
+      <code>controllers/code-analysis-orchestrator.ts</code>,
+      <code>agent/tasks/code-analysis/</code>...).</li>
+    <li><code>/code-analyze</code> -- slash command (verb form, paired with
+      <code>/data-analyze</code> and <code>/deploy-analyze</code>).</li>
+  </ul>
+  Sibling analyzers follow the same pattern: <code>data-analyzer</code> /
+  <code>data-analysis</code> / <code>/data-analyze</code>; <code>deployment-analyzer</code> /
+  <code>deployment-analysis</code> / <code>/deploy-analyze</code>.
+</div>
+
 <!-- ================================================================== -->
 <h2 id="architecture">4. Architecture</h2>
 
@@ -475,7 +493,7 @@
   <tr>
     <td><strong>Plan storage</strong></td>
     <td colspan="2"><strong>TODO framework</strong> — one <code>TodoList</code> owned by the
-      <code>research</code> family, one <code>TodoItem</code> per analysis task.</td>
+      <code>code-analyzer</code> family, one <code>TodoItem</code> per analysis task.</td>
     <td>Reads list + items live via <code>IInsrcTodosService</code></td>
   </tr>
 </table>
@@ -659,8 +677,8 @@
 const list: TodoList = {
   id:          ulid(),
   sessionId,
-  owner:       'research',              // stamped by deps.todos
-  source:      'research',
+  owner:       'code-analyzer',         // stamped by deps.todos
+  source:      'code-analyzer',
   status:      'active',
   title:       'Code Analysis: <slug-of-request>',
   description: userRequest,             // full original ask
@@ -673,7 +691,7 @@ const list: TodoList = {
 // Each item's meta keeps the per-task payload
 interface AnalysisItemMeta {
   kind:        'locate' | 'describe' | 'trace'
-             | 'compare' | 'inspect-schema' | 'free-form';
+             | 'compare' | 'free-form';
   scope?:      { entityIds?: string[]; paths?: string[]; packages?: string[] };
   origin:      'plan' | 'follow-up';
   retryCount:  number;
@@ -738,8 +756,8 @@ interface AnalysisItemMeta {
   <code>markInProgress</code> / <code>markComplete</code> / <code>markBlocked</code> but no
   <code>cancel</code> or generic <code>updateItem(meta)</code>. The analyzer needs both:
   <code>updateItem</code> to stash per-task payload on completion, and <code>cancel</code> for
-  <code>maxTasks</code>-cap truncation. See §15 Q7 — this is a framework PR we bundle with
-  phase 1.
+  <code>maxTasks</code>-cap truncation. This is a framework PR landed as
+  <a href="#phasing">phase 0</a>, before any analyzer wiring.
 </div>
 
 <h3 id="todo-comments">5.3 Feedback Channel: Batched Annotations &rarr; Chat</h3>
@@ -835,13 +853,13 @@ interface AnalysisItemMeta {
   (loop until list has no pending items OR caps hit;
    user may click "Stop analysis" on the pane to fire mid-flight-cancel gate)
     v
-  synthesise           (cloud LLM, no tools -- composes report)
+  synthesise           (local LLM, no tools -- composes report)
     |  -> updateList(body = markdown)
     v
   AnalysisReportPane opens with the rendered markdown
     v
   present       gate   (save / copy / send-to-chat / discard)
-    |  -> on save: artifact-save to docs/analysis/&lt;slug&gt;.md
+    |  -> on save: artifact-save to docs/code-analysis/&lt;slug&gt;.md
     |  -> on discard: list.transfer('system') for audit retention
 </div>
 
@@ -910,7 +928,7 @@ interface AnalysisItemMeta {
   <tr>
     <td><code>present</code></td>
     <td><span class="tag gate">gate</span></td>
-    <td>Final gate. Actions: <code>save</code> (to <code>docs/analysis/&lt;slug&gt;.md</code> via
+    <td>Final gate. Actions: <code>save</code> (to <code>docs/code-analysis/&lt;slug&gt;.md</code> via
       <code>artifact-save.ts</code>), <code>copy</code>, <code>send-to-chat</code>,
       <code>discard</code>.</td>
   </tr>
@@ -968,10 +986,12 @@ interface AnalysisItemMeta {
 
 <div class="callout warn">
   The caps exist because cloud-provider token costs scale with the review step running on every
-  analyzer result. An analyzer result is typically 200–800 tokens plus evidence; 16 reviews at
-  2k input tokens each is already ~32k tokens for a single analysis. The soft cap + approval
-  gate gives the user a chance to trim before paying for a wider-than-expected decomposition;
-  the hard cap is a backstop against runaway follow-ups.
+  analyzer result. An analyzer result is typically 200–800 tokens plus evidence, but the
+  reviewer also receives a compact pre-history of accepted findings (<a href="#orch-prompts">§6.4.2</a>),
+  so input grows roughly linearly across tasks: a 16-task run lands closer to ~60–100k
+  cumulative review-input tokens, not a flat 32k. The soft cap + approval gate gives the user a
+  chance to trim before paying for a wider-than-expected decomposition; the hard cap is a
+  backstop against runaway follow-ups.
 </div>
 
 <h3 id="orch-prompts">6.4 Prompts</h3>
@@ -1397,15 +1417,20 @@ interface CodeCitation {
   <li>Because approvals cascade to descendants, <strong>the expected case is one gate per
     out-of-repo root</strong>, not one per file or per sub-dir. The open question about
     batching co-temporal gates is moot — parent-grant semantics replace the batching need.</li>
-  <li>Approvals are session-scoped and <strong>not persisted</strong> across sessions. A new
-    chat session re-asks.</li>
+  <li>Approvals are scoped to the current <strong>chat session</strong>. They live on the
+    controller's persisted state (<code>approvedDirs</code> in <a href="#state">§8</a>), so
+    they survive daemon restart within the same chat session — a crash mid-run rehydrates the
+    grant and the access gate doesn't re-fire on resume. A <em>new</em> chat session, however,
+    starts with an empty approved set and re-asks for any out-of-repo read.</li>
 </ul>
 
 <p>
-  Why session-scoped and not persistent: an approval persisted to disk is an easy path to
-  accidental exfiltration a user wouldn't notice (e.g. an agent in a later session silently
-  reading <code>~/work/other-client-repo/</code> because an earlier session approved it). Asking
-  again per session is a small tax for a meaningful audit property.
+  Why bound to the chat session and not persistent across sessions: an approval persisted
+  beyond the conversation that granted it is an easy path to accidental exfiltration a user
+  wouldn't notice (e.g. an agent in a later session silently reading
+  <code>~/work/other-client-repo/</code> because an earlier session approved it). Asking again
+  per chat session is a small tax for a meaningful audit property; surviving daemon restarts
+  inside one session keeps crash recovery quiet.
 </p>
 
 <div class="callout warn">
@@ -1739,15 +1764,18 @@ time and produce a structured AnalyzerResult.
   </tr>
 </table>
 
-<div class="callout decision">
-  <strong>Plans &le; 16 tasks auto-proceed.</strong> Read-only work with a modestly sized plan
-  doesn't need an approval click. The plan-size gate only fires when decomposition produces a
-  plan big enough to be worth paying attention to.
+<div class="callout info">
+  Plan-size auto-approval thresholds (≤16 auto, &gt;16 gates), the
+  <code>trim-to-16</code> action semantics, and the rationale for the soft/hard cap split are
+  specified in <a href="#orch-flow">§6.1</a>; cap behaviour for follow-ups is in
+  <a href="#orch-termination">§6.3</a>. Not restated here.
 </div>
 
 <p>
-  Comments on tasks do not fire a gate — they flow through the framework's comment channel
-  (§5.3) and are consumed by the reviewer at the top of its next turn.
+  No comment-driven gates exist on this controller. The framework's per-item comment channel
+  is suppressed on code-analysis lists (<a href="#todo-comments">§5.3</a>); user feedback flows
+  through the Analysis Report Pane's annotate-and-batch-send-to-chat path
+  (<a href="#surface-feedback">§10.3</a>) instead.
 </p>
 
 <!-- ================================================================== -->
@@ -1946,7 +1974,11 @@ time and produce a structured AnalyzerResult.
   </tr>
   <tr>
     <td>Chat submission</td>
-    <td><code>IInsrcChatService.submit</code></td>
+    <td><code>IInsrcChatService.submit</code> — extended to accept an optional
+      <code>{ from?: string }</code> source tag so batched annotations carry
+      <code>'code-analysis-pane'</code> provenance into the chat panel. Tag is non-functional
+      today (no consumers branch on it) but is reserved for future telemetry / classifier
+      hints. Existing call sites are unaffected.</td>
   </tr>
 </table>
 
@@ -2122,19 +2154,23 @@ time and produce a structured AnalyzerResult.
 <h3 id="cross-contract">13.2 Single-Hop Depth Cap</h3>
 
 <div class="callout decision">
-  <strong>Decision:</strong> Cross-agent calls are <strong>single-hop</strong>. When the Code
-  Analyzer calls <code>data:describe-table</code>, the Data Analyzer's tool can in turn call
-  Code Analyzer tools <em>internally</em> for its own work, but it cannot call
-  <code>deploy:*</code> from within the Code-initiated call. Depth is enforced by a
-  <code>crossAgentDepth</code> counter in the run-task tool context; tools detect
-  <code>depth &gt;= 1</code> and return the <code>TOOL_UNAVAILABLE</code> sentinel.
+  <strong>Decision:</strong> Cross-agent calls are <strong>strict single-hop</strong>. From
+  the Code Analyzer's run-task loop, exactly one level of cross-agent dispatch is allowed: the
+  analyzer can call any <code>data:*</code> or <code>deploy:*</code> tool, and those handlers
+  are forbidden from calling any <code>code:*</code>, <code>data:*</code>, or
+  <code>deploy:*</code> tool in turn. Depth is enforced by a <code>crossAgentDepth</code>
+  counter on the run-task tool context; the registry rejects any cross-agent call where
+  <code>crossAgentDepth &gt;= 1</code> with the <code>TOOL_UNAVAILABLE</code> sentinel,
+  regardless of which family is calling which.
 </div>
 
 <p>
-  Why cap at 1: keeps the latency budget bounded (each cross-agent call adds a tool round-trip
-  + a domain-specific lookup), keeps citation density manageable, and prevents accidental
-  recursion when two analyzers register overlapping tool patterns. The cap can be raised later
-  with explicit token + latency budgets if real-world usage shows benefit from chains.
+  Why strict cap at 1: keeps the latency budget bounded (each cross-agent call adds a tool
+  round-trip + a domain-specific lookup), keeps citation density manageable, and prevents
+  accidental recursion when two analyzers register overlapping tool patterns. A sibling
+  analyzer that needs richer in-domain analysis must use its own native tools, not bounce
+  back through cross-agent. The cap can be raised later with explicit token + latency budgets
+  if real-world usage shows benefit from chains.
 </p>
 
 <h3 id="cross-citations">13.3 Citation Propagation</h3>
@@ -2182,8 +2218,21 @@ The token-refresh path is gated through `verifyToken()` in
 
 <p>
   Same fall-through applies when the target analyzer's daemon-side handler errors or times
-  out (5 s hard cap on cross-agent tool calls). The original analysis run never blocks on a
-  sibling.
+  out. Two timeout envelopes apply, by tool class:
+</p>
+<ul>
+  <li><strong>Per-capability cross-agent tools</strong> (<code>data:describe-table</code>,
+    <code>data:lineage</code>, <code>deploy:env-diff</code>, ...) carry a <strong>5 s hard
+    cap</strong>. They're meant to be cheap point lookups; anything longer is treated as a
+    sibling failure and falls through.</li>
+  <li><strong>Flow-2 dispatch tools</strong> (<code>code:analyze</code>,
+    <code>data:analyze</code>, <code>deploy:analyze</code> -- see <a href="#cross-flow2">§13.5</a>)
+    carry a <strong>60 s envelope</strong> to accommodate their internal multi-task run-task /
+    review / synthesise loop. Same fall-through behaviour on timeout: caller's reviewer logs
+    the missing dispatch and the synthesise step emits the "consider running /..." footer.</li>
+</ul>
+<p>
+  The original analysis run never blocks on a sibling beyond these caps.
 </p>
 
 <h3 id="cross-flow2">13.5 Flow 2 -- Plan-Level Delegation via <code>code:analyze</code></h3>
@@ -2254,6 +2303,15 @@ The token-refresh path is gated through `verifyToken()` in
 </p>
 
 <p>
+  No global throttle on <code>code:analyze</code> exists today: a misbehaving caller
+  (or a sibling whose own review step keeps emitting <code>add-follow-up</code>) could
+  dispatch back-to-back. The single-hop depth cap (<a href="#cross-contract">§13.2</a>)
+  prevents recursive amplification through cross-agent calls, but a sibling's own outer loop
+  is not capped from this side. Worth revisiting in <a href="#phasing">phase 4</a> with a
+  per-session call counter if real cross-agent traffic exposes the gap.
+</p>
+
+<p>
   Flow 2 has no <code>present</code> gate -- the caller is responsible for what to do with
   the returned report. Typically the caller's synthesise step folds these foreign findings
   into its own report under a "Code findings (code-analyzer)" subsection, the same shape
@@ -2272,6 +2330,13 @@ The token-refresh path is gated through `verifyToken()` in
   <li><strong>Invalidation.</strong> Repo revision is taken from the indexer's last
     "repo snapshot id". On re-index, entries simply miss on the new rev — no active purge. A
     manual <code>codeAnalysis.clearCache</code> command is exposed.</li>
+  <li><strong>Scope of the win.</strong> Per-rev keying means any commit (or watcher-driven
+    re-index) invalidates 100% of cached results. The cache therefore only pays off
+    <em>within</em> a single repo revision -- typically multi-task runs against an unchanging
+    tree, or a re-run of the same analysis question while the user is reading the report. We
+    accept this as the right trade: cross-rev hits would require span-level content hashing
+    (each citation's span SHA folded into the key) and we've deferred that until usage data
+    shows the cross-rev cache miss is actually a problem.</li>
   <li><strong>Resume after daemon restart.</strong> The controller's
     <code>TaskStateStore</code> retains <code>listId</code>; on resume, the framework's LanceDB
     tables rehydrate the list and items. Any item marked <code>in_progress</code> at crash time
@@ -2326,7 +2391,8 @@ The token-refresh path is gated through `verifyToken()` in
   </tr>
   <tr>
     <td>Orchestrator reviewer keeps saying <code>retry-with-hint</code></td>
-    <td>Per-task retry cap = 2. Plan-level <code>maxTasks</code> cap = 20.</td>
+    <td>Per-task retry cap = 2. Plan-level caps: soft 16, hard <code>maxTasks = 24</code>
+      (<a href="#orch-termination">§6.3</a>).</td>
   </tr>
   <tr>
     <td>User starts a second analysis while one is running</td>
@@ -2355,8 +2421,10 @@ The token-refresh path is gated through `verifyToken()` in
   </li>
   <li><strong>Phase 1 — Core loop.</strong>
     <ul>
-      <li>New <code>CodeAnalysisOrchestratorController</code> wired under the
-        <code>research</code> family, variant <code>code-analysis</code>.</li>
+      <li>New <code>CodeAnalysisOrchestratorController</code> registered as the
+        <code>code-analyzer</code> family — its own slash command (<code>/code-analyze</code>),
+        prompt directory (<code>~/.insrc/code-analyzer/</code>), and artefacts root
+        (<code>docs/code-analysis/</code>).</li>
       <li>Analyzer tool loop using the existing tool registry (graph + vector + fs + grep +
         entity.summary).</li>
       <li>Citations invariant + JSON schema for <code>AnalyzerResult</code>.</li>
