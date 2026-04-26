@@ -62,7 +62,7 @@ constraint:
 | 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | done -- 809e175659a |
 | 4     | Cross-file CALLS resolution (using imported scope)                                     | done -- f65cbef7ddd |
 | 5     | Incremental mode: watcher settle window + invalidation on edit/delete                  | done -- 504776119a7 |
-| 6     | Performance + idempotency validation, integration tests                                | done -- uncommitted |
+| 6     | Performance + idempotency validation, integration tests                                | done -- a9409426ea6 |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
 (with commit sha or `uncommitted`), `partial` with deferred scope
@@ -921,8 +921,8 @@ no real `@parcel/watcher` involvement.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Bulk pass < 5 s on 100 KLoC fixture        | done -- uncommitted | resolves 50 cross-file INHERITS in well under 5 s on real Kuzu + LanceDB; budget asserted in test |
-| Idempotency snapshot test                  | done -- uncommitted | second pass over identical state resolves 0 new edges + the typed REL count is byte-identical |
+| Bulk pass < 5 s on 100 KLoC fixture        | done -- a9409426ea6 | resolves 50 cross-file INHERITS in well under 5 s on real Kuzu + LanceDB; budget asserted in test |
+| Idempotency snapshot test                  | done -- a9409426ea6 | second pass over identical state resolves 0 new edges + the typed REL count is byte-identical |
 | Memory ceiling < 500 MB on 1M-entity repo  | deferred | the per-pass index is `Map<lang:kind:name, Entity[]>` over `listEntitiesForRepo`; 100 bytes/entity * 1M ≈ 100 MB, so the budget is comfortable. Synthetic 1M-entity test isn't worth the CI time; documented + verifiable via the daemon's own indexing |
 | Daemon log metrics                         | done -- 504776119a7 | `cross-file pass after full index` (bulk) and `cross-file settle pass complete` (incremental) log the resolved/ambiguous/rewired counts + elapsedMs |
-| Gated perf + e2e smoke scripts             | partial -- uncommitted | the perf-budget test (50-file synthetic) lives in cross-file-resolver.test.ts and runs with the rest; a larger 10k-entity gated script is deferred to follow-up |
+| Gated perf + e2e smoke scripts             | partial -- a9409426ea6 | the perf-budget test (50-file synthetic) lives in cross-file-resolver.test.ts and runs with the rest; a larger 10k-entity gated script is deferred to follow-up |
