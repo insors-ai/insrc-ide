@@ -56,8 +56,8 @@ constraint:
 
 | Phase | Scope                                                                                  | Status |
 |-------|----------------------------------------------------------------------------------------|--------|
-| 0     | Foundations: persistence schema for unresolved relations, settle hook, idempotency     | todo   |
-| 1     | Quick win -- fix Python relative-import path resolution                                | todo   |
+| 0     | Foundations: persistence schema for unresolved relations, settle hook, idempotency     | partial -- 62bea4defb7 (settle hook deferred to Phase 3) |
+| 1     | Quick win -- fix Python relative-import path resolution                                | done -- uncommitted |
 | 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | todo   |
 | 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | todo   |
 | 4     | Cross-file CALLS resolution (using imported scope)                                     | todo   |
@@ -851,21 +851,21 @@ no real `@parcel/watcher` involvement.
 
 | Item                                                | Status | Notes |
 |-----------------------------------------------------|--------|-------|
-| `UnresolvedRelation` Kuzu node table + schema migration | todo |    |
-| `upsertRelations` no longer drops `resolved: false` rows | todo |   |
-| `listUnresolvedRelations` + `deleteUnresolvedForFile` + `promoteToResolved` helpers | todo |  |
-| Settle hook on `IndexerService` (bulk + incremental + RPC) | todo |  |
-| Idempotency contract documented                     | todo   |       |
-| Per-language candidate map skeleton                 | todo   |       |
+| `UnresolvedRelation` Kuzu node table + schema migration | done -- 62bea4defb7 |    |
+| `upsertRelations` no longer drops `resolved: false` rows | done -- 62bea4defb7 |   |
+| `listUnresolvedRelations` + `deleteUnresolvedForFile` + `promoteToResolved` helpers | done -- 62bea4defb7 |  |
+| Settle hook on `IndexerService` (bulk + incremental + RPC) | deferred to Phase 3 | needs `cross-file-resolver.ts` to invoke |
+| Idempotency contract documented                     | done   | captured in plan body |
+| Per-language candidate map skeleton                 | done -- 62bea4defb7 | TS/JS only; Python in Phase 1 |
 
 ### Phase 1 -- Quick win: Python relative imports
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `EXTENSION_MAP` per-language split         | todo   |       |
-| Python `.py` + `__init__.py` candidates    | todo   |       |
-| `resolver.ts` plumbing for the new map     | todo   |       |
-| Unit tests                                 | todo   |       |
+| `EXTENSION_MAP` per-language split         | done   | landed in Phase 0.5 |
+| Python `.py` + `__init__.py` candidates    | done -- uncommitted | dot-prefix walker (not extension-map) -- the dot semantics don't fit the map shape |
+| `resolver.ts` plumbing for the new map     | done -- uncommitted | special-cased for python |
+| Unit tests                                 | done -- uncommitted | resolver-python.test.ts, 8 cases |
 
 ### Phase 2 -- Source-root detection
 

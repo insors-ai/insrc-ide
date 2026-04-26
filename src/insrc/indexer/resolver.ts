@@ -92,10 +92,64 @@ function resolveImportPath(
   // Strip query strings / hashes (rare but possible)
   const clean = specifier.split('?')[0]?.split('#')[0] ?? specifier;
 
+  // Python relative imports use dot-prefix semantics, not path-prefix:
+  //   `.foo`     -> <fromDir>/foo.py | <fromDir>/foo/__init__.py
+  //   `..pkg`    -> <parent>/pkg.py  | <parent>/pkg/__init__.py
+  //   `.`        -> <fromDir>/__init__.py
+  //   `..`       -> <parent>/__init__.py
+  // The generic path-resolve flow can't model these (it would treat
+  // `.foo` as a hidden filename in fromDir).
+  if (language === 'python' && clean.startsWith('.')) {
+    return resolvePythonRelativeImport(fromDir, clean, repo);
+  }
+
   const candidates = buildCandidates(resolve(fromDir, clean), language);
 
   for (const candidate of candidates) {
     // Must be inside the repo to avoid leaking outside the graph scope
+    if (!candidate.startsWith(repo)) continue;
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Resolve a Python relative-import specifier (dot-prefixed) to a file
+ * path. Walks up `numDots - 1` parent directories from `fromDir`, then
+ * probes for `<name>.py` or `<name>/__init__.py` (or just `__init__.py`
+ * when the specifier has no name part).
+ */
+function resolvePythonRelativeImport(
+  fromDir:   string,
+  specifier: string,
+  repo:      string,
+): string | null {
+  // Count leading dots; the remainder (after dots) is the dotted module name.
+  let numDots = 0;
+  while (numDots < specifier.length && specifier[numDots] === '.') {
+    numDots++;
+  }
+  const remaining = specifier.slice(numDots);
+
+  // 1 dot = same dir, 2 = parent, 3 = grandparent, ...
+  let baseDir = fromDir;
+  for (let i = 1; i < numDots; i++) {
+    baseDir = dirname(baseDir);
+  }
+
+  const candidates: string[] = [];
+  if (remaining === '') {
+    // `from . import x` / `from .. import x` -- target is the package's
+    // own __init__.py.
+    candidates.push(resolve(baseDir, '__init__.py'));
+  } else {
+    const segments = remaining.split('.');
+    const stem = resolve(baseDir, ...segments);
+    candidates.push(stem + '.py');
+    candidates.push(resolve(stem, '__init__.py'));
+  }
+
+  for (const candidate of candidates) {
     if (!candidate.startsWith(repo)) continue;
     if (existsSync(candidate)) return candidate;
   }
