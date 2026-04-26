@@ -24,7 +24,9 @@ import type { DbClient } from '../db/client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
 import { listEntitiesForRepo, getEntity } from '../db/entities.js';
 import {
-  listUnresolvedRelations, promoteToResolved, updateUnresolvedMeta,
+  listUnresolvedRelations,
+  promoteResolvedBatch,
+  updateUnresolvedMetaBatch,
   type UnresolvedRelation,
 } from '../db/relations.js';
 import type { SourceRoots } from './source-roots.js';
@@ -84,24 +86,37 @@ export async function runCrossFileResolver(
   );
   const tPass2 = Date.now();
 
+  // Pass 2 intents are accumulated and batch-flushed at the end (one
+  // UNWIND per chunk, one fsync per chunk, vs the pre-fix one fsync per
+  // row). Holds at most a few KB per intent; bounded by total unresolved
+  // row count.
+  const promotes: { unresolved: UnresolvedRelation; targetEntityId: string }[] = [];
+  const ambiguousUpdates: { id: string; meta: Record<string, unknown> }[] = [];
+
   let resolved        = 0;
   let ambiguous       = 0;
   let stillUnresolved = 0;
   let processed       = 0;
   for (const row of unresolved) {
-    let result: 'resolved' | 'ambiguous' | 'unresolved';
+    let intent: ResolveIntent;
     if (row.kind === 'INHERITS' || row.kind === 'IMPLEMENTS') {
-      result = await resolveInheritance(opts, row, index);
+      intent = await resolveInheritance(opts, row, index);
     } else if (row.kind === 'CALLS') {
-      result = await resolveCall(opts, row, index);
+      intent = await resolveCall(opts, row, index);
     } else {
       // Everything else stays unresolved.
       processed++;
       continue;
     }
-    if      (result === 'resolved')  resolved++;
-    else if (result === 'ambiguous') ambiguous++;
-    else                             stillUnresolved++;
+    if (intent.kind === 'resolved') {
+      promotes.push({ unresolved: row, targetEntityId: intent.targetId });
+      resolved++;
+    } else if (intent.kind === 'ambiguous') {
+      ambiguousUpdates.push({ id: row.id, meta: intent.meta });
+      ambiguous++;
+    } else {
+      stillUnresolved++;
+    }
     processed++;
     // Log every 100 rows (or every 25 once a row count is known to be
     // small) so a stall here is visible from the outside without
@@ -112,6 +127,18 @@ export async function runCrossFileResolver(
         'cross-file Pass 2 progress',
       );
     }
+  }
+
+  // Batch-flush. promoteResolvedBatch handles per-kind UNWIND grouping
+  // + the final UnresolvedRelation DETACH DELETE; updateUnresolvedMetaBatch
+  // UNWINDs the meta SET. Both chunk at KUZU_BATCH internally.
+  if (promotes.length > 0 || ambiguousUpdates.length > 0) {
+    log.info(
+      { repo: opts.repoRoot, promotes: promotes.length, ambiguousUpdates: ambiguousUpdates.length },
+      'cross-file Pass 2 batch-flushing writes',
+    );
+    await promoteResolvedBatch(opts.db, promotes);
+    await updateUnresolvedMetaBatch(opts.db, ambiguousUpdates);
   }
 
   const elapsedMs = Date.now() - t0;
@@ -252,11 +279,10 @@ async function rewireModuleStubImports(
     bucket.push({ oldModuleId: moduleId, targetEntityId: targetEntity.id });
   }
 
-  let rewired = 0;
+  // Batched DELETE: one round-trip per from-file regardless of how many
+  // module-stub IMPORTS that file has. Pattern matches eeae2ef7ac7's
+  // `WHERE n.id IN $ids` approach.
   for (const [fromId, rewires] of groups) {
-    // Batched DELETE: one round-trip per from-file, regardless of how
-    // many module-stub IMPORTS that file has. Pattern matches
-    // eeae2ef7ac7's `WHERE n.id IN $ids` approach.
     const moduleIds = rewires.map(r => r.oldModuleId);
     await execGraph(opts.db,
       `MATCH (f:Entity {id: $from})-[r:IMPORTS]->(m:Entity)
@@ -264,22 +290,42 @@ async function rewireModuleStubImports(
        DELETE r`,
       { from: fromId, modules: moduleIds },
     );
-    // MERGE stays per-row -- batching MERGE for distinct (from, target)
-    // pairs would need UNWIND, which isn't used elsewhere in the
-    // codebase yet. Per-row MERGE is still O(N) total queries vs the
-    // pre-fix 2N (DELETE was the easy half to batch).
+  }
+
+  // Batched MERGE: collapse the per-edge MERGEs into UNWIND batches of
+  // KUZU_BATCH (500). One Cypher statement per chunk -> one auto-commit
+  // transaction -> one fsync at the disk. Pre-fix this was N sequential
+  // MERGEs each paying ~11 ms fsync wait on the local NVMe, which alone
+  // gated Pass 1 to ~90 edges/sec (confirmed via iostat showing ~95%
+  // f_await-bound disk util during the resolver run).
+  const allPairs: { from: string; target: string }[] = [];
+  let rewired = 0;
+  for (const [fromId, rewires] of groups) {
     for (const r of rewires) {
-      await execGraph(opts.db,
-        `MATCH (f:Entity {id: $from}), (t:Entity {id: $target})
-         MERGE (f)-[:IMPORTS]->(t)`,
-        { from: fromId, target: r.targetEntityId },
-      );
+      allPairs.push({ from: fromId, target: r.targetEntityId });
       rewired++;
     }
+  }
+  for (let i = 0; i < allPairs.length; i += KUZU_BATCH) {
+    const chunk = allPairs.slice(i, i + KUZU_BATCH);
+    await execGraph(opts.db,
+      `UNWIND $pairs AS p
+       MATCH (f:Entity {id: p.from}), (t:Entity {id: p.target})
+       MERGE (f)-[:IMPORTS]->(t)`,
+      { pairs: chunk },
+    );
   }
 
   return rewired;
 }
+
+/**
+ * Chunk size for UNWIND-batched writes against Kuzu. Matches
+ * eeae2ef7ac7's choice for batched DETACH DELETE: large enough to amortise
+ * the fsync-per-statement cost (each chunk = one auto-commit txn = one
+ * fsync), small enough to bound prepared-statement parameter memory.
+ */
+const KUZU_BATCH = 500;
 
 function findFilePathByEntityId(id: string, index: EntityIndex): string | null {
   return index.fileIdToPath.get(id) ?? null;
@@ -416,8 +462,24 @@ function expandTsPaths(specifier: string, ts: NonNullable<SourceRoots['typescrip
 }
 
 // ---------------------------------------------------------------------------
-// Pass 2 -- INHERITS / IMPLEMENTS resolution
+// Pass 2 -- INHERITS / IMPLEMENTS / CALLS resolution
+//
+// resolveInheritance / resolveCall do all the in-memory matching but do
+// NOT issue Kuzu writes themselves; they return a ResolveIntent that the
+// outer loop accumulates and flushes via promoteResolvedBatch /
+// updateUnresolvedMetaBatch at the end of Pass 2. This collapses what
+// used to be 1-2 fsync-bound writes per row into a handful of UNWIND
+// statements -- the iostat investigation showed the per-row writes were
+// the dominant cost (~95% disk util at ~11 ms fsync each, capping the
+// resolver at ~90 writes/sec).
 // ---------------------------------------------------------------------------
+
+type ResolveIntent =
+  | { readonly kind: 'resolved';   readonly targetId: string }
+  | { readonly kind: 'ambiguous';  readonly meta: Record<string, unknown> }
+  | { readonly kind: 'unresolved' };
+
+const UNRESOLVED: ResolveIntent = { kind: 'unresolved' };
 
 /**
  * Resolve an INHERITS / IMPLEMENTS row against the entity index.
@@ -433,7 +495,7 @@ async function resolveInheritance(
   opts:  CrossFileResolveOpts,
   row:   UnresolvedRelation,
   index: EntityIndex,
-): Promise<'resolved' | 'ambiguous' | 'unresolved'> {
+): Promise<ResolveIntent> {
   const fromEntities = index.byFile.get(row.fromFile) ?? [];
   // The parser stores INHERITS edges with `from` = the inheriting class
   // entity id. Pull its language from the index.
@@ -442,7 +504,7 @@ async function resolveInheritance(
   if (fromEntity === undefined) {
     // Stale row; from-side was deleted but UnresolvedRelation row wasn't
     // cleaned. The Phase 5 invalidation hooks will catch this.
-    return 'unresolved';
+    return UNRESOLVED;
   }
 
   const language = fromEntity.language;
@@ -455,13 +517,10 @@ async function resolveInheritance(
     const sameFile = (index.byFile.get(row.fromFile) ?? [])
       .filter(e => e.language === language && e.kind === kind && e.name === row.rawTo);
     if (sameFile.length === 1) {
-      await promoteToResolved(opts.db, row, sameFile[0]!.id);
-      return 'resolved';
+      return { kind: 'resolved', targetId: sameFile[0]!.id };
     }
     if (sameFile.length > 1) {
-      await updateUnresolvedMeta(opts.db, row.id,
-        { ...row.meta, candidates: sameFile.map(e => e.id) });
-      return 'ambiguous';
+      return { kind: 'ambiguous', meta: { ...row.meta, candidates: sameFile.map(e => e.id) } };
     }
   }
 
@@ -479,15 +538,12 @@ async function resolveInheritance(
   }
 
   if (candidates.length === 1) {
-    await promoteToResolved(opts.db, row, candidates[0]!.id);
-    return 'resolved';
+    return { kind: 'resolved', targetId: candidates[0]!.id };
   }
   if (candidates.length > 1) {
-    await updateUnresolvedMeta(opts.db, row.id,
-      { ...row.meta, candidates: candidates.map(e => e.id) });
-    return 'ambiguous';
+    return { kind: 'ambiguous', meta: { ...row.meta, candidates: candidates.map(e => e.id) } };
   }
-  return 'unresolved';
+  return UNRESOLVED;
 }
 
 // ---------------------------------------------------------------------------
@@ -503,10 +559,10 @@ async function resolveCall(
   opts:  CrossFileResolveOpts,
   row:   UnresolvedRelation,
   index: EntityIndex,
-): Promise<'resolved' | 'ambiguous' | 'unresolved'> {
+): Promise<ResolveIntent> {
   const fromEntity = (index.byFile.get(row.fromFile) ?? []).find(e => e.id === row.fromEntity)
     ?? findEntityByIdAcrossIndex(index, row.fromEntity);
-  if (fromEntity === undefined) return 'unresolved';
+  if (fromEntity === undefined) return UNRESOLVED;
   const language = fromEntity.language;
 
   // 1. Same-file: function / method / class with matching name.
@@ -516,19 +572,16 @@ async function resolveCall(
               && e.name === row.rawTo
               && e.id !== row.fromEntity);
   if (sameFile.length === 1) {
-    await promoteToResolved(opts.db, row, sameFile[0]!.id);
-    return 'resolved';
+    return { kind: 'resolved', targetId: sameFile[0]!.id };
   }
   if (sameFile.length > 1) {
-    await updateUnresolvedMeta(opts.db, row.id,
-      { ...row.meta, candidates: sameFile.map(e => e.id) });
-    return 'ambiguous';
+    return { kind: 'ambiguous', meta: { ...row.meta, candidates: sameFile.map(e => e.id) } };
   }
 
   // 2. Cross-file: walk imported files (after Phase 3's rewire) and
   //    consider only exported targets.
   const importedFiles = await getResolvedImportTargets(opts.db, row.fromEntity, index);
-  if (importedFiles.size === 0) return 'unresolved';
+  if (importedFiles.size === 0) return UNRESOLVED;
 
   const candidates: Entity[] = [];
   for (const kind of CALL_TARGET_KINDS) {
@@ -541,15 +594,12 @@ async function resolveCall(
   }
 
   if (candidates.length === 1) {
-    await promoteToResolved(opts.db, row, candidates[0]!.id);
-    return 'resolved';
+    return { kind: 'resolved', targetId: candidates[0]!.id };
   }
   if (candidates.length > 1) {
-    await updateUnresolvedMeta(opts.db, row.id,
-      { ...row.meta, candidates: candidates.map(e => e.id) });
-    return 'ambiguous';
+    return { kind: 'ambiguous', meta: { ...row.meta, candidates: candidates.map(e => e.id) } };
   }
-  return 'unresolved';
+  return UNRESOLVED;
 }
 
 function findEntityByIdAcrossIndex(index: EntityIndex, id: string): Entity | undefined {

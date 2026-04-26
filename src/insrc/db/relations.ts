@@ -237,3 +237,96 @@ export async function updateUnresolvedMeta(
     { id, meta: JSON.stringify(meta), attemptedAt: new Date().toISOString() },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Batched cross-file-resolver writers
+//
+// Per-row promoteToResolved / updateUnresolvedMeta turn each accepted /
+// ambiguous resolution into 1-2 Kuzu auto-commit transactions, and each
+// transaction pays an fsync at the WAL (~11ms on the local NVMe per
+// iostat). For a Pass-2 walk over a few thousand rows that's tens of
+// seconds of fsync wait alone.
+//
+// These batch helpers collapse N writes into ceil(N/KUZU_BATCH) UNWIND
+// statements, one fsync per chunk. KUZU_BATCH = 500 matches eeae2ef7ac7's
+// chunk size for batched DETACH DELETE -- conservative enough to bound
+// prepared-statement parameter memory.
+// ---------------------------------------------------------------------------
+
+const KUZU_BATCH = 500;
+
+/**
+ * Batched form of promoteToResolved. Groups by relation kind (each kind
+ * has its own REL TABLE name in Cypher), UNWIND-batches the typed-rel
+ * MERGE per kind, then UNWIND-batches the DETACH DELETE of all
+ * unresolved rows together.
+ */
+export async function promoteResolvedBatch(
+  db: DbClient,
+  items: ReadonlyArray<{ unresolved: UnresolvedRelation; targetEntityId: string }>,
+): Promise<void> {
+  if (items.length === 0) return;
+
+  // Group by kind -- the REL TABLE name in MERGE is interpolated, not
+  // parameterised, so each kind needs its own UNWIND statement.
+  const byKind = new Map<RelationKind, { from: string; to: string }[]>();
+  for (const item of items) {
+    let arr = byKind.get(item.unresolved.kind);
+    if (arr === undefined) { arr = []; byKind.set(item.unresolved.kind, arr); }
+    arr.push({ from: item.unresolved.fromEntity, to: item.targetEntityId });
+  }
+
+  for (const [kind, rows] of byKind) {
+    const rel = REL_TABLE[kind];
+    for (let i = 0; i < rows.length; i += KUZU_BATCH) {
+      const chunk = rows.slice(i, i + KUZU_BATCH);
+      await kuzuExec(
+        db,
+        `UNWIND $rows AS r
+         MATCH (a:Entity {id: r.from}), (b:Entity {id: r.to})
+         MERGE (a)-[:${rel}]->(b)`,
+        { rows: chunk },
+      );
+    }
+  }
+
+  // Batch DETACH DELETE the unresolved rows. Same `WHERE id IN $ids`
+  // pattern as eeae2ef7ac7's batched entity DETACH DELETE.
+  const allIds = items.map(it => it.unresolved.id);
+  for (let i = 0; i < allIds.length; i += KUZU_BATCH) {
+    const chunk = allIds.slice(i, i + KUZU_BATCH);
+    await kuzuExec(
+      db,
+      'MATCH (u:UnresolvedRelation) WHERE u.id IN $ids DETACH DELETE u',
+      { ids: chunk },
+    );
+  }
+}
+
+/**
+ * Batched form of updateUnresolvedMeta. UNWIND-batches the SET of
+ * meta + attemptedAt across many unresolved rows; each batch shares a
+ * single `attemptedAt` timestamp (the resolver's wall-clock at flush
+ * time, accurate to within one batch's worth of work).
+ */
+export async function updateUnresolvedMetaBatch(
+  db: DbClient,
+  items: ReadonlyArray<{ id: string; meta: Record<string, unknown> }>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const attemptedAt = new Date().toISOString();
+  const rows = items.map(it => ({
+    id: it.id,
+    meta: JSON.stringify(it.meta),
+  }));
+  for (let i = 0; i < rows.length; i += KUZU_BATCH) {
+    const chunk = rows.slice(i, i + KUZU_BATCH);
+    await kuzuExec(
+      db,
+      `UNWIND $rows AS r
+       MATCH (u:UnresolvedRelation {id: r.id})
+       SET u.meta = r.meta, u.attemptedAt = $attemptedAt`,
+      { rows: chunk, attemptedAt },
+    );
+  }
+}
