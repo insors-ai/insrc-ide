@@ -52,12 +52,20 @@ after(async () => {
 	try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-function mkEntity(repo: string, file: string, kind: Entity['kind'], name: string, language: Entity['language'] = 'java'): Entity {
+function mkEntity(
+	repo: string,
+	file: string,
+	kind: Entity['kind'],
+	name: string,
+	language: Entity['language'] = 'java',
+	extra: Partial<Entity> = {},
+): Entity {
 	return {
 		id:        makeEntityId(repo, file, kind, name),
 		kind, name, language, repo, file,
 		startLine: 0, endLine: 0,
 		body: '', embedding: [], indexedAt: new Date().toISOString(),
+		...extra,
 	};
 }
 
@@ -260,5 +268,170 @@ describe('runCrossFileResolver -- external-dep stays as module stub', () => {
 		);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		assert.equal(Number((stillThere[0] as any)['n']), 1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: CALLS resolution -- two-file Python project, exported function
+// ---------------------------------------------------------------------------
+
+describe('runCrossFileResolver -- CALLS resolves to exported function in imported file', () => {
+	let repo: string;
+
+	before(async () => {
+		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-calls-'));
+		const helpersFile = join(repo, 'helpers.py');
+		const mainFile    = join(repo, 'main.py');
+		writeFileSync(helpersFile, 'def validate(x):\n    return x is not None\n');
+		writeFileSync(mainFile,
+			'from helpers import validate\n\ndef main():\n    return validate(1)\n');
+
+		const helpersFileEnt = mkEntity(repo, helpersFile, 'file', helpersFile, 'python');
+		const validateFn     = mkEntity(repo, helpersFile, 'function', 'validate', 'python', { isExported: true });
+		const mainFileEnt    = mkEntity(repo, mainFile,    'file', mainFile, 'python');
+		const mainFn         = mkEntity(repo, mainFile,    'function', 'main', 'python', { isExported: true });
+
+		await upsertEntities(db, [helpersFileEnt, validateFn, mainFileEnt, mainFn]);
+
+		// IMPORTS edge -- already file-targeted (mimics the per-file
+		// resolver having handled relative imports, so Phase 3 has nothing
+		// to rewire for this row).
+		await upsertRelations(db, [{
+			kind: 'IMPORTS', from: mainFileEnt.id, to: helpersFileEnt.id, resolved: true,
+		}]);
+
+		// CALLS edge -- main() -> validate (raw name, unresolved)
+		await upsertRelations(db, [{
+			kind: 'CALLS', from: mainFn.id, to: 'validate', resolved: false,
+			meta: { file: mainFile, repo },
+		}]);
+	});
+
+	after(() => {
+		try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+
+	it('promotes the CALLS edge to the validate function', async () => {
+		const sourceRoots = detectSourceRoots(repo);
+		const result = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.equal(result.resolved, 1,
+			`expected 1 CALLS resolution; got: ${JSON.stringify(result)}`);
+
+		const helpersFile = join(repo, 'helpers.py');
+		const mainFile    = join(repo, 'main.py');
+		const mainFnId     = makeEntityId(repo, mainFile,    'function', 'main');
+		const validateFnId = makeEntityId(repo, helpersFile, 'function', 'validate');
+		const edge = await fileExistsForGraph(
+			`MATCH (a:Entity {id: $from})-[:CALLS]->(b:Entity {id: $to})
+			 RETURN count(*) AS n`,
+			{ from: mainFnId, to: validateFnId },
+		);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		assert.equal(Number((edge[0] as any)['n']), 1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Test 5: CALLS to a non-exported function stays unresolved
+// ---------------------------------------------------------------------------
+
+describe('runCrossFileResolver -- CALLS to non-exported target stays unresolved', () => {
+	let repo: string;
+
+	before(async () => {
+		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-calls-priv-'));
+		const helpersFile = join(repo, 'helpers.py');
+		const mainFile    = join(repo, 'main.py');
+		writeFileSync(helpersFile, 'def _internal(x):\n    return x\n');
+		writeFileSync(mainFile, 'from helpers import _internal\n\ndef use():\n    return _internal(1)\n');
+
+		const helpersFileEnt = mkEntity(repo, helpersFile, 'file', helpersFile, 'python');
+		// Underscore-prefixed function, isExported: false
+		const internalFn     = mkEntity(repo, helpersFile, 'function', '_internal', 'python', { isExported: false });
+		const mainFileEnt    = mkEntity(repo, mainFile,    'file', mainFile, 'python');
+		const useFn          = mkEntity(repo, mainFile,    'function', 'use', 'python', { isExported: true });
+
+		await upsertEntities(db, [helpersFileEnt, internalFn, mainFileEnt, useFn]);
+		await upsertRelations(db, [
+			{ kind: 'IMPORTS', from: mainFileEnt.id, to: helpersFileEnt.id, resolved: true },
+			{ kind: 'CALLS',   from: useFn.id, to: '_internal', resolved: false,
+			  meta: { file: mainFile, repo } },
+		]);
+	});
+
+	after(() => {
+		try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+
+	it('does not resolve the CALLS edge', async () => {
+		const sourceRoots = detectSourceRoots(repo);
+		const result = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.equal(result.resolved, 0,
+			`expected no resolution; got: ${JSON.stringify(result)}`);
+
+		// The unresolved row should still be in UnresolvedRelation
+		const useFnId = makeEntityId(repo, join(repo, 'main.py'), 'function', 'use');
+		const stillUnresolved = await fileExistsForGraph(
+			`MATCH (u:UnresolvedRelation {fromEntity: $from, kind: 'CALLS'}) RETURN count(u) AS n`,
+			{ from: useFnId },
+		);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		assert.equal(Number((stillUnresolved[0] as any)['n']), 1);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Test 6: CALLS ambiguity -- same name in two imported files
+// ---------------------------------------------------------------------------
+
+describe('runCrossFileResolver -- CALLS marks ambiguous when two imported files export same name', () => {
+	let repo: string;
+
+	before(async () => {
+		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-calls-amb-'));
+		const aFile  = join(repo, 'a.py');
+		const bFile  = join(repo, 'b.py');
+		const main   = join(repo, 'main.py');
+		writeFileSync(aFile, 'def fmt(x):\n    return str(x)\n');
+		writeFileSync(bFile, 'def fmt(x):\n    return repr(x)\n');
+		writeFileSync(main,  'from a import fmt\nfrom b import fmt\n\ndef m():\n    return fmt(1)\n');
+
+		const aFileEnt = mkEntity(repo, aFile,  'file', aFile, 'python');
+		const bFileEnt = mkEntity(repo, bFile,  'file', bFile, 'python');
+		const mainFileEnt = mkEntity(repo, main, 'file', main, 'python');
+		const fmtA = mkEntity(repo, aFile, 'function', 'fmt', 'python', { isExported: true });
+		const fmtB = mkEntity(repo, bFile, 'function', 'fmt', 'python', { isExported: true });
+		const mFn  = mkEntity(repo, main,  'function', 'm',   'python', { isExported: true });
+
+		await upsertEntities(db, [aFileEnt, bFileEnt, mainFileEnt, fmtA, fmtB, mFn]);
+		await upsertRelations(db, [
+			{ kind: 'IMPORTS', from: mainFileEnt.id, to: aFileEnt.id, resolved: true },
+			{ kind: 'IMPORTS', from: mainFileEnt.id, to: bFileEnt.id, resolved: true },
+			{ kind: 'CALLS',   from: mFn.id, to: 'fmt', resolved: false,
+			  meta: { file: main, repo } },
+		]);
+	});
+
+	after(() => {
+		try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+
+	it('records candidates in meta and stays unresolved', async () => {
+		const sourceRoots = detectSourceRoots(repo);
+		const result = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.equal(result.ambiguous, 1,
+			`expected 1 ambiguous; got: ${JSON.stringify(result)}`);
+
+		const mFnId = makeEntityId(repo, join(repo, 'main.py'), 'function', 'm');
+		const rows = await fileExistsForGraph(
+			`MATCH (u:UnresolvedRelation {fromEntity: $from, kind: 'CALLS'})
+			 RETURN u.meta AS meta`,
+			{ from: mFnId },
+		);
+		assert.equal(rows.length, 1);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const meta = JSON.parse((rows[0] as any)['meta']);
+		assert.ok(Array.isArray(meta.candidates), `expected candidates array; got: ${JSON.stringify(meta)}`);
+		assert.equal(meta.candidates.length, 2);
 	});
 });

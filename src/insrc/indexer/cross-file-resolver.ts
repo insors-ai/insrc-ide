@@ -74,11 +74,15 @@ export async function runCrossFileResolver(
   let ambiguous       = 0;
   let stillUnresolved = 0;
   for (const row of unresolved) {
-    if (row.kind !== 'INHERITS' && row.kind !== 'IMPLEMENTS') {
-      // CALLS handled in Phase 4; everything else stays unresolved.
+    let result: 'resolved' | 'ambiguous' | 'unresolved';
+    if (row.kind === 'INHERITS' || row.kind === 'IMPLEMENTS') {
+      result = await resolveInheritance(opts, row, index);
+    } else if (row.kind === 'CALLS') {
+      result = await resolveCall(opts, row, index);
+    } else {
+      // Everything else stays unresolved.
       continue;
     }
-    const result = await resolveInheritance(opts, row, index);
     if      (result === 'resolved')  resolved++;
     else if (result === 'ambiguous') ambiguous++;
     else                             stillUnresolved++;
@@ -401,6 +405,68 @@ async function resolveInheritance(
       }
     }
     if (candidates.length > 0) break;
+  }
+
+  if (candidates.length === 1) {
+    await promoteToResolved(opts.db, row, candidates[0]!.id);
+    return 'resolved';
+  }
+  if (candidates.length > 1) {
+    await updateUnresolvedMeta(opts.db, row.id,
+      { ...row.meta, candidates: candidates.map(e => e.id) });
+    return 'ambiguous';
+  }
+  return 'unresolved';
+}
+
+// ---------------------------------------------------------------------------
+// CALLS resolution -- the noisiest kind. The parser emits one row per
+// invocation that didn't resolve to an in-file entity; this pass tries
+// to match each call against the in-scope set built from the from-file
+// (its own entities + exported entities from each imported file).
+// ---------------------------------------------------------------------------
+
+const CALL_TARGET_KINDS: readonly EntityKind[] = ['function', 'method', 'class'];
+
+async function resolveCall(
+  opts:  CrossFileResolveOpts,
+  row:   UnresolvedRelation,
+  index: EntityIndex,
+): Promise<'resolved' | 'ambiguous' | 'unresolved'> {
+  const fromEntity = (index.byFile.get(row.fromFile) ?? []).find(e => e.id === row.fromEntity)
+    ?? findEntityByIdAcrossIndex(index, row.fromEntity);
+  if (fromEntity === undefined) return 'unresolved';
+  const language = fromEntity.language;
+
+  // 1. Same-file: function / method / class with matching name.
+  const sameFile = (index.byFile.get(row.fromFile) ?? [])
+    .filter(e => e.language === language
+              && CALL_TARGET_KINDS.includes(e.kind)
+              && e.name === row.rawTo
+              && e.id !== row.fromEntity);
+  if (sameFile.length === 1) {
+    await promoteToResolved(opts.db, row, sameFile[0]!.id);
+    return 'resolved';
+  }
+  if (sameFile.length > 1) {
+    await updateUnresolvedMeta(opts.db, row.id,
+      { ...row.meta, candidates: sameFile.map(e => e.id) });
+    return 'ambiguous';
+  }
+
+  // 2. Cross-file: walk imported files (after Phase 3's rewire) and
+  //    consider only exported targets.
+  const importedFiles = await getResolvedImportTargets(opts.db, row.fromEntity, index);
+  if (importedFiles.size === 0) return 'unresolved';
+
+  const candidates: Entity[] = [];
+  for (const kind of CALL_TARGET_KINDS) {
+    const all = index.byNameKindLang.get(entityKey(language, kind, row.rawTo)) ?? [];
+    for (const e of all) {
+      if (!importedFiles.has(e.file)) continue;
+      if (e.isExported !== true) continue;
+      candidates.push(e);
+    }
   }
 
   if (candidates.length === 1) {

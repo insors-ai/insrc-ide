@@ -60,7 +60,7 @@ constraint:
 | 1     | Quick win -- fix Python relative-import path resolution                                | done -- 8a45171cc82 |
 | 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | done -- 063d600d1cb |
 | 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | done -- 809e175659a |
-| 4     | Cross-file CALLS resolution (using imported scope)                                     | todo   |
+| 4     | Cross-file CALLS resolution (using imported scope)                                     | done -- uncommitted |
 | 5     | Incremental mode: watcher settle window + invalidation on edit/delete                  | todo   |
 | 6     | Performance + idempotency validation, integration tests                                | todo   |
 
@@ -897,11 +897,11 @@ no real `@parcel/watcher` involvement.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Per-file scope reconstruction              | todo   |       |
-| `isExported` gating                        | todo   |       |
-| CALLS resolver                             | todo   |       |
-| Receiver hint preservation in `meta`       | todo   |       |
-| Unit tests                                 | todo   |       |
+| Per-file scope reconstruction              | done -- uncommitted | reuses Phase 3's `getResolvedImportTargets` -- walks file's resolved IMPORTS edges + filters out module stubs |
+| `isExported` gating                        | done -- uncommitted | cross-file candidates require `isExported === true`; same-file matches bypass the gate |
+| CALLS resolver                             | done -- uncommitted | new `resolveCall()` in cross-file-resolver.ts; same-file first, then imported-file scope; target kinds: function, method, class (constructors) |
+| Receiver hint preservation in `meta`       | deferred to follow-up | the parser already records receiver text on the unresolved meta; the resolver doesn't currently use it for narrowing -- documented as a future iteration |
+| Unit tests                                 | done -- uncommitted | 3 new cases extend cross-file-resolver.test.ts: imported-file resolves, non-exported stays unresolved, two-imports ambiguity records `meta.candidates` |
 
 ### Phase 5 -- Incremental mode
 
