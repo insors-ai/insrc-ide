@@ -6,7 +6,7 @@ The plan is structured to match the design doc's §16 phasing. Phase 0 lands sha
 
 ## Related plans
 
-- [todo-framework.md](../todo-framework.md) — load-bearing infrastructure. The analyzer rides on `TodoList` / `TodoItem` for plan storage, lifecycle, persistence, and live-progress UI. Phase 0 of this plan lands the small `TodosApi` extensions (`updateItem(meta)`, `cancel`) the analyzer needs.
+- [todo-framework.md](../todo-framework.md) — load-bearing infrastructure. The analyzer rides on `TodoList` / `TodoItem` for plan storage, lifecycle, persistence, and live-progress UI. The two `TodosApi` extensions originally proposed for Phase 0 (`updateItem(meta)`, `cancel`) already shipped with the framework as `updateItemMeta` / `markCancelled` — see §0.2 below.
 - [research/research-agent.md](../research/research-agent.md) — reminder of the boundary: `research` is the web/external-info family. The Code Analyzer is a separate top-level family, **not** a variant under `research`. Once phase 2 lands, the legacy `CodeAnalysisController` (currently classed under `research`) is deleted.
 - [brainstorm/category-implementation.md](../brainstorm/category-implementation.md) — controller-pattern reference. The new orchestrator implements the same `TaskController` interface (`buildInitialTasks` / `next` / `finalize`) that brainstorm controllers use.
 - [chat-implementation.md](../chat-implementation.md) — classifier intent + router touchpoints that need updating to point at the new family.
@@ -15,7 +15,7 @@ The plan is structured to match the design doc's §16 phasing. Phase 0 lands sha
 
 | Phase | Scope                                                                        | Status |
 |-------|------------------------------------------------------------------------------|--------|
-| 0     | Framework prerequisites — register family, extend `TodosApi`, pane widget    | pending |
+| 0     | Framework prerequisites — register family + pane widget (TodosApi already covers updateItemMeta/markCancelled) | in-progress (0.1 done `822b0348e2e`) |
 | 1     | Core orchestrator + analyzer loop; gates; classifier routing (legacy kept)   | pending |
 | 2     | Analysis Report Pane + annotate/batch-send + **legacy controller deletion**  | pending |
 | 3     | Cross-agent integration (`code:*` registered, `data:*` / `deploy:*` wired)   | pending |
@@ -166,57 +166,45 @@ export type AgentFamily =
 
 > Sibling families (`data-analyzer`, `deployment-analyzer`) land with their own plans; we deliberately do **not** add them in this phase. Adding one family per plan keeps each landing reviewable and avoids stranding registry rows for unimplemented controllers.
 
-### 0.2 Extend `TodosApi` with `updateItem(meta)` and `cancel`
+### 0.2 ~~Extend `TodosApi` with `updateItem(meta)` and `cancel`~~ — already in framework
 
-The analyzer needs both: `updateItem` to stash `AnalyzerResult` payload on completion (the framework only exposes status transitions today), `cancel` for `maxTasks`-cap truncation and `done`-decision pruning of the remaining queue.
+**Status: no work required.** The design doc's §5.2 callout was correct at design time, but `TodosApi` ([shared/todos.ts:334-371](../../src/insrc/shared/todos.ts#L334-L371)) already exposes both methods under their conventional names:
+
+| Plan-proposed name        | Existing framework name                         |
+|---------------------------|-------------------------------------------------|
+| `updateItem({ meta })`    | `updateItemMeta(itemId, meta)` (line 366)       |
+| `cancel(itemId, reason)`  | `markCancelled(itemId)` (line 358)              |
+
+`markCancelled` does **not** accept a reason argument because the `TodoItem` schema has no `cancelledReason` field (only `blockedReason`). Where the analyzer wants the reason persisted, it composes `markCancelled` with `updateItemMeta({ ...current.meta, cancelReason })`. We deliberately do **not** extend the framework signature here — per the project's "no premature abstractions" rule, two atomic primitives compose cleanly enough that a third is unjustified.
+
+**Implications for downstream phases:**
+- Phase 1 controller code uses `deps.todos.updateItemMeta(itemId, meta)` and `deps.todos.markCancelled(itemId)` directly.
+- The `mid-flight-cancel` gate handler in §2.4 calls `markCancelled` with no reason; if telemetry on cancellation cause is wanted later, stash a `cancelReason: 'user-cancelled' | 'cap-hit' | 'reviewer-done'` field via `updateItemMeta` first.
+- The smoke script `scripts/test-code-analyzer-phase0.ts` is no longer needed — the methods are already exercised by existing brainstorm/delegate consumers.
+
+> **Design-doc follow-up:** the §5.2 "Proposed framework addition" callout in [design/analyzers/code-analyzer.html](../../design/analyzers/code-analyzer.html#todo-lifecycle) is now stale. Worth a one-line edit to "Already in framework — uses `updateItemMeta` + `markCancelled` directly" when convenient. Not blocking for implementation.
+
+### 0.3 Suppress comment affordance for `code-analyzer`-owned lists
+
+The Code Analyzer's lists hide the `+ Add comment` affordance because feedback flows through the Report Pane (per [design §5.3](../../design/analyzers/code-analyzer.html#todo-comments)).
+
+**Implementation finding (deviation from design):** the design assumed `list.meta.suppressComments: true`, but `TodoList` has no `meta` field — only `TodoItem` does. Adding one to `TodoList` would touch the schema, DB serialisation, and RPC validators for a one-bit per-family policy. We instead express this as a family-level policy on `AgentFamilyMeta` — the rule is "all code-analyzer lists suppress", never list-by-list, so family-level fits cleanly and lives next to the family definition.
 
 **Files:**
-- `src/insrc/shared/todos.ts` — extend `TodosApi` interface signature
-- `src/insrc/daemon/controllers/todos.ts` (or wherever `deps.todos` lives) — implement
-- `src/insrc/daemon/rpc/todos-rpc.ts` — wire RPC entry points
+- `src/insrc/shared/agent-registry.ts` — add `suppressTodoComments?: boolean` field to `AgentFamilyMeta`; set `true` on the `code-analyzer` row.
+- `src/vs/workbench/contrib/insrc/browser/shared/todosViewHelpers.ts` — add `suppressCommentsForList(list)` helper that mirrors the daemon-side policy (workbench keeps `TodoOwner = string` loose on purpose; doesn't import the daemon-side registry, so the mirror is a small `Set` of owners that need to be kept in sync).
+- `src/vs/workbench/contrib/insrc/browser/todos/todosPane.ts` — pass the suppress flag from `_renderListCard` into `_renderItemRow`; gate `_appendAddCommentAffordance` on it. Existing comments still render — only the "+ Add comment" affordance is hidden.
 
-**API additions:**
-```ts
-interface TodosApi {
-  // existing: createList, addItem, markInProgress, markComplete, markBlocked, ...
-
-  /** Replace the item's `meta` payload. Status is unchanged.
-   *  Validates that meta is JSON-serialisable; rejects on owner mismatch. */
-  updateItem(itemId: string, patch: { meta: Readonly<Record<string, unknown>> }):
-    Promise<TodoItem>;
-
-  /** Move the item to `cancelled` status with a free-text reason.
-   *  Reason surfaces on the todos pane row tooltip. */
-  cancel(itemId: string, reason: string): Promise<TodoItem>;
-}
-```
-
-`cancelled` is already a member of `TodoItemStatus` per [todo-framework.md](../todo-framework.md) data model; only the API wrapper is new.
-
-**Acceptance:** unit test in `__tests__` for both APIs covers happy path + owner-mismatch rejection. Existing brainstorm/delegate consumers are untouched (they don't call these new methods).
-
-### 0.3 Extend `todosListWidget` for `suppressComments`
-
-The Code Analyzer's lists hide the `+ Add comment` affordance because feedback flows through the Report Pane (per [design §5.3](../../design/analyzers/code-analyzer.html#todo-comments)). Implementation is a one-line check in the existing widget.
-
-**File:** `src/vs/workbench/contrib/insrc/browser/todos/todosListWidget.ts` (path may differ; locate via `grep -r "Add comment" src/vs/workbench/contrib/insrc/browser/`)
-
-```ts
-// Add to the list-card render block:
-const showCommentRow = list.meta?.suppressComments !== true;
-if (showCommentRow) { /* existing comment-row render */ }
-```
-
-**Acceptance:** brainstorm/delegate lists render unchanged; a list with `meta: { suppressComments: true }` renders without the comment row affordance.
+**Acceptance:** brainstorm/delegate/etc lists render unchanged (still get the affordance); code-analyzer-owned lists render existing comments but no "+ Add comment" button. Confirmed visually + by precommit / IDE build green.
 
 ### Phase 0 acceptance summary
 
 ```
-1. AgentFamily union includes 'code-analyzer'; build green.
-2. todos.updateItem(meta) + todos.cancel(reason) callable via deps.todos.
+1. AgentFamily union includes 'code-analyzer'; build green.   ✓ (0.1 — 822b0348e2e)
+2. TodosApi already exposes updateItemMeta + markCancelled.   ✓ (0.2 — no work needed)
 3. todosListWidget honours list.meta.suppressComments: true.
 4. Build via scripts/build.sh — heap-pinned; logged to /tmp.
-5. Commit.
+5. Commit each independent piece.
 ```
 
 ---
@@ -690,7 +678,7 @@ Each phase ships a smoke script under `scripts/` for manual verification (we don
 
 | Script                                       | Phase | Covers |
 |----------------------------------------------|-------|--------|
-| `scripts/test-code-analyzer-phase0.ts`       | 0     | TodosApi.updateItem / cancel callable; agent-registry exhaustiveness. |
+| `scripts/test-code-analyzer-phase0.ts`       | 0     | Agent-registry exhaustiveness check (`isAgentFamily('code-analyzer')` is true; `AGENT_FAMILIES` includes it). `TodosApi.updateItemMeta` / `markCancelled` are already covered by existing brainstorm/delegate consumers — no script needed for those. |
 | `scripts/test-code-analyzer-flow1.ts`        | 1     | End-to-end Flow 1: plan → run-task → review → synthesise → present, against a fixture repo. |
 | `scripts/test-code-analyzer-fs-gate.ts`      | 1     | fs-access gate fires on out-of-repo path; cascade approval suppresses subsequent gates. |
 | `scripts/test-code-analyzer-citations.ts`    | 1     | Citation invariant retry path; missing-citation → confidence 'low'. |
