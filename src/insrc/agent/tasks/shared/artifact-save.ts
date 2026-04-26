@@ -20,7 +20,7 @@ export type ArtifactFormat = 'markdown' | 'html' | 'pdf';
 
 export interface ArtifactConfig {
   /** Agent producing the artifact. */
-  agent: 'designer' | 'planner' | 'tester-plan' | 'tester-report' | 'brainstorm';
+  agent: 'designer' | 'planner' | 'tester-plan' | 'tester-report' | 'brainstorm' | 'code-analyzer';
   /** Title for the artifact (used in filename). */
   title: string;
   /** Repo root path (for resolving relative paths). */
@@ -42,19 +42,21 @@ export interface SaveResult {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_DIRS: Record<ArtifactConfig['agent'], string> = {
-  'designer':      'design',
-  'planner':       'design',
-  'tester-plan':   'test/plans',
-  'tester-report': 'test/reports',
-  'brainstorm':    'brainstorms',
+  'designer':       'design',
+  'planner':        'design',
+  'tester-plan':    'test/plans',
+  'tester-report':  'test/reports',
+  'brainstorm':     'brainstorms',
+  'code-analyzer':  'docs/code-analysis',
 };
 
 const SUFFIXES: Record<ArtifactConfig['agent'], string> = {
-  'designer':      '',
-  'planner':       '-plan',
-  'tester-plan':   '-test-plan',
-  'tester-report': '-test-report',
-  'brainstorm':    '',
+  'designer':       '',
+  'planner':        '-plan',
+  'tester-plan':    '-test-plan',
+  'tester-report':  '-test-report',
+  'brainstorm':     '',
+  'code-analyzer':  '',
 };
 
 /**

@@ -615,25 +615,92 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
   private async afterPresentGate(gateReply: GateReply | undefined, state: TaskStateStore): Promise<Task[] | null> {
     const action = gateReply?.action ?? 'discard';
-    log.info({ action }, 'present gate fired');
-    // Phase 1 keeps the present gate as state-only -- the actual save /
-    // copy / send-to-chat side effects are wired in Phase 1.7 with the
-    // artifact-save integration. For now, just record the action and
-    // let finalize() return the report.
     const ca = state.get<CodeAnalysisState>(K_STATE);
+    const report = state.get<string>(K_SYNTH_RESULT) ?? '';
+    log.info({ action }, 'present gate fired');
+
     if (ca) {
-      state.set(K_STATE, {
-        ...ca,
-        ...(gateReply?.feedback !== undefined ? { presentedAt: Date.now() } : { presentedAt: Date.now() }),
-      });
+      state.set(K_STATE, { ...ca, presentedAt: Date.now() });
     }
-    if (action === 'discard') {
-      // List.transfer('system') for audit retention is a Phase 2 concern.
-      log.info('present: discard requested (no-op in Phase 1)');
+
+    switch (action) {
+      case 'save': {
+        if (ca === undefined || report.length === 0 || this.deps === undefined) {
+          this.emitGateActionFeedback('save failed: missing report or deps');
+          break;
+        }
+        try {
+          const { saveArtifact } = await import('../../agent/tasks/shared/artifact-save.js');
+          const result = saveArtifact(
+            {
+              agent: 'code-analyzer',
+              title: ca.request,
+              repoPath: ca.repoSummary.rootPath,
+              markdownContent: report,
+            },
+            'markdown',
+          );
+          state.set(K_STATE, { ...ca, presentedAt: Date.now(), reportUri: `file://${result.path}` });
+          this.emitGateActionFeedback(`Saved to \`${result.path}\` (${result.size} bytes).`);
+          log.info({ path: result.path, size: result.size }, 'present: saved');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.error({ err: msg }, 'present: save failed');
+          this.emitGateActionFeedback(`Save failed: ${msg}`);
+        }
+        break;
+      }
+
+      case 'send-to-chat': {
+        // Re-emit the report as a delta so it lands in the chat panel
+        // (the gate UI shows the markdown but the chat transcript
+        // doesn't capture it otherwise). The user can then quote-reply
+        // to it for follow-up turns.
+        if (this.deps !== undefined && report.length > 0) {
+          this.deps.send({
+            id: this.deps.requestId,
+            stream: 'delta',
+            data: { text: report, format: 'markdown' },
+          });
+        }
+        this.emitGateActionFeedback('Report sent to chat.');
+        log.info('present: sent-to-chat');
+        break;
+      }
+
+      case 'copy': {
+        // Daemon-side clipboard isn't wired in Phase 1; the gate UI
+        // already shows the markdown so the user can select+copy
+        // manually. Emit a hint message so the action's state is clear.
+        this.emitGateActionFeedback(
+          'Copy: select the report text in the gate panel and copy with Ctrl/Cmd-C. ' +
+            'Daemon-side clipboard support is a Phase 4 polish item.',
+        );
+        log.info('present: copy (manual fallback in Phase 1)');
+        break;
+      }
+
+      case 'discard':
+      default: {
+        // List.transfer('system') for audit retention is a Phase 2 concern.
+        this.emitGateActionFeedback('Report discarded.');
+        log.info('present: discard');
+        break;
+      }
     }
+
     state.set(K_PHASE, 'done' as Phase);
     state.markSessionComplete();
     return null;
+  }
+
+  private emitGateActionFeedback(text: string): void {
+    if (this.deps === undefined) return;
+    this.deps.send({
+      id: this.deps.requestId,
+      stream: 'delta',
+      data: { text: `\n${text}\n`, format: 'markdown' },
+    });
   }
 
   // -------------------------------------------------------------------------
