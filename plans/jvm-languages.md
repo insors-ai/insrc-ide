@@ -36,7 +36,7 @@ parsing covers both at once.
 | Phase | Scope                                                                            | Status |
 |-------|----------------------------------------------------------------------------------|--------|
 | 0     | Prerequisites: tree-sitter pins, `Language` union extension, asset pipeline      | todo   |
-| 1     | Java parser: entities + relations + tests against fixture                        | todo   |
+| 1     | Java parser: entities + relations + tests against fixture                        | done (uncommitted) |
 | 2     | Scala parser: entities + relations + tests; Scala 2 + 3 cross-version handling   | todo   |
 | 3     | Manifests + import resolution: pom.xml / build.gradle(.kts) / build.sbt / build.sc | todo |
 | 4     | CFG walkers in `kinds/cfg.ts` so `flow:code` artifacts work for Java + Scala     | todo   |
@@ -710,22 +710,22 @@ check rejects the call cleanly with the existing error message.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `Language` union extension                 | todo   |       |
-| `tree-sitter-java` pin                     | todo   |       |
-| `tree-sitter-scala` pin                    | todo   |       |
-| Build pipeline confirmation                | todo   |       |
+| `Language` union extension                 | done (65bb72b95c5) |       |
+| `tree-sitter-java` pin                     | done (65bb72b95c5) | `^0.23.5` |
+| `tree-sitter-scala` pin                    | done (65bb72b95c5) | `^0.23.4` |
+| Build pipeline confirmation                | done (65bb72b95c5) | smoke-loaded both grammars + parsed minimal fixtures |
 
 ### Phase 1 -- Java parser
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Class / interface / enum extraction        | todo   |       |
-| Method + constructor extraction            | todo   |       |
-| Annotation suffix capture                  | todo   |       |
-| Sealed / record / nested-class handling    | todo   |       |
-| Lambda field extraction                    | todo   |       |
-| Imports + CALLS + INHERITS + IMPLEMENTS    | todo   |       |
-| Unit tests (10+ fixtures)                  | todo   |       |
+| Class / interface / enum extraction        | done (uncommitted) | `class_declaration` / `interface_declaration` / `enum_declaration` / `annotation_type_declaration` / `record_declaration` -- all map to `class` kind (interfaces use `interface` kind), with `kindWord` distinguisher in the signature. |
+| Method + constructor extraction            | done (uncommitted) | `method_declaration` -> method (or function at file-top); constructors get the qualified name `<Class>.<init>`. CALLS extracted from the body subtree. |
+| Annotation suffix capture                  | done (uncommitted) | `marker_annotation` + `annotation` children of the `modifiers` node fold into the entity's `signature` prefix. |
+| Sealed / record / nested-class handling    | done (uncommitted) | `sealed` keyword captured via the modifiers walker; record syntax via `record_declaration`; nested types qualify their name with the outer class (`Outer.Inner`). |
+| Lambda field extraction                    | done (uncommitted) | When a `field_declaration` has a `lambda_expression` value, a separate `function`-kind entity (`<Field>$lambda`) is emitted alongside the field's `variable` entity. |
+| Imports + CALLS + INHERITS + IMPLEMENTS    | done (uncommitted) | IMPORTS for `import_declaration` (with `static` meta + wildcard suffix), package decl as own-package edge, CALLS from `method_invocation` + `object_creation_expression` (with `isConstructor` meta), INHERITS for class `extends` + interface `extends`, IMPLEMENTS for class `implements`. |
+| Unit tests (10+ fixtures)                  | done (uncommitted) | 17 cases at `indexer/parser/__tests__/java.test.ts`: top-level class with method, extends, implements, interface, enum, record, annotation interface, sealed, package, single + wildcard + static imports, CALLS (invocation + constructor), constructor `<init>` qualifier, fields, lambda lifting, annotations on classes + methods, nested-class qualifier. |
 
 ### Phase 2 -- Scala parser
 
