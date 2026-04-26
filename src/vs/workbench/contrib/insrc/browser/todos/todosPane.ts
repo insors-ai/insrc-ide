@@ -24,6 +24,7 @@ import {
 import { TodosEditorInput } from './todosInput.js';
 import {
 	defaultCollapsedForList, formatListMeta, iconForItemStatus,
+	suppressCommentsForList,
 } from '../shared/todosViewHelpers.js';
 import { InsrcEditorPaneBase } from '../shared/workspacePaneBase.js';
 
@@ -216,12 +217,13 @@ export class TodosEditorPane extends InsrcEditorPaneBase<TodosEditorInput> {
 		}
 
 		const itemsWrap = dom.append(body, dom.$('.insrc-todos-items'));
+		const suppressComments = suppressCommentsForList(list);
 		if (list.items.length === 0) {
 			const empty = dom.append(itemsWrap, dom.$('.insrc-todos-items-empty'));
 			empty.textContent = '(no items yet)';
 		} else {
 			for (const item of list.items) {
-				itemsWrap.appendChild(this._renderItemRow(item));
+				itemsWrap.appendChild(this._renderItemRow(item, suppressComments));
 			}
 		}
 
@@ -247,7 +249,7 @@ export class TodosEditorPane extends InsrcEditorPaneBase<TodosEditorInput> {
 		return card;
 	}
 
-	private _renderItemRow(item: TodoItem): HTMLElement {
+	private _renderItemRow(item: TodoItem, suppressComments: boolean): HTMLElement {
 		const row = dom.$('.insrc-todos-item', { 'data-item-id': item.id });
 		row.classList.add(`item-status-${item.status}`);
 
@@ -287,14 +289,18 @@ export class TodosEditorPane extends InsrcEditorPaneBase<TodosEditorInput> {
 		// item row, followed by a compact "+ Add comment" affordance
 		// that reveals an inline textarea. Only rendered once the user
 		// opens it (via the + button) to keep the list visually dense
-		// when most items have no comments.
+		// when most items have no comments. Owners that route feedback
+		// through a dedicated surface (e.g. code-analyzer) suppress the
+		// affordance entirely -- existing comments still render.
 		const commentsWrap = dom.append(row, dom.$('.insrc-todos-item-comments'));
 		if (comments.length > 0) {
 			for (const comment of comments) {
 				commentsWrap.appendChild(this._renderCommentRow(comment));
 			}
 		}
-		this._appendAddCommentAffordance(item, commentsWrap);
+		if (!suppressComments) {
+			this._appendAddCommentAffordance(item, commentsWrap);
+		}
 
 		return row;
 	}

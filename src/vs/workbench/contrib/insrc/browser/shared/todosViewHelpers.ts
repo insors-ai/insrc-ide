@@ -103,6 +103,34 @@ export function formatListMeta(list: TodoList): string {
 }
 
 // ---------------------------------------------------------------------------
+// Per-family policy mirrors
+// ---------------------------------------------------------------------------
+
+/**
+ * Owners whose lists hide the per-item "+ Add comment" affordance on
+ * the todos pane. Mirrors `AgentFamilyMeta.suppressTodoComments` from
+ * `src/insrc/shared/agent-registry.ts` -- the workbench keeps the
+ * type loose (string) on purpose and doesn't import the daemon-side
+ * registry, so any family that sets `suppressTodoComments: true` on
+ * its registry row needs to be added here too.
+ *
+ * Code Analyzer routes user feedback through the Analysis Report
+ * Pane (annotate-and-batch-send-to-chat) instead of framework
+ * comments -- per design/analyzers/code-analyzer.html section 5.3.
+ */
+const SUPPRESS_COMMENT_OWNERS: ReadonlySet<TodoOwner> = new Set<TodoOwner>([
+	'code-analyzer',
+]);
+
+/**
+ * True when the todos pane should hide the "+ Add comment" affordance
+ * on items of this list.
+ */
+export function suppressCommentsForList(list: TodoList): boolean {
+	return SUPPRESS_COMMENT_OWNERS.has(list.owner);
+}
+
+// ---------------------------------------------------------------------------
 // Forward targets
 // ---------------------------------------------------------------------------
 

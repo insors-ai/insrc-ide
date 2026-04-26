@@ -48,6 +48,12 @@ export interface AgentFamilyMeta {
   readonly description: string;
   /** Optional codicon name. Empty / omitted for text-only badges. */
   readonly icon?: string | undefined;
+  /** When true, the todos pane suppresses the per-item "+ Add comment"
+   *  affordance for lists owned by this family. Used by families that
+   *  route user feedback through a dedicated surface (e.g. the Code
+   *  Analyzer's Report Pane) instead of the framework's comment
+   *  channel. Defaults to false. */
+  readonly suppressTodoComments?: boolean | undefined;
 }
 
 export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
@@ -120,6 +126,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
     category: 'meta',
     description: 'Read-only structural / semantic analysis of the active repo. Cloud-orchestrated decomposition, local per-task tool loop, local synthesis. Independent of the research family (which covers web / external info).',
     icon: 'graph',
+    suppressTodoComments: true,
   },
   system: {
     id: 'system',
