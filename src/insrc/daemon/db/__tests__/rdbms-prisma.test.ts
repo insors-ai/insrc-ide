@@ -88,7 +88,9 @@ describe('prismaSchemaDescription', () => {
 		const byName = new Map(schema.columns.map(c => [c.name, c]));
 		assert.ok(!byName.has('user'), 'virtual `user` field should not be a column');
 		assert.ok(byName.has('userId'), 'scalar `userId` column should be present');
-		assert.deepEqual(byName.get('userId')?.foreignKey, { table: 'posts', column: 'id' });
+		// `userId` references User (the model); User has no @@map so the
+		// SQL table name == the Prisma model name.
+		assert.deepEqual(byName.get('userId')?.foreignKey, { table: 'User', column: 'id' });
 	});
 
 	it('honours @@map for table name resolution (lookup by SQL name)', async () => {

@@ -26,6 +26,12 @@ export const NATIVE_HTML: LibraryClassifier = {
 		'fieldset':{ direction: 'column' },
 		'form':    { direction: 'column' },
 		'span':    { direction: 'row' },
+
+		// Lists -- recurse so `<ul>{xs.map(x => <li/>)}</ul>` exposes
+		// its items rather than collapsing to a single 'List' cell.
+		'ul':      { direction: 'column' },
+		'ol':      { direction: 'column' },
+		'dl':      { direction: 'column' },
 	},
 	semanticElements: {
 		// Form controls -> placeholder cells with prefix.
@@ -42,10 +48,8 @@ export const NATIVE_HTML: LibraryClassifier = {
 		'canvas':   { kind: 'placeholder', labelPrefix: 'Canvas' },
 		'table':    { kind: 'placeholder', labelPrefix: 'Table' },
 
-		// Lists + items.
-		'ul':       { kind: 'placeholder', labelPrefix: 'List' },
-		'ol':       { kind: 'placeholder', labelPrefix: 'List' },
-		'dl':       { kind: 'placeholder', labelPrefix: 'List' },
+		// List items render as labeled placeholders within a list
+		// container above.
 		'li':       { kind: 'placeholder', labelPrefix: 'Item' },
 
 		// Inline + typographic.

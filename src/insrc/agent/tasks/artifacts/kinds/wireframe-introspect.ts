@@ -302,6 +302,11 @@ function findReturnedJsx(fnRoot: SyntaxNode): SyntaxNode | null {
 	if (body.type === 'jsx_element' || body.type === 'jsx_self_closing_element' || body.type === 'jsx_fragment') {
 		return body;
 	}
+	// Arrow functions can wrap their JSX body in parentheses:
+	// `const X = () => (<jsx/>)` -- unwrap to find the JSX inside.
+	if (body.type === 'parenthesized_expression') {
+		return unwrapJsx(body);
+	}
 	if (body.type !== 'statement_block') { return null; }
 
 	for (let i = 0; i < body.namedChildCount; i++) {
@@ -376,21 +381,36 @@ async function walkJsxAsCell(
 	const tagName = readTagName(node);
 	if (tagName === null) { return null; }
 
-	const importSource = imports.find(i => i.tagName === tagName)?.importSource ?? null;
+	// Member-access tags (`Layout.Sider`) inherit the importSource from
+	// their root namespace (the import is registered as just `Layout`).
+	let importSource = imports.find(i => i.tagName === tagName)?.importSource ?? null;
+	if (importSource === null && tagName.includes('.')) {
+		const root = tagName.split('.')[0];
+		if (root !== undefined) {
+			importSource = imports.find(i => i.tagName === root)?.importSource ?? null;
+		}
+	}
 	const classification = classifyTag(tagName, importSource);
 	const tailwindHint = extractTailwindLayout(readClassNameProp(node));
 
-	// Layout-containing tag, or a generic tag with Tailwind layout
-	// utilities, becomes a row collection.
-	if (classification?.layout !== undefined) {
+	// Region-typed layouts (`<aside>` -> sidebar) take priority over a
+	// Tailwind hint -- a `<header className="grid">` should still emit
+	// the header region.
+	if (classification?.layout?.region !== undefined) {
 		return cellFromLayout(node, classification.layout, tagName, imports, ctx, depth);
 	}
+	// Tailwind layout utilities override the classifier's default
+	// direction -- `<div className="grid grid-cols-3">` should grid,
+	// not stack as native `div`'s default `column` would.
 	if (tailwindHint !== null) {
 		const layoutSpec: LayoutContainerSpec = {
 			direction: tailwindHint.direction,
 			...(tailwindHint.cols !== undefined ? { defaultCols: tailwindHint.cols } : {}),
 		};
 		return cellFromLayout(node, layoutSpec, tagName, imports, ctx, depth);
+	}
+	if (classification?.layout !== undefined) {
+		return cellFromLayout(node, classification.layout, tagName, imports, ctx, depth);
 	}
 	if (classification?.element !== undefined) {
 		return cellFromElement(node, classification.element, tagName);

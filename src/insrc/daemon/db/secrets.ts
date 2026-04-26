@@ -11,11 +11,25 @@
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { deleteKey, getKey, setKey } from '../../shared/keystore.js';
+import * as defaultKeystore from '../../shared/keystore.js';
 
 const log = getLogger('db-secrets');
 
 const SECRET_TOKEN = /\$\{secret:([^}]+)\}/g;
+
+// Indirection through a mutable reference so tests can swap in an
+// in-memory fake -- ESM namespace imports are non-configurable, so
+// `mock.method` against `keystore` doesn't work here.
+interface KeystoreLike {
+	getKey(name: string): Promise<string | null>;
+	setKey(name: string, value: string): Promise<void>;
+	deleteKey(name: string): Promise<void>;
+}
+let keystore: KeystoreLike = defaultKeystore;
+
+export function _setKeystoreForTests(impl: KeystoreLike): void {
+	keystore = impl;
+}
 
 export function makeSecretRef(repoId: string, connId: string): string {
 	return `db:${repoId}:${connId}`;
@@ -34,7 +48,7 @@ export async function resolveSecrets(value: string): Promise<string> {
 	for (const match of tokens) {
 		const ref = match[1];
 		if (ref === undefined) { continue; }
-		const secret = await getKey(ref);
+		const secret = await keystore.getKey(ref);
 		if (secret === null) {
 			throw new Error(`data-driver: missing keychain secret for ref '${ref}'`);
 		}
@@ -45,12 +59,12 @@ export async function resolveSecrets(value: string): Promise<string> {
 
 export function setSecret(ref: string, value: string): Promise<void> {
 	log.debug({ ref }, 'setting data-driver secret');
-	return setKey(ref, value);
+	return keystore.setKey(ref, value);
 }
 
 export function deleteSecret(ref: string): Promise<void> {
 	log.debug({ ref }, 'deleting data-driver secret');
-	return deleteKey(ref);
+	return keystore.deleteKey(ref);
 }
 
 /**
@@ -81,9 +95,11 @@ export async function extractUrlPassword(
 	const password = decodeURIComponent(u.password);
 	await setSecret(ref, password);
 	u.password = `\${secret:${ref}}`;
-	// URL constructor re-encodes the `${...}` -- undo that so the
-	// token round-trips cleanly through JSON + resolveSecrets.
+	// URL constructor re-encodes the `${...}` token -- undo that so it
+	// round-trips cleanly through JSON + resolveSecrets. Two variants
+	// observed: `$` may or may not be percent-encoded depending on Node
+	// version, but `{`, `}`, and `:` always are inside userinfo.
 	return u.toString()
-		.replace('%24%7Bsecret%3A', '${secret:')
+		.replace(/(?:\$|%24)%7Bsecret%3A/, '${secret:')
 		.replace(encodeURIComponent(ref) + '%7D', ref + '}');
 }

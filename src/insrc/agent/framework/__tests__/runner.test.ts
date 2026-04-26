@@ -2,7 +2,8 @@
  * Tests for the agent runner — step loop, checkpointing, resume, cancel, artifacts.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, beforeEach, afterEach } from 'node:test';
+import { strict as assert } from 'node:assert';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,6 @@ import type { RunnerOpts } from '../runner.js';
 import { TestChannel } from '../test-channel.js';
 import {
   readCheckpoint, resolveRunDir, writeCheckpoint, createRunDir,
-  writeMeta, writeArtifact,
 } from '../checkpoint.js';
 import type {
   AgentDefinition, AgentState, AgentStep, StepContext, Checkpoint,
@@ -148,10 +148,10 @@ describe('runAgent — fresh run', () => {
     const channel = new TestChannel();
     const result = await runAgent(makeRunnerOpts({ channel }));
 
-    expect(result.steps).toBe(3);
-    expect(result.resumed).toBe(false);
-    expect((result.result as CounterState).count).toBe(3);
-    expect(channel.isClosed).toBe(true);
+    assert.equal(result.steps, 3);
+    assert.equal(result.resumed, false);
+    assert.equal((result.result as CounterState).count, 3);
+    assert.equal(channel.isClosed, true);
   });
 
   it('sends checkpoint messages after each step', async () => {
@@ -159,7 +159,7 @@ describe('runAgent — fresh run', () => {
     await runAgent(makeRunnerOpts({ channel }));
 
     const checkpoints = channel.getCheckpoints();
-    expect(checkpoints).toHaveLength(3);
+    assert.equal(checkpoints.length, 3);
   });
 
   it('sends done message on completion', async () => {
@@ -167,8 +167,8 @@ describe('runAgent — fresh run', () => {
     await runAgent(makeRunnerOpts({ channel }));
 
     const done = channel.getDone();
-    expect(done).toBeDefined();
-    expect((done!.payload as { summary: string }).summary).toContain('3 steps');
+    assert.notEqual(done, undefined);
+    assert.ok((done!.payload as { summary: string }).summary.includes('3 steps'));
   });
 
   it('sends progress messages', async () => {
@@ -176,7 +176,7 @@ describe('runAgent — fresh run', () => {
     await runAgent(makeRunnerOpts({ channel }));
 
     const progress = channel.getProgress();
-    expect(progress.length).toBeGreaterThanOrEqual(3);
+    assert.ok(progress.length >= 3);
   });
 
   it('writes final checkpoint with completed status', async () => {
@@ -185,9 +185,9 @@ describe('runAgent — fresh run', () => {
 
     const runDir = resolveRunDir(result.runId);
     const cp = readCheckpoint(runDir);
-    expect(cp).not.toBeNull();
-    expect(cp!.status).toBe('completed');
-    expect(cp!.completedSteps).toHaveLength(3);
+    assert.notEqual(cp, null);
+    assert.equal(cp!.status, 'completed');
+    assert.equal(cp!.completedSteps.length, 3);
   });
 
   it('releases lock after completion', async () => {
@@ -195,7 +195,7 @@ describe('runAgent — fresh run', () => {
     const result = await runAgent(makeRunnerOpts({ channel }));
 
     const lockPath = join(resolveRunDir(result.runId), 'lock');
-    expect(existsSync(lockPath)).toBe(false);
+    assert.equal(existsSync(lockPath), false);
   });
 });
 
@@ -229,10 +229,10 @@ describe('runAgent — resume', () => {
       options: { resumeFrom: checkpoint },
     }));
 
-    expect(result.resumed).toBe(true);
-    expect(result.runId).toBe(firstResult.runId);
+    assert.equal(result.resumed, true);
+    assert.equal(result.runId, firstResult.runId);
     // Should have run step-2 and step-3 (2 more steps from index 1)
-    expect((result.result as CounterState).count).toBe(3);
+    assert.equal((result.result as CounterState).count, 3);
   });
 });
 
@@ -265,23 +265,15 @@ describe('runAgent — cancel', () => {
     // Cancel after 30ms
     setTimeout(() => channel.cancel('test cancel'), 30);
 
-    await expect(
+    await assert.rejects(
       runAgent(makeRunnerOpts({ definition: slowAgent, channel })),
-    ).rejects.toThrow(AgentCancelledError);
+      AgentCancelledError,
+    );
 
-    expect(channel.isClosed).toBe(true);
+    assert.equal(channel.isClosed, true);
   });
 
   it('writes paused status on cancel', async () => {
-    const oneStepThenCancel: AgentStep = {
-      name: 'check',
-      async run(state, ctx) {
-        // Signal abort before returning
-        (ctx as unknown as { _abort: () => void })._abort?.();
-        return { state, next: 'check' };
-      },
-    };
-
     // Use a simpler approach: cancel inline
     const cancelAgent: AgentDefinition = {
       id: 'cancel-test',
@@ -306,16 +298,18 @@ describe('runAgent — cancel', () => {
 
     const channel = new TestChannel();
 
+    let caught: unknown = null;
     try {
       await runAgent(makeRunnerOpts({ definition: cancelAgent, channel }));
     } catch (err) {
-      expect(err).toBeInstanceOf(AgentCancelledError);
+      caught = err;
     }
+    assert.ok(caught instanceof AgentCancelledError);
 
     // Find the run directory (from the error message sent)
     const errorMsg = channel.getError();
-    expect(errorMsg).toBeDefined();
-    expect((errorMsg!.payload as { recoverable: boolean }).recoverable).toBe(true);
+    assert.notEqual(errorMsg, undefined);
+    assert.equal((errorMsg!.payload as { recoverable: boolean }).recoverable, true);
   });
 });
 
@@ -338,15 +332,16 @@ describe('runAgent — error handling', () => {
 
     const channel = new TestChannel();
 
-    await expect(
+    await assert.rejects(
       runAgent(makeRunnerOpts({ definition: failAgent, channel })),
-    ).rejects.toThrow('step exploded');
+      /step exploded/,
+    );
 
     const errorMsg = channel.getError();
-    expect(errorMsg).toBeDefined();
-    expect((errorMsg!.payload as { error: string }).error).toBe('step exploded');
-    expect((errorMsg!.payload as { recoverable: boolean }).recoverable).toBe(false);
-    expect(channel.isClosed).toBe(true);
+    assert.notEqual(errorMsg, undefined);
+    assert.equal((errorMsg!.payload as { error: string }).error, 'step exploded');
+    assert.equal((errorMsg!.payload as { recoverable: boolean }).recoverable, false);
+    assert.equal(channel.isClosed, true);
   });
 
   it('throws on unknown step', async () => {
@@ -366,9 +361,10 @@ describe('runAgent — error handling', () => {
     };
 
     const channel = new TestChannel();
-    await expect(
+    await assert.rejects(
       runAgent(makeRunnerOpts({ definition: badAgent, channel })),
-    ).rejects.toThrow('Unknown step "nonexistent"');
+      /Unknown step "nonexistent"/,
+    );
   });
 });
 
@@ -431,22 +427,23 @@ describe('runAgent — artifact validation on resume', () => {
     }));
 
     // step-2 should have been re-run
-    expect(step2RunCount).toBe(1);
+    assert.equal(step2RunCount, 1);
     // Artifact should exist again
-    expect(existsSync(join(runDir, 'artifacts', 'two.txt'))).toBe(true);
+    assert.equal(existsSync(join(runDir, 'artifacts', 'two.txt')), true);
   });
 });
 
 describe('runAgent — version migration', () => {
   it('calls migrate on version mismatch', async () => {
     let migrateCalled = false;
+    let observedFromVersion: number | null = null;
 
     const v2Agent = {
       ...counterAgent,
       version: 2,
       migrate(state: AgentState, fromVersion: number) {
         migrateCalled = true;
-        expect(fromVersion).toBe(1);
+        observedFromVersion = fromVersion;
         return state as CounterState;
       },
     } as unknown as AgentDefinition;
@@ -476,7 +473,8 @@ describe('runAgent — version migration', () => {
       options: { resumeFrom: checkpoint },
     }));
 
-    expect(migrateCalled).toBe(true);
+    assert.equal(migrateCalled, true);
+    assert.equal(observedFromVersion, 1);
   });
 
   it('throws on version mismatch without migrate', async () => {
@@ -501,13 +499,14 @@ describe('runAgent — version migration', () => {
     createRunDir(checkpoint.runId);
 
     const channel = new TestChannel();
-    await expect(
+    await assert.rejects(
       runAgent(makeRunnerOpts({
         definition: v2NoMigrate,
         channel,
         options: { resumeFrom: checkpoint },
       })),
-    ).rejects.toThrow('no migrate()');
+      /no migrate\(\)/,
+    );
   });
 });
 
@@ -547,9 +546,9 @@ describe('runAgent — gate interaction', () => {
       options: { input: {} },
     }));
 
-    expect((result.result as { approved: boolean }).approved).toBe(true);
-    expect(channel.getGates()).toHaveLength(1);
-    expect(channel.remainingReplies).toBe(0);
+    assert.equal((result.result as { approved: boolean }).approved, true);
+    assert.equal(channel.getGates().length, 1);
+    assert.equal(channel.remainingReplies, 0);
   });
 });
 
@@ -579,11 +578,12 @@ describe('runAgent — lock prevention', () => {
     acq(runDir);
 
     const channel = new TestChannel();
-    await expect(
+    await assert.rejects(
       runAgent(makeRunnerOpts({
         channel,
         options: { resumeFrom: checkpoint },
       })),
-    ).rejects.toThrow('locked by another process');
+      /locked by another process/,
+    );
   });
 });

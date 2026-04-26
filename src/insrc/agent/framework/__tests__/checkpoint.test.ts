@@ -2,7 +2,8 @@
  * Tests for checkpoint persistence, run lifecycle, locking, and crash detection.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, beforeEach, afterEach } from 'node:test';
+import { strict as assert } from 'node:assert';
 import {
   mkdirSync, rmSync, existsSync, readFileSync, writeFileSync,
 } from 'node:fs';
@@ -78,13 +79,13 @@ describe('atomicWriteSync', () => {
   it('writes file content', () => {
     const path = join(dir, 'test.json');
     atomicWriteSync(path, '{"ok":true}');
-    expect(readFileSync(path, 'utf-8')).toBe('{"ok":true}');
+    assert.equal(readFileSync(path, 'utf-8'), '{"ok":true}');
   });
 
   it('removes .tmp file after write', () => {
     const path = join(dir, 'test.json');
     atomicWriteSync(path, 'data');
-    expect(existsSync(path + '.tmp')).toBe(false);
+    assert.equal(existsSync(path + '.tmp'), false);
   });
 });
 
@@ -99,13 +100,13 @@ describe('cleanOrphanedTmp', () => {
     writeFileSync(join(dir, 'other.tmp'), 'orphan2');
     writeFileSync(join(dir, 'keep.json'), 'real');
     cleanOrphanedTmp(dir);
-    expect(existsSync(join(dir, 'state.json.tmp'))).toBe(false);
-    expect(existsSync(join(dir, 'other.tmp'))).toBe(false);
-    expect(existsSync(join(dir, 'keep.json'))).toBe(true);
+    assert.equal(existsSync(join(dir, 'state.json.tmp')), false);
+    assert.equal(existsSync(join(dir, 'other.tmp')), false);
+    assert.equal(existsSync(join(dir, 'keep.json')), true);
   });
 
   it('handles non-existent directory gracefully', () => {
-    expect(() => cleanOrphanedTmp('/tmp/does-not-exist-xyz')).not.toThrow();
+    assert.doesNotThrow(() => cleanOrphanedTmp('/tmp/does-not-exist-xyz'));
   });
 });
 
@@ -119,18 +120,18 @@ describe('checkpoint read/write', () => {
     const cp = makeCheckpoint();
     writeCheckpoint(dir, cp);
     const loaded = readCheckpoint(dir);
-    expect(loaded).toEqual(cp);
+    assert.deepEqual(loaded, cp);
   });
 
   it('returns null for missing checkpoint', () => {
-    expect(readCheckpoint(dir)).toBeNull();
+    assert.equal(readCheckpoint(dir), null);
   });
 
   it('preserves state data', () => {
     const cp = makeCheckpoint({ state: { items: [1, 2, 3], nested: { a: true } } });
     writeCheckpoint(dir, cp);
     const loaded = readCheckpoint(dir);
-    expect(loaded?.state).toEqual({ items: [1, 2, 3], nested: { a: true } });
+    assert.deepEqual(loaded?.state, { items: [1, 2, 3], nested: { a: true } });
   });
 });
 
@@ -143,14 +144,14 @@ describe('heartbeat', () => {
   it('writes and reads heartbeat timestamp', () => {
     writeHeartbeat(dir);
     const ts = readHeartbeat(dir);
-    expect(ts).toBeTruthy();
+    assert.ok(ts);
     // Should be a valid ISO string within the last few seconds
     const delta = Date.now() - new Date(ts!).getTime();
-    expect(delta).toBeLessThan(5000);
+    assert.ok(delta < 5000);
   });
 
   it('returns null for missing heartbeat', () => {
-    expect(readHeartbeat(dir)).toBeNull();
+    assert.equal(readHeartbeat(dir), null);
   });
 });
 
@@ -163,11 +164,11 @@ describe('run metadata', () => {
   it('round-trips metadata', () => {
     const meta = makeMeta();
     writeMeta(dir, meta);
-    expect(readMeta(dir)).toEqual(meta);
+    assert.deepEqual(readMeta(dir), meta);
   });
 
   it('returns null for missing metadata', () => {
-    expect(readMeta(dir)).toBeNull();
+    assert.equal(readMeta(dir), null);
   });
 });
 
@@ -182,10 +183,10 @@ describe('event log', () => {
     appendEvent(dir, { kind: 'step_end', step: 'init' });
     const lines = readFileSync(join(dir, 'events.jsonl'), 'utf-8')
       .trim().split('\n');
-    expect(lines).toHaveLength(2);
+    assert.equal(lines.length, 2);
     const first = JSON.parse(lines[0]!) as Record<string, unknown>;
-    expect(first['kind']).toBe('step_start');
-    expect(first['ts']).toBeTruthy();
+    assert.equal(first['kind'], 'step_start');
+    assert.ok(first['ts']);
   });
 });
 
@@ -197,17 +198,17 @@ describe('artifacts', () => {
 
   it('writes and reads an artifact', () => {
     const path = writeArtifact(dir, 'design.md', '# Design');
-    expect(path).toContain('artifacts');
-    expect(readArtifact(dir, 'design.md')).toBe('# Design');
+    assert.ok(path.includes('artifacts'));
+    assert.equal(readArtifact(dir, 'design.md'), '# Design');
   });
 
   it('supports nested artifact paths', () => {
     writeArtifact(dir, 'sub/nested.txt', 'hello');
-    expect(readArtifact(dir, 'sub/nested.txt')).toBe('hello');
+    assert.equal(readArtifact(dir, 'sub/nested.txt'), 'hello');
   });
 
   it('returns null for missing artifact', () => {
-    expect(readArtifact(dir, 'nope.txt')).toBeNull();
+    assert.equal(readArtifact(dir, 'nope.txt'), null);
   });
 });
 
@@ -221,19 +222,19 @@ describe('run lock', () => {
   });
 
   it('acquires lock on first attempt', () => {
-    expect(acquireLock(dir)).toBe(true);
+    assert.equal(acquireLock(dir), true);
   });
 
   it('fails to acquire when already held by this process', () => {
     acquireLock(dir);
     // Same PID is alive, so second acquire should fail
-    expect(acquireLock(dir)).toBe(false);
+    assert.equal(acquireLock(dir), false);
   });
 
   it('can re-acquire after release', () => {
     acquireLock(dir);
     releaseLock(dir);
-    expect(acquireLock(dir)).toBe(true);
+    assert.equal(acquireLock(dir), true);
   });
 
   it('breaks stale lock from dead PID', () => {
@@ -241,6 +242,6 @@ describe('run lock', () => {
     const lockPath = join(dir, 'lock');
     writeFileSync(lockPath, JSON.stringify({ pid: 999999, acquiredAt: new Date().toISOString() }));
     // Should break the stale lock and succeed
-    expect(acquireLock(dir)).toBe(true);
+    assert.equal(acquireLock(dir), true);
   });
 });

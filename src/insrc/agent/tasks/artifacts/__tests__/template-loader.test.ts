@@ -132,9 +132,9 @@ describe('listTemplates', () => {
 	it('returns one row per known kind, defaulting to bundled', async () => {
 		clearTemplateCache();
 		const infos = await listTemplates();
-		// All 5 kinds should resolve to bundled in a clean env.
+		// All 6 kinds should resolve to bundled in a clean env.
 		const kinds = infos.map(i => i.kind).sort();
-		assert.deepEqual(kinds, ['deployment', 'er', 'flow', 'sequence', 'wireframe']);
+		assert.deepEqual(kinds, ['callflow', 'deployment', 'er', 'flow', 'sequence', 'wireframe']);
 		for (const info of infos) {
 			assert.equal(info.layer, 'bundled');
 			assert.ok(info.path.endsWith(`${info.kind}.html`));

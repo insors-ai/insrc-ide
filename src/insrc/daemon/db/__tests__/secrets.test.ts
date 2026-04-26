@@ -2,28 +2,24 @@
  * Tests for daemon/db/secrets.ts -- `${secret:<ref>}` resolution +
  * URL-password redaction.
  *
- * We mock the keystore module with a small in-memory map so tests
- * don't touch the real OS keychain.
+ * We swap in an in-memory fake keystore via the module's
+ * `_setKeystoreForTests` hook so tests don't touch the real OS
+ * keychain. (`mock.method` against the keystore namespace doesn't
+ * work in strict ESM -- exports are non-configurable.)
  */
 
-import { describe, it, beforeEach, mock } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import { strict as assert } from 'node:assert';
 
-import * as keystore from '../../../shared/keystore.js';
+import { _setKeystoreForTests, extractUrlPassword, makeSecretRef, resolveSecrets } from '../secrets.js';
 
 const store = new Map<string, string>();
 
-mock.method(keystore, 'getKey', async (name: string) => store.get(name) ?? null);
-mock.method(keystore, 'setKey', async (name: string, value: string) => {
-	store.set(name, value);
+_setKeystoreForTests({
+	getKey:    async (name: string) => store.get(name) ?? null,
+	setKey:    async (name: string, value: string) => { store.set(name, value); },
+	deleteKey: async (name: string) => { store.delete(name); },
 });
-mock.method(keystore, 'deleteKey', async (name: string) => {
-	store.delete(name);
-});
-
-// Import after mocks so the module picks them up.
-const { extractUrlPassword, makeSecretRef, resolveSecrets } =
-	await import('../secrets.js');
 
 // ---------------------------------------------------------------------------
 // makeSecretRef

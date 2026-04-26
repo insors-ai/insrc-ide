@@ -220,12 +220,15 @@ async function resolveConfigPath(
 	const family = familyOf(config.kind);
 	let next: ConnectionConfig = config;
 
-	if (family === 'file') {
-		if (config.path === undefined) {
-			throw new Error(`data-driver: file connection '${config.id}' missing path`);
-		}
+	// File-family connections always carry a `path`. SQLite (rdbms
+	// family) is a single-file db, so it carries `path` too -- treat
+	// both the same for repo-root containment.
+	const needsPathResolution = family === 'file' || config.kind === 'sqlite';
+	if (needsPathResolution && config.path !== undefined) {
 		const abs = await resolveAndCheckRepoPath(config.id, config.path, repoRoot, 'path');
 		next = { ...next, path: abs };
+	} else if (family === 'file' && config.path === undefined) {
+		throw new Error(`data-driver: file connection '${config.id}' missing path`);
 	}
 
 	if (config.schemaSource !== undefined) {

@@ -39,7 +39,7 @@ describe('listTemplatesRpc', () => {
 	it('returns one entry per known kind, defaulting to bundled', async () => {
 		const infos = await listTemplatesRpc({});
 		const kinds = infos.map(i => i.kind).sort();
-		assert.deepEqual(kinds, ['deployment', 'er', 'flow', 'sequence', 'wireframe']);
+		assert.deepEqual(kinds, ['callflow', 'deployment', 'er', 'flow', 'sequence', 'wireframe']);
 		for (const info of infos) {
 			assert.ok(
 				info.layer === 'bundled' || info.layer === 'user' || info.layer === 'repo',
@@ -54,7 +54,7 @@ describe('listTemplatesRpc', () => {
 		// Setting a non-existent repoRoot shouldn't crash -- the loader
 		// just skips that layer and falls through.
 		const infos = await listTemplatesRpc({ repoRoot: '/tmp/nonexistent-repo-xyz' });
-		assert.equal(infos.length, 5);
+		assert.equal(infos.length, 6);
 	});
 
 	it('rejects non-object params silently (treated as empty opts)', async () => {
@@ -62,8 +62,8 @@ describe('listTemplatesRpc', () => {
 		// without throwing -- default to empty opts.
 		const a = await listTemplatesRpc(undefined);
 		const b = await listTemplatesRpc(null);
-		assert.equal(a.length, 5);
-		assert.equal(b.length, 5);
+		assert.equal(a.length, 6);
+		assert.equal(b.length, 6);
 	});
 });
 
