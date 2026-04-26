@@ -361,6 +361,23 @@ export async function deletePlan(db: DbClient, planId: string): Promise<void> {
   );
 }
 
+/**
+ * Delete every plan (and its steps + edges) belonging to a repo. Called
+ * by the `repo.remove` cleanup so plans don't linger when the repo is
+ * detached.
+ */
+export async function deletePlansForRepo(db: DbClient, repoPath: string): Promise<void> {
+  const result = await queryWithParams(db.graph,
+    `MATCH (p:Plan {repoPath: $repoPath}) RETURN p.id`,
+    { repoPath },
+  );
+  const rows = await resultToRows(result);
+  for (const row of rows) {
+    const planId = row['p.id'] as string;
+    await deletePlan(db, planId);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

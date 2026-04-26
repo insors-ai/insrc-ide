@@ -188,6 +188,19 @@ export async function deleteUnresolvedForFile(db: DbClient, file: string): Promi
 }
 
 /**
+ * Drop all UnresolvedRelation rows belonging to a repo. Used by the
+ * `repo.remove` cleanup so unresolved edges don't linger when the
+ * repo is detached from the registry.
+ */
+export async function deleteUnresolvedForRepo(db: DbClient, repo: string): Promise<void> {
+  await kuzuExec(
+    db,
+    'MATCH (u:UnresolvedRelation) WHERE u.repo = $repo DETACH DELETE u',
+    { repo },
+  );
+}
+
+/**
  * On successful cross-file resolution: insert the typed REL edge and
  * delete the matching UnresolvedRelation row in a single logical step.
  */

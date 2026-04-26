@@ -21,6 +21,8 @@ setLogMode('daemon');
 const log = getLogger('daemon');
 import { getDb, initDb, closeDb } from '../db/client.js';
 import { listRepos, addRepo, removeRepo } from '../db/repos.js';
+import { deleteEntitiesForRepo } from '../db/entities.js';
+import { deleteUnresolvedForRepo } from '../db/relations.js';
 import { Watcher } from '../indexer/watcher.js';
 import { IndexQueue } from './queue.js';
 import { IndexerService } from '../indexer/index.js';
@@ -40,7 +42,7 @@ import {
 } from '../db/conversations.js';
 import { compactConversations, type CompactionOpts } from '../db/compaction.js';
 import {
-	savePlan, getPlan, getActivePlan, updateStepState, getNextStep, deletePlan, resetStaleLocks,
+	savePlan, getPlan, getActivePlan, updateStepState, getNextStep, deletePlan, deletePlansForRepo, resetStaleLocks,
 } from '../agent/tasks/plan-store.js';
 import type { RegisteredRepo, DaemonStatus, Entity, Plan, PlanStepStatus, ConfigScope, ConfigSearchOpts, TemplateQuery } from '../shared/types.js';
 import { basename, dirname } from 'node:path';
@@ -163,8 +165,17 @@ async function main(): Promise<void> {
 
 		'repo.remove': async (params) => {
 			const { path } = params as { path: string };
+			// Order matters: stop watching first so no new file events arrive
+			// during cleanup; delete entities (cascades the typed REL edges)
+			// before the unresolved twins; then plans/sessions; then the
+			// Repo registry node last.
 			await indexer.removeRepo(path);
+			await deleteEntitiesForRepo(db, path);
+			await deleteUnresolvedForRepo(db, path);
+			await deletePlansForRepo(db, path);
+			await deleteSessionsForRepo(db, path);
 			await removeRepo(db, path);
+			log.info({ repo: path }, 'repo removed (entities + relations + plans + sessions purged)');
 			return { ok: true };
 		},
 
