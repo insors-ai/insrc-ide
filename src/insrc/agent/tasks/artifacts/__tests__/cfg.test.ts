@@ -692,6 +692,337 @@ func Foo(items []int) {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// Java walker
+// ---------------------------------------------------------------------------
+
+function javaEntity(name: string, body: string): Entity {
+	return {
+		id: `id-${name}`,
+		kind: 'method',
+		name,
+		language: 'java',
+		repo: '/repo',
+		file: '/repo/src/main/java/Foo.java',
+		startLine: 1,
+		endLine: 1,
+		body,
+		embedding: [],
+		indexedAt: '2026-04-26T00:00:00Z',
+	};
+}
+
+describe('walkCfgFromEntity - Java step tree', () => {
+	it('handles a straight-line method with calls + return', () => {
+		const ent = javaEntity('hi', `
+public String hi(String name) {
+  audit(name);
+  notify(name);
+  return done();
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps.length, 3);
+		assert.equal(r.steps[0]?.kind, 'call');
+		assert.equal(r.steps[1]?.kind, 'call');
+		assert.equal(r.steps[2]?.kind, 'return');
+	});
+
+	it('captures if/else as a branch', () => {
+		const ent = javaEntity('m', `
+public String m(User user) {
+  if (user.isAdmin()) {
+    return adminPath();
+  } else {
+    return userPath();
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'branch');
+		if (r.steps[0]?.kind !== 'branch') { return; }
+		assert.match(r.steps[0].predicate, /user\.isAdmin/);
+		assert.equal(r.steps[0].consequent[0]?.kind, 'return');
+		assert.notEqual(r.steps[0].alternative, null);
+	});
+
+	it('captures switch with case + default', () => {
+		const ent = javaEntity('m', `
+public int m(String state) {
+  switch (state) {
+    case "a": return 1;
+    case "b": return 2;
+    default: return 0;
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'switch');
+	});
+
+	it('captures C-style for + enhanced for', () => {
+		const cstyle = javaEntity('m', `
+public void m(int[] xs) {
+  for (int i = 0; i < xs.length; i++) {
+    process(xs[i]);
+  }
+}`);
+		const r1 = walkCfgFromEntity(cstyle);
+		assert.equal(r1.steps[0]?.kind, 'loop');
+		if (r1.steps[0]?.kind === 'loop') {
+			assert.equal(r1.steps[0].loopKind, 'for');
+		}
+
+		const enhanced = javaEntity('m', `
+public void m(List<String> items) {
+  for (String item : items) {
+    process(item);
+  }
+}`);
+		const r2 = walkCfgFromEntity(enhanced);
+		assert.equal(r2.steps[0]?.kind, 'loop');
+		if (r2.steps[0]?.kind === 'loop') {
+			assert.equal(r2.steps[0].loopKind, 'for-of');
+		}
+	});
+
+	it('captures while + do-while', () => {
+		const w = javaEntity('m', `
+public void m() {
+  while (cond()) { work(); }
+}`);
+		const r1 = walkCfgFromEntity(w);
+		assert.equal(r1.steps[0]?.kind, 'loop');
+		if (r1.steps[0]?.kind === 'loop') {
+			assert.equal(r1.steps[0].loopKind, 'while');
+		}
+
+		const dw = javaEntity('m', `
+public void m() {
+  do { work(); } while (cond());
+}`);
+		const r2 = walkCfgFromEntity(dw);
+		assert.equal(r2.steps[0]?.kind, 'loop');
+		if (r2.steps[0]?.kind === 'loop') {
+			assert.equal(r2.steps[0].loopKind, 'do-while');
+		}
+	});
+
+	it('captures try / catch / finally', () => {
+		const ent = javaEntity('m', `
+public void m() {
+  try {
+    risky();
+  } catch (IOException e) {
+    handleIO(e);
+  } catch (RuntimeException e) {
+    handleRuntime(e);
+  } finally {
+    cleanup();
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'try');
+		if (r.steps[0]?.kind !== 'try') { return; }
+		assert.equal(r.steps[0].tryBody[0]?.kind, 'call');
+		assert.notEqual(r.steps[0].catchBody, null);
+		// Two catch clauses produce two branch steps.
+		assert.equal(r.steps[0].catchBody?.length, 2);
+		assert.notEqual(r.steps[0].finallyBody, null);
+	});
+
+	it('captures try-with-resources as a try step', () => {
+		const ent = javaEntity('m', `
+public void m() {
+  try (var r = open()) {
+    use(r);
+  } catch (IOException e) {
+    handle(e);
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'try');
+	});
+
+	it('captures synchronized as inlined block + lock note', () => {
+		const ent = javaEntity('m', `
+public void m(Object lock) {
+  synchronized (lock) {
+    work();
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		// First step is the lock-note call; subsequent steps are body.
+		assert.equal(r.steps[0]?.kind, 'call');
+		if (r.steps[0]?.kind === 'call') {
+			assert.match(r.steps[0].callee, /^synchronized/);
+		}
+		assert.ok(r.steps.length >= 2);
+	});
+
+	it('captures throw / break / continue inside a for loop', () => {
+		const ent = javaEntity('m', `
+public void m(List<Integer> xs) {
+  for (Integer x : xs) {
+    if (x == null) continue;
+    if (x < 0) break;
+    if (x > 100) throw new IllegalArgumentException();
+    process(x);
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'loop');
+		if (r.steps[0]?.kind !== 'loop') { return; }
+		const body = r.steps[0].body;
+		assert.equal(body[0]?.kind, 'branch');
+		if (body[0]?.kind === 'branch') {
+			assert.equal(body[0].consequent[0]?.kind, 'continue');
+		}
+		assert.equal(body[1]?.kind, 'branch');
+		if (body[1]?.kind === 'branch') {
+			assert.equal(body[1].consequent[0]?.kind, 'break');
+		}
+		assert.equal(body[2]?.kind, 'branch');
+		if (body[2]?.kind === 'branch') {
+			assert.equal(body[2].consequent[0]?.kind, 'throw');
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Scala walker
+// ---------------------------------------------------------------------------
+
+function scalaEntity(name: string, body: string): Entity {
+	return {
+		id: `id-${name}`,
+		kind: 'method',
+		name,
+		language: 'scala',
+		repo: '/repo',
+		file: '/repo/src/main/scala/Foo.scala',
+		startLine: 1,
+		endLine: 1,
+		body,
+		embedding: [],
+		indexedAt: '2026-04-26T00:00:00Z',
+	};
+}
+
+describe('walkCfgFromEntity - Scala step tree', () => {
+	it('handles an expression-bodied function with if-expression', () => {
+		const ent = scalaEntity('m', `def m(x: Int) = if (x > 0) "pos" else "neg"`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps.length, 1);
+		assert.equal(r.steps[0]?.kind, 'branch');
+		if (r.steps[0]?.kind === 'branch') {
+			assert.match(r.steps[0].predicate, /x > 0/);
+		}
+	});
+
+	it('captures if/else with block bodies', () => {
+		const ent = scalaEntity('m', `
+def m(x: Int) = {
+  if (x > 0) {
+    work()
+  } else {
+    fallback()
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'branch');
+	});
+
+	it('captures match expression as switch', () => {
+		const ent = scalaEntity('m', `
+def m(state: String) = state match {
+  case "a" => 1
+  case "b" => 2
+  case _   => 0
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'switch');
+	});
+
+	it('captures while loop', () => {
+		const ent = scalaEntity('m', `
+def m(): Unit = {
+  while (cond()) work()
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'loop');
+		if (r.steps[0]?.kind === 'loop') {
+			assert.equal(r.steps[0].loopKind, 'while');
+		}
+	});
+
+	it('captures for-yield as a for-of loop', () => {
+		const ent = scalaEntity('m', `
+def m(xs: List[Int]) = for (x <- xs) yield x * 2
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'loop');
+		if (r.steps[0]?.kind === 'loop') {
+			assert.equal(r.steps[0].loopKind, 'for-of');
+		}
+	});
+
+	it('captures try / catch / finally with case patterns', () => {
+		const ent = scalaEntity('m', `
+def m(): Unit = {
+  try {
+    risky()
+  } catch {
+    case e: IOException => handleIO(e)
+    case _: Throwable   => handleAny()
+  } finally {
+    cleanup()
+  }
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'try');
+		if (r.steps[0]?.kind !== 'try') { return; }
+		assert.notEqual(r.steps[0].catchBody, null);
+		assert.notEqual(r.steps[0].finallyBody, null);
+	});
+
+	it('captures throw expression', () => {
+		const ent = scalaEntity('m', `
+def m(x: Int): Int = {
+  if (x < 0) throw new RuntimeException("nope")
+  x
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'branch');
+		if (r.steps[0]?.kind === 'branch') {
+			assert.equal(r.steps[0].consequent[0]?.kind, 'throw');
+		}
+	});
+
+	it('captures return expression', () => {
+		const ent = scalaEntity('m', `
+def m(x: Int): Int = {
+  if (x > 0) return x
+  0
+}
+		`);
+		const r = walkCfgFromEntity(ent);
+		assert.equal(r.steps[0]?.kind, 'branch');
+		if (r.steps[0]?.kind === 'branch') {
+			assert.equal(r.steps[0].consequent[0]?.kind, 'return');
+		}
+	});
+});
+
 describe('renderCfgMermaid - shape', () => {
 	it('emits a flowchart TD header + Enter / end nodes', () => {
 		const ent = fnEntity('foo', `

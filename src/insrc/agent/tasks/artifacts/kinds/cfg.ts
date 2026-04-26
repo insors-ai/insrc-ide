@@ -26,6 +26,8 @@ const TSGrammars    = _require('tree-sitter-typescript') as { typescript: unknow
 const JSGrammar     = _require('tree-sitter-javascript') as unknown;
 const PythonGrammar = _require('tree-sitter-python')     as unknown;
 const GoGrammar     = _require('tree-sitter-go')         as unknown;
+const JavaGrammar   = _require('tree-sitter-java')       as unknown;
+const ScalaGrammar  = _require('tree-sitter-scala')      as unknown;
 
 import type { Entity, Language } from '../../../../shared/types.js';
 
@@ -84,7 +86,7 @@ export interface CfgWalkResult {
 // TypeScript / JavaScript walker
 // ---------------------------------------------------------------------------
 
-type WalkLang = 'typescript' | 'javascript' | 'python' | 'go';
+type WalkLang = 'typescript' | 'javascript' | 'python' | 'go' | 'java' | 'scala';
 
 interface WalkCtx {
 	count: number;
@@ -112,6 +114,8 @@ function pickLanguageGrammar(language: Language, file: string): unknown {
 	if (language === 'javascript') { return JSGrammar; }
 	if (language === 'python') { return PythonGrammar; }
 	if (language === 'go') { return GoGrammar; }
+	if (language === 'java') { return JavaGrammar; }
+	if (language === 'scala') { return ScalaGrammar; }
 	throw new Error(`cfg: language '${language}' not yet supported`);
 }
 
@@ -128,15 +132,19 @@ function findBodyBlock(root: SyntaxNode, lang: WalkLang): SyntaxNode | null {
 		? new Set(['function_definition'])
 		: lang === 'go'
 			? new Set(['function_declaration', 'method_declaration'])
-			: new Set([
-				'function_declaration',
-				'method_definition',
-				'arrow_function',
-				'function',
-				'function_expression',
-				'generator_function',
-				'generator_function_declaration',
-			]);
+			: lang === 'java'
+				? new Set(['method_declaration', 'constructor_declaration', 'compact_constructor_declaration'])
+				: lang === 'scala'
+					? new Set(['function_definition'])
+					: new Set([
+						'function_declaration',
+						'method_definition',
+						'arrow_function',
+						'function',
+						'function_expression',
+						'generator_function',
+						'generator_function_declaration',
+					]);
 
 	let cur: SyntaxNode | null = root;
 	const queue: SyntaxNode[] = [root];
@@ -171,6 +179,8 @@ function walkBlock(block: SyntaxNode, ctx: WalkCtx): CfgStep[] {
 function walkStatement(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
 	if (ctx.lang === 'python') { return walkStatementPython(node, ctx); }
 	if (ctx.lang === 'go') { return walkStatementGo(node, ctx); }
+	if (ctx.lang === 'java') { return walkStatementJava(node, ctx); }
+	if (ctx.lang === 'scala') { return walkStatementScala(node, ctx); }
 	return walkStatementTs(node, ctx);
 }
 
@@ -178,7 +188,7 @@ function walkStatementTs(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | 
 	switch (node.type) {
 		case 'if_statement': {
 			bump(ctx);
-			const condition = node.childForFieldName('condition')?.text ?? 'cond';
+			const condition = stripParens(node.childForFieldName('condition')?.text ?? 'cond');
 			const consequence = node.childForFieldName('consequence');
 			const alternative = node.childForFieldName('alternative');
 			return {
@@ -677,15 +687,399 @@ function walkStatementGo(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | 
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Java walker (tree-sitter-java node names)
+// ---------------------------------------------------------------------------
+
+function walkStatementJava(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
+	switch (node.type) {
+		case 'if_statement': {
+			bump(ctx);
+			const condition = stripParens(node.childForFieldName('condition')?.text ?? 'cond');
+			const consequence = node.childForFieldName('consequence');
+			const alternative = node.childForFieldName('alternative');
+			return {
+				kind: 'branch',
+				predicate: trunc(condition),
+				consequent: walkBranch(consequence, ctx),
+				alternative: alternative === null ? null : walkBranch(alternative, ctx),
+			};
+		}
+		case 'switch_expression':
+		case 'switch_statement': {
+			bump(ctx);
+			const subject = stripParens(node.childForFieldName('condition')?.text
+				?? node.namedChild(0)?.text ?? 'subject');
+			const cases: { label: string; body: CfgStep[] }[] = [];
+			const switchBlock = node.namedChildren.find(c => c.type === 'switch_block');
+			if (switchBlock !== undefined) {
+				for (let i = 0; i < switchBlock.namedChildCount; i++) {
+					const c = switchBlock.namedChild(i);
+					if (c === null) { continue; }
+					if (c.type === 'switch_block_statement_group' || c.type === 'switch_rule') {
+						bump(ctx);
+						const labels: string[] = [];
+						const bodyStmts: SyntaxNode[] = [];
+						for (let j = 0; j < c.namedChildCount; j++) {
+							const cc = c.namedChild(j);
+							if (cc === null) { continue; }
+							if (cc.type === 'switch_label' || cc.type === 'switch_case_label') {
+								labels.push(stripParens(cc.text.replace(/^case\s+/, '').replace(/:$/, '').trim()));
+							} else {
+								bodyStmts.push(cc);
+							}
+						}
+						const caseBody: CfgStep[] = [];
+						for (const stmt of bodyStmts) {
+							const sub = walkStatement(stmt, ctx);
+							if (sub === null) { continue; }
+							if (Array.isArray(sub)) { caseBody.push(...sub); }
+							else { caseBody.push(sub); }
+						}
+						cases.push({
+							label: trunc(labels.length === 0 ? 'case' : labels.join(' / ')),
+							body: caseBody,
+						});
+					}
+				}
+			}
+			return { kind: 'switch', subject: trunc(subject), cases };
+		}
+		case 'for_statement': {
+			bump(ctx);
+			const condition = node.childForFieldName('condition')?.text ?? 'for';
+			return {
+				kind: 'loop', loopKind: 'for', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'enhanced_for_statement': {
+			bump(ctx);
+			const itemNode = node.namedChildren.find(
+				c => c.type === 'identifier' || c.type === 'variable_declarator',
+			);
+			// Collection sits between the item declarator and the body
+			// block. Walk children right-to-left to find the last
+			// non-body, non-itemNode child.
+			let collectionNode: SyntaxNode | null = null;
+			for (let i = node.namedChildCount - 1; i >= 0; i--) {
+				const c = node.namedChild(i);
+				if (c === null) { continue; }
+				if (c === itemNode) { continue; }
+				if (c.type === 'block' || c.type === 'expression_statement') { continue; }
+				collectionNode = c;
+				break;
+			}
+			const item = itemNode?.text ?? 'item';
+			const coll = collectionNode?.text ?? 'iter';
+			return {
+				kind: 'loop', loopKind: 'for-of',
+				predicate: trunc(`${item} : ${coll}`),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'while_statement': {
+			bump(ctx);
+			const condition = stripParens(node.childForFieldName('condition')?.text ?? 'cond');
+			return {
+				kind: 'loop', loopKind: 'while', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'do_statement': {
+			bump(ctx);
+			const condition = stripParens(node.childForFieldName('condition')?.text ?? 'cond');
+			return {
+				kind: 'loop', loopKind: 'do-while', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body'), ctx),
+			};
+		}
+		case 'try_statement':
+		case 'try_with_resources_statement': {
+			bump(ctx);
+			const tryBlock = node.namedChildren.find(c => c.type === 'block');
+			const catchClauses = node.namedChildren.filter(c => c.type === 'catch_clause');
+			const finallyClause = node.namedChildren.find(c => c.type === 'finally_clause');
+
+			let catchBody: CfgStep[] | null = null;
+			if (catchClauses.length > 0) {
+				catchBody = [];
+				for (const cc of catchClauses) {
+					bump(ctx);
+					const formal = cc.namedChildren.find(c => c.type === 'catch_formal_parameter');
+					const exType = formal?.namedChildren.find(
+						c => c.type === 'type_identifier' || c.type === 'union_type' || c.type === 'catch_type',
+					)?.text ?? 'Throwable';
+					const ccBody = cc.namedChildren.find(c => c.type === 'block');
+					catchBody.push({
+						kind: 'branch',
+						predicate: trunc(`catch ${exType}`),
+						consequent: ccBody === undefined ? [] : walkBlock(ccBody, ctx),
+						alternative: null,
+					});
+				}
+			}
+
+			let finallyBody: CfgStep[] | null = null;
+			if (finallyClause !== undefined) {
+				const fb = finallyClause.namedChildren.find(c => c.type === 'block');
+				finallyBody = fb === undefined ? [] : walkBlock(fb, ctx);
+			}
+
+			return {
+				kind: 'try',
+				tryBody: tryBlock === undefined ? [] : walkBlock(tryBlock, ctx),
+				catchBody,
+				finallyBody,
+			};
+		}
+		case 'synchronized_statement': {
+			// Inline the body as a column under the parent; emit a
+			// note-call step indicating the lock object.
+			bump(ctx);
+			const lockExpr = node.namedChildren.find(c => c.type === 'parenthesized_expression');
+			const lockText = stripParens(lockExpr?.text ?? '');
+			const block = node.namedChildren.find(c => c.type === 'block');
+			const inner = block === undefined ? [] : walkBlock(block, ctx);
+			return [
+				{ kind: 'call', callee: trunc(`synchronized ${lockText}`) },
+				...inner,
+			];
+		}
+		case 'return_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text;
+			return { kind: 'return', label: arg !== undefined ? trunc(`return ${arg}`) : 'return' };
+		}
+		case 'break_statement': {
+			bump(ctx);
+			return { kind: 'break' };
+		}
+		case 'continue_statement': {
+			bump(ctx);
+			return { kind: 'continue' };
+		}
+		case 'yield_statement': {
+			// Java switch-expression `yield` -- terminator that returns
+			// a value out of a case.
+			bump(ctx);
+			const arg = node.namedChild(0)?.text ?? '';
+			return { kind: 'return', label: trunc(`yield ${arg}`) };
+		}
+		case 'throw_statement': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text ?? '';
+			return { kind: 'throw', label: trunc(`throw ${arg}`) };
+		}
+		case 'expression_statement': {
+			const expr = node.namedChild(0);
+			if (expr === null) { return null; }
+			if (expr.type === 'method_invocation' || expr.type === 'object_creation_expression') {
+				bump(ctx);
+				return { kind: 'call', callee: trunc(expr.text) };
+			}
+			return null;
+		}
+		case 'block': {
+			return walkBlock(node, ctx);
+		}
+		case 'local_variable_declaration':
+		case 'assignment_expression':
+			return null;
+		default:
+			return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Scala walker (tree-sitter-scala node names)
+//
+// Scala's control-flow constructs are expressions (if / match / try /
+// for all return values), so `if_expression` / `match_expression` /
+// `try_expression` show up wherever a value can. The walker treats
+// them as control-flow steps regardless of whether their result is
+// consumed.
+// ---------------------------------------------------------------------------
+
+function walkStatementScala(node: SyntaxNode, ctx: WalkCtx): CfgStep | CfgStep[] | null {
+	switch (node.type) {
+		case 'if_expression': {
+			bump(ctx);
+			const condition = stripParens(node.childForFieldName('condition')?.text ?? 'cond');
+			const consequence = node.childForFieldName('consequence');
+			const alternative = node.childForFieldName('alternative');
+			return {
+				kind: 'branch',
+				predicate: trunc(condition),
+				consequent: walkBranch(consequence, ctx),
+				alternative: alternative === null ? null : walkBranch(alternative, ctx),
+			};
+		}
+		case 'match_expression': {
+			bump(ctx);
+			const subject = node.childForFieldName('value')?.text ?? 'subject';
+			const body = node.childForFieldName('body');
+			const cases: { label: string; body: CfgStep[] }[] = [];
+			if (body !== null) {
+				for (let i = 0; i < body.namedChildCount; i++) {
+					const c = body.namedChild(i);
+					if (c === null || c.type !== 'case_clause') { continue; }
+					bump(ctx);
+					// Pattern + optional guard, then the body block.
+					const pattern = c.namedChildren[0]?.text ?? 'case';
+					const guard = c.namedChildren.find(n => n.type === 'guard');
+					const label = trunc(
+						`${pattern}${guard !== undefined ? ` ${guard.text}` : ''}`,
+					);
+					// Collect the body steps -- everything after the
+					// pattern / guard, before the matching `=>` token.
+					const bodyChildren: SyntaxNode[] = [];
+					let pastArrow = false;
+					for (let j = 0; j < c.namedChildCount; j++) {
+						const cc = c.namedChild(j);
+						if (cc === null) { continue; }
+						if (!pastArrow) {
+							// First non-pattern, non-guard child is body.
+							if (cc === c.namedChildren[0]) { continue; }
+							if (cc.type === 'guard') { continue; }
+							pastArrow = true;
+						}
+						bodyChildren.push(cc);
+					}
+					const caseBody: CfgStep[] = [];
+					for (const stmt of bodyChildren) {
+						const sub = walkStatement(stmt, ctx);
+						if (sub === null) { continue; }
+						if (Array.isArray(sub)) { caseBody.push(...sub); }
+						else { caseBody.push(sub); }
+					}
+					cases.push({ label, body: caseBody });
+				}
+			}
+			return { kind: 'switch', subject: trunc(subject), cases };
+		}
+		case 'while_expression': {
+			bump(ctx);
+			const condition = stripParens(node.childForFieldName('condition')?.text
+				?? node.namedChildren[0]?.text ?? 'cond');
+			return {
+				kind: 'loop', loopKind: 'while', predicate: trunc(condition),
+				body: walkBranch(node.childForFieldName('body') ?? node.namedChildren[1] ?? null, ctx),
+			};
+		}
+		case 'for_expression': {
+			bump(ctx);
+			const enums = node.namedChildren.find(c => c.type === 'enumerators');
+			const predicate = enums?.text.split(/[\r\n;]/)[0]?.trim() ?? 'for';
+			const bodyExpr = node.namedChildren.find(
+				c => c.type !== 'enumerators' && c.type !== 'yield',
+			) ?? null;
+			return {
+				kind: 'loop', loopKind: 'for-of', predicate: trunc(predicate),
+				body: bodyExpr === null ? [] : walkBranch(bodyExpr, ctx),
+			};
+		}
+		case 'try_expression': {
+			bump(ctx);
+			const tryBlock = node.namedChildren.find(c => c.type === 'block');
+			const catchClause = node.namedChildren.find(c => c.type === 'catch_clause');
+			const finallyClause = node.namedChildren.find(c => c.type === 'finally_clause');
+
+			let catchBody: CfgStep[] | null = null;
+			if (catchClause !== undefined) {
+				catchBody = [];
+				// Catch body in Scala is a `case_block` with one or
+				// more `case_clause`s.
+				const caseBlock = catchClause.namedChildren.find(c => c.type === 'case_block');
+				if (caseBlock !== undefined) {
+					for (let i = 0; i < caseBlock.namedChildCount; i++) {
+						const cc = caseBlock.namedChild(i);
+						if (cc === null || cc.type !== 'case_clause') { continue; }
+						bump(ctx);
+						const pattern = cc.namedChildren[0]?.text ?? 'case';
+						catchBody.push({
+							kind: 'branch',
+							predicate: trunc(`catch ${pattern}`),
+							consequent: walkBranch(cc, ctx),
+							alternative: null,
+						});
+					}
+				}
+			}
+
+			let finallyBody: CfgStep[] | null = null;
+			if (finallyClause !== undefined) {
+				const fb = finallyClause.namedChildren.find(
+					c => c.type === 'block' || c.type !== 'finally',
+				);
+				finallyBody = fb === undefined ? [] : walkBranch(fb, ctx);
+			}
+
+			return {
+				kind: 'try',
+				tryBody: tryBlock === undefined ? [] : walkBlock(tryBlock, ctx),
+				catchBody,
+				finallyBody,
+			};
+		}
+		case 'return_expression': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text;
+			return { kind: 'return', label: arg !== undefined ? trunc(`return ${arg}`) : 'return' };
+		}
+		case 'throw_expression': {
+			bump(ctx);
+			const arg = node.namedChild(0)?.text ?? '';
+			return { kind: 'throw', label: trunc(`throw ${arg}`) };
+		}
+		case 'call_expression': {
+			bump(ctx);
+			return { kind: 'call', callee: trunc(node.text) };
+		}
+		case 'block': {
+			return walkBlock(node, ctx);
+		}
+		case 'val_definition':
+		case 'var_definition':
+		case 'assignment_expression':
+		case 'infix_expression':
+			return null;
+		default:
+			return null;
+	}
+}
+
+function stripParens(text: string): string {
+	const t = text.trim();
+	return t.startsWith('(') && t.endsWith(')') ? t.slice(1, -1).trim() : t;
+}
+
 /**
  * Walk a branch / loop body, which may be either a `statement_block`
  * (in `{ ... }`), Python `block`, or a single statement (no braces).
  * Either way, return a flat list of steps.
+ *
+ * Also drills into wrapper nodes the grammars emit around blocks:
+ * `else_clause` (TypeScript / JavaScript), where the field-named
+ * alternative slot returns the wrapper, not the contained block.
  */
 function walkBranch(node: SyntaxNode | null, ctx: WalkCtx): CfgStep[] {
 	if (node === null) { return []; }
 	if (node.type === 'statement_block' || node.type === 'block') {
 		return walkBlock(node, ctx);
+	}
+	// `else_clause` / `else_clause` (TS) / `finally_clause` wraps a
+	// block. Drill into the inner block + recurse.
+	if (node.type === 'else_clause' || node.type === 'finally_clause') {
+		const inner = node.namedChildren.find(
+			c => c.type === 'statement_block' || c.type === 'block',
+		);
+		if (inner !== undefined) { return walkBlock(inner, ctx); }
+		// When the inner is a single statement (e.g. `else if (...) ...`),
+		// recurse into the first non-keyword child.
+		const firstStmt = node.namedChildren[0];
+		if (firstStmt !== undefined) { return walkBranch(firstStmt, ctx); }
+		return [];
 	}
 	const single = walkStatement(node, ctx);
 	if (single === null) { return []; }
@@ -719,6 +1113,8 @@ export function walkCfgFromEntity(entity: Entity): CfgFromEntityResult {
 		&& entity.language !== 'javascript'
 		&& entity.language !== 'python'
 		&& entity.language !== 'go'
+		&& entity.language !== 'java'
+		&& entity.language !== 'scala'
 	) {
 		throw new Error(
 			`cfg: language '${entity.language}' not yet supported`,
@@ -742,7 +1138,17 @@ export function walkCfgFromEntity(entity: Entity): CfgFromEntityResult {
 	}
 
 	const ctx: WalkCtx = { count: 0, lang };
-	const steps = walkBlock(block, ctx);
+	const isBlock = block.type === 'statement_block' || block.type === 'block';
+	let steps: CfgStep[];
+	if (isBlock) {
+		steps = walkBlock(block, ctx);
+	} else {
+		// Scala expression-bodied functions (`def m = if (x) y else z`)
+		// have a non-block body. Walk it as a single statement to get
+		// the appropriate step.
+		const single = walkStatement(block, ctx);
+		steps = single === null ? [] : (Array.isArray(single) ? single : [single]);
+	}
 
 	return {
 		steps,

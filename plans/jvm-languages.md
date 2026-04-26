@@ -39,7 +39,7 @@ parsing covers both at once.
 | 1     | Java parser: entities + relations + tests against fixture                        | done (uncommitted) |
 | 2     | Scala parser: entities + relations + tests; Scala 2 + 3 cross-version handling   | done (uncommitted) |
 | 3     | Manifests: pom.xml / build.gradle(.kts) / build.sbt / build.sc                      | done (uncommitted) -- import resolution descoped to a future cross-file pass (see §3.4) |
-| 4     | CFG walkers in `kinds/cfg.ts` so `flow:code` artifacts work for Java + Scala     | todo   |
+| 4     | CFG walkers in `kinds/cfg.ts` so `flow:code` artifacts work for Java + Scala     | done (uncommitted) |
 | 5     | Cross-cutting integration: language-hint heuristics, fixtures, doc updates       | todo   |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
@@ -770,15 +770,15 @@ check rejects the call cleanly with the existing error message.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `WalkLang` extension                       | todo   |       |
-| Java grammar wiring                        | todo   |       |
-| Scala grammar wiring                       | todo   |       |
-| `findBodyBlock` per-language               | todo   |       |
-| `walkStatementJava`                        | todo   |       |
-| `walkStatementScala`                       | todo   |       |
-| Scala for-yield + match handling           | todo   |       |
-| Java try-with-resources handling           | todo   |       |
-| CFG unit tests for both languages          | todo   |       |
+| `WalkLang` extension                       | done (uncommitted) | `'java' | 'scala'` added. |
+| Java grammar wiring                        | done (uncommitted) | `tree-sitter-java` import + `pickLanguageGrammar` + `findBodyBlock` (recognises `method_declaration` / `constructor_declaration` / `compact_constructor_declaration`). |
+| Scala grammar wiring                       | done (uncommitted) | `tree-sitter-scala` import + `pickLanguageGrammar` + `findBodyBlock` (recognises `function_definition`). Expression-bodied functions (`def m = if (x) y else z`) walked as a single statement when the body isn't a block. |
+| `findBodyBlock` per-language               | done (uncommitted) | Per-language fn-type sets in a chained ternary. |
+| `walkStatementJava`                        | done (uncommitted) | `if_statement`, `switch_expression` / `switch_statement` (legacy + Java 14+ expression form), `for_statement` (C-style), `enhanced_for_statement`, `while_statement`, `do_statement`, `try_statement` + `try_with_resources_statement` with multi-`catch_clause` collapse + optional `finally_clause`, `synchronized_statement` (inlined body + lock-note call step), `return` / `break` / `continue` / `throw` / `yield` (switch-expression yield maps to a return step). Method-invocation + object-creation expressions become call steps. |
+| `walkStatementScala`                       | done (uncommitted) | Expression-style control flow: `if_expression` (with `condition` / `consequence` / `alternative` field names), `match_expression` (with `value` / `body` fields, case_clause walking + guard support), `while_expression`, `for_expression` (renders as `for-of` loop with the first generator as the predicate label), `try_expression` (multi-`case_clause` catch arms + optional finally), `throw_expression`, `return_expression`, `call_expression`. |
+| Scala for-yield + match handling           | done (uncommitted) | for-yield collapses into a single `for-of` loop step with the first `<-` generator as the predicate; multi-generator forms still render. Match: each `case_clause` becomes a switch case with the pattern + guard text as the case label. |
+| Java try-with-resources handling           | done (uncommitted) | Treated as a regular `try` step with the resource specification implicit in the diagram (no separate fan-out edge in v1). |
+| CFG unit tests for both languages          | done (uncommitted) | Java: 9 cases (straight-line, if/else, switch + default, C-style for + enhanced for, while + do-while, try/multi-catch/finally, try-with-resources, synchronized, throw/break/continue inside loop). Scala: 8 cases (expression-bodied function with if-expression, block-bodied if/else, match, while, for-yield, try/catch/finally with case patterns, throw expression, return expression). |
 
 ### Phase 5 -- Cross-cutting integration
 
