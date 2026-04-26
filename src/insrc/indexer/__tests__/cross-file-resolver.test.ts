@@ -435,3 +435,127 @@ describe('runCrossFileResolver -- CALLS marks ambiguous when two imported files 
 		assert.equal(meta.candidates.length, 2);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Test 7 (Phase 6): Idempotency -- a second pass over identical state is a no-op
+// ---------------------------------------------------------------------------
+
+describe('runCrossFileResolver -- idempotency', () => {
+	let repo: string;
+
+	before(async () => {
+		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-idem-'));
+		const javaRoot = join(repo, 'src', 'main', 'java', 'com', 'example');
+		mkdirSync(javaRoot, { recursive: true });
+		writeFileSync(join(javaRoot, 'Foo.java'), 'package com.example;\npublic class Foo {}');
+		writeFileSync(join(javaRoot, 'Bar.java'),
+			'package com.example;\npublic class Bar extends Foo {}');
+
+		const fooFile = join(javaRoot, 'Foo.java');
+		const barFile = join(javaRoot, 'Bar.java');
+
+		await upsertEntities(db, [
+			mkEntity(repo, fooFile, 'file',  fooFile),
+			mkEntity(repo, fooFile, 'class', 'Foo'),
+			mkEntity(repo, barFile, 'file',  barFile),
+			mkEntity(repo, barFile, 'class', 'Bar'),
+		]);
+		await upsertRelations(db, [{
+			kind: 'INHERITS', from: makeEntityId(repo, barFile, 'class', 'Bar'), to: 'Foo', resolved: false,
+			meta: { file: barFile, repo },
+		}]);
+	});
+
+	after(() => {
+		try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+
+	it('second run resolves nothing new and the typed REL count is unchanged', async () => {
+		const sourceRoots = detectSourceRoots(repo);
+
+		const first = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.equal(first.resolved, 1, `first: ${JSON.stringify(first)}`);
+
+		// Snapshot the INHERITS edge count
+		const before = await fileExistsForGraph('MATCH ()-[r:INHERITS]->() RETURN count(r) AS n', {});
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const beforeN = Number((before[0] as any)['n']);
+
+		const second = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.equal(second.resolved, 0, `second pass should resolve nothing new: ${JSON.stringify(second)}`);
+		assert.equal(second.importsRewired, 0);
+
+		const after = await fileExistsForGraph('MATCH ()-[r:INHERITS]->() RETURN count(r) AS n', {});
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const afterN = Number((after[0] as any)['n']);
+		assert.equal(afterN, beforeN, `INHERITS count drifted between passes: ${beforeN} -> ${afterN}`);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Test 8 (Phase 6): Perf budget -- the resolver is fast on synthetic input
+// ---------------------------------------------------------------------------
+
+describe('runCrossFileResolver -- perf budget', () => {
+	let repo: string;
+	const N_FILES = 50;
+	const N_CLASSES_PER_FILE = 4;
+
+	before(async () => {
+		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-perf-'));
+		const javaRoot = join(repo, 'src', 'main', 'java', 'com', 'pkg');
+		mkdirSync(javaRoot, { recursive: true });
+
+		const entities: Entity[] = [];
+		const relations: Relation[] = [];
+		// Each file defines N_CLASSES_PER_FILE classes; class-i in file f
+		// inherits from class-(i-1) in the same file (within-file resolution)
+		// or from class-N in a different file (cross-file resolution).
+		for (let f = 0; f < N_FILES; f++) {
+			const file = join(javaRoot, `File${f}.java`);
+			writeFileSync(file, `package com.pkg;\npublic class _stub {}\n`);
+			entities.push(mkEntity(repo, file, 'file', file));
+			for (let c = 0; c < N_CLASSES_PER_FILE; c++) {
+				const name = `C_${f}_${c}`;
+				entities.push(mkEntity(repo, file, 'class', name));
+			}
+			// Cross-file INHERITS: C_f_0 extends C_(f+1 mod N)_0
+			const target = `C_${(f + 1) % N_FILES}_0`;
+			relations.push({
+				kind: 'INHERITS',
+				from: makeEntityId(repo, file, 'class', `C_${f}_0`),
+				to: target,
+				resolved: false,
+				meta: { file, repo },
+			});
+		}
+
+		await upsertEntities(db, entities);
+		await upsertRelations(db, relations);
+	});
+
+	after(() => {
+		try { rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+
+	it(`resolves ${N_FILES} cross-file INHERITS in under 5 s`, async () => {
+		const sourceRoots = detectSourceRoots(repo);
+		const result = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.ok(result.resolved >= N_FILES,
+			`expected at least ${N_FILES} resolutions; got ${result.resolved}: ${JSON.stringify(result)}`);
+		assert.ok(result.elapsedMs < 5000,
+			`took ${result.elapsedMs} ms (>= 5 s budget): ${JSON.stringify(result)}`);
+	});
+
+	it('a no-op second pass is much cheaper than the first', async () => {
+		const sourceRoots = detectSourceRoots(repo);
+		const second = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
+		assert.equal(second.resolved, 0,
+			`second pass should resolve nothing new: ${JSON.stringify(second)}`);
+		// 1 s is generous; on local hardware the no-op pass typically
+		// finishes in <100 ms because there are no UnresolvedRelation
+		// rows left.
+		assert.ok(second.elapsedMs < 1000,
+			`no-op pass took ${second.elapsedMs} ms (>= 1 s): ${JSON.stringify(second)}`);
+	});
+});
