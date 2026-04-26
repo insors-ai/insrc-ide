@@ -267,12 +267,17 @@ export interface TaskController {
    *
    * For cyclic tasks: receives the gate reply and decides whether to
    * retry (return same task with updated state), skip, or advance.
+   *
+   * May return a Promise for controllers that need to await async work
+   * (e.g. an inline tool-loop run) before deciding the next task.
+   * Sync returns are still valid -- the call site awaits unconditionally,
+   * so a plain `Task[] | null` resolves immediately.
    */
   next(
     completed: TaskResult,
     gateReply: GateReply | undefined,
     state: TaskStateStore,
-  ): Task[] | null;
+  ): Task[] | null | Promise<Task[] | null>;
 
   /**
    * Called when the pipeline finishes. Produces the final output
@@ -734,7 +739,7 @@ export async function runControlledPipeline(
           allResults.push(result);
           log.info({ task: task.description }, 'cyclic task skipped');
           // Still ask controller for next
-          const nextTasks = controller.next(result, gateReply, stateStore);
+          const nextTasks = await controller.next(result, gateReply, stateStore);
           if (nextTasks) pendingTasks.unshift(...nextTasks);
           continue;
         }
@@ -782,7 +787,11 @@ export async function runControlledPipeline(
     // this call, otherwise the persisted snapshot would reflect the
     // state as of gate emission -- i.e. the user's last action would
     // not be visible on resume. plans/session-lifecycle.md Phase 1 fix.
-    const nextTasks = controller.next(result, gateReply, stateStore);
+    //
+    // `await` is unconditional so controllers may return a Promise when
+    // they need to do async work (e.g. an inline tool-loop run) before
+    // queueing the next task. Sync returns resolve immediately.
+    const nextTasks = await controller.next(result, gateReply, stateStore);
 
     // Emit QnA updates if controller stored them
     const qna = stateStore.get<unknown[]>('brainstormQnA');
