@@ -368,6 +368,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         data: { message: `[code-analyzer] ${msg}` },
       }),
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+      checkPathAccess: (path) => this.checkPathAccess(path, state),
     });
     state.set(K_LAST_RUNNER, outcome);
 
@@ -668,6 +669,99 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       throw new Error('resolveAnalyzerProvider: deps not attached');
     }
     return this.deps.session.resolver.resolve('code-analyzer', 'analyzer');
+  }
+
+  // -------------------------------------------------------------------------
+  // fs-access gate (Phase 1.6)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Path-access check the analyzer runner consults before fs-class
+   * tool calls. In-repo paths are implicit allow; out-of-repo paths
+   * are matched against the session's approvedDirs, and unapproved
+   * paths fire an interactive gate. On approve the parent directory
+   * is added to approvedDirs (cascades to descendants for the rest
+   * of the chat session).
+   */
+  private async checkPathAccess(
+    requestedPathRaw: string,
+    state: TaskStateStore,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    if (this.deps === undefined) return { allowed: false, reason: 'deps not attached' };
+    const ca = state.get<CodeAnalysisState>(K_STATE);
+    if (ca === undefined) return { allowed: true };
+    const { resolve: pathResolve, dirname, sep } = await import('node:path');
+
+    const requestedAbs = pathResolve(this.deps.session.repoPath || process.cwd(), requestedPathRaw);
+    const repoRoot = ca.repoSummary.rootPath;
+
+    if (repoRoot.length > 0 && (requestedAbs === repoRoot || requestedAbs.startsWith(repoRoot + sep))) {
+      return { allowed: true };
+    }
+    for (const approved of ca.approvedDirs) {
+      if (requestedAbs === approved || requestedAbs.startsWith(approved + sep)) {
+        return { allowed: true };
+      }
+    }
+    // Out-of-repo + unapproved -- fire the gate. Grant the parent
+    // directory so descendants are covered for the rest of the session.
+    const grantPath = dirname(requestedAbs);
+    log.info({ requestedAbs, grantPath }, 'fs-access gate: firing for out-of-repo path');
+    const action = await this.fireFsAccessGate(requestedAbs, grantPath);
+    if (action === 'approve') {
+      const updated: CodeAnalysisState = {
+        ...ca,
+        approvedDirs: [...ca.approvedDirs, grantPath],
+      };
+      state.set(K_STATE, updated);
+      log.info({ grantPath, total: updated.approvedDirs.length }, 'fs-access gate: approved');
+      return { allowed: true };
+    }
+    log.info({ grantPath }, 'fs-access gate: denied');
+    return { allowed: false, reason: `user denied access to ${grantPath}` };
+  }
+
+  /**
+   * Fire the fs-access gate via the daemon's external-gate channel.
+   * Awaits the user's reply (no timeout in Phase 1; matches
+   * gateTaskResult's behaviour).
+   */
+  private async fireFsAccessGate(requestedPath: string, grantPath: string): Promise<string> {
+    if (this.deps === undefined) {
+      throw new Error('fireFsAccessGate: deps not attached');
+    }
+    const gateId = `code-analyzer-fs-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const content = [
+      'The Code Analyzer wants to read a path **outside the active repo**:',
+      '',
+      `**Requested:** \`${requestedPath}\``,
+      `**Grant scope:** \`${grantPath}\` (covers all descendants for the rest of this chat session)`,
+      '',
+      'Approving once covers every file under the grant scope -- the analyzer will not re-prompt for further reads inside it. A new chat session re-asks.',
+    ].join('\n');
+    this.deps.send({
+      id: this.deps.requestId,
+      stream: 'gate',
+      data: {
+        gateId,
+        title: 'Code Analyzer: out-of-repo path',
+        content,
+        format: 'markdown',
+        actions: [
+          { name: 'approve', label: `Approve \`${grantPath}\`` },
+          { name: 'deny', label: 'Deny' },
+        ],
+      },
+    });
+
+    const channel = this.deps.channel;
+    return await new Promise<string>((resolve, reject) => {
+      channel.registerExternalGate(
+        gateId,
+        (reply) => resolve(reply.action),
+        reject,
+      );
+    });
   }
 }
 

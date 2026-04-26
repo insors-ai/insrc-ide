@@ -190,6 +190,17 @@ export interface RunAnalyzerOpts {
   onProgress?: ((message: string) => void) | undefined;
   /** Cancellation signal forwarded to executeTool. */
   signal?: AbortSignal | undefined;
+  /**
+   * Per-call path approval check (Phase 1.6 fs-access gate). Called
+   * with the absolute path the analyzer wants to read before
+   * executeTool runs for fs-class tools (Read / Grep / ListDirectory).
+   * The orchestrator implements this against its session-scoped
+   * approvedDirs registry and fires a user gate for unapproved
+   * out-of-repo paths.
+   *
+   * When unset, all paths are allowed (Phase 1.4 default behaviour).
+   */
+  checkPathAccess?: ((path: string) => Promise<{ allowed: boolean; reason?: string }>) | undefined;
 }
 
 export interface RunAnalyzerOutcome {
@@ -257,6 +268,28 @@ export async function runAnalyzer(
         callTrace.push({ name: call.name, argsHash: hashArgs(call.input), durationMs: 0, resultRows: 0, error: msg });
         resultsBlock.push(renderToolResultBlock(call.id, msg, true));
         continue;
+      }
+      // fs-access gate (Phase 1.6) -- consult the orchestrator-supplied
+      // checkPathAccess callback for fs-class tools. The callback may
+      // suspend on a user gate; we await its decision before deciding
+      // whether to execute the tool.
+      if (opts.checkPathAccess !== undefined) {
+        const requestedPath = extractPathArg(call);
+        if (requestedPath !== undefined) {
+          const decision = await opts.checkPathAccess(requestedPath);
+          if (!decision.allowed) {
+            const msg = `[error] PermissionDenied: ${decision.reason ?? `access to ${requestedPath} not approved`}`;
+            callTrace.push({
+              name: call.name,
+              argsHash: hashArgs(call.input),
+              durationMs: 0,
+              resultRows: 0,
+              error: msg,
+            });
+            resultsBlock.push(renderToolResultBlock(call.id, msg, true));
+            continue;
+          }
+        }
       }
 
       const t0 = Date.now();
@@ -486,5 +519,20 @@ function sortKeys(v: unknown): unknown {
   return v;
 }
 
-// avoid unused-import warning when ToolCall isn't otherwise referenced
-void (null as unknown as ToolCall);
+/**
+ * Extract the filesystem path argument the analyzer wants to read for
+ * fs-class tool calls. Returns undefined for tools that don't read
+ * paths or for calls that omit the path arg (Grep without `path`
+ * defaults to cwd, which is in-repo).
+ */
+function extractPathArg(call: ToolCall): string | undefined {
+  if (call.name === 'Read') {
+    const v = call.input['file_path'];
+    return typeof v === 'string' && v.length > 0 ? v : undefined;
+  }
+  if (call.name === 'Grep' || call.name === 'ListDirectory') {
+    const v = call.input['path'];
+    return typeof v === 'string' && v.length > 0 ? v : undefined;
+  }
+  return undefined;
+}
