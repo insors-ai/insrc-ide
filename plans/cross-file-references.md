@@ -59,7 +59,7 @@ constraint:
 | 0     | Foundations: persistence schema for unresolved relations, settle hook, idempotency     | partial -- 62bea4defb7 (settle hook deferred to Phase 3) |
 | 1     | Quick win -- fix Python relative-import path resolution                                | done -- 8a45171cc82 |
 | 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | done -- 063d600d1cb |
-| 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | done -- uncommitted |
+| 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | done -- 809e175659a |
 | 4     | Cross-file CALLS resolution (using imported scope)                                     | todo   |
 | 5     | Incremental mode: watcher settle window + invalidation on edit/delete                  | todo   |
 | 6     | Performance + idempotency validation, integration tests                                | todo   |
@@ -883,15 +883,15 @@ no real `@parcel/watcher` involvement.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `cross-file-resolver.ts` + entry API       | done -- uncommitted | `runCrossFileResolver({ db, repoRoot, sourceRoots, scopeFile? })` returns counts + elapsedMs |
+| `cross-file-resolver.ts` + entry API       | done -- 809e175659a | `runCrossFileResolver({ db, repoRoot, sourceRoots, scopeFile? })` returns counts + elapsedMs |
 | `listUnresolvedRelations` Kuzu query       | done   | landed in Phase 0 |
-| Name-to-entity index builder               | done -- uncommitted | per-pass in-memory `Map<lang:kind:name, Entity[]>` + per-file + module-stub indices |
-| IMPORTS module-stub-to-file linking (per-language) | done -- uncommitted | covers JVM (`com.x.Foo` -> `<root>/com/x/Foo.{java,scala}`), Python (`a.b.c` -> `.py` / `__init__.py`), Go (strips go.mod module prefix), TS/JS (expands `paths` mappings + extension probing) |
-| INHERITS resolution                        | done -- uncommitted | same-file first, then imported-file scope, then same-package visibility for JVM |
-| IMPLEMENTS resolution                      | done -- uncommitted | shares the inheritance pipeline with kind preference flipped (`interface` first, `class` for Scala traits) |
-| Ambiguity tracking (`meta.candidates`)     | done -- uncommitted | persists candidate id list via `updateUnresolvedMeta`; row stays in UnresolvedRelation for retry |
-| Batch-write helper                         | partial -- uncommitted | reuses Phase 0's `promoteToResolved`; explicit batching loop deferred until Phase 6 perf work shows it's needed |
-| Unit tests (per-language fixtures)         | done -- uncommitted | cross-file-resolver.test.ts -- 3 cases against real Kuzu + LanceDB (same-package INHERITS, module-stub rewire, external-dep stays-as-stub) |
+| Name-to-entity index builder               | done -- 809e175659a | per-pass in-memory `Map<lang:kind:name, Entity[]>` + per-file + module-stub indices |
+| IMPORTS module-stub-to-file linking (per-language) | done -- 809e175659a | covers JVM (`com.x.Foo` -> `<root>/com/x/Foo.{java,scala}`), Python (`a.b.c` -> `.py` / `__init__.py`), Go (strips go.mod module prefix), TS/JS (expands `paths` mappings + extension probing) |
+| INHERITS resolution                        | done -- 809e175659a | same-file first, then imported-file scope, then same-package visibility for JVM |
+| IMPLEMENTS resolution                      | done -- 809e175659a | shares the inheritance pipeline with kind preference flipped (`interface` first, `class` for Scala traits) |
+| Ambiguity tracking (`meta.candidates`)     | done -- 809e175659a | persists candidate id list via `updateUnresolvedMeta`; row stays in UnresolvedRelation for retry |
+| Batch-write helper                         | partial -- 809e175659a | reuses Phase 0's `promoteToResolved`; explicit batching loop deferred until Phase 6 perf work shows it's needed |
+| Unit tests (per-language fixtures)         | done -- 809e175659a | cross-file-resolver.test.ts -- 3 cases against real Kuzu + LanceDB (same-package INHERITS, module-stub rewire, external-dep stays-as-stub) |
 
 ### Phase 4 -- Cross-file CALLS
 
