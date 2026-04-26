@@ -16,7 +16,7 @@ The plan is structured to match the design doc's §16 phasing. Phase 0 lands sha
 | Phase | Scope                                                                        | Status |
 |-------|------------------------------------------------------------------------------|--------|
 | 0     | Framework prerequisites — register family + pane widget (TodosApi already covers updateItemMeta/markCancelled) | done (0.1 `822b0348e2e` + 0.3 `2f0652c3440`; 0.2 no-op) |
-| 1     | Core orchestrator + analyzer loop; gates; classifier routing (legacy kept)   | pending |
+| 1     | Core orchestrator + analyzer loop; gates; classifier routing (legacy kept)   | done (1.1 `a6fb4756b1b`, 1.3 `b425be90bcf`, 1.5 `cc615e6942a`, 1.4 `1621a82fcce`, framework `2e69644ed8a`, 1.2 `cc08185b711`, 1.8 `399c6e37bef`, 1.6 `05dd6c2b707`, 1.7 `95c8330df2e`) |
 | 2     | Analysis Report Pane + annotate/batch-send + **legacy controller deletion**  | pending |
 | 3     | Cross-agent integration (`code:*` registered, `data:*` / `deploy:*` wired)   | pending |
 | 4     | Polish — repo-rev re-run, diff-vs-previous, optional `@mention` dispatch     | pending |
