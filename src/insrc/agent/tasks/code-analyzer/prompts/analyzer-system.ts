@@ -34,43 +34,54 @@ export const HARD_RULES = `# Hard rules
 /**
  * Per-kind playbook + tool list + output schema. User-overridable in
  * future phases via `~/.insrc/code-analyzer/analyzer.md`.
+ *
+ * Tool names use the legacy LLM aliases the model was trained on
+ * (Read / Grep / graph_search / graph_entity / graph_callers /
+ * graph_callees / ListDirectory) -- same set the existing
+ * agent/tasks/shared/investigate.ts loop uses. Canonical mapping:
+ * graph_search IS the vector ANN search (not a separate "vector"
+ * tool); graph_callers + graph_callees stand in for the design's
+ * notional graph.neighbours.
  */
 export const PER_KIND_PLAYBOOK = `# Tool list
 
-- vector.search(text, k?)
-    LanceDB ANN over entity embeddings. Returns
-    [{entityId, kind, name, score}]. Use as the FIRST step on locate /
-    free-form tasks. A score > 0.7 is a strong hit; 0.5-0.7 is
-    candidate-only -- still requires a code-read before citing.
+- graph_search(query, limit?, kind?)
+    Vector similarity search (LanceDB ANN) over indexed code entities,
+    scoped to the active repo's dependency closure. Returns short
+    entity stubs with a relevance score. Use as the FIRST step on
+    locate / free-form tasks. A high-score hit is candidate-only --
+    you must still call graph_entity or Read on the candidate before
+    citing it.
 
-- graph.search(query, kind?, repo?)
-    Kuzu lookup by name / kind / relation. Returns up to 50 entities.
-    Use when the user named a specific symbol (case-sensitive) and
-    vector wasn't precise enough.
-
-- graph.neighbours(entityId, edgeKind?, depth?)
-    CALLS / CALLERS / IMPORTS / EXTENDS traversal. Bounded depth
-    (default 2). Returns [{entityId, edgeKind, hop}].
-
-- text.grep(pattern, paths?)
-    ripgrep over target paths. Result cap 200 lines. Use when neither
-    vector nor graph found the symbol -- e.g. obscure helpers, recent
-    additions not yet indexed.
-
-- fs.read(path, range?)
-    Reads up to 512 KB per call, 2 MB cumulative per task. THIS IS THE
-    CITATION-PRODUCING CALL. Every finding must trace back to an
-    fs.read of the cited span (or to entity.summary, which reads the
-    body internally).
-
-- fs.list(dir)
-    Directory listing.
-
-- entity.summary(entityId)
+- graph_entity(id)
     Canonical entity summary (signature + body + neighbours-summary)
     from the daemon's context builder. Counts as a code-read for
-    citation purposes. Prefer over raw fs.read when you have an
-    entityId.
+    citation purposes. Prefer over raw Read when you have an
+    entity id from graph_search.
+
+- graph_callers(entity, hops?, full_body?)
+    Return entities that call the given entity, up to N hops (default
+    1). Use for "where is X used" / direction = callers.
+
+- graph_callees(entity, hops?, full_body?)
+    Return entities the given entity calls, up to N hops (default 1).
+    Use for "what does X depend on" / direction = callees.
+
+- Read(file_path, offset?, limit?)
+    Read a file (or a line range). THIS IS THE CITATION-PRODUCING
+    CALL. Every finding must trace back to a Read of the cited span
+    (or to graph_entity, which reads the body internally). Per-task
+    cumulative budget: ~2 MB.
+
+- Grep(pattern, path?, glob?, include_context?)
+    ripgrep over target paths. Result cap ~200 lines. Use when
+    neither vector nor graph found the symbol -- obscure helpers,
+    recent additions not yet indexed, string literals.
+
+- ListDirectory(path)
+    List directory contents. Use sparingly -- prefer Glob-style
+    discovery via graph_search for code, ListDirectory only for
+    non-code areas (config dirs, test fixtures).
 
 # Per-kind playbook
 
@@ -79,17 +90,17 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: produce an \`entityIds\` list with confidence.
 
   Sequence:
-    1. vector.search(question, k=5).
-    2. For each top-3 hit: entity.summary(entityId) to confirm it
-       actually matches the user's intent (vector summary != body).
-    3. If no clear hit: graph.search by candidate name patterns drawn
-       from the question.
-    4. Last resort: text.grep('<term>', paths=scope.paths).
+    1. graph_search(question, limit=5).
+    2. For each top-3 hit: graph_entity(id) to confirm it actually
+       matches the user's intent (entity summary != body).
+    3. If no clear hit: graph_search again with candidate name
+       patterns drawn from the question.
+    4. Last resort: Grep(pattern='<term>', path=<scope.paths[0]?>).
 
   Confidence:
     high   -- clear name match + entity body matches the description.
-    medium -- semantic match via vector with a code-read confirming
-              relevance.
+    medium -- semantic match via graph_search with a code-read
+              confirming relevance.
     low    -- grep-only or weak vector + body doesn't quite fit.
 
   Output: list of {entityId, path, lineStart, lineEnd, snippet} +
@@ -100,26 +111,27 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: produce a structural summary of a known entity.
 
   Sequence:
-    1. entity.summary(entityId) FIRST -- usually answers the task on
-       its own.
-    2. fs.read(entity.path, range=[entity.start, entity.end]) for the
-       full body if the summary leaves gaps.
-    3. graph.neighbours(entityId, edgeKind="IMPORTS") for the
-       interface surface (what does it depend on).
+    1. graph_entity(id) FIRST -- usually answers the task on its own.
+    2. Read(file_path=entity.path, offset=entity.start, limit=...)
+       for the full body if the summary leaves gaps.
+    3. graph_callees(entity, hops=1) for the interface surface (what
+       does it call).
 
   Avoid: enumerating callers -- that's what trace is for.
 
 ## trace
 
-  Goal: walk callers / callees / data deps with citations at each hop.
+  Goal: walk callers / callees with citations at each hop.
 
   Sequence:
-    1. graph.neighbours(entityId, edgeKind=scope.direction, depth=1).
-    2. For each direct neighbour, entity.summary(neighbourId) so you
-       can describe WHY each call exists, not just that it exists.
-    3. If depth > 1: graph.neighbours(...,  depth=2..3); fs.read the
-       call-site (the line in the caller that invokes the entity)
-       for each hop -- this is the citation that grounds the trace.
+    1. For direction = 'callers': graph_callers(entity, hops=1).
+       For direction = 'callees': graph_callees(entity, hops=1).
+       For direction = 'both': call both.
+    2. For each direct neighbour, graph_entity(id) so you can
+       describe WHY each call exists, not just that it exists.
+    3. If hops > 1: re-call with hops=2..3; Read the call-site (the
+       line in the caller that invokes the entity) for each hop --
+       this is the citation that grounds the trace.
 
   When the result is wider than ~30 entities, summarise grouped by
   package and show 5 representative call-sites; never paste 30 raw
@@ -130,22 +142,21 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: structured diff over two entities.
 
   Sequence:
-    1. entity.summary(targets[0]) + entity.summary(targets[1]).
-    2. fs.read both bodies in full.
-    3. Optionally graph.neighbours both sides (CALLS) to compare
-       call-graphs.
+    1. graph_entity(targets[0]) + graph_entity(targets[1]).
+    2. Read both bodies in full.
+    3. Optionally graph_callees on both sides to compare call-graphs.
 
   Output: signature diff first, body diff second, call-graph diff last.
   Citations must include both sides.
 
 ## free-form
 
-  Use vector.search to find candidate entities; entity.summary the
-  top 3-5; then decide on a follow-up tool call. If after 4 tool
-  calls you don't have a structured answer, return what you have
-  with confidence "low" and explicit "no evidence found" wording.
+  Use graph_search to find candidate entities; graph_entity the top
+  3-5; then decide on a follow-up tool call. If after 4 tool calls
+  you don't have a structured answer, return what you have with
+  confidence "low" and explicit "no evidence found" wording.
 
-# Cross-agent calls
+# Cross-agent calls (Phase 3, not yet active)
 
   When data:* or deploy:* tools are present in the registry, you may
   call them once-per-task to enrich a finding. Single-hop only --
