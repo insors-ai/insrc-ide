@@ -228,7 +228,7 @@
     </li>
     <li><a href="#intent">Intent Routing</a></li>
     <li><a href="#llm-routing">LLM Routing</a></li>
-    <li><a href="#db-driver">DB Driver Extension (Phase 3)</a></li>
+    <li><a href="#cross-agent">Cross-Agent Integration</a></li>
     <li><a href="#caching">Caching &amp; Resume</a></li>
     <li><a href="#failure">Failure Modes</a></li>
     <li><a href="#phasing">Phasing</a></li>
@@ -239,7 +239,7 @@
 <main>
 
 <h1>Code Analyzer Agent</h1>
-<p class="subtitle">Cloud-orchestrated, local-analyzed, read-only code understanding with a live analysis surface.</p>
+<p class="subtitle">Cloud-orchestrated, local-analyzed, read-only code understanding with a live analysis surface. One of three standalone analyzers (alongside <a href="data-analyzer.html">Data Analyzer</a> and <a href="deployment-analyzer.html">Deployment Analyzer</a>).</p>
 
 <!-- ================================================================== -->
 <h2 id="overview">1. Overview</h2>
@@ -249,6 +249,16 @@
   Markdown report answering a user's question about a codebase. It handles everything from focused
   questions ("where is <code>UserService.refresh</code> called from?") to broad audits
   ("summarise the auth flow and call out gaps"). It never writes code.
+</p>
+
+<p>
+  The analyzer is <strong>standalone in every regard</strong> -- its plan, run loop, review
+  loop, synthesise, present gate, findings store, artifacts dir
+  (<code>docs/code-analysis/&lt;slug&gt;.md</code>), REPL entry (<code>/code-analyze</code>), and
+  tool registry are independent of the Data and Deployment analyzers. Removing one of the other
+  analyzers does not affect this one. When all three are present, cross-agent enrichment via
+  registered tools is opt-in (see <a href="#cross-agent">§13</a>); when not, the Code Analyzer
+  produces best-effort findings with a "consider running the X analyzer" footer.
 </p>
 
 <p>
@@ -307,37 +317,49 @@
 <h2 id="family">3. Family &amp; Variant</h2>
 
 <div class="callout decision">
-  <strong>Decision:</strong> The code analyzer is a <strong>variant of the <code>research</code>
-  family</strong>, not a new agent family. TodoList ownership stamps <code>owner: 'research'</code>;
-  the <code>code-analysis</code> vs free-form <code>research</code> distinction is an internal
-  variant, following the <code>pair</code>/<code>delegate</code> pattern under
-  <code>implementation</code>.
+  <strong>Decision:</strong> The Code Analyzer is its own <strong>family</strong>
+  (<code>code-analyzer</code>), not a variant of <code>research</code>. The Data Analyzer
+  (<code>data-analyzer</code>) and Deployment Analyzer (<code>deployment-analyzer</code>) are
+  sibling families. Each family owns its own registry row, slash command
+  (<code>/code-analyze</code>), TODO ownership stamp, prompt assets, artifacts directory, and
+  read-only tool surface. None depends on the others at runtime.
 </div>
 
 <p>
-  Why <code>research</code>, not a new family:
+  Why three sibling families instead of one umbrella with variants:
 </p>
 
 <ul>
-  <li>The registry row for <code>research</code>
-    (<code>src/insrc/shared/agent-registry.ts</code>) already reads:
-    <em>"Read-only exploration of code and docs; answers informational questions without mutating
-    anything."</em> That is exactly the analyzer's mandate.</li>
-  <li>Adding a new family means registry churn + exhaustiveness-check migrations + config-dir
-    layout + frontmatter whitelist changes. The framework explicitly says ownership lives at the
-    family level; variants are private.</li>
-  <li>The existing <code>ResearchController</code> (free-form web-capable investigation) and the
-    new code-analysis pipeline can coexist as sibling variants under one family, selected by
-    intent at classification time.</li>
+  <li><strong>Standalone in every regard.</strong> Removing one analyzer is a code-tree change
+    that doesn't touch the others. The user can disable any one of the three via
+    <code>insrc.analyzers.enabled</code> without breaking the survivors.</li>
+  <li><strong>Disjoint tool surfaces.</strong> Code wants graph / vector / fs / grep; Data wants
+    DB drivers; Deployment wants IaC parsers. Hosting them under one family forces a
+    lowest-common-denominator tool registry; three families let each carry the right closed set
+    for its domain.</li>
+  <li><strong>Disjoint citation shapes.</strong> Code citations are
+    <code>(path, lineRange, snippet)</code>; Data citations are
+    <code>(connection, table, column [, queryResult])</code>; Deployment citations are
+    <code>(manifestFile, resourceKind, envOverlay)</code>. A shared family would muddle citation
+    rendering in the Analysis Report Pane.</li>
+  <li><strong>Independent plan budgets.</strong> Each family carries its own 16/24
+    soft/hard task cap independent of the others, so cross-agent fan-out doesn't share a token
+    budget across analyzers (see <a href="#orch-termination">§6.3</a>).</li>
 </ul>
 
 <p>
-  Variant disambiguation uses the same pattern as <code>implementation</code>: the controller's
-  <code>variant: 'code-analysis' | 'free-form'</code> field distinguishes the pipelines;
-  prompt assets live in <code>~/.insrc/research/</code> under variant-named files
-  (<code>code-analysis-plan.md</code>, <code>code-analysis-review.md</code>,
-  <code>code-analysis-analyzer.md</code>, ...). Ownership in the todos framework stays at
-  <code>'research'</code> across variants.
+  The existing <code>ResearchController</code> (free-form web-capable investigation) stays as
+  the <code>research</code> family it always was; the legacy <code>CodeAnalysisController</code>
+  hosted under <code>research</code> is deprecated and removed alongside the cleanup tracked in
+  <a href="#arch-existing">§4.4</a>. After cleanup, <code>research</code> covers free-form
+  investigation only and the three analyzer families cover code / data / deployment cleanly.
+</p>
+
+<p>
+  Prompt assets live in <code>~/.insrc/code-analyzer/</code> for this agent (siblings:
+  <code>~/.insrc/data-analyzer/</code>, <code>~/.insrc/deployment-analyzer/</code>). Each
+  directory carries the family's <code>plan.md</code>, <code>review.md</code>,
+  <code>analyzer.md</code>, <code>synthesise.md</code> prompts.
 </p>
 
 <!-- ================================================================== -->
@@ -918,8 +940,8 @@ interface AnalysisItemMeta {
     | 'describe'                     // summarise an entity / file / package
     | 'trace'                        // trace callers / callees / data flow
     | 'compare'                      // two entities, two versions, two impls
-    | 'inspect-schema'               // (phase 3) DB schema / sample-rows
-    | 'free-form';                   // fallback
+    | 'free-form';                   // fallback (cross-agent calls -- see §13 -- happen as
+                                     //  tool calls inside any kind, not as a distinct task kind)
   question: string;                  // from item.description
   scope?: {
     entityIds?: string[];
@@ -1000,13 +1022,15 @@ interface CodeCitation {
     <td>Prefer over raw <code>fs.read</code> when the entity id is known.</td>
   </tr>
   <tr>
-    <td><code>db.describe</code> / <code>db.sample</code></td>
-    <td><em>Phase 3</em> DB driver (see §13)</td>
-    <td>Disabled by default; opt-in per-repo.</td>
+    <td><code>data:*</code> / <code>deploy:*</code></td>
+    <td>Cross-agent read-only enrichment (see <a href="#cross-agent">§13</a>)</td>
+    <td>Available only when the Data / Deployment analyzers are installed and enabled. Single-hop
+      depth cap; missing target returns the <code>TOOL_UNAVAILABLE</code> sentinel.</td>
   </tr>
 </table>
 
-<p><strong>Explicitly excluded:</strong> shell exec, file writes, network fetch, git mutation.</p>
+<p><strong>Explicitly excluded:</strong> shell exec, file writes, network fetch, git mutation,
+  any tool that mutates state in any of the three analyzer domains.</p>
 
 <h3 id="analyzer-scope">7.3 Scope &amp; Out-of-Repo Access Gate</h3>
 
@@ -1422,15 +1446,24 @@ interface CodeCitation {
 <h2 id="intent">11. Intent Routing</h2>
 
 <p>
-  The classifier's <code>code-analysis</code> intent already exists and currently maps to the
-  (now deprecated) single-pass controller. After phase 1 ships, the routing change is a one-line
-  swap: <code>code-analysis</code> &rarr; new orchestrator controller. No classifier / keyword
-  changes, no taxonomy change.
+  Two orthogonal entry points, both resolving to this controller:
 </p>
 
+<ul>
+  <li><strong>Explicit slash command:</strong> <code>/code-analyze &lt;prompt&gt;</code>.
+    Bypasses the classifier; the request goes directly to the Code Analyzer family. This is the
+    primary surface, mirroring <code>/data-analyze</code> and <code>/deploy-analyze</code> for
+    the sibling analyzers.</li>
+  <li><strong>Classifier intent:</strong> the <code>code-analysis</code> intent in the
+    classifier remains for free-form chat ("trace the auth flow"); it routes to the same
+    controller. The classifier never disambiguates between code / data / deployment intents on
+    a free-form prompt -- it picks the most likely fit by content, and the user reaches for the
+    explicit slash command when they want a specific analyzer.</li>
+</ul>
+
 <p>
-  Once phase 2 stabilises and the deprecated controller is deleted (§4.4), nothing in intent
-  routing mentions the legacy pipeline.
+  Once phase 2 stabilises and the deprecated controller is deleted (<a href="#arch-existing">§4.4</a>),
+  nothing in intent routing mentions the legacy pipeline.
 </p>
 
 <!-- ================================================================== -->
@@ -1484,305 +1517,147 @@ interface CodeCitation {
 </div>
 
 <!-- ================================================================== -->
-<h2 id="db-driver">13. DB Driver Extension (Phase 3)</h2>
+<h2 id="cross-agent">13. Cross-Agent Integration</h2>
 
 <p>
-  Answering "does the code match the schema?" or "what shape is the data in
-  <code>users.metadata</code>?" requires reading live DB state. We scope this as a
-  <strong>tool plugin</strong>, not a new agent surface, so the analyzer calls it exactly the
-  same way it calls <code>graph.search</code> or <code>fs.read</code>.
+  The Code Analyzer is fully functional on its own. When the Data Analyzer
+  (<code>data-analyzer</code> family) and Deployment Analyzer
+  (<code>deployment-analyzer</code> family) are installed and enabled, this analyzer can call
+  their read-only tools mid-task to enrich findings -- e.g. confirm that a
+  <code>db.query("SELECT * FROM users")</code> call references a real <code>users</code> table,
+  or that a <code>process.env.DB_HOST</code> reference resolves to a known deployment env-var.
+  When they're absent, the Code Analyzer reports best-effort findings with a
+  <em>"Consider running /data-analyze for richer schema findings"</em> footer line.
 </p>
-
-<h3>13.1 Per-Repo Connection Setup</h3>
-
-<p>
-  Each repo can configure <strong>one or more DB connections</strong>, across two families:
-</p>
-
-<ul>
-  <li><strong>RDBMS</strong> — tabular, schema-first stores reachable over a SQL-ish protocol:
-    Postgres, MySQL, SQLite, MSSQL, Oracle, CockroachDB, SingleStore, ClickHouse, etc.</li>
-  <li><strong>KV</strong> — key-value / document stores with no uniform schema: Redis / Valkey /
-    KeyDB, DynamoDB, etcd, Memcached, etc. MongoDB sits between the two — its collections are
-    schema-less documents, so it lives under the KV family for the analyzer's purposes even
-    though it has richer query semantics than a pure KV.</li>
-</ul>
-
-<p>
-  The expected setup is <em>development / local / staging</em> — the databases a developer
-  already has open in a tab while writing code (local Postgres from <code>docker-compose</code>,
-  a sqlite test DB, a local Redis, maybe a staging MongoDB). Pointing at production is
-  supported but not the default audience; we do not design safety assuming prod.
-</p>
-
-<p>
-  The <code>kind</code> field is an <strong>open string</strong>, not a closed union — any
-  driver registered in the daemon can be referenced. Drivers declare their own <code>kind</code>
-  + <code>family</code> when registering; unknown kinds reject at config-validate time. This
-  lets new stores land without a schema migration.
-</p>
-
-<pre><code>// ~/.insrc/&lt;repo&gt;/db-connections.json -- per-repo, not in the repo source
-{
-  "connections": [
-    {
-      "id":     "primary",                        // unique within the repo
-      "kind":   "mysql",                          // open string -- see registered drivers
-      "family": "rdbms",                          // optional; inferred from kind on load
-      "label":  "Local (docker-compose)",
-      "url":    "mysql://app:app@localhost:3306/app",
-      "schemaSource": {                           // optional -- SQL-only
-        "type": "prisma",
-        "path": "prisma/schema.prisma"            // path inside the repo
-      }
-    },
-    {
-      "id":    "cache",
-      "kind":  "redis",
-      "label": "Local redis",
-      "url":   "redis://localhost:6379",
-      "namespace": { "allow": ["cache:*", "session:*"] }   // optional scan-scope restriction
-    },
-    {
-      "id":    "ddb",
-      "kind":  "dynamodb",
-      "label": "Staging DynamoDB",
-      "region": "us-east-1",
-      "profile": "insrc-ro"                       // AWS credential profile
-    },
-    {
-      "id":    "sessions",
-      "kind":  "mongodb",
-      "family": "kv",                             // mongodb lives in the kv family
-      "label": "Session store",
-      "url":   "mongodb://readonly@mongo.host:27017/sessions"
-    }
-  ]
-}</code></pre>
-
-<p>
-  Omitting <code>schemaSource</code> defaults to live introspection; it applies to RDBMS
-  connections only and KV drivers silently ignore it.
-</p>
-
-<h4>Setup UX</h4>
-
-<ul>
-  <li>Command palette: <code>insrc.addDbConnection</code> walks through kind &rarr; URL &rarr;
-    label &rarr; optional Prisma schema path (defaults off; user sets
-    <code>schemaSource: 'prisma'</code> explicitly if they want it). URL secrets go to the OS
-    keychain (same mechanism as cloud-provider API keys); only a reference lives in the JSON.</li>
-  <li>Command palette: <code>insrc.removeDbConnection</code>, <code>insrc.editDbConnection</code>
-    for maintenance.</li>
-  <li>The Analysis Report Pane's empty-state (before any run) shows a footer
-    <em>DB: N connections configured</em> with a gear icon that opens the same setup flow.</li>
-  <li>On save, the daemon opens a test connection and runs a driver-equivalent
-    <code>SELECT 1</code>. If it fails, we surface the error; we don't probe for write permissions
-    (see §13.5 — that level of hardening is overkill for dev/local DBs).</li>
-</ul>
-
-<h3>13.2 Library Choice: Direct Drivers per Kind</h3>
 
 <div class="callout decision">
-  <strong>Decision:</strong> Use <strong>direct drivers per DB kind</strong> — the idiomatic
-  npm package for each store — behind two family-level interfaces
-  (<code>RdbmsDriver</code>, <code>KvDriver</code>). No single abstraction library (Prisma,
-  Knex, Kysely, Drizzle) is adopted runtime-wide. When a repo has a <code>schema.prisma</code>,
-  the RDBMS driver optionally reuses it for introspection; that's the extent of Prisma's
-  involvement.
+  <strong>Decision:</strong> Cross-agent enrichment uses the daemon's <strong>tool registry</strong>,
+  not a new orchestration primitive. Each sibling analyzer registers its read-only capabilities
+  as tools (<code>data:describe-table</code>, <code>deploy:topology</code>, ...); this
+  analyzer's run-task LLM sees them in the tool list and decides when to call them. No
+  sub-pipeline, no recursive plan-decomposition, no shared in-memory state.
 </div>
 
+<h3 id="cross-tools">13.1 Available Cross-Agent Tools</h3>
+
 <p>
-  Driver mapping (phase 3 ships a subset; the registry accepts any kind):
+  When the sibling analyzers are present, these tools become callable from the Code Analyzer's
+  run-task loop alongside its native <code>graph.*</code> / <code>fs.*</code> / <code>vector.*</code>
+  / <code>text.grep</code> tools:
 </p>
 
 <table>
   <tr>
-    <th>Family</th>
-    <th>Kind</th>
-    <th>npm driver</th>
-    <th>Phase</th>
+    <th>Tool</th>
+    <th>Owner</th>
+    <th>When this analyzer would call it</th>
   </tr>
-  <tr><td rowspan="5">RDBMS</td><td>postgres</td><td><code>pg</code></td><td>3</td></tr>
-  <tr><td>mysql / mariadb</td><td><code>mysql2</code></td><td>3</td></tr>
-  <tr><td>sqlite</td><td><code>better-sqlite3</code></td><td>3</td></tr>
-  <tr><td>mssql</td><td><code>tedious</code></td><td>4</td></tr>
-  <tr><td>clickhouse / oracle / cockroachdb / ...</td><td>(community)</td><td>4+</td></tr>
-  <tr><td rowspan="5">KV</td><td>redis / valkey / keydb</td><td><code>ioredis</code></td><td>3</td></tr>
-  <tr><td>mongodb</td><td><code>mongodb</code></td><td>3</td></tr>
-  <tr><td>dynamodb</td><td><code>@aws-sdk/client-dynamodb</code></td><td>4</td></tr>
-  <tr><td>etcd</td><td><code>etcd3</code></td><td>4</td></tr>
-  <tr><td>memcached / others</td><td>(community)</td><td>4+</td></tr>
+  <tr>
+    <td><code>data:list-connections</code></td>
+    <td>Data Analyzer</td>
+    <td>Discover what DB connections are registered before deciding whether to ask schema
+      questions.</td>
+  </tr>
+  <tr>
+    <td><code>data:describe-table</code></td>
+    <td>Data Analyzer</td>
+    <td>A <code>trace</code> task finds <code>db.query("...users...")</code>; calls
+      <code>data:describe-table</code> to confirm the columns the code accesses exist + match
+      types.</td>
+  </tr>
+  <tr>
+    <td><code>data:lineage</code></td>
+    <td>Data Analyzer</td>
+    <td>A <code>describe</code> task on a function that emits queries; lineage adds <em>"reads
+      from <code>orders</code>, <code>users</code>"</em> + which other code paths share the
+      same table.</td>
+  </tr>
+  <tr>
+    <td><code>data:schema-drift</code></td>
+    <td>Data Analyzer</td>
+    <td>A <code>compare</code> task between code's expected shape and live DB state -- surfaces
+      columns the code uses that no longer exist in the DB.</td>
+  </tr>
+  <tr>
+    <td><code>deploy:env-diff</code></td>
+    <td>Deployment Analyzer</td>
+    <td>A <code>trace</code> task finds <code>process.env.DB_HOST</code>; env-diff shows how
+      that var is set across dev / staging / prod overlays.</td>
+  </tr>
+  <tr>
+    <td><code>deploy:service-deps</code></td>
+    <td>Deployment Analyzer</td>
+    <td>A broad audit task asks "what depends on this module"; service-deps adds the deployment-
+      level dependents (other services that pull this one as a peer).</td>
+  </tr>
 </table>
 
-<p>
-  Why not a single abstraction library:
-</p>
+<h3 id="cross-contract">13.2 Single-Hop Depth Cap</h3>
 
-<ul>
-  <li><strong>Two families, two shapes.</strong> RDBMS and KV operations don't meaningfully
-    share an API — <code>sample(table, where)</code> and <code>scan(pattern)</code> are
-    different problems. A unifying layer would either be the lowest common denominator (too
-    thin to justify) or a leaky abstraction.</li>
-  <li><strong>Runtime weight.</strong> Heavy ORMs (Prisma, Drizzle) bundle query engines or
-    generation steps per connection. For three operations per kind (describe, sample,
-    explain / scan, get, sampleShape), hand-written driver modules are smaller and easier to
-    audit.</li>
-  <li><strong>Operational safety at driver level.</strong> Each driver module rejects write
-    statements for its own kind — we never need to trust a shared query-builder with the
-    no-DDL/DML guarantee.</li>
-  <li><strong>Heterogeneous KV semantics.</strong> Redis, DynamoDB, and etcd disagree on what
-    a "key" means (plain strings vs. partition+sort pairs vs. hierarchical paths). Any uniform
-    abstraction either flattens these into something lossy or adds per-kind shims anyway.</li>
-</ul>
-
-<p>
-  Why optionally reuse <code>schema.prisma</code> when present (RDBMS only):
-</p>
-
-<ul>
-  <li>Introspection is tedious across RDBMS dialects (<code>information_schema</code>,
-    <code>sqlite_master</code>, MS-SQL catalog views, etc.). A repo that already maintains a
-    Prisma schema has a clean canonical model the driver can parse with
-    <code>@prisma/internals</code> (schema parser only — no client, no generated code, no
-    engine binary).</li>
-  <li>The parsed schema gives typed column lists to validate the LLM's <code>where</code>
-    clauses against before query time.</li>
-  <li><strong>Not relevant to KV.</strong> Prisma's model is relational; KV drivers ignore
-    <code>schemaSource</code> entirely.</li>
-</ul>
-
-<h3>13.3 Driver Contracts</h3>
-
-<p>A thin base for registration + lifecycle, two family interfaces for operations:</p>
-
-<pre><code>interface BaseDriver {
-  readonly id:     string;            // connection id from config
-  readonly kind:   string;            // open -- "postgres", "redis", "dynamodb", ...
-  readonly family: 'rdbms' | 'kv';
-  close(): Promise&lt;void&gt;;             // cleanly close pool on shutdown / reconfig
-}
-
-// ---- RDBMS family ----
-interface RdbmsDriver extends BaseDriver {
-  family: 'rdbms';
-
-  /** Schema for a table / view. Consults `config.schemaSource`:
-   *  - 'introspect' -> live catalog query
-   *  - 'prisma'     -> parse schema.prisma once, cache in-memory */
-  describe(target: string): Promise&lt;SchemaDescription&gt;;
-
-  /** Row sample. Limit clamped &le; 50, wall-clock &le; 5s.
-   *  `where` is a parametrised filter; raw SQL never flows from the LLM. */
-  sample(target: string, opts: {
-    limit: number;
-    where?: { column: string; op: '=' | '!=' | 'in' | 'is null'; value?: unknown }[];
-  }): Promise&lt;SampleResult&gt;;
-
-  /** Optional. Runs EXPLAIN on an AST-validated query. */
-  explain?(queryAst: QueryAst): Promise&lt;PlanResult&gt;;
-}
-
-// ---- KV family ----
-interface KvDriver extends BaseDriver {
-  family: 'kv';
-
-  /** List keys matching a pattern / prefix. Limit clamped &le; 500.
-   *  For stores without patterns (DynamoDB), opts is interpreted as a
-   *  partition-key scan. */
-  scan(opts: { pattern?: string; prefix?: string; limit: number }): Promise&lt;KeyList&gt;;
-
-  /** Get the value at a specific key. For composite-key stores
-   *  (DynamoDB sort key, MongoDB collection+id), the key is an object. */
-  get(key: string | Record&lt;string, unknown&gt;): Promise&lt;KvValue&gt;;
-
-  /** Infer the shape of values under a pattern/prefix: sample N values,
-   *  summarise as a type tree (field names, observed types, nullability).
-   *  Replaces "describe" for schema-less stores. */
-  sampleShape(opts: {
-    pattern?: string; prefix?: string; limit: number;
-  }): Promise&lt;ShapeReport&gt;;
-}</code></pre>
-
-<div class="callout info">
-  Driver registration is a small extensibility seam: drivers self-register with the daemon on
-  boot (<code>registerDriver({ kind, family, factory })</code>), and connections in
-  <code>db-connections.json</code> with unknown <code>kind</code> reject at load time. Adding a
-  new store type is a driver module + one registry call, no core schema change.
+<div class="callout decision">
+  <strong>Decision:</strong> Cross-agent calls are <strong>single-hop</strong>. When the Code
+  Analyzer calls <code>data:describe-table</code>, the Data Analyzer's tool can in turn call
+  Code Analyzer tools <em>internally</em> for its own work, but it cannot call
+  <code>deploy:*</code> from within the Code-initiated call. Depth is enforced by a
+  <code>crossAgentDepth</code> counter in the run-task tool context; tools detect
+  <code>depth &gt;= 1</code> and return the <code>TOOL_UNAVAILABLE</code> sentinel.
 </div>
 
-<h3>13.4 Tool Surface</h3>
+<p>
+  Why cap at 1: keeps the latency budget bounded (each cross-agent call adds a tool round-trip
+  + a domain-specific lookup), keeps citation density manageable, and prevents accidental
+  recursion when two analyzers register overlapping tool patterns. The cap can be raised later
+  with explicit token + latency budgets if real-world usage shows benefit from chains.
+</p>
+
+<h3 id="cross-citations">13.3 Citation Propagation</h3>
 
 <p>
-  Split by family under <code>db.*</code>. The analyzer discovers capabilities from
-  <code>db.list_connections()</code> and picks the right namespace for each call:
+  Cross-agent results land in this analyzer's report as a separate citation block tagged with
+  the foreign agent. The synthesise step renders them in a "Schema findings" or "Deployment
+  findings" subsection, never inline with code citations. The reader can tell at a glance
+  which findings came from which analyzer.
+</p>
+
+<pre><code>// Excerpt from a synthesised report including foreign citations
+## Auth flow
+
+The token-refresh path is gated through `verifyToken()` in
+[`src/auth/token.ts:42-58`](path:src/auth/token.ts#L42-L58)...
+
+### Schema findings (data-analyzer)
+
+* `users.refresh_token_hash` is the column the code reads
+  [(connection: `primary`, table: `users`, column: `refresh_token_hash`)](data-cite:1).
+
+### Deployment findings (deployment-analyzer)
+
+* `JWT_SECRET` resolves to a `secretRef` named `auth-jwt` in dev/staging,
+  but is unset in the prod overlay [(manifest: `k8s/prod/auth.yaml`,
+  resource: `Deployment/auth`)](deploy-cite:1).</code></pre>
+
+<h3 id="cross-fallthrough">13.4 Graceful Fall-Through</h3>
+
+<p>
+  If a cross-agent tool returns <code>TOOL_UNAVAILABLE</code> (target analyzer's tools aren't
+  registered, e.g. user disabled it in <code>insrc.analyzers.enabled</code>):
 </p>
 
 <ul>
-  <li><code>db.list_connections()</code> &rarr; <code>{ id, kind, family, label }[]</code>.
-    Shared across families.</li>
-  <li><strong>RDBMS namespace:</strong>
-    <ul>
-      <li><code>db.sql.describe(connectionId, target)</code></li>
-      <li><code>db.sql.sample(connectionId, target, limit, where?)</code> — row sample,
-        <code>limit &le; 50</code>; optional PII masking per connection (§13.5).</li>
-      <li><code>db.sql.explain(connectionId, queryAst)</code> — optional impact-analysis
-        tool.</li>
-    </ul>
-  </li>
-  <li><strong>KV namespace:</strong>
-    <ul>
-      <li><code>db.kv.scan(connectionId, { pattern | prefix, limit })</code> — key listing,
-        <code>limit &le; 500</code>. Patterns restricted to the connection's
-        <code>namespace.allow</code> list if configured.</li>
-      <li><code>db.kv.get(connectionId, key)</code> — single-value read.</li>
-      <li><code>db.kv.sample_shape(connectionId, { pattern | prefix, limit })</code> —
-        infers field structure for JSON/document values.</li>
-    </ul>
-  </li>
+  <li>The analyzer's run-task LLM sees the structured unavailable response and continues with
+    whatever signal it can produce on its own.</li>
+  <li>The orchestrator's review step categorises the affected task as <em>"external dependency
+    missing"</em> -- still acceptable, just with reduced confidence.</li>
+  <li>The synthesise step emits a single line at the bottom of the report: <em>"Consider
+    running /data-analyze for richer schema findings"</em> (or the equivalent for deployment).
+    No hard failure.</li>
 </ul>
 
 <p>
-  Mismatched calls (calling <code>db.sql.*</code> on a KV connection, or vice versa) reject with
-  a clear error the analyzer sees and retries with the right tool.
+  Same fall-through applies when the target analyzer's daemon-side handler errors or times
+  out (5 s hard cap on cross-agent tool calls). The original analysis run never blocks on a
+  sibling.
 </p>
-
-<h3>13.5 Operational Rules</h3>
-
-<p>
-  Ergonomic guardrails — they stop a stray analyzer from flooding a developer's local DB, not
-  a hardened prod-safety model. The expected target is dev/staging.
-</p>
-
-<ul>
-  <li><strong>No raw queries.</strong> Tool inputs are structured (<code>target</code>,
-    <code>where</code>-objects, key objects, <code>queryAst</code>) — never raw SQL or raw
-    commands from the LLM. Correctness guarantee against accidental DDL/DML or
-    <code>FLUSHDB</code>-shaped mistakes, not security-grade enforcement.</li>
-  <li><strong>Result + timeout caps per family.</strong> RDBMS: 50 rows, 5 s.
-    KV: 500 keys for <code>scan</code>, 50 values for <code>sample_shape</code>, 5 s across
-    the board. Applied driver-side.</li>
-  <li><strong>KV namespace scoping.</strong> A connection's optional
-    <code>namespace.allow</code> patterns restrict <code>scan</code> / <code>sample_shape</code>
-    to whitelisted prefixes — useful on shared Redis instances where the analyzer shouldn't
-    roam across unrelated apps' keyspaces.</li>
-  <li><strong>Optional PII masking.</strong> Per-connection <code>pii</code> array (RDBMS uses
-    <code>"table.column"</code>; KV uses <code>"key-pattern:field-path"</code>) triggers
-    hashing in result values. Omitted = no masking. Users pointing at prod set this; local-DB
-    users typically don't bother.</li>
-  <li><strong>Out-of-repo file reads still gated.</strong> If a connection's
-    <code>schema.prisma</code> path resolves outside the active repo, the fs-access gate
-    (§7.3) fires on first read.</li>
-  <li><strong>Opt-in per repo.</strong> Disabled unless at least one connection is configured
-    — there's nothing for the analyzer to call otherwise.</li>
-</ul>
-
-<div class="callout info">
-  <strong>Why phase 3, not v1:</strong> not safety — the hygiene above is adequate for
-  dev/local targets. Phasing is a scope choice: the orchestrator/analyzer loop is the core
-  value, and we want it running cleanly before adding a new tool surface with its own setup
-  UX, family-split namespace, per-kind driver modules, and schema-parser plumbing.
-</div>
 
 <!-- ================================================================== -->
 <h2 id="caching">14. Caching &amp; Resume</h2>
@@ -1902,23 +1777,27 @@ interface KvDriver extends BaseDriver {
         files; classifier routing has no fallback after this phase.</li>
     </ul>
   </li>
-  <li><strong>Phase 3 — DB driver.</strong>
+  <li><strong>Phase 3 — Cross-agent integration.</strong>
     <ul>
-      <li>Per-repo <code>db-connections.json</code> + command-palette setup flow.</li>
-      <li>Unified <code>DbDriver</code> interface; Postgres + SQLite reference drivers.</li>
-      <li>Optional Prisma schema reuse via <code>@prisma/internals</code> (parse only, no
-        client).</li>
-      <li><code>db.*</code> tool surface wired into the analyzer tool registry.</li>
-      <li>Repo-level opt-in config + PII masking + read-only credential validation.</li>
+      <li>Register <code>code:*</code> tools in the daemon's tool registry so sibling analyzers
+        can call them (<a href="#cross-agent">§13</a>).</li>
+      <li>Wire <code>data:*</code> / <code>deploy:*</code> tools into this analyzer's tool list
+        (gated on <code>insrc.analyzers.enabled</code>).</li>
+      <li><code>TOOL_UNAVAILABLE</code> sentinel + graceful fall-through path.</li>
+      <li>Single-hop depth cap enforcement via <code>crossAgentDepth</code> in run-task ctx.</li>
+      <li>Citation propagation: foreign citations rendered as separate blocks in synthesise
+        output.</li>
     </ul>
   </li>
   <li><strong>Phase 4 — Polish.</strong>
     <ul>
-      <li>Export to file-in-repo (<code>docs/analysis/&lt;slug&gt;.md</code>) via the existing
-        artifact-save helper.</li>
+      <li>Export to file-in-repo (<code>docs/code-analysis/&lt;slug&gt;.md</code>) via the
+        existing artifact-save helper.</li>
       <li>"Re-run with new repo rev" one-click action on a past analysis.</li>
       <li>Diff-vs-previous-run mode (did audit findings change after the last commit?).</li>
-      <li>MongoDB + MySQL drivers behind the Phase 3 contract.</li>
+      <li>Optional <code>@mention</code>-driven cross-agent dispatch (let the user explicitly
+        target a specific analyzer in a chat message: <em>"@data-analyzer describe the
+        users table"</em>).</li>
     </ul>
   </li>
 </ol>
@@ -1968,24 +1847,18 @@ interface KvDriver extends BaseDriver {
       suppressed on code-analysis lists.</td>
   </tr>
   <tr>
-    <td>DB abstraction library choice</td>
-    <td><strong>Direct drivers</strong> under a unified <code>DbDriver</code> interface;
-      <strong>optionally reuse</strong> a repo's <code>schema.prisma</code> for introspection
-      when present. Not Prisma runtime. (§13.2)</td>
+    <td>DB / schema / sample-data scope</td>
+    <td><strong>Moved to the Data Analyzer</strong>
+      (<a href="data-analyzer.html">design/analyzers/data-analyzer.html</a>). Code Analyzer
+      reaches it via the cross-agent <code>data:*</code> tools when needed
+      (<a href="#cross-agent">§13</a>). Falls back to a "consider running /data-analyze"
+      footer when the Data Analyzer isn't enabled.</td>
   </tr>
   <tr>
-    <td>DB data safety model</td>
-    <td><strong>Dev/local-DB assumption.</strong> Ergonomic guardrails (read-only at protocol
-      level, row caps, timeouts, optional PII masking) — not prod-grade enforcement. Users who
-      point at prod opt into the <code>pii</code> config themselves. (§13.5)</td>
-  </tr>
-  <tr>
-    <td>Prisma schema auto-detection at setup</td>
-    <td><strong>No.</strong> Always default <code>schemaSource: 'introspect'</code>. Live
-      introspection already covers what the analyzer needs; auto-defaulting to a
-      <code>schema.prisma</code> risks silently stale column lists when the file and DB drift.
-      Users who want Prisma as source-of-truth opt in explicitly during
-      <code>insrc.addDbConnection</code>. (§13.1)</td>
+    <td>Deployment / infra topology scope</td>
+    <td><strong>Moved to the Deployment Analyzer</strong>
+      (<a href="deployment-analyzer.html">design/analyzers/deployment-analyzer.html</a>).
+      Code Analyzer reaches it via the cross-agent <code>deploy:*</code> tools.</td>
   </tr>
   <tr>
     <td>Plan size limit + approval</td>
