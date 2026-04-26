@@ -270,6 +270,12 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			detached: true,
 			env: {
 				...process.env,
+				// process.execPath in an Electron main process is the Electron
+				// binary, not Node. Without this flag Electron runs the daemon
+				// JS as a full Electron app (renderer, GPU process, ...) and
+				// the daemon code never actually executes. Setting it makes
+				// the binary behave like plain Node for this child.
+				ELECTRON_RUN_AS_NODE: '1',
 				INSRC_LOG_LEVEL: 'info',
 			},
 		});

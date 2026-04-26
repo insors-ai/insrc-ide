@@ -7,7 +7,6 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import { homedir } from 'os';
 import { delimiter, join, relative } from 'path';
-import { FileAccess } from '../../../base/common/network.js';
 import { ILogService } from '../../log/common/log.js';
 
 // ---------------------------------------------------------------------------
@@ -46,14 +45,15 @@ const UPDATE_LOG_HEAD = '[insrc-installer]';
 // ---------------------------------------------------------------------------
 
 /**
- * In dev, the IDE gulp compile populates out/insrc/ with both JS and node_modules.
- * Use that when available; otherwise fall back to the cloned install under ~/.insrc/daemon/.
+ * The daemon always runs from the cloned install at ~/.insrc/daemon/. The
+ * install path runs `linkNodeModules` so node_modules is reachable from
+ * the compiled entry; the local out/insrc/ build is for compile-checking
+ * only and shouldn't be spawned (gulp doesn't populate node_modules
+ * there). The shape stays a discriminated `{ path, isDev }` so callers
+ * that distinguish dev from cloned (logging, error messages) keep
+ * compiling.
  */
 export function resolveDaemonEntry(): { path: string; isDev: boolean } {
-	const devPath = FileAccess.asFileUri('insrc/daemon/index.js').fsPath;
-	if (fs.existsSync(devPath)) {
-		return { path: devPath, isDev: true };
-	}
 	return { path: DAEMON_ENTRY_CLONED, isDev: false };
 }
 
