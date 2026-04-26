@@ -38,7 +38,7 @@ parsing covers both at once.
 | 0     | Prerequisites: tree-sitter pins, `Language` union extension, asset pipeline      | todo   |
 | 1     | Java parser: entities + relations + tests against fixture                        | done (uncommitted) |
 | 2     | Scala parser: entities + relations + tests; Scala 2 + 3 cross-version handling   | done (uncommitted) |
-| 3     | Manifests + import resolution: pom.xml / build.gradle(.kts) / build.sbt / build.sc | todo |
+| 3     | Manifests: pom.xml / build.gradle(.kts) / build.sbt / build.sc                      | done (uncommitted) -- import resolution descoped to a future cross-file pass (see §3.4) |
 | 4     | CFG walkers in `kinds/cfg.ts` so `flow:code` artifacts work for Java + Scala     | todo   |
 | 5     | Cross-cutting integration: language-hint heuristics, fixtures, doc updates       | todo   |
 
@@ -430,30 +430,40 @@ references.
 - **Mill** (`build.sc`) uses `ivy"group::artifact:version"`. Same
   shape, different DSL marker. Single-line regex.
 
-### 3.4 Import resolution
+### 3.4 Import resolution -- deferred to a cross-file pass
 
-[`indexer/resolver.ts`](../src/insrc/indexer/resolver.ts)
-`resolveImportPath` gains language-aware branches:
+The existing [`indexer/resolver.ts`](../src/insrc/indexer/resolver.ts)
+runs **per file**, with access only to entities from that file. It
+handles relative imports (Python's `from .foo import x`,
+TypeScript's `./bar.js`) by probing the filesystem; the per-file
+scope is sufficient there because the import target is one file.
 
-- **Java**: `import com.example.foo.Bar;` -> probe candidate paths
-  under detected source roots:
-  - `<repo>/src/main/java/com/example/foo/Bar.java`
-  - `<repo>/<module>/src/main/java/com/example/foo/Bar.java` for each
-    discovered Maven / Gradle module
-  - Wildcard imports (`import com.example.foo.*;`) resolve to the
-    package directory; entities under it are linked individually
-    (same shape as Python's `from x import *`).
-- **Scala**: source roots default to `src/main/scala`, plus
-  `src/main/scala-2.13` / `src/main/scala-3` cross-build directories.
-  Grouped imports (`import a.b.{Foo, Bar}`) resolve as multiple
-  individual imports; renames (`import a.b.{Foo => F}`) record `F`
-  as the local alias but resolve to `Foo`.
+Java + Scala imports are different: `import com.example.foo.Bar`
+points at a fully-qualified type name that may live in any file
+under a source root anywhere in the repo. Resolving it requires
+the **full graph** (which file declares `class Bar` in the
+`com.example.foo` package?), which the per-file resolver doesn't
+have.
 
-Source-root detection: the manifest pass populates a per-repo
-`SourceRoots` map (e.g. `{ java: ['src/main/java', 'subprj/src/main/java'],
-scala: ['src/main/scala'] }`); the resolver consumes that map.
-When no manifest is found, fall back to convention defaults
-(`src/main/java`, `src/main/scala`).
+The Java + Scala parsers (phases 1 + 2) already emit IMPORTS edges
+to module-stub entities -- same shape Python uses for absolute
+imports. That's a structurally complete representation; analyzers
+can reach the import declarations without cross-file resolution.
+
+Cross-file Java/Scala import-to-file resolution (turning the
+module-stub edge into an actual file edge) is **deferred** to a
+follow-up plan. It needs:
+
+- A second-pass resolver that runs after the indexer's per-file
+  pass, with access to the full Kuzu graph.
+- Source-root detection (Maven `src/main/java`, Gradle defaults,
+  SBT `src/main/scala` + cross-build dirs `scala-2.13` / `scala-3`).
+- A package-to-file index keyed by (package, type-name).
+
+Out of scope for this plan to keep the scope reviewable. The
+JVM-toolchain manifest parsers in §3.1-3.3 already populate the
+dependency-closure registry the analyzer's transitive search uses
+(matching how the Python / TS / Go pipelines work today).
 
 ### 3.5 Tests
 
@@ -745,16 +755,16 @@ check rejects the call cleanly with the existing error message.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `parsePom` (single + multi-module)         | todo   |       |
-| `parseGradle` (groovy + kotlin DSL)        | todo   |       |
-| `parseSbt` (`%` + `%%` + cross-build)      | todo   |       |
-| `parseMill` (`build.sc`)                   | todo   |       |
-| `parseManifest` dispatch update            | todo   |       |
-| Java import path resolution                | todo   |       |
-| Scala import path resolution + cross-build | todo   |       |
-| Source-root detection from manifests       | todo   |       |
-| Manifest unit tests                        | todo   |       |
-| Resolver unit tests                        | todo   |       |
+| `parsePom` (single + multi-module)         | done (uncommitted) | Walks `<dependency>` elements; substitutes `${prop}` placeholders against same-pom `<properties>`; excludes `<dependencyManagement>`-only declarations. Multi-pom inheritance / parent BOM resolution deferred. |
+| `parseGradle` (groovy + kotlin DSL)        | done (uncommitted) | Single regex over the `dependencies { ... }` block extracts triples from `'group:artifact:version'` (Groovy) and `"group:artifact:version"` (Kotlin DSL). Skips `project(':...')` refs + interpolated strings. Variable substitution + version catalogs (`libs.versions.toml`) are best-effort -- v1 surfaces what it can and ignores the rest. |
+| `parseSbt` (`%` + `%%` + cross-build)      | done (uncommitted) | Permissive regex over the whole file: `"group" %% "artifact" % "version"` triples. `%%` form gets a `_<scala>` suffix marker on the artifact name; the analyzer's later cross-build resolution closes the version when known. |
+| `parseMill` (`build.sc`)                   | done (uncommitted) | `ivy"group::artifact:version"` regex; same `::` -> `_<scala>` suffix logic. |
+| `parseManifest` dispatch update            | done (uncommitted) | Five new file probes added in priority order: pom.xml, build.gradle.kts (newer projects prefer kts), build.gradle, build.sbt, build.sc. |
+| Java import path resolution                | deferred | Cross-file scope -- requires the full Kuzu graph, not just per-file. Out of scope for this plan; the per-file resolver stays unchanged. |
+| Scala import path resolution + cross-build | deferred | Same reason. |
+| Source-root detection from manifests       | deferred | Bundled with the resolver work above. |
+| Manifest unit tests                        | done (uncommitted) | 12 cases at `indexer/__tests__/manifest-jvm.test.ts`: pom triples + property substitution + dependencyManagement exclusion + missing-version handling, Gradle Groovy DSL with multiple configurations + commented-out lines + project refs, Gradle Kotlin DSL, kts-wins-over-groovy precedence, SBT `%` + `%%` mix with `Seq(...)` and `+=` syntax, Mill ivy + ivy-double-colon, no-manifest empty-array case. |
+| Resolver unit tests                        | deferred | Bundled with the resolver work above. |
 
 ### Phase 4 -- CFG walkers
 
