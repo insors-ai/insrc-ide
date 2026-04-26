@@ -18,6 +18,7 @@ import './parser/typescript.js';
 import './parser/python.js';
 import './parser/go.js';
 import './parser/java.js';
+import './parser/scala.js';
 import './parser/artifact.js';
 import { basenameParser } from './parser/artifact.js';
 import { Watcher, IGNORE_DIRS } from './watcher.js';

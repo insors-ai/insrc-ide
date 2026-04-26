@@ -37,7 +37,7 @@ parsing covers both at once.
 |-------|----------------------------------------------------------------------------------|--------|
 | 0     | Prerequisites: tree-sitter pins, `Language` union extension, asset pipeline      | todo   |
 | 1     | Java parser: entities + relations + tests against fixture                        | done (uncommitted) |
-| 2     | Scala parser: entities + relations + tests; Scala 2 + 3 cross-version handling   | todo   |
+| 2     | Scala parser: entities + relations + tests; Scala 2 + 3 cross-version handling   | done (uncommitted) |
 | 3     | Manifests + import resolution: pom.xml / build.gradle(.kts) / build.sbt / build.sc | todo |
 | 4     | CFG walkers in `kinds/cfg.ts` so `flow:code` artifacts work for Java + Scala     | todo   |
 | 5     | Cross-cutting integration: language-hint heuristics, fixtures, doc updates       | todo   |
@@ -731,15 +731,15 @@ check rejects the call cleanly with the existing error message.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| Class / object / trait extraction          | todo   |       |
-| Companion-object signature suffix          | todo   |       |
-| Case class + sealed trait suffixes         | todo   |       |
-| Mixin (`with`) IMPLEMENTS edges            | todo   |       |
-| Scala 3 `given` / `using` handling         | todo   |       |
-| Scala 3 extension method handling          | todo   |       |
-| Wildcard / grouped / renamed imports       | todo   |       |
-| Parse-error degradation                    | todo   |       |
-| Unit tests (10+ fixtures)                  | todo   |       |
+| Class / object / trait extraction          | done (uncommitted) | `class_definition` / `object_definition` -> `class` kind; `trait_definition` -> `interface` kind. Modifiers + annotations fold into the signature prefix. |
+| Companion-object signature suffix          | done (uncommitted) | First-pass scan collects file-level class names; subsequent `object_definition` visits append `(companion of <Class>)` to the signature when a same-named class exists at file scope. |
+| Case class + sealed trait suffixes         | done (uncommitted) | `case` token detected as an anonymous-token sibling (it lives outside the `modifiers` wrapper); the kind word becomes `case class` / `case object`. |
+| Mixin (`with`) IMPLEMENTS edges            | done (uncommitted) | `extends_clause` walker tracks `extends` -> `with` boundaries via anonymous tokens; first type after `extends` is INHERITS, every subsequent type after a `with` is IMPLEMENTS. Traits collapse both into INHERITS. |
+| Scala 3 `given` / `using` handling         | done (uncommitted) | `given_definition` -> `variable` kind with `signature: 'given <name>: <type>'`. Anonymous `given`s synthesize a name from the type. Grammar may emit ERROR nodes around `given X with { ... }` syntax; the parse-error fallback covers those files. |
+| Scala 3 extension method handling          | done (uncommitted) | `extension_definition` lifts each inner `def` into a `method`-kind entity whose qualified name uses the extension's target type (`<TargetType>.<methodName>`); signature carries `extension method`. |
+| Wildcard / grouped / renamed imports       | done (uncommitted) | `import_declaration` walker handles three shapes: simple (`a.b.c`), grouped (`{Foo, Bar}` -> one IMPORTS edge per selector), renamed (`{Foo => F}` -> meta.alias = "F"). |
+| Parse-error degradation                    | done (uncommitted) | `tree.rootNode.hasError` triggers a `parse-error` marker on the file entity's signature; cleanly-parsed children still emit. |
+| Unit tests (10+ fixtures)                  | done (uncommitted) | 17 cases at `indexer/parser/__tests__/scala.test.ts`: basic class + method, case class, sealed/abstract, object, companion-object suffix, trait, extends + with mixin chain, trait super-trait inheritance, simple/grouped/renamed imports, package own-package edge, val/var, type alias, top-level def, abstract def in trait, Scala 3 `given` (best-effort), Scala 3 `extension` (best-effort), Scala 3 significant-indent (best-effort), CALLS extraction. |
 
 ### Phase 3 -- Manifests + import resolution
 

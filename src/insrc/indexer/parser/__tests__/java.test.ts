@@ -158,11 +158,13 @@ describe('Java parser - package + imports', () => {
 package com.example.app;
 public class A {}
 `);
-		const imports = findRelations(r, 'IMPORTS');
-		assert.ok(
-			imports.some(rel => rel.to.includes('com.example.app') && rel.meta?.['isOwnPackage'] === true),
-			'should record an own-package IMPORTS edge',
-		);
+		const ownPkgImport = findRelations(r, 'IMPORTS')
+			.find(rel => rel.meta?.['isOwnPackage'] === true);
+		assert.ok(ownPkgImport, 'should record an own-package IMPORTS edge');
+		// Confirm the target is the `com.example.app` module entity.
+		const moduleEnt = r.entities.find(e => e.id === ownPkgImport!.to);
+		assert.equal(moduleEnt?.kind, 'module');
+		assert.equal(moduleEnt?.name, 'com.example.app');
 	});
 
 	it('records `import` declarations as IMPORTS edges to module stubs', () => {
