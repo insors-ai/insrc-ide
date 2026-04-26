@@ -36,7 +36,7 @@ import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModel
 import { resolveClosure, searchEntities, findCallers, findCallees } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
 import {
-	saveTurn, closeSession, saveSession, seedFromPrior, deleteSessionsForRepo, pruneConversations,
+	saveTurn, closeSession, saveSession, seedFromPrior, deleteSessionsForRepo, deleteTurnsForRepo, pruneConversations,
 	searchTurnsByRepo, getConversationStats, listSessions, getAllTurns,
 	type TurnRecord,
 } from '../db/conversations.js';
@@ -174,8 +174,9 @@ async function main(): Promise<void> {
 			await deleteUnresolvedForRepo(db, path);
 			await deletePlansForRepo(db, path);
 			await deleteSessionsForRepo(db, path);
+			await deleteTurnsForRepo(db, path);
 			await removeRepo(db, path);
-			log.info({ repo: path }, 'repo removed (entities + relations + plans + sessions purged)');
+			log.info({ repo: path }, 'repo removed (entities + relations + plans + sessions + turns purged)');
 			return { ok: true };
 		},
 

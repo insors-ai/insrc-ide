@@ -463,6 +463,22 @@ export async function deleteSessionsForRepo(db: DbClient, repo: string): Promise
   }
 }
 
+/**
+ * Delete every raw turn belonging to a repo. Sessions and turns are
+ * stored separately; `deleteSessionsForRepo` only touches the
+ * conversation_sessions table, so turns linger unless this is called
+ * alongside it (e.g. from the `repo.remove` cleanup).
+ */
+export async function deleteTurnsForRepo(db: DbClient, repo: string): Promise<void> {
+  const table = await getTurnsTable(db);
+  const safeRepo = repo.replace(/'/g, "''");
+  try {
+    await table.delete(`repo = '${safeRepo}'`);
+  } catch {
+    // Ignore if not found
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pruning
 // ---------------------------------------------------------------------------
