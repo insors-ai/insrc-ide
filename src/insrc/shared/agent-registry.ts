@@ -30,6 +30,7 @@ export type AgentFamily =
   | 'research'
   | 'debugging'
   | 'deployment'
+  | 'code-analyzer'
   | 'system';
 
 export type AgentFamilyCategory =
@@ -113,6 +114,13 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
     description: 'Shell-driven deploy / release / infra operations; wraps the command-extraction pipeline.',
     icon: 'rocket',
   },
+  'code-analyzer': {
+    id: 'code-analyzer',
+    displayName: 'Code Analyzer',
+    category: 'meta',
+    description: 'Read-only structural / semantic analysis of the active repo. Cloud-orchestrated decomposition, local per-task tool loop, local synthesis. Independent of the research family (which covers web / external info).',
+    icon: 'graph',
+  },
   system: {
     id: 'system',
     displayName: 'System',
@@ -128,7 +136,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
 const _exhaustivenessCheck: Record<AgentFamily, true> = {
   chat: true, implementation: true, brainstorm: true, designer: true,
   planner: true, tester: true, research: true, debugging: true,
-  deployment: true, system: true,
+  deployment: true, 'code-analyzer': true, system: true,
 };
 void _exhaustivenessCheck;
 
