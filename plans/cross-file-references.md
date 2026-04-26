@@ -61,7 +61,7 @@ constraint:
 | 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | done -- 063d600d1cb |
 | 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | done -- 809e175659a |
 | 4     | Cross-file CALLS resolution (using imported scope)                                     | done -- f65cbef7ddd |
-| 5     | Incremental mode: watcher settle window + invalidation on edit/delete                  | todo   |
+| 5     | Incremental mode: watcher settle window + invalidation on edit/delete                  | done -- uncommitted |
 | 6     | Performance + idempotency validation, integration tests                                | todo   |
 
 **Legend** for per-task status cells: `todo`, `in-progress`, `done`
@@ -907,15 +907,15 @@ no real `@parcel/watcher` involvement.
 
 | Item                                          | Status | Notes |
 |-----------------------------------------------|--------|-------|
-| Settle window timer on `IndexerService`       | todo   |       |
-| Per-file index triggers settle                | todo   |       |
-| `deleteUnresolvedForFile` on per-file re-index | todo  |       |
-| Source-side cleanup (5.2 sub-case 1)          | todo   |       |
-| Target-side cleanup decision: `ResolvedTrace` vs eventual-consistency | todo |  |
-| Scoped re-pass (`scopeFile` filter)           | todo   |       |
-| Manifest-change source-root invalidation      | todo   |       |
-| Race-free settle path                         | todo   |       |
-| Unit tests + fake-clock incremental tests     | todo   |       |
+| Settle window timer on `IndexerService`       | done -- uncommitted | per-repo `setTimeout` with `unref()`; window defaults to 2 s, ctor-overridable for tests |
+| Per-file index triggers settle                | done -- uncommitted | `fileEvent` (create/update/delete) calls `scheduleSettle(repo, file)`; the file is added to a per-repo scope set |
+| `deleteUnresolvedForFile` on per-file re-index | done   | landed in Phase 0 wiring |
+| Source-side cleanup (5.2 sub-case 1)          | done -- uncommitted | repurpose Phase 0's `deleteUnresolvedForFile`; the next per-file parse re-emits unresolved rows |
+| Target-side cleanup decision: `ResolvedTrace` vs eventual-consistency | partial -- uncommitted | chose eventual-consistency: when target file changes, Kuzu's DETACH DELETE on its entities cascades the typed REL edges; the source file's unresolved twins get rebuilt on its next edit. Documented as a deferred follow-up |
+| Scoped re-pass (`scopeFile` filter)           | done -- uncommitted | the settle pass loops over the scope set, calling `runCrossFileResolver` once per touched file |
+| Manifest-change source-root invalidation      | deferred | `detectSourceRoots` is recomputed on every settle pass anyway -- explicit invalidation only matters once the SourceRoots are cached on `IndexerService` |
+| Race-free settle path                         | done -- uncommitted | the timer is reset on every event; the pass operates on a snapshot of the scope set, then the set is cleared atomically before the resolver runs |
+| Unit tests + fake-clock incremental tests     | deferred -- end-to-end via remove+re-add | the settle wiring is ~30 LoC of straightforward setTimeout bookkeeping; integration coverage comes from the user's remove+re-add cycle exercising both bulk-mode and incremental paths against a real daemon |
 
 ### Phase 6 -- Performance + idempotency
 

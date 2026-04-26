@@ -6,6 +6,8 @@ import type { DbClient } from '../db/client.js';
 import type { RegisteredRepo, IndexJob, ConfigScope } from '../shared/types.js';
 import { upsertEntities } from '../db/entities.js';
 import { upsertRelations, deleteRelationsForFile, deleteUnresolvedForFile } from '../db/relations.js';
+import { runCrossFileResolver } from './cross-file-resolver.js';
+import { detectSourceRoots } from './source-roots.js';
 import { deleteEntitiesForFile, getEntity } from '../db/entities.js';
 import { updateRepoStatus } from '../db/repos.js';
 import { embedEntities, embedText } from './embedder.js';
@@ -111,13 +113,31 @@ export class IndexerService {
   private readonly watcher: Watcher;
   private readonly supported: Set<string>;
   private readonly configStore: ConfigStore | null;
+  /** Per-repo settle timer for the cross-file resolver pass (Phase 5).
+   *  Each per-file index resets the repo's timer; when 2 s elapses with
+   *  no further events for that repo, the cross-file pass runs over the
+   *  files touched in the window. */
+  private readonly settleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private readonly settleScopeFiles: Map<string, Set<string>> = new Map();
 
-  constructor(db: DbClient, queue: IndexQueue, watcher: Watcher, configStore?: ConfigStore | undefined) {
-    this.db          = db;
-    this.queue       = queue;
-    this.watcher     = watcher;
-    this.supported   = new Set(supportedExtensions());
-    this.configStore = configStore ?? null;
+  /** How long to wait after the last file event before kicking the
+   *  cross-file pass on the incremental path. Sits *on top of* the
+   *  watcher's existing 200 ms event-debounce. */
+  private readonly settleWindowMs: number;
+
+  constructor(
+    db: DbClient,
+    queue: IndexQueue,
+    watcher: Watcher,
+    configStore?: ConfigStore | undefined,
+    settleWindowMs: number = 2000,
+  ) {
+    this.db             = db;
+    this.queue          = queue;
+    this.watcher        = watcher;
+    this.supported      = new Set(supportedExtensions());
+    this.configStore    = configStore ?? null;
+    this.settleWindowMs = settleWindowMs;
   }
 
   /**
@@ -288,6 +308,20 @@ export class IndexerService {
       // Emit DEPENDS_ON edges from repo manifest
       await this.indexManifest(repoPath);
 
+      // Cross-file resolver: now that every file in the repo has been
+      // parsed once, walk the unresolved relations and try to link them
+      // up. See plans/cross-file-references.md §3-§5.
+      try {
+        const sourceRoots = detectSourceRoots(repoPath);
+        const cf = await runCrossFileResolver({ db: this.db, repoRoot: repoPath, sourceRoots });
+        log.info({ repo: repoPath, ...cf }, 'cross-file pass after full index');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Don't fail the whole index if the resolver throws -- the next
+        // settle pass (or a manual reindex) will retry.
+        log.warn({ repo: repoPath, err: msg }, 'cross-file pass failed; continuing');
+      }
+
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       log.info({ repo: repoPath, fileCount, skipped, elapsed: `${elapsed}s` }, 'full index complete');
       await updateRepoStatus(this.db, repoPath, 'ready', new Date().toISOString());
@@ -304,15 +338,68 @@ export class IndexerService {
     event:    'create' | 'update' | 'delete',
   ): Promise<void> {
     log.debug({ file: filePath, event }, 'file event');
+    const repoPath = this.repoForFile(filePath);
     if (event === 'delete') {
       await deleteRelationsForFile(this.db, filePath);
       await deleteEntitiesForFile(this.db, filePath);
       await deleteUnresolvedForFile(this.db, filePath);
       log.info({ file: filePath }, 'file deleted from index');
+      this.scheduleSettle(repoPath, filePath);
       return;
     }
     // create or update
-    await this.indexFile(filePath, this.repoForFile(filePath), true);
+    await this.indexFile(filePath, repoPath, true);
+    this.scheduleSettle(repoPath, filePath);
+  }
+
+  /**
+   * Reset the repo's settle timer. After settleWindowMs of no further
+   * events for the repo, fire the cross-file resolver pass scoped to
+   * the files touched in the window. See plans/cross-file-references.md
+   * §5.1.
+   */
+  private scheduleSettle(repoPath: string, filePath: string): void {
+    if (repoPath === '') return;  // file outside any registered repo
+
+    let scope = this.settleScopeFiles.get(repoPath);
+    if (scope === undefined) {
+      scope = new Set<string>();
+      this.settleScopeFiles.set(repoPath, scope);
+    }
+    scope.add(filePath);
+
+    const existing = this.settleTimers.get(repoPath);
+    if (existing !== undefined) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.settleTimers.delete(repoPath);
+      void this.runSettlePass(repoPath).catch(err => {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn({ repo: repoPath, err: msg }, 'settle pass failed');
+      });
+    }, this.settleWindowMs);
+    timer.unref();  // don't keep the daemon alive just for the settle
+    this.settleTimers.set(repoPath, timer);
+  }
+
+  private async runSettlePass(repoPath: string): Promise<void> {
+    const scope = this.settleScopeFiles.get(repoPath);
+    this.settleScopeFiles.delete(repoPath);
+    if (scope === undefined || scope.size === 0) return;
+
+    const sourceRoots = detectSourceRoots(repoPath);
+    let totalResolved = 0, totalAmbiguous = 0, totalRewired = 0;
+    for (const file of scope) {
+      const result = await runCrossFileResolver({
+        db: this.db, repoRoot: repoPath, sourceRoots, scopeFile: file,
+      });
+      totalResolved  += result.resolved;
+      totalAmbiguous += result.ambiguous;
+      totalRewired   += result.importsRewired;
+    }
+    log.info(
+      { repo: repoPath, files: scope.size, resolved: totalResolved, ambiguous: totalAmbiguous, importsRewired: totalRewired },
+      'cross-file settle pass complete',
+    );
   }
 
   private async reembed(repoPath: string): Promise<void> {
