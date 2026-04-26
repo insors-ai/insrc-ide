@@ -140,6 +140,19 @@ interface EntityIndex {
   readonly fileEntities:   Map<string, Entity>;
   /** all module-stub entities, keyed by entity id */
   readonly modules:        Map<string, Entity>;
+  /** O(1) entity-id -> entity lookup. Used by find*ById helpers that
+   *  used to do an O(N) linear scan -- pre-fix Pass 2 was hitting these
+   *  per-row, blowing up to O(N*rows) just for in-memory lookups. */
+  readonly byId:           Map<string, Entity>;
+  /** O(1) file-entity-id -> path lookup. Replaces another linear scan
+   *  in findFilePathByEntityId / getResolvedImportTargets. */
+  readonly fileIdToPath:   Map<string, string>;
+  /** Per-pass memoization cache for getResolvedImportTargets keyed by
+   *  the from-entity id. Pass-2 rows from the same function/file share
+   *  imports; without memoization each row re-issues an identical Kuzu
+   *  MATCH and two O(N) scans. Built lazily; one bucket per unique
+   *  from-entity. */
+  readonly importTargetsCache: Map<string, Set<string>>;
 }
 
 function buildEntityIndex(entities: readonly Entity[]): EntityIndex {
@@ -147,10 +160,14 @@ function buildEntityIndex(entities: readonly Entity[]): EntityIndex {
   const byFile         = new Map<string, Entity[]>();
   const fileEntities   = new Map<string, Entity>();
   const modules        = new Map<string, Entity>();
+  const byId           = new Map<string, Entity>();
+  const fileIdToPath   = new Map<string, string>();
 
   for (const e of entities) {
+    byId.set(e.id, e);
     if (e.kind === 'file') {
       fileEntities.set(e.file, e);
+      fileIdToPath.set(e.id, e.file);
       continue;
     }
     if (e.kind === 'module') {
@@ -167,7 +184,11 @@ function buildEntityIndex(entities: readonly Entity[]): EntityIndex {
     fileArr.push(e);
   }
 
-  return { byNameKindLang, byFile, fileEntities, modules };
+  return {
+    byNameKindLang, byFile, fileEntities, modules,
+    byId, fileIdToPath,
+    importTargetsCache: new Map(),
+  };
 }
 
 function entityKey(lang: Language, kind: EntityKind, name: string): string {
@@ -195,7 +216,14 @@ async function rewireModuleStubImports(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rows = await execGraph<any>(opts.db, stmt);
 
-  let rewired = 0;
+  // First pass: in-memory only -- resolve every row and group by from
+  // file. The Kuzu writes happen in a second pass below so we can batch
+  // the DELETEs (one query per from-file instead of one per edge,
+  // cutting Pass 1's Kuzu round-trip count by avg ~5-10x for typical
+  // imports-per-file ratios).
+  interface Rewire { readonly oldModuleId: string; readonly targetEntityId: string }
+  const groups = new Map<string, Rewire[]>();
+
   for (const row of rows) {
     const fromId   = row['fromId']   as string;
     const moduleId = row['moduleId'] as string;
@@ -219,30 +247,42 @@ async function rewireModuleStubImports(
     const targetEntity = index.fileEntities.get(targetFile);
     if (targetEntity === undefined) continue;
 
-    // Delete the old stub edge, add the new file-target edge. MERGE
-    // makes the second step idempotent if a previous pass already
-    // rewired this one.
+    let bucket = groups.get(fromId);
+    if (bucket === undefined) { bucket = []; groups.set(fromId, bucket); }
+    bucket.push({ oldModuleId: moduleId, targetEntityId: targetEntity.id });
+  }
+
+  let rewired = 0;
+  for (const [fromId, rewires] of groups) {
+    // Batched DELETE: one round-trip per from-file, regardless of how
+    // many module-stub IMPORTS that file has. Pattern matches
+    // eeae2ef7ac7's `WHERE n.id IN $ids` approach.
+    const moduleIds = rewires.map(r => r.oldModuleId);
     await execGraph(opts.db,
-      `MATCH (f:Entity {id: $from})-[r:IMPORTS]->(m:Entity {id: $module})
+      `MATCH (f:Entity {id: $from})-[r:IMPORTS]->(m:Entity)
+       WHERE m.id IN $modules
        DELETE r`,
-      { from: fromId, module: moduleId },
+      { from: fromId, modules: moduleIds },
     );
-    await execGraph(opts.db,
-      `MATCH (f:Entity {id: $from}), (t:Entity {id: $target})
-       MERGE (f)-[:IMPORTS]->(t)`,
-      { from: fromId, target: targetEntity.id },
-    );
-    rewired++;
+    // MERGE stays per-row -- batching MERGE for distinct (from, target)
+    // pairs would need UNWIND, which isn't used elsewhere in the
+    // codebase yet. Per-row MERGE is still O(N) total queries vs the
+    // pre-fix 2N (DELETE was the easy half to batch).
+    for (const r of rewires) {
+      await execGraph(opts.db,
+        `MATCH (f:Entity {id: $from}), (t:Entity {id: $target})
+         MERGE (f)-[:IMPORTS]->(t)`,
+        { from: fromId, target: r.targetEntityId },
+      );
+      rewired++;
+    }
   }
 
   return rewired;
 }
 
 function findFilePathByEntityId(id: string, index: EntityIndex): string | null {
-  for (const [path, e] of index.fileEntities) {
-    if (e.id === id) return path;
-  }
-  return null;
+  return index.fileIdToPath.get(id) ?? null;
 }
 
 /**
@@ -513,11 +553,7 @@ async function resolveCall(
 }
 
 function findEntityByIdAcrossIndex(index: EntityIndex, id: string): Entity | undefined {
-  for (const arr of index.byNameKindLang.values()) {
-    const hit = arr.find(e => e.id === id);
-    if (hit !== undefined) return hit;
-  }
-  return undefined;
+  return index.byId.get(id);
 }
 
 /**
@@ -530,19 +566,24 @@ async function getResolvedImportTargets(
   fromEntityId: string,
   index: EntityIndex,
 ): Promise<Set<string>> {
+  // Memo: pre-fix Pass 2 hammered this function once per row, even when
+  // many rows shared the same from-entity (e.g. a function with 20
+  // unresolved CALLs => 20 identical Kuzu queries). The cache is keyed
+  // by from-entity id and lives for the lifetime of one resolver pass.
+  const cached = index.importTargetsCache.get(fromEntityId);
+  if (cached !== undefined) return cached;
+
   // The from-side of the IMPORTS edge is the file entity, not the
-  // inheriting class. Look up the file entity by row.fromFile via the
-  // index, then walk its IMPORTS edges.
-  let fromFile: string | null = null;
-  for (const arr of index.byFile.values()) {
-    if (arr.some(e => e.id === fromEntityId)) {
-      fromFile = arr[0]!.file;
-      break;
-    }
+  // inheriting class. Resolve the from-entity to its file via the
+  // O(1) byId map, then look up the file entity that owns it.
+  const fromEntity = index.byId.get(fromEntityId);
+  const fromFile = fromEntity !== undefined ? fromEntity.file : null;
+  const fileEntity = fromFile !== null ? index.fileEntities.get(fromFile) : undefined;
+  if (fileEntity === undefined) {
+    const empty = new Set<string>();
+    index.importTargetsCache.set(fromEntityId, empty);
+    return empty;
   }
-  if (fromFile === null) return new Set();
-  const fileEntity = index.fileEntities.get(fromFile);
-  if (fileEntity === undefined) return new Set();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rows = await execGraph<any>(db,
@@ -554,10 +595,12 @@ async function getResolvedImportTargets(
   const out = new Set<string>();
   for (const row of rows) {
     const id = row['fileId'] as string;
-    for (const [path, e] of index.fileEntities) {
-      if (e.id === id) { out.add(path); break; }
-    }
+    // O(1) via fileIdToPath; replaces the prior linear scan over
+    // index.fileEntities entries.
+    const path = index.fileIdToPath.get(id);
+    if (path !== undefined) out.add(path);
   }
+  index.importTargetsCache.set(fromEntityId, out);
   return out;
 }
 
