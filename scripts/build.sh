@@ -79,14 +79,6 @@ build_daemon() {
 		# -a preserves timestamps so incremental builds stay cheap.
 		cp -a src/insrc/assets/. out/insrc/assets/
 	fi
-	# The IDE's dev-mode daemon spawn runs `node out/insrc/daemon/index.js`
-	# directly. Node walks up from there looking for node_modules and would
-	# never find src/insrc/node_modules; symlink so the daemon's deps
-	# resolve cleanly. Idempotent.
-	if [ ! -e "out/insrc/node_modules" ]; then
-		echo "[insrc-build] linking out/insrc/node_modules -> ../../src/insrc/node_modules"
-		ln -s ../../src/insrc/node_modules out/insrc/node_modules
-	fi
 }
 
 cmd="${1:-all}"
