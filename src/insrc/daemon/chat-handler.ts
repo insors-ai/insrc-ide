@@ -668,6 +668,106 @@ async function runPostPrimary(
 }
 
 // ---------------------------------------------------------------------------
+// Family-direct slash commands
+// ---------------------------------------------------------------------------
+
+/**
+ * Recognise per-family slash commands and dispatch them directly to
+ * the family controller, bypassing the classifier + decomposer.
+ *
+ *   /code-analyze <prompt>  -> CodeAnalyzerOrchestratorController
+ *
+ * Returns true when the message was handled (caller short-circuits).
+ * Returns false for any non-matching prefix so normal chat flow runs.
+ *
+ * Phase 1.8 of plans/analyzers/code-analyzer.md. Sibling analyzer
+ * families (data-analyzer, deployment-analyzer) will register their
+ * /data-analyze and /deploy-analyze commands here when they ship.
+ */
+async function tryFamilyDirectSlash(
+  active: ReturnType<ChatSessionPool['get']> & object,
+  channel: DaemonChannel,
+  message: string,
+  requestId: number,
+  send: (msg: IpcStreamMessage) => void,
+): Promise<boolean> {
+  const trimmed = message.trim();
+
+  const codeAnalyzeMatch = trimmed.match(/^\/code-analyze(?:\s+([\s\S]+))?$/);
+  if (codeAnalyzeMatch) {
+    const userPrompt = (codeAnalyzeMatch[1] ?? '').trim();
+    if (userPrompt.length === 0) {
+      send({
+        id: requestId,
+        stream: 'delta',
+        data: { text: 'Usage: `/code-analyze <question about the codebase>`' },
+      });
+      send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
+      return true;
+    }
+    await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send);
+    return true;
+  }
+
+  return false;
+}
+
+async function runCodeAnalyzerSlash(
+  active: ReturnType<ChatSessionPool['get']> & object,
+  channel: DaemonChannel,
+  userPrompt: string,
+  originalMessage: string,
+  requestId: number,
+  send: (msg: IpcStreamMessage) => void,
+): Promise<void> {
+  const session = active.session;
+  if (!session) {
+    send({ id: requestId, stream: 'delta', data: { text: '[error] session not initialised' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  send({
+    id: requestId,
+    stream: 'progress',
+    data: { message: 'Intent: code-analyzer (slash command)' },
+  });
+
+  const { CodeAnalyzerOrchestratorController } = await import(
+    './controllers/code-analyzer-orchestrator.js'
+  );
+  const { runControlledPipeline } = await import('./task.js');
+
+  const controller = new CodeAnalyzerOrchestratorController();
+  const deps: TaskOrchestratorDeps = {
+    session,
+    channel,
+    send,
+    requestId,
+    ...(active.abortController ? { abortController: active.abortController } : {}),
+  };
+
+  try {
+    const result = await runControlledPipeline(
+      controller,
+      { message: userPrompt, codeContext: '', session },
+      deps,
+    );
+    send({ id: requestId, stream: 'done', data: { summary: 'code-analyzer' } });
+    await persistTurn(session, originalMessage, result.finalOutput, result.finalFormat);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error({ err: msg }, '/code-analyze failed');
+    send({
+      id: requestId,
+      stream: 'delta',
+      data: { text: `[error] /code-analyze failed: ${msg}` },
+    });
+    send({ id: requestId, stream: 'done', data: {} });
+    await persistTurn(session, originalMessage, `[error] ${msg}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Core message processing
 // ---------------------------------------------------------------------------
 
@@ -683,6 +783,18 @@ async function runChatMessage(
     throw new Error(`session not properly initialized: session=${!!session}, repoPath=${session?.repoPath}`);
   }
   const pool = getPool();
+
+  // 0a. Family-direct slash commands -- bypass classifier + decomposer.
+  //
+  // /code-analyze <prompt>  -> CodeAnalyzerOrchestratorController
+  //
+  // Phase 1.8 of plans/analyzers/code-analyzer.md. The classifier path
+  // (intent='code-analysis') still routes to the legacy
+  // CodeAnalysisController as a rollback safety net; only the explicit
+  // slash command reaches the new family in Phase 1. Phase 2.6.a flips
+  // the classifier intent over and deletes the legacy.
+  const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send);
+  if (familyHandled) return;
 
   // 0. Resolve file references with per-session cache
   active.fileCache.setTurn(session.turnIndex);
