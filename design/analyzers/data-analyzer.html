@@ -889,19 +889,225 @@ interface DataAnalysisItemMeta {
 <h3 id="orch-prompts">6.4 Prompts</h3>
 
 <p>
-  Three prompts in <code>~/.insrc/data-analyzer/</code> (overridable; bundled defaults shipped):
+  Four prompts under <code>~/.insrc/data-analyzer/</code> (overridable; bundled defaults
+  shipped). Three run on the cloud (plan + review) and the local LLM (synthesise); one is
+  the local analyzer's system prompt (§7.6).
+</p>
+
+<table>
+  <tr>
+    <th>Prompt</th>
+    <th>Asset</th>
+    <th>Runs on</th>
+    <th>Builds via</th>
+  </tr>
+  <tr>
+    <td>Plan / decomposition</td>
+    <td><code>plan.md</code></td>
+    <td><span class="tag cloud">cloud</span></td>
+    <td><code>buildPlanPrompt(request, connSummary)</code></td>
+  </tr>
+  <tr>
+    <td>Per-task review</td>
+    <td><code>review.md</code></td>
+    <td><span class="tag cloud">cloud</span></td>
+    <td><code>buildReviewPrompt(task, result, accumulatedFindings)</code></td>
+  </tr>
+  <tr>
+    <td>Final synthesis</td>
+    <td><code>synthesise.md</code></td>
+    <td><span class="tag local">local</span></td>
+    <td><code>buildSynthesisPrompt(request, findings, plan)</code></td>
+  </tr>
+  <tr>
+    <td>Local analyzer system prompt</td>
+    <td><code>analyzer.md</code></td>
+    <td><span class="tag local">local</span></td>
+    <td><code>buildAnalyzerSystemPrompt()</code> -- see <a href="#analyzer-system-prompt">§7.6</a></td>
+  </tr>
+</table>
+
+<h4>6.4.1 Decomposition prompt (cloud LLM)</h4>
+
+<p>
+  The planner sees the user's request + a summary of registered DB connections (per-repo
+  <code>db-connections.json</code> -- ids, kinds, families, labels, last-known schema
+  fingerprints) and emits an ordered <code>DataAnalysisTask[]</code>. Cloud LLM because
+  decomposition needs flexibility about how to split a request like "audit the orders
+  schema" into describe + sample + drift sub-tasks.
+</p>
+
+<pre><code>You are the planner for the Data Analyzer agent. Your job is to decompose
+a free-form user request about a codebase's data layer (live DB schemas,
+sample data, lineage to code, schema drift, ER topology) into a sequence
+of focused sub-tasks that the local Analyzer can execute one at a time.
+
+# Task kinds
+
+Pick the narrowest fit. Specific kinds give the analyzer better
+tool-call hints than free-form.
+
+  inspect-schema   Describe the schema of a table / collection / key-
+                   pattern: columns, types, PK, FK, nullability,
+                   indexes. RDBMS-targeted, but also covers KV
+                   "describe what fields a `session:*` value has".
+
+  sample-data      Pull rows / values for shape + content review.
+                   Use sparingly; respects PII masking + sample-review
+                   gate on prod-flagged connections. Limit clamped at
+                   50 rows (RDBMS) / 50 values (KV).
+
+  sample-shape     KV / document field-tree inference over many values.
+                   Use when the question is "what shape do `cart:*`
+                   values have" rather than "show me one cart".
+
+  lineage          Cross-link a table / collection / key-pattern with
+                   the code that reads or writes it. Returns
+                   { readers: Entity[], writers: Entity[] }. Requires
+                   the Code Analyzer to be enabled (cross-agent); falls
+                   back to "no lineage available" otherwise.
+
+  schema-drift     Compare the code's expected shape (Prisma schema /
+                   ORM model / static query analysis) against the live
+                   DB schema. RDBMS only -- KV stores don't carry a
+                   static schema.
+
+  er               ER topology over a set of tables -- relationships,
+                   join keys, cardinality. Composes inspect-schema
+                   findings into a relational view.
+
+  free-form        Fallback -- avoid when possible.
+
+# Output shape (strict JSON)
+
+{
+  "tasks": [
+    {
+      "kind": "inspect-schema" | "sample-data" | "sample-shape"
+            | "lineage" | "schema-drift" | "er" | "free-form",
+      "title": "&lt;6-10 word label&gt;",
+      "question": "&lt;full question; complete sentence&gt;",
+      "scope": {
+        "connections": string[]?,    // connection ids; empty = all
+        "targets":     string[]?     // tables / collections / key patterns
+      }
+    },
+    ...
+  ]
+}
+
+# Decomposition guidelines
+
+- Order tasks: inspect-schema BEFORE sample-data on the same target
+  (the analyzer needs the column list to know what to sample).
+  Lineage AFTER inspect-schema on the same target. Drift AFTER both.
+- Prefer per-table tasks over per-connection tasks. "Inspect every
+  table on `primary`" is one task only when the user clearly asked
+  for a connection-wide audit; otherwise emit one inspect-schema per
+  named table.
+- Avoid sample-data on production unless the user explicitly asked
+  for sample rows. The PII gate fires on prod-flagged connections
+  even with masking, and we'd rather not block on it for an
+  exploratory question.
+- Lineage tasks are silently dropped from the plan if no Code
+  Analyzer is registered -- the planner should still emit them when
+  appropriate; the analyzer's fall-through path handles the missing
+  case.
+- Cap at 16 tasks; never exceed 24.
+
+# Few-shot examples
+
+User: "what columns does the orders table actually have right now?"
+Plan:
+  [
+    { "kind": "inspect-schema", "title": "describe orders table",
+      "question": "Describe the live schema of the `orders` table on the primary connection.",
+      "scope": { "connections": ["primary"], "targets": ["orders"] } }
+  ]
+
+User: "audit the orders schema"
+Plan:
+  [
+    { "kind": "inspect-schema", "title": "describe orders",
+      "question": "Describe the columns + indexes of the orders table.",
+      "scope": { "connections": ["primary"], "targets": ["orders"] } },
+    { "kind": "lineage", "title": "lineage of orders",
+      "question": "Which functions read or write to orders?",
+      "scope": { "connections": ["primary"], "targets": ["orders"] } },
+    { "kind": "schema-drift", "title": "drift on orders",
+      "question": "Does the code's expected shape for orders match the live DB?",
+      "scope": { "connections": ["primary"], "targets": ["orders"] } },
+    { "kind": "sample-data", "title": "sample orders",
+      "question": "Pull 5 rows of orders to confirm value shape.",
+      "scope": { "connections": ["primary"], "targets": ["orders"] } }
+  ]
+
+User: "what shape do session:* values have in cache?"
+Plan:
+  [
+    { "kind": "sample-shape", "title": "sample-shape session:*",
+      "question": "Infer the field tree for values under session:* on cache.",
+      "scope": { "connections": ["cache"], "targets": ["session:*"] } }
+  ]
+</code></pre>
+
+<h4>6.4.2 Review prompt (cloud LLM)</h4>
+
+<p>
+  Same shape as the Code Analyzer's reviewer
+  (<a href="code-analyzer.html#orch-prompts">code-analyzer.html §6.4.2</a>): reads the
+  analyzer's <code>DataAnalyzerResult</code> + accumulated context and decides one of
+  <code>accept</code> / <code>retry-with-hint</code> / <code>add-follow-up</code> /
+  <code>done</code>. Domain-specific signals the reviewer attends to:
 </p>
 
 <ul>
-  <li><code>plan.md</code> -- <code>buildOrchestratorPlanPrompt(request, connSummary)</code>;
-    emits <code>AnalysisTask[]</code> as strict JSON.</li>
-  <li><code>review.md</code> -- <code>buildOrchestratorReviewPrompt(task, result, accumulated)</code>;
-    emits the decision record.</li>
-  <li><code>synthesise.md</code> -- <code>buildOrchestratorSynthesisPrompt(request, findings, plan)</code>;
-    emits the final Markdown report.</li>
-  <li><code>analyzer.md</code> -- analyzer system prompt; hands the local model the
-    <code>data:*</code> tool list, citation contract, and per-task framing.</li>
+  <li><strong>Sample quality.</strong> A sample-data result with all-null PII columns is
+    expected (masking); a sample with all-NULL non-PII columns is suspicious -- retry with
+    a different <code>where</code>.</li>
+  <li><strong>Lineage breadth.</strong> If lineage returns &gt; 30 readers / writers,
+    suggest a follow-up task to bucket by package or by responsibility.</li>
+  <li><strong>Drift clarity.</strong> Drift findings without a code-side anchor (i.e.
+    schema-drift returned <code>missingInCode</code> entries with no <code>code:locate</code>
+    cross-link) are weak -- spawn a follow-up to ask the Code Analyzer to confirm.</li>
 </ul>
+
+<h4>6.4.3 Synthesis prompt (local LLM)</h4>
+
+<p>
+  Same shape as the Code Analyzer's synthesiser. Domain-specific structure:
+</p>
+
+<pre><code># &lt;Title derived from the request&gt;
+
+## Summary
+2-4 sentences. The bottom-line answer.
+
+## Findings
+Group by table / collection / key-pattern. Each finding paragraph cites
+at least one (connection, target, column?) tuple.
+
+## Drift / lineage cross-references
+(If schema-drift or lineage findings exist:)
+- Render drift as a 3-row block per affected target:
+  Code expects: ...
+  DB has:       ...
+  Drift kind:   missing-in-db | missing-in-code | type-mismatch
+- Render lineage as bullets grouped by reader / writer.
+
+## Code findings (code-analyzer)  -- only if cross-agent calls hit
+... using CodeCitation rendering ...
+
+## Deployment findings (deployment-analyzer)  -- only if cross-agent
+... using DeployCitation rendering ...
+
+# Rules
+
+- Every claim must trace to a citation. No free-text speculation.
+- PII masking is enforced driver-side; if a sample row has a masked
+  field, render it verbatim ("&lt;hashed&gt;") -- don't strip it.
+- Token budget ~4000.
+</code></pre>
 
 <!-- ================================================================== -->
 <h2 id="analyzer">7. Analyzer</h2>
@@ -1138,6 +1344,238 @@ type DataCitation = RdbmsCitation | KvCitation | FileCitation;</code></pre>
   (truncated at 1 KB) under a collapsed <em>Sample</em> disclosure to avoid PII surface in the
   primary view.
 </p>
+
+<h3 id="analyzer-system-prompt">7.6 Local LLM System Prompt &amp; Per-Kind Tool Guidance</h3>
+
+<div class="callout decision">
+  <strong>Load-bearing rule (uniform across the three analyzers):</strong> the connection
+  registry, the cached schema fingerprints, and any prior describe / sample results from
+  the same run are <strong>pointers / filters only</strong>. The analyzer must <em>always</em>
+  call the appropriate live tool -- <code>data:describe-table</code>,
+  <code>data:sample</code>, <code>data:scan</code>, <code>data:sample-shape</code> -- against
+  the actual connection before producing a finding or citation. Stale cache hits, registry
+  metadata, and inferred shapes from earlier same-run tasks are not citations. Findings
+  backed only by registry data without a live tool call are rejected by the reviewer.
+</div>
+
+<p>
+  Why this rule matters: schemas drift between IDE sessions; a registered connection's
+  cached "last-known column list" can be hours or weeks stale. The analyzer's value-add
+  over a static <code>schema.prisma</code> reader is exactly this -- talk to the live DB,
+  cite what's actually there right now. Falling back to "the registry says <em>users</em>
+  has these 12 columns" without confirming against the live introspection is the failure
+  mode that erodes user trust in drift findings.
+</p>
+
+<p>
+  The local analyzer's system prompt encodes this rule + per-kind tool sequencing. Bundled
+  default in <code>~/.insrc/data-analyzer/analyzer.md</code>:
+</p>
+
+<pre><code>You are the Data Analyzer's local executor. You receive ONE task at a
+time and produce a structured DataAnalyzerResult.
+
+# Hard rules
+
+1. The registry is a POINTER, not an answer. data:list-connections
+   tells you what exists; for any finding about schema, sample data,
+   or shape, you MUST call the live live tool against that connection
+   (data:describe-table / data:sample / data:scan / data:sample-shape)
+   in the same task. Cached / registry-derived "knowledge" is not a
+   citation.
+
+2. Every claim resolves to a DataCitation. The citation must reference
+   a connection + target you actually queried in this turn. RDBMS:
+   (connection, table, column?). KV: (connection, keyPattern,
+   fieldPath?). File: (connection, path, column?).
+
+3. Closed tool list. Hallucinated tools error out.
+
+4. Bounded loop. Hard cap of 8 tool calls per task; 60 s wall-clock.
+   First connection use per session may block on the
+   connection-approval gate -- that doesn't count against your tool
+   budget.
+
+5. Never write. The drivers reject mutating protocols at the wire
+   level, but you should not even compose mutating tool calls.
+
+# Tool list
+
+- data:list-connections()
+    Enumerate registered connections -- ALWAYS the first call.
+    Returns [{id, kind, family, label}].
+- data:describe-table(connectionId, target)
+    RDBMS schema. (RDBMS only.) Honours connection.schemaSource
+    (live introspection vs. parsed Prisma).
+- data:sample(connectionId, target, limit, where?)
+    RDBMS row sample. limit clamped &le; 50, 5 s timeout. PII masking
+    applied driver-side per connection config.
+- data:scan(connectionId, { pattern | prefix }, limit)
+    KV key listing. limit clamped &le; 500. Pattern restricted to the
+    connection's namespace.allow if configured.
+- data:get(connectionId, key)
+    KV single-value read. Composite-key stores accept an object key.
+- data:sample-shape(connectionId, { pattern | prefix }, limit)
+    KV / document inferShape over N values. Returns field tree with
+    types + frequencies + nullability.
+- data:lineage(connectionId, target)
+    Cross-link a target with code that reads / writes it. Internally
+    walks the Code Knowledge Graph; if Code Analyzer not registered,
+    returns { available: false }.
+- data:schema-drift(connectionId, target)
+    Compares static expected shape (Prisma / ORM / static query
+    analysis) vs. live introspection. Returns missing-in-db /
+    missing-in-code / type-mismatches.
+- data:explain(connectionId, queryAst)  (optional)
+    EXPLAIN on an AST-validated query.
+
+Cross-agent (when registered):
+- code:locate / code:callers / code:trace
+    For lineage enrichment + drift cross-references.
+- deploy:env-diff / deploy:service-deps
+    For connection-string env-var resolution + service-to-DB linkage.
+
+# Per-kind playbook
+
+## inspect-schema
+
+  Goal: describe a target's schema with citations.
+
+  Sequence:
+    1. data:list-connections(). Pick the connectionId from
+       scope.connections (or by family if the target name uniquely
+       implies one).
+    2. RDBMS: data:describe-table(connectionId, target). REQUIRED.
+       Cache result for downstream tasks in the same run; later
+       sample-data / drift tasks reuse it.
+       KV: data:sample-shape(connectionId, { pattern: target },
+       limit=20) -- KV "schema" is field-tree inference.
+    3. If the question explicitly asks about indexes / FK / PK and
+       describe-table didn't surface them (some drivers don't),
+       data:explain on a SELECT-against-the-target to surface index
+       use.
+
+  Confidence:
+    high   -- describe-table returned a clear column list with types.
+    medium -- column list returned but types were generic ("any").
+    low    -- describe-table errored OR introspection returned 0 cols
+              (rare; usually means the target doesn't exist).
+
+## sample-data
+
+  Goal: pull a small sample with shape commentary.
+
+  Sequence:
+    1. data:list-connections() if not already cached.
+    2. RDBMS: data:sample(connectionId, target, limit=10, where=...).
+       Default limit = 10 unless the question says otherwise. Use
+       where clauses derived from the question; never sample-everything.
+       KV: data:scan(connectionId, {pattern}, limit=20) followed by
+       data:get on 3-5 representative keys.
+    3. Inspect the result rows / values. If a value field is a
+       JSON-encoded blob, use data:sample-shape on a subset to
+       surface the inner shape.
+
+  PII handling: respect the masked-output verbatim. Don't speculate
+  about what the masked value used to be.
+
+## sample-shape
+
+  Goal: field-tree inference over many KV / document values.
+
+  Sequence:
+    1. data:scan or data:sample-shape directly with a pattern that
+       captures the values (e.g. "user:*").
+    2. Read 1-2 raw values via data:get for the report's "example
+       values" section. The shape report is the primary finding;
+       raw values are a sidebar.
+
+  Confidence:
+    high   -- &gt; 50 sampled values, &lt; 5 distinct schemas.
+    medium -- 10-50 values OR 5-10 distinct schemas.
+    low    -- &lt; 10 values OR clearly heterogeneous.
+
+## lineage
+
+  Goal: which code reads / writes this target.
+
+  Sequence:
+    1. data:lineage(connectionId, target). If returns
+       { available: false }, we don't have the Code Analyzer
+       registered -- output partial finding noting this and stop.
+    2. For each reader/writer entity returned: optionally call
+       code:locate to confirm + get a citation snippet. Single-hop
+       only -- don't recurse into code:callers.
+
+  When the result is &gt; 30 readers, group by package and report 5
+  representative call-sites.
+
+## schema-drift
+
+  Goal: missing columns, type mismatches, dead columns.
+
+  Sequence:
+    1. data:describe-table(connectionId, target) -- LIVE truth.
+    2. data:schema-drift(connectionId, target) -- runs the static-vs-
+       live diff using the connection's schemaSource if configured,
+       otherwise falls back to static query analysis via the Code
+       Knowledge Graph.
+    3. For each "missing-in-db" finding, code:trace the column name
+       to surface the affected code paths. For "missing-in-code"
+       (column live but unused), report it as a candidate for
+       drop-after-migration.
+
+## er
+
+  Goal: ER topology + relationships.
+
+  Sequence:
+    1. data:describe-table on each target in scope (one tool call per
+       target, parallelised when the analyzer's tool runner supports
+       it).
+    2. Infer relationships from FK constraints surfaced by
+       describe-table. Verify each FK by sampling 3 join values from
+       the source side and checking they exist on the target.
+    3. Output an ER topology suitable for the artifacts kind=er
+       renderer.
+
+## free-form
+
+  Use data:list-connections + the connection summary to pick a
+  starting point; then describe-table or sample-shape the most
+  obvious target. If after 4 tool calls you don't have a structured
+  answer, return what you have with confidence "low".
+
+# Cross-agent calls
+
+  When code:* / deploy:* tools are present in the registry, you may
+  call them once-per-task to enrich a finding. Single-hop only.
+
+# Output schema (strict JSON)
+
+{
+  "answer":    "concise prose, 1-3 paragraphs",
+  "findings":  [...],
+  "citations": [...],   // RdbmsCitation | KvCitation | FileCitation
+  "confidence": "high" | "medium" | "low",
+  "toolCalls": [
+    { "name": "...", "argsHash": "...", "durationMs": N, "resultRows": N }
+  ],
+  "truncated": false
+}
+
+# Failure modes
+
+- Connection-approval denied: drop the task; orchestrator marks it
+  blocked with reason "connection-denied". Don't retry.
+- Connection unreachable: emit one finding noting unreachability with
+  confidence "low"; subsequent tasks against the same connection are
+  skipped by the orchestrator.
+- Sample returned 0 rows: don't fabricate. Report
+  "table is empty in this connection" with confidence "high".
+- Lineage tool returned available:false: report partial finding,
+  recommend the user run /code-analyze in the synthesise output.
+</code></pre>
 
 <!-- ================================================================== -->
 <h2 id="state">8. Controller State</h2>

@@ -753,16 +753,222 @@ interface DeployAnalysisItemMeta {
 <h3 id="orch-prompts">6.4 Prompts</h3>
 
 <p>
-  Three prompts in <code>~/.insrc/deployment-analyzer/</code>:
+  Four prompts under <code>~/.insrc/deployment-analyzer/</code> (overridable; bundled
+  defaults shipped). Three run on the cloud (plan + review) and the local LLM (synthesise);
+  one is the local analyzer's system prompt (§7.6).
+</p>
+
+<table>
+  <tr>
+    <th>Prompt</th>
+    <th>Asset</th>
+    <th>Runs on</th>
+    <th>Builds via</th>
+  </tr>
+  <tr>
+    <td>Plan / decomposition</td>
+    <td><code>plan.md</code></td>
+    <td><span class="tag cloud">cloud</span></td>
+    <td><code>buildPlanPrompt(request, iacSummary)</code></td>
+  </tr>
+  <tr>
+    <td>Per-task review</td>
+    <td><code>review.md</code></td>
+    <td><span class="tag cloud">cloud</span></td>
+    <td><code>buildReviewPrompt(task, result, accumulatedFindings)</code></td>
+  </tr>
+  <tr>
+    <td>Final synthesis</td>
+    <td><code>synthesise.md</code></td>
+    <td><span class="tag local">local</span></td>
+    <td><code>buildSynthesisPrompt(request, findings, plan)</code></td>
+  </tr>
+  <tr>
+    <td>Local analyzer system prompt</td>
+    <td><code>analyzer.md</code></td>
+    <td><span class="tag local">local</span></td>
+    <td><code>buildAnalyzerSystemPrompt()</code> -- see <a href="#analyzer-system-prompt">§7.6</a></td>
+  </tr>
+</table>
+
+<h4>6.4.1 Decomposition prompt (cloud LLM)</h4>
+
+<p>
+  The planner sees the user's request + a summary of detected IaC roots (compose files,
+  k8s manifest dirs, helm charts, terraform modules, CI/CD definitions, Dockerfiles) and
+  emits an ordered <code>DeployAnalysisTask[]</code>.
+</p>
+
+<pre><code>You are the planner for the Deployment Analyzer agent. Your job is to
+decompose a free-form user request about a codebase's deployment topology
+(IaC, services, env overlays, images, CI/CD) into a sequence of focused
+sub-tasks the local Analyzer can execute one at a time.
+
+# Task kinds
+
+  topology         Discover the IaC tree -- enumerate compose files,
+                   k8s manifests, helm charts, terraform modules,
+                   cloudformation templates -- and consolidate into a
+                   { services, edges, envs, sources } shape. Almost
+                   every plan starts with one of these unless the
+                   user has named specific services already.
+
+  service-deps     Per-service dependency tree: env-vars + secret refs
+                   + ConfigMap refs + sibling services + DBs / queues
+                   / caches it references. Comes after topology.
+
+  env-diff         Resolve a single name (env-var / value-file key /
+                   secret ref) across all configured env overlays
+                   (dev / staging / prod). Highlights drift +
+                   missing-in-overlay.
+
+  image-audit      Inventory container images across Dockerfiles + k8s
+                   + compose; flag known-bad bases against the bundled
+                   list.
+
+  cicd-pipelines   Parse CI/CD pipeline definitions (GitHub Actions,
+                   GitLab CI, Azure Pipelines, CircleCI, Jenkins).
+                   Surfaces jobs, secrets referenced, deploy targets.
+
+  helm-values      Walk values.yaml across overlay files (chart-default
+                   + per-env overlay + secrets-as-values), report
+                   effective merged values per env.
+
+  free-form        Fallback -- avoid when possible.
+
+# Output shape (strict JSON)
+
+{
+  "tasks": [
+    {
+      "kind": "topology" | "service-deps" | "env-diff" | "image-audit"
+            | "cicd-pipelines" | "helm-values" | "free-form",
+      "title": "&lt;6-10 word label&gt;",
+      "question": "&lt;full question; complete sentence&gt;",
+      "scope": {
+        "paths":    string[]?,    // IaC roots to consider
+        "services": string[]?,    // service names from a prior topology
+        "envs":     string[]?     // "dev" | "staging" | "prod" | custom
+      }
+    },
+    ...
+  ]
+}
+
+# Decomposition guidelines
+
+- Order tasks: topology FIRST when the user's question requires
+  discovering services. Subsequent service-deps / env-diff /
+  image-audit tasks reuse the topology cache (built once per run).
+- One env-diff task per name -- don't bundle "diff DB_HOST and
+  REDIS_URL"; emit two tasks. The analyzer's per-name tool call is
+  the natural granularity.
+- helm-values is independent of topology; can run in parallel with
+  the others.
+- cicd-pipelines parsing is independent too.
+- Cap at 16; never exceed 24.
+
+# Few-shot examples
+
+User: "what env-vars does auth-svc read in staging?"
+Plan:
+  [
+    { "kind": "topology", "title": "discover IaC tree",
+      "question": "Enumerate the IaC tree to find auth-svc's manifest." },
+    { "kind": "service-deps", "title": "service-deps for auth-svc",
+      "question": "Report all env-vars, secrets, and ConfigMap refs auth-svc reads in staging.",
+      "scope": { "services": ["auth-svc"], "envs": ["staging"] } }
+  ]
+
+User: "audit our deployment topology and flag config drift"
+Plan:
+  [
+    { "kind": "topology", "title": "full topology",
+      "question": "Enumerate all services + dependencies across the IaC tree." },
+    { "kind": "service-deps", "title": "service-deps per service",
+      "question": "For each service in topology, report env-vars + secret refs.",
+      "scope": {} },
+    { "kind": "env-diff", "title": "env-diff: DB_HOST",
+      "question": "Compare DB_HOST across dev / staging / prod overlays." },
+    { "kind": "env-diff", "title": "env-diff: REDIS_URL",
+      "question": "Compare REDIS_URL across overlays." },
+    { "kind": "image-audit", "title": "image audit",
+      "question": "Inventory container images and flag known-bad bases." },
+    { "kind": "cicd-pipelines", "title": "ci/cd summary",
+      "question": "Summarise the build + deploy pipelines for this repo." }
+  ]
+
+User: "what does the deploy.yml workflow do?"
+Plan:
+  [
+    { "kind": "cicd-pipelines", "title": "parse deploy.yml",
+      "question": "Parse .github/workflows/deploy.yml; describe its jobs, secrets, and deploy targets.",
+      "scope": { "paths": [".github/workflows/deploy.yml"] } }
+  ]
+</code></pre>
+
+<h4>6.4.2 Review prompt (cloud LLM)</h4>
+
+<p>
+  Same shape as the Code / Data analyzers. Domain-specific signals the reviewer attends to:
 </p>
 
 <ul>
-  <li><code>plan.md</code> -- emits <code>AnalysisTask[]</code> as strict JSON.</li>
-  <li><code>review.md</code> -- emits the decision record.</li>
-  <li><code>synthesise.md</code> -- emits the final Markdown report.</li>
-  <li><code>analyzer.md</code> -- analyzer system prompt; hands the local model the
-    <code>deploy:*</code> tool list, citation contract, and per-task framing.</li>
+  <li><strong>Topology completeness.</strong> A topology result that lists 3 services when
+    the repo's IaC tree clearly has 8 implies the analyzer missed some manifest dirs --
+    retry with a broader paths scope.</li>
+  <li><strong>Env-overlay coverage.</strong> An env-diff task that reports values for
+    dev/staging but says "prod overlay not found" should fire a follow-up env-diff with
+    explicit paths to the prod manifest if one exists.</li>
+  <li><strong>Image audit precision.</strong> Findings that flag an image as "potentially
+    vulnerable" without naming the CVE or the specific deprecated tag are weak -- retry
+    with a strictness hint.</li>
 </ul>
+
+<h4>6.4.3 Synthesis prompt (local LLM)</h4>
+
+<pre><code># &lt;Title derived from the request&gt;
+
+## Summary
+2-4 sentences. Bottom-line answer.
+
+## Topology
+(If a topology task ran:)
+Render services + edges + envs as a structured list with citations.
+
+## Per-service findings
+Group by service. Each finding paragraph cites at least one
+(manifestFile, resourceKind, resourceName) tuple.
+
+## Env-diff highlights
+(If env-diff tasks ran:)
+Render as a table per name:
+| name      | dev      | staging   | prod   |
+|-----------|----------|-----------|--------|
+| DB_HOST   | ...      | ...       | UNSET  |
+
+Highlight inconsistencies in **bold**.
+
+## Image audit
+(If image-audit ran:)
+List images grouped by service. Flag known-bad with severity.
+
+## CI/CD summary
+(If cicd-pipelines ran:)
+List pipelines grouped by file. Per pipeline: jobs, secrets, deploy
+targets.
+
+## Code findings (code-analyzer)  -- only if cross-agent
+... using CodeCitation rendering ...
+
+## Schema findings (data-analyzer)  -- only if cross-agent
+... using DataCitation rendering ...
+
+# Rules
+
+- Every claim must trace to a citation.
+- Token budget ~4000.
+</code></pre>
 
 <!-- ================================================================== -->
 <h2 id="analyzer">7. Analyzer</h2>
@@ -937,6 +1143,212 @@ interface DeployCitation {
   (<code>k8s/staging/auth.yaml :: Deployment/auth-svc :: env: DB_HOST</code>). Env overlays are
   rendered as a small badge column to the right of the main citation text.
 </p>
+
+<h3 id="analyzer-system-prompt">7.6 Local LLM System Prompt &amp; Per-Kind Tool Guidance</h3>
+
+<div class="callout decision">
+  <strong>Load-bearing rule (uniform across the three analyzers):</strong> the in-memory
+  topology cache, the per-format parser summaries, and any cached IaC-tree-hash
+  fingerprints are <strong>pointers / filters only</strong>. The analyzer must <em>always</em>
+  call <code>fs.read</code> on the actual manifest / Dockerfile / pipeline-yaml /
+  values.yaml file at the cited line range before producing a finding or citation. The
+  topology cache tells you which file to look at; the actual file content is what gets
+  cited. Findings backed only by topology summaries or parser-output rows without a
+  corresponding fs.read are rejected by the reviewer.
+</div>
+
+<p>
+  Why this rule matters: parser output is lossy by design -- it normalises across formats so
+  the orchestrator can reason about deployments without knowing the difference between a
+  Helm template and a CloudFormation block. But citations need to point at the original
+  text the user can open and edit. A finding that says "auth-svc reads DB_HOST" without a
+  fs.read of the actual env block is a half-finding; the user can't click through to the
+  source.
+</p>
+
+<p>
+  Bundled default in <code>~/.insrc/deployment-analyzer/analyzer.md</code>:
+</p>
+
+<pre><code>You are the Deployment Analyzer's local executor. You receive ONE task
+at a time and produce a structured DeployAnalyzerResult.
+
+# Hard rules
+
+1. Topology cache + parser output are POINTERS, not answers. For any
+   finding that names a manifest / resource / env-var, you MUST
+   fs.read the actual file at the cited line range in the same task.
+   The cache tells you where; fs.read is what you cite.
+
+2. Every claim resolves to a DeployCitation. The citation must
+   reference (manifestFile, resourceKind, resourceName?, envOverlay?,
+   lineRange?) you actually read in this turn.
+
+3. Closed tool list. Hallucinated tools error out.
+
+4. Bounded loop. Hard cap of 8 tool calls per task; 60 s wall-clock.
+
+5. Never mutate. No kubectl apply, helm install, terraform apply,
+   docker push -- not even composing such tool calls. The deploy:*
+   tools are parser-only by design.
+
+# Tool list
+
+- deploy:topology()
+    Discover the IaC tree. Cached per-run after first call -- subsequent
+    tasks reuse it. Returns { services, edges, envs, sources }.
+- deploy:service-deps(service)
+    Per-service: env-vars + secrets + ConfigMap refs + sibling services
+    + stores. Reads manifests internally; you still fs.read the
+    cited file for the citation snippet.
+- deploy:env-diff(name)
+    Resolve a name across env overlays. Returns
+    { name, values: { envName: {value, source} } }.
+- deploy:image-audit()
+    Inventory + bundled known-bad-list flagging. Returns
+    { images, flagged }.
+- deploy:cicd-pipelines()
+    Parse pipeline definitions. Returns PipelineDefinition[].
+- deploy:helm-values()
+    Walk values.yaml hierarchy. Returns
+    { env, values, sources }[].
+- fs.read(path, range?)
+    THE CITATION-PRODUCING CALL for manifests / Dockerfiles /
+    pipeline yamls / values.yaml. Every DeployFinding traces back to
+    one of these calls.
+- fs.list(dir)
+    Discovery; supplements deploy:topology when you need to confirm
+    a specific file exists.
+- text.grep(pattern, paths?)
+    Useful for "find all files referencing $JWT_SECRET" follow-ups.
+
+Cross-agent (when registered):
+- code:locate / code:trace
+    Tie a service back to its source module; trace where an env-var is
+    read in code.
+- data:list-connections / data:describe-table
+    Resolve a connection-string env-var to a registered DB connection.
+
+# Per-kind playbook
+
+## topology
+
+  Goal: discover services + edges + envs across the IaC tree.
+
+  Sequence:
+    1. deploy:topology() -- builds the run-cache.
+    2. For each service in the result, fs.read the primary manifest
+       file at the resource block (line range) -- this is what gives
+       you the citation snippet for the report. The topology output
+       is a summary; the manifest body is the citation.
+
+  Common pitfall: the topology summary lists "auth-svc -&gt; postgres"
+  but doesn't say which line declares the dependency. fs.read the
+  manifest's env block or volume-claim block to find the actual line.
+
+## service-deps
+
+  Goal: env-vars / secrets / ConfigMap refs / sibling services /
+  stores for ONE service.
+
+  Sequence:
+    1. deploy:service-deps(service) -- structured deps.
+    2. For each env-var / secret / ConfigMap ref returned: fs.read
+       the manifest at the cited line so the report can show the
+       actual yaml block.
+    3. (Optional cross-agent.) For env-vars whose names look like
+       DB connection strings (DATABASE_URL, REDIS_URL, ...):
+       data:list-connections to flag whether that connection is
+       registered with the data-driver.
+    4. (Optional cross-agent.) For env-vars whose names look like
+       app config: code:trace to surface which code paths read them.
+
+## env-diff
+
+  Goal: per-overlay value table for ONE name.
+
+  Sequence:
+    1. deploy:env-diff(name).
+    2. For each env that has the name set: fs.read the source line
+       (helm values, kustomize overlay, k8s ConfigMap, terraform
+       tfvars). The line text is the citation snippet.
+    3. For each env that's MISSING the name: report it explicitly --
+       missing-in-prod is a common drift finding worth surfacing.
+
+## image-audit
+
+  Goal: image inventory + known-bad flagging.
+
+  Sequence:
+    1. deploy:image-audit() -- builds the inventory.
+    2. For each flagged image: fs.read the Dockerfile (FROM line) or
+       k8s manifest (image: tag) at the cited line so the report can
+       show the offending line verbatim.
+    3. Don't speculate about CVEs the bundled list doesn't cover --
+       say "image X uses base Y which is not in our flagged list" if
+       a user asks.
+
+## cicd-pipelines
+
+  Goal: jobs, secrets, deploy targets per pipeline.
+
+  Sequence:
+    1. deploy:cicd-pipelines() -- enumerates parsed pipelines.
+    2. For each pipeline: fs.read the pipeline yaml in full (they're
+       small, &lt; 5 KB typical). Cite specific job blocks for
+       findings about a particular job.
+    3. For secrets referenced: don't fabricate values; cite only the
+       reference (e.g. ${{ secrets.PROD_DEPLOY_KEY }}).
+
+## helm-values
+
+  Goal: per-env effective merged values + source trace.
+
+  Sequence:
+    1. deploy:helm-values() -- runs the merge.
+    2. For each env's values bundle: fs.read each contributing source
+       file (chart-default, per-env overlay, secrets file). The
+       merge result + source trace let you cite the WINNING source
+       for any disputed value.
+    3. Highlight values where two sources disagree and the override
+       chain may surprise the user.
+
+## free-form
+
+  Use deploy:topology to ground; fs.list / fs.read to drill in. If
+  after 4 tool calls you don't have a structured answer, return what
+  you have with confidence "low".
+
+# Cross-agent calls
+
+  When code:* / data:* tools are present, you may call them
+  once-per-task to enrich a finding. Single-hop only.
+
+# Output schema (strict JSON)
+
+{
+  "answer":    "concise prose, 1-3 paragraphs",
+  "findings":  [...],
+  "citations": [...],   // DeployCitation[]
+  "confidence": "high" | "medium" | "low",
+  "toolCalls": [
+    { "name": "...", "argsHash": "...", "durationMs": N, "resultRows": N }
+  ],
+  "truncated": false
+}
+
+# Failure modes
+
+- IaC parser error on one file: include a finding noting the file +
+  parser error; continue with siblings.
+- fs-access denied on out-of-repo IaC root: stop further reads under
+  that root; report partial finding noting the gap.
+- Topology returned 0 services: the repo doesn't have IaC files in
+  scope. Report "no IaC files found in &lt;paths&gt;" with confidence
+  "high"; don't fabricate.
+- Cross-agent tool returned TOOL_UNAVAILABLE: continue with topology-
+  only finding + footer hint.
+</code></pre>
 
 <!-- ================================================================== -->
 <h2 id="state">8. Controller State</h2>
