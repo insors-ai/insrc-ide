@@ -238,6 +238,7 @@ export interface AgentConfig {
 // ---------------------------------------------------------------------------
 
 export type Language = 'python' | 'go' | 'typescript' | 'javascript'
+  | 'java' | 'scala'
   | 'markdown' | 'html' | 'css' | 'yaml' | 'json' | 'toml' | 'shell'
   | 'sql' | 'proto' | 'graphql' | 'dockerfile' | 'config';
 
