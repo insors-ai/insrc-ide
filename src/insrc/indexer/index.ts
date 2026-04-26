@@ -5,7 +5,7 @@ import { join, extname, resolve } from 'node:path';
 import type { DbClient } from '../db/client.js';
 import type { RegisteredRepo, IndexJob, ConfigScope } from '../shared/types.js';
 import { upsertEntities } from '../db/entities.js';
-import { upsertRelations, deleteRelationsForFile } from '../db/relations.js';
+import { upsertRelations, deleteRelationsForFile, deleteUnresolvedForFile } from '../db/relations.js';
 import { deleteEntitiesForFile, getEntity } from '../db/entities.js';
 import { updateRepoStatus } from '../db/repos.js';
 import { embedEntities, embedText } from './embedder.js';
@@ -307,6 +307,7 @@ export class IndexerService {
     if (event === 'delete') {
       await deleteRelationsForFile(this.db, filePath);
       await deleteEntitiesForFile(this.db, filePath);
+      await deleteUnresolvedForFile(this.db, filePath);
       log.info({ file: filePath }, 'file deleted from index');
       return;
     }
@@ -373,6 +374,7 @@ export class IndexerService {
     } else {
       await deleteRelationsForFile(this.db, filePath);
       await deleteEntitiesForFile(this.db, filePath);
+      await deleteUnresolvedForFile(this.db, filePath);
     }
 
     // Parse

@@ -1,14 +1,14 @@
 import { existsSync } from 'node:fs';
 import { resolve, dirname, extname } from 'node:path';
-import type { Entity, Relation } from '../shared/types.js';
+import type { Entity, Relation, Language } from '../shared/types.js';
 import { makeEntityId } from './parser/base.js';
 
 /**
  * Resolve unresolved relations in a ParseResult.
  *
- * For relative IMPORTS (e.g. `../../shared/types.js`):
+ * For relative IMPORTS:
  *   - Compute the absolute path of the imported file
- *   - Try TypeScript/JavaScript extension variants
+ *   - Try the per-language extension candidate map
  *   - If the file exists on disk, mark the relation resolved with the File entity ID
  *
  * For CALLS with raw function/method names:
@@ -16,7 +16,8 @@ import { makeEntityId } from './parser/base.js';
  *   - If a unique match is found, resolve to the entity ID
  *
  * For INHERITS / IMPLEMENTS with raw class/interface names:
- *   - Left unresolved for a future cross-file pass (Phase 5)
+ *   - Left unresolved for the cross-file resolver pass.
+ *   - See plans/cross-file-references.md.
  *
  * Does not touch the database — purely path-based, synchronous.
  */
@@ -44,6 +45,8 @@ export function resolveRelations(
     }
   }
 
+  const language = detectLanguage(filePath, entities);
+
   return relations.map(rel => {
     if (rel.resolved) return rel;
 
@@ -60,7 +63,7 @@ export function resolveRelations(
     if (!rel.meta?.['isRelative']) return rel;       // external module: already handled by parser
 
     const specifier = rel.to;
-    const absPath   = resolveImportPath(filePath, specifier, repo);
+    const absPath   = resolveImportPath(filePath, specifier, repo, language);
 
     if (!absPath) return rel; // can't resolve — keep unresolved
 
@@ -74,22 +77,22 @@ export function resolveRelations(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve a relative import specifier to an absolute file path.
- * Handles TypeScript's convention of writing `.js` imports that map to `.ts` files.
+ * Resolve a relative import specifier to an absolute file path using the
+ * per-language extension candidate map.
  * Returns null if the file cannot be found.
  */
 function resolveImportPath(
   fromFile:  string,
   specifier: string,
   repo:      string,
+  language:  Language,
 ): string | null {
   const fromDir = dirname(fromFile);
 
   // Strip query strings / hashes (rare but possible)
   const clean = specifier.split('?')[0]?.split('#')[0] ?? specifier;
 
-  // Candidate paths to probe (TypeScript remaps .js → .ts at build time)
-  const candidates = buildCandidates(resolve(fromDir, clean));
+  const candidates = buildCandidates(resolve(fromDir, clean), language);
 
   for (const candidate of candidates) {
     // Must be inside the repo to avoid leaking outside the graph scope
@@ -99,7 +102,22 @@ function resolveImportPath(
   return null;
 }
 
-const TS_EXTENSION_MAP: Record<string, string[]> = {
+// ---------------------------------------------------------------------------
+// Per-language extension candidate map
+//
+// Outer key: source-file language. Inner key: extension on the import
+// specifier (or '' for an extensionless specifier). Value: the list of
+// candidate suffixes to probe in order. A leading '/' on an entry means
+// "append to the bare path" (used for index/__init__-style targets).
+//
+// Phase 0 ships the skeleton with TS/JS populated (current behaviour).
+// Phase 1 fills in Python; later phases add the other languages.
+// See plans/cross-file-references.md §0.5 / §1.
+// ---------------------------------------------------------------------------
+
+type ExtensionCandidates = Readonly<Record<string, readonly string[]>>;
+
+const TS_CANDIDATES: ExtensionCandidates = {
   '.js':  ['.ts', '.tsx', '.js', '.jsx'],
   '.jsx': ['.jsx', '.tsx', '.js', '.ts'],
   '.mjs': ['.mts', '.mjs'],
@@ -107,20 +125,56 @@ const TS_EXTENSION_MAP: Record<string, string[]> = {
   '':     ['.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.tsx', '/index.js'],
 };
 
-function buildCandidates(base: string): string[] {
-  const ext   = extname(base);
-  const stem  = base.slice(0, base.length - ext.length);
-  const alts  = TS_EXTENSION_MAP[ext] ?? [ext];
+const EXTENSION_MAP: Readonly<Partial<Record<Language, ExtensionCandidates>>> = {
+  typescript: TS_CANDIDATES,
+  javascript: TS_CANDIDATES,
+  // python: filled in Phase 1
+  // go / java / scala: filled in their respective phases (cross-file pass
+  // handles JVM package-style imports rather than relative-path probing).
+};
+
+function buildCandidates(base: string, language: Language): string[] {
+  const map = EXTENSION_MAP[language];
+  if (!map) return [base];
+
+  const ext  = extname(base);
+  const stem = base.slice(0, base.length - ext.length);
+  const alts = map[ext] ?? [ext];
 
   const candidates: string[] = alts.map(a =>
     a.startsWith('/') ? stem + a : stem + a,
   );
 
-  // Also try bare path (no extension) → index variants
+  // Also try bare path → index variants if we started with an extension
   if (ext) {
-    const bare = TS_EXTENSION_MAP[''] ?? [];
+    const bare = map[''] ?? [];
     candidates.push(...bare.map(a => a.startsWith('/') ? base + a : base + a));
   }
 
   return candidates;
 }
+
+// ---------------------------------------------------------------------------
+// Language detection — derive from a parsed file entity when available,
+// otherwise fall back to extension-based mapping.
+// ---------------------------------------------------------------------------
+
+function detectLanguage(filePath: string, entities?: Entity[]): Language {
+  if (entities) {
+    const fileEntity = entities.find(e => e.kind === 'file' && e.file === filePath);
+    if (fileEntity) return fileEntity.language;
+  }
+  const ext = extname(filePath).toLowerCase();
+  return EXT_TO_LANG[ext] ?? 'config';
+}
+
+const EXT_TO_LANG: Readonly<Record<string, Language>> = {
+  '.ts':    'typescript', '.tsx': 'typescript',
+  '.mts':   'typescript', '.cts': 'typescript',
+  '.js':    'javascript', '.jsx': 'javascript',
+  '.mjs':   'javascript', '.cjs': 'javascript',
+  '.py':    'python',
+  '.go':    'go',
+  '.java':  'java',
+  '.scala': 'scala', '.sc': 'scala',
+};

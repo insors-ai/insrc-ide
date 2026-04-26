@@ -31,6 +31,24 @@ export const KUZU_STATEMENTS: string[] = [
   'CREATE REL TABLE IF NOT EXISTS EXPORTS(FROM Entity TO Entity)',
   'CREATE REL TABLE IF NOT EXISTS REFERENCES(FROM Entity TO Entity)',
 
+  // Unresolved relations — persistence for cross-file resolver pass.
+  // The per-file parser/resolver leaves edges that need cross-file lookup
+  // (INHERITS / IMPLEMENTS / cross-file CALLS / Python relative IMPORTS) in
+  // this table; the cross-file pass walks it after the queue settles and
+  // promotes resolved edges into the typed REL tables above.
+  // See plans/cross-file-references.md §0.1.
+  `CREATE NODE TABLE IF NOT EXISTS UnresolvedRelation(
+    id          STRING,
+    repo        STRING,
+    fromEntity  STRING,
+    fromFile    STRING,
+    kind        STRING,
+    rawTo       STRING,
+    meta        STRING,
+    attemptedAt STRING,
+    PRIMARY KEY(id)
+  )`,
+
   // Plan graph — persistent across sessions, NOT subject to TTL pruning
   `CREATE NODE TABLE IF NOT EXISTS Plan(
     id        STRING,
