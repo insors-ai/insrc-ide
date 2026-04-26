@@ -58,7 +58,7 @@ constraint:
 |-------|----------------------------------------------------------------------------------------|--------|
 | 0     | Foundations: persistence schema for unresolved relations, settle hook, idempotency     | partial -- 62bea4defb7 (settle hook deferred to Phase 3) |
 | 1     | Quick win -- fix Python relative-import path resolution                                | done -- 8a45171cc82 |
-| 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | done -- uncommitted |
+| 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | done -- 063d600d1cb |
 | 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | todo   |
 | 4     | Cross-file CALLS resolution (using imported scope)                                     | todo   |
 | 5     | Incremental mode: watcher settle window + invalidation on edit/delete                  | todo   |
@@ -871,13 +871,13 @@ no real `@parcel/watcher` involvement.
 
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
-| `source-roots.ts` skeleton + API           | done -- uncommitted | shipped richer types than the plan: SourceRoots carries GoSourceInfo + TsSourceInfo (modulePath / paths map) rather than plain string[] for those two |
-| Java / Scala manifest source-root parsing  | done -- uncommitted | Maven `<modules>` recursion + `<sourceDirectory>` override; Gradle dotted form + `<lang> { srcDirs(...) }` block; SBT/Mill convention; Scala cross-build dirs (scala-2.13 / scala-3) |
-| Python source-root probing                 | done -- uncommitted | walks shallowest `__init__.py` + always seeds repo root + repo/src as fallbacks (covers PEP 420 namespace packages) |
-| Go module-path detection from go.mod       | done -- uncommitted | first-line `module <path>`; null when no go.mod |
-| TS tsconfig `baseUrl` / `paths` parsing    | done -- uncommitted | resolves baseUrl absolutely; reads paths into a Map; strips JSON comments; jsconfig.json takes priority for the JS slot, otherwise falls back to tsconfig |
+| `source-roots.ts` skeleton + API           | done -- 063d600d1cb | shipped richer types than the plan: SourceRoots carries GoSourceInfo + TsSourceInfo (modulePath / paths map) rather than plain string[] for those two |
+| Java / Scala manifest source-root parsing  | done -- 063d600d1cb | Maven `<modules>` recursion + `<sourceDirectory>` override; Gradle dotted form + `<lang> { srcDirs(...) }` block; SBT/Mill convention; Scala cross-build dirs (scala-2.13 / scala-3) |
+| Python source-root probing                 | done -- 063d600d1cb | walks shallowest `__init__.py` + always seeds repo root + repo/src as fallbacks (covers PEP 420 namespace packages) |
+| Go module-path detection from go.mod       | done -- 063d600d1cb | first-line `module <path>`; null when no go.mod |
+| TS tsconfig `baseUrl` / `paths` parsing    | done -- 063d600d1cb | resolves baseUrl absolutely; reads paths into a Map; strips JSON comments; jsconfig.json takes priority for the JS slot, otherwise falls back to tsconfig |
 | Caching + invalidation on manifest change  | deferred to Phase 5 | the cross-file pass will hold the SourceRoots; cache + invalidation lives with the settle hook |
-| Unit tests                                 | done -- uncommitted | source-roots.test.ts, 14 cases across all six languages + no-manifest fallbacks |
+| Unit tests                                 | done -- 063d600d1cb | source-roots.test.ts, 14 cases across all six languages + no-manifest fallbacks |
 
 ### Phase 3 -- Cross-file pass: stubs + INHERITS / IMPLEMENTS
 
