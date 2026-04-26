@@ -57,7 +57,7 @@ constraint:
 | Phase | Scope                                                                                  | Status |
 |-------|----------------------------------------------------------------------------------------|--------|
 | 0     | Foundations: persistence schema for unresolved relations, settle hook, idempotency     | partial -- 62bea4defb7 (settle hook deferred to Phase 3) |
-| 1     | Quick win -- fix Python relative-import path resolution                                | done -- uncommitted |
+| 1     | Quick win -- fix Python relative-import path resolution                                | done -- 8a45171cc82 |
 | 2     | Source-root detection (Java / Scala / Python / Go / TS path-mappings)                  | todo   |
 | 3     | Cross-file pass: module-stub-to-file linking + INHERITS / IMPLEMENTS                   | todo   |
 | 4     | Cross-file CALLS resolution (using imported scope)                                     | todo   |
@@ -863,9 +863,9 @@ no real `@parcel/watcher` involvement.
 | Item                                       | Status | Notes |
 |--------------------------------------------|--------|-------|
 | `EXTENSION_MAP` per-language split         | done   | landed in Phase 0.5 |
-| Python `.py` + `__init__.py` candidates    | done -- uncommitted | dot-prefix walker (not extension-map) -- the dot semantics don't fit the map shape |
-| `resolver.ts` plumbing for the new map     | done -- uncommitted | special-cased for python |
-| Unit tests                                 | done -- uncommitted | resolver-python.test.ts, 8 cases |
+| Python `.py` + `__init__.py` candidates    | done -- 8a45171cc82 | dot-prefix walker (not extension-map) -- the dot semantics don't fit the map shape |
+| `resolver.ts` plumbing for the new map     | done -- 8a45171cc82 | special-cased for python |
+| Unit tests                                 | done -- 8a45171cc82 | resolver-python.test.ts, 8 cases |
 
 ### Phase 2 -- Source-root detection
 
