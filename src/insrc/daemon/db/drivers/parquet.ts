@@ -14,7 +14,15 @@
  * is wrapped behind a small `ParquetReader` shape.
  */
 
-import { ParquetReader, type ParquetSchemaField } from 'parquetjs-lite';
+import { createRequire } from 'node:module';
+import type { ParquetSchemaField } from 'parquetjs-lite';
+// parquetjs-lite is a CommonJS package whose runtime exports Node's ESM
+// loader can't statically analyse -- a plain `import { ParquetReader }
+// from 'parquetjs-lite'` fatals at module-load time. Use createRequire so
+// the import goes through Node's CJS resolver. The `typeof import(...)`
+// cast keeps the schema types intact (the .d.ts file still applies).
+const _require = createRequire(import.meta.url);
+const { ParquetReader } = _require('parquetjs-lite') as typeof import('parquetjs-lite');
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
