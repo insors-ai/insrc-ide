@@ -46,7 +46,7 @@ import { join, sep } from 'node:path';
 import { getLogger } from '../shared/logger.js';
 import type { DbClient } from '../db/client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
-import { listEntitiesForRepo } from '../db/entities.js';
+import { listEntitiesForRepo, getEntitiesByIds } from '../db/entities.js';
 import {
   listUnresolvedRelations,
   promoteResolvedBatch,
@@ -138,38 +138,85 @@ async function runPass1(
   opts:  CrossFileResolveOpts,
   index: EntityIndex,
 ): Promise<number> {
-  // Step 1 -- opening MATCH (repo-scoped, JOINs name + language so we
-  // don't need a per-row entity fetch).
+  // Step 1 -- opening MATCH. Kuzu's Entity table is stub-only
+  // (`Entity(id STRING, kind STRING)` per db/schema.ts:10). Full entity
+  // data (name, language, repo, file) lives in LanceDB. So this MATCH
+  // returns just f.id + m.id; repo scoping happens in-memory below
+  // against the LanceDB-loaded `index.byId`, and module name/language
+  // come from a batched LanceDB prefetch.
   const tMatch = Date.now();
   const stmt = `MATCH (f:Entity)-[r:IMPORTS]->(m:Entity)
-                WHERE f.repo = $repo AND m.kind = 'module'
-                RETURN f.id AS fromId,
-                       m.id AS moduleId,
-                       m.name AS moduleName,
-                       m.language AS moduleLanguage`;
+                WHERE m.kind = 'module'
+                RETURN f.id AS fromId, m.id AS moduleId`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rows = await execGraph<any>(opts.db, stmt, { repo: opts.repoRoot });
+  const rows = await execGraph<any>(opts.db, stmt);
   log.info(
     { repo: opts.repoRoot, rows: rows.length, elapsedMs: Date.now() - tMatch },
     'cross-file Pass 1: opening MATCH done',
   );
   if (rows.length === 0) return 0;
 
-  // Step 2 -- in-memory resolve. No Kuzu calls in this loop.
+  // Step 2 -- in-memory repo filter + collect unique moduleIds.
+  // Cypher can't filter by f.repo since `repo` isn't on the Kuzu
+  // Entity stub; index.byId was built from listEntitiesForRepo(repo)
+  // and contains only this repo's entities, so .has(fromId) is the
+  // valid scope check. uniqueModuleIds drives the LanceDB prefetch
+  // and dedupes the (typically ~200-500 unique modules across thousands
+  // of edges).
+  const tFilter = Date.now();
+  const scopedRows: { fromId: string; moduleId: string }[] = [];
+  const uniqueModuleIds = new Set<string>();
+  for (const row of rows) {
+    const fromId   = row['fromId']   as string;
+    const moduleId = row['moduleId'] as string;
+    if (!index.byId.has(fromId)) continue;  // not in this repo
+    scopedRows.push({ fromId, moduleId });
+    uniqueModuleIds.add(moduleId);
+  }
+  log.info(
+    {
+      repo: opts.repoRoot,
+      scopedRows: scopedRows.length,
+      uniqueModules: uniqueModuleIds.size,
+      elapsedMs: Date.now() - tFilter,
+    },
+    'cross-file Pass 1: repo-scope filter + dedup done',
+  );
+  if (scopedRows.length === 0) return 0;
+
+  // Step 3 -- batched LanceDB prefetch for module name + language.
+  // Module-stub entities are created with repo='' so they don't
+  // appear in listEntitiesForRepo(repo); fetch only the unique set
+  // we actually need (1-2 chunks of 500 for typical repos).
+  const tPrefetch = Date.now();
+  const moduleEntities = await getEntitiesByIds(opts.db, [...uniqueModuleIds]);
+  const modulesById = new Map<string, Entity>();
+  for (const m of moduleEntities) {
+    if (m.kind === 'module') modulesById.set(m.id, m);
+  }
+  log.info(
+    {
+      repo: opts.repoRoot,
+      requested: uniqueModuleIds.size,
+      fetched: modulesById.size,
+      elapsedMs: Date.now() - tPrefetch,
+    },
+    'cross-file Pass 1: prefetched module entities (LanceDB)',
+  );
+
+  // Step 4 -- in-memory resolve. No Kuzu calls in this loop.
   const tResolve = Date.now();
   const rewires: Rewire[] = [];
-  for (const row of rows) {
-    const fromId         = row['fromId']         as string;
-    const oldModuleId    = row['moduleId']       as string;
-    const moduleName     = row['moduleName']     as string;
-    const moduleLanguage = row['moduleLanguage'] as Language;
+  for (const row of scopedRows) {
+    const module = modulesById.get(row.moduleId);
+    if (module === undefined) continue;  // shouldn't happen post-prefetch
 
-    const targetPath = locateInTreeFile(moduleName, moduleLanguage, opts.sourceRoots);
+    const targetPath = locateInTreeFile(module.name, module.language, opts.sourceRoots);
     if (targetPath === null) continue;
     const targetEntity = index.fileEntities.get(targetPath);
     if (targetEntity === undefined) continue;
 
-    rewires.push({ fromId, oldModuleId, targetFileId: targetEntity.id });
+    rewires.push({ fromId: row.fromId, oldModuleId: row.moduleId, targetFileId: targetEntity.id });
   }
   log.info(
     { repo: opts.repoRoot, rewires: rewires.length, elapsedMs: Date.now() - tResolve },
@@ -245,7 +292,7 @@ async function runPass2(
   );
 
   const tImports = Date.now();
-  const importsByFile = await prefetchImportsByFile(opts.db, opts.repoRoot);
+  const importsByFile = await prefetchImportsByFile(opts.db, index);
   log.info(
     { repo: opts.repoRoot, files: importsByFile.size, elapsedMs: Date.now() - tImports },
     'cross-file Pass 2: prefetched file->file imports',
@@ -309,28 +356,41 @@ async function runPass2(
 }
 
 /**
- * Single repo-scoped MATCH that returns every (fromFile, importedFile)
- * pair after Pass 1's rewire. Per-row resolve helpers below consult
- * the resulting Map<fromFileEntityId, Set<importedFilePath>> instead
- * of issuing a Kuzu query per from-entity.
+ * MATCH every (fromFile, importedFile) edge post-Pass-1, then build an
+ * in-memory Map<fromFileEntityId, Set<importedFilePath>> so per-row
+ * Pass 2 helpers can do O(1) lookups instead of issuing a Kuzu query
+ * per from-entity.
+ *
+ * Repo scoping is in-memory (Kuzu's Entity table is stub-only; `f.repo`
+ * isn't a property). Target paths come from `index.byId` -- the
+ * Kuzu MATCH only returns ids; we resolve to file paths via the
+ * LanceDB-loaded entity index.
  */
 async function prefetchImportsByFile(
-  db:   DbClient,
-  repo: string,
+  db:    DbClient,
+  index: EntityIndex,
 ): Promise<Map<string, Set<string>>> {
   const stmt = `MATCH (f:Entity)-[:IMPORTS]->(t:Entity)
-                WHERE f.repo = $repo AND t.kind = 'file'
-                RETURN f.id AS fromFileId, t.file AS targetPath`;
+                WHERE t.kind = 'file'
+                RETURN f.id AS fromFileId, t.id AS targetFileId`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rows = await execGraph<any>(db, stmt, { repo });
+  const rows = await execGraph<any>(db, stmt);
 
   const map = new Map<string, Set<string>>();
   for (const row of rows) {
-    const fromFileId = row['fromFileId'] as string;
-    const targetPath = row['targetPath'] as string;
+    const fromFileId   = row['fromFileId']   as string;
+    const targetFileId = row['targetFileId'] as string;
+    // Repo scope: only keep edges from files in this repo's index.
+    if (!index.byId.has(fromFileId)) continue;
+    // Cross-repo targets won't be in index.byId; skip them. Pass 2
+    // scope is single-repo; cross-repo CALLS / INHERITS resolution
+    // is out of scope today.
+    const targetEntity = index.byId.get(targetFileId);
+    if (targetEntity === undefined || targetEntity.kind !== 'file') continue;
+
     let set = map.get(fromFileId);
     if (set === undefined) { set = new Set<string>(); map.set(fromFileId, set); }
-    set.add(targetPath);
+    set.add(targetEntity.file);
   }
   return map;
 }
