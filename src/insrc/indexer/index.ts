@@ -169,7 +169,18 @@ export class IndexerService {
     for (const repo of repos) {
       await this.watcher.addRepo(repo.path);
 
-      if (repo.status === 'pending' || (repo.status === 'indexing' && !repo.lastIndexed)) {
+      if (
+        repo.status === 'pending' ||
+        repo.status === 'error' ||
+        (repo.status === 'indexing' && !repo.lastIndexed)
+      ) {
+        // 'pending':                 freshly-added repo, never indexed
+        // 'error':                   prior run failed (e.g. resolver exception); retry on
+        //                            startup since most error paths are code bugs that
+        //                            shipped a fix in the deployed daemon. If the error
+        //                            is persistent, operator sees it in the next-run logs.
+        // 'indexing' && !lastIndexed: prior run was killed mid-pass before the first
+        //                            successful checkpoint.
         log.info({ repo: repo.path, status: repo.status }, 'enqueuing full index (incomplete)');
         this.queue.enqueue({ kind: 'full', repoPath: repo.path });
       } else if (repo.status === 'ready' && repo.lastIndexed) {
@@ -309,18 +320,19 @@ export class IndexerService {
       await this.indexManifest(repoPath);
 
       // Cross-file resolver: now that every file in the repo has been
-      // parsed once, walk the unresolved relations and try to link them
-      // up. See plans/cross-file-references.md §3-§5.
-      try {
-        const sourceRoots = detectSourceRoots(repoPath);
-        const cf = await runCrossFileResolver({ db: this.db, repoRoot: repoPath, sourceRoots });
-        log.info({ repo: repoPath, ...cf }, 'cross-file pass after full index');
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // Don't fail the whole index if the resolver throws -- the next
-        // settle pass (or a manual reindex) will retry.
-        log.warn({ repo: repoPath, err: msg }, 'cross-file pass failed; continuing');
-      }
+      // parsed once, walk the unresolved relations and try to link
+      // them up. See plans/cross-file-references.md §3-§5.
+      //
+      // Failure here is NOT recoverable inline -- the resolver is
+      // load-bearing for cross-file analysis (graph_callers /
+      // graph_callees / code-analyzer's tool loop all depend on the
+      // post-resolve graph state). Letting the error propagate to the
+      // outer catch correctly sets `status='error'` on the repo so the
+      // next startup re-enqueues a full index instead of treating a
+      // half-done index as ready.
+      const sourceRoots = detectSourceRoots(repoPath);
+      const cf = await runCrossFileResolver({ db: this.db, repoRoot: repoPath, sourceRoots });
+      log.info({ repo: repoPath, ...cf }, 'cross-file pass after full index');
 
       // Explicit CHECKPOINT: bounds WAL growth now that
       // autoCheckpoint is disabled at db/client.ts. Best-effort --
