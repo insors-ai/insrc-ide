@@ -25,22 +25,25 @@ import type { TodoItemStatus, TodoList, TodoOwner } from '../../common/todosServ
 // Icons
 // ---------------------------------------------------------------------------
 
+/**
+ * Codicon for each TodoItem status. The Record dispatch (rather than a
+ * `switch`) lets `?? Codicon.circleOutline` catch a status value that
+ * drifts from the union -- data corruption, partial row, replay across
+ * a workbench refresh whose schema bumped before the daemon's. With a
+ * `switch`, TS proves the switch exhaustive and flags the fallback as
+ * unreachable. See plans/analyzers/code-analyzer.md F3.
+ */
+const ITEM_STATUS_ICON: Readonly<Record<TodoItemStatus, ThemeIcon>> = {
+	pending: Codicon.circleLargeOutline,
+	in_progress: Codicon.play,
+	blocked: Codicon.warning,
+	completed: Codicon.check,
+	cancelled: Codicon.close,
+};
+
 /** Codicon corresponding to each TodoItem status. */
 export function iconForItemStatus(status: TodoItemStatus): ThemeIcon {
-	switch (status) {
-		case 'pending': return Codicon.circleLargeOutline;
-		case 'in_progress': return Codicon.play;
-		case 'blocked': return Codicon.warning;
-		case 'completed': return Codicon.check;
-		case 'cancelled': return Codicon.close;
-	}
-	// Defensive fallback: if status is somehow not a known value (data
-	// corruption, partial row, race with delete), render a generic
-	// "circle-outline" rather than fall through to undefined and
-	// crash ThemeIcon.asClassNameArray. The TypeScript signature lies
-	// in production where data can drift from the schema. See
-	// plans/analyzers/code-analyzer.md F3 for the family of bugs.
-	return Codicon.circleOutline;
+	return ITEM_STATUS_ICON[status] ?? Codicon.circleOutline;
 }
 
 // ---------------------------------------------------------------------------

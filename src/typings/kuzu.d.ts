@@ -7,7 +7,15 @@ declare module 'kuzu' {
 	export type KuzuValue = null | boolean | number | bigint | string | Date | Record<string, unknown> | KuzuValue[];
 
 	export class Database {
-		constructor(databasePath?: string, bufferManagerSize?: number, enableCompression?: boolean, readOnly?: boolean, maxDBSize?: number);
+		constructor(
+			databasePath?: string,
+			bufferManagerSize?: number,
+			enableCompression?: boolean,
+			readOnly?: boolean,
+			maxDBSize?: number,
+			autoCheckpoint?: boolean,
+			checkpointThreshold?: number,
+		);
 		init(): Promise<void>;
 		close(): Promise<void>;
 	}
@@ -24,6 +32,7 @@ declare module 'kuzu' {
 		query(statement: string): Promise<QueryResult | QueryResult[]>;
 		prepare(statement: string): Promise<PreparedStatement>;
 		execute(preparedStatement: PreparedStatement, params?: Record<string, KuzuValue>): Promise<QueryResult | QueryResult[]>;
+		setQueryTimeout(timeoutInMs: number): void;
 	}
 
 	export class QueryResult {
