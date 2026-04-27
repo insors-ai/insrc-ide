@@ -78,13 +78,74 @@ export interface EnsureDaemonResult {
 }
 
 /**
- * Ensure a runnable daemon is installed at DAEMON_ENTRY_CLONED.
- * Installs on first run, optionally updates otherwise.
+ * Build fingerprint stored at `<DAEMON_OUT>/.buildinfo.json` after every
+ * successful tsc + linkNodeModules. Records the git commit SHA the build
+ * was made from. On the next `ensureClonedDaemon()` call, we compare the
+ * stamped SHA to the current `git HEAD`; mismatch = rebuild, regardless
+ * of whether the most recent `git pull` advanced HEAD.
  *
- * `updated` distinguishes "we did something" from "no-op": fresh
- * install counts as updated; an up-to-date checkout counts as not
- * updated; a failed update keeps the existing install (`ok: true,
- * updated: false`).
+ * This is the load-bearing "is the build current?" signal. Pre-fix we
+ * trusted the (before-pull, after-pull) SHA delta as a rebuild
+ * trigger -- but that mistakes "git is up to date" for "the on-disk
+ * `out/` is up to date". A partial build from a prior interrupted IDE
+ * run, or a manual `git pull` outside the IDE that skipped tsc, both
+ * leave inconsistent `out/` artifacts that the SHA-delta check
+ * cheerfully waves through. The fingerprint catches both.
+ */
+const BUILD_FINGERPRINT_FILE = join(DAEMON_OUT, '.buildinfo.json');
+
+interface BuildFingerprint {
+	readonly commitSha: string;
+	readonly builtAt: string;
+}
+
+async function readBuildFingerprint(): Promise<string | null> {
+	try {
+		const raw = await fs.promises.readFile(BUILD_FINGERPRINT_FILE, 'utf8');
+		const parsed = JSON.parse(raw) as Partial<BuildFingerprint>;
+		return typeof parsed.commitSha === 'string' && parsed.commitSha.length > 0
+			? parsed.commitSha
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+async function writeBuildFingerprint(commitSha: string): Promise<void> {
+	const payload: BuildFingerprint = {
+		commitSha,
+		builtAt: new Date().toISOString(),
+	};
+	await fs.promises.writeFile(BUILD_FINGERPRINT_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+}
+
+async function currentHeadSha(logService: ILogService): Promise<string> {
+	const result = await run(logService, 'git', ['rev-parse', 'HEAD'], DAEMON_DIR);
+	return result.stdout.trim();
+}
+
+/**
+ * Ensure a runnable daemon is installed at DAEMON_ENTRY_CLONED, with
+ * `out/` matching `git HEAD`.
+ *
+ * Flow:
+ *   1. First run (no DAEMON_ENTRY_CLONED on disk) -- clone, install,
+ *      build, stamp fingerprint. `updated: true`.
+ *   2. autoUpdate enabled -- `git fetch + checkout + pull`. Logs
+ *      whether the pull advanced HEAD (informational only; not the
+ *      rebuild trigger).
+ *   3. Read `out/.buildinfo.json`. If missing or commitSha != HEAD,
+ *      wipe `out/`, run npm install + tsc + linkNodeModules, stamp a
+ *      new fingerprint. `updated: true`. Catches: prior IDE crash
+ *      mid-build, manual git pull outside the IDE, partial tsc
+ *      output, deleted-source-file leaving stale `.js`.
+ *   4. Fingerprint matches HEAD -- safe to skip rebuild.
+ *      `updated: false`.
+ *
+ * `updated` is the trigger the caller (InsrcDaemonMainService) uses
+ * to decide whether to terminate a running daemon process whose ESM
+ * module cache predates the new build. Stamping always implies the
+ * caller MUST kill+respawn.
  */
 export async function ensureClonedDaemon(
 	logService: ILogService,
@@ -92,20 +153,49 @@ export async function ensureClonedDaemon(
 	repoConfig?: DaemonRepoConfig,
 ): Promise<EnsureDaemonResult> {
 	const resolved = resolveRepoConfig(repoConfig);
+
+	// First-install path -- clone + build + stamp fingerprint.
 	if (!fs.existsSync(DAEMON_ENTRY_CLONED)) {
 		const ok = await install(logService, resolved);
 		return { ok, updated: ok };
 	}
+
+	// Optional pull. Failure is non-fatal -- we keep going to the
+	// fingerprint check, which will rebuild if needed. The pull
+	// outcome itself is no longer the rebuild trigger.
 	if (autoUpdate) {
 		try {
-			const updated = await update(logService, resolved);
-			return { ok: true, updated };
+			await pullLatest(logService, resolved);
 		} catch (err) {
-			logService.warn(`${UPDATE_LOG_HEAD} update failed, keeping existing install:`, (err as Error).message);
-			return { ok: true, updated: false };
+			logService.warn(`${UPDATE_LOG_HEAD} pull failed, keeping existing source:`, (err as Error).message);
 		}
 	}
-	return { ok: true, updated: false };
+
+	// Fingerprint check -- the load-bearing rebuild trigger.
+	const headSha = await currentHeadSha(logService).catch(() => '');
+	if (headSha.length === 0) {
+		logService.warn(`${UPDATE_LOG_HEAD} could not read HEAD; assuming current build is fine`);
+		return { ok: true, updated: false };
+	}
+	const buildSha = await readBuildFingerprint();
+	if (buildSha === headSha) {
+		logService.info(`${UPDATE_LOG_HEAD} daemon build at ${headSha.slice(0, 12)} matches HEAD`);
+		return { ok: true, updated: false };
+	}
+
+	if (buildSha === null) {
+		logService.info(`${UPDATE_LOG_HEAD} build fingerprint missing; rebuilding at ${headSha.slice(0, 12)}`);
+	} else {
+		logService.info(`${UPDATE_LOG_HEAD} build at ${buildSha.slice(0, 12)} differs from HEAD ${headSha.slice(0, 12)}; rebuilding`);
+	}
+
+	try {
+		await rebuild(logService, headSha);
+		return { ok: true, updated: true };
+	} catch (err) {
+		logService.error(`${UPDATE_LOG_HEAD} rebuild failed:`, (err as Error).message);
+		return { ok: false, updated: false };
+	}
 }
 
 async function install(logService: ILogService, config: DaemonRepoConfig): Promise<boolean> {
@@ -133,33 +223,43 @@ async function install(logService: ILogService, config: DaemonRepoConfig): Promi
 		return false;
 	}
 
-	logService.info(`${UPDATE_LOG_HEAD} daemon installed`);
+	const headSha = await currentHeadSha(logService).catch(() => '');
+	if (headSha.length > 0) {
+		await writeBuildFingerprint(headSha);
+	}
+	logService.info(`${UPDATE_LOG_HEAD} daemon installed at ${headSha.slice(0, 12) || '(unknown sha)'}`);
 	return true;
 }
 
-async function update(logService: ILogService, config: DaemonRepoConfig): Promise<boolean> {
-	logService.info(`${UPDATE_LOG_HEAD} checking for daemon updates (branch ${config.repoBranch})`);
+async function pullLatest(logService: ILogService, config: DaemonRepoConfig): Promise<void> {
+	logService.info(`${UPDATE_LOG_HEAD} pulling daemon updates (branch ${config.repoBranch})`);
 
 	// Ensure the checkout tracks the configured daemon branch. Older
 	// installs may have been cloned against a different default branch.
 	await run(logService, 'git', ['fetch', 'origin', config.repoBranch], DAEMON_DIR);
 	await run(logService, 'git', ['checkout', config.repoBranch], DAEMON_DIR);
-
-	const before = await run(logService, 'git', ['rev-parse', 'HEAD'], DAEMON_DIR);
 	await run(logService, 'git', ['pull', '--ff-only', 'origin', config.repoBranch], DAEMON_DIR);
-	const after = await run(logService, 'git', ['rev-parse', 'HEAD'], DAEMON_DIR);
+}
 
-	if (before.stdout.trim() === after.stdout.trim()) {
-		logService.info(`${UPDATE_LOG_HEAD} daemon already up to date`);
-		return false;
-	}
-
-	logService.info(`${UPDATE_LOG_HEAD} rebuilding daemon ${before.stdout.trim().slice(0, 12)} -> ${after.stdout.trim().slice(0, 12)}`);
+/**
+ * Wipe `out/` and run a clean npm install + tsc + symlink, then stamp
+ * the fingerprint. The wipe is the defensive bit: it kills stale `.js`
+ * files left behind by a deleted-source-file or a previous interrupted
+ * tsc run. With incremental builds + .tsbuildinfo, tsc itself can
+ * happily skip re-emitting individual files; the only safe assumption
+ * is that any `out/` content from before this rebuild is suspect.
+ */
+async function rebuild(logService: ILogService, headSha: string): Promise<void> {
+	logService.info(`${UPDATE_LOG_HEAD} clean-rebuilding daemon at ${headSha.slice(0, 12)}`);
+	await fs.promises.rm(DAEMON_OUT, { recursive: true, force: true });
 	await run(logService, 'npm', ['install', '--legacy-peer-deps'], DAEMON_SRC);
 	await run(logService, 'npx', ['tsc'], DAEMON_SRC);
 	await linkNodeModules(logService);
-	logService.info(`${UPDATE_LOG_HEAD} daemon updated`);
-	return true;
+	if (!fs.existsSync(DAEMON_ENTRY_CLONED)) {
+		throw new Error(`build completed but entry missing: ${DAEMON_ENTRY_CLONED}`);
+	}
+	await writeBuildFingerprint(headSha);
+	logService.info(`${UPDATE_LOG_HEAD} daemon rebuilt at ${headSha.slice(0, 12)}`);
 }
 
 // ---------------------------------------------------------------------------
