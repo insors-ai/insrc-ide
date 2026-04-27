@@ -59,12 +59,21 @@ export async function runCrossFileResolver(
   opts: CrossFileResolveOpts,
 ): Promise<CrossFileResolveResult> {
   const t0 = Date.now();
+  log.info({ repo: opts.repoRoot }, 'cross-file resolver starting');
 
+  // -- setup: load entities + build in-memory index --
+  const tLoad = Date.now();
   const entities = await listEntitiesForRepo(opts.db, opts.repoRoot);
-  const index    = buildEntityIndex(entities);
   log.info(
-    { repo: opts.repoRoot, entities: entities.length },
-    'cross-file resolver starting',
+    { repo: opts.repoRoot, entities: entities.length, elapsedMs: Date.now() - tLoad },
+    'cross-file: loaded entities',
+  );
+
+  const tIdx = Date.now();
+  const index = buildEntityIndex(entities);
+  log.info(
+    { repo: opts.repoRoot, elapsedMs: Date.now() - tIdx },
+    'cross-file: built entity index',
   );
 
   // Pass 1: rewire module-stub IMPORTS to file-target IMPORTS for in-tree
@@ -77,11 +86,12 @@ export async function runCrossFileResolver(
   );
 
   // Pass 2: walk UnresolvedRelation rows for INHERITS / IMPLEMENTS / CALLS.
+  const tList = Date.now();
   const unresolved = await listUnresolvedRelations(
     opts.db, opts.repoRoot, opts.scopeFile,
   );
   log.info(
-    { repo: opts.repoRoot, rows: unresolved.length },
+    { repo: opts.repoRoot, rows: unresolved.length, elapsedMs: Date.now() - tList },
     'cross-file Pass 2 (relation resolution) starting',
   );
   const tPass2 = Date.now();
@@ -137,8 +147,18 @@ export async function runCrossFileResolver(
       { repo: opts.repoRoot, promotes: promotes.length, ambiguousUpdates: ambiguousUpdates.length },
       'cross-file Pass 2 batch-flushing writes',
     );
+    const tPromote = Date.now();
     await promoteResolvedBatch(opts.db, promotes);
+    log.info(
+      { repo: opts.repoRoot, count: promotes.length, elapsedMs: Date.now() - tPromote },
+      'cross-file Pass 2: promoted batch flushed',
+    );
+    const tAmb = Date.now();
     await updateUnresolvedMetaBatch(opts.db, ambiguousUpdates);
+    log.info(
+      { repo: opts.repoRoot, count: ambiguousUpdates.length, elapsedMs: Date.now() - tAmb },
+      'cross-file Pass 2: ambiguous-meta batch flushed',
+    );
   }
 
   const elapsedMs = Date.now() - t0;
@@ -236,18 +256,24 @@ async function rewireModuleStubImports(
   opts:  CrossFileResolveOpts,
   index: EntityIndex,
 ): Promise<number> {
+  // -- Step 1: opening MATCH (one full IMPORTS-rel scan, property-filtered) --
+  const tMatch = Date.now();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const stmt = `MATCH (f:Entity)-[r:IMPORTS]->(m:Entity)
                 WHERE m.kind = 'module'
                 RETURN f.id AS fromId, m.id AS moduleId`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rows = await execGraph<any>(opts.db, stmt);
+  log.info(
+    { repo: opts.repoRoot, rows: rows.length, elapsedMs: Date.now() - tMatch },
+    'cross-file Pass 1: opening MATCH done',
+  );
 
-  // First pass: in-memory only -- resolve every row and group by from
-  // file. The Kuzu writes happen in a second pass below so we can batch
-  // the DELETEs (one query per from-file instead of one per edge,
-  // cutting Pass 1's Kuzu round-trip count by avg ~5-10x for typical
-  // imports-per-file ratios).
+  // -- Step 2: in-memory grouping by from-file --
+  // Resolve every row and group by from-file. The Kuzu writes happen in
+  // a separate pass below so we can batch the DELETEs (one query per
+  // from-file instead of one per edge).
+  const tGroup = Date.now();
   interface Rewire { readonly oldModuleId: string; readonly targetEntityId: string }
   const groups = new Map<string, Rewire[]>();
 
@@ -278,10 +304,16 @@ async function rewireModuleStubImports(
     if (bucket === undefined) { bucket = []; groups.set(fromId, bucket); }
     bucket.push({ oldModuleId: moduleId, targetEntityId: targetEntity.id });
   }
+  log.info(
+    { repo: opts.repoRoot, groups: groups.size, elapsedMs: Date.now() - tGroup },
+    'cross-file Pass 1: in-memory grouping done',
+  );
 
+  // -- Step 3: DELETE phase (one query per from-file) --
   // Batched DELETE: one round-trip per from-file regardless of how many
   // module-stub IMPORTS that file has. Pattern matches eeae2ef7ac7's
   // `WHERE n.id IN $ids` approach.
+  const tDelete = Date.now();
   for (const [fromId, rewires] of groups) {
     const moduleIds = rewires.map(r => r.oldModuleId);
     await execGraph(opts.db,
@@ -291,13 +323,18 @@ async function rewireModuleStubImports(
       { from: fromId, modules: moduleIds },
     );
   }
+  log.info(
+    { repo: opts.repoRoot, queries: groups.size, elapsedMs: Date.now() - tDelete },
+    'cross-file Pass 1: DELETE phase done',
+  );
 
-  // Batched MERGE: collapse the per-edge MERGEs into UNWIND batches of
-  // KUZU_BATCH (500). One Cypher statement per chunk -> one auto-commit
-  // transaction -> one fsync at the disk. Pre-fix this was N sequential
-  // MERGEs each paying ~11 ms fsync wait on the local NVMe, which alone
-  // gated Pass 1 to ~90 edges/sec (confirmed via iostat showing ~95%
-  // f_await-bound disk util during the resolver run).
+  // -- Step 4: MERGE phase (UNWIND batches of KUZU_BATCH) --
+  // Collapse the per-edge MERGEs into UNWIND batches of KUZU_BATCH (500).
+  // One Cypher statement per chunk -> one auto-commit transaction ->
+  // one fsync at the disk. Pre-fix this was N sequential MERGEs each
+  // paying ~11 ms fsync wait on the local NVMe, which alone gated
+  // Pass 1 to ~90 edges/sec (confirmed via iostat).
+  const tMerge = Date.now();
   const allPairs: { from: string; target: string }[] = [];
   let rewired = 0;
   for (const [fromId, rewires] of groups) {
@@ -306,6 +343,7 @@ async function rewireModuleStubImports(
       rewired++;
     }
   }
+  const batches = Math.ceil(allPairs.length / KUZU_BATCH);
   for (let i = 0; i < allPairs.length; i += KUZU_BATCH) {
     const chunk = allPairs.slice(i, i + KUZU_BATCH);
     await execGraph(opts.db,
@@ -315,6 +353,10 @@ async function rewireModuleStubImports(
       { pairs: chunk },
     );
   }
+  log.info(
+    { repo: opts.repoRoot, pairs: allPairs.length, batches, elapsedMs: Date.now() - tMerge },
+    'cross-file Pass 1: MERGE phase done',
+  );
 
   return rewired;
 }
