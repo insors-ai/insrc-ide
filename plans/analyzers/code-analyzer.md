@@ -452,6 +452,11 @@ Ephemerality (per [design §10.2 decision](../../design/analyzers/code-analyzer.
 
 The pane does **not** auto-open on workbench cold start. It opens on (a) `synthesise` completion fires its `listCompleted` event in the active session, or (b) the user clicks *Open report* from the todos pane row's kebab menu.
 
+**Hard requirements (UX, validation feedback from Phase 1):**
+
+1. **The synthesised report must NOT be rendered in the chat panel.** Phase 1's temporary state of returning the markdown via `finalize()` (so it streams as a chat delta) is acceptable only until Phase 2.1 lands; the user-facing surface is exclusively the Report Pane. The chat panel may show a one-line "Report ready -- Open report" link as an `IInsrcChatService` notification but never the full markdown body.
+2. **Markdown rendering must respect the active workbench theme.** `MarkdownWidget` reads colours via VS Code's CSS variable system (`--vscode-editor-foreground`, `--vscode-editor-background`, `--vscode-textLink-foreground`, etc.). The Report Pane's stylesheet must use those tokens for all text, links, code blocks, headings, and finding badges -- never hard-coded hex values. Sibling analyzer panes (data-analyzer, deployment-analyzer) inherit this requirement.
+
 ### 2.2 Annotation manager — `annotationManager.ts`
 
 DOM-state-only (no persistence — annotations don't survive window reload by design):
