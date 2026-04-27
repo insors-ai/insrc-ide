@@ -7,6 +7,7 @@ import './media/notepadTodos.css';
 import './media/notepad.css';
 import * as dom from '../../../../../base/browser/dom.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
+import type { IReference } from '../../../../../base/common/lifecycle.js';
 import { IEditorGroup } from '../../../../services/editor/common/editorGroupsService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
@@ -16,6 +17,7 @@ import { INotificationService } from '../../../../../platform/notification/commo
 import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import type { CodeEditorWidget } from '../../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
+import { ITextModelService, type IResolvedTextEditorModel } from '../../../../../editor/common/services/resolverService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcTodosService,
@@ -24,7 +26,6 @@ import {
 	type TodoOwner,
 } from '../../common/todosService.js';
 import { NotepadEditorInput } from './notepadInput.js';
-import { PromptNotepadProvider } from './promptNotepadProvider.js';
 import {
 	FORWARD_TARGET_FAMILIES, formatListMeta, iconForItemStatus, nextStatus,
 } from '../shared/todosViewHelpers.js';
@@ -47,8 +48,10 @@ type Tab = 'draft' | 'todos';
  * Unified prompt notepad pane (plans/todo-framework.md Phase 9 follow-up).
  *
  * One pane, two tabs:
- * - **Draft**: Monaco markdown editor backed by the existing
- *   PromptNotepadProvider text model.
+ * - **Draft**: Monaco markdown editor backed by the file at
+ *   `~/.insrc/tmp/notepad-<id>.md` (see `EphemeralEditorInput`). The
+ *   workbench's standard text-file flow handles read / auto-save /
+ *   restoration.
  * - **TODOs**: structured user-owned TODO lists scoped to the active
  *   chat session, mutated through IInsrcTodosService.
  *
@@ -72,7 +75,7 @@ export class NotepadEditorPane extends InsrcEditorPaneBase<NotepadEditorInput> {
 	private _codeEditor: CodeEditorWidget | undefined;
 	private _activeTab: Tab = 'draft';
 	private _notepadId: string | undefined;
-	private _provider: PromptNotepadProvider | undefined;
+	private _modelRef: IReference<IResolvedTextEditorModel> | undefined;
 
 	private _selectedItemIds = new Map<string, Set<string>>();
 
@@ -87,20 +90,12 @@ export class NotepadEditorPane extends InsrcEditorPaneBase<NotepadEditorInput> {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IDialogService private readonly dialogService: IDialogService,
 		@ILogService private readonly logService: ILogService,
+		@ITextModelService private readonly textModelService: ITextModelService,
 	) {
 		super(NotepadEditorPane.ID, group, telemetryService, themeService, _storage);
 	}
 
-	/** PromptNotepadProvider is registered late by the contribution; the
-	 *  open-command sets it on this pane class so we can construct the
-	 *  Monaco editor without circular DI. */
-	private static _providerStatic: PromptNotepadProvider | undefined;
-	static setProvider(p: PromptNotepadProvider): void {
-		NotepadEditorPane._providerStatic = p;
-	}
-
 	protected createEditor(parent: HTMLElement): void {
-		this._provider = NotepadEditorPane._providerStatic;
 		this._container = dom.append(parent, dom.$('.insrc-notepad'));
 
 		// Header
@@ -149,14 +144,18 @@ export class NotepadEditorPane extends InsrcEditorPaneBase<NotepadEditorInput> {
 		);
 	}
 
-	protected override onSetInput(input: NotepadEditorInput): void {
+	protected override async onSetInput(input: NotepadEditorInput): Promise<void> {
 		this._notepadId = input.notepadId;
 
-		// Attach the existing PromptNotepadProvider's text model to the
-		// embedded Monaco editor.
-		if (this._provider !== undefined && this._codeEditor !== undefined) {
-			const { model } = this._provider.getOrCreateModel(input.notepadId);
-			this._codeEditor.setModel(model);
+		// Resolve the file-backed text model. The workbench's standard
+		// text-file flow handles read / auto-save / restoration upstream;
+		// we just attach the live ITextModel to the embedded Monaco
+		// editor and dispose the reference on clearInput / dispose so
+		// the model service can release it once nothing else holds a ref.
+		if (this._codeEditor !== undefined) {
+			this._modelRef?.dispose();
+			this._modelRef = await this.textModelService.createModelReference(input.resource);
+			this._codeEditor.setModel(this._modelRef.object.textEditorModel);
 		}
 
 		// Wire TODOs subscription + chat-session watcher for re-render
@@ -184,6 +183,8 @@ export class NotepadEditorPane extends InsrcEditorPaneBase<NotepadEditorInput> {
 		if (this._codeEditor !== undefined) {
 			this._codeEditor.setModel(null);
 		}
+		this._modelRef?.dispose();
+		this._modelRef = undefined;
 	}
 
 	protected override onLayout(_dimension: dom.Dimension): void {
@@ -194,6 +195,8 @@ export class NotepadEditorPane extends InsrcEditorPaneBase<NotepadEditorInput> {
 	}
 
 	override dispose(): void {
+		this._modelRef?.dispose();
+		this._modelRef = undefined;
 		if (this._codeEditor !== undefined) {
 			this._codeEditor.dispose();
 			this._codeEditor = undefined;

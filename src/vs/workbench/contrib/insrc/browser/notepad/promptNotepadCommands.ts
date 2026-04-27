@@ -13,19 +13,70 @@ import { IQuickInputService } from '../../../../../platform/quickinput/common/qu
 import { IInsrcChatService } from '../../common/chatService.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
-import { PromptNotepadProvider } from './promptNotepadProvider.js';
 import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { ICodeEditor } from '../../../../../editor/browser/editorBrowser.js';
 import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
+import { IModelService } from '../../../../../editor/common/services/model.js';
+import { ILanguageService } from '../../../../../editor/common/languages/language.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { NotepadEditorInput } from './notepadInput.js';
 
-let notepadProvider: PromptNotepadProvider | undefined;
+const NOTEPAD_TEMPLATE = `# Prompt Notepad
+# Write your prompt below. Use Run All (or select a section and Run Selection).
+# Variables: \${repo}, \${repoName}, \${file}, \${fileName}, \${selection}, \${line}, \${clipboard}
 
-export function setNotepadProvider(provider: PromptNotepadProvider): void {
-	notepadProvider = provider;
+`;
+
+// ---------------------------------------------------------------------------
+// Notepad content access helpers
+//
+// The notepad is now backed by a real file under `~/.insrc/tmp/` (see
+// `EphemeralEditorInput`). When the pane is open, the file's text
+// model is held alive by the workbench's IModelService and may carry
+// unsaved edits. Read from the live model first, fall back to the
+// file on disk -- the same precedence Save/Run uses elsewhere.
+// ---------------------------------------------------------------------------
+
+async function ensureNotepadInput(accessor: ServicesAccessor, notepadId: string = '1'): Promise<NotepadEditorInput> {
+	const fileService = accessor.get(IFileService);
+	const input = new NotepadEditorInput(notepadId);
+	await input.ensureBackingFile(fileService);
+	return input;
+}
+
+async function getNotepadContent(accessor: ServicesAccessor, notepadId: string = '1'): Promise<string> {
+	const input = await ensureNotepadInput(accessor, notepadId);
+	const modelService = accessor.get(IModelService);
+	const live = modelService.getModel(input.resource);
+	if (live && !live.isDisposed()) {
+		return live.getValue();
+	}
+	const fileService = accessor.get(IFileService);
+	const buffer = await fileService.readFile(input.resource);
+	return buffer.value.toString();
+}
+
+async function setNotepadContent(accessor: ServicesAccessor, content: string, notepadId: string = '1'): Promise<void> {
+	const input = await ensureNotepadInput(accessor, notepadId);
+	const modelService = accessor.get(IModelService);
+	const live = modelService.getModel(input.resource);
+	if (live && !live.isDisposed()) {
+		// Live edit if model is open -- triggers TextFileEditorModel
+		// auto-save downstream so the file follows the in-memory text.
+		live.setValue(content);
+		return;
+	}
+	// No live model: ensure one exists (creating it now lets the next
+	// open() in the same tick attach to the same instance), then seed
+	// it with `content`. Falling through to a raw fileService.writeFile
+	// would also work, but creating-then-setting keeps language id +
+	// auto-save wiring consistent with the open path.
+	const languageService = accessor.get(ILanguageService);
+	const languageId = languageService.getLanguageIdByLanguageName('markdown') ?? 'markdown';
+	const seeded = modelService.createModel(content, languageService.createById(languageId), input.resource);
+	void seeded; // model is registered with IModelService at construction; reference held by service
 }
 
 // ---------------------------------------------------------------------------
@@ -103,13 +154,9 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		if (!notepadProvider) { return; }
 		const editorService = accessor.get(IEditorService);
-		// Open the unified Notepad pane (Draft + TODOs tabs in one surface).
-		// The underlying text model is still served by PromptNotepadProvider
-		// via the insrc-prompt: scheme; the custom pane attaches it to an
-		// embedded Monaco editor for the Draft tab.
-		await editorService.openEditor(new NotepadEditorInput('1'));
+		const input = await ensureNotepadInput(accessor);
+		await editorService.openEditor(input);
 	}
 });
 
@@ -123,9 +170,8 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		if (!notepadProvider) { return; }
 		const chatService = accessor.get(IInsrcChatService);
-		const content = notepadProvider.getContent('1');
+		const content = await getNotepadContent(accessor);
 		const stripped = stripComments(content);
 		if (!stripped) { return; }
 		const expanded = await expandVariables(stripped, accessor);
@@ -161,8 +207,7 @@ registerAction2(class extends Action2 {
 		}
 
 		// Fall back to run all
-		if (!notepadProvider) { return; }
-		const content = notepadProvider.getContent('1');
+		const content = await getNotepadContent(accessor);
 		const stripped = stripComments(content);
 		if (!stripped) { return; }
 		const expanded = await expandVariables(stripped, accessor);
@@ -179,8 +224,8 @@ registerAction2(class extends Action2 {
 			f1: false,
 		});
 	}
-	run(): void {
-		notepadProvider?.clear('1');
+	async run(accessor: ServicesAccessor): Promise<void> {
+		await setNotepadContent(accessor, NOTEPAD_TEMPLATE);
 	}
 });
 
@@ -195,12 +240,11 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		if (!notepadProvider) { return; }
 		const fileDialogService = accessor.get(IFileDialogService);
 		const fileService = accessor.get(IFileService);
 		const notificationService = accessor.get(INotificationService);
 
-		const content = notepadProvider.getContent('1');
+		const content = await getNotepadContent(accessor);
 		if (!content.trim()) {
 			notificationService.info('Notepad is empty.');
 			return;
@@ -233,12 +277,11 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		if (!notepadProvider) { return; }
 		const quickInput = accessor.get(IQuickInputService);
 		const notificationService = accessor.get(INotificationService);
 		const daemonService = accessor.get(IInsrcDaemonService);
 
-		const content = notepadProvider.getContent('1');
+		const content = await getNotepadContent(accessor);
 		const stripped = stripComments(content);
 		if (!stripped) {
 			notificationService.info('Notepad is empty.');
@@ -271,7 +314,6 @@ registerAction2(class extends Action2 {
 		});
 	}
 	async run(accessor: ServicesAccessor): Promise<void> {
-		if (!notepadProvider) { return; }
 		const quickInput = accessor.get(IQuickInputService);
 		const editorService = accessor.get(IEditorService);
 		const daemonService = accessor.get(IInsrcDaemonService);
@@ -300,9 +342,9 @@ registerAction2(class extends Action2 {
 		try {
 			const content = await daemonService.rpc<string>('template.load', { name: pick.label });
 			if (content) {
-				const { model } = notepadProvider.getOrCreateModel('1');
-				model.setValue(content);
-				await editorService.openEditor(new NotepadEditorInput('1'));
+				await setNotepadContent(accessor, content);
+				const input = await ensureNotepadInput(accessor);
+				await editorService.openEditor(input);
 			}
 		} catch {
 			notificationService.error('Failed to load template.');

@@ -3,94 +3,58 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { URI } from '../../../../../base/common/uri.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
-import { Emitter, Event } from '../../../../../base/common/event.js';
 import { IWorkbenchContribution } from '../../../../common/contributions.js';
-import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ILanguageFeaturesService } from '../../../../../editor/common/services/languageFeatures.js';
-import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
-import { IFileService, FileSystemProviderCapabilities, type IFileSystemProviderWithFileReadWriteCapability, type IFileChange, type IStat, type FileType } from '../../../../../platform/files/common/files.js';
-import type { ITextModel } from '../../../../../editor/common/model.js';
-import { PromptNotepadProvider } from './promptNotepadProvider.js';
 import { PromptNotepadCodeLensProvider } from './promptNotepadCodeLens.js';
-import { setNotepadProvider } from './promptNotepadCommands.js';
-import { NotepadEditorPane } from './notepadPane.js';
+import { NotepadEditorInput } from './notepadInput.js';
+import { registerEphemeralEditorSerializer } from '../shared/ephemeralEditorInput.js';
 
-const SCHEME = 'insrc-prompt';
+// Cross-restart restoration: the workbench's editor restorer calls
+// this serializer to round-trip the input across IDE restarts. The
+// backing markdown file is already on disk from the previous
+// session, so deserialize() just reconstructs the input via the
+// public ctor. App-lifetime registration -- intentionally at module
+// load (not inside the BelowRestored contribution) so the serializer
+// is in place by the time the workbench rehydrates persisted tabs.
+// The IDisposable is discarded for the same reason artifacts'
+// equivalent does so: the registration lives for the workbench's
+// lifetime.
+registerEphemeralEditorSerializer(
+	NotepadEditorInput.ID,
+	(instanceId) => new NotepadEditorInput(instanceId),
+);
 
 /**
- * In-memory file system provider for insrc-prompt scheme.
- * Makes the notepad editable (not read-only).
+ * Workbench contribution that wires the prompt-notepad's CodeLens
+ * provider.
+ *
+ * Pre-Phase-9-followup the notepad lived under a custom `insrc-prompt:`
+ * scheme backed by an in-memory provider + filesystem provider; the
+ * scheme has been retired in favour of a real file under
+ * `~/.insrc/tmp/notepad-<id>.md` (see `EphemeralEditorInput`). The
+ * serializer registration moved to module load (above); all that's
+ * left here is the CodeLens registration, which depends on
+ * `ILanguageFeaturesService` and therefore needs DI through a
+ * contribution.
  */
-class NotepadFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
-	readonly capabilities = FileSystemProviderCapabilities.FileReadWrite;
-	readonly onDidChangeCapabilities = Event.None;
-	private readonly _onDidChangeFile = new Emitter<readonly IFileChange[]>();
-	readonly onDidChangeFile = this._onDidChangeFile.event;
-
-	private _provider: PromptNotepadProvider | undefined;
-	setProvider(p: PromptNotepadProvider): void { this._provider = p; }
-
-	async readFile(resource: URI): Promise<Uint8Array> {
-		const id = resource.path.split('/').pop() ?? '1';
-		const content = this._provider?.getContent(id) ?? '';
-		return new TextEncoder().encode(content);
-	}
-
-	async writeFile(resource: URI, content: Uint8Array): Promise<void> {
-		// Writing is handled by the model directly (auto-save via IStorageService)
-		// This method exists to satisfy the provider interface
-	}
-
-	async stat(_resource: URI): Promise<IStat> {
-		return { type: 1 satisfies FileType, ctime: Date.now(), mtime: Date.now(), size: 0 };
-	}
-
-	async mkdir(): Promise<void> { /* noop */ }
-	async readdir(): Promise<[string, FileType][]> { return []; }
-	async delete(): Promise<void> { /* noop */ }
-	async rename(): Promise<void> { /* noop */ }
-	watch(): { dispose(): void } { return { dispose() { } }; }
-}
-
 export class PromptNotepadContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.insrcPromptNotepad';
 
 	constructor(
-		@IInstantiationService instantiationService: IInstantiationService,
 		@ILanguageFeaturesService languageFeaturesService: ILanguageFeaturesService,
-		@ITextModelService textModelService: ITextModelService,
-		@IFileService fileService: IFileService,
 	) {
 		super();
 
-		// Create the notepad provider
-		const provider = this._register(instantiationService.createInstance(PromptNotepadProvider));
-		setNotepadProvider(provider);
-		// Hand the provider to the unified NotepadEditorPane so it can
-		// attach the existing text model to its embedded Monaco editor.
-		NotepadEditorPane.setProvider(provider);
-
-		// Register in-memory file system provider (makes editor writable)
-		const fsProvider = new NotepadFileSystemProvider();
-		fsProvider.setProvider(provider);
-		this._register(fileService.registerProvider(SCHEME, fsProvider));
-
-		// Register content provider for resolving models
-		this._register(textModelService.registerTextModelContentProvider(SCHEME, {
-			provideTextContent: async (resource: URI): Promise<ITextModel | null> => {
-				const notepadId = resource.path.split('/').pop() ?? '1';
-				const { model } = provider.getOrCreateModel(notepadId);
-				return model;
-			},
-		}));
-
-		// Register CodeLens provider for insrc-prompt scheme
-		const codeLensProvider = new PromptNotepadCodeLensProvider();
+		// CodeLens for any markdown file the notepad backs onto. The
+		// pattern intentionally matches the EphemeralEditorInput naming
+		// convention (`notepad-*.md`) under any path containing
+		// `.insrc/tmp` -- works with both posix (`/home/.../`) and
+		// windows (`C:\\Users\\...\\`) home-dir layouts via the
+		// language-features matcher.
 		this._register(languageFeaturesService.codeLensProvider.register(
-			{ scheme: SCHEME },
-			codeLensProvider,
+			{ scheme: 'file', pattern: '**/.insrc/tmp/notepad-*.md' },
+			new PromptNotepadCodeLensProvider(),
 		));
 	}
 }

@@ -8,21 +8,19 @@ import { ITextModel } from '../../../../../editor/common/model.js';
 import type { CodeLens, CodeLensList } from '../../../../../editor/common/languages.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 
-const SCHEME = 'insrc-prompt';
-
 /**
- * CodeLens provider for prompt notepad files.
+ * CodeLens provider for prompt notepad files. Registered against a
+ * `**\/.insrc/tmp/notepad-*.md` glob in `promptNotepadRegistration.ts`,
+ * so the model selector already filters matched files -- this
+ * provider doesn't need a scheme-side guard.
+ *
  * Shows Run All, Run Selection, Clear, Save as Template at the top.
  */
 export class PromptNotepadCodeLensProvider {
 
 	get onDidChange() { return undefined; }
 
-	provideCodeLenses(model: ITextModel, _token: CancellationToken): CodeLensList | undefined {
-		if (model.uri.scheme !== SCHEME) {
-			return undefined;
-		}
-
+	provideCodeLenses(_model: ITextModel, _token: CancellationToken): CodeLensList | undefined {
 		const topRange = new Range(1, 1, 1, 1);
 
 		const lenses: CodeLens[] = [
