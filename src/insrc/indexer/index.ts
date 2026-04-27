@@ -322,6 +322,19 @@ export class IndexerService {
         log.warn({ repo: repoPath, err: msg }, 'cross-file pass failed; continuing');
       }
 
+      // Explicit CHECKPOINT: bounds WAL growth now that
+      // autoCheckpoint is disabled at db/client.ts. Best-effort --
+      // a checkpoint failure is non-fatal; the WAL stays intact and
+      // the next safe-point checkpoint catches up.
+      try {
+        const tCp = Date.now();
+        await this.db.graph.query('CHECKPOINT;');
+        log.info({ repo: repoPath, elapsedMs: Date.now() - tCp }, 'kuzu checkpoint complete');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn({ repo: repoPath, err: msg }, 'kuzu checkpoint failed; WAL will be flushed at next safe point');
+      }
+
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       log.info({ repo: repoPath, fileCount, skipped, elapsed: `${elapsed}s` }, 'full index complete');
       await updateRepoStatus(this.db, repoPath, 'ready', new Date().toISOString());

@@ -1,13 +1,46 @@
 import kuzu from 'kuzu';
 import * as lancedb from '@lancedb/lancedb';
 import { mkdirSync } from 'node:fs';
+import { cpus } from 'node:os';
 import { dirname } from 'node:path';
 import { PATHS } from '../shared/paths.js';
 import { KUZU_STATEMENTS } from './schema.js';
 
+/**
+ * Cap on internal worker threads per Kuzu Connection. The default
+ * (`nproc`) over-parallelises single-Cypher queries internally;
+ * thread-state samples on the indexer's resolver pass showed
+ * `futex_wait_queue` activity (workers waiting on shared internal
+ * locks). Capping at `min(8, nproc/2)` eliminates the contention
+ * without serialising queries that genuinely benefit from internal
+ * parallelism. On a 32-CPU box this resolves to 8; on a 4-CPU dev
+ * box to 2; on 2-CPU to 1.
+ *
+ * See `plans/analyzers/code-analyzer.md` Phase 1 follow-up F7.
+ */
+const KUZU_THREADS = Math.min(8, Math.max(1, Math.floor(cpus().length / 2)));
+
+/** Defensive query-timeout cap on the reader connection. */
+const KUZU_READER_QUERY_TIMEOUT_MS = 30_000;
+
 export interface DbClients {
-  /** Kuzu property graph — Entity stubs, relations, and Repo registry */
+  /**
+   * Kuzu writer connection -- used by the indexer + cross-file resolver
+   * for all WAL-mutating Cypher (CREATE / MERGE / DELETE / SET).
+   */
   graph: kuzu.Connection;
+  /**
+   * Kuzu reader connection -- intended for analyzer / UI consumers
+   * (read-only tool calls, todos.subscribe, status RPCs). Sharing
+   * one Database across two Connections eliminates the contention
+   * F2 on the single shared connection that the resolver pass +
+   * concurrent /code-analyze runs surfaced. Auto-aborts queries
+   * past 30 s as a defensive guard against runaways.
+   *
+   * Same Database backing as `graph` -- writes through `graph` are
+   * visible to `graphReader` immediately.
+   */
+  graphReader: kuzu.Connection;
   /** LanceDB connection — entity data with embeddings and BM25 FTS */
   lance: lancedb.Connection;
 }
@@ -29,11 +62,28 @@ export async function getDb(): Promise<DbClients> {
   mkdirSync(dirname(PATHS.graph), { recursive: true });
   mkdirSync(PATHS.lance, { recursive: true });
 
-  _kuzuDb = new kuzu.Database(PATHS.graph);
-  const graph = new kuzu.Connection(_kuzuDb);
+  // autoCheckpoint=false stops Kuzu from flushing the WAL mid-pass.
+  // Default behaviour caused disk-I/O bursts during the resolver run
+  // exactly when we wanted clean disk for the writes. The indexer is
+  // expected to run an explicit CHECKPOINT statement at safe points
+  // (e.g. post-cross-file-resolver) to bound WAL growth -- see
+  // indexer/index.ts fullIndex tail.
+  _kuzuDb = new kuzu.Database(
+    PATHS.graph,
+    /* bufferManagerSize     */ undefined,
+    /* enableCompression     */ undefined,
+    /* readOnly              */ false,
+    /* maxDBSize             */ undefined,
+    /* autoCheckpoint        */ false,
+    /* checkpointThreshold   */ undefined,
+  );
+  const graph = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
+  const graphReader = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
+  graphReader.setQueryTimeout(KUZU_READER_QUERY_TIMEOUT_MS);
+
   const lance = await lancedb.connect(PATHS.lance);
 
-  _clients = { graph, lance };
+  _clients = { graph, graphReader, lance };
   return _clients;
 }
 
