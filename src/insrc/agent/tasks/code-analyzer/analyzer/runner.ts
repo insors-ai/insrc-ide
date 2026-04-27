@@ -48,6 +48,17 @@ import {
   validateCitations,
   downgradeForMissingCitations,
 } from './citations.js';
+import { ANALYZER_RESULT_SCHEMA } from './schema.js';
+
+/**
+ * Single source of truth for the response-format constraint passed to
+ * the LLM provider. Wrapping it in a getter makes the intent
+ * (Ollama-native JSON-Schema constraint, mirrors instructor-js'
+ * structured-outputs path) clearly visible at every call site.
+ */
+const RESPONSE_FORMAT_SCHEMA = {
+  schema: ANALYZER_RESULT_SCHEMA as unknown as Record<string, unknown>,
+} as const;
 
 const log = getLogger('code-analyzer:runner');
 
@@ -246,9 +257,18 @@ export async function runAnalyzer(
       break;
     }
 
+    // Pass the AnalyzerResult JSON Schema as the response-format
+    // constraint on every call -- including tool-using ones. The
+    // Ollama wrapper's per-family quirks downgrade this to no-format
+    // when tools are present AND the model family can't handle
+    // format+tools (qwen). For Mistral / Devstral / Codestral the
+    // schema constrains the model's text output across the entire
+    // tool-calling loop, eliminating the prose-on-final-turn pattern
+    // observed in the Phase 1 validation runs.
     const llmResponse: LLMResponse = await opts.provider.complete(messages, {
       tools: ANALYZER_TOOLS as ToolDefinition[],
       maxTokens: COMPLETION_MAX_TOKENS,
+      responseFormat: RESPONSE_FORMAT_SCHEMA,
     });
     lastText = llmResponse.text ?? '';
 
@@ -365,7 +385,7 @@ export async function runAnalyzer(
     const retryResp = await opts.provider.complete(messages, {
       tools: [],
       maxTokens: COMPLETION_MAX_TOKENS,
-      responseFormat: 'json',
+      responseFormat: RESPONSE_FORMAT_SCHEMA,
     });
     lastText = retryResp.text ?? '';
     parsed = parseAnalyzerResult(lastText, task.itemId);
@@ -411,7 +431,7 @@ export async function runAnalyzer(
     const retryResp = await opts.provider.complete(messages, {
       tools: [],
       maxTokens: COMPLETION_MAX_TOKENS,
-      responseFormat: 'json',
+      responseFormat: RESPONSE_FORMAT_SCHEMA,
     });
     const retryParsed: ParseResult = parseAnalyzerResult(retryResp.text ?? '', task.itemId);
     if (retryParsed.ok) {

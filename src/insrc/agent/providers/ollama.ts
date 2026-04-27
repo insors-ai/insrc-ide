@@ -24,12 +24,63 @@ function localDefaults(): import('../../shared/types.js').LocalProviderConfig {
   return _localDefaults;
 }
 
+/**
+ * Per-model-family quirks the wrapper has to apply. Most are
+ * legacies of qwen-specific control tokens / output limitations; new
+ * coder models (devstral, codestral, etc.) generally follow the
+ * standard Ollama tool-calling + JSON-format contract without help.
+ */
+interface ModelQuirks {
+  readonly family: 'qwen' | 'mistral' | 'codellama' | 'deepseek' | 'gemma' | 'unknown';
+  /**
+   * Prepend `/no_think` to the system prompt when tools are present.
+   * qwen2.5/qwen3 use this control token to disable thinking mode so
+   * tool_calls come back via the structured wire format instead of
+   * inside <think> tags. Other families ignore the token; for
+   * Mistral-family models it's just dead text in the prompt budget,
+   * so we skip it.
+   */
+  readonly noThinkOnTools: boolean;
+  /**
+   * Pass `format: 'json'` (or a JSON Schema object) to Ollama in the
+   * same call as `tools`. qwen breaks on this combo (returns blank
+   * tool_calls); Mistral / Devstral / Codestral handle it cleanly,
+   * which lets us constrain the model's text output across the
+   * whole tool-calling loop instead of only retrying after a
+   * parse failure.
+   */
+  readonly formatWithTools: boolean;
+}
+
+function detectModelFamily(model: string): ModelQuirks['family'] {
+  const lower = model.toLowerCase();
+  if (lower.startsWith('qwen')) { return 'qwen'; }
+  if (lower.startsWith('devstral') || lower.startsWith('mistral') || lower.startsWith('mixtral') || lower.startsWith('codestral')) { return 'mistral'; }
+  if (lower.startsWith('codellama') || lower.startsWith('llama')) { return 'codellama'; }
+  if (lower.startsWith('deepseek')) { return 'deepseek'; }
+  if (lower.startsWith('gemma')) { return 'gemma'; }
+  return 'unknown';
+}
+
+function modelQuirks(model: string): ModelQuirks {
+  const family = detectModelFamily(model);
+  switch (family) {
+    case 'qwen':      return { family, noThinkOnTools: true,  formatWithTools: false };
+    case 'mistral':   return { family, noThinkOnTools: false, formatWithTools: true  };
+    case 'codellama': return { family, noThinkOnTools: false, formatWithTools: true  };
+    case 'deepseek':  return { family, noThinkOnTools: false, formatWithTools: true  };
+    case 'gemma':     return { family, noThinkOnTools: false, formatWithTools: true  };
+    case 'unknown':   return { family, noThinkOnTools: false, formatWithTools: true  };
+  }
+}
+
 export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
   private readonly client: Ollama;
   private readonly model: string;
   private readonly numCtx: number;
   private readonly embeddingModel: string;
+  private readonly quirks: ModelQuirks;
 
   constructor(
     model?: string,
@@ -41,6 +92,8 @@ export class OllamaProvider implements LLMProvider {
     host = host ?? d.host;
     this.numCtx = numCtx ?? d.params[d.coreModel]?.maxInputTokens ?? 16_384;
     this.embeddingModel = d.embeddingModel;
+    this.quirks = modelQuirks(this.model);
+    log.info({ model: this.model, family: this.quirks.family, noThinkOnTools: this.quirks.noThinkOnTools, formatWithTools: this.quirks.formatWithTools }, 'ollama provider configured');
     // Override undici's default headers timeout (300s) which is too short for
     // CPU-bound large-context inference that can take 5-10 minutes.
     const agent = new Agent({
@@ -67,10 +120,12 @@ export class OllamaProvider implements LLMProvider {
     const ollamaMessages = toOllamaMessages(messages);
     const tools = opts.tools ? toOllamaTools(opts.tools) : undefined;
 
-    // qwen3-coder: disable thinking mode when tools are provided so the model
-    // uses Ollama's structured tool_calls wire format instead of emitting a
-    // text-formatted JSON "tool call" inside <think> tags.
-    if (tools && tools.length > 0 && ollamaMessages.length > 0 && ollamaMessages[0]!.role === 'system') {
+    // Per-family pre-prompt directives. /no_think is a qwen-specific
+    // control token that turns off thinking-mode so tool_calls come
+    // back via the structured wire format. Other families ignore it
+    // (or, for Mistral-family, would just see literal /no_think as
+    // dead text -- skip it).
+    if (this.quirks.noThinkOnTools && tools && tools.length > 0 && ollamaMessages.length > 0 && ollamaMessages[0]!.role === 'system') {
       const sys = ollamaMessages[0]!;
       if (!sys.content.startsWith('/no_think')) {
         sys.content = `/no_think\n${sys.content}`;
@@ -108,18 +163,24 @@ export class OllamaProvider implements LLMProvider {
     tools: OllamaTool[] | undefined,
     opts: CompletionOpts,
   ): Promise<LLMResponse> {
-    // Ollama's server-side JSON-mode forces strict-JSON output. We only
-    // turn it on when the caller asked for it AND no tools are present
-    // -- combining `format: 'json'` with `tools` confuses qwen3-coder
-    // and yields blank tool_calls. Caller controls when to ask (the
-    // analyzer's strict-JSON retry calls turn it on; the tool-loop turns
-    // it off).
-    const useJsonFormat = opts.responseFormat === 'json' && !tools;
+    // Resolve `format` from CompletionOpts.responseFormat. Three input
+    // forms (see shared/types.ts):
+    //   - 'json'               -> Ollama format: 'json' (parseable-JSON)
+    //   - { schema: <object> } -> Ollama format: <schema> (shape-bound)
+    //   - undefined            -> no format constraint
+    //
+    // The format/tools combo is gated on a per-family quirk: qwen
+    // breaks on it (returns blank tool_calls); Mistral / Devstral /
+    // Codestral handle it cleanly. Off-with-tools for qwen preserves
+    // the Phase-1 behaviour; on-with-tools for everything else lets
+    // the model produce shape-constrained answers across the whole
+    // tool-calling loop.
+    const ollamaFormat = this._resolveOllamaFormat(opts.responseFormat, tools);
     const response = await this.client.chat({
       model: this.model,
       messages: ollamaMessages,
       ...(tools ? { tools } : {}),
-      ...(useJsonFormat ? { format: 'json' as const } : {}),
+      ...(ollamaFormat !== undefined ? { format: ollamaFormat } : {}),
       stream: true,
       options: {
         num_ctx: this.numCtx,
@@ -156,6 +217,29 @@ export class OllamaProvider implements LLMProvider {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       stopReason: toolCalls.length > 0 ? 'tool_use' : 'end_turn',
     };
+  }
+
+  /**
+   * Resolve the `format` field passed to ollama.chat from
+   * CompletionOpts.responseFormat. Returns `undefined` when no
+   * constraint should be applied (caller didn't ask, or family-quirk
+   * gates it off when tools are present).
+   */
+  private _resolveOllamaFormat(
+    responseFormat: CompletionOpts['responseFormat'],
+    tools: OllamaTool[] | undefined,
+  ): string | object | undefined {
+    if (responseFormat === undefined) {
+      return undefined;
+    }
+    const hasTools = tools !== undefined && tools.length > 0;
+    if (hasTools && !this.quirks.formatWithTools) {
+      // qwen quirk: format + tools breaks tool_calls. Drop the
+      // constraint here; the analyzer's strict-JSON retry path picks
+      // it up on a no-tools call.
+      return undefined;
+    }
+    return responseFormat === 'json' ? 'json' : responseFormat.schema;
   }
 
   async embed(text: string): Promise<number[]> {

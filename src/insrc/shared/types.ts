@@ -48,12 +48,28 @@ export interface CompletionOpts {
   /** If provided, text tokens are streamed via this callback during complete(). */
   onToken?: ((token: string) => void) | undefined;
   /**
-   * Hint that the model must produce strict JSON (no prose, no fences,
-   * no <think> blocks). Providers that expose a server-side JSON-mode
-   * (Ollama `format: 'json'`) honour it; others ignore. Best-effort:
-   * the runner-side parse + retry remains the source of truth.
+   * Strict-output hint. Three forms:
+   *
+   *   - `'json'`               -- parseable-JSON constraint (Ollama
+   *                               `format: 'json'`). Model output is
+   *                               valid JSON of any shape.
+   *   - `{ schema: <object> }` -- shape-constrained output. The
+   *                               object is a JSON Schema; Ollama
+   *                               passes it as `format: <schema>`
+   *                               and the constrained decoder emits
+   *                               only output that matches.
+   *                               Higher leverage than 'json' --
+   *                               eliminates schema-violation
+   *                               failure modes by construction.
+   *                               Same approach instructor-js takes
+   *                               for OpenAI's structured-outputs.
+   *   - `undefined`            -- no constraint.
+   *
+   * Providers without server-side support (Anthropic, etc.) ignore
+   * the hint; the runner-side parse + retry remains the source of
+   * truth in that case.
    */
-  responseFormat?: 'json' | undefined;
+  responseFormat?: 'json' | { readonly schema: Record<string, unknown> } | undefined;
 }
 
 export interface LLMProvider {
