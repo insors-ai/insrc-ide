@@ -34,6 +34,13 @@ export function iconForItemStatus(status: TodoItemStatus): ThemeIcon {
 		case 'completed': return Codicon.check;
 		case 'cancelled': return Codicon.close;
 	}
+	// Defensive fallback: if status is somehow not a known value (data
+	// corruption, partial row, race with delete), render a generic
+	// "circle-outline" rather than fall through to undefined and
+	// crash ThemeIcon.asClassNameArray. The TypeScript signature lies
+	// in production where data can drift from the schema. See
+	// plans/analyzers/code-analyzer.md F3 for the family of bugs.
+	return Codicon.circleOutline;
 }
 
 // ---------------------------------------------------------------------------
