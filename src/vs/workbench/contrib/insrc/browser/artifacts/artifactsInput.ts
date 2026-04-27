@@ -3,10 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { EditorInput } from '../../../../common/editor/editorInput.js';
-import { URI } from '../../../../../base/common/uri.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../../base/common/themables.js';
+import { EphemeralEditorInput } from '../shared/ephemeralEditorInput.js';
 
 /**
  * EditorInput for the Artifacts pane
@@ -14,15 +13,23 @@ import { ThemeIcon } from '../../../../../base/common/themables.js';
  * session -- opening again for the same session re-focuses the
  * existing tab via `matches()`.
  *
- * Unlike the ephemeral Analysis Report Pane from the code-analyzer
- * design, this pane is durable: the list of artifacts per session
- * is an audit trail worth restoring across window reloads.
+ * Backed by a 0-byte stub file under `~/.insrc/tmp/artifacts-<sessionId>.md`
+ * (see `EphemeralEditorInput`). The pane re-renders entirely from
+ * `IInsrcTodosService` on `setInput`; the file is purely a placeholder
+ * that keeps the URI resolvable across IDE restarts so editor
+ * restoration finds something concrete to open instead of erroring out
+ * on an unregistered custom-scheme URI.
  */
-export class ArtifactsEditorInput extends EditorInput {
+export class ArtifactsEditorInput extends EphemeralEditorInput {
 	static readonly ID = 'insrc.artifactsInput';
 
-	constructor(readonly sessionId: string) {
-		super();
+	constructor(sessionId: string) {
+		super('artifacts', sessionId, '.md');
+	}
+
+	/** Backwards-compat alias for `instanceId`. The pane reaches for `sessionId`. */
+	get sessionId(): string {
+		return this.instanceId;
 	}
 
 	override get typeId(): string {
@@ -33,15 +40,11 @@ export class ArtifactsEditorInput extends EditorInput {
 		return 'Artifacts';
 	}
 
-	override get resource(): URI {
-		return URI.from({ scheme: 'insrc-artifacts', path: `/session/${this.sessionId}` });
-	}
-
 	override getIcon(): ThemeIcon {
 		return Codicon.symbolMisc;
 	}
 
 	override matches(other: unknown): boolean {
-		return other instanceof ArtifactsEditorInput && other.sessionId === this.sessionId;
+		return other instanceof ArtifactsEditorInput && other.instanceId === this.instanceId;
 	}
 }
