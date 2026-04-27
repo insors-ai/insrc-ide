@@ -20,14 +20,21 @@ const log = getLogger('search');
 // Helpers
 // ---------------------------------------------------------------------------
 
+// All queries in this module are read-only -- searchEntities,
+// findCallers, findCallees, findDefinedIn, findImports, resolveClosure
+// -- so the helper routes them through the dedicated read connection
+// (`db.graphReader`). That isolates analyzer / chat-side reads from
+// the indexer + cross-file resolver writers and gets the 30 s query
+// timeout guard for free. Plan F2 / F6 in
+// plans/analyzers/code-analyzer.md.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function kuzuQuery(db: DbClient, stmt: string, params?: any): Promise<Record<string, unknown>[]> {
   let result;
   if (params) {
-    const prepared = await db.graph.prepare(stmt);
-    result = await db.graph.execute(prepared, params);
+    const prepared = await db.graphReader.prepare(stmt);
+    result = await db.graphReader.execute(prepared, params);
   } else {
-    result = await db.graph.query(stmt);
+    result = await db.graphReader.query(stmt);
   }
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   const qr = Array.isArray(result) ? result[0]! : result;
