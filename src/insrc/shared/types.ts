@@ -47,6 +47,13 @@ export interface CompletionOpts {
   tools?: ToolDefinition[] | undefined;
   /** If provided, text tokens are streamed via this callback during complete(). */
   onToken?: ((token: string) => void) | undefined;
+  /**
+   * Hint that the model must produce strict JSON (no prose, no fences,
+   * no <think> blocks). Providers that expose a server-side JSON-mode
+   * (Ollama `format: 'json'`) honour it; others ignore. Best-effort:
+   * the runner-side parse + retry remains the source of truth.
+   */
+  responseFormat?: 'json' | undefined;
 }
 
 export interface LLMProvider {

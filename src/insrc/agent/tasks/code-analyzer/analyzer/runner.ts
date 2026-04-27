@@ -349,12 +349,14 @@ export async function runAnalyzer(
       role: 'user',
       content:
         'Your previous response was not valid AnalyzerResult JSON ' +
-        `(${parsed.reason}: ${parsed.detail}). Reply ONLY with the strict ` +
-        'JSON matching the schema in the system prompt. No prose, no fences.',
+        `(${parsed.reason}: ${parsed.detail}). Reply with ONLY a single JSON ` +
+        'object matching the schema in the system prompt -- no prose, no ' +
+        'fences, no <think> blocks, nothing before `{` or after `}`.',
     });
     const retryResp = await opts.provider.complete(messages, {
       tools: [],
       maxTokens: COMPLETION_MAX_TOKENS,
+      responseFormat: 'json',
     });
     lastText = retryResp.text ?? '';
     parsed = parseAnalyzerResult(lastText, task.itemId);
@@ -399,6 +401,7 @@ export async function runAnalyzer(
     const retryResp = await opts.provider.complete(messages, {
       tools: [],
       maxTokens: COMPLETION_MAX_TOKENS,
+      responseFormat: 'json',
     });
     const retryParsed: ParseResult = parseAnalyzerResult(retryResp.text ?? '', task.itemId);
     if (retryParsed.ok) {

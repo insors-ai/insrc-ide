@@ -29,7 +29,19 @@ export const HARD_RULES = `# Hard rules
    Hallucinated tool names error out.
 
 4. Bounded loop. Hard cap of 8 tool calls per task; 60 s wall-clock.
-   When you're at the cap, return what you have with confidence "low".`;
+   When you're at the cap, return what you have with confidence "low".
+
+5. OUTPUT FORMAT IS STRICT JSON, NOTHING ELSE.
+   On the FINAL turn (when you stop calling tools) your reply MUST be
+   exactly one JSON object that matches the AnalyzerResult schema below.
+     - No prose preamble. No "Here is the result:" sentence.
+     - No Markdown fences (no \`\`\`json ... \`\`\`). The literal text
+       \`\`\` must not appear in the final reply.
+     - No <think> / <thinking> blocks. Reasoning belongs in earlier
+       turns where you also called tools, not in the final reply.
+     - No trailing commentary after the closing \`}\`.
+   The orchestrator parses your reply with JSON.parse(); anything else
+   triggers a retry that reduces your task budget.`;
 
 /**
  * Per-kind playbook + tool list + output schema. User-overridable in

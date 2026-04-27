@@ -108,10 +108,18 @@ export class OllamaProvider implements LLMProvider {
     tools: OllamaTool[] | undefined,
     opts: CompletionOpts,
   ): Promise<LLMResponse> {
+    // Ollama's server-side JSON-mode forces strict-JSON output. We only
+    // turn it on when the caller asked for it AND no tools are present
+    // -- combining `format: 'json'` with `tools` confuses qwen3-coder
+    // and yields blank tool_calls. Caller controls when to ask (the
+    // analyzer's strict-JSON retry calls turn it on; the tool-loop turns
+    // it off).
+    const useJsonFormat = opts.responseFormat === 'json' && !tools;
     const response = await this.client.chat({
       model: this.model,
       messages: ollamaMessages,
       ...(tools ? { tools } : {}),
+      ...(useJsonFormat ? { format: 'json' as const } : {}),
       stream: true,
       options: {
         num_ctx: this.numCtx,
