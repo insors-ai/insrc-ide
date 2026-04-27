@@ -22,7 +22,7 @@ import { join, sep } from 'node:path';
 import { getLogger } from '../shared/logger.js';
 import type { DbClient } from '../db/client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
-import { listEntitiesForRepo, getEntity } from '../db/entities.js';
+import { listEntitiesForRepo, getEntity, getEntitiesByIds } from '../db/entities.js';
 import {
   listUnresolvedRelations,
   promoteResolvedBatch,
@@ -269,10 +269,43 @@ async function rewireModuleStubImports(
     'cross-file Pass 1: opening MATCH done',
   );
 
+  // -- Step 1.5: batch-prefetch module-stub entities --
+  // Module stubs are created with `repo: ''` so listEntitiesForRepo
+  // (the input to buildEntityIndex) returns 0 of them. Without this
+  // prefetch, the per-row `index.modules.get(moduleId)` lookup below
+  // misses on EVERY row and falls through to a sequential
+  // getEntity(db, moduleId) call. For the insrc repo with 9611
+  // module-stub IMPORTS rows this resulted in 9611 sequential Kuzu
+  // queries -- the dominant Pass 1 cost (validated by the per-step
+  // timing logs added in a5da4df3711).
+  //
+  // One IN-list batched LanceDB query per chunk (500) brings this
+  // from O(rows) round-trips to O(rows/500). For insrc that's 1-20
+  // queries instead of 9611.
+  const tPrefetch = Date.now();
+  const uniqueModuleIds = Array.from(new Set(rows.map(r => r['moduleId'] as string)));
+  const fetchedModules = await getEntitiesByIds(opts.db, uniqueModuleIds);
+  for (const m of fetchedModules) {
+    if (m.kind === 'module') {
+      index.modules.set(m.id, m);
+    }
+  }
+  log.info(
+    {
+      repo: opts.repoRoot,
+      uniqueIds: uniqueModuleIds.length,
+      fetched: fetchedModules.length,
+      indexed: index.modules.size,
+      elapsedMs: Date.now() - tPrefetch,
+    },
+    'cross-file Pass 1: prefetched module entities',
+  );
+
   // -- Step 2: in-memory grouping by from-file --
-  // Resolve every row and group by from-file. The Kuzu writes happen in
-  // a separate pass below so we can batch the DELETEs (one query per
-  // from-file instead of one per edge).
+  // After Step 1.5 the per-row `index.modules.get(moduleId)` lookup is
+  // O(1) with a high hit rate. The getEntity fallback below is now a
+  // rare-case safety net (e.g. module deleted between MATCH and
+  // prefetch).
   const tGroup = Date.now();
   interface Rewire { readonly oldModuleId: string; readonly targetEntityId: string }
   const groups = new Map<string, Rewire[]>();
@@ -280,10 +313,9 @@ async function rewireModuleStubImports(
   for (const row of rows) {
     const fromId   = row['fromId']   as string;
     const moduleId = row['moduleId'] as string;
-    // Module stubs are repo-agnostic (created with `repo: ''`) so they
-    // don't show up in listEntitiesForRepo. Pull the full entity by id.
     let moduleEntity = index.modules.get(moduleId);
     if (moduleEntity === undefined) {
+      // Safety net: should be rare after Step 1.5 prefetch.
       const fetched = await getEntity(opts.db, moduleId);
       if (fetched === null || fetched.kind !== 'module') continue;
       moduleEntity = fetched;

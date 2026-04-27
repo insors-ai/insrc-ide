@@ -205,6 +205,36 @@ export async function getEntity(db: DbClient, id: string): Promise<Entity | null
 }
 
 /**
+ * Batched form of getEntity. Returns the matched subset (no null
+ * placeholders); ids that don't match are omitted. Order is not
+ * preserved -- caller should re-key by id if it needs lookup.
+ *
+ * Chunked at 500 to bound the SQL string size + prepared-statement
+ * parameter memory, matching eeae2ef7ac7's DETACH DELETE chunk size.
+ */
+export async function getEntitiesByIds(
+  db: DbClient,
+  ids: readonly string[],
+): Promise<Entity[]> {
+  if (ids.length === 0) return [];
+  const table = await getEntitiesTable(db);
+  if (table === null) return [];
+
+  const CHUNK = 500;
+  const out: Entity[] = [];
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    const safe = slice.map(id => id.replace(/'/g, "''"));
+    const inList = safe.map(id => `'${id}'`).join(', ');
+    const rows = await table.query().where(`id IN (${inList})`).toArray();
+    for (const r of rows) {
+      out.push(rowToEntity(r as Record<string, unknown>));
+    }
+  }
+  return out;
+}
+
+/**
  * Find entities by name + kind filter. Intended for structured
  * lookups (e.g. the artifact:er kind resolving user-supplied table
  * names into Entity rows) where the caller knows the exact name but
