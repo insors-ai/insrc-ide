@@ -447,7 +447,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   private async afterReview(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
     const decision = parseReviewerDecision(completed.output);
     const currentTask = state.get<AnalysisTask>(K_CURRENT_TASK);
-    const outcome = state.get<{ result: AnalyzerResult; warning?: string; truncated: boolean }>(K_LAST_RUNNER);
+    const outcome = state.get<{ result: AnalyzerResult; warning?: string; truncated: boolean; proseOnlyFallback?: boolean }>(K_LAST_RUNNER);
     if (currentTask === undefined || outcome === undefined) {
       log.error('afterReview: missing currentTask or last runner outcome');
       return this.queueSynthesise(state);
@@ -460,9 +460,36 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const history = state.get<AnalyzerResult[]>(K_HISTORY) ?? [];
 
     log.info(
-      { itemId: currentTask.itemId, decision: decision.decision, retryCount: currentTask.retryCount, queueRemaining: queue.length },
+      { itemId: currentTask.itemId, decision: decision.decision, retryCount: currentTask.retryCount, queueRemaining: queue.length, proseOnlyFallback: outcome.proseOnlyFallback === true },
       'reviewer decision',
     );
+
+    // F4 guard: when the previous analyzer pass fell back to prose-only
+    // (the local model couldn't produce valid JSON across the strict-
+    // JSON retry), a reviewer-driven retry-with-hint is dead air. The
+    // model's blocked on JSON formatting, not on the question. Force
+    // accept-with-low-confidence so the run doesn't burn another ~60s
+    // per item to reach the same fallback.
+    if (decision.decision === 'retry-with-hint' && outcome.proseOnlyFallback === true) {
+      log.info(
+        { itemId: currentTask.itemId },
+        'F4: skipping retry-with-hint because previous outcome was prose-only fallback; accepting with low confidence',
+      );
+      if (this.deps?.todos !== undefined) {
+        try {
+          await this.deps.todos.markComplete(currentTask.itemId);
+        } catch (err) {
+          log.warn({ err, itemId: currentTask.itemId }, 'markComplete failed');
+        }
+      }
+      const downgraded: AnalyzerResult = { ...outcome.result, confidence: 'low' };
+      accepted.push({ task: currentTask, result: downgraded });
+      history.push(downgraded);
+      state.set(K_ACCEPTED, accepted);
+      state.set(K_HISTORY, history);
+      state.set(K_TASK_QUEUE, queue.slice(1));
+      return this.runNextAnalyzerTask(state);
+    }
 
     switch (decision.decision) {
       case 'accept': {

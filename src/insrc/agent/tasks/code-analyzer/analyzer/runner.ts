@@ -213,6 +213,15 @@ export interface RunAnalyzerOutcome {
   readonly warning?: string;
   /** True when the loop hit MAX_TOOL_CALLS or MAX_WALL_CLOCK_MS. */
   readonly truncated: boolean;
+  /**
+   * Set to true when the strict-JSON retry also failed and the runner
+   * returned a synthesised prose-only AnalyzerResult. The orchestrator
+   * uses this as a terminal signal (F4): a `retry-with-hint` reviewer
+   * decision becomes accept-with-low-confidence because the local
+   * model demonstrably can't produce JSON for this task; another
+   * 60-s analyzer pass won't help.
+   */
+  readonly proseOnlyFallback?: boolean;
 }
 
 /**
@@ -379,6 +388,7 @@ export async function runAnalyzer(
       result: fallback,
       warning: `analyzer JSON unparseable after retry (${parsed.reason}: ${parsed.detail})`,
       truncated,
+      proseOnlyFallback: true,
     };
   }
 
