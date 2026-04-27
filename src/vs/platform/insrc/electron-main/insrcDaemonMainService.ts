@@ -12,7 +12,7 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ILogService } from '../../log/common/log.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
-import { ensureClonedDaemon, resolveDaemonEntry } from './insrcDaemonInstaller.js';
+import { ensureClonedDaemon, gracefullyTerminateDaemon, resolveDaemonEntry } from './insrcDaemonInstaller.js';
 
 // ---------------------------------------------------------------------------
 // IInsrcDaemonMainService -- runs in the main process with full Node.js access
@@ -84,35 +84,61 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			return;
 		}
 
-		try {
-			await this._connectToSocket();
-			return;
-		} catch {
-			// Daemon not running
-		}
-
-		// Always run the clone install/update path, even in dev. The
-		// cloned copy is how real users get the daemon, and if we skip
-		// this step in dev the clone/pull/build logic rots until the
-		// next release. Dev still spawns from the dev build for fast
-		// iteration; the clone just validates that the install path
-		// still works against the current repo.
+		// Run the installer FIRST -- not after a failed connect. The
+		// pre-fix flow short-circuited the install step when the
+		// daemon was already running, which silently turned a user's
+		// `git push + IDE restart` workflow into a no-op for daemon
+		// updates: the on-disk code stayed at the previously-built
+		// SHA, the running daemon kept its (now stale) ESM module
+		// cache, and bug fixes that landed since the last cold-start
+		// never reached the daemon process.
+		//
+		// Always run the install/update path, even in dev. The
+		// cloned copy is how real users get the daemon; if we skip
+		// the install step in dev the clone/pull/build logic rots
+		// until the next release. Dev still spawns from the dev
+		// build for fast iteration; the clone just validates that
+		// the install path still works against the current repo.
 		const entry = resolveDaemonEntry();
 		const autoUpdate = this.configurationService.getValue<string>('insrc.daemon.autoUpdate') !== 'never';
 		const repoUrl = this.configurationService.getValue<string>('insrc.daemon.repoUrl');
 		const repoBranch = this.configurationService.getValue<string>('insrc.daemon.repoBranch');
-		const cloneOk = await ensureClonedDaemon(this.logService, autoUpdate, {
+		const installResult = await ensureClonedDaemon(this.logService, autoUpdate, {
 			repoUrl: repoUrl ?? '',
 			repoBranch: repoBranch ?? '',
 		});
-		if (!cloneOk) {
+		if (!installResult.ok) {
 			if (!entry.isDev) {
 				throw new Error('Failed to install daemon -- see Output > insrc for details');
 			}
 			this.logService.warn('[insrc] cloned-daemon install failed; continuing from dev build');
 		}
 
-		this.logService.info(`[insrc] Daemon not running, spawning detached (${entry.isDev ? 'dev build' : 'cloned install'})...`);
+		// If the installer pulled new commits, terminate any running
+		// daemon so the next spawn picks up the rebuilt bytes. Node's
+		// ESM module cache holds the version that was on disk at
+		// process start; rebuilding the files doesn't reload the
+		// running daemon, and the pre-fix flow happily kept talking
+		// to a daemon process whose loaded modules predated the pull.
+		if (installResult.updated) {
+			this.logService.info('[insrc] Daemon code updated; restarting daemon to pick up fresh build...');
+			await gracefullyTerminateDaemon(this.logService);
+			// Detach the IDE-side socket reference too -- the daemon
+			// it pointed at is gone.
+			this._detachSocket();
+			this._setConnected(false);
+		} else {
+			// No new code on disk -- safe to reuse the existing daemon
+			// process if one is up.
+			try {
+				await this._connectToSocket();
+				return;
+			} catch {
+				// Daemon not running; fall through to spawn.
+			}
+		}
+
+		this.logService.info(`[insrc] Spawning daemon (${entry.isDev ? 'dev build' : 'cloned install'})...`);
 		this._spawnDetachedDaemon(entry.path);
 
 		const deadline = Date.now() + SPAWN_CONNECT_MAX_WAIT_MS;

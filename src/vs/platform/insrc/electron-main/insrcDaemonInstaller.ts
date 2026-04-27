@@ -61,28 +61,51 @@ export function resolveDaemonEntry(): { path: string; isDev: boolean } {
 // Ensure / install / update
 // ---------------------------------------------------------------------------
 
+export interface EnsureDaemonResult {
+	/** True when an installable daemon is present on disk. */
+	readonly ok: boolean;
+	/**
+	 * True when this call advanced the daemon's code on disk -- a fresh
+	 * install, or a `git pull` that fast-forwarded the checkout. The
+	 * caller uses this to decide whether to keep talking to a
+	 * pre-existing daemon process (which still holds the old code in
+	 * Node's ESM module cache) or kill it so the next spawn picks up
+	 * fresh bytes. Stale-daemon-after-pull was the silent-failure mode
+	 * caught while testing the analyzer's Phase 2.A; see commit
+	 * 2dea43ccb15 follow-up.
+	 */
+	readonly updated: boolean;
+}
+
 /**
  * Ensure a runnable daemon is installed at DAEMON_ENTRY_CLONED.
  * Installs on first run, optionally updates otherwise.
- * Returns true when an installable daemon is present; false on failure.
+ *
+ * `updated` distinguishes "we did something" from "no-op": fresh
+ * install counts as updated; an up-to-date checkout counts as not
+ * updated; a failed update keeps the existing install (`ok: true,
+ * updated: false`).
  */
 export async function ensureClonedDaemon(
 	logService: ILogService,
 	autoUpdate: boolean,
 	repoConfig?: DaemonRepoConfig,
-): Promise<boolean> {
+): Promise<EnsureDaemonResult> {
 	const resolved = resolveRepoConfig(repoConfig);
 	if (!fs.existsSync(DAEMON_ENTRY_CLONED)) {
-		return install(logService, resolved);
+		const ok = await install(logService, resolved);
+		return { ok, updated: ok };
 	}
 	if (autoUpdate) {
 		try {
-			await update(logService, resolved);
+			const updated = await update(logService, resolved);
+			return { ok: true, updated };
 		} catch (err) {
 			logService.warn(`${UPDATE_LOG_HEAD} update failed, keeping existing install:`, (err as Error).message);
+			return { ok: true, updated: false };
 		}
 	}
-	return true;
+	return { ok: true, updated: false };
 }
 
 async function install(logService: ILogService, config: DaemonRepoConfig): Promise<boolean> {
@@ -114,7 +137,7 @@ async function install(logService: ILogService, config: DaemonRepoConfig): Promi
 	return true;
 }
 
-async function update(logService: ILogService, config: DaemonRepoConfig): Promise<void> {
+async function update(logService: ILogService, config: DaemonRepoConfig): Promise<boolean> {
 	logService.info(`${UPDATE_LOG_HEAD} checking for daemon updates (branch ${config.repoBranch})`);
 
 	// Ensure the checkout tracks the configured daemon branch. Older
@@ -128,14 +151,108 @@ async function update(logService: ILogService, config: DaemonRepoConfig): Promis
 
 	if (before.stdout.trim() === after.stdout.trim()) {
 		logService.info(`${UPDATE_LOG_HEAD} daemon already up to date`);
-		return;
+		return false;
 	}
 
-	logService.info(`${UPDATE_LOG_HEAD} rebuilding daemon`);
+	logService.info(`${UPDATE_LOG_HEAD} rebuilding daemon ${before.stdout.trim().slice(0, 12)} -> ${after.stdout.trim().slice(0, 12)}`);
 	await run(logService, 'npm', ['install', '--legacy-peer-deps'], DAEMON_SRC);
 	await run(logService, 'npx', ['tsc'], DAEMON_SRC);
 	await linkNodeModules(logService);
 	logService.info(`${UPDATE_LOG_HEAD} daemon updated`);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Daemon process termination
+// ---------------------------------------------------------------------------
+
+const PID_FILE = join(INSRC_DIR, 'daemon.pid');
+const SOCK_FILE = join(INSRC_DIR, 'daemon.sock');
+const TERMINATE_GRACE_MS = 5_000;
+const TERMINATE_POLL_MS = 100;
+
+/**
+ * Terminate the daemon process referenced by `~/.insrc/daemon.pid`.
+ *
+ * Used by the IDE's connect path when a `git pull` advanced the
+ * daemon's on-disk code: Node's ESM module cache holds the bytes
+ * loaded at process start, so even though the rebuilt files are now
+ * on disk, the running daemon can't see them. Killing it here lets
+ * the next spawn pick up the fresh code.
+ *
+ * Sends SIGTERM, polls for exit, escalates to SIGKILL after the
+ * grace window, and clears the pid + socket files unconditionally
+ * (a stale pid file from a long-dead process would otherwise block
+ * the next spawn with "already running -- exiting"). Best-effort:
+ * any failure is logged and swallowed -- the only correctness
+ * concern is that the next spawn finds no live process holding the
+ * socket.
+ */
+export async function gracefullyTerminateDaemon(logService: ILogService): Promise<void> {
+	let pid: number | undefined;
+	try {
+		const raw = await fs.promises.readFile(PID_FILE, 'utf8');
+		const parsed = Number(raw.trim());
+		if (Number.isFinite(parsed) && parsed > 0) {
+			pid = parsed;
+		}
+	} catch {
+		// No pid file -- no daemon to terminate.
+		return;
+	}
+
+	if (pid === undefined) {
+		await cleanupLockFiles();
+		return;
+	}
+
+	if (!isProcessAlive(pid)) {
+		logService.info(`${UPDATE_LOG_HEAD} stale pid file (${pid} is dead); cleaning up`);
+		await cleanupLockFiles();
+		return;
+	}
+
+	logService.info(`${UPDATE_LOG_HEAD} terminating daemon pid=${pid}`);
+	try {
+		process.kill(pid, 'SIGTERM');
+	} catch (err) {
+		logService.warn(`${UPDATE_LOG_HEAD} SIGTERM failed: ${(err as Error).message}`);
+	}
+
+	const deadline = Date.now() + TERMINATE_GRACE_MS;
+	while (Date.now() < deadline) {
+		await new Promise<void>(r => setTimeout(r, TERMINATE_POLL_MS));
+		if (!isProcessAlive(pid)) {
+			logService.info(`${UPDATE_LOG_HEAD} daemon pid=${pid} exited`);
+			await cleanupLockFiles();
+			return;
+		}
+	}
+
+	logService.warn(`${UPDATE_LOG_HEAD} graceful shutdown timed out; SIGKILL pid=${pid}`);
+	try {
+		process.kill(pid, 'SIGKILL');
+	} catch {
+		/* probably already dead */
+	}
+	await cleanupLockFiles();
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		// Signal 0 = existence check, no actual signal delivered.
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function cleanupLockFiles(): Promise<void> {
+	await Promise.all([
+		fs.promises.rm(PID_FILE, { force: true }).catch(() => { }),
+		fs.promises.rm(SOCK_FILE, { force: true }).catch(() => { }),
+	]);
 }
 
 // ---------------------------------------------------------------------------
