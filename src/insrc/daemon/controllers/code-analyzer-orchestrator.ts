@@ -95,6 +95,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   readonly id = 'code-analyzer';
 
   private deps?: TaskOrchestratorDeps;
+  /** Stashed in buildInitialTasks; consumed by ensureStateInitialized
+   *  on the first next() call when the state store is actually visible
+   *  to the controller. attachDeps fires before buildInitialTasks but
+   *  deps.stateStore is the ORIGINAL caller-passed value (often
+   *  undefined when the chat-handler builds deps inline) -- the
+   *  framework constructs the real stateStore locally and uses it for
+   *  next() calls without writing it back to deps. */
+  private _request?: string;
+  private _repoSummary?: RepoSummary;
 
   attachDeps(deps: TaskOrchestratorDeps): void {
     this.deps = deps;
@@ -103,27 +112,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   // -- start ----------------------------------------------------------------
 
   buildInitialTasks(input: ControllerInput): Task[] {
-    const repoSummary = this.buildRepoSummary(input);
-    const initialState: CodeAnalysisState = {
-      request: input.message,
-      repoSummary,
-      listId: '',
-      childListIds: [],
-      truncated: false,
-      cancelled: false,
-      approvedDirs: [],
-    };
-    // Stash via the deps' stateStore so the values are visible to the
-    // first next() call. buildInitialTasks runs before the loop, so we
-    // use the deps reference directly (attachDeps has been called).
-    if (this.deps?.stateStore) {
-      this.deps.stateStore.set(K_STATE, initialState);
-      this.deps.stateStore.set(K_PHASE, 'planning' as Phase);
-      this.deps.stateStore.set(K_RETRIES, {} as Record<string, number>);
-      this.deps.stateStore.set(K_FOLLOWUP_COUNT, 0);
-      this.deps.stateStore.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
-      this.deps.stateStore.set(K_HISTORY, [] as AnalyzerResult[]);
-    }
+    this._request = input.message;
+    this._repoSummary = this.buildRepoSummary(input);
 
     return [{
       index: 0,
@@ -131,7 +121,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       kind: 'llm',
       intent: 'code-analysis',
       systemPrompt: PLAN_SYSTEM,
-      userMessage: this.renderPlanUserMessage(input.message, repoSummary),
+      userMessage: this.renderPlanUserMessage(this._request, this._repoSummary),
       resolverAgent: 'code-analyzer',
       resolverStep: 'plan',
       providerHint: 'claude',
@@ -142,6 +132,37 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     }];
   }
 
+  /**
+   * Lazy-initialise controller state on the first next() call. The
+   * framework's runControlledPipeline creates the real stateStore
+   * locally (`stateStore = deps.stateStore ?? createTaskStateStore()`)
+   * but does not write it back to the deps it handed to attachDeps,
+   * so this.deps.stateStore is still undefined here. The state
+   * parameter passed to next() IS the right store -- seed it once.
+   */
+  private ensureStateInitialized(state: TaskStateStore): void {
+    if (state.has(K_STATE)) return;
+    if (this._request === undefined || this._repoSummary === undefined) {
+      log.error('ensureStateInitialized: instance fields missing (resume without buildInitialTasks?)');
+      return;
+    }
+    const initialState: CodeAnalysisState = {
+      request:      this._request,
+      repoSummary:  this._repoSummary,
+      listId:       '',
+      childListIds: [],
+      truncated:    false,
+      cancelled:    false,
+      approvedDirs: [],
+    };
+    state.set(K_STATE, initialState);
+    state.set(K_PHASE, 'planning' as Phase);
+    state.set(K_RETRIES, {} as Record<string, number>);
+    state.set(K_FOLLOWUP_COUNT, 0);
+    state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
+    state.set(K_HISTORY, [] as AnalyzerResult[]);
+  }
+
   // -- main state machine ---------------------------------------------------
 
   async next(
@@ -149,6 +170,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     gateReply: GateReply | undefined,
     state: TaskStateStore,
   ): Promise<Task[] | null> {
+    this.ensureStateInitialized(state);
     const phase = state.get<Phase>(K_PHASE) ?? 'planning';
     log.info({ phase, completed: completed.description, gateAction: gateReply?.action }, 'next()');
 
