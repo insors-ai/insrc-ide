@@ -56,7 +56,11 @@ const ITEM_TRANSITIONS: Readonly<Record<TodoItemStatus, readonly TodoItemStatus[
 /** True if `from -> to` is a legal item-status transition. */
 export function canTransitionItem(from: TodoItemStatus, to: TodoItemStatus): boolean {
   if (from === to) return true;  // no-op updates always allowed
-  return ITEM_TRANSITIONS[from].includes(to);
+  // Defensive fallback: if `from` is somehow not a known status (data
+  // corruption, partial row, race with delete), return false rather
+  // than throw. The TypeScript signature lies in production where data
+  // can drift from the schema. See plans/analyzers/code-analyzer.md F3.
+  return (ITEM_TRANSITIONS[from] ?? []).includes(to);
 }
 
 /**
