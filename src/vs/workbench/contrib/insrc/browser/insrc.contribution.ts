@@ -38,6 +38,18 @@ import './sidebar/insrcCommands.js';
 import { InsrcWorkspaceSyncContribution } from './sidebar/insrcWorkspaceSync.js';
 registerWorkbenchContribution2(InsrcWorkspaceSyncContribution.ID, InsrcWorkspaceSyncContribution, WorkbenchPhase.AfterRestored);
 
+// Ephemeral pane infrastructure: backs notepad / artifacts / report-style
+// panes with a real file under ~/.insrc/tmp/, so VS Code's editor
+// restoration finds a valid resource on restart instead of an
+// unregistered custom-scheme URI (which used to render as an "error
+// pane"). Registered at BlockStartup so the tmp-dir singleton on
+// EphemeralEditorInput is set BEFORE editor restoration deserializes
+// any pane input. The reconciler runs at AfterRestored and prunes
+// orphan files no open editor references.
+import { EphemeralPaneInitContribution, EphemeralPaneOrphanReconcilerContribution } from './shared/ephemeralPaneContribution.js';
+registerWorkbenchContribution2(EphemeralPaneInitContribution.ID, EphemeralPaneInitContribution, WorkbenchPhase.BlockStartup);
+registerWorkbenchContribution2(EphemeralPaneOrphanReconcilerContribution.ID, EphemeralPaneOrphanReconcilerContribution, WorkbenchPhase.AfterRestored);
+
 // File decorations: show repo indexing status on folder roots in Explorer
 import { InsrcFileDecorationsContribution } from './sidebar/insrcFileDecorations.js';
 registerWorkbenchContribution2(InsrcFileDecorationsContribution.ID, InsrcFileDecorationsContribution, WorkbenchPhase.AfterRestored);
