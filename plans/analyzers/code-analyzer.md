@@ -480,23 +480,28 @@ Applied at `db/client.ts` Database + Connection construction. Daemon-wide change
 
 ## Phase 2 — Analysis Report Pane + feedback + **legacy controller deletion**
 
-### 2.1 `AnalysisReportPane` (ephemeral, single per session)
+### 2.1 `AnalysisReportPane` (ephemeral, single per session) — **DONE**
 
-**Files:**
-- `src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportInput.ts`
-- `src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportPane.ts`
-- `src/vs/workbench/contrib/insrc/browser/code-analyzer/index.ts` (workbench contribution registration)
+**Status:** landed.
 
-`EditorInput` resource URI: `insrc-analysis-report:///session/<sessionId>`. `matches()` returns true on `sessionId` equality, so opening the same input from any code path focuses the existing tab. The pane subscribes to the todos service for live `completed / total` counts; the body is rendered via the existing `MarkdownWidget`.
+**Files (as built):**
+- `src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportInput.ts` — extends the [`EphemeralEditorInput`](../../src/vs/workbench/contrib/insrc/browser/shared/ephemeralEditorInput.ts) base shipped in `17b67803889`. Resource URI is `file:///<userHome>/.insrc/tmp/code-analysis-report-<listId>.md`.
+- `src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportPane.ts` — renders `list.body` via `MarkdownRenderer`; subscribes to `IInsrcTodosService.onDidChangeList` for live `K/N items` status badge.
+- `src/vs/workbench/contrib/insrc/browser/code-analyzer/codeAnalyzerFlowContribution.ts` — auto-opens the pane on `listUpdated` for any `code-analyzer`-owned list whose `body` just became non-empty. Deduplicated per `listId`; resets on chat-session change.
+- `src/vs/workbench/contrib/insrc/browser/code-analyzer/codeAnalyzerCommands.ts` — `insrc.codeAnalyzer.openReport` command (palette + invocable from the todos pane kebab when 2.2 wires it up). Takes optional `{ listId }` argument.
+- `src/vs/workbench/contrib/insrc/browser/code-analyzer/media/analysisReport.css` — every colour resolves through `var(--vscode-...)` tokens; no hex values.
 
-Ephemerality (per [design §10.2 decision](../../design/analyzers/code-analyzer.html#surface-report)): the pane does **not** persist across workbench reloads. Closing or reloading discards the tab; `list.body` survives in the framework's LanceDB tables, and the todos pane offers an *Open report* action that re-opens the pane from the persisted body.
+**Deviations from this section's text (intentional):**
 
-The pane does **not** auto-open on workbench cold start. It opens on (a) `synthesise` completion fires its `listCompleted` event in the active session, or (b) the user clicks *Open report* from the todos pane row's kebab menu.
+- **Keyed on `listId`, not `sessionId`.** Each `/code-analyze` run creates its own `TodoList`, so `listId` is the proper unit of work — this lets the user have multiple past reports open side-by-side and re-open a specific one via the kebab. `sessionId` is carried as a separate field on the input for surfaces that want to filter by session. (The plan text said "sessionId equality"; the per-analysis list architecture in Phase 1 made that read poorly.)
+- **No editor serializer registered** for `AnalysisReportInput` — the pane is intentionally ephemeral per design §10.2. `list.body` survives in LanceDB; restoration goes through the `Open Report` command, not the workbench's standard tab-restorer. The orphan reconciler shipped in `17b67803889` cleans the backing file at next startup.
+
+**Orchestrator changes** (`code-analyzer-orchestrator.ts`): the `presenting` phase + `afterPresentGate` + `emitGateActionFeedback` (the temporary "save / copy / send-to-chat / discard" gate that streamed the full markdown to the chat panel) is removed. `afterSynthesise` now writes `list.body`, emits a single-line "Report ready -- see the **Code Analysis Report** pane" delta, marks the session complete, and returns null. `finalize()` returns an empty string in the success path so the framework doesn't double-print on top of the delta. `Phase` union dropped `'presenting'`.
 
 **Hard requirements (UX, validation feedback from Phase 1):**
 
-1. **The synthesised report must NOT be rendered in the chat panel.** Phase 1's temporary state of returning the markdown via `finalize()` (so it streams as a chat delta) is acceptable only until Phase 2.1 lands; the user-facing surface is exclusively the Report Pane. The chat panel may show a one-line "Report ready -- Open report" link as an `IInsrcChatService` notification but never the full markdown body.
-2. **Markdown rendering must respect the active workbench theme.** `MarkdownWidget` reads colours via VS Code's CSS variable system (`--vscode-editor-foreground`, `--vscode-editor-background`, `--vscode-textLink-foreground`, etc.). The Report Pane's stylesheet must use those tokens for all text, links, code blocks, headings, and finding badges -- never hard-coded hex values. Sibling analyzer panes (data-analyzer, deployment-analyzer) inherit this requirement.
+1. **The synthesised report must NOT be rendered in the chat panel.** ✅ — `afterSynthesise` no longer streams `userMessage: report`; `finalize` returns `''`. Chat transcript gets only the one-line "Report ready" pointer.
+2. **Markdown rendering must respect the active workbench theme.** ✅ — `MarkdownRenderer` handles code-fence syntax highlighting via the workbench tokenizer; surrounding chrome styles are CSS-variable-only in `media/analysisReport.css`.
 
 ### 2.2 Annotation manager — `annotationManager.ts`
 

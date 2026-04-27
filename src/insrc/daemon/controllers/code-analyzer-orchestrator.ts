@@ -10,8 +10,10 @@
  *                          [review LLM task]
  *   reviewing           -> apply decision; loop or jump to synthesise
  *   synthesising        -> [synthesise LLM task]
- *   presenting          -> [present gate]
- *   done
+ *   done                  (writes list.body; the workbench-side
+ *                          CodeAnalyzerFlowContribution opens the
+ *                          Report Pane on the listUpdated event;
+ *                          plan §2.1)
  *
  * Plan task runs on the cloud-default provider; review tasks on the
  * cloud-default provider; synthesise on the local model. The
@@ -84,7 +86,6 @@ type Phase =
   | 'analyzing'
   | 'reviewing'
   | 'synthesising'
-  | 'presenting'
   | 'done';
 
 // ---------------------------------------------------------------------------
@@ -193,9 +194,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       case 'synthesising':
         return this.afterSynthesise(completed, state);
 
-      case 'presenting':
-        return this.afterPresentGate(gateReply, state);
-
       case 'done':
         return null;
     }
@@ -211,7 +209,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         : `_Code analysis aborted partway through (${accepted.length} task(s) completed). See the todos pane for details._`;
       return { output: fallback, format: 'markdown' };
     }
-    return { output: synthResult, format: 'markdown' };
+    // Plan §2.1 hard requirement 1: the chat panel MUST NOT render
+    // the synthesised markdown -- it lives in the Code Analysis
+    // Report Pane (workbench) and in `list.body` (durable). The
+    // afterSynthesise step already emits a one-line "report ready"
+    // delta to the transcript. Returning a duplicate one-liner here
+    // would just double-print; an empty FinalizeResult lets the
+    // framework render nothing extra.
+    return { output: '', format: 'markdown' };
   }
 
   // -------------------------------------------------------------------------
@@ -641,115 +646,29 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         log.warn({ err, listId }, 'updateListBody failed (continuing)');
       }
     }
-    state.set(K_PHASE, 'presenting' as Phase);
-    return [{
-      index: 300,
-      description: 'Code Analyzer: report ready -- save / copy / discard?',
-      kind: 'transform',
-      intent: 'code-analysis',
-      passThrough: true,
-      userMessage: report,
-      outputFormat: 'markdown',
-      requiresGate: true,
-      gateTitle: 'Code Analyzer report',
-      gateActions: [
-        { name: 'save', label: 'Save to docs/code-analysis/' },
-        { name: 'copy', label: 'Copy to clipboard' },
-        { name: 'send-to-chat', label: 'Send to chat' },
-        { name: 'discard', label: 'Discard' },
-      ],
-      persisted: true,
-    }];
-  }
 
-  private async afterPresentGate(gateReply: GateReply | undefined, state: TaskStateStore): Promise<Task[] | null> {
-    const action = gateReply?.action ?? 'discard';
-    const ca = state.get<CodeAnalysisState>(K_STATE);
-    const report = state.get<string>(K_SYNTH_RESULT) ?? '';
-    log.info({ action }, 'present gate fired');
-
-    if (ca) {
-      state.set(K_STATE, { ...ca, presentedAt: Date.now() });
+    // Phase 2.1: the synthesised markdown renders in the dedicated
+    // Code Analyzer Report Pane (workbench-side flow contribution
+    // listens for `listUpdated` on a code-analyzer list with a
+    // non-empty body and opens the pane). Plan §2.1 hard requirement
+    // 1: the report MUST NOT be rendered in the chat panel. We drop
+    // the previous `transform { passThrough, userMessage: report }`
+    // gate -- it was the temporary state from Phase 1 -- and emit a
+    // single-line "report ready" delta so the chat transcript still
+    // captures that the analysis finished.
+    if (this.deps !== undefined) {
+      this.deps.send({
+        id: this.deps.requestId,
+        stream: 'delta',
+        data: {
+          text: '\n_Code Analysis report ready -- see the **Code Analysis Report** pane._\n',
+          format: 'markdown',
+        },
+      });
     }
-
-    switch (action) {
-      case 'save': {
-        if (ca === undefined || report.length === 0 || this.deps === undefined) {
-          this.emitGateActionFeedback('save failed: missing report or deps');
-          break;
-        }
-        try {
-          const { saveArtifact } = await import('../../agent/tasks/shared/artifact-save.js');
-          const result = saveArtifact(
-            {
-              agent: 'code-analyzer',
-              title: ca.request,
-              repoPath: ca.repoSummary.rootPath,
-              markdownContent: report,
-            },
-            'markdown',
-          );
-          state.set(K_STATE, { ...ca, presentedAt: Date.now(), reportUri: `file://${result.path}` });
-          this.emitGateActionFeedback(`Saved to \`${result.path}\` (${result.size} bytes).`);
-          log.info({ path: result.path, size: result.size }, 'present: saved');
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.error({ err: msg }, 'present: save failed');
-          this.emitGateActionFeedback(`Save failed: ${msg}`);
-        }
-        break;
-      }
-
-      case 'send-to-chat': {
-        // Re-emit the report as a delta so it lands in the chat panel
-        // (the gate UI shows the markdown but the chat transcript
-        // doesn't capture it otherwise). The user can then quote-reply
-        // to it for follow-up turns.
-        if (this.deps !== undefined && report.length > 0) {
-          this.deps.send({
-            id: this.deps.requestId,
-            stream: 'delta',
-            data: { text: report, format: 'markdown' },
-          });
-        }
-        this.emitGateActionFeedback('Report sent to chat.');
-        log.info('present: sent-to-chat');
-        break;
-      }
-
-      case 'copy': {
-        // Daemon-side clipboard isn't wired in Phase 1; the gate UI
-        // already shows the markdown so the user can select+copy
-        // manually. Emit a hint message so the action's state is clear.
-        this.emitGateActionFeedback(
-          'Copy: select the report text in the gate panel and copy with Ctrl/Cmd-C. ' +
-            'Daemon-side clipboard support is a Phase 4 polish item.',
-        );
-        log.info('present: copy (manual fallback in Phase 1)');
-        break;
-      }
-
-      case 'discard':
-      default: {
-        // List.transfer('system') for audit retention is a Phase 2 concern.
-        this.emitGateActionFeedback('Report discarded.');
-        log.info('present: discard');
-        break;
-      }
-    }
-
     state.set(K_PHASE, 'done' as Phase);
     state.markSessionComplete();
     return null;
-  }
-
-  private emitGateActionFeedback(text: string): void {
-    if (this.deps === undefined) return;
-    this.deps.send({
-      id: this.deps.requestId,
-      stream: 'delta',
-      data: { text: `\n${text}\n`, format: 'markdown' },
-    });
   }
 
   // -------------------------------------------------------------------------

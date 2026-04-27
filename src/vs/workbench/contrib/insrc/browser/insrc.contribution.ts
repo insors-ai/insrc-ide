@@ -226,3 +226,21 @@ registerWorkbenchContribution2(ModelProvidersAutoOpenContribution.ID, ModelProvi
 import './notepad/promptNotepadCommands.js';
 import { PromptNotepadContribution } from './notepad/promptNotepadRegistration.js';
 registerWorkbenchContribution2(PromptNotepadContribution.ID, PromptNotepadContribution, WorkbenchPhase.AfterRestored);
+
+// Code Analyzer Report Pane (plans/analyzers/code-analyzer.md Phase 2.1).
+// Ephemeral pane that renders the synthesised analysis report. The
+// flow contribution listens to IInsrcTodosService.onDidChangeList and
+// auto-opens the pane the first time a code-analyzer list in the
+// active session gets a non-empty body. No editor serializer is
+// registered -- the pane is intentionally ephemeral; list.body
+// persists in LanceDB on the daemon side, so re-opening goes
+// through the todos pane's "Open report" action.
+import { AnalysisReportPane } from './code-analyzer/analysisReportPane.js';
+import { AnalysisReportInput } from './code-analyzer/analysisReportInput.js';
+import { CodeAnalyzerFlowContribution } from './code-analyzer/codeAnalyzerFlowContribution.js';
+import './code-analyzer/codeAnalyzerCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(AnalysisReportPane, AnalysisReportPane.ID, 'Code Analysis Report'),
+	[new SyncDescriptor(AnalysisReportInput)],
+);
+registerWorkbenchContribution2(CodeAnalyzerFlowContribution.ID, CodeAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
