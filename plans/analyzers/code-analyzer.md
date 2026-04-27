@@ -420,6 +420,21 @@ This split lets us ship Phase 1 without forcing every existing `code-analysis` c
 14. scripts/build.sh green; npm run precommit green.
 ```
 
+### Phase 1 follow-ups (validation findings)
+
+Issues observed live during the first end-to-end `/code-analyze` exercise on the `insrc` repo (concurrent with an in-flight indexer cross-file-resolver pass). None are run-blocking — orchestrator's defensive try/catch + analyzer's fallback paths kept the run going — but each is worth a small follow-up commit. Not blocking Phase 2; track here so they don't get lost.
+
+| # | Issue | Symptom | Fix sketch | Where |
+|---|---|---|---|---|
+| F1 | Local LLM produces prose, not strict JSON | Multiple `analyzer JSON parse failed; retrying once` warnings (level 40) on every analyzer task. Retry also fails. Fallback to prose-only result + `confidence: 'low'`. Observed prose openings: `"The src/cl..."`, `"Now let me..."`, `"Perfect! N..."` — all conversational. | Tighten the strict-JSON requirement in `prompts/analyzer-system.ts` (HARD_RULES section). Consider Ollama's structured-output / JSON-mode flag if available in the installed binding. As a backstop, the citations-invariant retry already adds a hint — do the same on parse failure. | `prompts/analyzer-system.ts` |
+| F2 | 60s wall-clock cap fires under indexer-Kuzu contention | `analyzer hit wall-clock cap` at `iter: 5` (= ~12s/tool-call). Single shared Kuzu connection means tool calls (`graph_search` etc.) queue serially behind the indexer's resolver pass. | Either (a) raise the cap when the indexer queue is non-empty, (b) gate analyzer launch on indexer-idle, or (c) longer-term: open a second read-only Kuzu connection for analyzer/UI consumers (separate from the writer the indexer uses). | `analyzer/runner.ts` cap; `db/client.ts` connection model |
+| F3 | `canTransitionItem` TypeError on undefined `from` status | Stack: `TypeError: Cannot read properties of undefined (reading 'includes') at canTransitionItem (shared/todos.js:38)`. Caught by orchestrator's try/catch around `markInProgress` / `markComplete` / `markCancelled`. Run continues but the markX call effectively didn't happen. | Framework hardening: 3-line null-coalesce in `canTransitionItem` — `STATE_TRANSITIONS[from] ?? []` so it returns `false` safely on unknown status. Also worth a defensive `getItem`-then-skip-if-missing wrapper in the orchestrator. | `shared/todos.ts` `canTransitionItem`; orchestrator markX call sites |
+| F4 | Failure cascade: per-item retry budget × per-task wall clock = ~3 min/item | Same item retried analyzer-internal (1) + orchestrator-level via reviewer's `retry-with-hint` (up to 2 per item). Each retry burns up to 60s. Over a 16-task plan that's a lot of dead air when the local LLM is misbehaving. | After F1 lands this should self-resolve. As a guard: treat "fallback to prose-only" as a terminal signal — orchestrator skips the retry-with-hint path on items the analyzer already gave up on. | `orchestrator-controller.ts` `afterReview` |
+| F5 | `groupBy from-file` DELETE phase is N round-trips, not one UNWIND | After `c35b36ffa91` MERGE batched, the DELETE side is still 281 sequential queries (one per from-file). Same UNWIND pattern would collapse to ~1 batch. | Mirror the MERGE-side UNWIND batching for the DELETE side. Validated approach (UNWIND now known to work post-`c35b36ffa91`). | `cross-file-resolver.ts` `rewireModuleStubImports` |
+| F6 | Validation environment: analyzer + indexer compete for single Kuzu connection | F2 root cause; surfaces during any concurrent indexer-running `/code-analyze` test. Not a bug per se, but inflates apparent latency for both. | Either run analyzer tests after `full index complete`, or fix the connection-pool architecture (F2(c)). | n/a — testing protocol |
+
+These are tracked here rather than as separate plan-doc commits so the validation context stays grouped with Phase 1's acceptance section. Convert to commits / per-issue work as bandwidth permits; F1 + F3 are the two highest-leverage low-risk fixes.
+
 ---
 
 ## Phase 2 — Analysis Report Pane + feedback + **legacy controller deletion**
