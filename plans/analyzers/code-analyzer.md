@@ -431,9 +431,50 @@ Issues observed live during the first end-to-end `/code-analyze` exercise on the
 | F3 | `canTransitionItem` TypeError on undefined `from` status | Stack: `TypeError: Cannot read properties of undefined (reading 'includes') at canTransitionItem (shared/todos.js:38)`. Caught by orchestrator's try/catch around `markInProgress` / `markComplete` / `markCancelled`. Run continues but the markX call effectively didn't happen. | Framework hardening: 3-line null-coalesce in `canTransitionItem` — `STATE_TRANSITIONS[from] ?? []` so it returns `false` safely on unknown status. Also worth a defensive `getItem`-then-skip-if-missing wrapper in the orchestrator. | `shared/todos.ts` `canTransitionItem`; orchestrator markX call sites |
 | F4 | Failure cascade: per-item retry budget × per-task wall clock = ~3 min/item | Same item retried analyzer-internal (1) + orchestrator-level via reviewer's `retry-with-hint` (up to 2 per item). Each retry burns up to 60s. Over a 16-task plan that's a lot of dead air when the local LLM is misbehaving. | After F1 lands this should self-resolve. As a guard: treat "fallback to prose-only" as a terminal signal — orchestrator skips the retry-with-hint path on items the analyzer already gave up on. | `orchestrator-controller.ts` `afterReview` |
 | F5 | `groupBy from-file` DELETE phase is N round-trips, not one UNWIND | After `c35b36ffa91` MERGE batched, the DELETE side is still 281 sequential queries (one per from-file). Same UNWIND pattern would collapse to ~1 batch. | Mirror the MERGE-side UNWIND batching for the DELETE side. Validated approach (UNWIND now known to work post-`c35b36ffa91`). | `cross-file-resolver.ts` `rewireModuleStubImports` |
-| F6 | Validation environment: analyzer + indexer compete for single Kuzu connection | F2 root cause; surfaces during any concurrent indexer-running `/code-analyze` test. Not a bug per se, but inflates apparent latency for both. | Either run analyzer tests after `full index complete`, or fix the connection-pool architecture (F2(c)). | n/a — testing protocol |
+| F6 | Validation environment: analyzer + indexer compete for single Kuzu connection | F2 root cause; surfaces during any concurrent indexer-running `/code-analyze` test. Not a bug per se, but inflates apparent latency for both. | Either run analyzer tests after `full index complete`, or fix the connection-pool architecture (F2(c)) -- which is exactly what F7 below proposes. | n/a — testing protocol |
+| F7 | Kuzu binding tuning (daemon-wide; surfaces during analyzer + resolver runs) | Default Kuzu config: single shared Connection, `numThreads = nproc` (32 here), `autoCheckpoint: true` with default threshold, no read-only side. Result: analyzer queues behind indexer (F2/F6), checkpoints fire mid-resolver causing disk-I/O bursts, intra-query worker contention via `futex_wait_queue`. | Apply at the `db/client.ts:33` construction site: see "Kuzu tuning" subsection below. | `db/client.ts` |
 
 These are tracked here rather than as separate plan-doc commits so the validation context stays grouped with Phase 1's acceptance section. Convert to commits / per-issue work as bandwidth permits; F1 + F3 are the two highest-leverage low-risk fixes.
+
+#### Kuzu tuning (F7) -- daemon-wide
+
+Applied at `db/client.ts` Database + Connection construction. Daemon-wide change, not analyzer-specific, but the analyzer's contention with the indexer is what surfaced the need.
+
+**Tier 1 (definite wins, small surface):**
+
+1. **Disable auto-checkpoint during ETL passes.**
+   ```ts
+   _kuzuDb = new kuzu.Database(PATHS.graph, /* bufferManagerSize */ undefined,
+     /* enableCompression */ undefined, /* readOnly */ false,
+     /* maxDBSize */ undefined,
+     /* autoCheckpoint */ false,
+     /* checkpointThreshold */ undefined,
+   );
+   ```
+   Then explicitly run `await db.graph.query('CHECKPOINT')` at the end of an indexer pass (after Pass 1 + Pass 2 of the cross-file resolver complete). Stops mid-pass disk bursts. Optionally a periodic background checkpoint every N minutes when the queue is idle.
+
+2. **Two Connections sharing one Database -- writer + reader.**
+   ```ts
+   import { cpus } from 'node:os';
+   const KUZU_THREADS = Math.min(8, Math.floor(cpus().length / 2));
+
+   const _writer = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
+   const _reader = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
+   _reader.setQueryTimeout(30_000);   // defensive cap on stuck reads
+   ```
+   `db.graph` (the existing handle) becomes `_writer` and is what the indexer + cross-file resolver use. A new `db.graphReader` exposes `_reader` and is what the analyzer's tool-call path + UI consumers (todos.subscribe, status RPCs) use. **Eliminates F2/F6 contention.**
+
+   `numThreads` is capped at **`min(8, nproc/2)`** -- on this 32-CPU machine that resolves to 8; on a 4-CPU dev box it's 2. Caps internal worker contention without serialising any single query into uselessness. Default of `nproc` (32) was excessive for our serialized application-side workload and showed up as `futex_wait_queue` activity in the `/proc` thread sample during Pass 1.
+
+**Tier 2 (worth measuring, not certain):**
+
+3. **`enableCompression: false`** for the writer database. Cuts CPU per write. Increases disk size. Worth a smoke if write-heavy passes still feel slow after Tier 1.
+
+**Tier 3 (cosmetic):**
+
+4. **`setQueryTimeout(30_000)`** on the reader connection (above) -- defensive guardrail against runaway analyzer queries.
+
+**What this does NOT replace:** the resolver architectural rewrite proposed during validation (eliminate per-row Kuzu calls, scope every MATCH by repo, use UNWIND batches throughout). Tuning sits on top of correct architecture, not as a substitute. The rewrite is its own plan-doc commit (TBD); F7 ships when the daemon's Database/Connection lifecycle gets a small refactor.
 
 ---
 
