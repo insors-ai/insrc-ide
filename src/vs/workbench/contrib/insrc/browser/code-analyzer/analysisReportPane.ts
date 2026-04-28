@@ -11,10 +11,12 @@ import { IStorageService } from '../../../../../platform/storage/common/storage.
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { MarkdownRenderer } from '../../../../../editor/browser/widget/markdownRenderer/browser/markdownRenderer.js';
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { AnalysisReportInput } from './analysisReportInput.js';
 import { InsrcEditorPaneBase } from '../shared/workspacePaneBase.js';
+import { parseDrillDownFooter, type DrillDownItem } from './drillDownFooter.js';
 
 /**
  * Code Analyzer Report Pane (plans/analyzers/code-analyzer.md Phase 2.1).
@@ -54,6 +56,7 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 		@IStorageService storageService: IStorageService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IInsrcTodosService private readonly todosService: IInsrcTodosService,
+		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super(AnalysisReportPane.ID, group, telemetryService, themeService, storageService);
 	}
@@ -136,8 +139,58 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 		this._emptyEl.style.display = 'none';
 		this._body.style.display = '';
 		dom.clearNode(this._body);
-		const rendered = this._getRenderer().render(new MarkdownString(body));
+
+		// Phase 5.D: split out the trailing `## Drill down` section so
+		// each candidate becomes a clickable button rather than plain
+		// markdown text. Markdown above the heading still renders
+		// through the standard MarkdownRenderer; the footer becomes
+		// native DOM with click handlers wired into the
+		// `insrc.codeAnalyzer.drillDown` command (parentListId set to
+		// THIS list's id, so the daemon stamps the parent edge on the
+		// child analysis's TodoList).
+		const { main, items } = parseDrillDownFooter(body);
+		const renderable = main.length > 0 ? main : body;
+		const rendered = this._getRenderer().render(new MarkdownString(renderable));
 		this._body.appendChild(rendered.element);
+
+		if (items.length > 0) {
+			this._renderDrillDownFooter(list.id, items);
+		}
+	}
+
+	/**
+	 * Render the parsed drill-down footer as a stack of buttons. Each
+	 * button fires `insrc.codeAnalyzer.drillDown` with this list's id
+	 * threaded as `parentListId` so the daemon's chat.send stamps the
+	 * parent edge on the child analysis's TodoList. Button label =
+	 * the candidate question (the synthesise prompt keeps these
+	 * one-liners). Scope (when present) renders as a dimmed
+	 * suffix and is forwarded as the command's `scope` arg.
+	 */
+	private _renderDrillDownFooter(parentListId: string, items: readonly DrillDownItem[]): void {
+		const wrapper = dom.append(this._body, dom.$('.insrc-analysis-report-drilldown'));
+		const heading = dom.append(wrapper, dom.$('h2.insrc-analysis-report-drilldown-heading'));
+		heading.textContent = 'Drill down';
+		const list = dom.append(wrapper, dom.$('.insrc-analysis-report-drilldown-list'));
+		for (const item of items) {
+			const button = dom.append(list, dom.$('button.insrc-analysis-report-drilldown-button'));
+			const questionEl = dom.append(button, dom.$('span.insrc-analysis-report-drilldown-question'));
+			questionEl.textContent = item.question;
+			if (item.scope.length > 0) {
+				const scopeEl = dom.append(button, dom.$('span.insrc-analysis-report-drilldown-scope'));
+				scopeEl.textContent = `scope: ${item.scope}`;
+			}
+			this._register(dom.addDisposableListener(button, dom.EventType.CLICK, () => {
+				const args: { parentListId: string; question: string; scope?: string } = {
+					parentListId,
+					question: item.question,
+				};
+				if (item.scope.length > 0) {
+					args.scope = item.scope;
+				}
+				void this.commandService.executeCommand('insrc.codeAnalyzer.drillDown', args);
+			}));
+		}
 	}
 
 	private _showEmpty(message: string): void {

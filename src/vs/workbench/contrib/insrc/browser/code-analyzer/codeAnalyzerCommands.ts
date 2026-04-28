@@ -127,3 +127,84 @@ registerAction2(class extends Action2 {
 		}
 	}
 });
+
+/**
+ * Drill into a sub-question off an existing Code Analysis report
+ * (plans/analyzers/code-analyzer.md Phase 5.D). Args:
+ *
+ *   {
+ *     parentListId: string;        // the report-pane list this came from
+ *     question:     string;        // one-line drill-down candidate
+ *     scope?:       string;        // optional path/module/entity hint
+ *   }
+ *
+ * Behaviour:
+ *   1. Build a `/code-analyze <question> (scope: <scope>)` chat
+ *      message via `buildDrillDownMessage`.
+ *   2. Send via `chatService.sendMessage(message, undefined, parentListId)` --
+ *      the third arg threads parentListId to the daemon's chat.send,
+ *      which carries it through to the orchestrator's createList.
+ *   3. The daemon's existing /code-analyze slash dispatcher kicks
+ *      off the Code Analyzer with the parent edge stamped on the new
+ *      TodoList; the Report Pane auto-opens for the child run via the
+ *      existing flow contribution.
+ *
+ * f1 is true so the command shows up in the palette, but the typical
+ * invocation is from the Report Pane's drill-down footer buttons --
+ * those pass the args programmatically. Palette invocation without
+ * args falls back to a manual prompt for the most-recent code-analyzer
+ * list + a free-form drill question.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.codeAnalyzer.drillDown',
+			title: localize2('insrc.codeAnalyzer.drillDown', 'Drill Down on Code Analysis'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(
+		accessor: ServicesAccessor,
+		arg?: { parentListId?: string; question?: string; scope?: string },
+	): Promise<void> {
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const notifications = accessor.get(INotificationService);
+
+		// Resolve the parent list. Programmatic mode supplies the id;
+		// palette mode falls back to the most-recent code-analyzer
+		// report list in the active session (same pattern as openReport
+		// above) so the user has a single-click "drill down on the last
+		// report" shortcut.
+		let parentListId = arg?.parentListId;
+		if (parentListId === undefined) {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notifications.info('No active chat session; run /code-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === CODE_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notifications.info('No code-analysis report yet. Run /code-analyze first.');
+				return;
+			}
+			parentListId = candidates[candidates.length - 1].id;
+		}
+
+		const question = (arg?.question ?? '').trim();
+		if (question.length === 0) {
+			notifications.info('Drill-down needs a question. Click a footer item in the Report pane, or pass a `question` arg.');
+			return;
+		}
+
+		const scope = (arg?.scope ?? '').trim();
+		const message = scope.length > 0
+			? `/code-analyze ${question} (scope: ${scope})`
+			: `/code-analyze ${question}`;
+		await chatService.sendMessage(message, undefined, parentListId);
+	}
+});

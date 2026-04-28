@@ -112,3 +112,66 @@
 	padding: 24px;
 	text-align: center;
 }
+
+/*
+ * Drill-down footer (Phase 5.D). Renders below the rendered markdown
+ * body. Each candidate is a clickable button styled as a row card --
+ * hover reveals the active border colour, click fires
+ * insrc.codeAnalyzer.drillDown which kicks off a child analysis with
+ * this list's id stamped as parentListId.
+ */
+
+.insrc-analysis-report-drilldown {
+	margin-top: 16px;
+	padding-top: 12px;
+	border-top: 1px solid var(--vscode-panel-border);
+}
+
+.insrc-analysis-report-drilldown-heading {
+	font-size: 1em;
+	font-weight: 600;
+	margin: 0 0 8px 0;
+	color: var(--vscode-editor-foreground);
+}
+
+.insrc-analysis-report-drilldown-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.insrc-analysis-report-drilldown-button {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	padding: 8px 12px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 4px;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	font-family: inherit;
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.insrc-analysis-report-drilldown-button:hover {
+	border-color: var(--vscode-focusBorder);
+	background-color: var(--vscode-list-hoverBackground);
+}
+
+.insrc-analysis-report-drilldown-button:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.insrc-analysis-report-drilldown-question {
+	font-weight: 500;
+}
+
+.insrc-analysis-report-drilldown-scope {
+	color: var(--vscode-descriptionForeground);
+	font-size: 0.9em;
+	font-family: monospace;
+}

@@ -275,7 +275,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._wireStreamHandle(this._streamHandle);
 	}
 
-	async sendMessage(message: string, provider?: string): Promise<void> {
+	async sendMessage(message: string, provider?: string, parentListId?: string): Promise<void> {
 		if (!this._activeSessionId) {
 			// Auto-start a session with the first available repo
 			if (!this._activeRepo) {
@@ -316,6 +316,14 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		};
 		if (actualProvider) {
 			params['provider'] = actualProvider;
+		}
+		// Code Analyzer drill-down (Phase 5.D): the daemon's chat.send
+		// reads `parentListId` and threads it through to the
+		// CodeAnalyzerOrchestrator so the new TodoList records its
+		// parent. Only set when the caller is the drillDown command;
+		// regular chat sends leave it absent.
+		if (parentListId) {
+			params['parentListId'] = parentListId;
 		}
 
 		this._streamHandle = this.daemonService.stream('chat.send', params);

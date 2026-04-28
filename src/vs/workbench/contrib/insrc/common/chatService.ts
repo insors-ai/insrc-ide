@@ -123,7 +123,16 @@ export interface IInsrcChatService {
 	closeSession(): Promise<void>;
 
 	// Messaging
-	sendMessage(message: string, provider?: string | undefined): Promise<void>;
+	/**
+	 * Send a chat message. `provider` overrides the per-turn provider
+	 * (same effect as an `@<provider>` prefix). `parentListId` is the
+	 * Code Analyzer drill-down hook (Phase 5.D): when set, the daemon
+	 * stamps it on the new TodoList so the Report Pane / todos pane
+	 * can render parent-child threads. Passed only by the
+	 * `insrc.codeAnalyzer.drillDown` command path -- regular chat
+	 * sends omit it.
+	 */
+	sendMessage(message: string, provider?: string | undefined, parentListId?: string | undefined): Promise<void>;
 	replyToGate(gateId: string, action: string, feedback?: string | undefined): Promise<void>;
 	cancelStream(): Promise<void>;
 	/**
