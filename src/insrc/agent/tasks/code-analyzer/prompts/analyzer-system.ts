@@ -31,17 +31,23 @@ export const HARD_RULES = `# Hard rules
 4. Bounded loop. Hard cap of 8 tool calls per task; 60 s wall-clock.
    When you're at the cap, return what you have with confidence "low".
 
-5. OUTPUT FORMAT IS STRICT JSON, NOTHING ELSE.
-   On the FINAL turn (when you stop calling tools) your reply MUST be
-   exactly one JSON object that matches the AnalyzerResult schema below.
-     - No prose preamble. No "Here is the result:" sentence.
-     - No Markdown fences (no \`\`\`json ... \`\`\`). The literal text
-       \`\`\` must not appear in the final reply.
-     - No <think> / <thinking> blocks. Reasoning belongs in earlier
-       turns where you also called tools, not in the final reply.
-     - No trailing commentary after the closing \`}\`.
-   The orchestrator parses your reply with JSON.parse(); anything else
-   triggers a retry that reduces your task budget.`;
+5. SUBMIT VIA TOOL CALL, NOT TEXT.
+   To finish the task, call the \`submit_analysis\` tool with your
+   findings as structured arguments. The tool's input schema IS the
+   AnalyzerResult shape; the orchestrator parses your tool args
+   directly -- no JSON-in-text dance is required.
+     - Do NOT write JSON in your reply text. Use the tool.
+     - Do NOT preface the call with "I will now submit:" or "Here is
+       the result:". Just call \`submit_analysis\`.
+     - Call \`submit_analysis\` once you have enough evidence. If
+       you're at the wall-clock cap with thin evidence, call it
+       anyway with confidence "low" and an honest "no evidence found"
+       answer.
+     - If by mistake you write JSON in text instead of calling the
+       tool, the orchestrator falls back to parsing the text -- but
+       that path is fragile (output-format constraints don't apply
+       once tools are also in the call). The tool path is the
+       reliable one.`;
 
 /**
  * Per-kind playbook + tool list + output schema. User-overridable in
@@ -94,6 +100,13 @@ export const PER_KIND_PLAYBOOK = `# Tool list
     List directory contents. Use sparingly -- prefer Glob-style
     discovery via graph_search for code, ListDirectory only for
     non-code areas (config dirs, test fixtures).
+
+- submit_analysis(answer, findings[], citations[], confidence, ...)
+    THE FINISHING TOOL. Call this with your AnalyzerResult once you
+    have enough evidence. The orchestrator parses your tool args
+    directly -- do NOT also write JSON in your reply text. See the
+    AnalyzerResult shape below; the tool's input schema enforces it
+    server-side, so the model is constrained to produce valid output.
 
 # Per-kind playbook
 
@@ -174,28 +187,32 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   call them once-per-task to enrich a finding. Single-hop only --
   the registry rejects nested cross-agent calls.
 
-# Output schema (strict JSON)
+# AnalyzerResult shape (tool args for submit_analysis)
 
 {
   "answer":    "concise prose, 1-3 paragraphs",
   "findings": [
-    { "concern": "...", "severity": "info|warn|error",
-      "issue": "...", "file": "...",
+    { "concern":  "duplicates" | "consistency" | "interface-mismatch" | "impact" | "smells",
+      "severity": "info" | "warn" | "error",
+      "issue":    "...", "file": "...",
       "citations": [
         { "entityId"?: "...", "path": "...", "lineStart"?: N, "lineEnd"?: N,
           "snippet"?: "..." }
-      ] }
+      ]
+    }
   ],
   "citations": [
     { "entityId"?: "...", "path": "...", "lineStart"?: N, "lineEnd"?: N,
       "snippet"?: "..." }
   ],
   "confidence": "high" | "medium" | "low",
-  "toolCalls": [
-    { "name": "...", "argsHash": "...", "durationMs": N, "resultRows": N }
-  ],
-  "truncated": false
+  "toolCalls":  [   /* runner stamps this from its own trace; safe to omit */ ],
+  "truncated":  false
 }
+
+The \`concern\` and \`severity\` enums are LOCKED -- any other value is
+rejected. \`findings.citations\` MUST be non-empty; cite the span you
+read.
 
 # Failure modes
 

@@ -183,7 +183,26 @@ const ANALYZER_TOOLS: readonly ToolDefinition[] = [
       required: ['entity'],
     },
   },
+  {
+    // F8: control-flow tool. The model calls this when it's done
+    // gathering evidence; the runner intercepts the call, treats the
+    // structured args as the AnalyzerResult, and exits the loop. Tool
+    // args travel through Ollama's structured `tool_calls` wire field
+    // (not free-form text), so they're not affected by the
+    // format-with-tools-drop quirk that forced the prose-then-retry
+    // dance pre-F8. See plans/analyzers/code-analyzer.md F8.
+    name: 'submit_analysis',
+    description:
+      'CALL THIS TO FINISH. Submit your AnalyzerResult as structured ' +
+      'arguments. The orchestrator parses the args directly -- do NOT ' +
+      'also write JSON in your reply text.',
+    inputSchema: ANALYZER_RESULT_SCHEMA as unknown as Record<string, unknown>,
+  },
 ];
+
+/** The `submit_analysis` control-flow tool name -- referenced by the
+ *  loop's intercept logic. */
+const SUBMIT_TOOL = 'submit_analysis';
 
 /** Names accepted by the analyzer. The runner refuses anything else. */
 const ALLOWED_NAMES: ReadonlySet<string> = new Set(ANALYZER_TOOLS.map(t => t.name));
@@ -274,6 +293,27 @@ export async function runAnalyzer(
 
     if (llmResponse.stopReason !== 'tool_use' || !llmResponse.toolCalls?.length) {
       // Final turn -- model returned text (expected to be JSON).
+      break;
+    }
+
+    // F8: intercept submit_analysis BEFORE entering the per-tool
+    // execution loop. The model signals task completion by calling
+    // this control-flow tool with the AnalyzerResult shape as args;
+    // we stringify the args so the existing parse path downstream
+    // handles validation + citations + retry uniformly. Multi-tool
+    // turns where the model calls submit_analysis alongside other
+    // tools resolve to "we're done" -- the other calls in this turn
+    // are dropped (the model already produced the answer).
+    const submitCall = llmResponse.toolCalls.find(c => c.name === SUBMIT_TOOL);
+    if (submitCall) {
+      lastText = JSON.stringify(submitCall.input);
+      callTrace.push({
+        name: SUBMIT_TOOL,
+        argsHash: hashArgs(submitCall.input),
+        durationMs: 0,
+        resultRows: Object.keys(submitCall.input).length,
+      });
+      opts.onProgress?.(`[analyzer] ${SUBMIT_TOOL} called -- finishing task`);
       break;
     }
 
@@ -377,10 +417,13 @@ export async function runAnalyzer(
     messages.push({
       role: 'user',
       content:
-        'Your previous response was not valid AnalyzerResult JSON ' +
-        `(${parsed.reason}: ${parsed.detail}). Reply with ONLY a single JSON ` +
-        'object matching the schema in the system prompt -- no prose, no ' +
-        'fences, no <think> blocks, nothing before `{` or after `}`.',
+        'Your previous result did not validate as an AnalyzerResult ' +
+        `(${parsed.reason}: ${parsed.detail}). The submit_analysis tool ` +
+        'is not available on this retry -- write the corrected JSON in ' +
+        'your reply text instead. Reply with ONLY a single JSON object ' +
+        'matching the AnalyzerResult shape from the system prompt -- no ' +
+        'prose, no fences, no <think> blocks, nothing before `{` or ' +
+        'after `}`.',
     });
     const retryResp = await opts.provider.complete(messages, {
       tools: [],
@@ -487,8 +530,10 @@ function buildInitialMessages(task: AnalysisTask): LLMMessage[] {
     ),
     '',
     '# Output',
-    'Run the per-kind playbook from the system prompt; reply with the strict-JSON',
-    'AnalyzerResult shape only on the final turn (no prose, no fences).',
+    'Run the per-kind playbook from the system prompt. When you have',
+    'enough evidence to answer, call the `submit_analysis` tool with',
+    'your AnalyzerResult as structured arguments. Do NOT write the',
+    'result as JSON in your reply text -- use the tool.',
   ].join('\n');
 
   return [
