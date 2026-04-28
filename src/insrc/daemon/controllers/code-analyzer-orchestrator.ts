@@ -33,6 +33,17 @@ import { readCachedResult, writeCachedResult } from '../../agent/tasks/code-anal
 import { buildPlanPrompt, buildPlanSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/plan.js';
 import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
 import { buildSynthesisPrompt, buildSynthesiseSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
+import {
+  buildMultipassOutlineInput,
+  makeSectionBuilder,
+  DRILL_DOWN_FALLBACK_SECTION,
+} from '../../agent/tasks/code-analyzer/prompts/synthesise-multipass.js';
+import {
+  generateMultiPass,
+  makeDiskContentCache,
+  type SectionResult,
+} from '../../agent/content-gen/index.js';
+import { PATHS } from '../../shared/paths.js';
 import type { ScopeSize } from '../../shared/classify.js';
 import type {
   AnalysisTask,
@@ -777,16 +788,44 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     }
   }
 
-  private queueSynthesise(state: TaskStateStore): Task[] | null {
+  private async queueSynthesise(state: TaskStateStore): Promise<Task[] | null> {
     state.set(K_PHASE, 'synthesising' as Phase);
     const ca = state.get<CodeAnalysisState>(K_STATE);
     const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
     const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
-    // Phase 5.C: thread the run's tier into both the system prompt
-    // (tierSynthesiseGuidance picks the report shape) and the user
-    // block (so the model sees an explicit "Run tier: X" reminder).
-    // Tier defaults to 'M' when missing -- the pre-Phase-5 shape.
     const tier = this._tier;
+
+    // S/M tiers: existing single-pass synthesise. The doc fits in
+    // one local-model output window; multi-pass is overhead.
+    if (tier === 'S' || tier === 'M') {
+      return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
+    }
+
+    // L / XL / XXL+ tiers: multi-pass via generateMultiPass to avoid
+    // the F10 truncation (devstral hits its num_predict ceiling
+    // around 13 KB of single-pass output). Runs INLINE -- no LLM
+    // Task is queued. On any failure we fall back to single-pass so
+    // the run still completes.
+    try {
+      const markdown = await this.runMultipassSynthesise(ca, planned, accepted, tier);
+      state.set(K_SYNTH_RESULT, markdown);
+      await this.finalizeSynthesisedReport(state);
+      return null;
+    } catch (err) {
+      log.warn(
+        { tier, err: (err as Error).message },
+        'multipass synthesis failed; falling back to single-pass',
+      );
+      return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
+    }
+  }
+
+  private queueSinglePassSynthesise(
+    ca: CodeAnalysisState | undefined,
+    planned: readonly AnalysisTask[],
+    accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+    tier: ScopeSize,
+  ): Task[] {
     const messages = buildSynthesisPrompt(ca?.request ?? '', accepted, planned, tier);
     const userMessage = messages
       .filter(m => m.role === 'user')
@@ -809,14 +848,107 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     }];
   }
 
-  private async afterSynthesise(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    // F11: local synthesis models occasionally prefix the report with
-    // a stray quote / backtick / wrapping fence that the Report Pane
-    // then renders as literal text, breaking the first heading. Strip
-    // the known prefixes BEFORE the body lands in list.body so every
-    // downstream surface (Report Pane, todos pane preview, save-to-
-    // file) sees the clean markdown. Idempotent.
-    const report = sanitizeMarkdownReport(completed.output);
+  /**
+   * Multi-pass synthesis (Phase 5.C / content-gen consumer). Outline
+   * pass plans the section list; pass-2 drafts each section body
+   * within a bounded token budget; the stitcher assembles the final
+   * markdown. The drill-down footer is added synthetically when the
+   * outline LLM omits it -- the Report Pane footer parser depends
+   * on it.
+   *
+   * Cache: per-section disk LRU under `~/.insrc/cache/code-analyzer-
+   * sections/`. Sibling to the per-task cache (Phase 2.5); same
+   * eviction shape. Cache key salts on the run's `repoSnapshotId`,
+   * so a new commit invalidates every cached section.
+   *
+   * Throws on outline+section both failing terminally; the caller's
+   * fallback path queues the legacy single-pass synthesise.
+   */
+  private async runMultipassSynthesise(
+    ca: CodeAnalysisState | undefined,
+    planned: readonly AnalysisTask[],
+    accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+    tier: ScopeSize,
+  ): Promise<string> {
+    if (this.deps === undefined) {
+      throw new Error('runMultipassSynthesise: deps not attached');
+    }
+    const provider = this.deps.session.resolver.resolve('code-analyzer', 'synthesise');
+    const request = ca?.request ?? '';
+    const repoSnapshotId = ca?.repoSummary.repoSnapshotId ?? '';
+
+    // Outline + section prompts (per-tier shape briefs).
+    const outlineInput = buildMultipassOutlineInput(request, accepted, planned, tier);
+    const sectionBuild = makeSectionBuilder(request, accepted, tier);
+
+    this.deps.send({
+      id: this.deps.requestId,
+      stream: 'progress',
+      data: { message: `[code-analyzer] multi-pass synthesis (tier ${tier}); planning sections...` },
+    });
+
+    const result = await generateMultiPass(
+      {
+        outline: {
+          system: outlineInput.system,
+          user:   outlineInput.user,
+          maxSections: outlineInput.maxSections,
+          maxTokens:   outlineInput.maxTokens,
+        },
+        section: {
+          build: sectionBuild,
+          defaultBudgetTokens: 1500,
+        },
+        parallel: true,
+        cache: makeDiskContentCache({
+          dir: pathJoin(PATHS.codeAnalyzerCache, '..', 'code-analyzer-sections'),
+        }),
+        cacheContext: repoSnapshotId,
+        onSectionComplete: (s: SectionResult) => {
+          if (this.deps === undefined) return;
+          const note = s.note ? ` (${s.note})` : '';
+          const status = s.fallback ? 'degraded' : 'ok';
+          this.deps.send({
+            id: this.deps.requestId,
+            stream: 'progress',
+            data: { message: `[code-analyzer] section "${s.id}" ${status}${note}` },
+          });
+        },
+        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+      },
+      provider,
+    );
+
+    if (result.degraded) {
+      log.info(
+        { tier, sections: result.sections.length, anyFallback: result.sections.some(s => s.fallback) },
+        'multipass synthesis: degraded result accepted',
+      );
+    }
+
+    // Defensive: if the outline omitted the drill-down section, the
+    // markdown lacks a footer and the Report Pane has no buttons to
+    // render. Append a synthetic one. The model's section bodies
+    // already cover the rest -- we just stitch the missing tail.
+    const hasDrillDown = result.outline.sections.some(s =>
+      s.id === DRILL_DOWN_FALLBACK_SECTION.id || /drill[-\s]?down/i.test(s.title),
+    );
+    if (!hasDrillDown) {
+      log.info({ tier }, 'multipass: outline missing drill-down section; appending synthetic footer');
+      return appendSyntheticDrillDown(result.markdown, request, accepted);
+    }
+    return result.markdown;
+  }
+
+  /**
+   * Shared post-processing: sanitiser + list.body update + chat
+   * delta + done state. Used by both the multi-pass branch (calls
+   * directly after `runMultipassSynthesise`) and the single-pass
+   * branch (called from `afterSynthesise`).
+   */
+  private async finalizeSynthesisedReport(state: TaskStateStore): Promise<void> {
+    const raw = state.get<string>(K_SYNTH_RESULT) ?? '';
+    const report = sanitizeMarkdownReport(raw);
     state.set(K_SYNTH_RESULT, report);
     const listId = state.get<string>(K_LIST_ID);
     if (listId && this.deps?.todos !== undefined) {
@@ -826,16 +958,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         log.warn({ err, listId }, 'updateListBody failed (continuing)');
       }
     }
-
-    // Phase 2.1: the synthesised markdown renders in the dedicated
-    // Code Analyzer Report Pane (workbench-side flow contribution
-    // listens for `listUpdated` on a code-analyzer list with a
-    // non-empty body and opens the pane). Plan §2.1 hard requirement
-    // 1: the report MUST NOT be rendered in the chat panel. We drop
-    // the previous `transform { passThrough, userMessage: report }`
-    // gate -- it was the temporary state from Phase 1 -- and emit a
-    // single-line "report ready" delta so the chat transcript still
-    // captures that the analysis finished.
     if (this.deps !== undefined) {
       this.deps.send({
         id: this.deps.requestId,
@@ -848,6 +970,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     }
     state.set(K_PHASE, 'done' as Phase);
     state.markSessionComplete();
+  }
+
+  private async afterSynthesise(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
+    // Single-pass branch: capture the LLM task's raw output, then
+    // run the shared post-processing (sanitise + updateListBody +
+    // chat delta + done state). Multi-pass takes the same path
+    // directly inside queueSynthesise.
+    state.set(K_SYNTH_RESULT, completed.output);
+    await this.finalizeSynthesisedReport(state);
     return null;
   }
 
@@ -1165,6 +1296,59 @@ function stripFences(text: string): string {
  * synchronous `buildInitialTasks` path. `.git/HEAD` and the ref file
  * are tiny (<100 bytes) and on the local fs; the read is negligible.
  */
+/**
+ * Tail-append a synthetic `## Drill down` section to a stitched
+ * multipass report when the outline LLM didn't plan one. The
+ * Report Pane's footer parser expects the section to exist; without
+ * it the user sees no clickable drill-down buttons.
+ *
+ * Three placeholder candidates derived from the run's content -- one
+ * per task kind that has accepted findings -- so the user always
+ * gets something actionable. If we can't derive any, we still emit
+ * a header so the pane parser sees a section (with zero items).
+ */
+function appendSyntheticDrillDown(
+  markdown: string,
+  request: string,
+  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+): string {
+  const lines: string[] = [markdown.replace(/\s+$/, ''), '', '## Drill down', ''];
+  const candidates = pickDrillDownCandidates(request, accepted);
+  if (candidates.length === 0) {
+    lines.push('_No drill-down candidates available; rephrase the original prompt to dig deeper._');
+  } else {
+    for (const c of candidates) {
+      const scope = c.scope.length > 0 ? ` -- scope: \`${c.scope}\`` : '';
+      lines.push(`- **${c.question}**${scope}`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+function pickDrillDownCandidates(
+  _request: string,
+  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+): Array<{ question: string; scope: string }> {
+  const out: Array<{ question: string; scope: string }> = [];
+  const seen = new Set<string>();
+  for (const { task, result } of accepted) {
+    if (out.length >= 3) {
+      break;
+    }
+    const firstCitation = result.citations[0];
+    const scope = firstCitation && typeof firstCitation === 'object' && 'path' in firstCitation
+      ? String((firstCitation as { path: string }).path)
+      : '';
+    const question = `Dig deeper on ${task.kind}: ${task.question}`;
+    if (seen.has(question)) {
+      continue;
+    }
+    seen.add(question);
+    out.push({ question, scope });
+  }
+  return out;
+}
+
 function readGitHeadSnapshotId(rootPath: string): string {
   if (rootPath.length === 0) {
     return `t-${Date.now()}`;
