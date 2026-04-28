@@ -9,6 +9,7 @@
 import { Session } from '../agent/session.js';
 import { decompose, type DecomposedAction } from '../agent/decompose.js';
 import { classifyPrimaryIntent } from '../agent/classify/intent.js';
+import { classifyScope } from '../agent/classify/scope.js';
 import type { AttachedAction } from '../agent/decompose.js';
 import { selectProvider } from '../agent/router.js';
 import { classify } from '../agent/classify/index.js';
@@ -747,14 +748,39 @@ async function runCodeAnalyzerSlash(
   };
 
   try {
-    // Phase 5.A: thread classification info (intent + scope) through to
-    // the orchestrator so it can drive tier-aware planner caps. The
-    // slash-command path knows the intent ('code-analysis') and confidence
-    // (1.0 -- user explicitly typed it). Scope defaults to 'M' for now;
-    // a follow-up commit can run a sizing classifier on the prompt and
-    // emit the real tier (S/M/L/XL/XXL/XXXL/XXXXL) here. The chat-handler
-    // classifier-fallback path (Phase 2.B work) will pass `classified.scope`
-    // straight through.
+    // Phase 5.A + follow-up: get the scope tier so the orchestrator
+    // can size its planner caps. The slash command already knows
+    // intent='code-analysis', so running the full intent classifier
+    // would just waste tokens picking a class we already have. The
+    // scope-only classifier (`agent/classify/scope.ts`) prompts for
+    // the size tier alone -- about half the tokens / latency of the
+    // full classify path. Repo signals (closure size + repo path)
+    // go in `context` to help the model judge "single function" vs
+    // "entire repo" prompts.
+    let scope: import('../shared/classify.js').ScopeSize = 'M';
+    try {
+      const repoCtxLines: string[] = [];
+      if (session.repoPath) { repoCtxLines.push(`active repo: ${session.repoPath}`); }
+      repoCtxLines.push(`dependency closure size: ${session.closureRepos.length}`);
+      const sized = await classifyScope(
+        {
+          role: 'scope sizer for the Code Analyzer',
+          text: userPrompt,
+          context: repoCtxLines.join('\n'),
+        },
+        resolveClassifierProvider(session, 'scope'),
+      );
+      scope = sized.scope;
+      log.info({ scope, fallback: sized.fallback, reasoning: sized.reasoning }, '[code-analyze] scope classifier emitted tier');
+      send({
+        id: requestId,
+        stream: 'progress',
+        data: { message: `Code Analyzer: tier ${scope}${sized.fallback ? ' (fallback)' : ''}` },
+      });
+    } catch (err) {
+      log.warn({ err }, '[code-analyze] scope classifier failed; defaulting to M');
+    }
+
     const result = await runControlledPipeline(
       controller,
       {
@@ -764,7 +790,7 @@ async function runCodeAnalyzerSlash(
         classification: {
           intent: 'code-analysis',
           confidence: 1.0,
-          scope: 'M',
+          scope,
         },
       },
       deps,
