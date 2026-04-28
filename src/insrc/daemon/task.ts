@@ -45,6 +45,15 @@ export interface Task {
   /** Intent that originated this task (infra, document, implement, etc.). */
   intent: string;
 
+  /**
+   * Scope tier captured by the primary-intent classifier. Threaded
+   * through to controllers via `ControllerInput.classification.scope`.
+   * Currently consumed by the code-analyzer orchestrator (Phase 5.A);
+   * other controllers ignore it. Optional -- callers that don't have
+   * a tier signal can omit it; the orchestrator falls back to `'M'`.
+   */
+  scope?: import('../shared/classify.js').ScopeSize | undefined;
+
   // -- Input --
   /** Shell command to execute (kind=shell). Populated by resolveCommand at exec time. */
   command?: string | undefined;
@@ -1612,10 +1621,20 @@ async function executeAgentTask(
     codeContext = assembled.code.text || codeContext;
   }
 
+  // Phase 5.A: forward the classifier's scope tier (when present)
+  // through to the controller so tier-aware controllers (currently
+  // the code-analyzer orchestrator) can size their budgets. Other
+  // controllers ignore the field. Confidence isn't tracked on the
+  // Task today; controllers that don't care use a synthesised 1.0.
   const controllerInput: ControllerInput = {
     message: userMsg,
     codeContext,
     session: deps.session,
+    classification: {
+      intent: task.intent,
+      confidence: 1.0,
+      ...(task.scope !== undefined ? { scope: task.scope } : {}),
+    },
   };
 
   const subDeps: TaskOrchestratorDeps = {
@@ -1744,8 +1763,14 @@ async function resolveController(
       break;
     }
     case 'code-analysis': {
-      const mod = await import('./controllers/code-analysis.js');
-      controller = new mod.CodeAnalysisController();
+      // Phase 2.B cutover: classifier-routed `code-analysis` intent
+      // now lands on the new tier-aware orchestrator. The legacy
+      // CodeAnalysisController + tasks/code-analysis/{prompts,types}.ts
+      // are deleted in the same commit. The intent name stays
+      // `code-analysis` because the classifier's vocabulary is
+      // stable; only the routing changes.
+      const mod = await import('./controllers/code-analyzer-orchestrator.js');
+      controller = new mod.CodeAnalyzerOrchestratorController();
       break;
     }
     default:

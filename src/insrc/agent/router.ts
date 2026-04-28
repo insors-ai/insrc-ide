@@ -7,10 +7,17 @@
  *                            If unset, returns RouteResult with `error`
  *                            populated (turn aborts in the caller).
  *   2. Explicit @mention:   caller-supplied `ExplicitProvider` wins
- *   3. No-LLM intents:      `code-analysis` -> graphOnly
- *   4. (reserved for future per-intent overrides; no-op today)
- *   5. Active provider:     `providers[activeProvider].default`
- *   6. Local fallback:      if no activeProvider configured -> ollamaProvider
+ *   3. (reserved for future per-intent overrides; no-op today)
+ *   4. Active provider:     `providers[activeProvider].default`
+ *   5. Local fallback:      if no activeProvider configured -> ollamaProvider
+ *
+ * Phase 2.B: `code-analysis` was previously a "no-LLM" intent that
+ * bypassed provider routing entirely (the legacy CodeAnalysisController
+ * answered structural queries from Kuzu / LanceDB without ever calling
+ * an LLM). The new tier-aware orchestrator IS LLM-driven (cloud
+ * planner + cloud reviewer + local analyzer), so the no-LLM
+ * short-circuit is gone; `code-analysis` now follows the standard
+ * active-provider cascade.
  */
 
 import type {
@@ -21,9 +28,6 @@ import { hasEscalationAttachment } from './attachments/router.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('router');
-
-/** Intent that uses no LLM at all -- pure structural code queries */
-const NO_LLM: Set<Intent> = new Set(['code-analysis']);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -77,12 +81,10 @@ export function selectProvider(
     return routeExplicit(explicit, config, cloudProvider, ollamaProvider);
   }
 
-  // 3. No-LLM intents (code-analysis)
-  if (NO_LLM.has(intent)) {
-    return { provider: ollamaProvider, label: 'Code Analysis (no LLM)', graphOnly: true };
-  }
-
-  // 5. Active provider default
+  // 3. Active provider default. Phase 2.B removed the legacy
+  //    code-analysis "no-LLM" branch; the orchestrator handles
+  //    provider resolution per-step now.
+  void intent;
   return routeActive(config, cloudProvider, ollamaProvider);
 }
 

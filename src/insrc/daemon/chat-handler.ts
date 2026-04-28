@@ -805,11 +805,11 @@ async function runChatMessage(
   //
   // /code-analyze <prompt>  -> CodeAnalyzerOrchestratorController
   //
-  // Phase 1.8 of plans/analyzers/code-analyzer.md. The classifier path
-  // (intent='code-analysis') still routes to the legacy
-  // CodeAnalysisController as a rollback safety net; only the explicit
-  // slash command reaches the new family in Phase 1. Phase 2.6.a flips
-  // the classifier intent over and deletes the legacy.
+  // Phase 1.8 of plans/analyzers/code-analyzer.md. Post-Phase-2.B:
+  // the classifier path (intent='code-analysis') ALSO routes to the
+  // new orchestrator now -- the legacy CodeAnalysisController and
+  // tasks/code-analysis/{prompts,types}.ts have been deleted. The
+  // slash command remains as the explicit-invocation entry point.
   const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send);
   if (familyHandled) return;
 
@@ -991,6 +991,11 @@ async function runChatMessage(
   let classifiedExplicit: import('../shared/types.js').ExplicitProvider | undefined;
   let classifiedConfidence = 1.0;
   let classifiedReasoning = '';
+  // Phase 5.A: scope tier captured from the classifier and threaded
+  // through to controllers via task.scope -> ControllerInput.classification.
+  // Defaults to 'M' for paths that don't run the classifier (decomposer
+  // single-action, /intent prefix override, etc.).
+  let classifiedScope: import('../shared/classify.js').ScopeSize = 'M';
 
   if (classifiedIntentOverride) {
     // Primary/attached model: use the enriched primary intent
@@ -1046,8 +1051,9 @@ async function runChatMessage(
     classifiedExplicit = classified.explicit;
     classifiedConfidence = classified.confidence;
     classifiedReasoning = classified.reasoning || (classified.fallback ? 'classifier fallback' : 'llm classifier');
+    classifiedScope = classified.scope;
     log.info(
-      { intent: classifiedIntent, confidence: classified.confidence, fallback: classified.fallback },
+      { intent: classifiedIntent, confidence: classified.confidence, scope: classified.scope, fallback: classified.fallback },
       'classified',
     );
   }
@@ -1162,7 +1168,10 @@ async function runChatMessage(
     'plan', 'brainstorm', 'requirements', 'research', 'code-analysis'].includes(classifiedIntent);
 
   if (isAgentIntent) {
-    // Build a single agent task and run through the task pipeline
+    // Build a single agent task and run through the task pipeline.
+    // Phase 5.A: stamp the classifier's scope on the task so the
+    // tier-aware orchestrator (currently code-analyzer) can size its
+    // budgets. Other controllers ignore it.
     const agentTask: import('./task.js').Task = {
       index: 0,
       description: `Running ${classifiedIntent} agent...`,
@@ -1170,12 +1179,18 @@ async function runChatMessage(
       intent: classifiedIntent,
       agentId: classifiedIntent,
       userMessage: enrichedMessage,
+      scope: classifiedScope,
       persisted: true,
     };
 
-    const agentLabel = classifiedIntent === 'research' || classifiedIntent === 'code-analysis'
+    // Phase 2.B: code-analysis is no longer "info-only" -- it routes
+    // to the tier-aware Code Analyzer orchestrator. Show its own
+    // progress label rather than the legacy "Research Agent..." copy.
+    const agentLabel = classifiedIntent === 'research'
       ? 'Research Agent: planning investigation...'
-      : `Running ${classifiedIntent} agent...`;
+      : classifiedIntent === 'code-analysis'
+        ? 'Code Analyzer: planning tasks...'
+        : `Running ${classifiedIntent} agent...`;
     send({ id: requestId, stream: 'progress', data: { message: agentLabel } });
 
     const taskDeps: TaskOrchestratorDeps = {

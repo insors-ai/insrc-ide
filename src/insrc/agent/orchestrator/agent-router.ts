@@ -8,8 +8,14 @@ import type { Intent, PersonaName } from '../../shared/types.js';
 //   intent. Personas are stateless across turns — they receive a fully
 //   assembled context package and return a structured result.
 //
-// Some intents are handled directly by the orchestrator (no persona):
-//   - code-analysis: direct MCP query, no LLM needed
+// Phase 2.B note: `code-analysis` was historically an orchestrator-direct
+// intent (the legacy CodeAnalysisController answered structural queries
+// from Kuzu/LanceDB without a persona). The new tier-aware orchestrator
+// (CodeAnalyzerOrchestratorController) is its own family controller and
+// owns its plan/analyze/review/synthesise pipeline. It still doesn't
+// belong to any persona above; the case branch returns persona: null
+// and the family-controller dispatch in daemon/task.ts:resolveController
+// picks up the new orchestrator.
 // ---------------------------------------------------------------------------
 
 /**
@@ -31,7 +37,11 @@ export interface AgentRouteResult {
  *   Developer: implement, refactor, debug, research, document
  *   Tester:    test
  *   Deployer:  deploy, release, infra
- *   Orchestrator (null): code-analysis
+ *   Family controller (null): code-analysis -- routed through
+ *     CodeAnalyzerOrchestratorController via the family-controller
+ *     dispatch in daemon/task.ts:resolveController, not through this
+ *     persona switch. The case below returns persona: null so the
+ *     switch stays exhaustive over the Intent union.
  */
 export function selectAgent(intent: Intent): AgentRouteResult {
   switch (intent) {
@@ -64,7 +74,9 @@ export function selectAgent(intent: Intent): AgentRouteResult {
     case 'infra':
       return { persona: 'deployer', intent };
 
-    // Orchestrator handles directly — no persona needed
+    // Family controller (no persona) -- code-analysis is routed
+    // through CodeAnalyzerOrchestratorController via the standard
+    // family-controller dispatch (daemon/task.ts:resolveController).
     case 'code-analysis':
       return { persona: null, intent };
   }
@@ -81,8 +93,3 @@ export const PERSONA_INTENTS: Record<PersonaName, readonly Intent[]> = {
   tester:    ['test'],
   deployer:  ['deploy', 'release', 'infra'],
 } as const;
-
-/**
- * Intents handled directly by the orchestrator (no persona).
- */
-export const ORCHESTRATOR_INTENTS: readonly Intent[] = ['code-analysis'] as const;
