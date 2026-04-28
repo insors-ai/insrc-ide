@@ -164,6 +164,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    * (pre-Phase-5.A behaviour) when the caller didn't supply a tier.
    */
   private _tier: ScopeSize = 'M';
+  /**
+   * Parent list id for drill-down runs (Phase 5.D). Captured from
+   * `ControllerInput.parentListId`; passed into `createList` so the
+   * todos framework records the parent-child edge. Undefined for
+   * top-level / non-drill runs. Declared `string | undefined`
+   * (rather than `?: string`) so `exactOptionalPropertyTypes` lets us
+   * assign through from `input.parentListId` cleanly.
+   */
+  private _parentListId: string | undefined = undefined;
 
   attachDeps(deps: TaskOrchestratorDeps): void {
     this.deps = deps;
@@ -175,7 +184,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     this._request = input.message;
     this._repoSummary = this.buildRepoSummary(input);
     this._tier = input.classification?.scope ?? 'M';
-    log.info({ tier: this._tier, caps: capsForTier(this._tier) }, 'code-analyzer scope tier captured');
+    this._parentListId = input.parentListId;
+    log.info(
+      { tier: this._tier, caps: capsForTier(this._tier), parentListId: this._parentListId ?? null },
+      'code-analyzer scope tier captured',
+    );
 
     return [{
       index: 0,
@@ -381,6 +394,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       sessionId: this.deps.session.id,
       title: `Code Analysis: ${truncateTitle(ca.request)}`,
       description: ca.request,
+      // Phase 5.D: when this run was kicked off as a drill-down from
+      // an existing report's footer, stamp the parent edge so the
+      // todos framework + Report Pane can render the parent-child
+      // thread (kebab "Open report" can climb back up; the pane can
+      // show breadcrumbs).
+      ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
     });
     const taskWithIds: AnalysisTask[] = [];
     const queue: string[] = [];

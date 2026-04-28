@@ -244,7 +244,16 @@ export const chatRestore: RpcHandler = async (params) => {
 // ---------------------------------------------------------------------------
 
 export const chatSend: StreamHandler = async (params, send, signal) => {
-  const { sessionId, message } = params as { sessionId: string; message: string };
+  const { sessionId, message, parentListId } = params as {
+    sessionId: string;
+    message: string;
+    // Optional drill-down parent (Code Analyzer Phase 5.D). When the
+    // workbench fires `insrc.codeAnalyzer.drillDown` from a Report
+    // Pane footer the chat.send carries this id; runChatMessage
+    // threads it into ControllerInput so the orchestrator stamps
+    // parent-child edges on the new TodoList.
+    parentListId?: string;
+  };
   const pool = getPool();
   const active = pool.get(sessionId);
   if (!active) throw new Error('session not found');
@@ -275,7 +284,7 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   }
 
   try {
-    await runChatMessage(active, channel, message, requestId, guardedSend);
+    await runChatMessage(active, channel, message, requestId, guardedSend, parentListId);
   } catch (err) {
     // Abort during any await (gate wait, LLM completion, etc.) throws
     // through here. Log once and exit; guardedSend will have silenced
@@ -691,6 +700,9 @@ async function tryFamilyDirectSlash(
   message: string,
   requestId: number,
   send: (msg: IpcStreamMessage) => void,
+  // Phase 5.D: drill-down parent. Forwarded into the slash handler
+  // so the orchestrator can stamp it on the new TodoList.
+  parentListId?: string,
 ): Promise<boolean> {
   const trimmed = message.trim();
 
@@ -706,7 +718,7 @@ async function tryFamilyDirectSlash(
       send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
       return true;
     }
-    await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send);
+    await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send, parentListId);
     return true;
   }
 
@@ -720,6 +732,10 @@ async function runCodeAnalyzerSlash(
   originalMessage: string,
   requestId: number,
   send: (msg: IpcStreamMessage) => void,
+  // Phase 5.D drill-down parent. When set, the resulting list is
+  // stamped with `parentListId` so the todos pane + Report Pane can
+  // render the parent-child thread.
+  parentListId?: string,
 ): Promise<void> {
   const session = active.session;
   if (!session) {
@@ -792,6 +808,9 @@ async function runCodeAnalyzerSlash(
           confidence: 1.0,
           scope,
         },
+        // Phase 5.D: thread the drill-down parent through to the
+        // orchestrator. Undefined for top-level / regular invocations.
+        ...(parentListId !== undefined ? { parentListId } : {}),
       },
       deps,
     );
@@ -820,6 +839,11 @@ async function runChatMessage(
   message: string,
   requestId: number,
   send: (msg: IpcStreamMessage) => void,
+  // Code Analyzer Phase 5.D: forwarded from `chatSend`'s optional
+  // `parentListId` param. Reaches the family-direct slash dispatcher
+  // so /code-analyze drill-downs stamp the parent edge on the new
+  // TodoList. Other code paths ignore it.
+  parentListId?: string,
 ): Promise<void> {
   const session = active.session;
   if (!session || !session.repoPath) {
@@ -836,7 +860,7 @@ async function runChatMessage(
   // new orchestrator now -- the legacy CodeAnalysisController and
   // tasks/code-analysis/{prompts,types}.ts have been deleted. The
   // slash command remains as the explicit-invocation entry point.
-  const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send);
+  const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send, parentListId);
   if (familyHandled) return;
 
   // 0. Resolve file references with per-session cache

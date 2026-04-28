@@ -329,6 +329,15 @@ export interface ControllerInput {
   /** Session reference so controllers can reach the provider resolver
    *  (e.g. CodingController running scope classification on start). */
   session?: import('../agent/session.js').Session | undefined;
+  /**
+   * Parent list id for drill-down runs (Code Analyzer Phase 5.D). When
+   * the workbench fires `insrc.codeAnalyzer.drillDown` from a Report
+   * Pane footer, the resulting chat.send carries the parent list id
+   * here; the Code Analyzer orchestrator stamps it on `createList`'s
+   * `parentListId` so the todos pane + Report Pane can render
+   * parent-child threading. Other controllers ignore the field.
+   */
+  parentListId?: string | undefined;
 }
 
 export interface GateReply {
