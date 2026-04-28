@@ -26,6 +26,7 @@
 
 import { getLogger } from '../../shared/logger.js';
 import { runAnalyzer } from '../../agent/tasks/code-analyzer/analyzer/runner.js';
+import { sanitizeMarkdownReport } from '../../agent/tasks/code-analyzer/analyzer/sanitize.js';
 import { buildPlanPrompt, PLAN_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/plan.js';
 import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
 import { buildSynthesisPrompt, SYNTHESISE_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
@@ -636,7 +637,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   private async afterSynthesise(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    const report = completed.output;
+    // F11: local synthesis models occasionally prefix the report with
+    // a stray quote / backtick / wrapping fence that the Report Pane
+    // then renders as literal text, breaking the first heading. Strip
+    // the known prefixes BEFORE the body lands in list.body so every
+    // downstream surface (Report Pane, todos pane preview, save-to-
+    // file) sees the clean markdown. Idempotent.
+    const report = sanitizeMarkdownReport(completed.output);
     state.set(K_SYNTH_RESULT, report);
     const listId = state.get<string>(K_LIST_ID);
     if (listId && this.deps?.todos !== undefined) {

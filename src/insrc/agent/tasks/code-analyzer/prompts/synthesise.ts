@@ -52,7 +52,19 @@ file / line range. Use the path:line format the IDE recognises:
   finding's confidence was low, say "the analyzer's evidence here is
   thin" once and move on.
 - Don't repeat the user's question back at them.
-- Token budget ~4000.`;
+- Token budget ~4000.
+
+# Output rules
+
+- The very first character of your reply MUST be \`#\` (the H1 heading).
+  No leading apostrophe, backtick, single-quote, double-quote, or
+  whitespace before \`#\`. The Report Pane parses your reply as
+  Markdown verbatim; any prefix character breaks the first heading.
+- Do NOT wrap the entire reply in a code fence (\`\`\`markdown ...
+  \`\`\` or \`\`\` ... \`\`\`). The reply IS markdown -- treating it
+  as a code block hides the structure.
+- No prose preamble ("Here is the report:", "Sure, here's the
+  analysis:"). Start with the H1 heading.`;
 
 /**
  * Build the synthesiser messages. The user block carries the original
