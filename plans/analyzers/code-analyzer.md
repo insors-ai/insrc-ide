@@ -838,11 +838,13 @@ The citation-invariant retry remains universal but the validation is tier-aware:
 
 Tier flag drives the report shape:
 
-- `S`/`M` → existing markdown shape (one section per finding; embedded code blocks).
-- `L`/`XL` → tabular summaries; per-module h2 sections; bodies → signatures.
-- `XXL+` → module map + responsibility table + dependency-edge list. No `## Findings` section per se — the structure IS the finding.
+- `S`/`M` → existing markdown shape (one section per finding; embedded code blocks). Single-pass synthesise -- the doc is short enough to fit in the local model's output window.
+- `L`/`XL` → tabular summaries; per-module h2 sections; bodies → signatures. **Multi-pass via [`agent/content-gen/`](../content-generator.md)** -- the L/XL doc is large enough that a single-pass devstral call hits its `num_predict` ceiling and truncates mid-string (F10 confirmed this: 13 KB output -> "Unterminated string in JSON at position 13186"). Outline pass plans the per-module sections; pass 2 drafts each section body within a bounded budget; stitcher composes the final markdown.
+- `XXL+` → module map + responsibility table + dependency-edge list. No `## Findings` section per se — the structure IS the finding. Multi-pass; each "module" / "sub-system" gets its own section.
 
 Plus a footer the synthesise prompt always emits: a "Drill down" section listing 3-5 candidate next-steps the user can run as scoped child analyses. The Report Pane renders these as clickable affordances (Phase 2.B+ work; for now they're plain text).
+
+> **Multi-pass content generation:** Phase 5.C is the first consumer of [`plans/content-generator.md`](../content-generator.md), which specs a generic two-pass module (outline → per-section bodies → stitch). The synthesise step's L/XL/XXL+ paths call `generateMultiPass()` with tier-specific outline + section prompts. The S/M paths bypass the module and call the local model directly (overhead-not-worth-it for short docs).
 
 #### 5.5 Drill-down command + UI (`code-analyzer/codeAnalyzerCommands.ts`)
 
