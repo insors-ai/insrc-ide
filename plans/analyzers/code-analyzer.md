@@ -917,6 +917,79 @@ Phase 5 itself splits into:
 
 Each sub-phase is a focused commit with its own acceptance subset. Recommend shipping 5.A first to validate the sizing path end-to-end before investing in the per-tier prompt work.
 
+### Cross-phase impact
+
+Phase 5 is a layer that touches every other phase's surfaces. Auditing each phase systematically so the integration points are explicit and don't get rediscovered as bugs mid-implementation.
+
+#### Already-shipped phases — backport required
+
+| Phase | Surface | Change needed |
+|---|---|---|
+| **Phase 1** types | [`code-analyzer/types.ts:294`](../../src/insrc/agent/tasks/code-analyzer/types.ts#L294) `CodeAnalysisState` | Add `tier: AnalysisTier` and `parentListId?: string`. Old saved states without these fields default to a tier the orchestrator infers post-hoc; small migration concern but in-flight runs survive. |
+| **Phase 1** orchestrator | [`code-analyzer-orchestrator.ts:57-58`](../../src/insrc/daemon/controllers/code-analyzer-orchestrator.ts#L57-L58) `SOFT_TASK_CAP / HARD_TASK_CAP` | Drop the constants; replace with `capsForTier(tier)` lookup driven from the per-tier table in 5.2. The plan-approval gate (around line 240) and the `trim-to-16` action label become tier-aware (`trim-to-<softCap>`). |
+| **Phase 1.3** prompts | `prompts/plan.ts`, `prompts/analyzer-system.ts`, `prompts/synthesise.ts` | All three become tier-conditional. Builders are already string functions; the change is "accept tier param + branch on it." Phase 5.2 / 5.3 / 5.4 own this work. |
+| **Phase 1.8** classifier routing | [`daemon/chat-handler.ts`](../../src/insrc/daemon/chat-handler.ts) | When the intent classifier returns `code-analysis`, run the SECOND classifier (sizing) before dispatching to the orchestrator. Same two-step pattern brainstorm uses for `intent -> sub-category`. |
+| **Phase 2.A** Report Pane | [`analysisReportPane.ts`](../../src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportPane.ts) + [`codeAnalyzerFlowContribution.ts`](../../src/vs/workbench/contrib/insrc/browser/code-analyzer/codeAnalyzerFlowContribution.ts) | Drill-down footer rendering (Phase 5.5). Tier badge on the pane header (small UX detail). Flow contribution unchanged. |
+
+#### In-flight phases (not yet shipped) — design refinement required
+
+| Phase | What it is | Phase 5 impact |
+|---|---|---|
+| **F8** (submit-tool) | Architectural fix for Ollama tools+schema drop | **Orthogonal**. AnalyzerResult schema is per-task and tier-agnostic at that level. The tier shapes the *plan* and *synthesis*, not individual analyzer task outputs. F8 + Phase 5 land independently. |
+| **F10** (diagnostic logging) | 1-line log fix | **Independent**. Ship first regardless of Phase 5 sequencing. |
+| **F11** (sanitize markdown) | Strip stray quotes / fences from synthesise output | **Slight extension**. Synthesise output shape varies by tier (markdown body vs tabular vs module-map). The sanitizer should handle all three; the strip-prefix-quote heuristic still applies. |
+| **F12 / F13** (progress streaming) | Richer progress events; persist transcript-style | **Tier-aware progress strings**. `[Tier=L analysis] task 3/10: ...`. Drill-down breadcrumb (parent->child relationship) threads through the same channel. |
+| **Phase 2.B** (legacy controller deletion) | Flip `code-analysis` intent routing to the new orchestrator | **Sequencing matters but no design conflict**. If 2.B lands BEFORE Phase 5.A, the new orchestrator handles classifier-routed turns with the OLD single-cap policy until tiers ship — acceptable as a stepping stone. If Phase 5.A lands BEFORE 2.B, tier-aware behaviour reaches `/code-analyze` first; classifier-routed turns inherit when 2.B flips. |
+| **Phase 2.4** (mid-flight-cancel) | `Stop analysis` button | **Drill-down scope**. Cancelling a child must NOT cancel the parent. Orchestrator already operates per-listId so the cancel scope is naturally correct, but the UX needs to clearly say "Stop *this* analysis" so the user understands the parent run keeps going. |
+| **Phase 2.5** (per-task cache) | LRU keyed on `SHA256(question + scope + repoSnapshotId)` | **Cache key MUST include tier**. Same prompt at L vs XXL produces fundamentally different plans + analyzer behaviour. Without tier in the key, an XXL cache hit could short-circuit an L re-run with stale narrow data (or vice-versa). One-line fix in the key derivation. |
+
+#### Future phases — design implications
+
+| Phase | What it is | Phase 5 impact |
+|---|---|---|
+| **Phase 3** cross-agent | `code:analyze({ tasks: AnalysisTask[] })` callable from data / deployment analyzers | **Needs a tier hint**. Cross-agent calls usually arrive narrow ("what calls this DB function?" -> S/M). Two options: (a) require the caller to specify `tier`; (b) run the sizing classifier on the cross-agent input. (a) is faster + cheaper since the calling agent has stronger signal about what it wants. Add `tier?: AnalysisTier` to the cross-agent input shape; default to running the classifier when omitted. |
+| **Phase 4** re-run | Re-run a completed analysis as a child list | **Tier should be sticky on re-run** unless the user explicitly edits the prompt — re-running the same prompt with a different tier defeats the purpose. Plan UX: re-run preserves tier; "re-run with different scope" is a separate affordance. |
+| **Phase 4** diff mode | Compare two completed runs | **Both runs must share a tier** for the diff to be semantically meaningful. Diff between an L-run and an XXL-run of the same prompt would compare apples to oranges. Block (or at least warn) on cross-tier diffs. |
+
+#### Concrete sequencing recommendation
+
+Pulling the dependency chain out:
+
+```
+F10 (diagnostic, 1-line) ──────────────────────────────────────┐
+                                                                ▼
+F8 (submit-tool, orthogonal) ──────────────────────────────────┐│
+                                                               ▼▼
+classification-rewrite (generic classify() module) ──► Phase 5.A (sizing classifier + caps)
+                                                               │
+                                                               ▼
+                                                     Phase 2.B (legacy → new orchestrator
+                                                                 inherits tier-aware caps)
+                                                               │
+                                                               ▼
+                                                     Phase 5.B (per-tier playbooks)
+                                                               │
+                                                               ▼
+                                                     Phase 2.5 (per-task cache, with
+                                                                 tier in key)
+                                                               │
+                                                               ▼
+                                                     Phase 5.C (per-tier synthesise +
+                                                                 drill-down footer)
+                                                               │
+                                                               ▼
+                                                     Phase 5.D (drill-down command + UI)
+                                                               │
+                                                               ▼
+                                                     Phase 3 (cross-agent, tier param)
+                                                               │
+                                                               ▼
+                                                     Phase 4 (re-run preserves;
+                                                                 diff matches tiers)
+```
+
+Short version: **F10 and F8 are independent and can land any time. classification-rewrite + Phase 5.A together unlock everything else. After 5.A, sequencing becomes natural — each downstream step's preconditions are met by the prior step.**
+
 ### Out of scope
 
 - Per-tier confidence calibration (the analyzer's `high`/`medium`/`low` bands stay tier-agnostic for now).
