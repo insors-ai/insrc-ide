@@ -22,6 +22,18 @@ decisions into concrete file-level work.
 - [`../design/brainstorm-agent.html`](../design/brainstorm-agent.html)
   -- brainstorm is the second phase-1 consumer; its theme-spec
   assembly step picks up `artifact.*` once phase 1 lands.
+- [`content-generator.md`](content-generator.md) -- multi-pass
+  content generator (outline -> per-section bodies -> stitch).
+  Two-way relationship: (1) artifact kinds with LLM-heavy paths
+  (`wireframe`, `flow:process`, free-text fallbacks across all
+  kinds) can hit the same `num_predict` truncation that drove the
+  multi-pass design, so complex specs at those kinds are
+  candidates for multi-pass generation; (2) multi-pass-generated
+  reports (code-analyzer L+/XL+ tiers, brainstorm specs) embed
+  artifacts as sections, so the generator's pass-2 section
+  builders can call `artifact.*` tools to fetch sequence /
+  flowchart / wireframe blocks. Phase 5 below schedules both
+  directions.
 
 ## Status
 
@@ -971,6 +983,145 @@ format).
   error span (status = ERROR rendering).
 - (No "plugin loader" test -- there's no loader. The five existing
   in-tree kinds collectively exercise the registration contract.)
+
+---
+
+## Phase 5 -- Multi-pass content gen integration
+
+**Status:** design-only. Not scheduled. Captured here so the
+two-way relationship with [`content-generator.md`](content-generator.md)
+has a single home for tracking.
+
+### 5.1 Why this exists
+
+Two distinct integration points emerged during the code-analyzer
+Phase 2.A test session, both pointing at the same multi-pass
+content generator:
+
+1. **Artifact LLM-heavy paths can hit the same truncation that
+   drove the multi-pass design.** Local devstral hit its
+   `num_predict` ceiling at ~13 KB of output (F10 in
+   plans/analyzers/code-analyzer.md), leaving an unterminated
+   string mid-document. Most artifact kinds avoid this because
+   their LLM stages produce SHORT outputs (Mermaid blocks
+   typically < 2 K tokens, even for 20-service callflows). But
+   two paths produce variable-length LLM output at risk:
+     - `wireframe` kind: the `WireframeSpec` JSON for a
+       multi-region screen with many components scales linearly
+       with the description's complexity. A "design the admin
+       dashboard" wireframe with sidebar + table + form + modal
+       can easily exceed the local-model output window when
+       captured as a single JSON pass.
+     - `flow:process` kind: free-text process diagrams with many
+       branches / sub-processes produce long Mermaid flowcharts.
+       At 50+ nodes the output is 2-4 K tokens; at 100+ it
+       truncates.
+
+2. **Multi-pass-generated reports want to embed artifacts as
+   sections.** A code-analyzer L+/XL+ report ([Phase 5.C](analyzers/code-analyzer.md#54-per-tier-synthesise-prompt-promptssynthesisetss))
+   could include "here's the auth flow" as a `sequence` artifact
+   embedded in one section, "here's the data model" as an `er`
+   artifact in another. The multi-pass generator's pass-2 section
+   builders are arbitrary code; they can call `artifact.*` tools
+   inline and surface the rendered Mermaid block in the section
+   body.
+
+### 5.2 Direction A -- artifact LLM paths via multi-pass
+
+For artifact kinds whose LLM-driven path produces variable-length
+output, sub the single LLM call for a `generateMultiPass()` call:
+
+  - **Wireframe (LLM `WireframeSpec` JSON):** outline-pass plans
+    sections (e.g. "header + nav", "main content", "sidebar",
+    "footer", "modals"); each pass-2 section produces a
+    `WireframeSpec` fragment for its region; the kind's renderer
+    stitches the fragments into the final spec. Cleaner than
+    asking one LLM call to lay out a whole admin dashboard.
+  - **Flow:process (LLM Mermaid flowchart):** outline-pass plans
+    sub-flow groupings; each pass-2 section produces a Mermaid
+    sub-flowchart that the kind's renderer composes via
+    `subgraph` blocks.
+  - **Free-text fallbacks across all kinds:** same pattern when
+    the description's scope warrants it. A short "draw a sequence
+    for login" stays single-pass; a 3-page handwritten
+    architecture description goes multi-pass.
+
+The content-generator's first cut produces markdown only (per its
+"Out of scope"). Direction A needs the JSON / structured-output
+extension noted there as a deferred item. Concrete sequencing:
+
+  - **5.2.a** -- ship content-generator's markdown-only path
+    (its three commits per the plan's sequencing).
+  - **5.2.b** -- extend content-generator with JSON-section
+    output mode (`section.outputFormat: 'markdown' | 'json'`).
+    Pass-2 sections in JSON mode produce structured fragments
+    instead of prose.
+  - **5.2.c** -- migrate `wireframe` first (largest LLM output
+    surface among artifact kinds) as the proving ground.
+  - **5.2.d** -- migrate `flow:process` + free-text fallbacks
+    only if 5.2.c shows real improvement.
+
+### 5.3 Direction B -- artifacts embedded in multi-pass docs
+
+When a multi-pass-generated report (code-analyzer Phase 5.C, a
+brainstorm spec, etc.) wants to include a diagram, the pass-2
+section builder calls `artifact.er` / `artifact.sequence` /
+`artifact.flow` / `artifact.wireframe` directly. The artifact tool
+returns rendered Mermaid (or SVG for wireframe) which the section
+embeds inline. The artifact persists as a TodoItem on the
+caller-family's Artifacts list; the section body's markdown
+references it.
+
+Pattern:
+
+```ts
+input.section.build = ({ section, ... }) => {
+  switch (section.id) {
+    case 'auth-flow':
+      // Pass-2 builder calls into the artifact tool inline.
+      return {
+        system: caller.sectionSystem,
+        user: `${caller.sectionUser}\n\nAttach the result of artifact.sequence({ entry: 'authMiddleware', depth: 4 }) inline as a Mermaid code block.`,
+      };
+    ...
+  }
+};
+```
+
+The model sees the artifact's tool result in its tool-loop,
+embeds the Mermaid in the section body, and the stitcher composes
+sections + diagrams into the final doc.
+
+This direction needs no content-generator extension -- pass-2
+section builders already accept arbitrary prompts. Adoption is
+purely caller-side: callers wire in the right `artifact.*` tool
+hints when their section needs a diagram.
+
+### 5.4 Acceptance
+
+```
+1. Wireframe via multi-pass: a "design the admin dashboard"
+   prompt that pre-Phase-5 truncated mid-spec now produces a
+   complete WireframeSpec assembled from 4-5 region fragments.
+2. Multi-pass synthesise embeds an artifact: a code-analyzer
+   L-tier report's "Auth flow" section contains a rendered
+   Mermaid sequenceDiagram block fetched via artifact.sequence
+   at section-build time.
+3. scripts/build.sh green; npm run precommit green.
+```
+
+### 5.5 Out of scope
+
+- **Auto-detection of "is this kind too big for single-pass".**
+  Caller decides per-invocation whether to use multi-pass.
+- **Per-section provider selection.** Today the multi-pass module
+  uses one provider for the whole call. Direction A's wireframe
+  case might want cloud for outline + local for sections, but
+  that's a content-generator extension (open question 1 in that
+  plan).
+- **Cross-format outline mixing.** A multi-pass run produces ONE
+  format (markdown OR JSON). Heterogeneous outlines (some
+  sections markdown, some JSON) are deferred.
 
 ---
 

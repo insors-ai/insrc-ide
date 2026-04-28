@@ -479,13 +479,19 @@ to the user (warning banner / silent / hard-fail).
 | Agent | Today | Next |
 |-------|-------|------|
 | **code-analyzer synthesise** (Phase 5.C) | Single-pass markdown. Hits maxTokens at L/XL/XXL+ tiers. | Migrate first -- highest pain, biggest win. The Phase 5.C plan slots multi-pass in as the synthesise step's implementation. |
-| **brainstorm assembly** | Single-pass HTML report assembly via `agent/tasks/brainstorm/assembly.ts`. | Phase-2 candidate (this plan, not the analyzer plan). Brainstorm specs at the upper-tier scale benefit from per-theme sections. |
-| **designer detail step** | Single-pass markdown. | Phase-3 candidate. Lower priority -- designer outputs are typically smaller. |
+| **brainstorm assembly** | Single-pass HTML report assembly via `agent/tasks/brainstorm/assembly.ts`. | Second migration. Brainstorm specs at the upper-tier scale benefit from per-theme sections. |
+| **designer detail step** | Single-pass markdown. | Third migration. Lower priority -- designer outputs are typically smaller. |
+| **artifact LLM-heavy kinds** (`wireframe`, `flow:process`, free-text fallbacks) | Single-pass LLM producing structured output (`WireframeSpec` JSON / Mermaid blocks). | Phase 5.2 of [`artifact-tasks.md`](artifact-tasks.md#52-direction-a----artifact-llm-paths-via-multi-pass). Needs the JSON-section output mode (open question / deferred in this plan's "Out of scope") -- ships AFTER the markdown-first cut validates. |
+| **artifact embedding within multi-pass docs** | N/A today. | Phase 5.3 of [`artifact-tasks.md`](artifact-tasks.md#53-direction-b----artifacts-embedded-in-multi-pass-docs). Pass-2 section builders call `artifact.*` tools inline; section body embeds the rendered Mermaid / SVG. No content-generator extension needed -- caller-side wiring only. |
 | **planner draft** | Single-pass JSON. | NOT a candidate -- structured output, schema-bound, length is task-count-bounded. Multi-pass would over-engineer. |
 
 The first migration (code-analyzer synthesise) IS the proving
 ground. Brainstorm + designer adopt only if 5.C validates the
-approach.
+markdown-first cut. Artifact integration (both directions) lands
+after the markdown path is proven; Direction A specifically
+requires the JSON-section output mode noted in "Out of scope" --
+that extension is gated on a concrete consumer asking for it
+(wireframe will be the first to need it).
 
 ---
 
