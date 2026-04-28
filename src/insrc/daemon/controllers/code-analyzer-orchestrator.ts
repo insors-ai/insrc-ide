@@ -32,7 +32,7 @@ import { sanitizeMarkdownReport } from '../../agent/tasks/code-analyzer/analyzer
 import { readCachedResult, writeCachedResult } from '../../agent/tasks/code-analyzer/cache.js';
 import { buildPlanPrompt, buildPlanSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/plan.js';
 import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
-import { buildSynthesisPrompt, SYNTHESISE_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
+import { buildSynthesisPrompt, buildSynthesiseSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
 import type { ScopeSize } from '../../shared/classify.js';
 import type {
   AnalysisTask,
@@ -763,17 +763,22 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const ca = state.get<CodeAnalysisState>(K_STATE);
     const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
     const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
-    const messages = buildSynthesisPrompt(ca?.request ?? '', accepted, planned);
+    // Phase 5.C: thread the run's tier into both the system prompt
+    // (tierSynthesiseGuidance picks the report shape) and the user
+    // block (so the model sees an explicit "Run tier: X" reminder).
+    // Tier defaults to 'M' when missing -- the pre-Phase-5 shape.
+    const tier = this._tier;
+    const messages = buildSynthesisPrompt(ca?.request ?? '', accepted, planned, tier);
     const userMessage = messages
       .filter(m => m.role === 'user')
       .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
       .join('\n\n');
     return [{
       index: 200,
-      description: 'Code Analyzer: composing report...',
+      description: `Code Analyzer: composing report (tier ${tier})...`,
       kind: 'llm',
       intent: 'code-analysis',
-      systemPrompt: SYNTHESISE_SYSTEM,
+      systemPrompt: buildSynthesiseSystemPrompt(tier),
       userMessage,
       resolverAgent: 'code-analyzer',
       resolverStep: 'synthesise',
