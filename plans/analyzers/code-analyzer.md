@@ -635,7 +635,7 @@ Issues observed live during the first end-to-end `/code-analyze` exercise on Pha
 | F11 | Synthesise output prefixed with stray apostrophe / backtick | Rendered Report Pane's first heading (`'# Agent Framework Functionality`) doesn't parse as H1 because the line starts with `'` before `#`. Subsequent headings (`## Summary`, `## Findings`) render fine. `afterSynthesise` writes `completed.output` straight to `list.body` with no sanitization. Local model occasionally prefixes its response with quote characters or wraps in markdown fences. | Add a `sanitizeMarkdownReport()` step in `afterSynthesise` before `updateListBody`: trim whitespace, strip wrapping ```` ```markdown / ``` ```` fences, strip a leading `'` / `` ` `` / `"` if it precedes a heading character. Plus tighten the synthesise prompt to forbid wrapping the output in fences or quotes. | `daemon/controllers/code-analyzer-orchestrator.ts:afterSynthesise`; `prompts/synthesise.ts` |
 | F12 | UX disconnect: chat panel sees only terse status messages during the run | Long silent gaps (60-90s per item × 10 items) where the user has no insight into what task is running, which tool is being called, or progress through the queue. The orchestrator emits `progress` stream events from `runNextAnalyzerTask` but the chat-panel rendering for them is sparse / replaced. | Stream richer per-task events: "Task K/N: '<title>' — running graph_search... Read... synthesising...", finding-as-it-lands previews, queue-position updates. Wire the daemon's `onProgress` callback (already in `runAnalyzer` opts) into a per-tool message and ensure the chat panel surfaces them. | `code-analyzer-orchestrator.ts:runNextAnalyzerTask`; chat-panel rendering for `progress` stream events |
 | F13 | Progress stream updates disappear from the chat panel before the next one arrives | Even when an update IS streamed, the chat-panel renderer replaces it with the next event or clears it on phase transitions. The user can't see what was just done. | Update the chat-panel rendering for `progress` events to be additive / transcript-style rather than replace-last. Each progress message persists in the transcript until the entire process finishes, with the latest as a live "in-progress" indicator on top. | Chat-panel `progress` event renderer (workbench-side) |
-| F14 | NEW FEATURE — scope-sizing classifier ahead of the planner | Today's `/code-analyze` jumps straight from the user's prompt to the planner with a fixed cap (24 tasks soft; 16 hard). No upfront sense of how big the requested analysis is, no user-visible effort estimate, no per-size budget tuning. A "summarise the auth flow" prompt and an "audit the entire repo for X" prompt look identical to the planner. | Add a sizing classifier that runs BEFORE the planner. Classify each prompt + repo state into `S` / `M` / `L` / `XL` based on (a) requested scope breadth (single function vs sub-tree vs whole repo), (b) repo size (entity count from the daemon's index), (c) tool budget heuristic. Output drives: planner soft/hard caps, per-task wall-clock budget, total cloud reviewer call limit, and a user-visible "estimated effort: M (~5min, ~10 tasks)" upfront. Pattern reference: [`shared/brainstorm-classes.ts`](../../src/insrc/shared/brainstorm-classes.ts) (`BrainstormCategoryClass` via the generic `ClassChoice` classifier in `shared/classify.ts`). No analogous size classifier exists in the codebase today. | New: `shared/code-analyzer-scope.ts` (size classes + descriptions); `agent/tasks/code-analyzer/scope.ts` (classifier wrapper); plumb result into `daemon/controllers/code-analyzer-orchestrator.ts:buildInitialTasks` so caps + estimates flow from there. |
+| F14 | NEW FEATURE — scope-aware analysis pipeline (S/M/L/XL/XXL+ tiers + per-tier flows + drill-down) | Today's `/code-analyze` jumps straight from prompt to planner with a single cap policy and a single playbook. "Summarise the auth flow" and "audit the entire repo for X" produce ~10-task plans regardless. Big-scope prompts get under-served (the analyzer drills into individual functions when the user wanted a structural read); small-scope prompts pay reviewer-overhead they don't need; users have no drill-down — a follow-up question means re-prompting from scratch. | Full design in **[Phase 5 — Scope-aware analysis pipeline](#phase-5--scope-aware-analysis-pipeline-f14-expansion)** below. Five tiers; per-tier planner caps + analyzer playbook + synthesise shape; explicit drill-down chain (XXL+ → L/XL → S/M). Sequenced after F8/F10 stabilise the analyzer flow and after the classification rewrite lands the generic `classify()` module the sizing classifier consumes. | Phase 5 sub-phases 5.A/5.B/5.C/5.D — see section. |
 
 These are tracked here rather than as separate plan-doc commits so the validation context stays grouped with Phase 2's acceptance section. F10's diagnostic fix (1-line) should ship first since it's the cheapest and gates intelligent decisions on the rest. F8 and F14 are the architectural items worth a focused design pass before Phase 2.B legacy deletion lands; F9, F11, F12, F13 are smaller polish items that can ride alongside.
 
@@ -751,6 +751,178 @@ Lets users explicitly target a specific analyzer in chat: *"@data-analyzer descr
 3. @data-analyzer / @deployment-analyzer mentions route correctly.
 4. scripts/build.sh green.
 ```
+
+---
+
+## Phase 5 — Scope-aware analysis pipeline (F14 expansion)
+
+**Status:** design-only. Not scheduled. Captured here so the Phase 2.A follow-up table (F14) has a single home for the full feature spec instead of an under-scoped table cell.
+
+### Why this exists
+
+Today's `/code-analyze` jumps straight from the user's prompt to the planner with one cap policy (16 soft / 24 hard tasks). The planner's per-task playbook is also one-size: each task is a focused per-entity investigation (locate / describe / trace / compare). Result:
+
+- "summarise the auth flow" (1 module, ~5 entities) and "audit the entire repo for X" (50 modules, 5000+ entities) both produce ~10-task plans because that's what the planner caps fall out at.
+- Big-scope prompts get under-served — the analyzer drills into individual functions when the user wanted a structural read.
+- Small-scope prompts pay reviewer-cost overhead — 10 cloud reviewer calls for a question that could have been one focused investigation.
+- No drill-down — the user gets a flat report; if a bullet sparks a follow-up question they have to re-prompt from scratch.
+
+### The scope tiers + per-tier flows
+
+A pre-planner classifier sizes each request into one of:
+
+| Tier | Indicator | Analysis altitude | Output shape |
+|------|-----------|-------------------|--------------|
+| **S** | "what does `foo()` do?", single function / handful of lines | Detailed code-level — read the body, callers, callees of one or two specific entities | One-section report; concrete code citations; one or two findings per entity at most |
+| **M** | "how does the auth middleware handle expired tokens?" — 1 file or a small group of related entities | Detailed code-level — same as S but plural; cross-entity tracing within a tight scope | Multi-section report grouped by entity; the bulk of citations are line-level |
+| **L** | "describe the agent framework" — one module / sub-tree (~10-50 entities) | Endpoints + module-level — public interfaces, exported symbols, top-level call patterns. Bodies only when load-bearing | Module-overview report; per-class / per-export sections; bodies are summarised, not pasted |
+| **XL** | "compare the brainstorm and designer agents" — multiple modules; cross-cutting | Endpoints + module-level — same as L but spans subtrees; the comparison/relation IS the finding | Cross-module report; tabular comparisons; selective deep-dives only on the load-bearing differences |
+| **XXL+** | "audit the entire repo's error handling" or "give me the architectural overview of insrc" | Design / architecture — module breakup, dependency graph, layering, responsibility map. **Infer** the boundaries the user didn't explicitly draw | High-level structural report; module map + dependency edges + responsibility callouts; almost no code-line citations |
+
+### Drill-down chain
+
+Each report ends with a "next steps" affordance pointing one tier deeper:
+
+- **XXL+** report → user picks one of the inferred modules → re-runs as **L/XL** scoped to that module
+- **L/XL** report → user picks one of the per-module sections → re-runs as **S/M** scoped to that section
+- **S/M** report → terminal (already at code-line citations)
+
+The user never has to re-prompt from scratch — the drill is "click this section, run a focused analysis on it." The new `/code-analyze` invocation inherits the parent run's context (parent listId, scope path) so the daemon can show the drill-down breadcrumb.
+
+### Component design
+
+#### 5.1 Sizing classifier (`agent/tasks/code-analyzer/scope.ts`)
+
+Runs BEFORE the planner. Inputs:
+- The user's prompt text.
+- Repo signals: total entity count from the daemon's index, primary-language mix, file count under the active repo + closure.
+- Optional context: prior run's scope (when this is a drill-down).
+
+Output: `{ tier: 'S' | 'M' | 'L' | 'XL' | 'XXL', rationale: string, confidence: 0..1 }`.
+
+Implementation: thin wrapper over the generic `classify({ classes: ANALYSIS_SCOPE_CLASSES, text, context }, provider)` from [plans/classification-rewrite.md](../classification-rewrite.md). Cloud-first, local fallback (the standard classifier provider chain). The class descriptions encode the tier indicators above.
+
+`ANALYSIS_SCOPE_CLASSES` lives in `src/insrc/shared/code-analyzer-scope.ts` next to the `AnalysisTier` type alias so TS catches drift.
+
+#### 5.2 Per-tier planner playbook (`prompts/plan.ts`)
+
+The plan prompt today is one block. After Phase 5 it has tier-conditional sections:
+
+- `S`/`M` → "produce 1-3 highly focused tasks; prefer one `describe` and one `trace` over many `locate`s."
+- `L`/`XL` → "produce 5-12 tasks at module-level; one summary task per logical sub-module; explicit cross-module comparison tasks for XL."
+- `XXL+` → "produce 3-6 tasks each scoped to a major sub-system the model infers from the repo signals; output is a structural map, not per-entity findings; per-task `kind` defaults to `describe` with `paths: <inferred-subtree>`."
+
+The hard-cap numbers also tier:
+
+| Tier | Soft cap | Hard cap | Per-task wall-clock | Cloud reviewer calls (max) |
+|------|---------:|---------:|--------------------:|---------------------------:|
+| S    | 3        | 5        | 30 s                | 1 per task                 |
+| M    | 5        | 8        | 45 s                | 1 per task                 |
+| L    | 10       | 16       | 60 s                | 1 per task                 |
+| XL   | 16       | 24       | 60 s                | 1 per task                 |
+| XXL+ | 6        | 10       | 90 s                | 1 per task                 |
+
+(`XXL+` has FEWER tasks than `XL` because each task is broader and slower. Reviewer count matches task count — no extra review overhead per tier.)
+
+#### 5.3 Per-tier analyzer playbook (`prompts/analyzer-system.ts`)
+
+The hard rules + tool list stay the same (citations invariant is universal). The PER_KIND_PLAYBOOK gets tier-aware sections:
+
+- `S`/`M` → existing playbook (locate / describe / trace / compare with body-level citations).
+- `L`/`XL` → "summarise the file's exports + public surface + first-order call relationships. Cite signatures, not bodies. Don't paste >30 lines of code."
+- `XXL+` → "describe the sub-system's responsibilities, public boundary, principal types, and the modules it depends on / is depended on by. Output is structural prose + a brief module-edge list. Per-line code citations are NOT required at this tier."
+
+The citation-invariant retry remains universal but the validation is tier-aware: at XXL+, citations may be at file-level (no `lineStart`/`lineEnd`) without triggering the missing-citations downgrade.
+
+#### 5.4 Per-tier synthesise prompt (`prompts/synthesise.ts`)
+
+Tier flag drives the report shape:
+
+- `S`/`M` → existing markdown shape (one section per finding; embedded code blocks).
+- `L`/`XL` → tabular summaries; per-module h2 sections; bodies → signatures.
+- `XXL+` → module map + responsibility table + dependency-edge list. No `## Findings` section per se — the structure IS the finding.
+
+Plus a footer the synthesise prompt always emits: a "Drill down" section listing 3-5 candidate next-steps the user can run as scoped child analyses. The Report Pane renders these as clickable affordances (Phase 2.B+ work; for now they're plain text).
+
+#### 5.5 Drill-down command + UI (`code-analyzer/codeAnalyzerCommands.ts`)
+
+New command: `insrc.codeAnalyzer.drillDown` taking `{ parentListId, scope: AnalysisScope }`. Behaviour:
+
+1. Look up parent list, capture its `tier` from list.meta.
+2. Build a child `/code-analyze` invocation with:
+   - Prompt = the chosen drill-down candidate text from the parent's footer.
+   - Scope = the user's chosen sub-scope (path / entityIds / module name).
+   - `parentListId` threaded so the daemon can show breadcrumbs.
+3. Submit to the existing chat path so the Report Pane auto-opens for the child run.
+
+UI affordance: each "Drill down" footer item in the Report Pane becomes a button. Click → invokes the command with the right scope.
+
+The orchestrator stamps `meta.parentListId` on the child list at `createList` time so the todos pane can render parent-child threads (and the kebab "Open report" knows the relationship).
+
+### Data model additions
+
+```ts
+// shared/code-analyzer-scope.ts (NEW)
+export type AnalysisTier = 'S' | 'M' | 'L' | 'XL' | 'XXL';
+
+export interface AnalysisScopeClass extends ClassChoice {
+  readonly id: AnalysisTier;
+}
+
+export const ANALYSIS_SCOPE_CLASSES: readonly AnalysisScopeClass[] = [ /* tier descriptions */ ];
+
+export interface ScopedAnalysisRequest {
+  readonly tier: AnalysisTier;
+  readonly rationale: string;        // classifier's one-line reason
+  readonly confidence: number;       // 0..1
+  readonly parentListId?: string;    // set when this is a drill-down
+  readonly scope?: {                 // tier-specific narrowing
+    readonly paths?: readonly string[];
+    readonly entityIds?: readonly string[];
+    readonly modules?: readonly string[];
+  };
+}
+```
+
+`CodeAnalysisState` (in `agent/tasks/code-analyzer/types.ts`) gains `tier: AnalysisTier` and `parentListId?: string`. The orchestrator stamps both on `createList({ meta: ... })` so the todos pane and the Report Pane see them.
+
+### Acceptance
+
+```
+1. Sizing classifier runs once per /code-analyze invocation. Tier is logged + visible in the orchestrator's first progress event.
+2. The five tier classes route correctly on a representative prompt set:
+   - "what does normalizeArgs() do?"                              -> S
+   - "how does the auth middleware handle expired tokens?"        -> M
+   - "describe the agent framework"                               -> L
+   - "compare the brainstorm and designer agents"                 -> XL
+   - "give me an architectural overview of insrc"                 -> XXL
+   Captured via scripts/test-code-analyzer-scope-classifier.ts.
+3. Per-tier planner caps actually fire: an L request produces a 10-task plan; an XXL request produces a 6-task plan. Verified via plan-task-count assertion in the smoke script.
+4. Per-tier analyzer playbook actually shifts behaviour: an XXL task's output is structural prose (no per-line citations); the citation-invariant retry does NOT fire on file-level citations at XXL.
+5. Per-tier synthesise output has the right shape (tabular for L/XL; module-map for XXL).
+6. Drill-down: click a "Drill down" affordance on an XXL report -> a new L/XL analysis runs scoped to the chosen module -> Report Pane opens with parentListId breadcrumb.
+7. scripts/build.sh green; npm run precommit green.
+```
+
+### Sequencing
+
+Phase 5 lands after the Phase 2.A follow-ups (F8/F10 in particular — the analyzer flow needs to be reliable before tiers are layered on top) AND after the classification rewrite ([plans/classification-rewrite.md](../classification-rewrite.md)) since the sizing classifier is a consumer of the generic `classify()` module.
+
+Phase 5 itself splits into:
+
+- **5.A** Sizing classifier + tier-aware caps (no playbook changes; just plan a different number of standard tasks based on tier). Smallest useful slice.
+- **5.B** Per-tier planner + analyzer playbooks (the meaty change; new prompts).
+- **5.C** Per-tier synthesise prompt + Report Pane drill-down footer rendering.
+- **5.D** `insrc.codeAnalyzer.drillDown` command + parent-child list threading.
+
+Each sub-phase is a focused commit with its own acceptance subset. Recommend shipping 5.A first to validate the sizing path end-to-end before investing in the per-tier prompt work.
+
+### Out of scope
+
+- Per-tier confidence calibration (the analyzer's `high`/`medium`/`low` bands stay tier-agnostic for now).
+- Re-classification on prompt revision (a user's "re-run" with an edited prompt re-invokes the classifier; there's no explicit "you said S, did you mean M?" gate).
+- Auto-drill (the user always picks the next-step affordance manually; no orchestrator-driven recursion).
+- Cross-tier diff view (comparing an XXL run against an L run for the same prompt — possible future polish; not in this plan).
 
 ---
 
