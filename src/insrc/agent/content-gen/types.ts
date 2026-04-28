@@ -2,9 +2,10 @@
  * Public types for the multi-pass content generator
  * (plans/content-generator.md).
  *
- * Commit 1 ships the outline-pass types; the section-pass +
- * multi-pass-result types arrive in commit 2 alongside
- * `generateMultiPass()`.
+ * Commit 1 shipped the outline-pass types (`SectionPlan`,
+ * `OutlineResult`); commit 2 adds the section + multi-pass result
+ * shapes alongside `generateMultiPass()`. Commit 3 adds the
+ * optional caching layer.
  */
 
 /**
@@ -38,4 +39,76 @@ export interface SectionPlan {
 export interface OutlineResult {
 	readonly title: string;
 	readonly sections: readonly SectionPlan[];
+}
+
+/**
+ * Pass-2 output for one section. `body` is the rendered markdown
+ * (no leading `#`/`##` heading -- the stitcher prepends one).
+ * `fallback` is true when the section degraded somehow:
+ *
+ *   - empty body                         -> note='empty response'
+ *   - max_tokens cap mid-draft           -> note='budget exceeded; truncated'
+ *   - provider error after the retry     -> note='provider error: ...'
+ *   - aborted via signal                 -> note='aborted'
+ *   - cache hit (commit 3 onward)        -> note='cache hit'
+ *
+ * The stitcher surfaces the `note` inline as italic text so the
+ * reader can see WHY a section is partial without inspecting state.
+ */
+export interface SectionResult {
+	readonly id: string;
+	readonly body: string;
+	readonly fallback: boolean;
+	readonly note?: string | undefined;
+}
+
+/**
+ * Caller-supplied pass-2 prompt builder. See `runSections` in
+ * `section.ts` for the receiving signature.
+ */
+export interface SectionBuildArgs {
+	readonly section: SectionPlan;
+	readonly outline: OutlineResult;
+	readonly prior: ReadonlyMap<string, SectionResult>;
+}
+
+/**
+ * Caller input to `generateMultiPass`. The module is content-
+ * agnostic -- callers supply the pass-1 + pass-2 prompts; we own
+ * the orchestration, retry, schema enforcement, parallelism,
+ * stitching, and streaming.
+ */
+export interface GenerateMultiPassInput {
+	readonly outline: {
+		readonly system: string;
+		readonly user:   string;
+		readonly maxSections?: number;
+		readonly maxTokens?:   number;
+	};
+	readonly section: {
+		build: (args: SectionBuildArgs) => { system: string; user: string };
+		readonly defaultBudgetTokens?: number;
+	};
+	/** Fires once per section as it completes. Caller can render live progress. */
+	readonly onSectionComplete?: ((r: SectionResult) => void) | undefined;
+	/** Cancellation. Checked at section boundaries. */
+	readonly signal?: AbortSignal | undefined;
+	/**
+	 * Run independent (no-deps) sections in parallel. Default true.
+	 * Set false when the local provider is GPU-throughput-bound and
+	 * N concurrent generations would swamp it.
+	 */
+	readonly parallel?: boolean;
+}
+
+export interface GenerateMultiPassResult {
+	readonly outline: OutlineResult;
+	readonly sections: readonly SectionResult[];
+	/** Stitched final markdown. */
+	readonly markdown: string;
+	/**
+	 * True when the outline degraded OR any section degraded. Caller
+	 * decides whether to warn the user / silent / hard-fail.
+	 */
+	readonly degraded: boolean;
 }
