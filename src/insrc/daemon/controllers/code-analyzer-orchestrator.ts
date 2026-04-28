@@ -30,6 +30,7 @@ import { sanitizeMarkdownReport } from '../../agent/tasks/code-analyzer/analyzer
 import { buildPlanPrompt, PLAN_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/plan.js';
 import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
 import { buildSynthesisPrompt, SYNTHESISE_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
+import type { ScopeSize } from '../../shared/classify.js';
 import type {
   AnalysisTask,
   AnalysisTaskSeed,
@@ -52,11 +53,57 @@ import type {
 const log = getLogger('code-analyzer:orchestrator');
 
 // ---------------------------------------------------------------------------
-// Caps
+// Caps -- per scope tier (Phase 5.A)
 // ---------------------------------------------------------------------------
 
-const SOFT_TASK_CAP = 16;
-const HARD_TASK_CAP = 24;
+interface TierCaps {
+  /** Soft cap: above this, we fire the plan-size approval gate. */
+  readonly softTaskCap: number;
+  /** Hard cap: planner output is silently trimmed to this length. */
+  readonly hardTaskCap: number;
+  /** Per-task wall-clock budget for the analyzer runner. */
+  readonly perTaskWallClockMs: number;
+}
+
+/**
+ * Scope-tier-driven caps for the code-analyzer orchestrator. The
+ * Phase 1 single-cap policy (16 soft / 24 hard for every prompt
+ * regardless of scope) over-served narrow questions and under-served
+ * sweeping audits. Phase 5.A introduces tier-aware caps so:
+ *
+ *   - "what does foo() do?" (S)        runs 1-3 focused tasks, ~30 s each
+ *   - "summarise the auth flow" (M)    runs 5-8 tasks at the legacy budget
+ *   - "describe the framework" (L)     runs 10-16 tasks
+ *   - "compare brainstorm + designer" (XL) runs up to 24 tasks
+ *   - "audit the entire repo" (XXL+)   runs 6-10 BROAD tasks (each
+ *                                       broader / slower; per-tier
+ *                                       playbook in Phase 5.B will
+ *                                       produce structural summaries
+ *                                       instead of per-entity findings)
+ *
+ * Scope ladder (`ScopeSize`): S, M, L, XL, XXL, XXXL, XXXXL. The XXL+
+ * tiers all collapse into the "broad / structural" cap shape; the
+ * planner playbook differentiates them by output level (XXXL spans
+ * the dependency graph; XXXXL produces the architectural overview).
+ *
+ * `M` matches the pre-Phase-5 constants exactly (16 soft / 24 hard /
+ * 60 s) so existing /code-analyze runs that default to `M` see no
+ * behavioural change.
+ */
+const TIER_CAPS: Readonly<Record<ScopeSize, TierCaps>> = {
+  S:     { softTaskCap: 3,  hardTaskCap: 5,  perTaskWallClockMs: 30_000 },
+  M:     { softTaskCap: 16, hardTaskCap: 24, perTaskWallClockMs: 60_000 },
+  L:     { softTaskCap: 10, hardTaskCap: 16, perTaskWallClockMs: 60_000 },
+  XL:    { softTaskCap: 16, hardTaskCap: 24, perTaskWallClockMs: 60_000 },
+  XXL:   { softTaskCap: 6,  hardTaskCap: 10, perTaskWallClockMs: 90_000 },
+  XXXL:  { softTaskCap: 6,  hardTaskCap: 10, perTaskWallClockMs: 90_000 },
+  XXXXL: { softTaskCap: 6,  hardTaskCap: 10, perTaskWallClockMs: 90_000 },
+};
+
+function capsForTier(tier: ScopeSize | undefined): TierCaps {
+  return TIER_CAPS[tier ?? 'M'];
+}
+
 const MAX_FOLLOWUPS = 8;
 const MAX_RETRIES_PER_TASK = 2;
 const PLAN_GATE_TIMEOUT_MS = 5 * 60 * 1000; void PLAN_GATE_TIMEOUT_MS;
@@ -106,6 +153,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    *  next() calls without writing it back to deps. */
   private _request?: string;
   private _repoSummary?: RepoSummary;
+  /**
+   * Scope tier for this run -- captured from
+   * `ControllerInput.classification.scope` in buildInitialTasks. Drives
+   * the per-tier cap lookup at every site that used to reference the
+   * old `SOFT_TASK_CAP` / `HARD_TASK_CAP` constants. Defaults to `'M'`
+   * (pre-Phase-5.A behaviour) when the caller didn't supply a tier.
+   */
+  private _tier: ScopeSize = 'M';
 
   attachDeps(deps: TaskOrchestratorDeps): void {
     this.deps = deps;
@@ -116,6 +171,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   buildInitialTasks(input: ControllerInput): Task[] {
     this._request = input.message;
     this._repoSummary = this.buildRepoSummary(input);
+    this._tier = input.classification?.scope ?? 'M';
+    log.info({ tier: this._tier, caps: capsForTier(this._tier) }, 'code-analyzer scope tier captured');
 
     return [{
       index: 0,
@@ -151,6 +208,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const initialState: CodeAnalysisState = {
       request:      this._request,
       repoSummary:  this._repoSummary,
+      tier:         this._tier,
       listId:       '',
       childListIds: [],
       truncated:    false,
@@ -235,30 +293,35 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       return null;
     }
 
-    // Apply hard cap silently (the planner prompt asks for <= 24 already;
-    // anything past 24 is dropped before the user even sees it).
-    const trimmedHard = planned.slice(0, HARD_TASK_CAP);
+    // Phase 5.A: tier-aware caps. Tier was captured in
+    // buildInitialTasks; default 'M' matches the pre-Phase-5 caps.
+    const caps = capsForTier(this._tier);
+
+    // Apply hard cap silently (the planner prompt asks for <= softCap
+    // already; anything past hardCap is dropped before the user even
+    // sees it).
+    const trimmedHard = planned.slice(0, caps.hardTaskCap);
     state.set(K_PLAN_TASKS, trimmedHard);
 
-    if (trimmedHard.length > SOFT_TASK_CAP) {
+    if (trimmedHard.length > caps.softTaskCap) {
       // Plan-size approval gate. Surface the plan to the user so they
-      // can approve / trim-to-16 / cancel before we pay the cloud cost
-      // of N reviews.
+      // can approve / trim-to-soft-cap / cancel before we pay the
+      // cloud cost of N reviews.
       state.set(K_PHASE, 'plan-approval' as Phase);
-      const summary = renderPlanSummary(trimmedHard);
+      const summary = renderPlanSummary(trimmedHard, caps);
       return [{
         index: 1,
-        description: `Plan has ${trimmedHard.length} tasks (> ${SOFT_TASK_CAP}). Approve, trim, or cancel?`,
+        description: `Plan has ${trimmedHard.length} tasks (tier ${this._tier}; soft cap ${caps.softTaskCap}). Approve, trim, or cancel?`,
         kind: 'transform',
         intent: 'code-analysis',
         passThrough: true,
         userMessage: summary,
         outputFormat: 'markdown',
         requiresGate: true,
-        gateTitle: 'Code Analyzer plan size approval',
+        gateTitle: `Code Analyzer plan size approval (tier ${this._tier})`,
         gateActions: [
           { name: 'approve', label: 'Approve all' },
-          { name: 'trim-to-16', label: `Trim to first ${SOFT_TASK_CAP}` },
+          { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
           { name: 'cancel', label: 'Cancel run' },
         ],
         persisted: true,
@@ -271,7 +334,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   private async afterPlanApprovalGate(gateReply: GateReply | undefined, state: TaskStateStore): Promise<Task[] | null> {
     const action = gateReply?.action ?? 'cancel';
     let planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    log.info({ action, plannedCount: planned.length }, 'plan-size-approval gate fired');
+    const caps = capsForTier(this._tier);
+    log.info({ action, plannedCount: planned.length, tier: this._tier }, 'plan-size-approval gate fired');
 
     if (action === 'cancel') {
       const ca = state.get<CodeAnalysisState>(K_STATE);
@@ -281,8 +345,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       state.markSessionComplete();
       return null;
     }
-    if (action === 'trim-to-16') {
-      planned = planned.slice(0, SOFT_TASK_CAP);
+    // 'trim-to-soft' is the new action name; keep accepting the legacy
+    // 'trim-to-16' so any in-flight runs from before this commit don't
+    // mis-route on the gate reply.
+    if (action === 'trim-to-soft' || action === 'trim-to-16') {
+      planned = planned.slice(0, caps.softTaskCap);
       state.set(K_PLAN_TASKS, planned);
       const ca = state.get<CodeAnalysisState>(K_STATE);
       if (ca) state.set(K_STATE, { ...ca, truncated: true });
@@ -397,6 +464,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }),
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       checkPathAccess: (path) => this.checkPathAccess(path, state),
+      // Phase 5.A: per-tier wall-clock budget. S=30s, M=60s, L=60s,
+      // XL=60s, XXL+=90s. Default tier is 'M' (60s -- the
+      // pre-Phase-5 budget) so existing callers don't change shape.
+      wallClockMs: capsForTier(this._tier).perTaskWallClockMs,
     });
     state.set(K_LAST_RUNNER, outcome);
 
@@ -556,10 +627,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         state.set(K_ACCEPTED, accepted);
         state.set(K_HISTORY, history);
 
-        // Add up to 2 follow-ups -- but respect the global cap.
+        // Add up to 2 follow-ups -- but respect the global cap. Phase
+        // 5.A: hard cap is now tier-driven.
         const slotsLeft = MAX_FOLLOWUPS - followUpsSoFar;
         const totalPlanned = (state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? []).length;
-        const slotsBudget = Math.min(slotsLeft, HARD_TASK_CAP - totalPlanned);
+        const slotsBudget = Math.min(slotsLeft, capsForTier(this._tier).hardTaskCap - totalPlanned);
         const newSeeds: AnalysisTaskSeed[] = decision.followUps.slice(0, Math.min(2, Math.max(0, slotsBudget)));
         if (newSeeds.length > 0 && this.deps?.todos !== undefined) {
           const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
@@ -941,14 +1013,14 @@ function truncateTitle(s: string): string {
   return trimmed.length > 80 ? trimmed.slice(0, 77) + '...' : trimmed;
 }
 
-function renderPlanSummary(tasks: readonly AnalysisTask[]): string {
+function renderPlanSummary(tasks: readonly AnalysisTask[], caps: TierCaps): string {
   const lines: string[] = [`# Code Analyzer plan (${tasks.length} tasks)`, ''];
   for (let i = 0; i < tasks.length; i++) {
     const t = tasks[i]!;
     lines.push(`${i + 1}. [${t.kind}] ${shortTitleFor(t)}`);
   }
   lines.push('');
-  lines.push(`Soft cap is ${SOFT_TASK_CAP}. Trim drops items past the first ${SOFT_TASK_CAP}.`);
+  lines.push(`Soft cap is ${caps.softTaskCap}. Trim drops items past the first ${caps.softTaskCap}.`);
   return lines.join('\n');
 }
 

@@ -221,6 +221,13 @@ export interface RunAnalyzerOpts {
   /** Cancellation signal forwarded to executeTool. */
   signal?: AbortSignal | undefined;
   /**
+   * Per-task wall-clock budget. Phase 5.A: the orchestrator passes a
+   * tier-driven value (S=30s, M=60s, L=60s, XL=60s, XXL+=90s).
+   * Defaults to 60 s -- the pre-Phase-5 Phase-1 budget -- when the
+   * caller doesn't supply one.
+   */
+  wallClockMs?: number | undefined;
+  /**
    * Per-call path approval check (Phase 1.6 fs-access gate). Called
    * with the absolute path the analyzer wants to read before
    * executeTool runs for fs-class tools (Read / Grep / ListDirectory).
@@ -266,12 +273,13 @@ export async function runAnalyzer(
   const callTrace: ToolCallSummary[] = [];
   let cumulativeReadBytes = 0;
   const startedAt = Date.now();
+  const wallClockMs = opts.wallClockMs ?? MAX_WALL_CLOCK_MS;
 
   // -- main tool-calling loop --
   let iter = 0;
   let lastText = '';
   while (iter < MAX_TOOL_CALLS) {
-    if (Date.now() - startedAt > MAX_WALL_CLOCK_MS) {
+    if (Date.now() - startedAt > wallClockMs) {
       log.warn({ itemId: task.itemId, iter }, 'analyzer hit wall-clock cap');
       break;
     }
@@ -405,7 +413,7 @@ export async function runAnalyzer(
     messages.push({ role: 'user', content: resultsBlock.join('\n\n') });
   }
 
-  const truncated = iter >= MAX_TOOL_CALLS || Date.now() - startedAt > MAX_WALL_CLOCK_MS;
+  const truncated = iter >= MAX_TOOL_CALLS || Date.now() - startedAt > wallClockMs;
 
   // -- parse + retry on bad JSON --
   let parsed = parseAnalyzerResult(lastText, task.itemId);

@@ -295,13 +295,21 @@ export interface CodeAnalysisState {
   /** Original user message; rehydrated into the planner prompt on resume. */
   readonly request: string;
   readonly repoSummary: RepoSummary;
+  /**
+   * Scope tier (S/M/L/XL/XXL/XXXL/XXXXL) the sizing classifier emitted
+   * for this run. Drives planner caps, per-task wall-clock budget, and
+   * (Phase 5.B) the per-tier playbook. Stored on state so a rehydrated
+   * run after a daemon crash keeps the same caps it started with.
+   * Defaults to `'M'` for runs from before Phase 5.A landed.
+   */
+  readonly tier: import('../../../shared/classify.js').ScopeSize;
   /** Primary TodoList id -- source of truth for plan / progress. */
   readonly listId: string;
   /** Any sub-lists spawned for large follow-up batches. */
   readonly childListIds: readonly string[];
   /** The item in_progress right now, if any. */
   readonly currentItemId?: string | undefined;
-  /** Set when maxTasks (24) or maxFollowUps (8) cap was hit. */
+  /** Set when the tier-driven hard cap was hit. */
   readonly truncated: boolean;
   /** Set when the user issued a mid-flight cancel. */
   readonly cancelled: boolean;

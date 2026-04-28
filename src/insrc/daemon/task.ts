@@ -302,8 +302,21 @@ export interface ControllerInput {
   codeContext: string;
   fileContext?: string | undefined;
   configContext?: string | undefined;
-  /** Classification result from intent classifier (passed through to controllers). */
-  classification?: { intent: string; confidence: number; keywords?: string[] | undefined } | undefined;
+  /**
+   * Classification result from the primary-intent classifier (passed
+   * through to controllers). `scope` carries the sizing tier
+   * (`S` / `M` / `L` / ... / `XXXXL`) the classifier emits alongside
+   * the class id; controllers that care about effort sizing
+   * (currently the code-analyzer orchestrator's planner caps) read
+   * this field. Defaults to `'M'` at the consumer when omitted, so
+   * existing controllers that don't know about scope keep working.
+   */
+  classification?: {
+    intent: string;
+    confidence: number;
+    keywords?: string[] | undefined;
+    scope?: import('../shared/classify.js').ScopeSize | undefined;
+  } | undefined;
   /** Session reference so controllers can reach the provider resolver
    *  (e.g. CodingController running scope classification on start). */
   session?: import('../agent/session.js').Session | undefined;

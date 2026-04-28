@@ -747,9 +747,26 @@ async function runCodeAnalyzerSlash(
   };
 
   try {
+    // Phase 5.A: thread classification info (intent + scope) through to
+    // the orchestrator so it can drive tier-aware planner caps. The
+    // slash-command path knows the intent ('code-analysis') and confidence
+    // (1.0 -- user explicitly typed it). Scope defaults to 'M' for now;
+    // a follow-up commit can run a sizing classifier on the prompt and
+    // emit the real tier (S/M/L/XL/XXL/XXXL/XXXXL) here. The chat-handler
+    // classifier-fallback path (Phase 2.B work) will pass `classified.scope`
+    // straight through.
     const result = await runControlledPipeline(
       controller,
-      { message: userPrompt, codeContext: '', session },
+      {
+        message: userPrompt,
+        codeContext: '',
+        session,
+        classification: {
+          intent: 'code-analysis',
+          confidence: 1.0,
+          scope: 'M',
+        },
+      },
       deps,
     );
     send({ id: requestId, stream: 'done', data: { summary: 'code-analyzer' } });
