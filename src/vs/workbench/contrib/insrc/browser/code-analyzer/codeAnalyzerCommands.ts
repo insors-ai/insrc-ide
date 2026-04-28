@@ -6,10 +6,11 @@
 import { localize2 } from '../../../../../nls.js';
 import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
-import { INotificationService } from '../../../../../platform/notification/common/notification.js';
+import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
+import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { AnalysisReportInput } from './analysisReportInput.js';
 
@@ -80,5 +81,49 @@ registerAction2(class extends Action2 {
 		const input = new AnalysisReportInput(list.sessionId, list.id, list.body ?? '');
 		await input.ensureBackingFile(fileService);
 		await editorService.openEditor(input);
+	}
+});
+
+/**
+ * Clear the Code Analyzer's per-task cache (plans/analyzers/code-analyzer.md
+ * Phase 2.5). The cache lives daemon-side under `~/.insrc/cache/code-
+ * analyzer/`; workbench can't read it directly, so this command goes
+ * through the `codeAnalyzer.clearCache` daemon RPC.
+ *
+ * Useful when:
+ *   - prompts changed and the user wants the next /code-analyze run
+ *     to redo every task without bumping git HEAD;
+ *   - debugging cache-related behaviour;
+ *   - reclaiming disk space (each entry caps at 256 KB; the LRU caps
+ *     entries at 200, but a force-clear is still sometimes faster).
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.codeAnalyzer.clearCache',
+			title: localize2('insrc.codeAnalyzer.clearCache', 'Clear Code Analyzer Cache'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const daemon = accessor.get(IInsrcDaemonService);
+		const notifications = accessor.get(INotificationService);
+		try {
+			const result = await daemon.rpc<{ removed: number }>('codeAnalyzer.clearCache');
+			const removed = result?.removed ?? 0;
+			notifications.notify({
+				severity: Severity.Info,
+				message: removed === 0
+					? 'Code Analyzer cache was already empty.'
+					: `Cleared Code Analyzer cache (${removed} entr${removed === 1 ? 'y' : 'ies'} removed).`,
+			});
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Failed to clear Code Analyzer cache: ${err instanceof Error ? err.message : String(err)}`,
+			});
+		}
 	}
 });

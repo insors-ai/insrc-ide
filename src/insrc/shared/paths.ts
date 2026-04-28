@@ -26,6 +26,15 @@ export const PATHS = {
   // an error pane). A startup reconciler in the workbench prunes any
   // file here that no open editor references.
   tmp:         join(INSRC_DIR, 'tmp'),
+  // Cache root for the Code Analyzer's per-task LRU
+  // (plans/analyzers/code-analyzer.md Phase 2.5). Each cache entry
+  // stores a reviewer-accepted AnalyzerResult keyed on
+  // SHA256(question + scope + tier + repoSnapshotId). Caps at 200
+  // entries; evicts oldest by mtime. Cache invalidates per-commit
+  // automatically when the repoSnapshotId carries the git HEAD
+  // SHA. Cleared via the `insrc.codeAnalyzer.clearCache` palette
+  // command.
+  codeAnalyzerCache: join(INSRC_DIR, 'cache', 'code-analyzer'),
   logDir:      LOG_DIR,
   daemonLog:   join(LOG_DIR, 'daemon.log'),
   agentLog:    join(LOG_DIR, 'agent.log'),

@@ -24,9 +24,12 @@
  * across the whole run. Caps in `caps.ts` (imported below).
  */
 
+import { readFileSync } from 'node:fs';
+import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
 import { runAnalyzer } from '../../agent/tasks/code-analyzer/analyzer/runner.js';
 import { sanitizeMarkdownReport } from '../../agent/tasks/code-analyzer/analyzer/sanitize.js';
+import { readCachedResult, writeCachedResult } from '../../agent/tasks/code-analyzer/cache.js';
 import { buildPlanPrompt, buildPlanSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/plan.js';
 import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
 import { buildSynthesisPrompt, SYNTHESISE_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
@@ -444,6 +447,59 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }
     }
 
+    // Phase 2.5: per-task cache. Look up before paying analyzer +
+    // reviewer cost. Tier is part of the key (different tiers produce
+    // different per-task playbook output for the same question --
+    // Phase 5.B). Hits short-circuit straight to accepted-with-original
+    // -confidence; the reviewer LLM task is skipped entirely.
+    const ca = state.get<CodeAnalysisState>(K_STATE);
+    const repoSnapshotId = ca?.repoSummary.repoSnapshotId ?? '';
+    const cached = await readCachedResult({
+      question: task.question,
+      scope: task.scope,
+      repoSnapshotId,
+      tier: this._tier,
+    });
+    if (cached !== null) {
+      log.info({ itemId, kind: task.kind, tier: this._tier }, 'analyzer cache hit; skipping analyzer + reviewer');
+      this.deps.send({
+        id: this.deps.requestId,
+        stream: 'progress',
+        data: { message: `[code-analyzer] cache hit: ${task.kind} -- ${shortTitleFor(task)}` },
+      });
+      // Mirror runNextAnalyzerTask's accept-path side-effects: meta,
+      // markComplete, accepted/history, queue advance.
+      if (this.deps.todos !== undefined) {
+        try {
+          await this.deps.todos.updateItemMeta(itemId, {
+            kind: task.kind,
+            scope: task.scope,
+            origin: task.origin,
+            retryCount: task.retryCount,
+            ...(task.hint !== undefined ? { hint: task.hint } : {}),
+            answer: cached.answer,
+            findings: cached.findings,
+            citations: cached.citations,
+            confidence: cached.confidence,
+            toolCalls: cached.toolCalls,
+            ...(cached.truncated ? { truncated: true } : {}),
+            cacheHit: true,
+          });
+          await this.deps.todos.markComplete(itemId);
+        } catch (err) {
+          log.warn({ err, itemId }, 'cache-hit todos update failed (continuing)');
+        }
+      }
+      const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
+      const history = state.get<AnalyzerResult[]>(K_HISTORY) ?? [];
+      accepted.push({ task, result: cached });
+      history.push(cached);
+      state.set(K_ACCEPTED, accepted);
+      state.set(K_HISTORY, history);
+      state.set(K_TASK_QUEUE, queue.slice(1));
+      return this.runNextAnalyzerTask(state);
+    }
+
     // Progress to the user -- the analyzer awaits below for up to 60s,
     // and the framework only emits progress between tasks; we manually
     // emit so the user sees something happening.
@@ -574,6 +630,23 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
     switch (decision.decision) {
       case 'accept': {
+        // Phase 2.5: write to per-task cache BEFORE markComplete --
+        // every reviewer-accepted result is reusable on the next run
+        // (same question + scope + tier within the same git revision).
+        // Cache write is fire-and-forget defensively inside the helper
+        // (write errors are logged but never thrown), so an unexpected
+        // failure here can't sink the analyze run.
+        const caForCache = state.get<CodeAnalysisState>(K_STATE);
+        const snapshotId = caForCache?.repoSummary.repoSnapshotId ?? '';
+        await writeCachedResult(
+          {
+            question: currentTask.question,
+            scope: currentTask.scope,
+            repoSnapshotId: snapshotId,
+            tier: this._tier,
+          },
+          outcome.result,
+        );
         // Mark item complete + capture for synthesise.
         if (this.deps?.todos !== undefined) {
           try {
@@ -768,9 +841,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       primaryLanguages: [],
       topLevelPackages: [],
       closureSize,
-      // Repo snapshot id wires up in Phase 2 when the indexer exposes
-      // a stable id; for now use a startup timestamp.
-      repoSnapshotId: `t-${Date.now()}`,
+      // Phase 2.5: stable repo snapshot id keyed on git HEAD. The
+      // per-task cache uses this as part of the entry key; a new commit
+      // on this repo flips the snapshot id and naturally invalidates
+      // every cached entry. Synchronous read is fine -- `.git/HEAD` is
+      // tiny and on the local fs. Falls back to a per-process timestamp
+      // when there's no git checkout (manual rootPath, fresh dir, ...).
+      repoSnapshotId: readGitHeadSnapshotId(rootPath),
     };
   }
 
@@ -1042,4 +1119,47 @@ function stripFences(text: string): string {
     out = out.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
   }
   return out.trim();
+}
+
+/**
+ * Compute a stable repo snapshot id from the active repo's git HEAD.
+ *
+ * Handles two HEAD shapes:
+ *   1. `ref: refs/heads/<branch>` -- normal branch checkout. Read the
+ *      branch ref for the actual SHA; fall back to the literal `ref:`
+ *      string if the ref file is missing (just-created branch with no
+ *      commit yet).
+ *   2. Bare 40-hex SHA -- detached HEAD. Return it directly.
+ *
+ * On any failure (no `.git/`, unreadable file, unknown shape, empty
+ * rootPath) falls back to a per-process timestamp so cache lookups
+ * still work, but every controller instance ends up in its own private
+ * key-space (no cross-run reuse). That's acceptable -- the cache stays
+ * correct, just empty.
+ *
+ * Sync I/O is intentional: `buildRepoSummary` is called from the
+ * synchronous `buildInitialTasks` path. `.git/HEAD` and the ref file
+ * are tiny (<100 bytes) and on the local fs; the read is negligible.
+ */
+function readGitHeadSnapshotId(rootPath: string): string {
+  if (rootPath.length === 0) {
+    return `t-${Date.now()}`;
+  }
+  try {
+    const headPath = pathJoin(rootPath, '.git', 'HEAD');
+    const head = readFileSync(headPath, 'utf8').trim();
+    if (head.startsWith('ref: ')) {
+      const ref = head.slice(5).trim();
+      try {
+        const refPath = pathJoin(rootPath, '.git', ref);
+        return readFileSync(refPath, 'utf8').trim();
+      } catch {
+        return head;
+      }
+    }
+    // Detached HEAD: bare SHA.
+    return head;
+  } catch {
+    return `t-${Date.now()}`;
+  }
 }

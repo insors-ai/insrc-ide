@@ -1055,6 +1055,16 @@ async function main(): Promise<void> {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.removeOfflineBundleRpc();
 		},
+
+		// Code Analyzer per-task cache (plans/analyzers/code-analyzer.md
+		// Phase 2.5). The clearCache RPC backs the
+		// `insrc.codeAnalyzer.clearCache` palette command -- workbench
+		// doesn't have direct access to the daemon's `~/.insrc/cache/`
+		// dir, so the daemon owns the unlink and reports the count.
+		'codeAnalyzer.clearCache': async () => {
+			const mod = await import('../agent/tasks/code-analyzer/cache.js');
+			return mod.clearCache();
+		},
 	}, {
 		// Streaming handlers
 		'chat.send': chatSend,
