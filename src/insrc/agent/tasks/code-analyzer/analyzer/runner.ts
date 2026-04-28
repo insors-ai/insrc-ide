@@ -392,7 +392,13 @@ export async function runAnalyzer(
   }
 
   if (!parsed.ok) {
-    log.warn({ itemId: task.itemId, reason: parsed.reason }, 'analyzer JSON retry also failed; falling back to prose-only result');
+    // Log `detail` alongside `reason` so the schema_violation path
+    // names the specific parser rule that failed (e.g. "missing or
+    // empty `answer`", "findings[2].concern \"complexity\" is not a
+    // recognised CodeAnalysisConcern"). Without this, F10 in
+    // plans/analyzers/code-analyzer.md was a black box -- we knew
+    // the retry failed but not why.
+    log.warn({ itemId: task.itemId, reason: parsed.reason, detail: parsed.detail }, 'analyzer JSON retry also failed; falling back to prose-only result');
     const fallback: AnalyzerResult = {
       itemId: task.itemId,
       answer: lastText.length > 0
