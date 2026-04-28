@@ -23,6 +23,11 @@
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import {
+	computeSectionCacheKey,
+	priorBodiesFromMap,
+	type ContentCache,
+} from './cache.js';
 import type { OutlineResult, SectionPlan, SectionResult } from './types.js';
 
 const log = getLogger('content-gen:section');
@@ -54,6 +59,23 @@ export interface RunSectionsInput {
 	readonly parallel: boolean;
 	readonly signal?: AbortSignal | undefined;
 	readonly onSectionComplete?: ((r: SectionResult) => void) | undefined;
+	/**
+	 * Optional section-level cache (commit 3). When set, each
+	 * section's body is keyed on outline.title + section.id +
+	 * section.intent + dependsOn-bodies-hash + cacheContext. On hit
+	 * the LLM call is skipped and the cached body is returned as a
+	 * non-fallback SectionResult; on a successful (non-fallback)
+	 * generation the body is written back. Cache misses + writes are
+	 * logged but never throw.
+	 */
+	readonly cache?: ContentCache | undefined;
+	/**
+	 * Caller-supplied salt for the cache key -- typically the active
+	 * repo's git HEAD SHA or analogous version stamp. Bumping this
+	 * invalidates every cached entry for the run. Ignored when
+	 * `cache` is unset.
+	 */
+	readonly cacheContext?: string | undefined;
 }
 
 /**
@@ -149,6 +171,33 @@ async function runSection(
 		return finalize(emptyFallback(section.id, 'aborted'), input);
 	}
 
+	// ----- Cache lookup (commit 3) ------------------------------------------
+	let cacheKey: string | undefined;
+	if (input.cache !== undefined) {
+		const ctxOpts: { cacheContext?: string } = {};
+		if (input.cacheContext !== undefined) {
+			ctxOpts.cacheContext = input.cacheContext;
+		}
+		cacheKey = computeSectionCacheKey({
+			outlineTitle: input.outline.title,
+			section,
+			priorBodies: priorBodiesFromMap(section.dependsOn, prior),
+			...ctxOpts,
+		});
+		try {
+			const cached = await input.cache.get(cacheKey);
+			if (cached !== undefined) {
+				log.info({ id: section.id, cacheKey }, 'section: cache hit; skipping LLM call');
+				return finalize(
+					{ id: section.id, body: cached, fallback: false, note: 'cache hit' },
+					input,
+				);
+			}
+		} catch (err) {
+			log.warn({ id: section.id, err: (err as Error).message }, 'section: cache.get threw (treating as miss)');
+		}
+	}
+
 	const { system, user } = input.build({
 		section,
 		outline: input.outline,
@@ -163,7 +212,9 @@ async function runSection(
 	// First attempt.
 	const first = await tryComplete(messages, provider, maxTokens);
 	if (first.kind === 'ok') {
-		return finalize(toResult(section, first), input);
+		const result = toResult(section, first);
+		await maybeCachePut(input, cacheKey, result);
+		return finalize(result, input);
 	}
 	if (first.kind === 'aborted') {
 		return finalize(emptyFallback(section.id, 'aborted'), input);
@@ -176,7 +227,9 @@ async function runSection(
 	log.warn({ id: section.id, reason: first.reason }, 'section: first attempt failed; retrying');
 	const second = await tryComplete(messages, provider, maxTokens);
 	if (second.kind === 'ok') {
-		return finalize(toResult(section, second), input);
+		const result = toResult(section, second);
+		await maybeCachePut(input, cacheKey, result);
+		return finalize(result, input);
 	}
 	if (second.kind === 'aborted') {
 		return finalize(emptyFallback(section.id, 'aborted'), input);
@@ -185,6 +238,29 @@ async function runSection(
 	const note = `provider error: ${second.reason}`;
 	log.warn({ id: section.id, note }, 'section: both attempts failed; falling back');
 	return finalize({ id: section.id, body: '', fallback: true, note }, input);
+}
+
+/**
+ * Write a successful (non-fallback) section to the cache. Failures
+ * (no key / no cache / fallback result / put error) are swallowed --
+ * cache is opportunistic.
+ */
+async function maybeCachePut(
+	input: RunSectionsInput,
+	cacheKey: string | undefined,
+	result: SectionResult,
+): Promise<void> {
+	if (input.cache === undefined || cacheKey === undefined) {
+		return;
+	}
+	if (result.fallback) {
+		return;
+	}
+	try {
+		await input.cache.put(cacheKey, result.body);
+	} catch (err) {
+		log.warn({ id: result.id, err: (err as Error).message }, 'section: cache.put threw (continuing)');
+	}
 }
 
 function finalize(result: SectionResult, input: RunSectionsInput): SectionResult {

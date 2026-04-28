@@ -56,6 +56,15 @@ export {
 export { runSections, DEFAULT_SECTION_BUDGET_TOKENS } from './section.js';
 export { stitch } from './stitch.js';
 export { OUTLINE_SCHEMA } from './schema.js';
+export {
+	makeDiskContentCache,
+	computeSectionCacheKey,
+	hashPriorBodies,
+	priorBodiesFromMap,
+	type ContentCache,
+	type DiskContentCacheOpts,
+	type SectionCacheKeyInput,
+} from './cache.js';
 
 /**
  * Run the full two-pass content generation: outline -> per-section
@@ -108,6 +117,9 @@ export async function generateMultiPass(
 			parallel,
 			...(input.signal !== undefined ? { signal: input.signal } : {}),
 			...(input.onSectionComplete !== undefined ? { onSectionComplete: input.onSectionComplete } : {}),
+			// Commit 3: per-section cache + key salt threaded through.
+			...(input.cache !== undefined ? { cache: input.cache } : {}),
+			...(input.cacheContext !== undefined ? { cacheContext: input.cacheContext } : {}),
 		},
 		provider,
 	);

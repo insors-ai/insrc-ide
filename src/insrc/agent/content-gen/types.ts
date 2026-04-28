@@ -99,6 +99,22 @@ export interface GenerateMultiPassInput {
 	 * N concurrent generations would swamp it.
 	 */
 	readonly parallel?: boolean;
+	/**
+	 * Optional section-level cache (commit 3). When provided, each
+	 * section's body is keyed on outline.title + section.id +
+	 * section.intent + dependsOn-bodies-hash + cacheContext. On
+	 * hit the LLM call is skipped; on a successful generation the
+	 * body is written back. Caller decides storage shape -- pass
+	 * `makeDiskContentCache(...)` for a disk LRU, or implement
+	 * the `ContentCache` interface in-memory / sqlite / wherever.
+	 */
+	readonly cache?: import('./cache.js').ContentCache | undefined;
+	/**
+	 * Optional cache-key salt -- typically the active repo's git
+	 * HEAD SHA so a new commit invalidates every cached entry.
+	 * Ignored when `cache` is unset.
+	 */
+	readonly cacheContext?: string | undefined;
 }
 
 export interface GenerateMultiPassResult {
