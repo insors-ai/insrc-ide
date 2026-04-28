@@ -12,9 +12,17 @@
  *                    daemon boot creates all three tables idempotently.
  *
  * Mirrors the `conversations.ts` pattern: lazy module-level table cache,
- * idempotent create-or-open on startup, SQL-string helper for
- * `table.update()` calls (LanceDB parses string values as SQL
- * expressions, not bind parameters).
+ * idempotent create-or-open on startup. LanceDB's `table.update()` has
+ * two overloads:
+ *   - `{ where, values }`    -- `where` is a SQL expression; `values`
+ *                               holds LITERAL strings written verbatim
+ *                               into the cell (sqlStr() must NOT be
+ *                               applied here -- F9 in
+ *                               plans/analyzers/code-analyzer.md).
+ *   - `{ where, valuesSql }` -- both fields are SQL expressions; the
+ *                               value side accepts e.g. `"x + 1"` or
+ *                               `"'literal'"`. We don't use this
+ *                               overload here.
  */
 
 import { Schema, Field, Utf8, Float32, FixedSizeList, Float64, Bool } from 'apache-arrow';
@@ -633,11 +641,22 @@ export async function updateList(
     );
   }
 
-  const updates: Record<string, string> = { updatedAt: sqlStr(now) };
-  if (fields.title       !== undefined) updates['title']       = sqlStr(fields.title);
-  if (fields.description !== undefined) updates['description'] = sqlStr(fields.description);
-  if (fields.status      !== undefined) updates['status']      = sqlStr(fields.status);
-  if (fields.body        !== undefined) updates['body']        = sqlStr(fields.body);
+  // F9 fix: LanceDB's `table.update({ where, values })` overload takes
+  // LITERAL values (the string written verbatim into the cell). The
+  // companion `valuesSql` overload is the one that takes SQL
+  // expressions. Pre-fix this code wrapped each value with `sqlStr()`
+  // (which adds surrounding single quotes for SQL syntax) and then
+  // passed the result through `values:` -- so the cell ended up
+  // storing the literal text `'in_progress'` (quote chars included).
+  // On the next read, `canTransitionItem` saw `''in_progress''` (the
+  // outer quotes plus the SQL-quoted text) and rejected every
+  // legitimate status transition. The `where` clause genuinely IS a
+  // SQL expression, so it keeps using `sqlStr()`.
+  const updates: Record<string, string> = { updatedAt: now };
+  if (fields.title       !== undefined) updates['title']       = fields.title;
+  if (fields.description !== undefined) updates['description'] = fields.description;
+  if (fields.status      !== undefined) updates['status']      = fields.status;
+  if (fields.body        !== undefined) updates['body']        = fields.body;
 
   const table = await getListsTable(db);
   await table.update({ where: `id = ${sqlStr(listId)}`, values: updates });
@@ -686,15 +705,19 @@ export async function updateItem(
     }
   }
 
-  const updates: Record<string, string> = { updatedAt: sqlStr(now) };
-  if (fields.title         !== undefined) updates['title']         = sqlStr(fields.title);
-  if (fields.description   !== undefined) updates['description']   = sqlStr(fields.description);
-  if (fields.status        !== undefined) updates['status']        = sqlStr(fields.status);
-  if (fields.blockedReason !== undefined) updates['blockedReason'] = sqlStr(fields.blockedReason);
-  if (fields.tags          !== undefined) updates['tagsJson']      = sqlStr(JSON.stringify(fields.tags));
-  if (fields.meta          !== undefined) updates['metaJson']      = sqlStr(JSON.stringify(fields.meta));
+  // F9 fix: see the matching block in updateList(). LanceDB's
+  // `values:` overload takes literal values; pre-fix every assignment
+  // here ran the value through `sqlStr()` and wrote the SQL-quoted
+  // form (e.g. `'in_progress'`) into the cell verbatim.
+  const updates: Record<string, string> = { updatedAt: now };
+  if (fields.title         !== undefined) updates['title']         = fields.title;
+  if (fields.description   !== undefined) updates['description']   = fields.description;
+  if (fields.status        !== undefined) updates['status']        = fields.status;
+  if (fields.blockedReason !== undefined) updates['blockedReason'] = fields.blockedReason;
+  if (fields.tags          !== undefined) updates['tagsJson']      = JSON.stringify(fields.tags);
+  if (fields.meta          !== undefined) updates['metaJson']      = JSON.stringify(fields.meta);
   if (fields.orderKey      !== undefined) updates['orderKey']      = String(fields.orderKey);
-  if (fields.status === 'completed') updates['completedAt'] = sqlStr(now);
+  if (fields.status === 'completed') updates['completedAt'] = now;
 
   const table = await getItemsTable(db);
   await table.update({ where: `id = ${sqlStr(itemId)}`, values: updates });
@@ -734,13 +757,14 @@ export async function transferList(
   };
   const transfers = [...existing.transfers, entry];
 
+  // F9 fix: literal values for the `values:` overload (no sqlStr).
   const table = await getListsTable(db);
   await table.update({
     where: `id = ${sqlStr(listId)}`,
     values: {
-      owner:         sqlStr(to),
-      transfersJson: sqlStr(JSON.stringify(transfers)),
-      updatedAt:     sqlStr(now),
+      owner:         to,
+      transfersJson: JSON.stringify(transfers),
+      updatedAt:     now,
     },
   });
 
@@ -768,12 +792,13 @@ export async function reparentList(
     await assertParentAllowed(db, newParentListId, listId, existing.sessionId);
   }
 
+  // F9 fix: literal values for the `values:` overload (no sqlStr).
   const table = await getListsTable(db);
   await table.update({
     where: `id = ${sqlStr(listId)}`,
     values: {
-      parentListId: sqlStr(newParentListId ?? ''),
-      updatedAt:    sqlStr(now),
+      parentListId: newParentListId ?? '',
+      updatedAt:    now,
     },
   });
 
@@ -807,9 +832,10 @@ export async function updateComment(
 	if (existing === null) {
 		throw new Error(`updateComment: comment '${commentId}' does not exist`);
 	}
+	// F9 fix: literal values for the `values:` overload (no sqlStr).
 	const updates: Record<string, string> = {};
-	if (fields.body !== undefined) { updates['body'] = sqlStr(fields.body); }
-	if (fields.editedAt !== undefined) { updates['editedAt'] = sqlStr(fields.editedAt); }
+	if (fields.body !== undefined) { updates['body'] = fields.body; }
+	if (fields.editedAt !== undefined) { updates['editedAt'] = fields.editedAt; }
 	if (fields.agentAcknowledged !== undefined) {
 		updates['agentAcknowledged'] = fields.agentAcknowledged ? 'true' : 'false';
 	}
