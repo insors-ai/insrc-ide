@@ -228,6 +228,14 @@ export interface RunAnalyzerOpts {
    */
   wallClockMs?: number | undefined;
   /**
+   * Scope tier for this run. Phase 5.B: threaded into the analyzer
+   * system prompt so the tier-conditional playbook section
+   * (`tierAnalyzerGuidance`) shifts the analytical altitude
+   * (per-line citations / signature-level / structural). Defaults
+   * to 'M' for backwards compat.
+   */
+  tier?: import('../../../../shared/classify.js').ScopeSize | undefined;
+  /**
    * Per-call path approval check (Phase 1.6 fs-access gate). Called
    * with the absolute path the analyzer wants to read before
    * executeTool runs for fs-class tools (Read / Grep / ListDirectory).
@@ -269,7 +277,7 @@ export async function runAnalyzer(
   task: AnalysisTask,
   opts: RunAnalyzerOpts,
 ): Promise<RunAnalyzerOutcome> {
-  const messages = buildInitialMessages(task);
+  const messages = buildInitialMessages(task, opts.tier ?? 'M');
   const callTrace: ToolCallSummary[] = [];
   let cumulativeReadBytes = 0;
   const startedAt = Date.now();
@@ -521,7 +529,10 @@ export async function runAnalyzer(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildInitialMessages(task: AnalysisTask): LLMMessage[] {
+function buildInitialMessages(
+  task: AnalysisTask,
+  tier: import('../../../../shared/classify.js').ScopeSize,
+): LLMMessage[] {
   const userBody = [
     '# Task',
     JSON.stringify(
@@ -529,6 +540,7 @@ function buildInitialMessages(task: AnalysisTask): LLMMessage[] {
         kind: task.kind,
         question: task.question,
         scope: task.scope,
+        tier,
         retryCount: task.retryCount,
         hint: task.hint,
         origin: task.origin,
@@ -545,7 +557,7 @@ function buildInitialMessages(task: AnalysisTask): LLMMessage[] {
   ].join('\n');
 
   return [
-    { role: 'system', content: buildAnalyzerSystemPrompt() },
+    { role: 'system', content: buildAnalyzerSystemPrompt(tier) },
     { role: 'user', content: userBody },
   ];
 }

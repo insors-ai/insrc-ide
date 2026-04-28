@@ -1,13 +1,21 @@
 /**
  * Local-LLM analyzer system prompt.
  *
- * Per `design/analyzers/code-analyzer.html` section 7.6: the four hard
+ * Per `design/analyzers/code-analyzer.html` section 7.6: the hard
  * rules at the top are re-injected by the builder regardless of any
  * user override. Users may loosen the per-kind playbook by editing
  * `~/.insrc/code-analyzer/analyzer.md` (Phase 4 polish), but
  * `HARD_RULES` is non-negotiable -- the analyzer's value-add over raw
  * search depends on grounding every claim in an actual code-read.
+ *
+ * Phase 5.B: the playbook is now tier-conditional. HARD_RULES stay
+ * universal; the per-tier addendum shifts the analytical altitude
+ * (per-line citations / signature-level / structural) and tells the
+ * model whether to read full bodies (S/M), prefer signatures (L/XL),
+ * or stay at file-level (XXL+).
  */
+
+import type { ScopeSize } from '../../../../shared/classify.js';
 
 /**
  * Re-injected on every analyzer task, even if the user has overridden
@@ -225,12 +233,93 @@ read.
   to handle it.`;
 
 /**
+ * Per-tier analyzer guidance. Injected after PER_KIND_PLAYBOOK so the
+ * model's per-kind sequences are still in context, then refined by
+ * the tier rules. The kind playbook tells the model HOW to walk; the
+ * tier guidance tells it WHAT ALTITUDE to walk at.
+ */
+function tierAnalyzerGuidance(tier: ScopeSize): string {
+  switch (tier) {
+    case 'S':
+    case 'M':
+      return `# Tier (${tier} -- per-entity, line-level)
+
+The user wants a focused answer on one entity or a tight cluster.
+Per-kind sequences above apply as written:
+  - Read full bodies when the answer hinges on what the body
+    actually does.
+  - Citations include lineStart / lineEnd; snippets show the
+    load-bearing lines.
+  - Findings drill into specific lines / functions.
+
+This is the existing default. Don't pad with module-level
+summaries the user didn't ask for.`;
+
+    case 'L':
+    case 'XL':
+      return `# Tier (${tier} -- module / signature-level)
+
+The user wants a module-level read, not a per-line dive. Adjust
+the per-kind sequences accordingly:
+  - Prefer \`graph_entity\` (signature + neighbours-summary) over
+    \`Read\` (full body). Bodies only for the load-bearing N
+    functions.
+  - Cite SIGNATURES, not full bodies. Citation snippets should
+    show signatures or the specific bytes that decide the
+    finding -- not the whole function body.
+  - Don't paste >30 lines of code in any single citation.
+  - Findings describe public-surface contracts and call patterns,
+    not individual lines.
+
+When you'd otherwise call \`Read(file_path, offset, limit)\` to
+slurp 200 lines, ask yourself if a \`graph_entity\` summary +
+"signature + 2-line snippet" citation answers the question. It
+usually does at this tier.`;
+
+    case 'XXL':
+    case 'XXXL':
+    case 'XXXXL':
+      return `# Tier (${tier} -- structural / sub-system)
+
+The user wants the architectural shape -- responsibility map,
+dependency graph, sub-system boundaries -- NOT line-level
+findings. Adjust the per-kind sequences accordingly:
+  - \`describe\` tasks at this tier produce structural prose +
+    a brief module-edge list. Public surface, principal types,
+    "what does this sub-system DO", "what does it depend on / who
+    depends on it".
+  - Use \`graph_search\` + \`ListDirectory\` to map the
+    sub-system's shape. \`graph_entity\` for principal types
+    only. Avoid \`Read\` entirely unless asked about a specific
+    contract.
+  - Citations may be FILE-LEVEL: \`{ "path": "src/auth/" }\` is
+    valid; \`lineStart\` / \`lineEnd\` are optional and usually
+    absent at this tier. The parser still requires citations[]
+    on each finding to be non-empty -- give at least one
+    file-level path.
+  - Don't paste any code body. The output is a structural map,
+    not a code listing.
+  - Findings describe the sub-system, not individual lines:
+    "the auth sub-system owns session persistence + token
+    verification; depends on the storage layer (lance) for
+    session rows; consumers are the chat-handler and the
+    daemon's startup path".
+
+If you find yourself reading a function body at this tier, you're
+working at the wrong altitude. Step back to the sub-system view.`;
+  }
+}
+
+/**
  * Build the analyzer's per-task system prompt. The /no_think prefix
  * (required for qwen3-coder structured tool calls per CLAUDE.md) is
  * NOT prepended here -- the provider wrapper does that based on the
  * tools-present check.
+ *
+ * Tier defaults to `'M'` for backwards compat with callers that
+ * don't yet thread the scope through.
  */
-export function buildAnalyzerSystemPrompt(): string {
+export function buildAnalyzerSystemPrompt(tier: ScopeSize = 'M'): string {
   return [
     'You are the Code Analyzer\'s local executor. You receive ONE task at a',
     'time and produce a structured AnalyzerResult.',
@@ -238,5 +327,7 @@ export function buildAnalyzerSystemPrompt(): string {
     HARD_RULES,
     '',
     PER_KIND_PLAYBOOK,
+    '',
+    tierAnalyzerGuidance(tier),
   ].join('\n');
 }

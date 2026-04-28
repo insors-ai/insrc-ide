@@ -27,7 +27,7 @@
 import { getLogger } from '../../shared/logger.js';
 import { runAnalyzer } from '../../agent/tasks/code-analyzer/analyzer/runner.js';
 import { sanitizeMarkdownReport } from '../../agent/tasks/code-analyzer/analyzer/sanitize.js';
-import { buildPlanPrompt, PLAN_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/plan.js';
+import { buildPlanPrompt, buildPlanSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/plan.js';
 import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
 import { buildSynthesisPrompt, SYNTHESISE_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
 import type { ScopeSize } from '../../shared/classify.js';
@@ -176,10 +176,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
     return [{
       index: 0,
-      description: 'Code Analyzer: planning tasks...',
+      description: `Code Analyzer: planning tasks (tier ${this._tier})...`,
       kind: 'llm',
       intent: 'code-analysis',
-      systemPrompt: PLAN_SYSTEM,
+      systemPrompt: buildPlanSystemPrompt(this._tier),
       userMessage: this.renderPlanUserMessage(this._request, this._repoSummary),
       resolverAgent: 'code-analyzer',
       resolverStep: 'plan',
@@ -468,6 +468,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // XL=60s, XXL+=90s. Default tier is 'M' (60s -- the
       // pre-Phase-5 budget) so existing callers don't change shape.
       wallClockMs: capsForTier(this._tier).perTaskWallClockMs,
+      // Phase 5.B: tier threaded into the analyzer system prompt so
+      // tierAnalyzerGuidance shifts the analytical altitude
+      // (per-line citations / signature-level / structural).
+      tier: this._tier,
     });
     state.set(K_LAST_RUNNER, outcome);
 
@@ -771,7 +775,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   private renderPlanUserMessage(request: string, repo: RepoSummary): string {
-    const messages = buildPlanPrompt(request, repo);
+    const messages = buildPlanPrompt(request, repo, this._tier);
     return messages
       .filter(m => m.role === 'user')
       .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
