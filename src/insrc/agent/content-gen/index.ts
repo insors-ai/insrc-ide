@@ -53,7 +53,7 @@ export {
 	type GenerateOutlineInput,
 	type GenerateOutlineResult,
 } from './outline.js';
-export { runSections, DEFAULT_SECTION_BUDGET_TOKENS } from './section.js';
+export { runSections, DEFAULT_SECTION_BUDGET_TOKENS, MAX_SECTION_CONTINUATIONS } from './section.js';
 export { stitch } from './stitch.js';
 export { OUTLINE_SCHEMA } from './schema.js';
 export {

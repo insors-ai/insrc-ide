@@ -33,12 +33,65 @@ import type { OutlineResult, SectionPlan, SectionResult } from './types.js';
 const log = getLogger('content-gen:section');
 
 /**
- * Default per-section token budget when neither `SectionPlan
+ * Default per-CALL token budget when neither `SectionPlan
  * .budgetTokens` nor `GenerateMultiPassInput.section
- * .defaultBudgetTokens` is set. 1500 is comfortably under devstral's
- * post-tool-loop output ceiling.
+ * .defaultBudgetTokens` is set. 4000 sits just under devstral's
+ * post-tool-loop output ceiling and matches the legacy single-pass
+ * synthesise budget. Note this caps a SINGLE provider.complete
+ * call -- the section runner's continuation loop strings multiple
+ * calls together when the model hits `stopReason: max_tokens`, so
+ * a section's effective ceiling is `MAX_SECTION_CONTINUATIONS *
+ * DEFAULT_SECTION_BUDGET_TOKENS` (default 5 * 4000 = 20K tokens).
  */
-export const DEFAULT_SECTION_BUDGET_TOKENS = 1500;
+export const DEFAULT_SECTION_BUDGET_TOKENS = 4000;
+
+/**
+ * How many continuation passes a section may chain together when
+ * each call ends at `stopReason: max_tokens`. The first call is
+ * always allowed; this cap counts the EXTRA passes after that.
+ * Default 4 -> up to 5 calls per section. Above that we ship the
+ * partial body with `fallback: true, note: 'continuation cap
+ * reached; truncated'` so a verbose / runaway section can't burn
+ * unbounded provider time.
+ */
+export const MAX_SECTION_CONTINUATIONS = 4;
+
+/**
+ * Continuation prompt fed back as a fresh user turn after each
+ * `max_tokens` exit. Keep it stern -- local models like to start
+ * a continuation with "Continuing..." or re-summarise everything
+ * they've already written, both of which we strip in
+ * `stripContinuationPreamble`.
+ */
+const CONTINUATION_PROMPT = [
+	'Continue from exactly where you left off. Specifically:',
+	'- Do NOT repeat any content you have already written.',
+	'- Do NOT summarise what you wrote so far.',
+	'- Do NOT start with "Continuing..." / "I will continue..." / "Here is the rest...".',
+	'- Begin with the next sentence as if your previous reply had not been cut off.',
+].join('\n');
+
+/**
+ * Strip the most common preambles a continuation pass emits despite
+ * the prompt. Conservative -- only matches at the very start of the
+ * response so we don't accidentally remove content that legitimately
+ * mentions "continuing" mid-sentence.
+ */
+const PREAMBLE_PATTERNS: readonly RegExp[] = [
+	/^\s*(continuing|continued)\s*[.\-:,]\s*/i,
+	/^\s*i'?ll continue\s*[.\-:,]?\s*/i,
+	/^\s*let me continue\s*[.\-:,]?\s*/i,
+	/^\s*here'?s the (rest|continuation|next part)\s*[.\-:,]?\s*/i,
+	/^\s*(picking up|resuming) (from|where)[^.\n]*\.\s*/i,
+];
+
+function stripContinuationPreamble(text: string): string {
+	let out = text;
+	for (const re of PREAMBLE_PATTERNS) {
+		out = out.replace(re, '');
+	}
+	return out.replace(/^\s+/, '');
+}
 
 /**
  * Caller-supplied prompt builder. Receives the section under draft,
@@ -203,41 +256,114 @@ async function runSection(
 		outline: input.outline,
 		prior,
 	});
-	const messages: LLMMessage[] = [
+	const baseMessages: LLMMessage[] = [
 		{ role: 'system', content: system },
 		{ role: 'user',   content: user },
 	];
 	const maxTokens = section.budgetTokens ?? input.defaultBudgetTokens;
 
-	// First attempt.
-	const first = await tryComplete(messages, provider, maxTokens);
-	if (first.kind === 'ok') {
-		const result = toResult(section, first);
-		await maybeCachePut(input, cacheKey, result);
-		return finalize(result, input);
-	}
-	if (first.kind === 'aborted') {
-		return finalize(emptyFallback(section.id, 'aborted'), input);
+	// Continuation loop. Each iteration runs one provider.complete:
+	//
+	//   - attempt 0: original prompt; tokens become the first chunk.
+	//   - attempt 1+: the accumulated body so far is fed back as the
+	//     prior assistant turn + a CONTINUATION_PROMPT user turn.
+	//
+	// Exit conditions:
+	//   - `stopReason: end_turn`  -> model finished; ship clean.
+	//   - aborted via signal      -> ship partial body if any, else
+	//                                empty fallback.
+	//   - provider error          -> retry once on attempt 0 only;
+	//                                later attempts return partial.
+	//   - MAX_SECTION_CONTINUATIONS reached AND last call still hit
+	//     max_tokens -> ship with fallback note 'continuation cap
+	//     reached; truncated'.
+	let body = '';
+	let truncated = false;
+	let attempt = 0;
+	while (attempt <= MAX_SECTION_CONTINUATIONS) {
+		if (input.signal?.aborted) {
+			return finalize(
+				body.length > 0
+					? { id: section.id, body: body.trim(), fallback: true, note: 'aborted (partial body kept)' }
+					: emptyFallback(section.id, 'aborted'),
+				input,
+			);
+		}
+
+		const callMessages = attempt === 0
+			? baseMessages
+			: [
+					...baseMessages,
+					{ role: 'assistant' as const, content: body },
+					{ role: 'user'      as const, content: CONTINUATION_PROMPT },
+				];
+
+		let result = await tryComplete(callMessages, provider, maxTokens);
+
+		// Provider-error retry: existing semantics preserved -- only
+		// the FIRST call gets a free retry (later attempts are
+		// continuations; a mid-loop retry is a partial-body return).
+		if (result.kind === 'error' && attempt === 0) {
+			log.warn({ id: section.id, reason: result.reason }, 'section: first attempt failed; retrying');
+			result = await tryComplete(callMessages, provider, maxTokens);
+		}
+
+		if (result.kind === 'aborted') {
+			return finalize(
+				body.length > 0
+					? { id: section.id, body: body.trim(), fallback: true, note: 'aborted (partial body kept)' }
+					: emptyFallback(section.id, 'aborted'),
+				input,
+			);
+		}
+		if (result.kind === 'error') {
+			if (body.length > 0) {
+				log.warn({ id: section.id, attempt, reason: result.reason }, 'section: continuation error; keeping partial body');
+				return finalize(
+					{ id: section.id, body: body.trim(), fallback: true, note: `continuation error after ${attempt} pass(es): ${result.reason}` },
+					input,
+				);
+			}
+			log.warn({ id: section.id, reason: result.reason }, 'section: both attempts failed; falling back');
+			return finalize(
+				{ id: section.id, body: '', fallback: true, note: `provider error: ${result.reason}` },
+				input,
+			);
+		}
+
+		// ok
+		const chunk = attempt === 0 ? result.text : stripContinuationPreamble(result.text);
+		body += chunk;
+		truncated = result.truncated;
+
+		if (!result.truncated) {
+			break;  // model finished naturally
+		}
+		if (attempt < MAX_SECTION_CONTINUATIONS) {
+			log.info({ id: section.id, attempt, bodyLen: body.length }, 'section: max_tokens hit; continuing');
+		}
+		attempt++;
 	}
 
-	// Retry once -- provider error is the only retry-eligible failure
-	// (truncation / empty body are accepted-with-fallback-flag and
-	// don't re-fire). The retry uses the same messages -- no
-	// validation feedback to attach since pass 2 is unconstrained.
-	log.warn({ id: section.id, reason: first.reason }, 'section: first attempt failed; retrying');
-	const second = await tryComplete(messages, provider, maxTokens);
-	if (second.kind === 'ok') {
-		const result = toResult(section, second);
-		await maybeCachePut(input, cacheKey, result);
-		return finalize(result, input);
+	const finalBody = body.trim();
+	if (finalBody.length === 0) {
+		return finalize({ id: section.id, body: '', fallback: true, note: 'empty response' }, input);
 	}
-	if (second.kind === 'aborted') {
-		return finalize(emptyFallback(section.id, 'aborted'), input);
+	if (truncated) {
+		// Hit the continuation cap with the last call STILL truncated.
+		// Ship what we have but flag the section as partial.
+		const partial: SectionResult = {
+			id: section.id,
+			body: finalBody,
+			fallback: true,
+			note: `continuation cap reached (${MAX_SECTION_CONTINUATIONS + 1} passes); truncated`,
+		};
+		await maybeCachePut(input, cacheKey, partial);
+		return finalize(partial, input);
 	}
-
-	const note = `provider error: ${second.reason}`;
-	log.warn({ id: section.id, note }, 'section: both attempts failed; falling back');
-	return finalize({ id: section.id, body: '', fallback: true, note }, input);
+	const clean: SectionResult = { id: section.id, body: finalBody, fallback: false };
+	await maybeCachePut(input, cacheKey, clean);
+	return finalize(clean, input);
 }
 
 /**
@@ -272,20 +398,6 @@ function finalize(result: SectionResult, input: RunSectionsInput): SectionResult
 		}
 	}
 	return result;
-}
-
-function toResult(
-	section: SectionPlan,
-	attempt: Extract<CompleteAttempt, { kind: 'ok' }>,
-): SectionResult {
-	const body = attempt.text.trim();
-	if (body.length === 0) {
-		return { id: section.id, body: '', fallback: true, note: 'empty response' };
-	}
-	if (attempt.truncated) {
-		return { id: section.id, body, fallback: true, note: 'budget exceeded; truncated' };
-	}
-	return { id: section.id, body, fallback: false };
 }
 
 function emptyFallback(id: string, note: string): SectionResult {

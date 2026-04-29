@@ -999,7 +999,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
         section: {
           build: sectionBuild,
-          defaultBudgetTokens: 1500,
+          // 4 K matches the single-pass synthesise budget + sits
+          // under devstral's post-tool-loop output ceiling. Combined
+          // with the section runner's continuation loop (up to
+          // MAX_SECTION_CONTINUATIONS extra passes when the model
+          // hits max_tokens), each section can grow to ~20 K tokens
+          // before we ship a partial.
+          defaultBudgetTokens: 4000,
         },
         parallel: true,
         cache: makeDiskContentCache({
