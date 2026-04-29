@@ -119,6 +119,15 @@ const PRESENT_GATE_TIMEOUT_MS = 60 * 60 * 1000; void PRESENT_GATE_TIMEOUT_MS;
  */
 const RERUN_BOOTSTRAP_MARKER = '__rerun-bootstrap__';
 
+/**
+ * Sentinel emitted by buildResumeTask's transform task on a
+ * checkpoint resume (Phase 4-followup-C). The next() phase machine
+ * recognises this and dispatches to the resume-bootstrap handler,
+ * which inspects the persisted phase / queue / accepted state and
+ * decides where to pick the run back up.
+ */
+const RESUME_BOOTSTRAP_MARKER = '__resume-bootstrap__';
+
 // ---------------------------------------------------------------------------
 // State keys (kept here so the rest of the file uses string constants)
 // ---------------------------------------------------------------------------
@@ -291,6 +300,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const phase = state.get<Phase>(K_PHASE) ?? 'planning';
     log.info({ phase, completed: completed.description, gateAction: gateReply?.action }, 'next()');
 
+    // Resume bootstrap: the resume RPC's first task is a pass-through
+    // transform carrying the RESUME_BOOTSTRAP_MARKER. Detect it before
+    // the regular phase routing so we can pick where to re-enter the
+    // pipeline based on the persisted `phase`, not the marker's
+    // current phase value (which is whatever was checkpointed).
+    if (completed.output.trim() === RESUME_BOOTSTRAP_MARKER) {
+      return this.afterResumeBootstrap(state, phase);
+    }
+
     switch (phase) {
       case 'planning':
         return this.afterPlan(completed, state);
@@ -333,6 +351,72 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // would just double-print; an empty FinalizeResult lets the
     // framework render nothing extra.
     return { output: '', format: 'markdown' };
+  }
+
+  // -------------------------------------------------------------------------
+  // Checkpoint resume (project_code_analyzer_checkpoint_recovery.md)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Restore controller instance fields from a persisted state store
+   * before `next()` resumes the pipeline. Called from the resume RPC
+   * after the framework has hydrated the state store from the on-disk
+   * checkpoint file. Pure rebuild -- no side effects beyond setting
+   * private fields. Mirrors the brainstorm `restoreState` shape.
+   */
+  restoreState(state: TaskStateStore): void {
+    const ca = state.get<CodeAnalysisState>(K_STATE);
+    if (ca === undefined) {
+      log.warn('restoreState: K_STATE missing; resume will run with default tier and no parent edge');
+      return;
+    }
+    this._request     = ca.request;
+    this._repoSummary = ca.repoSummary;
+    this._tier        = ca.tier;
+    // The checkpoint file doesn't currently persist the
+    // `_parentListId` / `_rerunFromListId` instance fields. They're
+    // reconstructable from the active list's `parentListId` (the
+    // todos framework stores it durably) but only if the caller
+    // re-supplies them via ControllerInput. For now leave them
+    // undefined on resume -- new analyzer items still belong to the
+    // existing list (see `_listId` -> `K_LIST_ID`), so the
+    // parent-child thread is preserved without re-stamping.
+  }
+
+  /**
+   * Build the first task to run when resuming from a checkpoint.
+   * Returned as a single pass-through transform carrying the
+   * `RESUME_BOOTSTRAP_MARKER`; `next()`'s phase handler recognises
+   * the marker and dispatches based on the persisted `K_PHASE`:
+   *
+   *   - planning              -> re-fire the plan LLM task.
+   *   - plan-approval         -> re-fire the plan-size approval gate.
+   *   - analyzing / reviewing -> pop next from K_TASK_QUEUE and re-run
+   *                              the analyzer + review loop.
+   *   - synthesising          -> re-fire synthesise (single-pass) or
+   *                              re-run multipass.
+   *   - done                  -> error out; nothing to resume.
+   *
+   * Caveat: the analyzer runner's inline tool-loop iterations are
+   * not individually checkpointed (each call to `runAnalyzer` is one
+   * persisted step at the framework level). On a crash mid-runAnalyzer
+   * the in-flight task restarts from scratch; previously-accepted
+   * tasks survive in K_ACCEPTED.
+   */
+  buildResumeTask(state: TaskStateStore): Task {
+    const phase = state.get<Phase>(K_PHASE) ?? 'planning';
+    log.info({ phase, queueLen: state.get<string[]>(K_TASK_QUEUE)?.length ?? 0 }, 'resume: building bootstrap task');
+    return {
+      index: 0,
+      description: `Code Analyzer: resuming from checkpoint (phase ${phase})...`,
+      kind: 'transform',
+      intent: 'code-analysis',
+      passThrough: true,
+      userMessage: RESUME_BOOTSTRAP_MARKER,
+      outputFormat: 'text',
+      stateKey: K_PLAN_RESULT,
+      persisted: true,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -475,6 +559,103 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     }
 
     return this.beginAnalysis(reconstructed, state);
+  }
+
+  /**
+   * Dispatch the resume-bootstrap transform's completion based on
+   * the persisted `phase`. Called by next() when it recognises the
+   * RESUME_BOOTSTRAP_MARKER.
+   *
+   * The implementation strategy varies by phase:
+   *   - planning            -> re-fire the plan LLM task. Plan
+   *                            results aren't expensive (one cloud
+   *                            call) and idempotent enough that
+   *                            re-running is fine; if the prior
+   *                            checkpoint had a parsed plan we'd
+   *                            ideally skip, but the framework's
+   *                            checkpoint shape doesn't surface
+   *                            "this task already completed" to a
+   *                            controller that wasn't running when
+   *                            it did.
+   *   - plan-approval       -> re-fire the gate task. User makes
+   *                            the same approve/trim/cancel call.
+   *   - analyzing/reviewing -> hand off to runNextAnalyzerTask,
+   *                            which pops queue head, runs
+   *                            analyzer + review again. The
+   *                            already-accepted tasks in
+   *                            K_ACCEPTED survive; only the
+   *                            in-flight task restarts.
+   *   - synthesising        -> re-fire synthesise. queueSynthesise
+   *                            handles single-pass vs multipass
+   *                            internally based on tier.
+   *   - done                -> error -- nothing to resume.
+   */
+  private async afterResumeBootstrap(state: TaskStateStore, phase: Phase): Promise<Task[] | null> {
+    log.info({ phase }, 'resume: dispatching from bootstrap');
+    if (phase === 'done') {
+      log.warn('resume: phase is done; nothing to resume');
+      state.set(K_PHASE, 'done' as Phase);
+      state.markSessionComplete();
+      return null;
+    }
+    if (phase === 'planning') {
+      // Re-fire the plan LLM task verbatim from buildInitialTasks.
+      // The original instance fields were rebuilt by restoreState.
+      if (this._request === undefined || this._repoSummary === undefined) {
+        log.error('resume: planning phase but instance fields missing; aborting');
+        return null;
+      }
+      return [{
+        index: 0,
+        description: `Code Analyzer: re-planning (resume; tier ${this._tier})...`,
+        kind: 'llm',
+        intent: 'code-analysis',
+        systemPrompt: buildPlanSystemPrompt(this._tier),
+        userMessage: this.renderPlanUserMessage(this._request, this._repoSummary),
+        resolverAgent: 'code-analyzer',
+        resolverStep: 'plan',
+        providerHint: 'claude',
+        temperature: 0,
+        maxTokens: 2500,
+        stateKey: K_PLAN_RESULT,
+        persisted: true,
+      }];
+    }
+    if (phase === 'plan-approval') {
+      const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
+      const caps = capsForTier(this._tier);
+      const summary = renderPlanSummary(planned, caps);
+      return [{
+        index: 1,
+        description: `Plan has ${planned.length} tasks (resume; tier ${this._tier}). Approve, trim, or cancel?`,
+        kind: 'transform',
+        intent: 'code-analysis',
+        passThrough: true,
+        userMessage: summary,
+        outputFormat: 'markdown',
+        requiresGate: true,
+        gateTitle: `Code Analyzer plan size approval (tier ${this._tier})`,
+        gateActions: [
+          { name: 'approve', label: 'Approve all' },
+          { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
+          { name: 'cancel', label: 'Cancel run' },
+        ],
+        persisted: true,
+      }];
+    }
+    if (phase === 'analyzing' || phase === 'reviewing') {
+      // Both phases mean: a task is in flight (or about to be).
+      // runNextAnalyzerTask handles both cases -- pops queue head,
+      // re-runs analyzer + review. K_TASK_QUEUE state survives the
+      // crash; in-flight task restarts.
+      state.set(K_PHASE, 'analyzing' as Phase);
+      return this.runNextAnalyzerTask(state);
+    }
+    if (phase === 'synthesising') {
+      return this.queueSynthesise(state);
+    }
+    log.warn({ phase }, 'resume: unknown phase; falling through to runNextAnalyzerTask');
+    return this.runNextAnalyzerTask(state);
   }
 
   private async beginAnalysis(planned: AnalysisTask[], state: TaskStateStore): Promise<Task[] | null> {

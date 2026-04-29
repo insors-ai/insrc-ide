@@ -557,6 +557,154 @@ export const chatResumeFromCheckpoint: StreamHandler = async (params, send, sign
  * Fetch code context from the knowledge graph via daemon RPC search.
  * Returns an empty string if the search fails (degrades gracefully).
  */
+/**
+ * Resume an in-progress code-analyzer run from its on-disk
+ * checkpoint (project_code_analyzer_checkpoint_recovery.md).
+ *
+ * Mirrors `chatResumeFromCheckpoint` (the brainstorm-side flow)
+ * but specialised for code-analyzer: skip the brainstorm subclass
+ * dispatcher, build a `CodeAnalyzerOrchestratorController`, hydrate
+ * via `controller.restoreState(stateStore)`, and seed the pipeline
+ * with `controller.buildResumeTask(stateStore)`.
+ *
+ * Caller hands `{ sessionId }`. The session's row.agent must be
+ * 'code-analyzer' (stamped by runCodeAnalyzerSlash above).
+ *
+ * Resume granularity is per-completed-Task -- the analyzer runner's
+ * inline tool-loop iterations aren't checkpointed individually, so
+ * a crash mid-runAnalyzer restarts that one task from scratch on
+ * resume. Already-accepted tasks survive in K_ACCEPTED.
+ */
+export const chatResumeCodeAnalysis: StreamHandler = async (params, send, signal) => {
+  const { sessionId } = params as { sessionId: string };
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { PATHS } = await import('../shared/paths.js');
+  const { CHECKPOINT_SCHEMA_VERSION, runControlledPipeline, createTaskStateStore } =
+    await import('./task.js');
+  const { getSessionById, setSessionStatus } = await import('../db/conversations.js');
+  const { getDb } = await import('../db/client.js');
+
+  const requestId = Date.now();
+  const abortController = new AbortController();
+  signal.addEventListener('abort', () => abortController.abort(), { once: true });
+  const guardedSend = (msg: IpcStreamMessage): void => {
+    if (abortController.signal.aborted) {
+      return;
+    }
+    send(msg);
+  };
+
+  // Session metadata.
+  const db = await getDb();
+  const row = await getSessionById(db, sessionId);
+  if (!row) {
+    send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} not found.` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (row.status === 'discarded' || row.status === 'completed') {
+    send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} is ${row.status}; nothing to resume.` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (row.agent !== 'code-analyzer') {
+    send({ id: requestId, stream: 'error', data: { error: `Resume only supports code-analyzer sessions (got agent=${row.agent || '(unset)'}).` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  // Checkpoint file. The framework's runControlledPipeline writes to
+  // `<insrc>/checkpoints/<controllerId>-<sessionId>.json`. The
+  // code-analyzer's controller id is 'code-analyzer'.
+  const checkpointFile = join(PATHS.insrc, 'checkpoints', `code-analyzer-${sessionId}.json`);
+  if (!existsSync(checkpointFile)) {
+    send({ id: requestId, stream: 'error', data: { error: `No checkpoint for session ${sessionId}.` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  let raw: { schemaVersion?: number; controller?: string; state?: Record<string, unknown> };
+  try {
+    raw = JSON.parse(readFileSync(checkpointFile, 'utf-8'));
+  } catch (err) {
+    send({ id: requestId, stream: 'error', data: { error: `Checkpoint read failed: ${(err as Error).message}` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (raw.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
+    send({ id: requestId, stream: 'error', data: {
+      error: `schema-drift: checkpoint is schemaVersion=${raw.schemaVersion}, daemon is schemaVersion=${CHECKPOINT_SCHEMA_VERSION}. Re-run from scratch.`,
+    } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  // Pool + channel.
+  const pool = getPool();
+  let active = pool.get(sessionId);
+  if (!active) {
+    const restored = await pool.restore(sessionId);
+    if (!restored) {
+      send({ id: requestId, stream: 'error', data: { error: `pool.restore failed for ${sessionId}.` } });
+      send({ id: requestId, stream: 'done', data: {} });
+      return;
+    }
+    active = pool.get(sessionId)!;
+  }
+  if (active.agentRunning) {
+    send({ id: requestId, stream: 'error', data: { error: 'agent already running on this session' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  const channel = new DaemonChannel(requestId, guardedSend, abortController);
+  if (!pool.attachChannel(sessionId, channel, abortController)) {
+    send({ id: requestId, stream: 'error', data: { error: 'agent already running on this session' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  try {
+    const { CodeAnalyzerOrchestratorController } = await import(
+      './controllers/code-analyzer-orchestrator.js'
+    );
+    const controller = new CodeAnalyzerOrchestratorController();
+    const stateStore = createTaskStateStore(raw.state ?? {});
+    controller.restoreState(stateStore);
+    const resumeTask = controller.buildResumeTask(stateStore);
+
+    await setSessionStatus(db, sessionId, 'active').catch(() => { /* best-effort */ });
+
+    send({ id: requestId, stream: 'progress', data: { message: 'Intent: code-analysis (resumed)' } });
+
+    const controllerInput = {
+      message: '',
+      codeContext: '',
+      session: active.session,
+    };
+    await runControlledPipeline(controller, controllerInput, {
+      session: active.session,
+      channel,
+      send: guardedSend,
+      requestId,
+      stateStore,
+      initialTasks: [resumeTask],
+      ...(abortController ? { abortController } : {}),
+    });
+
+    send({ id: requestId, stream: 'done', data: { summary: 'code-analyzer resume complete' } });
+  } catch (err) {
+    if (abortController.signal.aborted) {
+      log.info({ sessionId }, 'chat.resumeCodeAnalysis aborted by user');
+    } else {
+      log.error({ err, sessionId }, 'chat.resumeCodeAnalysis failed');
+      send({ id: requestId, stream: 'error', data: { error: (err as Error).message } });
+      send({ id: requestId, stream: 'done', data: {} });
+    }
+  } finally {
+    pool.detachChannel(sessionId);
+  }
+};
+
 async function fetchCodeContext(message: string): Promise<string> {
   try {
     const { rpc: cliRpc } = await import('../cli/client.js');
@@ -822,6 +970,20 @@ async function runCodeAnalyzerSlash(
   // list's items.
   rerunFromListId?: string,
 ): Promise<void> {
+  // Slice C: stamp the session's agent column so the resume RPC
+  // (chat.resumeCodeAnalysis) can locate code-analyzer sessions.
+  // Brainstorm has the same pattern via `setSessionAgent` in
+  // task.ts; no equivalent existed for code-analyzer until now,
+  // so all prior code-analyzer sessions show `agent: ''` in the
+  // DB and resume can't find them. Best-effort -- a failed write
+  // means the run still works, just isn't resumable.
+  try {
+    const { setSessionAgent } = await import('../db/conversations.js');
+    const { getDb } = await import('../db/client.js');
+    await setSessionAgent(await getDb(), active.session.id, 'code-analyzer');
+  } catch (err) {
+    log.warn({ err, sessionId: active.session.id }, '[code-analyze] setSessionAgent failed (continuing)');
+  }
   const session = active.session;
   if (!session) {
     send({ id: requestId, stream: 'delta', data: { text: '[error] session not initialised' } });
