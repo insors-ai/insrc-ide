@@ -244,7 +244,7 @@ export const chatRestore: RpcHandler = async (params) => {
 // ---------------------------------------------------------------------------
 
 export const chatSend: StreamHandler = async (params, send, signal) => {
-  const { sessionId, message, parentListId } = params as {
+  const { sessionId, message, parentListId, rerunFromListId } = params as {
     sessionId: string;
     message: string;
     // Optional drill-down parent (Code Analyzer Phase 5.D). When the
@@ -253,6 +253,12 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
     // threads it into ControllerInput so the orchestrator stamps
     // parent-child edges on the new TodoList.
     parentListId?: string;
+    // Optional re-run source (Code Analyzer Phase 4.1). When the
+    // workbench fires `insrc.codeAnalyzer.rerun` the chat.send
+    // carries the prior list id; the orchestrator skips its plan
+    // LLM call and reconstructs `AnalysisTask[]` from the prior
+    // list's items.
+    rerunFromListId?: string;
   };
   const pool = getPool();
   const active = pool.get(sessionId);
@@ -284,7 +290,7 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   }
 
   try {
-    await runChatMessage(active, channel, message, requestId, guardedSend, parentListId);
+    await runChatMessage(active, channel, message, requestId, guardedSend, parentListId, rerunFromListId);
   } catch (err) {
     // Abort during any await (gate wait, LLM completion, etc.) throws
     // through here. Log once and exit; guardedSend will have silenced
@@ -703,6 +709,10 @@ async function tryFamilyDirectSlash(
   // Phase 5.D: drill-down parent. Forwarded into the slash handler
   // so the orchestrator can stamp it on the new TodoList.
   parentListId?: string,
+  // Phase 4.1: re-run source list id. When set, the orchestrator
+  // skips its plan LLM step and reconstructs tasks from the prior
+  // list's items.
+  rerunFromListId?: string,
 ): Promise<boolean> {
   const trimmed = message.trim();
 
@@ -718,7 +728,7 @@ async function tryFamilyDirectSlash(
       send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
       return true;
     }
-    await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send, parentListId);
+    await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send, parentListId, rerunFromListId);
     return true;
   }
 
@@ -736,6 +746,10 @@ async function runCodeAnalyzerSlash(
   // stamped with `parentListId` so the todos pane + Report Pane can
   // render the parent-child thread.
   parentListId?: string,
+  // Phase 4.1 re-run source. When set, the orchestrator skips its
+  // plan LLM step and reconstructs `AnalysisTask[]` from the prior
+  // list's items.
+  rerunFromListId?: string,
 ): Promise<void> {
   const session = active.session;
   if (!session) {
@@ -811,6 +825,10 @@ async function runCodeAnalyzerSlash(
         // Phase 5.D: thread the drill-down parent through to the
         // orchestrator. Undefined for top-level / regular invocations.
         ...(parentListId !== undefined ? { parentListId } : {}),
+        // Phase 4.1: thread the re-run source through. When set,
+        // the orchestrator skips planning and reconstructs from the
+        // prior list's items.
+        ...(rerunFromListId !== undefined ? { rerunFromListId } : {}),
       },
       deps,
     );
@@ -844,6 +862,10 @@ async function runChatMessage(
   // so /code-analyze drill-downs stamp the parent edge on the new
   // TodoList. Other code paths ignore it.
   parentListId?: string,
+  // Code Analyzer Phase 4.1: forwarded re-run source list id. When
+  // set, the slash dispatcher passes it to runCodeAnalyzerSlash and
+  // the orchestrator reconstructs the task list from the prior run.
+  rerunFromListId?: string,
 ): Promise<void> {
   const session = active.session;
   if (!session || !session.repoPath) {
@@ -860,7 +882,7 @@ async function runChatMessage(
   // new orchestrator now -- the legacy CodeAnalysisController and
   // tasks/code-analysis/{prompts,types}.ts have been deleted. The
   // slash command remains as the explicit-invocation entry point.
-  const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send, parentListId);
+  const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send, parentListId, rerunFromListId);
   if (familyHandled) return;
 
   // 0. Resolve file references with per-session cache

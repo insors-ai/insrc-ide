@@ -338,6 +338,18 @@ export interface ControllerInput {
    * parent-child threading. Other controllers ignore the field.
    */
   parentListId?: string | undefined;
+  /**
+   * Re-run mode (Code Analyzer Phase 4.1). When set, the
+   * orchestrator skips the plan LLM call and instead reconstructs
+   * `AnalysisTask[]` from the prior list's items (preserving kind /
+   * question / scope / hint per-item meta). The new run gets
+   * `parentListId = rerunFromListId` so it threads under the prior
+   * one in the todos pane. Tier defaults to the prior list's tier
+   * (sticky on re-run per plan §953); a different tier may be
+   * supplied via `classification.scope` to force re-classification.
+   * Other controllers ignore the field.
+   */
+  rerunFromListId?: string | undefined;
 }
 
 export interface GateReply {

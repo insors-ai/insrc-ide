@@ -123,6 +123,14 @@ const MAX_RETRIES_PER_TASK = 2;
 const PLAN_GATE_TIMEOUT_MS = 5 * 60 * 1000; void PLAN_GATE_TIMEOUT_MS;
 const PRESENT_GATE_TIMEOUT_MS = 60 * 60 * 1000; void PRESENT_GATE_TIMEOUT_MS;
 
+/**
+ * Sentinel emitted by buildInitialTasks's pass-through transform task
+ * when the run is in re-run mode (Phase 4.1). afterPlan recognises
+ * this exact string and routes to afterRerunBootstrap instead of the
+ * LLM-plan-output parser.
+ */
+const RERUN_BOOTSTRAP_MARKER = '__rerun-bootstrap__';
+
 // ---------------------------------------------------------------------------
 // State keys (kept here so the rest of the file uses string constants)
 // ---------------------------------------------------------------------------
@@ -184,6 +192,16 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    * assign through from `input.parentListId` cleanly.
    */
   private _parentListId: string | undefined = undefined;
+  /**
+   * Re-run mode (Phase 4.1). Set from
+   * `ControllerInput.rerunFromListId`. When non-undefined the
+   * orchestrator skips the plan LLM step entirely -- buildInitialTasks
+   * queues a pass-through transform task whose afterPlan handler
+   * detects the rerun marker and reconstructs `AnalysisTask[]` from
+   * the prior list's items. The new run gets `parentListId = this`
+   * value so it threads under the prior in the todos pane.
+   */
+  private _rerunFromListId: string | undefined = undefined;
 
   attachDeps(deps: TaskOrchestratorDeps): void {
     this.deps = deps;
@@ -196,10 +214,34 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     this._repoSummary = this.buildRepoSummary(input);
     this._tier = input.classification?.scope ?? 'M';
     this._parentListId = input.parentListId;
+    this._rerunFromListId = input.rerunFromListId;
     log.info(
-      { tier: this._tier, caps: capsForTier(this._tier), parentListId: this._parentListId ?? null },
+      {
+        tier:             this._tier,
+        caps:             capsForTier(this._tier),
+        parentListId:     this._parentListId ?? null,
+        rerunFromListId:  this._rerunFromListId ?? null,
+      },
       'code-analyzer scope tier captured',
     );
+
+    // Phase 4.1: re-run path skips the plan LLM call. We queue a
+    // pass-through transform task carrying a sentinel marker; the
+    // afterPlan handler detects the marker and reconstructs the
+    // AnalysisTask[] from the prior list's items asynchronously.
+    if (this._rerunFromListId !== undefined) {
+      return [{
+        index: 0,
+        description: `Code Analyzer: re-running from prior list ${this._rerunFromListId.slice(0, 8)}...`,
+        kind: 'transform',
+        intent: 'code-analysis',
+        passThrough: true,
+        userMessage: RERUN_BOOTSTRAP_MARKER,
+        outputFormat: 'text',
+        stateKey: K_PLAN_RESULT,
+        persisted: true,
+      }];
+    }
 
     return [{
       index: 0,
@@ -310,6 +352,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   // -------------------------------------------------------------------------
 
   private async afterPlan(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
+    // Phase 4.1: re-run mode uses a pass-through transform whose output
+    // is the bootstrap marker. Detect it BEFORE attempting JSON parse.
+    if (this._rerunFromListId !== undefined && completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
+      return this.afterRerunBootstrap(state);
+    }
+
     const planText = completed.output;
     const planned = parsePlannedTasks(planText);
     if (planned.length === 0) {
@@ -382,6 +430,63 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       if (ca) state.set(K_STATE, { ...ca, truncated: true });
     }
     return await this.beginAnalysis(planned, state);
+  }
+
+  /**
+   * Phase 4.1 re-run bootstrap. Loads the prior list, reconstructs
+   * `AnalysisTask[]` from its items (using `TodoItem.description` for
+   * the question + `meta.kind` / `meta.scope` / `meta.hint` for the
+   * rest), then proceeds to `beginAnalysis` which creates a fresh
+   * TodoList (with parentListId stamped) and queues the first
+   * analyzer review.
+   *
+   * Defensive paths: if the prior list is gone, has no items, or
+   * none of its items have parseable meta, we fall back to a single
+   * "redo whatever the original prompt asked" task so the run still
+   * produces SOMETHING the user can compare against.
+   */
+  private async afterRerunBootstrap(state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps?.todos === undefined || this._rerunFromListId === undefined) {
+      log.error('afterRerunBootstrap: deps.todos or rerunFromListId missing');
+      state.set(K_PHASE, 'done' as Phase);
+      state.set(K_SYNTH_RESULT, '_Re-run bootstrap failed: internal state missing._');
+      state.markSessionComplete();
+      return null;
+    }
+    const priorListId = this._rerunFromListId;
+    const priorList = await this.deps.todos.getList(priorListId);
+    if (priorList === null) {
+      log.warn({ priorListId }, 'afterRerunBootstrap: prior list not found; falling back to single-task plan');
+      return this.beginAnalysis(buildFallbackTaskFromRequest(state.get<CodeAnalysisState>(K_STATE)?.request ?? ''), state);
+    }
+
+    const priorItems = priorList.items ?? [];
+    const reconstructed: AnalysisTask[] = [];
+    for (const item of priorItems) {
+      const task = reconstructTaskFromItem(item);
+      if (task !== null) {
+        reconstructed.push(task);
+      }
+    }
+    log.info(
+      { priorListId, priorItemCount: priorItems.length, reconstructed: reconstructed.length },
+      'afterRerunBootstrap: reconstructed task list',
+    );
+    if (reconstructed.length === 0) {
+      log.warn({ priorListId }, 'afterRerunBootstrap: no parseable items; falling back to single-task plan');
+      return this.beginAnalysis(buildFallbackTaskFromRequest(state.get<CodeAnalysisState>(K_STATE)?.request ?? ''), state);
+    }
+
+    // Phase 4.1: the new run threads under the prior list as a child
+    // (same id used both for parent edge AND skip-plan source). If
+    // the caller already supplied a different parentListId via the
+    // chat.send param, keep the caller-supplied one (drill-down +
+    // re-run could combine in theory).
+    if (this._parentListId === undefined) {
+      this._parentListId = priorListId;
+    }
+
+    return this.beginAnalysis(reconstructed, state);
   }
 
   private async beginAnalysis(planned: AnalysisTask[], state: TaskStateStore): Promise<Task[] | null> {
@@ -1346,6 +1451,67 @@ function stripFences(text: string): string {
  * synchronous `buildInitialTasks` path. `.git/HEAD` and the ref file
  * are tiny (<100 bytes) and on the local fs; the read is negligible.
  */
+// ---------------------------------------------------------------------------
+// Phase 4.1 re-run helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an `AnalysisTask` from a prior run's `TodoItem`. Reads the
+ * question from `description` and `kind` / `scope` / `hint` from
+ * `meta` (AnalysisItemMeta wire shape). Returns null when the item
+ * lacks the minimal fields (no description / unrecognised kind) so
+ * the caller can fall back to its single-task default.
+ */
+function reconstructTaskFromItem(item: {
+  readonly id: string;
+  readonly description?: string | undefined;
+  readonly meta?: Readonly<Record<string, unknown>> | undefined;
+}): AnalysisTask | null {
+  const question = (item.description ?? '').trim();
+  if (question.length === 0) {
+    return null;
+  }
+  const meta = item.meta ?? {};
+  const kindRaw = meta['kind'];
+  if (typeof kindRaw !== 'string' || !isAnalysisKind(kindRaw)) {
+    return null;
+  }
+  const scopeRaw = meta['scope'];
+  const hintRaw = meta['hint'];
+  const task: AnalysisTask = {
+    itemId: '', // assigned at addItem time in beginAnalysis
+    kind: kindRaw,
+    question,
+    origin: 'plan',
+    retryCount: 0,
+    ...(scopeRaw !== null && typeof scopeRaw === 'object' && !Array.isArray(scopeRaw)
+      ? { scope: parseScope(scopeRaw as Record<string, unknown>) }
+      : {}),
+    ...(typeof hintRaw === 'string' && hintRaw.length > 0 ? { hint: hintRaw } : {}),
+  };
+  return task;
+}
+
+/**
+ * Last-resort fallback when the prior list is gone or has no
+ * parseable items. Produces a single free-form task carrying the
+ * original request as the question, so the user still gets SOME
+ * analysis they can compare against.
+ */
+function buildFallbackTaskFromRequest(request: string): AnalysisTask[] {
+  const trimmed = request.trim();
+  if (trimmed.length === 0) {
+    return [];
+  }
+  return [{
+    itemId: '',
+    kind: 'free-form',
+    question: trimmed,
+    origin: 'plan',
+    retryCount: 0,
+  }];
+}
+
 /**
  * Tail-append a synthetic `## Drill down` section to a stitched
  * multipass report when the outline LLM didn't plan one. The
