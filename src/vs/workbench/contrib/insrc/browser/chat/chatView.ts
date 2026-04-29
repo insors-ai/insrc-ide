@@ -35,6 +35,7 @@ import { IQuickInputService } from '../../../../../platform/quickinput/common/qu
 import { IFileDialogService, IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { clearNode } from '../../../../../base/browser/dom.js';
 import { createTrustedTypesPolicy } from '../../../../../base/browser/trustedTypes.js';
+import { SLASH_COMMANDS } from '../../common/slashCommands.js';
 
 // ---------------------------------------------------------------------------
 // SVG icon helpers (avoid innerHTML for CSP)
@@ -307,7 +308,7 @@ export class InsrcChatViewPane extends ViewPane {
 		const inputRow = dom.append(this._inputArea, dom.$('.insrc-chat-input-row'));
 
 		this._input = dom.append(inputRow, dom.$('textarea.insrc-chat-input')) as HTMLTextAreaElement;
-		this._input.placeholder = 'Type a message... (@local, @sonnet for provider)';
+		this._input.placeholder = 'Type a message... (@local, @sonnet for provider; / for commands)';
 		this._input.rows = 1;
 		this._register(dom.addDisposableListener(this._input, 'keydown', (e: KeyboardEvent) => {
 			if (e.key === 'Enter' && !e.shiftKey) {
@@ -317,6 +318,13 @@ export class InsrcChatViewPane extends ViewPane {
 			if (e.key === 'Escape' && this.chatService.isStreaming) {
 				e.preventDefault();
 				this.chatService.cancelStream();
+			}
+			// Slash-command autocomplete: trigger when `/` is typed
+			// at the start of an empty input. setTimeout 0 so the `/`
+			// has landed in the input.value before we read it / pop
+			// the quick-pick.
+			if (e.key === '/' && this._input.value.length === 0) {
+				setTimeout(() => this._showSlashAutocomplete(), 0);
 			}
 		}));
 		this._register(dom.addDisposableListener(this._input, 'input', () => this._autoResize()));
@@ -1523,5 +1531,48 @@ export class InsrcChatViewPane extends ViewPane {
 	private _autoResize(): void {
 		this._input.style.height = 'auto';
 		this._input.style.height = Math.min(this._input.scrollHeight, 120) + 'px';
+	}
+
+	/**
+	 * Slash-command autocomplete. Pops a QuickPick listing the
+	 * registered chat slash commands (today: just `/code-analyze`).
+	 * Selection inserts `${command} ` into the input + focuses;
+	 * Esc / dismiss leaves the typed `/` so the user can keep typing
+	 * a free-text message.
+	 *
+	 * Trigger: `/` typed as the first character of an empty input
+	 * (see the keydown handler in `createEditor`). Re-entrant safe --
+	 * picking once dismisses the picker; the next `/` keystroke
+	 * triggers a fresh open.
+	 *
+	 * QuickPick takes focus while open, which is acceptable for the
+	 * "I want to discover commands" UX and matches VS Code's own
+	 * Ctrl+Shift+P pattern. A future inline suggestion widget could
+	 * replace this for a smoother feel; out of scope for the slice
+	 * landing slash discovery.
+	 */
+	private async _showSlashAutocomplete(): Promise<void> {
+		const items = SLASH_COMMANDS.map(cmd => ({
+			label: `/${cmd.id}`,
+			description: cmd.description,
+			detail: cmd.example,
+			id: cmd.id,
+		}));
+		const pick = await this.quickInputService.pick(items, {
+			placeHolder: 'Slash commands -- pick one or press Esc to keep typing',
+			matchOnDescription: true,
+			matchOnDetail: true,
+		});
+		if (pick === undefined) {
+			// User dismissed -- leave the `/` in the input so they
+			// can keep typing a free-text message.
+			this._input.focus();
+			this._input.setSelectionRange(this._input.value.length, this._input.value.length);
+			return;
+		}
+		this._input.value = `/${pick.id} `;
+		this._input.focus();
+		this._input.setSelectionRange(this._input.value.length, this._input.value.length);
+		this._autoResize();
 	}
 }

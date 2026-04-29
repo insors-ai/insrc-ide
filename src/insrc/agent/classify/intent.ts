@@ -19,6 +19,7 @@ import { parsePrefix } from '../prefix.js';
 import { classify } from './index.js';
 import { resolveClassifierProvider } from './provider.js';
 import { INTENT_CLASSES } from '../../shared/intent-classes.js';
+import { SLASH_COMMANDS } from '../../shared/slash-commands.js';
 
 export interface IntentClassifyResult {
   /** Resolved primary intent. */
@@ -74,6 +75,16 @@ export async function classifyPrimaryIntent(
       role: 'intent classifier for a coding assistant',
       classes: INTENT_CLASSES,
       text: prefix.message,
+      // Slice B (slash discovery): tell the classifier which slash
+      // commands the chat path recognises. Without this, a user
+      // typo like `/code-analyzer` (extra `-r`) bypasses the
+      // family-direct dispatcher (exact-match miss + Levenshtein
+      // miss when the typo is far) and gets topic-classified by
+      // the LLM, which routed `/code-analyzer ...` to `research`
+      // because of the keyword overlap. The classifier now sees
+      // the slash list and can return its closest registered
+      // intent (or set fallback when there's no fit).
+      context: buildSlashContext(),
     },
     resolveClassifierProvider(session, 'classify'),
   );
@@ -87,4 +98,23 @@ export async function classifyPrimaryIntent(
     scope: result.scope,
     fallback: result.fallback,
   };
+}
+
+/**
+ * Build the slash-command awareness block the classifier sees as
+ * `ClassifyInput.context`. Tells the LLM which `/<name>` literals
+ * are real slash commands so a typo or unknown slash doesn't get
+ * topic-classified into a tangentially-related intent.
+ */
+function buildSlashContext(): string {
+	const lines = ['Registered chat slash commands (these are exact-match-only on the dispatcher):'];
+	for (const cmd of SLASH_COMMANDS) {
+		lines.push(`- /${cmd.id}: ${cmd.description}`);
+	}
+	lines.push('');
+	lines.push('If the input begins with `/<name>` (the leading slash is a strong signal), the user is attempting a slash command:');
+	lines.push('- If `<name>` matches one of the registered ids verbatim, the dispatcher already handled it -- you will not see that message.');
+	lines.push('- If `<name>` is close to a registered id (typo), the dispatcher emitted a "did you mean" hint -- you will not see that message either.');
+	lines.push('- If `<name>` is unfamiliar AND not close to any registered id, classify by the user\'s INTENT (what they\'re asking for after the slash), not by the slash literal itself. Do NOT route on the slash text alone.');
+	return lines.join('\n');
 }

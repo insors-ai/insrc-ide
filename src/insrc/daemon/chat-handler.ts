@@ -29,6 +29,7 @@ import { DaemonChannel } from './channel.js';
 import { ChatSessionPool } from './chat-sessions.js';
 import { resolveFileRefs, formatFileContext, type FileRefResult } from './file-refs.js';
 import { parseAnalyzerMention } from './analyzer-mention.js';
+import { findClosestSlashCommand, isRegisteredSlashCommand } from '../shared/slash-commands.js';
 import { getLogger } from '../shared/logger.js';
 import type { IpcStreamMessage, LLMMessage, ToolDefinition } from '../shared/types.js';
 import type { AgentDefinition, ReplyPayload } from '../agent/framework/types.js';
@@ -731,6 +732,35 @@ async function tryFamilyDirectSlash(
     }
     await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send, parentListId, rerunFromListId);
     return true;
+  }
+
+  // Slice B (slash discovery): if the message starts with `/<name>`
+  // but `<name>` isn't a registered slash command, try a fuzzy
+  // match. A near-miss (e.g. `/code-analyzer` for `/code-analyze`)
+  // emits a one-line "did you mean ..." hint instead of falling
+  // through to the topic classifier (which would mis-route it as
+  // research). The user sees the typo, can retry. We do NOT
+  // auto-execute the corrected command -- that'd silently rewrite
+  // their input, which is the kind of thing that surprises users.
+  const slashTypoMatch = trimmed.match(/^\/([\w-]+)(?:\s|$)/);
+  if (slashTypoMatch && !isRegisteredSlashCommand(slashTypoMatch[1]!)) {
+    const typedName = slashTypoMatch[1]!;
+    const guess = findClosestSlashCommand(typedName);
+    if (guess !== undefined) {
+      send({
+        id: requestId,
+        stream: 'delta',
+        data: {
+          text: `Unknown slash command \`/${typedName}\`. Did you mean \`/${guess.id}\`?`,
+          format: 'markdown',
+        },
+      });
+      send({ id: requestId, stream: 'done', data: { summary: 'slash typo' } });
+      return true;
+    }
+    // No close match -- fall through to the classifier, which will
+    // see the slash command via the system prompt's slash list and
+    // can decide to route on topic / refuse / suggest.
   }
 
   // Phase 4.3: analyzer-family @-mentions. Distinct from
