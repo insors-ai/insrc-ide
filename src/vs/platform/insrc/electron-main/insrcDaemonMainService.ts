@@ -140,7 +140,24 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 		}
 
 		this.logService.info(`[insrc] Spawning daemon (${entry.isDev ? 'dev build' : 'cloned install'})...`);
-		this._spawnDetachedDaemon(entry.path);
+		await this._spawnAndAwaitConnect(entry.path);
+	}
+
+	/**
+	 * Spawn a detached daemon (if not already running under another
+	 * orphaned PID) and poll the socket until we can connect or the
+	 * 10 s deadline elapses. Throws on timeout.
+	 *
+	 * Used by `connect()` (initial bring-up) and the reconnect loop
+	 * after a daemon crash. Without the reconnect-loop call, a daemon
+	 * that died after the IDE was already connected leaves the IDE
+	 * stuck retrying `_connectToSocket()` against a dead socket forever
+	 * -- observed live during code-analyzer testing 2026-04-29: the
+	 * daemon process disappeared post-completion and the IDE logged
+	 * 41 reconnect attempts (and counting) without ever respawning.
+	 */
+	private async _spawnAndAwaitConnect(entryPath: string): Promise<void> {
+		this._spawnDetachedDaemon(entryPath);
 
 		const deadline = Date.now() + SPAWN_CONNECT_MAX_WAIT_MS;
 		while (Date.now() < deadline) {
@@ -278,10 +295,32 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 
 		this._reconnectTimer = setTimeout(async () => {
 			this._reconnectTimer = undefined;
+			// First try the cheap path -- daemon may just have rebooted
+			// or socket may have transiently dropped.
 			try {
 				await this._connectToSocket();
 				this.logService.info('[insrc] Reconnected to daemon');
+				return;
 			} catch {
+				// Daemon is genuinely dead. Fall through to respawn.
+			}
+
+			// Daemon process is gone. Without this branch the IDE used
+			// to retry `_connectToSocket` against a dead socket forever
+			// (observed live: 41+ reconnect attempts after daemon
+			// crash). Respawn via the same path `connect()` uses on
+			// initial bring-up. Skip the install-update step -- the
+			// installer already ran on initial connect and re-running it
+			// here on every disconnect would re-pull / re-build on a
+			// loop if git fetch ever flakes.
+			try {
+				const entry = resolveDaemonEntry();
+				this.logService.info(`[insrc] Daemon process gone; respawning (${entry.isDev ? 'dev build' : 'cloned install'})...`);
+				await this._spawnAndAwaitConnect(entry.path);
+				this.logService.info('[insrc] Reconnected to daemon (respawned)');
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				this.logService.warn(`[insrc] Respawn failed: ${msg}; will retry`);
 				this._scheduleReconnect();
 			}
 		}, delaySec * 1000);
