@@ -90,7 +90,19 @@ export class InsrcAgentRunServiceImpl extends Disposable implements IInsrcAgentR
 		// selector otherwise drifts after a cold-daemon resume).
 		const run = this._cachedRuns.find(r => r.id === runId);
 		const repo = run?.repo ?? '';
-		await this.chatService.resumeFromCheckpoint(result.sessionId, repo);
+
+		// Branch on controllerId. Each agent family has its own
+		// resume RPC -- the daemon constructs different controller
+		// classes + uses different state-restore logic. Today:
+		//   - 'code-analyzer'    -> chat.resumeCodeAnalysis
+		//   - everything else    -> chat.resumeFromCheckpoint
+		//     (brainstorm subclasses validated daemon-side via
+		//     row.agent === 'brainstorm').
+		if (result.controllerId === 'code-analyzer') {
+			await this.chatService.resumeCodeAnalysis(result.sessionId, repo);
+		} else {
+			await this.chatService.resumeFromCheckpoint(result.sessionId, repo);
+		}
 
 		this._onDidChangeRuns.fire();
 		this.logService.info(`[insrc] Resumed agent run id=${runId} controller=${result.controllerId ?? '(unknown)'}`);

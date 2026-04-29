@@ -275,6 +275,31 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._wireStreamHandle(this._streamHandle);
 	}
 
+	async resumeCodeAnalysis(sessionId: string, repoPath: string): Promise<void> {
+		// Code-analyzer-specific resume. Identical scaffolding to
+		// `resumeFromCheckpoint` except the IPC method name; the
+		// daemon's chat.resumeCodeAnalysis hydrates the
+		// CodeAnalyzerOrchestratorController instead of the
+		// brainstorm subclass.
+		if (!this.daemonService.isConnected) {
+			throw new Error('Not connected to daemon');
+		}
+		if (this._isStreaming) {
+			throw new Error('Already streaming');
+		}
+		this._activeSessionId = sessionId;
+		this._activeRepo = repoPath || this._activeRepo;
+		this._messages = await this.loadHistory(sessionId);
+		this._persistState();
+		this._onDidChangeSession.fire(sessionId);
+
+		this._isStreaming = true;
+		this._pendingContent = '';
+
+		this._streamHandle = this.daemonService.stream('chat.resumeCodeAnalysis', { sessionId });
+		this._wireStreamHandle(this._streamHandle);
+	}
+
 	async sendMessage(message: string, provider?: string, parentListId?: string, rerunFromListId?: string): Promise<void> {
 		if (!this._activeSessionId) {
 			// Auto-start a session with the first available repo

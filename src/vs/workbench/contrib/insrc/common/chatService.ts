@@ -120,6 +120,16 @@ export interface IInsrcChatService {
 	 * verified the run via `agentRunService.resumeRun` / `agent.resume`.
 	 */
 	resumeFromCheckpoint(sessionId: string, repoPath: string): Promise<void>;
+	/**
+	 * Code-analyzer-specific resume from checkpoint. Mirrors
+	 * `resumeFromCheckpoint` shape but opens the daemon's
+	 * `chat.resumeCodeAnalysis` stream instead of
+	 * `chat.resumeFromCheckpoint` -- the daemon's resume handler
+	 * is per-agent (brainstorm vs code-analyzer differ in
+	 * controller construction). Caller resolves the right method
+	 * by inspecting `controllerId` from `agent.resume`.
+	 */
+	resumeCodeAnalysis(sessionId: string, repoPath: string): Promise<void>;
 	closeSession(): Promise<void>;
 
 	// Messaging
