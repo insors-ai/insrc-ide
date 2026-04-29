@@ -28,6 +28,7 @@ import { testerAgent } from '../agent/tasks/tester/agent.js';
 import { DaemonChannel } from './channel.js';
 import { ChatSessionPool } from './chat-sessions.js';
 import { resolveFileRefs, formatFileContext, type FileRefResult } from './file-refs.js';
+import { parseAnalyzerMention } from './analyzer-mention.js';
 import { getLogger } from '../shared/logger.js';
 import type { IpcStreamMessage, LLMMessage, ToolDefinition } from '../shared/types.js';
 import type { AgentDefinition, ReplyPayload } from '../agent/framework/types.js';
@@ -729,6 +730,46 @@ async function tryFamilyDirectSlash(
       return true;
     }
     await runCodeAnalyzerSlash(active, channel, userPrompt, message, requestId, send, parentListId, rerunFromListId);
+    return true;
+  }
+
+  // Phase 4.3: analyzer-family @-mentions. Distinct from
+  // `provider-mention.ts` (which handles per-step LLM provider
+  // overrides like `@local` / `@anthropic` inside a running agent):
+  // these target which analyzer family the WHOLE turn belongs to.
+  // `@code-analyzer` routes to the same flow as `/code-analyze`;
+  // sibling families that haven't shipped yet emit a recognised-but-
+  // unavailable message so the user sees the mention was understood.
+  const familyMention = parseAnalyzerMention(trimmed);
+  if (familyMention !== null) {
+    if (familyMention.prompt.length === 0) {
+      send({
+        id: requestId,
+        stream: 'delta',
+        data: { text: `Usage: \`@${familyMention.family} <prompt>\`` },
+      });
+      send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
+      return true;
+    }
+    if (familyMention.family === 'code-analyzer') {
+      await runCodeAnalyzerSlash(active, channel, familyMention.prompt, message, requestId, send, parentListId, rerunFromListId);
+      return true;
+    }
+    // data-analyzer / deployment-analyzer: not yet registered. Emit a
+    // clear "not available" message; when those families ship, this
+    // branch will route to their own slash dispatchers.
+    send({
+      id: requestId,
+      stream: 'delta',
+      data: {
+        text:
+          `_The **${familyMention.family}** family is not yet registered._ ` +
+          `When it ships, \`@${familyMention.family} <prompt>\` will route there directly. ` +
+          `For now: try \`/code-analyze\` for code questions, or omit the mention to fall through to the regular intent classifier.`,
+        format: 'markdown',
+      },
+    });
+    send({ id: requestId, stream: 'done', data: { summary: `${familyMention.family} unavailable` } });
     return true;
   }
 
