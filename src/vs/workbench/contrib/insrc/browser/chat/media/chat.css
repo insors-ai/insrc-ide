@@ -362,6 +362,44 @@
 	white-space: pre-wrap;
 }
 
+/*
+ * F13 (plans/analyzers/code-analyzer.md): inline progress trail.
+ * Accumulates daemon-emitted progress events as a transcript-style
+ * log instead of the prior replace-last single-line display. The
+ * latest item is the "live" indicator; previous items dim. On
+ * stream end the trail switches to a finished style and stays in
+ * the transcript so the user retains the per-step record.
+ */
+.insrc-chat-progress-trail {
+	margin: 6px 12px;
+	padding: 6px 10px;
+	border: 1px solid var(--vscode-panel-border);
+	border-left: 3px solid var(--vscode-progressBar-background);
+	border-radius: 4px;
+	background: var(--vscode-editorWidget-background);
+	font-family: var(--monaco-monospace-font);
+	font-size: 11px;
+	line-height: 1.5;
+	color: var(--vscode-editor-foreground);
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.insrc-chat-progress-trail.insrc-chat-progress-trail-finished {
+	border-left-color: var(--vscode-panel-border);
+	opacity: 0.85;
+}
+
+.insrc-chat-progress-trail-item {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.insrc-chat-progress-trail-item.insrc-chat-progress-trail-stale {
+	color: var(--vscode-descriptionForeground);
+}
+
 /* Items 32b+55: live-step activity console -- boxed, spinner header, auto-scrolling monospace body. */
 .insrc-chat-live-console {
 	margin: 6px 12px;
