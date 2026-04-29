@@ -268,7 +268,21 @@ async function rebuild(logService: ILogService, headSha: string): Promise<void> 
 
 const PID_FILE = join(INSRC_DIR, 'daemon.pid');
 const SOCK_FILE = join(INSRC_DIR, 'daemon.sock');
-const TERMINATE_GRACE_MS = 5_000;
+/**
+ * How long we wait after SIGTERM before escalating to SIGKILL.
+ * 5 s was too tight -- the daemon's `shutdown()` waits for
+ * `queueDone` (the indexer + cross-file resolver queue) to drain,
+ * which can take 17-45 s on a sizable repo. Live testing
+ * 2026-04-29 showed every IDE restart triggering a SIGKILL whose
+ * silent exit produced no crash trace + lost in-flight chat
+ * sessions.
+ *
+ * 30 s gives typical drains room to finish. The daemon-side
+ * `shutdown()` ALSO has its own hard-exit backstop (~20 s) so
+ * it force-exits before this grace window expires whenever
+ * possible.
+ */
+const TERMINATE_GRACE_MS = 30_000;
 const TERMINATE_POLL_MS = 100;
 
 /**

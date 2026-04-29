@@ -971,7 +971,7 @@ async function main(): Promise<void> {
 
 		'daemon.shutdown': async () => {
 			log.info('shutdown requested');
-			shutdown();
+			shutdown('daemon.shutdown RPC');
 			return { ok: true };
 		},
 
@@ -1183,30 +1183,64 @@ async function main(): Promise<void> {
 	const stopTodosRetention = todosRpc.scheduleTodosRetention(db);
 
 	// 9. Graceful shutdown on signals
-	// TODO: shutdown hangs — `daemon stop` CLI times out after 5s and the old process
-	// keeps the Kuzu DB lock, preventing restart. Root cause: queueDone never resolves
-	// if jobs are in-flight (e.g. long-running LLM brainstorm tasks). Need to:
-	//   1. Abort in-flight jobs (signal the queue to reject pending work)
-	//   2. Set a hard timeout (e.g. 10s) that calls process.exit(1) if graceful close stalls
-	//   3. Release the Kuzu lock before waiting for queue drain
-	function shutdown(): void {
-		log.info('shutting down...');
+	// Shutdown handler. Race between two timelines:
+	//
+	//   1. `queueDone.finally(...)` cleanly drains the indexer + cross-
+	//      file resolver queue, then calls process.exit(0) with pino
+	//      having flushed.
+	//   2. The hard-exit backstop fires at HARD_EXIT_MS regardless of
+	//      queue state. Used to be: queueDone never resolved if a
+	//      long-running indexer job was in flight, so SIGTERM left the
+	//      process running until the IDE escalated to SIGKILL --
+	//      silent death, no flush, no PID cleanup. Live testing
+	//      2026-04-29 confirmed every IDE restart that re-pulled the
+	//      daemon code produced this signature.
+	//
+	// HARD_EXIT_MS is intentionally less than the IDE's
+	// TERMINATE_GRACE_MS (30 s) so the backstop fires first whenever
+	// possible -- the daemon flushes pino + clears its PID before
+	// the IDE escalates to SIGKILL.
+	const HARD_EXIT_MS = 20_000;
+	let shutdownStarted = false;
+	function shutdown(signal: string): void {
+		// Re-entrant safety: SIGINT followed by SIGTERM (or vice
+		// versa) shouldn't restart the timers / double-emit "bye".
+		if (shutdownStarted) {
+			log.warn({ signal }, 'shutdown signal received again; already in progress');
+			return;
+		}
+		shutdownStarted = true;
+		// Log synchronously at the top so even a SIGKILL race leaves
+		// at least the receipt line in agent.*.log. pino's worker-
+		// thread transport may not flush this in time, but it's the
+		// best-effort bookend matching the daemon-crash handler.
+		log.info({ signal }, 'shutdown signal received; draining...');
 		clearInterval(pruneTimer);
 		stopTodosRetention();
 		queue.stop();
 		void disposeChatHandlers();
 		void watcher.close();
 		void server.close();
+		// Hard-exit backstop -- fires whether or not queueDone resolved.
+		// `unref()` so the timer doesn't keep the event loop alive on
+		// its own; queue drain finishing first lets us exit early.
+		const backstop = setTimeout(() => {
+			log.warn({ ms: HARD_EXIT_MS }, 'shutdown: hard-exit backstop fired (queue drain stalled)');
+			try { clearPid(); } catch { /* nothing */ }
+			process.exit(0);
+		}, HARD_EXIT_MS);
+		backstop.unref();
 		void queueDone.finally(async () => {
 			await closeDb();
 			clearPid();
 			log.info('bye');
+			clearTimeout(backstop);
 			process.exit(0);
 		});
 	}
 
-	process.on('SIGTERM', shutdown);
-	process.on('SIGINT', shutdown);
+	process.on('SIGTERM', () => shutdown('SIGTERM'));
+	process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
 main().catch(err => {
