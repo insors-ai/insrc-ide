@@ -148,6 +148,15 @@ async function main(): Promise<void> {
 	const { registerBuiltinDataDrivers } = await import('./db/drivers/index.js');
 	registerBuiltinDataDrivers();
 
+	// 6d. Register cross-agent surface (plans/analyzers/code-analyzer.md
+	//     Phase 3). The Code Analyzer exposes `code:locate` / `code:trace`
+	//     / `code:describe` for sibling analyzer families to dispatch
+	//     into. Sibling families (data-analyzer, deployment-analyzer)
+	//     will register their own `data:*` / `deploy:*` modules when
+	//     they ship; today the cross-agent registry is one-sided.
+	const { registerCodeAnalyzerCrossAgentTools } = await import('./cross-agent/index.js');
+	registerCodeAnalyzerCrossAgentTools();
+
 	// 7. Start IPC server
 	const server = new IpcServer({
 		'repo.add': async (params) => {
