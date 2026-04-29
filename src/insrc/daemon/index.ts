@@ -1074,6 +1074,15 @@ async function main(): Promise<void> {
 			const mod = await import('../agent/tasks/code-analyzer/cache.js');
 			return mod.clearCache();
 		},
+
+		// Code Analyzer diff-vs-previous-run (plans/analyzers/code-analyzer.md
+		// Phase 4.2). Compares two completed analysis lists; returns a
+		// structured diff over their accepted findings plus a rendered
+		// markdown summary. Backs `insrc.codeAnalyzer.diffWithPrevious`.
+		'codeAnalyzer.diffRuns': async (params) => {
+			const mod = await import('./code-analyzer-diff.js');
+			return mod.diffRunsRpc(params as { priorListId?: unknown; currentListId?: unknown });
+		},
 	}, {
 		// Streaming handlers
 		'chat.send': chatSend,

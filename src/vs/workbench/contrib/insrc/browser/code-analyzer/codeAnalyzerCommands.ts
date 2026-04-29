@@ -8,11 +8,14 @@ import { Action2, registerAction2 } from '../../../../../platform/actions/common
 import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
+import { joinPath } from '../../../../../base/common/resources.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { AnalysisReportInput } from './analysisReportInput.js';
+import { EphemeralEditorInput } from '../shared/ephemeralEditorInput.js';
 
 const CATEGORY = localize2('insrc', 'insrc');
 const CODE_ANALYZER_OWNER = 'code-analyzer';
@@ -283,3 +286,147 @@ registerAction2(class extends Action2 {
 		await chatService.sendMessage(message, undefined, undefined, priorList.id);
 	}
 });
+
+/**
+ * Diff a Code Analysis run against a prior run
+ * (plans/analyzers/code-analyzer.md section 4.2). Args:
+ *
+ *   {
+ *     priorListId?:   string;  // the older run
+ *     currentListId?: string;  // the newer run; defaults to a list
+ *                              // whose parentListId === priorListId
+ *                              // OR the most-recent list overall.
+ *   }
+ *
+ * Behaviour:
+ *   1. Resolve the (prior, current) pair.
+ *      Programmatic mode: caller supplies both ids.
+ *      Palette mode (no args): pick the most-recent code-analyzer
+ *      list as `current`; use its `parentListId` as `prior` when
+ *      set, otherwise the next-most-recent.
+ *   2. Call the daemon's `codeAnalyzer.diffRuns` RPC; render the
+ *      structured diff into markdown (the daemon returns both).
+ *   3. Open the markdown in the workbench's default editor under
+ *      `~/.insrc/tmp/code-analysis-diff-<id>.md` so the user can
+ *      scroll, search, and copy chunks.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.codeAnalyzer.diffWithPrevious',
+			title: localize2('insrc.codeAnalyzer.diffWithPrevious', 'Diff Code Analysis With Previous Run'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(
+		accessor: ServicesAccessor,
+		arg?: { priorListId?: string; currentListId?: string },
+	): Promise<void> {
+		const daemon = accessor.get(IInsrcDaemonService);
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const fileService = accessor.get(IFileService);
+		const editorService = accessor.get(IEditorService);
+		const notifications = accessor.get(INotificationService);
+
+		const pair = await resolveDiffPair(arg, chatService, todosService);
+		if (typeof pair === 'string') {
+			notifications.info(pair);
+			return;
+		}
+
+		let result: { markdown: string; stats: { added: number; removed: number; changed: number; unchanged: number } };
+		try {
+			result = await daemon.rpc(
+				'codeAnalyzer.diffRuns',
+				{ priorListId: pair.priorListId, currentListId: pair.currentListId },
+			);
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Diff failed: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+
+		const diffId = `${pair.priorListId.slice(0, 8)}__${pair.currentListId.slice(0, 8)}`;
+		const target = joinPath(EphemeralEditorInput.getTmpDir(), `code-analysis-diff-${diffId}.md`);
+		try {
+			await fileService.writeFile(target, VSBuffer.fromString(result.markdown));
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Could not write diff file: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+
+		await editorService.openEditor({ resource: target });
+		notifications.notify({
+			severity: Severity.Info,
+			message: `Diff: +${result.stats.added} added · -${result.stats.removed} removed · ~${result.stats.changed} changed · ${result.stats.unchanged} unchanged.`,
+		});
+	}
+});
+
+/**
+ * Resolve the (prior, current) list-id pair for the diff command.
+ * Returns a string error message when no usable pair exists.
+ */
+async function resolveDiffPair(
+	arg: { priorListId?: string; currentListId?: string } | undefined,
+	chatService: IInsrcChatService,
+	todosService: IInsrcTodosService,
+): Promise<{ priorListId: string; currentListId: string } | string> {
+	if (arg?.priorListId !== undefined && arg?.currentListId !== undefined) {
+		return { priorListId: arg.priorListId, currentListId: arg.currentListId };
+	}
+
+	const sessionId = chatService.activeSessionId;
+	if (sessionId === undefined) {
+		return 'No active chat session; run /code-analyze first.';
+	}
+	const candidates = todosService.lists.filter(
+		l => l.sessionId === sessionId && l.owner === CODE_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+	);
+	if (candidates.length < 2) {
+		return 'Need at least two completed code-analyzer reports to diff. Re-run an existing report and try again.';
+	}
+
+	// Prefer the parent-child pair when the most-recent run was a
+	// re-run / drill-down; that's the natural "diff against the run
+	// that produced me" shape Phase 4 is built around.
+	const current = arg?.currentListId !== undefined
+		? candidates.find(l => l.id === arg.currentListId) ?? candidates[candidates.length - 1]
+		: candidates[candidates.length - 1];
+	const prior = arg?.priorListId !== undefined
+		? candidates.find(l => l.id === arg.priorListId)
+		: undefined;
+
+	if (current === undefined) {
+		return 'Could not resolve the current run to diff.';
+	}
+
+	if (prior !== undefined) {
+		return { priorListId: prior.id, currentListId: current.id };
+	}
+
+	if (current.parentListId !== undefined) {
+		const parent = candidates.find(l => l.id === current.parentListId);
+		if (parent !== undefined) {
+			return { priorListId: parent.id, currentListId: current.id };
+		}
+	}
+
+	// No parent edge -- fall back to the next-most-recent list as the
+	// prior. This is best-effort; the daemon-side diff renderer warns
+	// when the prompts differ.
+	const olderCandidates = candidates.filter(l => l.id !== current.id);
+	if (olderCandidates.length === 0) {
+		return 'No prior run available to diff against.';
+	}
+	const fallback = olderCandidates[olderCandidates.length - 1]!;
+	return { priorListId: fallback.id, currentListId: current.id };
+}
