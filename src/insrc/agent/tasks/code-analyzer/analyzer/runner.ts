@@ -67,7 +67,14 @@ const log = getLogger('code-analyzer:runner');
 // ---------------------------------------------------------------------------
 
 const MAX_TOOL_CALLS = 8;
-const MAX_WALL_CLOCK_MS = 60_000;
+/**
+ * Safety upper bound on per-task wall-clock. Generous on purpose --
+ * local Ollama models routinely need 30-60 s per iteration; a tight
+ * cap forces premature truncation into the strict-JSON retry path
+ * (empirically tripled per-item cost on devstral). 10 minutes is
+ * the "stuck Ollama" backstop, not a target SLA.
+ */
+const MAX_WALL_CLOCK_MS = 600_000;
 /** Approximate per-task ceiling on cumulative `Read` rendered output. */
 const MAX_CUMULATIVE_READ_BYTES = 2 * 1024 * 1024;
 /** Bytes refused per single `Read` call -- corresponds to file:read 512 KB cap. */
@@ -218,6 +225,15 @@ export interface RunAnalyzerOpts {
   session: Session;
   /** Optional progress callback for tool-call traces. */
   onProgress?: ((message: string) => void) | undefined;
+  /**
+   * Optional token streaming callback. When set, fired with each
+   * token chunk during free-text LLM emissions in the tool loop.
+   * The orchestrator wires this into the chat panel's brainstorm-
+   * style "live console" bubble so the user sees raw model output
+   * stream in alongside the tool-call traces from `onProgress`.
+   * Tokens carry no implicit newline -- the receiver appends inline.
+   */
+  onToken?: ((token: string) => void) | undefined;
   /** Cancellation signal forwarded to executeTool. */
   signal?: AbortSignal | undefined;
   /**
@@ -304,6 +320,7 @@ export async function runAnalyzer(
       tools: ANALYZER_TOOLS as ToolDefinition[],
       maxTokens: COMPLETION_MAX_TOKENS,
       responseFormat: RESPONSE_FORMAT_SCHEMA,
+      ...(opts.onToken !== undefined ? { onToken: opts.onToken } : {}),
     });
     lastText = llmResponse.text ?? '';
 
@@ -445,6 +462,7 @@ export async function runAnalyzer(
       tools: [],
       maxTokens: COMPLETION_MAX_TOKENS,
       responseFormat: RESPONSE_FORMAT_SCHEMA,
+      ...(opts.onToken !== undefined ? { onToken: opts.onToken } : {}),
     });
     lastText = retryResp.text ?? '';
     parsed = parseAnalyzerResult(lastText, task.itemId);
@@ -497,6 +515,7 @@ export async function runAnalyzer(
       tools: [],
       maxTokens: COMPLETION_MAX_TOKENS,
       responseFormat: RESPONSE_FORMAT_SCHEMA,
+      ...(opts.onToken !== undefined ? { onToken: opts.onToken } : {}),
     });
     const retryParsed: ParseResult = parseAnalyzerResult(retryResp.text ?? '', task.itemId);
     if (retryParsed.ok) {

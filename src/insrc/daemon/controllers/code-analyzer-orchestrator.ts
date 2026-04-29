@@ -75,43 +75,31 @@ interface TierCaps {
   readonly softTaskCap: number;
   /** Hard cap: planner output is silently trimmed to this length. */
   readonly hardTaskCap: number;
-  /** Per-task wall-clock budget for the analyzer runner. */
-  readonly perTaskWallClockMs: number;
 }
 
 /**
- * Scope-tier-driven caps for the code-analyzer orchestrator. The
- * Phase 1 single-cap policy (16 soft / 24 hard for every prompt
- * regardless of scope) over-served narrow questions and under-served
- * sweeping audits. Phase 5.A introduces tier-aware caps so:
+ * Scope-tier-driven task caps. Phase 5.A introduced these so:
  *
- *   - "what does foo() do?" (S)        runs 1-3 focused tasks, ~30 s each
- *   - "summarise the auth flow" (M)    runs 5-8 tasks at the legacy budget
+ *   - "what does foo() do?" (S)        runs 1-3 focused tasks
+ *   - "summarise the auth flow" (M)    runs 5-8 tasks
  *   - "describe the framework" (L)     runs 10-16 tasks
  *   - "compare brainstorm + designer" (XL) runs up to 24 tasks
- *   - "audit the entire repo" (XXL+)   runs 6-10 BROAD tasks (each
- *                                       broader / slower; per-tier
- *                                       playbook in Phase 5.B will
- *                                       produce structural summaries
- *                                       instead of per-entity findings)
+ *   - "audit the entire repo" (XXL+)   runs 6-10 BROAD tasks
  *
- * Scope ladder (`ScopeSize`): S, M, L, XL, XXL, XXXL, XXXXL. The XXL+
- * tiers all collapse into the "broad / structural" cap shape; the
- * planner playbook differentiates them by output level (XXXL spans
- * the dependency graph; XXXXL produces the architectural overview).
- *
- * `M` matches the pre-Phase-5 constants exactly (16 soft / 24 hard /
- * 60 s) so existing /code-analyze runs that default to `M` see no
- * behavioural change.
+ * Per-tier wall-clock caps were ALSO part of Phase 5.A but were
+ * removed -- local Ollama runs routinely take 30-60 s per iteration;
+ * a tight 30-90 s cap forces every task into the strict-JSON retry
+ * path and roughly triples per-item cost. The runner's
+ * `MAX_WALL_CLOCK_MS` (10 min) is the only safety bound now.
  */
 const TIER_CAPS: Readonly<Record<ScopeSize, TierCaps>> = {
-  S:     { softTaskCap: 3,  hardTaskCap: 5,  perTaskWallClockMs: 30_000 },
-  M:     { softTaskCap: 16, hardTaskCap: 24, perTaskWallClockMs: 60_000 },
-  L:     { softTaskCap: 10, hardTaskCap: 16, perTaskWallClockMs: 60_000 },
-  XL:    { softTaskCap: 16, hardTaskCap: 24, perTaskWallClockMs: 60_000 },
-  XXL:   { softTaskCap: 6,  hardTaskCap: 10, perTaskWallClockMs: 90_000 },
-  XXXL:  { softTaskCap: 6,  hardTaskCap: 10, perTaskWallClockMs: 90_000 },
-  XXXXL: { softTaskCap: 6,  hardTaskCap: 10, perTaskWallClockMs: 90_000 },
+  S:     { softTaskCap: 3,  hardTaskCap: 5  },
+  M:     { softTaskCap: 16, hardTaskCap: 24 },
+  L:     { softTaskCap: 10, hardTaskCap: 16 },
+  XL:    { softTaskCap: 16, hardTaskCap: 24 },
+  XXL:   { softTaskCap: 6,  hardTaskCap: 10 },
+  XXXL:  { softTaskCap: 6,  hardTaskCap: 10 },
+  XXXXL: { softTaskCap: 6,  hardTaskCap: 10 },
 };
 
 function capsForTier(tier: ScopeSize | undefined): TierCaps {
@@ -597,11 +585,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     });
     if (cached !== null) {
       log.info({ itemId, kind: task.kind, tier: this._tier }, 'analyzer cache hit; skipping analyzer + reviewer');
-      this.deps.send({
-        id: this.deps.requestId,
-        stream: 'progress',
-        data: { message: this.formatProgress(state, `cache hit: ${task.kind} -- ${shortTitleFor(task)}`) },
-      });
+      // Brainstorm-style bubble: open + emit one line + close
+      // immediately. Cache hits are fast; a longer-lived bubble
+      // would just blink. The chat panel still gets a transient
+      // visual cue that the task short-circuited.
+      const cacheStep = this.analyzeLiveStepName(state);
+      this.emitLiveStep(cacheStep, '');
+      this.emitLiveStep(cacheStep, this.formatProgress(state, `cache hit: ${task.kind} -- ${shortTitleFor(task)}`) + '\n');
+      this.emitLiveStep(cacheStep, '', true);
       // Mirror runNextAnalyzerTask's accept-path side-effects: meta,
       // markComplete, accepted/history, queue advance.
       if (this.deps.todos !== undefined) {
@@ -635,42 +626,44 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       return this.runNextAnalyzerTask(state);
     }
 
-    // Progress to the user -- the analyzer awaits below for up to 60s,
-    // and the framework only emits progress between tasks; we manually
-    // emit so the user sees something happening.
-    this.deps.send({
-      id: this.deps.requestId,
-      stream: 'progress',
-      data: { message: this.formatProgress(state, `running task: ${task.kind} -- ${shortTitleFor(task)}`) },
-    });
+    // Brainstorm-style bubble: open before the runner fires;
+    // accumulate tool-call notes + LLM tokens during the loop;
+    // close when the task completes (after the await).
+    const liveStepName = this.analyzeLiveStepName(state);
+    this.emitLiveStep(liveStepName, '');
+    this.emitLiveStep(liveStepName, this.formatProgress(state, `running task: ${task.kind} -- ${shortTitleFor(task)}`) + '\n');
 
     const provider = this.resolveAnalyzerProvider();
     const outcome = await runAnalyzer(task, {
       provider,
       session: this.deps.session,
-      // F12: drop the redundant `[code-analyzer] ...` prefix runner
-      // messages used to receive -- the formatProgress header already
-      // tags the source with `[code-analyzer | tier=X | K/N]`. The
-      // runner message itself is e.g. `[analyzer] graph_search(...)
-      // -> 5 rows in 234ms`; the inner `[analyzer]` tag stays so the
-      // user can see the tool call layer.
-      onProgress: (msg) => this.deps?.send({
-        id: this.deps.requestId,
-        stream: 'progress',
-        data: { message: this.formatProgress(state, msg) },
-      }),
+      // Tool-call traces from the runner (`[analyzer] graph_search(...)
+      // -> 5 rows in 234ms`) become bubble lines. The inner
+      // `[analyzer]` tag stays so the user can see the tool call
+      // layer; formatProgress prepends the `[code-analyzer | tier=X
+      // | K/N]` header.
+      onProgress: (msg) => this.emitLiveStep(liveStepName, this.formatProgress(state, msg) + '\n'),
+      // Token streaming during free-text LLM emissions between tool
+      // calls. Tokens append inline (no newline added) so the LLM's
+      // raw output flows in the bubble like brainstorm's spec writer.
+      onToken: (token) => this.emitLiveStep(liveStepName, token),
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       checkPathAccess: (path) => this.checkPathAccess(path, state),
-      // Phase 5.A: per-tier wall-clock budget. S=30s, M=60s, L=60s,
-      // XL=60s, XXL+=90s. Default tier is 'M' (60s -- the
-      // pre-Phase-5 budget) so existing callers don't change shape.
-      wallClockMs: capsForTier(this._tier).perTaskWallClockMs,
+      // Phase 5.A's per-tier wall-clock caps were dropped; the
+      // runner's MAX_WALL_CLOCK_MS (10 min safety bound) applies
+      // unconditionally. Local Ollama runs were getting cut off by
+      // the tight tier caps, forcing every task into the strict-
+      // JSON retry path and tripling per-item wall-clock cost.
       // Phase 5.B: tier threaded into the analyzer system prompt so
       // tierAnalyzerGuidance shifts the analytical altitude
       // (per-line citations / signature-level / structural).
       tier: this._tier,
     });
     state.set(K_LAST_RUNNER, outcome);
+    // Close the per-task live-console bubble; the framework will
+    // open its own ('code-analyzer', 'review') bubble for the next
+    // queued review LLM task.
+    this.emitLiveStep(liveStepName, '', true);
 
     // Stash the runner result on item.meta so the todos pane / future
     // resume can render it without rerunning.
@@ -992,11 +985,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const outlineInput = buildMultipassOutlineInput(request, accepted, planned, tier);
     const sectionBuild = makeSectionBuilder(request, accepted, tier);
 
-    this.deps.send({
-      id: this.deps.requestId,
-      stream: 'progress',
-      data: { message: this.formatProgress(undefined, 'multi-pass synthesis: planning sections...', { phase: 'synthesis' }) },
-    });
+    const synthStep = 'synthesise (multi-pass)';
+    this.emitLiveStep(synthStep, '');
+    this.emitLiveStep(synthStep, this.formatProgress(undefined, 'multi-pass synthesis: planning sections...', { phase: 'synthesis' }) + '\n');
 
     const result = await generateMultiPass(
       {
@@ -1016,16 +1007,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         }),
         cacheContext: repoSnapshotId,
         onSectionComplete: (s: SectionResult) => {
-          if (this.deps === undefined) {
-            return;
-          }
           const note = s.note ? ` (${s.note})` : '';
           const status = s.fallback ? 'degraded' : 'ok';
-          this.deps.send({
-            id: this.deps.requestId,
-            stream: 'progress',
-            data: { message: this.formatProgress(undefined, `section "${s.id}" ${status}${note}`, { phase: 'synthesis' }) },
-          });
+          this.emitLiveStep(synthStep, this.formatProgress(undefined, `section "${s.id}" ${status}${note}`, { phase: 'synthesis' }) + '\n');
         },
         ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       },
@@ -1038,6 +1022,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         'multipass synthesis: degraded result accepted',
       );
     }
+    // Close the multipass bubble. The framework will open its own
+    // ('code-analyzer', 'synthesise') bubble if the run falls back
+    // to single-pass; otherwise the user just sees the report
+    // appear in the Report Pane.
+    this.emitLiveStep(synthStep, '', true);
 
     // Defensive: if the outline omitted the drill-down section, the
     // markdown lacks a footer and the Report Pane has no buttons to
@@ -1174,6 +1163,57 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       parts.push('drill-down');
     }
     return `[${parts.join(' | ')}] ${message}`;
+  }
+
+  /**
+   * Emit a brainstorm-style `liveStep` event so the chat panel
+   * renders progress / token chunks inside a boxed monospace
+   * "live console" bubble (the same widget the framework uses for
+   * plan / review / synthesise LLM tasks). Replaced the F13
+   * progress-trail rendering after user feedback (2026-04-29):
+   * "for the streaming output check how the message display happens
+   * in brainstorming and apply the same to this".
+   *
+   * Per-task bubbles use a unique `step` (e.g. `analyze (3/10)`)
+   * keyed on the analyzing-phase task counter so each task gets its
+   * own bubble that opens before the runner fires + closes when the
+   * task completes. Multipass synthesis uses `synthesise (multi-pass)`.
+   * Cache-hit fast-paths get a brief one-line bubble that opens +
+   * closes immediately so the user sees the hit but no empty shell.
+   *
+   * `text=''` opens (or no-ops on existing). `done=true` removes the
+   * bubble. Token chunks append inline (no newline added). Progress
+   * lines should include their own trailing `\n`.
+   */
+  private emitLiveStep(step: string, text: string, done = false): void {
+    if (this.deps === undefined) {
+      return;
+    }
+    this.deps.send({
+      id: this.deps.requestId,
+      stream: 'liveStep',
+      data: {
+        agent: 'code-analyzer',
+        step,
+        text,
+        ...(done ? { done: true } : {}),
+      },
+    });
+  }
+
+  /**
+   * Compute the per-task `liveStep` step name. Includes the K/N
+   * counter so each task creates a distinct bubble (chat panel
+   * keys bubbles on `${agent}:${step}`).
+   */
+  private analyzeLiveStepName(state: TaskStateStore): string {
+    const total = state.get<AnalysisTask[]>(K_PLAN_TASKS)?.length ?? 0;
+    const queue = state.get<string[]>(K_TASK_QUEUE)?.length ?? 0;
+    if (total > 0) {
+      const k = Math.max(1, Math.min(total, total - queue + 1));
+      return `analyze (${k}/${total})`;
+    }
+    return 'analyze';
   }
 
   // -------------------------------------------------------------------------

@@ -1005,76 +1005,19 @@ export class InsrcChatViewPane extends ViewPane {
 		this._scrollToBottom();
 	}
 
-	/**
-	 * Inline progress trail (F13: plans/analyzers/code-analyzer.md).
-	 * Older single-element progress display would replace each event
-	 * with the next, leaving the user with no record of what already
-	 * ran. The trail accumulates events as a transcript-style log:
-	 * each new progress message appends a line, previous lines dim,
-	 * the latest is the live indicator. Stream end marks the trail
-	 * as finished and resets the field so the next turn gets a
-	 * fresh trail.
-	 */
-	private _progressTrailEl: HTMLElement | undefined;
-
 	private _showProgress(step: string, status: string): void {
 		const label = status ? `${step}: ${status}` : step;
 
 		// Top progress bar -- the always-visible "live" indicator.
+		// Per-event historical record now flows through the
+		// brainstorm-style `liveStep` bubbles (see `_handleLiveStep`)
+		// emitted by the daemon's analyzer + content-gen paths; the
+		// F13 inline trail this method used to maintain was removed
+		// after user feedback (2026-04-29) preferring the brainstorm
+		// pattern. Intent announcements still get a persistent
+		// assistant message via `_ingestIntentAnnouncement`.
 		this._progressBar.classList.remove('hidden');
 		this._progressText.textContent = label;
-
-		// F13: append to the inline trail so the user retains every
-		// progress message in the transcript. Skip "Intent: ..."
-		// events because `_ingestIntentAnnouncement` already
-		// synthesises a persistent assistant message for those --
-		// adding them to the trail too would double-up.
-		if (label.startsWith('Intent:')) {
-			return;
-		}
-		this._appendProgressTrail(label);
-	}
-
-	/**
-	 * Append a progress message to the inline trail. Creates the
-	 * container on first call (one trail per turn). Dims previous
-	 * items so the latest stands out as the "live" indicator;
-	 * `_finalizeProgressTrail()` at stream end marks all items
-	 * stale and detaches the field so the next turn starts a fresh
-	 * trail.
-	 */
-	private _appendProgressTrail(message: string): void {
-		if (!this._progressTrailEl) {
-			this._progressTrailEl = dom.append(this._messageList, dom.$('.insrc-chat-progress-trail'));
-			this._emptyState.style.display = 'none';
-			this._messageList.style.display = '';
-		}
-		// Dim previous items.
-		for (const child of Array.from(this._progressTrailEl.children)) {
-			child.classList.add('insrc-chat-progress-trail-stale');
-		}
-		const item = dom.append(this._progressTrailEl, dom.$('.insrc-chat-progress-trail-item'));
-		item.textContent = message;
-		this._scrollToBottom();
-	}
-
-	/**
-	 * Mark the active progress trail as completed. Keeps the trail
-	 * visible in the transcript (per-plan: "persists in the
-	 * transcript") but drops the "live" highlighting from the last
-	 * item. Resets the field so the next turn renders a fresh trail
-	 * below this one rather than re-using the same DOM.
-	 */
-	private _finalizeProgressTrail(): void {
-		if (!this._progressTrailEl) {
-			return;
-		}
-		this._progressTrailEl.classList.add('insrc-chat-progress-trail-finished');
-		const last = this._progressTrailEl.lastElementChild;
-		if (last) {
-			last.classList.add('insrc-chat-progress-trail-stale');
-		}
-		this._progressTrailEl = undefined;
 	}
 
 	/**
@@ -1144,10 +1087,6 @@ export class InsrcChatViewPane extends ViewPane {
 		// LLM step that ended without emitting its `done` event (abort,
 		// connection lost, etc.).
 		this._clearLiveStepBubbles();
-
-		// F13: mark the inline progress trail finished but keep it in
-		// the transcript so the user retains the per-step record.
-		this._finalizeProgressTrail();
 
 		// Don't re-enable input if the brainstorm pane is still driving; the
 		// brainstorm lock keeps the composer dormant until the flow completes.
