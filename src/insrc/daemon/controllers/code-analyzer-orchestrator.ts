@@ -495,7 +495,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       this.deps.send({
         id: this.deps.requestId,
         stream: 'progress',
-        data: { message: `[code-analyzer] cache hit: ${task.kind} -- ${shortTitleFor(task)}` },
+        data: { message: this.formatProgress(state, `cache hit: ${task.kind} -- ${shortTitleFor(task)}`) },
       });
       // Mirror runNextAnalyzerTask's accept-path side-effects: meta,
       // markComplete, accepted/history, queue advance.
@@ -536,17 +536,23 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     this.deps.send({
       id: this.deps.requestId,
       stream: 'progress',
-      data: { message: `[code-analyzer] running task: ${task.kind} -- ${shortTitleFor(task)}` },
+      data: { message: this.formatProgress(state, `running task: ${task.kind} -- ${shortTitleFor(task)}`) },
     });
 
     const provider = this.resolveAnalyzerProvider();
     const outcome = await runAnalyzer(task, {
       provider,
       session: this.deps.session,
+      // F12: drop the redundant `[code-analyzer] ...` prefix runner
+      // messages used to receive -- the formatProgress header already
+      // tags the source with `[code-analyzer | tier=X | K/N]`. The
+      // runner message itself is e.g. `[analyzer] graph_search(...)
+      // -> 5 rows in 234ms`; the inner `[analyzer]` tag stays so the
+      // user can see the tool call layer.
       onProgress: (msg) => this.deps?.send({
         id: this.deps.requestId,
         stream: 'progress',
-        data: { message: `[code-analyzer] ${msg}` },
+        data: { message: this.formatProgress(state, msg) },
       }),
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       checkPathAccess: (path) => this.checkPathAccess(path, state),
@@ -884,7 +890,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     this.deps.send({
       id: this.deps.requestId,
       stream: 'progress',
-      data: { message: `[code-analyzer] multi-pass synthesis (tier ${tier}); planning sections...` },
+      data: { message: this.formatProgress(undefined, 'multi-pass synthesis: planning sections...', { phase: 'synthesis' }) },
     });
 
     const result = await generateMultiPass(
@@ -905,13 +911,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         }),
         cacheContext: repoSnapshotId,
         onSectionComplete: (s: SectionResult) => {
-          if (this.deps === undefined) return;
+          if (this.deps === undefined) {
+            return;
+          }
           const note = s.note ? ` (${s.note})` : '';
           const status = s.fallback ? 'degraded' : 'ok';
           this.deps.send({
             id: this.deps.requestId,
             stream: 'progress',
-            data: { message: `[code-analyzer] section "${s.id}" ${status}${note}` },
+            data: { message: this.formatProgress(undefined, `section "${s.id}" ${status}${note}`, { phase: 'synthesis' }) },
           });
         },
         ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
@@ -1019,6 +1027,48 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       throw new Error('resolveAnalyzerProvider: deps not attached');
     }
     return this.deps.session.resolver.resolve('code-analyzer', 'analyzer');
+  }
+
+  /**
+   * Format a progress message with the run's tier + task counter +
+   * drill-down breadcrumb (F12: plans/analyzers/code-analyzer.md
+   * §F12). Output shape:
+   *
+   *   `[code-analyzer | tier=L | 3/10] running task: describe -- ...`
+   *   `[code-analyzer | tier=XXL | synthesis | drill-down] section "summary" ok`
+   *
+   * - `tier`        always present.
+   * - `K/N`         present during the analyzer phase (K = task index
+   *                 the runner is about to start; N = total planned
+   *                 tasks at this moment, including any added
+   *                 follow-ups). Replaced by `synthesis` during the
+   *                 synthesise phase; absent otherwise.
+   * - `drill-down`  present when this run was kicked off via the
+   *                 `insrc.codeAnalyzer.drillDown` command (parent
+   *                 list id supplied) -- gives the user transcript-
+   *                 level context that they're inside a drill chain.
+   */
+  private formatProgress(
+    state: TaskStateStore | undefined,
+    message: string,
+    opts?: { phase?: 'analyzer' | 'synthesis' },
+  ): string {
+    const phase = opts?.phase ?? 'analyzer';
+    const parts: string[] = ['code-analyzer', `tier=${this._tier}`];
+    if (phase === 'analyzer' && state !== undefined) {
+      const total  = state.get<AnalysisTask[]>(K_PLAN_TASKS)?.length ?? 0;
+      const queue  = state.get<string[]>(K_TASK_QUEUE)?.length ?? 0;
+      if (total > 0) {
+        const k = Math.max(1, Math.min(total, total - queue + 1));
+        parts.push(`${k}/${total}`);
+      }
+    } else if (phase === 'synthesis') {
+      parts.push('synthesis');
+    }
+    if (this._parentListId !== undefined) {
+      parts.push('drill-down');
+    }
+    return `[${parts.join(' | ')}] ${message}`;
   }
 
   // -------------------------------------------------------------------------
