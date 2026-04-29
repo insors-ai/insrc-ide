@@ -38,7 +38,7 @@
 
 import type { LLMMessage } from '../../../../shared/types.js';
 import type { ScopeSize } from '../../../../shared/classify.js';
-import type { AnalysisTask, AnalyzerResult } from '../types.js';
+import type { AnalysisTask, AnalyzerResult, ForeignCitations } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Universal HEAD: input contract + universal rules. Tier-agnostic.
@@ -249,6 +249,14 @@ export const SYNTHESISE_SYSTEM = buildSynthesiseSystemPrompt('M');
  *
  * Phase 5.C: tier threads through to the system prompt so the user
  * block sees a per-tier-shaped instruction.
+ *
+ * Phase 3.5: when any accepted task carried `foreignCitations` (from
+ * a `data:*` / `deploy:*` cross-agent dispatch), they're aggregated
+ * and surfaced in the user block under a dedicated section. The
+ * system prompt instructs the writer to render them under their own
+ * `## Schema findings (data-analyzer)` / `## Deployment findings
+ * (deployment-analyzer)` subsections -- never inline with code
+ * citations.
  */
 export function buildSynthesisPrompt(
   request: string,
@@ -276,6 +284,10 @@ export function buildSynthesisPrompt(
     })
     .join('\n\n');
 
+  const aggregatedForeign = aggregateForeignCitations(acceptedResults.map(r => r.result));
+  const foreignBlock = renderForeignCitationsBlock(aggregatedForeign);
+  const hasForeign = foreignBlock.length > 0;
+
   const userBody = [
     '# Original request',
     request,
@@ -287,13 +299,64 @@ export function buildSynthesisPrompt(
     '',
     '# Accepted task results',
     findingsBlock || '(no accepted results)',
+    ...(hasForeign ? ['', '# Foreign citations (cross-agent)', foreignBlock] : []),
     '',
     '# Output',
-    `Reply with the rendered Markdown report only -- shaped per the ${tier}-tier structure spec in the system prompt. No JSON, no fences around the whole document. End with the required "## Drill down" footer.`,
+    `Reply with the rendered Markdown report only -- shaped per the ${tier}-tier structure spec in the system prompt. No JSON, no fences around the whole document.${hasForeign ? ' Render each foreign citation bucket under its own dedicated `## Schema findings (data-analyzer)` / `## Deployment findings (deployment-analyzer)` subsection -- NEVER inline with code citations.' : ''} End with the required "## Drill down" footer.`,
   ].join('\n');
 
   return [
     { role: 'system', content: buildSynthesiseSystemPrompt(tier) },
     { role: 'user', content: userBody },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Foreign citation aggregation (Phase 3.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Union the foreignCitations across accepted task results. Returns
+ * undefined when none of the tasks carried any foreign citations.
+ */
+function aggregateForeignCitations(
+  results: readonly AnalyzerResult[],
+): ForeignCitations | undefined {
+  const data: Record<string, unknown>[] = [];
+  const deploy: Record<string, unknown>[] = [];
+  for (const r of results) {
+    if (r.foreignCitations?.data) {
+      data.push(...r.foreignCitations.data);
+    }
+    if (r.foreignCitations?.deploy) {
+      deploy.push(...r.foreignCitations.deploy);
+    }
+  }
+  if (data.length === 0 && deploy.length === 0) {
+    return undefined;
+  }
+  const out: { -readonly [K in keyof ForeignCitations]: ForeignCitations[K] } = {};
+  if (data.length > 0) {
+    out.data = data;
+  }
+  if (deploy.length > 0) {
+    out.deploy = deploy;
+  }
+  return out;
+}
+
+function renderForeignCitationsBlock(
+  foreign: ForeignCitations | undefined,
+): string {
+  if (foreign === undefined) {
+    return '';
+  }
+  const sections: string[] = [];
+  if (foreign.data && foreign.data.length > 0) {
+    sections.push(`## data-analyzer (${foreign.data.length})\n${JSON.stringify(foreign.data, null, 2)}`);
+  }
+  if (foreign.deploy && foreign.deploy.length > 0) {
+    sections.push(`## deployment-analyzer (${foreign.deploy.length})\n${JSON.stringify(foreign.deploy, null, 2)}`);
+  }
+  return sections.join('\n\n');
 }

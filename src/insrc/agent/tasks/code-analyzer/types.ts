@@ -179,6 +179,27 @@ export interface AnalyzerResult {
   readonly confidence: Confidence;
   readonly toolCalls: readonly ToolCallSummary[];
   readonly truncated?: boolean | undefined;
+  /**
+   * Foreign citations from cross-agent dispatches (Phase 3.5). When
+   * the analyzer's run-task LLM calls `data:*` or `deploy:*` tools
+   * (sibling families' surface) the structured results land here so
+   * the synthesise step can render them under their own
+   * ## subsection -- never inline with code citations. Shapes are
+   * declared by the sibling families; this plan declares them
+   * opaque (`Record<string, unknown>`) per design §13.3 until those
+   * siblings ship and tighten the type.
+   */
+  readonly foreignCitations?: ForeignCitations | undefined;
+}
+
+/**
+ * Cross-agent citation bundle (Phase 3.5). One bucket per sibling
+ * family; entries are opaque to the Code Analyzer -- DataCitation /
+ * DeployCitation shapes live in the sibling families' own modules.
+ */
+export interface ForeignCitations {
+  readonly data?: readonly Record<string, unknown>[] | undefined;
+  readonly deploy?: readonly Record<string, unknown>[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
