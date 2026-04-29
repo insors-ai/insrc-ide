@@ -153,13 +153,31 @@ export class ContextManager {
     // L1: System
     messages.push({ role: 'system', content: assembled.system.text });
 
-    // L2 + L3b + L4: Summary, semantic history, and code as context preamble
+    // L2 + L3b + L4: Summary, semantic history, and code as context preamble.
+    // Each session-coupled block is explicitly framed as BACKGROUND so the
+    // model doesn't latch onto the most concrete signal in the preamble
+    // (e.g. an OCR-heavy prior session) when the current request itself is
+    // generic. Live testing 2026-04-29: a fresh `/code-analyze` pulled
+    // OCR-flavoured plans into a totally unrelated repo because the recent
+    // turns described an OCR feature -- the planner LLM treated those as
+    // signal rather than context.
     const contextParts: string[] = [];
     if (assembled.summary.text) {
-      contextParts.push(`## Session Summary\n${assembled.summary.text}`);
+      contextParts.push(
+        `## Session Summary (BACKGROUND ONLY)\n` +
+        `Prior topics in this session, for continuity reference. NOT the current request. ` +
+        `Do not carry the subject matter into the response unless the user's request below explicitly invokes it.\n\n` +
+        assembled.summary.text
+      );
     }
     if (assembled.semantic.text) {
-      contextParts.push(`## Related Past Exchanges\n${assembled.semantic.text}`);
+      contextParts.push(
+        `## Related Past Exchanges (BACKGROUND ONLY)\n` +
+        `Past turns retrieved by similarity to the current message -- shown only because the embedding matched, ` +
+        `not because the user is asking about them. NOT the current request. ` +
+        `Do not let their topic, scope, or focus bias what you do here.\n\n` +
+        assembled.semantic.text
+      );
     }
     if (assembled.code.text) {
       contextParts.push(`## Relevant Code\n${assembled.code.text}`);
@@ -180,16 +198,35 @@ export class ContextManager {
           : '(no response)';
         turnSummaries.push(`User: ${turn.userMessage.slice(0, 150)}\nAssistant: ${assistantSnippet}`);
       }
-      contextParts.push(`## Recent Conversation (for continuity only -- do NOT re-execute these)\n${turnSummaries.join('\n\n')}`);
+      contextParts.push(
+        `## Recent Conversation (BACKGROUND ONLY)\n` +
+        `Recent turns from this session, shown for tonal continuity only. NOT the current request and ` +
+        `MUST NOT influence the topic, scope, entities, or focus of your response. ` +
+        `Treat the current request below on its own merits, even if it is brief or generic.\n\n` +
+        turnSummaries.join('\n\n')
+      );
     }
 
     if (contextParts.length > 0) {
       messages.push({ role: 'user', content: contextParts.join('\n\n') });
-      messages.push({ role: 'assistant', content: 'Understood. I have the context.' });
+      messages.push({
+        role: 'assistant',
+        content:
+          `Understood. The blocks above are BACKGROUND context only. ` +
+          `I will respond to the upcoming user request on its own merits, ` +
+          `without carrying over topics, entities, or focus from prior turns ` +
+          `unless the user's request explicitly invokes them.`,
+      });
     }
 
-    // Current user message -- this is the ONLY thing to act on
-    messages.push({ role: 'user', content: userMessage });
+    // Current user message -- this is the ONLY thing to act on. Prefixed so
+    // the model has a clear delimiter between background and the live ask.
+    messages.push({
+      role: 'user',
+      content: contextParts.length > 0
+        ? `## Current Request (act on this only)\n${userMessage}`
+        : userMessage,
+    });
 
     return messages;
   }
