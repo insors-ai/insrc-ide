@@ -69,6 +69,19 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 		this._titleEl.textContent = 'Code Analysis Report';
 		this._statusEl = dom.append(this._header, dom.$('span.insrc-analysis-report-status'));
 
+		// Save button -- writes the report markdown to a real file
+		// under the active repo's docs/code-analysis/. Disabled until
+		// `_listId` is set so the click target's args resolve cleanly.
+		const saveBtn = dom.append(this._header, dom.$('button.insrc-analysis-report-action'));
+		saveBtn.textContent = 'Save...';
+		saveBtn.title = 'Save report to file (docs/code-analysis/)';
+		this._register(dom.addDisposableListener(saveBtn, dom.EventType.CLICK, () => {
+			if (this._listId === undefined) {
+				return;
+			}
+			void this.commandService.executeCommand('insrc.codeAnalyzer.saveReport', { listId: this._listId });
+		}));
+
 		this._body = dom.append(this._container, dom.$('.insrc-analysis-report-body.rendered-markdown-host'));
 		this._emptyEl = dom.append(this._container, dom.$('.insrc-analysis-report-empty'));
 		this._emptyEl.textContent = 'Report not yet ready. The pane will populate when the analysis finishes.';

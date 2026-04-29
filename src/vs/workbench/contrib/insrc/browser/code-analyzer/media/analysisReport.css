@@ -55,6 +55,28 @@
 	color: var(--vscode-charts-green);
 }
 
+.insrc-analysis-report-action {
+	margin-left: 8px;
+	padding: 3px 10px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 3px;
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	font-family: inherit;
+	font-size: 0.85em;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.insrc-analysis-report-action:hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.insrc-analysis-report-action:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
 .insrc-analysis-report-body {
 	flex: 1;
 	overflow-y: auto;

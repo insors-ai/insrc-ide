@@ -8,6 +8,9 @@ import { Action2, registerAction2 } from '../../../../../platform/actions/common
 import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
+import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
+import { URI } from '../../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { joinPath } from '../../../../../base/common/resources.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
@@ -429,4 +432,175 @@ async function resolveDiffPair(
 	}
 	const fallback = olderCandidates[olderCandidates.length - 1]!;
 	return { priorListId: fallback.id, currentListId: current.id };
+}
+
+/**
+ * Save a Code Analysis report to a real file in the workspace.
+ *
+ * Today the synthesised markdown lives only in `list.body` (LanceDB)
+ * + the Report Pane (ephemeral). Both vanish on session rotation /
+ * IDE shutdown. Users want to commit findings alongside code, share
+ * snapshots, or just keep a permanent record. This command writes
+ * the body out to a real file under the active repo so all of those
+ * become possible.
+ *
+ * Args (all optional):
+ *   {
+ *     listId?: string;   // the report list to save; defaults to the
+ *                        // most-recent code-analyzer list with body.
+ *   }
+ *
+ * Target path:
+ *   <repo-root>/docs/code-analysis/<slug>-<short-listId>.md
+ *
+ * `<slug>` is derived from the list's `description` (the original
+ * `/code-analyze` prompt). `<short-listId>` is the first 8 chars of
+ * the list id -- gives the file a stable name + makes collisions
+ * across re-runs of the same prompt avoidable. Existing-target
+ * confirmation goes through `IDialogService.confirm`; on confirm
+ * we overwrite, on cancel the command returns silently.
+ *
+ * Resolution of the repo root: prefer `chatService.activeRepo` (the
+ * repo the analysis was run against, when still the active session
+ * repo). Fall back to the workspace's first folder. Error with a
+ * clear message if neither is available.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.codeAnalyzer.saveReport',
+			title: localize2('insrc.codeAnalyzer.saveReport', 'Save Code Analysis Report'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, arg?: { listId?: string }): Promise<void> {
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const fileService = accessor.get(IFileService);
+		const dialogService = accessor.get(IDialogService);
+		const editorService = accessor.get(IEditorService);
+		const workspaceService = accessor.get(IWorkspaceContextService);
+		const notifications = accessor.get(INotificationService);
+
+		// ----- Resolve list ----------------------------------------------------
+		let list: TodoList | undefined;
+		const targetListId = arg?.listId;
+		if (targetListId !== undefined) {
+			list = todosService.lists.find(l => l.id === targetListId);
+			if (list === undefined) {
+				notifications.info('Save aborted -- the analysis list is no longer loaded for this session.');
+				return;
+			}
+		} else {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notifications.info('No active chat session; run /code-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === CODE_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notifications.info('No completed code-analysis report yet for this session.');
+				return;
+			}
+			list = candidates[candidates.length - 1];
+		}
+		if (list === undefined || list.body === undefined || list.body.trim().length === 0) {
+			notifications.info('Save aborted -- the report has no body.');
+			return;
+		}
+
+		// ----- Resolve repo root ----------------------------------------------
+		const repoRoot = resolveRepoRoot(chatService, workspaceService);
+		if (repoRoot === undefined) {
+			notifications.info('Save aborted -- no active repo or workspace folder available.');
+			return;
+		}
+
+		// ----- Build target path ----------------------------------------------
+		const slug = slugFromRequest(list.description ?? list.title);
+		const filename = `${slug}-${list.id.slice(0, 8)}.md`;
+		const target = joinPath(repoRoot, 'docs', 'code-analysis', filename);
+
+		// ----- Confirm overwrite if exists ------------------------------------
+		try {
+			const exists = await fileService.exists(target);
+			if (exists) {
+				const result = await dialogService.confirm({
+					message: 'Overwrite existing report?',
+					detail: `${target.fsPath} already exists.`,
+					primaryButton: 'Overwrite',
+					type: 'warning',
+				});
+				if (!result.confirmed) {
+					return;
+				}
+			}
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Could not check target file: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+
+		// ----- Write + open ----------------------------------------------------
+		try {
+			await fileService.writeFile(target, VSBuffer.fromString(list.body));
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Save failed: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+		await editorService.openEditor({ resource: target });
+		notifications.notify({
+			severity: Severity.Info,
+			message: `Saved to ${target.fsPath}`,
+		});
+	}
+});
+
+/**
+ * Pick the repo path the report should land under. Prefers
+ * `chatService.activeRepo` -- that's the repo the analysis was run
+ * against when the run started, and it's still the active session's
+ * repo unless the user rotated. Falls back to the workspace's first
+ * folder when no chat session is active. Returns undefined when
+ * neither is available (no folder open + no chat session).
+ */
+function resolveRepoRoot(
+	chatService: IInsrcChatService,
+	workspaceService: IWorkspaceContextService,
+): URI | undefined {
+	const activeRepo = chatService.activeRepo;
+	if (activeRepo !== undefined && activeRepo.length > 0) {
+		return URI.file(activeRepo);
+	}
+	const folders = workspaceService.getWorkspace().folders;
+	if (folders.length > 0) {
+		return folders[0]!.uri;
+	}
+	return undefined;
+}
+
+/**
+ * Derive a filesystem-safe slug from the original analysis request.
+ * Lowercase, alnum-and-hyphen only, collapsed runs of `-`, capped at
+ * 60 chars. Falls back to `report` when the input is empty.
+ */
+function slugFromRequest(request: string): string {
+	const trimmed = request.trim().toLowerCase();
+	if (trimmed.length === 0) {
+		return 'report';
+	}
+	const slug = trimmed
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 60);
+	return slug.length > 0 ? slug : 'report';
 }
