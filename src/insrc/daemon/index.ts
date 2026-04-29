@@ -12,13 +12,56 @@
  *  8. Handle SIGTERM / SIGINT for graceful shutdown
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
 import * as lancedb from '@lancedb/lancedb';
 import { PATHS } from '../shared/paths.js';
 import { setLogMode, getLogger } from '../shared/logger.js';
 
 setLogMode('daemon');
 const log = getLogger('daemon');
+
+// ---------------------------------------------------------------------------
+// Top-level crash handlers
+// ---------------------------------------------------------------------------
+//
+// Node 20+ kills the process by default on an unhandled rejection /
+// uncaught exception. The daemon's pino-roll transport runs in a
+// worker thread (async) so any pending log line is lost on
+// process.exit -- previously a daemon crash left agent.*.log silent
+// past the last successful flush, with no trace of WHY we died.
+//
+// Capture both shapes here. We log THREE places, each as resilient as
+// we can manage given the imminent exit:
+//
+//   1. stderr (sync fd write) -- captured by the IDE's spawn redirect
+//      to /tmp/.insrc/daemon.stderr.log (electron-main side).
+//   2. /tmp/.insrc/daemon.crash.log (sync appendFileSync) -- always
+//      lands even when stderr isn't redirected (manual launches /
+//      tests / detached invocations).
+//   3. pino fatal -- best-effort. setImmediate before process.exit
+//      gives the worker-thread transport a chance to drain.
+//
+// All three log the kind (uncaughtException | unhandledRejection)
+// + the error message + stack, prefixed with an ISO timestamp so
+// post-mortem readers can correlate against agent.*.log lines.
+function reportFatal(kind: 'uncaughtException' | 'unhandledRejection', reason: unknown): void {
+	const err = reason instanceof Error ? reason : new Error(String(reason));
+	const traceText = `[insrc-daemon][${new Date().toISOString()}][${kind}] ${err.message}\n${err.stack ?? '(no stack)'}\n`;
+	try { process.stderr.write(traceText); } catch { /* stderr closed */ }
+	try {
+		mkdirSync(PATHS.logDir, { recursive: true });
+		appendFileSync(`${PATHS.logDir}/daemon.crash.log`, traceText);
+	} catch { /* fs unavailable */ }
+	try { log.fatal({ kind, err: err.message, stack: err.stack }, 'daemon fatal'); } catch { /* logger broken */ }
+	// Hard exit on next tick so async writes have a chance to flush.
+	// Using setTimeout(0) instead of setImmediate so pino's worker has
+	// at least one event-loop turn -- empirically reliable on Node 20.
+	setTimeout(() => { process.exit(1); }, 50).unref();
+}
+
+process.on('uncaughtException',  (err) =>    reportFatal('uncaughtException',  err));
+process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', reason));
+
 import { getDb, initDb, closeDb } from '../db/client.js';
 import { listRepos, addRepo, removeRepo } from '../db/repos.js';
 import { deleteEntitiesForRepo } from '../db/entities.js';

@@ -5,6 +5,7 @@
 
 import * as net from 'net';
 import * as cp from 'child_process';
+import * as fs from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { createDecorator } from '../../instantiation/common/instantiation.js';
@@ -291,8 +292,30 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 	// ---------------------------------------------------------------------------
 
 	private _spawnDetachedDaemon(entryPath: string): void {
+		// Capture stderr to /tmp/.insrc/daemon.stderr.log so any
+		// unhandled-exception trace from Node lands somewhere we can
+		// grep post-crash. The previous `stdio: 'ignore'` swallowed
+		// the trace entirely -- when the daemon died there was no
+		// diagnostic record and we had to guess. Append mode so we
+		// keep the trail across respawns.
+		//
+		// /tmp/.insrc/ is also the daemon's own logDir (PATHS.logDir);
+		// daemon startup creates it, but we may spawn before that
+		// happens, so ensure it from this side too.
+		const stderrLogPath = '/tmp/.insrc/daemon.stderr.log';
+		let stderrFd: number | undefined;
+		try {
+			fs.mkdirSync('/tmp/.insrc', { recursive: true });
+			stderrFd = fs.openSync(stderrLogPath, 'a');
+		} catch (err) {
+			this.logService.warn(`[insrc] could not open daemon stderr log (${stderrLogPath}): ${(err as Error).message}; falling back to ignore`);
+		}
+
 		const child = cp.spawn(process.execPath, [entryPath], {
-			stdio: 'ignore',
+			// Index 0 = stdin, 1 = stdout, 2 = stderr. Pass the open
+			// fd for stderr; ignore the rest. spawn dups our fd into
+			// the child, so we can close ours immediately after.
+			stdio: ['ignore', 'ignore', stderrFd ?? 'ignore'],
 			detached: true,
 			env: {
 				...process.env,
@@ -305,8 +328,11 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 				INSRC_LOG_LEVEL: 'info',
 			},
 		});
+		if (stderrFd !== undefined) {
+			try { fs.closeSync(stderrFd); } catch { /* nothing */ }
+		}
 		child.unref();
-		this.logService.info(`[insrc] Spawned detached daemon process: ${entryPath}`);
+		this.logService.info(`[insrc] Spawned detached daemon process: ${entryPath} (stderr -> ${stderrLogPath})`);
 	}
 
 	// ---------------------------------------------------------------------------
