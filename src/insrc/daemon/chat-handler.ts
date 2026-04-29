@@ -29,7 +29,7 @@ import { DaemonChannel } from './channel.js';
 import { ChatSessionPool } from './chat-sessions.js';
 import { resolveFileRefs, formatFileContext, type FileRefResult } from './file-refs.js';
 import { parseAnalyzerMention } from './analyzer-mention.js';
-import { findClosestSlashCommand, isRegisteredSlashCommand } from '../shared/slash-commands.js';
+import { findClosestSlashCommand, isIntentSlashCommand, isRegisteredSlashCommand, slashIdToIntent } from '../shared/slash-commands.js';
 import { getLogger } from '../shared/logger.js';
 import type { IpcStreamMessage, LLMMessage, ToolDefinition } from '../shared/types.js';
 import type { AgentDefinition, ReplyPayload } from '../agent/framework/types.js';
@@ -1118,6 +1118,41 @@ async function runChatMessage(
   const familyHandled = await tryFamilyDirectSlash(active, channel, message, requestId, send, parentListId, rerunFromListId);
   if (familyHandled) return;
 
+  // 0a-bis. Intent-slash shortcuts.
+  //
+  // `/design <prompt>` / `/plan <prompt>` / `/brainstorm <prompt>` /
+  // ... bypass the topic classifier and route directly to the matching
+  // agent family. Sibling of `/code-analyze` but uses the
+  // classified-intent override path rather than the family-direct one
+  // (no dedicated controller -- the existing classifier-fallback flow
+  // already routes to the agents). The slash registry
+  // (shared/slash-commands.ts) is the source of truth for which slash
+  // ids are intent shortcuts; isIntentSlashCommand gates the lookup.
+  //
+  // We strip the prefix from `message` so downstream stages
+  // (file-ref resolution, decomposer, classifier) operate on the
+  // user's actual content, then seed the classifiedIntentOverride
+  // chain so the dispatch picks up the forced intent.
+  let forcedIntentFromSlash: string | undefined;
+  const intentSlashMatch = message.trim().match(/^\/([\w-]+)(?:\s+([\s\S]+))?$/);
+  if (intentSlashMatch && isIntentSlashCommand(intentSlashMatch[1]!)) {
+    const slashId = intentSlashMatch[1]!;
+    const rest = (intentSlashMatch[2] ?? '').trim();
+    if (rest.length === 0) {
+      send({
+        id: requestId,
+        stream: 'delta',
+        data: { text: `Usage: \`/${slashId} <prompt>\`` },
+      });
+      send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
+      return;
+    }
+    forcedIntentFromSlash = slashIdToIntent(slashId);
+    message = rest;
+    log.info({ intent: forcedIntentFromSlash, slashId }, 'intent slash override');
+    send({ id: requestId, stream: 'progress', data: { message: `Intent forced: ${forcedIntentFromSlash}` } });
+  }
+
   // 0. Resolve file references with per-session cache
   active.fileCache.setTurn(session.turnIndex);
   // Get Anthropic API key for PDF vision extraction
@@ -1209,11 +1244,14 @@ async function runChatMessage(
   const decomposeProvider = session.resolver.resolve('classifier', 'decompose');
   const decomposed = await decompose(message, decomposeProvider, historyMessages);
 
-  // Primary/attached processing state
-  let classifiedIntentOverride: string | undefined;
-  let classifiedMessageOverride: string | undefined;
-  let classifiedConfidenceOverride: number | undefined;
-  let classifiedReasoningOverride: string | undefined;
+  // Primary/attached processing state. Seeded from the intent-slash
+  // shortcut detected above so `/<intent> <prompt>` short-circuits the
+  // decomposer + classifier the same way a high-confidence primary/
+  // attached decomposition does.
+  let classifiedIntentOverride: string | undefined = forcedIntentFromSlash;
+  let classifiedMessageOverride: string | undefined = forcedIntentFromSlash !== undefined ? message : undefined;
+  let classifiedConfidenceOverride: number | undefined = forcedIntentFromSlash !== undefined ? 1.0 : undefined;
+  let classifiedReasoningOverride: string | undefined = forcedIntentFromSlash !== undefined ? 'intent slash override' : undefined;
   let postPrimaryActions: {
     formatActions: import('../agent/decompose.js').AttachedAction[];
     dependActions: import('../agent/decompose.js').AttachedAction[];

@@ -31,7 +31,94 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 		description: 'Run a structural code analysis against the active repo.',
 		example: '/code-analyze how does the auth middleware work?',
 	},
+	// Intent shortcuts -- bypass the topic classifier and route directly
+	// to the matching agent family. Useful when the user knows what they
+	// want and doesn't want the classifier guessing (or guessing wrong).
+	{
+		id: 'design',
+		description: 'Designer agent -- iterative per-requirement design with validation gates.',
+		example: '/design a token-bucket rate limiter for the public API',
+	},
+	{
+		id: 'plan',
+		description: 'Planner agent -- 8-step implementation plan generation.',
+		example: '/plan migrate auth from session cookies to JWT',
+	},
+	{
+		id: 'brainstorm',
+		description: 'Brainstorm agent -- iterative spec-building from a fuzzy idea.',
+		example: '/brainstorm options for cross-region failover',
+	},
+	{
+		id: 'implement',
+		description: 'Implement an approved plan or a single-shot change (Pair / Delegate).',
+		example: '/implement the rate limiter from the plan',
+	},
+	{
+		id: 'refactor',
+		description: 'Refactor existing code without changing behaviour.',
+		example: '/refactor extract the retry loop into a helper',
+	},
+	{
+		id: 'test',
+		description: 'Tester agent -- write or run tests; never modifies impl code.',
+		example: '/test add coverage for the token-bucket edge cases',
+	},
+	{
+		id: 'debug',
+		description: 'Pair agent in debug mode -- investigate + fix a specific failure.',
+		example: '/debug the 500 on POST /v1/sessions',
+	},
+	{
+		id: 'review',
+		description: 'Review a diff, branch, or recent change.',
+		example: '/review the last commit',
+	},
+	{
+		id: 'document',
+		description: 'Generate or update documentation for a module / API.',
+		example: '/document the auth middleware',
+	},
+	{
+		id: 'research',
+		description: 'Research agent -- web + external sources, no code modifications.',
+		example: '/research current best practices for token-bucket rate limiting',
+	},
+	{
+		id: 'requirements',
+		description: 'Requirements agent -- capture acceptance criteria from a fuzzy ask.',
+		example: '/requirements the new billing dashboard',
+	},
 ];
+
+/**
+ * Subset of SLASH_COMMANDS whose `id` is a registered intent (per
+ * `Intent` in shared/types.ts) -- the dispatcher uses this set to
+ * recognise `/<intent> <message>` and force-classify the turn,
+ * bypassing the topic classifier. `code-analyze` is excluded
+ * because it routes through its own family-direct path
+ * (`runCodeAnalyzerSlash`), not the classified-intent flow.
+ */
+export const INTENT_SLASH_NAMES: ReadonlySet<string> = new Set([
+	'design', 'plan', 'brainstorm', 'implement', 'refactor', 'test',
+	'debug', 'review', 'document', 'research', 'requirements',
+]);
+
+export function isIntentSlashCommand(name: string): boolean {
+	return INTENT_SLASH_NAMES.has(name);
+}
+
+/**
+ * Map a slash-command id to the canonical Intent name, where they
+ * differ. Today only `code-analyze` -> `code-analysis` differs;
+ * every other intent slash uses its own intent name verbatim.
+ */
+export function slashIdToIntent(id: string): string {
+	if (id === 'code-analyze') {
+		return 'code-analysis';
+	}
+	return id;
+}
 
 const SLASH_NAMES: ReadonlySet<string> = new Set(SLASH_COMMANDS.map(c => c.id));
 
