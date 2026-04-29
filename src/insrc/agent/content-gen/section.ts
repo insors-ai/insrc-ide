@@ -40,8 +40,8 @@ const log = getLogger('content-gen:section');
  * synthesise budget. Note this caps a SINGLE provider.complete
  * call -- the section runner's continuation loop strings multiple
  * calls together when the model hits `stopReason: max_tokens`, so
- * a section's effective ceiling is `MAX_SECTION_CONTINUATIONS *
- * DEFAULT_SECTION_BUDGET_TOKENS` (default 5 * 4000 = 20K tokens).
+ * a section's effective ceiling is `(MAX_SECTION_CONTINUATIONS + 1)
+ * * DEFAULT_SECTION_BUDGET_TOKENS` (default 16 * 4000 = 64K tokens).
  */
 export const DEFAULT_SECTION_BUDGET_TOKENS = 4000;
 
@@ -49,12 +49,15 @@ export const DEFAULT_SECTION_BUDGET_TOKENS = 4000;
  * How many continuation passes a section may chain together when
  * each call ends at `stopReason: max_tokens`. The first call is
  * always allowed; this cap counts the EXTRA passes after that.
- * Default 4 -> up to 5 calls per section. Above that we ship the
- * partial body with `fallback: true, note: 'continuation cap
- * reached; truncated'` so a verbose / runaway section can't burn
- * unbounded provider time.
+ * 15 -> up to 16 calls per section -> ~64 K tokens per section
+ * worst case (16 * 4000 token budget). Bumped from 4 (5 calls)
+ * after live testing surfaced large L-tier sections like
+ * `error-handling` / `module-overview` legitimately needing more
+ * passes. Above the cap we ship the partial body with `fallback:
+ * true, note: 'continuation cap reached; truncated'` so a runaway
+ * section can't burn unbounded provider time.
  */
-export const MAX_SECTION_CONTINUATIONS = 4;
+export const MAX_SECTION_CONTINUATIONS = 15;
 
 /**
  * Continuation prompt fed back as a fresh user turn after each
