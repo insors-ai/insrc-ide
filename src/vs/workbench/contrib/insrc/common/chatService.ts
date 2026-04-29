@@ -128,11 +128,18 @@ export interface IInsrcChatService {
 	 * (same effect as an `@<provider>` prefix). `parentListId` is the
 	 * Code Analyzer drill-down hook (Phase 5.D): when set, the daemon
 	 * stamps it on the new TodoList so the Report Pane / todos pane
-	 * can render parent-child threads. Passed only by the
-	 * `insrc.codeAnalyzer.drillDown` command path -- regular chat
-	 * sends omit it.
+	 * can render parent-child threads. `rerunFromListId` is the
+	 * Code Analyzer re-run hook (Phase 4.1): when set, the daemon
+	 * skips the plan LLM call and reconstructs the analyzer task
+	 * list from the prior run's items. Both are passed only by the
+	 * dedicated workbench commands; regular chat sends omit them.
 	 */
-	sendMessage(message: string, provider?: string | undefined, parentListId?: string | undefined): Promise<void>;
+	sendMessage(
+		message: string,
+		provider?: string | undefined,
+		parentListId?: string | undefined,
+		rerunFromListId?: string | undefined,
+	): Promise<void>;
 	replyToGate(gateId: string, action: string, feedback?: string | undefined): Promise<void>;
 	cancelStream(): Promise<void>;
 	/**

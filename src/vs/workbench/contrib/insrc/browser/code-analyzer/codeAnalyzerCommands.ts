@@ -208,3 +208,78 @@ registerAction2(class extends Action2 {
 		await chatService.sendMessage(message, undefined, parentListId);
 	}
 });
+
+/**
+ * Re-run a completed Code Analysis against the current repo
+ * revision (plans/analyzers/code-analyzer.md section 4.1). Args:
+ *
+ *   {
+ *     listId?: string;   // the prior analysis list to re-run
+ *   }
+ *
+ * Behaviour:
+ *   1. Resolve the prior list (programmatic mode supplies it; palette
+ *      mode picks the most-recent code-analyzer report list in the
+ *      active session).
+ *   2. Re-issue the prior `request` as a `/code-analyze` chat message
+ *      with `rerunFromListId` set; the daemon skips the plan LLM
+ *      call and reconstructs the task list from the prior list's
+ *      items. The new run threads under the prior in the todos
+ *      pane (parentListId = priorListId).
+ *
+ * The Report Pane wires this into a "Re-run" affordance in the
+ * pane header (follow-up commit); today the palette is the entry.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.codeAnalyzer.rerun',
+			title: localize2('insrc.codeAnalyzer.rerun', 'Re-run Code Analysis'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, arg?: { listId?: string }): Promise<void> {
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const notifications = accessor.get(INotificationService);
+
+		let priorList: TodoList | undefined;
+		const targetListId = arg?.listId;
+		if (targetListId !== undefined) {
+			priorList = todosService.lists.find(l => l.id === targetListId);
+		} else {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notifications.info('No active chat session; run /code-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === CODE_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notifications.info('No code-analysis report yet for this session. Run /code-analyze first.');
+				return;
+			}
+			priorList = candidates[candidates.length - 1];
+		}
+
+		if (priorList === undefined) {
+			notifications.info('Re-run target not available -- the prior analysis list is no longer loaded for this session.');
+			return;
+		}
+
+		// Use the prior list's `description` (which the orchestrator
+		// stamps as the original request) as the new prompt. Falls
+		// back to the title if description is missing.
+		const priorRequest = (priorList.description ?? priorList.title).trim();
+		if (priorRequest.length === 0) {
+			notifications.info('Re-run aborted -- prior list has no recoverable request text.');
+			return;
+		}
+
+		const message = `/code-analyze ${priorRequest}`;
+		await chatService.sendMessage(message, undefined, undefined, priorList.id);
+	}
+});

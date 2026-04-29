@@ -275,7 +275,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._wireStreamHandle(this._streamHandle);
 	}
 
-	async sendMessage(message: string, provider?: string, parentListId?: string): Promise<void> {
+	async sendMessage(message: string, provider?: string, parentListId?: string, rerunFromListId?: string): Promise<void> {
 		if (!this._activeSessionId) {
 			// Auto-start a session with the first available repo
 			if (!this._activeRepo) {
@@ -324,6 +324,13 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		// regular chat sends leave it absent.
 		if (parentListId) {
 			params['parentListId'] = parentListId;
+		}
+		// Code Analyzer re-run (Phase 4.1): when set, the daemon
+		// skips the plan LLM call and reconstructs the task list
+		// from the prior list's items. Set only by the
+		// `insrc.codeAnalyzer.rerun` command path.
+		if (rerunFromListId) {
+			params['rerunFromListId'] = rerunFromListId;
 		}
 
 		this._streamHandle = this.daemonService.stream('chat.send', params);
