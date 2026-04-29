@@ -654,6 +654,7 @@ export class InsrcChatViewPane extends ViewPane {
 				const content = this._streamingMessageEl.querySelector('.insrc-chat-message-content');
 				if (content) {
 					this._setTrustedHtml(content as HTMLElement, msg.content);
+					this._wireMarkdownLinks(content as HTMLElement);
 				}
 			} else {
 				this._streamingMessageEl = this._createMessageEl(msg);
@@ -708,6 +709,8 @@ export class InsrcChatViewPane extends ViewPane {
 			this._setTrustedHtml(content, msg.content);
 			// Wire copy buttons for code-viewer blocks
 			this._wireCopyButtons(content);
+			// Wire markdown link clicks (path: citations etc.) through openerService
+			this._wireMarkdownLinks(content);
 			// Make collapsible if long
 			this._makeCollapsible(el, content);
 		}
@@ -780,6 +783,40 @@ export class InsrcChatViewPane extends ViewPane {
 			// Fallback: textContent only (no HTML rendering without TrustedTypes)
 			el.textContent = html;
 		}
+	}
+
+	/**
+	 * Route clicks on markdown-rendered anchors through the IOpenerService.
+	 * Without this delegate, `<a href="path:...">` (citation links emitted
+	 * by the code-analyzer's synthesise prompt) and other custom-scheme
+	 * URIs would just call the browser's default-navigation, which webview
+	 * sandboxing blocks silently. With it, clicks reach the registered
+	 * openers (e.g. PathUriOpenerContribution -> open file at line range).
+	 *
+	 * Uses event delegation on the message-content container so we don't
+	 * have to reattach per-anchor every re-render. Idempotent via a data
+	 * flag so repeated _setTrustedHtml updates during streaming don't
+	 * stack listeners.
+	 */
+	private _wireMarkdownLinks(container: HTMLElement): void {
+		if (container.dataset['linksWired'] === '1') {
+			return;
+		}
+		container.dataset['linksWired'] = '1';
+		this._register(dom.addDisposableListener(container, 'click', (e) => {
+			const target = e.target as HTMLElement | null;
+			const anchor = target?.closest('a') as HTMLAnchorElement | null;
+			if (!anchor) {
+				return;
+			}
+			const href = anchor.getAttribute('href');
+			if (!href) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			void this.openerService.open(href, { fromUserGesture: true, allowContributedOpeners: true });
+		}));
 	}
 
 	/** Wire click handlers for code-viewer copy buttons */

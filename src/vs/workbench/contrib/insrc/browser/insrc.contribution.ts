@@ -238,9 +238,16 @@ registerWorkbenchContribution2(PromptNotepadContribution.ID, PromptNotepadContri
 import { AnalysisReportPane } from './code-analyzer/analysisReportPane.js';
 import { AnalysisReportInput } from './code-analyzer/analysisReportInput.js';
 import { CodeAnalyzerFlowContribution } from './code-analyzer/codeAnalyzerFlowContribution.js';
+import { PathUriOpenerContribution } from './code-analyzer/pathUriOpener.js';
 import './code-analyzer/codeAnalyzerCommands.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(AnalysisReportPane, AnalysisReportPane.ID, 'Code Analysis Report'),
 	[new SyncDescriptor(AnalysisReportInput)],
 );
 registerWorkbenchContribution2(CodeAnalyzerFlowContribution.ID, CodeAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
+
+// path: URI opener -- resolves citation links emitted by the synthesise
+// prompt (e.g. `[label](path:src/foo.ts#L42-L58)`) so clicks in the
+// Report Pane and the chat panel actually open the cited file at the
+// cited line instead of falling through silently.
+registerWorkbenchContribution2(PathUriOpenerContribution.ID, PathUriOpenerContribution, WorkbenchPhase.AfterRestored);
