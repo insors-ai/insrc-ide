@@ -13,7 +13,7 @@ import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ILogService } from '../../log/common/log.js';
 import { IConfigurationService } from '../../configuration/common/configuration.js';
-import { ensureClonedDaemon, gracefullyTerminateDaemon, resolveDaemonEntry } from './insrcDaemonInstaller.js';
+import { ensureClonedDaemon, gracefullyTerminateDaemon, resolveCommand, resolveDaemonEntry } from './insrcDaemonInstaller.js';
 
 // ---------------------------------------------------------------------------
 // IInsrcDaemonMainService -- runs in the main process with full Node.js access
@@ -350,7 +350,15 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			this.logService.warn(`[insrc] could not open daemon stderr log (${stderrLogPath}): ${(err as Error).message}; falling back to ignore`);
 		}
 
-		const child = cp.spawn(process.execPath, [entryPath], {
+		// Spawn under a real Node binary (PATH/nvm resolved), NOT Electron-as-Node.
+		// Electron's embedded Node has its own modules ABI (e.g. modules=128 on
+		// Electron 32) that doesn't match the Node that ran `npm install` for
+		// the daemon's native modules (modules=127 on Node 22). The mismatch
+		// SIGSEGVs tree-sitter at require-time. Resolving a system Node keeps
+		// build and runtime ABI in lockstep and decouples the daemon from
+		// the IDE's Electron version.
+		const nodeBin = resolveCommand('node');
+		const child = cp.spawn(nodeBin, [entryPath], {
 			// Index 0 = stdin, 1 = stdout, 2 = stderr. Pass the open
 			// fd for stderr; ignore the rest. spawn dups our fd into
 			// the child, so we can close ours immediately after.
@@ -358,12 +366,6 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			detached: true,
 			env: {
 				...process.env,
-				// process.execPath in an Electron main process is the Electron
-				// binary, not Node. Without this flag Electron runs the daemon
-				// JS as a full Electron app (renderer, GPU process, ...) and
-				// the daemon code never actually executes. Setting it makes
-				// the binary behave like plain Node for this child.
-				ELECTRON_RUN_AS_NODE: '1',
 				INSRC_LOG_LEVEL: 'info',
 			},
 		});
@@ -371,7 +373,7 @@ export class InsrcDaemonMainService extends Disposable implements IInsrcDaemonMa
 			try { fs.closeSync(stderrFd); } catch { /* nothing */ }
 		}
 		child.unref();
-		this.logService.info(`[insrc] Spawned detached daemon process: ${entryPath} (stderr -> ${stderrLogPath})`);
+		this.logService.info(`[insrc] Spawned detached daemon process: ${nodeBin} ${entryPath} (stderr -> ${stderrLogPath})`);
 	}
 
 	// ---------------------------------------------------------------------------

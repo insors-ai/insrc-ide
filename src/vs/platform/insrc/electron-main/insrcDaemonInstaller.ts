@@ -400,12 +400,17 @@ interface RunResult {
 }
 
 /**
- * Resolve a command (git / npm / npx) to an absolute path before spawning.
+ * Resolve a command (git / npm / npx / node) to an absolute path before spawning.
  * Electron-main's `process.env.PATH` often excludes nvm-installed Node tools
  * because the GUI process doesn't source ~/.bashrc. We look in the usual
  * places so the install step works for users whose Node lives under nvm.
+ *
+ * Also used by `insrcDaemonMainService` to pick the Node binary that runs
+ * the daemon -- spawning the daemon under Electron-as-Node binds it to
+ * Electron's embedded Node ABI, which can mismatch the Node that built
+ * its native modules (tree-sitter etc.) and SIGSEGV at module load.
  */
-function resolveCommand(command: string): string {
+export function resolveCommand(command: string): string {
 	// Already an absolute path.
 	if (command.startsWith('/')) { return command; }
 
