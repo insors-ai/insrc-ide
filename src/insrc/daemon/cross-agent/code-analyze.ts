@@ -56,8 +56,14 @@ const log = getLogger('code-analyzer:flow2');
 // Caps + envelope
 // ---------------------------------------------------------------------------
 
-const FLOW2_SOFT_CAP = 16;
-const FLOW2_HARD_CAP = 24;
+/**
+ * Flow 2 silently trims a caller-supplied task list to this cap and
+ * sets `truncated: true`. Mirrors Flow 1's soft cap (16) -- Flow 1
+ * fires a user gate at the soft cap; Flow 2 has no user in the
+ * loop, so the gate becomes a quiet trim per plan §3.6 ("silent
+ * trim to 16, truncated: true set in the return value").
+ */
+const FLOW2_TRIM_CAP = 16;
 const FLOW2_TOTAL_TIMEOUT_MS = 60_000;
 /** Per-task wall clock at the runner level. The overall 60 s envelope
  *  is the binding cap; each task is given a generous 45 s slot since
@@ -111,7 +117,7 @@ export const codeAnalyzeTool: Tool = {
 		properties: {
 			tasks: {
 				type: 'array',
-				description: `Caller-supplied task list. Hard cap ${FLOW2_HARD_CAP}; entries past that are dropped silently and \`truncated\` is set.`,
+				description: `Caller-supplied task list. Trim cap ${FLOW2_TRIM_CAP}; entries past that are dropped silently and \`truncated\` is set.`,
 				minItems: 1,
 				items: {
 					type: 'object',
@@ -174,11 +180,12 @@ export const codeAnalyzeTool: Tool = {
 			return fail('tasks array must contain at least one entry');
 		}
 
-		// Silent trim past hard cap.
-		const droppedTasks = Math.max(0, allTasks.length - FLOW2_HARD_CAP);
-		const tasks = allTasks.slice(0, FLOW2_HARD_CAP);
+		// Silent trim past the trim cap (plan §3.6: same as Flow 1's
+		// soft cap, but no user gate -- just drop and set truncated).
+		const droppedTasks = Math.max(0, allTasks.length - FLOW2_TRIM_CAP);
+		const tasks = allTasks.slice(0, FLOW2_TRIM_CAP);
 		if (droppedTasks > 0) {
-			log.info({ requested: allTasks.length, kept: tasks.length, dropped: droppedTasks }, 'code:analyze: trimmed task list to hard cap');
+			log.info({ requested: allTasks.length, kept: tasks.length, dropped: droppedTasks }, 'code:analyze: trimmed task list to Flow-2 cap');
 		}
 
 		const callerCtx = input['callerContext'] as RawCallerContext | undefined;
