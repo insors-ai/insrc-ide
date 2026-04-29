@@ -57,6 +57,10 @@ const COMMON_SECTION_RULES = [
 	'- No prose preamble ("Here is the section:", "Below is...").',
 	'- Every claim must trace to a citation when one is available.',
 	`- Use the path:line citation format the IDE recognises: ${CITATION_FORMAT}.`,
+	'- When you mention an entity (function, class, method, type) by name AND a citation for it exists in the inputs, wrap the entity name as a clickable link instead of just backticks. Prefer:',
+	`    ${CITATION_FORMAT}  (do this)`,
+	'    `functionName`                                     (avoid -- bare backticks render as plain code spans, no navigation)',
+	'  Bare backticks are still fine for entity names that have NO citation, or for inline keywords / language tokens.',
 ].join('\n');
 
 // ---------------------------------------------------------------------------
