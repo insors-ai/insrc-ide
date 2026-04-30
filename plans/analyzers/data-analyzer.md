@@ -23,37 +23,65 @@ added late or rediscovered as bugs there are landed up-front here.
 
 ## Status
 
-Pre-implementation. No code, no controller, no pane.
+Phases 0, 1, 2 shipped. Phases 3, 4, 5 pending.
+
+| Phase | Slice | State | Notes |
+|---|---|---|---|
+| 0 | Family + slash | shipped | `/data-analyze` registered; `/data-analyzer` typo guard in place |
+| 1.1 | types.ts | shipped | |
+| 1.2 | orchestrator | shipped | `daemon/controllers/data-analyzer-orchestrator.ts` |
+| 1.3 | prompts | shipped | plan / analyzer-system / synthesise-multipass / review |
+| 1.4 | analyzer runner | shipped | `agent/tasks/data-analyzer/analyzer/runner.ts` |
+| 1.5 | citations invariant | shipped | one retry, then downgrade-to-low |
+| 1.6 | connection-approval gate | superseded | replaced by the universal access gate (plans/access-gate.md Phases 4-5); the orchestrator seeds `Session.access` for ephemeral connections at task start, the dispatcher in `agent/tools/executor.ts` handles UI gating uniformly. `agent/tasks/data-analyzer/access-gate.ts` is now an orphan reserved for future PII / schema-drift gate types per its docstring. |
+| 1.7 | `data-conn:` URI scheme | shape only | types.ts emits the scheme; click-handler wiring is Phase 5.6 |
+| 1.8 | slash dispatch | shipped | |
+| 1.9 | checkpoint / resume | shipped | restoreState + buildResumeTask + afterResumeBootstrap |
+| 1.10 | scope-tier classification | shipped | per-tier prompt addenda + plan-size approval gate |
+| 1.H | ephemeral connections from prompt | shipped | `_registerEphemeralFromPrompt` registers JSON / CSV paths typed by the user; auto-approved via `Session.access` seeding |
+| 2.1 | DataAnalysisReportPane | shipped | flow contribution auto-opens on `list.body` write; Save... uses shared `rewriteCustomUrisForSave` helper. Drill-down footer rendering deferred to 5.3. |
+| 2.2 | annotation manager | deferred | existing `InsrcAnnotationContribution` already covers code-citation annotation through `path:` link → source-file open. Pane-internal "highlight finding → batch to chat" needs a separate UI surface (DOM text-selection + report-anchored annotation kind); not a "reuse" of the existing manager. |
+| 2.3 | mid-flight cancel | shipped | `deps.abortController.signal` plumbed through runner + multipass; framework's pipeline already breaks on `signal.aborted`. No analyzer-specific gate is required. |
+| 2.4 | per-task on-disk cache | shipped (with deferred fingerprint) | `~/.insrc/cache/data-analysis/`, 200-entry LRU, mtime eviction, atomic writes; `dataAnalyzer.clearCache` RPC + palette command. **`connection-fingerprint` is currently a roster-level hash** (sorted scope + sorted full session connection list summary). Schema drift on an unchanged connection is NOT detected; the proper `getSchemaFingerprint(connectionId, target)` driver helper called out in this plan's "Driver gap" section is deferred to a follow-up because driver-family dispatch (RDBMS describe / KV sample-shape / file describe) and `SchemaDescription` canonicalisation are their own slice. Workaround: `insrc.dataAnalyzer.clearCache`. |
+| 3 | lineage + drift | pending | |
+| 4 | cross-agent integration | pending | |
+| 5 | polish | pending | |
 
 The data-driver shipped earlier (see [plans/data-driver.md](../data-driver.md))
-and exposes a stable `db:*` tool surface registered as built-in tools:
+and exposes a stable `db_*` tool surface registered as built-in tools.
+Tool ids were renamed from colon-form (e.g. `db:sql:describe`) to
+underscore-form (`db_sql_describe`) on 2026-04-30 for Anthropic API
+regex compatibility (`^[a-zA-Z0-9_-]{1,128}$`); see
+[plans/access-gate.md](../access-gate.md) for the full rename context.
 
 | Shipped tool id | Maps to design's name | Notes |
 |---|---|---|
-| `db:list_connections` | `data:list-connections` | enumerates registered connections |
-| `db:sql:describe` | `data:describe-table` | RDBMS introspection (Prisma fast-path when present) |
-| `db:sql:sample` | `data:sample` (RDBMS branch) | structured `where` only; row cap 50 |
-| `db:sql:explain` | `data:explain` | per-dialect EXPLAIN |
-| `db:kv:scan` | `data:scan` | namespace.allow-aware; cap 500 |
-| `db:kv:get` | `data:get` | per-key fetch |
-| `db:kv:sample_shape` | `data:sample-shape` (KV branch) | merges via `inferShape` from `shape-common.ts` |
-| `db:file:describe` / `db:file:sample` / `db:file:sample_shape` | `data:*` (file branch) | csv / parquet / jsonl / etc. |
+| `db_list_connections` | `data:list-connections` | enumerates registered connections |
+| `db_sql_describe` | `data:describe-table` | RDBMS introspection (Prisma fast-path when present) |
+| `db_sql_sample` | `data:sample` (RDBMS branch) | structured `where` only; row cap 50 |
+| `db_sql_explain` | `data:explain` | per-dialect EXPLAIN |
+| `db_kv_scan` | `data:scan` | namespace.allow-aware; cap 500 |
+| `db_kv_get` | `data:get` | per-key fetch |
+| `db_kv_sample_shape` | `data:sample-shape` (KV branch) | merges via `inferShape` from `shape-common.ts` |
+| `db_file_describe` / `db_file_sample` / `db_file_sample_shape` | `data:*` (file branch) | csv / parquet / jsonl / etc. |
 
 **Naming convention for this plan.** Where the analyzer's *internal*
-tool list is meant, the plan uses the shipped `db:*` ids. Where the
+tool list is meant, the plan uses the shipped `db_*` ids. Where the
 *cross-agent* surface is meant (Phase 4 -- the namespace other
 analyzers see), the plan uses the design's `data:*` names. The
-cross-agent layer (Phase 4.1) wraps the `db:*` builtins behind
+cross-agent layer (Phase 4.1) wraps the `db_*` builtins behind
 `data:*` aliases plus adds analyzer-native tools like `data:lineage`
 and `data:schema-drift` that don't have driver-level equivalents.
 
-**One small data-driver gap** that this plan needs to close (Phase
-2.4): there is no centralised `getSchemaFingerprint(connectionId)`
-helper today. Each driver's `describe()` returns a `SchemaDescription`,
-but no shared pipeline hashes it for cache invalidation. The
-analyzer's per-task cache key needs that hash. Phase 2.4 adds a small
-helper to `daemon/db/index.ts` that wraps per-driver introspection +
-hash; ~30 lines, no new tool surface.
+**Open driver gap** -- carried over from the original Phase 2.4
+write-up. There is still no centralised `getSchemaFingerprint(connectionId, target)`
+helper. Each driver's `describe()` returns a `SchemaDescription`, but
+no shared pipeline canonicalises + hashes it for cache invalidation.
+The shipped Phase 2.4 cache uses a connection-roster fingerprint as
+a stand-in (catches roster changes but not live-schema drift). The
+proper helper is a ~30-line addition to `daemon/db/index.ts` that
+dispatches by family and canonicalises the description; left for a
+follow-up slice when usage data justifies the precision bump.
 
 ## Goals (short)
 
@@ -98,7 +126,7 @@ its lower per-token cost matters.
 | Step | Default provider | What it does | Why this side |
 |---|---|---|---|
 | `plan` | **cloud** (`providerHint: 'claude'`) | Decompose the user's free-form question into a `DataAnalysisTask[]` from the request + the resolved connection list. Single LLM call, ≤2.5K output tokens. | One-shot reasoning; needs a model strong enough to factor an audit-style question into discrete tasks. Cloud is right because the cost is bounded (one call per analysis). |
-| `analyzer` (run-task / tool-loop) | **local** (Ollama) | The N-call tool loop per task. Calls `db:list_connections`, `db:sql:describe`, `db:sql:sample`, `db:kv:scan`, etc. Up to 8 tool calls / 10 min per task. Emits a `DataAnalyzerResult` via `submit_analysis`. | Cost-driven: a 10-task XL audit could be 80 LLM calls. Cloud would be expensive for what is mostly schema-driven structured-output work. Local model with `/no_think` + tool-call structured output is sufficient and free. |
+| `analyzer` (run-task / tool-loop) | **local** (Ollama) | The N-call tool loop per task. Calls `db_list_connections`, `db_sql_describe`, `db_sql_sample`, `db_kv_scan`, etc. Up to 8 tool calls / 10 min per task. Emits a `DataAnalyzerResult` via `submit_analysis`. | Cost-driven: a 10-task XL audit could be 80 LLM calls. Cloud would be expensive for what is mostly schema-driven structured-output work. Local model with `/no_think` + tool-call structured output is sufficient and free. |
 | `review` | **cloud** (`providerHint: 'claude'`) | Per-task reviewer. Decides `accept` / `retry-with-hint` / `add-follow-up` / `done`. One LLM call per accepted task; ≤1.2K output tokens. | Quality-control gate at every task boundary. Cloud catches subtle problems (hallucinated columns, contradictions with cited samples) that the local model misses. Bounded by the plan size (≤10 calls). |
 | `synthesise` | **local** (Ollama) | Multi-pass content-gen: outline → per-section writers → stitch. Composes the final markdown from accepted findings + citations. Hot path under the per-section continuation cap. | The cloud already did the reasoning work in plan + review; the local model just composes prose from inputs it has in hand. Keeps cloud cost focused on decisions, not prose generation. |
 | `embedding` | **local-only** | Used by L4 code-relevance lookups when lineage findings cross into code. | Embedding model is local-only by framework policy (every cloud provider's `embed()` returns `[]` per CLAUDE.md). |
@@ -146,8 +174,8 @@ Phase 1 include this fall-back path.
 | Prereq | Status |
 |---|---|
 | TODO framework with `meta` extensibility | shipped |
-| Data driver (connections, drivers, `db:*` tools, sample-shape, Prisma fast-path) | shipped |
-| `getSchemaFingerprint(connectionId)` helper for cache keying | **NOT shipped** -- Phase 2.4 adds it (~30 lines in `daemon/db/index.ts`) |
+| Data driver (connections, drivers, `db_*` tools, sample-shape, Prisma fast-path) | shipped |
+| `getSchemaFingerprint(connectionId, target)` helper for cache keying | **deferred** -- Phase 2.4 ships the cache layer with a roster-level fingerprint stand-in (`buildConnectionFingerprint` in `agent/tasks/data-analyzer/cache.ts`); the proper schema-aware helper waits for a follow-up slice |
 | Cross-agent tool registry framework (`daemon/cross-agent/`) | shipped |
 | `code:*` cross-agent tools (`code:locate`, `code:trace`, `code:describe`, `code:analyze`) | shipped (`registerCodeAnalyzerCrossAgentTools` wired at daemon startup) |
 | `data:*` cross-agent tools | **NOT shipped** -- Phase 4.1 adds `daemon/cross-agent/data-tools.ts` |
@@ -251,7 +279,7 @@ src/insrc/
     cross-agent/
       data-tools.ts                       # data:* registrations (mirror of code-tools.ts)
     db/
-      index.ts                            # +getSchemaFingerprint helper (Phase 2.4 ~30 lines)
+      index.ts                            # (deferred) +getSchemaFingerprint helper (~30 lines)
   agent/
     tasks/
       _shared/
@@ -446,17 +474,17 @@ defaults the same way the Code Analyzer does.
 
 Mirror code-analyzer's runner. Differences:
 
-- **Tool inventory uses the shipped `db:*` builtins**, not the design's
+- **Tool inventory uses the shipped `db_*` builtins**, not the design's
   `data:*` names. The full list:
-  - `db:list_connections` -- enumerate registered connections
-  - `db:sql:describe` -- RDBMS introspection (uses Prisma fast-path
+  - `db_list_connections` -- enumerate registered connections
+  - `db_sql_describe` -- RDBMS introspection (uses Prisma fast-path
     when a Prisma schema is present per `daemon/db/drivers/rdbms-prisma.ts`)
-  - `db:sql:sample` -- row sample with structured `where` (no raw SQL)
-  - `db:sql:explain` -- per-dialect query plan
-  - `db:kv:scan` -- key scan with namespace allow-list
-  - `db:kv:get` -- per-key fetch
-  - `db:kv:sample_shape` -- value-shape inference via `inferShape`
-  - `db:file:describe` / `db:file:sample` / `db:file:sample_shape` --
+  - `db_sql_sample` -- row sample with structured `where` (no raw SQL)
+  - `db_sql_explain` -- per-dialect query plan
+  - `db_kv_scan` -- key scan with namespace allow-list
+  - `db_kv_get` -- per-key fetch
+  - `db_kv_sample_shape` -- value-shape inference via `inferShape`
+  - `db_file_describe` / `db_file_sample` / `db_file_sample_shape` --
     file-driver introspection
   - `submit_analysis` -- the analyzer's finishing tool (mirror of the
     code-analyzer's, returns a `DataAnalyzerResult`)
@@ -464,8 +492,8 @@ Mirror code-analyzer's runner. Differences:
   not part of Phase 1's inventory.
 - The connection-approval gate fires inline -- before the first tool call
   that targets a connection not yet approved in the session.
-- Sample-review gate fires inline before any `db:sql:sample` /
-  `db:kv:get` / `db:file:sample` call against a connection flagged
+- Sample-review gate fires inline before any `db_sql_sample` /
+  `db_kv_get` / `db_file_sample` call against a connection flagged
   `prod` whose result contains unmasked PII columns.
 - Result parser uses the SAME `stripFences` helper as code-analyzer
   (extract `{...}` span, ignore preamble). Factor the helper out to
@@ -733,9 +761,9 @@ Each prompt builder takes a `tier` argument and appends an addendum:
 - **`prompts/analyzer-system.ts`** -- `buildAnalyzerSystemPrompt(tier)`.
   Addendum tells the runner what altitude to read at:
   - S/M: read full describe + samples; per-row / per-column citations.
-  - L: prefer `db:sql:describe` + targeted `db:sql:sample` (10 rows).
+  - L: prefer `db_sql_describe` + targeted `db_sql_sample` (10 rows).
     Don't dump full table data.
-  - XL: stay at file/connection level; a single `db:sql:sample` per
+  - XL: stay at file/connection level; a single `db_sql_sample` per
     connection is enough; cite at the connection level.
 
 - **`prompts/synthesise-multipass.ts`** -- per-tier outline brief.
@@ -818,19 +846,28 @@ SHA256(task.question + normalize(scope) + connection-version)
 ```
 
 Where `connection-version` is a small fingerprint per connection:
-- **RDBMS**: hash of the `db:sql:describe` result for the cited
+- **RDBMS**: hash of the `db_sql_describe` result for the cited
   table(s). Stable across queries; changes only when the table's
   introspection differs (column added / removed, type changed).
-- **KV**: hash of the `db:kv:sample_shape` result merged from a fixed
+- **KV**: hash of the `db_kv_sample_shape` result merged from a fixed
   sample size (e.g. 50 values). Stable when the document shape is
   stable.
-- **File**: hash of the `db:file:describe` result.
+- **File**: hash of the `db_file_describe` result.
 
-**Driver gap**: today there's no centralised
-`getSchemaFingerprint(connectionId, target)` helper on the data-driver
--- per-driver `describe()` returns a `SchemaDescription`, but no
-shared pipeline canonicalises + hashes it. This slice adds that
-helper to `daemon/db/index.ts` (~30 lines):
+**Driver gap (still open as of the shipped Phase 2.4)**: there is no
+centralised `getSchemaFingerprint(connectionId, target)` helper on the
+data-driver -- per-driver `describe()` returns a `SchemaDescription`,
+but no shared pipeline canonicalises + hashes it. The shipped Phase
+2.4 cache module (`agent/tasks/data-analyzer/cache.ts`) uses a
+roster-level stand-in via `buildConnectionFingerprint` -- it hashes
+the sorted scope.connections + a summary of every registered
+connection (id + kind + family) -- so the cache invalidates on
+roster changes but NOT on schema drift against an unchanged
+connection. Workaround until the proper helper lands: clear the cache
+via `insrc.dataAnalyzer.clearCache`.
+
+The proper helper lands in a follow-up slice (~30 lines in
+`daemon/db/index.ts`):
 
 ```ts
 export async function getSchemaFingerprint(
@@ -845,10 +882,11 @@ export async function getSchemaFingerprint(
 }
 ```
 
-The cache layer calls it lazily on first cache lookup per (connection,
-target) and memoises the result for the session. Recomputed when the
-session's `db:list_connections` reports a connection-changed event
-(driver already emits this when a connection's pool is reset).
+When wired, the cache layer would call it lazily on first cache
+lookup per (connection, target) and memoise the result for the
+session. Recomputed when the session's `db_list_connections` reports
+a connection-changed event (driver already emits this when a
+connection's pool is reset).
 
 LRU at 200 entries (matches code-analyzer's policy).
 `dataAnalyzer.clearCache` command + IPC handler. `data-conn:<id>` URIs
@@ -929,22 +967,22 @@ New file `daemon/cross-agent/data-tools.ts` (mirroring the shipped
 `daemon/cross-agent/code-tools.ts`). Exports
 `registerDataAnalyzerCrossAgentTools()` that registers:
 
-- `data:list-connections`  -- thin wrapper over `db:list_connections`
+- `data:list-connections`  -- thin wrapper over `db_list_connections`
 - `data:describe-table`    -- routes RDBMS / KV / file family on the
                               fly via the connection's family
-- `data:sample`            -- routes to `db:sql:sample` /
-                              `db:kv:get` / `db:file:sample`
-- `data:scan`              -- thin wrapper over `db:kv:scan`
-- `data:get`               -- thin wrapper over `db:kv:get`
-- `data:sample-shape`      -- routes to `db:kv:sample_shape` /
-                              `db:file:sample_shape`
-- `data:explain`           -- thin wrapper over `db:sql:explain`
+- `data:sample`            -- routes to `db_sql_sample` /
+                              `db_kv_get` / `db_file_sample`
+- `data:scan`              -- thin wrapper over `db_kv_scan`
+- `data:get`               -- thin wrapper over `db_kv_get`
+- `data:sample-shape`      -- routes to `db_kv_sample_shape` /
+                              `db_file_sample_shape`
+- `data:explain`           -- thin wrapper over `db_sql_explain`
 - `data:lineage`           -- the analyzer's own (Phase 3.1)
 - `data:schema-drift`      -- the analyzer's own (Phase 3.2)
 - `data:analyze`           -- Flow 2 entry (Phase 4.3)
 
 The wrappers exist because (a) the design's documented cross-agent
-namespace is `data:*` not `db:*`, (b) some calls dispatch over the
+namespace is `data:*` not `db_*`, (b) some calls dispatch over the
 connection family at the cross-agent layer so callers don't need to
 know whether a target is RDBMS / KV / file, and (c) the analyzer
 adds tools (`lineage`, `schema-drift`, `analyze`) that have no
