@@ -112,6 +112,14 @@ function capsForTier(tier: ScopeSize | undefined): TierCaps {
 }
 
 const MAX_FOLLOWUPS = 6;
+
+/**
+ * Sentinel that buildInitialTasks emits when `rerunFromListId` is
+ * set (Phase 5.1 of plans/analyzers/data-analyzer.md). The afterPlan
+ * handler detects the sentinel and reconstructs DataAnalysisTask[]
+ * from the prior list's items instead of parsing planner output.
+ */
+const RERUN_BOOTSTRAP_MARKER = '__rerun-bootstrap__';
 const MAX_RETRIES_PER_TASK = 2;
 
 // ---------------------------------------------------------------------------
@@ -174,6 +182,23 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       },
       'data-analyzer scope tier captured',
     );
+
+    // Phase 5.1 of plans/analyzers/data-analyzer.md: re-run path
+    // skips the plan LLM call entirely and reconstructs the task
+    // list from the prior list's items in afterRerunBootstrap.
+    if (this._rerunFromListId !== undefined) {
+      return [{
+        index: 0,
+        description: `Data Analyzer: re-running from prior list ${this._rerunFromListId.slice(0, 8)}...`,
+        kind: 'transform',
+        intent: 'data-analysis',
+        passThrough: true,
+        userMessage: RERUN_BOOTSTRAP_MARKER,
+        outputFormat: 'text',
+        stateKey: K_PLAN_RESULT,
+        persisted: true,
+      }];
+    }
 
     return [{
       index: 0,
@@ -326,6 +351,14 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       return this.afterResumeBootstrap(state, phase);
     }
 
+    // Phase 5.1: re-run path. buildInitialTasks queued a transform
+    // task carrying RERUN_BOOTSTRAP_MARKER instead of the plan LLM
+    // task; reconstruct the DataAnalysisTask[] from the prior list's
+    // items and skip straight to beginAnalysis.
+    if (this._rerunFromListId !== undefined && completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
+      return this.afterRerunBootstrap(state);
+    }
+
     switch (phase) {
       case 'planning':       return this.afterPlan(completed, state);
       case 'plan-approval':  return this.afterPlanApprovalGate(gateReply, state);
@@ -381,43 +414,10 @@ export class DataAnalyzerOrchestratorController implements TaskController {
 
     state.set(K_PLAN_TASKS, planned);
 
-    // Create the TodoList + per-task items via the framework. addItem
-    // assigns the item id (we update the planned-task's itemId from
-    // the framework-assigned one) so downstream consumers see a
-    // single canonical id per item.
-    if (this.deps?.todos !== undefined) {
-      try {
-        const list = await this.deps.todos.createList({
-          sessionId:   this.deps.session.id,
-          title:       `Data Analysis: ${this._request?.slice(0, 60) ?? '(no request)'}`,
-          description: this._request ?? '',
-          // Phase 5.3: stamp parent edge for drill-down runs so the
-          // todos pane + Report Pane can thread the new list under
-          // the prior one.
-          ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
-        });
-        this._listId = list.id;
-        const ca = state.get<DataAnalysisState>(K_STATE)!;
-        state.set(K_STATE, { ...ca, listId: list.id });
-        const withIds: DataAnalysisTask[] = [];
-        for (const t of planned) {
-          const item = await this.deps.todos.addItem(list.id, {
-            title: shortTitleFor(t),
-            description: t.question,
-            meta: {
-              kind: t.kind,
-              ...(t.scope !== undefined ? { scope: t.scope } : {}),
-              origin: t.origin,
-              retryCount: 0,
-            },
-          });
-          withIds.push({ ...t, itemId: item.id });
-        }
-        state.set(K_PLAN_TASKS, withIds);
-      } catch (err) {
-        log.warn({ err }, 'afterPlan: createList / addItem failed');
-      }
-    }
+    // Create TodoList + per-task items. The block is shared with
+    // afterRerunBootstrap (Phase 5.1) so both entry points end up
+    // with the same persisted-todos shape.
+    await this._persistTaskList(planned, state);
 
     // Plan-approval gate fires when planner emitted more than the soft cap.
     if (planned.length > caps.softTaskCap) {
@@ -464,6 +464,116 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     }
     // approve
     return this.beginAnalysis(planned, state);
+  }
+
+  /**
+   * Create the TodoList + addItem rows for a planned task list and
+   * stamp the framework-assigned item ids back onto K_PLAN_TASKS.
+   * Shared between afterPlan (planner-driven) and afterRerunBootstrap
+   * (Phase 5.1, prior-list-driven). Best-effort: a failure here just
+   * means the run proceeds without the persisted list (degraded UX
+   * but the analyzer still does its job).
+   */
+  private async _persistTaskList(
+    planned: DataAnalysisTask[],
+    state: TaskStateStore,
+  ): Promise<void> {
+    if (this.deps?.todos === undefined) return;
+    try {
+      const list = await this.deps.todos.createList({
+        sessionId:   this.deps.session.id,
+        title:       `Data Analysis: ${this._request?.slice(0, 60) ?? '(no request)'}`,
+        description: this._request ?? '',
+        // Phase 5.3: stamp parent edge for drill-down runs so the
+        // todos pane + Report Pane can thread the new list under
+        // the prior one.
+        ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
+      });
+      this._listId = list.id;
+      const ca = state.get<DataAnalysisState>(K_STATE)!;
+      state.set(K_STATE, { ...ca, listId: list.id });
+      const withIds: DataAnalysisTask[] = [];
+      for (const t of planned) {
+        const item = await this.deps.todos.addItem(list.id, {
+          title: shortTitleFor(t),
+          description: t.question,
+          meta: {
+            kind: t.kind,
+            ...(t.scope !== undefined ? { scope: t.scope } : {}),
+            origin: t.origin,
+            retryCount: 0,
+          },
+        });
+        withIds.push({ ...t, itemId: item.id });
+      }
+      state.set(K_PLAN_TASKS, withIds);
+    } catch (err) {
+      log.warn({ err }, '_persistTaskList: createList / addItem failed');
+    }
+  }
+
+  /**
+   * Re-run path bootstrap (Phase 5.1 of plans/analyzers/data-analyzer.md).
+   * The pass-through transform in buildInitialTasks emitted
+   * RERUN_BOOTSTRAP_MARKER instead of running the planner; here we
+   * walk the prior list's items, reconstruct DataAnalysisTask[] from
+   * their `description` + `meta`, then proceed straight into
+   * `beginAnalysis` (which creates a fresh TodoList stamped with
+   * `parentListId = priorListId` so the new run threads under it).
+   *
+   * Defensive paths: if the prior list is gone or yields no
+   * parseable items, fall back to a single free-form task carrying
+   * the original request -- the user still gets SOMETHING to compare
+   * against.
+   */
+  private async afterRerunBootstrap(state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps?.todos === undefined || this._rerunFromListId === undefined) {
+      log.error('afterRerunBootstrap: deps.todos or rerunFromListId missing');
+      const ca = state.get<DataAnalysisState>(K_STATE);
+      if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: true });
+      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+      return null;
+    }
+    const priorListId = this._rerunFromListId;
+    const priorList = await this.deps.todos.getList(priorListId);
+    if (priorList === null) {
+      log.warn({ priorListId }, 'afterRerunBootstrap: prior list not found; falling back to single-task plan');
+      return this._beginRerunWith(buildFallbackTaskFromRequest(this._request ?? ''), priorListId, state);
+    }
+
+    const reconstructed: DataAnalysisTask[] = [];
+    for (const item of priorList.items ?? []) {
+      const task = reconstructTaskFromItem(item);
+      if (task !== null) reconstructed.push(task);
+    }
+    log.info(
+      { priorListId, priorItemCount: priorList.items?.length ?? 0, reconstructed: reconstructed.length },
+      'afterRerunBootstrap: reconstructed task list',
+    );
+    if (reconstructed.length === 0) {
+      log.warn({ priorListId }, 'afterRerunBootstrap: no parseable items; falling back to single-task plan');
+      return this._beginRerunWith(buildFallbackTaskFromRequest(this._request ?? ''), priorListId, state);
+    }
+    return this._beginRerunWith(reconstructed, priorListId, state);
+  }
+
+  /**
+   * Helper for afterRerunBootstrap that persists the reconstructed
+   * task list and starts the analysis. Stamps `parentListId` to the
+   * prior list when the caller hasn't already supplied a different
+   * one (drill-down + re-run could combine in theory).
+   */
+  private async _beginRerunWith(
+    reconstructed: DataAnalysisTask[],
+    priorListId: string,
+    state: TaskStateStore,
+  ): Promise<Task[] | null> {
+    if (this._parentListId === undefined) {
+      this._parentListId = priorListId;
+    }
+    state.set(K_PLAN_TASKS, reconstructed);
+    await this._persistTaskList(reconstructed, state);
+    return this.beginAnalysis(reconstructed, state);
   }
 
   // -- analyze + review ----------------------------------------------------
@@ -1055,6 +1165,83 @@ function clampToDataAltitude(tier: ScopeSize): ScopeSize {
 function shortTitleFor(t: DataAnalysisTask): string {
   const head = t.question.split(/\s+/).slice(0, 8).join(' ');
   return head.length > 60 ? head.slice(0, 57) + '...' : head;
+}
+
+const VALID_DATA_ANALYSIS_KINDS: ReadonlySet<DataAnalysisTask['kind']> = new Set([
+  'inspect-schema',
+  'sample-data',
+  'sample-shape',
+  'lineage',
+  'schema-drift',
+  'er',
+  'free-form',
+]);
+
+function isDataAnalysisKind(v: unknown): v is DataAnalysisTask['kind'] {
+  return typeof v === 'string' && VALID_DATA_ANALYSIS_KINDS.has(v as DataAnalysisTask['kind']);
+}
+
+/**
+ * Phase 5.1 helper. Convert a persisted TodoItem from a prior
+ * data-analysis run back into a DataAnalysisTask the orchestrator
+ * can hand to `beginAnalysis`. Returns null when the item lacks
+ * either a usable description (the planner-supplied question) or
+ * a recognisable `meta.kind` -- those items get skipped and the
+ * caller falls back to its single-task default if nothing parses.
+ */
+function reconstructTaskFromItem(item: {
+  readonly id: string;
+  readonly description?: string | undefined;
+  readonly meta?: Readonly<Record<string, unknown>> | undefined;
+}): DataAnalysisTask | null {
+  const question = (item.description ?? '').trim();
+  if (question.length === 0) return null;
+  const meta = item.meta ?? {};
+  const kindRaw = meta['kind'];
+  if (!isDataAnalysisKind(kindRaw)) return null;
+  const scopeRaw = meta['scope'];
+  const hintRaw = meta['hint'];
+  const task: DataAnalysisTask = {
+    itemId: '', // assigned at addItem time in _persistTaskList
+    kind: kindRaw,
+    question,
+    origin: 'plan',
+    ...(scopeRaw !== null && typeof scopeRaw === 'object' && !Array.isArray(scopeRaw)
+      ? { scope: parseScopeForRerun(scopeRaw as Record<string, unknown>) }
+      : {}),
+    ...(typeof hintRaw === 'string' && hintRaw.length > 0 ? { hint: hintRaw } : {}),
+  };
+  return task;
+}
+
+function parseScopeForRerun(raw: Record<string, unknown>): DataAnalysisTask['scope'] {
+  const out: { connections?: string[]; targets?: string[] } = {};
+  if (Array.isArray(raw['connections'])) {
+    const conns = raw['connections'].filter((s): s is string => typeof s === 'string');
+    if (conns.length > 0) out.connections = conns;
+  }
+  if (Array.isArray(raw['targets'])) {
+    const targets = raw['targets'].filter((s): s is string => typeof s === 'string');
+    if (targets.length > 0) out.targets = targets;
+  }
+  return out;
+}
+
+/**
+ * Last-resort fallback when the prior list is gone or has no
+ * parseable items. Produces a single free-form task carrying the
+ * original request as the question, so the user still gets some
+ * analysis they can compare against.
+ */
+function buildFallbackTaskFromRequest(request: string): DataAnalysisTask[] {
+  const trimmed = request.trim();
+  if (trimmed.length === 0) return [];
+  return [{
+    itemId: '',
+    kind: 'free-form',
+    question: trimmed,
+    origin: 'plan',
+  }];
 }
 
 /**

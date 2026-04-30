@@ -309,6 +309,76 @@ registerAction2(class extends Action2 {
 });
 
 /**
+ * Re-run a completed Data Analysis (plans/analyzers/data-analyzer.md
+ * Phase 5.1). Args:
+ *
+ *   {
+ *     listId?: string;   // the prior analysis list to re-run
+ *   }
+ *
+ * Behaviour:
+ *   1. Resolve the prior list (programmatic mode supplies it; palette
+ *      mode picks the most-recent data-analyzer list in the active
+ *      session).
+ *   2. Re-issue the prior `request` as a `/data-analyze` chat message
+ *      with `rerunFromListId` set; the daemon skips the plan LLM
+ *      call and reconstructs the task list from the prior list's
+ *      items. The new run threads under the prior in the todos
+ *      pane (parentListId = priorListId) and benefits from the
+ *      Phase 2.4 cache when nothing has changed.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.dataAnalyzer.rerun',
+			title: localize2('insrc.dataAnalyzer.rerun', 'Re-run Data Analysis'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, arg?: { listId?: string }): Promise<void> {
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const notifications = accessor.get(INotificationService);
+
+		let priorList: TodoList | undefined;
+		const targetListId = arg?.listId;
+		if (targetListId !== undefined) {
+			priorList = todosService.lists.find(l => l.id === targetListId);
+		} else {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notifications.info('No active chat session; run /data-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === DATA_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notifications.info('No data-analysis report yet for this session. Run /data-analyze first.');
+				return;
+			}
+			priorList = candidates[candidates.length - 1];
+		}
+
+		if (priorList === undefined) {
+			notifications.info('Re-run target not available -- the prior analysis list is no longer loaded for this session.');
+			return;
+		}
+
+		const priorRequest = (priorList.description ?? priorList.title).trim();
+		if (priorRequest.length === 0) {
+			notifications.info('Re-run aborted -- prior list has no recoverable request text.');
+			return;
+		}
+
+		const message = `/data-analyze ${priorRequest}`;
+		await chatService.sendMessage(message, undefined, undefined, priorList.id);
+	}
+});
+
+/**
  * Clear the Data Analyzer's per-task cache (plans/analyzers/data-analyzer.md
  * Phase 2.4). Mirrors `insrc.codeAnalyzer.clearCache`. Useful when the
  * connection-roster fingerprint hasn't changed but the user wants
