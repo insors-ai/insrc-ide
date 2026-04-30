@@ -95,11 +95,14 @@ export class InsrcAgentRunServiceImpl extends Disposable implements IInsrcAgentR
 		// resume RPC -- the daemon constructs different controller
 		// classes + uses different state-restore logic. Today:
 		//   - 'code-analyzer'    -> chat.resumeCodeAnalysis
+		//   - 'data-analyzer'    -> chat.resumeDataAnalysis
 		//   - everything else    -> chat.resumeFromCheckpoint
 		//     (brainstorm subclasses validated daemon-side via
 		//     row.agent === 'brainstorm').
 		if (result.controllerId === 'code-analyzer') {
 			await this.chatService.resumeCodeAnalysis(result.sessionId, repo);
+		} else if (result.controllerId === 'data-analyzer') {
+			await this.chatService.resumeDataAnalysis(result.sessionId, repo);
 		} else {
 			await this.chatService.resumeFromCheckpoint(result.sessionId, repo);
 		}

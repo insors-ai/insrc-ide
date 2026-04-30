@@ -73,7 +73,7 @@ import { IpcServer } from './server.js';
 import {
 	initChatHandlers, disposeChatHandlers, reloadChatConfig,
 	chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore, brainstormAddIdea,
-	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis,
+	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees } from '../db/search.js';
@@ -1132,6 +1132,7 @@ async function main(): Promise<void> {
 		'chat.resume': chatResume,
 		'chat.resumeFromCheckpoint': chatResumeFromCheckpoint,
 		'chat.resumeCodeAnalysis':   chatResumeCodeAnalysis,
+		'chat.resumeDataAnalysis':   chatResumeDataAnalysis,
 		'todos.subscribe': todosRpc.subscribe,
 		'ollama.pull': async (params, send, signal) => {
 			const { model } = params as { model: string };

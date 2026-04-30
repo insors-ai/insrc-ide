@@ -130,6 +130,15 @@ export interface IInsrcChatService {
 	 * by inspecting `controllerId` from `agent.resume`.
 	 */
 	resumeCodeAnalysis(sessionId: string, repoPath: string): Promise<void>;
+	/**
+	 * Data-analyzer-specific resume. Mirror of `resumeCodeAnalysis`
+	 * for the data-analyzer family. Opens
+	 * `chat.resumeDataAnalysis` on the daemon side, which
+	 * reconstructs the DataAnalyzerOrchestratorController from the
+	 * persisted checkpoint and re-enters via the controller's
+	 * buildResumeTask + restoreState pattern (slice 1.9).
+	 */
+	resumeDataAnalysis(sessionId: string, repoPath: string): Promise<void>;
 	closeSession(): Promise<void>;
 
 	// Messaging

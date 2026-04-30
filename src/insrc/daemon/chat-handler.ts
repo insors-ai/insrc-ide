@@ -705,6 +705,137 @@ export const chatResumeCodeAnalysis: StreamHandler = async (params, send, signal
   }
 };
 
+/**
+ * Resume RPC for the Data Analyzer. Mirror of chatResumeCodeAnalysis.
+ * Picks up a checkpointed run from
+ * `<insrc>/checkpoints/data-analyzer-<sessionId>.json` and re-enters
+ * via the controller's buildResumeTask + restoreState pattern (slice 1.9).
+ */
+export const chatResumeDataAnalysis: StreamHandler = async (params, send, signal) => {
+  const { sessionId } = params as { sessionId: string };
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { PATHS } = await import('../shared/paths.js');
+  const { CHECKPOINT_SCHEMA_VERSION, runControlledPipeline, createTaskStateStore } =
+    await import('./task.js');
+  const { getSessionById, setSessionStatus } = await import('../db/conversations.js');
+  const { getDb } = await import('../db/client.js');
+
+  const requestId = Date.now();
+  const abortController = new AbortController();
+  signal.addEventListener('abort', () => abortController.abort(), { once: true });
+  const guardedSend = (msg: IpcStreamMessage): void => {
+    if (abortController.signal.aborted) {
+      return;
+    }
+    send(msg);
+  };
+
+  const db = await getDb();
+  const row = await getSessionById(db, sessionId);
+  if (!row) {
+    send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} not found.` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (row.status === 'discarded' || row.status === 'completed') {
+    send({ id: requestId, stream: 'error', data: { error: `Session ${sessionId} is ${row.status}; nothing to resume.` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (row.agent !== 'data-analyzer') {
+    send({ id: requestId, stream: 'error', data: { error: `Resume only supports data-analyzer sessions (got agent=${row.agent || '(unset)'}).` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  const checkpointFile = join(PATHS.insrc, 'checkpoints', `data-analyzer-${sessionId}.json`);
+  if (!existsSync(checkpointFile)) {
+    send({ id: requestId, stream: 'error', data: { error: `No checkpoint for session ${sessionId}.` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  let raw: { schemaVersion?: number; controller?: string; state?: Record<string, unknown> };
+  try {
+    raw = JSON.parse(readFileSync(checkpointFile, 'utf-8'));
+  } catch (err) {
+    send({ id: requestId, stream: 'error', data: { error: `Checkpoint read failed: ${(err as Error).message}` } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  if (raw.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) {
+    send({ id: requestId, stream: 'error', data: {
+      error: `schema-drift: checkpoint is schemaVersion=${raw.schemaVersion}, daemon is schemaVersion=${CHECKPOINT_SCHEMA_VERSION}. Re-run from scratch.`,
+    } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  const pool = getPool();
+  let active = pool.get(sessionId);
+  if (!active) {
+    const restored = await pool.restore(sessionId);
+    if (!restored) {
+      send({ id: requestId, stream: 'error', data: { error: `pool.restore failed for ${sessionId}.` } });
+      send({ id: requestId, stream: 'done', data: {} });
+      return;
+    }
+    active = pool.get(sessionId)!;
+  }
+  if (active.agentRunning) {
+    send({ id: requestId, stream: 'error', data: { error: 'agent already running on this session' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+  const channel = new DaemonChannel(requestId, guardedSend, abortController);
+  if (!pool.attachChannel(sessionId, channel, abortController)) {
+    send({ id: requestId, stream: 'error', data: { error: 'agent already running on this session' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
+  try {
+    const { DataAnalyzerOrchestratorController } = await import(
+      './controllers/data-analyzer-orchestrator.js'
+    );
+    const controller = new DataAnalyzerOrchestratorController();
+    const stateStore = createTaskStateStore(raw.state ?? {});
+    controller.restoreState(stateStore);
+    const resumeTask = controller.buildResumeTask(stateStore);
+
+    await setSessionStatus(db, sessionId, 'active').catch(() => { /* best-effort */ });
+
+    send({ id: requestId, stream: 'progress', data: { message: 'Intent: data-analysis (resumed)' } });
+
+    const controllerInput = {
+      message: '',
+      codeContext: '',
+      session: active.session,
+    };
+    await runControlledPipeline(controller, controllerInput, {
+      session: active.session,
+      channel,
+      send: guardedSend,
+      requestId,
+      stateStore,
+      initialTasks: [resumeTask],
+      ...(abortController ? { abortController } : {}),
+    });
+
+    send({ id: requestId, stream: 'done', data: { summary: 'data-analyzer resume complete' } });
+  } catch (err) {
+    if (abortController.signal.aborted) {
+      log.info({ sessionId }, 'chat.resumeDataAnalysis aborted by user');
+    } else {
+      log.error({ err, sessionId }, 'chat.resumeDataAnalysis failed');
+      send({ id: requestId, stream: 'error', data: { error: (err as Error).message } });
+      send({ id: requestId, stream: 'done', data: {} });
+    }
+  } finally {
+    pool.detachChannel(sessionId);
+  }
+};
+
 async function fetchCodeContext(message: string): Promise<string> {
   try {
     const { rpc: cliRpc } = await import('../cli/client.js');
