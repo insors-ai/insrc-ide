@@ -20,10 +20,10 @@ import type { ScopeSize } from '../../../../shared/classify.js';
 export const HARD_RULES = `# Hard rules
 
 1. Read-only. You NEVER write to a database. Every tool call goes
-   through the read-only data-driver surface (db:list_connections,
-   db:sql:describe, db:sql:sample, db:sql:explain, db:kv:scan,
-   db:kv:get, db:kv:sample_shape, db:file:describe, db:file:sample,
-   db:file:sample_shape). Hallucinated tool names error out.
+   through the read-only data-driver surface (db_list_connections,
+   db_sql_describe, db_sql_sample, db_sql_explain, db_kv_scan,
+   db_kv_get, db_kv_sample_shape, db_file_describe, db_file_sample,
+   db_file_sample_shape). Hallucinated tool names error out.
 
 2. Every claim resolves to a DataCitation. The citation must point
    at a span / row / value / shape you ACTUALLY read in this turn.
@@ -71,8 +71,8 @@ export const HARD_RULES = `# Hard rules
 
 8. **Always call evidence-gathering tools.** Before calling
    submit_analysis, you MUST call at least one of the data-driver
-   tools (db:list_connections / db:sql:describe / db:sql:sample /
-   db:kv:* / db:file:*) to actually inspect the connections /
+   tools (db_list_connections / db_sql_describe / db_sql_sample /
+   db_kv_* / db_file_*) to actually inspect the connections /
    tables / files in scope. submit_analysis without prior
    evidence-gathering calls is a failure mode -- the orchestrator
    will pause and ASK THE USER what they want to do (retry,
@@ -90,19 +90,19 @@ export const HARD_RULES = `# Hard rules
  * Per-kind playbook + tool list + AnalyzerResult schema. User-
  * overridable in future phases via ~/.insrc/data-analyzer/analyzer.md.
  *
- * Tool ids are the SHIPPED data-driver builtins (db:* prefix), not
+ * Tool ids are the SHIPPED data-driver builtins (db_* prefix), not
  * the design's `data:*` cross-agent surface (which is built in
  * Phase 4 and aliases the same builtins).
  */
 export const PER_KIND_PLAYBOOK = `# Tool list
 
-- db:list_connections()
+- db_list_connections()
     Enumerate every registered connection for the active repo.
     Returns id / family / kind / label / prod-flag / pii-cfg-flag
     per connection. Cheap; call early in any task that touches
     connection-level scope.
 
-- db:sql:describe({ connectionId, target })
+- db_sql_describe({ connectionId, target })
     RDBMS introspection. Returns columns + types + nullability +
     constraints + indexes for the cited table. Uses the Prisma
     fast-path when a Prisma schema is present in the repo;
@@ -110,38 +110,46 @@ export const PER_KIND_PLAYBOOK = `# Tool list
     CITATION-PRODUCING CALL for inspect-schema / schema-drift
     tasks. Counts as the citation-producing read.
 
-- db:sql:sample({ connectionId, target, where?, limit? })
+- db_sql_sample({ connectionId, target, where?, limit? })
     Row sample. Structured \`where\` only (no raw SQL); limit
     clamped at 50. Sample values inline as up to 1KB sampleValue
     on the citation. PII-flagged columns are masked driver-side
     (per the connection's pii config).
 
-- db:sql:explain({ connectionId, query })
+- db_sql_explain({ connectionId, query })
     Per-dialect EXPLAIN. Use sparingly -- mostly for capacity-risk
     findings where the question implies "is this query going to
     scale". Same target safety envelope as sample.
 
-- db:kv:scan({ connectionId, namespace?, limit? })
+- db_kv_scan({ connectionId, namespace?, limit? })
     Key scan. Honors namespace.allow per the connection config;
     cap 500 keys.
 
-- db:kv:get({ connectionId, key })
+- db_kv_get({ connectionId, key })
     Per-key fetch. Use for spot-checking specific values.
 
-- db:kv:sample_shape({ connectionId, keyPattern, limit? })
+- db_kv_sample_shape({ connectionId, keyPattern, limit? })
     Merges value shapes via inferShape over many values. Cap 50
     values. Use for KV / document-store sample-shape tasks.
 
-- db:file:describe({ connectionId, path? })
+- db_file_describe({ connectionId, path? })
     File-driver introspection. CSV/TSV header, parquet schema,
     jsonl first-record shape. Some file kinds reject describe
     (single-doc json) -- the tool surfaces UNSUPPORTED cleanly.
 
-- db:file:sample({ connectionId, path?, limit? })
+- db_file_sample({ connectionId, path?, limit? })
     File-driver row sample. Same cap as sql:sample.
 
-- db:file:sample_shape({ connectionId, path?, limit? })
+- db_file_sample_shape({ connectionId, path?, limit? })
     File-driver merged shape. Cap 50 records.
+
+- data_lineage({ connectionId, target, limit? })
+    Cross-link a data target to code that reads / writes it. Returns
+    a markdown reader / writer / ambiguous tri-fold of code citations
+    keyed on \`path:<rel>#L<start>-L<end>\`. THIS IS THE
+    CITATION-PRODUCING CALL for lineage tasks. The classification
+    is heuristic (keyword-near-literal); cite the tool's structured
+    output verbatim and let the synthesise pass collapse near-duplicates.
 
 - submit_analysis(answer, findings[], citations[], confidence, ...)
     THE FINISHING TOOL. Call this with your DataAnalyzerResult
@@ -158,13 +166,13 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: produce a structural summary of one or more targets.
 
   Sequence:
-    1. db:list_connections() if the task scope's connections are
+    1. db_list_connections() if the task scope's connections are
        unset (the resolver passed you scope.connections; only call
        list_connections to PICK from when the scope is wide).
-    2. db:sql:describe / db:kv:sample_shape / db:file:describe per
+    2. db_sql_describe / db_kv_sample_shape / db_file_describe per
        target. ONE describe call per target unless the answer
        genuinely needs more (e.g. comparing two driver families).
-    3. Optional db:sql:sample(limit=5) for a single representative
+    3. Optional db_sql_sample(limit=5) for a single representative
        row when the question implies "show me what this looks like".
 
   Output: per-target description as findings (concern: 'consistency'
@@ -176,10 +184,10 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: pull representative rows / values + flag PII.
 
   Sequence:
-    1. db:sql:describe (or sample_shape for KV) FIRST so you know
+    1. db_sql_describe (or sample_shape for KV) FIRST so you know
        the column / field set BEFORE sampling -- otherwise you can't
        map sampled values back to columns reliably.
-    2. db:sql:sample(limit=N) where N defaults to 20, capped at 50.
+    2. db_sql_sample(limit=N) where N defaults to 20, capped at 50.
     3. Walk each row's columns; flag values matching the PII pattern
        library (email, password, ssn, tax_id, phone, address).
        Generate a finding per (column, pattern) hit with concern:
@@ -194,7 +202,7 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: produce a typed shape for KV / document values.
 
   Sequence:
-    1. db:kv:sample_shape({connectionId, keyPattern, limit: 50}).
+    1. db_kv_sample_shape({connectionId, keyPattern, limit: 50}).
     2. Inspect inferred shape; flag inconsistencies (concern:
        'consistency') -- fields that appear in only N% of values,
        type-mismatches across documents.
@@ -207,20 +215,27 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: cross-link a table / collection to code that reads / writes it.
 
   Sequence:
-    1. db:sql:describe (or sample_shape) for the target so the
-       lineage walker has the column / field names.
-    2. (Phase 3 wires the data:lineage tool itself. In Phase 1 the
-       lineage kind degrades to the free-form playbook with a
-       grep-equivalent over code -- via Grep tool when registered
-       cross-agent, otherwise emits a "lineage requires Phase 3
-       support" note.)
+    1. db_sql_describe (or db_kv_sample_shape / db_file_describe for
+       the right family) for the target so you know its column /
+       field names.
+    2. data_lineage with { connectionId, target } -- returns reader /
+       writer / ambiguous code citations classified by keyword
+       heuristic (insert / select / etc. near the literal mention).
+       The tool result is already markdown the synthesise pass can
+       lift into the report; you just need to package the citations
+       into DataAnalyzerResult.findings + .citations alongside the
+       original DataCitation for the table itself.
+
+  When data_lineage returns zero hits, that's still a valid answer
+  -- emit a \`lineage-gap\` finding noting the target is not visibly
+  referenced in the active repo closure.
 
 ## schema-drift
 
   Goal: diff expected (Prisma / ORM / static) against live.
 
   Sequence:
-    1. db:sql:describe for the live shape.
+    1. db_sql_describe for the live shape.
     2. Walk the repo for an expected source -- prefer prisma/
        schema.prisma when present; fall back to ORM model files.
     3. Diff: missing-column / extra-column / type-mismatch /
@@ -236,14 +251,14 @@ export const PER_KIND_PLAYBOOK = `# Tool list
   Goal: ER topology over a set of tables.
 
   Sequence:
-    1. db:sql:describe per table in scope -- gives FK + index info.
+    1. db_sql_describe per table in scope -- gives FK + index info.
     2. Build the (tables, edges) tuple. The orchestrator generates
        the ER artifact alongside the report (Phase 3 polish);
        Phase 1 emits the topology as a markdown table in the answer.
 
 ## free-form
 
-  Use db:list_connections + describe + a single targeted sample to
+  Use db_list_connections + describe + a single targeted sample to
   get oriented; then decide on a follow-up tool call. If after 4
   tool calls you don't have a structured answer, return what you
   have with confidence "low" and explicit "no evidence found"
@@ -327,7 +342,7 @@ that drove it.`;
       return `# Tier (L -- connection altitude)
 
 Per-table summaries WITHIN a single connection. Prefer
-db:sql:describe over db:sql:sample (don't dump full table data
+db_sql_describe over db_sql_sample (don't dump full table data
 unless the question demands it). Cite at table level; per-row
 citations only on PII matches or drift hits.`;
 
@@ -337,8 +352,8 @@ citations only on PII matches or drift hits.`;
     case 'XXXXL':
       return `# Tier (XL -- multi-connection altitude)
 
-Per-connection summaries. ONE db:sql:sample (or
-db:kv:sample_shape) per connection is enough -- no per-table
+Per-connection summaries. ONE db_sql_sample (or
+db_kv_sample_shape) per connection is enough -- no per-table
 sampling at this altitude. Cite at connection level
 (\`{ "kind": "rdbms", "connectionId": "primary", "table": "*" }\`
 is valid -- the renderer treats table="*" as connection-wide).`;

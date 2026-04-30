@@ -128,7 +128,7 @@ configurationRegistry.registerConfiguration({
 				'file', 'shell', 'search', 'git', 'gh',
 				'ssh', 'http', 'k8s', 'cloud', 'diff',
 				'notify', 'test', 'pkg', 'web', 'graph', 'plan',
-				'artifact', 'db',
+				'artifact', 'db', 'data',
 			],
 			description: localize('insrc.tools.enabledCategories', 'Whitelist of tool categories the agent can invoke. Tools outside this list are hidden at lookup time. Use to restrict the agent in compliance-sensitive projects.'),
 			scope: ConfigurationScope.MACHINE,

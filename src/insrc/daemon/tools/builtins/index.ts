@@ -28,6 +28,7 @@ import { registerGraphTools } from './graph/index.js';
 import { registerPlanTools } from './plan/index.js';
 import { registerArtifactTools } from './artifact/index.js';
 import { registerDbTools } from './db/index.js';
+import { registerDataTools } from './data/index.js';
 import { registerLlmAliases } from './llm-aliases.js';
 
 const log = getLogger('tools-builtins');
@@ -51,6 +52,7 @@ const CATEGORIES: Readonly<Record<string, () => void>> = {
   plan:     registerPlanTools,
   artifact: registerArtifactTools,
   db:       registerDbTools,
+  data:     registerDataTools,
 };
 
 export function registerBuiltinTools(): void {

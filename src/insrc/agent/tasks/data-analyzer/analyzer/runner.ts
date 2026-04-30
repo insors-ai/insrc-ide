@@ -77,6 +77,7 @@ const DB_KV_SAMPLE_SHAPE  = 'db_kv_sample_shape';
 const DB_FILE_DESCRIBE    = 'db_file_describe';
 const DB_FILE_SAMPLE      = 'db_file_sample';
 const DB_FILE_SAMPLE_SHAPE = 'db_file_sample_shape';
+const DATA_LINEAGE        = 'data_lineage';
 const SUBMIT_TOOL         = 'submit_analysis';
 
 const ANALYZER_TOOLS: readonly ToolDefinition[] = [
@@ -198,6 +199,22 @@ const ANALYZER_TOOLS: readonly ToolDefinition[] = [
         limit:        { type: 'number' },
       },
       required: ['connectionId'],
+    },
+  },
+  {
+    name: DATA_LINEAGE,
+    description:
+      'Cross-link a data target (table / namespace / file) to the code that reads or writes it. ' +
+      'Returns reader / writer / ambiguous classification per code citation. Use for `lineage` tasks ' +
+      'or whenever a finding needs to point readers at the call sites behind a schema observation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionId: { type: 'string' },
+        target:       { type: 'string', description: 'Table name (RDBMS), key pattern (KV), or file path (file driver).' },
+        limit:        { type: 'number' },
+      },
+      required: ['connectionId', 'target'],
     },
   },
   {
