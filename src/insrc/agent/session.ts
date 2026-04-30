@@ -9,6 +9,7 @@ import { embedText } from './context/semantic.js';
 import { sessionClose, sessionSeed, sessionForget, sessionHistory } from './tools/mcp-client.js';
 import { HealthMonitor, type HealthSnapshot } from './faults/index.js';
 import { ContextAwareProvider } from './context/context-aware-provider.js';
+import { DefaultAccessStore, type AccessStore } from '../shared/access.js';
 
 export interface SessionOpts {
   repoPath: string;
@@ -60,6 +61,24 @@ export class Session {
 
   /** Health monitor for Ollama and daemon (Phase 12). */
   readonly health: HealthMonitor;
+
+  /**
+   * Universal Access Gate -- session-scoped approval store
+   * (plans/access-gate.md). Tools that declare an `access` policy
+   * route through this on every call: the executor's gate
+   * dispatcher reads `isApproved(kind, key)`; on miss it fires a
+   * gate UI and writes the user's reply back via `approve(...)`.
+   *
+   * Controllers can pre-seed approvals (e.g. data-analyzer's
+   * ephemeral file connections, code-analyzer's active-repo
+   * scope) so the user isn't prompted for resources they
+   * implicitly consented to by typing the prompt.
+   *
+   * Per design §14, approvals are session-scoped only -- the
+   * store dies with the session; resume re-prompts on first
+   * access.
+   */
+  readonly access: AccessStore = new DefaultAccessStore();
 
   constructor(opts: SessionOpts) {
     this.id = opts.id ?? randomUUID();
