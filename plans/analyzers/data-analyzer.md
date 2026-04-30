@@ -46,7 +46,10 @@ Phases 0, 1, 2 shipped. Phases 3, 4, 5 pending.
 | 3.1 | data_lineage tool | shipped | `daemon/tools/builtins/data/lineage.ts`. v1 uses literal-name matching + keyword-near-literal classification (insert/select/etc.). ORM-typed-identifier matching deferred. |
 | 3.2 | data_schema-drift tool | shipped (Prisma fast-path only) | `daemon/tools/builtins/data/schema-drift.ts`. Diffs Prisma vs live RDBMS. ORM model resolvers (TypeORM / Sequelize / Mongoose) and static query-builder analysis are deferred follow-ups; the tool returns confidence:'low' for connections without `schemaSource.type === 'prisma'`. |
 | 3.3 | ER artifact integration | shipped | Orchestrator's `_appendErArtifactSection` walks accepted tasks for `kind === 'er'`, invokes `artifact_er` per (connection, tables) group, appends a "## ER Diagrams" section to the report. |
-| 4 | cross-agent integration | pending | |
+| 4.1 | data_* cross-agent wrappers | shipped | `daemon/cross-agent/data-tools.ts`: pure-namespace forwarders (data_list_connections / data_scan / data_get / data_explain) + family-dispatch wrappers (data_describe / data_sample / data_sample_shape). All depth-check via `_crossAgentDepth`. data_lineage + data_schema-drift gained inline depth checks in their existing tool definitions. |
+| 4.2 | bidirectional cross-agent inventory | shipped | data-analyzer's runner advertises `code_locate` / `code_trace` / `code_describe`; code-analyzer's runner advertises `data_lineage` / `data_schema-drift`. Both directions respect the single-hop depth cap. |
+| 4.3 | data_analyze Flow-2 dispatch | shipped | `daemon/cross-agent/data-analyze.ts` mirrors `code_analyze`: 16-task soft cap, 60s envelope, 45s per-task; runs through the data-analyzer's tool loop; returns stitched markdown + findings + citations. |
+| 4.4 | @data-analyzer mention routing | shipped (Phase 1) | Already wired in `chat-handler.ts:parseAnalyzerMention` -- routes through `runDataAnalyzerSlash`. |
 | 5 | polish | pending | |
 
 The data-driver shipped earlier (see [plans/data-driver.md](../data-driver.md))

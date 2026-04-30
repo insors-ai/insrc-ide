@@ -12,6 +12,7 @@
 import { registerCodeAnalyzerCrossAgentTools as registerCodeLookups } from './code-tools.js';
 import { registerCodeAnalyzeFlow2Tool } from './code-analyze.js';
 import { registerDataAnalyzerCrossAgentTools as registerDataLookups } from './data-tools.js';
+import { registerDataAnalyzeFlow2Tool } from './data-analyze.js';
 
 export {
 	codeLocateTool,
@@ -28,6 +29,7 @@ export {
 	dataSampleShapeTool,
 	dataExplainTool,
 } from './data-tools.js';
+export { dataAnalyzeTool } from './data-analyze.js';
 
 /**
  * Register the full Code Analyzer cross-agent surface:
@@ -55,9 +57,10 @@ export function registerCodeAnalyzerCrossAgentTools(): void {
  * their depth checks added inline. Cross-agent callers use the same
  * canonical ids as the analyzer's own runner.
  *
- * Phase 4.3's `data_analyze` Flow-2 entry will land alongside this
- * module in a follow-up slice (mirrors `code_analyze`).
+ * Phase 4.3's `data_analyze` Flow-2 dispatch entry registers
+ * alongside the lookup wrappers; mirrors `code_analyze`.
  */
 export function registerDataAnalyzerCrossAgentTools(): void {
 	registerDataLookups();
+	registerDataAnalyzeFlow2Tool();
 }
