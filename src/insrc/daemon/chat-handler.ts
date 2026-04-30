@@ -1036,7 +1036,7 @@ async function tryFamilyDirectSlash(
       send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
       return true;
     }
-    await runDataAnalyzerSlash(active, channel, userPrompt, message, requestId, send);
+    await runDataAnalyzerSlash(active, channel, userPrompt, message, requestId, send, parentListId, rerunFromListId);
     return true;
   }
 
@@ -1132,6 +1132,13 @@ async function runDataAnalyzerSlash(
   originalMessage: string,
   requestId: number,
   send: (msg: IpcStreamMessage) => void,
+  // Phase 5.3 of plans/analyzers/data-analyzer.md. When a drill-down
+  // candidate is clicked in the report pane, the workbench routes
+  // back through chat.send with `parentListId` set to the prior
+  // list's id. The orchestrator stamps this on the new TodoList so
+  // the todos pane + Report Pane can render the parent edge.
+  parentListId?: string,
+  rerunFromListId?: string,
 ): Promise<void> {
   // Stamp the session's agent column so the resume RPC
   // (chat.resumeDataAnalysis) can locate data-analyzer sessions later.
@@ -1212,6 +1219,8 @@ async function runDataAnalyzerSlash(
           confidence: 1.0,
           scope,
         },
+        ...(parentListId !== undefined ? { parentListId } : {}),
+        ...(rerunFromListId !== undefined ? { rerunFromListId } : {}),
       },
       deps,
     );

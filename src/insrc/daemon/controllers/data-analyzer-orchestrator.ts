@@ -127,6 +127,20 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   /** Scope tier for this run. Captured from input.classification.scope. */
   private _tier: ScopeSize = 'M';
   private _listId: string | undefined;
+  /**
+   * Parent list id for drill-down runs (Phase 5.3 of
+   * plans/analyzers/data-analyzer.md). Captured from
+   * `ControllerInput.parentListId` (drill-down click in the report
+   * pane → chat.send carries it through). Stamped on the new
+   * TodoList in `createList` so the todos pane + Report Pane can
+   * render the parent edge.
+   */
+  private _parentListId: string | undefined = undefined;
+  /**
+   * Re-run mode (Phase 5.1). Reserved -- wired through but not yet
+   * acted on; the re-run command will land alongside this slice.
+   */
+  private _rerunFromListId: string | undefined = undefined;
 
   attachDeps(deps: TaskOrchestratorDeps): void {
     this.deps = deps;
@@ -137,6 +151,8 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   async buildInitialTasks(input: ControllerInput): Promise<Task[]> {
     this._request = input.message;
     this._tier = clampToDataAltitude(input.classification?.scope ?? 'M');
+    this._parentListId = input.parentListId;
+    this._rerunFromListId = input.rerunFromListId;
 
     // Phase 1.H: register ephemeral connections for any local file
     // paths the user typed in their prompt (e.g.
@@ -375,6 +391,10 @@ export class DataAnalyzerOrchestratorController implements TaskController {
           sessionId:   this.deps.session.id,
           title:       `Data Analysis: ${this._request?.slice(0, 60) ?? '(no request)'}`,
           description: this._request ?? '',
+          // Phase 5.3: stamp parent edge for drill-down runs so the
+          // todos pane + Report Pane can thread the new list under
+          // the prior one.
+          ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
         });
         this._listId = list.id;
         const ca = state.get<DataAnalysisState>(K_STATE)!;

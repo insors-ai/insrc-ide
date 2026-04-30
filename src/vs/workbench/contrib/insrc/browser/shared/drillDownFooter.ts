@@ -4,22 +4,20 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * Drill-down footer parser for Code Analyzer reports
- * (plans/analyzers/code-analyzer.md Phase 5.D).
+ * Drill-down footer parser for analyzer reports.
  *
- * Phase 5.C taught the synthesise prompt to always emit a final
- * `## Drill down` section listing 3-5 candidate next-step analyses
- * the user could run as scoped child runs. The Report Pane parses
- * that section here and renders each candidate as a clickable button
- * that fires `insrc.codeAnalyzer.drillDown`.
+ * Both the Code Analyzer (Phase 5.D) and the Data Analyzer (Phase 5.3)
+ * synthesise prompts emit a final `## Drill down` section listing 3-5
+ * candidate next-step analyses. Their report panes parse that section
+ * here and render each candidate as a clickable button that fires
+ * `insrc.<family>Analyzer.drillDown`.
  *
- * Expected shape (per the synthesise prompt's
- * `DRILL_DOWN_FOOTER_RULE`):
+ * Expected shape:
  *
  *     ## Drill down
  *
- *     - **<one-line candidate question>** -- scope: `<path | module | entity>`
- *     - **<one-line candidate question>** -- scope: `<path | module | entity>`
+ *     - **<one-line candidate question>** -- scope: `<path | module | entity | connection>`
+ *     - **<one-line candidate question>** -- scope: `<...>`
  *     ...
  *
  * Tolerant of:
@@ -49,29 +47,22 @@ const HEADING_RE = /^##\s+drill[-\s]?down\s*$/im;
 /**
  * Bullet shape: `- **<question>** -- scope: \`<scope>\``. The
  * `--` separator is matched loosely (ASCII `--`, U+2014 em dash,
- * U+2013 en dash), as is the surrounding whitespace. Unicode
- * dashes are encoded via \u escapes so the file stays ASCII-clean
- * for the workbench's hygiene check.
- *
- * The `[\s\S]+?` after the question is non-greedy so a trailing
- * unbalanced asterisk in the question text doesn't swallow the rest
- * of the line.
+ * U+2013 en dash). Unicode dashes are encoded via \u escapes so the
+ * file stays ASCII-clean for the workbench's hygiene check.
  */
 const BULLET_RE = /^\s*[-*]\s+\*\*([\s\S]+?)\*\*\s*(?:--|\u2014|\u2013)\s*scope\s*:\s*`([^`]+)`\s*$/i;
 
 /**
  * Looser fallback: bullet with bolded question but no recognisable
  * scope segment. Captures the question; scope returns ''. Used so a
- * model that drops the scope hint still surfaces a clickable button
- * (the user can still drill down with a no-scope hint).
+ * model that drops the scope hint still surfaces a clickable button.
  */
 const BULLET_NO_SCOPE_RE = /^\s*[-*]\s+\*\*([\s\S]+?)\*\*\s*$/;
 
 /**
- * Parse a Code Analyzer report body into the part above the drill-
- * down footer + the parsed footer items. When no `## Drill down`
- * section is present, returns the body untouched and an empty items
- * array.
+ * Parse an analyzer report body into the part above the drill-down
+ * footer + the parsed footer items. When no `## Drill down` section
+ * is present, returns the body untouched and an empty items array.
  */
 export function parseDrillDownFooter(body: string): ParsedReport {
 	const match = HEADING_RE.exec(body);
@@ -117,19 +108,4 @@ function parseFooterBullets(section: string): DrillDownItem[] {
 		}
 	}
 	return items;
-}
-
-/**
- * Compose the message a drill-down click should send to chat. Stable
- * shape so the daemon's `/code-analyze` slash matcher consumes it
- * unchanged. Scope hint is appended in parentheses when present so
- * the planner can pick it up; the parent edge is carried separately
- * via `chat.send`'s `parentListId` param (not encoded in the text).
- */
-export function buildDrillDownMessage(item: DrillDownItem): string {
-	const base = `/code-analyze ${item.question}`;
-	if (item.scope.length === 0) {
-		return base;
-	}
-	return `${base} (scope: ${item.scope})`;
 }

@@ -236,6 +236,79 @@ function slugFromRequest(request: string): string {
 }
 
 /**
+ * Drill down on a data-analysis report (plans/analyzers/data-analyzer.md
+ * Phase 5.3). Args:
+ *
+ *   {
+ *     parentListId: string;   // the report-pane list this came from
+ *     question:     string;   // one-line drill-down candidate
+ *     scope?:       string;   // optional connection / table / path hint
+ *   }
+ *
+ * Behaviour:
+ *   1. Resolve the parent list (programmatic mode supplies the id;
+ *      palette-mode falls back to the most-recent data-analyzer list
+ *      in the active session, mirroring openReport / saveReport).
+ *   2. Build a `/data-analyze <question> (scope: <scope>)` chat
+ *      message.
+ *   3. Send via `chatService.sendMessage(message, undefined, parentListId)`
+ *      -- the third arg threads parentListId to the daemon's
+ *      chat.send, which carries it to the orchestrator's createList.
+ *   4. The daemon's existing /data-analyze slash dispatcher kicks
+ *      off a child analysis with the parent edge stamped on the new
+ *      TodoList; the Report Pane auto-opens for the child run via
+ *      the existing flow contribution.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.dataAnalyzer.drillDown',
+			title: localize2('insrc.dataAnalyzer.drillDown', 'Drill Down on Data Analysis'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(
+		accessor: ServicesAccessor,
+		arg?: { parentListId?: string; question?: string; scope?: string },
+	): Promise<void> {
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const notifications = accessor.get(INotificationService);
+
+		let parentListId = arg?.parentListId;
+		if (parentListId === undefined) {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notifications.info('No active chat session; run /data-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === DATA_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notifications.info('No data-analysis report yet. Run /data-analyze first.');
+				return;
+			}
+			parentListId = candidates[candidates.length - 1].id;
+		}
+
+		const question = (arg?.question ?? '').trim();
+		if (question.length === 0) {
+			notifications.info('Drill-down needs a question. Click a footer item in the Report pane, or pass a `question` arg.');
+			return;
+		}
+
+		const scope = (arg?.scope ?? '').trim();
+		const message = scope.length > 0
+			? `/data-analyze ${question} (scope: ${scope})`
+			: `/data-analyze ${question}`;
+		await chatService.sendMessage(message, undefined, parentListId);
+	}
+});
+
+/**
  * Clear the Data Analyzer's per-task cache (plans/analyzers/data-analyzer.md
  * Phase 2.4). Mirrors `insrc.codeAnalyzer.clearCache`. Useful when the
  * connection-roster fingerprint hasn't changed but the user wants

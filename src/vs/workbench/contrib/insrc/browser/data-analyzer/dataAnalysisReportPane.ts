@@ -16,6 +16,7 @@ import { MarkdownRenderer } from '../../../../../editor/browser/widget/markdownR
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { DataAnalysisReportInput } from './dataAnalysisReportInput.js';
 import { InsrcEditorPaneBase } from '../shared/workspacePaneBase.js';
+import { parseDrillDownFooter, type DrillDownItem } from '../shared/drillDownFooter.js';
 
 /**
  * Data Analyzer Report Pane (plans/analyzers/data-analyzer.md Phase 2.1).
@@ -156,14 +157,54 @@ export class DataAnalysisReportPane extends InsrcEditorPaneBase<DataAnalysisRepo
 		this._body.style.display = '';
 		dom.clearNode(this._body);
 
-		// Phase 5.3 will split out a `## Drill down` footer the way
-		// the code-analyzer pane does. For Phase 2.1 we render the
-		// body verbatim -- the synthesise prompt always emits a
-		// drill-down section (with a placeholder when no candidates
-		// exist), and showing it as plain markdown is acceptable
-		// until the clickable variant lands.
-		const rendered = this._getRenderer().render(new MarkdownString(body));
+		// Phase 5.3 of plans/analyzers/data-analyzer.md: split the
+		// trailing `## Drill down` section out of the rendered body
+		// and turn each candidate into a clickable button that fires
+		// `insrc.dataAnalyzer.drillDown` with this list's id stamped
+		// as `parentListId`. Mirrors the code-analyzer pane's
+		// behaviour; the parser is shared via shared/drillDownFooter.
+		const { main, items } = parseDrillDownFooter(body);
+		const renderable = main.length > 0 ? main : body;
+		const rendered = this._getRenderer().render(new MarkdownString(renderable));
 		this._body.appendChild(rendered.element);
+
+		if (items.length > 0) {
+			this._renderDrillDownFooter(list.id, items);
+		}
+	}
+
+	/**
+	 * Render the parsed drill-down footer as a stack of buttons. Each
+	 * button fires `insrc.dataAnalyzer.drillDown` with this list's id
+	 * threaded as `parentListId` so the daemon's chat.send stamps
+	 * the parent edge on the child analysis's TodoList. Button label
+	 * = the candidate question; scope (when present) renders as a
+	 * dimmed suffix and is forwarded as the command's `scope` arg.
+	 */
+	private _renderDrillDownFooter(parentListId: string, items: readonly DrillDownItem[]): void {
+		const wrapper = dom.append(this._body, dom.$('.insrc-data-analysis-report-drilldown'));
+		const heading = dom.append(wrapper, dom.$('h2.insrc-data-analysis-report-drilldown-heading'));
+		heading.textContent = 'Drill down';
+		const list = dom.append(wrapper, dom.$('.insrc-data-analysis-report-drilldown-list'));
+		for (const item of items) {
+			const button = dom.append(list, dom.$('button.insrc-data-analysis-report-drilldown-button'));
+			const questionEl = dom.append(button, dom.$('span.insrc-data-analysis-report-drilldown-question'));
+			questionEl.textContent = item.question;
+			if (item.scope.length > 0) {
+				const scopeEl = dom.append(button, dom.$('span.insrc-data-analysis-report-drilldown-scope'));
+				scopeEl.textContent = `scope: ${item.scope}`;
+			}
+			this._register(dom.addDisposableListener(button, dom.EventType.CLICK, () => {
+				const args: { parentListId: string; question: string; scope?: string } = {
+					parentListId,
+					question: item.question,
+				};
+				if (item.scope.length > 0) {
+					args.scope = item.scope;
+				}
+				void this.commandService.executeCommand('insrc.dataAnalyzer.drillDown', args);
+			}));
+		}
 	}
 
 	private _showEmpty(message: string): void {

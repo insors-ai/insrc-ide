@@ -16,7 +16,7 @@ import { MarkdownRenderer } from '../../../../../editor/browser/widget/markdownR
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { AnalysisReportInput } from './analysisReportInput.js';
 import { InsrcEditorPaneBase } from '../shared/workspacePaneBase.js';
-import { parseDrillDownFooter, type DrillDownItem } from './drillDownFooter.js';
+import { parseDrillDownFooter, type DrillDownItem } from '../shared/drillDownFooter.js';
 
 /**
  * Code Analyzer Report Pane (plans/analyzers/code-analyzer.md Phase 2.1).
