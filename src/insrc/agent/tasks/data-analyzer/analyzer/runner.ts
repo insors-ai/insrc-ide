@@ -78,6 +78,7 @@ const DB_FILE_DESCRIBE    = 'db_file_describe';
 const DB_FILE_SAMPLE      = 'db_file_sample';
 const DB_FILE_SAMPLE_SHAPE = 'db_file_sample_shape';
 const DATA_LINEAGE        = 'data_lineage';
+const DATA_SCHEMA_DRIFT   = 'data_schema-drift';
 const SUBMIT_TOOL         = 'submit_analysis';
 
 const ANALYZER_TOOLS: readonly ToolDefinition[] = [
@@ -213,6 +214,22 @@ const ANALYZER_TOOLS: readonly ToolDefinition[] = [
         connectionId: { type: 'string' },
         target:       { type: 'string', description: 'Table name (RDBMS), key pattern (KV), or file path (file driver).' },
         limit:        { type: 'number' },
+      },
+      required: ['connectionId', 'target'],
+    },
+  },
+  {
+    name: DATA_SCHEMA_DRIFT,
+    description:
+      'Diff an RDBMS connection\'s expected schema (Prisma) against the live shape. Reports ' +
+      'missing-column / extra-column / type-mismatch / nullable-mismatch / pk-changed / fk-changed. ' +
+      'When the connection has no Prisma schemaSource, returns confidence:"low" with a "no static ' +
+      'schema source" note rather than fabricating findings.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionId: { type: 'string' },
+        target:       { type: 'string', description: 'Table name (Prisma model OR @@map target).' },
       },
       required: ['connectionId', 'target'],
     },

@@ -151,6 +151,16 @@ export const PER_KIND_PLAYBOOK = `# Tool list
     is heuristic (keyword-near-literal); cite the tool's structured
     output verbatim and let the synthesise pass collapse near-duplicates.
 
+- data_schema-drift({ connectionId, target })
+    Diff an RDBMS connection's expected schema (Prisma fast-path)
+    against the live shape returned by the driver. Reports
+    missing-column / extra-column / type-mismatch / nullable-mismatch /
+    pk-changed / fk-changed with severity per kind (info / warn /
+    error). THIS IS THE CITATION-PRODUCING CALL for schema-drift
+    tasks. When the connection lacks \`schemaSource.type === 'prisma'\`,
+    the tool returns confidence:"low" with a "no static schema source"
+    note -- emit that as the answer rather than fabricating drift.
+
 - submit_analysis(answer, findings[], citations[], confidence, ...)
     THE FINISHING TOOL. Call this with your DataAnalyzerResult
     once you have enough evidence. The orchestrator parses your
@@ -232,19 +242,24 @@ export const PER_KIND_PLAYBOOK = `# Tool list
 
 ## schema-drift
 
-  Goal: diff expected (Prisma / ORM / static) against live.
+  Goal: diff expected (Prisma) against live.
 
   Sequence:
-    1. db_sql_describe for the live shape.
-    2. Walk the repo for an expected source -- prefer prisma/
-       schema.prisma when present; fall back to ORM model files.
-    3. Diff: missing-column / extra-column / type-mismatch /
-       nullable-mismatch. Severity = info (extra-column), warn
-       (type / nullable mismatch), error (missing-column).
+    1. data_schema-drift({ connectionId, target }) -- this single
+       call handles BOTH the expected-shape resolution (Prisma fast
+       path) AND the live describe in one go, then diffs them. The
+       structured output already has columns + types + nullability +
+       PK / FK, plus a per-item drift list with severities. Lift the
+       drift items into DataAnalyzerResult.findings; cite the table
+       via DataCitation { kind: 'rdbms' }.
 
-  When no expected source is found, downgrade to confidence: "low"
-  with answer "no static schema source for <target>; live shape
-  emitted".
+  When the tool returns \`expectedSource: 'none'\` (the connection
+  has no \`schemaSource.type === 'prisma'\`), the playbook is to emit
+  a single finding noting the gap and set confidence:"low". Do NOT
+  fall back to free-form heuristics -- the tool already surfaces the
+  live shape so the analyzer can describe what exists without
+  speculating about what's missing. ORM model and static-query
+  expected sources are deferred follow-ups.
 
 ## er
 
