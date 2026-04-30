@@ -263,6 +263,7 @@ registerWorkbenchContribution2(CodeAnalyzerFlowContribution.ID, CodeAnalyzerFlow
 import { DataAnalysisReportPane } from './data-analyzer/dataAnalysisReportPane.js';
 import { DataAnalysisReportInput } from './data-analyzer/dataAnalysisReportInput.js';
 import { DataAnalyzerFlowContribution } from './data-analyzer/dataAnalyzerFlowContribution.js';
+import { DataConnUriOpenerContribution } from './data-analyzer/dataConnUriOpener.js';
 import './data-analyzer/dataAnalyzerCommands.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(DataAnalysisReportPane, DataAnalysisReportPane.ID, 'Data Analysis Report'),
@@ -275,3 +276,9 @@ registerWorkbenchContribution2(DataAnalyzerFlowContribution.ID, DataAnalyzerFlow
 // Report Pane and the chat panel actually open the cited file at the
 // cited line instead of falling through silently.
 registerWorkbenchContribution2(PathUriOpenerContribution.ID, PathUriOpenerContribution, WorkbenchPhase.AfterRestored);
+
+// data-conn: URI opener (plans/analyzers/data-analyzer.md Phase 5.6).
+// Resolves data-citation links the data-analyzer's synthesise prompt
+// emits (e.g. `[label](data-conn:dev/public/users?col=email)`) so
+// clicks open the Data Sources pane and surface the parsed citation.
+registerWorkbenchContribution2(DataConnUriOpenerContribution.ID, DataConnUriOpenerContribution, WorkbenchPhase.AfterRestored);
