@@ -202,11 +202,11 @@ function clampListLimit(n: number | undefined): number {
  * when the Artifacts list doesn't exist yet (no artifacts produced
  * this session).
  *
- * Used by the `artifact:list` tool so an LLM turn can resolve
+ * Used by the `artifact_list` tool so an LLM turn can resolve
  * artifact ids by name/kind/recency before calling
  * `artifact:regenerate({ artifactId, edits })` -- phase 2's NL
  * regenerate UX needs an artifact-discovery surface
- * (`artifact:list_templates` lists templates, not artifacts).
+ * (`artifact_list_templates` lists templates, not artifacts).
  */
 export async function listSessionArtifacts(
 	api: TodosApi,

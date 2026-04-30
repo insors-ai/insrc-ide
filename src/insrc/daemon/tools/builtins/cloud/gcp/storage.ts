@@ -27,7 +27,7 @@ interface GcpStorageLsData {
 }
 
 export const gcpStorageLsTool: Tool = {
-  id: 'cloud:gcp:storage:ls',
+  id: 'cloud_gcp_storage_ls',
   description: 'List a GCS bucket or prefix.',
   inputSchema: {
     type: 'object',
@@ -51,7 +51,7 @@ export const gcpStorageLsTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:storage:ls', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_storage_ls', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpStorageLsData = { path, recursive: bool(input, 'recursive') ?? false, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -82,7 +82,7 @@ interface GcpStorageCpData {
 }
 
 export const gcpStorageCpTool: Tool = {
-  id: 'cloud:gcp:storage:cp',
+  id: 'cloud_gcp_storage_cp',
   description: 'Copy to/from/within GCS via `gcloud storage cp`. Always gated.',
   inputSchema: {
     type: 'object',
@@ -102,7 +102,7 @@ export const gcpStorageCpTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:storage:cp',
+      title: 'cloud_gcp_storage_cp',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `\`${str(input, 'source')}\` -> \`${str(input, 'destination')}\``,
@@ -118,7 +118,7 @@ export const gcpStorageCpTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const src = str(input, 'source');
     const dst = str(input, 'destination');
-    if (!src || !dst) { return fail('cloud:gcp:storage:cp', 'source and destination required'); }
+    if (!src || !dst) { return fail('cloud_gcp_storage_cp', 'source and destination required'); }
     const flags = gcpFlags(input);
     const argv = ['gcloud', 'storage', 'cp', src, dst];
     if (bool(input, 'recursive')   === true) { argv.push('--recursive'); }
@@ -128,7 +128,7 @@ export const gcpStorageCpTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 30 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:storage:cp', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_storage_cp', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpStorageCpData = { source: src, destination: dst, recursive: bool(input, 'recursive') ?? false, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -158,7 +158,7 @@ interface GcpStorageRmData {
 }
 
 export const gcpStorageRmTool: Tool = {
-  id: 'cloud:gcp:storage:rm',
+  id: 'cloud_gcp_storage_rm',
   description: 'Delete GCS objects. Always gated; recursive requires confirmBucket.',
   inputSchema: {
     type: 'object',
@@ -177,7 +177,7 @@ export const gcpStorageRmTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:storage:rm',
+      title: 'cloud_gcp_storage_rm',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Delete \`${str(input, 'path')}\``,
@@ -192,15 +192,15 @@ export const gcpStorageRmTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = str(input, 'path');
-    if (!path) { return fail('cloud:gcp:storage:rm', 'path required'); }
+    if (!path) { return fail('cloud_gcp_storage_rm', 'path required'); }
     const recursive = bool(input, 'recursive') === true;
     if (recursive) {
       const m = path.match(/^gs:\/\/([^/]+)/);
       const bucket = m?.[1];
-      if (!bucket) { return fail('cloud:gcp:storage:rm', 'recursive rm: could not parse bucket from path'); }
+      if (!bucket) { return fail('cloud_gcp_storage_rm', 'recursive rm: could not parse bucket from path'); }
       const confirm = str(input, 'confirmBucket');
       if (confirm !== bucket) {
-        return fail('cloud:gcp:storage:rm', `recursive rm requires confirmBucket to match "${bucket}"`);
+        return fail('cloud_gcp_storage_rm', `recursive rm requires confirmBucket to match "${bucket}"`);
       }
     }
     const flags = gcpFlags(input);
@@ -209,7 +209,7 @@ export const gcpStorageRmTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 15 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:storage:rm', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_storage_rm', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpStorageRmData = { path, recursive, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

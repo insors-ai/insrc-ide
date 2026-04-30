@@ -19,7 +19,7 @@ export interface GitStageData {
 }
 
 export const gitStageTool: Tool = {
-  id: 'git:stage',
+  id: 'git_stage',
   description: 'Stage (git add) or unstage (git restore --staged) paths.',
   inputSchema: {
     type: 'object',

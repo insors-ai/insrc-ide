@@ -23,7 +23,7 @@ interface AwsEcrLoginData {
 }
 
 export const awsEcrLoginTool: Tool = {
-  id: 'cloud:aws:ecr:login',
+  id: 'cloud_aws_ecr_login',
   description: 'Produce docker login credentials for ECR (ecr get-login-password). Password redacted unless reveal:true.',
   inputSchema: {
     type: 'object',
@@ -39,7 +39,7 @@ export const awsEcrLoginTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:ecr:login',
+      title: 'cloud_aws_ecr_login',
       content: [
         `Scope: **${awsScope(flags)}**`,
         str(input, 'registryId') ? `Registry: \`${str(input, 'registryId')}\`` : 'Registry: current account.',
@@ -60,7 +60,7 @@ export const awsEcrLoginTool: Tool = {
     argv.push(...awsArgv(flags, { defaultJson: false }));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:ecr:login', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ecr_login', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const password = r.stdout.trim();
 

@@ -225,7 +225,7 @@ function walkDir(
  * across calls (no timestamps / random parts) so the same prompt run
  * twice in a row reuses the same connection entry. Prefix
  * `ephemeral:` keeps it visually distinct from user-registered ids
- * in `db:list_connections` output.
+ * in `db_list_connections` output.
  */
 function makeEphemeralId(absPath: string): string {
   const base = basename(absPath, extname(absPath));

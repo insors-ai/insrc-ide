@@ -42,7 +42,7 @@ function renderPlan(plan: Plan): string {
 interface PlanGetData { plan: Plan | null }
 
 export const planGetTool: Tool = {
-  id: 'plan:get',
+  id: 'plan_get',
   description: 'Fetch a plan by ID, or the active plan for a repo (defaults to the session repo).',
   inputSchema: {
     type: 'object',
@@ -62,7 +62,7 @@ export const planGetTool: Tool = {
       plan = await getPlan(db, planId);
     } else {
       const repo = str(input, 'repo') ?? deps.session.repoPath;
-      if (!repo) { return fail('plan:get', 'repo required (no session repo and no override)'); }
+      if (!repo) { return fail('plan_get', 'repo required (no session repo and no override)'); }
       plan = await getActivePlan(db, repo);
     }
     const data: PlanGetData = { plan };

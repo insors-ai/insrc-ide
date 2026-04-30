@@ -22,7 +22,7 @@ export interface GitTagData {
 }
 
 export const gitTagTool: Tool = {
-  id: 'git:tag',
+  id: 'git_tag',
   description: 'List / create / delete tags. list is read-only; create and delete gate.',
   inputSchema: {
     type: 'object',
@@ -74,8 +74,8 @@ export const gitTagTool: Tool = {
       ];
       if (pattern) { argv.push(pattern); }
       const r = await runShell(argv, { cwd, timeoutMs: 10_000 });
-      if (r.spawnError) { return spawnFail('git:tag', r.stderr); }
-      if (r.code !== 0) { return fail('git:tag', r.stderr, r.stdout, r.code); }
+      if (r.spawnError) { return spawnFail('git_tag', r.stderr); }
+      if (r.code !== 0) { return fail('git_tag', r.stderr, r.stdout, r.code); }
       const tags: GitTagEntry[] = [];
       for (const line of r.stdout.split('\n')) {
         if (!line.trim()) { continue; }
@@ -91,7 +91,7 @@ export const gitTagTool: Tool = {
     }
 
     const name = str(input, 'name');
-    if (!name) { return fail('git:tag', `missing name for ${op}`, '', 1); }
+    if (!name) { return fail('git_tag', `missing name for ${op}`, '', 1); }
 
     if (op === 'create') {
       const ref = str(input, 'ref') ?? 'HEAD';
@@ -100,15 +100,15 @@ export const gitTagTool: Tool = {
       if (msg) { argv.push('-a', '-m', msg); }
       argv.push(name, ref);
       const r = await runShell(argv, { cwd, timeoutMs: 15_000 });
-      if (r.spawnError) { return spawnFail('git:tag', r.stderr); }
-      if (r.code !== 0) { return fail('git:tag', r.stderr, r.stdout, r.code); }
+      if (r.spawnError) { return spawnFail('git_tag', r.stderr); }
+      if (r.code !== 0) { return fail('git_tag', r.stderr, r.stdout, r.code); }
       return { output: `Created tag \`${name}\` at \`${ref}\`.`, format: 'markdown', success: true, data: { op, target: name } satisfies GitTagData };
     }
 
     // delete
     const r = await runShell(['git', 'tag', '-d', name], { cwd, timeoutMs: 10_000 });
-    if (r.spawnError) { return spawnFail('git:tag', r.stderr); }
-    if (r.code !== 0) { return fail('git:tag', r.stderr, r.stdout, r.code); }
+    if (r.spawnError) { return spawnFail('git_tag', r.stderr); }
+    if (r.code !== 0) { return fail('git_tag', r.stderr, r.stdout, r.code); }
     return { output: `Deleted tag \`${name}\`.`, format: 'markdown', success: true, data: { op, target: name } satisfies GitTagData };
   },
 };

@@ -10,8 +10,8 @@
  * review step downgrades affected tasks; the synthesise step adds
  * a "Consider running /<sibling>" hint to the report).
  *
- * The Code Analyzer's Phase 3 commit registers `code:locate`,
- * `code:trace`, `code:describe`, and `code:analyze`. Sibling
+ * The Code Analyzer's Phase 3 commit registers `code_locate`,
+ * `code_trace`, `code_describe`, and `code_analyze`. Sibling
  * families register their own `data:*` / `deploy:*` tools when they
  * ship; the cross-agent envelope here is family-agnostic.
  */

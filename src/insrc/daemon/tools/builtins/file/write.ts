@@ -15,7 +15,7 @@ export interface FileWriteData {
 }
 
 export const fileWriteTool: Tool = {
-  id: 'file:write',
+  id: 'file_write',
   description: 'Write or overwrite a file. Gates with old-size -> new-size + content preview.',
   inputSchema: {
     type: 'object',
@@ -59,9 +59,9 @@ export const fileWriteTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:write', 'missing path'); }
+    if (!path) { return fail('file_write', 'missing path'); }
     const content = input['content'];
-    if (typeof content !== 'string') { return fail('file:write', 'content is required'); }
+    if (typeof content !== 'string') { return fail('file_write', 'content is required'); }
     const mkdirp = input['mkdirp'] !== false;
 
     let previousBytes = 0;
@@ -74,13 +74,13 @@ export const fileWriteTool: Tool = {
 
     if (mkdirp) {
       try { await fs.mkdir(dirname(path), { recursive: true }); }
-      catch (err) { return fail('file:write', `mkdir failed: ${(err as Error).message}`); }
+      catch (err) { return fail('file_write', `mkdir failed: ${(err as Error).message}`); }
     }
 
     try {
       await fs.writeFile(path, content, 'utf8');
     } catch (err) {
-      return fail('file:write', `write failed: ${(err as Error).message}`);
+      return fail('file_write', `write failed: ${(err as Error).message}`);
     }
 
     const bytesWritten = Buffer.byteLength(content);

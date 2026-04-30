@@ -227,7 +227,7 @@ const DEFAULT_RUN_TIMEOUT = 10 * 60_000;
 const MAX_RUN_TIMEOUT = 60 * 60_000;
 
 export const testRunTool: Tool = {
-  id: 'test:run',
+  id: 'test_run',
   description: 'Run tests. Supply argv (preferred) or command; optional framework hint enables structured parsing.',
   inputSchema: {
     type: 'object',
@@ -249,7 +249,7 @@ export const testRunTool: Tool = {
     const argv = argvFromInput(input);
     const framework = parseFramework(input);
     return {
-      title: 'test:run',
+      title: 'test_run',
       content: [
         `Framework: **${framework}**`,
         `Cwd: \`${str(input, 'cwd') ?? process.cwd()}\``,
@@ -273,7 +273,7 @@ export const testRunTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const argv = argvFromInput(input);
-    if (argv.length === 0) { return fail('test:run', 'argv or command required'); }
+    if (argv.length === 0) { return fail('test_run', 'argv or command required'); }
     const framework = parseFramework(input);
     const cwd = str(input, 'cwd');
     const timeoutMs = Math.min(num(input, 'timeoutMs') ?? DEFAULT_RUN_TIMEOUT, MAX_RUN_TIMEOUT);
@@ -303,7 +303,7 @@ export const testRunTool: Tool = {
     const started = Date.now();
     const r = await runShell(finalArgv, { cwd, env, timeoutMs });
     const durationMs = Date.now() - started;
-    if (r.spawnError) { return fail('test:run', `runner not found: ${r.stderr.trim() || finalArgv[0]}`); }
+    if (r.spawnError) { return fail('test_run', `runner not found: ${r.stderr.trim() || finalArgv[0]}`); }
 
     let summary: TestSummary | undefined;
     try {
@@ -371,7 +371,7 @@ const MAX_WATCH_RUNTIME     = 4 * 60 * 60_000;
 const LINE_FLUSH_CHARS = 256;
 
 export const testWatchTool: Tool = {
-  id: 'test:watch',
+  id: 'test_watch',
   description: 'Run tests in watch mode, streaming output. Bounded runtime; sends SIGTERM on timeout.',
   inputSchema: {
     type: 'object',
@@ -392,7 +392,7 @@ export const testWatchTool: Tool = {
     const framework = parseFramework(input);
     const maxRuntime = Math.min(num(input, 'maxRuntimeMs') ?? DEFAULT_WATCH_RUNTIME, MAX_WATCH_RUNTIME);
     return {
-      title: 'test:watch',
+      title: 'test_watch',
       content: [
         `Framework: **${framework}**`,
         `Cwd: \`${str(input, 'cwd') ?? process.cwd()}\``,
@@ -417,7 +417,7 @@ export const testWatchTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const argv = argvFromInput(input);
-    if (argv.length === 0) { return fail('test:watch', 'argv or command required'); }
+    if (argv.length === 0) { return fail('test_watch', 'argv or command required'); }
     const framework = parseFramework(input);
     const cwd = str(input, 'cwd');
     const maxRuntimeMs = Math.min(num(input, 'maxRuntimeMs') ?? DEFAULT_WATCH_RUNTIME, MAX_WATCH_RUNTIME);
@@ -468,7 +468,7 @@ export const testWatchTool: Tool = {
         clearTimeout(timer);
         deps.signal?.removeEventListener('abort', onAbort);
         flushOut(); flushErr();
-        resolve(fail('test:watch', `spawn failed: ${err.message}`));
+        resolve(fail('test_watch', `spawn failed: ${err.message}`));
       });
       child.on('close', code => {
         clearTimeout(timer);
@@ -550,7 +550,7 @@ interface TestCoverageData {
 const DEFAULT_COVERAGE_TIMEOUT = 30 * 60_000;
 
 export const testCoverageTool: Tool = {
-  id: 'test:coverage',
+  id: 'test_coverage',
   description: 'Run tests with coverage and return a parsed summary when possible.',
   inputSchema: {
     type: 'object',
@@ -571,7 +571,7 @@ export const testCoverageTool: Tool = {
     const argv = argvFromInput(input);
     const framework = parseFramework(input);
     return {
-      title: 'test:coverage',
+      title: 'test_coverage',
       content: [
         `Framework: **${framework}**`,
         `Cwd: \`${str(input, 'cwd') ?? process.cwd()}\``,
@@ -595,7 +595,7 @@ export const testCoverageTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const argv = argvFromInput(input);
-    if (argv.length === 0) { return fail('test:coverage', 'argv or command required'); }
+    if (argv.length === 0) { return fail('test_coverage', 'argv or command required'); }
     const framework = parseFramework(input);
     const cwd = str(input, 'cwd');
     const timeoutMs = Math.min(num(input, 'timeoutMs') ?? DEFAULT_COVERAGE_TIMEOUT, MAX_RUN_TIMEOUT);
@@ -625,7 +625,7 @@ export const testCoverageTool: Tool = {
     const started = Date.now();
     const r = await runShell(final, { cwd, env, timeoutMs });
     const durationMs = Date.now() - started;
-    if (r.spawnError) { return fail('test:coverage', `runner not found: ${r.stderr.trim() || final[0]}`); }
+    if (r.spawnError) { return fail('test_coverage', `runner not found: ${r.stderr.trim() || final[0]}`); }
 
     let summary: CoverageSummary | undefined;
     if (framework === 'jest')   { summary = parseJsCoverageSummary(r.stdout, 'jest-summary'); }

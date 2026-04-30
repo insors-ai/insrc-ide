@@ -15,7 +15,7 @@ export interface FileCopyData {
 }
 
 export const fileCopyTool: Tool = {
-  id: 'file:copy',
+  id: 'file_copy',
   description: 'Copy a file or directory.',
   inputSchema: {
     type: 'object',
@@ -35,7 +35,7 @@ export const fileCopyTool: Tool = {
     const from = str(input, 'from') ? resolve(str(input, 'from')!) : '(missing)';
     const to = str(input, 'to') ? resolve(str(input, 'to')!) : '(missing)';
     return {
-      title: 'file:copy',
+      title: 'file_copy',
       content: [
         '**Copy**',
         `From: \`${from}\``,
@@ -52,7 +52,7 @@ export const fileCopyTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const from = str(input, 'from');
     const to = str(input, 'to');
-    if (!from || !to) { return fail('file:copy', 'from and to required'); }
+    if (!from || !to) { return fail('file_copy', 'from and to required'); }
     const src = resolve(from);
     const dst = resolve(to);
     const recursive = input['recursive'] !== false;
@@ -62,17 +62,17 @@ export const fileCopyTool: Tool = {
     let overwritten = false;
     try {
       await fs.stat(dst);
-      if (!overwrite) { return fail('file:copy', 'destination exists; set overwrite:true to replace'); }
+      if (!overwrite) { return fail('file_copy', 'destination exists; set overwrite:true to replace'); }
       overwritten = true;
     } catch { /* missing is fine */ }
 
     if (mkdirp) {
       try { await fs.mkdir(dirname(dst), { recursive: true }); }
-      catch (err) { return fail('file:copy', `mkdir failed: ${(err as Error).message}`); }
+      catch (err) { return fail('file_copy', `mkdir failed: ${(err as Error).message}`); }
     }
 
     try { await fs.cp(src, dst, { recursive, force: overwrite }); }
-    catch (err) { return fail('file:copy', `copy failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_copy', `copy failed: ${(err as Error).message}`); }
 
     const data: FileCopyData = { from: src, to: dst, recursive, overwritten };
     return {

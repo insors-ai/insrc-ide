@@ -25,7 +25,7 @@ export interface GitPushData {
 const PROTECTED_REFS = /^(main|master|release\/|trunk)/i;
 
 export const gitPushTool: Tool = {
-  id: 'git:push',
+  id: 'git_push',
   description: 'Push a branch or tag to a remote. Gates with target preview; refuses force-push to protected refs.',
   inputSchema: {
     type: 'object',
@@ -68,7 +68,7 @@ export const gitPushTool: Tool = {
     }
 
     return {
-      title: protectedRef && (force || forceRaw) ? 'git:push (PROTECTED REF)' : 'git:push',
+      title: protectedRef && (force || forceRaw) ? 'git:push (PROTECTED REF)' : 'git_push',
       content: lines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -84,7 +84,7 @@ export const gitPushTool: Tool = {
     if (!ref) {
       const br = await currentBranch(cwd);
       if (!br) {
-        return fail('git:push', 'detached HEAD -- supply an explicit ref', '', 1);
+        return fail('git_push', 'detached HEAD -- supply an explicit ref', '', 1);
       }
       ref = br;
     }
@@ -99,7 +99,7 @@ export const gitPushTool: Tool = {
 
     if ((force || forceRaw) && protectedRef && !forceToMain) {
       return fail(
-        'git:push',
+        'git_push',
         `refusing force push to protected ref \`${ref}\` -- rerun with forceToMain:true to override`,
         '', 1,
       );
@@ -114,8 +114,8 @@ export const gitPushTool: Tool = {
     argv.push(remote, ref);
 
     const result = await runShell(argv, { cwd, timeoutMs: 120_000 });
-    if (result.spawnError) { return spawnFail('git:push', result.stderr); }
-    if (result.code !== 0) { return fail('git:push', result.stderr, result.stdout, result.code); }
+    if (result.spawnError) { return spawnFail('git_push', result.stderr); }
+    if (result.code !== 0) { return fail('git_push', result.stderr, result.stdout, result.code); }
 
     const shortSha = await revParse(cwd, ref);
     const data: GitPushData = {

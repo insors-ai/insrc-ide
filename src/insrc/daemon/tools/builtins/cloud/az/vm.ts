@@ -31,7 +31,7 @@ interface AzVmListData {
 }
 
 export const azVmListTool: Tool = {
-  id: 'cloud:az:vm:list',
+  id: 'cloud_az_vm_list',
   description: 'List Azure VMs (scoped to resourceGroup when supplied).',
   inputSchema: {
     type: 'object',
@@ -50,7 +50,7 @@ export const azVmListTool: Tool = {
     argv.push(...azArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:vm:list', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_vm_list', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzVmListData = { resourceGroup: flags.resourceGroup, exitCode: r.code, parsed, stdout: r.stdout };
@@ -86,7 +86,7 @@ function requireRg(flags: ReturnType<typeof azFlags>, id: string): string | Tool
 }
 
 export const azVmStartTool: Tool = {
-  id: 'cloud:az:vm:start',
+  id: 'cloud_az_vm_start',
   description: 'Start Azure VMs in a resource group.',
   inputSchema: {
     type: 'object',
@@ -103,7 +103,7 @@ export const azVmStartTool: Tool = {
     const flags = azFlags(input);
     const names = namesFromInput(input);
     return {
-      title: 'cloud:az:vm:start',
+      title: 'cloud_az_vm_start',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Start: ${names.map(n => '`' + n + '`').join(', ')}`,
@@ -117,13 +117,13 @@ export const azVmStartTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const names = namesFromInput(input);
-    if (names.length === 0) { return fail('cloud:az:vm:start', 'names required'); }
+    if (names.length === 0) { return fail('cloud_az_vm_start', 'names required'); }
     const flags = azFlags(input);
-    const rg = requireRg(flags, 'cloud:az:vm:start');
+    const rg = requireRg(flags, 'cloud_az_vm_start');
     if (typeof rg !== 'string') { return rg; }
     const argv = ['az', 'vm', 'start', '--name', ...names, '--resource-group', rg, '--output', 'json', ...azArgv(flags, { includeResourceGroup: false })];
     const r = await runShell(argv, { timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:vm:start', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_vm_start', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzVmStateData = { names, action: 'start', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -144,7 +144,7 @@ export const azVmStartTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const azVmStopTool: Tool = {
-  id: 'cloud:az:vm:stop',
+  id: 'cloud_az_vm_stop',
   description: 'Stop Azure VMs. Deallocates by default so compute billing stops; graceful:true keeps the VM billed.',
   inputSchema: {
     type: 'object',
@@ -163,7 +163,7 @@ export const azVmStopTool: Tool = {
     const names = namesFromInput(input);
     const graceful = bool(input, 'graceful') === true;
     return {
-      title: 'cloud:az:vm:stop',
+      title: 'cloud_az_vm_stop',
       content: [
         `Scope: **${azScope(flags)}**`,
         `${graceful ? 'Graceful **stop** (still billed)' : '**Deallocate** (billing stops)'}: ${names.map(n => '`' + n + '`').join(', ')}`,
@@ -177,14 +177,14 @@ export const azVmStopTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const names = namesFromInput(input);
-    if (names.length === 0) { return fail('cloud:az:vm:stop', 'names required'); }
+    if (names.length === 0) { return fail('cloud_az_vm_stop', 'names required'); }
     const flags = azFlags(input);
-    const rg = requireRg(flags, 'cloud:az:vm:stop');
+    const rg = requireRg(flags, 'cloud_az_vm_stop');
     if (typeof rg !== 'string') { return rg; }
     const verb = bool(input, 'graceful') === true ? 'stop' : 'deallocate';
     const argv = ['az', 'vm', verb, '--name', ...names, '--resource-group', rg, '--output', 'json', ...azArgv(flags, { includeResourceGroup: false })];
     const r = await runShell(argv, { timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:vm:stop', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_vm_stop', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzVmStateData = { names, action: 'stop', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -205,7 +205,7 @@ export const azVmStopTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const azVmDeleteTool: Tool = {
-  id: 'cloud:az:vm:delete',
+  id: 'cloud_az_vm_delete',
   description: 'Delete Azure VMs. Requires confirmCount == names.length.',
   inputSchema: {
     type: 'object',
@@ -225,7 +225,7 @@ export const azVmDeleteTool: Tool = {
     const flags = azFlags(input);
     const names = namesFromInput(input);
     return {
-      title: 'cloud:az:vm:delete',
+      title: 'cloud_az_vm_delete',
       content: [
         `Scope: **${azScope(flags)}**`,
         `**DELETE** VMs: ${names.map(n => '`' + n + '`').join(', ')}`,
@@ -240,20 +240,20 @@ export const azVmDeleteTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const names = namesFromInput(input);
-    if (names.length === 0) { return fail('cloud:az:vm:delete', 'names required'); }
+    if (names.length === 0) { return fail('cloud_az_vm_delete', 'names required'); }
     const confirm = input['confirmCount'];
     if (typeof confirm !== 'number' || confirm !== names.length) {
-      return fail('cloud:az:vm:delete', `confirmCount must equal names.length (${names.length})`);
+      return fail('cloud_az_vm_delete', `confirmCount must equal names.length (${names.length})`);
     }
     const flags = azFlags(input);
-    const rg = requireRg(flags, 'cloud:az:vm:delete');
+    const rg = requireRg(flags, 'cloud_az_vm_delete');
     if (typeof rg !== 'string') { return rg; }
     const argv = ['az', 'vm', 'delete', '--name', ...names, '--resource-group', rg, '--yes', '--output', 'json'];
     if (bool(input, 'forceDeletion') === true) { argv.push('--force-deletion', 'true'); }
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 15 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:vm:delete', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_vm_delete', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzVmStateData = { names, action: 'delete', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

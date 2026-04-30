@@ -32,7 +32,7 @@ interface AwsSecretGetData {
 }
 
 export const awsSecretsGetTool: Tool = {
-  id: 'cloud:aws:secretsmanager:get',
+  id: 'cloud_aws_secretsmanager_get',
   description: 'Fetch a secret value. Secret stays redacted in the rendered output unless reveal:true.',
   inputSchema: {
     type: 'object',
@@ -51,7 +51,7 @@ export const awsSecretsGetTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:secretsmanager:get',
+      title: 'cloud_aws_secretsmanager_get',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Secret: \`${str(input, 'secretId')}\``,
@@ -66,7 +66,7 @@ export const awsSecretsGetTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const secretId = str(input, 'secretId');
-    if (!secretId) { return fail('cloud:aws:secretsmanager:get', 'secretId required'); }
+    if (!secretId) { return fail('cloud_aws_secretsmanager_get', 'secretId required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'secretsmanager', 'get-secret-value', '--secret-id', secretId];
     const versionId = str(input, 'versionId');
@@ -76,7 +76,7 @@ export const awsSecretsGetTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:secretsmanager:get', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_secretsmanager_get', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
 
@@ -134,7 +134,7 @@ interface AwsSecretPutData {
 }
 
 export const awsSecretsPutTool: Tool = {
-  id: 'cloud:aws:secretsmanager:put',
+  id: 'cloud_aws_secretsmanager_put',
   description: 'Write a new version to an existing Secrets Manager secret. Value hidden in gate.',
   inputSchema: {
     type: 'object',
@@ -154,7 +154,7 @@ export const awsSecretsPutTool: Tool = {
     const flags = awsFlags(input);
     const v = str(input, 'secretString');
     return {
-      title: 'cloud:aws:secretsmanager:put',
+      title: 'cloud_aws_secretsmanager_put',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Secret: \`${str(input, 'secretId')}\``,
@@ -171,7 +171,7 @@ export const awsSecretsPutTool: Tool = {
     const secretId = str(input, 'secretId');
     const value = str(input, 'secretString');
     if (!secretId || value === undefined) {
-      return fail('cloud:aws:secretsmanager:put', 'secretId and secretString required');
+      return fail('cloud_aws_secretsmanager_put', 'secretId and secretString required');
     }
     const flags = awsFlags(input);
     const argv = ['aws', 'secretsmanager', 'put-secret-value', '--secret-id', secretId, '--secret-string', value];
@@ -182,7 +182,7 @@ export const awsSecretsPutTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:secretsmanager:put', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_secretsmanager_put', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     let versionId: string | undefined;

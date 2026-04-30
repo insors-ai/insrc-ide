@@ -38,7 +38,7 @@ const ISSUE_VIEW_FIELDS = ISSUE_JSON_FIELDS + ',body,comments';
 // ---------------------------------------------------------------------------
 
 export const ghIssueListTool: Tool = {
-  id: 'gh:issue:list',
+  id: 'gh_issue_list',
   description: 'List / search issues in the current or named repo.',
   inputSchema: {
     type: 'object',
@@ -69,7 +69,7 @@ export const ghIssueListTool: Tool = {
     if (str(input, 'search'))   { argv.push('-S', str(input, 'search')!); }
 
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:issue:list', r); }
+    if (r.code !== 0) { return shellFail('gh_issue_list', r); }
     const issues = parseJson<RawIssue[]>(r.stdout) ?? [];
     const data = { count: issues.length, issues };
     return { output: renderIssueList(issues), format: 'markdown', success: true, data };
@@ -81,7 +81,7 @@ export const ghIssueListTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghIssueViewTool: Tool = {
-  id: 'gh:issue:view',
+  id: 'gh_issue_view',
   description: 'View a single issue: body, comments, metadata.',
   inputSchema: {
     type: 'object',
@@ -97,13 +97,13 @@ export const ghIssueViewTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:issue:view', 'missing number'); }
+    if (!n) { return fail('gh_issue_view', 'missing number'); }
     const argv = ['gh', 'issue', 'view', String(n), '--json', ISSUE_VIEW_FIELDS];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:issue:view', r); }
+    if (r.code !== 0) { return shellFail('gh_issue_view', r); }
     const issue = parseJson<RawIssue>(r.stdout);
-    if (!issue) { return fail('gh:issue:view', 'could not parse gh JSON'); }
+    if (!issue) { return fail('gh_issue_view', 'could not parse gh JSON'); }
     return { output: renderIssueView(issue), format: 'markdown', success: true, data: issue };
   },
 };
@@ -113,7 +113,7 @@ export const ghIssueViewTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghIssueCreateTool: Tool = {
-  id: 'gh:issue:create',
+  id: 'gh_issue_create',
   description: 'Create an issue.',
   inputSchema: {
     type: 'object',
@@ -139,7 +139,7 @@ export const ghIssueCreateTool: Tool = {
     const labels = strArr(input, 'labels')?.join(', ') ?? '(none)';
     const assignees = strArr(input, 'assignees')?.join(', ') ?? '(none)';
     return {
-      title: 'gh:issue:create',
+      title: 'gh_issue_create',
       content: [
         `Repo: **${repo}**`,
         `Title: **${title}**`,
@@ -165,7 +165,7 @@ export const ghIssueCreateTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const title = str(input, 'title');
-    if (!title) { return fail('gh:issue:create', 'missing title'); }
+    if (!title) { return fail('gh_issue_create', 'missing title'); }
     const argv = ['gh', 'issue', 'create', '-t', title];
     if (str(input, 'body'))      { argv.push('-b', str(input, 'body')!); }
     else                         { argv.push('-b', ''); }
@@ -177,7 +177,7 @@ export const ghIssueCreateTool: Tool = {
     if (str(input, 'milestone')) { argv.push('-m', str(input, 'milestone')!); }
     if (str(input, 'project'))   { argv.push('-p', str(input, 'project')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 60_000 });
-    if (r.code !== 0) { return shellFail('gh:issue:create', r); }
+    if (r.code !== 0) { return shellFail('gh_issue_create', r); }
     const url = r.stdout.trim();
     return { output: `Created issue: ${url}`, format: 'markdown', success: true, data: { url } };
   },
@@ -188,7 +188,7 @@ export const ghIssueCreateTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghIssueCommentTool: Tool = {
-  id: 'gh:issue:comment',
+  id: 'gh_issue_comment',
   description: 'Add a comment to an issue.',
   inputSchema: {
     type: 'object',
@@ -207,7 +207,7 @@ export const ghIssueCommentTool: Tool = {
     const n = num(input, 'number');
     const body = str(input, 'body') ?? '';
     return {
-      title: 'gh:issue:comment',
+      title: 'gh_issue_comment',
       content: [
         `Issue #${n} in **${str(input, 'repo') ?? '(current)'}**`,
         '',
@@ -231,11 +231,11 @@ export const ghIssueCommentTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
     const body = str(input, 'body');
-    if (!n || !body) { return fail('gh:issue:comment', 'missing number or body'); }
+    if (!n || !body) { return fail('gh_issue_comment', 'missing number or body'); }
     const argv = ['gh', 'issue', 'comment', String(n), '-b', body];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:issue:comment', r); }
+    if (r.code !== 0) { return shellFail('gh_issue_comment', r); }
     return { output: `Commented on #${n}.`, format: 'markdown', success: true, data: { number: n, url: r.stdout.trim() } };
   },
 };
@@ -245,7 +245,7 @@ export const ghIssueCommentTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghIssueEditTool: Tool = {
-  id: 'gh:issue:edit',
+  id: 'gh_issue_edit',
   description: 'Edit an issue\'s title / body / labels / assignees / milestone.',
   inputSchema: {
     type: 'object',
@@ -280,7 +280,7 @@ export const ghIssueEditTool: Tool = {
     if (remAs) { parts.push(`-assignees: ${remAs}`); }
     if ('milestone' in input) { parts.push(`milestone -> ${JSON.stringify(input['milestone'])}`); }
     return {
-      title: 'gh:issue:edit',
+      title: 'gh_issue_edit',
       content: `Issue #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}**\n\n` + (parts.length === 0 ? '_(no changes specified)_' : parts.map(p => `- ${p}`).join('\n')),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -291,7 +291,7 @@ export const ghIssueEditTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:issue:edit', 'missing number'); }
+    if (!n) { return fail('gh_issue_edit', 'missing number'); }
     const argv = ['gh', 'issue', 'edit', String(n)];
     if (str(input, 'title'))     { argv.push('-t', str(input, 'title')!); }
     if (typeof input['body'] === 'string') { argv.push('-b', input['body'] as string); }
@@ -309,7 +309,7 @@ export const ghIssueEditTool: Tool = {
     }
     if (str(input, 'repo'))      { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:issue:edit', r); }
+    if (r.code !== 0) { return shellFail('gh_issue_edit', r); }
     return { output: `Edited #${n}.`, format: 'markdown', success: true, data: { number: n } };
   },
 };
@@ -368,15 +368,15 @@ function stateChangeTool(id: string, op: 'close' | 'reopen'): Tool {
   };
 }
 
-export const ghIssueCloseTool = stateChangeTool('gh:issue:close', 'close');
-export const ghIssueReopenTool = stateChangeTool('gh:issue:reopen', 'reopen');
+export const ghIssueCloseTool = stateChangeTool('gh_issue_close', 'close');
+export const ghIssueReopenTool = stateChangeTool('gh_issue_reopen', 'reopen');
 
 // ---------------------------------------------------------------------------
 // link (close as completed by PR, or add a reference comment)
 // ---------------------------------------------------------------------------
 
 export const ghIssueLinkTool: Tool = {
-  id: 'gh:issue:link',
+  id: 'gh_issue_link',
   description: 'Add a cross-reference comment linking an issue to a PR or another issue.',
   inputSchema: {
     type: 'object',
@@ -399,7 +399,7 @@ export const ghIssueLinkTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const rel = str(input, 'relation') ?? 'relates-to';
     return {
-      title: 'gh:issue:link',
+      title: 'gh_issue_link',
       content: [
         `Issue #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}**`,
         `Will add a comment: **${rel}** \`${str(input, 'target')}\`.`,
@@ -414,13 +414,13 @@ export const ghIssueLinkTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
     const target = str(input, 'target');
-    if (!n || !target) { return fail('gh:issue:link', 'missing number or target'); }
+    if (!n || !target) { return fail('gh_issue_link', 'missing number or target'); }
     const rel = str(input, 'relation') ?? 'relates-to';
     const body = `${rel} ${target}`;
     const argv = ['gh', 'issue', 'comment', String(n), '-b', body];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:issue:link', r); }
+    if (r.code !== 0) { return shellFail('gh_issue_link', r); }
     return { output: `Linked #${n} -> ${target} (${rel}).`, format: 'markdown', success: true, data: { number: n, target, relation: rel } };
   },
 };

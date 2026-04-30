@@ -14,7 +14,7 @@ export interface FileMoveData {
 }
 
 export const fileMoveTool: Tool = {
-  id: 'file:move',
+  id: 'file_move',
   description: 'Rename or move a file / directory.',
   inputSchema: {
     type: 'object',
@@ -34,7 +34,7 @@ export const fileMoveTool: Tool = {
     const to = str(input, 'to') ? resolve(str(input, 'to')!) : '(missing)';
     const overwrite = input['overwrite'] === true;
     return {
-      title: 'file:move',
+      title: 'file_move',
       content: [
         `**Move**`,
         `From: \`${from}\``,
@@ -51,7 +51,7 @@ export const fileMoveTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const from = str(input, 'from');
     const to = str(input, 'to');
-    if (!from || !to) { return fail('file:move', 'from and to required'); }
+    if (!from || !to) { return fail('file_move', 'from and to required'); }
     const src = resolve(from);
     const dst = resolve(to);
     const overwrite = input['overwrite'] === true;
@@ -60,14 +60,14 @@ export const fileMoveTool: Tool = {
     let overwritten = false;
     try {
       await fs.stat(dst);
-      if (!overwrite) { return fail('file:move', 'destination exists; set overwrite:true to replace'); }
+      if (!overwrite) { return fail('file_move', 'destination exists; set overwrite:true to replace'); }
       overwritten = true;
       await fs.rm(dst, { recursive: true, force: true });
     } catch { /* destination missing; fine */ }
 
     if (mkdirp) {
       try { await fs.mkdir(dirname(dst), { recursive: true }); }
-      catch (err) { return fail('file:move', `mkdir failed: ${(err as Error).message}`); }
+      catch (err) { return fail('file_move', `mkdir failed: ${(err as Error).message}`); }
     }
 
     try { await fs.rename(src, dst); }
@@ -78,10 +78,10 @@ export const fileMoveTool: Tool = {
           await fs.cp(src, dst, { recursive: true, force: true });
           await fs.rm(src, { recursive: true, force: true });
         } catch (err2) {
-          return fail('file:move', `cross-device move failed: ${(err2 as Error).message}`);
+          return fail('file_move', `cross-device move failed: ${(err2 as Error).message}`);
         }
       } else {
-        return fail('file:move', `rename failed: ${(err as Error).message}`);
+        return fail('file_move', `rename failed: ${(err as Error).message}`);
       }
     }
 

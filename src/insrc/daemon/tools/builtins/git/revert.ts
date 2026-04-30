@@ -20,7 +20,7 @@ export interface GitRevertData {
 }
 
 export const gitRevertTool: Tool = {
-  id: 'git:revert',
+  id: 'git_revert',
   description: 'Create a new commit that undoes the specified commit(s).',
   inputSchema: {
     type: 'object',
@@ -55,7 +55,7 @@ export const gitRevertTool: Tool = {
       noCommit ? '\nStage only -- no commit will be recorded (--no-commit).' : '',
     ].filter(Boolean);
     return {
-      title: 'git:revert',
+      title: 'git_revert',
       content: lines.join('\n'),
       actions: [ { name: 'approve', label: 'Approve' }, { name: 'skip', label: 'Skip' } ],
     };
@@ -67,28 +67,28 @@ export const gitRevertTool: Tool = {
 
     if (op !== 'start') {
       const r = await runShell(['git', 'revert', `--${op}`], { cwd, timeoutMs: 60_000 });
-      if (r.spawnError) { return spawnFail('git:revert', r.stderr); }
+      if (r.spawnError) { return spawnFail('git_revert', r.stderr); }
       if (r.code !== 0) {
         const conflicts = await listConflicts(cwd);
         if (conflicts.length > 0) { return conflictResult(op, [], conflicts); }
-        return fail('git:revert', r.stderr, r.stdout, r.code);
+        return fail('git_revert', r.stderr, r.stdout, r.code);
       }
       return okResult(op, [], cwd);
     }
 
     const refs = Array.isArray(input['refs']) ? (input['refs'] as unknown[]).map(String).filter(Boolean) : [];
-    if (refs.length === 0) { return fail('git:revert', 'op=start requires refs', '', 1); }
+    if (refs.length === 0) { return fail('git_revert', 'op=start requires refs', '', 1); }
     const argv = ['git', 'revert', '--no-edit'];
     if (input['noCommit'] === true) { argv.push('--no-commit'); }
     if (typeof input['mainline'] === 'number') { argv.push('--mainline', String(Math.floor(input['mainline']))); }
     argv.push(...refs);
 
     const r = await runShell(argv, { cwd, timeoutMs: 120_000 });
-    if (r.spawnError) { return spawnFail('git:revert', r.stderr); }
+    if (r.spawnError) { return spawnFail('git_revert', r.stderr); }
     if (r.code !== 0) {
       const conflicts = await listConflicts(cwd);
       if (conflicts.length > 0) { return conflictResult('start', refs, conflicts); }
-      return fail('git:revert', r.stderr, r.stdout, r.code);
+      return fail('git_revert', r.stderr, r.stdout, r.code);
     }
     return okResult('start', refs, cwd);
   },
@@ -109,7 +109,7 @@ async function conflictResult(op: GitRevertOp, refs: string[], conflicts: string
     ...conflicts.slice(0, 40).map(p => `- \`${p}\``),
     conflicts.length > 40 ? `- _... and ${conflicts.length - 40} more_` : '',
     '',
-    'Resolve, `git add`, then `git:revert` with `op: continue`.',
+    'Resolve, `git add`, then `git_revert` with `op: continue`.',
   ].filter(Boolean).join('\n');
   return { output: body, format: 'markdown', success: false, error: 'revert conflict', data };
 }

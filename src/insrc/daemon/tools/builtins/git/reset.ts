@@ -26,7 +26,7 @@ export interface GitResetData {
 }
 
 export const gitResetTool: Tool = {
-  id: 'git:reset',
+  id: 'git_reset',
   description: 'Move HEAD to a ref. mode=hard also discards the worktree.',
   inputSchema: {
     type: 'object',
@@ -64,7 +64,7 @@ export const gitResetTool: Tool = {
     }
 
     return {
-      title: mode === 'hard' ? 'git:reset --hard (DESTRUCTIVE)' : 'git:reset',
+      title: mode === 'hard' ? 'git:reset --hard (DESTRUCTIVE)' : 'git_reset',
       content: lines.join('\n'),
       actions: [ { name: 'approve', label: 'Approve' }, { name: 'skip', label: 'Skip' } ],
     };
@@ -74,7 +74,7 @@ export const gitResetTool: Tool = {
     const cwd = str(input, 'cwd') ?? process.cwd();
     const mode = (str(input, 'mode') ?? 'mixed') as GitResetMode;
     const ref = str(input, 'ref');
-    if (!ref) { return fail('git:reset', 'missing ref', '', 1); }
+    if (!ref) { return fail('git_reset', 'missing ref', '', 1); }
 
     const branch = (await currentBranch(cwd)) ?? '(detached)';
     const priorShort = await runShell(['git', 'rev-parse', '--short', 'HEAD'], { cwd, timeoutMs: 5_000 });
@@ -82,8 +82,8 @@ export const gitResetTool: Tool = {
     const requiresForcePush = await willNeedForcePush(cwd, ref);
 
     const r = await runShell(['git', 'reset', `--${mode}`, ref], { cwd, timeoutMs: 30_000 });
-    if (r.spawnError) { return spawnFail('git:reset', r.stderr); }
-    if (r.code !== 0) { return fail('git:reset', r.stderr, r.stdout, r.code); }
+    if (r.spawnError) { return spawnFail('git_reset', r.stderr); }
+    if (r.code !== 0) { return fail('git_reset', r.stderr, r.stdout, r.code); }
 
     const afterShort = await runShell(['git', 'rev-parse', '--short', 'HEAD'], { cwd, timeoutMs: 5_000 });
     const data: GitResetData = {

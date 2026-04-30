@@ -67,7 +67,24 @@ export const HARD_RULES = `# Hard rules
    in your DataAnalyzerResult: one finding per (concern, id) when
    per-connection differences matter; one aggregate finding spanning
    all ids when the group is homogeneous (e.g. "all 6 customer-export
-   JSON files have the same column set").`;
+   JSON files have the same column set").
+
+8. **Always call evidence-gathering tools.** Before calling
+   submit_analysis, you MUST call at least one of the data-driver
+   tools (db:list_connections / db:sql:describe / db:sql:sample /
+   db:kv:* / db:file:*) to actually inspect the connections /
+   tables / files in scope. submit_analysis without prior
+   evidence-gathering calls is a failure mode -- the orchestrator
+   will pause and ASK THE USER what they want to do (retry,
+   continue with the empty result, or cancel) instead of accepting
+   a no-evidence result silently.
+
+   If you genuinely think the tools listed in the system prompt
+   can't answer the task (e.g. the user asked about a code-level
+   class definition you have no graph access to), say so in the
+   answer field with confidence "low" -- DO NOT invent reasons
+   the tools are unavailable. The tools ARE available; if you
+   skip them, the run halts on a gate.`;
 
 /**
  * Per-kind playbook + tool list + AnalyzerResult schema. User-

@@ -21,7 +21,7 @@ interface AzFunctionAppListData {
 }
 
 export const azFunctionAppListTool: Tool = {
-  id: 'cloud:az:functionapp:list',
+  id: 'cloud_az_functionapp_list',
   description: 'List Azure Function apps (scoped to resourceGroup when supplied).',
   inputSchema: {
     type: 'object',
@@ -34,7 +34,7 @@ export const azFunctionAppListTool: Tool = {
     const flags = azFlags(input);
     const argv = ['az', 'functionapp', 'list', '--output', 'json', ...azArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:functionapp:list', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_functionapp_list', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzFunctionAppListData = { exitCode: r.code, parsed, stdout: r.stdout };
@@ -65,7 +65,7 @@ interface AzFunctionAppDeployData {
 }
 
 export const azFunctionAppDeployTool: Tool = {
-  id: 'cloud:az:functionapp:deploy',
+  id: 'cloud_az_functionapp_deploy',
   description: 'Deploy a zip package to an Azure Function app (az functionapp deployment source config-zip).',
   inputSchema: {
     type: 'object',
@@ -83,7 +83,7 @@ export const azFunctionAppDeployTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = azFlags(input);
     return {
-      title: 'cloud:az:functionapp:deploy',
+      title: 'cloud_az_functionapp_deploy',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Function app: \`${str(input, 'name')}\``,
@@ -100,9 +100,9 @@ export const azFunctionAppDeployTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const name = str(input, 'name');
     const zipPath = str(input, 'zipPath');
-    if (!name || !zipPath) { return fail('cloud:az:functionapp:deploy', 'name and zipPath required'); }
+    if (!name || !zipPath) { return fail('cloud_az_functionapp_deploy', 'name and zipPath required'); }
     const flags = azFlags(input);
-    if (!flags.resourceGroup) { return fail('cloud:az:functionapp:deploy', 'resourceGroup required'); }
+    if (!flags.resourceGroup) { return fail('cloud_az_functionapp_deploy', 'resourceGroup required'); }
     const argv = [
       'az', 'functionapp', 'deployment', 'source', 'config-zip',
       '--name', name,
@@ -114,7 +114,7 @@ export const azFunctionAppDeployTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 30 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:functionapp:deploy', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_functionapp_deploy', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzFunctionAppDeployData = { name, zipPath, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

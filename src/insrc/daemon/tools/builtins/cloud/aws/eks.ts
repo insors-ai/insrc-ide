@@ -25,7 +25,7 @@ interface AwsEksListData {
 }
 
 export const awsEksListTool: Tool = {
-  id: 'cloud:aws:eks:list',
+  id: 'cloud_aws_eks_list',
   description: 'List EKS clusters in the region.',
   inputSchema: {
     type: 'object',
@@ -38,7 +38,7 @@ export const awsEksListTool: Tool = {
     const flags = awsFlags(input);
     const argv = ['aws', 'eks', 'list-clusters', ...awsArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:eks:list', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_eks_list', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsEksListData = { exitCode: r.code, parsed, stdout: r.stdout };

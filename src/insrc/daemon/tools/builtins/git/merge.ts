@@ -22,7 +22,7 @@ export interface GitMergeData {
 }
 
 export const gitMergeTool: Tool = {
-  id: 'git:merge',
+  id: 'git_merge',
   description: 'Merge a ref into the current branch. Gates with commit count + strategy.',
   inputSchema: {
     type: 'object',
@@ -63,7 +63,7 @@ export const gitMergeTool: Tool = {
       lines.push('Squash merge -- incoming commits will collapse into staged changes, no merge commit recorded.');
     }
     return {
-      title: 'git:merge',
+      title: 'git_merge',
       content: lines.join('\n'),
       actions: [ { name: 'approve', label: 'Approve' }, { name: 'skip', label: 'Skip' } ],
     };
@@ -73,8 +73,8 @@ export const gitMergeTool: Tool = {
     const cwd = str(input, 'cwd') ?? process.cwd();
     if (input['abort'] === true) {
       const r = await runShell(['git', 'merge', '--abort'], { cwd, timeoutMs: 15_000 });
-      if (r.spawnError) { return spawnFail('git:merge', r.stderr); }
-      if (r.code !== 0) { return fail('git:merge', r.stderr, r.stdout, r.code); }
+      if (r.spawnError) { return spawnFail('git_merge', r.stderr); }
+      if (r.code !== 0) { return fail('git_merge', r.stderr, r.stdout, r.code); }
       return {
         output: 'Merge aborted.',
         format: 'markdown',
@@ -84,7 +84,7 @@ export const gitMergeTool: Tool = {
     }
 
     const ref = str(input, 'ref');
-    if (!ref) { return fail('git:merge', 'missing ref', '', 1); }
+    if (!ref) { return fail('git_merge', 'missing ref', '', 1); }
     const strategy = (str(input, 'strategy') ?? 'default') as GitMergeData['strategy'];
     const message = str(input, 'message');
     const branch = (await currentBranch(cwd)) ?? '(detached)';
@@ -97,7 +97,7 @@ export const gitMergeTool: Tool = {
     argv.push(ref);
 
     const result = await runShell(argv, { cwd, timeoutMs: 120_000 });
-    if (result.spawnError) { return spawnFail('git:merge', result.stderr); }
+    if (result.spawnError) { return spawnFail('git_merge', result.stderr); }
 
     // A non-zero exit on merge can mean conflicts. Detect that so the
     // caller sees "inConflict: true" rather than a raw failure.
@@ -113,7 +113,7 @@ export const gitMergeTool: Tool = {
             ...conflicts.slice(0, 40).map(p => `- \`${p}\``),
             conflicts.length > 40 ? `- _... and ${conflicts.length - 40} more_` : '',
             '',
-            'Resolve them, `git add`, then `git commit`. Or use `git:merge` with `abort: true`.',
+            'Resolve them, `git add`, then `git commit`. Or use `git_merge` with `abort: true`.',
           ].filter(Boolean).join('\n'),
           format: 'markdown',
           success: false,
@@ -121,7 +121,7 @@ export const gitMergeTool: Tool = {
           data,
         };
       }
-      return fail('git:merge', result.stderr, result.stdout, result.code);
+      return fail('git_merge', result.stderr, result.stdout, result.code);
     }
 
     const data: GitMergeData = { ref, branch, strategy, merged: true, inConflict: false, conflicts: [] };

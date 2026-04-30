@@ -330,7 +330,7 @@ export async function parseLiveDbSource(
 	if (opts.tables.length === 0) {
 		throw new Error(
 			'Live DB ER needs an explicit `tables` list -- there is no ' +
-			'`db:sql:list_tables` tool, and dumping the entire schema ' +
+			'`db_sql_list_tables` tool, and dumping the entire schema ' +
 			'unconditionally is hostile.',
 		);
 	}

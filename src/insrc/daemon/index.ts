@@ -192,8 +192,8 @@ async function main(): Promise<void> {
 	registerBuiltinDataDrivers();
 
 	// 6d. Register cross-agent surface (plans/analyzers/code-analyzer.md
-	//     Phase 3). The Code Analyzer exposes `code:locate` / `code:trace`
-	//     / `code:describe` for sibling analyzer families to dispatch
+	//     Phase 3). The Code Analyzer exposes `code_locate` / `code_trace`
+	//     / `code_describe` for sibling analyzer families to dispatch
 	//     into. Sibling families (data-analyzer, deployment-analyzer)
 	//     will register their own `data:*` / `deploy:*` modules when
 	//     they ship; today the cross-agent registry is one-sided.

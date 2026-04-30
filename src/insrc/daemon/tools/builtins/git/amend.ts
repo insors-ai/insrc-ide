@@ -29,7 +29,7 @@ export interface GitAmendData {
 }
 
 export const gitAmendTool: Tool = {
-  id: 'git:amend',
+  id: 'git_amend',
   description: 'Amend the most recent commit. mode=message rewrites only the text; mode=staged folds staged changes in.',
   inputSchema: {
     type: 'object',
@@ -52,7 +52,7 @@ export const gitAmendTool: Tool = {
     const pushedWarning = await wasPushed(cwd);
 
     return {
-      title: 'git:amend',
+      title: 'git_amend',
       content: [
         `Repo: \`${cwd}\``,
         `Mode: **${mode}**${mode === 'message' ? ' (rewrite message only)' : ' (fold staged changes + optional message rewrite)'}`,
@@ -88,15 +88,15 @@ export const gitAmendTool: Tool = {
       else { argv.push('--no-edit'); }
     } else {
       // message-only: --only --no-edit tree-wise, but rewrite message.
-      if (!message) { return fail('git:amend', 'mode=message requires a message', '', 1); }
+      if (!message) { return fail('git_amend', 'mode=message requires a message', '', 1); }
       argv.push('-m', message, '--only');
     }
     if (signoff) { argv.push('-s'); }
     if (!verifyHooks) { argv.push('--no-verify'); }
 
     const result = await runShell(argv, { cwd, timeoutMs: 60_000 });
-    if (result.spawnError) { return spawnFail('git:amend', result.stderr); }
-    if (result.code !== 0) { return fail('git:amend', result.stderr, result.stdout, result.code); }
+    if (result.spawnError) { return spawnFail('git_amend', result.stderr); }
+    if (result.code !== 0) { return fail('git_amend', result.stderr, result.stdout, result.code); }
 
     const short = await revParse(cwd, 'HEAD');
     const long = await runShell(['git', 'rev-parse', 'HEAD'], { cwd, timeoutMs: 5_000 });

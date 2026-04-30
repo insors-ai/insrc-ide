@@ -36,7 +36,7 @@ interface RawWorkflow {
 // ---------------------------------------------------------------------------
 
 export const ghRunListTool: Tool = {
-  id: 'gh:run:list',
+  id: 'gh_run_list',
   description: 'Recent workflow runs.',
   inputSchema: {
     type: 'object',
@@ -65,7 +65,7 @@ export const ghRunListTool: Tool = {
     if (str(input, 'event'))    { argv.push('-e', str(input, 'event')!); }
     if (str(input, 'status'))   { argv.push('-s', str(input, 'status')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:run:list', r); }
+    if (r.code !== 0) { return shellFail('gh_run_list', r); }
     const runs = parseJson<RawRun[]>(r.stdout) ?? [];
     const lines: string[] = [`# ${runs.length} run${runs.length === 1 ? '' : 's'}`, ''];
     if (runs.length > 0) {
@@ -84,7 +84,7 @@ export const ghRunListTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghRunViewTool: Tool = {
-  id: 'gh:run:view',
+  id: 'gh_run_view',
   description: 'View a workflow run: jobs + failed-step logs by default.',
   inputSchema: {
     type: 'object',
@@ -102,7 +102,7 @@ export const ghRunViewTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const id = num(input, 'runId');
-    if (!id) { return fail('gh:run:view', 'missing runId'); }
+    if (!id) { return fail('gh_run_view', 'missing runId'); }
     const repoFlag = str(input, 'repo') ? ['-R', str(input, 'repo')!] : [];
     const logFailedOnly = input['logFailedOnly'] !== false;
     const maxLogBytes = num(input, 'maxLogBytes') ?? 128 * 1024;
@@ -110,9 +110,9 @@ export const ghRunViewTool: Tool = {
     const baseArgv = ['gh', 'run', 'view', String(id), '--json', 'jobs,conclusion,status,workflowName,displayTitle,headBranch,url'];
     baseArgv.push(...repoFlag);
     const base = await ghExec(baseArgv, { cwd: str(input, 'cwd') });
-    if (base.code !== 0) { return shellFail('gh:run:view', base); }
+    if (base.code !== 0) { return shellFail('gh_run_view', base); }
     const payload = parseJson<{ jobs?: Array<{ name: string; status?: string; conclusion?: string; url?: string }>; conclusion?: string; status?: string; workflowName?: string; displayTitle?: string; headBranch?: string; url?: string }>(base.stdout);
-    if (!payload) { return fail('gh:run:view', 'could not parse JSON'); }
+    if (!payload) { return fail('gh_run_view', 'could not parse JSON'); }
 
     const logsArgv = ['gh', 'run', 'view', String(id)];
     if (logFailedOnly) { logsArgv.push('--log-failed'); }
@@ -148,7 +148,7 @@ export const ghRunViewTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghRunRerunTool: Tool = {
-  id: 'gh:run:rerun',
+  id: 'gh_run_rerun',
   description: 'Re-run a workflow run (failed jobs only by default).',
   inputSchema: {
     type: 'object',
@@ -166,7 +166,7 @@ export const ghRunRerunTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:run:rerun',
+      title: 'gh_run_rerun',
       content: [
         `Re-run run **${num(input, 'runId')}** in **${str(input, 'repo') ?? '(current)'}**.`,
         input['allJobs'] === true ? 'Re-running ALL jobs.' : 'Re-running failed jobs only.',
@@ -181,19 +181,19 @@ export const ghRunRerunTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const id = num(input, 'runId');
-    if (!id) { return fail('gh:run:rerun', 'missing runId'); }
+    if (!id) { return fail('gh_run_rerun', 'missing runId'); }
     const argv = ['gh', 'run', 'rerun', String(id)];
     if (input['allJobs'] !== true) { argv.push('--failed'); }
     if (input['debug'] === true) { argv.push('--debug'); }
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:run:rerun', r); }
+    if (r.code !== 0) { return shellFail('gh_run_rerun', r); }
     return { output: `Re-queued run ${id}.`, format: 'markdown', success: true, data: { runId: id } };
   },
 };
 
 export const ghRunCancelTool: Tool = {
-  id: 'gh:run:cancel',
+  id: 'gh_run_cancel',
   description: 'Cancel an in-progress workflow run.',
   inputSchema: {
     type: 'object',
@@ -209,7 +209,7 @@ export const ghRunCancelTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:run:cancel',
+      title: 'gh_run_cancel',
       content: `Cancel in-progress run **${num(input, 'runId')}** in **${str(input, 'repo') ?? '(current)'}**.`,
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -220,11 +220,11 @@ export const ghRunCancelTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const id = num(input, 'runId');
-    if (!id) { return fail('gh:run:cancel', 'missing runId'); }
+    if (!id) { return fail('gh_run_cancel', 'missing runId'); }
     const argv = ['gh', 'run', 'cancel', String(id)];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:run:cancel', r); }
+    if (r.code !== 0) { return shellFail('gh_run_cancel', r); }
     return { output: `Cancelled run ${id}.`, format: 'markdown', success: true, data: { runId: id } };
   },
 };
@@ -234,7 +234,7 @@ export const ghRunCancelTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghWorkflowListTool: Tool = {
-  id: 'gh:workflow:list',
+  id: 'gh_workflow_list',
   description: 'List workflow definitions.',
   inputSchema: {
     type: 'object',
@@ -252,7 +252,7 @@ export const ghWorkflowListTool: Tool = {
     if (input['all'] === true) { argv.push('-a'); }
     if (str(input, 'repo'))    { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:workflow:list', r); }
+    if (r.code !== 0) { return shellFail('gh_workflow_list', r); }
     // gh workflow list doesn't support --json, so parse the plain output.
     const workflows: RawWorkflow[] = [];
     for (const line of r.stdout.split('\n')) {
@@ -283,7 +283,7 @@ export const ghWorkflowListTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghWorkflowRunTool: Tool = {
-  id: 'gh:workflow:run',
+  id: 'gh_workflow_run',
   description: 'Manually dispatch a workflow (workflow_dispatch event).',
   inputSchema: {
     type: 'object',
@@ -307,7 +307,7 @@ export const ghWorkflowRunTool: Tool = {
     const inputs = input['inputs'] && typeof input['inputs'] === 'object' ? input['inputs'] as Record<string, string> : {};
     const kvs = Object.entries(inputs).map(([k, v]) => `  ${k} = ${JSON.stringify(v)}`).join('\n');
     return {
-      title: 'gh:workflow:run',
+      title: 'gh_workflow_run',
       content: [
         `Dispatch workflow \`${str(input, 'workflow')}\` in **${str(input, 'repo') ?? '(current)'}**.`,
         str(input, 'ref') ? `Ref: \`${str(input, 'ref')}\`` : '',
@@ -322,7 +322,7 @@ export const ghWorkflowRunTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const wf = str(input, 'workflow');
-    if (!wf) { return fail('gh:workflow:run', 'missing workflow'); }
+    if (!wf) { return fail('gh_workflow_run', 'missing workflow'); }
     const argv = ['gh', 'workflow', 'run', wf];
     if (str(input, 'ref')) { argv.push('-r', str(input, 'ref')!); }
     const inputs = input['inputs'] && typeof input['inputs'] === 'object' ? input['inputs'] as Record<string, string> : {};
@@ -331,7 +331,7 @@ export const ghWorkflowRunTool: Tool = {
     }
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 60_000 });
-    if (r.code !== 0) { return shellFail('gh:workflow:run', r); }
+    if (r.code !== 0) { return shellFail('gh_workflow_run', r); }
     return { output: `Dispatched \`${wf}\`.`, format: 'markdown', success: true, data: { workflow: wf } };
   },
 };

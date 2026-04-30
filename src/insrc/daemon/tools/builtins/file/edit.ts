@@ -17,7 +17,7 @@ export interface FileEditData {
 }
 
 export const fileEditTool: Tool = {
-  id: 'file:edit',
+  id: 'file_edit',
   description: 'Replace a substring in a file. Gates with before/after snippet.',
   inputSchema: {
     type: 'object',
@@ -58,7 +58,7 @@ export const fileEditTool: Tool = {
       '```',
     ];
     return {
-      title: 'file:edit',
+      title: 'file_edit',
       content: lines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -69,20 +69,20 @@ export const fileEditTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:edit', 'missing path'); }
+    if (!path) { return fail('file_edit', 'missing path'); }
     const oldStr = str(input, 'oldString');
-    if (oldStr === undefined) { return fail('file:edit', 'oldString is required'); }
+    if (oldStr === undefined) { return fail('file_edit', 'oldString is required'); }
     const newStr = typeof input['newString'] === 'string' ? input['newString'] : '';
     const replaceAll = input['replaceAll'] === true;
 
     let text: string;
     try { text = await fs.readFile(path, 'utf8'); }
-    catch (err) { return fail('file:edit', `read failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_edit', `read failed: ${(err as Error).message}`); }
 
     const count = countOccurrences(text, oldStr);
-    if (count === 0) { return fail('file:edit', 'oldString not found'); }
+    if (count === 0) { return fail('file_edit', 'oldString not found'); }
     if (!replaceAll && count > 1) {
-      return fail('file:edit', `oldString matched ${count} times; set replaceAll:true or narrow the match`);
+      return fail('file_edit', `oldString matched ${count} times; set replaceAll:true or narrow the match`);
     }
 
     const updated = replaceAll
@@ -90,7 +90,7 @@ export const fileEditTool: Tool = {
       : text.replace(oldStr, newStr);
 
     try { await fs.writeFile(path, updated, 'utf8'); }
-    catch (err) { return fail('file:edit', `write failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_edit', `write failed: ${(err as Error).message}`); }
 
     const replacements = replaceAll ? count : 1;
     const data: FileEditData = { path, replacements, replaceAll };

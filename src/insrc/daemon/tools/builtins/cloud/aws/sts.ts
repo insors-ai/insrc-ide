@@ -17,7 +17,7 @@ interface AwsStsWhoAmIData {
 }
 
 export const awsStsWhoAmITool: Tool = {
-  id: 'cloud:aws:sts:whoami',
+  id: 'cloud_aws_sts_whoami',
   description: 'Return the AWS principal behind the current credentials (aws sts get-caller-identity).',
   inputSchema: {
     type: 'object',
@@ -30,7 +30,7 @@ export const awsStsWhoAmITool: Tool = {
     const flags = awsFlags(input);
     const argv = ['aws', 'sts', 'get-caller-identity', ...awsArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:sts:whoami', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_sts_whoami', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsStsWhoAmIData = { exitCode: r.code, stdout: r.stdout, parsed };

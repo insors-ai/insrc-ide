@@ -33,7 +33,7 @@ const FS = '\x1f';
 const HEADER_PRETTY = `%H${FS}%h${FS}%P${FS}%an${FS}%ae${FS}%aI${FS}%s${FS}%b`;
 
 export const gitShowTool: Tool = {
-  id: 'git:show',
+  id: 'git_show',
   description: 'Show a single commit: metadata + full diff.',
   inputSchema: {
     type: 'object',

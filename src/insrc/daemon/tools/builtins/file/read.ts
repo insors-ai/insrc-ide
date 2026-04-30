@@ -22,7 +22,7 @@ const DEFAULT_LIMIT = 2000;
 const MAX_LIMIT = 50_000;
 
 export const fileReadTool: Tool = {
-  id: 'file:read',
+  id: 'file_read',
   description: 'Read a file. For directories, list contents. No approval (read-only).',
   inputSchema: {
     type: 'object',
@@ -39,13 +39,13 @@ export const fileReadTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:read', 'missing path'); }
+    if (!path) { return fail('file_read', 'missing path'); }
 
     let stat;
     try {
       stat = await fs.stat(path);
     } catch (err) {
-      return fail('file:read', `stat failed: ${(err as Error).message}`);
+      return fail('file_read', `stat failed: ${(err as Error).message}`);
     }
 
     if (stat.isDirectory()) {
@@ -67,20 +67,20 @@ export const fileReadTool: Tool = {
         const data: FileReadData = { path, kind: 'directory', entries: entryList };
         return { output: body, format: 'markdown', success: true, data };
       } catch (err) {
-        return fail('file:read', `readdir failed: ${(err as Error).message}`);
+        return fail('file_read', `readdir failed: ${(err as Error).message}`);
       }
     }
 
     // File path
     if (stat.size > 10 * 1024 * 1024) {
-      return fail('file:read', `refusing to read ${humanBytes(stat.size)} file -- use offset/limit`);
+      return fail('file_read', `refusing to read ${humanBytes(stat.size)} file -- use offset/limit`);
     }
 
     let contents: string;
     try {
       contents = await fs.readFile(path, 'utf8');
     } catch (err) {
-      return fail('file:read', `read failed: ${(err as Error).message}`);
+      return fail('file_read', `read failed: ${(err as Error).message}`);
     }
 
     const allLines = contents.split('\n');

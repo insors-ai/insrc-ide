@@ -187,7 +187,7 @@ interface PkgInstallData {
 }
 
 export const pkgInstallTool: Tool = {
-  id: 'pkg:install',
+  id: 'pkg_install',
   description: 'Install all declared dependencies. Manager auto-detects from lockfile unless `manager` is passed.',
   inputSchema: {
     type: 'object',
@@ -205,7 +205,7 @@ export const pkgInstallTool: Tool = {
     const cwd = str(input, 'cwd') ?? process.cwd();
     const mgr = parseManager(input) ?? await detectManager(cwd) ?? 'unknown';
     return {
-      title: 'pkg:install',
+      title: 'pkg_install',
       content: [
         `Manager: **${mgr}**`,
         `Cwd: \`${cwd}\``,
@@ -221,7 +221,7 @@ export const pkgInstallTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cwd = str(input, 'cwd') ?? process.cwd();
-    const mgr = await resolveManager(input, cwd, 'pkg:install');
+    const mgr = await resolveManager(input, cwd, 'pkg_install');
     if (typeof mgr !== 'string') { return mgr; }
 
     const argv = installArgv(mgr);
@@ -239,7 +239,7 @@ export const pkgInstallTool: Tool = {
 
     const opts: PkgRunOpts = { cwd, timeoutMs: 20 * 60_000 };
     const r = await runShell(argv, opts);
-    if (r.spawnError) { return fail('pkg:install', `${mgr} not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('pkg_install', `${mgr} not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: PkgInstallData = { manager: mgr, cwd, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -270,7 +270,7 @@ interface PkgAddData {
 }
 
 export const pkgAddTool: Tool = {
-  id: 'pkg:add',
+  id: 'pkg_add',
   description: 'Add one or more dependencies. `dev:true` adds to dev deps where supported.',
   inputSchema: {
     type: 'object',
@@ -290,7 +290,7 @@ export const pkgAddTool: Tool = {
     const mgr = parseManager(input) ?? await detectManager(cwd) ?? 'unknown';
     const packages = packageNamesFromInput(input);
     return {
-      title: 'pkg:add',
+      title: 'pkg_add',
       content: [
         `Manager: **${mgr}** (cwd: \`${cwd}\`)`,
         `Packages: ${packages.map(p => '`' + p + '`').join(', ')}`,
@@ -306,14 +306,14 @@ export const pkgAddTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const cwd = str(input, 'cwd') ?? process.cwd();
     const packages = packageNamesFromInput(input);
-    if (packages.length === 0) { return fail('pkg:add', 'packages or package required'); }
-    const mgr = await resolveManager(input, cwd, 'pkg:add');
+    if (packages.length === 0) { return fail('pkg_add', 'packages or package required'); }
+    const mgr = await resolveManager(input, cwd, 'pkg_add');
     if (typeof mgr !== 'string') { return mgr; }
     const dev = isDev(input);
     const argv = addArgv(mgr, packages, dev);
 
     const r = await runShell(argv, { cwd, timeoutMs: 15 * 60_000 });
-    if (r.spawnError) { return fail('pkg:add', `${mgr} not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('pkg_add', `${mgr} not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: PkgAddData = { manager: mgr, packages, dev, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -344,7 +344,7 @@ interface PkgRemoveData {
 }
 
 export const pkgRemoveTool: Tool = {
-  id: 'pkg:remove',
+  id: 'pkg_remove',
   description: 'Remove one or more dependencies. For Go, runs `go mod tidy` (caller must delete the import first).',
   inputSchema: {
     type: 'object',
@@ -363,7 +363,7 @@ export const pkgRemoveTool: Tool = {
     const mgr = parseManager(input) ?? await detectManager(cwd) ?? 'unknown';
     const packages = packageNamesFromInput(input);
     return {
-      title: 'pkg:remove',
+      title: 'pkg_remove',
       content: [
         `Manager: **${mgr}** (cwd: \`${cwd}\`)`,
         `Remove: ${packages.map(p => '`' + p + '`').join(', ') || '_none_'}`,
@@ -379,15 +379,15 @@ export const pkgRemoveTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const cwd = str(input, 'cwd') ?? process.cwd();
     const packages = packageNamesFromInput(input);
-    const mgr = await resolveManager(input, cwd, 'pkg:remove');
+    const mgr = await resolveManager(input, cwd, 'pkg_remove');
     if (typeof mgr !== 'string') { return mgr; }
     if (mgr !== 'go' && packages.length === 0) {
-      return fail('pkg:remove', 'packages or package required');
+      return fail('pkg_remove', 'packages or package required');
     }
 
     const argv = removeArgv(mgr, packages);
     const r = await runShell(argv, { cwd, timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('pkg:remove', `${mgr} not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('pkg_remove', `${mgr} not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const note = mgr === 'go' ? 'Ran `go mod tidy`. Edit the import out of Go sources and re-run to finalize removal.' : undefined;
     const data: PkgRemoveData = { manager: mgr, packages, exitCode: r.code, stdout: r.stdout, stderr: r.stderr, note };
@@ -417,7 +417,7 @@ interface PkgOutdatedData {
 }
 
 export const pkgOutdatedTool: Tool = {
-  id: 'pkg:outdated',
+  id: 'pkg_outdated',
   description: 'List outdated packages. Returns parsed JSON where supported, raw text otherwise.',
   inputSchema: {
     type: 'object',
@@ -431,12 +431,12 @@ export const pkgOutdatedTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cwd = str(input, 'cwd') ?? process.cwd();
-    const mgr = await resolveManager(input, cwd, 'pkg:outdated');
+    const mgr = await resolveManager(input, cwd, 'pkg_outdated');
     if (typeof mgr !== 'string') { return mgr; }
 
     const { argv, expectsJson, nonZeroOk } = outdatedArgv(mgr);
     const r = await runShell(argv, { cwd, timeoutMs: 5 * 60_000 });
-    if (r.spawnError) { return fail('pkg:outdated', `${mgr} not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('pkg_outdated', `${mgr} not found: ${r.stderr.trim()}`); }
     const reportingOk = r.code === 0 || nonZeroOk;
     const parsed = expectsJson ? tryParseJson(r.stdout) : null;
     const data: PkgOutdatedData = { manager: mgr, exitCode: r.code, parsed, stdout: r.stdout };
@@ -467,7 +467,7 @@ interface PkgAuditData {
 }
 
 export const pkgAuditTool: Tool = {
-  id: 'pkg:audit',
+  id: 'pkg_audit',
   description: 'Run a security audit. npm/pnpm/yarn/pip/poetry/go/cargo via their native audit tooling.',
   inputSchema: {
     type: 'object',
@@ -481,13 +481,13 @@ export const pkgAuditTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cwd = str(input, 'cwd') ?? process.cwd();
-    const mgr = await resolveManager(input, cwd, 'pkg:audit');
+    const mgr = await resolveManager(input, cwd, 'pkg_audit');
     if (typeof mgr !== 'string') { return mgr; }
 
     const { argv, expectsJson, nonZeroOk } = auditArgv(mgr);
     const r = await runShell(argv, { cwd, timeoutMs: 10 * 60_000 });
     if (r.spawnError) {
-      return fail('pkg:audit', `${argv[0]} not found: ${r.stderr.trim()}. For pip use pip-audit, for go use govulncheck, for cargo use cargo-audit.`);
+      return fail('pkg_audit', `${argv[0]} not found: ${r.stderr.trim()}. For pip use pip-audit, for go use govulncheck, for cargo use cargo-audit.`);
     }
     const reportingOk = r.code === 0 || nonZeroOk;
     const parsed = expectsJson ? tryParseJson(r.stdout) : null;

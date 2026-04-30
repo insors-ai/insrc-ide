@@ -230,7 +230,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     if (this.deps === undefined) return [];
     try {
       const r = await executeTool(
-        { id: 'discover', name: 'db:list_connections', input: {} },
+        { id: 'discover', name: 'db_list_connections', input: {} },
         { session: this.deps.session },
       );
       if (r.isError) {

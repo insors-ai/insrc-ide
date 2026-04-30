@@ -221,7 +221,7 @@ export interface DataAnalysisItemMeta {
 // ---------------------------------------------------------------------------
 
 /**
- * One row of `db:list_connections` output, projected for prompt rendering.
+ * One row of `db_list_connections` output, projected for prompt rendering.
  * Stored in `K_STATE` so the plan / analyzer steps see the same view.
  */
 export interface ConnectionSummary {

@@ -68,16 +68,16 @@ const COMPLETION_MAX_TOKENS = 4000;
 // Closed tool list -- the data-driver's shipped builtins.
 // ---------------------------------------------------------------------------
 
-const DB_LIST_CONNECTIONS = 'db:list_connections';
-const DB_SQL_DESCRIBE     = 'db:sql:describe';
-const DB_SQL_SAMPLE       = 'db:sql:sample';
-const DB_SQL_EXPLAIN      = 'db:sql:explain';
-const DB_KV_SCAN          = 'db:kv:scan';
-const DB_KV_GET           = 'db:kv:get';
-const DB_KV_SAMPLE_SHAPE  = 'db:kv:sample_shape';
-const DB_FILE_DESCRIBE    = 'db:file:describe';
-const DB_FILE_SAMPLE      = 'db:file:sample';
-const DB_FILE_SAMPLE_SHAPE = 'db:file:sample_shape';
+const DB_LIST_CONNECTIONS = 'db_list_connections';
+const DB_SQL_DESCRIBE     = 'db_sql_describe';
+const DB_SQL_SAMPLE       = 'db_sql_sample';
+const DB_SQL_EXPLAIN      = 'db_sql_explain';
+const DB_KV_SCAN          = 'db_kv_scan';
+const DB_KV_GET           = 'db_kv_get';
+const DB_KV_SAMPLE_SHAPE  = 'db_kv_sample_shape';
+const DB_FILE_DESCRIBE    = 'db_file_describe';
+const DB_FILE_SAMPLE      = 'db_file_sample';
+const DB_FILE_SAMPLE_SHAPE = 'db_file_sample_shape';
 const SUBMIT_TOOL         = 'submit_analysis';
 
 const ANALYZER_TOOLS: readonly ToolDefinition[] = [

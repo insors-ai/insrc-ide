@@ -45,7 +45,7 @@ interface RawItem {
 // ---------------------------------------------------------------------------
 
 export const ghProjectListTool: Tool = {
-  id: 'gh:project:list',
+  id: 'gh_project_list',
   description: 'List Projects v2 for an owner (user or org).',
   inputSchema: {
     type: 'object',
@@ -67,7 +67,7 @@ export const ghProjectListTool: Tool = {
     argv.push('-L', String(limit));
     if (input['closed'] === true) { argv.push('--closed'); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:project:list', r); }
+    if (r.code !== 0) { return shellFail('gh_project_list', r); }
     const payload = parseJson<{ projects?: RawProject[] }>(r.stdout);
     const projects = payload?.projects ?? [];
     const lines: string[] = [`# ${projects.length} project${projects.length === 1 ? '' : 's'}`, ''];
@@ -83,7 +83,7 @@ export const ghProjectListTool: Tool = {
 };
 
 export const ghProjectViewTool: Tool = {
-  id: 'gh:project:view',
+  id: 'gh_project_view',
   description: 'View a Project v2 (title, fields summary, item count).',
   inputSchema: {
     type: 'object',
@@ -99,13 +99,13 @@ export const ghProjectViewTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:project:view', 'missing number'); }
+    if (!n) { return fail('gh_project_view', 'missing number'); }
     const argv = ['gh', 'project', 'view', String(n), '--format', 'json'];
     if (str(input, 'owner')) { argv.push('--owner', str(input, 'owner')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:project:view', r); }
+    if (r.code !== 0) { return shellFail('gh_project_view', r); }
     const p = parseJson<RawProject>(r.stdout);
-    if (!p) { return fail('gh:project:view', 'could not parse JSON'); }
+    if (!p) { return fail('gh_project_view', 'could not parse JSON'); }
     const lines: string[] = [];
     lines.push(`# Project #${p.number}: ${md(p.title)}`);
     lines.push('');

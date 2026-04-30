@@ -3,7 +3,7 @@
  * snippets (ER / sequence / flow / deployment / wireframe).
  *
  * Phase 1 MVP registers all five tool ids so the surface is
- * discoverable, but only `artifact:wireframe` has a runnable
+ * discoverable, but only `artifact_wireframe` has a runnable
  * implementation (via the kind registry). The other four return a
  * clean "not yet implemented" error from the dispatcher -- good for
  * exercising the full tool loop + chat widget plumbing before the
@@ -265,7 +265,7 @@ const CALLFLOW_SCHEMA = {
 // ---------------------------------------------------------------------------
 
 const wireframeTool: Tool = {
-	id: 'artifact:wireframe',
+	id: 'artifact_wireframe',
 	description: 'Generate a low-fi UI wireframe as an embeddable HTML snippet (SVG). Accepts a structured WireframeSpec or a free-text description + layout.',
 	inputSchema: WIREFRAME_SCHEMA,
 	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -274,7 +274,7 @@ const wireframeTool: Tool = {
 };
 
 const erTool: Tool = {
-	id: 'artifact:er',
+	id: 'artifact_er',
 	description: 'Generate an ER diagram as an embeddable HTML snippet (Mermaid erDiagram). Accepts a pre-built Mermaid source, a list of tables, or a free-text description; falls back to a default scaffold.',
 	inputSchema: ER_SCHEMA,
 	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -283,7 +283,7 @@ const erTool: Tool = {
 };
 
 const sequenceTool: Tool = {
-	id: 'artifact:sequence',
+	id: 'artifact_sequence',
 	description: 'Generate a sequence diagram as an embeddable HTML snippet (Mermaid sequenceDiagram). Accepts a pre-built Mermaid source or a free-text description; falls back to a two-actor scaffold.',
 	inputSchema: SEQUENCE_SCHEMA,
 	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -292,7 +292,7 @@ const sequenceTool: Tool = {
 };
 
 const flowTool: Tool = {
-	id: 'artifact:flow',
+	id: 'artifact_flow',
 	description: 'Generate a flow diagram as an embeddable HTML snippet (Mermaid flowchart). Supports code-flow and process-flow sub-kinds; accepts a pre-built source or generates a scaffold from the description.',
 	inputSchema: FLOW_SCHEMA,
 	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -301,7 +301,7 @@ const flowTool: Tool = {
 };
 
 const deploymentTool: Tool = {
-	id: 'artifact:deployment',
+	id: 'artifact_deployment',
 	description: 'Generate a deployment diagram as an embeddable HTML snippet (Mermaid flowchart). Accepts a pre-built source or a free-text description; falls back to a client-service-datastore scaffold.',
 	inputSchema: DEPLOYMENT_SCHEMA,
 	execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -310,7 +310,7 @@ const deploymentTool: Tool = {
 };
 
 const callflowTool: Tool = {
-	id: 'artifact:callflow',
+	id: 'artifact_callflow',
 	description:
 		'Generate a cross-service callflow diagram from a distributed trace ' +
 		'(OpenTelemetry / OTLP JSON in v1; Jaeger + Zipkin in a follow-up). ' +
@@ -344,7 +344,7 @@ const REGENERATE_SCHEMA = {
 } as const;
 
 const regenerateTool: Tool = {
-	id: 'artifact:regenerate',
+	id: 'artifact_regenerate',
 	description:
 		'Iteratively edit an existing artifact. Re-runs the LLM against the prior source + the user\'s edit request, ' +
 		'pushes the prior source onto the item\'s revision history (keep last 5), and emits the new rendered snippet. ' +
@@ -406,7 +406,7 @@ const LIST_TEMPLATES_SCHEMA = {
 } as const;
 
 const listTemplatesTool: Tool = {
-	id: 'artifact:list_templates',
+	id: 'artifact_list_templates',
 	description:
 		'List the template resolution status for every artifact kind ' +
 		'(repo override / user override / bundled). Useful for agents that want to report ' +
@@ -441,18 +441,18 @@ const LIST_ARTIFACTS_SCHEMA = {
 } as const;
 
 const listArtifactsTool: Tool = {
-	id: 'artifact:list',
+	id: 'artifact_list',
 	description:
 		'List the artifacts produced on the current session, newest first (cap 50). ' +
 		'Each entry carries `artifactId`, `kind`, `title`, `createdAt`, `updatedAt`, and ' +
 		'`revisionsCount` -- useful for an LLM turn that needs to resolve a user reference ' +
 		'like "regenerate the user/orders ER" to a concrete `artifactId` before calling ' +
-		'`artifact:regenerate`.',
+		'`artifact_regenerate`.',
 	inputSchema: LIST_ARTIFACTS_SCHEMA,
 	async execute(_input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
 		if (deps.todos === undefined) {
 			return fail(
-				'artifact:list',
+				'artifact_list',
 				'TodosApi missing from ToolDeps; cannot enumerate artifacts. This is a daemon wiring bug -- ' +
 				'the tool executor (daemon/task.ts or agent/tools/executor.ts) should supply `deps.todos`.',
 			);

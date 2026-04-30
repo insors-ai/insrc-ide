@@ -49,7 +49,7 @@ const PR_CHECKS_FIELDS = 'statusCheckRollup,number';
 // ---------------------------------------------------------------------------
 
 export const ghPrListTool: Tool = {
-  id: 'gh:pr:list',
+  id: 'gh_pr_list',
   description: 'List / filter pull requests.',
   inputSchema: {
     type: 'object',
@@ -86,14 +86,14 @@ export const ghPrListTool: Tool = {
     if (str(input, 'search'))   { argv.push('-S', str(input, 'search')!); }
 
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:list', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_list', r); }
     const prs = parseJson<RawPr[]>(r.stdout) ?? [];
     return { output: renderPrList(prs), format: 'markdown', success: true, data: { count: prs.length, prs } };
   },
 };
 
 export const ghPrViewTool: Tool = {
-  id: 'gh:pr:view',
+  id: 'gh_pr_view',
   description: 'View a PR: body, metadata, review status.',
   inputSchema: {
     type: 'object',
@@ -109,13 +109,13 @@ export const ghPrViewTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:view', 'missing number'); }
+    if (!n) { return fail('gh_pr_view', 'missing number'); }
     const argv = ['gh', 'pr', 'view', String(n), '--json', PR_VIEW_FIELDS];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:view', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_view', r); }
     const pr = parseJson<RawPr>(r.stdout);
-    if (!pr) { return fail('gh:pr:view', 'could not parse gh JSON'); }
+    if (!pr) { return fail('gh_pr_view', 'could not parse gh JSON'); }
     return { output: renderPrView(pr), format: 'markdown', success: true, data: pr };
   },
 };
@@ -125,7 +125,7 @@ export const ghPrViewTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghPrDiffTool: Tool = {
-  id: 'gh:pr:diff',
+  id: 'gh_pr_diff',
   description: 'Unified diff of a PR. Output is capped.',
   inputSchema: {
     type: 'object',
@@ -142,12 +142,12 @@ export const ghPrDiffTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:diff', 'missing number'); }
+    if (!n) { return fail('gh_pr_diff', 'missing number'); }
     const maxBytes = num(input, 'maxBytes') ?? 256 * 1024;
     const argv = ['gh', 'pr', 'diff', String(n)];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), maxBytes, timeoutMs: 60_000 });
-    if (r.code !== 0) { return shellFail('gh:pr:diff', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_diff', r); }
     const truncated = r.stdout.length >= maxBytes;
     const body = (truncated ? r.stdout.slice(0, maxBytes) : r.stdout).replace(/\n+$/, '');
     return {
@@ -160,7 +160,7 @@ export const ghPrDiffTool: Tool = {
 };
 
 export const ghPrChecksTool: Tool = {
-  id: 'gh:pr:checks',
+  id: 'gh_pr_checks',
   description: 'CI check status for a PR.',
   inputSchema: {
     type: 'object',
@@ -176,11 +176,11 @@ export const ghPrChecksTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:checks', 'missing number'); }
+    if (!n) { return fail('gh_pr_checks', 'missing number'); }
     const argv = ['gh', 'pr', 'view', String(n), '--json', PR_CHECKS_FIELDS];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:checks', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_checks', r); }
     const payload = parseJson<{ statusCheckRollup?: RawPr['statusCheckRollup'] }>(r.stdout);
     const checks = payload?.statusCheckRollup ?? [];
     const lines: string[] = [`# PR #${n} checks (${checks.length})`, ''];
@@ -197,7 +197,7 @@ export const ghPrChecksTool: Tool = {
 };
 
 export const ghPrFilesTool: Tool = {
-  id: 'gh:pr:files',
+  id: 'gh_pr_files',
   description: 'Changed files + per-file stats.',
   inputSchema: {
     type: 'object',
@@ -213,14 +213,14 @@ export const ghPrFilesTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:files', 'missing number'); }
+    if (!n) { return fail('gh_pr_files', 'missing number'); }
     // gh pr diff --name-only is the easiest + portable way; per-file
     // additions/deletions come from `gh api` with the PR's file list.
     const repoFlag = str(input, 'repo') ? ['-R', str(input, 'repo')!] : [];
     const apiArgv = ['gh', 'pr', 'view', String(n), '--json', 'files'];
     apiArgv.push(...repoFlag);
     const r = await ghExec(apiArgv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:files', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_files', r); }
     const payload = parseJson<{ files?: Array<{ path: string; additions: number; deletions: number }> }>(r.stdout);
     const files = payload?.files ?? [];
     const lines: string[] = [`# PR #${n} files (${files.length})`, ''];
@@ -239,7 +239,7 @@ export const ghPrFilesTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const ghPrCreateTool: Tool = {
-  id: 'gh:pr:create',
+  id: 'gh_pr_create',
   description: 'Open a pull request.',
   inputSchema: {
     type: 'object',
@@ -265,7 +265,7 @@ export const ghPrCreateTool: Tool = {
     const title = str(input, 'title') ?? '';
     const body = str(input, 'body') ?? '';
     return {
-      title: 'gh:pr:create',
+      title: 'gh_pr_create',
       content: [
         `Repo: **${str(input, 'repo') ?? '(current)'}**`,
         `Title: **${title}**`,
@@ -291,7 +291,7 @@ export const ghPrCreateTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const title = str(input, 'title');
-    if (!title) { return fail('gh:pr:create', 'missing title'); }
+    if (!title) { return fail('gh_pr_create', 'missing title'); }
     const argv = ['gh', 'pr', 'create', '-t', title];
     if (str(input, 'body') !== undefined) { argv.push('-b', str(input, 'body') ?? ''); }
     if (str(input, 'base')) { argv.push('-B', str(input, 'base')!); }
@@ -306,14 +306,14 @@ export const ghPrCreateTool: Tool = {
     if (reviewers) { argv.push('-r', reviewers); }
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 90_000 });
-    if (r.code !== 0) { return shellFail('gh:pr:create', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_create', r); }
     const url = r.stdout.trim();
     return { output: `Opened PR: ${url}`, format: 'markdown', success: true, data: { url } };
   },
 };
 
 export const ghPrEditTool: Tool = {
-  id: 'gh:pr:edit',
+  id: 'gh_pr_edit',
   description: 'Edit PR title / body / labels / assignees / reviewers / base.',
   inputSchema: {
     type: 'object',
@@ -346,7 +346,7 @@ export const ghPrEditTool: Tool = {
       if (csv) { parts.push(`${verb}: ${csv}`); }
     }
     return {
-      title: 'gh:pr:edit',
+      title: 'gh_pr_edit',
       content: `PR #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}**\n\n` + (parts.length === 0 ? '_(no changes)_' : parts.map(p => `- ${p}`).join('\n')),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -357,7 +357,7 @@ export const ghPrEditTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:edit', 'missing number'); }
+    if (!n) { return fail('gh_pr_edit', 'missing number'); }
     const argv = ['gh', 'pr', 'edit', String(n)];
     if (str(input, 'title')) { argv.push('-t', str(input, 'title')!); }
     if (str(input, 'body') !== undefined) { argv.push('-b', str(input, 'body') ?? ''); }
@@ -370,13 +370,13 @@ export const ghPrEditTool: Tool = {
     const rmA = joinCsv(strArr(input, 'removeAssignees')); if (rmA)  { argv.push('--remove-assignee', rmA); }
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:edit', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_edit', r); }
     return { output: `Edited PR #${n}.`, format: 'markdown', success: true, data: { number: n } };
   },
 };
 
 export const ghPrCommentTool: Tool = {
-  id: 'gh:pr:comment',
+  id: 'gh_pr_comment',
   description: 'Add a top-level comment to a PR.',
   inputSchema: {
     type: 'object',
@@ -394,7 +394,7 @@ export const ghPrCommentTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const body = str(input, 'body') ?? '';
     return {
-      title: 'gh:pr:comment',
+      title: 'gh_pr_comment',
       content: `PR #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}**\n\n**Comment**\n\`\`\`\n${body.length > 1500 ? body.slice(0, 1500) + '\n...[truncated]' : body}\n\`\`\``,
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -411,17 +411,17 @@ export const ghPrCommentTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
     const body = str(input, 'body');
-    if (!n || !body) { return fail('gh:pr:comment', 'missing number or body'); }
+    if (!n || !body) { return fail('gh_pr_comment', 'missing number or body'); }
     const argv = ['gh', 'pr', 'comment', String(n), '-b', body];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:comment', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_comment', r); }
     return { output: `Commented on PR #${n}.`, format: 'markdown', success: true, data: { number: n, url: r.stdout.trim() } };
   },
 };
 
 export const ghPrReviewTool: Tool = {
-  id: 'gh:pr:review',
+  id: 'gh_pr_review',
   description: 'Submit a review on a PR (APPROVE / REQUEST_CHANGES / COMMENT).',
   inputSchema: {
     type: 'object',
@@ -455,7 +455,7 @@ export const ghPrReviewTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
     const event = str(input, 'event');
-    if (!n || !event) { return fail('gh:pr:review', 'missing number or event'); }
+    if (!n || !event) { return fail('gh_pr_review', 'missing number or event'); }
     const argv = ['gh', 'pr', 'review', String(n)];
     if (event === 'approve') { argv.push('-a'); }
     else if (event === 'request-changes') { argv.push('-r'); }
@@ -463,13 +463,13 @@ export const ghPrReviewTool: Tool = {
     if (str(input, 'body')) { argv.push('-b', str(input, 'body')!); }
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:review', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_review', r); }
     return { output: `Submitted ${event} review on PR #${n}.`, format: 'markdown', success: true, data: { number: n, event } };
   },
 };
 
 export const ghPrMergeTool: Tool = {
-  id: 'gh:pr:merge',
+  id: 'gh_pr_merge',
   description: 'Merge a PR (squash / rebase / merge).',
   inputSchema: {
     type: 'object',
@@ -492,7 +492,7 @@ export const ghPrMergeTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const method = str(input, 'method') ?? 'merge';
     return {
-      title: 'gh:pr:merge',
+      title: 'gh_pr_merge',
       content: [
         `PR #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}**`,
         `Method: **${method}**`,
@@ -510,7 +510,7 @@ export const ghPrMergeTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
     const method = str(input, 'method');
-    if (!n || !method) { return fail('gh:pr:merge', 'missing number or method'); }
+    if (!n || !method) { return fail('gh_pr_merge', 'missing number or method'); }
     const argv = ['gh', 'pr', 'merge', String(n)];
     if (method === 'squash') { argv.push('-s'); }
     else if (method === 'rebase') { argv.push('-r'); }
@@ -522,13 +522,13 @@ export const ghPrMergeTool: Tool = {
     if (str(input, 'body'))  { argv.push('-b', str(input, 'body')!); }
     if (str(input, 'repo'))  { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 180_000 });
-    if (r.code !== 0) { return shellFail('gh:pr:merge', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_merge', r); }
     return { output: `Merged PR #${n} (${method}).\n\n\`\`\`\n${r.stdout.trim() || r.stderr.trim()}\n\`\`\``, format: 'markdown', success: true, data: { number: n, method } };
   },
 };
 
 export const ghPrCloseTool: Tool = {
-  id: 'gh:pr:close',
+  id: 'gh_pr_close',
   description: 'Close a PR without merging.',
   inputSchema: {
     type: 'object',
@@ -546,7 +546,7 @@ export const ghPrCloseTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:pr:close',
+      title: 'gh_pr_close',
       content: [
         `Close PR #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}** (not merged).`,
         input['deleteBranch'] === true ? 'Head branch will be deleted.' : '',
@@ -561,19 +561,19 @@ export const ghPrCloseTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:close', 'missing number'); }
+    if (!n) { return fail('gh_pr_close', 'missing number'); }
     const argv = ['gh', 'pr', 'close', String(n)];
     if (str(input, 'comment')) { argv.push('-c', str(input, 'comment')!); }
     if (input['deleteBranch'] === true) { argv.push('-d'); }
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:close', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_close', r); }
     return { output: `Closed PR #${n}.`, format: 'markdown', success: true, data: { number: n } };
   },
 };
 
 export const ghPrReadyTool: Tool = {
-  id: 'gh:pr:ready',
+  id: 'gh_pr_ready',
   description: 'Mark a draft PR as ready for review.',
   inputSchema: {
     type: 'object',
@@ -589,7 +589,7 @@ export const ghPrReadyTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:pr:ready',
+      title: 'gh_pr_ready',
       content: `Mark PR #${num(input, 'number')} in **${str(input, 'repo') ?? '(current)'}** as ready for review.`,
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -600,11 +600,11 @@ export const ghPrReadyTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const n = num(input, 'number');
-    if (!n) { return fail('gh:pr:ready', 'missing number'); }
+    if (!n) { return fail('gh_pr_ready', 'missing number'); }
     const argv = ['gh', 'pr', 'ready', String(n)];
     if (str(input, 'repo')) { argv.push('-R', str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:pr:ready', r); }
+    if (r.code !== 0) { return shellFail('gh_pr_ready', r); }
     return { output: `PR #${n} marked ready for review.`, format: 'markdown', success: true, data: { number: n } };
   },
 };

@@ -44,7 +44,7 @@ const FS = '\x1f';
 const PRETTY = `%H${FS}%h${FS}%an${FS}%ae${FS}%aI${FS}%s${FS}%b`;
 
 export const gitLogTool: Tool = {
-  id: 'git:log',
+  id: 'git_log',
   description: 'Show commit history, optionally filtered by ref, path, author, message, or date range.',
   inputSchema: {
     type: 'object',

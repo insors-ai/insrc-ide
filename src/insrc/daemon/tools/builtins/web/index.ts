@@ -46,7 +46,7 @@ interface WebSearchData {
 const BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
 
 export const webSearchTool: Tool = {
-  id: 'web:search',
+  id: 'web_search',
   description: 'Search the web. Uses Brave Search API when BRAVE_API_KEY is set.',
   inputSchema: {
     type: 'object',
@@ -61,7 +61,7 @@ export const webSearchTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const query = str(input, 'query');
-    if (!query) { return fail('web:search', 'query required'); }
+    if (!query) { return fail('web_search', 'query required'); }
     const limit = num(input, 'limit') ?? 5;
     const keySource = getToolSettings().web.braveApiKeySource;
     let key: string | undefined;
@@ -88,7 +88,7 @@ export const webSearchTool: Tool = {
       const resp = await undiciFetch(url, {
         headers: { 'X-Subscription-Token': key, Accept: 'application/json' },
       });
-      if (!resp.ok) { return fail('web:search', `Brave API ${resp.status} ${resp.statusText}`); }
+      if (!resp.ok) { return fail('web_search', `Brave API ${resp.status} ${resp.statusText}`); }
       const body = await resp.json() as { web?: { results?: BraveResult[] } };
       const results = body.web?.results ?? [];
       const data: WebSearchData = { query, limit, provider: 'brave', results };
@@ -100,7 +100,7 @@ export const webSearchTool: Tool = {
         format: 'markdown', success: true, data,
       };
     } catch (err: unknown) {
-      return fail('web:search', `fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('web_search', `fetch failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };
@@ -123,7 +123,7 @@ const WEB_FETCH_MAX_BYTES = 512 * 1024;
 const WEB_FETCH_TIMEOUT = 30_000;
 
 export const webFetchTool: Tool = {
-  id: 'web:fetch',
+  id: 'web_fetch',
   description: 'Fetch a URL body (read-only GET). Response truncated above 512 KB.',
   inputSchema: {
     type: 'object',
@@ -139,7 +139,7 @@ export const webFetchTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const url = str(input, 'url');
-    if (!url) { return fail('web:fetch', 'url required'); }
+    if (!url) { return fail('web_fetch', 'url required'); }
     const maxBytes = num(input, 'maxBytes') ?? WEB_FETCH_MAX_BYTES;
     const timeoutMs = num(input, 'timeoutMs') ?? WEB_FETCH_TIMEOUT;
 
@@ -197,7 +197,7 @@ export const webFetchTool: Tool = {
         data,
       };
     } catch (err: unknown) {
-      return fail('web:fetch', `fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('web_fetch', `fetch failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       clearTimeout(timer);
     }

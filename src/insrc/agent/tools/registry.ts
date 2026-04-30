@@ -56,7 +56,7 @@ export interface RegisteredTool {
  *
  * The LLM path currently keys tools by their legacy short names
  * (`Read`, `Grep`, `graph_search`, ...) rather than canonical
- * `file:read` / `search:grep` ids. We emit only the names the LLM
+ * `file_read` / `search_grep` ids. We emit only the names the LLM
  * already knows so prompt templates don't change, but the definitions
  * are pulled from the unified registry.
  *

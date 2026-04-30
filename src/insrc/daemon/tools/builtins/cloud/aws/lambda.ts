@@ -31,7 +31,7 @@ interface AwsLambdaInvokeData {
 }
 
 export const awsLambdaInvokeTool: Tool = {
-  id: 'cloud:aws:lambda:invoke',
+  id: 'cloud_aws_lambda_invoke',
   description: 'Invoke a Lambda function (RequestResponse by default) and return its response.',
   inputSchema: {
     type: 'object',
@@ -58,7 +58,7 @@ export const awsLambdaInvokeTool: Tool = {
         ? JSON.stringify(input['payload'], null, 2)
         : '{}';
     return {
-      title: 'cloud:aws:lambda:invoke',
+      title: 'cloud_aws_lambda_invoke',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Function: \`${str(input, 'functionName')}\` (${invocationType})`,
@@ -77,7 +77,7 @@ export const awsLambdaInvokeTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const fn = str(input, 'functionName');
-    if (!fn) { return fail('cloud:aws:lambda:invoke', 'functionName required'); }
+    if (!fn) { return fail('cloud_aws_lambda_invoke', 'functionName required'); }
     const flags = awsFlags(input);
     const invocationType = str(input, 'invocationType') ?? 'RequestResponse';
 
@@ -104,7 +104,7 @@ export const awsLambdaInvokeTool: Tool = {
 
     try {
       const r = await runShell(argv, { timeoutMs: 15 * 60_000 });
-      if (r.spawnError) { return fail('cloud:aws:lambda:invoke', `aws CLI not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('cloud_aws_lambda_invoke', `aws CLI not found: ${r.stderr.trim()}`); }
 
       let responseBody = '';
       try { responseBody = await fs.readFile(responsePath, 'utf8'); } catch { /* may be empty for Event type */ }
@@ -162,7 +162,7 @@ interface AwsLambdaListData {
 }
 
 export const awsLambdaListTool: Tool = {
-  id: 'cloud:aws:lambda:list',
+  id: 'cloud_aws_lambda_list',
   description: 'List Lambda functions in the account/region.',
   inputSchema: {
     type: 'object',
@@ -188,7 +188,7 @@ export const awsLambdaListTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:lambda:list', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_lambda_list', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsLambdaListData = { exitCode: r.code, parsed, stdout: r.stdout };

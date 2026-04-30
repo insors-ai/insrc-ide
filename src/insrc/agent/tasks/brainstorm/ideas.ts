@@ -258,7 +258,7 @@ function resolveRefs(refs: string[], entityIndex: EntityIndex | undefined): Idea
     }
 
     if (entityIndex) {
-      // LLMs sometimes produce `ClassName.method`, `file:line`, or stray
+      // LLMs sometimes produce `ClassName.method`, `file_line`, or stray
       // qualifiers. Match on the exact name first, then fall back to the
       // last segment.
       const direct = entityIndex[cleaned];

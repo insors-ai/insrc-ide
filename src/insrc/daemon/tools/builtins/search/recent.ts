@@ -30,7 +30,7 @@ const MAX_LIMIT = 5000;
 const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.next', '.cache']);
 
 export const searchRecentTool: Tool = {
-  id: 'search:recent',
+  id: 'search_recent',
   description: 'Files modified in the last N minutes (default 60).',
   inputSchema: {
     type: 'object',

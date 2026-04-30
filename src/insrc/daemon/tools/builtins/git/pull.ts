@@ -20,7 +20,7 @@ export interface GitPullData {
 }
 
 export const gitPullTool: Tool = {
-  id: 'git:pull',
+  id: 'git_pull',
   description: 'Pull from the current branch\'s upstream. Default --ff-only; merge / rebase modes opt-in.',
   inputSchema: {
     type: 'object',
@@ -42,7 +42,7 @@ export const gitPullTool: Tool = {
     const remote = str(input, 'remote') ?? '(tracked remote)';
     const branch = str(input, 'branch') ?? (await currentBranch(cwd)) ?? '(current branch)';
     return {
-      title: 'git:pull',
+      title: 'git_pull',
       content: [
         `Repo: \`${cwd}\``,
         `Pull \`${remote}/${branch}\` into **${branch}** using **${mode}**.`,
@@ -72,8 +72,8 @@ export const gitPullTool: Tool = {
       if (remote) { argv.push(remote); }
       if (branch) { argv.push(branch); }
       const result = await runShell(argv, { cwd, timeoutMs: 120_000 });
-      if (result.spawnError) { return spawnFail('git:pull', result.stderr); }
-      if (result.code !== 0) { return fail('git:pull', result.stderr, result.stdout, result.code); }
+      if (result.spawnError) { return spawnFail('git_pull', result.stderr); }
+      if (result.code !== 0) { return fail('git_pull', result.stderr, result.stdout, result.code); }
       const data: GitPullData = { remote: remote ?? '(tracked)', branch, mode, output: mergeStreams(result) };
       return { output: `Dry-run pull (fetch only) OK.\n\n\`\`\`\n${data.output.trim() || '(no updates)'}\n\`\`\``, format: 'markdown', success: true, data };
     }
@@ -87,8 +87,8 @@ export const gitPullTool: Tool = {
     if (branch && remote)   { argv.push(branch); }  // pull requires both or neither
 
     const result = await runShell(argv, { cwd, timeoutMs: 180_000 });
-    if (result.spawnError) { return spawnFail('git:pull', result.stderr); }
-    if (result.code !== 0) { return fail('git:pull', result.stderr, result.stdout, result.code); }
+    if (result.spawnError) { return spawnFail('git_pull', result.stderr); }
+    if (result.code !== 0) { return fail('git_pull', result.stderr, result.stdout, result.code); }
 
     const data: GitPullData = { remote: remote ?? '(tracked)', branch, mode, output: mergeStreams(result) };
     return {

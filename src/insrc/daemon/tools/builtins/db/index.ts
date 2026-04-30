@@ -1,5 +1,5 @@
 /**
- * Data-driver tools: `db:list_connections` + `db:sql:*` + `db:kv:*`
+ * Data-driver tools: `db_list_connections` + `db:sql:*` + `db:kv:*`
  * + `db:file:*`.
  *
  * Each tool validates input shape, acquires a driver from the repo's
@@ -114,7 +114,7 @@ function summariseConnections(conns: readonly ConnectionConfig[]): string {
 const CONNECTION_ID_PROP = {
 	connectionId: {
 		type: 'string',
-		description: 'Connection id from `db:list_connections` (unique within the repo).',
+		description: 'Connection id from `db_list_connections` (unique within the repo).',
 	},
 } as const;
 
@@ -138,7 +138,7 @@ const WHERE_SCHEMA = {
 // ---------------------------------------------------------------------------
 
 const listConnectionsTool: Tool = {
-	id: 'db:list_connections',
+	id: 'db_list_connections',
 	description:
 		'List every data-driver connection configured for the active repo. ' +
 		'Each entry: { id, kind, family, label }. Use this first to discover which ' +
@@ -167,7 +167,7 @@ const listConnectionsTool: Tool = {
 // ---------------------------------------------------------------------------
 
 const sqlDescribeTool: Tool = {
-	id: 'db:sql:describe',
+	id: 'db_sql_describe',
 	description:
 		'Describe the schema of a single RDBMS table or view: columns + types + nullability + PK/FK. ' +
 		'Accepts bare `table` or `schema.table`. Use this before db:sql:sample so the LLM can pick valid column names.',
@@ -211,7 +211,7 @@ const sqlDescribeTool: Tool = {
 };
 
 const sqlExplainTool: Tool = {
-	id: 'db:sql:explain',
+	id: 'db_sql_explain',
 	description:
 		'Run EXPLAIN against a SELECT-shaped query on an RDBMS connection. ' +
 		'Returns the dialect-native plan as a string. Same WHERE / target ' +
@@ -267,7 +267,7 @@ const sqlExplainTool: Tool = {
 };
 
 const sqlSampleTool: Tool = {
-	id: 'db:sql:sample',
+	id: 'db_sql_sample',
 	description:
 		'Sample up to 50 rows from an RDBMS table / view with an optional WHERE filter. ' +
 		'Raw SQL is never accepted; filters are structured { column, op, value } objects. ' +
@@ -306,7 +306,7 @@ const sqlSampleTool: Tool = {
 // ---------------------------------------------------------------------------
 
 const kvScanTool: Tool = {
-	id: 'db:kv:scan',
+	id: 'db_kv_scan',
 	description:
 		'List keys on a KV connection (redis / valkey / keydb / mongodb / cassandra / nats). ' +
 		'Supply either `pattern` (glob / subject-wildcard per kind) or `prefix`. ' +
@@ -342,7 +342,7 @@ const kvScanTool: Tool = {
 };
 
 const kvGetTool: Tool = {
-	id: 'db:kv:get',
+	id: 'db_kv_get',
 	description:
 		'Read a single key from a KV connection. For string-key stores (redis / valkey / nats) ' +
 		'pass `key` as a string; for composite-key stores (mongodb: {db, collection, _id}; ' +
@@ -382,7 +382,7 @@ const kvGetTool: Tool = {
 };
 
 const kvSampleShapeTool: Tool = {
-	id: 'db:kv:sample_shape',
+	id: 'db_kv_sample_shape',
 	description:
 		'Infer the shape (field names + observed types + nullability + frequency) of values ' +
 		'under a pattern or prefix on a KV connection. Samples at most 50 values + 5s wall-clock.',
@@ -425,7 +425,7 @@ const kvSampleShapeTool: Tool = {
 // ---------------------------------------------------------------------------
 
 const fileDescribeTool: Tool = {
-	id: 'db:file:describe',
+	id: 'db_file_describe',
 	description:
 		'Describe the inferred / embedded schema of a tabular file connection ' +
 		'(csv / tsv / jsonl / xlsx / avro / arrow / bson / fixed-width). ' +
@@ -470,7 +470,7 @@ const fileDescribeTool: Tool = {
 };
 
 const fileSampleTool: Tool = {
-	id: 'db:file:sample',
+	id: 'db_file_sample',
 	description:
 		'Sample up to 50 records from a file connection with an optional WHERE filter. ' +
 		'Clamped at 50 rows + 5s wall-clock.',
@@ -506,7 +506,7 @@ const fileSampleTool: Tool = {
 };
 
 const fileSampleShapeTool: Tool = {
-	id: 'db:file:sample_shape',
+	id: 'db_file_sample_shape',
 	description:
 		'Infer the shape of records in a document-style file connection (e.g. single-doc JSON, nested fields). ' +
 		'Clamped at 50 records + 5s wall-clock.',

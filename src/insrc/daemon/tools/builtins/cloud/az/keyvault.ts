@@ -29,7 +29,7 @@ interface AzKvSecretShowData {
 }
 
 export const azKeyvaultSecretShowTool: Tool = {
-  id: 'cloud:az:keyvault:secret:show',
+  id: 'cloud_az_keyvault_secret_show',
   description: 'Show a Key Vault secret. Value redacts unless reveal:true.',
   inputSchema: {
     type: 'object',
@@ -48,7 +48,7 @@ export const azKeyvaultSecretShowTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = azFlags(input);
     return {
-      title: 'cloud:az:keyvault:secret:show',
+      title: 'cloud_az_keyvault_secret_show',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Vault: \`${str(input, 'vault')}\`, secret: \`${str(input, 'name')}\`${str(input, 'version') ? ` (v${str(input, 'version')})` : ''}`,
@@ -64,7 +64,7 @@ export const azKeyvaultSecretShowTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const vault = str(input, 'vault');
     const name = str(input, 'name');
-    if (!vault || !name) { return fail('cloud:az:keyvault:secret:show', 'vault and name required'); }
+    if (!vault || !name) { return fail('cloud_az_keyvault_secret_show', 'vault and name required'); }
     const flags = azFlags(input);
     const argv = ['az', 'keyvault', 'secret', 'show', '--vault-name', vault, '--name', name, '--output', 'json'];
     const version = str(input, 'version');
@@ -72,7 +72,7 @@ export const azKeyvaultSecretShowTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:az:keyvault:secret:show', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_keyvault_secret_show', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     let value: string | undefined;
@@ -112,7 +112,7 @@ interface AzKvSecretSetData {
 }
 
 export const azKeyvaultSecretSetTool: Tool = {
-  id: 'cloud:az:keyvault:secret:set',
+  id: 'cloud_az_keyvault_secret_set',
   description: 'Set a Key Vault secret (creates a new version).',
   inputSchema: {
     type: 'object',
@@ -133,7 +133,7 @@ export const azKeyvaultSecretSetTool: Tool = {
     const flags = azFlags(input);
     const v = str(input, 'value');
     return {
-      title: 'cloud:az:keyvault:secret:set',
+      title: 'cloud_az_keyvault_secret_set',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Vault: \`${str(input, 'vault')}\`, secret: \`${str(input, 'name')}\``,
@@ -150,7 +150,7 @@ export const azKeyvaultSecretSetTool: Tool = {
     const vault = str(input, 'vault');
     const name  = str(input, 'name');
     const value = str(input, 'value');
-    if (!vault || !name || value === undefined) { return fail('cloud:az:keyvault:secret:set', 'vault, name and value required'); }
+    if (!vault || !name || value === undefined) { return fail('cloud_az_keyvault_secret_set', 'vault, name and value required'); }
     const flags = azFlags(input);
     const argv = ['az', 'keyvault', 'secret', 'set', '--vault-name', vault, '--name', name, '--value', value, '--output', 'json'];
     const tags = Array.isArray(input['tags']) ? (input['tags'] as unknown[]).map(String).filter(s => s.length > 0) : [];
@@ -160,7 +160,7 @@ export const azKeyvaultSecretSetTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:az:keyvault:secret:set', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_keyvault_secret_set', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzKvSecretSetData = { vault, name, exitCode: r.code, parsed };

@@ -30,7 +30,7 @@ const MAX_LIMIT = 5000;
 const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.next', '.cache']);
 
 export const searchGrepTool: Tool = {
-  id: 'search:grep',
+  id: 'search_grep',
   description: 'Search file contents by regex. Uses ripgrep when available, Node fallback otherwise.',
   inputSchema: {
     type: 'object',

@@ -24,7 +24,7 @@ export interface GitCheckoutData {
 }
 
 export const gitCheckoutTool: Tool = {
-  id: 'git:checkout',
+  id: 'git_checkout',
   description: 'Switch HEAD to a ref, or restore specific paths to a ref\'s state. Destructive; gates with a warning.',
   inputSchema: {
     type: 'object',
@@ -67,7 +67,7 @@ export const gitCheckoutTool: Tool = {
     }
 
     return {
-      title: mode === 'ref' && discard ? 'git:checkout (FORCED)' : 'git:checkout',
+      title: mode === 'ref' && discard ? 'git:checkout (FORCED)' : 'git_checkout',
       content: lines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -82,14 +82,14 @@ export const gitCheckoutTool: Tool = {
 
     if (mode === 'ref') {
       const ref = str(input, 'ref');
-      if (!ref) { return fail('git:checkout', 'mode=ref requires ref', '', 1); }
+      if (!ref) { return fail('git_checkout', 'mode=ref requires ref', '', 1); }
       const previous = await currentBranch(cwd);
       const argv = ['git', 'switch'];
       if (input['discard'] === true) { argv.push('--force'); }
       argv.push(ref);
       const result = await runShell(argv, { cwd, timeoutMs: 15_000 });
-      if (result.spawnError) { return spawnFail('git:checkout', result.stderr); }
-      if (result.code !== 0) { return fail('git:checkout', result.stderr, result.stdout, result.code); }
+      if (result.spawnError) { return spawnFail('git_checkout', result.stderr); }
+      if (result.code !== 0) { return fail('git_checkout', result.stderr, result.stdout, result.code); }
       const data: GitCheckoutData = { mode, ref, ...(previous ? { previous } : {}) };
       return {
         output: previous
@@ -102,12 +102,12 @@ export const gitCheckoutTool: Tool = {
     // mode === 'path'
     const ref = str(input, 'ref') ?? 'HEAD';
     const paths = Array.isArray(input['paths']) ? (input['paths'] as unknown[]).map(String).filter(Boolean) : [];
-    if (paths.length === 0) { return fail('git:checkout', 'mode=path requires paths', '', 1); }
+    if (paths.length === 0) { return fail('git_checkout', 'mode=path requires paths', '', 1); }
 
     const argv = ['git', 'restore', '--source', ref, '--worktree', '--', ...paths];
     const result = await runShell(argv, { cwd, timeoutMs: 15_000 });
-    if (result.spawnError) { return spawnFail('git:checkout', result.stderr); }
-    if (result.code !== 0) { return fail('git:checkout', result.stderr, result.stdout, result.code); }
+    if (result.spawnError) { return spawnFail('git_checkout', result.stderr); }
+    if (result.code !== 0) { return fail('git_checkout', result.stderr, result.stdout, result.code); }
 
     const data: GitCheckoutData = { mode, ref, paths };
     return {

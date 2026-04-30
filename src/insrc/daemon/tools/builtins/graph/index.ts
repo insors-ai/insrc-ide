@@ -64,7 +64,7 @@ function renderEntity(e: Entity, includeBody: boolean): string {
 interface GraphEntityData { entity: Entity | null }
 
 export const graphEntityTool: Tool = {
-  id: 'graph:entity',
+  id: 'graph_entity',
   description: 'Fetch a single entity by ID from the code knowledge graph.',
   inputSchema: {
     type: 'object',
@@ -78,7 +78,7 @@ export const graphEntityTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const id = str(input, 'id');
-    if (!id) { return fail('graph:entity', 'id required'); }
+    if (!id) { return fail('graph_entity', 'id required'); }
     const db = await getDb();
     const entity = await getEntity(db, id);
     const data: GraphEntityData = { entity };
@@ -104,7 +104,7 @@ interface GraphSearchData {
 }
 
 export const graphSearchTool: Tool = {
-  id: 'graph:search',
+  id: 'graph_search',
   description: 'Vector similarity search over indexed code entities, scoped to the session repo closure.',
   inputSchema: {
     type: 'object',
@@ -120,16 +120,16 @@ export const graphSearchTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const query = str(input, 'query');
-    if (!query) { return fail('graph:search', 'query required'); }
+    if (!query) { return fail('graph_search', 'query required'); }
     const limit = num(input, 'limit') ?? 10;
     const closure = deps.session.closureRepos;
     if (closure.length === 0) {
-      return fail('graph:search', 'session has no closure repos initialized');
+      return fail('graph_search', 'session has no closure repos initialized');
     }
     const db = await getDb();
     const vec = await embedQuery(query);
     if (vec.length === 0) {
-      return fail('graph:search', 'failed to embed query (Ollama unavailable?)');
+      return fail('graph_search', 'failed to embed query (Ollama unavailable?)');
     }
     const hits = await searchEntities(db, vec, closure, limit);
     const data: GraphSearchData = {
@@ -209,7 +209,7 @@ interface GraphQueryData {
 const MAX_QUERY_ROWS = 500;
 
 export const graphQueryTool: Tool = {
-  id: 'graph:query',
+  id: 'graph_query',
   description: 'Run an arbitrary Cypher query against the Kuzu code knowledge graph. Read-only usage expected.',
   inputSchema: {
     type: 'object',
@@ -223,7 +223,7 @@ export const graphQueryTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cypher = str(input, 'cypher');
-    if (!cypher) { return fail('graph:query', 'cypher required'); }
+    if (!cypher) { return fail('graph_query', 'cypher required'); }
     const db = await getDb();
     try {
       const result = await db.graph.query(cypher);
@@ -241,7 +241,7 @@ export const graphQueryTool: Tool = {
         format: 'markdown', success: true, data,
       };
     } catch (err: unknown) {
-      return fail('graph:query', `cypher failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('graph_query', `cypher failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };

@@ -32,7 +32,7 @@ const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;  // 1 MB
 const MAX_MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB hard cap
 
 export const shellExecTool: Tool = {
-  id: 'shell:exec',
+  id: 'shell_exec',
   description: 'Run a single command and return structured stdout/stderr/exit.',
   inputSchema: {
     type: 'object',
@@ -81,7 +81,7 @@ export const shellExecTool: Tool = {
     lines.push(`Timeout: ${Math.round(timeoutMs / 1000)}s`);
 
     return {
-      title: usesShell ? 'shell:exec (via bash -c)' : 'shell:exec',
+      title: usesShell ? 'shell:exec (via bash -c)' : 'shell_exec',
       content: lines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },

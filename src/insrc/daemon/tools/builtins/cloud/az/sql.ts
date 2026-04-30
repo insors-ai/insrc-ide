@@ -21,7 +21,7 @@ interface AzSqlServerListData {
 }
 
 export const azSqlServerListTool: Tool = {
-  id: 'cloud:az:sql:server:list',
+  id: 'cloud_az_sql_server_list',
   description: 'List Azure SQL servers.',
   inputSchema: {
     type: 'object',
@@ -34,7 +34,7 @@ export const azSqlServerListTool: Tool = {
     const flags = azFlags(input);
     const argv = ['az', 'sql', 'server', 'list', '--output', 'json', ...azArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:sql:server:list', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_sql_server_list', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzSqlServerListData = { exitCode: r.code, parsed, stdout: r.stdout };
@@ -65,7 +65,7 @@ interface AzSqlServerStateData {
 }
 
 export const azSqlServerStartTool: Tool = {
-  id: 'cloud:az:sql:server:start',
+  id: 'cloud_az_sql_server_start',
   description: 'Start / resume an Azure SQL server (uses sql mi start under the hood for Managed Instance).',
   inputSchema: {
     type: 'object',
@@ -82,7 +82,7 @@ export const azSqlServerStartTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = azFlags(input);
     return {
-      title: 'cloud:az:sql:server:start',
+      title: 'cloud_az_sql_server_start',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Server: \`${str(input, 'server')}\`${input['managedInstance'] === true ? ' (Managed Instance)' : ''}`,
@@ -96,9 +96,9 @@ export const azSqlServerStartTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const server = str(input, 'server');
-    if (!server) { return fail('cloud:az:sql:server:start', 'server required'); }
+    if (!server) { return fail('cloud_az_sql_server_start', 'server required'); }
     const flags = azFlags(input);
-    if (!flags.resourceGroup) { return fail('cloud:az:sql:server:start', 'resourceGroup required'); }
+    if (!flags.resourceGroup) { return fail('cloud_az_sql_server_start', 'resourceGroup required'); }
     const miMode = input['managedInstance'] === true;
     const argv = miMode
       ? ['az', 'sql', 'mi', 'start-stop-schedule', 'create', '--mi', server, '--resource-group', flags.resourceGroup, '--output', 'json']
@@ -106,7 +106,7 @@ export const azSqlServerStartTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 15 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:sql:server:start', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_sql_server_start', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzSqlServerStateData = { server, action: 'start', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -127,7 +127,7 @@ export const azSqlServerStartTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const azSqlServerStopTool: Tool = {
-  id: 'cloud:az:sql:server:stop',
+  id: 'cloud_az_sql_server_stop',
   description: 'Pause / stop an Azure SQL server.',
   inputSchema: {
     type: 'object',
@@ -144,7 +144,7 @@ export const azSqlServerStopTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = azFlags(input);
     return {
-      title: 'cloud:az:sql:server:stop',
+      title: 'cloud_az_sql_server_stop',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Server: \`${str(input, 'server')}\`${input['managedInstance'] === true ? ' (Managed Instance)' : ''}`,
@@ -158,9 +158,9 @@ export const azSqlServerStopTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const server = str(input, 'server');
-    if (!server) { return fail('cloud:az:sql:server:stop', 'server required'); }
+    if (!server) { return fail('cloud_az_sql_server_stop', 'server required'); }
     const flags = azFlags(input);
-    if (!flags.resourceGroup) { return fail('cloud:az:sql:server:stop', 'resourceGroup required'); }
+    if (!flags.resourceGroup) { return fail('cloud_az_sql_server_stop', 'resourceGroup required'); }
     const miMode = input['managedInstance'] === true;
     const argv = miMode
       ? ['az', 'sql', 'mi', 'stop', '--mi', server, '--resource-group', flags.resourceGroup, '--output', 'json']
@@ -168,7 +168,7 @@ export const azSqlServerStopTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 15 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:sql:server:stop', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_sql_server_stop', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzSqlServerStateData = { server, action: 'stop', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

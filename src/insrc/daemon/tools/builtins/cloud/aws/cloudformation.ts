@@ -25,7 +25,7 @@ interface AwsCfnListData {
 }
 
 export const awsCfnListTool: Tool = {
-  id: 'cloud:aws:cloudformation:list',
+  id: 'cloud_aws_cloudformation_list',
   description: 'List CloudFormation stacks with optional status filter.',
   inputSchema: {
     type: 'object',
@@ -48,7 +48,7 @@ export const awsCfnListTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:cloudformation:list', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_cloudformation_list', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsCfnListData = { statusFilter: statuses, exitCode: r.code, parsed, stdout: r.stdout };
@@ -86,7 +86,7 @@ async function writeTemplateToTemp(body: string): Promise<string> {
 }
 
 export const awsCfnDeployTool: Tool = {
-  id: 'cloud:aws:cloudformation:deploy',
+  id: 'cloud_aws_cloudformation_deploy',
   description: 'Deploy a CloudFormation stack (create-or-update, capabilities-aware).',
   inputSchema: {
     type: 'object',
@@ -116,7 +116,7 @@ export const awsCfnDeployTool: Tool = {
     const flags = awsFlags(input);
     const caps = Array.isArray(input['capabilities']) ? (input['capabilities'] as unknown[]).map(String) : [];
     return {
-      title: 'cloud:aws:cloudformation:deploy',
+      title: 'cloud_aws_cloudformation_deploy',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Stack: \`${str(input, 'stackName')}\``,
@@ -134,11 +134,11 @@ export const awsCfnDeployTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const stackName = str(input, 'stackName');
-    if (!stackName) { return fail('cloud:aws:cloudformation:deploy', 'stackName required'); }
+    if (!stackName) { return fail('cloud_aws_cloudformation_deploy', 'stackName required'); }
     const flags = awsFlags(input);
     const path = str(input, 'templatePath');
     const body = str(input, 'templateBody');
-    if (!path && !body) { return fail('cloud:aws:cloudformation:deploy', 'templatePath or templateBody required'); }
+    if (!path && !body) { return fail('cloud_aws_cloudformation_deploy', 'templatePath or templateBody required'); }
 
     let templateSource: 'file' | 'inline';
     let templatePath: string;
@@ -170,7 +170,7 @@ export const awsCfnDeployTool: Tool = {
 
     try {
       const r = await runShell(argv, { timeoutMs: 60 * 60_000 });
-      if (r.spawnError) { return fail('cloud:aws:cloudformation:deploy', `aws CLI not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('cloud_aws_cloudformation_deploy', `aws CLI not found: ${r.stderr.trim()}`); }
       const ok = r.code === 0;
       const data: AwsCfnDeployData = {
         stackName, templateSource,
@@ -206,7 +206,7 @@ interface AwsCfnDeleteData {
 }
 
 export const awsCfnDeleteTool: Tool = {
-  id: 'cloud:aws:cloudformation:delete',
+  id: 'cloud_aws_cloudformation_delete',
   description: 'Delete a CloudFormation stack. Always gated; requires confirmStack to match.',
   inputSchema: {
     type: 'object',
@@ -226,7 +226,7 @@ export const awsCfnDeleteTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:cloudformation:delete',
+      title: 'cloud_aws_cloudformation_delete',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `**DELETE** stack: \`${str(input, 'stackName')}\``,
@@ -241,8 +241,8 @@ export const awsCfnDeleteTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const stackName = str(input, 'stackName');
     const confirm = str(input, 'confirmStack');
-    if (!stackName) { return fail('cloud:aws:cloudformation:delete', 'stackName required'); }
-    if (confirm !== stackName) { return fail('cloud:aws:cloudformation:delete', 'confirmStack must equal stackName'); }
+    if (!stackName) { return fail('cloud_aws_cloudformation_delete', 'stackName required'); }
+    if (confirm !== stackName) { return fail('cloud_aws_cloudformation_delete', 'confirmStack must equal stackName'); }
 
     const flags = awsFlags(input);
     const argv = ['aws', 'cloudformation', 'delete-stack', '--stack-name', stackName];
@@ -253,7 +253,7 @@ export const awsCfnDeleteTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:cloudformation:delete', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_cloudformation_delete', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AwsCfnDeleteData = { stackName, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

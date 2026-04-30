@@ -79,7 +79,7 @@ interface SshExecData {
 const DEFAULT_EXEC_TIMEOUT = 120_000;
 
 export const sshExecTool: Tool = {
-  id: 'ssh:exec',
+  id: 'ssh_exec',
   description: 'Run a command on a remote host via ssh. Supports ~/.ssh/config aliases.',
   inputSchema: {
     type: 'object',
@@ -97,7 +97,7 @@ export const sshExecTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'ssh:exec',
+      title: 'ssh_exec',
       content: [
         `Host: **${str(input, 'host')}**`,
         '',
@@ -121,7 +121,7 @@ export const sshExecTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const host = str(input, 'host');
     const command = str(input, 'command');
-    if (!host || !command) { return fail('ssh:exec', 'host and command required'); }
+    if (!host || !command) { return fail('ssh_exec', 'host and command required'); }
 
     const { target, port } = parseHost(host);
     const argv = ['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'BatchMode=yes'];
@@ -136,7 +136,7 @@ export const sshExecTool: Tool = {
     const r = await runShell(argv, { timeoutMs });
     const durationMs = Date.now() - started;
 
-    if (r.spawnError) { return fail('ssh:exec', `ssh not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('ssh_exec', `ssh not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: SshExecData = {
       host, exitCode: r.code, stdout: r.stdout, stderr: r.stderr,

@@ -20,7 +20,7 @@ export interface GitFetchData {
 }
 
 export const gitFetchTool: Tool = {
-  id: 'git:fetch',
+  id: 'git_fetch',
   description: 'Fetch refs from a remote. No working-tree changes; no approval required.',
   inputSchema: {
     type: 'object',
@@ -52,8 +52,8 @@ export const gitFetchTool: Tool = {
     if (remote) { argv.push(remote); }
 
     const result = await runShell(argv, { cwd, timeoutMs: 120_000 });
-    if (result.spawnError) { return spawnFail('git:fetch', result.stderr); }
-    if (result.code !== 0) { return fail('git:fetch', result.stderr, result.stdout, result.code); }
+    if (result.spawnError) { return spawnFail('git_fetch', result.stderr); }
+    if (result.code !== 0) { return fail('git_fetch', result.stderr, result.stdout, result.code); }
 
     // git fetch writes its progress / update summary to stderr by
     // convention. Extract meaningful lines (ref updates start with

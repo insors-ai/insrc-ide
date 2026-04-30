@@ -105,7 +105,7 @@ const MAX_REQUEST_TIMEOUT = 600_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // 2 MB
 
 export const httpRequestTool: Tool = {
-  id: 'http:request',
+  id: 'http_request',
   description: 'Make an HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS). Write methods gate for approval.',
   inputSchema: {
     type: 'object',
@@ -147,7 +147,7 @@ export const httpRequestTool: Tool = {
           ? '```json\n' + JSON.stringify(input['body'], null, 2).slice(0, 1000) + '\n```'
           : '_no body_';
     return {
-      title: 'http:request',
+      title: 'http_request',
       content: [
         `**${method}** \`${url}\``,
         '',
@@ -173,7 +173,7 @@ export const httpRequestTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const url = str(input, 'url');
-    if (!url) { return fail('http:request', 'url required'); }
+    if (!url) { return fail('http_request', 'url required'); }
     const method = (str(input, 'method') ?? 'GET').toUpperCase();
     const timeoutMs = Math.min(num(input, 'timeoutMs') ?? DEFAULT_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT);
     const maxResponseBytes = num(input, 'maxResponseBytes') ?? DEFAULT_MAX_RESPONSE_BYTES;
@@ -272,7 +272,7 @@ export const httpRequestTool: Tool = {
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      return fail('http:request', `request failed: ${msg}`);
+      return fail('http_request', `request failed: ${msg}`);
     } finally {
       clearTimeout(timer);
       deps.signal?.removeEventListener('abort', onUpstreamAbort);
@@ -299,7 +299,7 @@ const DEFAULT_DOWNLOAD_TIMEOUT = 120_000;
 const MAX_DOWNLOAD_TIMEOUT = 3_600_000;
 
 export const httpDownloadTool: Tool = {
-  id: 'http:download',
+  id: 'http_download',
   description: 'Download a URL to a local file. Streams; size cap enforced.',
   inputSchema: {
     type: 'object',
@@ -324,7 +324,7 @@ export const httpDownloadTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const maxBytes = num(input, 'maxBytes') ?? DEFAULT_DOWNLOAD_MAX_BYTES;
     return {
-      title: 'http:download',
+      title: 'http_download',
       content: [
         `**URL**: \`${str(input, 'url')}\``,
         `**Dest**: \`${str(input, 'destPath')}\``,
@@ -340,7 +340,7 @@ export const httpDownloadTool: Tool = {
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const url = str(input, 'url');
     const destPath = str(input, 'destPath');
-    if (!url || !destPath) { return fail('http:download', 'url and destPath required'); }
+    if (!url || !destPath) { return fail('http_download', 'url and destPath required'); }
 
     const overwrite = bool(input, 'overwrite') ?? false;
     const maxBytes = num(input, 'maxBytes') ?? DEFAULT_DOWNLOAD_MAX_BYTES;
@@ -350,7 +350,7 @@ export const httpDownloadTool: Tool = {
     if (!overwrite) {
       try {
         await fs.access(absDest);
-        return fail('http:download', `dest already exists (set overwrite:true): ${absDest}`);
+        return fail('http_download', `dest already exists (set overwrite:true): ${absDest}`);
       } catch { /* ok: doesn't exist */ }
     }
     try { await fs.mkdir(dirname(absDest), { recursive: true }); } catch { /* ignore */ }
@@ -371,11 +371,11 @@ export const httpDownloadTool: Tool = {
         signal: ac.signal,
       });
       if (!resp.ok) {
-        return fail('http:download', `HTTP ${resp.status} ${resp.statusText}`);
+        return fail('http_download', `HTTP ${resp.status} ${resp.statusText}`);
       }
       const contentType = resp.headers.get('content-type') ?? undefined;
       const reader = resp.body?.getReader();
-      if (!reader) { return fail('http:download', 'empty response body'); }
+      if (!reader) { return fail('http_download', 'empty response body'); }
 
       const file = createWriteStream(absDest);
       try {
@@ -402,7 +402,7 @@ export const httpDownloadTool: Tool = {
 
       if (overflow) {
         try { await fs.unlink(absDest); } catch { /* ignore */ }
-        return fail('http:download', `size cap exceeded (>${formatBytes(maxBytes)}); partial file removed`);
+        return fail('http_download', `size cap exceeded (>${formatBytes(maxBytes)}); partial file removed`);
       }
 
       const durationMs = Date.now() - started;
@@ -422,7 +422,7 @@ export const httpDownloadTool: Tool = {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       try { if (bytesWritten > 0) { await fs.unlink(absDest); } } catch { /* ignore */ }
-      return fail('http:download', `download failed: ${msg}`);
+      return fail('http_download', `download failed: ${msg}`);
     } finally {
       clearTimeout(timer);
       deps.signal?.removeEventListener('abort', onUpstreamAbort);
@@ -451,7 +451,7 @@ const MAX_UPLOAD_TIMEOUT = 3_600_000;
 const UPLOAD_RESPONSE_CAP = 256 * 1024;
 
 export const httpUploadTool: Tool = {
-  id: 'http:upload',
+  id: 'http_upload',
   description: 'Upload a file (multipart or raw PUT/POST) to a URL.',
   inputSchema: {
     type: 'object',
@@ -487,7 +487,7 @@ export const httpUploadTool: Tool = {
     const method = (str(input, 'method') ?? 'POST').toUpperCase();
     const mode = str(input, 'mode') ?? 'multipart';
     return {
-      title: 'http:upload',
+      title: 'http_upload',
       content: [
         `**${method}** (${mode}) \`${str(input, 'url')}\``,
         `File: \`${filePath}\` (${formatBytes(size)})`,
@@ -502,7 +502,7 @@ export const httpUploadTool: Tool = {
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const url = str(input, 'url');
     const filePath = str(input, 'filePath');
-    if (!url || !filePath) { return fail('http:upload', 'url and filePath required'); }
+    if (!url || !filePath) { return fail('http_upload', 'url and filePath required'); }
 
     const method = (str(input, 'method') ?? 'POST').toUpperCase();
     const mode = (str(input, 'mode') ?? 'multipart') as 'multipart' | 'raw';
@@ -511,8 +511,8 @@ export const httpUploadTool: Tool = {
 
     let stat;
     try { stat = await fs.stat(abs); }
-    catch { return fail('http:upload', `file not found: ${abs}`); }
-    if (!stat.isFile()) { return fail('http:upload', `not a regular file: ${abs}`); }
+    catch { return fail('http_upload', `file not found: ${abs}`); }
+    if (!stat.isFile()) { return fail('http_upload', `not a regular file: ${abs}`); }
 
     const headers = collectHeaders(input);
     const explicitContentType = str(input, 'contentType');
@@ -609,7 +609,7 @@ export const httpUploadTool: Tool = {
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      return fail('http:upload', `upload failed: ${msg}`);
+      return fail('http_upload', `upload failed: ${msg}`);
     } finally {
       clearTimeout(timer);
       deps.signal?.removeEventListener('abort', onUpstreamAbort);
@@ -645,7 +645,7 @@ const MAX_WS_RUNTIME = 30 * 60_000;
 const DEFAULT_WS_MAX_FRAMES = 100;
 
 export const httpWebSocketTool: Tool = {
-  id: 'http:websocket',
+  id: 'http_websocket',
   description: 'Open a WebSocket, send initial frames, stream received frames. Bounded runtime.',
   inputSchema: {
     type: 'object',
@@ -667,7 +667,7 @@ export const httpWebSocketTool: Tool = {
     const maxRuntime = Math.min(num(input, 'maxRuntimeMs') ?? DEFAULT_WS_RUNTIME, MAX_WS_RUNTIME);
     const initial = Array.isArray(input['initialFrames']) ? (input['initialFrames'] as unknown[]) : [];
     return {
-      title: 'http:websocket',
+      title: 'http_websocket',
       content: [
         `URL: \`${str(input, 'url')}\``,
         `Max runtime: ${Math.round(maxRuntime / 1000)}s. Initial frames: ${initial.length}.`,
@@ -681,7 +681,7 @@ export const httpWebSocketTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const url = str(input, 'url');
-    if (!url) { return fail('http:websocket', 'url required'); }
+    if (!url) { return fail('http_websocket', 'url required'); }
     const maxRuntimeMs = Math.min(num(input, 'maxRuntimeMs') ?? DEFAULT_WS_RUNTIME, MAX_WS_RUNTIME);
     const maxFrames = num(input, 'maxFrames') ?? DEFAULT_WS_MAX_FRAMES;
     const closeOnFirstReply = bool(input, 'closeOnFirstReply') ?? false;

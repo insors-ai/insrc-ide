@@ -36,7 +36,7 @@ export interface GitBranchData {
 }
 
 export const gitBranchTool: Tool = {
-  id: 'git:branch',
+  id: 'git_branch',
   description: 'List / create / switch / delete branches. op=list is read-only; others gate.',
   inputSchema: {
     type: 'object',
@@ -117,8 +117,8 @@ async function listBranches(cwd: string, includeRemote: boolean): Promise<ToolRe
   ];
   if (includeRemote) { argv.push('-a'); }
   const result = await runShell(argv, { cwd, timeoutMs: 10_000 });
-  if (result.spawnError) { return spawnFail('git:branch', result.stderr); }
-  if (result.code !== 0) { return fail('git:branch', result.stderr, result.stdout, result.code); }
+  if (result.spawnError) { return spawnFail('git_branch', result.stderr); }
+  if (result.code !== 0) { return fail('git_branch', result.stderr, result.stdout, result.code); }
 
   const branches: GitBranchEntry[] = [];
   for (const line of result.stdout.split('\n')) {
@@ -147,7 +147,7 @@ async function listBranches(cwd: string, includeRemote: boolean): Promise<ToolRe
 
 async function createBranch(cwd: string, input: ToolInput): Promise<ToolResult> {
   const name = str(input, 'name');
-  if (!name) { return fail('git:branch', 'missing name for create', '', 1); }
+  if (!name) { return fail('git_branch', 'missing name for create', '', 1); }
   const startPoint = str(input, 'startPoint');
   const track = input['track'] === true;
 
@@ -157,8 +157,8 @@ async function createBranch(cwd: string, input: ToolInput): Promise<ToolResult> 
   if (startPoint) { argv.push(startPoint); }
 
   const result = await runShell(argv, { cwd, timeoutMs: 10_000 });
-  if (result.spawnError) { return spawnFail('git:branch', result.stderr); }
-  if (result.code !== 0) { return fail('git:branch', result.stderr, result.stdout, result.code); }
+  if (result.spawnError) { return spawnFail('git_branch', result.stderr); }
+  if (result.code !== 0) { return fail('git_branch', result.stderr, result.stdout, result.code); }
 
   const data: GitBranchData = { op: 'create', target: name };
   return {
@@ -175,15 +175,15 @@ async function createBranch(cwd: string, input: ToolInput): Promise<ToolResult> 
 
 async function switchBranch(cwd: string, input: ToolInput): Promise<ToolResult> {
   const name = str(input, 'name');
-  if (!name) { return fail('git:branch', 'missing name for switch', '', 1); }
+  if (!name) { return fail('git_branch', 'missing name for switch', '', 1); }
 
   // Capture previous branch for audit trail.
   const head = await runShell(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], { cwd, timeoutMs: 5_000 });
   const previous = head.code === 0 ? head.stdout.trim() : undefined;
 
   const result = await runShell(['git', 'switch', name], { cwd, timeoutMs: 10_000 });
-  if (result.spawnError) { return spawnFail('git:branch', result.stderr); }
-  if (result.code !== 0) { return fail('git:branch', result.stderr, result.stdout, result.code); }
+  if (result.spawnError) { return spawnFail('git_branch', result.stderr); }
+  if (result.code !== 0) { return fail('git_branch', result.stderr, result.stdout, result.code); }
 
   const data: GitBranchData = { op: 'switch', target: name, ...(previous ? { previous } : {}) };
   return {
@@ -202,13 +202,13 @@ async function switchBranch(cwd: string, input: ToolInput): Promise<ToolResult> 
 
 async function deleteBranch(cwd: string, input: ToolInput): Promise<ToolResult> {
   const name = str(input, 'name');
-  if (!name) { return fail('git:branch', 'missing name for delete', '', 1); }
+  if (!name) { return fail('git_branch', 'missing name for delete', '', 1); }
   const force = input['force'] === true;
 
   const argv = ['git', 'branch', force ? '-D' : '-d', name];
   const result = await runShell(argv, { cwd, timeoutMs: 10_000 });
-  if (result.spawnError) { return spawnFail('git:branch', result.stderr); }
-  if (result.code !== 0) { return fail('git:branch', result.stderr, result.stdout, result.code); }
+  if (result.spawnError) { return spawnFail('git_branch', result.stderr); }
+  if (result.code !== 0) { return fail('git_branch', result.stderr, result.stdout, result.code); }
 
   const data: GitBranchData = { op: 'delete', target: name };
   return {

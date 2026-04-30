@@ -5,15 +5,15 @@
  * Sibling analyzer families dispatch into the Code Analyzer through
  * these tools instead of invoking the chat path. Per design §13:
  *
- *   - `code:locate`   ~5 s envelope; vector + structural lookup
+ *   - `code_locate`   ~5 s envelope; vector + structural lookup
  *                     for "where is this defined?" questions.
- *   - `code:trace`    ~5 s envelope; CALLS predecessor / successor
+ *   - `code_trace`    ~5 s envelope; CALLS predecessor / successor
  *                     graph walk for "who calls X / what does X
  *                     call?".
- *   - `code:describe` ~5 s envelope; full entity card (signature +
+ *   - `code_describe` ~5 s envelope; full entity card (signature +
  *                     body + 1-hop neighbours summary).
  *
- * `code:analyze` (Flow-2 entry, 60 s envelope) ships in slice 2 of
+ * `code_analyze` (Flow-2 entry, 60 s envelope) ships in slice 2 of
  * Phase 3 -- it's the dispatch point that runs a caller-supplied
  * `AnalysisTask[]` through the orchestrator without a plan step or
  * gate.
@@ -98,7 +98,7 @@ interface CodeLocateData {
 }
 
 export const codeLocateTool: Tool = {
-	id: 'code:locate',
+	id: 'code_locate',
 	description:
 		'Cross-agent lookup: find entities by name / description in the active session\'s code knowledge graph. Returns a small list of entity stubs (no bodies). Used by sibling analyzers asking "where is X defined?".',
 	inputSchema: {
@@ -120,21 +120,21 @@ export const codeLocateTool: Tool = {
 	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
 		const depth = readCrossAgentDepth(input);
 		if (exceedsCrossAgentDepth(depth)) {
-			return unavailableResult('code:locate', 'cross_agent_depth_exceeded');
+			return unavailableResult('code_locate', 'cross_agent_depth_exceeded');
 		}
 		const query = str(input, 'query');
 		if (!query) {
-			return fail('code:locate', 'query required');
+			return fail('code_locate', 'query required');
 		}
 		const k = Math.min(20, Math.max(1, num(input, 'k') ?? 5));
 		const closure = deps.session.closureRepos;
 		if (closure.length === 0) {
-			return fail('code:locate', 'session has no closure repos initialized');
+			return fail('code_locate', 'session has no closure repos initialized');
 		}
 		const db = await getDb();
 		const vec = await embedQuery(query);
 		if (vec.length === 0) {
-			return fail('code:locate', 'failed to embed query (Ollama unavailable?)');
+			return fail('code_locate', 'failed to embed query (Ollama unavailable?)');
 		}
 		const hits = await searchEntities(db, vec, closure, k);
 		const data: CodeLocateData = { query, results: hits.map(shortEntity) };
@@ -171,7 +171,7 @@ interface CodeTraceData {
 }
 
 export const codeTraceTool: Tool = {
-	id: 'code:trace',
+	id: 'code_trace',
 	description:
 		'Cross-agent lookup: walk CALLS edges from a given entity. `direction: callers | callees | both`. Default depth 1 hop. Used by sibling analyzers asking "what calls X / what does X call?".',
 	inputSchema: {
@@ -190,15 +190,15 @@ export const codeTraceTool: Tool = {
 	async execute(input: ToolInput): Promise<ToolResult> {
 		const depth = readCrossAgentDepth(input);
 		if (exceedsCrossAgentDepth(depth)) {
-			return unavailableResult('code:trace', 'cross_agent_depth_exceeded');
+			return unavailableResult('code_trace', 'cross_agent_depth_exceeded');
 		}
 		const entityId = str(input, 'entityId');
 		if (!entityId) {
-			return fail('code:trace', 'entityId required');
+			return fail('code_trace', 'entityId required');
 		}
 		const direction = str(input, 'direction');
 		if (direction !== 'callers' && direction !== 'callees' && direction !== 'both') {
-			return fail('code:trace', 'direction must be one of callers | callees | both');
+			return fail('code_trace', 'direction must be one of callers | callees | both');
 		}
 		const db = await getDb();
 		const neighbours: CodeTraceNeighbour[] = [];
@@ -255,7 +255,7 @@ interface CodeDescribeData {
 }
 
 export const codeDescribeTool: Tool = {
-	id: 'code:describe',
+	id: 'code_describe',
 	description:
 		'Cross-agent lookup: full entity card -- signature, body, 1-hop callers + callees summary. Used by sibling analyzers needing context on a specific entity.',
 	inputSchema: {
@@ -272,16 +272,16 @@ export const codeDescribeTool: Tool = {
 	async execute(input: ToolInput): Promise<ToolResult> {
 		const depth = readCrossAgentDepth(input);
 		if (exceedsCrossAgentDepth(depth)) {
-			return unavailableResult('code:describe', 'cross_agent_depth_exceeded');
+			return unavailableResult('code_describe', 'cross_agent_depth_exceeded');
 		}
 		const entityId = str(input, 'entityId');
 		if (!entityId) {
-			return fail('code:describe', 'entityId required');
+			return fail('code_describe', 'entityId required');
 		}
 		const db = await getDb();
 		const entity = await getEntity(db, entityId);
 		if (!entity) {
-			return fail('code:describe', `no entity with id ${entityId}`);
+			return fail('code_describe', `no entity with id ${entityId}`);
 		}
 		const [callers, callees] = await Promise.all([
 			findCallers(db, entityId),
@@ -322,7 +322,7 @@ export const codeDescribeTool: Tool = {
  * Register the cross-agent surface (code:locate / code:trace /
  * code:describe). Called from the daemon bootstrap after the
  * built-in tools register, so the registry contains every
- * non-cross-agent tool first. `code:analyze` ships in Phase 3 slice
+ * non-cross-agent tool first. `code_analyze` ships in Phase 3 slice
  * 2 alongside the orchestrator-side Flow-2 entry.
  */
 export function registerCodeAnalyzerCrossAgentTools(): void {

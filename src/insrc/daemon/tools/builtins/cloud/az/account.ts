@@ -17,7 +17,7 @@ interface AzAccountShowData {
 }
 
 export const azAccountShowTool: Tool = {
-  id: 'cloud:az:account:show',
+  id: 'cloud_az_account_show',
   description: 'Return the active Azure subscription + tenant (az account show).',
   inputSchema: {
     type: 'object',
@@ -30,7 +30,7 @@ export const azAccountShowTool: Tool = {
     const flags = azFlags(input);
     const argv = ['az', 'account', 'show', '--output', 'json', ...azArgv(flags, { includeResourceGroup: false })];
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:az:account:show', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_account_show', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzAccountShowData = { exitCode: r.code, parsed, stdout: r.stdout };

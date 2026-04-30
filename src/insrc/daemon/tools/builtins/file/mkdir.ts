@@ -12,7 +12,7 @@ export interface FileMkdirData {
 }
 
 export const fileMkdirTool: Tool = {
-  id: 'file:mkdir',
+  id: 'file_mkdir',
   description: 'Create a directory. Recursive by default.',
   inputSchema: {
     type: 'object',
@@ -29,7 +29,7 @@ export const fileMkdirTool: Tool = {
     const path = resolvePath(input) ?? '(missing)';
     const recursive = input['recursive'] !== false;
     return {
-      title: 'file:mkdir',
+      title: 'file_mkdir',
       content: `Path: \`${path}\`\n${recursive ? 'Creates intermediate directories if missing.' : 'Requires parent to exist.'}`,
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -40,11 +40,11 @@ export const fileMkdirTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:mkdir', 'missing path'); }
+    if (!path) { return fail('file_mkdir', 'missing path'); }
     const recursive = input['recursive'] !== false;
 
     try { await fs.mkdir(path, { recursive }); }
-    catch (err) { return fail('file:mkdir', `mkdir failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_mkdir', `mkdir failed: ${(err as Error).message}`); }
 
     const data: FileMkdirData = { path, createdIntermediate: recursive };
     return { output: `Created \`${path}\`.`, format: 'markdown', success: true, data };

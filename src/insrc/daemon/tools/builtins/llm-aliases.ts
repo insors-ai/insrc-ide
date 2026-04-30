@@ -3,7 +3,7 @@
  *
  * The LLM was trained against tool names like `Read`, `Grep`,
  * `graph_search`, etc. Those names resolve to canonical unified
- * ids (`file:read`, `search:grep`, `graph:search`) via the
+ * ids (`file_read`, `search_grep`, `graph_search`) via the
  * registry's alias table. A few of the legacy schemas also use
  * different argument names from the canonical schemas
  * (`file_path` vs `path`, `entity` vs `entityId`, etc.); we ship
@@ -22,25 +22,25 @@ import type { ToolInput } from '../types.js';
 // ---------------------------------------------------------------------------
 
 const LEGACY_LLM_ALIASES: Readonly<Record<string, readonly string[]>> = {
-  'file:read':        ['Read'],
-  'file:write':       ['Write'],
-  'file:edit':        ['Edit'],
-  'file:stat':        ['FileInfo'],
-  'search:glob':      ['Glob'],
-  'search:grep':      ['Grep'],
+  'file_read':        ['Read'],
+  'file_write':       ['Write'],
+  'file_edit':        ['Edit'],
+  'file_stat':        ['FileInfo'],
+  'search_glob':      ['Glob'],
+  'search_grep':      ['Grep'],
   'search:list-dir':  ['ListDirectory'],
-  'shell:exec':       ['Bash'],
-  'diff:compute':     ['Diff'],
-  'git:log':          ['GitLog'],
-  'git:blame':        ['GitBlame'],
-  'web:search':       ['WebSearch'],
-  'web:fetch':        ['WebFetch'],
-  'graph:entity':     ['graph_entity'],
-  'graph:search':     ['graph_search'],
-  'graph:callers':    ['graph_callers'],
-  'graph:callees':    ['graph_callees'],
-  'graph:query':      ['graph_query'],
-  'plan:get':         ['plan_get'],
+  'shell_exec':       ['Bash'],
+  'diff_compute':     ['Diff'],
+  'git_log':          ['GitLog'],
+  'git_blame':        ['GitBlame'],
+  'web_search':       ['WebSearch'],
+  'web_fetch':        ['WebFetch'],
+  'graph_entity':     ['graph_entity'],
+  'graph_search':     ['graph_search'],
+  'graph_callers':    ['graph_callers'],
+  'graph_callees':    ['graph_callees'],
+  'graph_query':      ['graph_query'],
+  'plan_get':         ['plan_get'],
   'plan:step-update': ['plan_step_update'],
   'plan:next-step':   ['plan_next_step'],
 };

@@ -25,7 +25,7 @@ interface RawRepo {
 }
 
 export const ghRepoViewTool: Tool = {
-  id: 'gh:repo:view',
+  id: 'gh_repo_view',
   description: 'View a repository\'s metadata.',
   inputSchema: {
     type: 'object',
@@ -41,9 +41,9 @@ export const ghRepoViewTool: Tool = {
     const argv = ['gh', 'repo', 'view', '--json', 'nameWithOwner,description,visibility,isPrivate,isFork,isArchived,pushedAt,stargazerCount,forkCount,defaultBranchRef,primaryLanguage,url'];
     if (str(input, 'repo')) { argv.push(str(input, 'repo')!); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:repo:view', r); }
+    if (r.code !== 0) { return shellFail('gh_repo_view', r); }
     const repo = parseJson<RawRepo>(r.stdout);
-    if (!repo) { return fail('gh:repo:view', 'could not parse JSON'); }
+    if (!repo) { return fail('gh_repo_view', 'could not parse JSON'); }
     const lines: string[] = [
       `# ${md(repo.nameWithOwner)}`,
       '',
@@ -59,7 +59,7 @@ export const ghRepoViewTool: Tool = {
 };
 
 export const ghRepoListTool: Tool = {
-  id: 'gh:repo:list',
+  id: 'gh_repo_list',
   description: 'List repositories owned by a user or org.',
   inputSchema: {
     type: 'object',
@@ -87,7 +87,7 @@ export const ghRepoListTool: Tool = {
     if (input['source']   === true) { argv.push('--source'); }
     if (input['fork']     === true) { argv.push('--fork'); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:repo:list', r); }
+    if (r.code !== 0) { return shellFail('gh_repo_list', r); }
     const repos = parseJson<RawRepo[]>(r.stdout) ?? [];
     const lines: string[] = [`# ${repos.length} repo${repos.length === 1 ? '' : 's'}`, ''];
     if (repos.length > 0) {
@@ -102,7 +102,7 @@ export const ghRepoListTool: Tool = {
 };
 
 export const ghRepoCreateTool: Tool = {
-  id: 'gh:repo:create',
+  id: 'gh_repo_create',
   description: 'Create a repository.',
   inputSchema: {
     type: 'object',
@@ -124,7 +124,7 @@ export const ghRepoCreateTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:repo:create',
+      title: 'gh_repo_create',
       content: [
         `Name: **${str(input, 'name')}**`,
         `Visibility: **${str(input, 'visibility')}**`,
@@ -142,7 +142,7 @@ export const ghRepoCreateTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const name = str(input, 'name');
     const visibility = str(input, 'visibility');
-    if (!name || !visibility) { return fail('gh:repo:create', 'missing name or visibility'); }
+    if (!name || !visibility) { return fail('gh_repo_create', 'missing name or visibility'); }
     const argv = ['gh', 'repo', 'create', name, `--${visibility}`];
     if (str(input, 'description')) { argv.push('-d', str(input, 'description')!); }
     if (str(input, 'homepage'))    { argv.push('-h', str(input, 'homepage')!); }
@@ -151,13 +151,13 @@ export const ghRepoCreateTool: Tool = {
     if (str(input, 'team'))        { argv.push('-t', str(input, 'team')!); }
     if (input['clone'] === true)   { argv.push('--clone'); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 120_000 });
-    if (r.code !== 0) { return shellFail('gh:repo:create', r); }
+    if (r.code !== 0) { return shellFail('gh_repo_create', r); }
     return { output: `Created repo: ${r.stdout.trim()}`, format: 'markdown', success: true, data: { name, url: r.stdout.trim() } };
   },
 };
 
 export const ghRepoForkTool: Tool = {
-  id: 'gh:repo:fork',
+  id: 'gh_repo_fork',
   description: 'Fork a repository.',
   inputSchema: {
     type: 'object',
@@ -175,7 +175,7 @@ export const ghRepoForkTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:repo:fork',
+      title: 'gh_repo_fork',
       content: [
         `Fork \`${str(input, 'repo')}\`${str(input, 'org') ? ` into **${str(input, 'org')}**` : ''}.`,
         input['clone'] === true ? 'Will clone locally.' : '',
@@ -190,19 +190,19 @@ export const ghRepoForkTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const repo = str(input, 'repo');
-    if (!repo) { return fail('gh:repo:fork', 'missing repo'); }
+    if (!repo) { return fail('gh_repo_fork', 'missing repo'); }
     const argv = ['gh', 'repo', 'fork', repo, '--remote=false'];
     if (str(input, 'org'))                    { argv.push('--org', str(input, 'org')!); }
     if (input['clone']              === true) { argv.push('--clone'); }
     if (input['defaultBranchOnly']  === true) { argv.push('--default-branch-only'); }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 120_000 });
-    if (r.code !== 0) { return shellFail('gh:repo:fork', r); }
+    if (r.code !== 0) { return shellFail('gh_repo_fork', r); }
     return { output: `Forked \`${repo}\`.\n\n\`\`\`\n${r.stdout.trim() || r.stderr.trim()}\n\`\`\``, format: 'markdown', success: true, data: { source: repo } };
   },
 };
 
 export const ghRepoDeleteTool: Tool = {
-  id: 'gh:repo:delete',
+  id: 'gh_repo_delete',
   description: 'Delete a repository. DESTRUCTIVE -- no undo.',
   inputSchema: {
     type: 'object',
@@ -233,16 +233,16 @@ export const ghRepoDeleteTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const repo = str(input, 'repo');
-    if (!repo) { return fail('gh:repo:delete', 'missing repo'); }
+    if (!repo) { return fail('gh_repo_delete', 'missing repo'); }
     const argv = ['gh', 'repo', 'delete', repo, '--yes'];
     const r = await ghExec(argv, { cwd: str(input, 'cwd') });
-    if (r.code !== 0) { return shellFail('gh:repo:delete', r); }
+    if (r.code !== 0) { return shellFail('gh_repo_delete', r); }
     return { output: `Deleted \`${repo}\`.`, format: 'markdown', success: true, data: { repo } };
   },
 };
 
 export const ghRepoCloneTool: Tool = {
-  id: 'gh:repo:clone',
+  id: 'gh_repo_clone',
   description: 'Clone a repository locally.',
   inputSchema: {
     type: 'object',
@@ -259,7 +259,7 @@ export const ghRepoCloneTool: Tool = {
 
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     return {
-      title: 'gh:repo:clone',
+      title: 'gh_repo_clone',
       content: `Clone \`${str(input, 'repo')}\` into ${str(input, 'dir') ? `\`${str(input, 'dir')}\`` : 'the default directory'}.`,
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -270,7 +270,7 @@ export const ghRepoCloneTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const repo = str(input, 'repo');
-    if (!repo) { return fail('gh:repo:clone', 'missing repo'); }
+    if (!repo) { return fail('gh_repo_clone', 'missing repo'); }
     const argv = ['gh', 'repo', 'clone', repo];
     if (str(input, 'dir')) { argv.push(str(input, 'dir')!); }
     const extra = Array.isArray(input['extraArgs']) ? (input['extraArgs'] as unknown[]).map(String) : [];
@@ -278,7 +278,7 @@ export const ghRepoCloneTool: Tool = {
       argv.push('--', ...extra);
     }
     const r = await ghExec(argv, { cwd: str(input, 'cwd'), timeoutMs: 600_000, maxBytes: 2 * 1024 * 1024 });
-    if (r.code !== 0) { return shellFail('gh:repo:clone', r); }
+    if (r.code !== 0) { return shellFail('gh_repo_clone', r); }
     return { output: `Cloned \`${repo}\`.\n\n\`\`\`\n${r.stdout.trim() || r.stderr.trim()}\n\`\`\``, format: 'markdown', success: true, data: { repo, dir: str(input, 'dir') } };
   },
 };

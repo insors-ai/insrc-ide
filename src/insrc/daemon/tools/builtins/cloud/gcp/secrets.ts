@@ -30,7 +30,7 @@ interface GcpSecretsAccessData {
 }
 
 export const gcpSecretsAccessTool: Tool = {
-  id: 'cloud:gcp:secrets:access',
+  id: 'cloud_gcp_secrets_access',
   description: 'Access a Secret Manager version. Value redacts in output unless reveal:true.',
   inputSchema: {
     type: 'object',
@@ -48,7 +48,7 @@ export const gcpSecretsAccessTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:secrets:access',
+      title: 'cloud_gcp_secrets_access',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Secret: \`${str(input, 'secret')}\` (version \`${str(input, 'version') ?? 'latest'}\`)`,
@@ -63,12 +63,12 @@ export const gcpSecretsAccessTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const secret = str(input, 'secret');
-    if (!secret) { return fail('cloud:gcp:secrets:access', 'secret required'); }
+    if (!secret) { return fail('cloud_gcp_secrets_access', 'secret required'); }
     const version = str(input, 'version') ?? 'latest';
     const flags = gcpFlags(input);
     const argv = ['gcloud', 'secrets', 'versions', 'access', version, '--secret', secret, ...gcloudCommonArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:gcp:secrets:access', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_secrets_access', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const reveal = bool(input, 'reveal') === true;
     const data: GcpSecretsAccessData = { secret, version, revealed: reveal, exitCode: r.code, value: r.stdout };
@@ -102,7 +102,7 @@ interface GcpSecretsAddData {
 }
 
 export const gcpSecretsAddTool: Tool = {
-  id: 'cloud:gcp:secrets:add',
+  id: 'cloud_gcp_secrets_add',
   description: 'Add a new version to an existing Secret Manager secret.',
   inputSchema: {
     type: 'object',
@@ -120,7 +120,7 @@ export const gcpSecretsAddTool: Tool = {
     const flags = gcpFlags(input);
     const v = str(input, 'value');
     return {
-      title: 'cloud:gcp:secrets:add',
+      title: 'cloud_gcp_secrets_add',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Secret: \`${str(input, 'secret')}\``,
@@ -136,14 +136,14 @@ export const gcpSecretsAddTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const secret = str(input, 'secret');
     const value = str(input, 'value');
-    if (!secret || value === undefined) { return fail('cloud:gcp:secrets:add', 'secret and value required'); }
+    if (!secret || value === undefined) { return fail('cloud_gcp_secrets_add', 'secret and value required'); }
     const flags = gcpFlags(input);
     const tmpPath = join(tmpdir(), `insrc-gcp-secret-${process.pid}-${Date.now()}.bin`);
     await fs.writeFile(tmpPath, value, 'utf8');
     try {
       const argv = ['gcloud', 'secrets', 'versions', 'add', secret, '--data-file', tmpPath, '--format=json', ...gcloudCommonArgv(flags)];
       const r = await runShell(argv, { timeoutMs: 30_000 });
-      if (r.spawnError) { return fail('cloud:gcp:secrets:add', `gcloud not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('cloud_gcp_secrets_add', `gcloud not found: ${r.stderr.trim()}`); }
       const ok = r.code === 0;
       const data: GcpSecretsAddData = { secret, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
       return {

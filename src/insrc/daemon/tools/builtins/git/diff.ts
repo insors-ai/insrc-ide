@@ -52,7 +52,7 @@ const DEFAULT_MAX_BYTES = 256 * 1024;  // 256 KB
 const MAX_MAX_BYTES = 2 * 1024 * 1024; // 2 MB hard cap
 
 export const gitDiffTool: Tool = {
-  id: 'git:diff',
+  id: 'git_diff',
   description: 'Show a unified diff. Supports unstaged (default), staged, arbitrary commit ranges, or a specific path.',
   inputSchema: {
     type: 'object',

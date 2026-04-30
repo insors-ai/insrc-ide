@@ -3,7 +3,7 @@
  *
  * Source priority (first match wins; failures soft-fall through):
  *   1. Caller-supplied Mermaid `source` -- rendered verbatim.
- *   2. Live DB via `db:sql:describe` -- when `connection` is set
+ *   2. Live DB via `db_sql_describe` -- when `connection` is set
  *      and `tables` is non-empty. Per-table describe() composed
  *      into an `erDiagram` with FK relationship lines. Probe /
  *      describe failure falls through.

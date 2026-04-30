@@ -48,7 +48,7 @@ interface AzBlobListData {
 }
 
 export const azStorageBlobLsTool: Tool = {
-  id: 'cloud:az:storage:blob:ls',
+  id: 'cloud_az_storage_blob_ls',
   description: 'List blobs in a storage container.',
   inputSchema: {
     type: 'object',
@@ -67,7 +67,7 @@ export const azStorageBlobLsTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const container = str(input, 'container');
     const account = str(input, 'accountName');
-    if (!container || !account) { return fail('cloud:az:storage:blob:ls', 'container and accountName required'); }
+    if (!container || !account) { return fail('cloud_az_storage_blob_ls', 'container and accountName required'); }
     const flags = azFlags(input);
     const argv = ['az', 'storage', 'blob', 'list', '--container-name', container, '--account-name', account, '--output', 'json'];
     const prefix = str(input, 'prefix');
@@ -78,7 +78,7 @@ export const azStorageBlobLsTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:storage:blob:ls', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_storage_blob_ls', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzBlobListData = { container, prefix, exitCode: r.code, parsed, stdout: r.stdout };
@@ -111,7 +111,7 @@ interface AzBlobCpData {
 }
 
 export const azStorageBlobCpTool: Tool = {
-  id: 'cloud:az:storage:blob:cp',
+  id: 'cloud_az_storage_blob_cp',
   description: 'Upload or download a blob. direction=upload sends localPath to the blob; download does the reverse.',
   inputSchema: {
     type: 'object',
@@ -133,7 +133,7 @@ export const azStorageBlobCpTool: Tool = {
     const flags = azFlags(input);
     const direction = str(input, 'direction') ?? '';
     return {
-      title: 'cloud:az:storage:blob:cp',
+      title: 'cloud_az_storage_blob_cp',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Account: \`${str(input, 'accountName')}\`, container: \`${str(input, 'container')}\``,
@@ -156,7 +156,7 @@ export const azStorageBlobCpTool: Tool = {
     const localPath = str(input, 'localPath');
     const account = str(input, 'accountName');
     if (!direction || !container || !blobName || !localPath || !account) {
-      return fail('cloud:az:storage:blob:cp', 'direction, container, blobName, localPath, accountName required');
+      return fail('cloud_az_storage_blob_cp', 'direction, container, blobName, localPath, accountName required');
     }
     const flags = azFlags(input);
     const verb = direction === 'upload' ? 'upload' : 'download';
@@ -172,7 +172,7 @@ export const azStorageBlobCpTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 30 * 60_000 });
-    if (r.spawnError) { return fail('cloud:az:storage:blob:cp', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_storage_blob_cp', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzBlobCpData = { direction, container, blobName, localPath, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -205,7 +205,7 @@ interface AzBlobRmData {
 }
 
 export const azStorageBlobRmTool: Tool = {
-  id: 'cloud:az:storage:blob:rm',
+  id: 'cloud_az_storage_blob_rm',
   description: 'Delete a blob. Always gated.',
   inputSchema: {
     type: 'object',
@@ -224,7 +224,7 @@ export const azStorageBlobRmTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = azFlags(input);
     return {
-      title: 'cloud:az:storage:blob:rm',
+      title: 'cloud_az_storage_blob_rm',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Account: \`${str(input, 'accountName')}\`, container: \`${str(input, 'container')}\``,
@@ -241,7 +241,7 @@ export const azStorageBlobRmTool: Tool = {
     const container = str(input, 'container');
     const blobName = str(input, 'blobName');
     const account = str(input, 'accountName');
-    if (!container || !blobName || !account) { return fail('cloud:az:storage:blob:rm', 'container, blobName, accountName required'); }
+    if (!container || !blobName || !account) { return fail('cloud_az_storage_blob_rm', 'container, blobName, accountName required'); }
     const flags = azFlags(input);
     const argv = ['az', 'storage', 'blob', 'delete',
       '--container-name', container,
@@ -255,7 +255,7 @@ export const azStorageBlobRmTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:storage:blob:rm', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_storage_blob_rm', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzBlobRmData = { container, blobName, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

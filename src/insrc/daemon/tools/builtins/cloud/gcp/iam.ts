@@ -17,7 +17,7 @@ interface GcpIamWhoAmIData {
 }
 
 export const gcpIamWhoAmITool: Tool = {
-  id: 'cloud:gcp:iam:whoami',
+  id: 'cloud_gcp_iam_whoami',
   description: 'Return the active gcloud account and project (auth list + config list).',
   inputSchema: {
     type: 'object',
@@ -35,7 +35,7 @@ export const gcpIamWhoAmITool: Tool = {
       runShell(authArgv, { timeoutMs: 20_000 }),
       runShell(cfgArgv,  { timeoutMs: 20_000 }),
     ]);
-    if (auth.spawnError) { return fail('cloud:gcp:iam:whoami', `gcloud not found: ${auth.stderr.trim()}`); }
+    if (auth.spawnError) { return fail('cloud_gcp_iam_whoami', `gcloud not found: ${auth.stderr.trim()}`); }
     const ok = auth.code === 0 && cfg.code === 0;
     const parsed = {
       auth: tryParseJson(auth.stdout),

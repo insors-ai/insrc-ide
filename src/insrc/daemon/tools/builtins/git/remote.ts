@@ -23,7 +23,7 @@ export interface GitRemoteData {
 }
 
 export const gitRemoteTool: Tool = {
-  id: 'git:remote',
+  id: 'git_remote',
   description: 'Manage remote URLs. list is read-only; add / remove / set-url / rename gate.',
   inputSchema: {
     type: 'object',
@@ -69,8 +69,8 @@ export const gitRemoteTool: Tool = {
 
     if (op === 'list') {
       const r = await runShell(['git', 'remote', '-v'], { cwd, timeoutMs: 10_000 });
-      if (r.spawnError) { return spawnFail('git:remote', r.stderr); }
-      if (r.code !== 0) { return fail('git:remote', r.stderr, r.stdout, r.code); }
+      if (r.spawnError) { return spawnFail('git_remote', r.stderr); }
+      if (r.code !== 0) { return fail('git_remote', r.stderr, r.stdout, r.code); }
       const remotes = parseRemotes(r.stdout);
       const body = remotes.length === 0
         ? '_No remotes configured._'
@@ -80,31 +80,31 @@ export const gitRemoteTool: Tool = {
     }
 
     const name = str(input, 'name');
-    if (!name) { return fail('git:remote', `missing name for ${op}`, '', 1); }
+    if (!name) { return fail('git_remote', `missing name for ${op}`, '', 1); }
 
     let argv: string[];
     if (op === 'add') {
       const url = str(input, 'url');
-      if (!url) { return fail('git:remote', 'add requires url', '', 1); }
+      if (!url) { return fail('git_remote', 'add requires url', '', 1); }
       argv = ['git', 'remote', 'add', name, url];
     } else if (op === 'remove') {
       argv = ['git', 'remote', 'remove', name];
     } else if (op === 'set-url') {
       const url = str(input, 'url');
-      if (!url) { return fail('git:remote', 'set-url requires url', '', 1); }
+      if (!url) { return fail('git_remote', 'set-url requires url', '', 1); }
       argv = ['git', 'remote', 'set-url'];
       if (input['push'] === true) { argv.push('--push'); }
       argv.push(name, url);
     } else {
       // rename
       const newName = str(input, 'newName');
-      if (!newName) { return fail('git:remote', 'rename requires newName', '', 1); }
+      if (!newName) { return fail('git_remote', 'rename requires newName', '', 1); }
       argv = ['git', 'remote', 'rename', name, newName];
     }
 
     const r = await runShell(argv, { cwd, timeoutMs: 10_000 });
-    if (r.spawnError) { return spawnFail('git:remote', r.stderr); }
-    if (r.code !== 0) { return fail('git:remote', r.stderr, r.stdout, r.code); }
+    if (r.spawnError) { return spawnFail('git_remote', r.stderr); }
+    if (r.code !== 0) { return fail('git_remote', r.stderr, r.stdout, r.code); }
 
     const data: GitRemoteData = { op, name };
     if (op === 'add' || op === 'set-url') {

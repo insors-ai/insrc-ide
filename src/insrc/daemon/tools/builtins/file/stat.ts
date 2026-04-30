@@ -20,7 +20,7 @@ export interface FileStatData {
 }
 
 export const fileStatTool: Tool = {
-  id: 'file:stat',
+  id: 'file_stat',
   description: 'Get file / directory metadata (size, mtime, mode). Follows symlinks by default.',
   inputSchema: {
     type: 'object',
@@ -35,7 +35,7 @@ export const fileStatTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:stat', 'missing path'); }
+    if (!path) { return fail('file_stat', 'missing path'); }
     const follow = input['followSymlinks'] !== false;
 
     try {
@@ -73,7 +73,7 @@ export const fileStatTool: Tool = {
 
       return { output: body, format: 'markdown', success: true, data };
     } catch (err) {
-      return fail('file:stat', `stat failed: ${(err as Error).message}`);
+      return fail('file_stat', `stat failed: ${(err as Error).message}`);
     }
   },
 };

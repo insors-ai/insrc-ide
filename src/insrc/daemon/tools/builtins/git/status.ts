@@ -39,7 +39,7 @@ export interface GitStatusEntry {
 // ---------------------------------------------------------------------------
 
 export const gitStatusTool: Tool = {
-  id: 'git:status',
+  id: 'git_status',
   description: 'Show working tree status -- staged, unstaged, untracked, and conflicted paths.',
   inputSchema: {
     type: 'object',

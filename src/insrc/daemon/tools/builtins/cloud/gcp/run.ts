@@ -26,7 +26,7 @@ interface GcpRunListData {
 }
 
 export const gcpRunListTool: Tool = {
-  id: 'cloud:gcp:run:list',
+  id: 'cloud_gcp_run_list',
   description: 'List Cloud Run services.',
   inputSchema: {
     type: 'object',
@@ -46,7 +46,7 @@ export const gcpRunListTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:run:list', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_run_list', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: GcpRunListData = { platform, exitCode: r.code, parsed, stdout: r.stdout };
@@ -78,7 +78,7 @@ interface GcpRunDeployData {
 }
 
 export const gcpRunDeployTool: Tool = {
-  id: 'cloud:gcp:run:deploy',
+  id: 'cloud_gcp_run_deploy',
   description: 'Deploy or update a Cloud Run service from a container image or source directory.',
   inputSchema: {
     type: 'object',
@@ -106,7 +106,7 @@ export const gcpRunDeployTool: Tool = {
     const flags = gcpFlags(input);
     const source = str(input, 'image') ? `image \`${str(input, 'image')}\`` : str(input, 'sourceDir') ? `source \`${str(input, 'sourceDir')}\`` : '_no source supplied_';
     return {
-      title: 'cloud:gcp:run:deploy',
+      title: 'cloud_gcp_run_deploy',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Service: \`${str(input, 'name')}\``,
@@ -122,11 +122,11 @@ export const gcpRunDeployTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const name = str(input, 'name');
-    if (!name) { return fail('cloud:gcp:run:deploy', 'name required'); }
+    if (!name) { return fail('cloud_gcp_run_deploy', 'name required'); }
     const flags = gcpFlags(input);
     const image = str(input, 'image');
     const sourceDir = str(input, 'sourceDir');
-    if (!image && !sourceDir) { return fail('cloud:gcp:run:deploy', 'image or sourceDir required'); }
+    if (!image && !sourceDir) { return fail('cloud_gcp_run_deploy', 'image or sourceDir required'); }
 
     const source: GcpRunDeployData['source'] = image ? 'image' : 'sourceDir';
     const argv = ['gcloud', 'run', 'deploy', name, '--format=json', '--quiet'];
@@ -154,7 +154,7 @@ export const gcpRunDeployTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 30 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:run:deploy', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_run_deploy', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: GcpRunDeployData = { name, source, exitCode: r.code, stdout: r.stdout, stderr: r.stderr, parsed };
@@ -184,7 +184,7 @@ interface GcpRunDeleteData {
 }
 
 export const gcpRunDeleteTool: Tool = {
-  id: 'cloud:gcp:run:delete',
+  id: 'cloud_gcp_run_delete',
   description: 'Delete a Cloud Run service. Requires confirmService to match name.',
   inputSchema: {
     type: 'object',
@@ -203,7 +203,7 @@ export const gcpRunDeleteTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:run:delete',
+      title: 'cloud_gcp_run_delete',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `**DELETE** Cloud Run service: \`${str(input, 'name')}\``,
@@ -218,8 +218,8 @@ export const gcpRunDeleteTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const name = str(input, 'name');
     const confirm = str(input, 'confirmService');
-    if (!name) { return fail('cloud:gcp:run:delete', 'name required'); }
-    if (confirm !== name) { return fail('cloud:gcp:run:delete', 'confirmService must equal name'); }
+    if (!name) { return fail('cloud_gcp_run_delete', 'name required'); }
+    if (confirm !== name) { return fail('cloud_gcp_run_delete', 'confirmService must equal name'); }
     const flags = gcpFlags(input);
     const argv = ['gcloud', 'run', 'services', 'delete', name, '--quiet', '--format=json'];
     const platform = str(input, 'platform') ?? 'managed';
@@ -228,7 +228,7 @@ export const gcpRunDeleteTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 5 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:run:delete', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_run_delete', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpRunDeleteData = { name, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

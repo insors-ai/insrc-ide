@@ -19,7 +19,7 @@ export interface FileDeleteData {
 }
 
 export const fileDeleteTool: Tool = {
-  id: 'file:delete',
+  id: 'file_delete',
   description: 'Delete a file or directory. Gates with content preview.',
   inputSchema: {
     type: 'object',
@@ -57,7 +57,7 @@ export const fileDeleteTool: Tool = {
       lines.push(`_(stat failed: ${(err as Error).message})_`);
     }
     return {
-      title: 'file:delete',
+      title: 'file_delete',
       content: lines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -68,22 +68,22 @@ export const fileDeleteTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:delete', 'missing path'); }
+    if (!path) { return fail('file_delete', 'missing path'); }
     const recursive = input['recursive'] === true;
 
     let stat;
     try { stat = await fs.stat(path); }
-    catch (err) { return fail('file:delete', `stat failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_delete', `stat failed: ${(err as Error).message}`); }
 
     if (stat.isDirectory()) {
       try { await fs.rm(path, { recursive, force: false }); }
-      catch (err) { return fail('file:delete', `rm failed: ${(err as Error).message}`); }
+      catch (err) { return fail('file_delete', `rm failed: ${(err as Error).message}`); }
       const data: FileDeleteData = { path, kind: 'directory', recursive };
       return { output: `Deleted directory \`${path}\`.`, format: 'markdown', success: true, data };
     }
 
     try { await fs.rm(path); }
-    catch (err) { return fail('file:delete', `rm failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_delete', `rm failed: ${(err as Error).message}`); }
     const data: FileDeleteData = { path, kind: 'file', bytes: stat.size };
     return { output: `Deleted \`${path}\` (${humanBytes(stat.size)}).`, format: 'markdown', success: true, data };
   },

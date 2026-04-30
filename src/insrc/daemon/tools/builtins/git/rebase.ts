@@ -29,7 +29,7 @@ export interface GitRebaseData {
 }
 
 export const gitRebaseTool: Tool = {
-  id: 'git:rebase',
+  id: 'git_rebase',
   description: 'Rebase the current branch onto a ref (or continue / abort / skip an in-progress rebase). Interactive mode unsupported.',
   inputSchema: {
     type: 'object',
@@ -72,7 +72,7 @@ export const gitRebaseTool: Tool = {
       lines.push('\n⚠️ HEAD is at or behind the tracked upstream -- `git push --force-with-lease` will be required afterward.');
     }
     return {
-      title: 'git:rebase',
+      title: 'git_rebase',
       content: lines.join('\n'),
       actions: [ { name: 'approve', label: 'Approve' }, { name: 'skip', label: 'Skip' } ],
     };
@@ -85,19 +85,19 @@ export const gitRebaseTool: Tool = {
     if (op !== 'start') {
       const argv = ['git', 'rebase', `--${op}`];
       const r = await runShell(argv, { cwd, timeoutMs: 120_000 });
-      if (r.spawnError) { return spawnFail('git:rebase', r.stderr); }
+      if (r.spawnError) { return spawnFail('git_rebase', r.stderr); }
       if (r.code !== 0) {
         const conflicts = await listConflicts(cwd);
         if (conflicts.length > 0) {
           return conflictResult(op, cwd, conflicts);
         }
-        return fail('git:rebase', r.stderr, r.stdout, r.code);
+        return fail('git_rebase', r.stderr, r.stdout, r.code);
       }
       return okResult(op, cwd);
     }
 
     const onto = str(input, 'onto');
-    if (!onto) { return fail('git:rebase', 'missing onto for op=start', '', 1); }
+    if (!onto) { return fail('git_rebase', 'missing onto for op=start', '', 1); }
     const upstream = str(input, 'upstream');
     const autostash = input['autostash'] === true;
     const rerere = input['rerereAutoupdate'] === true;
@@ -109,13 +109,13 @@ export const gitRebaseTool: Tool = {
     else           { argv.push(onto); }
 
     const r = await runShell(argv, { cwd, timeoutMs: 240_000 });
-    if (r.spawnError) { return spawnFail('git:rebase', r.stderr); }
+    if (r.spawnError) { return spawnFail('git_rebase', r.stderr); }
     if (r.code !== 0) {
       const conflicts = await listConflicts(cwd);
       if (conflicts.length > 0) {
         return conflictResult('start', cwd, conflicts, onto);
       }
-      return fail('git:rebase', r.stderr, r.stdout, r.code);
+      return fail('git_rebase', r.stderr, r.stdout, r.code);
     }
     return okResult('start', cwd, onto);
   },
@@ -139,7 +139,7 @@ async function conflictResult(op: GitRebaseOp, cwd: string, conflicts: string[],
     ...conflicts.slice(0, 40).map(p => `- \`${p}\``),
     conflicts.length > 40 ? `- _... and ${conflicts.length - 40} more_` : '',
     '',
-    'Resolve, `git add`, then re-run `git:rebase` with `op: continue`. Or `op: abort`.',
+    'Resolve, `git add`, then re-run `git_rebase` with `op: continue`. Or `op: abort`.',
   ].filter(Boolean).join('\n');
   return { output: body, format: 'markdown', success: false, error: 'rebase conflict', data };
 }

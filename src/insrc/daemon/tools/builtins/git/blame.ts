@@ -31,7 +31,7 @@ export interface GitBlameData {
 }
 
 export const gitBlameTool: Tool = {
-  id: 'git:blame',
+  id: 'git_blame',
   description: 'Show line-level authorship for a file (optionally a range).',
   inputSchema: {
     type: 'object',

@@ -202,7 +202,7 @@ function makeWebSearchTask(index: number, query: string): Task {
     kind: 'tool',
     intent: 'research',
     stateKey: K.FINDINGS,
-    toolId: 'web:search',
+    toolId: 'web_search',
     toolInput: { query },
   };
 }

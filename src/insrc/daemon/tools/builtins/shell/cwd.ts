@@ -34,7 +34,7 @@ export function getSessionCwd(session: Session | null | undefined): string {
 }
 
 export const shellCwdTool: Tool = {
-  id: 'shell:cwd',
+  id: 'shell_cwd',
   description: 'Get or set the session-scoped working directory. op=get is read-only; op=set updates the session default.',
   inputSchema: {
     type: 'object',

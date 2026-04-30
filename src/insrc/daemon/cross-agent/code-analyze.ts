@@ -1,5 +1,5 @@
 /**
- * `code:analyze` -- Flow-2 cross-agent dispatch entry
+ * `code_analyze` -- Flow-2 cross-agent dispatch entry
  * (plans/analyzers/code-analyzer.md Phase 3.6).
  *
  * Sibling analyzer families (data-analyzer, deployment-analyzer)
@@ -109,7 +109,7 @@ interface CodeAnalyzeResult {
 // ---------------------------------------------------------------------------
 
 export const codeAnalyzeTool: Tool = {
-	id: 'code:analyze',
+	id: 'code_analyze',
 	description:
 		'Cross-agent Flow-2 dispatch: run a sibling-supplied AnalysisTask[] through the Code Analyzer\'s per-task tool loop. Skips planning + reviews + gates -- caller does its own review against the returned findings. 60 s envelope. Returns a structured payload with stitched report + findings + citations.',
 	inputSchema: {
@@ -429,7 +429,7 @@ function stitchFlow2Report(
 // ---------------------------------------------------------------------------
 
 /**
- * Register `code:analyze`. Called from the cross-agent index after
+ * Register `code_analyze`. Called from the cross-agent index after
  * the lookup tools (code:locate / code:trace / code:describe).
  */
 export function registerCodeAnalyzeFlow2Tool(): void {

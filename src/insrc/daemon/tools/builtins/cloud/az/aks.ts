@@ -21,7 +21,7 @@ interface AzAksListData {
 }
 
 export const azAksListTool: Tool = {
-  id: 'cloud:az:aks:list',
+  id: 'cloud_az_aks_list',
   description: 'List AKS clusters (scoped to resourceGroup when supplied).',
   inputSchema: {
     type: 'object',
@@ -34,7 +34,7 @@ export const azAksListTool: Tool = {
     const flags = azFlags(input);
     const argv = ['az', 'aks', 'list', '--output', 'json', ...azArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:aks:list', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_aks_list', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AzAksListData = { exitCode: r.code, parsed, stdout: r.stdout };

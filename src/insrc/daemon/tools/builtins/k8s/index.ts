@@ -95,7 +95,7 @@ interface K8sGetData {
 }
 
 export const k8sGetTool: Tool = {
-  id: 'k8s:get',
+  id: 'k8s_get',
   description: 'Read k8s resources (pods, deployments, svc, ...). Supports selectors; no write side effects.',
   inputSchema: {
     type: 'object',
@@ -116,7 +116,7 @@ export const k8sGetTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const resource = str(input, 'resource');
-    if (!resource) { return fail('k8s:get', 'resource required'); }
+    if (!resource) { return fail('k8s_get', 'resource required'); }
     const cluster = clusterFlags(input);
     const describe = bool(input, 'describe') ?? false;
     const format = str(input, 'output') ?? 'yaml';
@@ -133,7 +133,7 @@ export const k8sGetTool: Tool = {
     argv.push(...clusterArgv(cluster));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('k8s:get', `kubectl not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('k8s_get', `kubectl not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: K8sGetData = {
       resource, name, cluster, format: describe ? 'describe' : format,
@@ -176,7 +176,7 @@ async function writeManifestToTemp(yaml: string): Promise<string> {
 }
 
 export const k8sApplyTool: Tool = {
-  id: 'k8s:apply',
+  id: 'k8s_apply',
   description: 'Apply a k8s manifest. Shows server-side diff before applying.',
   inputSchema: {
     type: 'object',
@@ -229,7 +229,7 @@ export const k8sApplyTool: Tool = {
     const diffPreview = diff.length > 3000 ? diff.slice(0, 3000) + '\n... (diff truncated)' : diff;
 
     return {
-      title: 'k8s:apply',
+      title: 'k8s_apply',
       content: [
         `Cluster: **${clusterDescription(cluster)}**`,
         source,
@@ -251,7 +251,7 @@ export const k8sApplyTool: Tool = {
     const cluster = clusterFlags(input);
     const path = str(input, 'manifestPath');
     const inline = str(input, 'manifest');
-    if (!path && !inline) { return fail('k8s:apply', 'manifestPath or manifest required'); }
+    if (!path && !inline) { return fail('k8s_apply', 'manifestPath or manifest required'); }
 
     let source: 'inline' | 'file';
     let manifestPath: string;
@@ -273,7 +273,7 @@ export const k8sApplyTool: Tool = {
 
     try {
       const r = await runShell(argv, { timeoutMs: 180_000 });
-      if (r.spawnError) { return fail('k8s:apply', `kubectl not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('k8s_apply', `kubectl not found: ${r.stderr.trim()}`); }
       const ok = r.code === 0;
       const data: K8sApplyData = {
         source,
@@ -320,7 +320,7 @@ function deleteTarget(input: ToolInput): string {
 }
 
 export const k8sDeleteTool: Tool = {
-  id: 'k8s:delete',
+  id: 'k8s_delete',
   description: 'Delete k8s resources. Always gated. Refuses wholesale wipes without confirmNamespace.',
   inputSchema: {
     type: 'object',
@@ -342,7 +342,7 @@ export const k8sDeleteTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const cluster = clusterFlags(input);
     return {
-      title: 'k8s:delete',
+      title: 'k8s_delete',
       content: [
         `Cluster: **${clusterDescription(cluster)}**`,
         `Resource: \`${str(input, 'resource')}\``,
@@ -359,7 +359,7 @@ export const k8sDeleteTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const resource = str(input, 'resource');
-    if (!resource) { return fail('k8s:delete', 'resource required'); }
+    if (!resource) { return fail('k8s_delete', 'resource required'); }
     const cluster = clusterFlags(input);
     const all = bool(input, 'all') === true;
     const name = str(input, 'name');
@@ -369,13 +369,13 @@ export const k8sDeleteTool: Tool = {
       const ns = cluster.namespace;
       const confirm = str(input, 'confirmNamespace');
       if (!ns) {
-        return fail('k8s:delete', 'all:true requires an explicit namespace');
+        return fail('k8s_delete', 'all:true requires an explicit namespace');
       }
       if (confirm !== ns) {
-        return fail('k8s:delete', `all:true requires confirmNamespace to match namespace (${ns})`);
+        return fail('k8s_delete', `all:true requires confirmNamespace to match namespace (${ns})`);
       }
     } else if (!name && !label) {
-      return fail('k8s:delete', 'name or labelSelector required (or all:true)');
+      return fail('k8s_delete', 'name or labelSelector required (or all:true)');
     }
 
     const argv = ['kubectl', 'delete', resource];
@@ -386,7 +386,7 @@ export const k8sDeleteTool: Tool = {
     argv.push(...clusterArgv(cluster));
 
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('k8s:delete', `kubectl not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('k8s_delete', `kubectl not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: K8sDeleteData = {
       resource, target: deleteTarget(input), cluster,
@@ -426,7 +426,7 @@ const DEFAULT_FOLLOW_RUNTIME = 10 * 60_000;
 const MAX_FOLLOW_RUNTIME = 30 * 60_000;
 
 export const k8sLogsTool: Tool = {
-  id: 'k8s:logs',
+  id: 'k8s_logs',
   description: 'Fetch pod logs. Follow mode streams; otherwise returns a one-shot snapshot.',
   inputSchema: {
     type: 'object',
@@ -447,7 +447,7 @@ export const k8sLogsTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const pod = str(input, 'pod');
-    if (!pod) { return fail('k8s:logs', 'pod required'); }
+    if (!pod) { return fail('k8s_logs', 'pod required'); }
     const cluster = clusterFlags(input);
     const container = str(input, 'container');
     const follow = bool(input, 'follow') ?? false;
@@ -464,7 +464,7 @@ export const k8sLogsTool: Tool = {
 
     if (!follow) {
       const r = await runShell(argv, { timeoutMs: 60_000 });
-      if (r.spawnError) { return fail('k8s:logs', `kubectl not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('k8s_logs', `kubectl not found: ${r.stderr.trim()}`); }
       const ok = r.code === 0;
       const data: K8sLogsData = {
         pod, container, cluster, follow: false,
@@ -526,7 +526,7 @@ export const k8sLogsTool: Tool = {
         clearTimeout(timer);
         deps.signal?.removeEventListener('abort', onAbort);
         flush();
-        resolve(fail('k8s:logs', `spawn failed: ${err.message}`));
+        resolve(fail('k8s_logs', `spawn failed: ${err.message}`));
       });
 
       child.on('close', code => {
@@ -575,7 +575,7 @@ const DEFAULT_EXEC_TIMEOUT = 120_000;
 const MAX_EXEC_TIMEOUT = 10 * 60_000;
 
 export const k8sExecTool: Tool = {
-  id: 'k8s:exec',
+  id: 'k8s_exec',
   description: 'Exec a one-shot command in a pod container. Always gated.',
   inputSchema: {
     type: 'object',
@@ -600,7 +600,7 @@ export const k8sExecTool: Tool = {
     const pod = str(input, 'pod');
     const container = str(input, 'container');
     return {
-      title: 'k8s:exec',
+      title: 'k8s_exec',
       content: [
         `Cluster: **${clusterDescription(cluster)}**`,
         `Pod: \`${pod}\`${container ? ` / container \`${container}\`` : ''}`,
@@ -619,11 +619,11 @@ export const k8sExecTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const pod = str(input, 'pod');
-    if (!pod) { return fail('k8s:exec', 'pod required'); }
+    if (!pod) { return fail('k8s_exec', 'pod required'); }
     const cmd = Array.isArray(input['command'])
       ? (input['command'] as unknown[]).map(String)
       : [];
-    if (cmd.length === 0) { return fail('k8s:exec', 'command required (non-empty argv)'); }
+    if (cmd.length === 0) { return fail('k8s_exec', 'command required (non-empty argv)'); }
     const cluster = clusterFlags(input);
     const container = str(input, 'container');
     const stdin = str(input, 'stdin');
@@ -657,7 +657,7 @@ export const k8sExecTool: Tool = {
       child.on('error', err => {
         clearTimeout(timer);
         deps.signal?.removeEventListener('abort', onAbort);
-        resolve(fail('k8s:exec', `spawn failed: ${err.message}`));
+        resolve(fail('k8s_exec', `spawn failed: ${err.message}`));
       });
       child.on('close', code => {
         clearTimeout(timer);

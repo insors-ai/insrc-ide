@@ -26,7 +26,7 @@ interface AwsRdsDescribeData {
 }
 
 export const awsRdsDescribeTool: Tool = {
-  id: 'cloud:aws:rds:describe',
+  id: 'cloud_aws_rds_describe',
   description: 'Describe RDS DB instances (optionally filtered by identifier).',
   inputSchema: {
     type: 'object',
@@ -51,7 +51,7 @@ export const awsRdsDescribeTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:rds:describe', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_rds_describe', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsRdsDescribeData = { dbInstanceId: id, exitCode: r.code, parsed, stdout: r.stdout };
@@ -82,7 +82,7 @@ interface AwsRdsStateChangeData {
 }
 
 export const awsRdsStartTool: Tool = {
-  id: 'cloud:aws:rds:start',
+  id: 'cloud_aws_rds_start',
   description: 'Start a stopped RDS DB instance.',
   inputSchema: {
     type: 'object',
@@ -98,7 +98,7 @@ export const awsRdsStartTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:rds:start',
+      title: 'cloud_aws_rds_start',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Start DB instance: \`${str(input, 'dbInstanceId')}\``,
@@ -112,11 +112,11 @@ export const awsRdsStartTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const id = str(input, 'dbInstanceId');
-    if (!id) { return fail('cloud:aws:rds:start', 'dbInstanceId required'); }
+    if (!id) { return fail('cloud_aws_rds_start', 'dbInstanceId required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'rds', 'start-db-instance', '--db-instance-identifier', id, ...awsArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:rds:start', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_rds_start', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsRdsStateChangeData = { dbInstanceId: id, action: 'start', exitCode: r.code, parsed, stdout: r.stdout };
@@ -138,7 +138,7 @@ export const awsRdsStartTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const awsRdsStopTool: Tool = {
-  id: 'cloud:aws:rds:stop',
+  id: 'cloud_aws_rds_stop',
   description: 'Stop an RDS DB instance (up to 7 days without auto-start).',
   inputSchema: {
     type: 'object',
@@ -155,7 +155,7 @@ export const awsRdsStopTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:rds:stop',
+      title: 'cloud_aws_rds_stop',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Stop DB instance: \`${str(input, 'dbInstanceId')}\``,
@@ -170,7 +170,7 @@ export const awsRdsStopTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const id = str(input, 'dbInstanceId');
-    if (!id) { return fail('cloud:aws:rds:stop', 'dbInstanceId required'); }
+    if (!id) { return fail('cloud_aws_rds_stop', 'dbInstanceId required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'rds', 'stop-db-instance', '--db-instance-identifier', id];
     const snap = str(input, 'dbSnapshotIdentifier');
@@ -178,7 +178,7 @@ export const awsRdsStopTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:rds:stop', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_rds_stop', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsRdsStateChangeData = { dbInstanceId: id, action: 'stop', exitCode: r.code, parsed, stdout: r.stdout };

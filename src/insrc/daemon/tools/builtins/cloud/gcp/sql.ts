@@ -22,7 +22,7 @@ interface GcpSqlDescribeData {
 }
 
 export const gcpSqlDescribeTool: Tool = {
-  id: 'cloud:gcp:sql:describe',
+  id: 'cloud_gcp_sql_describe',
   description: 'Describe a Cloud SQL instance (or list all when instance omitted).',
   inputSchema: {
     type: 'object',
@@ -43,7 +43,7 @@ export const gcpSqlDescribeTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:sql:describe', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_sql_describe', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: GcpSqlDescribeData = { instance: inst, exitCode: r.code, parsed, stdout: r.stdout };
@@ -82,7 +82,7 @@ function patchActivationPolicyArgv(instance: string, policy: 'ALWAYS' | 'NEVER',
 }
 
 export const gcpSqlStartTool: Tool = {
-  id: 'cloud:gcp:sql:start',
+  id: 'cloud_gcp_sql_start',
   description: 'Start a Cloud SQL instance (activation-policy=ALWAYS).',
   inputSchema: {
     type: 'object',
@@ -98,7 +98,7 @@ export const gcpSqlStartTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:sql:start',
+      title: 'cloud_gcp_sql_start',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Start Cloud SQL instance: \`${str(input, 'instance')}\``,
@@ -112,10 +112,10 @@ export const gcpSqlStartTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const instance = str(input, 'instance');
-    if (!instance) { return fail('cloud:gcp:sql:start', 'instance required'); }
+    if (!instance) { return fail('cloud_gcp_sql_start', 'instance required'); }
     const flags = gcpFlags(input);
     const r = await runShell(patchActivationPolicyArgv(instance, 'ALWAYS', flags), { timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:sql:start', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_sql_start', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpSqlStateData = { instance, action: 'start', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -132,7 +132,7 @@ export const gcpSqlStartTool: Tool = {
 };
 
 export const gcpSqlStopTool: Tool = {
-  id: 'cloud:gcp:sql:stop',
+  id: 'cloud_gcp_sql_stop',
   description: 'Stop a Cloud SQL instance (activation-policy=NEVER).',
   inputSchema: {
     type: 'object',
@@ -148,7 +148,7 @@ export const gcpSqlStopTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:sql:stop',
+      title: 'cloud_gcp_sql_stop',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Stop Cloud SQL instance: \`${str(input, 'instance')}\``,
@@ -162,10 +162,10 @@ export const gcpSqlStopTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const instance = str(input, 'instance');
-    if (!instance) { return fail('cloud:gcp:sql:stop', 'instance required'); }
+    if (!instance) { return fail('cloud_gcp_sql_stop', 'instance required'); }
     const flags = gcpFlags(input);
     const r = await runShell(patchActivationPolicyArgv(instance, 'NEVER', flags), { timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:sql:stop', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_sql_stop', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpSqlStateData = { instance, action: 'stop', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

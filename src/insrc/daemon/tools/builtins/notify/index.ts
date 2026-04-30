@@ -77,7 +77,7 @@ interface SlackSendData {
 }
 
 export const notifySlackTool: Tool = {
-  id: 'notify:slack',
+  id: 'notify_slack',
   description: 'Post a Slack message via an incoming webhook URL or a bot token + channel.',
   inputSchema: {
     type: 'object',
@@ -103,7 +103,7 @@ export const notifySlackTool: Tool = {
     const bot = str(input, 'botToken');
     const channel = str(input, 'channel');
     return {
-      title: 'notify:slack',
+      title: 'notify_slack',
       content: [
         webhook ? `Webhook host: \`${webhookHost(webhook)}\`` : '',
         bot     ? `Bot token: ${redactLen(bot)}, channel: \`${channel ?? '?'}\`` : '',
@@ -125,7 +125,7 @@ export const notifySlackTool: Tool = {
     const blocks = input['blocks'];
     const attachments = input['attachments'];
     if (!text && blocks === undefined && attachments === undefined) {
-      return fail('notify:slack', 'text, blocks, or attachments required');
+      return fail('notify_slack', 'text, blocks, or attachments required');
     }
 
     let webhookUrl = str(input, 'webhookUrl');
@@ -134,8 +134,8 @@ export const notifySlackTool: Tool = {
     }
     const botToken = str(input, 'botToken');
     const channel = str(input, 'channel');
-    if (!webhookUrl && !botToken) { return fail('notify:slack', 'webhookUrl or botToken required (or set insrc.tools.notify.slack.defaultWebhookRef)'); }
-    if (botToken && !channel)     { return fail('notify:slack', 'botToken requires channel'); }
+    if (!webhookUrl && !botToken) { return fail('notify_slack', 'webhookUrl or botToken required (or set insrc.tools.notify.slack.defaultWebhookRef)'); }
+    if (botToken && !channel)     { return fail('notify_slack', 'botToken requires channel'); }
 
     const payload: Record<string, unknown> = {};
     if (text !== undefined)         { payload['text'] = text; }
@@ -181,7 +181,7 @@ export const notifySlackTool: Tool = {
         data,
       };
     } catch (err: unknown) {
-      return fail('notify:slack', `request failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('notify_slack', `request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };
@@ -197,7 +197,7 @@ interface DiscordSendData {
 }
 
 export const notifyDiscordTool: Tool = {
-  id: 'notify:discord',
+  id: 'notify_discord',
   description: 'Post a message to a Discord incoming webhook URL (webhookUrl optional when insrc.tools.notify.discord.defaultWebhookRef is set).',
   inputSchema: {
     type: 'object',
@@ -216,7 +216,7 @@ export const notifyDiscordTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const content = str(input, 'content') ?? '';
     return {
-      title: 'notify:discord',
+      title: 'notify_discord',
       content: [
         `Webhook host: \`${webhookHost(str(input, 'webhookUrl') ?? '')}\``,
         '',
@@ -237,11 +237,11 @@ export const notifyDiscordTool: Tool = {
     if (!webhookUrl) {
       webhookUrl = await resolveSecretRef(getToolSettings().notify.discord.defaultWebhookRef);
     }
-    if (!webhookUrl) { return fail('notify:discord', 'webhookUrl required (or set insrc.tools.notify.discord.defaultWebhookRef)'); }
+    if (!webhookUrl) { return fail('notify_discord', 'webhookUrl required (or set insrc.tools.notify.discord.defaultWebhookRef)'); }
     const content = str(input, 'content');
     const embeds = input['embeds'];
     if (content === undefined && embeds === undefined) {
-      return fail('notify:discord', 'content or embeds required');
+      return fail('notify_discord', 'content or embeds required');
     }
 
     const payload: Record<string, unknown> = {};
@@ -273,7 +273,7 @@ export const notifyDiscordTool: Tool = {
         data,
       };
     } catch (err: unknown) {
-      return fail('notify:discord', `request failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('notify_discord', `request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };
@@ -290,7 +290,7 @@ interface TeamsSendData {
 }
 
 export const notifyTeamsTool: Tool = {
-  id: 'notify:teams',
+  id: 'notify_teams',
   description: 'Post to a Microsoft Teams incoming webhook (webhookUrl optional when insrc.tools.notify.teams.defaultWebhookRef is set).',
   inputSchema: {
     type: 'object',
@@ -308,7 +308,7 @@ export const notifyTeamsTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const text = str(input, 'text') ?? '';
     return {
-      title: 'notify:teams',
+      title: 'notify_teams',
       content: [
         `Webhook host: \`${webhookHost(str(input, 'webhookUrl') ?? '')}\``,
         str(input, 'title') ? `Title: \`${str(input, 'title')}\`` : '',
@@ -327,7 +327,7 @@ export const notifyTeamsTool: Tool = {
     if (!webhookUrl) {
       webhookUrl = await resolveSecretRef(getToolSettings().notify.teams.defaultWebhookRef);
     }
-    if (!webhookUrl) { return fail('notify:teams', 'webhookUrl required (or set insrc.tools.notify.teams.defaultWebhookRef)'); }
+    if (!webhookUrl) { return fail('notify_teams', 'webhookUrl required (or set insrc.tools.notify.teams.defaultWebhookRef)'); }
     const text = str(input, 'text');
     const title = str(input, 'title');
     const card = input['adaptiveCard'];
@@ -358,7 +358,7 @@ export const notifyTeamsTool: Tool = {
       };
       payloadType = 'text';
     } else {
-      return fail('notify:teams', 'text, adaptiveCard, or rawPayload required');
+      return fail('notify_teams', 'text, adaptiveCard, or rawPayload required');
     }
 
     try {
@@ -381,7 +381,7 @@ export const notifyTeamsTool: Tool = {
         data,
       };
     } catch (err: unknown) {
-      return fail('notify:teams', `request failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('notify_teams', `request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };
@@ -438,7 +438,7 @@ function parseAttachments(raw: unknown): EmailAttachmentInput[] {
 }
 
 export const notifyEmailTool: Tool = {
-  id: 'notify:email',
+  id: 'notify_email',
   description: 'Send an email via SMTP (nodemailer). Supports multiple recipients and attachments.',
   inputSchema: {
     type: 'object',
@@ -485,7 +485,7 @@ export const notifyEmailTool: Tool = {
     const attachments = parseAttachments(input['attachments']);
     const bodyPreview = str(input, 'text') ?? '';
     return {
-      title: 'notify:email',
+      title: 'notify_email',
       content: [
         `SMTP: \`${str(input, 'smtpHost')}:${num(input, 'smtpPort') ?? '<default>'}\` (user: \`${str(input, 'smtpUser') ?? '<none>'}\`, password: ${redactLen(str(input, 'smtpPass'))})`,
         `From: \`${str(input, 'from')}\``,
@@ -510,13 +510,13 @@ export const notifyEmailTool: Tool = {
     const subject = str(input, 'subject');
     const smtpHost = str(input, 'smtpHost') ?? (emailDefaults.smtpHost || undefined);
     if (!from || to.length === 0 || !subject || !smtpHost) {
-      return fail('notify:email', 'from, to, subject, smtpHost required (defaults via insrc.tools.notify.email.*)');
+      return fail('notify_email', 'from, to, subject, smtpHost required (defaults via insrc.tools.notify.email.*)');
     }
     const cc = strList(input, 'cc');
     const bcc = strList(input, 'bcc');
     const text = str(input, 'text');
     const html = str(input, 'html');
-    if (!text && !html) { return fail('notify:email', 'text or html body required'); }
+    if (!text && !html) { return fail('notify_email', 'text or html body required'); }
 
     // Resolve SMTP credentials: per-call wins, then keychain refs.
     const smtpUser = str(input, 'smtpUser') ?? (await resolveSecretRef(emailDefaults.smtpUserRef));
@@ -574,7 +574,7 @@ export const notifyEmailTool: Tool = {
         data,
       };
     } catch (err: unknown) {
-      return fail('notify:email', `SMTP send failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('notify_email', `SMTP send failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       transporter.close();
     }

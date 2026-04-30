@@ -27,7 +27,7 @@ interface GcpComputeListData {
 }
 
 export const gcpComputeListTool: Tool = {
-  id: 'cloud:gcp:compute:list',
+  id: 'cloud_gcp_compute_list',
   description: 'List GCE VM instances (gcloud compute instances list).',
   inputSchema: {
     type: 'object',
@@ -53,7 +53,7 @@ export const gcpComputeListTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:compute:list', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_compute_list', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: GcpComputeListData = { filter, exitCode: r.code, parsed, stdout: r.stdout };
@@ -95,7 +95,7 @@ function requireZone(input: ToolInput, id: string): string | ToolResult {
 // ---------------------------------------------------------------------------
 
 export const gcpComputeStartTool: Tool = {
-  id: 'cloud:gcp:compute:start',
+  id: 'cloud_gcp_compute_start',
   description: 'Start GCE instances. Zonal -- zone is required.',
   inputSchema: {
     type: 'object',
@@ -112,7 +112,7 @@ export const gcpComputeStartTool: Tool = {
     const flags = gcpFlags(input);
     const names = instanceNamesFromInput(input);
     return {
-      title: 'cloud:gcp:compute:start',
+      title: 'cloud_gcp_compute_start',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Start: ${names.map(n => '`' + n + '`').join(', ')}`,
@@ -126,13 +126,13 @@ export const gcpComputeStartTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const names = instanceNamesFromInput(input);
-    if (names.length === 0) { return fail('cloud:gcp:compute:start', 'names required'); }
-    const z = requireZone(input, 'cloud:gcp:compute:start');
+    if (names.length === 0) { return fail('cloud_gcp_compute_start', 'names required'); }
+    const z = requireZone(input, 'cloud_gcp_compute_start');
     if (typeof z !== 'string') { return z; }
     const flags = gcpFlags(input);
     const argv = ['gcloud', 'compute', 'instances', 'start', ...names, '--zone', z, '--format=json', ...gcloudCommonArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 5 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:compute:start', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_compute_start', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpComputeStateData = { names, zone: z, action: 'start', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -153,7 +153,7 @@ export const gcpComputeStartTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const gcpComputeStopTool: Tool = {
-  id: 'cloud:gcp:compute:stop',
+  id: 'cloud_gcp_compute_stop',
   description: 'Stop GCE instances. Zonal.',
   inputSchema: {
     type: 'object',
@@ -171,7 +171,7 @@ export const gcpComputeStopTool: Tool = {
     const flags = gcpFlags(input);
     const names = instanceNamesFromInput(input);
     return {
-      title: 'cloud:gcp:compute:stop',
+      title: 'cloud_gcp_compute_stop',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Stop: ${names.map(n => '`' + n + '`').join(', ')}`,
@@ -185,15 +185,15 @@ export const gcpComputeStopTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const names = instanceNamesFromInput(input);
-    if (names.length === 0) { return fail('cloud:gcp:compute:stop', 'names required'); }
-    const z = requireZone(input, 'cloud:gcp:compute:stop');
+    if (names.length === 0) { return fail('cloud_gcp_compute_stop', 'names required'); }
+    const z = requireZone(input, 'cloud_gcp_compute_stop');
     if (typeof z !== 'string') { return z; }
     const flags = gcpFlags(input);
     const argv = ['gcloud', 'compute', 'instances', 'stop', ...names, '--zone', z, '--format=json'];
     if (input['discardLocalSsd'] === true) { argv.push('--discard-local-ssd=true'); }
     argv.push(...gcloudCommonArgv(flags));
     const r = await runShell(argv, { timeoutMs: 5 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:compute:stop', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_compute_stop', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpComputeStateData = { names, zone: z, action: 'stop', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {
@@ -214,7 +214,7 @@ export const gcpComputeStopTool: Tool = {
 // ---------------------------------------------------------------------------
 
 export const gcpComputeDeleteTool: Tool = {
-  id: 'cloud:gcp:compute:delete',
+  id: 'cloud_gcp_compute_delete',
   description: 'Delete GCE instances (irrecoverable). Requires confirmCount.',
   inputSchema: {
     type: 'object',
@@ -234,7 +234,7 @@ export const gcpComputeDeleteTool: Tool = {
     const flags = gcpFlags(input);
     const names = instanceNamesFromInput(input);
     return {
-      title: 'cloud:gcp:compute:delete',
+      title: 'cloud_gcp_compute_delete',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `**DELETE** (irrecoverable): ${names.map(n => '`' + n + '`').join(', ')}`,
@@ -249,12 +249,12 @@ export const gcpComputeDeleteTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const names = instanceNamesFromInput(input);
-    if (names.length === 0) { return fail('cloud:gcp:compute:delete', 'names required'); }
+    if (names.length === 0) { return fail('cloud_gcp_compute_delete', 'names required'); }
     const confirm = input['confirmCount'];
     if (typeof confirm !== 'number' || confirm !== names.length) {
-      return fail('cloud:gcp:compute:delete', `confirmCount must equal names.length (${names.length})`);
+      return fail('cloud_gcp_compute_delete', `confirmCount must equal names.length (${names.length})`);
     }
-    const z = requireZone(input, 'cloud:gcp:compute:delete');
+    const z = requireZone(input, 'cloud_gcp_compute_delete');
     if (typeof z !== 'string') { return z; }
     const flags = gcpFlags(input);
     const argv = ['gcloud', 'compute', 'instances', 'delete', ...names, '--zone', z, '--quiet', '--format=json'];
@@ -262,7 +262,7 @@ export const gcpComputeDeleteTool: Tool = {
     if (dd) { argv.push('--delete-disks', dd); }
     argv.push(...gcloudCommonArgv(flags));
     const r = await runShell(argv, { timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:compute:delete', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_compute_delete', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpComputeStateData = { names, zone: z, action: 'delete', exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

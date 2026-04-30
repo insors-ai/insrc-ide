@@ -26,7 +26,7 @@ export interface GitCommitData {
 }
 
 export const gitCommitTool: Tool = {
-  id: 'git:commit',
+  id: 'git_commit',
   description: 'Create a commit from the staged changes. Gates with diff + message preview.',
   inputSchema: {
     type: 'object',
@@ -56,7 +56,7 @@ export const gitCommitTool: Tool = {
     const author = str(input, 'author');
     const preview = previewMessage(message);
     return {
-      title: amend ? 'git:commit (amend)' : 'git:commit',
+      title: amend ? 'git:commit (amend)' : 'git_commit',
       content: [
         `Repo: \`${cwd}\``,
         '',
@@ -86,7 +86,7 @@ export const gitCommitTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const cwd = str(input, 'cwd') ?? process.cwd();
     const message = str(input, 'message');
-    if (!message) { return fail('git:commit', 'missing message', '', 1); }
+    if (!message) { return fail('git_commit', 'missing message', '', 1); }
 
     const author = str(input, 'author');
     const signoff = input['signoff'] === true;
@@ -99,7 +99,7 @@ export const gitCommitTool: Tool = {
     const branch = await currentBranch(cwd);
     if (!branch && !allowDetached) {
       return fail(
-        'git:commit',
+        'git_commit',
         'refusing to commit on detached HEAD -- rerun with allowDetached:true to override',
         '', 1,
       );
@@ -110,7 +110,7 @@ export const gitCommitTool: Tool = {
       const count = await stagedCount(cwd);
       if (count === 0) {
         return fail(
-          'git:commit',
+          'git_commit',
           'nothing staged -- run git:stage first, or pass allowEmpty:true for an empty commit',
           '', 1,
         );
@@ -125,8 +125,8 @@ export const gitCommitTool: Tool = {
     if (!verifyHooks) { argv.push('--no-verify'); }
 
     const result = await runShell(argv, { cwd, timeoutMs: 60_000 });
-    if (result.spawnError) { return spawnFail('git:commit', result.stderr); }
-    if (result.code !== 0) { return fail('git:commit', result.stderr, result.stdout, result.code); }
+    if (result.spawnError) { return spawnFail('git_commit', result.stderr); }
+    if (result.code !== 0) { return fail('git_commit', result.stderr, result.stdout, result.code); }
 
     const data = await collectCommitData(cwd, branch ?? '(detached)', message);
     const body = [

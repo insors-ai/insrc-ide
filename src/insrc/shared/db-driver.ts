@@ -65,7 +65,7 @@ export interface ConnectionConfig {
 	 *   - survive `pool.reload()` -- the prune pass skips them so a
 	 *     concurrent Data Sources edit doesn't drop the analyzer's
 	 *     ephemeral entries mid-run,
-	 *   - are visible to `db:list_connections` like any other entry,
+	 *   - are visible to `db_list_connections` like any other entry,
 	 *   - are auto-approved by the connection-approval gate (the
 	 *     user just typed the path; explicit consent).
 	 */

@@ -32,7 +32,7 @@ const DEFAULT_TAIL_RUNTIME = 10 * 60_000;
 const MAX_TAIL_RUNTIME = 30 * 60_000;
 
 export const awsLogsTailTool: Tool = {
-  id: 'cloud:aws:logs:tail',
+  id: 'cloud_aws_logs_tail',
   description: 'Tail CloudWatch Logs (live follow streams; one-shot otherwise).',
   inputSchema: {
     type: 'object',
@@ -52,7 +52,7 @@ export const awsLogsTailTool: Tool = {
 
   async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
     const logGroup = str(input, 'logGroup');
-    if (!logGroup) { return fail('cloud:aws:logs:tail', 'logGroup required'); }
+    if (!logGroup) { return fail('cloud_aws_logs_tail', 'logGroup required'); }
     const flags = awsFlags(input);
     const follow = bool(input, 'follow') ?? false;
 
@@ -68,7 +68,7 @@ export const awsLogsTailTool: Tool = {
 
     if (!follow) {
       const r = await runShell(argv, { timeoutMs: 120_000 });
-      if (r.spawnError) { return fail('cloud:aws:logs:tail', `aws CLI not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('cloud_aws_logs_tail', `aws CLI not found: ${r.stderr.trim()}`); }
       const ok = r.code === 0;
       const data: AwsLogsTailData = {
         logGroup, follow: false, exitCode: r.code,
@@ -121,7 +121,7 @@ export const awsLogsTailTool: Tool = {
         clearTimeout(timer);
         deps.signal?.removeEventListener('abort', onAbort);
         flush();
-        resolve(fail('cloud:aws:logs:tail', `spawn failed: ${err.message}`));
+        resolve(fail('cloud_aws_logs_tail', `spawn failed: ${err.message}`));
       });
       child.on('close', code => {
         clearTimeout(timer);
@@ -158,7 +158,7 @@ interface AwsLogsFilterData {
 }
 
 export const awsLogsFilterTool: Tool = {
-  id: 'cloud:aws:logs:filter',
+  id: 'cloud_aws_logs_filter',
   description: 'Run filter-log-events against a CloudWatch log group.',
   inputSchema: {
     type: 'object',
@@ -179,7 +179,7 @@ export const awsLogsFilterTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const logGroup = str(input, 'logGroup');
-    if (!logGroup) { return fail('cloud:aws:logs:filter', 'logGroup required'); }
+    if (!logGroup) { return fail('cloud_aws_logs_filter', 'logGroup required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'logs', 'filter-log-events', '--log-group-name', logGroup];
     const pattern = str(input, 'filterPattern');
@@ -197,7 +197,7 @@ export const awsLogsFilterTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:logs:filter', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_logs_filter', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsLogsFilterData = { logGroup, exitCode: r.code, parsed, stdout: r.stdout };

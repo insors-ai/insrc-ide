@@ -106,7 +106,7 @@ function countDiffLines(diff: string): { additions: number; deletions: number; h
 }
 
 export const diffComputeTool: Tool = {
-  id: 'diff:compute',
+  id: 'diff_compute',
   description: 'Compute a unified diff between two sources (inline content, file paths, or git refs).',
   inputSchema: {
     type: 'object',
@@ -144,23 +144,23 @@ export const diffComputeTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const a = parseSource(input['a']);
     const b = parseSource(input['b']);
-    if (!a || !b) { return fail('diff:compute', 'a and b must be source specs'); }
+    if (!a || !b) { return fail('diff_compute', 'a and b must be source specs'); }
     const cwd = str(input, 'cwd');
     const ma = await materializeSource(a, 'a', cwd);
     const mb = await materializeSource(b, 'b', cwd);
     try {
-      if (ma.error) { return fail('diff:compute', `side a: ${ma.error}`); }
-      if (mb.error) { return fail('diff:compute', `side b: ${mb.error}`); }
+      if (ma.error) { return fail('diff_compute', `side a: ${ma.error}`); }
+      if (mb.error) { return fail('diff_compute', `side b: ${mb.error}`); }
       const context = typeof input['contextLines'] === 'number' && Number.isFinite(input['contextLines'] as number)
         ? String(input['contextLines']) : '3';
       const labelA = str(input, 'labelA') ?? ma.path;
       const labelB = str(input, 'labelB') ?? mb.path;
       const argv = ['diff', '-u', `-U${context}`, '--label', labelA, '--label', labelB, ma.path, mb.path];
       const r = await runShell(argv, { cwd, timeoutMs: 60_000 });
-      if (r.spawnError) { return fail('diff:compute', `diff not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('diff_compute', `diff not found: ${r.stderr.trim()}`); }
       // diff exit codes: 0=identical, 1=different, >1=error.
       if (r.code !== 0 && r.code !== 1) {
-        return fail('diff:compute', `diff failed (exit ${r.code}): ${r.stderr.trim()}`);
+        return fail('diff_compute', `diff failed (exit ${r.code}): ${r.stderr.trim()}`);
       }
       const { additions, deletions, hunkCount } = countDiffLines(r.stdout);
       const data: DiffComputeData = {
@@ -210,7 +210,7 @@ async function writePatchToTemp(patch: string): Promise<string> {
 }
 
 export const diffApplyTool: Tool = {
-  id: 'diff:apply',
+  id: 'diff_apply',
   description: 'Apply a unified patch. Uses `git apply`; falls back to `patch` for plain hunks when git fails.',
   inputSchema: {
     type: 'object',
@@ -235,7 +235,7 @@ export const diffApplyTool: Tool = {
     const preview = patchPath ? `File: \`${patchPath}\`` : patch ? patch : '_no patch supplied_';
     const clamped = preview.length > 3000 ? preview.slice(0, 3000) + '\n... (truncated)' : preview;
     return {
-      title: 'diff:apply',
+      title: 'diff_apply',
       content: [
         `Target: \`${str(input, 'targetDir') ?? process.cwd()}\``,
         bool(input, 'reverse') === true ? 'Reverse apply (undoes the patch).' : '',
@@ -258,7 +258,7 @@ export const diffApplyTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const patch = str(input, 'patch');
     const patchPath = str(input, 'patchPath');
-    if (!patch && !patchPath) { return fail('diff:apply', 'patch or patchPath required'); }
+    if (!patch && !patchPath) { return fail('diff_apply', 'patch or patchPath required'); }
 
     const cwd = str(input, 'targetDir') ?? process.cwd();
     const dryRun = bool(input, 'dryRun') === true;
@@ -309,7 +309,7 @@ export const diffApplyTool: Tool = {
 
       const patchR = await runShell(patchArgv, { cwd, timeoutMs: 5 * 60_000 });
       if (patchR.spawnError && gitR.spawnError) {
-        return fail('diff:apply', `neither git nor patch is available: ${gitStderr || patchR.stderr.trim()}`);
+        return fail('diff_apply', `neither git nor patch is available: ${gitStderr || patchR.stderr.trim()}`);
       }
       const ok = patchR.code === 0;
       const data: DiffApplyData = {
@@ -385,7 +385,7 @@ function invertUnifiedDiff(patch: string): { inverted: string; hunks: number } {
 }
 
 export const diffInvertTool: Tool = {
-  id: 'diff:invert',
+  id: 'diff_invert',
   description: 'Return the inverse of a unified diff (applying the result undoes the original).',
   inputSchema: {
     type: 'object',
@@ -404,9 +404,9 @@ export const diffInvertTool: Tool = {
     if (inline) { patch = inline; }
     else if (path) {
       try { patch = await fs.readFile(path, 'utf8'); }
-      catch (err: unknown) { return fail('diff:invert', `cannot read ${path}: ${err instanceof Error ? err.message : String(err)}`); }
+      catch (err: unknown) { return fail('diff_invert', `cannot read ${path}: ${err instanceof Error ? err.message : String(err)}`); }
     } else {
-      return fail('diff:invert', 'patch or patchPath required');
+      return fail('diff_invert', 'patch or patchPath required');
     }
     const { inverted, hunks } = invertUnifiedDiff(patch);
     const data: DiffInvertData = { inverted, hunksInverted: hunks };

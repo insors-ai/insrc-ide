@@ -23,7 +23,7 @@ const MAX_LIMIT = 5000;
 const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.next', '.cache']);
 
 export const searchGlobTool: Tool = {
-  id: 'search:glob',
+  id: 'search_glob',
   description: 'Find files by glob pattern. Returns paths sorted by mtime (newest first).',
   inputSchema: {
     type: 'object',

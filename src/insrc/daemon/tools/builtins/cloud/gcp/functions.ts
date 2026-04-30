@@ -29,7 +29,7 @@ interface GcpFunctionsListData {
 }
 
 export const gcpFunctionsListTool: Tool = {
-  id: 'cloud:gcp:functions:list',
+  id: 'cloud_gcp_functions_list',
   description: 'List Cloud Functions (region-scoped when region provided).',
   inputSchema: {
     type: 'object',
@@ -55,7 +55,7 @@ export const gcpFunctionsListTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:gcp:functions:list', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_functions_list', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: GcpFunctionsListData = {
@@ -90,7 +90,7 @@ interface GcpFunctionsCallData {
 }
 
 export const gcpFunctionsCallTool: Tool = {
-  id: 'cloud:gcp:functions:call',
+  id: 'cloud_gcp_functions_call',
   description: 'Invoke a Cloud Function (gcloud functions call) with a JSON payload.',
   inputSchema: {
     type: 'object',
@@ -112,7 +112,7 @@ export const gcpFunctionsCallTool: Tool = {
       ? (input['dataString'] as string)
       : input['data'] !== undefined ? JSON.stringify(input['data'], null, 2) : '{}';
     return {
-      title: 'cloud:gcp:functions:call',
+      title: 'cloud_gcp_functions_call',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Function: \`${str(input, 'name')}\``,
@@ -131,7 +131,7 @@ export const gcpFunctionsCallTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const name = str(input, 'name');
-    if (!name) { return fail('cloud:gcp:functions:call', 'name required'); }
+    if (!name) { return fail('cloud_gcp_functions_call', 'name required'); }
     const flags = gcpFlags(input);
     const payload = typeof input['dataString'] === 'string'
       ? (input['dataString'] as string)
@@ -146,7 +146,7 @@ export const gcpFunctionsCallTool: Tool = {
 
     try {
       const r = await runShell(argv, { timeoutMs: 10 * 60_000 });
-      if (r.spawnError) { return fail('cloud:gcp:functions:call', `gcloud not found: ${r.stderr.trim()}`); }
+      if (r.spawnError) { return fail('cloud_gcp_functions_call', `gcloud not found: ${r.stderr.trim()}`); }
       const ok = r.code === 0;
       const parsed = ok ? tryParseJson(r.stdout) : null;
       const data: GcpFunctionsCallData = {

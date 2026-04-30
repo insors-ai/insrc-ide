@@ -19,7 +19,7 @@ interface GcpLoggingReadData {
 }
 
 export const gcpLoggingReadTool: Tool = {
-  id: 'cloud:gcp:logging:read',
+  id: 'cloud_gcp_logging_read',
   description: 'Run `gcloud logging read` with an advanced filter.',
   inputSchema: {
     type: 'object',
@@ -49,7 +49,7 @@ export const gcpLoggingReadTool: Tool = {
     argv.push(...gcloudCommonArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:gcp:logging:read', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_logging_read', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: GcpLoggingReadData = { filter, limit, exitCode: r.code, parsed, stdout: r.stdout };
