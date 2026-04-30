@@ -160,6 +160,16 @@ editorPaneRegistry.registerEditorPane(
 	[new SyncDescriptor(DbDriversInput)],
 );
 
+// Access Approvals EditorPane (plans/access-gate.md Phase 5.3) -- live
+// view of the active session's approval state + audit trail.
+import { AccessApprovalsPane } from './access/accessPane.js';
+import { AccessApprovalsInput } from './access/accessInput.js';
+import './access/accessCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(AccessApprovalsPane, AccessApprovalsPane.ID, 'Access Approvals'),
+	[new SyncDescriptor(AccessApprovalsInput)],
+);
+
 // Todos editor pane (plans/todo-framework.md Phase 5a). Read-only review
 // surface for agent-authored todo lists. One pane instance per chat
 // session; opens via the `insrc.todos.open` command.

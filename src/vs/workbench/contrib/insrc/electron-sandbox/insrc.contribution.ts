@@ -22,6 +22,8 @@ import { IInsrcArtifactsService } from '../common/artifactsService.js';
 import { InsrcArtifactsServiceImpl } from '../browser/artifacts/insrcArtifactsServiceImpl.js';
 import { IInsrcDbConnectionsService } from '../common/dbConnectionsService.js';
 import { InsrcDbConnectionsServiceImpl } from '../browser/dbDrivers/insrcDbConnectionsServiceImpl.js';
+import { IInsrcAccessService } from '../common/accessService.js';
+import { InsrcAccessServiceImpl } from '../browser/access/accessServiceImpl.js';
 import { InsrcDaemonServiceImpl } from './daemonServiceImpl.js';
 import { InsrcSessionServiceImpl } from './sessionServiceImpl.js';
 import { InsrcWorkspaceServiceImpl } from './workspaceServiceImpl.js';
@@ -48,3 +50,4 @@ registerSingleton(IInsrcBrainstormSessionService, InsrcBrainstormSessionServiceI
 registerSingleton(IInsrcTodosService, InsrcTodosServiceImpl, InstantiationType.Eager);
 registerSingleton(IInsrcArtifactsService, InsrcArtifactsServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcDbConnectionsService, InsrcDbConnectionsServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcAccessService, InsrcAccessServiceImpl, InstantiationType.Delayed);

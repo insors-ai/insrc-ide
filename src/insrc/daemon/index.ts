@@ -1095,6 +1095,22 @@ async function main(): Promise<void> {
 			const mod = await import('./db-rpc.js');
 			return mod.testConnectionRpc(params as { repoRoot?: unknown; config?: unknown });
 		},
+
+		// Access-gate RPCs (plans/access-gate.md Phase 5.3). Read /
+		// revoke window into Session.access + Session.accessAudit so
+		// the workbench Approvals pane can render the live picture.
+		'access.snapshot': async (params) => {
+			const mod = await import('./access-rpc.js');
+			return mod.snapshotRpc(params as { sessionId?: unknown });
+		},
+		'access.revoke': async (params) => {
+			const mod = await import('./access-rpc.js');
+			return mod.revokeRpc(params as { sessionId?: unknown; kind?: unknown; key?: unknown });
+		},
+		'access.revokePrefix': async (params) => {
+			const mod = await import('./access-rpc.js');
+			return mod.revokePrefixRpc(params as { sessionId?: unknown; kind?: unknown; prefix?: unknown });
+		},
 		'artifacts.getOfflineBundleStatus': async () => {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.getOfflineBundleStatusRpc();

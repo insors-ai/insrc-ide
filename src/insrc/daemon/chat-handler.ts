@@ -72,6 +72,14 @@ function getPool(): ChatSessionPool {
   return sessionPool;
 }
 
+/** Lookup a session in the active pool without throwing on init-pending. */
+export function getActiveSession(sessionId: string): { id: string; access: import('../shared/access.js').AccessStore; accessAudit: import('../shared/access.js').AccessAuditLog } | undefined {
+  if (!sessionPool) return undefined;
+  const active = sessionPool.get(sessionId);
+  if (!active) return undefined;
+  return { id: active.id, access: active.session.access, accessAudit: active.session.accessAudit };
+}
+
 /**
  * Drop a session from the in-memory pool. Called by `agent.discard`
  * (plans/session-lifecycle.md Phase 4) so the daemon's chat-session
