@@ -31,6 +31,7 @@ export type AgentFamily =
   | 'debugging'
   | 'deployment'
   | 'code-analyzer'
+  | 'data-analyzer'
   | 'system';
 
 export type AgentFamilyCategory =
@@ -128,6 +129,14 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
     icon: 'graph',
     suppressTodoComments: true,
   },
+  'data-analyzer': {
+    id: 'data-analyzer',
+    displayName: 'Data Analyzer',
+    category: 'meta',
+    description: 'Read-only analysis of registered DB connections: live schema introspection, sample-shape inference, lineage between code and tables, expected-vs-live drift, ER topology. Cloud-orchestrated decomposition, local per-task tool loop, local synthesis. Independent of the Code Analyzer.',
+    icon: 'database',
+    suppressTodoComments: true,
+  },
   system: {
     id: 'system',
     displayName: 'System',
@@ -143,7 +152,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
 const _exhaustivenessCheck: Record<AgentFamily, true> = {
   chat: true, implementation: true, brainstorm: true, designer: true,
   planner: true, tester: true, research: true, debugging: true,
-  deployment: true, 'code-analyzer': true, system: true,
+  deployment: true, 'code-analyzer': true, 'data-analyzer': true, system: true,
 };
 void _exhaustivenessCheck;
 

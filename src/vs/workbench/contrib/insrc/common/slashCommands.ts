@@ -24,6 +24,11 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 		description: 'Run a structural code analysis against the active repo.',
 		example: '/code-analyze how does the auth middleware work?',
 	},
+	{
+		id: 'data-analyze',
+		description: 'Run a read-only data analysis against the active repo\'s registered DB connections (schema, samples, drift, lineage).',
+		example: '/data-analyze find pii columns in production',
+	},
 	// Intent shortcuts -- bypass the topic classifier and route directly
 	// to the matching agent family. Mirror of src/insrc/shared/slash-commands.ts.
 	{

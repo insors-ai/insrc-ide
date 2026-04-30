@@ -882,6 +882,29 @@ async function tryFamilyDirectSlash(
     return true;
   }
 
+  // Phase 0 of plans/analyzers/data-analyzer.md. The slash entry +
+  // family registration land before the orchestrator (Phase 1) ships
+  // so the typo guard and Model Providers pane bindings work for
+  // users running `/data-analyze` while Phase 1 is in flight. The
+  // stub emits a clear "not yet implemented" message instead of
+  // mis-routing; once Phase 1 lands, this branch swaps to
+  // runDataAnalyzerSlash + the real orchestrator.
+  const dataAnalyzeMatch = trimmed.match(/^\/data-analyze(?:\s+([\s\S]+))?$/);
+  if (dataAnalyzeMatch) {
+    const userPrompt = (dataAnalyzeMatch[1] ?? '').trim();
+    if (userPrompt.length === 0) {
+      send({
+        id: requestId,
+        stream: 'delta',
+        data: { text: 'Usage: `/data-analyze <question about your DB schemas / data>`' },
+      });
+      send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
+      return true;
+    }
+    runDataAnalyzerStub(userPrompt, requestId, send);
+    return true;
+  }
+
   // Slice B (slash discovery): if the message starts with `/<name>`
   // but `<name>` isn't a registered slash command, try a fuzzy
   // match. A near-miss (e.g. `/code-analyzer` for `/code-analyze`)
@@ -933,9 +956,16 @@ async function tryFamilyDirectSlash(
       await runCodeAnalyzerSlash(active, channel, familyMention.prompt, message, requestId, send, parentListId, rerunFromListId);
       return true;
     }
-    // data-analyzer / deployment-analyzer: not yet registered. Emit a
-    // clear "not available" message; when those families ship, this
-    // branch will route to their own slash dispatchers.
+    if (familyMention.family === 'data-analyzer') {
+      // Phase 0: family registered, orchestrator stubbed. Routes to
+      // the same not-yet-implemented stub as `/data-analyze`. When
+      // Phase 1 lands, this branch routes to runDataAnalyzerSlash.
+      runDataAnalyzerStub(familyMention.prompt, requestId, send);
+      return true;
+    }
+    // deployment-analyzer: not yet registered. Emit a clear "not
+    // available" message; when that family ships, this branch will
+    // route to its own slash dispatcher.
     send({
       id: requestId,
       stream: 'delta',
@@ -943,7 +973,7 @@ async function tryFamilyDirectSlash(
         text:
           `_The **${familyMention.family}** family is not yet registered._ ` +
           `When it ships, \`@${familyMention.family} <prompt>\` will route there directly. ` +
-          `For now: try \`/code-analyze\` for code questions, or omit the mention to fall through to the regular intent classifier.`,
+          `For now: try \`/code-analyze\` or \`/data-analyze\`, or omit the mention to fall through to the regular intent classifier.`,
         format: 'markdown',
       },
     });
@@ -952,6 +982,39 @@ async function tryFamilyDirectSlash(
   }
 
   return false;
+}
+
+/**
+ * Phase 0 stub for the Data Analyzer (plans/analyzers/data-analyzer.md).
+ * The slash entry + family registration land first so `/data-analyze`
+ * appears in the autocomplete and the Model Providers pane shows the
+ * step bindings; the orchestrator + analyzer loop arrive in Phase 1.
+ *
+ * Until Phase 1 ships, surfaces a clear "not yet implemented" message
+ * to the user with a pointer at the working sibling. Synchronous --
+ * no daemon-side work to do yet.
+ */
+function runDataAnalyzerStub(
+  userPrompt: string,
+  requestId: number,
+  send: (msg: IpcStreamMessage) => void,
+): void {
+  log.info({ promptHead: userPrompt.slice(0, 80) }, '/data-analyze stub hit -- Phase 1 not yet shipped');
+  send({
+    id: requestId,
+    stream: 'delta',
+    data: {
+      text:
+        `**Data Analyzer:** the orchestrator hasn't shipped yet -- only the slash ` +
+        `entry, family registration, and Model Providers bindings are in place ` +
+        `(Phase 0 of plans/analyzers/data-analyzer.md). Phase 1 lands the plan / ` +
+        `analyzer / review / synthesise pipeline.\n\n` +
+        `For now: \`/code-analyze\` for codebase questions, or browse your ` +
+        `registered DB connections directly via the Data Sources pane.`,
+      format: 'markdown',
+    },
+  });
+  send({ id: requestId, stream: 'done', data: { summary: 'data-analyzer stub' } });
 }
 
 async function runCodeAnalyzerSlash(

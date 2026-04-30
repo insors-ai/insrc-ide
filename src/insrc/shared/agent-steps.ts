@@ -101,6 +101,34 @@ export const AGENT_STEP_CATALOG: readonly AgentDefinition[] = [
 			{ step: 'detail', defaultTier: 'local', description: 'Write the detailed design document' },
 		],
 	},
+	{
+		// Code Analyzer family. The orchestrator already routes per-step
+		// via `resolverAgent: 'code-analyzer'` + `providerHint`; this entry
+		// surfaces the four steps in the Model Providers pane so users can
+		// rebind any of them. plan + review are quality-critical decision
+		// steps -> cloud; analyzer (the per-task tool loop) and synthesise
+		// (final markdown composition) -> local for cost.
+		agent: 'code-analyzer',
+		steps: [
+			{ step: 'plan',       defaultTier: 'cloud', description: 'Decompose the request into AnalysisTask[]' },
+			{ step: 'analyzer',   defaultTier: 'local', description: 'Per-task tool-loop runner' },
+			{ step: 'review',     defaultTier: 'cloud', description: 'Review each task result; accept / retry / follow-up / done' },
+			{ step: 'synthesise', defaultTier: 'local', description: 'Compose the final Markdown report from accepted findings' },
+		],
+	},
+	{
+		// Data Analyzer family. Same step shape + tier policy as the Code
+		// Analyzer -- cloud reasons (plan + review), local tool-loops and
+		// composes (analyzer + synthesise). See
+		// plans/analyzers/data-analyzer.md "LLM routing" section.
+		agent: 'data-analyzer',
+		steps: [
+			{ step: 'plan',       defaultTier: 'cloud', description: 'Decompose the request into DataAnalysisTask[]' },
+			{ step: 'analyzer',   defaultTier: 'local', description: 'Per-task tool-loop against registered DB connections' },
+			{ step: 'review',     defaultTier: 'cloud', description: 'Review each task result; accept / retry / follow-up / done' },
+			{ step: 'synthesise', defaultTier: 'local', description: 'Compose the final Markdown report from accepted findings' },
+		],
+	},
 ];
 
 /** All agent names in the catalog. */

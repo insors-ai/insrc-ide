@@ -31,6 +31,11 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 		description: 'Run a structural code analysis against the active repo.',
 		example: '/code-analyze how does the auth middleware work?',
 	},
+	{
+		id: 'data-analyze',
+		description: 'Run a read-only data analysis against the active repo\'s registered DB connections (schema, samples, drift, lineage).',
+		example: '/data-analyze find pii columns in production',
+	},
 	// Intent shortcuts -- bypass the topic classifier and route directly
 	// to the matching agent family. Useful when the user knows what they
 	// want and doesn't want the classifier guessing (or guessing wrong).
@@ -116,6 +121,9 @@ export function isIntentSlashCommand(name: string): boolean {
 export function slashIdToIntent(id: string): string {
 	if (id === 'code-analyze') {
 		return 'code-analysis';
+	}
+	if (id === 'data-analyze') {
+		return 'data-analysis';
 	}
 	return id;
 }
