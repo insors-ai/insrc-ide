@@ -1,0 +1,896 @@
+/**
+ * DataAnalyzerOrchestratorController -- the Data Analyzer family's
+ * task-controller entry point.
+ *
+ * Phase 1.E of plans/analyzers/data-analyzer.md. State machine:
+ *
+ *   planning            -> [plan LLM task]
+ *   plan-approval       -> [plan-size gate]   (only when |tasks| > softCap)
+ *   analyzing           -> runDataAnalyzer() (inline in next()) +
+ *                          [review LLM task]
+ *   reviewing           -> apply decision; loop or jump to synthesise
+ *   synthesising        -> generateMultiPass() (inline in next())
+ *   present             -> [present gate]
+ *   done                  (writes list.body)
+ *
+ * Cloud LLM defaults: plan + review. Local LLM defaults: analyzer
+ * tool loop + synthesise. Per-step rebind via the Model Providers
+ * pane (see plans/analyzers/data-analyzer.md "LLM routing" section).
+ *
+ * Resume: restoreState + buildResumeTask + afterResumeBootstrap mirror
+ * the code-analyzer's slice-C pattern. Connection approvals are NOT
+ * persisted -- they re-prompt on resume per design §14.
+ *
+ * Phase 1 deliberately omits per-task on-disk caching (Phase 2.4),
+ * drill-down (Phase 5), and re-run (Phase 5).
+ */
+
+import { getLogger } from '../../shared/logger.js';
+import { runDataAnalyzer } from '../../agent/tasks/data-analyzer/analyzer/runner.js';
+import {
+  buildPlanSystemPrompt,
+  renderPlanUserMessage,
+} from '../../agent/tasks/data-analyzer/prompts/plan.js';
+import {
+  buildReviewPrompt,
+  REVIEW_SYSTEM,
+} from '../../agent/tasks/data-analyzer/prompts/review.js';
+import {
+  buildMultipassOutlineInput,
+  makeSectionBuilder,
+  DRILL_DOWN_FALLBACK_SECTION,
+} from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
+import { generateMultiPass } from '../../agent/content-gen/index.js';
+import {
+  GATE_CONNECTION_APPROVAL,
+  type ConnectionApprovalRequest,
+  type ConnectionApprovalReply,
+} from '../../agent/tasks/data-analyzer/access-gate.js';
+import {
+  K_STATE,
+  K_PHASE,
+  K_RETRIES,
+  K_FOLLOWUP_COUNT,
+  K_PLAN_RESULT,
+  K_PLAN_TASKS,
+  K_REVIEW_RESULT,
+  K_SYNTH_RESULT,
+  K_ACCEPTED,
+  K_HISTORY,
+  RESUME_BOOTSTRAP_MARKER,
+  type DataAnalysisState,
+  type DataAnalyzerPhase,
+  type AcceptedTask,
+} from '../../agent/tasks/data-analyzer/state.js';
+import type {
+  ConnectionSummary,
+  DataAnalysisTask,
+  DataAnalyzerResult,
+} from '../../agent/tasks/data-analyzer/types.js';
+import type { ScopeSize } from '../../shared/classify.js';
+import type {
+  ControllerInput,
+  FinalizeResult,
+  GateReply,
+  Task,
+  TaskController,
+  TaskOrchestratorDeps,
+  TaskResult,
+  TaskStateStore,
+} from '../task.js';
+import { stripFences } from '../../agent/tasks/_shared/json-extract.js';
+import { executeTool } from '../../agent/tools/executor.js';
+
+const log = getLogger('data-analyzer:orchestrator');
+
+// ---------------------------------------------------------------------------
+// Per-tier task caps (slice 1.10.c)
+// ---------------------------------------------------------------------------
+
+interface TierCaps {
+  /** Soft cap: above this, the plan-size approval gate fires. */
+  readonly softTaskCap: number;
+  /** Hard cap: planner output is silently trimmed to this length. */
+  readonly hardTaskCap: number;
+}
+
+const TIER_CAPS: Readonly<Record<ScopeSize, TierCaps>> = {
+  S:     { softTaskCap: 2,  hardTaskCap: 4  },
+  M:     { softTaskCap: 4,  hardTaskCap: 6  },
+  L:     { softTaskCap: 6,  hardTaskCap: 10 },
+  XL:    { softTaskCap: 8,  hardTaskCap: 12 },
+  XXL:   { softTaskCap: 8,  hardTaskCap: 12 },
+  XXXL:  { softTaskCap: 8,  hardTaskCap: 12 },
+  XXXXL: { softTaskCap: 8,  hardTaskCap: 12 },
+};
+
+function capsForTier(tier: ScopeSize | undefined): TierCaps {
+  return TIER_CAPS[tier ?? 'M'];
+}
+
+const MAX_FOLLOWUPS = 6;
+const MAX_RETRIES_PER_TASK = 2;
+
+// ---------------------------------------------------------------------------
+// Controller
+// ---------------------------------------------------------------------------
+
+export class DataAnalyzerOrchestratorController implements TaskController {
+  readonly id = 'data-analyzer';
+
+  private deps?: TaskOrchestratorDeps;
+  private _request?: string;
+  private _connections: readonly ConnectionSummary[] = [];
+  /** Scope tier for this run. Captured from input.classification.scope. */
+  private _tier: ScopeSize = 'M';
+  /** Per-session connection-approval set. NOT persisted (re-prompt on resume). */
+  private readonly _approvedConnections = new Set<string>();
+  private _listId: string | undefined;
+
+  attachDeps(deps: TaskOrchestratorDeps): void {
+    this.deps = deps;
+  }
+
+  // -- start ----------------------------------------------------------------
+
+  async buildInitialTasks(input: ControllerInput): Promise<Task[]> {
+    this._request = input.message;
+    this._tier = clampToDataAltitude(input.classification?.scope ?? 'M');
+    this._connections = await this._loadConnections(input);
+
+    log.info(
+      {
+        tier:        this._tier,
+        caps:        capsForTier(this._tier),
+        connections: this._connections.length,
+      },
+      'data-analyzer scope tier captured',
+    );
+
+    return [{
+      index: 0,
+      description: `Data Analyzer: planning tasks (tier ${this._tier})...`,
+      kind: 'llm',
+      intent: 'data-analysis',
+      systemPrompt: buildPlanSystemPrompt(this._tier),
+      userMessage: renderPlanUserMessage(this._request, this._connections, this._tier),
+      resolverAgent: 'data-analyzer',
+      resolverStep: 'plan',
+      providerHint: 'claude',
+      temperature: 0,
+      maxTokens: 2500,
+      stateKey: K_PLAN_RESULT,
+      persisted: true,
+    }];
+  }
+
+  private async _loadConnections(input: ControllerInput): Promise<readonly ConnectionSummary[]> {
+    if (this.deps === undefined) return [];
+    try {
+      const r = await executeTool(
+        { id: 'discover', name: 'db:list_connections', input: {} },
+        { session: this.deps.session },
+      );
+      if (r.isError) {
+        log.warn({ content: r.content.slice(0, 200) }, '_loadConnections: db:list_connections failed');
+        return [];
+      }
+      // The driver returns structured rows alongside the markdown
+      // summary in `r.metadata`. Until we tighten the executor's
+      // return shape, parse the JSON-ish rows out of metadata when
+      // present; fall back to an empty list.
+      const rawRows = (r as { metadata?: { rows?: unknown } }).metadata?.rows;
+      const rows = Array.isArray(rawRows) ? rawRows : [];
+      void input;
+      return rows.map((row): ConnectionSummary => {
+        const r2 = row as Record<string, unknown>;
+        const family = (typeof r2['family'] === 'string' ? r2['family'] : 'other') as ConnectionSummary['family'];
+        return {
+          id:          typeof r2['id'] === 'string' ? r2['id'] : '',
+          family,
+          kind:        typeof r2['kind'] === 'string' ? r2['kind'] : '',
+          ...(typeof r2['label'] === 'string' ? { label: r2['label'] as string } : {}),
+          prod:        r2['prod'] === true,
+          hasPiiConfig: r2['hasPiiConfig'] === true,
+        };
+      }).filter(c => c.id.length > 0);
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, '_loadConnections: threw');
+      return [];
+    }
+  }
+
+  // -- state init ----------------------------------------------------------
+
+  private ensureStateInitialized(state: TaskStateStore): void {
+    if (state.has(K_STATE)) return;
+    if (this._request === undefined) {
+      log.error('ensureStateInitialized: instance fields missing (resume without buildInitialTasks?)');
+      return;
+    }
+    const initial: DataAnalysisState = {
+      request:      this._request,
+      tier:         this._tier,
+      connections:  this._connections,
+      listId:       '',
+      childListIds: [],
+      truncated:    false,
+      cancelled:    false,
+    };
+    state.set(K_STATE, initial);
+    state.set(K_PHASE, 'planning' as DataAnalyzerPhase);
+    state.set(K_RETRIES, {} as Record<string, number>);
+    state.set(K_FOLLOWUP_COUNT, 0);
+    state.set(K_ACCEPTED, [] as AcceptedTask[]);
+    state.set(K_HISTORY, [] as DataAnalyzerResult[]);
+  }
+
+  // -- main router ---------------------------------------------------------
+
+  async next(
+    completed: TaskResult,
+    gateReply: GateReply | undefined,
+    state: TaskStateStore,
+  ): Promise<Task[] | null> {
+    this.ensureStateInitialized(state);
+    const phase = state.get<DataAnalyzerPhase>(K_PHASE) ?? 'planning';
+    log.info({ phase, completed: completed.description, gateAction: gateReply?.action }, 'next()');
+
+    // Resume entry: a buildResumeTask transform fires first; detect
+    // by output marker and dispatch on persisted phase.
+    if (completed.output.trim() === RESUME_BOOTSTRAP_MARKER) {
+      return this.afterResumeBootstrap(state, phase);
+    }
+
+    switch (phase) {
+      case 'planning':       return this.afterPlan(completed, state);
+      case 'plan-approval':  return this.afterPlanApprovalGate(gateReply, state);
+      case 'analyzing':      return this.runNextAnalyzerTask(state);
+      case 'reviewing':      return this.afterReview(completed, state);
+      case 'synthesising':   return this.afterSynthesise(completed, state);
+      case 'present':        return null;
+      case 'done':           return null;
+    }
+  }
+
+  // -- plan -> approval ----------------------------------------------------
+
+  private async afterPlan(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
+    const planRaw = completed.output;
+    let parsed: { tasks: unknown[] } | null = null;
+    try {
+      parsed = JSON.parse(stripFences(planRaw));
+    } catch (err) {
+      log.error({ err: (err as Error).message }, 'afterPlan: plan output not parseable');
+    }
+    if (!parsed || !Array.isArray(parsed.tasks)) {
+      // Plan failed to parse. Mark cancelled and finalise; subsequent
+      // resume sees cancelled=true and exits cleanly.
+      const ca = state.get<DataAnalysisState>(K_STATE)!;
+      state.set(K_STATE, { ...ca, cancelled: true });
+      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+      return null;
+    }
+
+    const caps = capsForTier(this._tier);
+    const planned: DataAnalysisTask[] = (parsed.tasks as Array<Record<string, unknown>>)
+      .slice(0, caps.hardTaskCap)
+      .map((raw): DataAnalysisTask => {
+        const kind = (typeof raw['kind'] === 'string' ? raw['kind'] : 'free-form') as DataAnalysisTask['kind'];
+        const question = typeof raw['question'] === 'string' ? raw['question'] : '';
+        const scopeRaw = (raw['scope'] ?? {}) as Record<string, unknown>;
+        const scope: DataAnalysisTask['scope'] = {
+          ...(Array.isArray(scopeRaw['connections']) ? { connections: scopeRaw['connections'].filter((s): s is string => typeof s === 'string') } : {}),
+          ...(Array.isArray(scopeRaw['targets']) ? { targets: scopeRaw['targets'].filter((s): s is string => typeof s === 'string') } : {}),
+        };
+        // Placeholder itemId; replaced with the framework-assigned
+        // id by the addItem block below before the plan lands in
+        // K_PLAN_TASKS.
+        return {
+          itemId: '',
+          kind,
+          question,
+          ...(scope.connections !== undefined || scope.targets !== undefined ? { scope } : {}),
+          origin: 'plan',
+        };
+      });
+
+    state.set(K_PLAN_TASKS, planned);
+
+    // Create the TodoList + per-task items via the framework. addItem
+    // assigns the item id (we update the planned-task's itemId from
+    // the framework-assigned one) so downstream consumers see a
+    // single canonical id per item.
+    if (this.deps?.todos !== undefined) {
+      try {
+        const list = await this.deps.todos.createList({
+          sessionId:   this.deps.session.id,
+          title:       `Data Analysis: ${this._request?.slice(0, 60) ?? '(no request)'}`,
+          description: this._request ?? '',
+        });
+        this._listId = list.id;
+        const ca = state.get<DataAnalysisState>(K_STATE)!;
+        state.set(K_STATE, { ...ca, listId: list.id });
+        const withIds: DataAnalysisTask[] = [];
+        for (const t of planned) {
+          const item = await this.deps.todos.addItem(list.id, {
+            title: shortTitleFor(t),
+            description: t.question,
+            meta: {
+              kind: t.kind,
+              ...(t.scope !== undefined ? { scope: t.scope } : {}),
+              origin: t.origin,
+              retryCount: 0,
+            },
+          });
+          withIds.push({ ...t, itemId: item.id });
+        }
+        state.set(K_PLAN_TASKS, withIds);
+      } catch (err) {
+        log.warn({ err }, 'afterPlan: createList / addItem failed');
+      }
+    }
+
+    // Plan-approval gate fires when planner emitted more than the soft cap.
+    if (planned.length > caps.softTaskCap) {
+      state.set(K_PHASE, 'plan-approval' as DataAnalyzerPhase);
+      return [{
+        index: 1,
+        description: `Plan has ${planned.length} tasks (tier ${this._tier}). Approve, trim, or cancel?`,
+        kind: 'transform',
+        intent: 'data-analysis',
+        passThrough: true,
+        userMessage: renderPlanSummary(planned, caps),
+        outputFormat: 'markdown',
+        requiresGate: true,
+        gateTitle: `Data Analyzer plan size approval (tier ${this._tier})`,
+        gateActions: [
+          { name: 'approve', label: 'Approve all' },
+          { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
+          { name: 'cancel', label: 'Cancel run' },
+        ],
+        persisted: true,
+      }];
+    }
+
+    // No gate -- begin analysis directly.
+    return this.beginAnalysis(planned, state);
+  }
+
+  private async afterPlanApprovalGate(
+    gateReply: GateReply | undefined,
+    state: TaskStateStore,
+  ): Promise<Task[] | null> {
+    const action = gateReply?.action ?? 'cancel';
+    const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
+    if (action === 'cancel') {
+      const ca = state.get<DataAnalysisState>(K_STATE)!;
+      state.set(K_STATE, { ...ca, cancelled: true });
+      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+      return null;
+    }
+    if (action === 'trim-to-soft') {
+      const trimmed = planned.slice(0, capsForTier(this._tier).softTaskCap);
+      state.set(K_PLAN_TASKS, trimmed);
+      return this.beginAnalysis(trimmed, state);
+    }
+    // approve
+    return this.beginAnalysis(planned, state);
+  }
+
+  // -- analyze + review ----------------------------------------------------
+
+  private async beginAnalysis(
+    planned: DataAnalysisTask[],
+    state: TaskStateStore,
+  ): Promise<Task[] | null> {
+    state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
+    if (planned.length === 0) {
+      // Nothing to analyse -- jump to synthesise (will produce an empty-state report).
+      return this.queueSynthesise(state);
+    }
+    return this.runNextAnalyzerTask(state);
+  }
+
+  private async runNextAnalyzerTask(state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps === undefined) return null;
+    const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
+    const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
+    const history = state.get<DataAnalyzerResult[]>(K_HISTORY) ?? [];
+    const acceptedIds = new Set(accepted.map(a => a.task.itemId));
+    const next = planned.find(t => !acceptedIds.has(t.itemId));
+
+    if (next === undefined) {
+      // All planned tasks accepted -> synthesise.
+      return this.queueSynthesise(state);
+    }
+
+    if (this.deps.todos !== undefined) {
+      try { await this.deps.todos.markInProgress(next.itemId); } catch { /* keep going */ }
+    }
+
+    // Resolve the analyzer provider via the per-step resolver.
+    const provider = this.deps.session.resolver.resolve('data-analyzer', 'analyzer');
+
+    const outcome = await runDataAnalyzer(next, {
+      provider,
+      session: this.deps.session,
+      ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+      checkConnectionAccess: (connectionId) => this.checkConnectionAccess(connectionId),
+      tier: this._tier,
+    });
+
+    const result = outcome.result;
+
+    if (this.deps.todos !== undefined) {
+      try {
+        await this.deps.todos.updateItemMeta(next.itemId, {
+          kind: next.kind,
+          ...(next.scope !== undefined ? { scope: next.scope } : {}),
+          origin: next.origin,
+          retryCount: 0,
+          answer: result.answer,
+          findings: result.findings,
+          citations: result.citations,
+          confidence: result.confidence,
+          toolCalls: result.toolCalls,
+          ...(result.truncated ? { truncated: true } : {}),
+          ...(result.blockedReason !== undefined ? { blockedReason: result.blockedReason } : {}),
+        });
+      } catch (err) {
+        log.warn({ err, itemId: next.itemId }, 'updateItemMeta failed (continuing)');
+      }
+    }
+
+    // Gate-blocked tasks auto-accept and bypass review.
+    if (result.blockedReason !== undefined) {
+      accepted.push({ task: next, result });
+      history.push(result);
+      state.set(K_ACCEPTED, accepted);
+      state.set(K_HISTORY, history);
+      if (this.deps.todos !== undefined) {
+        try { await this.deps.todos.markBlocked(next.itemId, result.blockedReason); } catch { /* keep going */ }
+      }
+      return this.runNextAnalyzerTask(state);
+    }
+
+    // Queue the review LLM task.
+    state.set(K_PHASE, 'reviewing' as DataAnalyzerPhase);
+    state.set('lastResult', result);
+    state.set('lastTask', next);
+    const reviewMessages = buildReviewPrompt(next, result, history);
+    const userMessage = reviewMessages
+      .filter(m => m.role === 'user')
+      .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
+      .join('\n\n');
+    return [{
+      index: 100,
+      description: `Data Analyzer: reviewing task "${shortTitleFor(next)}"...`,
+      kind: 'llm',
+      intent: 'data-analysis',
+      systemPrompt: REVIEW_SYSTEM,
+      userMessage,
+      resolverAgent: 'data-analyzer',
+      resolverStep: 'review',
+      providerHint: 'claude',
+      temperature: 0,
+      maxTokens: 1200,
+      stateKey: K_REVIEW_RESULT,
+      persisted: true,
+    }];
+  }
+
+  private async afterReview(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps === undefined) return null;
+    const lastTask = state.get<DataAnalysisTask>('lastTask');
+    const lastResult = state.get<DataAnalyzerResult>('lastResult');
+    if (lastTask === undefined || lastResult === undefined) {
+      log.error('afterReview: missing lastTask or lastResult; skipping');
+      return this.runNextAnalyzerTask(state);
+    }
+    const decision = parseReviewerDecision(completed.output);
+    const retries = state.get<Record<string, number>>(K_RETRIES) ?? {};
+    const followups = state.get<number>(K_FOLLOWUP_COUNT) ?? 0;
+    const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
+    const history = state.get<DataAnalyzerResult[]>(K_HISTORY) ?? [];
+
+    if (decision.kind === 'accept' || decision.kind === 'done') {
+      accepted.push({ task: lastTask, result: lastResult });
+      history.push(lastResult);
+      state.set(K_ACCEPTED, accepted);
+      state.set(K_HISTORY, history);
+      if (this.deps.todos !== undefined) {
+        try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
+      }
+      if (decision.kind === 'done') {
+        return this.queueSynthesise(state);
+      }
+      state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
+      return this.runNextAnalyzerTask(state);
+    }
+
+    if (decision.kind === 'retry') {
+      const count = retries[lastTask.itemId] ?? 0;
+      if (count >= MAX_RETRIES_PER_TASK) {
+        // Retry cap hit -- accept with downgraded confidence.
+        accepted.push({ task: lastTask, result: { ...lastResult, confidence: 'low' } });
+        history.push(lastResult);
+        state.set(K_ACCEPTED, accepted);
+        state.set(K_HISTORY, history);
+        if (this.deps.todos !== undefined) {
+          try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
+        }
+        state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
+        return this.runNextAnalyzerTask(state);
+      }
+      retries[lastTask.itemId] = count + 1;
+      state.set(K_RETRIES, retries);
+      // Re-queue the SAME task with the reviewer's hint applied.
+      const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
+      const idx = planned.findIndex(t => t.itemId === lastTask.itemId);
+      if (idx >= 0) {
+        planned[idx] = {
+          ...lastTask,
+          ...(decision.retryHint !== undefined ? { hint: decision.retryHint } : {}),
+        };
+        state.set(K_PLAN_TASKS, planned);
+      }
+      state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
+      return this.runNextAnalyzerTask(state);
+    }
+
+    // add-follow-up
+    if (decision.kind === 'follow-up') {
+      // Accept the original task too.
+      accepted.push({ task: lastTask, result: lastResult });
+      history.push(lastResult);
+      state.set(K_ACCEPTED, accepted);
+      state.set(K_HISTORY, history);
+      if (this.deps.todos !== undefined) {
+        try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
+      }
+      const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
+      let added = 0;
+      for (const fu of decision.followUps.slice(0, 2)) {
+        if (followups + added >= MAX_FOLLOWUPS) break;
+        // Need the framework-assigned item.id BEFORE the task lands
+        // in K_PLAN_TASKS so downstream consumers see one canonical id.
+        let itemId: string | undefined;
+        if (this.deps.todos !== undefined && this._listId !== undefined) {
+          try {
+            const item = await this.deps.todos.addItem(this._listId, {
+              title: shortTitleFor({ ...fu, itemId: '', origin: 'follow-up' } as DataAnalysisTask),
+              description: fu.question,
+              meta: { kind: fu.kind, ...(fu.scope !== undefined ? { scope: fu.scope } : {}), origin: 'follow-up', retryCount: 0 },
+            });
+            itemId = item.id;
+          } catch { /* keep going */ }
+        }
+        const task: DataAnalysisTask = {
+          itemId: itemId ?? `pending-${added}-${Date.now()}`,
+          kind: fu.kind,
+          question: fu.question,
+          ...(fu.scope !== undefined ? { scope: fu.scope } : {}),
+          origin: 'follow-up',
+        };
+        planned.push(task);
+        added++;
+      }
+      state.set(K_PLAN_TASKS, planned);
+      state.set(K_FOLLOWUP_COUNT, followups + added);
+      state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
+      return this.runNextAnalyzerTask(state);
+    }
+
+    return null;
+  }
+
+  // -- synthesise ----------------------------------------------------------
+
+  private async queueSynthesise(state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps === undefined) return null;
+    state.set(K_PHASE, 'synthesising' as DataAnalyzerPhase);
+
+    const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
+    const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
+
+    const provider = this.deps.session.resolver.resolve('data-analyzer', 'synthesise');
+    const outline = buildMultipassOutlineInput(this._request ?? '', accepted, planned, this._tier);
+    const sectionBuild = makeSectionBuilder(this._request ?? '', accepted, this._tier);
+
+    let markdown = '';
+    try {
+      const result = await generateMultiPass(
+        {
+          outline: { system: outline.system, user: outline.user, maxSections: outline.maxSections, maxTokens: outline.maxTokens },
+          section: { build: sectionBuild },
+          ...(this.deps.abortController?.signal !== undefined ? { signal: this.deps.abortController.signal } : {}),
+        },
+        provider,
+      );
+      markdown = result.markdown;
+      // Inject drill-down fallback if the outline omitted it.
+      const hasDrillDown = result.outline.sections.some(
+        s => s.id === DRILL_DOWN_FALLBACK_SECTION.id ||
+             /drill[-\s]?down/i.test(s.title),
+      );
+      if (!hasDrillDown) {
+        markdown += `\n\n## ${DRILL_DOWN_FALLBACK_SECTION.title}\n\n_(no drill-down candidates emitted by the synthesise pass)_\n`;
+      }
+    } catch (err) {
+      log.error({ err: (err as Error).message }, 'queueSynthesise: generateMultiPass failed');
+      markdown = `# Data Analysis Report\n\n_Synthesis failed: ${(err as Error).message}_\n\nSee accepted findings in the todos pane.`;
+    }
+
+    state.set(K_SYNTH_RESULT, markdown);
+
+    // Persist body on the list so the (future Phase 2) report pane
+    // sees it. The TodosApi has no list-level "complete" state -- the
+    // workbench-side flow contribution opens the report when the
+    // body lands; the list itself stays `active` until the user
+    // archives it.
+    if (this.deps.todos !== undefined && this._listId !== undefined) {
+      try {
+        await this.deps.todos.updateListBody(this._listId, markdown);
+      } catch (err) {
+        log.warn({ err }, 'queueSynthesise: updateListBody failed');
+      }
+    }
+
+    state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+    return null;
+  }
+
+  private async afterSynthesise(_completed: TaskResult, _state: TaskStateStore): Promise<Task[] | null> {
+    // Synthesise runs inline in queueSynthesise via generateMultiPass;
+    // there's no LLM-task completion to react to here. Reserved for
+    // future Phase 2 (present gate). For Phase 1 we just close out.
+    return null;
+  }
+
+  // -- finalize ------------------------------------------------------------
+
+  finalize(state: TaskStateStore): FinalizeResult {
+    const md = state.get<string>(K_SYNTH_RESULT) ?? '_(no synthesis output)_';
+    return { output: md, format: 'markdown' };
+  }
+
+  // -- resume hooks --------------------------------------------------------
+
+  restoreState(state: TaskStateStore): void {
+    const persisted = state.get<DataAnalysisState>(K_STATE);
+    if (!persisted) return;
+    this._request = persisted.request;
+    this._tier = persisted.tier;
+    this._connections = persisted.connections;
+    this._listId = persisted.listId.length > 0 ? persisted.listId : undefined;
+    // approvedConnections deliberately NOT restored -- re-prompt on first use.
+    this._approvedConnections.clear();
+  }
+
+  buildResumeTask(state: TaskStateStore): Task {
+    const phase = state.get<DataAnalyzerPhase>(K_PHASE) ?? 'planning';
+    return {
+      index: 0,
+      description: `Resuming data analysis (phase: ${phase})...`,
+      kind: 'transform',
+      intent: 'data-analysis',
+      passThrough: true,
+      userMessage: RESUME_BOOTSTRAP_MARKER,
+      outputFormat: 'text',
+      persisted: false,
+    };
+  }
+
+  private async afterResumeBootstrap(
+    state: TaskStateStore,
+    phase: DataAnalyzerPhase,
+  ): Promise<Task[] | null> {
+    log.info({ phase, listId: this._listId }, 'data-analyzer resume entry');
+    switch (phase) {
+      case 'planning':
+        // Re-fire the plan task verbatim.
+        if (this._request === undefined) return null;
+        return [{
+          index: 0,
+          description: `Data Analyzer: re-planning (resume; tier ${this._tier})...`,
+          kind: 'llm',
+          intent: 'data-analysis',
+          systemPrompt: buildPlanSystemPrompt(this._tier),
+          userMessage: renderPlanUserMessage(this._request, this._connections, this._tier),
+          resolverAgent: 'data-analyzer',
+          resolverStep: 'plan',
+          providerHint: 'claude',
+          temperature: 0,
+          maxTokens: 2500,
+          stateKey: K_PLAN_RESULT,
+          persisted: true,
+        }];
+      case 'plan-approval': {
+        const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
+        const caps = capsForTier(this._tier);
+        return [{
+          index: 1,
+          description: `Plan has ${planned.length} tasks (resume; tier ${this._tier}). Approve, trim, or cancel?`,
+          kind: 'transform',
+          intent: 'data-analysis',
+          passThrough: true,
+          userMessage: renderPlanSummary(planned, caps),
+          outputFormat: 'markdown',
+          requiresGate: true,
+          gateTitle: `Data Analyzer plan size approval (tier ${this._tier})`,
+          gateActions: [
+            { name: 'approve', label: 'Approve all' },
+            { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
+            { name: 'cancel', label: 'Cancel run' },
+          ],
+          persisted: true,
+        }];
+      }
+      case 'analyzing':
+      case 'reviewing':
+        // Items left in 'in_progress' at crash time will re-run
+        // naturally: runNextAnalyzerTask picks the first task that
+        // isn't in K_ACCEPTED, and an in-progress-but-not-accepted
+        // item matches that filter. The status badge will read
+        // "in_progress" briefly until markComplete fires after the
+        // re-execute.
+        return this.runNextAnalyzerTask(state);
+      case 'synthesising':
+        return this.queueSynthesise(state);
+      case 'present':
+      case 'done':
+        return null;
+    }
+  }
+
+  // -- connection-approval gate -------------------------------------------
+
+  private async checkConnectionAccess(connectionId: string): Promise<{ allowed: boolean; reason?: string }> {
+    if (this._approvedConnections.has(connectionId)) {
+      return { allowed: true };
+    }
+    if (this.deps === undefined) {
+      return { allowed: false, reason: 'orchestrator deps missing' };
+    }
+    const conn = this._connections.find(c => c.id === connectionId);
+    const request: ConnectionApprovalRequest = {
+      gateId: GATE_CONNECTION_APPROVAL,
+      connectionId,
+      ...(conn?.label !== undefined ? { connectionLabel: conn.label } : {}),
+      family: conn?.family ?? 'other',
+      kind: conn?.kind ?? 'unknown',
+      prod: conn?.prod ?? false,
+      intent: `Data Analyzer wants to use connection "${connectionId}"`,
+    };
+    const reply = await this._fireGate(request);
+    if (reply.action === 'approve') {
+      this._approvedConnections.add(connectionId);
+      return { allowed: true };
+    }
+    return { allowed: false, reason: 'user denied connection-approval gate' };
+  }
+
+  private async _fireGate(request: ConnectionApprovalRequest): Promise<ConnectionApprovalReply> {
+    if (this.deps === undefined) return { action: 'deny' };
+    const gateId = `data-analyzer-conn-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const content = [
+      `The Data Analyzer wants to use connection \`${request.connectionId}\`${request.prod ? ' **(PROD)**' : ''}.`,
+      '',
+      `**Family / kind:** ${request.family} / ${request.kind}`,
+      ...(request.connectionLabel !== undefined ? [`**Label:** ${request.connectionLabel}`] : []),
+      `**Intent:** ${request.intent}`,
+      '',
+      'Approving covers all subsequent tool calls against this connection for the rest of this chat session. A new session re-asks. Approvals do NOT persist across IDE restarts.',
+    ].join('\n');
+    this.deps.send({
+      id: this.deps.requestId,
+      stream: 'gate',
+      data: {
+        gateId,
+        title: `Data Analyzer: approve connection \`${request.connectionId}\``,
+        content,
+        format: 'markdown',
+        actions: [
+          { name: 'approve', label: `Approve \`${request.connectionId}\`` },
+          { name: 'deny', label: 'Deny' },
+        ],
+      },
+    });
+    const channel = this.deps.channel;
+    try {
+      return await new Promise<ConnectionApprovalReply>((resolve, reject) => {
+        channel.registerExternalGate(
+          gateId,
+          (reply: { action: string }) => {
+            resolve(reply.action === 'approve' ? { action: 'approve' } : { action: 'deny' });
+          },
+          reject,
+        );
+      });
+    } catch {
+      return { action: 'deny' };
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function clampToDataAltitude(tier: ScopeSize): ScopeSize {
+  switch (tier) {
+    case 'XXL':
+    case 'XXXL':
+    case 'XXXXL':
+      return 'XL';
+    default:
+      return tier;
+  }
+}
+
+function shortTitleFor(t: DataAnalysisTask): string {
+  const head = t.question.split(/\s+/).slice(0, 8).join(' ');
+  return head.length > 60 ? head.slice(0, 57) + '...' : head;
+}
+
+function renderPlanSummary(planned: readonly DataAnalysisTask[], caps: TierCaps): string {
+  const lines: string[] = [
+    `Planner emitted **${planned.length} tasks** (soft cap: ${caps.softTaskCap}, hard cap: ${caps.hardTaskCap}).`,
+    '',
+  ];
+  for (let i = 0; i < planned.length; i++) {
+    const t = planned[i]!;
+    lines.push(`${i + 1}. **[${t.kind}]** ${t.question}`);
+  }
+  return lines.join('\n');
+}
+
+interface ReviewerDecision {
+  readonly kind: 'accept' | 'retry' | 'follow-up' | 'done';
+  readonly retryHint?: string;
+  readonly followUps: readonly { kind: DataAnalysisTask['kind']; question: string; scope?: DataAnalysisTask['scope'] }[];
+}
+
+function parseReviewerDecision(rawText: string): ReviewerDecision {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(stripFences(rawText));
+  } catch {
+    return { kind: 'accept', followUps: [] };
+  }
+  const decision = typeof parsed['decision'] === 'string' ? parsed['decision'] : 'accept';
+  if (decision === 'retry-with-hint') {
+    return {
+      kind: 'retry',
+      ...(typeof parsed['retryHint'] === 'string' ? { retryHint: parsed['retryHint'] } : {}),
+      followUps: [],
+    };
+  }
+  if (decision === 'add-follow-up') {
+    const fus = Array.isArray(parsed['followUps']) ? parsed['followUps'] : [];
+    const followUps: { kind: DataAnalysisTask['kind']; question: string; scope?: DataAnalysisTask['scope'] }[] = [];
+    for (const raw of fus) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const r = raw as Record<string, unknown>;
+      const kind = (typeof r['kind'] === 'string' ? r['kind'] : 'free-form') as DataAnalysisTask['kind'];
+      const question = typeof r['question'] === 'string' ? r['question'] : '';
+      if (question.length === 0) continue;
+      const scopeRaw = (r['scope'] ?? {}) as Record<string, unknown>;
+      const scope: DataAnalysisTask['scope'] = {
+        ...(Array.isArray(scopeRaw['connections']) ? { connections: scopeRaw['connections'].filter((s): s is string => typeof s === 'string') } : {}),
+        ...(Array.isArray(scopeRaw['targets']) ? { targets: scopeRaw['targets'].filter((s): s is string => typeof s === 'string') } : {}),
+      };
+      followUps.push({
+        kind,
+        question,
+        ...(scope.connections !== undefined || scope.targets !== undefined ? { scope } : {}),
+      });
+    }
+    return { kind: 'follow-up', followUps };
+  }
+  if (decision === 'done') {
+    return { kind: 'done', followUps: [] };
+  }
+  return { kind: 'accept', followUps: [] };
+}
