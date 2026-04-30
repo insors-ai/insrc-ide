@@ -87,6 +87,60 @@ hash; ~30 lines, no new tool surface.
   the analyzer doesn't synthesise data *from* one connection *into* a
   query on another.
 
+## LLM routing -- local vs cloud per step
+
+Mirrors the code-analyzer split: cloud reasons, local writes + tool-loops.
+Cloud token cost is concentrated on the decision steps (plan + per-task
+review); the local model handles the long-tail workloads (tool-driven
+analysis + final markdown composition) where its slowness is fine and
+its lower per-token cost matters.
+
+| Step | Default provider | What it does | Why this side |
+|---|---|---|---|
+| `plan` | **cloud** (`providerHint: 'claude'`) | Decompose the user's free-form question into a `DataAnalysisTask[]` from the request + the resolved connection list. Single LLM call, ≤2.5K output tokens. | One-shot reasoning; needs a model strong enough to factor an audit-style question into discrete tasks. Cloud is right because the cost is bounded (one call per analysis). |
+| `analyzer` (run-task / tool-loop) | **local** (Ollama) | The N-call tool loop per task. Calls `db:list_connections`, `db:sql:describe`, `db:sql:sample`, `db:kv:scan`, etc. Up to 8 tool calls / 10 min per task. Emits a `DataAnalyzerResult` via `submit_analysis`. | Cost-driven: a 10-task XL audit could be 80 LLM calls. Cloud would be expensive for what is mostly schema-driven structured-output work. Local model with `/no_think` + tool-call structured output is sufficient and free. |
+| `review` | **cloud** (`providerHint: 'claude'`) | Per-task reviewer. Decides `accept` / `retry-with-hint` / `add-follow-up` / `done`. One LLM call per accepted task; ≤1.2K output tokens. | Quality-control gate at every task boundary. Cloud catches subtle problems (hallucinated columns, contradictions with cited samples) that the local model misses. Bounded by the plan size (≤10 calls). |
+| `synthesise` | **local** (Ollama) | Multi-pass content-gen: outline → per-section writers → stitch. Composes the final markdown from accepted findings + citations. Hot path under the per-section continuation cap. | The cloud already did the reasoning work in plan + review; the local model just composes prose from inputs it has in hand. Keeps cloud cost focused on decisions, not prose generation. |
+| `embedding` | **local-only** | Used by L4 code-relevance lookups when lineage findings cross into code. | Embedding model is local-only by framework policy (every cloud provider's `embed()` returns `[]` per CLAUDE.md). |
+
+**Bring-your-own-LLM is in scope for v1.** The framework's
+per-step resolver (`session.resolver.resolve('data-analyzer', '<step>')`)
+already lets users override any step via the Model Providers pane. In
+the orchestrator, every LLM task ships with:
+
+```ts
+resolverAgent: 'data-analyzer',
+resolverStep:  'plan' | 'analyzer' | 'review' | 'synthesise',
+providerHint:  'claude' | 'local',          // default
+```
+
+The hint is the fallback; the resolver picks `models.agents.data-analyzer.<step>` from config first when set. A user can:
+
+- Pin `synthesise` to Claude/OpenAI/Gemini for higher-quality reports
+  (e.g. `models.agents.data-analyzer.synthesise = "openai:gpt-4o"`).
+- Pin `analyzer` to a different local model (e.g. a deepseek-coder
+  variant) -- just point the local Ollama config at the new model.
+- Air-gapped: keep `plan` and `review` on a self-hosted cloud-shaped
+  endpoint (any OpenAI-compatible URL works via `models.local.url`).
+- Cost-conscious: rebind `review` to local; quality drops but token
+  cost goes to zero.
+
+**Step-binding seeding.** The Model Providers pane's
+`buildDefaultAgentBindings(activeCloud)` already seeds bindings for
+shipped families. Phase 0.1 adds `data-analyzer` to that helper so
+the four step keys (`plan`, `analyzer`, `review`, `synthesise`) appear
+in the pane on first load with the defaults from the table above.
+Users with no cloud key configured: `plan` and `review` fall back to
+local automatically (the resolver's fallback chain is hint → step
+binding → active cloud default → local).
+
+**Failure mode.** If a cloud step is bound to a provider whose key is
+missing or invalid, the orchestrator emits `provenance: 'local-only'`
+on the final report and a warning banner. Per design §15: cloud-
+unavailable downgrades plan + review to local; synthesise is
+unaffected since it's already local. The acceptance criteria for
+Phase 1 include this fall-back path.
+
 ## Prerequisites
 
 | Prereq | Status |
@@ -175,6 +229,13 @@ Analyzer rollout. Hard-wire them into the Data Analyzer's first commits.
     the data-analyzer's plan should still emit a self-contained prompt
     (no implicit reliance on session memory).
 
+12. **Scope-tier classifier baked in from day one** (NOT deferred to a
+    "Phase 5" the way it was for the Code Analyzer). The shipped
+    `classifyScope` (`agent/classify/scope.ts`) is generic and ready to
+    reuse; the cost of pre-wiring per-tier caps + prompt addenda in
+    Phase 1 is far less than retrofitting them after broad-scope
+    queries hit pain. See Phase 1.10 for the data-tier mapping.
+
 12. **Daemon restart picks up Stage 1 / 2 fixes for free.** No special
     work; Node 22 / tree-sitter@0.25 are framework-level.
 
@@ -242,6 +303,12 @@ suppression, `updateItem(meta)`, ownership stamps) is now generic.
   `data-analysis`. (It does; no change.)
 - `src/insrc/daemon/todos-api.ts`: nothing to add -- `makeTodosApi(db, family)`
   is family-scoped; passing `'data-analyzer'` is enough.
+- `src/insrc/agent/config.ts`: extend `buildDefaultAgentBindings(activeCloud)`
+  to seed the four `data-analyzer` step keys
+  (`plan` -> activeCloud, `analyzer` -> local, `review` -> activeCloud,
+  `synthesise` -> local). Users see all four entries pre-populated in
+  the Model Providers pane on first load and can rebind any of them
+  per the LLM-routing table above.
 
 ### 0.2 Slash registry
 
@@ -585,6 +652,115 @@ The reset happens once at resume entry, in `afterResumeBootstrap`'s
 `analyzing` branch -- not on every `next()` call, to avoid trampling
 items the controller is mid-transition on.
 
+### 1.10 Scope-tier classification + per-tier playbook
+
+The Code Analyzer added tier-awareness as Phase 5, late, after broad-
+scope queries (XL+ on a multi-module repo) routinely returned
+under-detailed reports. Bake-in cost is small for data-analyzer; do
+it now.
+
+#### 1.10.a Tier mapping
+
+Reuses the shipped `classifyScope` verbatim. The tier names map to
+data altitudes:
+
+| Tier | Data altitude | Typical query | Default `softTaskCap / hardTaskCap` |
+|---|---|---|---|
+| `S` | single column / single key pattern | "what columns does the `email` column on `users` actually carry now?" | 2 / 4 |
+| `M` | single table / single key namespace | "audit `orders` for nullability + index drift" | 4 / 6 |
+| `L` | single connection (full audit) | "walk every table in `primary` for PII + drift" | 6 / 10 |
+| `XL` | multi-connection (cross-DB sweep) | "find shape drift across all connections registered for the active repo" | 8 / 12 |
+
+`XXL` and above are not used -- the data altitude doesn't extend
+above multi-connection. The classifier will still emit `XXL` for
+unusually-broad questions; the orchestrator clamps anything above
+`XL` down to `XL` before applying caps.
+
+#### 1.10.b Wiring the classifier
+
+Mirror code-analyzer's chat-handler integration:
+
+1. `daemon/chat-handler.ts` `runDataAnalyzerSlash`: before constructing
+   the orchestrator, call `classifyScope(message, ...)` to size the
+   request. Same call shape code-analyzer uses; reuses the same
+   provider resolver (`'classifier' / 'scope'`).
+2. The result lands in `ControllerInput.classification.scope`.
+3. `DataAnalyzerOrchestratorController.attachInput` reads
+   `input.classification?.scope ?? 'M'` into `this._tier` and
+   persists it in `K_STATE` so resume picks it up.
+4. The user sees the classified tier emitted as a progress event:
+   `[code-analyze] scope classifier emitted tier` -> mirror as
+   `[data-analyze] scope classifier emitted tier` (matches the
+   monitor pattern code-analyzer logs throughout this session).
+
+#### 1.10.c Per-tier task caps -- `capsForTier`
+
+Helper at the top of the orchestrator file:
+
+```ts
+function capsForTier(tier: ScopeSize): { softTaskCap: number; hardTaskCap: number } {
+  switch (tier) {
+    case 'S':                    return { softTaskCap: 2, hardTaskCap: 4 };
+    case 'M':                    return { softTaskCap: 4, hardTaskCap: 6 };
+    case 'L':                    return { softTaskCap: 6, hardTaskCap: 10 };
+    case 'XL':
+    case 'XXL':
+    case 'XXXL':
+    case 'XXXXL':                return { softTaskCap: 8, hardTaskCap: 12 };
+  }
+}
+```
+
+Caps apply at plan-approval (offer the user "trim to softTaskCap" as
+a gate action) and at follow-up generation (reviewer can't add a
+follow-up that would push the live count past `hardTaskCap`).
+
+#### 1.10.d Per-tier prompt addenda
+
+Each prompt builder takes a `tier` argument and appends an addendum:
+
+- **`prompts/plan.ts`** -- `buildPlanSystemPrompt(tier)`. Addendum
+  tells the planner what altitude to plan at:
+  - S: "1-2 highly-targeted tasks. NO multi-table audits."
+  - M: "3-4 tasks scoped to a single table / namespace. Pull
+    full describe + a sample-shape if useful."
+  - L: "Plan the audit at connection level. Group by table; cap at
+    one task per table."
+  - XL: "Plan AT THE CONNECTION LEVEL, not the table level. One
+    task per connection (file-level citations are fine). NO
+    per-table tasks."
+
+- **`prompts/analyzer-system.ts`** -- `buildAnalyzerSystemPrompt(tier)`.
+  Addendum tells the runner what altitude to read at:
+  - S/M: read full describe + samples; per-row / per-column citations.
+  - L: prefer `db:sql:describe` + targeted `db:sql:sample` (10 rows).
+    Don't dump full table data.
+  - XL: stay at file/connection level; a single `db:sql:sample` per
+    connection is enough; cite at the connection level.
+
+- **`prompts/synthesise-multipass.ts`** -- per-tier outline brief.
+  Mirrors the code-analyzer's L/XL/XXL outline briefs:
+  - S/M: prose findings with per-citation drill-in.
+  - L: module-overview-style table per connection + per-table summary.
+  - XL: connection-overview table + cross-connection drift table; NO
+    per-row content.
+
+User-overridable via `~/.insrc/data-analyzer/<file>.md`; the loader
+merges per-tier addenda the same way code-analyzer does.
+
+#### 1.10.e File: `scope.ts`
+
+The file structure block lists `agent/tasks/data-analyzer/scope.ts`.
+Its job is small: a single function `clampToDataAltitude(tier:
+ScopeSize): ScopeSize` that maps `XXL`/`XXXL`/`XXXXL` down to `XL`
+(per 1.10.a -- data altitude tops out at XL). Called by the
+orchestrator on `attachInput`, before threading into `K_STATE`.
+
+The classifier itself stays at `agent/classify/scope.ts` (shipped,
+generic). No data-specific classifier is needed -- the same prompt
+sizes data questions just as well as code questions; only the
+post-processing differs.
+
 ### Phase 1 acceptance
 
 - `/data-analyze list pii columns in production` runs end-to-end.
@@ -596,6 +772,10 @@ items the controller is mid-transition on.
 - **Resume from each phase boundary works.** Kill the IDE during planning / analyzing / reviewing / synthesising / present; reopen; daemon picks up where it left off. No phase double-executes; no completed task re-runs (cache absorbs in-progress reruns when connections are unchanged).
 - **Connection approvals re-prompt cleanly on resume.** Approving a connection in the original run does NOT carry over -- the gate fires again on first connection use after restart.
 - **Cancellation persists.** Cancelling mid-run leaves `cancelled: true` in `K_STATE`; resume sees the cancel and finalises immediately rather than re-running.
+- **Per-step provider rebind works.** Rebinding `data-analyzer.synthesise` to a cloud provider in the Model Providers pane causes synthesise to issue against that cloud on the next run. Rebinding `data-analyzer.analyzer` to local is a no-op (default). Bindings persist across daemon restart.
+- **Cloud-unavailable fall-back.** With the cloud provider key cleared, `/data-analyze` still completes -- plan + review fall back to local with a warning banner; the final report carries `provenance: 'local-only'` in its metadata.
+- **Scope tier classifies correctly + caps apply.** "describe the `email` column on `users`" classifies as S; "audit primary for drift" classifies as L; "find drift across all connections" classifies as XL. The plan-approval gate offers a "trim to softTaskCap" action when the planner emits more tasks than the soft cap. XXL+ classification is clamped to XL.
+- **Per-tier prompt addenda land.** Plan output for an S query is 1-2 tasks; for XL it's connection-level rather than table-level. The same query at different tiers produces different plans (verifiable in the daemon log's plan task list).
 
 ## Phase 2 -- Analysis Report Pane + feedback + caching
 
@@ -872,10 +1052,6 @@ present, run a single-row fetch).
 
 ## Out of scope
 
-- Tier-aware playbook (the equivalent of code-analyzer Phase 5.A-C).
-  Data analyses' altitude doesn't span the same range -- "single column"
-  through "multi-connection audit" is narrower than code's S/M/L/XL/XXL.
-  Add it later if real usage shows the need.
 - Recursive cross-agent calls (single-hop only; per design).
 - Statistical PII inference. Pattern-based only.
 - Real-time schema-change watching. Drift is on-demand.
@@ -974,7 +1150,3 @@ users running `/data-analyze` while Phase 1 is in flight (it'll emit a
 - **Schema-change watcher.** A daemon-side watcher that re-fingerprints
   registered connections on a schedule and surfaces drift findings as
   notifications.
-- **Bring-your-own-LLM for the analyzer.** Today the analyzer is local-
-  only (matching code-analyzer). For air-gapped users with cloud-only
-  LLM access, route the analyzer to cloud with stricter sample-data
-  redaction.
