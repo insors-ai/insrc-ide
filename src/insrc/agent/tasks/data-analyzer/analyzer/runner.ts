@@ -22,7 +22,6 @@ import type {
   LLMMessage,
   LLMProvider,
   LLMResponse,
-  ToolCall,
   ToolDefinition,
 } from '../../../../shared/types.js';
 import type { Session } from '../../../session.js';
@@ -224,16 +223,17 @@ export interface RunDataAnalyzerOpts {
   readonly wallClockMs?: number | undefined;
   readonly tier?: ScopeSize | undefined;
   /**
-   * Per-call connection-approval gate. Called with the connectionId
-   * the analyzer wants to act against BEFORE the first tool call
-   * against that connection in the session. The orchestrator
-   * implements this against its session-scoped ApprovedConnectionsStore
-   * and fires a user gate for unapproved connections. When unset, all
-   * connections are allowed (no gate -- only in tests).
+   * Plumb-through fields for the universal access gate (Phase 4 of
+   * plans/access-gate.md). The orchestrator pre-seeds Session.access
+   * with auto-approved connection ids (e.g. ephemeral file connections
+   * the user typed in their prompt) at task start; the dispatcher
+   * inside executeTool consults that store on every db_* call and
+   * fires a UI gate here on miss. Without these the dispatcher fails
+   * closed and denies the call.
    */
-  readonly checkConnectionAccess?:
-    | ((connectionId: string) => Promise<{ allowed: boolean; reason?: string }>)
-    | undefined;
+  readonly send?: ToolExecContext['send'];
+  readonly channel?: ToolExecContext['channel'];
+  readonly requestId?: ToolExecContext['requestId'];
 }
 
 export interface RunDataAnalyzerOutcome {
@@ -307,37 +307,33 @@ export async function runDataAnalyzer(
         continue;
       }
 
-      // Connection-approval gate. Fires per-connection on first use.
-      const connectionId = extractConnectionId(call);
-      if (connectionId !== undefined && opts.checkConnectionAccess !== undefined) {
-        const decision = await opts.checkConnectionAccess(connectionId);
-        if (!decision.allowed) {
-          const msg = `[error] CONNECTION_DENIED: ${decision.reason ?? `connection "${connectionId}" not approved by user`}`;
-          callTrace.push({
-            name: call.name,
-            argsHash: hashArgs(call.input),
-            durationMs: 0,
-            resultRows: 0,
-            error: msg,
-          });
-          resultsBlock.push(renderToolResultBlock(call.id, msg, true));
-          // Track the first deny so the runner can short-circuit
-          // to a blocked result if the model can't recover.
-          if (blockedReason === undefined) {
-            blockedReason = 'connection-denied';
-          }
-          continue;
-        }
-      }
-
+      // Universal access gate dispatch happens INSIDE executeTool
+      // (Phase 2 of plans/access-gate.md). The runner just plumbs
+      // send/channel/requestId so the dispatcher can fire a UI gate
+      // when a connection misses Session.access. The orchestrator
+      // pre-seeds ephemeral connections (auto-approved on registration)
+      // at task start; gated connections raise a generic "Approve
+      // connection use" prompt.
       const t0 = Date.now();
       const execCtx: ToolExecContext = {
         session: opts.session,
         ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
+        ...(opts.send !== undefined ? { send: opts.send } : {}),
+        ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
+        ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
       };
       const r = await executeTool(call, execCtx);
       const durationMs = Date.now() - t0;
+
+      // Detect access-gate denial so the result carries blockedReason
+      // even if the model can't recover with another tool call. The
+      // dispatcher prefixes its denial body with "ACCESS_DENIED:" --
+      // string-match is robust enough since no other tool result uses
+      // that token.
+      if (r.isError && r.content.includes('ACCESS_DENIED') && blockedReason === undefined) {
+        blockedReason = 'connection-denied';
+      }
 
       const trace: ToolCallSummary = {
         name: call.name,
@@ -552,20 +548,3 @@ function sortKeys(v: unknown): unknown {
   return v;
 }
 
-/**
- * Extract the connectionId arg the analyzer wants to act against, for
- * gate dispatch. Every db:* tool the analyzer can call (except
- * db:list_connections) takes a `connectionId` field; we hoist it
- * uniformly so the connection-approval gate fires per-connection-per-
- * session regardless of which tool kind is being invoked.
- *
- * db:list_connections deliberately bypasses the gate -- it's the
- * "what's available?" call and shouldn't require pre-approval.
- */
-function extractConnectionId(call: ToolCall): string | undefined {
-  if (call.name === DB_LIST_CONNECTIONS) {
-    return undefined;
-  }
-  const v = call.input['connectionId'];
-  return typeof v === 'string' && v.length > 0 ? v : undefined;
-}

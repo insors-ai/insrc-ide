@@ -42,11 +42,6 @@ import {
 } from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
 import { generateMultiPass } from '../../agent/content-gen/index.js';
 import {
-  GATE_CONNECTION_APPROVAL,
-  type ConnectionApprovalRequest,
-  type ConnectionApprovalReply,
-} from '../../agent/tasks/data-analyzer/access-gate.js';
-import {
   K_STATE,
   K_PHASE,
   K_RETRIES,
@@ -125,8 +120,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   private _connections: readonly ConnectionSummary[] = [];
   /** Scope tier for this run. Captured from input.classification.scope. */
   private _tier: ScopeSize = 'M';
-  /** Per-session connection-approval set. NOT persisted (re-prompt on resume). */
-  private readonly _approvedConnections = new Set<string>();
   private _listId: string | undefined;
 
   attachDeps(deps: TaskOrchestratorDeps): void {
@@ -210,9 +203,16 @@ export class DataAnalyzerOrchestratorController implements TaskController {
           path:  f.absPath,
         });
         // Auto-approve so the analyzer's first tool call against
-        // this connection doesn't trigger the user gate. The user
-        // already gave consent by typing the path.
-        this._approvedConnections.add(f.connectionId);
+        // this connection doesn't trigger the user gate (Phase 4 of
+        // plans/access-gate.md). The user already gave consent by
+        // typing the path. Seed both kinds: db_sql/db_kv tools key on
+        // 'connection', db_file_* tools resolve the connection-id to
+        // the file path and key on 'fs-path'.
+        const access = this.deps?.session.access;
+        if (access !== undefined) {
+          access.approve('connection', f.connectionId);
+          access.approve('fs-path', f.absPath);
+        }
         log.info(
           { id: f.connectionId, kind: f.kind, path: f.absPath },
           'data-analyzer: registered ephemeral connection from prompt',
@@ -478,7 +478,15 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       provider,
       session: this.deps.session,
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      checkConnectionAccess: (connectionId) => this.checkConnectionAccess(connectionId),
+      // Phase 4 of plans/access-gate.md: drop the per-call
+      // checkConnectionAccess hook in favour of seeding Session.access
+      // at task start (ephemeral connections auto-approved on
+      // registration). The dispatcher inside executeTool fires the
+      // gate UI on miss using the send / channel / requestId we plumb
+      // here.
+      send:      this.deps.send,
+      channel:   this.deps.channel,
+      requestId: this.deps.requestId,
       tier: this._tier,
     });
 
@@ -726,8 +734,10 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     this._tier = persisted.tier;
     this._connections = persisted.connections;
     this._listId = persisted.listId.length > 0 ? persisted.listId : undefined;
-    // approvedConnections deliberately NOT restored -- re-prompt on first use.
-    this._approvedConnections.clear();
+    // Per design §14, connection approvals do not persist across
+    // sessions. On resume the new Session has an empty AccessStore;
+    // the analyzer's first call against any connection will re-fire
+    // the universal access gate (Phase 4 of plans/access-gate.md).
   }
 
   buildResumeTask(state: TaskStateStore): Task {
@@ -806,74 +816,12 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     }
   }
 
-  // -- connection-approval gate -------------------------------------------
-
-  private async checkConnectionAccess(connectionId: string): Promise<{ allowed: boolean; reason?: string }> {
-    if (this._approvedConnections.has(connectionId)) {
-      return { allowed: true };
-    }
-    if (this.deps === undefined) {
-      return { allowed: false, reason: 'orchestrator deps missing' };
-    }
-    const conn = this._connections.find(c => c.id === connectionId);
-    const request: ConnectionApprovalRequest = {
-      gateId: GATE_CONNECTION_APPROVAL,
-      connectionId,
-      ...(conn?.label !== undefined ? { connectionLabel: conn.label } : {}),
-      family: conn?.family ?? 'other',
-      kind: conn?.kind ?? 'unknown',
-      prod: conn?.prod ?? false,
-      intent: `Data Analyzer wants to use connection "${connectionId}"`,
-    };
-    const reply = await this._fireGate(request);
-    if (reply.action === 'approve') {
-      this._approvedConnections.add(connectionId);
-      return { allowed: true };
-    }
-    return { allowed: false, reason: 'user denied connection-approval gate' };
-  }
-
-  private async _fireGate(request: ConnectionApprovalRequest): Promise<ConnectionApprovalReply> {
-    if (this.deps === undefined) return { action: 'deny' };
-    const gateId = `data-analyzer-conn-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    const content = [
-      `The Data Analyzer wants to use connection \`${request.connectionId}\`${request.prod ? ' **(PROD)**' : ''}.`,
-      '',
-      `**Family / kind:** ${request.family} / ${request.kind}`,
-      ...(request.connectionLabel !== undefined ? [`**Label:** ${request.connectionLabel}`] : []),
-      `**Intent:** ${request.intent}`,
-      '',
-      'Approving covers all subsequent tool calls against this connection for the rest of this chat session. A new session re-asks. Approvals do NOT persist across IDE restarts.',
-    ].join('\n');
-    this.deps.send({
-      id: this.deps.requestId,
-      stream: 'gate',
-      data: {
-        gateId,
-        title: `Data Analyzer: approve connection \`${request.connectionId}\``,
-        content,
-        format: 'markdown',
-        actions: [
-          { name: 'approve', label: `Approve \`${request.connectionId}\`` },
-          { name: 'deny', label: 'Deny' },
-        ],
-      },
-    });
-    const channel = this.deps.channel;
-    try {
-      return await new Promise<ConnectionApprovalReply>((resolve, reject) => {
-        channel.registerExternalGate(
-          gateId,
-          (reply: { action: string }) => {
-            resolve(reply.action === 'approve' ? { action: 'approve' } : { action: 'deny' });
-          },
-          reject,
-        );
-      });
-    } catch {
-      return { action: 'deny' };
-    }
-  }
+  // Connection-approval gating moved to the universal access
+  // dispatcher (Phase 4 of plans/access-gate.md). The orchestrator's
+  // role is now just to seed Session.access for ephemeral
+  // connections (auto-approved on registration); the dispatcher in
+  // agent/tools/executor.ts handles the gate UI for any connection
+  // the analyzer asks about that hasn't been approved.
 }
 
 // ---------------------------------------------------------------------------
