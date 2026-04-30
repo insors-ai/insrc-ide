@@ -944,7 +944,12 @@ export class InsrcChatViewPane extends ViewPane {
 					return;
 				}
 				clearNode(this._gateContainer);
-				this.chatService.replyToGate(gate.gateId, detail.name);
+				// Phase 5 of plans/access-gate.md: an `approve-prefix`
+				// action carries the parent-dir / provider-scope payload
+				// the daemon pre-computed. Pass it through so the
+				// dispatcher can call AccessStore.approvePrefix and
+				// cascade the grant to descendants.
+				this.chatService.replyToGate(gate.gateId, detail.name, undefined, detail.prefix);
 				// Item 53: post-save handoff. When the user picks an
 				// action on the handoff-proposal gate, lift the
 				// brainstorm lock so the composer re-enables for the

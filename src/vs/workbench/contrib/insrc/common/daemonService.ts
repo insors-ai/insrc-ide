@@ -18,6 +18,14 @@ export interface DaemonGateAction {
 	readonly label?: string;
 	readonly hint?: string;
 	readonly needsInput?: boolean;
+	/**
+	 * Phase 5 of plans/access-gate.md: when the daemon offers an
+	 * "Approve scope" button on an fs-path / cloud-resource gate it
+	 * pre-computes the parent prefix and stamps it here. The
+	 * workbench echoes the prefix back via replyToGate; the daemon's
+	 * gate dispatcher uses it to call AccessStore.approvePrefix.
+	 */
+	readonly prefix?: string;
 }
 
 export type DaemonStreamMessage =

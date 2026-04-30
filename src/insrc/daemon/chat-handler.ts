@@ -105,18 +105,19 @@ export const chatStart: RpcHandler = async (params) => {
 };
 
 export const chatReply: RpcHandler = async (params) => {
-  const { sessionId, gateId, action, feedback } = params as {
+  const { sessionId, gateId, action, feedback, prefix } = params as {
     sessionId: string;
     gateId: string;
     action: string;
     feedback?: string;
+    prefix?: string;
   };
   const pool = getPool();
   const session = pool.get(sessionId);
   if (!session) return { error: 'session not found' };
   if (!session.channel) return { error: 'no agent running' };
 
-  const resolved = session.channel.resolveGate(gateId, { gateId, action, feedback });
+  const resolved = session.channel.resolveGate(gateId, { gateId, action, feedback, prefix });
   if (!resolved) return { error: `gate ${gateId} not found` };
   return { ok: true };
 };

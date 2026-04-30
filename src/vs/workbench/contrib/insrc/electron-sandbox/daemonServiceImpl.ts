@@ -138,7 +138,7 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 			case 'gate': {
 				const actions = data?.['actions'];
 				const actionNames: string[] = [];
-				const actionDetails: Array<{ name: string; label?: string; hint?: string; needsInput?: boolean }> = [];
+				const actionDetails: Array<{ name: string; label?: string; hint?: string; needsInput?: boolean; prefix?: string }> = [];
 				if (Array.isArray(actions)) {
 					for (const a of actions) {
 						if (typeof a === 'string') {
@@ -149,10 +149,11 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 							const name = typeof o['name'] === 'string' ? o['name'] as string : '';
 							if (!name) { continue; }
 							actionNames.push(name);
-							const entry: { name: string; label?: string; hint?: string; needsInput?: boolean } = { name };
+							const entry: { name: string; label?: string; hint?: string; needsInput?: boolean; prefix?: string } = { name };
 							if (typeof o['label'] === 'string') { entry.label = o['label'] as string; }
 							if (typeof o['hint'] === 'string') { entry.hint = o['hint'] as string; }
 							if (o['needsInput'] === true) { entry.needsInput = true; }
+							if (typeof o['prefix'] === 'string') { entry.prefix = o['prefix'] as string; }
 							actionDetails.push(entry);
 						}
 					}

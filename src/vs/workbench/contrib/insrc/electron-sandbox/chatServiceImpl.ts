@@ -385,7 +385,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this._wireStreamHandle(this._streamHandle);
 	}
 
-	async replyToGate(gateId: string, action: string, feedback?: string): Promise<void> {
+	async replyToGate(gateId: string, action: string, feedback?: string, prefix?: string): Promise<void> {
 		if (!this._activeSessionId) {
 			throw new Error('No active session');
 		}
@@ -395,6 +395,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 			gateId,
 			action,
 			feedback,
+			prefix,
 		});
 
 		// After gate reply, the daemon may resume streaming

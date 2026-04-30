@@ -22,6 +22,14 @@ export interface GateActionDetail {
 	readonly label?: string | undefined;
 	readonly hint?: string | undefined;
 	readonly needsInput?: boolean | undefined;
+	/**
+	 * Phase 5 of plans/access-gate.md: prefix payload the daemon
+	 * stamps on `approve-prefix` actions for fs-path / cloud-resource
+	 * gates. The chat panel echoes it back via replyToGate so the
+	 * daemon can call AccessStore.approvePrefix and cascade the
+	 * grant to every descendant key.
+	 */
+	readonly prefix?: string | undefined;
 }
 
 export interface GateInfo {
@@ -159,7 +167,7 @@ export interface IInsrcChatService {
 		parentListId?: string | undefined,
 		rerunFromListId?: string | undefined,
 	): Promise<void>;
-	replyToGate(gateId: string, action: string, feedback?: string | undefined): Promise<void>;
+	replyToGate(gateId: string, action: string, feedback?: string | undefined, prefix?: string | undefined): Promise<void>;
 	cancelStream(): Promise<void>;
 	/**
 	 * Mid-turn intent correction (Item 6). Cancels the current stream and

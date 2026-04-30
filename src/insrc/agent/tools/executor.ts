@@ -220,13 +220,32 @@ async function fireAccessGate(
       : 'Approval is session-scoped; re-prompts after IDE restart.',
   );
 
-  const actions: { name: string; label: string }[] = [
+  const actions: { name: string; label: string; prefix?: string }[] = [
     {
       name: 'approve',
       label: isDestructive ? 'Approve once' : `Approve \`${truncateForLabel(key)}\``,
     },
-    { name: 'deny', label: 'Deny' },
   ];
+
+  // Phase 5 of plans/access-gate.md: offer an "Approve scope" action
+  // for kinds where a prefix grant is materially useful (the user
+  // clears every descendant in one click). Skip for destructive ops
+  // -- prefix-grants don't bypass destructive-severity, and offering
+  // them on rm/delete/terminate would mislead the user. Skip kinds
+  // where a prefix isn't meaningful (connection ids are atomic;
+  // shell commands are always destructive).
+  if (!isDestructive) {
+    const prefix = inferPrefixForGate(policy.kind, key);
+    if (prefix !== undefined && prefix.length > 0 && prefix !== key) {
+      actions.push({
+        name: 'approve-prefix',
+        label: `Approve scope \`${truncateForLabel(prefix)}\``,
+        prefix,
+      });
+    }
+  }
+
+  actions.push({ name: 'deny', label: 'Deny' });
 
   ctx.send({
     id: ctx.requestId,
@@ -245,13 +264,53 @@ async function fireAccessGate(
     return await new Promise<GateReply>((resolve, reject) => {
       channel.registerExternalGate(
         gateId,
-        (reply: { action: string; prefix?: string }) => resolve({ action: reply.action, ...(reply.prefix !== undefined ? { prefix: reply.prefix } : {}) }),
+        (reply) => resolve({ action: reply.action, ...(reply.prefix !== undefined ? { prefix: reply.prefix } : {}) }),
         reject,
       );
     });
   } catch {
     return { action: 'deny' };
   }
+}
+
+/**
+ * Compute a sensible prefix to offer for an "Approve scope" gate
+ * action (Phase 5 of plans/access-gate.md). Returns undefined when no
+ * useful prefix exists for this kind/key.
+ *
+ *   - fs-path:        the parent directory (covers every sibling /
+ *                     descendant file). DefaultAccessStore auto-appends
+ *                     `/` so we don't risk `/var/log` matching
+ *                     `/var/log_archive/`.
+ *   - cloud-resource: the provider+scope segment of the key. Cloud
+ *                     keys are shaped `aws:profile=p,region=r:ec2:i-X`
+ *                     so the scope is everything up to and including
+ *                     the second `:`. Approving that covers every
+ *                     resource (ec2, s3, lambda, ...) in the same
+ *                     profile/region for the rest of the session.
+ *
+ * Returns undefined for kinds without a meaningful prefix shape:
+ *   - connection: ids are atomic; no parent.
+ *   - shell-command: always destructive (caller skips the prefix
+ *                    branch); no parent shell-command anyway.
+ *   - network-host: a future kind; FQDN slicing isn't well-defined.
+ */
+function inferPrefixForGate(kind: string, key: string): string | undefined {
+  if (kind === 'fs-path') {
+    const lastSep = Math.max(key.lastIndexOf('/'), key.lastIndexOf('\\'));
+    if (lastSep <= 0) return undefined;          // root path; no parent
+    return key.slice(0, lastSep);                 // store auto-appends '/'
+  }
+  if (kind === 'cloud-resource') {
+    // Find the second `:`; everything up to and including it is the
+    // provider+scope marker.
+    const first = key.indexOf(':');
+    if (first === -1) return undefined;
+    const second = key.indexOf(':', first + 1);
+    if (second === -1) return undefined;
+    return key.slice(0, second + 1);              // include the trailing ':'
+  }
+  return undefined;
 }
 
 function verbForKind(kind: string, destructive: boolean): string {

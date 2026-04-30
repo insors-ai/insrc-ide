@@ -53,6 +53,17 @@ export interface GateAction {
   label:      string;
   hint?:      string | undefined;
   needsInput?: boolean | undefined;
+  /**
+   * Prefix payload carried alongside an `approve-prefix` action
+   * (Phase 5 of plans/access-gate.md). When the user clicks an
+   * action that has this set, the workbench echoes it back in the
+   * reply so the daemon's gate dispatcher can call
+   * AccessStore.approvePrefix(kind, prefix) and cascade the grant
+   * to every descendant key. The dispatcher (executor.fireAccessGate)
+   * pre-populates this for fs-path / cloud-resource gates so the
+   * UI doesn't have to do path arithmetic.
+   */
+  prefix?:    string | undefined;
 }
 
 export interface DonePayload {
@@ -83,6 +94,13 @@ export interface ReplyPayload {
   gateId:    string;
   action:    string;
   feedback?: string | undefined;
+  /**
+   * Prefix echoed back from a clicked action that carried one
+   * (typically `approve-prefix` for fs-path / cloud-resource scopes;
+   * see GateAction.prefix). The daemon's executor.fireAccessGate
+   * uses this to call AccessStore.approvePrefix(kind, prefix).
+   */
+  prefix?:   string | undefined;
 }
 
 export interface CancelPayload {
