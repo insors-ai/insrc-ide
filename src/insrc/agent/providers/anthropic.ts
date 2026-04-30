@@ -109,7 +109,7 @@ export class AnthropicProvider implements LLMProvider {
           .filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use')
           .map((b): ToolCall => ({
             id:    b.id,
-            name:  b.name,
+            name:  fromClaudeToolName(b.name),
             input: b.input as Record<string, unknown>,
           }));
 
@@ -336,9 +336,32 @@ function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam
   });
 }
 
+/**
+ * Anthropic's API restricts tool names to `^[a-zA-Z0-9_-]{1,128}$`.
+ * Many of our tool ids use `:` as a namespace separator
+ * (`db:sql:describe`, `code:locate`, `data:lineage`, etc.) which the
+ * API rejects with HTTP 400.
+ *
+ * We translate `:` -> `__` when sending the tool list to Claude, and
+ * the inverse on tool_use blocks coming back, so the rest of the
+ * pipeline (executor + tool registry) sees the canonical colon form.
+ *
+ * `__` was picked because none of our shipped tool ids contain it;
+ * the round-trip is lossless for every tool registered today.
+ */
+const CLAUDE_NAME_SEP = '__';
+
+function toClaudeToolName(name: string): string {
+  return name.replace(/:/g, CLAUDE_NAME_SEP);
+}
+
+export function fromClaudeToolName(name: string): string {
+  return name.split(CLAUDE_NAME_SEP).join(':');
+}
+
 function toAnthropicTools(tools: ToolDefinition[]): Anthropic.Tool[] {
   return tools.map(t => ({
-    name:         t.name,
+    name:         toClaudeToolName(t.name),
     description:  t.description,
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
   }));
