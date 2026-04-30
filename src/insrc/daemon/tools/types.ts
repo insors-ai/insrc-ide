@@ -15,6 +15,7 @@ import type { IpcStreamMessage } from '../../shared/types.js';
 import type { DaemonChannel } from '../channel.js';
 import type { GateAction } from '../../agent/framework/types.js';
 import type { TodosApi } from '../../shared/todos.js';
+import type { AccessPolicy } from '../../shared/access.js';
 
 // ---------------------------------------------------------------------------
 // Tool contract
@@ -113,6 +114,24 @@ export interface Tool {
    * token (confirmBucket, confirmCount, confirmService, ...).
    */
   readonly destructive?: boolean;
+
+  /**
+   * Universal Access Gate declaration (plans/access-gate.md). A tool
+   * that touches an EXTERNAL RESOURCE (DB, filesystem, cloud API,
+   * shell, network host) declares its access requirement here; the
+   * executor's gate dispatcher (Phase 2) consults Session.access on
+   * every call and fires a gate UI on miss. Tools that only read
+   * daemon-internal state (registry queries, list_connections,
+   * config getters) leave this undefined -- the dispatcher's
+   * `if (tool.access)` check short-circuits and the call runs
+   * ungated.
+   *
+   * Distinct from `requiresApproval`: that flag triggers a generic
+   * per-call confirm; `access` is keyed on a real-world resource and
+   * caches approvals across calls in the same session via the
+   * AccessStore. Both can coexist on the same tool.
+   */
+  readonly access?: AccessPolicy;
 
   /**
    * Build the approval gate shown to the user. The default gate is

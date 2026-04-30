@@ -50,7 +50,13 @@ export function getTool(name: string): Tool | undefined {
   // registration still populates everything (defaults are all
   // enabled); the gate fires at lookup time so IDE-pushed changes
   // take effect without a daemon restart.
-  const category = tool.id.split(':', 1)[0] ?? '';
+  //
+  // The category is the first underscore-separated segment of the
+  // tool id (`db_sql_describe` -> `db`, `cloud_aws_lambda_invoke`
+  // -> `cloud`). The 2026-04-30 rename moved tool ids from
+  // `<cat>:<rest>` to `<cat>_<rest>` for Claude API compatibility;
+  // this gate now parses on `_` rather than `:`.
+  const category = tool.id.includes('_') ? (tool.id.split('_', 1)[0] ?? '') : '';
   if (category && !getToolSettings().enabledCategories.includes(category)) {
     return undefined;
   }
