@@ -9,7 +9,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -34,6 +34,10 @@ interface AwsSecretGetData {
 export const awsSecretsGetTool: Tool = {
   id: 'cloud_aws_secretsmanager_get',
   description: 'Fetch a secret value. Secret stays redacted in the rendered output unless reveal:true.',
+  access: awsAccess({
+    resource: (input) => `secret:${str(input, 'secretId') ?? '?'}`,
+    verb: 'read secret',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -136,6 +140,11 @@ interface AwsSecretPutData {
 export const awsSecretsPutTool: Tool = {
   id: 'cloud_aws_secretsmanager_put',
   description: 'Write a new version to an existing Secrets Manager secret. Value hidden in gate.',
+  access: awsAccess({
+    resource: (input) => `secret:${str(input, 'secretId') ?? '?'}`,
+    verb: 'write secret',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

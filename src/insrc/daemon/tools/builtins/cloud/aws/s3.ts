@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, str } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, str } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -29,6 +29,10 @@ interface AwsS3LsData {
 export const awsS3LsTool: Tool = {
   id: 'cloud_aws_s3_ls',
   description: 'List an S3 bucket or prefix.',
+  access: awsAccess({
+    resource: (input) => `s3:${str(input, 'path') ?? '<all>'}`,
+    verb: 'list',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -89,6 +93,11 @@ interface AwsS3CpData {
 export const awsS3CpTool: Tool = {
   id: 'cloud_aws_s3_cp',
   description: 'Copy to/from/within S3. Gated for write targets.',
+  access: awsAccess({
+    resource: (input) => `s3:${str(input, 'source') ?? '?'}->${str(input, 'destination') ?? '?'}`,
+    verb: 'copy',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -179,6 +188,11 @@ interface AwsS3RmData {
 export const awsS3RmTool: Tool = {
   id: 'cloud_aws_s3_rm',
   description: 'Delete S3 objects. Always gated. Recursive delete requires confirmBucket to match.',
+  access: awsAccess({
+    resource: (input) => `s3:${str(input, 'path') ?? '?'}`,
+    verb: 'delete',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -271,6 +285,11 @@ interface AwsS3SyncData {
 export const awsS3SyncTool: Tool = {
   id: 'cloud_aws_s3_sync',
   description: 'Sync a directory with an S3 prefix. Gated; --dry-run supported for preview.',
+  access: awsAccess({
+    resource: (input) => `s3:${str(input, 'source') ?? '?'}->${str(input, 'destination') ?? '?'}`,
+    verb: 'sync',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

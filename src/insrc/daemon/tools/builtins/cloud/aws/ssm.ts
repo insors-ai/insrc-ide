@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -31,6 +31,10 @@ interface AwsSsmGetData {
 export const awsSsmGetParameterTool: Tool = {
   id: 'cloud_aws_ssm_get-parameter',
   description: 'Fetch a Parameter Store value. SecureString values stay redacted unless reveal:true.',
+  access: awsAccess({
+    resource: (input) => `ssm:${str(input, 'name') ?? '?'}`,
+    verb: 'read SSM parameter',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -122,6 +126,11 @@ interface AwsSsmPutData {
 export const awsSsmPutParameterTool: Tool = {
   id: 'cloud_aws_ssm_put-parameter',
   description: 'Create or update a Parameter Store value.',
+  access: awsAccess({
+    resource: (input) => `ssm:${str(input, 'name') ?? '?'}`,
+    verb: 'write SSM parameter',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

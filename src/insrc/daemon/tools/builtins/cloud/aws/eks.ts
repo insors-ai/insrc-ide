@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -27,6 +27,7 @@ interface AwsEksListData {
 export const awsEksListTool: Tool = {
   id: 'cloud_aws_eks_list',
   description: 'List EKS clusters in the region.',
+  access: awsAccess({ resource: () => 'eks:*', verb: 'list clusters in' }),
   inputSchema: {
     type: 'object',
     properties: { ...AWS_SCHEMA },
@@ -73,6 +74,11 @@ interface AwsEksUpdateKubeconfigData {
 export const awsEksUpdateKubeconfigTool: Tool = {
   id: 'cloud_aws_eks_update-kubeconfig',
   description: 'Write a kubeconfig entry for an EKS cluster. Mutates the kubeconfig file.',
+  access: awsAccess({
+    resource: (input) => `eks:${str(input, 'clusterName') ?? '?'}`,
+    verb: 'write kubeconfig for',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process';
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolDeps, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, num, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, num, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -34,6 +34,10 @@ const MAX_TAIL_RUNTIME = 30 * 60_000;
 export const awsLogsTailTool: Tool = {
   id: 'cloud_aws_logs_tail',
   description: 'Tail CloudWatch Logs (live follow streams; one-shot otherwise).',
+  access: awsAccess({
+    resource: (input) => `logs:${str(input, 'logGroup') ?? '?'}`,
+    verb: 'tail',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -160,6 +164,10 @@ interface AwsLogsFilterData {
 export const awsLogsFilterTool: Tool = {
   id: 'cloud_aws_logs_filter',
   description: 'Run filter-log-events against a CloudWatch log group.',
+  access: awsAccess({
+    resource: (input) => `logs:${str(input, 'logGroup') ?? '?'}`,
+    verb: 'filter logs in',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

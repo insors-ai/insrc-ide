@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -19,6 +19,7 @@ interface AwsStsWhoAmIData {
 export const awsStsWhoAmITool: Tool = {
   id: 'cloud_aws_sts_whoami',
   description: 'Return the AWS principal behind the current credentials (aws sts get-caller-identity).',
+  access: awsAccess({ resource: () => 'sts', verb: 'identity for' }),
   inputSchema: {
     type: 'object',
     properties: { ...AWS_SCHEMA },

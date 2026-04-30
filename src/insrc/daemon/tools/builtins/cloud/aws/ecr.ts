@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, str } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, str } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -25,6 +25,10 @@ interface AwsEcrLoginData {
 export const awsEcrLoginTool: Tool = {
   id: 'cloud_aws_ecr_login',
   description: 'Produce docker login credentials for ECR (ecr get-login-password). Password redacted unless reveal:true.',
+  access: awsAccess({
+    resource: (input) => `ecr:${str(input, 'registryId') ?? '<account>'}`,
+    verb: 'fetch ECR login for',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

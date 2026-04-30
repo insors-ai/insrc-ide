@@ -9,7 +9,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -26,6 +26,14 @@ interface AwsIamListAttachedData {
 export const awsIamListAttachedPoliciesTool: Tool = {
   id: 'cloud_aws_iam_list-attached-policies',
   description: 'List attached managed policies for the caller, a user, a role, or a group.',
+  access: awsAccess({
+    resource: (input) => {
+      const target = str(input, 'target') ?? 'caller';
+      const name = str(input, 'name');
+      return name ? `iam:${target}:${name}` : `iam:${target}`;
+    },
+    verb: 'list policies for',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

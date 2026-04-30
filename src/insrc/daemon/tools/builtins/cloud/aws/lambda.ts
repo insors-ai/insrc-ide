@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, num, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, num, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -33,6 +33,11 @@ interface AwsLambdaInvokeData {
 export const awsLambdaInvokeTool: Tool = {
   id: 'cloud_aws_lambda_invoke',
   description: 'Invoke a Lambda function (RequestResponse by default) and return its response.',
+  access: awsAccess({
+    resource: (input) => `lambda:${str(input, 'functionName') ?? '?'}`,
+    verb: 'invoke',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -164,6 +169,7 @@ interface AwsLambdaListData {
 export const awsLambdaListTool: Tool = {
   id: 'cloud_aws_lambda_list',
   description: 'List Lambda functions in the account/region.',
+  access: awsAccess({ resource: () => 'lambda:*', verb: 'list functions in' }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -221,6 +227,11 @@ interface AwsLambdaUpdateCodeData {
 export const awsLambdaUpdateCodeTool: Tool = {
   id: 'cloud_aws_lambda_update-code',
   description: 'Update Lambda function code from a local zip, S3 object, or container image URI.',
+  access: awsAccess({
+    resource: (input) => `lambda:${str(input, 'functionName') ?? '?'}`,
+    verb: 'update code on',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

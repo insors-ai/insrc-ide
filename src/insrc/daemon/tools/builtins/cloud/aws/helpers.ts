@@ -8,6 +8,7 @@
  */
 
 import type { ToolInput } from '../../../types.js';
+import type { AccessPolicy } from '../../../../../shared/access.js';
 
 export interface AwsFlags {
   profile?: string;
@@ -72,4 +73,49 @@ export const AWS_SCHEMA = {
 
 export function tryParseJson(stdout: string): unknown {
   try { return JSON.parse(stdout); } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// AccessPolicy factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an AccessPolicy for an AWS tool (plans/access-gate.md Phase 3).
+ *
+ * Key shape: `aws:profile=<p>,region=<r>:<resource>` so:
+ *   - read tools (severity standard) share an approval bucket per
+ *     (profile, region) pair: once the user approves "profile=dev,
+ *     region=us-east-1", subsequent list/describe calls in that
+ *     scope bypass silently
+ *   - mutate tools (severity destructive) re-prompt on every call
+ *     regardless of prior approvals; the resource still gets baked
+ *     into the key so the AccessStore audit log identifies what was
+ *     touched
+ *
+ * The `resource` callback returns a short identifier used both in the
+ * key suffix and the gate-body description. For multi-target tools
+ * (e.g. ec2:terminate with several instance IDs) join them with ',';
+ * the gate UI truncates long labels.
+ */
+export function awsAccess(opts: {
+  resource: (input: ToolInput) => string;
+  severity?: 'standard' | 'destructive';
+  verb: string;
+}): AccessPolicy {
+  const severity = opts.severity ?? 'standard';
+  return {
+    kind: 'cloud-resource',
+    extractKey: (input) => {
+      const flags = awsFlags(input as ToolInput);
+      const scope = `aws:profile=${flags.profile ?? 'default'},region=${flags.region ?? 'default'}`;
+      const res = opts.resource(input as ToolInput);
+      return res.length > 0 ? `${scope}:${res}` : scope;
+    },
+    describe: (input) => {
+      const flags = awsFlags(input as ToolInput);
+      const res = opts.resource(input as ToolInput);
+      return `${opts.verb} ${res || '<no target>'} (aws ${awsScope(flags)})`;
+    },
+    severity,
+  };
 }

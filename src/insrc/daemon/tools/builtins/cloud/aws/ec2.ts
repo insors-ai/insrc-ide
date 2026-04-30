@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -34,6 +34,13 @@ interface AwsEc2ListData {
 export const awsEc2ListTool: Tool = {
   id: 'cloud_aws_ec2_list',
   description: 'Describe EC2 instances. Filters and instance IDs supported.',
+  access: awsAccess({
+    resource: (input) => {
+      const ids = instanceIdsFromInput(input);
+      return ids.length > 0 ? `ec2:${ids.join(',')}` : 'ec2:*';
+    },
+    verb: 'describe',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -99,6 +106,11 @@ interface AwsEc2StateChangeData {
 export const awsEc2StartTool: Tool = {
   id: 'cloud_aws_ec2_start',
   description: 'Start stopped EC2 instances.',
+  access: awsAccess({
+    resource: (input) => `ec2:${instanceIdsFromInput(input).join(',')}`,
+    verb: 'start',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -157,6 +169,11 @@ export const awsEc2StartTool: Tool = {
 export const awsEc2StopTool: Tool = {
   id: 'cloud_aws_ec2_stop',
   description: 'Stop running EC2 instances. Optional --force for immediate stop.',
+  access: awsAccess({
+    resource: (input) => `ec2:${instanceIdsFromInput(input).join(',')}`,
+    verb: 'stop',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -219,6 +236,11 @@ export const awsEc2StopTool: Tool = {
 export const awsEc2TerminateTool: Tool = {
   id: 'cloud_aws_ec2_terminate',
   description: 'Terminate EC2 instances (irrecoverable). Always gated; requires confirmCount.',
+  access: awsAccess({
+    resource: (input) => `ec2:${instanceIdsFromInput(input).join(',')}`,
+    verb: 'terminate',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

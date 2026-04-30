@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, bool, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -27,6 +27,7 @@ interface AwsCfnListData {
 export const awsCfnListTool: Tool = {
   id: 'cloud_aws_cloudformation_list',
   description: 'List CloudFormation stacks with optional status filter.',
+  access: awsAccess({ resource: () => 'cfn:*', verb: 'list stacks in' }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -88,6 +89,11 @@ async function writeTemplateToTemp(body: string): Promise<string> {
 export const awsCfnDeployTool: Tool = {
   id: 'cloud_aws_cloudformation_deploy',
   description: 'Deploy a CloudFormation stack (create-or-update, capabilities-aware).',
+  access: awsAccess({
+    resource: (input) => `cfn:${str(input, 'stackName') ?? '?'}`,
+    verb: 'deploy stack',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -208,6 +214,11 @@ interface AwsCfnDeleteData {
 export const awsCfnDeleteTool: Tool = {
   id: 'cloud_aws_cloudformation_delete',
   description: 'Delete a CloudFormation stack. Always gated; requires confirmStack to match.',
+  access: awsAccess({
+    resource: (input) => `cfn:${str(input, 'stackName') ?? '?'}`,
+    verb: 'delete stack',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

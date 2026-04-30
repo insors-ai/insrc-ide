@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AWS_SCHEMA, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
+import { AWS_SCHEMA, awsAccess, awsArgv, awsFlags, awsScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -28,6 +28,10 @@ interface AwsRdsDescribeData {
 export const awsRdsDescribeTool: Tool = {
   id: 'cloud_aws_rds_describe',
   description: 'Describe RDS DB instances (optionally filtered by identifier).',
+  access: awsAccess({
+    resource: (input) => `rds:${str(input, 'dbInstanceId') ?? '*'}`,
+    verb: 'describe RDS',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -84,6 +88,11 @@ interface AwsRdsStateChangeData {
 export const awsRdsStartTool: Tool = {
   id: 'cloud_aws_rds_start',
   description: 'Start a stopped RDS DB instance.',
+  access: awsAccess({
+    resource: (input) => `rds:${str(input, 'dbInstanceId') ?? '?'}`,
+    verb: 'start RDS',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -140,6 +149,11 @@ export const awsRdsStartTool: Tool = {
 export const awsRdsStopTool: Tool = {
   id: 'cloud_aws_rds_stop',
   description: 'Stop an RDS DB instance (up to 7 days without auto-start).',
+  access: awsAccess({
+    resource: (input) => `rds:${str(input, 'dbInstanceId') ?? '?'}`,
+    verb: 'stop RDS',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
