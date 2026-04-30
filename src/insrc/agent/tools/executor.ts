@@ -138,7 +138,10 @@ async function checkAccess(
   }
 
   const store = ctx.session.access;
+  const audit = ctx.session.accessAudit;
   const isDestructive = policy.severity === 'destructive';
+  const severity: 'standard' | 'destructive' = isDestructive ? 'destructive' : 'standard';
+  const description = policy.describe ? policy.describe(input) : undefined;
 
   const denials: string[] = [];
   for (const key of keys) {
@@ -146,6 +149,15 @@ async function checkAccess(
     // user must explicitly re-approve every call. Read approvals
     // never auto-promote to writes.
     if (!isDestructive && store.isApproved(policy.kind, key)) {
+      audit.record({
+        timestamp: Date.now(),
+        toolId: tool.id,
+        kind: policy.kind,
+        key,
+        decision: 'auto-pass',
+        severity,
+        ...(description !== undefined ? { description } : {}),
+      });
       continue;
     }
     const reply = await fireAccessGate(ctx, tool, policy, input, key, isDestructive);
@@ -154,12 +166,47 @@ async function checkAccess(
       if (!isDestructive) {
         store.approve(policy.kind, key);
       }
+      audit.record({
+        timestamp: Date.now(),
+        toolId: tool.id,
+        kind: policy.kind,
+        key,
+        decision: 'approve',
+        severity,
+        ...(description !== undefined ? { description } : {}),
+      });
       continue;
     }
     if (reply.action === 'approve-prefix' && typeof reply.prefix === 'string' && reply.prefix.length > 0) {
       store.approvePrefix(policy.kind, reply.prefix);
+      audit.record({
+        timestamp: Date.now(),
+        toolId: tool.id,
+        kind: policy.kind,
+        key,
+        decision: 'approve-prefix',
+        prefix: reply.prefix,
+        severity,
+        ...(description !== undefined ? { description } : {}),
+      });
       continue;
     }
+    audit.record({
+      timestamp: Date.now(),
+      toolId: tool.id,
+      kind: policy.kind,
+      key,
+      // Distinguish user-driven deny from fail-closed (no UI plumbing).
+      // fireAccessGate stamps `action: 'deny'` for both paths but logs
+      // a warning for the latter; we approximate by checking whether
+      // the dispatcher had the plumbing to ask at all.
+      decision:
+        ctx.send !== undefined && ctx.channel !== undefined && ctx.requestId !== undefined
+          ? 'deny'
+          : 'auto-deny',
+      severity,
+      ...(description !== undefined ? { description } : {}),
+    });
     denials.push(key);
     if (isDestructive) break;   // no point asking about further keys
   }

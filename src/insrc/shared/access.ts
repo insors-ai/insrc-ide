@@ -269,3 +269,84 @@ export class PermissiveAccessStore implements AccessStore {
   revokePrefix(_kind: string, _prefix: string): void { /* no-op */ }
   list(): readonly AccessApproval[] { return []; }
 }
+
+// ---------------------------------------------------------------------------
+// AccessAuditLog -- chronological log of every gate decision
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a single gate dispatch. Together with `AccessApproval`,
+ * gives the approvals pane (Phase 5.3 of plans/access-gate.md) the
+ * full picture: what was approved (current state), AND what was
+ * asked / denied along the way (history).
+ *
+ *   auto-pass        Pre-existing approval; gate skipped silently.
+ *   approve          User clicked Approve; exact key approval added.
+ *   approve-prefix   User clicked Approve scope; prefix approval added.
+ *   deny             User clicked Deny; tool call short-circuited.
+ *   auto-deny        Dispatcher had no send/channel/requestId, so the
+ *                    fail-closed branch denied without prompting.
+ */
+export type AccessDecision =
+  | 'auto-pass'
+  | 'approve'
+  | 'approve-prefix'
+  | 'deny'
+  | 'auto-deny';
+
+export interface AccessAuditEvent {
+  /** ms since epoch, captured at dispatch time. */
+  readonly timestamp: number;
+  /** Canonical tool id (`file_read`, `cloud_aws_ec2_terminate`, ...). */
+  readonly toolId: string;
+  /** AccessPolicy.kind (`fs-path`, `connection`, `cloud-resource`, ...). */
+  readonly kind: string;
+  /** Resource key the dispatcher checked. */
+  readonly key: string;
+  readonly decision: AccessDecision;
+  /** Set on `approve-prefix` decisions. */
+  readonly prefix?: string | undefined;
+  readonly severity: 'standard' | 'destructive';
+  /** AccessPolicy.describe(input) when present, for human-readable rendering. */
+  readonly description?: string | undefined;
+}
+
+/**
+ * Append-only chronological log. The Session pool constructs one per
+ * session alongside its AccessStore; the dispatcher records every
+ * decision through it.
+ */
+export interface AccessAuditLog {
+  record(event: AccessAuditEvent): void;
+  /** Snapshot in chronological order. Most-recent last. */
+  list(): readonly AccessAuditEvent[];
+}
+
+/**
+ * Default in-memory implementation. Capped at MAX_EVENTS to bound
+ * memory on long-running sessions; over-cap entries roll off the
+ * front (oldest first). The cap is generous enough that a typical
+ * analysis run keeps every event.
+ */
+export class DefaultAccessAuditLog implements AccessAuditLog {
+  private static readonly MAX_EVENTS = 1000;
+  private readonly events: AccessAuditEvent[] = [];
+
+  record(event: AccessAuditEvent): void {
+    this.events.push(event);
+    const overflow = this.events.length - DefaultAccessAuditLog.MAX_EVENTS;
+    if (overflow > 0) {
+      this.events.splice(0, overflow);
+    }
+  }
+
+  list(): readonly AccessAuditEvent[] {
+    return this.events.slice();
+  }
+}
+
+/** No-op audit log for tests / PermissiveAccessStore consumers. */
+export class NullAccessAuditLog implements AccessAuditLog {
+  record(_event: AccessAuditEvent): void { /* no-op */ }
+  list(): readonly AccessAuditEvent[] { return []; }
+}

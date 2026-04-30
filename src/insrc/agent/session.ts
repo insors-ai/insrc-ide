@@ -9,7 +9,12 @@ import { embedText } from './context/semantic.js';
 import { sessionClose, sessionSeed, sessionForget, sessionHistory } from './tools/mcp-client.js';
 import { HealthMonitor, type HealthSnapshot } from './faults/index.js';
 import { ContextAwareProvider } from './context/context-aware-provider.js';
-import { DefaultAccessStore, type AccessStore } from '../shared/access.js';
+import {
+  DefaultAccessStore,
+  DefaultAccessAuditLog,
+  type AccessStore,
+  type AccessAuditLog,
+} from '../shared/access.js';
 
 export interface SessionOpts {
   repoPath: string;
@@ -79,6 +84,18 @@ export class Session {
    * access.
    */
   readonly access: AccessStore = new DefaultAccessStore();
+
+  /**
+   * Chronological audit trail of access-gate decisions
+   * (plans/access-gate.md Phase 5.2). Every dispatch -- auto-pass,
+   * approve, approve-prefix, deny, auto-deny -- writes one event.
+   * The approvals pane (Phase 5.3) reads `access.list()` for current
+   * approvals and `accessAudit.list()` for history.
+   *
+   * Capped at 1000 entries; oldest events roll off. Session-scoped:
+   * dies with the session.
+   */
+  readonly accessAudit: AccessAuditLog = new DefaultAccessAuditLog();
 
   constructor(opts: SessionOpts) {
     this.id = opts.id ?? randomUUID();
