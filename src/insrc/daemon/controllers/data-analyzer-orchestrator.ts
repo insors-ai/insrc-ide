@@ -744,6 +744,15 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       markdown = `# Data Analysis Report\n\n_Synthesis failed: ${(err as Error).message}_\n\nSee accepted findings in the todos pane.`;
     }
 
+    // Phase 3.3: ER artifact integration. For every `kind: 'er'`
+    // task in the accepted set, generate an ER diagram via the
+    // shipped artifact_er tool. Each artifact persists as a TodoItem
+    // (visible in the artifacts pane) and lands a one-line reference
+    // in the report so readers know which diagrams cover the run.
+    // Best-effort: failures append an inline warning rather than
+    // bubbling up.
+    markdown = await this._appendErArtifactSection(markdown, accepted);
+
     state.set(K_SYNTH_RESULT, markdown);
 
     // Persist body on the list so the (future Phase 2) report pane
@@ -876,6 +885,113 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   // the analyzer asks about that hasn't been approved.
 
   /**
+   * Phase 3.3 of plans/analyzers/data-analyzer.md: when the planner
+   * emits a `kind: 'er'` task, generate an ER artifact via the
+   * shipped `artifact_er` tool and append a reference section to the
+   * report. The artifact itself persists as a TodoItem (the
+   * artifact tool routes through `persistArtifact`); we just
+   * surface the existence so the user can pivot from report -> ER
+   * pane.
+   *
+   * Connection / tables resolution: each ER task's `scope` carries
+   * `connections[]` and `targets[]`. We invoke one artifact per
+   * connection, with the union of that connection's targets as the
+   * `tables` payload. When scope.connections is unset, we fall
+   * through to the artifact's prisma / kuzu fallback (no `connection`
+   * arg) -- the tool itself decides the source priority.
+   */
+  private async _appendErArtifactSection(
+    markdown: string,
+    accepted: readonly AcceptedTask[],
+  ): Promise<string> {
+    if (this.deps === undefined) return markdown;
+    const erTasks = accepted.filter(a => a.task.kind === 'er');
+    if (erTasks.length === 0) return markdown;
+
+    const generated: { title: string; id: string; provenance: string }[] = [];
+    const failures: string[] = [];
+
+    for (const { task } of erTasks) {
+      const groups = groupTablesByConnection(task);
+      // No scope at all -- fall through to artifact_er's free-text
+      // / prisma / kuzu source chain with just the question.
+      if (groups.length === 0) {
+        groups.push({ connection: undefined, tables: [] });
+      }
+      for (const group of groups) {
+        const result = await this._runErArtifact(task.question, group);
+        if ('error' in result) {
+          failures.push(`${group.connection ?? '<no connection>'}: ${result.error}`);
+        } else {
+          generated.push(result);
+        }
+      }
+    }
+
+    if (generated.length === 0 && failures.length === 0) return markdown;
+
+    const lines: string[] = ['', '## ER Diagrams', ''];
+    if (generated.length > 0) {
+      lines.push(`Generated ${generated.length} ER artifact${generated.length === 1 ? '' : 's'} (open via the Artifacts pane):`);
+      lines.push('');
+      for (const g of generated) {
+        lines.push(`- **${g.title}** -- \`${g.id}\` _(${g.provenance})_`);
+      }
+    }
+    if (failures.length > 0) {
+      lines.push('');
+      lines.push('_ER generation skipped for the following:_');
+      for (const f of failures) {
+        lines.push(`- ${f}`);
+      }
+    }
+    return markdown + lines.join('\n');
+  }
+
+  /**
+   * Invoke `artifact_er` via the unified tool executor. Wraps the
+   * call result so the caller gets either a structured success
+   * payload or a single-line error string.
+   */
+  private async _runErArtifact(
+    description: string,
+    group: { connection: string | undefined; tables: readonly string[] },
+  ): Promise<
+    | { title: string; id: string; provenance: string }
+    | { error: string }
+  > {
+    if (this.deps === undefined) return { error: 'orchestrator deps missing' };
+    const input: Record<string, unknown> = { description };
+    if (group.connection !== undefined) { input['connection'] = group.connection; }
+    if (group.tables.length > 0)        { input['tables'] = [...group.tables]; }
+
+    const r = await executeTool(
+      { id: `er-${Date.now()}-${Math.floor(Math.random() * 1000)}`, name: 'artifact_er', input },
+      {
+        session: this.deps.session,
+        send: this.deps.send,
+        channel: this.deps.channel,
+        requestId: this.deps.requestId,
+      },
+    );
+    if (r.isError) {
+      return { error: r.content.slice(0, 200) };
+    }
+    // executeTool returns ToolResult; the structured payload from the
+    // tool's data field isn't propagated, so parse the summary line
+    // for id / title.
+    const idMatch = /id=([^,]+)/.exec(r.content);
+    const titleMatch = /title="([^"]+)"/.exec(r.content);
+    return {
+      id: idMatch?.[1] ?? '<unknown>',
+      title: titleMatch?.[1] ?? 'ER diagram',
+      provenance: group.connection !== undefined
+        ? `connection=${group.connection}, ${group.tables.length} table${group.tables.length === 1 ? '' : 's'}`
+        : 'prisma / kuzu fallback',
+    };
+  }
+
+  /**
    * Build the cache-key input for a task (Phase 2.4). The
    * connection fingerprint combines the task's explicit scope with
    * the active session's full connection roster -- so cache hits
@@ -919,6 +1035,24 @@ function clampToDataAltitude(tier: ScopeSize): ScopeSize {
 function shortTitleFor(t: DataAnalysisTask): string {
   const head = t.question.split(/\s+/).slice(0, 8).join(' ');
   return head.length > 60 ? head.slice(0, 57) + '...' : head;
+}
+
+/**
+ * Phase 3.3 helper. Walk a task's scope and produce one
+ * (connection, tables[]) group per referenced connection.
+ *
+ * - When `scope.connections` is set, build one group per connection
+ *   id, with `scope.targets` (or [] if absent) repeated. We don't
+ *   try to infer which targets belong to which connection -- the
+ *   planner is responsible for that pairing in tier-aware scope.
+ * - When `scope.connections` is unset OR empty, return [] so the
+ *   caller can decide whether to fall back to free-text.
+ */
+function groupTablesByConnection(t: DataAnalysisTask): Array<{ connection: string | undefined; tables: readonly string[] }> {
+  const conns = t.scope?.connections ?? [];
+  const tables = t.scope?.targets ?? [];
+  if (conns.length === 0) return [];
+  return conns.map(c => ({ connection: c, tables }));
 }
 
 function renderPlanSummary(planned: readonly DataAnalysisTask[], caps: TierCaps): string {
