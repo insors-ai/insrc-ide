@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -31,6 +31,10 @@ interface AzKvSecretShowData {
 export const azKeyvaultSecretShowTool: Tool = {
   id: 'cloud_az_keyvault_secret_show',
   description: 'Show a Key Vault secret. Value redacts unless reveal:true.',
+  access: azAccess({
+    resource: (input) => `kv:${str(input, 'vault') ?? '?'}/${str(input, 'name') ?? '?'}`,
+    verb: 'read secret',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -114,6 +118,11 @@ interface AzKvSecretSetData {
 export const azKeyvaultSecretSetTool: Tool = {
   id: 'cloud_az_keyvault_secret_set',
   description: 'Set a Key Vault secret (creates a new version).',
+  access: azAccess({
+    resource: (input) => `kv:${str(input, 'vault') ?? '?'}/${str(input, 'name') ?? '?'}`,
+    verb: 'write secret',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

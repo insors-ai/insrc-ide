@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -23,6 +23,7 @@ interface AzFunctionAppListData {
 export const azFunctionAppListTool: Tool = {
   id: 'cloud_az_functionapp_list',
   description: 'List Azure Function apps (scoped to resourceGroup when supplied).',
+  access: azAccess({ resource: () => 'functionapp:*', verb: 'list function apps in' }),
   inputSchema: {
     type: 'object',
     properties: { ...AZ_SCHEMA },
@@ -67,6 +68,11 @@ interface AzFunctionAppDeployData {
 export const azFunctionAppDeployTool: Tool = {
   id: 'cloud_az_functionapp_deploy',
   description: 'Deploy a zip package to an Azure Function app (az functionapp deployment source config-zip).',
+  access: azAccess({
+    resource: (input) => `functionapp:${str(input, 'name') ?? '?'}`,
+    verb: 'deploy zip to',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

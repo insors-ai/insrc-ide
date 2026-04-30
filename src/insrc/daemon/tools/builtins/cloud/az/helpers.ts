@@ -8,6 +8,7 @@
  */
 
 import type { ToolInput } from '../../../types.js';
+import type { AccessPolicy } from '../../../../../shared/access.js';
 
 export interface AzFlags {
   subscription?: string;
@@ -59,4 +60,39 @@ export const AZ_SCHEMA = {
 
 export function tryParseJson(stdout: string): unknown {
   try { return JSON.parse(stdout); } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// AccessPolicy factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an AccessPolicy for an Azure tool (plans/access-gate.md Phase 3).
+ *
+ * Key shape: `az:subscription=<s>,rg=<g>:<resource>` so reads share an
+ * approval bucket per (subscription, resourceGroup) pair while
+ * mutating ops re-prompt on every call. See cloud/aws/helpers.ts:awsAccess
+ * for rationale.
+ */
+export function azAccess(opts: {
+  resource: (input: ToolInput) => string;
+  severity?: 'standard' | 'destructive';
+  verb: string;
+}): AccessPolicy {
+  const severity = opts.severity ?? 'standard';
+  return {
+    kind: 'cloud-resource',
+    extractKey: (input) => {
+      const flags = azFlags(input as ToolInput);
+      const scope = `az:subscription=${flags.subscription ?? 'default'},rg=${flags.resourceGroup ?? '*'}`;
+      const res = opts.resource(input as ToolInput);
+      return res.length > 0 ? `${scope}:${res}` : scope;
+    },
+    describe: (input) => {
+      const flags = azFlags(input as ToolInput);
+      const res = opts.resource(input as ToolInput);
+      return `${opts.verb} ${res || '<no target>'} (az ${azScope(flags)})`;
+    },
+    severity,
+  };
 }

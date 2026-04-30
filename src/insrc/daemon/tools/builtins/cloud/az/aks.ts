@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -23,6 +23,7 @@ interface AzAksListData {
 export const azAksListTool: Tool = {
   id: 'cloud_az_aks_list',
   description: 'List AKS clusters (scoped to resourceGroup when supplied).',
+  access: azAccess({ resource: () => 'aks:*', verb: 'list AKS clusters in' }),
   inputSchema: {
     type: 'object',
     properties: { ...AZ_SCHEMA },
@@ -67,6 +68,11 @@ interface AzAksCredsData {
 export const azAksGetCredentialsTool: Tool = {
   id: 'cloud_az_aks_get-credentials',
   description: 'Write a kubeconfig entry for an AKS cluster. Mutates the kubeconfig file.',
+  access: azAccess({
+    resource: (input) => `aks:${str(input, 'cluster') ?? '?'}`,
+    verb: 'write kubeconfig for',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

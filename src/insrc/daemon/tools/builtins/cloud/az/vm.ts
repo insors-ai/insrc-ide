@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, bool, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, bool, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -33,6 +33,7 @@ interface AzVmListData {
 export const azVmListTool: Tool = {
   id: 'cloud_az_vm_list',
   description: 'List Azure VMs (scoped to resourceGroup when supplied).',
+  access: azAccess({ resource: () => 'vm:*', verb: 'list VMs in' }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -88,6 +89,11 @@ function requireRg(flags: ReturnType<typeof azFlags>, id: string): string | Tool
 export const azVmStartTool: Tool = {
   id: 'cloud_az_vm_start',
   description: 'Start Azure VMs in a resource group.',
+  access: azAccess({
+    resource: (input) => `vm:${namesFromInput(input).join(',')}`,
+    verb: 'start',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -146,6 +152,11 @@ export const azVmStartTool: Tool = {
 export const azVmStopTool: Tool = {
   id: 'cloud_az_vm_stop',
   description: 'Stop Azure VMs. Deallocates by default so compute billing stops; graceful:true keeps the VM billed.',
+  access: azAccess({
+    resource: (input) => `vm:${namesFromInput(input).join(',')}`,
+    verb: 'stop/deallocate',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -207,6 +218,11 @@ export const azVmStopTool: Tool = {
 export const azVmDeleteTool: Tool = {
   id: 'cloud_az_vm_delete',
   description: 'Delete Azure VMs. Requires confirmCount == names.length.',
+  access: azAccess({
+    resource: (input) => `vm:${namesFromInput(input).join(',')}`,
+    verb: 'delete',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

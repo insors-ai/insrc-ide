@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, str, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -23,6 +23,7 @@ interface AzSqlServerListData {
 export const azSqlServerListTool: Tool = {
   id: 'cloud_az_sql_server_list',
   description: 'List Azure SQL servers.',
+  access: azAccess({ resource: () => 'sql:*', verb: 'list SQL servers in' }),
   inputSchema: {
     type: 'object',
     properties: { ...AZ_SCHEMA },
@@ -67,6 +68,11 @@ interface AzSqlServerStateData {
 export const azSqlServerStartTool: Tool = {
   id: 'cloud_az_sql_server_start',
   description: 'Start / resume an Azure SQL server (uses sql mi start under the hood for Managed Instance).',
+  access: azAccess({
+    resource: (input) => `sql:${str(input, 'server') ?? '?'}`,
+    verb: 'resume SQL server',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -129,6 +135,11 @@ export const azSqlServerStartTool: Tool = {
 export const azSqlServerStopTool: Tool = {
   id: 'cloud_az_sql_server_stop',
   description: 'Pause / stop an Azure SQL server.',
+  access: azAccess({
+    resource: (input) => `sql:${str(input, 'server') ?? '?'}`,
+    verb: 'pause SQL server',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, str, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -21,6 +21,10 @@ interface AzMonitorLogQueryData {
 export const azMonitorLogQueryTool: Tool = {
   id: 'cloud_az_monitor_log_query',
   description: 'Run a KQL query against a Log Analytics workspace (az monitor log-analytics query).',
+  access: azAccess({
+    resource: (input) => `monitor:${str(input, 'workspace') ?? '?'}`,
+    verb: 'query Log Analytics workspace',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

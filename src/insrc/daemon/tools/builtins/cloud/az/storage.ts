@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, bool, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -50,6 +50,10 @@ interface AzBlobListData {
 export const azStorageBlobLsTool: Tool = {
   id: 'cloud_az_storage_blob_ls',
   description: 'List blobs in a storage container.',
+  access: azAccess({
+    resource: (input) => `blob:${str(input, 'accountName') ?? '?'}/${str(input, 'container') ?? '?'}`,
+    verb: 'list blobs in',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -113,6 +117,11 @@ interface AzBlobCpData {
 export const azStorageBlobCpTool: Tool = {
   id: 'cloud_az_storage_blob_cp',
   description: 'Upload or download a blob. direction=upload sends localPath to the blob; download does the reverse.',
+  access: azAccess({
+    resource: (input) => `blob:${str(input, 'accountName') ?? '?'}/${str(input, 'container') ?? '?'}/${str(input, 'blobName') ?? '?'}`,
+    verb: 'upload/download blob',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -207,6 +216,11 @@ interface AzBlobRmData {
 export const azStorageBlobRmTool: Tool = {
   id: 'cloud_az_storage_blob_rm',
   description: 'Delete a blob. Always gated.',
+  access: azAccess({
+    resource: (input) => `blob:${str(input, 'accountName') ?? '?'}/${str(input, 'container') ?? '?'}/${str(input, 'blobName') ?? '?'}`,
+    verb: 'delete blob',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

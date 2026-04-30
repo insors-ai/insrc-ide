@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../../types.js';
-import { AZ_SCHEMA, azArgv, azFlags, azScope, tryParseJson } from './helpers.js';
+import { AZ_SCHEMA, azAccess, azArgv, azFlags, azScope, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -19,6 +19,7 @@ interface AzAccountShowData {
 export const azAccountShowTool: Tool = {
   id: 'cloud_az_account_show',
   description: 'Return the active Azure subscription + tenant (az account show).',
+  access: azAccess({ resource: () => 'account', verb: 'show identity for' }),
   inputSchema: {
     type: 'object',
     properties: { ...AZ_SCHEMA },
