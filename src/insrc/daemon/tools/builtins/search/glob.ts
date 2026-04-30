@@ -9,6 +9,7 @@
 import { promises as fs, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import type { Tool, ToolInput, ToolResult } from '../../types.js';
+import { searchAccess } from '../file/helpers.js';
 
 export interface SearchGlobData {
   pattern: string;
@@ -25,6 +26,7 @@ const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.
 export const searchGlobTool: Tool = {
   id: 'search_glob',
   description: 'Find files by glob pattern. Returns paths sorted by mtime (newest first).',
+  access: searchAccess('cwd'),
   inputSchema: {
     type: 'object',
     properties: {

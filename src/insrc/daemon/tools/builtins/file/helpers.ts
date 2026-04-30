@@ -66,6 +66,33 @@ export const FS_MOVE_ACCESS: AccessPolicy = {
   severity: 'destructive',
 };
 
+/**
+ * Search-style fs access -- kind: 'fs-path', shared bucket with
+ * file_read / db_file_*. Same severity (standard) so prior approvals
+ * carry over: a `file_read` approval for `/foo` covers `search_grep`
+ * scanning `/foo` afterwards.
+ *
+ * Differs from FS_READ_ACCESS in two ways:
+ *   - Reads from `argName` (search_glob uses `cwd`; the rest use `path`).
+ *   - Defaults to `process.cwd()` when the arg is absent. Search tools
+ *     run on cwd if no path is given, so the gate must reflect what the
+ *     call will actually scan.
+ */
+export function searchAccess(argName: string): AccessPolicy {
+  return {
+    kind: 'fs-path',
+    extractKey: (input) => {
+      const explicit = resolvePath(input as ToolInput, argName);
+      return explicit ?? resolve(process.cwd());
+    },
+    describe: (input) => {
+      const arg = (input as Record<string, unknown>)[argName];
+      const path = typeof arg === 'string' && arg.length > 0 ? arg : '<cwd>';
+      return `search \`${path}\``;
+    },
+  };
+}
+
 export function str(input: ToolInput, key: string): string | undefined {
   const v = input[key];
   return typeof v === 'string' && v.length > 0 ? v : undefined;

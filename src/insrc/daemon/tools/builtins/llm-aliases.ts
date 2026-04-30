@@ -28,7 +28,7 @@ const LEGACY_LLM_ALIASES: Readonly<Record<string, readonly string[]>> = {
   'file_stat':        ['FileInfo'],
   'search_glob':      ['Glob'],
   'search_grep':      ['Grep'],
-  'search:list-dir':  ['ListDirectory'],
+  'search_list-dir':  ['ListDirectory'],
   'shell_exec':       ['Bash'],
   'diff_compute':     ['Diff'],
   'git_log':          ['GitLog'],
@@ -98,7 +98,7 @@ const ALIAS_INPUT_TRANSFORMS: Readonly<Record<string, Transformer>> = {
   Edit:             renameKeys({ file_path: 'path', old_string: 'oldString', new_string: 'newString', replace_all: 'replaceAll' }),
   FileInfo:         renameKey('file_path', 'path'),
   ListDirectory:    input => {
-    // Legacy: { path, depth }. Canonical search:list-dir uses `path` too; depth is optional.
+    // Legacy: { path, depth }. Canonical search_list-dir uses `path` too; depth is optional.
     return input;
   },
   Bash:             renameKeys({ timeout: 'timeoutMs' }),

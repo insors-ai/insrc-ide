@@ -9,6 +9,7 @@
 import { promises as fs, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import type { Tool, ToolInput, ToolResult } from '../../types.js';
+import { searchAccess } from '../file/helpers.js';
 
 export interface RecentEntry {
   path: string;
@@ -32,6 +33,7 @@ const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.
 export const searchRecentTool: Tool = {
   id: 'search_recent',
   description: 'Files modified in the last N minutes (default 60).',
+  access: searchAccess('path'),
   inputSchema: {
     type: 'object',
     properties: {

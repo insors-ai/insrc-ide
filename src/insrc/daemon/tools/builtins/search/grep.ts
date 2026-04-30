@@ -10,6 +10,7 @@ import { promises as fs, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { runShell } from '../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../types.js';
+import { searchAccess } from '../file/helpers.js';
 
 export interface GrepHit {
   path: string;
@@ -32,6 +33,7 @@ const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.
 export const searchGrepTool: Tool = {
   id: 'search_grep',
   description: 'Search file contents by regex. Uses ripgrep when available, Node fallback otherwise.',
+  access: searchAccess('path'),
   inputSchema: {
     type: 'object',
     properties: {

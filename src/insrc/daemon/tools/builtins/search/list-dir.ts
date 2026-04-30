@@ -5,6 +5,7 @@
 import { promises as fs, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import type { Tool, ToolInput, ToolResult } from '../../types.js';
+import { searchAccess } from '../file/helpers.js';
 
 export type ListDirKind = 'file' | 'directory' | 'symlink' | 'other';
 
@@ -28,8 +29,9 @@ const MAX_LIMIT = 5000;
 const IGNORE_DIRS = new Set(['.git', 'node_modules', '.build', 'out', 'dist', '.next', '.cache']);
 
 export const searchListDirTool: Tool = {
-  id: 'search:list-dir',
+  id: 'search_list-dir',
   description: 'List directory entries. Optionally recursive.',
+  access: searchAccess('path'),
   inputSchema: {
     type: 'object',
     properties: {
