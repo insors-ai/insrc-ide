@@ -13,6 +13,7 @@
 
 import { spawn } from 'node:child_process';
 import type { Tool, ToolApprovalGate, ToolDeps, ToolInput, ToolResult } from '../../types.js';
+import { SHELL_EXEC_ACCESS } from './access-policies.js';
 
 export interface ShellExecDetachedData {
   exitCode: number | null;
@@ -28,8 +29,9 @@ const HARD_MAX_RUNTIME_MS = 30 * 60_000;     // 30 min
 const LINE_STREAM_FLUSH_CHARS = 256;
 
 export const shellExecDetachedTool: Tool = {
-  id: 'shell:exec-detached',
+  id: 'shell_exec-detached',
   description: 'Run a long-lived command; streams output to the caller and returns when the process exits or the runtime cap elapses.',
+  access: SHELL_EXEC_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {
@@ -76,7 +78,7 @@ export const shellExecDetachedTool: Tool = {
     }
 
     return {
-      title: 'shell:exec-detached',
+      title: 'shell_exec-detached',
       content: lines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },

@@ -12,6 +12,7 @@
 
 import { runShell, type ShellResult } from '../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
+import { SHELL_PIPELINE_ACCESS } from './access-policies.js';
 
 export interface ShellPipelineData {
   stdout: string;
@@ -26,8 +27,9 @@ const DEFAULT_TIMEOUT_MS = 300_000;  // 5 min
 const MAX_TIMEOUT_MS = 1_800_000;    // 30 min hard cap
 
 export const shellExecPipelineTool: Tool = {
-  id: 'shell:exec-pipeline',
+  id: 'shell_exec-pipeline',
   description: 'Run a multi-stage bash script. Whole script shown in the gate; fails fast with `set -euo pipefail` by default.',
+  access: SHELL_PIPELINE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {
@@ -49,7 +51,7 @@ export const shellExecPipelineTool: Tool = {
     const strict = input['strict'] !== false;
     const preview = script.length > 4000 ? script.slice(0, 4000) + '\n...[truncated]' : script;
     return {
-      title: 'shell:exec-pipeline',
+      title: 'shell_exec-pipeline',
       content: [
         `Repo: \`${cwd}\``,
         `Timeout: ${Math.round(timeoutMs / 1000)}s`,

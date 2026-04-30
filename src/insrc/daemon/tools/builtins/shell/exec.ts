@@ -13,6 +13,7 @@
 import { runShell, type ShellResult } from '../../shell-helper.js';
 import { getToolSettings } from '../../config.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
+import { SHELL_EXEC_ACCESS } from './access-policies.js';
 
 export interface ShellExecData {
   stdout: string;
@@ -34,6 +35,7 @@ const MAX_MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB hard cap
 export const shellExecTool: Tool = {
   id: 'shell_exec',
   description: 'Run a single command and return structured stdout/stderr/exit.',
+  access: SHELL_EXEC_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {
