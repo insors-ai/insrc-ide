@@ -62,20 +62,21 @@ export async function getDb(): Promise<DbClients> {
   mkdirSync(dirname(PATHS.graph), { recursive: true });
   mkdirSync(PATHS.lance, { recursive: true });
 
-  // autoCheckpoint=false stops Kuzu from flushing the WAL mid-pass.
-  // Default behaviour caused disk-I/O bursts during the resolver run
-  // exactly when we wanted clean disk for the writes. The indexer is
-  // expected to run an explicit CHECKPOINT statement at safe points
-  // (e.g. post-cross-file-resolver) to bound WAL growth -- see
-  // indexer/index.ts fullIndex tail.
+  // autoCheckpoint with a 512 MB threshold: the default cadence caused
+  // disk-I/O bursts during the resolver run, but disabling auto-checkpoint
+  // entirely lets the WAL grow unbounded on large repos (12k+ files) and
+  // exhausts the buffer pool with "Unable to allocate memory". A 512 MB
+  // threshold is a backstop -- it only fires on very large indexes, leaving
+  // the indexer's explicit CHECKPOINT at fullIndex tail as the primary flush
+  // for normal-size repos.
   _kuzuDb = new kuzu.Database(
     PATHS.graph,
     /* bufferManagerSize     */ undefined,
     /* enableCompression     */ undefined,
     /* readOnly              */ false,
     /* maxDBSize             */ undefined,
-    /* autoCheckpoint        */ false,
-    /* checkpointThreshold   */ undefined,
+    /* autoCheckpoint        */ true,
+    /* checkpointThreshold   */ 512 * 1024 * 1024,
   );
   const graph = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
   const graphReader = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
