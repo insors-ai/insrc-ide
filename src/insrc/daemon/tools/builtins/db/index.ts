@@ -31,8 +31,68 @@ import type {
 	ScanOpts,
 	WhereClause,
 } from '../../../../shared/db-driver.js';
+import type { AccessPolicy, AccessPolicyContext } from '../../../../shared/access.js';
 
 const log = getLogger('tools-db');
+
+// ---------------------------------------------------------------------------
+// Access policies (plans/access-gate.md Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Connection-level access policy used by db_sql_* and db_kv_* tools.
+ * Sync extractKey: the connection id IS the resource id for remote
+ * RDBMS / KV connections; one approval per (kind: connection, key:
+ * connectionId) covers describe / sample / explain / scan / get /
+ * sample_shape across the same connection in the session.
+ */
+const CONNECTION_ACCESS: AccessPolicy = {
+	kind: 'connection',
+	extractKey: (input) => typeof input['connectionId'] === 'string'
+		? (input['connectionId'] as string)
+		: undefined,
+	describe: (input) => `connection \`${String(input['connectionId'] ?? '?')}\``,
+};
+
+/**
+ * Filesystem-level access policy used by db_file_* tools. Async
+ * extractKey: the surface input is a connectionId, but the
+ * underlying RESOURCE is a filesystem path. Resolve the connection
+ * id to its `path` via the pool so the gate uses (kind: 'fs-path',
+ * key: <absolute path>) -- shared with the file_* tools (one
+ * approval covers either access method against the same path).
+ *
+ * Returns undefined when:
+ *   - no connectionId in input,
+ *   - no repoPath in ctx (test harness),
+ *   - the connection isn't registered (acquireDriver will surface
+ *     a clean error inside the tool body),
+ *   - the connection's config has no `path` (kv / rdbms families).
+ *     Those families shouldn't reach db_file_*; the executor
+ *     short-circuits to NO_CONNECTIONS / FAMILY_MISMATCH below.
+ */
+async function fileAccessExtract(
+	input: Record<string, unknown>,
+	ctx: AccessPolicyContext,
+): Promise<string | undefined> {
+	const connectionId = input['connectionId'];
+	if (typeof connectionId !== 'string' || connectionId.length === 0) return undefined;
+	if (typeof ctx.repoPath !== 'string' || ctx.repoPath.length === 0) return undefined;
+	try {
+		const pool = await acquirePool(ctx.repoPath);
+		const config = pool.list().find(c => c.id === connectionId);
+		const p = config?.path;
+		return typeof p === 'string' && p.length > 0 ? p : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+const FILE_ACCESS: AccessPolicy = {
+	kind: 'fs-path',
+	extractKey: fileAccessExtract,
+	describe: (input) => `file via connection \`${String(input['connectionId'] ?? '?')}\``,
+};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -167,6 +227,7 @@ const listConnectionsTool: Tool = {
 // ---------------------------------------------------------------------------
 
 const sqlDescribeTool: Tool = {
+	access: CONNECTION_ACCESS,
 	id: 'db_sql_describe',
 	description:
 		'Describe the schema of a single RDBMS table or view: columns + types + nullability + PK/FK. ' +
@@ -211,6 +272,7 @@ const sqlDescribeTool: Tool = {
 };
 
 const sqlExplainTool: Tool = {
+	access: CONNECTION_ACCESS,
 	id: 'db_sql_explain',
 	description:
 		'Run EXPLAIN against a SELECT-shaped query on an RDBMS connection. ' +
@@ -267,6 +329,7 @@ const sqlExplainTool: Tool = {
 };
 
 const sqlSampleTool: Tool = {
+	access: CONNECTION_ACCESS,
 	id: 'db_sql_sample',
 	description:
 		'Sample up to 50 rows from an RDBMS table / view with an optional WHERE filter. ' +
@@ -306,6 +369,7 @@ const sqlSampleTool: Tool = {
 // ---------------------------------------------------------------------------
 
 const kvScanTool: Tool = {
+	access: CONNECTION_ACCESS,
 	id: 'db_kv_scan',
 	description:
 		'List keys on a KV connection (redis / valkey / keydb / mongodb / cassandra / nats). ' +
@@ -342,6 +406,7 @@ const kvScanTool: Tool = {
 };
 
 const kvGetTool: Tool = {
+	access: CONNECTION_ACCESS,
 	id: 'db_kv_get',
 	description:
 		'Read a single key from a KV connection. For string-key stores (redis / valkey / nats) ' +
@@ -382,6 +447,7 @@ const kvGetTool: Tool = {
 };
 
 const kvSampleShapeTool: Tool = {
+	access: CONNECTION_ACCESS,
 	id: 'db_kv_sample_shape',
 	description:
 		'Infer the shape (field names + observed types + nullability + frequency) of values ' +
@@ -425,6 +491,7 @@ const kvSampleShapeTool: Tool = {
 // ---------------------------------------------------------------------------
 
 const fileDescribeTool: Tool = {
+	access: FILE_ACCESS,
 	id: 'db_file_describe',
 	description:
 		'Describe the inferred / embedded schema of a tabular file connection ' +
@@ -470,6 +537,7 @@ const fileDescribeTool: Tool = {
 };
 
 const fileSampleTool: Tool = {
+	access: FILE_ACCESS,
 	id: 'db_file_sample',
 	description:
 		'Sample up to 50 records from a file connection with an optional WHERE filter. ' +
@@ -506,6 +574,7 @@ const fileSampleTool: Tool = {
 };
 
 const fileSampleShapeTool: Tool = {
+	access: FILE_ACCESS,
 	id: 'db_file_sample_shape',
 	description:
 		'Infer the shape of records in a document-style file connection (e.g. single-doc JSON, nested fields). ' +
