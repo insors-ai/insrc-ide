@@ -32,6 +32,11 @@ import { getDb } from '../../../../db/client.js';
 import { embedQuery } from '../../../../indexer/embedder.js';
 import { searchEntities } from '../../../../db/search.js';
 import type { Entity } from '../../../../shared/types.js';
+import {
+	exceedsCrossAgentDepth,
+	readCrossAgentDepth,
+	toolUnavailable,
+} from '../../../../shared/cross-agent.js';
 
 const log = getLogger('data:lineage');
 
@@ -118,6 +123,24 @@ export const dataLineageTool: Tool = {
 	requiresApproval: false,
 
 	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		// Cross-agent depth check (Phase 4 of plans/analyzers/data-analyzer.md).
+		// `data_lineage` is exposed both internally (data-analyzer's own
+		// runner; depth=0) and cross-agent (sibling analyzers; depth>=1
+		// when this is the second hop). The cap is strict: once a
+		// cross-agent hop has happened, we stop recursing rather than
+		// cascading further calls.
+		const depth = readCrossAgentDepth(input);
+		if (exceedsCrossAgentDepth(depth)) {
+			const sentinel = toolUnavailable('cross_agent_depth_exceeded');
+			return {
+				output: '[data_lineage] unavailable: cross_agent_depth_exceeded',
+				format: 'json',
+				success: false,
+				error: 'cross_agent_depth_exceeded',
+				data: sentinel,
+			};
+		}
+
 		const connectionId = typeof input['connectionId'] === 'string' ? input['connectionId'] : '';
 		const target = typeof input['target'] === 'string' ? input['target'] : '';
 		if (connectionId.length === 0 || target.length === 0) {

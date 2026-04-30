@@ -44,6 +44,11 @@ import type {
 } from '../../../../shared/db-driver.js';
 import { acquirePool } from '../../../db/pool-cache.js';
 import { prismaSchemaDescription } from '../../../db/drivers/rdbms-prisma.js';
+import {
+	exceedsCrossAgentDepth,
+	readCrossAgentDepth,
+	toolUnavailable,
+} from '../../../../shared/cross-agent.js';
 
 const log = getLogger('data:schema-drift');
 
@@ -111,6 +116,20 @@ export const dataSchemaDriftTool: Tool = {
 	requiresApproval: false,
 
 	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		// Cross-agent depth check (Phase 4 of plans/analyzers/data-analyzer.md).
+		// Same envelope as data_lineage; the cap is strict at depth>=1.
+		const depth = readCrossAgentDepth(input);
+		if (exceedsCrossAgentDepth(depth)) {
+			const sentinel = toolUnavailable('cross_agent_depth_exceeded');
+			return {
+				output: '[data_schema-drift] unavailable: cross_agent_depth_exceeded',
+				format: 'json',
+				success: false,
+				error: 'cross_agent_depth_exceeded',
+				data: sentinel,
+			};
+		}
+
 		const connectionId = typeof input['connectionId'] === 'string' ? input['connectionId'] : '';
 		const target = typeof input['target'] === 'string' ? input['target'] : '';
 		if (connectionId.length === 0 || target.length === 0) {

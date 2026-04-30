@@ -194,11 +194,11 @@ async function main(): Promise<void> {
 	// 6d. Register cross-agent surface (plans/analyzers/code-analyzer.md
 	//     Phase 3). The Code Analyzer exposes `code_locate` / `code_trace`
 	//     / `code_describe` for sibling analyzer families to dispatch
-	//     into. Sibling families (data-analyzer, deployment-analyzer)
-	//     will register their own `data:*` / `deploy:*` modules when
-	//     they ship; today the cross-agent registry is one-sided.
-	const { registerCodeAnalyzerCrossAgentTools } = await import('./cross-agent/index.js');
+	//     into. Phase 4 of plans/analyzers/data-analyzer.md adds the
+	//     symmetrical `data_*` registrations alongside.
+	const { registerCodeAnalyzerCrossAgentTools, registerDataAnalyzerCrossAgentTools } = await import('./cross-agent/index.js');
 	registerCodeAnalyzerCrossAgentTools();
+	registerDataAnalyzerCrossAgentTools();
 
 	// 7. Start IPC server
 	const server = new IpcServer({
