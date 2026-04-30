@@ -35,6 +35,13 @@ export const PATHS = {
   // SHA. Cleared via the `insrc.codeAnalyzer.clearCache` palette
   // command.
   codeAnalyzerCache: join(INSRC_DIR, 'cache', 'code-analyzer'),
+  // Cache root for the Data Analyzer's per-task LRU
+  // (plans/analyzers/data-analyzer.md Phase 2.4). Mirrors the
+  // code-analyzer cache shape; key shape differs --
+  // SHA256(question + scope + tier + connection-fingerprint) -- so
+  // schema changes invalidate per-target rather than per-commit.
+  // Cleared via `insrc.dataAnalyzer.clearCache`.
+  dataAnalyzerCache: join(INSRC_DIR, 'cache', 'data-analysis'),
   logDir:      LOG_DIR,
   daemonLog:   join(LOG_DIR, 'daemon.log'),
   agentLog:    join(LOG_DIR, 'agent.log'),

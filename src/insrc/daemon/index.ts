@@ -1134,6 +1134,14 @@ async function main(): Promise<void> {
 			return mod.clearCache();
 		},
 
+		// Data Analyzer per-task cache (plans/analyzers/data-analyzer.md
+		// Phase 2.4). Mirror of `codeAnalyzer.clearCache`. Backs the
+		// `insrc.dataAnalyzer.clearCache` palette command.
+		'dataAnalyzer.clearCache': async () => {
+			const mod = await import('../agent/tasks/data-analyzer/cache.js');
+			return mod.clearCache();
+		},
+
 		// Code Analyzer diff-vs-previous-run (plans/analyzers/code-analyzer.md
 		// Phase 4.2). Compares two completed analysis lists; returns a
 		// structured diff over their accepted findings plus a rendered

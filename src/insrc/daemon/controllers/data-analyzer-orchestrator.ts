@@ -42,6 +42,12 @@ import {
 } from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
 import { generateMultiPass } from '../../agent/content-gen/index.js';
 import {
+  buildConnectionFingerprint,
+  readCachedResult,
+  writeCachedResult,
+  type CacheKeyInput,
+} from '../../agent/tasks/data-analyzer/cache.js';
+import {
   K_STATE,
   K_PHASE,
   K_RETRIES,
@@ -471,6 +477,45 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       try { await this.deps.todos.markInProgress(next.itemId); } catch { /* keep going */ }
     }
 
+    // Phase 2.4: cache lookup before we burn any LLM tokens. Cache
+    // key includes the connection-roster fingerprint so a registry
+    // change (added / removed / re-registered connection) invalidates
+    // every entry that touched the affected connection. Note: schema
+    // drift on an unchanged connection is NOT detected -- callers
+    // wanting fresh introspection clear the cache via
+    // `insrc.dataAnalyzer.clearCache`.
+    const cacheKeyInput = this._buildCacheKeyInput(next);
+    const cachedResult = await readCachedResult(cacheKeyInput);
+    if (cachedResult !== null) {
+      // Stamp the cached result into K_ACCEPTED + K_HISTORY and mark
+      // the todo complete; skip the analyzer + reviewer pair entirely.
+      accepted.push({ task: next, result: cachedResult });
+      history.push(cachedResult);
+      state.set(K_ACCEPTED, accepted);
+      state.set(K_HISTORY, history);
+      if (this.deps.todos !== undefined) {
+        try {
+          await this.deps.todos.updateItemMeta(next.itemId, {
+            kind: next.kind,
+            ...(next.scope !== undefined ? { scope: next.scope } : {}),
+            origin: next.origin,
+            retryCount: 0,
+            answer: cachedResult.answer,
+            findings: cachedResult.findings,
+            citations: cachedResult.citations,
+            confidence: cachedResult.confidence,
+            toolCalls: cachedResult.toolCalls,
+            cacheHit: true,
+            ...(cachedResult.truncated ? { truncated: true } : {}),
+          });
+          await this.deps.todos.markComplete(next.itemId);
+        } catch (err) {
+          log.warn({ err, itemId: next.itemId }, 'cache-hit todo update failed (continuing)');
+        }
+      }
+      return this.runNextAnalyzerTask(state);
+    }
+
     // Resolve the analyzer provider via the per-step resolver.
     const provider = this.deps.session.resolver.resolve('data-analyzer', 'analyzer');
 
@@ -572,6 +617,13 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       if (this.deps.todos !== undefined) {
         try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
       }
+      // Phase 2.4: persist the reviewer-accepted result to cache so a
+      // re-run against the same task with the same connection roster
+      // skips the analyzer + reviewer pair entirely. Best-effort --
+      // a write failure shouldn't bubble up.
+      void writeCachedResult(this._buildCacheKeyInput(lastTask), lastResult).catch(err => {
+        log.warn({ err: (err as Error).message, itemId: lastTask.itemId }, 'cache write failed (non-fatal)');
+      });
       if (decision.kind === 'done') {
         return this.queueSynthesise(state);
       }
@@ -822,6 +874,31 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   // connections (auto-approved on registration); the dispatcher in
   // agent/tools/executor.ts handles the gate UI for any connection
   // the analyzer asks about that hasn't been approved.
+
+  /**
+   * Build the cache-key input for a task (Phase 2.4). The
+   * connection fingerprint combines the task's explicit scope with
+   * the active session's full connection roster -- so cache hits
+   * stay valid only as long as both inputs are stable. Schema drift
+   * on an unchanged connection is not yet detected; see cache.ts for
+   * the trade-off and follow-up note.
+   */
+  private _buildCacheKeyInput(task: DataAnalysisTask): CacheKeyInput {
+    const fingerprint = buildConnectionFingerprint({
+      taskScope: task.scope,
+      registeredConnections: this._connections.map(c => ({
+        id: c.id,
+        kind: c.kind,
+        family: c.family,
+      })),
+    });
+    return {
+      question: task.question,
+      scope: task.scope,
+      tier: this._tier,
+      connectionFingerprint: fingerprint,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

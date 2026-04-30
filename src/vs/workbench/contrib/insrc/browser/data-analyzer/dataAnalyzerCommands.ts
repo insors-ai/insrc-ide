@@ -15,6 +15,7 @@ import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { joinPath } from '../../../../../base/common/resources.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
+import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { DataAnalysisReportInput } from './dataAnalysisReportInput.js';
 import { rewriteCustomUrisForSave } from '../shared/saveReportUris.js';
@@ -233,3 +234,41 @@ function slugFromRequest(request: string): string {
 		.slice(0, 60);
 	return slug.length > 0 ? slug : 'report';
 }
+
+/**
+ * Clear the Data Analyzer's per-task cache (plans/analyzers/data-analyzer.md
+ * Phase 2.4). Mirrors `insrc.codeAnalyzer.clearCache`. Useful when the
+ * connection-roster fingerprint hasn't changed but the user wants
+ * fresh introspection (e.g. an out-of-band schema migration the
+ * roster-level fingerprint can't detect).
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.dataAnalyzer.clearCache',
+			title: localize2('insrc.dataAnalyzer.clearCache', 'Clear Data Analyzer Cache'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const daemon = accessor.get(IInsrcDaemonService);
+		const notifications = accessor.get(INotificationService);
+		try {
+			const result = await daemon.rpc<{ removed: number }>('dataAnalyzer.clearCache');
+			const removed = result?.removed ?? 0;
+			notifications.notify({
+				severity: Severity.Info,
+				message: removed === 0
+					? 'Data Analyzer cache was already empty.'
+					: `Cleared Data Analyzer cache (${removed} entr${removed === 1 ? 'y' : 'ies'} removed).`,
+			});
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Failed to clear Data Analyzer cache: ${err instanceof Error ? err.message : String(err)}`,
+			});
+		}
+	}
+});
