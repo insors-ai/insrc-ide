@@ -18,6 +18,7 @@ import { IInsrcChatService } from '../../common/chatService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { DataAnalysisReportInput } from './dataAnalysisReportInput.js';
+import { EphemeralEditorInput } from '../shared/ephemeralEditorInput.js';
 import { rewriteCustomUrisForSave } from '../shared/saveReportUris.js';
 
 const CATEGORY = localize2('insrc', 'insrc');
@@ -377,6 +378,136 @@ registerAction2(class extends Action2 {
 		await chatService.sendMessage(message, undefined, undefined, priorList.id);
 	}
 });
+
+/**
+ * Diff a Data Analysis run against a prior run
+ * (plans/analyzers/data-analyzer.md Phase 5.2). Args:
+ *
+ *   {
+ *     priorListId?:   string;
+ *     currentListId?: string;  // defaults to the most-recent list, with
+ *                              // its parentListId picked as `prior` when set.
+ *   }
+ *
+ * Behaviour: resolve the (prior, current) pair, call the daemon's
+ * `dataAnalyzer.diffRuns` RPC, write the rendered markdown to a tmp
+ * file, open it in the workbench's default editor.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.dataAnalyzer.diffWithPrevious',
+			title: localize2('insrc.dataAnalyzer.diffWithPrevious', 'Diff Data Analysis With Previous Run'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(
+		accessor: ServicesAccessor,
+		arg?: { priorListId?: string; currentListId?: string },
+	): Promise<void> {
+		const daemon = accessor.get(IInsrcDaemonService);
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const fileService = accessor.get(IFileService);
+		const editorService = accessor.get(IEditorService);
+		const notifications = accessor.get(INotificationService);
+
+		const pair = await resolveDataDiffPair(arg, chatService, todosService);
+		if (typeof pair === 'string') {
+			notifications.info(pair);
+			return;
+		}
+
+		let result: { markdown: string; stats: { added: number; removed: number; changed: number; unchanged: number } };
+		try {
+			result = await daemon.rpc(
+				'dataAnalyzer.diffRuns',
+				{ priorListId: pair.priorListId, currentListId: pair.currentListId },
+			);
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Diff failed: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+
+		const diffId = `${pair.priorListId.slice(0, 8)}__${pair.currentListId.slice(0, 8)}`;
+		const target = joinPath(EphemeralEditorInput.getTmpDir(), `data-analysis-diff-${diffId}.md`);
+		try {
+			await fileService.writeFile(target, VSBuffer.fromString(result.markdown));
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Could not write diff file: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+
+		await editorService.openEditor({ resource: target });
+		notifications.notify({
+			severity: Severity.Info,
+			message: `Diff: +${result.stats.added} added · -${result.stats.removed} removed · ~${result.stats.changed} changed · ${result.stats.unchanged} unchanged.`,
+		});
+	}
+});
+
+/**
+ * Resolve the (prior, current) pair for diff. Mirrors the
+ * code-analyzer helper -- prefer the parent-child pairing when
+ * available; fall back to the next-most-recent list as `prior`.
+ */
+async function resolveDataDiffPair(
+	arg: { priorListId?: string; currentListId?: string } | undefined,
+	chatService: IInsrcChatService,
+	todosService: IInsrcTodosService,
+): Promise<{ priorListId: string; currentListId: string } | string> {
+	if (arg?.priorListId !== undefined && arg?.currentListId !== undefined) {
+		return { priorListId: arg.priorListId, currentListId: arg.currentListId };
+	}
+
+	const sessionId = chatService.activeSessionId;
+	if (sessionId === undefined) {
+		return 'No active chat session; run /data-analyze first.';
+	}
+	const candidates = todosService.lists.filter(
+		l => l.sessionId === sessionId && l.owner === DATA_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+	);
+	if (candidates.length < 2) {
+		return 'Need at least two completed data-analyzer reports to diff. Re-run an existing report and try again.';
+	}
+
+	const current = arg?.currentListId !== undefined
+		? candidates.find(l => l.id === arg.currentListId) ?? candidates[candidates.length - 1]
+		: candidates[candidates.length - 1];
+	const prior = arg?.priorListId !== undefined
+		? candidates.find(l => l.id === arg.priorListId)
+		: undefined;
+
+	if (current === undefined) {
+		return 'Could not resolve the current run to diff.';
+	}
+
+	if (prior !== undefined) {
+		return { priorListId: prior.id, currentListId: current.id };
+	}
+
+	if (current.parentListId !== undefined) {
+		const parent = candidates.find(l => l.id === current.parentListId);
+		if (parent !== undefined) {
+			return { priorListId: parent.id, currentListId: current.id };
+		}
+	}
+
+	const olderCandidates = candidates.filter(l => l.id !== current.id);
+	if (olderCandidates.length === 0) {
+		return 'No prior run available to diff against.';
+	}
+	const fallback = olderCandidates[olderCandidates.length - 1]!;
+	return { priorListId: fallback.id, currentListId: current.id };
+}
 
 /**
  * Clear the Data Analyzer's per-task cache (plans/analyzers/data-analyzer.md

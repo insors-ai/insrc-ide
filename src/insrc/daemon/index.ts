@@ -1142,6 +1142,15 @@ async function main(): Promise<void> {
 			return mod.clearCache();
 		},
 
+		// Data Analyzer diff-vs-previous-run (plans/analyzers/data-analyzer.md
+		// Phase 5.2). Compares two completed analysis lists and returns a
+		// structured diff over their accepted findings plus a rendered
+		// markdown summary. Backs `insrc.dataAnalyzer.diffWithPrevious`.
+		'dataAnalyzer.diffRuns': async (params) => {
+			const mod = await import('./data-analyzer-diff.js');
+			return mod.diffRunsRpc(params as { priorListId?: unknown; currentListId?: unknown });
+		},
+
 		// Code Analyzer diff-vs-previous-run (plans/analyzers/code-analyzer.md
 		// Phase 4.2). Compares two completed analysis lists; returns a
 		// structured diff over their accepted findings plus a rendered
