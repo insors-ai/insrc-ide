@@ -104,6 +104,18 @@ specific kinds give the analyzer better tool-call hints than free-form.
   given UNLESS the user's request explicitly mentioned a connection
   by name, label, or kind. When unsure, leave scope.connections out
   and let the analyzer default to "any in scope".
+- **Batch many ephemeral connections per task.** When the user pointed
+  at a directory with N data files (json / csv / parquet / etc.), the
+  detector registered N ephemeral connections (ids prefixed with
+  "ephemeral:"). The analyzer per-task tool budget is 8 calls; reserve
+  2 (sample + submit_analysis) and put **6 connection ids per task**
+  in scope.connections. For 30 ephemeral files that's 5 batched tasks
+  -- NOT 30 per-file tasks. The analyzer iterates over scope.connections
+  inside the task with one describe / sample call per id.
+- A task whose scope.connections has > 1 entry is a BATCH task: the
+  analyzer treats them as a homogeneous group (same kind, similar
+  shape) and produces one finding per connection or one aggregate
+  finding across the group.
 
 # Few-shot examples
 

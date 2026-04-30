@@ -58,7 +58,16 @@ export const HARD_RULES = `# Hard rules
 
 6. Sample sizes are CAPPED by the driver. Don't ask for 10000 rows;
    the driver clamps at 50. Don't issue many sample calls hoping
-   to widen the sample -- the cap is per call AND per task.`;
+   to widen the sample -- the cap is per call AND per task.
+
+7. **Batch tasks** -- when scope.connections in your task has more
+   than one connectionId, you've been given a batch. Iterate the
+   per-kind playbook ONCE PER ID, calling the right describe /
+   sample tool with that id. Aggregate findings across the batch
+   in your DataAnalyzerResult: one finding per (concern, id) when
+   per-connection differences matter; one aggregate finding spanning
+   all ids when the group is homogeneous (e.g. "all 6 customer-export
+   JSON files have the same column set").`;
 
 /**
  * Per-kind playbook + tool list + AnalyzerResult schema. User-
