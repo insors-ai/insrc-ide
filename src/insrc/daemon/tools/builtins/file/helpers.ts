@@ -4,6 +4,67 @@
 
 import { resolve } from 'node:path';
 import type { ToolInput, ToolResult } from '../../types.js';
+import type { AccessPolicy } from '../../../../shared/access.js';
+
+// ---------------------------------------------------------------------------
+// Access policies (plans/access-gate.md Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-style file access -- kind: 'fs-path', single key from the
+ * tool's `path` arg, resolved to absolute. Standard severity: prior
+ * approval bypasses on subsequent calls in the same session.
+ *
+ * Used by file_read, file_stat. Shared with db_file_describe /
+ * sample / sample_shape (those resolve the connection's path
+ * through the pool and present the same kind+key pair, so a
+ * `file_read` approval covers a `db_file_describe` against the
+ * same path AND vice versa).
+ */
+export const FS_READ_ACCESS: AccessPolicy = {
+  kind: 'fs-path',
+  extractKey: (input) => resolvePath(input as ToolInput, 'path'),
+  describe: (input) => `read \`${String(input['path'] ?? '?')}\``,
+};
+
+/**
+ * Write-style file access -- kind: 'fs-path' (shared bucket with
+ * reads), single key from `path`, **destructive severity**. The
+ * dispatcher fires the gate on EVERY call regardless of prior
+ * approvals -- read approval doesn't auto-promote to write.
+ *
+ * Used by file_write, file_edit, file_multi-edit, file_delete,
+ * file_mkdir.
+ */
+export const FS_WRITE_ACCESS: AccessPolicy = {
+  kind: 'fs-path',
+  extractKey: (input) => resolvePath(input as ToolInput, 'path'),
+  describe: (input) => `write \`${String(input['path'] ?? '?')}\``,
+  severity: 'destructive',
+};
+
+/**
+ * Move/copy two-key access -- destructive on both source (move
+ * deletes it) and destination (write target). Returns a string[]
+ * so the dispatcher gates BOTH keys before the call runs; the
+ * destructive severity makes every call re-prompt.
+ *
+ * Used by file_move, file_copy. (Copy is technically not
+ * destructive on `from`, but distinguishing read-from + write-to
+ * in a single AccessPolicy is more API surface than the call
+ * shape warrants; destructive on both is the safer default.)
+ */
+export const FS_MOVE_ACCESS: AccessPolicy = {
+  kind: 'fs-path',
+  extractKey: (input) => {
+    const from = resolvePath(input as ToolInput, 'from');
+    const to = resolvePath(input as ToolInput, 'to');
+    const keys = [from, to].filter((s): s is string => typeof s === 'string');
+    return keys.length > 0 ? keys : undefined;
+  },
+  describe: (input) => `move/copy \`${String(input['from'] ?? '?')}\` -> \`${String(input['to'] ?? '?')}\``,
+  severity: 'destructive',
+};
 
 export function str(input: ToolInput, key: string): string | undefined {
   const v = input[key];

@@ -4,7 +4,7 @@
 
 import { promises as fs } from 'node:fs';
 import type { Tool, ToolInput, ToolResult } from '../../types.js';
-import { resolvePath, fail, humanBytes } from './helpers.js';
+import { resolvePath, fail, humanBytes, FS_READ_ACCESS } from './helpers.js';
 
 export interface FileStatData {
   path: string;
@@ -22,6 +22,7 @@ export interface FileStatData {
 export const fileStatTool: Tool = {
   id: 'file_stat',
   description: 'Get file / directory metadata (size, mtime, mode). Follows symlinks by default.',
+  access: FS_READ_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {

@@ -9,7 +9,7 @@
 
 import { promises as fs } from 'node:fs';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
-import { resolvePath, fail, truncate } from './helpers.js';
+import { resolvePath, fail, truncate, FS_WRITE_ACCESS } from './helpers.js';
 
 interface EditSpec {
   oldString: string;
@@ -24,8 +24,9 @@ export interface FileMultiEditData {
 }
 
 export const fileMultiEditTool: Tool = {
-  id: 'file:multi-edit',
+  id: 'file_multi-edit',
   description: 'Apply multiple edits to one file atomically. All-or-nothing.',
+  access: FS_WRITE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {
@@ -61,7 +62,7 @@ export const fileMultiEditTool: Tool = {
       summaryLines.push('```', truncate(e.newString, 400), '```');
     });
     return {
-      title: 'file:multi-edit',
+      title: 'file_multi-edit',
       content: summaryLines.join('\n'),
       actions: [
         { name: 'approve', label: 'Approve' },
@@ -72,13 +73,13 @@ export const fileMultiEditTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = resolvePath(input);
-    if (!path) { return fail('file:multi-edit', 'missing path'); }
+    if (!path) { return fail('file_multi-edit', 'missing path'); }
     const edits = parseEdits(input);
-    if (edits.length === 0) { return fail('file:multi-edit', 'edits must be non-empty'); }
+    if (edits.length === 0) { return fail('file_multi-edit', 'edits must be non-empty'); }
 
     let text: string;
     try { text = await fs.readFile(path, 'utf8'); }
-    catch (err) { return fail('file:multi-edit', `read failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_multi-edit', `read failed: ${(err as Error).message}`); }
 
     let current = text;
     let totalReplacements = 0;
@@ -87,10 +88,10 @@ export const fileMultiEditTool: Tool = {
       const e = edits[i]!;
       const count = countOccurrences(current, e.oldString);
       if (count === 0) {
-        return fail('file:multi-edit', `edit ${i + 1}: oldString not found (no writes performed)`);
+        return fail('file_multi-edit', `edit ${i + 1}: oldString not found (no writes performed)`);
       }
       if (!e.replaceAll && count > 1) {
-        return fail('file:multi-edit', `edit ${i + 1}: oldString matched ${count} times; set replaceAll:true or narrow the match`);
+        return fail('file_multi-edit', `edit ${i + 1}: oldString matched ${count} times; set replaceAll:true or narrow the match`);
       }
       current = e.replaceAll
         ? current.split(e.oldString).join(e.newString)
@@ -99,7 +100,7 @@ export const fileMultiEditTool: Tool = {
     }
 
     try { await fs.writeFile(path, current, 'utf8'); }
-    catch (err) { return fail('file:multi-edit', `write failed: ${(err as Error).message}`); }
+    catch (err) { return fail('file_multi-edit', `write failed: ${(err as Error).message}`); }
 
     const data: FileMultiEditData = { path, edits: edits.length, totalReplacements };
     return {

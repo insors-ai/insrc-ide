@@ -5,7 +5,7 @@
 import { promises as fs, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
-import { resolvePath, str, fail, humanBytes, previewLines } from './helpers.js';
+import { resolvePath, str, fail, humanBytes, previewLines, FS_WRITE_ACCESS } from './helpers.js';
 
 export interface FileWriteData {
   path: string;
@@ -17,6 +17,7 @@ export interface FileWriteData {
 export const fileWriteTool: Tool = {
   id: 'file_write',
   description: 'Write or overwrite a file. Gates with old-size -> new-size + content preview.',
+  access: FS_WRITE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {

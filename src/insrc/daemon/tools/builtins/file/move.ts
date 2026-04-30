@@ -5,7 +5,7 @@
 import { promises as fs } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
-import { str, fail } from './helpers.js';
+import { str, fail, FS_MOVE_ACCESS } from './helpers.js';
 
 export interface FileMoveData {
   from: string;
@@ -16,6 +16,7 @@ export interface FileMoveData {
 export const fileMoveTool: Tool = {
   id: 'file_move',
   description: 'Rename or move a file / directory.',
+  access: FS_MOVE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {

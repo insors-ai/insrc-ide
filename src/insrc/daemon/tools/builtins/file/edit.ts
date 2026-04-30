@@ -8,7 +8,7 @@
 
 import { promises as fs } from 'node:fs';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
-import { resolvePath, str, fail, truncate } from './helpers.js';
+import { resolvePath, str, fail, truncate, FS_WRITE_ACCESS } from './helpers.js';
 
 export interface FileEditData {
   path: string;
@@ -19,6 +19,7 @@ export interface FileEditData {
 export const fileEditTool: Tool = {
   id: 'file_edit',
   description: 'Replace a substring in a file. Gates with before/after snippet.',
+  access: FS_WRITE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {

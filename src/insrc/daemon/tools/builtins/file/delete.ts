@@ -8,7 +8,7 @@
 
 import { promises as fs } from 'node:fs';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
-import { resolvePath, fail, humanBytes } from './helpers.js';
+import { resolvePath, fail, humanBytes, FS_WRITE_ACCESS } from './helpers.js';
 
 export interface FileDeleteData {
   path: string;
@@ -21,6 +21,7 @@ export interface FileDeleteData {
 export const fileDeleteTool: Tool = {
   id: 'file_delete',
   description: 'Delete a file or directory. Gates with content preview.',
+  access: FS_WRITE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {

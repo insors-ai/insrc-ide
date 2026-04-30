@@ -4,7 +4,7 @@
 
 import { promises as fs } from 'node:fs';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../types.js';
-import { resolvePath, fail } from './helpers.js';
+import { resolvePath, fail, FS_WRITE_ACCESS } from './helpers.js';
 
 export interface FileMkdirData {
   path: string;
@@ -14,6 +14,7 @@ export interface FileMkdirData {
 export const fileMkdirTool: Tool = {
   id: 'file_mkdir',
   description: 'Create a directory. Recursive by default.',
+  access: FS_WRITE_ACCESS,
   inputSchema: {
     type: 'object',
     properties: {
