@@ -183,11 +183,38 @@ export interface AccessPolicy {
   readonly kind: string;
 
   /**
-   * Extract the access key from the tool's input. Returns undefined
-   * to skip the gate for THIS call (e.g. db_list_connections is
-   * a discovery call -- no specific connection in scope).
+   * Extract the access key(s) from the tool's input.
+   *
+   *   - Returns `undefined` to skip the gate for THIS call (rare;
+   *     reserved for inputs that don't yet name a specific
+   *     resource).
+   *   - Returns a single string for single-resource tools (most
+   *     common -- the tool touches one connection / file / cloud
+   *     resource per call).
+   *   - Returns a string[] for multi-resource tools (e.g. a
+   *     hypothetical db_cross_join that joins across two
+   *     connections). The dispatcher gates every key
+   *     independently; ALL must clear before the call runs.
+   *
+   * May be sync or async (returning a Promise). The dispatcher
+   * awaits the result. Async is needed by tools whose access kind
+   * differs from the surface input shape -- e.g. db_file_*
+   * receives a connectionId but its access kind is 'fs-path', so
+   * extractKey resolves the connection id to the connection's
+   * file path via the pool. See "Shared gates across access
+   * methods" below.
+   *
+   * NB: tools that read DAEMON-INTERNAL state (db_list_connections,
+   * registry queries, config getters) should not declare an
+   * `access` policy at all -- the dispatcher's `if (tool.access)`
+   * check short-circuits and the call runs ungated. See Q2 in the
+   * Open questions section.
    */
-  extractKey(input: Record<string, unknown>): string | undefined;
+  extractKey(
+    input: Record<string, unknown>,
+    ctx: ToolExecContext,
+  ): string | readonly string[] | undefined
+   | Promise<string | readonly string[] | undefined>;
 
   /**
    * Human-readable description of the access being requested. Used in
@@ -210,17 +237,40 @@ export interface AccessPolicy {
 ### Examples
 
 ```ts
-// db_sql_sample
+// db_sql_sample -- gate on the (remote) connection id; user
+// approves "primary" once and every subsequent SQL tool against
+// that connection bypasses.
 access: {
   kind: 'connection',
   extractKey: (input) => typeof input['connectionId'] === 'string' ? input['connectionId'] : undefined,
   describe: (input) => `connection \`${input['connectionId']}\` (sample rows)`,
 }
 
-// db_list_connections (discovery; no key needed)
+// db_list_connections -- internal configuration read; NO access
+// declaration at all. The dispatcher's `if (tool.access)` check
+// short-circuits and the call runs ungated. Same convention for
+// every internal/discovery tool (registry queries, config getters).
+
+// db_file_describe -- the underlying RESOURCE is a filesystem path,
+// not the synthetic ephemeral connection id. Gate kind = 'fs-path'
+// (NOT 'connection') so an `fs-path` approval the orchestrator
+// pre-seeded for the typed prompt path covers this call -- and a
+// `file_read` against the same path shares the same approval. One
+// resource = one gate, regardless of which tool reaches it.
+//
+// extractKey is async because it has to look up the connection's
+// path via the pool.
 access: {
-  kind: 'connection',
-  extractKey: () => undefined,   // never gates
+  kind: 'fs-path',
+  extractKey: async (input, ctx) => {
+    const cid = input['connectionId'];
+    if (typeof cid !== 'string') return undefined;
+    if (!ctx.session?.repoPath) return undefined;
+    const { acquirePool } = await import('../db/pool-cache.js');
+    const pool = await acquirePool(ctx.session.repoPath);
+    return pool.list().find(c => c.id === cid)?.path;
+  },
+  describe: (input) => `read file via connection \`${input['connectionId']}\``,
 }
 
 // file_read
@@ -243,6 +293,45 @@ access: {
   severity: 'destructive',
 }
 ```
+
+## Shared gates across access methods
+
+A consent gate represents user approval to access a real-world
+resource. Two tools that touch the same resource share the same
+gate -- a single approval covers every access method.
+
+Concrete cases:
+
+- **`db_file_*` and `file_*`** both read filesystem paths. They
+  share `kind: 'fs-path'`, key = the absolute file path. A
+  `file_read` of `/tmp/customers.json` and a `db_file_describe`
+  through an ephemeral connection that points at the same path
+  share the same approval. The user is asked once; either tool
+  can serve subsequent requests.
+
+- **`db_sql_*`** and a (hypothetical) `db_sql_explain_remote`
+  both act against an RDBMS connection. Kind = `'connection'`,
+  key = the connection id. A user who approves `primary` for
+  describe sees no further gate when the same session calls
+  sample / explain / etc.
+
+- **`cloud_aws_rds_describe` and `cloud_aws_rds_modify`**
+  share kind = `'cloud-resource'`, key = the ARN. Read approves
+  describe; modify (severity: 'destructive') always re-fires
+  even with a prior approval (see destructive flow below).
+
+Why this matters: gating on the access METHOD (e.g. "approve
+the connection id `ephemeral_customers_009ad085`") would ask
+the user to approve a synthetic id they don't recognise. Gating
+on the underlying RESOURCE ("approve `/tmp/customers.json`")
+asks for consent on the thing the user actually thinks about.
+
+The pattern: when the surface input doesn't directly name the
+resource (a connection id wrapping a path, an ARN built from
+parts), `extractKey` is async and resolves the input through
+the pool / registry / config to the canonical resource id. The
+kind in this case is the kind of the RESOURCE (`fs-path` for a
+file connection), NOT the surface ('connection').
 
 ## AccessStore shape
 
@@ -516,10 +605,20 @@ unapproved key.
 
 ### Phase 3 -- annotate built-in tools
 
-6. **db_* tools** in `daemon/tools/builtins/db/index.ts` -- add
-   `access: { kind: 'connection', extractKey: i => i['connectionId'] }`.
-   Set `db_list_connections.extractKey` to `() => undefined`
-   (discovery exempts).
+6. **db_* tools** in `daemon/tools/builtins/db/index.ts`:
+   - **db_sql_***  (describe / sample / explain) → `kind:
+     'connection'`, sync extractKey returns
+     `input['connectionId']`. Gate is per-(remote) connection.
+   - **db_kv_***   (scan / get / sample_shape) → same as
+     db_sql_*: `kind: 'connection'`.
+   - **db_file_*** (describe / sample / sample_shape) → `kind:
+     'fs-path'`, ASYNC extractKey resolves connectionId →
+     connection.path via the pool. Shares the gate surface with
+     `file_*` tools (same path = same approval; see "Shared gates
+     across access methods" above).
+   - **db_list_connections** UNANNOTATED -- internal-config read;
+     no external access. Same convention for any future tool
+     that's purely internal-config.
 7. **file_* tools** (`file_read`, `file_write`, `file_delete`,
    `file_move`, `file_copy`, `file_mkdir`, `file_stat`,
    `file_edit`) -- add `access: { kind: 'fs-path', extractKey: ... }`.
@@ -707,24 +806,102 @@ SHRINK of code.
 ## Open questions
 
 1. **Should `Tool.access.kind` be a typed enum or a free string?**
-   Free string is more flexible (cloud subkinds: `aws-s3-object`,
-   `aws-rds-instance`); enum is harder to extend later. Lean
-   free-string with documented conventions.
+   ✅ **Resolved -- free string** (per user direction 2026-04-30).
+   Free string keeps the door open for finer subkinds without
+   touching the shared `AccessPolicy` type each time
+   (e.g. `aws-s3-object`, `aws-rds-instance`, `gcp-bucket`). The
+   plan documents the canonical kinds (`connection`, `fs-path`,
+   `fs-path-prefix`, `cloud-resource`, `cloud-resource-prefix`,
+   `shell-command`, `network-host`) as conventions; tool authors
+   may add new ones inline. The AccessStore is kind-agnostic.
 
-2. **Discovery calls (e.g. db_list_connections)** -- should they
-   register a wildcard scope automatically? E.g. after a successful
-   list, auto-approve every returned connection so the very next
-   call doesn't gate? Probably not -- the user typing the slash is
-   different consent than the model deciding to use a connection.
-   Default: discovery is exempt, every USE still gates.
+2. **Discovery / internal-config calls (e.g. db_list_connections)**
+   -- gate or no?
+   ✅ **Resolved -- no gate** (per user direction 2026-04-30):
+   internal configuration is automatically available to the daemon,
+   no access policy required. Tools that read DAEMON-INTERNAL
+   STATE (the registered connections list, the tool registry's
+   own contents, configuration getters, etc.) declare NO `access`
+   field at all -- the dispatcher's `if (tool.access)` check
+   short-circuits and the call runs ungated.
+
+   Tools that touch EXTERNAL state (a DB query, a file read, a
+   network call, a shell exec) declare `access` with the
+   appropriate resource kind. The split is clean:
+
+   - `db_list_connections`   -- internal (lists what's configured).      No `access`.
+   - `db_sql_describe`       -- queries the live DB.                     `access: connection`.
+   - `db_sql_sample`         -- queries the live DB.                     `access: connection`.
+   - `tools_list_drivers`    -- internal registry read.                  No `access`.
+   - `file_read`             -- reads filesystem.                        `access: fs-path`.
+   - `cloud_aws_rds_list`    -- calls AWS API (external).                `access: cloud-resource`.
+
+   Phase 3 of this plan annotates only resource-touching tools.
+   Internal/discovery tools stay ungated by simply omitting
+   `access` -- no special "internal" kind needed.
 
 3. **Gate timeout**: today's gate UI doesn't time out. Should the
-   dispatcher? Out-of-scope for v1 -- inherits whatever the existing
-   gate plumbing does (today: indefinite wait + `chat.cancel` is
-   the only escape).
+   dispatcher?
+   ✅ **Resolved -- leave as is** (per user direction 2026-04-30).
+   The dispatcher inherits whatever the existing gate plumbing does
+   (indefinite wait + `chat.cancel` is the escape hatch). No
+   timeout machinery added by this plan.
 
 4. **Tools that read MANY resources at once** (e.g. a hypothetical
-   `db_cross_join` querying two connections). For v1, `extractKey`
-   returns the primary; the secondary's gate fires when the tool
-   internally calls another tool. Multi-key gates are a future
-   extension if needed.
+   `db_cross_join` querying two connections).
+   ✅ **Resolved -- gate every key** (per user direction
+   2026-04-30): a tool that joins across N resources must have
+   all N approved before the call runs. If any aren't approved,
+   the dispatcher fires gates for the missing ones (serially in
+   v1) and runs the tool only when every key clears.
+
+   API change to support this:
+
+       interface AccessPolicy {
+         readonly kind: string;
+         /**
+          * Returns:
+          *   - undefined        -- skip the gate entirely
+          *   - string           -- single resource (most common)
+          *   - readonly string[] -- multiple resources; ALL must
+          *                         clear the gate before the tool
+          *                         runs. Order doesn't matter.
+          */
+         extractKey(input: Record<string, unknown>): string | readonly string[] | undefined;
+         describe?(input: Record<string, unknown>): string;
+         severity?: 'standard' | 'destructive';
+       }
+
+   Dispatcher logic:
+
+       const raw = policy.extractKey(input);
+       if (raw === undefined) return { allowed: true };
+       const keys = Array.isArray(raw) ? raw : [raw];
+
+       const denials: string[] = [];
+       for (const key of keys) {
+         if (store.isApproved(policy.kind, key)) continue;
+         const reply = await fireAccessGate(ctx, tool, policy, input, key);
+         if (reply.action === 'approve') {
+           store.approve(policy.kind, key);
+         } else {
+           denials.push(key);
+           // For destructive tools, abort on first deny -- no point
+           // approving subsequent keys if the call is going to fail.
+           // For non-destructive, keep collecting so the user sees
+           // every denial in the trace.
+           if (policy.severity === 'destructive') break;
+         }
+       }
+       if (denials.length > 0) {
+         return { allowed: false, reason: `denied: ${denials.join(', ')}` };
+       }
+       return { allowed: true };
+
+   UX in v1: serial. The user sees one gate per missing approval,
+   one after the other. Familiar, uses the existing gate widget.
+
+   Phase 5 polish: batched-gate UI for multi-key calls --
+   a single "Approve all of these for the session?" prompt with
+   a multi-select list. Lands when the first multi-key tool ships
+   and gives the UX a real workout.
