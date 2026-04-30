@@ -1,0 +1,235 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { localize2 } from '../../../../../nls.js';
+import { Action2, registerAction2 } from '../../../../../platform/actions/common/actions.js';
+import { ServicesAccessor } from '../../../../../platform/instantiation/common/instantiation.js';
+import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
+import { IFileService } from '../../../../../platform/files/common/files.js';
+import { IDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
+import { IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
+import { URI } from '../../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
+import { joinPath } from '../../../../../base/common/resources.js';
+import { IEditorService } from '../../../../services/editor/common/editorService.js';
+import { IInsrcChatService } from '../../common/chatService.js';
+import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
+import { DataAnalysisReportInput } from './dataAnalysisReportInput.js';
+import { rewriteCustomUrisForSave } from '../shared/saveReportUris.js';
+
+const CATEGORY = localize2('insrc', 'insrc');
+const DATA_ANALYZER_OWNER = 'data-analyzer';
+
+/**
+ * Open the Data Analysis Report pane for a given listId, or for the
+ * most recent data-analyzer list in the active session if no listId
+ * is supplied. Mirrors `insrc.codeAnalyzer.openReport`.
+ *
+ * The workbench drops the report-pane tab across IDE reloads (the
+ * pane is ephemeral); this command is the re-entry point. Bound to
+ * the todos pane's "Open report" row action via `arg.listId`, and
+ * available from the palette without args (most-recent fallback).
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.dataAnalyzer.openReport',
+			title: localize2('insrc.dataAnalyzer.openReport', 'Open Data Analysis Report'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, arg?: { listId?: string }): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const fileService = accessor.get(IFileService);
+		const notificationService = accessor.get(INotificationService);
+
+		const targetListId = arg?.listId;
+		let list: TodoList | undefined;
+		if (targetListId !== undefined) {
+			list = todosService.lists.find(l => l.id === targetListId);
+			if (list === undefined) {
+				notificationService.info('Report not available -- the analysis list is no longer loaded for this session.');
+				return;
+			}
+		} else {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notificationService.info('No active chat session; run /data-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === DATA_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notificationService.info('No data-analysis report yet for this session. Run /data-analyze.');
+				return;
+			}
+			list = candidates[candidates.length - 1];
+		}
+
+		if (list === undefined) {
+			return;
+		}
+
+		const input = new DataAnalysisReportInput(list.sessionId, list.id, list.body ?? '');
+		await input.ensureBackingFile(fileService);
+		await editorService.openEditor(input);
+	}
+});
+
+/**
+ * Save the Data Analysis report markdown to a file under
+ * `<repo-root>/docs/data-analysis/<slug>-<short-listId>.md`. Mirrors
+ * `insrc.codeAnalyzer.saveReport`. Uses the shared
+ * `rewriteCustomUrisForSave` helper to convert `path:` citations to
+ * absolute `file://` URIs so the saved markdown clicks through under
+ * VS Code's stock markdown preview.
+ *
+ * `data-conn:` URIs are intentionally left untouched -- they're
+ * navigation anchors keyed on the connection registry, not file
+ * references. They're inert in stock preview but still work in-IDE
+ * once Phase 5.6 ships the `data-conn:` opener.
+ */
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.dataAnalyzer.saveReport',
+			title: localize2('insrc.dataAnalyzer.saveReport', 'Save Data Analysis Report'),
+			f1: true,
+			category: CATEGORY,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, arg?: { listId?: string }): Promise<void> {
+		const chatService = accessor.get(IInsrcChatService);
+		const todosService = accessor.get(IInsrcTodosService);
+		const fileService = accessor.get(IFileService);
+		const dialogService = accessor.get(IDialogService);
+		const editorService = accessor.get(IEditorService);
+		const workspaceService = accessor.get(IWorkspaceContextService);
+		const notifications = accessor.get(INotificationService);
+
+		// Resolve list (explicit listId or most-recent fallback).
+		let list: TodoList | undefined;
+		const targetListId = arg?.listId;
+		if (targetListId !== undefined) {
+			list = todosService.lists.find(l => l.id === targetListId);
+			if (list === undefined) {
+				notifications.info('Save aborted -- the analysis list is no longer loaded for this session.');
+				return;
+			}
+		} else {
+			const sessionId = chatService.activeSessionId;
+			if (sessionId === undefined) {
+				notifications.info('No active chat session; run /data-analyze first.');
+				return;
+			}
+			const candidates = todosService.lists.filter(
+				l => l.sessionId === sessionId && l.owner === DATA_ANALYZER_OWNER && l.body !== undefined && l.body.length > 0,
+			);
+			if (candidates.length === 0) {
+				notifications.info('No completed data-analysis report yet for this session.');
+				return;
+			}
+			list = candidates[candidates.length - 1];
+		}
+		if (list === undefined || list.body === undefined || list.body.trim().length === 0) {
+			notifications.info('Save aborted -- the report has no body.');
+			return;
+		}
+
+		const repoRoot = resolveRepoRoot(chatService, workspaceService);
+		if (repoRoot === undefined) {
+			notifications.info('Save aborted -- no active repo or workspace folder available.');
+			return;
+		}
+
+		const slug = slugFromRequest(list.description ?? list.title);
+		const filename = `${slug}-${list.id.slice(0, 8)}.md`;
+		const target = joinPath(repoRoot, 'docs', 'data-analysis', filename);
+
+		try {
+			const exists = await fileService.exists(target);
+			if (exists) {
+				const result = await dialogService.confirm({
+					message: 'Overwrite existing report?',
+					detail: `${target.fsPath} already exists.`,
+					primaryButton: 'Overwrite',
+					type: 'warning',
+				});
+				if (!result.confirmed) {
+					return;
+				}
+			}
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Could not check target file: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+
+		// Rewrite path: citations to absolute file:// URIs via the
+		// shared helper. data-conn: URIs are left as-is (Phase 5.6).
+		const rewrittenBody = rewriteCustomUrisForSave(list.body, repoRoot);
+
+		try {
+			await fileService.writeFile(target, VSBuffer.fromString(rewrittenBody));
+		} catch (err) {
+			notifications.notify({
+				severity: Severity.Error,
+				message: `Save failed: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return;
+		}
+		await editorService.openEditor({ resource: target });
+		notifications.notify({
+			severity: Severity.Info,
+			message: `Saved to ${target.fsPath}`,
+		});
+	}
+});
+
+/**
+ * Pick the repo path the report should land under. Prefers
+ * `chatService.activeRepo` (the repo the analysis was run against);
+ * falls back to the workspace's first folder. Returns undefined when
+ * neither is available.
+ */
+function resolveRepoRoot(
+	chatService: IInsrcChatService,
+	workspaceService: IWorkspaceContextService,
+): URI | undefined {
+	const activeRepo = chatService.activeRepo;
+	if (activeRepo !== undefined && activeRepo.length > 0) {
+		return URI.file(activeRepo);
+	}
+	const folders = workspaceService.getWorkspace().folders;
+	if (folders.length > 0) {
+		return folders[0]!.uri;
+	}
+	return undefined;
+}
+
+/**
+ * Derive a filesystem-safe slug from the original analysis request.
+ * Lowercase, alnum-and-hyphen only, collapsed runs of `-`, capped at
+ * 60 chars. Falls back to `report` when the input is empty.
+ */
+function slugFromRequest(request: string): string {
+	const trimmed = request.trim().toLowerCase();
+	if (trimmed.length === 0) {
+		return 'report';
+	}
+	const slug = trimmed
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 60);
+	return slug.length > 0 ? slug : 'report';
+}

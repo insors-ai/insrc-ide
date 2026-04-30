@@ -1,0 +1,140 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * Data Analyzer Report Pane (plans/analyzers/data-analyzer.md Phase 2.1).
+ * Hard requirement: every colour resolves through vscode CSS variables
+ * so the pane follows the active theme. No hard-coded hex values.
+ *
+ * Class names mirror the Code Analyzer's `insrc-analysis-report-*` set
+ * with a `data-` infix to keep the two panes' selector spaces disjoint
+ * -- if either evolves (e.g. drift-finding callouts), they stay
+ * independent without leaking style.
+ */
+
+.insrc-data-analysis-report {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	font-family: inherit;
+	font-size: 13px;
+}
+
+.insrc-data-analysis-report-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 16px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+	flex-shrink: 0;
+}
+
+.insrc-data-analysis-report-title {
+	font-size: 1.1em;
+	font-weight: 600;
+	margin: 0;
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.insrc-data-analysis-report-status {
+	font-size: 0.85em;
+	color: var(--vscode-descriptionForeground);
+	flex-shrink: 0;
+}
+
+.insrc-data-analysis-report-status.in-progress {
+	color: var(--vscode-charts-yellow);
+}
+
+.insrc-data-analysis-report-status.complete {
+	color: var(--vscode-charts-green);
+}
+
+.insrc-data-analysis-report-action {
+	margin-left: 8px;
+	padding: 3px 10px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	border-radius: 3px;
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	font-family: inherit;
+	font-size: 0.85em;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.insrc-data-analysis-report-action:hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.insrc-data-analysis-report-action:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: -1px;
+}
+
+.insrc-data-analysis-report-body {
+	flex: 1;
+	overflow-y: auto;
+	padding: 16px 24px;
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host h1,
+.insrc-data-analysis-report-body.rendered-markdown-host h2,
+.insrc-data-analysis-report-body.rendered-markdown-host h3,
+.insrc-data-analysis-report-body.rendered-markdown-host h4 {
+	color: var(--vscode-editor-foreground);
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host a {
+	color: var(--vscode-textLink-foreground);
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host a:hover {
+	color: var(--vscode-textLink-activeForeground);
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host code {
+	color: var(--vscode-textPreformat-foreground);
+	background-color: var(--vscode-textPreformat-background);
+	padding: 2px 4px;
+	border-radius: 3px;
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host pre {
+	background-color: var(--vscode-textCodeBlock-background);
+	padding: 12px;
+	border-radius: 4px;
+	overflow-x: auto;
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host pre code {
+	background-color: transparent;
+	padding: 0;
+}
+
+.insrc-data-analysis-report-body.rendered-markdown-host blockquote {
+	border-left: 3px solid var(--vscode-textBlockQuote-border);
+	background-color: var(--vscode-textBlockQuote-background);
+	padding: 8px 12px;
+	margin: 8px 0;
+}
+
+.insrc-data-analysis-report-empty {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--vscode-descriptionForeground);
+	font-style: italic;
+	padding: 24px;
+	text-align: center;
+}

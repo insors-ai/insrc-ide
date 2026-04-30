@@ -256,6 +256,20 @@ editorPaneRegistry.registerEditorPane(
 );
 registerWorkbenchContribution2(CodeAnalyzerFlowContribution.ID, CodeAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
 
+// Data Analyzer Report Pane (plans/analyzers/data-analyzer.md Phase 2.1).
+// Mirror of the Code Analyzer pane: ephemeral pane, auto-opens when the
+// data-analyzer's TodoList gets a non-empty body, no editor serializer
+// (re-open via `insrc.dataAnalyzer.openReport`).
+import { DataAnalysisReportPane } from './data-analyzer/dataAnalysisReportPane.js';
+import { DataAnalysisReportInput } from './data-analyzer/dataAnalysisReportInput.js';
+import { DataAnalyzerFlowContribution } from './data-analyzer/dataAnalyzerFlowContribution.js';
+import './data-analyzer/dataAnalyzerCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(DataAnalysisReportPane, DataAnalysisReportPane.ID, 'Data Analysis Report'),
+	[new SyncDescriptor(DataAnalysisReportInput)],
+);
+registerWorkbenchContribution2(DataAnalyzerFlowContribution.ID, DataAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
+
 // path: URI opener -- resolves citation links emitted by the synthesise
 // prompt (e.g. `[label](path:src/foo.ts#L42-L58)`) so clicks in the
 // Report Pane and the chat panel actually open the cited file at the

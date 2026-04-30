@@ -19,6 +19,7 @@ import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcTodosService, type TodoList } from '../../common/todosService.js';
 import { AnalysisReportInput } from './analysisReportInput.js';
 import { EphemeralEditorInput } from '../shared/ephemeralEditorInput.js';
+import { rewriteCustomUrisForSave } from '../shared/saveReportUris.js';
 
 const CATEGORY = localize2('insrc', 'insrc');
 const CODE_ANALYZER_OWNER = 'code-analyzer';
@@ -547,34 +548,11 @@ registerAction2(class extends Action2 {
 			return;
 		}
 
-		// ----- Rewrite path: citations to absolute file:// URIs ----------------
-		//
-		// In-IDE rendering uses our PathUriOpener (see pathUriOpener.ts) which
-		// resolves `path:src/foo.ts#L42-L58` against the active workspace
-		// folder. The saved file is opened by VS Code's stock markdown
-		// preview (or shared elsewhere), where `path:` is an unknown scheme
-		// and clicks fall through. Rewriting to absolute file:// URIs --
-		// which the stock preview natively understands, including the
-		// `#L42-L58` fragment for line-range selection (see opener.ts:136)
-		// -- makes the saved report self-contained on this machine. We
-		// trade cross-machine portability for click reliability; the
-		// alternative (relative paths anchored on the saved file's
-		// location) needs the reader to know the report lives under
-		// docs/code-analysis/, which we can't guarantee for users who
-		// rename or move it.
-		const rewrittenBody = list.body.replace(
-			/\]\(path:([^)\s]+)\)/g,
-			(_match, pathSpec: string) => {
-				// pathSpec is the post-`path:` portion: "src/foo.ts#L42-L58"
-				// or "src/foo.ts" with no fragment. Split on first '#' to
-				// keep the fragment intact when re-emitting.
-				const hashIdx = pathSpec.indexOf('#');
-				const rel = hashIdx === -1 ? pathSpec : pathSpec.slice(0, hashIdx);
-				const fragment = hashIdx === -1 ? '' : pathSpec.slice(hashIdx);
-				const absolute = joinPath(repoRoot, rel);
-				return `](${absolute.toString()}${fragment})`;
-			},
-		);
+		// Rewrite path: citations to absolute file:// URIs via the
+		// shared helper (rewriteCustomUrisForSave). See its docstring
+		// for the trade-off (saved-file portability vs click
+		// reliability) and which schemes it touches.
+		const rewrittenBody = rewriteCustomUrisForSave(list.body, repoRoot);
 
 		// ----- Write + open ----------------------------------------------------
 		try {
