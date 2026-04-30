@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, gcloudCommonArgv, gcpFlags, gcpScope, num, str, tryParseJson } from './helpers.js';
+import { GCP_SCHEMA, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, num, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -21,6 +21,7 @@ interface GcpLoggingReadData {
 export const gcpLoggingReadTool: Tool = {
   id: 'cloud_gcp_logging_read',
   description: 'Run `gcloud logging read` with an advanced filter.',
+  access: gcpAccess({ resource: () => 'logging', verb: 'read logs in' }),
   inputSchema: {
     type: 'object',
     properties: {

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpFlags, gcpScope, str } from './helpers.js';
+import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -32,6 +32,10 @@ interface GcpSecretsAccessData {
 export const gcpSecretsAccessTool: Tool = {
   id: 'cloud_gcp_secrets_access',
   description: 'Access a Secret Manager version. Value redacts in output unless reveal:true.',
+  access: gcpAccess({
+    resource: (input) => `secrets:${str(input, 'secret') ?? '?'}`,
+    verb: 'read secret',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -104,6 +108,11 @@ interface GcpSecretsAddData {
 export const gcpSecretsAddTool: Tool = {
   id: 'cloud_gcp_secrets_add',
   description: 'Add a new version to an existing Secret Manager secret.',
+  access: gcpAccess({
+    resource: (input) => `secrets:${str(input, 'secret') ?? '?'}`,
+    verb: 'add secret version',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

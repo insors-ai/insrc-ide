@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
+import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -28,6 +28,7 @@ interface GcpRunListData {
 export const gcpRunListTool: Tool = {
   id: 'cloud_gcp_run_list',
   description: 'List Cloud Run services.',
+  access: gcpAccess({ resource: () => 'run:*', verb: 'list Cloud Run services in' }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -80,6 +81,11 @@ interface GcpRunDeployData {
 export const gcpRunDeployTool: Tool = {
   id: 'cloud_gcp_run_deploy',
   description: 'Deploy or update a Cloud Run service from a container image or source directory.',
+  access: gcpAccess({
+    resource: (input) => `run:${str(input, 'name') ?? '?'}`,
+    verb: 'deploy Cloud Run service',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -186,6 +192,11 @@ interface GcpRunDeleteData {
 export const gcpRunDeleteTool: Tool = {
   id: 'cloud_gcp_run_delete',
   description: 'Delete a Cloud Run service. Requires confirmService to match name.',
+  access: gcpAccess({
+    resource: (input) => `run:${str(input, 'name') ?? '?'}`,
+    verb: 'delete Cloud Run service',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

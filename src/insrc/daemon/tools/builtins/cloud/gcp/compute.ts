@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, gcloudCommonArgv, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
+import { GCP_SCHEMA, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -29,6 +29,7 @@ interface GcpComputeListData {
 export const gcpComputeListTool: Tool = {
   id: 'cloud_gcp_compute_list',
   description: 'List GCE VM instances (gcloud compute instances list).',
+  access: gcpAccess({ resource: () => 'compute:*', verb: 'list instances in' }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -97,6 +98,11 @@ function requireZone(input: ToolInput, id: string): string | ToolResult {
 export const gcpComputeStartTool: Tool = {
   id: 'cloud_gcp_compute_start',
   description: 'Start GCE instances. Zonal -- zone is required.',
+  access: gcpAccess({
+    resource: (input) => `compute:${instanceNamesFromInput(input).join(',')}`,
+    verb: 'start',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -155,6 +161,11 @@ export const gcpComputeStartTool: Tool = {
 export const gcpComputeStopTool: Tool = {
   id: 'cloud_gcp_compute_stop',
   description: 'Stop GCE instances. Zonal.',
+  access: gcpAccess({
+    resource: (input) => `compute:${instanceNamesFromInput(input).join(',')}`,
+    verb: 'stop',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -216,6 +227,11 @@ export const gcpComputeStopTool: Tool = {
 export const gcpComputeDeleteTool: Tool = {
   id: 'cloud_gcp_compute_delete',
   description: 'Delete GCE instances (irrecoverable). Requires confirmCount.',
+  access: gcpAccess({
+    resource: (input) => `compute:${instanceNamesFromInput(input).join(',')}`,
+    verb: 'delete',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

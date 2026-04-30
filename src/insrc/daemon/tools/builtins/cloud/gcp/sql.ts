@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, gcloudCommonArgv, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
+import { GCP_SCHEMA, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -24,6 +24,10 @@ interface GcpSqlDescribeData {
 export const gcpSqlDescribeTool: Tool = {
   id: 'cloud_gcp_sql_describe',
   description: 'Describe a Cloud SQL instance (or list all when instance omitted).',
+  access: gcpAccess({
+    resource: (input) => `sql:${str(input, 'instance') ?? '*'}`,
+    verb: 'describe SQL',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -84,6 +88,11 @@ function patchActivationPolicyArgv(instance: string, policy: 'ALWAYS' | 'NEVER',
 export const gcpSqlStartTool: Tool = {
   id: 'cloud_gcp_sql_start',
   description: 'Start a Cloud SQL instance (activation-policy=ALWAYS).',
+  access: gcpAccess({
+    resource: (input) => `sql:${str(input, 'instance') ?? '?'}`,
+    verb: 'start SQL',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -134,6 +143,11 @@ export const gcpSqlStartTool: Tool = {
 export const gcpSqlStopTool: Tool = {
   id: 'cloud_gcp_sql_stop',
   description: 'Stop a Cloud SQL instance (activation-policy=NEVER).',
+  access: gcpAccess({
+    resource: (input) => `sql:${str(input, 'instance') ?? '?'}`,
+    verb: 'stop SQL',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

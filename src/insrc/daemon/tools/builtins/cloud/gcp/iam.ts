@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, gcloudCommonArgv, gcpFlags, gcpScope, tryParseJson } from './helpers.js';
+import { GCP_SCHEMA, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -19,6 +19,7 @@ interface GcpIamWhoAmIData {
 export const gcpIamWhoAmITool: Tool = {
   id: 'cloud_gcp_iam_whoami',
   description: 'Return the active gcloud account and project (auth list + config list).',
+  access: gcpAccess({ resource: () => 'iam', verb: 'show identity for' }),
   inputSchema: {
     type: 'object',
     properties: { ...GCP_SCHEMA },

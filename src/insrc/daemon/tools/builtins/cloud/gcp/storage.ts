@@ -8,7 +8,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpFlags, gcpScope, str } from './helpers.js';
+import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -29,6 +29,10 @@ interface GcpStorageLsData {
 export const gcpStorageLsTool: Tool = {
   id: 'cloud_gcp_storage_ls',
   description: 'List a GCS bucket or prefix.',
+  access: gcpAccess({
+    resource: (input) => `gcs:${str(input, 'path') ?? '<all>'}`,
+    verb: 'list',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -84,6 +88,11 @@ interface GcpStorageCpData {
 export const gcpStorageCpTool: Tool = {
   id: 'cloud_gcp_storage_cp',
   description: 'Copy to/from/within GCS via `gcloud storage cp`. Always gated.',
+  access: gcpAccess({
+    resource: (input) => `gcs:${str(input, 'source') ?? '?'}->${str(input, 'destination') ?? '?'}`,
+    verb: 'copy',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -160,6 +169,11 @@ interface GcpStorageRmData {
 export const gcpStorageRmTool: Tool = {
   id: 'cloud_gcp_storage_rm',
   description: 'Delete GCS objects. Always gated; recursive requires confirmBucket.',
+  access: gcpAccess({
+    resource: (input) => `gcs:${str(input, 'path') ?? '?'}`,
+    verb: 'delete',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

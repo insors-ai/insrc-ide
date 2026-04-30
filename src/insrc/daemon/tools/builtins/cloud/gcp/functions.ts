@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
+import { GCP_SCHEMA, bool, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str, tryParseJson } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -31,6 +31,7 @@ interface GcpFunctionsListData {
 export const gcpFunctionsListTool: Tool = {
   id: 'cloud_gcp_functions_list',
   description: 'List Cloud Functions (region-scoped when region provided).',
+  access: gcpAccess({ resource: () => 'functions:*', verb: 'list functions in' }),
   inputSchema: {
     type: 'object',
     properties: {
@@ -92,6 +93,11 @@ interface GcpFunctionsCallData {
 export const gcpFunctionsCallTool: Tool = {
   id: 'cloud_gcp_functions_call',
   description: 'Invoke a Cloud Function (gcloud functions call) with a JSON payload.',
+  access: gcpAccess({
+    resource: (input) => `functions:${str(input, 'name') ?? '?'}`,
+    verb: 'invoke function',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {

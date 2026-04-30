@@ -7,6 +7,7 @@
  */
 
 import type { ToolInput } from '../../../types.js';
+import type { AccessPolicy } from '../../../../../shared/access.js';
 
 export interface GcpFlags {
   project?: string;
@@ -73,4 +74,39 @@ export const GCP_SCHEMA = {
 
 export function tryParseJson(stdout: string): unknown {
   try { return JSON.parse(stdout); } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// AccessPolicy factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an AccessPolicy for a GCP tool (plans/access-gate.md Phase 3).
+ *
+ * Key shape: `gcp:project=<p>,region=<r>,zone=<z>:<resource>` so reads
+ * share an approval bucket per (project, region, zone) tuple while
+ * mutating ops re-prompt on every call. See cloud/aws/helpers.ts:awsAccess
+ * for rationale.
+ */
+export function gcpAccess(opts: {
+  resource: (input: ToolInput) => string;
+  severity?: 'standard' | 'destructive';
+  verb: string;
+}): AccessPolicy {
+  const severity = opts.severity ?? 'standard';
+  return {
+    kind: 'cloud-resource',
+    extractKey: (input) => {
+      const flags = gcpFlags(input as ToolInput);
+      const scope = `gcp:project=${flags.project ?? 'default'},region=${flags.region ?? 'default'},zone=${flags.zone ?? 'default'}`;
+      const res = opts.resource(input as ToolInput);
+      return res.length > 0 ? `${scope}:${res}` : scope;
+    },
+    describe: (input) => {
+      const flags = gcpFlags(input as ToolInput);
+      const res = opts.resource(input as ToolInput);
+      return `${opts.verb} ${res || '<no target>'} (gcp ${gcpScope(flags)})`;
+    },
+    severity,
+  };
 }

@@ -4,7 +4,7 @@
 
 import { runShell } from '../../../shell-helper.js';
 import type { Tool, ToolApprovalGate, ToolInput, ToolResult } from '../../../types.js';
-import { GCP_SCHEMA, gcloudCommonArgv, gcpFlags, gcpScope, str } from './helpers.js';
+import { GCP_SCHEMA, gcloudCommonArgv, gcpAccess, gcpFlags, gcpScope, str } from './helpers.js';
 
 function fail(id: string, msg: string): ToolResult {
   return { output: `[${id}] ${msg}`, format: 'text', success: false, error: msg };
@@ -22,6 +22,11 @@ interface GcpContainerCredsData {
 export const gcpContainerGetCredentialsTool: Tool = {
   id: 'cloud_gcp_container_get-credentials',
   description: 'Write a kubeconfig entry for a GKE cluster. Mutates the kubeconfig file.',
+  access: gcpAccess({
+    resource: (input) => `gke:${str(input, 'cluster') ?? '?'}`,
+    verb: 'write kubeconfig for',
+    severity: 'destructive',
+  }),
   inputSchema: {
     type: 'object',
     properties: {
