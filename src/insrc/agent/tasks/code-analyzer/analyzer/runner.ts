@@ -189,6 +189,42 @@ const ANALYZER_TOOLS: readonly ToolDefinition[] = [
       required: ['entity'],
     },
   },
+  // Cross-agent: Data Analyzer surface (Phase 4.2 of
+  // plans/analyzers/data-analyzer.md). When a code-analysis task
+  // surfaces a query against a table, the analyzer can call
+  // `data_lineage` to enumerate readers / writers via the data-
+  // analyzer's structured probe, or `data_schema-drift` to confirm
+  // a Prisma vs live mismatch the code is paying for. Both fail
+  // closed on `_crossAgentDepth >= 1` so the depth cap holds.
+  {
+    name: 'data_lineage',
+    description:
+      'Cross-agent: cross-link a data target (table / namespace / file) to the code that reads / writes it. ' +
+      'Use to ground a code-side observation about a query in the actual call sites.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionId: { type: 'string' },
+        target:       { type: 'string' },
+        limit:        { type: 'number' },
+      },
+      required: ['connectionId', 'target'],
+    },
+  },
+  {
+    name: 'data_schema-drift',
+    description:
+      'Cross-agent: diff an RDBMS connection\'s expected schema (Prisma) against the live shape. ' +
+      'Returns missing-column / extra-column / type-mismatch / nullable-mismatch / pk-changed / fk-changed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connectionId: { type: 'string' },
+        target:       { type: 'string' },
+      },
+      required: ['connectionId', 'target'],
+    },
+  },
   {
     // F8: control-flow tool. The model calls this when it's done
     // gathering evidence; the runner intercepts the call, treats the

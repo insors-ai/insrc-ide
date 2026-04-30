@@ -79,6 +79,9 @@ const DB_FILE_SAMPLE      = 'db_file_sample';
 const DB_FILE_SAMPLE_SHAPE = 'db_file_sample_shape';
 const DATA_LINEAGE        = 'data_lineage';
 const DATA_SCHEMA_DRIFT   = 'data_schema-drift';
+const CODE_LOCATE         = 'code_locate';
+const CODE_TRACE          = 'code_trace';
+const CODE_DESCRIBE       = 'code_describe';
 const SUBMIT_TOOL         = 'submit_analysis';
 
 const ANALYZER_TOOLS: readonly ToolDefinition[] = [
@@ -232,6 +235,55 @@ const ANALYZER_TOOLS: readonly ToolDefinition[] = [
         target:       { type: 'string', description: 'Table name (Prisma model OR @@map target).' },
       },
       required: ['connectionId', 'target'],
+    },
+  },
+  // Cross-agent surface (Phase 4.2 of plans/analyzers/data-analyzer.md).
+  // The data-analyzer's lineage / schema-drift findings often want to
+  // ground in code citations; the Code Analyzer's lookup tools provide
+  // those. The tools fail closed on `_crossAgentDepth >= 1` so the
+  // depth cap holds when this analyzer was itself invoked
+  // cross-agent. When the Code Analyzer isn't registered in this
+  // daemon build the tool calls return TOOL_UNAVAILABLE and the
+  // analyzer LLM downgrades the affected findings.
+  {
+    name: CODE_LOCATE,
+    description:
+      'Cross-agent: vector + entity lookup over the active session\'s code knowledge graph. ' +
+      'Returns small entity stubs for "where is X defined?" follow-ups behind a lineage / drift finding.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: CODE_TRACE,
+    description:
+      'Cross-agent: CALLS-edge graph walk for "who calls X / what does X call?". Pair with code_locate ' +
+      'to seed an entityId, then trace one or two hops to surface readers / writers behind a table.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entityId:  { type: 'string' },
+        direction: { type: 'string', enum: ['callers', 'callees', 'both'] },
+        depth:     { type: 'number' },
+      },
+      required: ['entityId'],
+    },
+  },
+  {
+    name: CODE_DESCRIBE,
+    description:
+      'Cross-agent: full entity card (signature + body + 1-hop neighbours summary) for a given entityId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entityId: { type: 'string' },
+      },
+      required: ['entityId'],
     },
   },
   {

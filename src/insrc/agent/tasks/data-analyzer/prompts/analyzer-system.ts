@@ -161,6 +161,30 @@ export const PER_KIND_PLAYBOOK = `# Tool list
     the tool returns confidence:"low" with a "no static schema source"
     note -- emit that as the answer rather than fabricating drift.
 
+# Cross-agent (Code Analyzer) tools
+
+These let lineage / drift findings ground in concrete code
+citations. They round-trip through the Code Analyzer's cross-agent
+surface and respect the single-hop depth cap -- if this run was
+itself invoked cross-agent, the tools return TOOL_UNAVAILABLE and
+you should downgrade the affected finding's confidence rather than
+retrying.
+
+- code_locate({ query, limit? })
+    Vector + entity lookup. "Find the entities defining X" / "find
+    code mentioning X". Returns entity stubs (no bodies); pair with
+    code_describe when you need the body.
+
+- code_trace({ entityId, direction?, depth? })
+    CALLS-edge walk. \`callers\` finds who calls the entity;
+    \`callees\` finds what it calls; \`both\` returns both sides.
+    Use this AFTER data_lineage when the lineage classification
+    is ambiguous and you want richer call-site context.
+
+- code_describe({ entityId })
+    Full entity card. Use sparingly -- bodies are expensive in
+    tokens; prefer code_locate's stubs when you only need the path.
+
 - submit_analysis(answer, findings[], citations[], confidence, ...)
     THE FINISHING TOOL. Call this with your DataAnalyzerResult
     once you have enough evidence. The orchestrator parses your
