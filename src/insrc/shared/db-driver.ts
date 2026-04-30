@@ -53,6 +53,23 @@ export interface ConnectionConfig {
 	/** Kind-specific extras (e.g. CSV delimiter, Cassandra
 	 *  keyspace + contactPoints, fixed-width column spec). */
 	readonly options?: Readonly<Record<string, unknown>>;
+	/**
+	 * Session-scoped ephemeral connection. Set by the data-analyzer
+	 * (and future siblings) when registering a one-off local file the
+	 * user referenced in their prompt -- so they don't have to go
+	 * through the Data Sources pane for every ad-hoc file.
+	 *
+	 * Ephemeral connections:
+	 *   - live in the pool's in-memory entries map only (NOT written
+	 *     to db-connections.json),
+	 *   - survive `pool.reload()` -- the prune pass skips them so a
+	 *     concurrent Data Sources edit doesn't drop the analyzer's
+	 *     ephemeral entries mid-run,
+	 *   - are visible to `db:list_connections` like any other entry,
+	 *   - are auto-approved by the connection-approval gate (the
+	 *     user just typed the path; explicit consent).
+	 */
+	readonly ephemeral?: boolean;
 }
 
 export interface ConnectionsFile {

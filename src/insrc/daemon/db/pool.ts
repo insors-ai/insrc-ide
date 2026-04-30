@@ -61,7 +61,14 @@ export class DriverPool {
 
 		const nextIds = new Set(resolved.map(c => c.id));
 		for (const [id, entry] of this.entries) {
-			if (!nextIds.has(id)) {
+			// Preserve ephemeral entries across reload. The data-analyzer
+			// (and future siblings) can register a one-off local file
+			// connection mid-run; that entry isn't in db-connections.json
+			// so the prune pass would drop it on the next reload triggered
+			// by an unrelated Data Sources edit. Skipping ephemerals here
+			// keeps the analyzer's run-time view of registered connections
+			// stable.
+			if (!nextIds.has(id) && entry.config.ephemeral !== true) {
 				await this.closeEntry(entry);
 				this.entries.delete(id);
 			}
@@ -138,6 +145,32 @@ export class DriverPool {
 			await this.closeEntry(entry);
 		}
 		this.entries.clear();
+	}
+
+	/**
+	 * Register an ephemeral session-scoped connection -- used by the
+	 * data-analyzer (and future siblings) when the user references a
+	 * local file path in their prompt that isn't in
+	 * db-connections.json. Idempotent: replaces any existing entry
+	 * with the same id, closing the previous driver. The entry is
+	 * marked `ephemeral: true` so `reload()` preserves it across
+	 * unrelated Data Sources edits.
+	 */
+	async registerEphemeral(config: ConnectionConfig): Promise<void> {
+		const stamped: ConnectionConfig = { ...config, ephemeral: true };
+		const existing = this.entries.get(stamped.id);
+		if (existing !== undefined) {
+			await this.closeEntry(existing);
+		}
+		this.entries.set(stamped.id, {
+			connectionId: stamped.id,
+			config: stamped,
+			driver: null,
+			building: null,
+			lastUsedAt: 0,
+			idleTimer: null,
+		});
+		log.debug({ id: stamped.id, kind: stamped.kind, path: stamped.path }, 'pool: ephemeral connection registered');
 	}
 
 	private async build(entry: PoolEntry): Promise<Driver> {

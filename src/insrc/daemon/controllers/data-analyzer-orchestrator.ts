@@ -80,6 +80,8 @@ import type {
 } from '../task.js';
 import { stripFences } from '../../agent/tasks/_shared/json-extract.js';
 import { executeTool } from '../../agent/tools/executor.js';
+import { detectFilePaths } from '../../agent/tasks/data-analyzer/file-detect.js';
+import { acquirePool } from '../db/pool-cache.js';
 
 const log = getLogger('data-analyzer:orchestrator');
 
@@ -136,6 +138,17 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   async buildInitialTasks(input: ControllerInput): Promise<Task[]> {
     this._request = input.message;
     this._tier = clampToDataAltitude(input.classification?.scope ?? 'M');
+
+    // Phase 1.H: register ephemeral connections for any local file
+    // paths the user typed in their prompt (e.g.
+    // `/data-analyze find pii in /tmp/customers.json`). The user
+    // shouldn't need to register every one-off file in the Data
+    // Sources pane just to ask about it. Ephemerals live in the
+    // pool's in-memory entries only -- not written to
+    // db-connections.json -- and are auto-approved (the user just
+    // typed the path; explicit consent).
+    await this._registerEphemeralFromPrompt(input);
+
     this._connections = await this._loadConnections(input);
 
     log.info(
@@ -162,6 +175,55 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       stateKey: K_PLAN_RESULT,
       persisted: true,
     }];
+  }
+
+  /**
+   * Detect file paths in the prompt and register them as ephemeral
+   * connections in the data-driver pool. Auto-approves each so the
+   * connection-approval gate doesn't fire on the analyzer's first
+   * tool call against them (the user explicitly typed the path).
+   *
+   * Best-effort: a failure here just means the user doesn't get the
+   * one-off ephemeral; they can still register manually in the
+   * Data Sources pane.
+   */
+  private async _registerEphemeralFromPrompt(input: ControllerInput): Promise<void> {
+    if (this.deps === undefined) return;
+    const repoPath = this.deps.session.repoPath;
+    if (!repoPath) return;
+    const detected = detectFilePaths(input.message, repoPath);
+    if (detected.length === 0) return;
+    let pool;
+    try {
+      pool = await acquirePool(repoPath);
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, '_registerEphemeralFromPrompt: acquirePool failed');
+      return;
+    }
+    for (const f of detected) {
+      try {
+        await pool.registerEphemeral({
+          id:    f.connectionId,
+          kind:  f.kind,
+          family: 'file',
+          label: f.typed,
+          path:  f.absPath,
+        });
+        // Auto-approve so the analyzer's first tool call against
+        // this connection doesn't trigger the user gate. The user
+        // already gave consent by typing the path.
+        this._approvedConnections.add(f.connectionId);
+        log.info(
+          { id: f.connectionId, kind: f.kind, path: f.absPath },
+          'data-analyzer: registered ephemeral connection from prompt',
+        );
+      } catch (err) {
+        log.warn(
+          { err: (err as Error).message, path: f.absPath },
+          '_registerEphemeralFromPrompt: registerEphemeral failed',
+        );
+      }
+    }
   }
 
   private async _loadConnections(input: ControllerInput): Promise<readonly ConnectionSummary[]> {
