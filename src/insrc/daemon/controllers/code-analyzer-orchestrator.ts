@@ -287,6 +287,30 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     state.set(K_FOLLOWUP_COUNT, 0);
     state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
     state.set(K_HISTORY, [] as AnalyzerResult[]);
+
+    this.seedAccessFromState(initialState);
+  }
+
+  /**
+   * Seed Session.access with the analyzer's pre-approved fs scopes
+   * (Phase 4 of plans/access-gate.md). Replaces the per-call
+   * checkPathAccess hook + fireFsAccessGate path: the analyzer runner
+   * now hands every fs tool call straight to executeTool, whose
+   * dispatcher (Phase 2) consults Session.access for a hit before
+   * firing a UI gate. The repo root cascades to every descendant via
+   * approvePrefix; out-of-repo dirs the user has previously approved
+   * during this run are re-seeded on resume so a long task crossing a
+   * daemon restart doesn't re-prompt for already-cleared paths.
+   */
+  private seedAccessFromState(ca: CodeAnalysisState): void {
+    if (this.deps === undefined) return;
+    const access = this.deps.session.access;
+    if (ca.repoSummary.rootPath.length > 0) {
+      access.approvePrefix('fs-path', ca.repoSummary.rootPath);
+    }
+    for (const dir of ca.approvedDirs) {
+      access.approvePrefix('fs-path', dir);
+    }
   }
 
   // -- main state machine ---------------------------------------------------
@@ -373,6 +397,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     this._request     = ca.request;
     this._repoSummary = ca.repoSummary;
     this._tier        = ca.tier;
+
+    // Re-seed Session.access on resume (Phase 4 of plans/access-gate.md).
+    // Sessions are disposable; on IDE restart the AccessStore is fresh.
+    // Replay the pre-approved repo root + every dir the user cleared
+    // during the prior run so the analyzer doesn't re-prompt the user
+    // for paths that had already been approved.
+    this.seedAccessFromState(ca);
     // The checkpoint file doesn't currently persist the
     // `_parentListId` / `_rerunFromListId` instance fields. They're
     // reconstructable from the active list's `parentListId` (the
@@ -829,7 +860,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // raw output flows in the bubble like brainstorm's spec writer.
       onToken: (token) => this.emitLiveStep(liveStepName, token),
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      checkPathAccess: (path) => this.checkPathAccess(path, state),
+      // Phase 4 of plans/access-gate.md: drop the per-call
+      // checkPathAccess hook in favour of seeding Session.access at
+      // task start (see seedAccessFromState). The dispatcher inside
+      // executeTool fires the gate UI on miss using the send / channel
+      // / requestId we plumb here.
+      send:      this.deps.send,
+      channel:   this.deps.channel,
+      requestId: this.deps.requestId,
       // Phase 5.A's per-tier wall-clock caps were dropped; the
       // runner's MAX_WALL_CLOCK_MS (10 min safety bound) applies
       // unconditionally. Local Ollama runs were getting cut off by
@@ -1403,98 +1441,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     return 'analyze';
   }
 
-  // -------------------------------------------------------------------------
-  // fs-access gate (Phase 1.6)
-  // -------------------------------------------------------------------------
-
-  /**
-   * Path-access check the analyzer runner consults before fs-class
-   * tool calls. In-repo paths are implicit allow; out-of-repo paths
-   * are matched against the session's approvedDirs, and unapproved
-   * paths fire an interactive gate. On approve the parent directory
-   * is added to approvedDirs (cascades to descendants for the rest
-   * of the chat session).
-   */
-  private async checkPathAccess(
-    requestedPathRaw: string,
-    state: TaskStateStore,
-  ): Promise<{ allowed: boolean; reason?: string }> {
-    if (this.deps === undefined) return { allowed: false, reason: 'deps not attached' };
-    const ca = state.get<CodeAnalysisState>(K_STATE);
-    if (ca === undefined) return { allowed: true };
-    const { resolve: pathResolve, dirname, sep } = await import('node:path');
-
-    const requestedAbs = pathResolve(this.deps.session.repoPath || process.cwd(), requestedPathRaw);
-    const repoRoot = ca.repoSummary.rootPath;
-
-    if (repoRoot.length > 0 && (requestedAbs === repoRoot || requestedAbs.startsWith(repoRoot + sep))) {
-      return { allowed: true };
-    }
-    for (const approved of ca.approvedDirs) {
-      if (requestedAbs === approved || requestedAbs.startsWith(approved + sep)) {
-        return { allowed: true };
-      }
-    }
-    // Out-of-repo + unapproved -- fire the gate. Grant the parent
-    // directory so descendants are covered for the rest of the session.
-    const grantPath = dirname(requestedAbs);
-    log.info({ requestedAbs, grantPath }, 'fs-access gate: firing for out-of-repo path');
-    const action = await this.fireFsAccessGate(requestedAbs, grantPath);
-    if (action === 'approve') {
-      const updated: CodeAnalysisState = {
-        ...ca,
-        approvedDirs: [...ca.approvedDirs, grantPath],
-      };
-      state.set(K_STATE, updated);
-      log.info({ grantPath, total: updated.approvedDirs.length }, 'fs-access gate: approved');
-      return { allowed: true };
-    }
-    log.info({ grantPath }, 'fs-access gate: denied');
-    return { allowed: false, reason: `user denied access to ${grantPath}` };
-  }
-
-  /**
-   * Fire the fs-access gate via the daemon's external-gate channel.
-   * Awaits the user's reply (no timeout in Phase 1; matches
-   * gateTaskResult's behaviour).
-   */
-  private async fireFsAccessGate(requestedPath: string, grantPath: string): Promise<string> {
-    if (this.deps === undefined) {
-      throw new Error('fireFsAccessGate: deps not attached');
-    }
-    const gateId = `code-analyzer-fs-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    const content = [
-      'The Code Analyzer wants to read a path **outside the active repo**:',
-      '',
-      `**Requested:** \`${requestedPath}\``,
-      `**Grant scope:** \`${grantPath}\` (covers all descendants for the rest of this chat session)`,
-      '',
-      'Approving once covers every file under the grant scope -- the analyzer will not re-prompt for further reads inside it. A new chat session re-asks.',
-    ].join('\n');
-    this.deps.send({
-      id: this.deps.requestId,
-      stream: 'gate',
-      data: {
-        gateId,
-        title: 'Code Analyzer: out-of-repo path',
-        content,
-        format: 'markdown',
-        actions: [
-          { name: 'approve', label: `Approve \`${grantPath}\`` },
-          { name: 'deny', label: 'Deny' },
-        ],
-      },
-    });
-
-    const channel = this.deps.channel;
-    return await new Promise<string>((resolve, reject) => {
-      channel.registerExternalGate(
-        gateId,
-        (reply) => resolve(reply.action),
-        reject,
-      );
-    });
-  }
+  // fs-access gating moved to the universal access dispatcher (Phase
+  // 4 of plans/access-gate.md). The orchestrator's role here is just
+  // to seed Session.access at task start (see seedAccessFromState);
+  // the dispatcher in agent/tools/executor.ts handles the gate UI.
 }
 
 // ---------------------------------------------------------------------------

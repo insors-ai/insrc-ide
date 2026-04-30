@@ -26,7 +26,6 @@ import type {
   LLMMessage,
   LLMProvider,
   LLMResponse,
-  ToolCall,
   ToolDefinition,
 } from '../../../../shared/types.js';
 import type { Session } from '../../../session.js';
@@ -252,16 +251,21 @@ export interface RunAnalyzerOpts {
    */
   tier?: import('../../../../shared/classify.js').ScopeSize | undefined;
   /**
-   * Per-call path approval check (Phase 1.6 fs-access gate). Called
-   * with the absolute path the analyzer wants to read before
-   * executeTool runs for fs-class tools (Read / Grep / ListDirectory).
-   * The orchestrator implements this against its session-scoped
-   * approvedDirs registry and fires a user gate for unapproved
-   * out-of-repo paths.
+   * Plumb-through fields for the universal access gate (Phase 4 of
+   * plans/access-gate.md). The orchestrator pre-seeds Session.access
+   * with the repo root prefix + any approvedDirs at task start; the
+   * dispatcher inside `executeTool` consults that store on every fs-
+   * class call and fires a gate UI here when an out-of-repo path
+   * misses. These fields tell the dispatcher WHERE to send the gate
+   * request -- without them it fails closed and denies the call.
    *
-   * When unset, all paths are allowed (Phase 1.4 default behaviour).
+   * The orchestrator threads its own `deps.send`/`deps.channel`/
+   * `deps.requestId` straight through; the runner doesn't construct
+   * or interpret any of them.
    */
-  checkPathAccess?: ((path: string) => Promise<{ allowed: boolean; reason?: string }>) | undefined;
+  send?: ToolExecContext['send'];
+  channel?: ToolExecContext['channel'];
+  requestId?: ToolExecContext['requestId'];
 }
 
 export interface RunAnalyzerOutcome {
@@ -371,34 +375,20 @@ export async function runAnalyzer(
         resultsBlock.push(renderToolResultBlock(call.id, msg, true));
         continue;
       }
-      // fs-access gate (Phase 1.6) -- consult the orchestrator-supplied
-      // checkPathAccess callback for fs-class tools. The callback may
-      // suspend on a user gate; we await its decision before deciding
-      // whether to execute the tool.
-      if (opts.checkPathAccess !== undefined) {
-        const requestedPath = extractPathArg(call);
-        if (requestedPath !== undefined) {
-          const decision = await opts.checkPathAccess(requestedPath);
-          if (!decision.allowed) {
-            const msg = `[error] PermissionDenied: ${decision.reason ?? `access to ${requestedPath} not approved`}`;
-            callTrace.push({
-              name: call.name,
-              argsHash: hashArgs(call.input),
-              durationMs: 0,
-              resultRows: 0,
-              error: msg,
-            });
-            resultsBlock.push(renderToolResultBlock(call.id, msg, true));
-            continue;
-          }
-        }
-      }
-
+      // Universal access gate dispatch happens INSIDE executeTool
+      // (Phase 2 of plans/access-gate.md) -- the runner just plumbs
+      // send/channel/requestId so the dispatcher can fire a gate UI
+      // when a path misses Session.access. The orchestrator pre-seeds
+      // the repo root + approvedDirs at task start, so in-repo reads
+      // never gate.
       const t0 = Date.now();
       const execCtx: ToolExecContext = {
         session: opts.session,
         ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
+        ...(opts.send !== undefined ? { send: opts.send } : {}),
+        ...(opts.channel !== undefined ? { channel: opts.channel } : {}),
+        ...(opts.requestId !== undefined ? { requestId: opts.requestId } : {}),
       };
       const r = await executeTool(call, execCtx);
       const durationMs = Date.now() - t0;
@@ -642,20 +632,3 @@ function sortKeys(v: unknown): unknown {
   return v;
 }
 
-/**
- * Extract the filesystem path argument the analyzer wants to read for
- * fs-class tool calls. Returns undefined for tools that don't read
- * paths or for calls that omit the path arg (Grep without `path`
- * defaults to cwd, which is in-repo).
- */
-function extractPathArg(call: ToolCall): string | undefined {
-  if (call.name === 'Read') {
-    const v = call.input['file_path'];
-    return typeof v === 'string' && v.length > 0 ? v : undefined;
-  }
-  if (call.name === 'Grep' || call.name === 'ListDirectory') {
-    const v = call.input['path'];
-    return typeof v === 'string' && v.length > 0 ? v : undefined;
-  }
-  return undefined;
-}
