@@ -20,7 +20,7 @@ interface GcpContainerCredsData {
 }
 
 export const gcpContainerGetCredentialsTool: Tool = {
-  id: 'cloud:gcp:container:get-credentials',
+  id: 'cloud_gcp_container_get-credentials',
   description: 'Write a kubeconfig entry for a GKE cluster. Mutates the kubeconfig file.',
   inputSchema: {
     type: 'object',
@@ -40,7 +40,7 @@ export const gcpContainerGetCredentialsTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = gcpFlags(input);
     return {
-      title: 'cloud:gcp:container:get-credentials',
+      title: 'cloud_gcp_container_get-credentials',
       content: [
         `Scope: **${gcpScope(flags)}**`,
         `Cluster: \`${str(input, 'cluster')}\``,
@@ -55,7 +55,7 @@ export const gcpContainerGetCredentialsTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cluster = str(input, 'cluster');
-    if (!cluster) { return fail('cloud:gcp:container:get-credentials', 'cluster required'); }
+    if (!cluster) { return fail('cloud_gcp_container_get-credentials', 'cluster required'); }
     const flags = gcpFlags(input);
     const location: GcpContainerCredsData['location'] = (str(input, 'location') ?? (flags.region ? 'region' : 'zone')) as 'region' | 'zone';
     const kubeconfig = str(input, 'kubeconfig');
@@ -71,7 +71,7 @@ export const gcpContainerGetCredentialsTool: Tool = {
     if (kubeconfig) { env['KUBECONFIG'] = kubeconfig; }
 
     const r = await runShell(argv, { timeoutMs: 60_000, env });
-    if (r.spawnError) { return fail('cloud:gcp:container:get-credentials', `gcloud not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_gcp_container_get-credentials', `gcloud not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: GcpContainerCredsData = { cluster, location, kubeconfigPath: kubeconfig, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

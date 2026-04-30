@@ -24,7 +24,7 @@ interface AwsIamListAttachedData {
 }
 
 export const awsIamListAttachedPoliciesTool: Tool = {
-  id: 'cloud:aws:iam:list-attached-policies',
+  id: 'cloud_aws_iam_list-attached-policies',
   description: 'List attached managed policies for the caller, a user, a role, or a group.',
   inputSchema: {
     type: 'object',
@@ -43,14 +43,14 @@ export const awsIamListAttachedPoliciesTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const target = str(input, 'target') as AwsIamListAttachedData['target'] | undefined;
-    if (!target) { return fail('cloud:aws:iam:list-attached-policies', 'target required'); }
+    if (!target) { return fail('cloud_aws_iam_list-attached-policies', 'target required'); }
     const flags = awsFlags(input);
     const name = str(input, 'name');
 
     let resolvedName = name;
     if (target === 'caller') {
       const whoamiR = await runShell(['aws', 'sts', 'get-caller-identity', ...awsArgv(flags)], { timeoutMs: 20_000 });
-      if (whoamiR.code !== 0) { return fail('cloud:aws:iam:list-attached-policies', 'sts:GetCallerIdentity failed: ' + whoamiR.stderr.trim()); }
+      if (whoamiR.code !== 0) { return fail('cloud_aws_iam_list-attached-policies', 'sts:GetCallerIdentity failed: ' + whoamiR.stderr.trim()); }
       const whoami = tryParseJson(whoamiR.stdout);
       if (whoami && typeof whoami === 'object') {
         const arn = (whoami as { Arn?: unknown }).Arn;
@@ -60,10 +60,10 @@ export const awsIamListAttachedPoliciesTool: Tool = {
         }
       }
       if (!resolvedName) {
-        return fail('cloud:aws:iam:list-attached-policies', 'could not resolve caller name; specify target/name manually');
+        return fail('cloud_aws_iam_list-attached-policies', 'could not resolve caller name; specify target/name manually');
       }
     } else if (!resolvedName) {
-      return fail('cloud:aws:iam:list-attached-policies', `name required when target=${target}`);
+      return fail('cloud_aws_iam_list-attached-policies', `name required when target=${target}`);
     }
 
     const cmd = target === 'caller' || target === 'user' ? 'list-attached-user-policies'
@@ -75,7 +75,7 @@ export const awsIamListAttachedPoliciesTool: Tool = {
 
     const argv = ['aws', 'iam', cmd, flagName, resolvedName, ...awsArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:iam:list-attached-policies', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_iam_list-attached-policies', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsIamListAttachedData = { target, name: resolvedName, exitCode: r.code, parsed, stdout: r.stdout };

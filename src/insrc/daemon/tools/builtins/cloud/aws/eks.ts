@@ -57,7 +57,7 @@ export const awsEksListTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:aws:eks:update-kubeconfig
+// cloud_aws_eks_update-kubeconfig
 // ---------------------------------------------------------------------------
 
 interface AwsEksUpdateKubeconfigData {
@@ -71,7 +71,7 @@ interface AwsEksUpdateKubeconfigData {
 }
 
 export const awsEksUpdateKubeconfigTool: Tool = {
-  id: 'cloud:aws:eks:update-kubeconfig',
+  id: 'cloud_aws_eks_update-kubeconfig',
   description: 'Write a kubeconfig entry for an EKS cluster. Mutates the kubeconfig file.',
   inputSchema: {
     type: 'object',
@@ -91,7 +91,7 @@ export const awsEksUpdateKubeconfigTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:eks:update-kubeconfig',
+      title: 'cloud_aws_eks_update-kubeconfig',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Cluster: \`${str(input, 'clusterName')}\``,
@@ -108,7 +108,7 @@ export const awsEksUpdateKubeconfigTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cluster = str(input, 'clusterName');
-    if (!cluster) { return fail('cloud:aws:eks:update-kubeconfig', 'clusterName required'); }
+    if (!cluster) { return fail('cloud_aws_eks_update-kubeconfig', 'clusterName required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'eks', 'update-kubeconfig', '--name', cluster];
     const alias = str(input, 'alias');
@@ -121,7 +121,7 @@ export const awsEksUpdateKubeconfigTool: Tool = {
     argv.push(...awsArgv(flags, { defaultJson: false }));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:eks:update-kubeconfig', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_eks_update-kubeconfig', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AwsEksUpdateKubeconfigData = {
       clusterName: cluster, kubeconfigPath: kubeconfig, alias, roleArn,

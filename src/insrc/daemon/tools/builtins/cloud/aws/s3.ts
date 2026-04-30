@@ -27,7 +27,7 @@ interface AwsS3LsData {
 }
 
 export const awsS3LsTool: Tool = {
-  id: 'cloud:aws:s3:ls',
+  id: 'cloud_aws_s3_ls',
   description: 'List an S3 bucket or prefix.',
   inputSchema: {
     type: 'object',
@@ -53,7 +53,7 @@ export const awsS3LsTool: Tool = {
     argv.push(...awsArgv(flags, { defaultJson: false })); // ls defaults to table-ish output
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:s3:ls', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_s3_ls', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AwsS3LsData = {
       path, recursive: bool(input, 'recursive') ?? false,
@@ -87,7 +87,7 @@ interface AwsS3CpData {
 }
 
 export const awsS3CpTool: Tool = {
-  id: 'cloud:aws:s3:cp',
+  id: 'cloud_aws_s3_cp',
   description: 'Copy to/from/within S3. Gated for write targets.',
   inputSchema: {
     type: 'object',
@@ -110,7 +110,7 @@ export const awsS3CpTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:s3:cp',
+      title: 'cloud_aws_s3_cp',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `\`${str(input, 'source')}\` -> \`${str(input, 'destination')}\``,
@@ -126,7 +126,7 @@ export const awsS3CpTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const src = str(input, 'source');
     const dst = str(input, 'destination');
-    if (!src || !dst) { return fail('cloud:aws:s3:cp', 'source and destination required'); }
+    if (!src || !dst) { return fail('cloud_aws_s3_cp', 'source and destination required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 's3', 'cp', src, dst];
     if (bool(input, 'recursive') === true) { argv.push('--recursive'); }
@@ -143,7 +143,7 @@ export const awsS3CpTool: Tool = {
     argv.push(...awsArgv(flags, { defaultJson: false }));
 
     const r = await runShell(argv, { timeoutMs: 30 * 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:s3:cp', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_s3_cp', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AwsS3CpData = {
       source: src, destination: dst,
@@ -177,7 +177,7 @@ interface AwsS3RmData {
 }
 
 export const awsS3RmTool: Tool = {
-  id: 'cloud:aws:s3:rm',
+  id: 'cloud_aws_s3_rm',
   description: 'Delete S3 objects. Always gated. Recursive delete requires confirmBucket to match.',
   inputSchema: {
     type: 'object',
@@ -198,7 +198,7 @@ export const awsS3RmTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:s3:rm',
+      title: 'cloud_aws_s3_rm',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Delete \`${str(input, 'path')}\``,
@@ -213,15 +213,15 @@ export const awsS3RmTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const path = str(input, 'path');
-    if (!path) { return fail('cloud:aws:s3:rm', 'path required'); }
+    if (!path) { return fail('cloud_aws_s3_rm', 'path required'); }
     const recursive = bool(input, 'recursive') === true;
     if (recursive) {
       const m = path.match(/^s3:\/\/([^/]+)/);
       const bucket = m?.[1];
       const confirm = str(input, 'confirmBucket');
-      if (!bucket) { return fail('cloud:aws:s3:rm', 'recursive rm: could not parse bucket from path'); }
+      if (!bucket) { return fail('cloud_aws_s3_rm', 'recursive rm: could not parse bucket from path'); }
       if (confirm !== bucket) {
-        return fail('cloud:aws:s3:rm', `recursive rm requires confirmBucket to match "${bucket}"`);
+        return fail('cloud_aws_s3_rm', `recursive rm requires confirmBucket to match "${bucket}"`);
       }
     }
     const flags = awsFlags(input);
@@ -234,7 +234,7 @@ export const awsS3RmTool: Tool = {
     argv.push(...awsArgv(flags, { defaultJson: false }));
 
     const r = await runShell(argv, { timeoutMs: 15 * 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:s3:rm', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_s3_rm', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AwsS3RmData = {
       path, recursive,
@@ -269,7 +269,7 @@ interface AwsS3SyncData {
 }
 
 export const awsS3SyncTool: Tool = {
-  id: 'cloud:aws:s3:sync',
+  id: 'cloud_aws_s3_sync',
   description: 'Sync a directory with an S3 prefix. Gated; --dry-run supported for preview.',
   inputSchema: {
     type: 'object',
@@ -290,7 +290,7 @@ export const awsS3SyncTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:s3:sync',
+      title: 'cloud_aws_s3_sync',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `\`${str(input, 'source')}\` -> \`${str(input, 'destination')}\``,
@@ -307,7 +307,7 @@ export const awsS3SyncTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const src = str(input, 'source');
     const dst = str(input, 'destination');
-    if (!src || !dst) { return fail('cloud:aws:s3:sync', 'source and destination required'); }
+    if (!src || !dst) { return fail('cloud_aws_s3_sync', 'source and destination required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 's3', 'sync', src, dst];
     if (bool(input, 'dryRun')           === true) { argv.push('--dryrun'); }
@@ -319,7 +319,7 @@ export const awsS3SyncTool: Tool = {
     argv.push(...awsArgv(flags, { defaultJson: false }));
 
     const r = await runShell(argv, { timeoutMs: 60 * 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:s3:sync', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_s3_sync', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AwsS3SyncData = {
       source: src, destination: dst,

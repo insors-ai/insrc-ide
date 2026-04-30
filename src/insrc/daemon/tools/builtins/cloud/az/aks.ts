@@ -53,7 +53,7 @@ export const azAksListTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:az:aks:get-credentials
+// cloud_az_aks_get-credentials
 // ---------------------------------------------------------------------------
 
 interface AzAksCredsData {
@@ -65,7 +65,7 @@ interface AzAksCredsData {
 }
 
 export const azAksGetCredentialsTool: Tool = {
-  id: 'cloud:az:aks:get-credentials',
+  id: 'cloud_az_aks_get-credentials',
   description: 'Write a kubeconfig entry for an AKS cluster. Mutates the kubeconfig file.',
   inputSchema: {
     type: 'object',
@@ -84,7 +84,7 @@ export const azAksGetCredentialsTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = azFlags(input);
     return {
-      title: 'cloud:az:aks:get-credentials',
+      title: 'cloud_az_aks_get-credentials',
       content: [
         `Scope: **${azScope(flags)}**`,
         `Cluster: \`${str(input, 'cluster')}\``,
@@ -100,9 +100,9 @@ export const azAksGetCredentialsTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const cluster = str(input, 'cluster');
-    if (!cluster) { return fail('cloud:az:aks:get-credentials', 'cluster required'); }
+    if (!cluster) { return fail('cloud_az_aks_get-credentials', 'cluster required'); }
     const flags = azFlags(input);
-    if (!flags.resourceGroup) { return fail('cloud:az:aks:get-credentials', 'resourceGroup required'); }
+    if (!flags.resourceGroup) { return fail('cloud_az_aks_get-credentials', 'resourceGroup required'); }
     const kubeconfig = str(input, 'kubeconfig');
     const argv = ['az', 'aks', 'get-credentials', '--name', cluster, '--resource-group', flags.resourceGroup, '--output', 'json'];
     if (bool(input, 'admin')     === true) { argv.push('--admin'); }
@@ -111,7 +111,7 @@ export const azAksGetCredentialsTool: Tool = {
     argv.push(...azArgv(flags, { includeResourceGroup: false }));
 
     const r = await runShell(argv, { timeoutMs: 60_000 });
-    if (r.spawnError) { return fail('cloud:az:aks:get-credentials', `az CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_az_aks_get-credentials', `az CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const data: AzAksCredsData = { cluster, kubeconfigPath: kubeconfig, exitCode: r.code, stdout: r.stdout, stderr: r.stderr };
     return {

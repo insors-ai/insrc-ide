@@ -15,7 +15,7 @@ function fail(id: string, msg: string): ToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// cloud:aws:ssm:get-parameter
+// cloud_aws_ssm_get-parameter
 // ---------------------------------------------------------------------------
 
 interface AwsSsmGetData {
@@ -29,7 +29,7 @@ interface AwsSsmGetData {
 }
 
 export const awsSsmGetParameterTool: Tool = {
-  id: 'cloud:aws:ssm:get-parameter',
+  id: 'cloud_aws_ssm_get-parameter',
   description: 'Fetch a Parameter Store value. SecureString values stay redacted unless reveal:true.',
   inputSchema: {
     type: 'object',
@@ -47,7 +47,7 @@ export const awsSsmGetParameterTool: Tool = {
   buildApprovalGate(input: ToolInput): ToolApprovalGate {
     const flags = awsFlags(input);
     return {
-      title: 'cloud:aws:ssm:get-parameter',
+      title: 'cloud_aws_ssm_get-parameter',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Parameter: \`${str(input, 'name')}\``,
@@ -63,7 +63,7 @@ export const awsSsmGetParameterTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const name = str(input, 'name');
-    if (!name) { return fail('cloud:aws:ssm:get-parameter', 'name required'); }
+    if (!name) { return fail('cloud_aws_ssm_get-parameter', 'name required'); }
     const flags = awsFlags(input);
     const withDecryption = bool(input, 'withDecryption') === true;
     const argv = ['aws', 'ssm', 'get-parameter', '--name', name];
@@ -71,7 +71,7 @@ export const awsSsmGetParameterTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:ssm:get-parameter', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ssm_get-parameter', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     let value: string | undefined;
@@ -108,7 +108,7 @@ export const awsSsmGetParameterTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:aws:ssm:put-parameter
+// cloud_aws_ssm_put-parameter
 // ---------------------------------------------------------------------------
 
 interface AwsSsmPutData {
@@ -120,7 +120,7 @@ interface AwsSsmPutData {
 }
 
 export const awsSsmPutParameterTool: Tool = {
-  id: 'cloud:aws:ssm:put-parameter',
+  id: 'cloud_aws_ssm_put-parameter',
   description: 'Create or update a Parameter Store value.',
   inputSchema: {
     type: 'object',
@@ -144,7 +144,7 @@ export const awsSsmPutParameterTool: Tool = {
     const type = str(input, 'type') ?? '';
     const v = str(input, 'value');
     return {
-      title: 'cloud:aws:ssm:put-parameter',
+      title: 'cloud_aws_ssm_put-parameter',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Parameter: \`${str(input, 'name')}\` (${type})`,
@@ -164,7 +164,7 @@ export const awsSsmPutParameterTool: Tool = {
     const name = str(input, 'name');
     const value = str(input, 'value');
     const type = str(input, 'type');
-    if (!name || value === undefined || !type) { return fail('cloud:aws:ssm:put-parameter', 'name, value and type required'); }
+    if (!name || value === undefined || !type) { return fail('cloud_aws_ssm_put-parameter', 'name, value and type required'); }
     const flags = awsFlags(input);
     const overwrite = bool(input, 'overwrite') === true;
     const argv = ['aws', 'ssm', 'put-parameter', '--name', name, '--value', value, '--type', type];
@@ -178,7 +178,7 @@ export const awsSsmPutParameterTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 30_000 });
-    if (r.spawnError) { return fail('cloud:aws:ssm:put-parameter', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ssm_put-parameter', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsSsmPutData = { name, parameterType: type, overwrite, exitCode: r.code, parsed };

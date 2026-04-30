@@ -207,7 +207,7 @@ export const awsLambdaListTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:aws:lambda:update-code
+// cloud_aws_lambda_update-code
 // ---------------------------------------------------------------------------
 
 interface AwsLambdaUpdateCodeData {
@@ -219,7 +219,7 @@ interface AwsLambdaUpdateCodeData {
 }
 
 export const awsLambdaUpdateCodeTool: Tool = {
-  id: 'cloud:aws:lambda:update-code',
+  id: 'cloud_aws_lambda_update-code',
   description: 'Update Lambda function code from a local zip, S3 object, or container image URI.',
   inputSchema: {
     type: 'object',
@@ -249,7 +249,7 @@ export const awsLambdaUpdateCodeTool: Tool = {
           ? `s3://${str(input, 's3Bucket')}/${str(input, 's3Key')}`
           : '_no source supplied_';
     return {
-      title: 'cloud:aws:lambda:update-code',
+      title: 'cloud_aws_lambda_update-code',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Function: \`${str(input, 'functionName')}\``,
@@ -264,7 +264,7 @@ export const awsLambdaUpdateCodeTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const fn = str(input, 'functionName');
-    if (!fn) { return fail('cloud:aws:lambda:update-code', 'functionName required'); }
+    if (!fn) { return fail('cloud_aws_lambda_update-code', 'functionName required'); }
     const flags = awsFlags(input);
     const zipPath = str(input, 'zipPath');
     const imageUri = str(input, 'imageUri');
@@ -285,14 +285,14 @@ export const awsLambdaUpdateCodeTool: Tool = {
       const version = str(input, 's3ObjectVersion');
       if (version) { argv.push('--s3-object-version', version); }
     } else {
-      return fail('cloud:aws:lambda:update-code', 'must supply zipPath or imageUri or (s3Bucket + s3Key)');
+      return fail('cloud_aws_lambda_update-code', 'must supply zipPath or imageUri or (s3Bucket + s3Key)');
     }
     if (input['publish'] === true) { argv.push('--publish'); }
     if (input['dryRun']  === true) { argv.push('--dry-run'); }
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 10 * 60_000 });
-    if (r.spawnError) { return fail('cloud:aws:lambda:update-code', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_lambda_update-code', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsLambdaUpdateCodeData = { functionName: fn, source, exitCode: r.code, parsed, stdout: r.stdout };

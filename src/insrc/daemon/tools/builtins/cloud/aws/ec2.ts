@@ -20,7 +20,7 @@ function instanceIdsFromInput(input: ToolInput): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// cloud:aws:ec2:list  (describe-instances with optional filters)
+// cloud_aws_ec2_list  (describe-instances with optional filters)
 // ---------------------------------------------------------------------------
 
 interface AwsEc2ListData {
@@ -32,7 +32,7 @@ interface AwsEc2ListData {
 }
 
 export const awsEc2ListTool: Tool = {
-  id: 'cloud:aws:ec2:list',
+  id: 'cloud_aws_ec2_list',
   description: 'Describe EC2 instances. Filters and instance IDs supported.',
   inputSchema: {
     type: 'object',
@@ -64,7 +64,7 @@ export const awsEc2ListTool: Tool = {
     argv.push(...awsArgv(flags));
 
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:ec2:list', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ec2_list', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsEc2ListData = {
@@ -85,7 +85,7 @@ export const awsEc2ListTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:aws:ec2:start
+// cloud_aws_ec2_start
 // ---------------------------------------------------------------------------
 
 interface AwsEc2StateChangeData {
@@ -97,7 +97,7 @@ interface AwsEc2StateChangeData {
 }
 
 export const awsEc2StartTool: Tool = {
-  id: 'cloud:aws:ec2:start',
+  id: 'cloud_aws_ec2_start',
   description: 'Start stopped EC2 instances.',
   inputSchema: {
     type: 'object',
@@ -114,7 +114,7 @@ export const awsEc2StartTool: Tool = {
     const flags = awsFlags(input);
     const ids = instanceIdsFromInput(input);
     return {
-      title: 'cloud:aws:ec2:start',
+      title: 'cloud_aws_ec2_start',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Start instances: ${ids.map(id => '`' + id + '`').join(', ')}`,
@@ -128,11 +128,11 @@ export const awsEc2StartTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const ids = instanceIdsFromInput(input);
-    if (ids.length === 0) { return fail('cloud:aws:ec2:start', 'instanceIds required'); }
+    if (ids.length === 0) { return fail('cloud_aws_ec2_start', 'instanceIds required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'ec2', 'start-instances', '--instance-ids', ...ids, ...awsArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:ec2:start', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ec2_start', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsEc2StateChangeData = { instanceIds: ids, action: 'start', exitCode: r.code, stdout: r.stdout, parsed };
@@ -151,11 +151,11 @@ export const awsEc2StartTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:aws:ec2:stop
+// cloud_aws_ec2_stop
 // ---------------------------------------------------------------------------
 
 export const awsEc2StopTool: Tool = {
-  id: 'cloud:aws:ec2:stop',
+  id: 'cloud_aws_ec2_stop',
   description: 'Stop running EC2 instances. Optional --force for immediate stop.',
   inputSchema: {
     type: 'object',
@@ -173,7 +173,7 @@ export const awsEc2StopTool: Tool = {
     const flags = awsFlags(input);
     const ids = instanceIdsFromInput(input);
     return {
-      title: 'cloud:aws:ec2:stop',
+      title: 'cloud_aws_ec2_stop',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `Stop instances: ${ids.map(id => '`' + id + '`').join(', ')}`,
@@ -188,13 +188,13 @@ export const awsEc2StopTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const ids = instanceIdsFromInput(input);
-    if (ids.length === 0) { return fail('cloud:aws:ec2:stop', 'instanceIds required'); }
+    if (ids.length === 0) { return fail('cloud_aws_ec2_stop', 'instanceIds required'); }
     const flags = awsFlags(input);
     const argv = ['aws', 'ec2', 'stop-instances', '--instance-ids', ...ids];
     if (bool(input, 'force') === true) { argv.push('--force'); }
     argv.push(...awsArgv(flags));
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:ec2:stop', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ec2_stop', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsEc2StateChangeData = { instanceIds: ids, action: 'stop', exitCode: r.code, stdout: r.stdout, parsed };
@@ -213,11 +213,11 @@ export const awsEc2StopTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// cloud:aws:ec2:terminate
+// cloud_aws_ec2_terminate
 // ---------------------------------------------------------------------------
 
 export const awsEc2TerminateTool: Tool = {
-  id: 'cloud:aws:ec2:terminate',
+  id: 'cloud_aws_ec2_terminate',
   description: 'Terminate EC2 instances (irrecoverable). Always gated; requires confirmCount.',
   inputSchema: {
     type: 'object',
@@ -236,7 +236,7 @@ export const awsEc2TerminateTool: Tool = {
     const flags = awsFlags(input);
     const ids = instanceIdsFromInput(input);
     return {
-      title: 'cloud:aws:ec2:terminate',
+      title: 'cloud_aws_ec2_terminate',
       content: [
         `Scope: **${awsScope(flags)}**`,
         `**TERMINATE** (irrecoverable): ${ids.map(id => '`' + id + '`').join(', ')}`,
@@ -250,15 +250,15 @@ export const awsEc2TerminateTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const ids = instanceIdsFromInput(input);
-    if (ids.length === 0) { return fail('cloud:aws:ec2:terminate', 'instanceIds required'); }
+    if (ids.length === 0) { return fail('cloud_aws_ec2_terminate', 'instanceIds required'); }
     const confirm = input['confirmCount'];
     if (typeof confirm !== 'number' || confirm !== ids.length) {
-      return fail('cloud:aws:ec2:terminate', `confirmCount must equal instanceIds.length (${ids.length})`);
+      return fail('cloud_aws_ec2_terminate', `confirmCount must equal instanceIds.length (${ids.length})`);
     }
     const flags = awsFlags(input);
     const argv = ['aws', 'ec2', 'terminate-instances', '--instance-ids', ...ids, ...awsArgv(flags)];
     const r = await runShell(argv, { timeoutMs: 120_000 });
-    if (r.spawnError) { return fail('cloud:aws:ec2:terminate', `aws CLI not found: ${r.stderr.trim()}`); }
+    if (r.spawnError) { return fail('cloud_aws_ec2_terminate', `aws CLI not found: ${r.stderr.trim()}`); }
     const ok = r.code === 0;
     const parsed = ok ? tryParseJson(r.stdout) : null;
     const data: AwsEc2StateChangeData = { instanceIds: ids, action: 'terminate', exitCode: r.code, stdout: r.stdout, parsed };
