@@ -882,13 +882,8 @@ async function tryFamilyDirectSlash(
     return true;
   }
 
-  // Phase 0 of plans/analyzers/data-analyzer.md. The slash entry +
-  // family registration land before the orchestrator (Phase 1) ships
-  // so the typo guard and Model Providers pane bindings work for
-  // users running `/data-analyze` while Phase 1 is in flight. The
-  // stub emits a clear "not yet implemented" message instead of
-  // mis-routing; once Phase 1 lands, this branch swaps to
-  // runDataAnalyzerSlash + the real orchestrator.
+  // Phase 1 of plans/analyzers/data-analyzer.md. Routes /data-analyze
+  // through the orchestrator + analyzer loop + scope-tier classifier.
   const dataAnalyzeMatch = trimmed.match(/^\/data-analyze(?:\s+([\s\S]+))?$/);
   if (dataAnalyzeMatch) {
     const userPrompt = (dataAnalyzeMatch[1] ?? '').trim();
@@ -901,7 +896,7 @@ async function tryFamilyDirectSlash(
       send({ id: requestId, stream: 'done', data: { summary: 'usage' } });
       return true;
     }
-    runDataAnalyzerStub(userPrompt, requestId, send);
+    await runDataAnalyzerSlash(active, channel, userPrompt, message, requestId, send);
     return true;
   }
 
@@ -957,10 +952,9 @@ async function tryFamilyDirectSlash(
       return true;
     }
     if (familyMention.family === 'data-analyzer') {
-      // Phase 0: family registered, orchestrator stubbed. Routes to
-      // the same not-yet-implemented stub as `/data-analyze`. When
-      // Phase 1 lands, this branch routes to runDataAnalyzerSlash.
-      runDataAnalyzerStub(familyMention.prompt, requestId, send);
+      // Phase 1: routes the @-mention through the same orchestrator
+      // path as the /data-analyze slash command.
+      await runDataAnalyzerSlash(active, channel, familyMention.prompt, message, requestId, send);
       return true;
     }
     // deployment-analyzer: not yet registered. Emit a clear "not
@@ -985,36 +979,115 @@ async function tryFamilyDirectSlash(
 }
 
 /**
- * Phase 0 stub for the Data Analyzer (plans/analyzers/data-analyzer.md).
- * The slash entry + family registration land first so `/data-analyze`
- * appears in the autocomplete and the Model Providers pane shows the
- * step bindings; the orchestrator + analyzer loop arrive in Phase 1.
- *
- * Until Phase 1 ships, surfaces a clear "not yet implemented" message
- * to the user with a pointer at the working sibling. Synchronous --
- * no daemon-side work to do yet.
+ * Phase 1 entry point for the Data Analyzer
+ * (plans/analyzers/data-analyzer.md). Mirrors runCodeAnalyzerSlash:
+ * stamps the session's agent column for resume RPC discoverability,
+ * runs the scope-tier classifier, constructs the orchestrator, and
+ * dispatches via runControlledPipeline.
  */
-function runDataAnalyzerStub(
+async function runDataAnalyzerSlash(
+  active: ReturnType<ChatSessionPool['get']> & object,
+  channel: DaemonChannel,
   userPrompt: string,
+  originalMessage: string,
   requestId: number,
   send: (msg: IpcStreamMessage) => void,
-): void {
-  log.info({ promptHead: userPrompt.slice(0, 80) }, '/data-analyze stub hit -- Phase 1 not yet shipped');
+): Promise<void> {
+  // Stamp the session's agent column so the resume RPC
+  // (chat.resumeDataAnalysis) can locate data-analyzer sessions later.
+  // Best-effort -- a failed write means the run still works, just
+  // isn't resumable through the Runs sidebar.
+  try {
+    const { setSessionAgent } = await import('../db/conversations.js');
+    const { getDb } = await import('../db/client.js');
+    await setSessionAgent(await getDb(), active.session.id, 'data-analyzer');
+  } catch (err) {
+    log.warn({ err, sessionId: active.session.id }, '[data-analyze] setSessionAgent failed (continuing)');
+  }
+
+  const session = active.session;
+  if (!session) {
+    send({ id: requestId, stream: 'delta', data: { text: '[error] session not initialised' } });
+    send({ id: requestId, stream: 'done', data: {} });
+    return;
+  }
+
   send({
     id: requestId,
-    stream: 'delta',
-    data: {
-      text:
-        `**Data Analyzer:** the orchestrator hasn't shipped yet -- only the slash ` +
-        `entry, family registration, and Model Providers bindings are in place ` +
-        `(Phase 0 of plans/analyzers/data-analyzer.md). Phase 1 lands the plan / ` +
-        `analyzer / review / synthesise pipeline.\n\n` +
-        `For now: \`/code-analyze\` for codebase questions, or browse your ` +
-        `registered DB connections directly via the Data Sources pane.`,
-      format: 'markdown',
-    },
+    stream: 'progress',
+    data: { message: 'Intent: data-analyzer (slash command)' },
   });
-  send({ id: requestId, stream: 'done', data: { summary: 'data-analyzer stub' } });
+
+  const { DataAnalyzerOrchestratorController } = await import(
+    './controllers/data-analyzer-orchestrator.js'
+  );
+  const { runControlledPipeline } = await import('./task.js');
+
+  const controller = new DataAnalyzerOrchestratorController();
+  const deps: TaskOrchestratorDeps = {
+    session,
+    channel,
+    send,
+    requestId,
+    ...(active.abortController ? { abortController: active.abortController } : {}),
+  };
+
+  try {
+    // Scope-tier classification (slice 1.10.b). The slash command
+    // already knows intent='data-analysis', so running the full
+    // intent classifier would just waste tokens picking a class we
+    // already have. The scope-only classifier prompts for the size
+    // tier alone. The active repo's connection list (just the count)
+    // goes in context so the sizer can judge "single column" vs
+    // "multi-connection audit".
+    let scope: import('../shared/classify.js').ScopeSize = 'M';
+    try {
+      const sized = await classifyScope(
+        {
+          role: 'scope sizer for the Data Analyzer',
+          text: userPrompt,
+          context: session.repoPath ? `active repo: ${session.repoPath}` : '',
+        },
+        resolveClassifierProvider(session, 'scope'),
+      );
+      scope = sized.scope;
+      log.info({ scope, fallback: sized.fallback, reasoning: sized.reasoning }, '[data-analyze] scope classifier emitted tier');
+      send({
+        id: requestId,
+        stream: 'progress',
+        data: { message: `Data Analyzer: tier ${scope}${sized.fallback ? ' (fallback)' : ''}` },
+      });
+    } catch (err) {
+      log.warn({ err }, '[data-analyze] scope classifier failed; defaulting to M');
+    }
+
+    const result = await runControlledPipeline(
+      controller,
+      {
+        message: userPrompt,
+        codeContext: '',
+        session,
+        classification: {
+          intent: 'data-analysis',
+          confidence: 1.0,
+          scope,
+        },
+      },
+      deps,
+    );
+    send({ id: requestId, stream: 'done', data: { summary: 'data-analyzer' } });
+    await persistTurn(session, originalMessage, result.finalOutput, result.finalFormat);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error({ err: msg }, '/data-analyze failed');
+    send({
+      id: requestId,
+      stream: 'delta',
+      data: { text: `[error] /data-analyze failed: ${msg}` },
+    });
+    send({ id: requestId, stream: 'done', data: {} });
+    await persistTurn(session, originalMessage, `[error] ${msg}`);
+  }
 }
 
 async function runCodeAnalyzerSlash(
