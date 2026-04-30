@@ -35,14 +35,11 @@ const LEGACY_LLM_ALIASES: Readonly<Record<string, readonly string[]>> = {
   'git_blame':        ['GitBlame'],
   'web_search':       ['WebSearch'],
   'web_fetch':        ['WebFetch'],
-  'graph_entity':     ['graph_entity'],
-  'graph_search':     ['graph_search'],
-  'graph_callers':    ['graph_callers'],
-  'graph_callees':    ['graph_callees'],
-  'graph_query':      ['graph_query'],
-  'plan_get':         ['plan_get'],
-  'plan:step-update': ['plan_step_update'],
-  'plan:next-step':   ['plan_next_step'],
+  // The plan_step-update / plan_next-step tools carry hyphens in their
+  // canonical ids (Anthropic's regex permits them); the LLM was trained
+  // against underscore-only forms, so keep the underscore-only aliases.
+  'plan_step-update': ['plan_step_update'],
+  'plan_next-step':   ['plan_next_step'],
 };
 
 export function registerLlmAliases(): void {

@@ -148,7 +148,7 @@ export const graphSearchTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// graph:callers / graph:callees
+// graph_callers / graph_callees
 // ---------------------------------------------------------------------------
 
 interface GraphNeighborsData {
@@ -158,7 +158,7 @@ interface GraphNeighborsData {
 }
 
 function buildNeighborsTool(direction: 'callers' | 'callees'): Tool {
-  const id = `graph:${direction}`;
+  const id = `graph_${direction}`;
   const label = direction === 'callers' ? 'Entities that call' : 'Entities called by';
   const fn = direction === 'callers' ? findCallers : findCallees;
   return {

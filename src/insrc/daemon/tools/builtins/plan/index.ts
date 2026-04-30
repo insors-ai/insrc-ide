@@ -77,7 +77,7 @@ export const planGetTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// plan:step-update
+// plan_step-update
 // ---------------------------------------------------------------------------
 
 interface PlanStepUpdateData {
@@ -89,7 +89,7 @@ interface PlanStepUpdateData {
 }
 
 export const planStepUpdateTool: Tool = {
-  id: 'plan:step-update',
+  id: 'plan_step-update',
   description: 'Transition a plan step to a new status (pending / in_progress / done / failed / skipped).',
   inputSchema: {
     type: 'object',
@@ -106,8 +106,8 @@ export const planStepUpdateTool: Tool = {
   async execute(input: ToolInput): Promise<ToolResult> {
     const stepId = str(input, 'stepId');
     const status = input['status'];
-    if (!stepId) { return fail('plan:step-update', 'stepId required'); }
-    if (!isStatus(status)) { return fail('plan:step-update', 'status must be pending / in_progress / done / failed / skipped'); }
+    if (!stepId) { return fail('plan_step-update', 'stepId required'); }
+    if (!isStatus(status)) { return fail('plan_step-update', 'status must be pending / in_progress / done / failed / skipped'); }
     const note = str(input, 'note');
     const db = await getDb();
     const result = await updateStepState(db, stepId, status, note);
@@ -129,7 +129,7 @@ export const planStepUpdateTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
-// plan:next-step
+// plan_next-step
 // ---------------------------------------------------------------------------
 
 interface PlanNextStepData {
@@ -138,7 +138,7 @@ interface PlanNextStepData {
 }
 
 export const planNextStepTool: Tool = {
-  id: 'plan:next-step',
+  id: 'plan_next-step',
   description: 'Return the next unblocked step for a plan (first pending step with all dependencies done).',
   inputSchema: {
     type: 'object',
@@ -152,7 +152,7 @@ export const planNextStepTool: Tool = {
 
   async execute(input: ToolInput): Promise<ToolResult> {
     const planId = str(input, 'planId');
-    if (!planId) { return fail('plan:next-step', 'planId required'); }
+    if (!planId) { return fail('plan_next-step', 'planId required'); }
     const db = await getDb();
     const step = await getNextStep(db, planId);
     const data: PlanNextStepData = { planId, step };
