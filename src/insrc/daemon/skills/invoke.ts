@@ -205,6 +205,12 @@ export async function runSkill<I = unknown, O = unknown>(
     const msg = err instanceof Error ? err.message : String(err);
     emit({ kind: 'skill-error', skillId: id, error: msg });
     log.warn({ id, err: msg }, 'runSkill: execute threw');
+    const errNotes: string[] = [`execute-threw: ${msg}`];
+    // Phase 5.2: even when execute() threw, surface over-budget so a
+    // skill that hung for minutes before throwing is visible in the
+    // trace -- the no-walltime-caps rule applies to enforcement, not
+    // to observability.
+    checkSoftBudget(skill, startedAt, errNotes, emit);
     emit({
       kind: 'skill-end',
       skillId: id,
@@ -214,7 +220,7 @@ export async function runSkill<I = unknown, O = unknown>(
     return {
       value: nullValueFor<O>(),
       confidence: 'low',
-      notes: [`execute-threw: ${msg}`],
+      notes: errNotes,
       toolCalls: toolCallTrace,
       ...(subSkillTrace.length > 0 ? { subSkillCalls: subSkillTrace } : {}),
     };
@@ -256,6 +262,12 @@ export async function runSkill<I = unknown, O = unknown>(
   if (outputClampToLow) {
     calibrated = clampDown(calibrated, 'low');
   }
+
+  // Phase 5.2: soft-budget telemetry. Telemetry-only -- the skill has
+  // already completed; we never abort. Emits skill-over-budget event
+  // and pushes a caller-visible note when elapsed exceeds the
+  // declared softBudgetMs.
+  checkSoftBudget(skill, startedAt, notes, emit);
 
   emit({
     kind: 'skill-end',
@@ -334,6 +346,43 @@ function computeNextDepth(
 
 function clampDown(actual: SkillConfidence, ceiling: SkillConfidence): SkillConfidence {
   return CONFIDENCE_RANK[actual] <= CONFIDENCE_RANK[ceiling] ? actual : ceiling;
+}
+
+/**
+ * Phase 5.2: soft-budget enforcement.
+ *
+ * Skills declare an optional `softBudgetMs` -- a wall-clock guideline,
+ * NOT a hard timeout (the no-walltime-caps lesson from the code-
+ * analyzer rollout: skills should not abort themselves on time). When
+ * elapsed exceeds the budget we:
+ *
+ *   1. emit a `skill-over-budget` telemetry event so downstream
+ *      consumers (the meta.feasibility-check rollup, the workbench
+ *      skill-trace panel) can flag persistently-slow skills, and
+ *   2. push a human-readable note to the SkillResult so the calling
+ *      agent / user can see the overshoot inline.
+ *
+ * Skills without a softBudgetMs are skipped; budgets are opt-in.
+ */
+function checkSoftBudget(
+  skill: Skill,
+  startedAt: number,
+  notes: string[],
+  emit: (e: SkillEvent) => void,
+): void {
+  if (skill.softBudgetMs === undefined) { return; }
+  const durationMs = Date.now() - startedAt;
+  if (durationMs <= skill.softBudgetMs) { return; }
+  const overshootPct = Math.round(((durationMs / skill.softBudgetMs) - 1) * 100);
+  emit({
+    kind: 'skill-over-budget',
+    skillId: skill.id,
+    durationMs,
+    budgetMs: skill.softBudgetMs,
+  });
+  notes.push(
+    `over soft budget: ${durationMs}ms vs ${skill.softBudgetMs}ms (+${overshootPct}%)`,
+  );
 }
 
 function computeErrorRatio(calls: readonly SkillToolCallSummary[]): number {

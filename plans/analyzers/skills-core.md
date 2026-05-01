@@ -60,10 +60,10 @@ data-analyzer's runner is built.
 
 ## Status
 
-Substrate landed in commit `0f0c80917df`; RPC surface in `61222a86c2b`.
-Remaining work: audit ring buffer (7.2), test harness (8.1 / 8.2),
-migration tooling (6.2). Soft-budget enforcement (5.2) and per-session
-telemetry (7.1) are partial; `skill.audit` ships with 7.2.
+Substrate landed in commit `0f0c80917df`; RPC surface in `61222a86c2b`;
+soft-budget telemetry shipped next. Remaining work: audit ring buffer
+(7.2), test harness (8.1 / 8.2), migration tooling (6.2). Per-session
+telemetry (7.1) is partial; `skill.audit` ships with 7.2.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -81,7 +81,7 @@ telemetry (7.1) are partial; `skill.audit` ships with 7.2.
 | 4.2 | `assertFeasible(id, ctx)` | done | walks preconditions; returns Feasibility |
 | 4.3 | Calibrated confidence helpers | done | clamps on tool-error ratio, sub-skill 'low', invalid output |
 | 5.1 | Provider affinity + step resolver | done | `local` / `cloud` / `auto` per skill; resolved via `SkillRunnerDeps.resolveProvider` |
-| 5.2 | Skill-level token / time budgets | partial | `softBudgetMs` field declared on Skill; runner-side enforcement / telemetry not yet wired |
+| 5.2 | Skill-level token / time budgets | done | `softBudgetMs` checked after execute() (success + execute-threw paths); over-budget skills emit `skill-over-budget` telemetry + caller-visible note. Telemetry-only -- no hard timeout per the no-walltime-caps lesson |
 | 6.1 | Versioning policy | done | hard-coded version: 1; lookup-by-version supported |
 | 6.2 | Deprecation + migration helper | pending | optional v1; tooling lands when v2 of any skill ships |
 | 7.1 | Telemetry: per-skill duration / success / confidence | partial | structured `SkillEvent`s emitted to `module: 'skills'` log lines; no per-session audit ring buffer yet |

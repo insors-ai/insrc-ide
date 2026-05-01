@@ -289,6 +289,18 @@ export type SkillEvent =
       readonly confidence: SkillConfidence;
       readonly durationMs: number;
     }
+  /**
+   * Telemetry-only over-budget signal -- the skill ran past its
+   * declared `softBudgetMs`. NOT a timeout: emit + note, never abort.
+   * Plans/analyzers/skills-core.md "Lessons baked in" §3 (no wall-
+   * clock caps inside skills).
+   */
+  | {
+      readonly kind: 'skill-over-budget';
+      readonly skillId: string;
+      readonly durationMs: number;
+      readonly budgetMs: number;
+    }
   | {
       readonly kind: 'skill-error';
       readonly skillId: string;
