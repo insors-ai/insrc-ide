@@ -1,0 +1,656 @@
+# Plan: Data Analyzer Skills
+
+Decomposes the data-analyzer's monolithic per-task analyzer runner into a
+graph of fine-grained, registered skills. Builds on the substrate in
+[plans/analyzers/skills-core.md](./skills-core.md). Bakes in the lessons from
+the 2026-04-30 hallucinated-class incident (tracked in commit history; the
+post-mortem fixes shipped 2026-05-01 added a tool-error gate, runner-side
+confidence downgrade, reviewer hallucination guardrails, and the missing
+`code`/`data` registry-category enables).
+
+## Why decompose?
+
+Today the data-analyzer's per-task work is one bounded LLM tool loop with one
+prompt that switches behaviour by `task.kind` (`inspect-schema`, `sample-data`,
+`sample-shape`, `lineage`, `schema-drift`, `er`, `free-form`). The single-
+runner approach has two structural failure modes:
+
+1. **Behaviour leaks across kinds.** A task labelled `inspect-schema` against
+   a class-shaped question (`"Describe the INPurchaseOrder class"`) ends up
+   inside the same tool loop as a real schema-drift task; the model picks
+   from the same wide tool list with the same per-kind playbook nudges, and
+   when its tool calls fail it has no per-task contract to fall back on.
+2. **Quality / statistical analysis is impossible to land.** Every
+   distributional, profiling, or PII-detection capability would have to be
+   bolted onto the same runner, growing its prompt + tool list past the
+   point where the local model's tool-call accuracy degrades.
+
+Skills give every capability a typed contract (input / output / preconditions
+/ confidence calibration) and let the orchestrator compose them. The model
+sees a small closed set of skill ids per question; the runner enforces
+preconditions before any LLM call; the registry calibrates confidence after
+the fact.
+
+## Related plans
+
+- [plans/analyzers/skills-core.md](./skills-core.md) -- substrate. Required
+  prerequisite. Every phase below assumes the registry, `runSkill`,
+  `invoke_skill` meta-tool, and feasibility infrastructure are landed.
+- [plans/analyzers/data-analyzer.md](./data-analyzer.md) -- existing
+  data-analyzer. Orchestrator stays; per-task runner becomes a skill
+  composer. The `db_*` tool surface stays as the primitive layer skills
+  call into.
+- [plans/analyzers/code-analyzer.md](./code-analyzer.md) -- exposes its
+  first batch of skills (`code.class.extract-fields`, `code.lineage.callers`)
+  via the cross-owner skill mechanism. Without these, data-analyzer's
+  code-binding family hard-fails the `required-tools` precondition.
+- [plans/data-driver.md](../data-driver.md) -- shipped; the substrate the
+  source-introspection / sampling / aggregation tools call into. This plan
+  adds a new `db_aggregate_*` tool family on top of the driver.
+- [plans/access-gate.md](../access-gate.md) -- shipped; skill calls inherit
+  the universal access gate via the tools they call.
+- [plans/content-generator.md](../content-generator.md) -- shipped; the
+  multi-pass synthesise infrastructure that synthesis-family skills compose.
+
+## Status
+
+All slices pending. Skill core (skills-core.md) must land first.
+
+| Phase | Slice | State | Notes |
+|---|---|---|---|
+| 0.1 | `db_sql_aggregate` tool | pending | count/sum/avg/stddev/percentile via SQL |
+| 0.2 | `db_sql_histogram` tool | pending | bucketed counts |
+| 0.3 | `db_sql_distinct` tool | pending | distinct-count + top-N |
+| 0.4 | `db_file_aggregate` tool | pending | DuckDB over csv/parquet/jsonl in-process |
+| 0.5 | `db_correlation_matrix` tool | pending | pairwise correlation; SQL or DuckDB |
+| 0.6 | `db_outliers` tool | pending | IQR / Z-score per column |
+| 0.7 | sampling-confidence library | pending | sample-size sufficiency + CI helpers |
+| 1.1 | source-introspection: rdbms | pending | describe-table, list-tables, list-indexes |
+| 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
+| 1.3 | source-introspection: file | pending | one variant per kind (csv, parquet, jsonl, ...) |
+| 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
+| 2.1 | source-sampling: rdbms | pending | sample-rows, sample-distinct |
+| 2.2 | source-sampling: kv | pending | scan-keys, get-value, sample-shape |
+| 2.3 | source-sampling: file | pending | sample-rows, sample-shape |
+| 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |
+| 3.1 | code-binding: class.extract-fields | pending | cross-owner into code-analyzer |
+| 3.2 | code-binding: class.locate-references | pending | |
+| 3.3 | code-binding: orm.resolve-model | pending | Prisma / TypeORM / SQLAlchemy / Hibernate |
+| 3.4 | code-binding: lineage.read-write-callsites | partial (one wrapper from skills-core 9) | atomic skill replacing data_lineage tool |
+| 3.5 | code-binding: migration.extract-history | pending | |
+| 4.1 | comparison-diff: drift.prisma-vs-live | pending | composite over rdbms.describe-table |
+| 4.2 | comparison-diff: drift.typeorm-vs-live | pending | |
+| 4.3 | comparison-diff: drift.sqlalchemy-vs-live | pending | |
+| 4.4 | comparison-diff: mapping.json-vs-class | pending | composite (class.extract-fields + file.sample-shape) |
+| 4.5 | comparison-diff: mapping.csv-vs-dto | pending | |
+| 4.6 | comparison-diff: cardinality.expected-vs-live | pending | |
+| 4.7 | comparison-diff: range.expected-vs-live | pending | |
+| 5a.1 | quality-profile: profile.numeric | pending | uses db_sql_aggregate |
+| 5a.2 | quality-profile: profile.categorical | pending | distinct + top-N + length stats |
+| 5a.3 | quality-profile: profile.temporal | pending | range, gap detection, period inference |
+| 5a.4 | quality-profile: profile.text | pending | length stats, encoding, regex pattern inference |
+| 5a.5 | quality-profile: profile.boolean | pending | |
+| 5a.6 | quality-profile: profile.auto | pending | composite -- picks profiler from declared type |
+| 5b.1 | distribution: distribution.histogram | pending | |
+| 5b.2 | distribution: distribution.outliers-iqr | pending | |
+| 5b.3 | distribution: distribution.outliers-zscore | pending | |
+| 5b.4 | distribution: distribution.outliers-mad | pending | |
+| 5b.5 | distribution: distribution.normality-test | pending | |
+| 5b.6 | distribution: distribution.heavy-tail-check | pending | |
+| 5b.7 | distribution: distribution.modes | pending | |
+| 5c.1 | dependency: correlation.numeric-pairwise | pending | Pearson + Spearman |
+| 5c.2 | dependency: correlation.categorical-pairwise | pending | Cramér's V |
+| 5c.3 | dependency: dependency.functional | pending | does A determine B? |
+| 5c.4 | dependency: dependency.co-null-pattern | pending | |
+| 5c.5 | dependency: cardinality.join-key | pending | 1:1 / 1:N / N:M |
+| 5d.1 | quality scorecard: quality.completeness | pending | null-rate per column + table |
+| 5d.2 | quality scorecard: quality.uniqueness | pending | distinct/total per column; PK candidates |
+| 5d.3 | quality scorecard: quality.validity | pending | matches declared type / domain / regex |
+| 5d.4 | quality scorecard: quality.conformity | pending | date / currency / country / postal formats |
+| 5d.5 | quality scorecard: quality.consistency | pending | cross-column agreements |
+| 5d.6 | quality scorecard: quality.scorecard | pending | composite rollup of 5d.1-5d.5 |
+| 5e.1 | sensitivity: pii.detect-patterns | pending | email / ssn / phone / address / api-key / jwt / IBAN |
+| 5e.2 | sensitivity: pii.column-classifier | pending | regex + values + column-name heuristics |
+| 5e.3 | sensitivity: sensitivity.policy-check | pending | vs connection's pii config |
+| 5f.1 | drift over windows: drift.distribution | pending | KL / JS divergence between sample windows |
+| 5f.2 | drift over windows: drift.volume | pending | row-count outlier vs cadence |
+| 5f.3 | drift over windows: anomaly.change-point | pending | |
+| 5g.1 | timeseries: timeseries.trend | pending | regression slope |
+| 5g.2 | timeseries: timeseries.seasonality | pending | autocorrelation peaks |
+| 5g.3 | timeseries: timeseries.stationarity | pending | ADF test |
+| 5g.4 | timeseries: timeseries.gap-analysis | pending | |
+| 6.1 | synthesis: synth.target-description | pending | |
+| 6.2 | synthesis: synth.field-table | pending | |
+| 6.3 | synthesis: synth.drift-report | pending | |
+| 6.4 | synthesis: synth.er-diagram | pending | mermaid |
+| 6.5 | synthesis: synth.sample-table | pending | |
+| 6.6 | synthesis: synth.lineage-fold | pending | |
+| 6.7 | synthesis: synth.profile-card | pending | univariate profile card per column |
+| 6.8 | synthesis: synth.scorecard | pending | quality scorecard rendering |
+| 6.9 | synthesis: synth.histogram-block | pending | mermaid histogram |
+| 7.1 | meta: meta.classify-question | pending | which family answers this? |
+| 7.2 | meta: meta.select-scope | pending | pick connections / tables / files |
+| 7.3 | meta: meta.feasibility-check | pending | thin wrapper around assertFeasible |
+| 7.4 | meta: meta.calibrate-confidence | pending | findings + tool-error trace -> final confidence |
+| 8.1 | planner rewrite | pending | emits skill invocations, not DataAnalysisTask kinds |
+| 8.2 | per-task runner rewrite | pending | composes skills via `invoke_skill` meta-tool |
+| 8.3 | reviewer integration | pending | reviewer sees per-skill confidence, not just per-task |
+| 9.1 | backward-compat shim | pending | legacy DataAnalysisTask kinds map onto skill invocations |
+| 9.2 | per-skill caching layer | pending | extends existing per-task cache |
+| 10.1 | telemetry + skill-trace pane | pending | workbench inspector |
+| 10.2 | smoke fixtures per skill | pending | CI gate |
+
+## Goals (short)
+
+1. **Every claim in the report grounds in a typed skill output.** The
+   answer-text and findings are stitched from `SkillResult.value`s; a finding
+   that doesn't trace back to a skill is rejected by the synthesise pass.
+2. **Statistical analysis is first-class.** Family 5 (quality / distribution
+   / dependency) ships with driver-side aggregation (Phase 0) so the local
+   LLM never invents numerical answers from row samples.
+3. **Cross-analyzer reuse.** The test-agent, designer, pair (debug mode), and
+   code-analyzer can each call data-analyzer skills via `runSkill` without
+   touching the data-analyzer's runner internals.
+4. **Backward-compatible cutover.** The legacy `data:*` cross-agent tool
+   surface stays callable; internally it dispatches to the registered
+   skills. A workspace that names `data_lineage` in a custom prompt keeps
+   working.
+5. **Bake in 2026-04-30 hallucinated-class lessons.** `class.extract-fields`
+   declares `required-tools: ['code_locate', 'code_describe']`; its absence
+   fails the precondition and clamps confidence to `low` instead of letting
+   the model fabricate. `mapping.json-vs-class` is a composite that calls
+   both `class.extract-fields` AND `file.sample-shape`, so a missing class
+   side cannot be silently papered over with the JSON side.
+
+## Non-goals (in this plan)
+
+- **No replacement of the data-analyzer orchestrator.** The pipeline stages
+  (`planning -> reviewing -> synthesising`) stay. Only the per-task runner's
+  internals change.
+- **No new data-driver families.** Skills consume the existing 29 driver
+  kinds. Adding new drivers is in [plans/data-driver.md](../data-driver.md)'s
+  scope.
+- **No SQL-write capability.** Aggregation tools are read-only. The driver-
+  side enforcement from data-driver stays the source of truth.
+- **No real-time / continuous quality monitoring.** Skills run inside a
+  `/data-analyze` invocation. Periodic background quality-scoring is a future
+  plan.
+- **No external statistical engine.** `db_sql_aggregate` uses native SQL
+  aggregations; `db_file_aggregate` uses DuckDB. We do not embed numpy /
+  scipy / pandas as a subprocess. Anything those would do beyond what
+  DuckDB offers is out of scope until a concrete user need surfaces.
+- **No user-overrideable skill prompts in v1.** The
+  `~/.insrc/data-analyzer/<kind>.md` overrides shipped in
+  [data-analyzer.md](./data-analyzer.md) Phase 1.3 stay file-by-file at
+  the per-kind level. Per-skill prompt overrides are a follow-up.
+
+## Phase 0 -- aggregation tool substrate
+
+This phase is **infrastructure only** -- no skills land here. It exists
+because Family 5 will hallucinate numbers if asked to compute them in the
+LLM; the only safe path is to push aggregation into the driver and let
+skills consume structured numerical results.
+
+### 0.1 `db_sql_aggregate`
+
+Tool id: `db_sql_aggregate`. Inputs: `connectionId`, `target`, `aggregations`
+(an array of `{column, function, args?}` entries). Functions:
+
+```
+count | count_non_null | distinct_count
+sum | avg | stddev | variance | min | max
+percentile (args.p)
+```
+
+Output: a flat numeric record keyed on `<column>__<function>`. One SQL
+statement, server-side aggregation. Per-driver dialect handled by the
+existing driver dispatch. Row cap doesn't apply (this is aggregate, not
+sampled).
+
+### 0.2 `db_sql_histogram`
+
+Inputs: `connectionId`, `target`, `column`, `buckets` (default 20),
+`mode` (`equal-width` | `equal-frequency`). Output: an array of
+`{lower, upper, count}`. Per-driver via `width_bucket` (Postgres,
+DuckDB) or `NTILE` for equal-frequency variants on dialects without
+`width_bucket`. Documented per-dialect coverage matrix in the
+implementation note.
+
+### 0.3 `db_sql_distinct`
+
+Inputs: `connectionId`, `target`, `column`, `topN` (default 20). Output:
+`{distinctCount, topValues: Array<{value, count}>}`. The top-N is
+ordered by frequency descending; ties broken by lexicographic order to
+keep results deterministic across re-runs (cache-friendly).
+
+### 0.4 `db_file_aggregate`
+
+Same surface as 0.1, executed via embedded DuckDB over the file's
+content. Supports csv, tsv, parquet, jsonl, ndjson, json (single-doc
+falls back to sampling -- the file is read fully into memory and
+aggregated in process). Cap: 1 GB total file size; above that the tool
+returns `confidence: low` with a "file too large for in-process
+aggregation" note. (DuckDB streams parquet so this cap is mostly an
+out-of-memory guard for csv / json.)
+
+### 0.5 `db_correlation_matrix`
+
+Inputs: `connectionId`, `target`, `columns` (≤ 10), `method`
+(`pearson` | `spearman`). Output: a symmetric matrix of pairwise
+coefficients. SQL implementation uses driver-native correlation
+functions where available; falls back to DuckDB-over-sample for
+drivers without (Cassandra, Mongo).
+
+### 0.6 `db_outliers`
+
+Inputs: `connectionId`, `target`, `column`, `method`
+(`iqr` | `zscore`). Output: `{count, examples: Array<{rowKey?, value}>}`
+(examples capped at 20). For drivers without window functions, the
+tool returns `confidence: low` and a note about the missing
+implementation -- the skill calling it is responsible for falling back
+gracefully.
+
+### 0.7 Sampling-confidence library
+
+A shared helper module (`daemon/db/sampling-confidence.ts`) exposing:
+
+```ts
+export function sampleSizeFor(
+  estimator: 'mean' | 'percentile-p' | 'normality' | 'correlation',
+  populationN: number | null,
+  desiredCI: number,
+): number;
+
+export function confidenceFor(
+  actualN: number,
+  estimator: ...,
+  populationN: number | null,
+): 'high' | 'medium' | 'low';
+```
+
+Skills in Family 5 use this to translate "I have 50 sampled values" + "I'm
+running a Shapiro-Wilk normality test" into a confidence value the registry
+can clamp on. **No skill implements its own sample-size threshold logic;
+they all consult this library.**
+
+## Phase 1 -- source-introspection skills (atomic)
+
+Each skill is a thin typed wrapper over one introspection tool, plus
+preconditions for the connection family. Example:
+
+```ts
+const rdbmsDescribeTable: Skill<...> = {
+  id: 'data.source.rdbms.describe-table',
+  family: 'source-introspection',
+  owner: 'data-analyzer',
+  version: 1,
+  inputs: { /* { connectionId, target } */ },
+  outputs: { /* SchemaDescription */ },
+  toolDeps: ['db_sql_describe'],
+  providerAffinity: 'auto',
+  preconditions: [
+    { kind: 'required-tools', tools: ['db_sql_describe'], reason: 'introspection' },
+    { kind: 'connection-family', families: ['postgres', 'mysql', 'sqlite', 'mssql', ...],
+      reason: 'SQL describe path' },
+  ],
+  execute: async (input, deps) => {
+    const result = await deps.runTool({ name: 'db_sql_describe', input });
+    if (result.isError) {
+      return { value: null, confidence: 'low', notes: [result.content], toolCalls: [...] };
+    }
+    return { value: parseDescribe(result.content), confidence: 'high', toolCalls: [...] };
+  },
+};
+```
+
+Slices 1.1-1.4 ship one Skill per (driver-family, kind) combination. Total
+skill count ~12. All atomic. Confidence is `high` on success, `low` on
+tool error.
+
+## Phase 2 -- source-sampling skills (atomic)
+
+Same pattern as Phase 1 but for the sampling tools. Confidence calibration
+adds a sample-size factor: `low` if the requested limit was clamped down by
+the driver to a value below the precondition's `min-sample-size`. Total
+skill count ~8.
+
+## Phase 3 -- code-binding skills (cross-owner atomic)
+
+The hallucinated-class incident's primary fix.
+
+### 3.1 `data.code.class.extract-fields`
+
+Owner: `data-analyzer`. `cross-owner-allowed: true`. Calls
+`code.class.extract-fields` (registered by code-analyzer) via `runSkill`
+under the cross-owner depth cap. Inputs: `className` + optional
+`repoPath` scope. Outputs: typed field list `{name, type, nullable,
+defaultValue?}`. Without code-analyzer registered (or with code-analyzer's
+family-gate disabled), the skill fails the `required-tools: ['code_locate',
+'code_describe']` precondition and returns `confidence: 'low'` with a
+"code-analyzer unavailable" note. **No fabrication path.**
+
+### 3.2-3.5
+
+Each is the same shape: cross-owner atomic skill, narrow tool deps, hard
+fail on precondition miss. Implementations live mostly inside the code-
+analyzer; this plan ships only the data-analyzer-side typed wrappers and
+their preconditions. The code-analyzer-side skills are tracked as a
+prerequisite work item in [code-analyzer.md](./code-analyzer.md).
+
+## Phase 4 -- comparison / diff skills (composite)
+
+Composite skills that orchestrate atomics. Sub-skill failure floors the
+composite's confidence (per the registry contract in skills-core 4.3).
+
+### Example: `data.mapping.json-vs-class`
+
+```ts
+{
+  id: 'data.mapping.json-vs-class',
+  family: 'comparison-diff',
+  owner: 'data-analyzer',
+  skillDeps: [
+    'data.code.class.extract-fields',
+    'data.source.file.sample-shape',
+  ],
+  preconditions: [
+    { kind: 'cross-owner-allowed', reason: 'consumes code-analyzer' },
+    { kind: 'required-tools', tools: ['code_describe', 'db_file_sample_shape'], ... },
+  ],
+  execute: async (input, deps) => {
+    const klass = await deps.runSkill('data.code.class.extract-fields', { className: input.className });
+    const shape = await deps.runSkill('data.source.file.sample-shape', { connectionId, path });
+    if (klass.confidence === 'low' || shape.confidence === 'low') {
+      // Floor to low; surface BOTH sides' notes; never paper over a missing side.
+      return {
+        value: { klass: klass.value, shape: shape.value, diff: null },
+        confidence: 'low',
+        notes: [...klass.notes ?? [], ...shape.notes ?? []],
+        toolCalls: [...klass.toolCalls, ...shape.toolCalls],
+      };
+    }
+    const diff = computeFieldDiff(klass.value, shape.value);
+    return { value: { klass: klass.value, shape: shape.value, diff }, confidence: 'high', ... };
+  },
+}
+```
+
+The hallucinated "perfect alignment" finding from 2026-04-30 is
+mechanically impossible under this composite: no class side, no diff;
+diff is `null` and confidence is `low`.
+
+Slices 4.1-4.7 each follow the composite pattern. Total skill count ~7.
+
+## Phase 5 -- quality / statistical skills
+
+Largest phase. Sub-divided per the seven sub-families introduced in the
+discussion thread that preceded this plan:
+
+- **5a univariate profiling** (6 skills) -- atomic, each backed by
+  `db_sql_aggregate` + `db_sql_distinct` calls. `profile.auto` is the only
+  composite in 5a; it picks the right profile skill from the declared
+  type.
+- **5b distribution shape** (7 skills) -- atomic, each backed by
+  `db_sql_aggregate` / `db_sql_histogram` / `db_outliers`. Heavy on
+  `min-sample-size` preconditions: e.g. `distribution.normality-test`
+  declares `n >= 50`, `distribution.heavy-tail-check` declares `n >= 200`.
+- **5c cross-column** (5 skills) -- atomic, backed by
+  `db_correlation_matrix` and per-skill SQL queries (functional dependency
+  detection is one query; co-null patterns is another). The join-key
+  cardinality skill needs paired sampling across two tables.
+- **5d quality scorecard** (6 skills) -- 5 atomics + the `quality.scorecard`
+  composite. Atomic skills run cheap aggregations; the scorecard composes
+  them into a single typed rollup with weights per dimension (the rubric
+  is hard-coded; per-repo override is a follow-up).
+- **5e PII / sensitivity** (3 skills) -- `pii.detect-patterns` is atomic
+  (regex over sampled values); `pii.column-classifier` composes 5e.1 with
+  column-name heuristics; `sensitivity.policy-check` reads the connection's
+  pii config and compares against detected patterns.
+- **5f drift / anomalies** (3 skills) -- composite. Each requires two
+  windows of input data; `drift.distribution` calls
+  `db_sql_aggregate` twice with `where`-clauses splitting the windows.
+- **5g time-series** (4 skills) -- atomic. Each requires a temporal
+  column declaration in input; precondition asserts the column is
+  temporal-typed.
+
+**Confidence calibration** in this phase is unusually strict: any sample-
+based computation declares its `min-sample-size` precondition; the registry
+clamps confidence to `low` when the actual sample falls below. Skills that
+push aggregation to the driver (the common case in 5a-5d) skip the clamp.
+
+**No statistical computation in the LLM.** The skill body's `execute()`
+pulls aggregated numbers from tools and packages them into the typed
+output. The LLM call (when one exists -- mostly in 5d's scorecard
+composition) is for narrative, not arithmetic.
+
+## Phase 6 -- synthesis skills
+
+Each renderer takes one typed `SkillResult.value` shape and produces a
+markdown fragment. They have **no LLM call** -- they're deterministic
+templates. The data-analyzer orchestrator's existing `synthesise` step
+(which does have LLM calls) consumes these fragments inside its multi-pass
+content-gen pipeline; the skills are the substrate for finding-typed
+rendering.
+
+The per-skill-output schema makes this possible: a `synth.profile-card`
+skill knows how to render a `profile.numeric` output because it imports
+the same JsonSchema that defines that output. Slices 6.1-6.9 ship one
+renderer per major output shape. Total skill count 9.
+
+## Phase 7 -- meta skills
+
+### 7.1 `meta.classify-question`
+
+LLM-routed (cloud affinity). Input: the user's question + the available
+connection roster. Output: a list of skill ids the planner should invoke,
+ordered by priority. This is the skill the planner-rewrite (8.1) calls
+first; its output is the skeleton of the per-task plan.
+
+### 7.2 `meta.select-scope`
+
+LLM-routed (cloud affinity). Input: the user's question. Output: a list
+of `{connectionId, target?}` scoping the rest of the run. Preconditions:
+`required-tools: ['db_list_connections']`. The current orchestrator's
+`_registerEphemeralFromPrompt` plus `_loadConnections` lift moves into
+this skill.
+
+### 7.3 `meta.feasibility-check`
+
+Pure helper -- no LLM, no tool calls. Walks `assertFeasible(skillId, ctx)`
+for every skill in a candidate list and returns a structured rejection
+report. The planner uses this AFTER `meta.classify-question` to drop
+infeasible skill ids from the plan before any execution starts.
+
+### 7.4 `meta.calibrate-confidence`
+
+Per-task post-processing. Input: a list of `SkillResult` values + the
+question + the tool-error trace. Output: a calibrated final confidence
+for the task's answer. Atomic, deterministic. The reviewer (cloud-side
+LLM) consumes the calibrated value as a hard prior, mitigating the over-
+acceptance failure mode the 2026-05-01 fixes addressed at the prompt
+level.
+
+## Phase 8 -- planner / runner / reviewer rewrite
+
+The orchestrator stays. Its three LLM tasks (`plan`, `analyzer-per-task`,
+`review`) gain a skill-shaped contract.
+
+### 8.1 Planner
+
+The planner's prompt today decomposes a question into a `DataAnalysisTask[]`.
+Post-rewrite, it produces a list of `SkillInvocation`s:
+
+```ts
+interface SkillInvocation {
+  skillId: string;
+  args: Record<string, unknown>;
+  why: string;          // for the user-facing TodoItem title
+  parentItemId?: string; // for drill-down chains, unchanged
+}
+```
+
+The plan stays human-readable in the TodoList; the orchestrator now knows
+how to run each item without a per-kind playbook.
+
+### 8.2 Per-task runner
+
+Replaces the inline 8-call tool loop. The new runner:
+
+1. Validates the invocation against the registered skill's input schema.
+2. Calls `runSkill(invocation.skillId, invocation.args, deps)`.
+3. Streams the resulting `toolCalls` as `liveStep` events (the same
+   transcript-style pattern shipped in F13).
+4. Returns the `SkillResult` to the orchestrator's `K_LAST_RESULT` slot.
+
+The existing JSON parse retry / citations invariant retry / runner-side
+confidence downgrade all move into the registry's `runSkill` machinery
+(skills-core 3.1 / 3.7) -- they apply to every skill, not just data-
+analyzer skills.
+
+### 8.3 Reviewer integration
+
+The reviewer LLM now receives `SkillResult` shapes instead of free-form
+analyzer results. The decision rules in
+[review.ts](../../src/insrc/agent/tasks/data-analyzer/prompts/review.ts) (which
+got hardened 2026-05-01) carry over almost verbatim; the only change is
+that the toolCalls list is per-skill, and the answer is a typed value
+rather than a free-form string. The hallucination guardrails added
+2026-05-01 stay -- they work on the same `toolCalls` summary the registry
+exposes.
+
+## Phase 9 -- backward compatibility
+
+### 9.1 Legacy `DataAnalysisTask` shim
+
+The orchestrator's `K_PLAN_TASKS` storage retains its `DataAnalysisTask[]`
+shape for one daemon release. A migration helper maps each legacy `kind`
+to a default skill invocation:
+
+```
+inspect-schema -> data.source.rdbms.describe-table | kv | file (per scope)
+sample-data    -> data.source.<family>.sample-rows
+sample-shape   -> data.source.<family>.sample-shape
+lineage        -> data.code.lineage.read-write-callsites
+schema-drift   -> data.comparison.drift.prisma-vs-live
+er             -> [composite -- multiple describe-table + artifact_er rendering]
+free-form      -> data.meta.classify-question + per-result skills
+```
+
+This shim lets pre-skill-cutover cached plans (per-task cache from
+[data-analyzer.md](./data-analyzer.md) Phase 2.4) keep replaying through
+the new runner. After one release, the legacy shape is removed and the
+cache directory is invalidated by a versioned cache-key bump.
+
+### 9.2 Legacy `data:*` cross-agent tools
+
+`data_lineage` / `data_schema-drift` / `data_describe` / etc. stay
+registered. Their bodies become one-line dispatches to the corresponding
+skill (skills-core Phase 9 already shipped this pattern for `data_lineage`).
+A custom user prompt that names `data_schema-drift` keeps working.
+
+## Phase 10 -- caching + telemetry
+
+### 10.1 Telemetry / skill-trace
+
+Every `runSkill` invocation emits a `SkillEvent` (skills-core Phase 7).
+The data-analyzer orchestrator already streams `liveStep` for LLM tasks;
+this phase adds a parallel `skill-trace` stream rendered in a new
+sub-pane of the analyzer report (or behind a "Show skill trace" toggle
+on the existing pane). Inspector-style; not in the user's primary path.
+
+### 10.2 Per-skill cache layer
+
+Extends the existing per-task cache from
+[data-analyzer.md](./data-analyzer.md) Phase 2.4 down to skill granularity.
+Cache key: `(skill.id, skill.version, hashCanonical(input), connection-roster-fingerprint)`.
+On hit, skip the skill's `execute()` entirely; the orchestrator stamps the
+cached `SkillResult` into the task's accepted bucket. Same LRU + atomic-
+write disk layout as the per-task cache, separate directory:
+`~/.insrc/cache/skills/`.
+
+This cache is **strictly orthogonal** to the per-task cache: a re-run hits
+the per-task cache first (cheap), and only when the per-task entry is
+invalidated (different connection roster, different question, no entry)
+does the per-skill cache become relevant. The cost of the per-skill cache
+is its complexity around invalidation; we'd skip it entirely if not for
+the high cost of repeating Family 5 statistical computations on the same
+target.
+
+## LLM routing -- per-skill provider affinity
+
+| Skill family | Affinity | Why |
+|---|---|---|
+| source-introspection (1) | `auto` | thin tool wrapper; the calling agent picks |
+| source-sampling (2) | `auto` | thin tool wrapper |
+| code-binding (3) | `auto` | dispatches to code-analyzer; depth-cap handles the rest |
+| comparison-diff (4) | `auto` | composite; calling agent picks; some need cloud for narrative |
+| 5a univariate profile | `local` | post-processing; deterministic; cost-driven |
+| 5b distribution | `local` | post-processing; deterministic |
+| 5c dependency | `local` | post-processing; deterministic |
+| 5d quality scorecard | `cloud` | composite needing narrative ranking |
+| 5e PII | `local` | regex + heuristics; deterministic |
+| 5f drift | `cloud` | composite needing narrative explanation |
+| 5g timeseries | `local` | numerical |
+| synthesis (6) | n/a | no LLM call |
+| meta (7) | `cloud` | classifier + scope picker; judgment-heavy |
+
+This routing is the per-skill realisation of the routing table in
+[data-analyzer.md](./data-analyzer.md)'s "LLM routing" section. The agent-
+level resolver in [agent/router.ts](../../src/insrc/agent/router.ts) overrides any of these
+when the user `@mentions` a provider; per-step-binding overrides apply
+identically.
+
+## Open questions
+
+1. **Should skill-level caching invalidate on connection schema drift?**
+   The per-task cache uses a connection-roster fingerprint that catches
+   roster changes but not live schema changes (driver-fingerprint helper
+   is deferred per [data-analyzer.md](./data-analyzer.md) Phase 2.4
+   notes). Per-skill cache inherits the same blind spot. **Default for
+   v1: same as per-task -- explicit `clearCache` is the user's escape
+   hatch. Land the proper fingerprint helper as a follow-up shared
+   between both caches.**
+
+2. **How does Phase 5g (time-series) handle non-temporal connections?**
+   Time-series skills declare a precondition that the target has a
+   `timestamp`-typed column; the precondition fails on KV connections
+   without a configured time field. **Default: `confidence: 'low'` plus
+   a "no temporal column" note. Connection-level configuration of "this
+   key is the timestamp" is a follow-up plan tied to the data-driver.**
+
+3. **Should `quality.scorecard` weights be repo-overridable?** Today
+   the scorecard rubric is hard-coded (e.g. completeness=30%, validity=25%,
+   uniqueness=20%, ...). **Default: hard-coded for v1; ship per-repo
+   override as `~/.insrc/data-analyzer/scorecard.json` once a real user
+   has a non-default rubric in mind.**
+
+4. **Should the planner skip Phase 7's `meta.classify-question` for
+   simple slash-direct invocations like `/data-profile <connection>
+   <table>`?** A direct-skill invocation route (`/data <skill> ...`) is
+   tempting -- bypasses planner entirely -- but ships a parallel UX that
+   needs its own help / autocomplete / error surface. **Default: not in
+   this plan; revisit if power users ask.**
+
+## Lessons baked in from prior incidents
+
+1. **No fabrication of code-side facts.** `class.extract-fields` and
+   `mapping.json-vs-class` hard-fail without code-binding tools. The
+   2026-04-30 hallucinated 28-row INPurchaseOrder field table is
+   structurally impossible.
+2. **No statistical computation in the LLM.** Phase 0 is a hard
+   prerequisite; quality skills consume tool output, never compute means
+   from row samples.
+3. **Default-enabled list / registry agreement.** Mirrors the
+   skills-core 2.4 fix for the cross-agent tool oversight. Every family
+   declared in [skills-core.md](./skills-core.md)'s validator is in
+   `enabledSkillFamilies` defaults; CI gate.
+4. **Confidence floors enforced server-side.** A skill that claims
+   `high` confidence with one tool error in its trace is clamped down by
+   the registry. The skill body cannot lie its way past this. Mirrors
+   the runner-side downgrade lever from 2026-05-01.
+5. **Tool-error gate inheritance.** Skills calling tools that error
+   inherit the tool-error gate the data-analyzer runner shipped
+   2026-05-01. The skill body's `deps.runTool` calls are the same
+   dispatch path; user gets the same Continue / Abort prompt; abort
+   propagates as `confidence: 'low'` plus a `notes` entry up through
+   composite skills.
