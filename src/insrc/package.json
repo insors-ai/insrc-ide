@@ -74,6 +74,7 @@
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-dual-write.test.ts",
+    "test:graph-relations": "tsx --test db/__tests__/duckdb-relations-dual-write.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }
