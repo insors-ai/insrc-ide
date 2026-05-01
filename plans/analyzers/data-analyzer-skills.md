@@ -65,6 +65,10 @@ All slices pending. Skill core (skills-core.md) must land first.
 | 0.5 | `db_correlation_matrix` tool | pending | pairwise correlation; SQL or DuckDB |
 | 0.6 | `db_outliers` tool | pending | IQR / Z-score per column |
 | 0.7 | sampling-confidence library | pending | sample-size sufficiency + CI helpers |
+| 0.8 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
+| 0.9 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
+| 0.10 | `db_file_list_files` tool | pending | enumerate files within an active file-connection root. Required by 1.3 (today only `db_file_describe` for one file exists) |
+| 0.11 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
 | 1.1 | source-introspection: rdbms | pending | describe-table, list-tables, list-indexes |
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
 | 1.3 | source-introspection: file | pending | one variant per kind (csv, parquet, jsonl, ...) |
@@ -184,12 +188,30 @@ All slices pending. Skill core (skills-core.md) must land first.
   [data-analyzer.md](./data-analyzer.md) Phase 1.3 stay file-by-file at
   the per-kind level. Per-skill prompt overrides are a follow-up.
 
-## Phase 0 -- aggregation tool substrate
+## Phase 0 -- driver-tool substrate
 
-This phase is **infrastructure only** -- no skills land here. It exists
-because Family 5 will hallucinate numbers if asked to compute them in the
-LLM; the only safe path is to push aggregation into the driver and let
-skills consume structured numerical results.
+This phase is **infrastructure only** -- no skills land here. It exists for
+two reasons:
+
+1. **Family 5 cannot land without aggregation tools.** Quality / distribution
+   / dependency skills will hallucinate numbers if asked to compute them in
+   the LLM; the only safe path is to push aggregation into the driver and
+   let skills consume structured numerical results. Slices 0.1-0.7 below.
+
+2. **Phase 1 / 2 introspection skills depend on tool primitives that are
+   not yet registered.** The existing `db_*` family covers SQL describe /
+   sample, KV scan / get / sample-shape, and file describe / sample / shape
+   -- but NOT keyspace / namespace enumeration on the KV side, and NOT
+   file-listing within a connection root. Skills that need to "tell me what
+   collections / namespaces / files exist on this connection" hard-fail on
+   the `required-tools` precondition without these. Slices 0.8-0.10 below.
+
+Slice 0.11 is a naming reconciliation, not new code: the plan refers to a
+`doc` source family (Phase 1.4 / 2.4) but the data-driver classifies
+MongoDB / Cassandra under `kv`. Either the driver grows a `doc` family
+distinction (Mongo collections + Cassandra column-families have richer
+structure than Redis-style flat KV) or the plan-side `doc` references all
+collapse into `kv`. Decide before any 1.4 / 2.4 / 5e-vs-mongo skill lands.
 
 ### 0.1 `db_sql_aggregate`
 
@@ -272,6 +294,78 @@ Skills in Family 5 use this to translate "I have 50 sampled values" + "I'm
 running a Shapiro-Wilk normality test" into a confidence value the registry
 can clamp on. **No skill implements its own sample-size threshold logic;
 they all consult this library.**
+
+### 0.8 `db_kv_list_namespaces`
+
+Inputs: `connectionId`. Output: `Array<{name, kind, approxKeyCount?}>`.
+Per-driver semantics:
+
+```
+Redis / Valkey / KeyDB / DragonflyDB   distinct prefixes from SCAN  (kind: 'prefix')
+MongoDB                                 db.listCollections()          (kind: 'collection')
+Cassandra                               keyspace + table list         (kind: 'table')
+DynamoDB                                ListTables                    (kind: 'table')
+etcd                                    distinct prefixes from KV     (kind: 'prefix')
+```
+
+The shape is unified so a skill can iterate "namespaces on this kv
+connection" without per-driver branching. `approxKeyCount` is best-effort;
+omit when the driver has no cheap count path. Required by Phase 1.2
+(`source-introspection: kv -> list-namespaces`).
+
+### 0.9 `db_kv_describe_namespace`
+
+Inputs: `connectionId`, `namespace`. Output: a NamespaceShape document
+that mirrors the existing `db_kv_sample_shape` envelope but adds
+namespace-level metadata (key-prefix patterns, sub-document field
+inventory for Mongo / Cassandra). Builds on `db_kv_sample_shape` -- the
+new tool wraps it with namespace-scoping logic and consolidates the
+shape view that `describe-namespace` skills need. Required by Phase 1.2
+(`source-introspection: kv -> describe-namespace`).
+
+### 0.10 `db_file_list_files`
+
+Inputs: `connectionId`, optional `globPattern` (default `**/*`), optional
+`limit` (default 200). Output: `Array<{path, size, kind}>` where `kind`
+is the file-driver classification (csv / parquet / jsonl / ...). Today
+only `db_file_describe` exists, which describes ONE file given its path;
+file-flavoured skills need to enumerate first. Cap at 200 by default
+(deeper enumeration is a sampling concern, not introspection).
+Required by Phase 1.3 (`source-introspection: file`) when the
+target is a directory rather than a single file.
+
+### 0.11 doc-family naming reconciliation
+
+No code lands for 0.11 -- it's the plan-level decision needed before any
+of Phase 1.4 / 2.4 / doc-flavoured 5e (PII against Mongo) can land.
+
+The data-driver in `daemon/db/drivers/` classifies MongoDB and Cassandra
+under `family: 'kv'`. Mongo's documents and Cassandra's column-families
+have richer structure than a flat Redis namespace; treating them all as
+`kv` loses that distinction at the skill-precondition level
+(`connection-family: ['kv']` is too broad).
+
+Two paths:
+
+- **A. Driver grows a `doc` family.** Mongo and Cassandra (and possibly
+  DynamoDB single-table) move out of `kv`. Adds a SOURCE_FAMILY enum
+  member; skills can declare `connection-family: ['doc']` to scope to
+  document stores. Most expensive option; touches the data-driver type
+  surface.
+- **B. Plan-side `doc` collapses into `kv`.** Phase 1.4 / 2.4 / etc.
+  rename to use `kv`; the doc-vs-kv distinction lives at the skill-id
+  level (`data.kv.collection.list-fields` for Mongo-style;
+  `data.kv.namespace.list-keys` for Redis-style). Cheapest, but skill
+  consumers have to know which kv kind they're targeting.
+
+Default for v1: **B**, because the data-driver is shipped and adding a
+new family breaks existing connection registrations. Ship a per-skill
+`required-driver-kind: ['mongodb', 'cassandra', ...]` precondition to
+recover the discrimination Path A would have given for free.
+(Implementation note: if `required-driver-kind` doesn't already exist as
+a Precondition variant in skills-core, this slice adds it -- it's a
+narrower restriction than `connection-family` and hasn't been needed
+until now.)
 
 ## Phase 1 -- source-introspection skills (atomic)
 
