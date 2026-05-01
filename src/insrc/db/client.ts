@@ -71,7 +71,7 @@ export async function getDb(): Promise<DbClients> {
   // for normal-size repos.
   _kuzuDb = new kuzu.Database(
     PATHS.graph,
-    /* bufferManagerSize     */ undefined,
+    /* bufferManagerSize     */ 2 * 1024 * 1024 * 1024,
     /* enableCompression     */ undefined,
     /* readOnly              */ false,
     /* maxDBSize             */ undefined,
