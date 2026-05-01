@@ -76,6 +76,7 @@
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-dual-write.test.ts",
     "test:graph-relations": "tsx --test db/__tests__/duckdb-relations-dual-write.test.ts",
     "test:graph-repos": "tsx --test db/__tests__/duckdb-repos-dual-write.test.ts",
+    "test:graph-search": "tsx --test db/__tests__/duckdb-search-queries.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }
