@@ -62,21 +62,23 @@ export async function getDb(): Promise<DbClients> {
   mkdirSync(dirname(PATHS.graph), { recursive: true });
   mkdirSync(PATHS.lance, { recursive: true });
 
-  // autoCheckpoint with a 512 MB threshold: the default cadence caused
-  // disk-I/O bursts during the resolver run, but disabling auto-checkpoint
-  // entirely lets the WAL grow unbounded on large repos (12k+ files) and
-  // exhausts the buffer pool with "Unable to allocate memory". A 512 MB
-  // threshold is a backstop -- it only fires on very large indexes, leaving
-  // the indexer's explicit CHECKPOINT at fullIndex tail as the primary flush
-  // for normal-size repos.
+  // Buffer pool + autoCheckpoint sized aggressively to bound WAL growth.
+  // Earlier configs ran with 8 GB buffer + 512 MB checkpoint threshold;
+  // on a 12k+-file resolver pass the WAL still hit ~500 MB before the
+  // checkpoint fired, exhausted the buffer pool, and left the DB
+  // unrecoverable -- WAL replay on restart can't fit a 500 MB log
+  // alongside the working set even at 8 GB. The fix is the opposite of
+  // "bigger buffer": keep the WAL small enough that replay is cheap,
+  // and let the working set live within a 1 GB pool that a typical
+  // code-graph never approaches anyway.
   _kuzuDb = new kuzu.Database(
     PATHS.graph,
-    /* bufferManagerSize     */ 8 * 1024 * 1024 * 1024,
+    /* bufferManagerSize     */ 1 * 1024 * 1024 * 1024,
     /* enableCompression     */ undefined,
     /* readOnly              */ false,
     /* maxDBSize             */ undefined,
     /* autoCheckpoint        */ true,
-    /* checkpointThreshold   */ 512 * 1024 * 1024,
+    /* checkpointThreshold   */ 128 * 1024 * 1024,
   );
   const graph = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
   const graphReader = new kuzu.Connection(_kuzuDb, KUZU_THREADS);
