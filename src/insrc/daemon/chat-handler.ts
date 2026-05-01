@@ -81,6 +81,21 @@ export function getActiveSession(sessionId: string): { id: string; access: impor
 }
 
 /**
+ * Get the full Session object for a given sessionId. Required by RPC
+ * paths that need to construct a SkillRunnerDeps (skill.invoke,
+ * skill.feasibility) -- the trimmed `getActiveSession` view doesn't
+ * carry the provider / resolver / contextManager fields a runner
+ * needs. Returns undefined on miss; callers translate to a structured
+ * `{error}` payload rather than throwing.
+ */
+export function getRunnerSession(
+  sessionId: string,
+): import('../agent/session.js').Session | undefined {
+  if (!sessionPool) return undefined;
+  return sessionPool.get(sessionId)?.session;
+}
+
+/**
  * Drop a session from the in-memory pool. Called by `agent.discard`
  * (plans/session-lifecycle.md Phase 4) so the daemon's chat-session
  * internals stay private to this module; callers go through this

@@ -1122,6 +1122,24 @@ async function main(): Promise<void> {
 			const mod = await import('./access-rpc.js');
 			return mod.revokePrefixRpc(params as { sessionId?: unknown; kind?: unknown; prefix?: unknown });
 		},
+
+		// Skill registry RPCs (plans/analyzers/skills-core.md Phase 2.3).
+		// Workbench / CLI window into the runSkill pipeline -- the same
+		// pipeline the skill_invoke meta-tool uses from an LLM tool loop.
+		// `skill.audit` ships separately with the per-session ring buffer
+		// covered by Phase 7.2.
+		'skill.list': async () => {
+			const mod = await import('./skills-rpc.js');
+			return mod.listRpc();
+		},
+		'skill.feasibility': async (params) => {
+			const mod = await import('./skills-rpc.js');
+			return mod.feasibilityRpc(params as Parameters<typeof mod.feasibilityRpc>[0]);
+		},
+		'skill.invoke': async (params) => {
+			const mod = await import('./skills-rpc.js');
+			return mod.invokeRpc(params as Parameters<typeof mod.invokeRpc>[0]);
+		},
 		'artifacts.getOfflineBundleStatus': async () => {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.getOfflineBundleStatusRpc();
