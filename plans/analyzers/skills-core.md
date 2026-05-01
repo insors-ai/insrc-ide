@@ -60,32 +60,34 @@ data-analyzer's runner is built.
 
 ## Status
 
-All slices pending.
+Substrate landed in commit `0f0c80917df`. Remaining work: RPC surface (2.3),
+audit ring buffer (7.2), test harness (8.1 / 8.2), migration tooling (6.2).
+Soft-budget enforcement (5.2) and per-session telemetry (7.1) are partial.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
-| 0.1 | Skill type + JsonSchema contract | pending | |
-| 0.2 | Registry data structures | pending | byId / byFamily / byOwner indices |
-| 1.1 | `registerSkill` + `getSkill` + `listByFamily` | pending | mirrors `daemon/tools/registry.ts` shape |
-| 1.2 | Settings / category gate | pending | `enabledSkillFamilies` in tools/config.ts |
-| 1.3 | Skill-id naming validator | pending | dotted-form, lowercase, max 64 chars, single-version per id |
-| 2.1 | `runSkill(id, input, deps)` typed helper | pending | the agent-to-agent path |
-| 2.2 | `invoke_skill` meta-tool | pending | the LLM-exposed path; one tool, all skills |
-| 2.3 | `skill.invoke` RPC | pending | the workbench / CLI path |
-| 3.1 | Composition + depth cap | pending | `_skillDepth` mirrors `_crossAgentDepth` |
-| 3.2 | Cross-owner invocation accounting | pending | second increment when owner mismatch |
-| 4.1 | Precondition declaration syntax | pending | minSampleSize / requiredTools / connectionFamily |
-| 4.2 | `assertFeasible(id, ctx)` | pending | walks preconditions; returns Feasibility |
-| 4.3 | Calibrated confidence helpers | pending | downstream of feasibility + tool-error trace |
-| 5.1 | Provider affinity + step resolver | pending | `local` / `cloud` / `auto` per skill |
-| 5.2 | Skill-level token / time budgets | pending | exposed to the runner, not the LLM |
-| 6.1 | Versioning policy | pending | hard-coded version: 1; lookup-by-version supported |
+| 0.1 | Skill type + JsonSchema contract | done | hand-rolled Draft-07 subset in [daemon/skills/json-schema.ts](../../src/insrc/daemon/skills/json-schema.ts); avoids an Ajv dep |
+| 0.2 | Registry data structures | done | byId / byIdAndVersion / byFamily / byOwner indices |
+| 1.1 | `registerSkill` + `getSkill` + `listByFamily` | done | mirrors `daemon/tools/registry.ts` shape; strict registration with cycle + cross-owner checks |
+| 1.2 | Settings / category gate | done | `enabledSkillFamilies` in tools/config.ts; defaults to `ALL_SKILL_FAMILIES` |
+| 1.3 | Skill-id naming validator | done | dotted-form, lowercase, max 64 chars, single-version per id |
+| 2.1 | `runSkill(id, input, deps)` typed helper | done | the agent-to-agent path |
+| 2.2 | `invoke_skill` meta-tool | done | shipped as `skill_invoke` (underscore-prefix puts it in the `skill` tool category); one tool exposes all skills via the closed-list pattern |
+| 2.3 | `skill.invoke` RPC | pending | the workbench / CLI path; no daemon RPCs registered yet |
+| 3.1 | Composition + depth cap | done | `_skillDepth` mirrors `_crossAgentDepth`; cap = 4 |
+| 3.2 | Cross-owner invocation accounting | done | second increment when owner mismatch; `shared` callees exempt |
+| 4.1 | Precondition declaration syntax | done | min-sample-size / required-tools / connection-family / connection-property / cross-owner-allowed |
+| 4.2 | `assertFeasible(id, ctx)` | done | walks preconditions; returns Feasibility |
+| 4.3 | Calibrated confidence helpers | done | clamps on tool-error ratio, sub-skill 'low', invalid output |
+| 5.1 | Provider affinity + step resolver | done | `local` / `cloud` / `auto` per skill; resolved via `SkillRunnerDeps.resolveProvider` |
+| 5.2 | Skill-level token / time budgets | partial | `softBudgetMs` field declared on Skill; runner-side enforcement / telemetry not yet wired |
+| 6.1 | Versioning policy | done | hard-coded version: 1; lookup-by-version supported |
 | 6.2 | Deprecation + migration helper | pending | optional v1; tooling lands when v2 of any skill ships |
-| 7.1 | Telemetry: per-skill duration / success / confidence | pending | logged at `skills` module level |
+| 7.1 | Telemetry: per-skill duration / success / confidence | partial | structured `SkillEvent`s emitted to `module: 'skills'` log lines; no per-session audit ring buffer yet |
 | 7.2 | Audit log entry per `runSkill` | pending | session-scoped; distinct from access audit |
 | 8.1 | Test harness | pending | `runSkillIsolated()` + scripted SkillDeps |
 | 8.2 | Skill smoke-test contract | pending | each skill ships with a fixture |
-| 9.1 | First migration target | pending | `data.lineage.read-write-callsites` from `db_lineage` tool |
+| 9.1 | First migration target | done | `data.lineage.read-write-callsites` shipped in [daemon/skills/built-ins/data-lineage.ts](../../src/insrc/daemon/skills/built-ins/data-lineage.ts) |
 
 ## Goals (short)
 
