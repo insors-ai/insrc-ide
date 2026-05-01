@@ -86,6 +86,16 @@ export interface SkillRunnerDeps {
   /** Forwarded to executeTool so the access gate / tool-error gate fire correctly. */
   readonly toolExecCtx?: SkillRunnerToolCtx | undefined;
   readonly signal?: AbortSignal | undefined;
+  /**
+   * Test-harness override for the tool-dispatch path
+   * (plans/analyzers/skills-core.md Phase 8.1). When set, `runSkill`
+   * routes every `deps.runTool(call)` through this function instead of
+   * `executeTool`, bypassing the access gate, the tool registry, and
+   * the daemon's IPC channel. Production callers leave this undefined;
+   * `runSkillIsolated` in `skills/test-harness.ts` populates it from
+   * a fixture's `fakeTools` map.
+   */
+  readonly runTool?: ((call: ToolCall) => Promise<SkillToolResult>) | undefined;
 }
 
 export async function runSkill<I = unknown, O = unknown>(
@@ -308,14 +318,25 @@ async function runToolForSkill(
   emit: (e: SkillEvent) => void,
 ): Promise<SkillToolResult> {
   const t0 = Date.now();
-  const exec = runnerDeps.toolExecCtx ?? {};
-  const result = await executeTool(call, {
-    session: runnerDeps.session,
-    ...(exec.send !== undefined ? { send: exec.send } : {}),
-    ...(exec.channel !== undefined ? { channel: exec.channel } : {}),
-    ...(exec.requestId !== undefined ? { requestId: exec.requestId } : {}),
-    ...(runnerDeps.signal !== undefined ? { signal: runnerDeps.signal } : {}),
-  });
+  let result: SkillToolResult;
+  if (runnerDeps.runTool !== undefined) {
+    // Phase 8.1 harness path: tests inject fake tool handlers; we
+    // skip executeTool entirely so there's no daemon / access gate /
+    // registry coupling. Telemetry still flows.
+    result = await runnerDeps.runTool(call);
+  } else {
+    // Production path: through executeTool so the access gate, tool
+    // registry, and tool-error gate all fire as usual.
+    const exec = runnerDeps.toolExecCtx ?? {};
+    const r = await executeTool(call, {
+      session: runnerDeps.session,
+      ...(exec.send !== undefined ? { send: exec.send } : {}),
+      ...(exec.channel !== undefined ? { channel: exec.channel } : {}),
+      ...(exec.requestId !== undefined ? { requestId: exec.requestId } : {}),
+      ...(runnerDeps.signal !== undefined ? { signal: runnerDeps.signal } : {}),
+    });
+    result = { content: r.content, isError: r.isError === true };
+  }
   const durationMs = Date.now() - t0;
   const summary: SkillToolCallSummary = {
     toolId: call.name,
@@ -330,10 +351,7 @@ async function runToolForSkill(
     durationMs,
     ...(result.isError ? { error: result.content.slice(0, 200) } : {}),
   });
-  return {
-    content: result.content,
-    isError: result.isError === true,
-  };
+  return result;
 }
 
 // ---------------------------------------------------------------------------

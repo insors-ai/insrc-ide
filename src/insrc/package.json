@@ -68,6 +68,7 @@
     "build": "tsc",
     "test:artifacts": "tsx --test agent/tasks/artifacts/__tests__/*.test.ts",
     "test:artifacts:smoke": "tsx agent/tasks/artifacts/__tests__/smoke.ts",
-    "test:data-driver": "tsx --test daemon/db/__tests__/*.test.ts"
+    "test:data-driver": "tsx --test daemon/db/__tests__/*.test.ts",
+    "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }
