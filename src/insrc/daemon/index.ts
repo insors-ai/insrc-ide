@@ -63,6 +63,7 @@ process.on('uncaughtException',  (err) =>    reportFatal('uncaughtException',  e
 process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', reason));
 
 import { getDb, initDb, closeDb } from '../db/client.js';
+import { closeDuckDB } from './db/duckdb-pool.js';
 import { listRepos, addRepo, removeRepo } from '../db/repos.js';
 import { deleteEntitiesForRepo } from '../db/entities.js';
 import { deleteUnresolvedForRepo } from '../db/relations.js';
@@ -1298,7 +1299,11 @@ async function main(): Promise<void> {
 		}, HARD_EXIT_MS);
 		backstop.unref();
 		void queueDone.finally(async () => {
+			// Order: Kuzu first (WAL flush is a hard correctness
+			// requirement), then DuckDB (no on-disk state; build-artifact
+			// cache only). LanceDB is closed inside closeDb().
 			await closeDb();
+			await closeDuckDB();
 			clearPid();
 			log.info('bye');
 			clearTimeout(backstop);

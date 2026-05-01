@@ -9,6 +9,7 @@
     "@aws-sdk/client-dynamodb": "^3.1037.0",
     "@aws-sdk/credential-providers": "^3.1037.0",
     "@clickhouse/client": "^1.18.3",
+    "@duckdb/node-api": "1.5.2-r.1",
     "@google/genai": "^1.50.1",
     "@lancedb/lancedb": "^0.26.2",
     "@mistralai/mistralai": "^2.2.0",
@@ -69,6 +70,7 @@
     "test:artifacts": "tsx --test agent/tasks/artifacts/__tests__/*.test.ts",
     "test:artifacts:smoke": "tsx agent/tasks/artifacts/__tests__/smoke.ts",
     "test:data-driver": "tsx --test daemon/db/__tests__/*.test.ts",
+    "test:duckdb": "tsx --test daemon/db/__tests__/duckdb-pool.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }
