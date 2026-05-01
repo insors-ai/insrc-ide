@@ -314,17 +314,29 @@ export class IndexerService {
           log.error({ file: filePath, err: msg }, 'full index: file error (skipping)');
           skipped++;
         }
-        // Periodic explicit CHECKPOINT every 200 files to bound buffer-
+        // Periodic explicit CHECKPOINT every 50 files to bound buffer-
         // pool pressure on large indexes. Auto-checkpoint at the
         // configured WAL threshold cannot keep up here: on the hadoop
         // workload (12k+ Java files) the buffer pool fills with dirty
         // pages well before the WAL reaches the threshold, after which
         // every subsequent file write throws "Buffer manager exception:
-        // unable to allocate memory". The explicit flush every 200
-        // files evicts dirty pages, frees the pool, and lets the run
-        // continue. Best-effort: a checkpoint failure isn't fatal; we
-        // log and keep going.
-        if (total > 0 && total % 200 === 0) {
+        // unable to allocate memory".
+        //
+        // The previous interval (every 200 files) was too coarse:
+        // observed live, the daemon ran cleanly through ~2600 files
+        // before the per-file dirty-page volume grew (later hadoop
+        // modules have larger Java files than the early simple ones)
+        // and 200 files between flushes started overflowing the pool
+        // before the next checkpoint could fire. The signal was the
+        // checkpoint duration itself climbing from 187 ms at file 200
+        // to 648 ms at file 2400 -- each flush draining more dirty
+        // pages than the last.
+        //
+        // 50 matches the progress-log cadence and keeps each
+        // checkpoint cheap (~500 ms even at the slow end). Best-
+        // effort: a checkpoint failure isn't fatal; we log and keep
+        // going. Next safe-point catches up.
+        if (total > 0 && total % 50 === 0) {
           try {
             const tCp = Date.now();
             await this.db.graph.query('CHECKPOINT;');
