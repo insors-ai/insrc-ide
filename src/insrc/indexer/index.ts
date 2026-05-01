@@ -314,6 +314,26 @@ export class IndexerService {
           log.error({ file: filePath, err: msg }, 'full index: file error (skipping)');
           skipped++;
         }
+        // Periodic explicit CHECKPOINT every 200 files to bound buffer-
+        // pool pressure on large indexes. Auto-checkpoint at the
+        // configured WAL threshold cannot keep up here: on the hadoop
+        // workload (12k+ Java files) the buffer pool fills with dirty
+        // pages well before the WAL reaches the threshold, after which
+        // every subsequent file write throws "Buffer manager exception:
+        // unable to allocate memory". The explicit flush every 200
+        // files evicts dirty pages, frees the pool, and lets the run
+        // continue. Best-effort: a checkpoint failure isn't fatal; we
+        // log and keep going.
+        if (total > 0 && total % 200 === 0) {
+          try {
+            const tCp = Date.now();
+            await this.db.graph.query('CHECKPOINT;');
+            log.info({ repo: repoPath, atFile: total, elapsedMs: Date.now() - tCp }, 'kuzu periodic checkpoint');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn({ repo: repoPath, atFile: total, err: msg }, 'kuzu periodic checkpoint failed');
+          }
+        }
       }
 
       // Emit DEPENDS_ON edges from repo manifest
