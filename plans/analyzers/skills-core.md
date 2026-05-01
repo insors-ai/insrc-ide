@@ -60,9 +60,10 @@ data-analyzer's runner is built.
 
 ## Status
 
-Substrate landed in commit `0f0c80917df`. Remaining work: RPC surface (2.3),
-audit ring buffer (7.2), test harness (8.1 / 8.2), migration tooling (6.2).
-Soft-budget enforcement (5.2) and per-session telemetry (7.1) are partial.
+Substrate landed in commit `0f0c80917df`; RPC surface in `61222a86c2b`.
+Remaining work: audit ring buffer (7.2), test harness (8.1 / 8.2),
+migration tooling (6.2). Soft-budget enforcement (5.2) and per-session
+telemetry (7.1) are partial; `skill.audit` ships with 7.2.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -73,7 +74,7 @@ Soft-budget enforcement (5.2) and per-session telemetry (7.1) are partial.
 | 1.3 | Skill-id naming validator | done | dotted-form, lowercase, max 64 chars, single-version per id |
 | 2.1 | `runSkill(id, input, deps)` typed helper | done | the agent-to-agent path |
 | 2.2 | `invoke_skill` meta-tool | done | shipped as `skill_invoke` (underscore-prefix puts it in the `skill` tool category); one tool exposes all skills via the closed-list pattern |
-| 2.3 | `skill.invoke` RPC | pending | the workbench / CLI path; no daemon RPCs registered yet |
+| 2.3 | `skill.invoke` RPC | done | shipped in [daemon/skills-rpc.ts](../../src/insrc/daemon/skills-rpc.ts) as `skill.list` / `skill.feasibility` / `skill.invoke`; `skill.audit` deferred to 7.2 |
 | 3.1 | Composition + depth cap | done | `_skillDepth` mirrors `_crossAgentDepth`; cap = 4 |
 | 3.2 | Cross-owner invocation accounting | done | second increment when owner mismatch; `shared` callees exempt |
 | 4.1 | Precondition declaration syntax | done | min-sample-size / required-tools / connection-family / connection-property / cross-owner-allowed |
