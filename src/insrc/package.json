@@ -71,6 +71,7 @@
     "test:artifacts:smoke": "tsx agent/tasks/artifacts/__tests__/smoke.ts",
     "test:data-driver": "tsx --test daemon/db/__tests__/*.test.ts",
     "test:duckdb": "tsx --test daemon/db/__tests__/duckdb-pool.test.ts",
+    "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }
