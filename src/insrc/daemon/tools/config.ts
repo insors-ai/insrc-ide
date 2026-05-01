@@ -68,6 +68,12 @@ const ALL_CATEGORIES: readonly string[] = [
   'ssh', 'http', 'k8s', 'cloud', 'diff',
   'notify', 'test', 'pkg', 'web', 'graph', 'plan',
   'artifact', 'db',
+  // Cross-agent surfaces -- registered by registerCodeAnalyzerCrossAgentTools()
+  // and registerDataAnalyzerCrossAgentTools() at daemon bootstrap.
+  // Without these in the default enabled set, getTool() silently
+  // returns undefined and cross-agent calls surface as "Unknown tool"
+  // errors at the dispatcher.
+  'code', 'data',
 ];
 
 function defaults(): ToolSettings {

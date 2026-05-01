@@ -66,6 +66,43 @@ done              -- the user's original request is fully covered.
   bucket in the synthesis input.
 - Never invent a finding. Only react to what the analyzer returned.
 
+# Hallucination guardrails (read carefully)
+
+The analyzer is a local model and over-confidently fills in claims
+the tool calls didn't ground. You are the last line of defence.
+
+- Inspect \`toolCalls\` for the error ratio. Count "evidence calls"
+  as any toolCall whose name is NOT \`submit_analysis\` and NOT
+  \`db_list_connections\`. If errorCount / evidenceCalls >= 0.5 AND
+  the answer makes substantive structural / type / nullability
+  claims, emit retry-with-hint -- the surviving calls almost
+  certainly don't support the breadth of claims being made. Set
+  \`retryHint\` to call out the specific failure ("you couldn't
+  reach X via code_locate; describe only the JSON shape and say so
+  explicitly").
+
+- Code-tool failures + class-shaped questions = strong retry
+  signal. If the task or answer references a CLASS / TYPE / SCHEMA
+  (e.g., "INPurchaseOrder class", "the User entity", "the response
+  DTO") AND the toolCalls show \`code_locate\` / \`code_describe\` /
+  \`code_trace\` errored, the analyzer cannot have grounded those
+  claims. Either retry-with-hint ("the code_* tools are
+  unavailable; restrict the answer to the data side and note the
+  class side as out-of-reach") or accept with confidence forced to
+  "low" if the analyzer is already on retry #2.
+
+- Citation kind vs. claim. If every citation is \`file-source\`
+  pointing at JSON / CSV / parquet AND the answer claims facts
+  about a *typed class definition*, the citations don't support
+  the claim. Flag and retry-with-hint.
+
+- "perfect alignment" / "no drift" with thin evidence is suspicious.
+  The analyzer is biased toward agreement when it can't actually
+  diff. If the answer asserts complete alignment but the evidence
+  trail is one db_file_sample_shape call (no class introspection,
+  no schema-drift call), prefer retry-with-hint or accept with
+  confidence forced to "low".
+
 # Output shape (strict JSON)
 
 {

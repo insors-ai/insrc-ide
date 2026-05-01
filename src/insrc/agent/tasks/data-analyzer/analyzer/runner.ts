@@ -22,6 +22,7 @@ import type {
   LLMMessage,
   LLMProvider,
   LLMResponse,
+  ToolCall,
   ToolDefinition,
 } from '../../../../shared/types.js';
 import type { Session } from '../../../session.js';
@@ -390,6 +391,14 @@ export async function runDataAnalyzer(
         const msg = `[error] tool "${call.name}" is not in the analyzer's closed list`;
         callTrace.push({ name: call.name, argsHash: '', durationMs: 0, resultRows: 0, error: msg });
         resultsBlock.push(renderToolResultBlock(call.id, msg, true));
+        if (blockedReason === undefined) {
+          const decision = await fireToolErrorGate(call, msg, opts, task);
+          if (decision === 'abort') {
+            blockedReason = 'tool-error-abort';
+            log.warn({ itemId: task.itemId, toolName: call.name }, 'user aborted task on unknown-tool error');
+            break;
+          }
+        }
         continue;
       }
 
@@ -417,7 +426,8 @@ export async function runDataAnalyzer(
       // dispatcher prefixes its denial body with "ACCESS_DENIED:" --
       // string-match is robust enough since no other tool result uses
       // that token.
-      if (r.isError && r.content.includes('ACCESS_DENIED') && blockedReason === undefined) {
+      const isAccessDenied = r.isError === true && r.content.includes('ACCESS_DENIED');
+      if (isAccessDenied && blockedReason === undefined) {
         blockedReason = 'connection-denied';
       }
 
@@ -432,16 +442,39 @@ export async function runDataAnalyzer(
       opts.onProgress?.(`[analyzer] ${call.name}(${summariseInput(call.input)}) -> ${trace.resultRows} rows in ${durationMs}ms`);
 
       resultsBlock.push(renderToolResultBlock(call.id, r.content, r.isError === true));
+
+      // Tool-error gate: when a non-access tool call fails, ask the
+      // user whether to continue (model gets the error in messages
+      // and may self-correct) or abort (mark the task blocked so
+      // synthesise surfaces the failure verbatim instead of letting
+      // the analyzer fabricate around it). Skip on ACCESS_DENIED --
+      // the access gate already prompted; double-prompting the user
+      // for the same denial would be noise. Skip when blockedReason
+      // is already set so we don't keep asking after the user already
+      // committed to a route.
+      if (r.isError && !isAccessDenied && blockedReason === undefined) {
+        const decision = await fireToolErrorGate(call, r.content, opts, task);
+        if (decision === 'abort') {
+          blockedReason = 'tool-error-abort';
+          log.warn({ itemId: task.itemId, toolName: call.name }, 'user aborted task on tool-error gate');
+          break;
+        }
+      }
     }
     messages.push({ role: 'user', content: resultsBlock.join('\n\n') });
+    if (blockedReason === 'tool-error-abort') { break; }
   }
 
   const truncated = iter >= MAX_TOOL_CALLS || Date.now() - startedAt > wallClockMs;
 
-  // Parse the model's final text. One retry on parse failure.
+  // Parse the model's final text. One retry on parse failure -- but
+  // skip the retry when the user aborted via the tool-error gate.
+  // Aborting means "stop, this run is done"; burning another LLM call
+  // to coerce a result the user already declined to wait for is just
+  // wasted tokens.
   let parsed: ParseResult = parseDataAnalyzerResult(lastText, task.itemId);
   let parseRetried = false;
-  if (!parsed.ok) {
+  if (!parsed.ok && blockedReason !== 'tool-error-abort') {
     log.warn({ itemId: task.itemId, reason: parsed.reason, detail: parsed.detail }, 'analyzer JSON parse failed; retrying once');
     parseRetried = true;
     messages.push({ role: 'assistant', content: lastText });
@@ -515,7 +548,7 @@ export async function runDataAnalyzer(
         const retryResult = withRunnerToolCalls(retryParsed.result, callTrace, truncated, blockedReason);
         const retryValidation = validateCitations(retryResult);
         if (retryValidation.ok) {
-          return { result: retryResult, truncated };
+          return { result: downgradeForToolErrors(retryResult, task.itemId), truncated };
         }
         return {
           result: downgradeForMissingCitations(retryResult),
@@ -531,9 +564,140 @@ export async function runDataAnalyzer(
     }
   }
 
+  result = downgradeForToolErrors(result, task.itemId);
+
   return parseRetried
     ? { result, warning: 'analyzer JSON required one strict-JSON retry', truncated }
     : { result, truncated };
+}
+
+/**
+ * Auto-downgrade confidence when evidence-gathering tool calls had a
+ * high error ratio. Rationale: a model that asked four questions of
+ * the data tier and got three errors back can't credibly emit
+ * confidence: "high" -- it's stitching together claims from one
+ * surviving call. We clamp to "low" so the reviewer + synthesise pass
+ * treat the result skeptically; the reviewer is also independently
+ * trained (via prompt) to flag this combination for retry-with-hint.
+ *
+ * Excludes from the count:
+ *   - submit_analysis (control-flow, not evidence)
+ *   - db_list_connections (cheap discovery; failure here is unusual but
+ *     by itself doesn't invalidate downstream describe / sample calls)
+ *
+ * Threshold: errors / non-excluded calls >= 0.5. Single-call edge case
+ * (one evidence call, errored) also triggers -- a one-shot failure is
+ * the strongest possible signal that the answer is unsupported.
+ */
+function downgradeForToolErrors(
+  result: DataAnalyzerResult,
+  itemId: string,
+): DataAnalyzerResult {
+  const evidence = result.toolCalls.filter(
+    c => c.name !== SUBMIT_TOOL && c.name !== DB_LIST_CONNECTIONS,
+  );
+  if (evidence.length === 0) { return result; }
+  const errorCount = evidence.filter(c => c.error !== undefined).length;
+  if (errorCount * 2 < evidence.length) { return result; }
+  if (result.confidence === 'low') { return result; }
+  log.warn(
+    { itemId, evidenceCalls: evidence.length, errorCount, prevConfidence: result.confidence },
+    'analyzer tool-error ratio >= 0.5; clamping confidence to low',
+  );
+  return { ...result, confidence: 'low' };
+}
+
+// ---------------------------------------------------------------------------
+// Tool-error gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Surface a failed tool call to the user and wait for them to decide
+ * whether to keep going or stop the task. Mirrors the access-gate
+ * pattern in agent/tools/executor.ts but without the
+ * approve/approve-prefix/deny-tax: tool errors aren't a permission
+ * decision, they're a "the model is now operating on bad evidence,
+ * how do you want me to handle it?" decision.
+ *
+ * Actions:
+ *   - continue: feed the error result back to the analyzer; it can
+ *               self-correct (e.g. db_file_describe error -> retry
+ *               with db_file_sample_shape) or accept low confidence.
+ *   - abort:    set blockedReason='tool-error-abort' on the result;
+ *               the orchestrator routes to the blocked bucket and the
+ *               synthesise pass surfaces the failure verbatim instead
+ *               of treating the partial finding as accepted.
+ *
+ * Fails open (returns 'continue') when send/channel/requestId are
+ * missing -- the runner is also driven from tests and scripts that
+ * have no IPC plumbing; auto-aborting on every error there would make
+ * those harnesses unusable.
+ */
+async function fireToolErrorGate(
+  call: ToolCall,
+  errorContent: string,
+  opts: RunDataAnalyzerOpts,
+  task: DataAnalysisTask,
+): Promise<'continue' | 'abort'> {
+  const send = opts.send;
+  const channel = opts.channel;
+  const requestId = opts.requestId;
+  if (send === undefined || channel === undefined || requestId === undefined) {
+    log.warn({ tool: call.name, itemId: task.itemId }, 'tool-error gate: no plumbing; auto-continuing');
+    return 'continue';
+  }
+
+  const gateId = `tool-error-${call.name}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const inputSummary = summariseInput(call.input);
+  const truncatedErr = errorContent.length > 800
+    ? errorContent.slice(0, 800) + '...'
+    : errorContent;
+
+  const contentLines = [
+    `**Task:** ${task.question}`,
+    '',
+    `**Tool call:** \`${call.name}(${inputSummary})\``,
+    '',
+    '**Error:**',
+    '```',
+    truncatedErr,
+    '```',
+    '',
+    'Continuing lets the analyzer feed the error back into the model so it can ' +
+    'self-correct (try a sibling tool) or finish with low confidence. Aborting ' +
+    'marks the task blocked so the report calls out the failure verbatim ' +
+    'instead of papering over it with a fabricated answer.',
+  ];
+
+  send({
+    id: requestId,
+    stream: 'gate',
+    data: {
+      gateId,
+      title: `Data Analyzer tool error: ${call.name}`,
+      content: contentLines.join('\n'),
+      format: 'markdown',
+      actions: [
+        { name: 'continue', label: 'Continue' },
+        { name: 'abort',    label: 'Abort task' },
+      ],
+    },
+  });
+
+  try {
+    return await new Promise<'continue' | 'abort'>((resolve, reject) => {
+      channel.registerExternalGate(
+        gateId,
+        (reply) => resolve(reply.action === 'abort' ? 'abort' : 'continue'),
+        reject,
+      );
+    });
+  } catch {
+    // Channel closed / gate cancelled before the user replied -- don't
+    // wedge the run; treat as continue and let downstream confidence
+    // downgrades + reviewer rules catch the bad evidence.
+    return 'continue';
+  }
 }
 
 // ---------------------------------------------------------------------------

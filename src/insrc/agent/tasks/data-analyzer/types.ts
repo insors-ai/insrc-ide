@@ -144,7 +144,15 @@ export interface DataFinding {
 export type BlockedReason =
   | 'connection-denied'
   | 'pii-gate-denied'
-  | 'no-connections';
+  | 'no-connections'
+  /**
+   * The user clicked "Abort" on the tool-error gate after a tool call
+   * failed mid-analysis. The runner stops the bounded loop early and
+   * returns the partial result; the orchestrator routes it to the
+   * "blocked" bucket so the synthesise pass can surface the failure
+   * verbatim instead of treating the partial finding as accepted.
+   */
+  | 'tool-error-abort';
 
 /**
  * Parsed per-task analyzer output. Invariants enforced by the parser

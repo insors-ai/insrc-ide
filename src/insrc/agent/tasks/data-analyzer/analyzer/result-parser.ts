@@ -41,7 +41,7 @@ const VALID_CONFIDENCES: ReadonlySet<Confidence> = new Set<Confidence>([
 ]);
 
 const VALID_BLOCKED_REASONS: ReadonlySet<BlockedReason> = new Set<BlockedReason>([
-  'connection-denied', 'pii-gate-denied', 'no-connections',
+  'connection-denied', 'pii-gate-denied', 'no-connections', 'tool-error-abort',
 ]);
 
 const SAMPLE_VALUE_MAX_CHARS = 1024;
