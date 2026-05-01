@@ -31,12 +31,18 @@ interface AccessRevokePrefixRequest {
   readonly prefix?: unknown;
 }
 
-function resolveSession(req: { sessionId?: unknown }) {
+type ResolvedSession = NonNullable<ReturnType<typeof getActiveSession>>;
+
+type SessionResolution =
+  | { ok: false; error: string }
+  | { ok: true; session: ResolvedSession };
+
+function resolveSession(req: { sessionId?: unknown }): SessionResolution {
   const id = typeof req.sessionId === 'string' ? req.sessionId : '';
-  if (id.length === 0) return { error: 'sessionId required' as const };
+  if (id.length === 0) return { ok: false, error: 'sessionId required' };
   const session = getActiveSession(id);
-  if (!session) return { error: `session ${id} not found` as const };
-  return { session };
+  if (!session) return { ok: false, error: `session ${id} not found` };
+  return { ok: true, session };
 }
 
 /**
@@ -68,7 +74,7 @@ export async function snapshotRpc(
     }
 > {
   const r = resolveSession(params);
-  if ('error' in r) return { error: r.error };
+  if (!r.ok) return { error: r.error };
   const approvals = r.session.access.list().map(a => ({
     kind: a.kind,
     key: a.key,
@@ -97,7 +103,7 @@ export async function revokeRpc(
   params: AccessRevokeRequest,
 ): Promise<{ error: string } | { ok: true }> {
   const r = resolveSession(params);
-  if ('error' in r) return { error: r.error };
+  if (!r.ok) return { error: r.error };
   const kind = typeof params.kind === 'string' ? params.kind : '';
   const key = typeof params.key === 'string' ? params.key : '';
   if (kind.length === 0 || key.length === 0) {
@@ -118,7 +124,7 @@ export async function revokePrefixRpc(
   params: AccessRevokePrefixRequest,
 ): Promise<{ error: string } | { ok: true }> {
   const r = resolveSession(params);
-  if ('error' in r) return { error: r.error };
+  if (!r.ok) return { error: r.error };
   const kind = typeof params.kind === 'string' ? params.kind : '';
   const prefix = typeof params.prefix === 'string' ? params.prefix : '';
   if (kind.length === 0 || prefix.length === 0) {
