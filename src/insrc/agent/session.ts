@@ -15,6 +15,7 @@ import {
   type AccessStore,
   type AccessAuditLog,
 } from '../shared/access.js';
+import { DefaultSkillAuditLog, type SkillAuditLog } from '../daemon/skills/audit.js';
 
 export interface SessionOpts {
   repoPath: string;
@@ -96,6 +97,18 @@ export class Session {
    * dies with the session.
    */
   readonly accessAudit: AccessAuditLog = new DefaultAccessAuditLog();
+
+  /**
+   * Chronological audit trail of skill invocations
+   * (plans/analyzers/skills-core.md Phase 7.2). Every runSkill emit
+   * -- skill-start / feasibility / tool-call / sub-skill / end /
+   * error / over-budget -- writes one event. Powers the
+   * `skill.audit` RPC and the workbench skill-trace panel.
+   *
+   * Capped at 1000 entries; oldest roll off. Session-scoped: dies
+   * with the session.
+   */
+  readonly skillAudit: SkillAuditLog = new DefaultSkillAuditLog();
 
   constructor(opts: SessionOpts) {
     this.id = opts.id ?? randomUUID();

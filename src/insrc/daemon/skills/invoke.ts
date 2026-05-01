@@ -98,6 +98,16 @@ export async function runSkill<I = unknown, O = unknown>(
   const depth = (opts?.skillDepth ?? 0);
   const callerOwner = opts?.callerOwner;
 
+  // Phase 7.2: session-scoped emit. Every event flows to the daemon
+  // log AND the session's bounded SkillAuditLog so the `skill.audit`
+  // RPC + the workbench skill-trace panel can replay what happened.
+  // The closure captures `runnerDeps` so sub-skill re-entries push
+  // into the same session audit (same session, same closure-builder).
+  const emit = (event: SkillEvent): void => {
+    log.info(event, `skill-event:${event.kind}`);
+    runnerDeps.session.skillAudit.push(event);
+  };
+
   // 1. Lookup.
   const skill = getSkill(id, opts?.version);
   if (skill === undefined) {
@@ -456,21 +466,6 @@ function nullValueFor<O>(): O {
   // callers downstream of a low-confidence result should consult
   // confidence + notes before reading value.
   return {} as O;
-}
-
-// ---------------------------------------------------------------------------
-// Telemetry emit
-// ---------------------------------------------------------------------------
-
-/**
- * Module-level telemetry sink. Logs structured events at info level
- * so they show up in `module: 'skills'` lines in the daemon log. The
- * audit ring buffer (Phase 7.2 of skills-core) plugs in here in a
- * follow-up commit -- when it lands, it taps this same emit and
- * keeps a per-session window.
- */
-function emit(event: SkillEvent): void {
-  log.info(event, `skill-event:${event.kind}`);
 }
 
 // ---------------------------------------------------------------------------

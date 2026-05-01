@@ -34,6 +34,8 @@ export { runSkill } from './invoke.js';
 export type { SkillRunnerDeps, SkillRunnerToolCtx } from './invoke.js';
 export { getSkill, listSkills, listSkillsByFamily, listSkillsByOwner } from './registry.js';
 export { assertFeasible } from './feasibility.js';
+export { DefaultSkillAuditLog } from './audit.js';
+export type { SkillAuditLog } from './audit.js';
 export type {
   Feasibility,
   Precondition,

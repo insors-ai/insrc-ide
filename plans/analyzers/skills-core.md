@@ -60,10 +60,10 @@ data-analyzer's runner is built.
 
 ## Status
 
-Substrate landed in commit `0f0c80917df`; RPC surface in `61222a86c2b`;
-soft-budget telemetry shipped next. Remaining work: audit ring buffer
-(7.2), test harness (8.1 / 8.2), migration tooling (6.2). Per-session
-telemetry (7.1) is partial; `skill.audit` ships with 7.2.
+Substrate + RPC + soft-budget + audit ring buffer all shipped (commits
+`0f0c80917df`, `61222a86c2b`, `726b77fa149`, plus the audit slice in
+this commit). Remaining work: test harness (8.1 / 8.2), migration
+tooling (6.2 -- deferred until v2 of any skill ships).
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -84,8 +84,8 @@ telemetry (7.1) is partial; `skill.audit` ships with 7.2.
 | 5.2 | Skill-level token / time budgets | done | `softBudgetMs` checked after execute() (success + execute-threw paths); over-budget skills emit `skill-over-budget` telemetry + caller-visible note. Telemetry-only -- no hard timeout per the no-walltime-caps lesson |
 | 6.1 | Versioning policy | done | hard-coded version: 1; lookup-by-version supported |
 | 6.2 | Deprecation + migration helper | pending | optional v1; tooling lands when v2 of any skill ships |
-| 7.1 | Telemetry: per-skill duration / success / confidence | partial | structured `SkillEvent`s emitted to `module: 'skills'` log lines; no per-session audit ring buffer yet |
-| 7.2 | Audit log entry per `runSkill` | pending | session-scoped; distinct from access audit |
+| 7.1 | Telemetry: per-skill duration / success / confidence | done | structured `SkillEvent`s emitted to `module: 'skills'` log lines AND the session's bounded ring buffer (see 7.2) |
+| 7.2 | Audit log entry per `runSkill` | done | per-session 1000-entry ring buffer in [daemon/skills/audit.ts](../../src/insrc/daemon/skills/audit.ts); read via `skill.audit` RPC with optional `limit` / `skillId` / `kind` filters |
 | 8.1 | Test harness | pending | `runSkillIsolated()` + scripted SkillDeps |
 | 8.2 | Skill smoke-test contract | pending | each skill ships with a fixture |
 | 9.1 | First migration target | done | `data.lineage.read-write-callsites` shipped in [daemon/skills/built-ins/data-lineage.ts](../../src/insrc/daemon/skills/built-ins/data-lineage.ts) |

@@ -1140,6 +1140,10 @@ async function main(): Promise<void> {
 			const mod = await import('./skills-rpc.js');
 			return mod.invokeRpc(params as Parameters<typeof mod.invokeRpc>[0]);
 		},
+		'skill.audit': async (params) => {
+			const mod = await import('./skills-rpc.js');
+			return mod.auditRpc(params as Parameters<typeof mod.auditRpc>[0]);
+		},
 		'artifacts.getOfflineBundleStatus': async () => {
 			const mod = await import('./artifacts-rpc.js');
 			return mod.getOfflineBundleStatusRpc();

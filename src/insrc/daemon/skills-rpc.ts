@@ -1,19 +1,16 @@
 /**
- * Skill RPCs (plans/analyzers/skills-core.md Phase 2.3).
+ * Skill RPCs (plans/analyzers/skills-core.md Phases 2.3 + 7.2).
  *
  * Workbench / CLI -facing window into the skill registry + invoker.
- * Three RPCs ship in this slice:
+ * Four RPCs:
  *
  *   skill.list         enumerate registered, family-enabled skills
  *   skill.feasibility  preflight a skill against a session without executing
  *   skill.invoke       run a skill via the same runSkill pipeline the
  *                      `skill_invoke` meta-tool uses; returns the full
  *                      SkillResult
- *
- * `skill.audit` is intentionally NOT shipped here -- it depends on the
- * per-session SkillEvent ring buffer covered by Phase 7.2, which lands
- * separately. Until then telemetry events are emitted only as
- * `module: 'skills'` log lines (the runner's emit() at invoke.ts:423).
+ *   skill.audit        snapshot of the session's SkillEvent ring buffer;
+ *                      powers the workbench skill-trace panel
  *
  * All RPCs that need a runtime session resolve through chat-handler's
  * `getRunnerSession`; callers must pass an active sessionId. The
@@ -32,6 +29,7 @@ import { getSkill, listSkills } from './skills/registry.js';
 import type {
   ProviderAffinity,
   SkillContext,
+  SkillEvent,
   SkillOwner,
   SkillResult,
 } from './skills/types.js';
@@ -249,4 +247,60 @@ export async function invokeRpc(
   );
 
   return { ...result, skillId };
+}
+
+// ---------------------------------------------------------------------------
+// skill.audit
+// ---------------------------------------------------------------------------
+
+interface AuditRequest {
+  readonly sessionId?: unknown;
+  readonly limit?: unknown;
+  readonly skillId?: unknown;
+  readonly kind?: unknown;
+}
+
+/**
+ * Snapshot of the session's SkillEvent ring buffer (Phase 7.2). Read
+ * only -- v1 has no revoke / clear via RPC; events roll off the bounded
+ * 1000-entry ring as new ones arrive. The workbench's skill-trace panel
+ * polls this for the "what skills did this run touch?" view.
+ *
+ * Optional filters:
+ *   - `limit`   -- last N events (default: full buffer)
+ *   - `skillId` -- only events for that skill id
+ *   - `kind`    -- only events of that telemetry kind
+ *
+ * Filters compose; we apply skillId / kind first then take the tail.
+ */
+export async function auditRpc(
+  params: AuditRequest,
+): Promise<{ error: string } | { events: readonly SkillEvent[] }> {
+  const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
+  if (sessionId.length === 0) return { error: 'sessionId required' };
+
+  const session = getRunnerSession(sessionId);
+  if (session === undefined) return { error: `session ${sessionId} not found` };
+
+  const skillIdFilter = typeof params.skillId === 'string' && params.skillId.length > 0
+    ? params.skillId
+    : undefined;
+  const kindFilter = typeof params.kind === 'string' && params.kind.length > 0
+    ? params.kind
+    : undefined;
+  const limit = typeof params.limit === 'number' && params.limit > 0
+    ? Math.floor(params.limit)
+    : undefined;
+
+  let events = session.skillAudit.list();
+  if (skillIdFilter !== undefined) {
+    events = events.filter(e => 'skillId' in e && e.skillId === skillIdFilter);
+  }
+  if (kindFilter !== undefined) {
+    events = events.filter(e => e.kind === kindFilter);
+  }
+  if (limit !== undefined && events.length > limit) {
+    events = events.slice(-limit);
+  }
+  return { events };
 }
