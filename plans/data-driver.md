@@ -55,6 +55,14 @@ and in the code-analyzer design doc's
   the optional `schemaSource: 'prisma'` branch on RDBMS drivers.
 - [`src/insrc/shared/keystore.ts`](../src/insrc/shared/keystore.ts)
   -- keytar-backed OS keychain. Re-used for DB URL secrets.
+- [`plans/data-driver-duckdb-files.md`](data-driver-duckdb-files.md)
+  -- consolidates the file-driver portion of this plan onto a
+  DuckDB-backed driver + Parquet converters for non-native formats.
+  Adds directory-as-table support (with recursive descent). Replaces
+  the per-format file drivers shipped in §1.4 below with a single
+  DuckDB-backed implementation; the bespoke avro / bson / fixed-width
+  / xlsx logic moves into thin converters that produce Parquet for
+  DuckDB to query.
 
 ---
 
@@ -63,11 +71,11 @@ and in the code-analyzer design doc's
 | Phase | Scope                                                                   | Status |
 |-------|-------------------------------------------------------------------------|--------|
 | 0     | Foundations: config schema, driver registry, family interfaces, keychain integration | done (225e10ec68a) |
-| 1     | Core drivers: 5 RDBMS + 4 KV + 8 file (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width)               | partial -- 17 drivers + Prisma fast path + integration tests for postgres / mysql / redis / mongodb landed. mssql / oracle / cassandra / nats integration tests still open (heavier images / niche-er deployments). |
+| 1     | Core drivers: 5 RDBMS + 4 KV + file family (CSV / JSONL / JSON / Excel / Avro / Arrow / BSON / fixed-width / Parquet -- consolidated under [data-driver-duckdb-files.md](data-driver-duckdb-files.md)) | partial -- 17 drivers + Prisma fast path + integration tests for postgres / mysql / redis / mongodb landed. mssql / oracle / cassandra / nats integration tests still open. The 9 standalone file drivers shipped in this phase are being replaced by one DuckDB-backed driver + four converter modules per the new plan. |
 | 2     | Setup UX: palette commands, Data Sources pane, connection tester                    | done (uncommitted) |
 | 3     | Tool surface: `db.list_connections` + `db.sql.*` + `db.kv.*` + `db.file.*`          | done -- 10 tools landed (incl. db:sql:explain across all 5 RDBMS dialects). Browser service has list / save / remove / test (Phase 2). |
 | 4     | Guardrails: raw-query rejection, row/time caps, namespace scoping, opt-in           | done -- caps + raw-query denylist + KV namespace scoping landed in phase 1, per-repo opt-in short-circuit landed in phase 3. PII masking explicitly dropped (target is dev/staging, not prod). |
-| 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB, Memcached       | done -- 6 new kinds shipped (cockroachdb, clickhouse, dynamodb, etcd, memcached, parquet); valkey / keydb / tsv had already shipped in phase 1. 23 distinct driver kinds total. |
+| 5     | Extended drivers: DynamoDB, etcd, ClickHouse, Parquet, CockroachDB, Memcached       | done -- 6 new kinds shipped (cockroachdb, clickhouse, dynamodb, etcd, memcached, parquet); valkey / keydb / tsv had already shipped in phase 1. 23 distinct driver kinds total. **Note**: the parquet driver shipped here is being absorbed into the consolidated DuckDB-backed file driver per [data-driver-duckdb-files.md](data-driver-duckdb-files.md). |
 | 6     | Schema indexing: graph-resident `db_table` / `db_column` entities + ORM-aware linking | todo |
 | 7     | Sampling extensions: `random` / `stratified` row strategies + RDBMS JSON shape inspection | todo |
 
@@ -285,36 +293,38 @@ Shared logic in `src/insrc/daemon/db/drivers/kv-common.ts`:
 - `scan` cap 500; `sampleShape` sample cap 50; 5 s wall-clock
   timeout everywhere (`AbortSignal.timeout`).
 
-### 1.4 File -- CSV, JSONL, JSON, Excel, Avro, Arrow, BSON, fixed-width
+### 1.4 File family -- moved to a sibling plan
 
-Every file kind below is **tabular-leaning** (rdbms-shape), with one
-exception -- single-document JSON falls back to kv-shape when the
-root is an object rather than an array.
+The file-family drivers (csv, tsv, jsonl, ndjson, json, parquet,
+arrow, feather, xlsx, avro, bson, fixed-width -- 12 distinct kinds
+in total) are now owned by
+[`plans/data-driver-duckdb-files.md`](data-driver-duckdb-files.md).
+That plan replaces every per-format driver implementation in this
+section with **one DuckDB-backed driver** plus **four converter
+modules** for the formats DuckDB can't read natively, and adds
+**directory-as-table** semantics with a recursive descent option.
 
-| Kind        | npm driver              | Family-surface                                  |
-|-------------|-------------------------|-------------------------------------------------|
-| csv         | `csv-parse`             | rdbms-shape; header row -> columns; type inference samples first 100 rows. |
-| jsonl       | none (stdlib)           | rdbms-shape; each line is a record; `describe` samples first 100 lines, merges observed fields into a union schema. |
-| json        | none (stdlib)           | kv-shape (`get` returns the whole doc; `sampleShape` over its top-level). If the root is an array-of-objects, auto-promotes to rdbms-shape. |
-| xlsx        | `exceljs`               | rdbms-shape. **Each sheet is a `target`** (`describe(sheetName)` / `sample(sheetName, opts)`); `list_targets` for multi-sheet files. Streaming read; first row treated as header unless `options.header === false`. |
-| avro        | `avsc`                  | rdbms-shape. Schema is in the OCF header, so `describe` is zero-cost (no row sample needed). Streamed decode via `avsc.createFileDecoder` for `sample`. |
-| arrow       | `apache-arrow`          | rdbms-shape. Covers `.arrow` (IPC stream / file) + `.feather` (Arrow v2). Columnar format is memory-mapped via `RecordBatchFileReader` / `RecordBatchStreamReader`; column types come from the schema directly. |
-| bson        | `bson` (official)       | rdbms-shape when the file is a stream of documents (typical `mongodump` output; each doc is a record). `describe` samples first 100 docs and merges observed fields. |
-| fixed-width | none (hand-rolled)      | rdbms-shape. **Requires a column spec** in `options.columns: { name, start, length, type }[]` -- there is no in-band schema, so the config carries it. No library dep; parser is ~50 LoC on a streamed read. |
+The historical per-format-driver design (`csv-parse`, `avsc`,
+`apache-arrow`, etc.) lived here in earlier drafts of this document
+and shipped between Phase 1 round 3 and Phase 5. It is being
+removed from this plan to avoid two-source-of-truth drift; see the
+new plan for:
 
-- File drivers resolve `path` relative to the repo root. Absolute
-  paths and paths that escape the repo go through the fs-access
-  gate from the analyzer design (§7.3).
-- `sample()` streams the file wherever the format allows -- never
-  read the whole thing into memory. The 50-row limit applies the
-  same way.
-- Results include `metadata.fileSize` and `metadata.rowCountHint`
-  (exact once we've streamed to EOF; otherwise `>=<N>`). Arrow +
-  Avro + Parquet carry exact row counts in their footers / headers
-  and populate it without streaming.
-- **Binary formats (Avro / Arrow / BSON / Parquet / xlsx)** also
-  populate `metadata.schemaSource = "header"` to distinguish from
-  text formats where the schema is inferred from samples.
+- Driver class + reader-selection table (csv → `read_csv_auto`,
+  parquet → `read_parquet`, etc.)
+- Converter modules for avro / bson / fixed-width / xlsx (Phase 2)
+- Cache layout, invalidation, eviction (Phase 3)
+- Connection-config additions: `path` may be a directory,
+  `recursive: boolean`, `partitioning: 'hive' | 'none'` (Phase 4)
+- Files to be deleted from `src/insrc/daemon/db/drivers/`
+  (Phase 7.1 -- complete deletion list)
+
+The `FileDriver` interface in
+[`shared/db-driver.ts`](../src/insrc/shared/db-driver.ts) stays;
+only the implementation behind it changes. The `db_file_*` tool
+surface (Phase 3 of this plan) keeps its existing shape, with two
+new tools (`db_file_aggregate`, `db_file_list_files`) gained on
+top per the new plan's Phase 6.
 
 ### 1.5 Driver tests
 
@@ -327,8 +337,11 @@ root is an object rather than an array.
   opt in without always running containers.
 - **KV drivers** -- same shape; Redis + MongoDB containers in the
   compose file.
-- **File drivers** -- purely local fixtures under
-  `test/fixtures/db-driver/files/`. No env flag needed.
+- **File drivers** -- the file-family tests are owned by
+  [`plans/data-driver-duckdb-files.md`](data-driver-duckdb-files.md);
+  they cover the DuckDB-backed driver path plus the converters for
+  avro / bson / fixed-width / xlsx. No env flag needed; fixtures
+  live under `test/fixtures/db-driver/files/`.
 
 ---
 

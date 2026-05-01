@@ -47,6 +47,16 @@ the fact.
 - [plans/data-driver.md](../data-driver.md) -- shipped; the substrate the
   source-introspection / sampling / aggregation tools call into. This plan
   adds a new `db_aggregate_*` tool family on top of the driver.
+- [plans/data-driver-duckdb-files.md](../data-driver-duckdb-files.md) --
+  **hard prerequisite**, lands before this plan starts. Consolidates
+  the file driver layer onto a single DuckDB-backed driver with Parquet
+  converters for non-native formats and adds directory-as-table support
+  (recursive descent). By the time any slice in this plan begins,
+  `db_file_aggregate`, `db_file_list_files`, and the consolidated
+  `db_file_describe` / `db_file_sample` / `db_file_sample_shape` are
+  all in place; this plan does not re-implement them. File-flavoured
+  Family 5 (quality / distribution) skills consume those tools as
+  shipped primitives.
 - [plans/access-gate.md](../access-gate.md) -- shipped; skill calls inherit
   the universal access gate via the tools they call.
 - [plans/content-generator.md](../content-generator.md) -- shipped; the
@@ -61,14 +71,12 @@ All slices pending. Skill core (skills-core.md) must land first.
 | 0.1 | `db_sql_aggregate` tool | pending | count/sum/avg/stddev/percentile via SQL |
 | 0.2 | `db_sql_histogram` tool | pending | bucketed counts |
 | 0.3 | `db_sql_distinct` tool | pending | distinct-count + top-N |
-| 0.4 | `db_file_aggregate` tool | pending | DuckDB over csv/parquet/jsonl in-process |
-| 0.5 | `db_correlation_matrix` tool | pending | pairwise correlation; SQL or DuckDB |
-| 0.6 | `db_outliers` tool | pending | IQR / Z-score per column |
-| 0.7 | sampling-confidence library | pending | sample-size sufficiency + CI helpers |
-| 0.8 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
-| 0.9 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
-| 0.10 | `db_file_list_files` tool | pending | enumerate files within an active file-connection root. Required by 1.3 (today only `db_file_describe` for one file exists) |
-| 0.11 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
+| 0.4 | `db_correlation_matrix` tool | pending | pairwise correlation; native SQL (RDBMS connections) or via the existing DuckDB-backed file driver (file connections). NOT a cross-driver fallback for KV / Mongo: those refuse via precondition rather than return sample-based numbers as if they were the population |
+| 0.5 | `db_outliers` tool | pending | IQR / Z-score per column |
+| 0.6 | sampling-confidence library | pending | sample-size sufficiency + CI helpers |
+| 0.7 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
+| 0.8 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
+| 0.9 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
 | 1.1 | source-introspection: rdbms | pending | describe-table, list-tables, list-indexes |
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
 | 1.3 | source-introspection: file | pending | one variant per kind (csv, parquet, jsonl, ...) |
@@ -196,17 +204,26 @@ two reasons:
 1. **Family 5 cannot land without aggregation tools.** Quality / distribution
    / dependency skills will hallucinate numbers if asked to compute them in
    the LLM; the only safe path is to push aggregation into the driver and
-   let skills consume structured numerical results. Slices 0.1-0.7 below.
+   let skills consume structured numerical results. Slices 0.1-0.6 below
+   ship the **RDBMS aggregation** primitives. The **file-side aggregation**
+   primitives (`db_file_aggregate`, `db_file_list_files`, the consolidated
+   `db_file_describe` / `db_file_sample` / `db_file_sample_shape`,
+   directory-as-table semantics) are already in place by this point: the
+   prerequisite plan
+   [data-driver-duckdb-files.md](../data-driver-duckdb-files.md) lands
+   first. **Skills in subsequent phases can assume the file tool surface
+   exists; this plan does not re-define it.**
 
-2. **Phase 1 / 2 introspection skills depend on tool primitives that are
-   not yet registered.** The existing `db_*` family covers SQL describe /
-   sample, KV scan / get / sample-shape, and file describe / sample / shape
-   -- but NOT keyspace / namespace enumeration on the KV side, and NOT
-   file-listing within a connection root. Skills that need to "tell me what
-   collections / namespaces / files exist on this connection" hard-fail on
-   the `required-tools` precondition without these. Slices 0.8-0.10 below.
+2. **Phase 1 / 2 introspection skills depend on KV-side tool primitives
+   that are not yet registered.** The existing `db_*` family covers SQL
+   describe / sample, KV scan / get / sample-shape, and (via the
+   DuckDB-backed driver) the full file query surface -- but NOT
+   keyspace / namespace enumeration on the KV side. Skills that need to
+   "tell me what collections / namespaces exist on this connection"
+   hard-fail on the `required-tools` precondition without these.
+   Slices 0.7-0.8 below close that gap.
 
-Slice 0.11 is a naming reconciliation, not new code: the plan refers to a
+Slice 0.9 is a naming reconciliation, not new code: the plan refers to a
 `doc` source family (Phase 1.4 / 2.4) but the data-driver classifies
 MongoDB / Cassandra under `kv`. Either the driver grows a `doc` family
 distinction (Mongo collections + Cassandra column-families have richer
@@ -245,25 +262,29 @@ Inputs: `connectionId`, `target`, `column`, `topN` (default 20). Output:
 ordered by frequency descending; ties broken by lexicographic order to
 keep results deterministic across re-runs (cache-friendly).
 
-### 0.4 `db_file_aggregate`
-
-Same surface as 0.1, executed via embedded DuckDB over the file's
-content. Supports csv, tsv, parquet, jsonl, ndjson, json (single-doc
-falls back to sampling -- the file is read fully into memory and
-aggregated in process). Cap: 1 GB total file size; above that the tool
-returns `confidence: low` with a "file too large for in-process
-aggregation" note. (DuckDB streams parquet so this cap is mostly an
-out-of-memory guard for csv / json.)
-
-### 0.5 `db_correlation_matrix`
+### 0.4 `db_correlation_matrix`
 
 Inputs: `connectionId`, `target`, `columns` (≤ 10), `method`
 (`pearson` | `spearman`). Output: a symmetric matrix of pairwise
-coefficients. SQL implementation uses driver-native correlation
-functions where available; falls back to DuckDB-over-sample for
-drivers without (Cassandra, Mongo).
+coefficients.
 
-### 0.6 `db_outliers`
+Coverage:
+
+- **RDBMS connections**: native SQL via `corr()` (Postgres / DuckDB) or
+  per-dialect computed expressions (`SUM((x-avg(x))*(y-avg(y))) / ...`)
+  for dialects without a built-in.
+- **File connections**: routed through the DuckDB-backed file driver's
+  `aggregate()` path; DuckDB has `corr` natively.
+- **KV / document connections (Cassandra, Mongo, Redis)**: precondition
+  fails with `connection-family: ['rdbms', 'file']`. The skill returns
+  `confidence: low` + a "correlation not supported on this connection
+  family; pull a sample first if you want sample-based correlation"
+  note. Earlier drafts of this slice claimed a "DuckDB-over-sample
+  fallback" for non-SQL drivers; that's removed -- a sample-based
+  correlation presented as if it were the full-table answer is the
+  same correctness failure as letting the LLM compute it.
+
+### 0.5 `db_outliers`
 
 Inputs: `connectionId`, `target`, `column`, `method`
 (`iqr` | `zscore`). Output: `{count, examples: Array<{rowKey?, value}>}`
@@ -272,7 +293,7 @@ tool returns `confidence: low` and a note about the missing
 implementation -- the skill calling it is responsible for falling back
 gracefully.
 
-### 0.7 Sampling-confidence library
+### 0.6 Sampling-confidence library
 
 A shared helper module (`daemon/db/sampling-confidence.ts`) exposing:
 
@@ -295,7 +316,7 @@ running a Shapiro-Wilk normality test" into a confidence value the registry
 can clamp on. **No skill implements its own sample-size threshold logic;
 they all consult this library.**
 
-### 0.8 `db_kv_list_namespaces`
+### 0.7 `db_kv_list_namespaces`
 
 Inputs: `connectionId`. Output: `Array<{name, kind, approxKeyCount?}>`.
 Per-driver semantics:
@@ -313,7 +334,7 @@ connection" without per-driver branching. `approxKeyCount` is best-effort;
 omit when the driver has no cheap count path. Required by Phase 1.2
 (`source-introspection: kv -> list-namespaces`).
 
-### 0.9 `db_kv_describe_namespace`
+### 0.8 `db_kv_describe_namespace`
 
 Inputs: `connectionId`, `namespace`. Output: a NamespaceShape document
 that mirrors the existing `db_kv_sample_shape` envelope but adds
@@ -323,20 +344,9 @@ new tool wraps it with namespace-scoping logic and consolidates the
 shape view that `describe-namespace` skills need. Required by Phase 1.2
 (`source-introspection: kv -> describe-namespace`).
 
-### 0.10 `db_file_list_files`
+### 0.9 doc-family naming reconciliation
 
-Inputs: `connectionId`, optional `globPattern` (default `**/*`), optional
-`limit` (default 200). Output: `Array<{path, size, kind}>` where `kind`
-is the file-driver classification (csv / parquet / jsonl / ...). Today
-only `db_file_describe` exists, which describes ONE file given its path;
-file-flavoured skills need to enumerate first. Cap at 200 by default
-(deeper enumeration is a sampling concern, not introspection).
-Required by Phase 1.3 (`source-introspection: file`) when the
-target is a directory rather than a single file.
-
-### 0.11 doc-family naming reconciliation
-
-No code lands for 0.11 -- it's the plan-level decision needed before any
+No code lands for 0.9 -- it's the plan-level decision needed before any
 of Phase 1.4 / 2.4 / doc-flavoured 5e (PII against Mongo) can land.
 
 The data-driver in `daemon/db/drivers/` classifies MongoDB and Cassandra
