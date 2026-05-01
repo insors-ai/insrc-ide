@@ -200,6 +200,17 @@ async function main(): Promise<void> {
 	registerCodeAnalyzerCrossAgentTools();
 	registerDataAnalyzerCrossAgentTools();
 
+	// 6e. Register the skill registry (plans/analyzers/skills-core.md).
+	//     Skills depend on tools (toolDeps) so this runs strictly after
+	//     all tool / cross-agent registrations. The bootstrap is
+	//     dependency-aware: atomic skills register before composites
+	//     so the registry's sub-skill check passes. v1 ships one
+	//     migration target -- data.lineage.read-write-callsites -- as
+	//     proof of substrate; per-family build-outs land in
+	//     plans/analyzers/data-analyzer-skills.md.
+	const { registerAllSkills } = await import('./skills/index.js');
+	registerAllSkills();
+
 	// 7. Start IPC server
 	const server = new IpcServer({
 		'repo.add': async (params) => {
