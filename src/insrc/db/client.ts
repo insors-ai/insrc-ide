@@ -5,6 +5,12 @@ import { cpus } from 'node:os';
 import { dirname } from 'node:path';
 import { PATHS } from '../shared/paths.js';
 import { KUZU_STATEMENTS } from './schema.js';
+import { DUCKDB_GRAPH_STATEMENTS } from './duckdb-graph-schema.js';
+import {
+  getDuckDBGraphClient,
+  resetDuckDBGraphClient,
+  type GraphClient,
+} from './duckdb-graph-client.js';
 
 /**
  * Cap on internal worker threads per Kuzu Connection. The default
@@ -41,6 +47,18 @@ export interface DbClients {
    * visible to `graphReader` immediately.
    */
   graphReader: kuzu.Connection;
+  /**
+   * DuckDB-backed graph client -- the Kuzu replacement landing in
+   * Phase A of plans/storage-migration-duckdb.md. During the dual-
+   * track / dual-write phases this is populated alongside `graph` /
+   * `graphReader`; per-file rewrites in A.3-A.6 issue writes to
+   * both, reads still come from Kuzu (A.8) until the read cutover
+   * in A.9. After A.10 the Kuzu fields are removed entirely.
+   *
+   * v1 uses one client for both reads and writes; DuckDB's MVCC
+   * makes a separate reader connection unnecessary.
+   */
+  duck: GraphClient;
   /** LanceDB connection — entity data with embeddings and BM25 FTS */
   lance: lancedb.Connection;
 }
@@ -86,26 +104,48 @@ export async function getDb(): Promise<DbClients> {
 
   const lance = await lancedb.connect(PATHS.lance);
 
-  _clients = { graph, graphReader, lance };
+  // DuckDB graph client is daemon-wide singleton from
+  // duckdb-graph-client.ts; the underlying DuckDB instance is the
+  // shared one from daemon/db/duckdb-pool.ts (lazy-init on first
+  // query). We just return the GraphClient handle here; opening
+  // the DuckDB instance happens on first use.
+  const duck = getDuckDBGraphClient();
+
+  _clients = { graph, graphReader, duck, lance };
   return _clients;
 }
 
 /**
- * Runs all Kuzu DDL statements and ensures LanceDB tables exist.
- * Idempotent — safe to call on every daemon startup.
+ * Runs Kuzu DDL + DuckDB graph DDL + ensures LanceDB tables exist.
+ * Idempotent -- safe to call on every daemon startup.
+ *
+ * During the dual-track phase (A.1-A.7) both schemas apply; once
+ * the Kuzu cutover lands (A.10) the Kuzu DDL block goes away.
  */
 export async function initDb(db: DbClients): Promise<void> {
   for (const stmt of KUZU_STATEMENTS) {
     await db.graph.query(stmt);
+  }
+  // Apply DuckDB graph schema. Failure here is non-fatal during the
+  // dual-track phase -- the daemon can still serve Kuzu-backed
+  // reads/writes -- but it does mean the dual-write path will fail
+  // on first use, surfacing the schema problem loudly enough to
+  // notice. We log + propagate.
+  for (const stmt of DUCKDB_GRAPH_STATEMENTS) {
+    await db.duck.exec(stmt);
   }
 }
 
 /**
  * Clears the singleton references.
  * Note: do NOT call kuzu close() — the 0.11.x Node.js binding segfaults on
- * explicit close; GC handles cleanup safely.
+ * explicit close; GC handles cleanup safely. The underlying DuckDB
+ * instance is closed separately by `closeDuckDB` in daemon/db/duckdb-pool.ts
+ * via the daemon's graceful-shutdown handler; we just clear the
+ * cached GraphClient handle here.
  */
 export async function closeDb(): Promise<void> {
   _clients = null;
   _kuzuDb  = null;
+  resetDuckDBGraphClient();
 }
