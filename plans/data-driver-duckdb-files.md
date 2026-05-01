@@ -150,41 +150,164 @@ fallback only kicks in on unsupported targets.
 The data-analyzer-skills Phase 0 budget for the wider integration
 work (memory sizing, connection lifecycle) lives in this plan.
 
-### 0.2 Singleton instance + memory budget
+### 0.2 Singleton instance + lifecycle + memory budget
+
+#### Lifecycle decision: lazy-init singleton, daemon-lifetime
+
+Four lifecycle models were considered:
+
+| Model | Init | Lifetime | Memory when idle | Cold-call latency |
+|---|---|---|---|---|
+| **A. Lazy singleton, daemon-lifetime** | first file query | until daemon shutdown | ~50-100 MB resident; `memory_limit` is a cap not a reservation | ~0 ms once warm |
+| **B. Lazy singleton + idle-timeout close** | first file query | closes after N min idle | reclaims everything | 50-100 ms after each timeout (re-init + extension load) |
+| **C. Per-connection instance** | first query on the connection | until the connection closes | scales with active file connection count | 50-100 ms per connection cold start |
+| **D. Per-call instance** | every query | one query | zero | 50-100 ms every query (kills DuckDB plan cache) |
+
+**v1 picks A** for three reasons:
+
+1. **Idle memory is small enough that auto-close pays for itself
+   poorly.** The `memory_limit='512MB'` is the per-query CAP, not a
+   reservation. DuckDB allocates pages for active result sets, sorts,
+   hash joins -- not idle metadata. Resident size on an idle daemon
+   is ~50-100 MB (prepared-statement cache + extension binaries).
+   Compared to the daemon's existing memory ledger -- Kuzu's 1 GB
+   pool, Ollama's ~3 GB resident, Node's 4-8 GB heap during indexing
+   -- 50-100 MB of DuckDB idle state is in the noise.
+2. **Plan cache + DESCRIBE-result cache stay warm.** Analyzer
+   skills hit the same file across many queries in one session
+   (sample → describe → aggregate → describe again). Re-initialising
+   between them throws away the cache that makes the second through
+   Nth query fast.
+3. **Simpler code path.** No idle-timer, no re-init-on-cold race,
+   no double-close handling around skill cancellations. The
+   complexity of B / C buys little when the savings are 50-100 MB.
+
+B remains a viable v2 if memory profiling under load shows the
+singleton is meaningful in the daemon's resident size. Until then
+it's premature.
+
+#### Concurrent-init guard
+
+Two skills firing on a cold daemon could call `getDuckDB()` in
+parallel; both would see `_db === null` and start their own
+`new Database(...)`. The guard collapses concurrent first-callers
+onto the same init promise:
 
 ```ts
 // daemon/db/duckdb-pool.ts (new)
 
-import { Database } from '@duckdb/node-api';
+import { Database, type Connection } from '@duckdb/node-api';
+import { getLogger } from '../../shared/logger.js';
+
+const log = getLogger('duckdb-pool');
 
 let _db: Database | null = null;
+let _initPromise: Promise<Database> | null = null;
 
-export function getDuckDB(): Database {
+export async function getDuckDB(): Promise<Database> {
   if (_db !== null) return _db;
-  _db = new Database(':memory:');
-  // Sized alongside Kuzu (1 GB pool) and Ollama (~3 GB resident on
-  // the test box). Default is conservative; users with bigger files
-  // bump via `~/.insrc/config.json` ductdb.memoryMb.
-  _db.run("PRAGMA memory_limit='512MB'");
-  // Lock down extensions: only the explicitly allowed ones are
-  // installed. `enable_external_access=false` blocks ATTACH /
-  // httpfs / load_extension at runtime.
-  _db.run("SET enable_external_access=false");
-  // Optional whitelist: load `arrow` extension at startup so
-  // `read_arrow_table` works for native-format `.arrow` files. We
-  // do NOT install postgres / mysql / sqlite attach extensions.
-  try { _db.run("INSTALL arrow; LOAD arrow"); }
-  catch (e) { /* Arrow IPC files won't read; non-fatal */ }
-  return _db;
+  if (_initPromise !== null) return _initPromise;
+
+  _initPromise = (async () => {
+    const t0 = Date.now();
+    const db = new Database(':memory:');
+    const conn = db.connect();
+    try {
+      // Cap on per-query buffer-pool memory. Sized alongside Kuzu's
+      // 1 GB pool + Ollama's ~3 GB resident; conservative for 16 GB
+      // dev laptops. Bumpable via `~/.insrc/config.json`
+      // duckdb.memoryMb.
+      await conn.run("PRAGMA memory_limit='512MB'");
+      // Lock down extensions: ATTACH / httpfs / load_extension all
+      // blocked at runtime. The `arrow` extension is the only one
+      // explicitly loaded (for native .arrow IPC reads).
+      await conn.run("SET enable_external_access=false");
+      try {
+        await conn.run("INSTALL arrow; LOAD arrow");
+      } catch (e) {
+        log.warn({ err: (e as Error).message }, 'arrow extension unavailable -- .arrow files will fall back to error');
+      }
+    } finally {
+      conn.close();
+    }
+    log.info({ initMs: Date.now() - t0 }, 'duckdb singleton initialised');
+    _db = db;
+    return db;
+  })();
+
+  try {
+    return await _initPromise;
+  } catch (e) {
+    // Init failed; clear the promise so the next caller can retry
+    // instead of awaiting a permanently-rejected promise.
+    _initPromise = null;
+    throw e;
+  }
 }
 
-export function closeDuckDB(): void {
-  if (_db !== null) { _db.close(); _db = null; }
+export async function closeDuckDB(): Promise<void> {
+  const inst = _db;
+  _db = null;
+  _initPromise = null;
+  if (inst !== null) {
+    try { await inst.close(); }
+    catch (e) { log.warn({ err: (e as Error).message }, 'duckdb close failed'); }
+  }
 }
 ```
 
-The instance is daemon-lifetime; query plans and DESCRIBE caches stay
-warm. Closed in the daemon shutdown handler alongside Kuzu / LanceDB.
+#### Per-query Connection handle
+
+DuckDB Database state is process-wide; Connections are cheap
+(`db.connect()` is sub-millisecond) and provide query-isolation +
+per-query cancel. Every tool / driver method acquires a fresh
+Connection per call, runs its query, and closes the Connection
+before returning:
+
+```ts
+export async function withConnection<T>(
+  fn: (conn: Connection) => Promise<T>,
+): Promise<T> {
+  const db = await getDuckDB();
+  const conn = db.connect();
+  try {
+    return await fn(conn);
+  } finally {
+    conn.close();
+  }
+}
+```
+
+This is the canonical entry point for DuckDB usage in the daemon.
+The DuckDB-backed file driver, the converters, and the
+`db_file_aggregate` tool all go through `withConnection`; they
+never call `getDuckDB()` directly except in cold-init paths where
+a long-lived Connection is genuinely warranted (none in v1).
+
+#### Daemon shutdown integration
+
+The daemon's existing graceful-shutdown handler (per
+`daemon/index.ts` -- the same handler that closes Kuzu and LanceDB)
+calls `closeDuckDB()` alongside the other DB closes. Order: Kuzu
+first (it has the WAL-flush dependency), then LanceDB, then DuckDB.
+DuckDB has no on-disk state to flush (everything is in-memory or
+in the file-converted cache, which is a build artifact); close is
+fast. The hard-exit backstop covers the case where close hangs.
+
+#### Memory budget recap
+
+| Knob | Value | Effect |
+|---|---|---|
+| `memory_limit` PRAGMA | 512 MB | per-query cap; only allocated under load |
+| Idle resident (no queries) | ~50-100 MB | prepared-statement cache + extension binaries |
+| Sustained under load | up to 512 MB | hash joins / sorts / large aggregations |
+| Configurable via | `~/.insrc/config.json` `duckdb.memoryMb` (default 512) | user override; same pattern as Kuzu's pool size |
+
+The 512 MB default sits within the daemon's overall budget on a
+16 GB machine alongside Kuzu (1 GB), Ollama (~3 GB), and Node
+(4-8 GB during indexing). Users with bigger files who hit
+"out of memory" errors from DuckDB bump the knob; users on tight
+machines reduce it.
 
 ### 0.3 Path-injection guard
 
@@ -938,6 +1061,17 @@ NOT enable `spatial`.
    it: `s3://...` paths flow through `read_parquet` once `httpfs`
    is loaded. **Default: not in v1; ship as a follow-up plan tied
    to credential management.**
+
+5. **Should the singleton auto-close on idle to reclaim the
+   ~50-100 MB resident size?** Phase 0.2 picks the always-on
+   lazy-init singleton (Model A) over the idle-timeout-close
+   variant (Model B) on the read that 50-100 MB is in the noise
+   compared to the daemon's existing memory ledger
+   (Kuzu 1 GB + Ollama ~3 GB + Node 4-8 GB). **Default: stay
+   always-on for v1.** Revisit if memory profiling under sustained
+   load shows the singleton's idle footprint is meaningful, or if
+   a "low-memory mode" daemon setting is added (in which case B
+   would be the natural opt-in).
 
 ## Lessons baked in from prior work
 
