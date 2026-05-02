@@ -1,137 +1,40 @@
-import { Schema, Field, Utf8, Int32, Float32, FixedSizeList } from 'apache-arrow';
-import type { Table } from '@lancedb/lancedb';
+/**
+ * DuckDB persistence for conversation sessions + turns
+ * (plans/storage-migration-duckdb.md Phase B.6).
+ *
+ * Two tables on the storage pool:
+ *
+ *   conversation_session — one row per session. Owned by chat / agent
+ *     controllers; lifecycle status (active / paused / completed /
+ *     discarded). 30-day TTL + 20-per-repo cap enforced by
+ *     `pruneConversations`.
+ *   conversation_turn — persistent turn store. Turns survive session
+ *     close and are compacted over time via tiered compression
+ *     (`tier`, `type`, `compacted_at`, `source_ids`).
+ *
+ * Both tables carry an `embedding FLOAT[N]` column with an HNSW
+ * cosine index (B.3 schema); `seedFromPrior` and `searchTurnsByRepo`
+ * route through it.
+ *
+ * Surface preserved verbatim from the LanceDB era so callers
+ * (daemon/index.ts, daemon/chat-sessions.ts, db/compaction.ts,
+ * cli/commands/conversation.ts) require no changes. The
+ * `resetTableCaches` no-op is kept for back-compat -- table-handle
+ * caching is an artifact of the LanceDB layer.
+ */
+
+import { arrayValue, type DuckDBArrayValue } from '@duckdb/node-api';
 import type { DbClient } from './client.js';
 import { loadConfig } from '../agent/config.js';
 
-// ---------------------------------------------------------------------------
-// LanceDB tables for conversation persistence.
-//
-// conversation_sessions — one row per closed session, retained for cross-
-//   session seeding. Pruned by 30-day TTL and 20-per-repo cap.
-//
-// conversation_turns — persistent turn store. Turns survive session close
-//   and are compacted over time via tiered compression.
-// ---------------------------------------------------------------------------
+const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 
 // ---------------------------------------------------------------------------
-// LanceDB SQL quoting helper
-// ---------------------------------------------------------------------------
-
-/**
- * LanceDB's `Table.update()` treats each value in the updates object as
- * a SQL expression, NOT a bind parameter. A raw string like 'brainstorm'
- * gets parsed as a field reference and throws "No field named brainstorm".
- * Every string we assign has to arrive double-quoted with internal
- * single-quotes escaped. Use this helper for string columns and leave
- * numeric / vector columns untouched.
- */
-function sqlStr(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-// ---------------------------------------------------------------------------
-// Entry types and tiers for compaction
+// Types
 // ---------------------------------------------------------------------------
 
 export type ConversationEntryType = 'turn' | 'directive' | 'summary' | 'merged';
 export type ConversationTier = 'hot' | 'warm' | 'cold' | 'archive';
-
-const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
-const ZERO_VEC = new Array<number>(EMBEDDING_DIM).fill(0);
-
-const SESSIONS_SCHEMA = new Schema([
-  new Field('id',             new Utf8(), false),
-  new Field('repo',           new Utf8(), false),
-  new Field('summary',        new Utf8(), false),
-  new Field('seenEntities',   new Utf8(), false), // JSON-encoded string[]
-  new Field('createdAt',      new Utf8(), false),
-  new Field('expiresAt',      new Utf8(), false),
-  // Session lifecycle metadata (plans/session-lifecycle.md Phase 1).
-  // `agent` + `category` identify which controller owns the session
-  // so Resume + Runs sidebar don't need to parse checkpoint state.
-  // `status` transitions active -> paused (checkpoint written) ->
-  // completed (pipeline finished) or discarded (explicit user action).
-  // `lastActivityAt` bumps on every checkpoint / turn so the sidebar
-  // can sort by recency.
-  new Field('agent',          new Utf8(), false),
-  new Field('category',       new Utf8(), false),
-  new Field('status',         new Utf8(), false),
-  new Field('lastActivityAt', new Utf8(), false),
-  new Field('vector', new FixedSizeList(EMBEDDING_DIM, new Field('item', new Float32(), true)), false),
-]);
-
-const TURNS_SCHEMA = new Schema([
-  new Field('id',          new Utf8(),  false), // sessionId:idx
-  new Field('sessionId',   new Utf8(),  false),
-  new Field('idx',         new Int32(), false),
-  new Field('user',        new Utf8(),  false),
-  new Field('assistant',   new Utf8(),  false),
-  new Field('entities',    new Utf8(),  false), // JSON-encoded string[]
-  new Field('createdAt',   new Utf8(),  false),
-  new Field('repo',        new Utf8(),  false), // repo path for per-repo queries
-  new Field('type',        new Utf8(),  false), // 'turn' | 'directive' | 'summary' | 'merged'
-  new Field('tier',        new Utf8(),  false), // 'hot' | 'warm' | 'cold' | 'archive'
-  new Field('compactedAt', new Utf8(),  false), // ISO timestamp, empty if not compacted
-  new Field('sourceIds',   new Utf8(),  false), // JSON string[] of merged source turn IDs
-  new Field('format',      new Utf8(),  false), // 'text' | 'markdown' | 'html' | 'code' | 'diff'
-  new Field('vector', new FixedSizeList(EMBEDDING_DIM, new Field('item', new Float32(), true)), false),
-]);
-
-// ---------------------------------------------------------------------------
-// Table accessors (module-level cache)
-// ---------------------------------------------------------------------------
-
-let _sessionsTable: Table | null = null;
-let _turnsTable: Table | null = null;
-
-async function getSessionsTable(db: DbClient): Promise<Table> {
-  if (_sessionsTable !== null) return _sessionsTable;
-  const names = await db.lance.tableNames();
-  if (names.includes('conversation_sessions')) {
-    _sessionsTable = await db.lance.openTable('conversation_sessions');
-    // Migrate: add session-lifecycle columns if absent (matches the
-    // `format` migration on the turns table). Safe on repeat startup --
-    // addColumns no-ops when the column already exists.
-    const schema = await _sessionsTable.schema();
-    const have = new Set(schema.fields.map((f: { name: string }) => f.name));
-    const additions: Array<{ name: string; valueSql: string }> = [];
-    if (!have.has('agent'))          additions.push({ name: 'agent',          valueSql: "''" });
-    if (!have.has('category'))       additions.push({ name: 'category',       valueSql: "''" });
-    if (!have.has('status'))         additions.push({ name: 'status',         valueSql: "'completed'" });
-    if (!have.has('lastActivityAt')) additions.push({ name: 'lastActivityAt', valueSql: "''" });
-    if (additions.length > 0) {
-      await _sessionsTable.addColumns(additions);
-    }
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _sessionsTable = await (db.lance as any).createEmptyTable('conversation_sessions', SESSIONS_SCHEMA);
-  }
-  return _sessionsTable!;
-}
-
-async function getTurnsTable(db: DbClient): Promise<Table> {
-  if (_turnsTable !== null) return _turnsTable;
-  const names = await db.lance.tableNames();
-  if (names.includes('conversation_turns')) {
-    _turnsTable = await db.lance.openTable('conversation_turns');
-    // Migrate: add 'format' column if missing (added after initial schema)
-    const schema = await _turnsTable.schema();
-    const hasFormat = schema.fields.some((f: { name: string }) => f.name === 'format');
-    if (!hasFormat) {
-      await _turnsTable.addColumns([{ name: 'format', valueSql: "'text'" }]);
-    }
-  } else {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _turnsTable = await (db.lance as any).createEmptyTable('conversation_turns', TURNS_SCHEMA);
-  }
-  return _turnsTable!;
-}
-
-// ---------------------------------------------------------------------------
-// Session record type
-// ---------------------------------------------------------------------------
-
-/** Lifecycle states for `sessions.status`. */
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'discarded';
 
 export interface SessionRecord {
@@ -141,20 +44,12 @@ export interface SessionRecord {
   seenEntities: string[];
   createdAt: string;
   expiresAt: string;
-  /** Controller that owns this session (brainstorm / designer / planner / chat). */
   agent: string;
-  /** Sub-category for agents that have them (design / requirements / ...). */
   category: string;
-  /** Lifecycle status. */
   status: SessionStatus;
-  /** ISO timestamp -- last time state was bumped (checkpoint write, turn save). */
   lastActivityAt: string;
   vector: number[];
 }
-
-// ---------------------------------------------------------------------------
-// Turn persistence
-// ---------------------------------------------------------------------------
 
 export interface TurnRecord {
   sessionId: string;
@@ -172,96 +67,220 @@ export interface TurnRecord {
   format?: string | undefined;
 }
 
+export interface ConversationStats {
+  totalTurns: number;
+  byType: Record<string, number>;
+  byTier: Record<string, number>;
+  byRepo: Record<string, number>;
+  sessions: number;
+}
+
+export interface SessionSummary {
+  id: string;
+  repo: string;
+  summary: string;
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 /**
- * Save a single turn to the conversation_turns table.
- * Called after each recordTurn() via daemon RPC (fire-and-forget).
+ * DuckDB returns FLOAT[N] columns as `{ items: number[] }` (the
+ * DuckDBArrayValue runtime shape). Unwrap to plain number[]; null
+ * becomes [] (rows without an embedding).
+ */
+function unwrapEmbedding(raw: unknown): number[] {
+  if (raw === null || raw === undefined) return [];
+  if (Array.isArray(raw)) return raw as number[];
+  const inner = (raw as { items?: unknown }).items;
+  return Array.isArray(inner) ? (inner as number[]) : [];
+}
+
+function bindEmbedding(vec: number[]): DuckDBArrayValue | null {
+  return vec.length === EMBEDDING_DIM ? arrayValue(vec) : null;
+}
+
+function parseJsonStringArray(raw: string): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rowToSessionRecord(row: Record<string, unknown>): SessionRecord {
+  return {
+    id:             row['id']               as string,
+    repo:           (row['repo']            as string) ?? '',
+    summary:        (row['summary']         as string) ?? '',
+    seenEntities:   parseJsonStringArray(row['seen_entities'] as string),
+    createdAt:      (row['created_at']      as string) ?? '',
+    expiresAt:      (row['expires_at']      as string) ?? '',
+    agent:          (row['agent']           as string) ?? 'chat',
+    category:       (row['category']        as string) ?? '',
+    status:         (row['status']          as SessionStatus) ?? 'completed',
+    lastActivityAt: (row['last_activity_at'] as string) ?? (row['created_at'] as string) ?? '',
+    vector:         unwrapEmbedding(row['embedding']),
+  };
+}
+
+function rowToTurnRecord(row: Record<string, unknown>): TurnRecord {
+  return {
+    sessionId:   (row['session_id']  as string) ?? '',
+    idx:         Number(row['idx']   ?? 0),
+    user:        (row['user_text']   as string) ?? '',
+    assistant:   (row['assistant']   as string) ?? '',
+    entities:    parseJsonStringArray(row['entities'] as string),
+    vector:      unwrapEmbedding(row['embedding']),
+    repo:        (row['repo']        as string) ?? '',
+    type:        ((row['type']       as string) ?? 'turn') as ConversationEntryType,
+    tier:        ((row['tier']       as string) ?? 'hot') as ConversationTier,
+    compactedAt: (row['compacted_at'] as string) ?? '',
+    sourceIds:   parseJsonStringArray(row['source_ids'] as string),
+    createdAt:   (row['created_at'] as string) ?? '',
+    format:      (row['format'] as string | undefined) ?? undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Turn writes
+// ---------------------------------------------------------------------------
+
+/**
+ * Save a single turn. Called fire-and-forget from the daemon after
+ * each recordTurn(). Bumps the session's lastActivityAt so the Runs
+ * sidebar can sort live chat sessions to the top even when they
+ * haven't checkpointed yet (plans/session-lifecycle.md Phase 1).
  */
 export async function saveTurn(db: DbClient, turn: TurnRecord): Promise<void> {
-  const table = await getTurnsTable(db);
-  await table.add([{
-    id:          `${turn.sessionId}:${turn.idx}`,
-    sessionId:   turn.sessionId,
-    idx:         turn.idx,
-    user:        turn.user,
-    assistant:   turn.assistant,
-    entities:    JSON.stringify(turn.entities),
-    createdAt:   new Date().toISOString(),
-    repo:        turn.repo,
-    type:        turn.type ?? 'turn',
-    tier:        turn.tier ?? 'hot',
-    compactedAt: turn.compactedAt ?? '',
-    sourceIds:   JSON.stringify(turn.sourceIds ?? []),
-    format:      turn.format ?? 'text',
-    vector:      turn.vector.length === EMBEDDING_DIM ? turn.vector : ZERO_VEC,
-  }]);
+  const id = `${turn.sessionId}:${turn.idx}`;
+  await db.duck.exec(
+    `INSERT INTO conversation_turn
+       (id, session_id, idx, user_text, assistant, entities, created_at, repo,
+        type, tier, compacted_at, source_ids, format, embedding)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       user_text    = excluded.user_text,
+       assistant    = excluded.assistant,
+       entities     = excluded.entities,
+       compacted_at = excluded.compacted_at,
+       source_ids   = excluded.source_ids,
+       format       = excluded.format,
+       embedding    = excluded.embedding`,
+    [
+      id,
+      turn.sessionId,
+      turn.idx,
+      turn.user,
+      turn.assistant,
+      JSON.stringify(turn.entities),
+      new Date().toISOString(),
+      turn.repo,
+      turn.type ?? 'turn',
+      turn.tier ?? 'hot',
+      turn.compactedAt ?? '',
+      JSON.stringify(turn.sourceIds ?? []),
+      turn.format ?? 'text',
+      bindEmbedding(turn.vector),
+    ],
+  );
 
-  // Bump the session's lastActivityAt so the Runs sidebar sorts live
-  // chat sessions to the top even when they haven't checkpointed
-  // (plans/session-lifecycle.md Phase 1). Best-effort -- missing
-  // session row just means this is a legacy pre-Phase-1 turn write.
   try {
     await bumpSessionActivity(db, turn.sessionId);
   } catch {
-    // ignore
+    // ignore -- legacy turn write without a session row
+  }
+}
+
+/**
+ * Add compacted turn entries (output of the compaction pass).
+ * Same row shape as `saveTurn` but with sensible defaults that
+ * differentiate compacted entries (`type: 'merged'`, `tier: 'cold'`,
+ * `compacted_at: now`).
+ */
+export async function addCompactedTurns(db: DbClient, turns: TurnRecord[]): Promise<void> {
+  if (turns.length === 0) return;
+  const now = new Date().toISOString();
+  for (const t of turns) {
+    const id = `${t.sessionId}:${t.idx}`;
+    await db.duck.exec(
+      `INSERT INTO conversation_turn
+         (id, session_id, idx, user_text, assistant, entities, created_at, repo,
+          type, tier, compacted_at, source_ids, format, embedding)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         user_text = excluded.user_text, assistant = excluded.assistant,
+         entities = excluded.entities, type = excluded.type,
+         tier = excluded.tier, compacted_at = excluded.compacted_at,
+         source_ids = excluded.source_ids, embedding = excluded.embedding`,
+      [
+        id, t.sessionId, t.idx, t.user, t.assistant,
+        JSON.stringify(t.entities),
+        now, t.repo,
+        t.type ?? 'merged',
+        t.tier ?? 'cold',
+        now,
+        JSON.stringify(t.sourceIds ?? []),
+        t.format ?? 'text',
+        bindEmbedding(t.vector),
+      ],
+    );
   }
 }
 
 // ---------------------------------------------------------------------------
-// Session close — promote summary, retain raw turns
+// Session writes
 // ---------------------------------------------------------------------------
 
 /**
- * Close a session: persist the final summary to conversation_sessions.
- * Raw turns are retained for compaction and cross-session L3b hydration.
+ * Close a session: persist the final summary. Raw turns are retained
+ * for compaction and cross-session L3b hydration. Upsert because the
+ * session row may have been created at chat.start.
  */
 export async function closeSession(
   db: DbClient,
   session: { id: string; repo: string; summary: string; seenEntities: string[] },
   summaryVector: number[],
 ): Promise<void> {
-  const sessionsTable = await getSessionsTable(db);
   const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString(); // 30 days
+  const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString();
 
-  // Upsert semantics -- the session row was likely written at chat.start
-  // (plans/session-lifecycle.md Phase 1), so we need to update summary +
-  // seenEntities + vector + status rather than add a duplicate.
-  const existing = await sessionsTable.query()
-    .filter(`id = '${session.id.replace(/'/g, "''")}'`)
-    .toArray();
+  const existing = await db.duck.query<{ id: string }>(
+    'SELECT id FROM conversation_session WHERE id = ?',
+    [session.id],
+  );
   if (existing.length > 0) {
-    await sessionsTable.update(
-      {
-        summary:        sqlStr(session.summary),
-        seenEntities:   sqlStr(JSON.stringify(session.seenEntities)),
-        expiresAt:      sqlStr(expiresAt),
-        status:         sqlStr('completed'),
-        lastActivityAt: sqlStr(now),
-      },
-      { where: `id = ${sqlStr(session.id)}` },
+    await db.duck.exec(
+      `UPDATE conversation_session
+         SET summary = ?, seen_entities = ?, expires_at = ?,
+             status = 'completed', last_activity_at = ?
+       WHERE id = ?`,
+      [session.summary, JSON.stringify(session.seenEntities), expiresAt, now, session.id],
     );
   } else {
-    await sessionsTable.add([{
-      id:             session.id,
-      repo:           session.repo,
-      summary:        session.summary,
-      seenEntities:   JSON.stringify(session.seenEntities),
-      createdAt:      now,
-      expiresAt:      expiresAt,
-      agent:          'chat',
-      category:       '',
-      status:         'completed',
-      lastActivityAt: now,
-      vector:         summaryVector.length === EMBEDDING_DIM ? summaryVector : ZERO_VEC,
-    }]);
+    await db.duck.exec(
+      `INSERT INTO conversation_session
+         (id, repo, summary, seen_entities, created_at, expires_at,
+          agent, category, status, last_activity_at, embedding)
+       VALUES (?, ?, ?, ?, ?, ?, 'chat', '', 'completed', ?, ?)`,
+      [
+        session.id, session.repo, session.summary,
+        JSON.stringify(session.seenEntities),
+        now, expiresAt, now,
+        bindEmbedding(summaryVector),
+      ],
+    );
   }
-
-  // Raw turns are retained — compaction manages lifecycle
 }
 
 /**
- * Save or update a session record (upsert).
- * Called on first turn to create the record, and on title generation to update summary.
+ * Upsert a session record. Called on first turn (create) and on
+ * title generation (update summary). Optional vector lets callers
+ * stamp the embedding alongside the create path.
  */
 export async function saveSession(
   db: DbClient,
@@ -275,49 +294,48 @@ export async function saveSession(
   },
   vector?: number[] | undefined,
 ): Promise<void> {
-  const sessionsTable = await getSessionsTable(db);
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 30 * 86_400_000).toISOString();
 
-  // Check if session already exists
-  const existing = await sessionsTable.query()
-    .filter(`id = '${session.id}'`)
-    .toArray();
+  const existing = await db.duck.query<{ id: string }>(
+    'SELECT id FROM conversation_session WHERE id = ?',
+    [session.id],
+  );
 
   if (existing.length > 0) {
-    // Update summary (callers that pass agent/category/status update
-    // them too; the dedicated setters below are the preferred entry
-    // for those fields so a no-op callsite doesn't accidentally wipe).
-    const updates: Record<string, string> = {
-      summary:        sqlStr(session.summary),
-      lastActivityAt: sqlStr(now),
-    };
-    if (session.agent !== undefined)    updates['agent']    = sqlStr(session.agent);
-    if (session.category !== undefined) updates['category'] = sqlStr(session.category);
-    if (session.status !== undefined)   updates['status']   = sqlStr(session.status);
-    await sessionsTable.update(updates, { where: `id = ${sqlStr(session.id)}` });
+    const sets: string[] = ['summary = ?', 'last_activity_at = ?'];
+    const params: unknown[] = [session.summary, now];
+    if (session.agent    !== undefined) { sets.push('agent = ?');    params.push(session.agent); }
+    if (session.category !== undefined) { sets.push('category = ?'); params.push(session.category); }
+    if (session.status   !== undefined) { sets.push('status = ?');   params.push(session.status); }
+    params.push(session.id);
+    await db.duck.exec(
+      `UPDATE conversation_session SET ${sets.join(', ')} WHERE id = ?`,
+      params as never[],
+    );
   } else {
-    // Create new
-    await sessionsTable.add([{
-      id:             session.id,
-      repo:           session.repo,
-      summary:        session.summary,
-      seenEntities:   '[]',
-      createdAt:      now,
-      expiresAt,
-      agent:          session.agent ?? 'chat',
-      category:       session.category ?? '',
-      status:         session.status ?? 'active',
-      lastActivityAt: now,
-      vector:         vector && vector.length === EMBEDDING_DIM ? vector : ZERO_VEC,
-    }]);
+    await db.duck.exec(
+      `INSERT INTO conversation_session
+         (id, repo, summary, seen_entities, created_at, expires_at,
+          agent, category, status, last_activity_at, embedding)
+       VALUES (?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        session.id, session.repo, session.summary,
+        now, expiresAt,
+        session.agent ?? 'chat',
+        session.category ?? '',
+        session.status ?? 'active',
+        now,
+        vector !== undefined ? bindEmbedding(vector) : null,
+      ],
+    );
   }
 }
 
 /**
  * Stamp the session's controller id and sub-category. Called after
- * classifier + sub-classifier resolve (e.g. from `resolveController`
- * when brainstorm is picked). No-op if the row doesn't exist yet.
+ * classifier + sub-classifier resolve. No-op if the row doesn't
+ * exist yet.
  */
 export async function setSessionAgent(
   db: DbClient,
@@ -325,67 +343,63 @@ export async function setSessionAgent(
   agent: string,
   category?: string,
 ): Promise<void> {
-  const sessionsTable = await getSessionsTable(db);
-  const updates: Record<string, string> = {
-    agent:          sqlStr(agent),
-    lastActivityAt: sqlStr(new Date().toISOString()),
-  };
-  if (category !== undefined) updates['category'] = sqlStr(category);
-  await sessionsTable.update(updates, { where: `id = ${sqlStr(id)}` });
+  if (category !== undefined) {
+    await db.duck.exec(
+      'UPDATE conversation_session SET agent = ?, category = ?, last_activity_at = ? WHERE id = ?',
+      [agent, category, new Date().toISOString(), id],
+    );
+  } else {
+    await db.duck.exec(
+      'UPDATE conversation_session SET agent = ?, last_activity_at = ? WHERE id = ?',
+      [agent, new Date().toISOString(), id],
+    );
+  }
 }
 
-/**
- * Update the session's lifecycle status. Emitted from:
- *  - Pipeline: `paused` on checkpoint write, `completed` on clean exit.
- *  - Discard: `discarded` before the row is removed.
- *  - Resume: `active` when the pipeline restarts.
- */
+/** Update the session's lifecycle status. */
 export async function setSessionStatus(
   db: DbClient,
   id: string,
   status: SessionStatus,
 ): Promise<void> {
-  const sessionsTable = await getSessionsTable(db);
-  await sessionsTable.update(
-    { status: sqlStr(status), lastActivityAt: sqlStr(new Date().toISOString()) },
-    { where: `id = ${sqlStr(id)}` },
+  await db.duck.exec(
+    'UPDATE conversation_session SET status = ?, last_activity_at = ? WHERE id = ?',
+    [status, new Date().toISOString(), id],
   );
 }
 
-/** Bump `lastActivityAt` without touching other fields. */
+/** Bump `last_activity_at` without touching other fields. */
 export async function bumpSessionActivity(db: DbClient, id: string): Promise<void> {
-  const sessionsTable = await getSessionsTable(db);
-  await sessionsTable.update(
-    { lastActivityAt: sqlStr(new Date().toISOString()) },
-    { where: `id = ${sqlStr(id)}` },
+  await db.duck.exec(
+    'UPDATE conversation_session SET last_activity_at = ? WHERE id = ?',
+    [new Date().toISOString(), id],
   );
 }
 
 /**
- * Phase 4 hard delete (plans/session-lifecycle.md). Removes the
- * session row, all turns with the matching sessionId, and returns
- * counts so `agent.discard` can log what was cleaned up.
- *
- * Kept separate from `setSessionStatus('discarded', id)` because
- * discard is permanent -- the caller should only reach here after
- * the user confirmed "permanently delete this run" in the UI.
+ * Hard-delete a session row + all its turns. Returns counts so
+ * `agent.discard` can log what was cleaned up.
  */
 export async function deleteSession(
   db: DbClient,
   sessionId: string,
 ): Promise<{ sessionRows: number; turnRows: number }> {
-  const safeId = sessionId.replace(/'/g, "''");
-  const sessionsTable = await getSessionsTable(db);
-  const turnsTable = await getTurnsTable(db);
-
-  const sessionRows = (await sessionsTable.query().filter(`id = '${safeId}'`).toArray()).length;
+  const sessionsRows = await db.duck.query<{ count: number }>(
+    'SELECT COUNT(*)::INTEGER AS count FROM conversation_session WHERE id = ?',
+    [sessionId],
+  );
+  const sessionRows = Number(sessionsRows[0]?.count ?? 0);
   if (sessionRows > 0) {
-    await sessionsTable.delete(`id = '${safeId}'`);
+    await db.duck.exec('DELETE FROM conversation_session WHERE id = ?', [sessionId]);
   }
 
-  const turnRows = (await turnsTable.query().filter(`sessionId = '${safeId}'`).toArray()).length;
+  const turnsRows = await db.duck.query<{ count: number }>(
+    'SELECT COUNT(*)::INTEGER AS count FROM conversation_turn WHERE session_id = ?',
+    [sessionId],
+  );
+  const turnRows = Number(turnsRows[0]?.count ?? 0);
   if (turnRows > 0) {
-    await turnsTable.delete(`sessionId = '${safeId}'`);
+    await db.duck.exec('DELETE FROM conversation_turn WHERE session_id = ?', [sessionId]);
   }
 
   return { sessionRows, turnRows };
@@ -396,9 +410,9 @@ export async function deleteSession(
 // ---------------------------------------------------------------------------
 
 /**
- * Search prior session summaries for the same repo, ordered by vector
- * similarity to the opening message embedding. Returns top-3 non-expired
- * summaries sorted by recency.
+ * Top-K prior session summaries for the same repo, ranked by cosine
+ * distance to the opening message embedding, then re-sorted by
+ * recency. Drops expired summaries.
  */
 export async function seedFromPrior(
   db: DbClient,
@@ -406,19 +420,17 @@ export async function seedFromPrior(
   queryVector: number[],
   limit = 3,
 ): Promise<SessionRecord[]> {
-  const table = await getSessionsTable(db);
+  if (queryVector.length === 0) return [];
   const now = new Date().toISOString();
-  const safeRepo = repo.replace(/'/g, "''");
-
   try {
-    const rows = await table
-      .search(queryVector)
-      .where(`repo = '${safeRepo}' AND expiresAt > '${now}'`)
-      .limit(limit)
-      .toArray();
-
+    const rows = await db.duck.query(
+      `SELECT * FROM conversation_session
+       WHERE repo = ? AND expires_at > ? AND embedding IS NOT NULL
+       ORDER BY array_distance(embedding, ?::FLOAT[${queryVector.length}])
+       LIMIT ?`,
+      [repo, now, arrayValue(queryVector), limit],
+    );
     const records = rows.map(rowToSessionRecord);
-    // Sort by recency (vector search returns by similarity)
     records.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return records;
   } catch {
@@ -430,222 +442,115 @@ export async function seedFromPrior(
 // Deletion helpers
 // ---------------------------------------------------------------------------
 
-/** Delete all raw turns for a session. */
 export async function deleteTurnsForSession(db: DbClient, sessionId: string): Promise<void> {
-  const table = await getTurnsTable(db);
-  const safeId = sessionId.replace(/'/g, "''");
-  try {
-    await table.delete(`sessionId = '${safeId}'`);
-  } catch {
-    // Table may be empty — ignore
-  }
+  await db.duck.exec('DELETE FROM conversation_turn WHERE session_id = ?', [sessionId]);
 }
 
-/** Delete a session summary by ID. */
 export async function deleteSessionRecord(db: DbClient, sessionId: string): Promise<void> {
-  const table = await getSessionsTable(db);
-  const safeId = sessionId.replace(/'/g, "''");
-  try {
-    await table.delete(`id = '${safeId}'`);
-  } catch {
-    // Ignore if not found
-  }
+  await db.duck.exec('DELETE FROM conversation_session WHERE id = ?', [sessionId]);
 }
 
-/** Delete all session summaries for a repo (for /forget). */
 export async function deleteSessionsForRepo(db: DbClient, repo: string): Promise<void> {
-  const table = await getSessionsTable(db);
-  const safeRepo = repo.replace(/'/g, "''");
-  try {
-    await table.delete(`repo = '${safeRepo}'`);
-  } catch {
-    // Ignore if not found
-  }
+  await db.duck.exec('DELETE FROM conversation_session WHERE repo = ?', [repo]);
 }
 
-/**
- * Delete every raw turn belonging to a repo. Sessions and turns are
- * stored separately; `deleteSessionsForRepo` only touches the
- * conversation_sessions table, so turns linger unless this is called
- * alongside it (e.g. from the `repo.remove` cleanup).
- */
 export async function deleteTurnsForRepo(db: DbClient, repo: string): Promise<void> {
-  const table = await getTurnsTable(db);
-  const safeRepo = repo.replace(/'/g, "''");
-  try {
-    await table.delete(`repo = '${safeRepo}'`);
-  } catch {
-    // Ignore if not found
-  }
+  await db.duck.exec('DELETE FROM conversation_turn WHERE repo = ?', [repo]);
+}
+
+export async function deleteTurnsByIds(db: DbClient, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(', ');
+  await db.duck.exec(
+    `DELETE FROM conversation_turn WHERE id IN (${placeholders})`,
+    [...ids],
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Pruning
+// Pruning -- expired + per-repo cap
 // ---------------------------------------------------------------------------
 
-/**
- * Delete expired session summaries and enforce per-repo cap of 20.
- * Plan/PlanStep nodes are NOT affected — they live in Kuzu only.
- */
-export async function pruneConversations(db: DbClient): Promise<{ expired: number; capped: number }> {
-  const table = await getSessionsTable(db);
-  let expired = 0;
-  let capped = 0;
+const PER_REPO_CAP = 20;
 
-  // 1. Delete expired summaries
+export async function pruneConversations(
+  db: DbClient,
+): Promise<{ expired: number; capped: number }> {
   const now = new Date().toISOString();
-  try {
-    const expiredRows = await table.query().where(`expiresAt < '${now}'`).select(['id']).toArray();
-    expired = expiredRows.length;
-    if (expired > 0) {
-      await table.delete(`expiresAt < '${now}'`);
-    }
-  } catch {
-    // Table may be empty
+
+  const expiredRow = await db.duck.query<{ count: number }>(
+    "SELECT COUNT(*)::INTEGER AS count FROM conversation_session WHERE expires_at < ?",
+    [now],
+  );
+  const expired = Number(expiredRow[0]?.count ?? 0);
+  if (expired > 0) {
+    await db.duck.exec('DELETE FROM conversation_session WHERE expires_at < ?', [now]);
   }
 
-  // 2. Cap at 20 summaries per repo
-  try {
-    const allSessions = await table.query().toArray();
-    const byRepo = new Map<string, Array<Record<string, unknown>>>();
-    for (const row of allSessions) {
-      const repo = row['repo'] as string;
-      if (!byRepo.has(repo)) byRepo.set(repo, []);
-      byRepo.get(repo)!.push(row as Record<string, unknown>);
-    }
-
-    for (const [, sessions] of byRepo) {
-      if (sessions.length <= 20) continue;
-      sessions.sort((a, b) =>
-        (b['createdAt'] as string).localeCompare(a['createdAt'] as string),
-      );
-      const toDelete = sessions.slice(20);
-      for (const row of toDelete) {
-        const safeId = (row['id'] as string).replace(/'/g, "''");
-        await table.delete(`id = '${safeId}'`);
-        capped++;
-      }
-    }
-  } catch {
-    // Ignore errors during cap enforcement
+  // Per-repo cap. A window function picks the rows that go beyond
+  // the cap (oldest first), then we delete by id.
+  const overflow = await db.duck.query<{ id: string }>(
+    `WITH ranked AS (
+       SELECT id,
+              ROW_NUMBER() OVER (PARTITION BY repo ORDER BY created_at DESC) AS rn
+       FROM conversation_session
+     )
+     SELECT id FROM ranked WHERE rn > ?`,
+    [PER_REPO_CAP],
+  );
+  let capped = 0;
+  if (overflow.length > 0) {
+    const placeholders = overflow.map(() => '?').join(', ');
+    await db.duck.exec(
+      `DELETE FROM conversation_session WHERE id IN (${placeholders})`,
+      overflow.map(r => r.id),
+    );
+    capped = overflow.length;
   }
-
   return { expired, capped };
 }
 
 // ---------------------------------------------------------------------------
-// Turn search (for L3b hydration and compaction)
+// Reads -- turns + sessions
 // ---------------------------------------------------------------------------
 
-/**
- * Search turns by repo using vector similarity.
- * Returns turns ordered by relevance to the query vector.
- */
 export async function searchTurnsByRepo(
   db: DbClient,
   repo: string,
   queryVector: number[],
   limit = 20,
 ): Promise<TurnRecord[]> {
-  const table = await getTurnsTable(db);
-  const safeRepo = repo.replace(/'/g, "''");
-
+  if (queryVector.length === 0) return [];
   try {
-    const rows = await table
-      .search(queryVector)
-      .where(`repo = '${safeRepo}' AND type IN ('turn', 'directive', 'merged')`)
-      .limit(limit)
-      .toArray();
-
+    const rows = await db.duck.query(
+      `SELECT * FROM conversation_turn
+       WHERE repo = ? AND type IN ('turn', 'directive', 'merged') AND embedding IS NOT NULL
+       ORDER BY array_distance(embedding, ?::FLOAT[${queryVector.length}])
+       LIMIT ?`,
+      [repo, arrayValue(queryVector), limit],
+    );
     return rows.map(rowToTurnRecord);
   } catch {
     return [];
   }
 }
 
-/**
- * Get all turns for a repo (for compaction). No vector search — returns all.
- */
 export async function getAllTurnsForRepo(
   db: DbClient,
   repo: string,
 ): Promise<TurnRecord[]> {
-  const table = await getTurnsTable(db);
-  const safeRepo = repo.replace(/'/g, "''");
-
-  try {
-    const rows = await table.query().where(`repo = '${safeRepo}'`).toArray();
-    return rows.map(rowToTurnRecord);
-  } catch {
-    return [];
-  }
+  const rows = await db.duck.query(
+    'SELECT * FROM conversation_turn WHERE repo = ?',
+    [repo],
+  );
+  return rows.map(rowToTurnRecord);
 }
 
-/**
- * Get all turns across all repos (for compaction without repo filter).
- */
 export async function getAllTurns(db: DbClient): Promise<TurnRecord[]> {
-  const table = await getTurnsTable(db);
-  try {
-    const rows = await table.query().toArray();
-    return rows.map(rowToTurnRecord);
-  } catch {
-    return [];
-  }
+  const rows = await db.duck.query('SELECT * FROM conversation_turn');
+  return rows.map(rowToTurnRecord);
 }
 
-/**
- * Delete specific turns by ID.
- */
-export async function deleteTurnsByIds(db: DbClient, ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  const table = await getTurnsTable(db);
-  const idList = ids.map(id => `'${id.replace(/'/g, "''")}'`).join(',');
-  try {
-    await table.delete(`id IN (${idList})`);
-  } catch {
-    // Ignore errors
-  }
-}
-
-/**
- * Add compacted turn entries (for compaction output).
- */
-export async function addCompactedTurns(db: DbClient, turns: TurnRecord[]): Promise<void> {
-  if (turns.length === 0) return;
-  const table = await getTurnsTable(db);
-  await table.add(turns.map(t => ({
-    id:          `${t.sessionId}:${t.idx}`,
-    sessionId:   t.sessionId,
-    idx:         t.idx,
-    user:        t.user,
-    assistant:   t.assistant,
-    entities:    JSON.stringify(t.entities),
-    createdAt:   new Date().toISOString(),
-    repo:        t.repo,
-    type:        t.type ?? 'merged',
-    tier:        t.tier ?? 'cold',
-    compactedAt: new Date().toISOString(),
-    sourceIds:   JSON.stringify(t.sourceIds ?? []),
-    vector:      t.vector.length === EMBEDDING_DIM ? t.vector : ZERO_VEC,
-  })));
-}
-
-// ---------------------------------------------------------------------------
-// Statistics
-// ---------------------------------------------------------------------------
-
-export interface ConversationStats {
-  totalTurns: number;
-  byType: Record<string, number>;
-  byTier: Record<string, number>;
-  byRepo: Record<string, number>;
-  sessions: number;
-}
-
-/**
- * Get conversation storage statistics for monitoring.
- */
 export async function getConversationStats(
   db: DbClient,
   repo?: string,
@@ -664,190 +569,107 @@ export async function getConversationStats(
     byRepo[t.repo] = (byRepo[t.repo] ?? 0) + 1;
   }
 
-  const sessionsTable = await getSessionsTable(db);
-  let sessions = 0;
-  try {
-    const allSessions = await sessionsTable.query().toArray();
-    sessions = repo
-      ? allSessions.filter(s => (s['repo'] as string) === repo).length
-      : allSessions.length;
-  } catch { /* ignore */ }
+  const sessionsRow = repo
+    ? await db.duck.query<{ count: number }>(
+        'SELECT COUNT(*)::INTEGER AS count FROM conversation_session WHERE repo = ?',
+        [repo],
+      )
+    : await db.duck.query<{ count: number }>(
+        'SELECT COUNT(*)::INTEGER AS count FROM conversation_session',
+      );
+  const sessions = Number(sessionsRow[0]?.count ?? 0);
 
   return { totalTurns: turns.length, byType, byTier, byRepo, sessions };
 }
 
 // ---------------------------------------------------------------------------
-// Row mapping
-// ---------------------------------------------------------------------------
-
-function rowToTurnRecord(row: Record<string, unknown>): TurnRecord {
-  let entities: string[] = [];
-  try {
-    const raw = row['entities'] as string;
-    if (raw) entities = JSON.parse(raw) as string[];
-  } catch { /* ignore */ }
-
-  let sourceIds: string[] = [];
-  try {
-    const raw = row['sourceIds'] as string;
-    if (raw) sourceIds = JSON.parse(raw) as string[];
-  } catch { /* ignore */ }
-
-  return {
-    sessionId:   (row['sessionId']   as string) ?? '',
-    idx:         (row['idx']         as number) ?? 0,
-    user:        (row['user']        as string) ?? '',
-    assistant:   (row['assistant']   as string) ?? '',
-    entities,
-    vector:      (row['vector']      as number[]) ?? [],
-    repo:        (row['repo']        as string) ?? '',
-    type:        ((row['type']       as string) ?? 'turn') as ConversationEntryType,
-    tier:        ((row['tier']       as string) ?? 'hot') as ConversationTier,
-    compactedAt: (row['compactedAt'] as string) ?? '',
-    sourceIds,
-    createdAt:   (row['createdAt']   as string) ?? '',
-    format:      (row['format']      as string) ?? undefined,
-  };
-}
-
-function rowToSessionRecord(row: Record<string, unknown>): SessionRecord {
-  let seenEntities: string[] = [];
-  try {
-    const raw = row['seenEntities'] as string;
-    if (raw) seenEntities = JSON.parse(raw) as string[];
-  } catch { /* ignore */ }
-
-  return {
-    id:             row['id']             as string,
-    repo:           row['repo']           as string,
-    summary:        row['summary']        as string,
-    seenEntities,
-    createdAt:      row['createdAt']      as string,
-    expiresAt:      row['expiresAt']      as string,
-    agent:          (row['agent']          as string | undefined) ?? 'chat',
-    category:       (row['category']       as string | undefined) ?? '',
-    status:         ((row['status']        as string | undefined) ?? 'completed') as SessionStatus,
-    lastActivityAt: (row['lastActivityAt'] as string | undefined) ?? (row['createdAt'] as string),
-    vector:         (row['vector']         as number[]) ?? [],
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Session listing (for TreeView)
-// ---------------------------------------------------------------------------
-
-export interface SessionSummary {
-  id: string;
-  repo: string;
-  summary: string;
-  createdAt: string;
-}
-
-/**
- * List all sessions, optionally filtered by repo.
- * Returns newest-first, with only the fields needed for display.
- */
-// ---------------------------------------------------------------------------
 // Session restore queries
 // ---------------------------------------------------------------------------
 
-/** Get a single session record by ID. Returns null if not found. */
 export async function getSessionById(
   db: DbClient,
   sessionId: string,
 ): Promise<SessionRecord | null> {
-  const table = await getSessionsTable(db);
-  const rows = await table.query()
-    .where(`id = '${sessionId.replace(/'/g, "''")}'`)
-    .toArray();
+  const rows = await db.duck.query(
+    'SELECT * FROM conversation_session WHERE id = ?',
+    [sessionId],
+  );
   if (rows.length === 0) return null;
-  const row = rows[0]!;
-  return {
-    id: row['id'] as string,
-    repo: row['repo'] as string,
-    summary: row['summary'] as string,
-    seenEntities: JSON.parse((row['seenEntities'] as string) || '[]') as string[],
-    createdAt: row['createdAt'] as string,
-    expiresAt: row['expiresAt'] as string,
-    agent:          (row['agent']          as string | undefined) ?? 'chat',
-    category:       (row['category']       as string | undefined) ?? '',
-    status:         ((row['status']        as string | undefined) ?? 'completed') as SessionStatus,
-    lastActivityAt: (row['lastActivityAt'] as string | undefined) ?? (row['createdAt'] as string),
-    vector: row['vector'] as number[],
-  };
+  return rowToSessionRecord(rows[0]!);
 }
 
-/** Get all turns for a specific session, ordered by idx. */
 export async function getTurnsForSession(
   db: DbClient,
   sessionId: string,
 ): Promise<TurnRecord[]> {
-  const table = await getTurnsTable(db);
-  const rows = await table.query()
-    .where(`sessionId = '${sessionId.replace(/'/g, "''")}'`)
-    .toArray();
-  return rows
-    .map(row => ({
-      sessionId: row['sessionId'] as string,
-      idx: row['idx'] as number,
-      user: row['user'] as string,
-      assistant: row['assistant'] as string,
-      entities: JSON.parse((row['entities'] as string) || '[]') as string[],
-      vector: row['vector'] as number[],
-      repo: row['repo'] as string,
-      type: (row['type'] as ConversationEntryType) || 'turn',
-      tier: (row['tier'] as ConversationTier) || 'hot',
-      format: (row['format'] as string) || 'text',
-    }))
-    .filter(t => t.type === 'turn')
-    .sort((a, b) => a.idx - b.idx);
+  const rows = await db.duck.query(
+    `SELECT * FROM conversation_turn
+     WHERE session_id = ? AND type = 'turn'
+     ORDER BY idx`,
+    [sessionId],
+  );
+  return rows.map(rowToTurnRecord);
 }
 
 export async function listSessions(
   db: DbClient,
   repo?: string | undefined,
 ): Promise<SessionSummary[]> {
-  const table = await getSessionsTable(db);
-  const rows = await table.query().toArray();
-  const sessions: SessionSummary[] = rows
-    .filter(row => !repo || (row['repo'] as string) === repo)
-    .map(row => ({
-      id: row['id'] as string,
-      repo: row['repo'] as string,
-      summary: row['summary'] as string,
-      createdAt: row['createdAt'] as string,
-    }))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  return sessions;
+  const rows = repo !== undefined
+    ? await db.duck.query(
+        `SELECT id, repo, summary, created_at FROM conversation_session
+         WHERE repo = ? ORDER BY created_at DESC`,
+        [repo],
+      )
+    : await db.duck.query(
+        `SELECT id, repo, summary, created_at FROM conversation_session
+         ORDER BY created_at DESC`,
+      );
+  return rows.map(r => ({
+    id:        r['id']         as string,
+    repo:      r['repo']       as string,
+    summary:   r['summary']    as string,
+    createdAt: r['created_at'] as string,
+  }));
 }
 
 /**
  * Return full SessionRecord rows, optionally filtered by repo and/or
- * status. Used by `agent.list` (plans/session-lifecycle.md Phase 2)
- * so the Runs sidebar can key on the DB-authoritative agent + status
- * + lastActivityAt fields without parsing checkpoint files.
+ * status. Used by `agent.list` so the Runs sidebar can key on the
+ * DB-authoritative agent + status + last_activity_at fields without
+ * parsing checkpoint files.
  */
 export async function listSessionRecords(
   db: DbClient,
   opts?: { repo?: string; statuses?: SessionStatus[] },
 ): Promise<SessionRecord[]> {
-  const table = await getSessionsTable(db);
-  const rows = await table.query().toArray();
-  const statusSet = opts?.statuses ? new Set<string>(opts.statuses) : undefined;
-  const out = rows
-    .filter(row => !opts?.repo || (row['repo'] as string) === opts.repo)
-    .filter(row => {
-      if (!statusSet) return true;
-      const rowStatus = (row['status'] as string | undefined) ?? 'completed';
-      return statusSet.has(rowStatus);
-    })
-    .map(row => rowToSessionRecord(row))
-    .sort((a, b) => (b.lastActivityAt || b.createdAt).localeCompare(a.lastActivityAt || a.createdAt));
-  return out;
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (opts?.repo !== undefined) {
+    conds.push('repo = ?');
+    params.push(opts.repo);
+  }
+  if (opts?.statuses && opts.statuses.length > 0) {
+    const placeholders = opts.statuses.map(() => '?').join(', ');
+    conds.push(`status IN (${placeholders})`);
+    params.push(...opts.statuses);
+  }
+  const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+
+  const rows = await db.duck.query(
+    `SELECT * FROM conversation_session
+     ${where}
+     ORDER BY COALESCE(NULLIF(last_activity_at, ''), created_at) DESC`,
+    params as never[],
+  );
+  return rows.map(rowToSessionRecord);
 }
 
-/** Reset module-level table caches (for testing). */
+/**
+ * Reset module-level table caches. No-op in the DuckDB era -- table
+ * handles aren't cached. Kept for back-compat with daemon test
+ * harnesses that called the Lance version.
+ */
 export function resetTableCaches(): void {
-  _sessionsTable = null;
-  _turnsTable = null;
+  // intentionally empty
 }

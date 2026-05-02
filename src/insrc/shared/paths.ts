@@ -9,8 +9,8 @@ export const PATHS = {
   config:      join(INSRC_DIR, 'config.json'),
   duckdb:      join(INSRC_DIR, 'duckdb.db'),    // DuckDB — graph + entities + conversations + config-store + todos
   graph:       join(INSRC_DIR, 'graph'),        // legacy: Kuzu DB (cleaned up on first DuckDB-only boot)
-  lance:       join(INSRC_DIR, 'lance'),        // LanceDB — entity store + embeddings (Phase B; removed in B.10)
-  configStore: join(INSRC_DIR, 'config-store'), // LanceDB — config entry store (Phase B; removed in B.10)
+  lance:       join(INSRC_DIR, 'lance'),        // legacy: LanceDB store (cleaned up on first post-B.10 boot)
+  configStore: join(INSRC_DIR, 'config-store'), // legacy: LanceDB config-store (cleaned up on first post-B.10 boot)
   templates:   join(INSRC_DIR, 'templates'),    // global config templates
   feedback:    join(INSRC_DIR, 'feedback'),     // global config feedback
   conventions: join(INSRC_DIR, 'conventions'),  // global config conventions

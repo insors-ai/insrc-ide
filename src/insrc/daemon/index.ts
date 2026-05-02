@@ -13,7 +13,6 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, rmSync } from 'node:fs';
-import * as lancedb from '@lancedb/lancedb';
 import { PATHS } from '../shared/paths.js';
 import { setLogMode, getLogger } from '../shared/logger.js';
 
@@ -66,7 +65,7 @@ import { getDb, initDb, closeDb } from '../db/client.js';
 import { closeDuckDB } from './db/duckdb-pool.js';
 import { closeDuckDBStorage } from './db/duckdb-storage-pool.js';
 import { listRepos, addRepo, removeRepo } from '../db/repos.js';
-import { deleteEntitiesForRepo } from '../db/entities.js';
+import { deleteEntitiesForRepo, findEntitiesByFile } from '../db/entities.js';
 import { deleteUnresolvedForRepo } from '../db/relations.js';
 import { Watcher } from '../indexer/watcher.js';
 import { IndexQueue } from './queue.js';
@@ -107,30 +106,30 @@ async function main(): Promise<void> {
 	}
 
 	// 2. Ensure directories
-	// (Post Phase A.11: graph data lives in DuckDB which is in-memory
-	//  in the daemon-pool singleton; PATHS.graph and the legacy WAL/
-	//  shadow files from Kuzu are no longer used. Stale Kuzu state on
-	//  disk gets removed below if present.)
-	mkdirSync(dirname(PATHS.graph), { recursive: true });
-	mkdirSync(PATHS.lance, { recursive: true });
+	mkdirSync(dirname(PATHS.duckdb), { recursive: true });
 
-	// One-time cleanup of orphaned Kuzu on-disk state from before the
-	// DuckDB cutover. Idempotent: silently no-ops once the files are
-	// gone. Runs early so a partial cleanup on a previous boot doesn't
-	// trip later code that scans the directory.
-	for (const stale of [PATHS.graph, `${PATHS.graph}.wal`, `${PATHS.graph}.shadow`]) {
+	// One-time cleanup of orphaned legacy on-disk state from before the
+	// storage migration. Removes Kuzu (post Phase A.11) and LanceDB
+	// (post Phase B.10) directories. Idempotent: silently no-ops once
+	// the files are gone.
+	for (const stale of [
+		PATHS.graph,
+		`${PATHS.graph}.wal`,
+		`${PATHS.graph}.shadow`,
+		PATHS.lance,
+		PATHS.configStore,
+	]) {
 		try {
 			if (existsSync(stale)) {
 				rmSync(stale, { recursive: true, force: true });
-				log.info({ path: stale }, 'removed legacy Kuzu state on first DuckDB-only boot');
+				log.info({ path: stale }, 'removed legacy storage state on post-migration boot');
 			}
 		} catch (err) {
 			log.warn({ path: stale, err: err instanceof Error ? err.message : String(err) },
-				'failed to remove legacy Kuzu state -- non-fatal, retry on next boot');
+				'failed to remove legacy storage state -- non-fatal, retry on next boot');
 		}
 	}
 
-	mkdirSync(PATHS.configStore, { recursive: true });
 	mkdirSync(PATHS.templates, { recursive: true });
 	mkdirSync(PATHS.feedback, { recursive: true });
 	mkdirSync(PATHS.conventions, { recursive: true });
@@ -183,8 +182,7 @@ async function main(): Promise<void> {
 	void bootstrapEmbeddingModel();
 
 	// 5. Load repos, start indexer
-	const configLance = await lancedb.connect(PATHS.configStore);
-	const configStore = new ConfigStore(configLance);
+	const configStore = new ConfigStore(db);
 
 	const repos = await listRepos(db);
 	const watcher = new Watcher();
@@ -593,17 +591,7 @@ async function main(): Promise<void> {
 
 		'search.by_file': async (params) => {
 			const { filePath } = params as { filePath: string };
-			// Search LanceDB for all entities in this file
-			const table = await (async () => {
-				const names = await db.lance.tableNames();
-				if (!names.includes('entities')) return null;
-				return db.lance.openTable('entities');
-			})();
-			if (!table) return [];
-			const rows = await table.query()
-				.where(`file = '${filePath.replace(/'/g, "''")}'`)
-				.toArray();
-			return rows as Entity[];
+			return findEntitiesByFile(db, filePath);
 		},
 
 		'search.callers_nhop': async (params) => {

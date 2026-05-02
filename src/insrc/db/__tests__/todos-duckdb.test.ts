@@ -40,11 +40,7 @@ test.afterEach(async () => {
 
 async function setup(): Promise<DbClient> {
   await withStorageConnection(async (conn) => applyDuckDBGraphSchema(conn));
-  // db.lance isn't used by the rewritten todos.ts, so a stub is fine
-  // for these tests. The Phase B.10 cleanup will drop the lance field
-  // entirely.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { duck: getDuckDBGraphClient(), lance: {} as any } as DbClient;
+  return { duck: getDuckDBGraphClient() } satisfies DbClient;
 }
 
 const NOW = '2026-05-02T00:00:00Z';

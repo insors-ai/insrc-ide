@@ -56,8 +56,7 @@ test.afterEach(async () => {
 
 async function setup(): Promise<DbClient> {
   await withStorageConnection(async (conn) => applyDuckDBGraphSchema(conn));
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return { duck: getDuckDBGraphClient(), lance: {} as any } as DbClient;
+  return { duck: getDuckDBGraphClient() } satisfies DbClient;
 }
 
 const NOW = '2026-05-02T00:00:00Z';

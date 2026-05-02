@@ -254,6 +254,12 @@ export async function listEntitiesForRepo(db: DbClient, repo: string): Promise<E
   return rows.map(rowToEntity);
 }
 
+/** List all entities defined in a single file (used by search.by_file IPC). */
+export async function findEntitiesByFile(db: DbClient, file: string): Promise<Entity[]> {
+  const rows = await db.duck.query('SELECT * FROM entity WHERE file = ?', [file]);
+  return rows.map(rowToEntity);
+}
+
 /** List entities not yet embedded (embedding_model = '' sentinel). */
 export async function listUnembeddedEntities(db: DbClient, repo: string): Promise<Entity[]> {
   const rows = await db.duck.query(

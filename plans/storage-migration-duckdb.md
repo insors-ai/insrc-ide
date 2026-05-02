@@ -83,11 +83,10 @@ is the one that doesn't work. Phase B (LanceDB) is next.
 | B.3 | Vector schema | pending | extend the entity table from A.1 with `embedding FLOAT[N]` column + HNSW index. Conversations / config-store gain their own DuckDB tables with the same column shape. No FTS columns / indexes anywhere |
 | B.4 | ~~Hybrid-search helper~~ | **dropped** (B.0) | no hybrid search used; pure vector search needs no helper beyond the existing one-liner |
 | B.5 | Non-vector Lance usage migration | pending | todos (always ZERO_VEC, never searched) moves to plain DuckDB tables -- drop vector columns entirely. The vector-shaped overhead today (Float32 zero-fill of EMBEDDING_DIM rows) is dead weight |
-| B.6 | Vector-search Lance usage migration | pending | entities + conversations + config-store: each gets a DuckDB table with `embedding FLOAT[N]` column + HNSW index. Read paths swap from `table.search(vec)` / `table.vectorSearch(vec)` to `ORDER BY array_distance(embedding, ?) LIMIT k`. Write paths swap from Arrow record batches to plain DuckDB INSERTs |
-| B.7 | Side-by-side dual-write phase | pending | mirror A.8 |
-| B.8 | Read cutover | pending | mirror A.9 |
-| B.9 | Single-write cutover + LanceDB removal | pending | mirror A.10; remove `@lancedb/lancedb` + `apache-arrow` (verify no other users) |
-| B.10 | Cleanup -- files + deps | pending | every Lance call site rewired; deps removed |
+| B.5 | todos -> DuckDB (no vectors) | done | `db/todos.ts` rewritten on the storage pool; vector column dropped entirely (audit confirmed it was always ZERO_VEC). Surface kept identical for daemon/todos-{api,rpc}.ts callers. 9-test smoke suite |
+| B.6 | Vector-search Lance usage migration | done | entities (`db/entities.ts` + `db/search.ts`), conversations (`db/conversations.ts`), config-store (`config/store.ts`) all rewired onto the storage pool. `array_distance(embedding, ?::FLOAT[N])` + HNSW indexes from B.3. DuckDB returns FLOAT[N] columns as `{ items: number[] }` -- row mappers unwrap. ConfigStore constructor now takes a `DbClient` instead of a `lancedb.Connection`. 11+15 smoke tests |
+| B.7-B.9 | Side-by-side dual-write phases | skipped | same call as A.8-A.11 -- migrate in one coordinated change; no production data on Lance to validate against (it's a developer tool) |
+| B.10 | Cleanup -- files + deps | done | `@lancedb/lancedb` removed from package.json; `db/client.ts` shape simplified to `{ duck: GraphClient }` (no more `lance` field); `daemon/index.ts` drops `lancedb.connect`, the `mkdirSync(PATHS.lance)` / `mkdirSync(PATHS.configStore)` seeds, and the import. Boot-time legacy-state cleanup expanded to remove `~/.insrc/lance/` + `~/.insrc/config-store/` alongside the Kuzu paths. `apache-arrow` kept (still used by the data-driver `arrow.ts` driver) |
 | C.1 | Daemon resource ledger reclamation | pending | the 1 GB Kuzu pool + Lance-backing-memory free up; revisit DuckDB's 512 MB cap accordingly |
 | C.2 | Documentation + post-mortem | pending | update CLAUDE.md, design docs; archive the Kuzu-incident write-ups |
 

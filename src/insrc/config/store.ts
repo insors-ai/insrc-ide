@@ -1,86 +1,57 @@
 /**
- * Config vector store — LanceDB wrapper for config entries.
+ * Config vector store — DuckDB-backed wrapper for config entries.
  *
- * Uses a separate LanceDB database at ~/.insrc/config-store/,
- * isolated from the code entity store at ~/.insrc/lance/.
+ * plans/storage-migration-duckdb.md Phase B.6.
  *
- * Follows the same patterns as src/db/entities.ts:
- * - Apache Arrow schema with all non-nullable fields
- * - Sentinel values for absent optional fields
- * - Module-level table cache
+ * Backed by the `config_entry` table on the daemon's storage pool.
+ * Vector search uses `array_distance(embedding, ?)` against the
+ * cosine HNSW index from B.3. The class shape is preserved so
+ * config/search.ts and daemon/index.ts callsites continue to use the
+ * same API; only the constructor changes -- callers now pass a
+ * `DbClient` instead of a `lancedb.Connection`. The Lance store
+ * directory at `~/.insrc/config-store/` is no longer created
+ * (B.10 cleanup will remove the path constant).
  */
 
-import { Schema, Field, Utf8, Float32, FixedSizeList } from 'apache-arrow';
-import type { Connection, Table } from '@lancedb/lancedb';
+import { arrayValue } from '@duckdb/node-api';
 import type {
   ConfigCategory,
   ConfigEntry,
   ConfigNamespace,
   Language,
 } from '../shared/types.js';
+import type { DbClient } from '../db/client.js';
 import { loadConfig } from '../agent/config.js';
 import { formatScope, parseScope } from './paths.js';
 
 const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 
 // ---------------------------------------------------------------------------
-// Apache Arrow schema for the 'config_entries' table
-// ---------------------------------------------------------------------------
-
-const CONFIG_SCHEMA = new Schema([
-  new Field('id',          new Utf8(), false),
-  new Field('scope',       new Utf8(), false),   // formatted: 'global' or 'project:<path>'
-  new Field('namespace',   new Utf8(), false),
-  new Field('category',    new Utf8(), false),
-  new Field('language',    new Utf8(), false),
-  new Field('name',        new Utf8(), false),
-  new Field('filePath',    new Utf8(), false),
-  new Field('body',        new Utf8(), false),
-  new Field('tags',        new Utf8(), false),   // comma-separated
-  new Field('updatedAt',   new Utf8(), false),
-  new Field('contentHash', new Utf8(), false),
-  new Field('vector', new FixedSizeList(EMBEDDING_DIM, new Field('item', new Float32(), true)), false),
-]);
-
-const TABLE_NAME = 'config_entries';
-const ZERO_VEC = new Array<number>(EMBEDDING_DIM).fill(0);
-
-// ---------------------------------------------------------------------------
 // Row mapping
 // ---------------------------------------------------------------------------
 
-function configEntryToRow(entry: ConfigEntry): Record<string, unknown> {
-  return {
-    id:          entry.id,
-    scope:       formatScope(entry.scope),
-    namespace:   entry.namespace,
-    category:    entry.category,
-    language:    entry.language,
-    name:        entry.name,
-    filePath:    entry.filePath,
-    body:        entry.body,
-    tags:        entry.tags.join(','),
-    updatedAt:   entry.updatedAt,
-    contentHash: entry.contentHash,
-    vector:      entry.embedding.length === EMBEDDING_DIM ? entry.embedding : ZERO_VEC,
-  };
+function unwrapEmbedding(raw: unknown): number[] {
+  if (raw === null || raw === undefined) return [];
+  if (Array.isArray(raw)) return raw as number[];
+  const inner = (raw as { items?: unknown }).items;
+  return Array.isArray(inner) ? (inner as number[]) : [];
 }
 
 function rowToConfigEntry(row: Record<string, unknown>): ConfigEntry {
-  const tagsRaw = row['tags'] as string;
+  const tagsRaw = (row['tags'] as string) ?? '';
   return {
-    id:          row['id']          as string,
+    id:          row['id']           as string,
     scope:       parseScope(row['scope'] as string),
-    namespace:   row['namespace']   as ConfigNamespace,
-    category:    row['category']    as ConfigCategory,
-    language:    row['language']    as Language | 'all',
-    name:        row['name']        as string,
-    filePath:    row['filePath']    as string,
-    body:        row['body']        as string,
+    namespace:   row['namespace']    as ConfigNamespace,
+    category:    row['category']     as ConfigCategory,
+    language:    row['language']     as Language | 'all',
+    name:        row['name']         as string,
+    filePath:    (row['file_path']    as string) ?? '',
+    body:        (row['body']         as string) ?? '',
     tags:        tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [],
-    updatedAt:   row['updatedAt']   as string,
-    contentHash: row['contentHash'] as string,
-    embedding:   (row['vector']     as number[]) ?? [],
+    updatedAt:   (row['updated_at']   as string) ?? '',
+    contentHash: (row['content_hash'] as string) ?? '',
+    embedding:   unwrapEmbedding(row['embedding']),
   };
 }
 
@@ -89,69 +60,66 @@ function rowToConfigEntry(row: Record<string, unknown>): ConfigEntry {
 // ---------------------------------------------------------------------------
 
 export class ConfigStore {
-  private _lance: Connection;
-  private _table: Table | null = null;
+  private readonly _db: DbClient;
 
-  constructor(lance: Connection) {
-    this._lance = lance;
-  }
-
-  /** Get or open the config entries table. Returns null if table doesn't exist. */
-  private async getTable(): Promise<Table | null> {
-    if (this._table !== null) return this._table;
-    const names = await this._lance.tableNames();
-    if (!names.includes(TABLE_NAME)) return null;
-    this._table = await this._lance.openTable(TABLE_NAME);
-    return this._table;
-  }
-
-  /** Ensure the table exists, creating it if needed. */
-  private async ensureTable(): Promise<Table> {
-    let table = await this.getTable();
-    if (table === null) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      this._table = await (this._lance as any).createEmptyTable(TABLE_NAME, CONFIG_SCHEMA);
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      table = this._table!;
-    }
-    return table;
+  constructor(db: DbClient) {
+    this._db = db;
   }
 
   /** Upsert a config entry (delete existing by id, then add). */
   async upsertEntry(entry: ConfigEntry): Promise<void> {
-    const table = await this.ensureTable();
-    const safeId = entry.id.replace(/'/g, "''");
-    try {
-      await table.delete(`id = '${safeId}'`);
-    } catch {
-      // Table may be empty — ignore delete errors
-    }
-    await table.add([configEntryToRow(entry)]);
+    await this._db.duck.exec(
+      `INSERT INTO config_entry (
+         id, scope, namespace, category, language, name, file_path,
+         body, tags, updated_at, content_hash, embedding
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         scope        = excluded.scope,
+         namespace    = excluded.namespace,
+         category     = excluded.category,
+         language     = excluded.language,
+         name         = excluded.name,
+         file_path    = excluded.file_path,
+         body         = excluded.body,
+         tags         = excluded.tags,
+         updated_at   = excluded.updated_at,
+         content_hash = excluded.content_hash,
+         embedding    = excluded.embedding`,
+      [
+        entry.id,
+        formatScope(entry.scope),
+        entry.namespace,
+        entry.category,
+        entry.language,
+        entry.name,
+        entry.filePath,
+        entry.body,
+        entry.tags.join(','),
+        entry.updatedAt,
+        entry.contentHash,
+        entry.embedding.length === EMBEDDING_DIM ? arrayValue(entry.embedding) : null,
+      ],
+    );
   }
 
   /** Delete a config entry by id. */
   async deleteEntry(id: string): Promise<void> {
-    const table = await this.getTable();
-    if (table === null) return;
-    const safeId = id.replace(/'/g, "''");
-    await table.delete(`id = '${safeId}'`);
+    await this._db.duck.exec('DELETE FROM config_entry WHERE id = ?', [id]);
   }
 
-  /** Delete all entries matching a scope string (e.g. 'global' or 'project:/path'). */
+  /** Delete all entries matching a scope string ('global' or 'project:/path'). */
   async deleteByScope(scope: string): Promise<void> {
-    const table = await this.getTable();
-    if (table === null) return;
-    const safeScope = scope.replace(/'/g, "''");
-    await table.delete(`scope = '${safeScope}'`);
+    await this._db.duck.exec('DELETE FROM config_entry WHERE scope = ?', [scope]);
   }
 
   /** Fetch a single entry by id. */
   async getEntry(id: string): Promise<ConfigEntry | null> {
-    const table = await this.getTable();
-    if (table === null) return null;
-    const safeId = id.replace(/'/g, "''");
-    const rows = await table.query().where(`id = '${safeId}'`).limit(1).toArray();
-    return rows[0] ? rowToConfigEntry(rows[0] as Record<string, unknown>) : null;
+    const rows = await this._db.duck.query(
+      'SELECT * FROM config_entry WHERE id = ?',
+      [id],
+    );
+    if (rows.length === 0) return null;
+    return rowToConfigEntry(rows[0]!);
   }
 
   /** List entries with optional filters. */
@@ -160,35 +128,27 @@ export class ConfigStore {
     category?: string | undefined;
     scope?: string | undefined;
   }): Promise<ConfigEntry[]> {
-    const table = await this.getTable();
-    if (table === null) return [];
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (opts?.namespace) { conds.push('namespace = ?'); params.push(opts.namespace); }
+    if (opts?.category)  { conds.push('category = ?');  params.push(opts.category); }
+    if (opts?.scope)     { conds.push('scope = ?');     params.push(opts.scope); }
 
-    const conditions: string[] = [];
-    if (opts?.namespace) {
-      const safe = opts.namespace.replace(/'/g, "''");
-      conditions.push(`namespace = '${safe}'`);
-    }
-    if (opts?.category) {
-      const safe = opts.category.replace(/'/g, "''");
-      conditions.push(`category = '${safe}'`);
-    }
-    if (opts?.scope) {
-      const safe = opts.scope.replace(/'/g, "''");
-      conditions.push(`scope = '${safe}'`);
-    }
-
-    let query = table.query();
-    if (conditions.length > 0) {
-      query = query.where(conditions.join(' AND '));
-    }
-
-    const rows = await query.toArray();
-    return rows.map(r => rowToConfigEntry(r as Record<string, unknown>));
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+    const rows = await this._db.duck.query(
+      `SELECT * FROM config_entry ${where}`,
+      params as never[],
+    );
+    return rows.map(rowToConfigEntry);
   }
 
   /**
    * Vector search on config entries.
-   * Returns raw rows with distance — caller handles ranking/boosting.
+   * Returns rows with cosine-distance scores -- caller handles ranking
+   * / boosting. The optional `where` is a raw SQL fragment built by
+   * `config/search.ts` (already escapes its inputs); we splice it
+   * straight in so the existing query-construction code stays
+   * unchanged.
    */
   async vectorSearch(
     queryVec: number[],
@@ -197,18 +157,21 @@ export class ConfigStore {
   ): Promise<Array<{ entry: ConfigEntry; distance: number }>> {
     if (queryVec.length === 0) return [];
 
-    const table = await this.getTable();
-    if (table === null) return [];
-
-    let search = table.vectorSearch(queryVec).distanceType('cosine').limit(limit);
-    if (where) {
-      search = search.where(where);
-    }
-
-    const rows = await search.toArray();
+    const conditions: string[] = ['embedding IS NOT NULL'];
+    if (where) conditions.push(`(${where})`);
+    const sql =
+      `SELECT *, array_distance(embedding, ?::FLOAT[${queryVec.length}]) AS _distance
+       FROM config_entry
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY _distance
+       LIMIT ?`;
+    const rows = await this._db.duck.query(
+      sql,
+      [arrayValue(queryVec), limit] as never[],
+    );
     return rows.map(r => ({
-      entry: rowToConfigEntry(r as Record<string, unknown>),
-      distance: (r as Record<string, unknown>)['_distance'] as number,
+      entry: rowToConfigEntry(r),
+      distance: Number(r['_distance']),
     }));
   }
 }
