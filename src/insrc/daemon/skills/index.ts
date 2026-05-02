@@ -42,6 +42,9 @@ import { registerDataSynthLineageFoldSkill } from './built-ins/data.synth.lineag
 import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality.scorecard.rdbms.js';
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
+import { registerDataDistributionOutliersIqrRdbmsSkill } from './built-ins/data.distribution.outliers-iqr.rdbms.js';
+import { registerDataDistributionOutliersZScoreRdbmsSkill } from './built-ins/data.distribution.outliers-zscore.rdbms.js';
+import { registerDataDistributionOutliersMadRdbmsSkill } from './built-ins/data.distribution.outliers-mad.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -75,6 +78,12 @@ export function registerAllSkills(): void {
   registerDataQualityCompletenessRdbmsSkill();
   registerDataQualityUniquenessRdbmsSkill();
   registerDataQualityValidityRdbmsSkill();
+  // Phase 5b (Family-5 distribution shape) -- outlier detection
+  // variants. All hybrid: bounds from server-side aggregate,
+  // examples + estimated counts from a 50-row sample.
+  registerDataDistributionOutliersIqrRdbmsSkill();
+  registerDataDistributionOutliersZScoreRdbmsSkill();
+  registerDataDistributionOutliersMadRdbmsSkill();
   // Phase 5e (sensitivity / PII) -- regex over sampled values;
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();

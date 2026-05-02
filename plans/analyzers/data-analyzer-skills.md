@@ -149,9 +149,9 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5a.5 | quality-profile: profile.boolean | partial | `data.profile.boolean.rdbms` shipped (atomic; one `db_sql_distinct` round-trip + cross-dialect normalization for true / false / null / other counts plus true ratio). File-side variant pending |
 | 5a.6 | quality-profile: profile.auto | done | `data.profile.auto.rdbms` shipped (composite over all 5 RDBMS profile atomics). Calls `db_sql_describe` to read the column's declared SQL type, classifies into `numeric / text / boolean / temporal / categorical` via lowercase substring rules, dispatches to the matching profiler via `runSkill`. Returns `{ declaredType, kind, profile }` so synthesise renderers branch without re-classifying |
 | 5b.1 | distribution: distribution.histogram | pending | |
-| 5b.2 | distribution: distribution.outliers-iqr | pending | |
-| 5b.3 | distribution: distribution.outliers-zscore | pending | |
-| 5b.4 | distribution: distribution.outliers-mad | pending | |
+| 5b.2 | distribution: distribution.outliers-iqr | partial | `data.distribution.outliers-iqr.rdbms` shipped (Tukey-IQR, default k=1.5; Q1/Q3/IQR + bounds from server-side `db_sql_aggregate`, sample-based outlier examples + estimated count over 50 rows). `hasFullTableOutliers` boolean derived from min/max vs bounds is precise. File-side variant pending |
+| 5b.3 | distribution: distribution.outliers-zscore | partial | `data.distribution.outliers-zscore.rdbms` shipped (Z-score with default threshold 3.0; mean / stddev server-side, examples sample-based). Documented as parametric -- assumes near-normal data; IQR/MAD variants are recommended for skewed columns. File-side variant pending |
+| 5b.4 | distribution: distribution.outliers-mad | partial | `data.distribution.outliers-mad.rdbms` shipped (modified Z-score via MAD, default threshold 3.5; median server-side, MAD computed over 50-row sample with `madSource: 'sample'` flag). Best fit for heavy-tailed columns where IQR / Z-score under-detect. Server-side MAD needs a two-pass aggregate the current tool doesn't expose; sample MAD is the v1 compromise. File-side variant pending |
 | 5b.5 | distribution: distribution.normality-test | pending | |
 | 5b.6 | distribution: distribution.heavy-tail-check | pending | |
 | 5b.7 | distribution: distribution.modes | pending | |
