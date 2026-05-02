@@ -23,23 +23,29 @@ import type { Entity, Relation } from '../../shared/types.js';
 import { makeEntityId } from '../parser/base.js';
 import { runCrossFileResolver } from '../cross-file-resolver.js';
 import { detectSourceRoots } from '../source-roots.js';
+import {
+	closeDuckDBStorage,
+	setStorageDuckDBPath,
+} from '../../daemon/db/duckdb-storage-pool.js';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
 
 let tmpHome:  string;
-let origGraph: string;
 let origLance: string;
 let db: DbClients;
 
 before(async () => {
 	tmpHome = mkdtempSync(join(tmpdir(), 'insrc-cfr-'));
-	origGraph = PATHS.graph;
 	origLance = PATHS.lance;
-	(PATHS as Record<string, string>)['graph'] = join(tmpHome, 'graph');
 	(PATHS as Record<string, string>)['lance'] = join(tmpHome, 'lance');
 	mkdirSync(join(tmpHome, 'lance'), { recursive: true });
+
+	// In-memory DuckDB storage so each test run starts fresh and
+	// doesn't touch ~/.insrc/duckdb.db.
+	setStorageDuckDBPath(':memory:');
+	await closeDuckDBStorage();
 
 	db = await getDb();
 	await initDb(db);
@@ -47,7 +53,7 @@ before(async () => {
 
 after(async () => {
 	await closeDb();
-	(PATHS as Record<string, string>)['graph'] = origGraph;
+	await closeDuckDBStorage();
 	(PATHS as Record<string, string>)['lance'] = origLance;
 	try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });

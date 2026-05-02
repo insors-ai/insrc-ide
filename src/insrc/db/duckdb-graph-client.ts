@@ -25,12 +25,17 @@
  *    GraphClient surface drops `prepare` entirely.
  *
  * 3. **Fresh Connection per call.** Each GraphClient call goes
- *    through `withConnection` from the duckdb-pool (Phase 0.2);
+ *    through `withStorageConnection` from the duckdb-storage-pool;
  *    Connections are sub-millisecond and per-call gives us query
  *    isolation + per-query cancel semantics.
+ *
+ * 4. **Storage pool, not query pool.** The graph is daemon-owned
+ *    state that must survive restart, so it lives on the file-backed
+ *    `duckdb-storage-pool.ts`. The `:memory:` query engine in
+ *    `duckdb-pool.ts` is reserved for the data-driver attaches.
  */
 
-import { withConnection } from '../daemon/db/duckdb-pool.js';
+import { withStorageConnection } from '../daemon/db/duckdb-storage-pool.js';
 import type { DuckDBValue } from '@duckdb/node-api';
 
 /**
@@ -68,7 +73,7 @@ class DuckDBGraphClient implements GraphClient {
     sql: string,
     params?: GraphParams,
   ): Promise<T[]> {
-    return withConnection(async (conn) => {
+    return withStorageConnection(async (conn) => {
       const reader = params !== undefined
         ? await conn.runAndReadAll(sql, params as DuckDBValue[] | Record<string, DuckDBValue>)
         : await conn.runAndReadAll(sql);
@@ -77,7 +82,7 @@ class DuckDBGraphClient implements GraphClient {
   }
 
   async exec(sql: string, params?: GraphParams): Promise<void> {
-    await withConnection(async (conn) => {
+    await withStorageConnection(async (conn) => {
       if (params !== undefined) {
         await conn.run(sql, params as DuckDBValue[] | Record<string, DuckDBValue>);
       } else {
@@ -102,8 +107,8 @@ export function getDuckDBGraphClient(): GraphClient {
 /**
  * Reset the cached client. Called from [client.ts](./client.ts)
  * `closeDb` so a daemon restart picks up a fresh instance.
- * The underlying DuckDB instance is closed by `closeDuckDB` in
- * the pool module, not here.
+ * The underlying DuckDB instance is closed by `closeDuckDBStorage`
+ * in the pool module, not here.
  */
 export function resetDuckDBGraphClient(): void {
   _instance = null;

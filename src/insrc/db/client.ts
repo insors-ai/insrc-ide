@@ -1,38 +1,34 @@
 import * as lancedb from '@lancedb/lancedb';
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { PATHS } from '../shared/paths.js';
-import { DUCKDB_GRAPH_STATEMENTS } from './duckdb-graph-schema.js';
+import { buildDuckDBSchema } from './duckdb-graph-schema.js';
 import {
   getDuckDBGraphClient,
   resetDuckDBGraphClient,
   type GraphClient,
 } from './duckdb-graph-client.js';
+import { loadConfig } from '../agent/config.js';
 
 /**
  * Daemon-side database clients.
  *
  * Post Kuzu → DuckDB migration (plans/storage-migration-duckdb.md
- * Phase A.8-A.11): the graph layer runs on DuckDB only. The legacy
- * `graph` / `graphReader` Kuzu connections are gone; callers go
- * through `duck` (a `GraphClient` over the daemon's shared DuckDB
- * instance from daemon/db/duckdb-pool.ts).
+ * Phase A.8-A.11): the graph layer runs on the file-backed DuckDB
+ * storage pool (daemon/db/duckdb-storage-pool.ts) via the shared
+ * `GraphClient`. The legacy `graph` / `graphReader` Kuzu connections
+ * are gone.
  *
- * `lance` stays through Phase A; it migrates to DuckDB VSS in
- * Phase B.
+ * `lance` stays through Phase A; Phase B.6 replaces it with DuckDB
+ * VSS tables on the same storage pool.
  */
 export interface DbClients {
   /**
-   * DuckDB-backed graph client. v1 uses one client for both reads
-   * and writes; DuckDB's MVCC makes a separate reader connection
-   * unnecessary. The 30-second query-timeout guard from the old
-   * Kuzu reader connection isn't replicated here -- query timeouts
-   * are a per-call concern in DuckDB; the few callers that needed
-   * it can wrap their query in a per-connection timeout if it
-   * comes up.
+   * DuckDB-backed graph client. Storage-pool-backed; one client for
+   * both reads and writes. DuckDB's MVCC makes a separate reader
+   * connection unnecessary.
    */
   duck: GraphClient;
-  /** LanceDB connection — entity data with embeddings and BM25 FTS */
+  /** LanceDB connection — entity data with embeddings (removed in B.10). */
   lance: lancedb.Connection;
 }
 
@@ -47,19 +43,12 @@ let _clients: DbClients | null = null;
 export async function getDb(): Promise<DbClients> {
   if (_clients !== null) return _clients;
 
-  // Ensure the LanceDB directory exists; DuckDB graph state is
-  // in-memory in the singleton (daemon/db/duckdb-pool.ts) and has no
-  // on-disk parent of its own.
-  mkdirSync(dirname(PATHS.graph), { recursive: true });
+  // Ensure required directories exist. The DuckDB storage pool
+  // creates its own parent (`~/.insrc/`) on first init; we only need
+  // to seed the Lance directory here. Phase B.10 drops this.
   mkdirSync(PATHS.lance, { recursive: true });
 
-  // DuckDB graph client is daemon-wide singleton from
-  // duckdb-graph-client.ts; the underlying DuckDB instance is the
-  // shared one from daemon/db/duckdb-pool.ts (lazy-init on first
-  // query). We just return the GraphClient handle here; opening
-  // the DuckDB instance happens on first use.
   const duck = getDuckDBGraphClient();
-
   const lance = await lancedb.connect(PATHS.lance);
 
   _clients = { duck, lance };
@@ -67,20 +56,21 @@ export async function getDb(): Promise<DbClients> {
 }
 
 /**
- * Apply DuckDB graph DDL + ensure LanceDB tables exist.
+ * Apply the DuckDB schema (graph + Phase B vector tables).
  * Idempotent -- safe to call on every daemon startup.
  */
 export async function initDb(db: DbClients): Promise<void> {
-  for (const stmt of DUCKDB_GRAPH_STATEMENTS) {
+  const dim = loadConfig().models.providers.local.embeddingDim;
+  for (const stmt of buildDuckDBSchema(dim)) {
     await db.duck.exec(stmt);
   }
 }
 
 /**
  * Clears the singleton references. The underlying DuckDB instance is
- * closed separately by `closeDuckDB` in daemon/db/duckdb-pool.ts via
- * the daemon's graceful-shutdown handler; we just clear the cached
- * GraphClient handle here.
+ * closed separately by `closeDuckDBStorage` in
+ * daemon/db/duckdb-storage-pool.ts via the daemon's graceful-shutdown
+ * handler; we just clear the cached GraphClient handle here.
  */
 export async function closeDb(): Promise<void> {
   _clients = null;

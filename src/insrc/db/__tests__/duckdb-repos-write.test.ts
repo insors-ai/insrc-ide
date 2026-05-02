@@ -10,21 +10,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { closeDuckDB } from '../../daemon/db/duckdb-pool.js';
+import {
+  closeDuckDBStorage,
+  setStorageDuckDBPath,
+  withStorageConnection as withConnection,
+} from '../../daemon/db/duckdb-storage-pool.js';
 import {
   getDuckDBGraphClient,
   resetDuckDBGraphClient,
 } from '../duckdb-graph-client.js';
 import { applyDuckDBGraphSchema } from '../duckdb-graph-schema.js';
-import { withConnection } from '../../daemon/db/duckdb-pool.js';
 
 test.beforeEach(async () => {
   resetDuckDBGraphClient();
-  await closeDuckDB();
+  setStorageDuckDBPath(':memory:');
+  await closeDuckDBStorage();
 });
 test.afterEach(async () => {
   resetDuckDBGraphClient();
-  await closeDuckDB();
+  await closeDuckDBStorage();
 });
 
 async function setupSchema(): Promise<void> {

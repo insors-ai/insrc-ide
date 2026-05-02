@@ -1,15 +1,27 @@
 /**
- * DuckDB process-wide singleton + per-query connection handle.
+ * DuckDB process-wide singleton -- the IN-MEMORY query engine.
  *
- * Plans/data-driver-duckdb-files.md Phase 0.2.
+ * plans/data-driver-duckdb-files.md Phase 0.2.
+ *
+ * **Scope.** This singleton is the *query engine* used by the data
+ * drivers (CSV / JSON / JSONL / Parquet / .arrow attaches) and the
+ * `db_file_aggregate` tool. The source files are the source of truth;
+ * DuckDB attaches them at query time and the in-memory state is
+ * disposable. Persistence would just bloat the file with stale
+ * cached views.
+ *
+ * **NOT for storage.** Graph data + entity rows + conversations + todos
+ * + config-store all live in the file-backed *storage* DuckDB exposed
+ * via `daemon/db/duckdb-storage-pool.ts`. Picking the wrong pool will
+ * silently lose data on daemon restart.
  *
  * Lifecycle: lazy-init singleton, daemon-lifetime. The first call to
  * `getDuckDB()` opens an in-memory DuckDB instance, sets the memory
- * cap (`PRAGMA memory_limit`), locks down extension installs, and
- * loads the `arrow` extension for `.arrow` IPC reads. Subsequent
- * calls share the instance; concurrent first-callers collapse onto
- * the same init promise via `_initPromise`. Closed in the daemon's
- * graceful-shutdown handler alongside Kuzu / LanceDB.
+ * cap (`PRAGMA memory_limit`), loads the `arrow` + `vss` extensions,
+ * then locks down further extension installs / network access.
+ * Subsequent calls share the instance; concurrent first-callers
+ * collapse onto the same init promise. Closed in the daemon's
+ * graceful-shutdown handler.
  *
  * Per-query: `withConnection<T>(fn)` is the canonical entry point.
  * DuckDB Connections are sub-millisecond; we acquire a fresh one per
@@ -19,11 +31,7 @@
  * Memory: the `memory_limit` PRAGMA is a per-query CAP, not a
  * reservation. Idle resident size is ~50-100 MB (prepared-statement
  * cache + extension binaries); under-load usage scales up to the
- * cap. The 512 MB default sits within the daemon's overall budget
- * alongside Kuzu (1 GB pool) + Ollama (~3 GB resident) + Node
- * (4-8 GB during indexing). Bumpable via `~/.insrc/config.json`
- * `duckdb.memoryMb` (handled by the loader; this module just reads
- * the resolved value).
+ * cap. Bumpable via `~/.insrc/config.json` `duckdb.memoryMb`.
  */
 
 import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
@@ -40,9 +48,10 @@ let _instance: DuckDBInstance | null = null;
 let _initPromise: Promise<DuckDBInstance> | null = null;
 
 /**
- * Lazy-init the daemon-wide DuckDB singleton. Concurrent first-callers
- * share the same init promise so the Database is created exactly once
- * even when two skills hit `getDuckDB()` in parallel on a cold daemon.
+ * Lazy-init the in-memory query-engine singleton. Concurrent first-
+ * callers share the same init promise so the Database is created
+ * exactly once even when two skills hit `getDuckDB()` in parallel on
+ * a cold daemon.
  *
  * On init failure the cached promise is cleared so the next caller
  * re-attempts (avoids permanently-rejected-promise reuse). Production
@@ -57,8 +66,9 @@ export async function getDuckDB(): Promise<DuckDBInstance> {
   _initPromise = (async (): Promise<DuckDBInstance> => {
     const t0 = Date.now();
     const memoryMb = readMemoryBudget();
-    // `:memory:` ensures no on-disk DuckDB state is created. The Parquet
-    // cache (Phase 3) is a separate, file-backed concern.
+    // `:memory:` ensures no on-disk DuckDB state is created. The
+    // file-backed storage layer for graph + user state is a separate
+    // singleton (duckdb-storage-pool.ts).
     const instance = await DuckDBInstance.create(':memory:');
     const conn = await instance.connect();
     try {
@@ -102,9 +112,8 @@ export async function getDuckDB(): Promise<DuckDBInstance> {
 
 /**
  * Close the singleton. Called by the daemon's graceful-shutdown
- * handler alongside Kuzu / LanceDB. DuckDB has no on-disk state to
- * flush (the Parquet cache is a build artifact, not a write target),
- * so this is fast. Errors during close are logged but not re-thrown
+ * handler. The query-engine DB has no on-disk state to flush, so
+ * close is fast. Errors during close are logged but not re-thrown
  * -- the daemon is on the way down anyway.
  */
 export async function closeDuckDB(): Promise<void> {

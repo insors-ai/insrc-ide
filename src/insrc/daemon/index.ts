@@ -64,6 +64,7 @@ process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', r
 
 import { getDb, initDb, closeDb } from '../db/client.js';
 import { closeDuckDB } from './db/duckdb-pool.js';
+import { closeDuckDBStorage } from './db/duckdb-storage-pool.js';
 import { listRepos, addRepo, removeRepo } from '../db/repos.js';
 import { deleteEntitiesForRepo } from '../db/entities.js';
 import { deleteUnresolvedForRepo } from '../db/relations.js';
@@ -1319,11 +1320,14 @@ async function main(): Promise<void> {
 		}, HARD_EXIT_MS);
 		backstop.unref();
 		void queueDone.finally(async () => {
-			// Order: Kuzu first (WAL flush is a hard correctness
-			// requirement), then DuckDB (no on-disk state; build-artifact
-			// cache only). LanceDB is closed inside closeDb().
+			// Order: storage pool last so the WAL flushes after every
+			// other writer has closed. closeDb() handles LanceDB +
+			// graph-client reset; closeDuckDB() drops the in-memory
+			// query engine (no on-disk state); closeDuckDBStorage()
+			// flushes + closes ~/.insrc/duckdb.db.
 			await closeDb();
 			await closeDuckDB();
+			await closeDuckDBStorage();
 			clearPid();
 			log.info('bye');
 			clearTimeout(backstop);

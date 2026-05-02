@@ -10,16 +10,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  closeDuckDB,
-  withConnection,
-} from '../../daemon/db/duckdb-pool.js';
+  closeDuckDBStorage,
+  setStorageDuckDBPath,
+  withStorageConnection as withConnection,
+} from '../../daemon/db/duckdb-storage-pool.js';
 import {
   DUCKDB_GRAPH_STATEMENTS,
   applyDuckDBGraphSchema,
 } from '../duckdb-graph-schema.js';
 
-test.beforeEach(async () => { await closeDuckDB(); });
-test.afterEach(async () => { await closeDuckDB(); });
+test.beforeEach(async () => { setStorageDuckDBPath(':memory:'); await closeDuckDBStorage(); });
+test.afterEach(async () => { await closeDuckDBStorage(); });
 
 const EXPECTED_TABLES = [
   'entity',

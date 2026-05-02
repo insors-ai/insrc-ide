@@ -7,9 +7,10 @@ const LOG_DIR   = join('/tmp', '.insrc');
 export const PATHS = {
   insrc:       INSRC_DIR,
   config:      join(INSRC_DIR, 'config.json'),
-  graph:       join(INSRC_DIR, 'graph'),   // Kuzu — Code Knowledge Graph
-  lance:       join(INSRC_DIR, 'lance'),   // LanceDB — entity store + embeddings
-  configStore: join(INSRC_DIR, 'config-store'), // LanceDB — config entry store
+  duckdb:      join(INSRC_DIR, 'duckdb.db'),    // DuckDB — graph + entities + conversations + config-store + todos
+  graph:       join(INSRC_DIR, 'graph'),        // legacy: Kuzu DB (cleaned up on first DuckDB-only boot)
+  lance:       join(INSRC_DIR, 'lance'),        // LanceDB — entity store + embeddings (Phase B; removed in B.10)
+  configStore: join(INSRC_DIR, 'config-store'), // LanceDB — config entry store (Phase B; removed in B.10)
   templates:   join(INSRC_DIR, 'templates'),    // global config templates
   feedback:    join(INSRC_DIR, 'feedback'),     // global config feedback
   conventions: join(INSRC_DIR, 'conventions'),  // global config conventions
