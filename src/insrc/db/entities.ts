@@ -45,32 +45,41 @@ function entityToParams(entity: Entity): unknown[] {
   ];
 }
 
-const INSERT_SQL = `
-  INSERT INTO entity (
-    id, kind, name, language, repo, file, start_line, end_line,
-    body, indexed_at, embedding_model,
-    is_exported, is_async, is_abstract,
-    signature, hash, root_path, artifact, embedding
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT (id) DO UPDATE SET
-    kind            = excluded.kind,
-    name            = excluded.name,
-    language        = excluded.language,
-    repo            = excluded.repo,
-    file            = excluded.file,
-    start_line      = excluded.start_line,
-    end_line        = excluded.end_line,
-    body            = excluded.body,
-    indexed_at      = excluded.indexed_at,
-    embedding_model = excluded.embedding_model,
-    is_exported     = excluded.is_exported,
-    is_async        = excluded.is_async,
-    is_abstract     = excluded.is_abstract,
-    signature       = excluded.signature,
-    hash            = excluded.hash,
-    root_path       = excluded.root_path,
-    artifact        = excluded.artifact,
-    embedding       = excluded.embedding`;
+const ENTITY_COLUMNS = [
+  'id', 'kind', 'name', 'language', 'repo', 'file', 'start_line', 'end_line',
+  'body', 'indexed_at', 'embedding_model',
+  'is_exported', 'is_async', 'is_abstract',
+  'signature', 'hash', 'root_path', 'artifact', 'embedding',
+] as const;
+const ENTITY_PLACEHOLDER = `(${ENTITY_COLUMNS.map(() => '?').join(', ')})`;
+const ENTITY_ON_CONFLICT = `ON CONFLICT (id) DO UPDATE SET
+  kind            = excluded.kind,
+  name            = excluded.name,
+  language        = excluded.language,
+  repo            = excluded.repo,
+  file            = excluded.file,
+  start_line      = excluded.start_line,
+  end_line        = excluded.end_line,
+  body            = excluded.body,
+  indexed_at      = excluded.indexed_at,
+  embedding_model = excluded.embedding_model,
+  is_exported     = excluded.is_exported,
+  is_async        = excluded.is_async,
+  is_abstract     = excluded.is_abstract,
+  signature       = excluded.signature,
+  hash            = excluded.hash,
+  root_path       = excluded.root_path,
+  artifact        = excluded.artifact,
+  embedding       = excluded.embedding`;
+
+/**
+ * Cap on rows-per-INSERT for the bulk path. 100 rows × 19 columns =
+ * 1.9k positional parameters, well below DuckDB's prepared-statement
+ * cap. Tuned for the indexer's typical per-file entity count
+ * (5-200); chunked above this so the parameter array doesn't grow
+ * unboundedly on full-repo upserts.
+ */
+const ENTITY_BULK_CHUNK = 100;
 
 /**
  * DuckDB returns FLOAT[N] columns as `{ items: number[] }` (the
@@ -122,21 +131,32 @@ export function rowToEntity(row: Record<string, unknown>): Entity {
 // ---------------------------------------------------------------------------
 
 /**
- * Upsert a batch of entities. Replaces the LanceDB add() + Kuzu stub
- * path with a single per-row INSERT ... ON CONFLICT DO UPDATE on the
- * `entity` table. Embeddings travel through alongside row data; rows
- * without embeddings (the indexer's first pass) get NULL in the
- * embedding column and the embedder fills them in later.
+ * Upsert a batch of entities. Bulk multi-VALUES INSERT chunked at
+ * ENTITY_BULK_CHUNK rows per call -- the prior per-row loop made one
+ * round-trip + one Connection acquire per entity, which dominated the
+ * indexer's per-file cost (50-200 entities × ~1ms/row vs ~10ms for
+ * the whole batch in one statement). Embeddings travel through
+ * alongside row data; rows without embeddings (the indexer's first
+ * pass) get NULL in the embedding column and the embedder fills
+ * them in later.
  *
- * Per-row SQL avoids the Lance pre-delete pattern; ON CONFLICT covers
- * re-indexing. The previous implementation pre-deleted file entities
- * before insert; the new pattern leaves that responsibility to
- * `deleteEntitiesForFile` for explicit purges.
+ * ON CONFLICT (id) DO UPDATE covers re-indexing; the previous
+ * implementation pre-deleted file entities before insert, but the
+ * new pattern leaves that to `deleteEntitiesForFile` for explicit
+ * purges.
  */
 export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<void> {
   if (entities.length === 0) return;
-  for (const e of entities) {
-    await db.duck.exec(INSERT_SQL, entityToParams(e) as never[]);
+  for (let i = 0; i < entities.length; i += ENTITY_BULK_CHUNK) {
+    const chunk = entities.slice(i, i + ENTITY_BULK_CHUNK);
+    const placeholders = chunk.map(() => ENTITY_PLACEHOLDER).join(', ');
+    const params: unknown[] = [];
+    for (const e of chunk) params.push(...entityToParams(e));
+    const sql =
+      `INSERT INTO entity (${ENTITY_COLUMNS.join(', ')})
+       VALUES ${placeholders}
+       ${ENTITY_ON_CONFLICT}`;
+    await db.duck.exec(sql, params as never[]);
   }
 }
 

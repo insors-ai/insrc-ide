@@ -26,12 +26,48 @@ export async function upsertRelation(db: DbClient, relation: Relation): Promise<
 }
 
 /**
- * Upsert multiple relations.
+ * Bulk-row chunk size for the multi-VALUES INSERT path. Sized so the
+ * positional-parameter array stays well under DuckDB's prepared-
+ * statement cap on per-file relation counts (typically <500 per file).
+ */
+const RELATION_BULK_CHUNK = 200;
+
+/**
+ * Upsert multiple relations. Splits resolved vs unresolved up-front
+ * (different target tables, different shapes) and bulk-inserts each
+ * group via a multi-VALUES INSERT chunked at RELATION_BULK_CHUNK.
+ *
+ * The prior per-row loop was a measurable hot path during full
+ * indexing -- a typical TS file emits ~50-100 relation edges, and
+ * one round-trip per edge dominated wall time. Bulk INSERT collapses
+ * each chunk into a single Connection acquire + one statement.
  */
 export async function upsertRelations(db: DbClient, relations: Relation[]): Promise<void> {
-  for (const rel of relations) {
-    await upsertRelation(db, rel);
+  if (relations.length === 0) return;
+
+  const resolved: Relation[] = [];
+  const unresolved: Relation[] = [];
+  for (const r of relations) {
+    if (r.resolved) resolved.push(r); else unresolved.push(r);
   }
+
+  // Resolved -> relation table. (src, dst, kind), ON CONFLICT DO NOTHING.
+  for (let i = 0; i < resolved.length; i += RELATION_BULK_CHUNK) {
+    const chunk = resolved.slice(i, i + RELATION_BULK_CHUNK);
+    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ');
+    const params: unknown[] = [];
+    for (const r of chunk) params.push(r.from, r.to, r.kind);
+    await db.duck.exec(
+      `INSERT INTO relation (src, dst, kind) VALUES ${placeholders}
+       ON CONFLICT (src, dst, kind) DO NOTHING`,
+      params as never[],
+    );
+  }
+
+  // Unresolved -> unresolved_relation table. Per-row meta-validation
+  // (file/repo presence) means we still iterate, but the INSERT itself
+  // batches.
+  await upsertUnresolvedRelations(db, unresolved);
 }
 
 /**
@@ -83,41 +119,57 @@ export function makeUnresolvedRelationId(
 }
 
 async function upsertUnresolvedRelation(db: DbClient, relation: Relation): Promise<void> {
-  const meta     = relation.meta ?? {};
-  const fromFile = typeof meta['file'] === 'string' ? meta['file'] as string : '';
-  const repo     = typeof meta['repo'] === 'string' ? meta['repo'] as string : '';
-  if (!fromFile || !repo) {
-    // Parser-emitted unresolved relations always carry meta.file/meta.repo.
-    // Anything else is a programming error -- log + drop rather than poison
-    // the table with un-invalidatable rows.
-    log.debug(
-      { kind: relation.kind, from: relation.from, to: relation.to },
-      'unresolved relation missing meta.file/meta.repo — dropping',
-    );
-    return;
-  }
+  await upsertUnresolvedRelations(db, [relation]);
+}
 
-  const id          = makeUnresolvedRelationId(repo, relation.from, relation.kind, relation.to);
-  const metaJson    = JSON.stringify(meta);
+/**
+ * Bulk variant. Validates meta + builds the row tuples up-front,
+ * then issues one chunked multi-VALUES INSERT per RELATION_BULK_CHUNK
+ * group. Drops rows missing meta.file/meta.repo with a debug log
+ * (parser invariant -- programming error if it fires).
+ */
+async function upsertUnresolvedRelations(db: DbClient, relations: Relation[]): Promise<void> {
+  if (relations.length === 0) return;
+
   const attemptedAt = new Date().toISOString();
+  const tuples: unknown[][] = [];
+  for (const r of relations) {
+    const meta     = r.meta ?? {};
+    const fromFile = typeof meta['file'] === 'string' ? meta['file'] as string : '';
+    const repo     = typeof meta['repo'] === 'string' ? meta['repo'] as string : '';
+    if (!fromFile || !repo) {
+      log.debug(
+        { kind: r.kind, from: r.from, to: r.to },
+        'unresolved relation missing meta.file/meta.repo — dropping',
+      );
+      continue;
+    }
+    const id       = makeUnresolvedRelationId(repo, r.from, r.kind, r.to);
+    const metaJson = JSON.stringify(meta);
+    tuples.push([id, repo, r.from, fromFile, r.kind, r.to, metaJson, attemptedAt]);
+  }
+  if (tuples.length === 0) return;
 
-  // unresolved_relation primary-keyed on id; ON CONFLICT DO UPDATE
-  // replicates Cypher MERGE+SET semantics. Note camelCase →
-  // snake_case column-name shift (fromEntity → from_entity etc.).
-  await db.duck.exec(
-    `INSERT INTO unresolved_relation
-       (id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (id) DO UPDATE SET
-       repo = excluded.repo,
-       from_entity = excluded.from_entity,
-       from_file = excluded.from_file,
-       kind = excluded.kind,
-       raw_to = excluded.raw_to,
-       meta = excluded.meta,
-       attempted_at = excluded.attempted_at`,
-    [id, repo, relation.from, fromFile, relation.kind, relation.to, metaJson, attemptedAt],
-  );
+  for (let i = 0; i < tuples.length; i += RELATION_BULK_CHUNK) {
+    const chunk = tuples.slice(i, i + RELATION_BULK_CHUNK);
+    const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const params: unknown[] = [];
+    for (const t of chunk) params.push(...t);
+    await db.duck.exec(
+      `INSERT INTO unresolved_relation
+         (id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at)
+       VALUES ${placeholders}
+       ON CONFLICT (id) DO UPDATE SET
+         repo = excluded.repo,
+         from_entity = excluded.from_entity,
+         from_file = excluded.from_file,
+         kind = excluded.kind,
+         raw_to = excluded.raw_to,
+         meta = excluded.meta,
+         attempted_at = excluded.attempted_at`,
+      params as never[],
+    );
+  }
 }
 
 /**
