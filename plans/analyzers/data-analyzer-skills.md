@@ -176,15 +176,15 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5g.2 | timeseries: timeseries.seasonality | pending | autocorrelation peaks |
 | 5g.3 | timeseries: timeseries.stationarity | pending | ADF test |
 | 5g.4 | timeseries: timeseries.gap-analysis | pending | |
-| 6.1 | synthesis: synth.target-description | pending | |
-| 6.2 | synthesis: synth.field-table | pending | |
-| 6.3 | synthesis: synth.drift-report | pending | |
-| 6.4 | synthesis: synth.er-diagram | pending | mermaid |
-| 6.5 | synthesis: synth.sample-table | pending | |
-| 6.6 | synthesis: synth.lineage-fold | pending | |
-| 6.7 | synthesis: synth.profile-card | pending | univariate profile card per column |
-| 6.8 | synthesis: synth.scorecard | pending | quality scorecard rendering |
-| 6.9 | synthesis: synth.histogram-block | pending | mermaid histogram |
+| 6.1 | synthesis: synth.target-description | pending | needs an LLM call (narrative summary); not template-only |
+| 6.2 | synthesis: synth.field-table | done | `data.synth.field-table` ships -- renders SchemaDescription as markdown table with header / summary / per-row [PK] / [FK] / [nullable] tags |
+| 6.3 | synthesis: synth.drift-report | pending | needs Phase 4 drift skills first |
+| 6.4 | synthesis: synth.er-diagram | pending | mermaid; multi-table input shape -- needs Phase 4.x or a new aggregation point |
+| 6.5 | synthesis: synth.sample-table | done | `data.synth.sample-table` ships -- renders sample-rows as markdown table; long values truncate at 80 chars; nested JSON-stringified |
+| 6.6 | synthesis: synth.lineage-fold | done | `data.synth.lineage-fold` ships -- groups call-sites by source-file path; classification badges + truncated snippets in fenced code blocks |
+| 6.7 | synthesis: synth.profile-card | done | `data.synth.profile-card` ships -- branches on `kind` (numeric / categorical / boolean / temporal / text), pairs with profile.auto.rdbms's output |
+| 6.8 | synthesis: synth.scorecard | pending | needs the 5d.6 quality.scorecard composite first |
+| 6.9 | synthesis: synth.histogram-block | pending | needs the 5b.1 histogram skill first |
 | 7.1 | meta: meta.classify-question | pending | which family answers this? |
 | 7.2 | meta: meta.select-scope | pending | pick connections / tables / files |
 | 7.3 | meta: meta.feasibility-check | pending | thin wrapper around assertFeasible |

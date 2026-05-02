@@ -1,0 +1,41 @@
+{
+  "input": {
+    "target": "users",
+    "connectionId": "pg-orders",
+    "hits": [
+      {
+        "entityId": "ent-1",
+        "path": "src/data/userRepository.ts",
+        "startLine": 42,
+        "endLine": 58,
+        "entityName": "selectActiveUsers",
+        "entityKind": "function",
+        "classification": "reader",
+        "snippet": "const rows = await db.query('SELECT * FROM users WHERE active = $1', [true]);"
+      },
+      {
+        "entityId": "ent-2",
+        "path": "src/data/userRepository.ts",
+        "startLine": 70,
+        "endLine": 85,
+        "entityName": "createUser",
+        "entityKind": "function",
+        "classification": "writer",
+        "snippet": "await db.query('INSERT INTO users (name) VALUES ($1)', [name]);"
+      },
+      {
+        "entityId": "ent-3",
+        "path": "src/scripts/migrate.ts",
+        "startLine": 12,
+        "endLine": 12,
+        "entityName": "main",
+        "entityKind": "function",
+        "classification": "ambiguous",
+        "snippet": "db.query('TRUNCATE users');"
+      }
+    ],
+    "truncated": false,
+    "counts": { "readers": 1, "writers": 1, "ambiguous": 1 }
+  },
+  "expectedConfidenceFloor": "high"
+}

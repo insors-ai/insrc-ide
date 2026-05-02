@@ -35,6 +35,10 @@ import { registerDataProfileTemporalRdbmsSkill } from './built-ins/data.profile.
 import { registerDataProfileTextRdbmsSkill } from './built-ins/data.profile.text.rdbms.js';
 import { registerDataProfileAutoRdbmsSkill } from './built-ins/data.profile.auto.rdbms.js';
 import { registerDataPiiColumnClassifierRdbmsSkill } from './built-ins/data.pii.column-classifier.rdbms.js';
+import { registerDataSynthFieldTableSkill } from './built-ins/data.synth.field-table.js';
+import { registerDataSynthSampleTableSkill } from './built-ins/data.synth.sample-table.js';
+import { registerDataSynthProfileCardSkill } from './built-ins/data.synth.profile-card.js';
+import { registerDataSynthLineageFoldSkill } from './built-ins/data.synth.lineage-fold.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -78,6 +82,12 @@ export function registerAllSkills(): void {
   // 5e.2 -- pii.column-classifier composes pii.detect-patterns
   // with column-name heuristics for a per-column PII verdict.
   registerDataPiiColumnClassifierRdbmsSkill();
+  // Phase 6 -- pure-template synthesis renderers. No tools, no
+  // LLM. Take a typed skill output, return a markdown fragment.
+  registerDataSynthFieldTableSkill();
+  registerDataSynthSampleTableSkill();
+  registerDataSynthProfileCardSkill();
+  registerDataSynthLineageFoldSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
