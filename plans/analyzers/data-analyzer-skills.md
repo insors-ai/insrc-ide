@@ -70,12 +70,12 @@ has fully shipped, so the substrate is no longer a blocker. Phase 0
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
-| 0.1 | `db_sql_aggregate` tool | pending | count/sum/avg/stddev/percentile via SQL |
-| 0.2 | `db_sql_histogram` tool | pending | bucketed counts |
-| 0.3 | `db_sql_distinct` tool | pending | distinct-count + top-N |
-| 0.4 | `db_correlation_matrix` tool | pending | pairwise correlation; native SQL (RDBMS connections) or via the existing DuckDB-backed file driver (file connections). NOT a cross-driver fallback for KV / Mongo: those refuse via precondition rather than return sample-based numbers as if they were the population |
-| 0.5 | `db_outliers` tool | pending | IQR / Z-score per column |
-| 0.6 | sampling-confidence library | pending | sample-size sufficiency + CI helpers |
+| 0.1 | `db_sql_aggregate` tool | done | `daemon/tools/builtins/db/index.ts` + `compileAggregate(Exprs)` in `rdbms-common.ts` + `aggregate()` on `RdbmsDriver` (postgres / mysql / sqlite / mssql / oracle real impls; clickhouse throws for now) and on the new `DuckDBFileDriver`. 35 + 8 tests |
+| 0.2 | `db_sql_histogram` tool | pending | needs `histogram(target, opts)` driver method per dialect (`width_bucket` Postgres / DuckDB; `NTILE` fallback for SQLite / MySQL). Deferred until first Family-5 distribution skill needs it -- avoids speculative cross-dialect work |
+| 0.3 | `db_sql_distinct` tool | pending | needs `distinct(target, opts)` driver method (`COUNT(DISTINCT) + GROUP BY ... ORDER BY freq LIMIT N`). Deferred with same reasoning |
+| 0.4 | `db_correlation_matrix` tool | pending | needs `correlationMatrix(target, opts)` driver method (`corr(c1, c2)` pairwise). RDBMS + file (DuckDB has `corr` natively); KV/doc connections refuse via precondition. Deferred |
+| 0.5 | `db_outliers` tool | pending | composite over existing aggregate primitives (percentile for IQR; avg + stddev for Z-score) plus a new sample-with-comparison helper (`>=` / `<=` ops on WhereClause). Deferred |
+| 0.6 | sampling-confidence library | done | `daemon/db/sampling-confidence.ts` -- `sampleSizeFor` + `confidenceFor` for mean / percentile / normality / correlation estimators; finite-population correction; 11-test suite |
 | 0.7 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
 | 0.8 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
 | 0.9 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
