@@ -31,16 +31,25 @@ interface UniquenessStats {
 	readonly isPrimaryKeyCandidate: boolean;
 }
 
+interface ValidityStats {
+	readonly score: number | null;
+	readonly pattern: string | null;
+	readonly matchCount: number | null;
+	readonly mismatchCount: number | null;
+	readonly sampleSize: number | null;
+}
+
 interface ColumnScorecard {
 	readonly name: string;
 	readonly completeness: DimensionStats;
 	readonly uniqueness: UniquenessStats;
+	readonly validity?: ValidityStats;
 	readonly compositeScore: number | null;
 }
 
 interface ScorecardIssue {
 	readonly column: string;
-	readonly dimension: 'completeness' | 'uniqueness' | 'composite';
+	readonly dimension: 'completeness' | 'uniqueness' | 'validity' | 'composite';
 	readonly score: number;
 	readonly detail: string;
 }
@@ -48,7 +57,7 @@ interface ScorecardIssue {
 interface ScorecardInput {
 	readonly target: string;
 	readonly totalRows: number | null;
-	readonly weights: { readonly completeness: number; readonly uniqueness: number };
+	readonly weights: { readonly completeness: number; readonly uniqueness: number; readonly validity?: number };
 	readonly columns: readonly ColumnScorecard[];
 	readonly primaryKeyCandidates: readonly string[];
 	readonly overallScore: number | null;
@@ -79,6 +88,7 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 				properties: {
 					completeness: { type: 'number' },
 					uniqueness:   { type: 'number' },
+					validity:     { type: 'number' },
 				},
 				required: ['completeness', 'uniqueness'],
 				additionalProperties: false,
@@ -105,15 +115,23 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 	async execute(input): Promise<SkillResult<ScorecardOutput>> {
 		const overallTag = scoreBadge(input.overallScore);
 		const truncTag = input.truncated === true ? ' (truncated)' : '';
+		const validityWeight = input.weights.validity ?? 0;
+		const validityIncluded = validityWeight > 0;
+		const weightLine = validityIncluded
+			? `weights: completeness ${formatWeight(input.weights.completeness)}, ` +
+			  `uniqueness ${formatWeight(input.weights.uniqueness)}, ` +
+			  `validity ${formatWeight(validityWeight)} ` +
+			  `_(conformity / consistency dimensions pending)_`
+			: `weights: completeness ${formatWeight(input.weights.completeness)}, ` +
+			  `uniqueness ${formatWeight(input.weights.uniqueness)} ` +
+			  `_(validity / conformity / consistency dimensions pending; supply \`validityPatterns\` to enable validity)_`;
 		const lines: string[] = [
 			`## Quality scorecard: \`${input.target}\`${truncTag}`,
 			'',
 			`overall score: ${overallTag}` +
 				(input.totalRows !== null ? ` -- ${input.totalRows.toLocaleString('en-US')} rows` : ''),
 			'',
-			`weights: completeness ${formatWeight(input.weights.completeness)}, ` +
-				`uniqueness ${formatWeight(input.weights.uniqueness)} ` +
-				`_(validity / conformity / consistency dimensions pending)_`,
+			weightLine,
 			'',
 		];
 
@@ -140,6 +158,25 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 		lines.push('### Per-column detail', '');
 		if (input.columns.length === 0) {
 			lines.push('_(no columns)_');
+		} else if (validityIncluded) {
+			lines.push(
+				'| column | composite | completeness | null rate | uniqueness | distinct | validity | PK? |',
+				'|---|---|---|---|---|---|---|---|',
+			);
+			for (const c of input.columns) {
+				const composite = formatScore(c.compositeScore);
+				const cScore    = formatScore(c.completeness.score);
+				const nullPct   = formatPct(c.completeness.nullRate);
+				const uScore    = formatScore(c.uniqueness.score);
+				const distinct  = c.uniqueness.distinctCount !== null
+					? c.uniqueness.distinctCount.toLocaleString('en-US')
+					: '_null_';
+				const validity  = c.validity !== undefined && c.validity.score !== null
+					? `${formatScore(c.validity.score)} (\`${c.validity.pattern ?? '?'}\`)`
+					: '_n/a_';
+				const pk        = c.uniqueness.isPrimaryKeyCandidate ? 'yes' : '';
+				lines.push(`| \`${c.name}\` | ${composite} | ${cScore} | ${nullPct} | ${uScore} | ${distinct} | ${validity} | ${pk} |`);
+			}
 		} else {
 			lines.push(
 				'| column | composite | completeness | null rate | uniqueness | distinct | PK? |',
