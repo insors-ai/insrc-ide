@@ -69,12 +69,43 @@ function mkEntity(
 	};
 }
 
-async function fileExistsForGraph(stmt: string, params: Record<string, unknown>): Promise<unknown[]> {
-	const prepared = await db.graph.prepare(stmt);
-	const result   = await db.graph.execute(prepared, params);
-	const qr = Array.isArray(result) ? result[0]! : result;
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	return (qr as any).getAll() as Promise<unknown[]>;
+/**
+ * Count edges in the `relation` table matching (src, dst, kind).
+ * Replaces the old MATCH ... RETURN count(*) Cypher pattern.
+ */
+async function countEdge(src: string, dst: string, kind: string): Promise<number> {
+	const rows = await db.duck.query<{ n: number }>(
+		'SELECT COUNT(*)::INTEGER AS n FROM relation WHERE src = ? AND dst = ? AND kind = ?',
+		[src, dst, kind],
+	);
+	return Number(rows[0]?.n ?? 0);
+}
+
+/** Count rows in `unresolved_relation` matching (from_entity, kind). */
+async function countUnresolved(fromEntity: string, kind: string): Promise<number> {
+	const rows = await db.duck.query<{ n: number }>(
+		'SELECT COUNT(*)::INTEGER AS n FROM unresolved_relation WHERE from_entity = ? AND kind = ?',
+		[fromEntity, kind],
+	);
+	return Number(rows[0]?.n ?? 0);
+}
+
+/** Count all relations of a given kind. */
+async function countAllOfKind(kind: string): Promise<number> {
+	const rows = await db.duck.query<{ n: number }>(
+		'SELECT COUNT(*)::INTEGER AS n FROM relation WHERE kind = ?',
+		[kind],
+	);
+	return Number(rows[0]?.n ?? 0);
+}
+
+/** Fetch unresolved-relation rows for a fromEntity + kind, returning meta + raw_to. */
+async function listUnresolvedRows(fromEntity: string, kind: string): Promise<{ rawTo: string; meta: string }[]> {
+	const rows = await db.duck.query<{ raw_to: string; meta: string }>(
+		'SELECT raw_to, meta FROM unresolved_relation WHERE from_entity = ? AND kind = ?',
+		[fromEntity, kind],
+	);
+	return rows.map(r => ({ rawTo: r.raw_to, meta: r.meta }));
 }
 
 // ---------------------------------------------------------------------------
@@ -126,18 +157,10 @@ describe('runCrossFileResolver -- INHERITS in same package', () => {
 		assert.equal(result.ambiguous, 0);
 
 		// Verify the typed REL edge now exists
-		const rows = await fileExistsForGraph(
-			`MATCH (a:Entity)-[:INHERITS]->(b:Entity)
-			 WHERE a.id = $barId AND b.id = $fooId
-			 RETURN count(*) AS n`,
-			{
-				barId: makeEntityId(repo, join(repo, 'src/main/java/com/example/Bar.java'), 'class', 'Bar'),
-				fooId: makeEntityId(repo, join(repo, 'src/main/java/com/example/Foo.java'), 'class', 'Foo'),
-			},
-		);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const n = (rows[0] as any)['n'];
-		assert.equal(Number(n), 1);
+		const barId = makeEntityId(repo, join(repo, 'src/main/java/com/example/Bar.java'), 'class', 'Bar');
+		const fooId = makeEntityId(repo, join(repo, 'src/main/java/com/example/Foo.java'), 'class', 'Foo');
+		const n = await countEdge(barId, fooId, 'INHERITS');
+		assert.equal(n, 1);
 	});
 });
 
@@ -198,23 +221,11 @@ describe('runCrossFileResolver -- module-stub IMPORTS rewiring', () => {
 		);
 
 		// Verify file-target edge exists
-		const fileEdge = await fileExistsForGraph(
-			`MATCH (u:Entity {id: $userId})-[:IMPORTS]->(f:Entity {id: $fooId})
-			 RETURN count(*) AS n`,
-			{ userId: userFileId, fooId: fooFileId },
-		);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		assert.equal(Number((fileEdge[0] as any)['n']), 1);
+		assert.equal(await countEdge(userFileId, fooFileId, 'IMPORTS'), 1);
 
 		// Verify module-stub edge is gone
 		const stubId = makeEntityId('', '', 'module', 'com.example.Foo');
-		const stubEdge = await fileExistsForGraph(
-			`MATCH (u:Entity {id: $userId})-[:IMPORTS]->(m:Entity {id: $stubId})
-			 RETURN count(*) AS n`,
-			{ userId: userFileId, stubId },
-		);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		assert.equal(Number((stubEdge[0] as any)['n']), 0);
+		assert.equal(await countEdge(userFileId, stubId, 'IMPORTS'), 0);
 	});
 });
 
@@ -261,13 +272,7 @@ describe('runCrossFileResolver -- external-dep stays as module stub', () => {
 			repo, join(repo, 'src/main/java/app/App.java'), 'file',
 			join(repo, 'src/main/java/app/App.java'),
 		);
-		const stillThere = await fileExistsForGraph(
-			`MATCH (a:Entity {id: $appId})-[:IMPORTS]->(m:Entity {id: $stubId})
-			 RETURN count(*) AS n`,
-			{ appId: appFileId, stubId },
-		);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		assert.equal(Number((stillThere[0] as any)['n']), 1);
+		assert.equal(await countEdge(appFileId, stubId, 'IMPORTS'), 1);
 	});
 });
 
@@ -321,13 +326,7 @@ describe('runCrossFileResolver -- CALLS resolves to exported function in importe
 		const mainFile    = join(repo, 'main.py');
 		const mainFnId     = makeEntityId(repo, mainFile,    'function', 'main');
 		const validateFnId = makeEntityId(repo, helpersFile, 'function', 'validate');
-		const edge = await fileExistsForGraph(
-			`MATCH (a:Entity {id: $from})-[:CALLS]->(b:Entity {id: $to})
-			 RETURN count(*) AS n`,
-			{ from: mainFnId, to: validateFnId },
-		);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		assert.equal(Number((edge[0] as any)['n']), 1);
+		assert.equal(await countEdge(mainFnId, validateFnId, 'CALLS'), 1);
 	});
 });
 
@@ -371,12 +370,7 @@ describe('runCrossFileResolver -- CALLS to non-exported target stays unresolved'
 
 		// The unresolved row should still be in UnresolvedRelation
 		const useFnId = makeEntityId(repo, join(repo, 'main.py'), 'function', 'use');
-		const stillUnresolved = await fileExistsForGraph(
-			`MATCH (u:UnresolvedRelation {fromEntity: $from, kind: 'CALLS'}) RETURN count(u) AS n`,
-			{ from: useFnId },
-		);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		assert.equal(Number((stillUnresolved[0] as any)['n']), 1);
+		assert.equal(await countUnresolved(useFnId, 'CALLS'), 1);
 	});
 });
 
@@ -423,14 +417,9 @@ describe('runCrossFileResolver -- CALLS marks ambiguous when two imported files 
 			`expected 1 ambiguous; got: ${JSON.stringify(result)}`);
 
 		const mFnId = makeEntityId(repo, join(repo, 'main.py'), 'function', 'm');
-		const rows = await fileExistsForGraph(
-			`MATCH (u:UnresolvedRelation {fromEntity: $from, kind: 'CALLS'})
-			 RETURN u.meta AS meta`,
-			{ from: mFnId },
-		);
+		const rows = await listUnresolvedRows(mFnId, 'CALLS');
 		assert.equal(rows.length, 1);
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const meta = JSON.parse((rows[0] as any)['meta']);
+		const meta = JSON.parse(rows[0]!.meta);
 		assert.ok(Array.isArray(meta.candidates), `expected candidates array; got: ${JSON.stringify(meta)}`);
 		assert.equal(meta.candidates.length, 2);
 	});
@@ -477,17 +466,13 @@ describe('runCrossFileResolver -- idempotency', () => {
 		assert.equal(first.resolved, 1, `first: ${JSON.stringify(first)}`);
 
 		// Snapshot the INHERITS edge count
-		const before = await fileExistsForGraph('MATCH ()-[r:INHERITS]->() RETURN count(r) AS n', {});
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const beforeN = Number((before[0] as any)['n']);
+		const beforeN = await countAllOfKind('INHERITS');
 
 		const second = await runCrossFileResolver({ db, repoRoot: repo, sourceRoots });
 		assert.equal(second.resolved, 0, `second pass should resolve nothing new: ${JSON.stringify(second)}`);
 		assert.equal(second.importsRewired, 0);
 
-		const after = await fileExistsForGraph('MATCH ()-[r:INHERITS]->() RETURN count(r) AS n', {});
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		const afterN = Number((after[0] as any)['n']);
+		const afterN = await countAllOfKind('INHERITS');
 		assert.equal(afterN, beforeN, `INHERITS count drifted between passes: ${beforeN} -> ${afterN}`);
 	});
 });

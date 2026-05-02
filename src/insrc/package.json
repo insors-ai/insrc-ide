@@ -35,7 +35,6 @@
     "ioredis": "^5.10.1",
     "js-yaml": "^4.1.0",
     "keytar": "^7.9.0",
-    "kuzu": "^0.11.3",
     "marked": "^17.0.4",
     "memjs": "^1.3.2",
     "mongodb": "^7.2.0",
@@ -73,9 +72,9 @@
     "test:duckdb": "tsx --test daemon/db/__tests__/duckdb-pool.test.ts",
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
-    "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-dual-write.test.ts",
-    "test:graph-relations": "tsx --test db/__tests__/duckdb-relations-dual-write.test.ts",
-    "test:graph-repos": "tsx --test db/__tests__/duckdb-repos-dual-write.test.ts",
+    "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",
+    "test:graph-relations": "tsx --test db/__tests__/duckdb-relations-write.test.ts",
+    "test:graph-repos": "tsx --test db/__tests__/duckdb-repos-write.test.ts",
     "test:graph-search": "tsx --test db/__tests__/duckdb-search-queries.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }

@@ -12,7 +12,7 @@
  *  8. Handle SIGTERM / SIGINT for graceful shutdown
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, rmSync } from 'node:fs';
 import * as lancedb from '@lancedb/lancedb';
 import { PATHS } from '../shared/paths.js';
 import { setLogMode, getLogger } from '../shared/logger.js';
@@ -106,9 +106,29 @@ async function main(): Promise<void> {
 	}
 
 	// 2. Ensure directories
-	// Kuzu creates the DB directory itself — only ensure the parent exists
+	// (Post Phase A.11: graph data lives in DuckDB which is in-memory
+	//  in the daemon-pool singleton; PATHS.graph and the legacy WAL/
+	//  shadow files from Kuzu are no longer used. Stale Kuzu state on
+	//  disk gets removed below if present.)
 	mkdirSync(dirname(PATHS.graph), { recursive: true });
 	mkdirSync(PATHS.lance, { recursive: true });
+
+	// One-time cleanup of orphaned Kuzu on-disk state from before the
+	// DuckDB cutover. Idempotent: silently no-ops once the files are
+	// gone. Runs early so a partial cleanup on a previous boot doesn't
+	// trip later code that scans the directory.
+	for (const stale of [PATHS.graph, `${PATHS.graph}.wal`, `${PATHS.graph}.shadow`]) {
+		try {
+			if (existsSync(stale)) {
+				rmSync(stale, { recursive: true, force: true });
+				log.info({ path: stale }, 'removed legacy Kuzu state on first DuckDB-only boot');
+			}
+		} catch (err) {
+			log.warn({ path: stale, err: err instanceof Error ? err.message : String(err) },
+				'failed to remove legacy Kuzu state -- non-fatal, retry on next boot');
+		}
+	}
+
 	mkdirSync(PATHS.configStore, { recursive: true });
 	mkdirSync(PATHS.templates, { recursive: true });
 	mkdirSync(PATHS.feedback, { recursive: true });

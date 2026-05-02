@@ -138,18 +138,18 @@ async function runPass1(
   opts:  CrossFileResolveOpts,
   index: EntityIndex,
 ): Promise<number> {
-  // Step 1 -- opening MATCH. Kuzu's Entity table is stub-only
-  // (`Entity(id STRING, kind STRING)` per db/schema.ts:10). Full entity
-  // data (name, language, repo, file) lives in LanceDB. So this MATCH
-  // returns just f.id + m.id; repo scoping happens in-memory below
-  // against the LanceDB-loaded `index.byId`, and module name/language
-  // come from a batched LanceDB prefetch.
+  // Step 1 -- opening lookup. Entity table is stub-only (id + kind);
+  // full entity data lives in LanceDB. Returns just (fromId, moduleId);
+  // repo scoping happens in-memory below against the LanceDB-loaded
+  // `index.byId`. Module name + language come from a batched LanceDB
+  // prefetch.
   const tMatch = Date.now();
-  const stmt = `MATCH (f:Entity)-[r:IMPORTS]->(m:Entity)
-                WHERE m.kind = 'module'
-                RETURN f.id AS fromId, m.id AS moduleId`;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rows = await execGraph<any>(opts.db, stmt);
+  const rows = await opts.db.duck.query<{ fromId: string; moduleId: string }>(
+    `SELECT r.src AS "fromId", r.dst AS "moduleId"
+     FROM relation r
+     JOIN entity m ON m.id = r.dst
+     WHERE r.kind = 'IMPORTS' AND m.kind = 'module'`,
+  );
   log.info(
     { repo: opts.repoRoot, rows: rows.length, elapsedMs: Date.now() - tMatch },
     'cross-file Pass 1: opening MATCH done',
@@ -224,15 +224,18 @@ async function runPass1(
   );
   if (rewires.length === 0) return 0;
 
-  // Step 3 -- batched DELETE via UNWIND. One auto-commit txn per chunk.
+  // Step 3 -- batched DELETE of the old module-stub IMPORTS edges.
+  // Each chunk becomes one DELETE with WHERE (src, dst) IN ((?,?), ...).
   const tDelete = Date.now();
   for (let i = 0; i < rewires.length; i += KUZU_BATCH) {
     const chunk = rewires.slice(i, i + KUZU_BATCH);
-    await execGraph(opts.db,
-      `UNWIND $rewires AS r
-       MATCH (f:Entity {id: r.fromId})-[e:IMPORTS]->(m:Entity {id: r.oldModuleId})
-       DELETE e`,
-      { rewires: chunk },
+    const valuesSql = chunk.map(() => '(?, ?)').join(', ');
+    const params: string[] = [];
+    for (const r of chunk) { params.push(r.fromId, r.oldModuleId); }
+    await opts.db.duck.exec(
+      `DELETE FROM relation
+       WHERE kind = 'IMPORTS' AND (src, dst) IN (VALUES ${valuesSql})`,
+      params,
     );
   }
   log.info(
@@ -244,15 +247,19 @@ async function runPass1(
     'cross-file Pass 1: DELETE complete',
   );
 
-  // Step 4 -- batched MERGE via UNWIND. Idempotent: re-runs are safe.
+  // Step 4 -- batched INSERT of the new file-target IMPORTS edges.
+  // ON CONFLICT DO NOTHING makes the operation idempotent (re-runs of
+  // the resolver are safe). Each chunk is one multi-VALUES INSERT.
   const tMerge = Date.now();
   for (let i = 0; i < rewires.length; i += KUZU_BATCH) {
     const chunk = rewires.slice(i, i + KUZU_BATCH);
-    await execGraph(opts.db,
-      `UNWIND $rewires AS r
-       MATCH (f:Entity {id: r.fromId}), (t:Entity {id: r.targetFileId})
-       MERGE (f)-[:IMPORTS]->(t)`,
-      { rewires: chunk },
+    const valuesSql = chunk.map(() => "(?, ?, 'IMPORTS')").join(', ');
+    const params: string[] = [];
+    for (const r of chunk) { params.push(r.fromId, r.targetFileId); }
+    await opts.db.duck.exec(
+      `INSERT INTO relation (src, dst, kind) VALUES ${valuesSql}
+       ON CONFLICT (src, dst, kind) DO NOTHING`,
+      params,
     );
   }
   log.info(
@@ -370,16 +377,17 @@ async function prefetchImportsByFile(
   db:    DbClient,
   index: EntityIndex,
 ): Promise<Map<string, Set<string>>> {
-  const stmt = `MATCH (f:Entity)-[:IMPORTS]->(t:Entity)
-                WHERE t.kind = 'file'
-                RETURN f.id AS fromFileId, t.id AS targetFileId`;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rows = await execGraph<any>(db, stmt);
+  const rows = await db.duck.query<{ fromFileId: string; targetFileId: string }>(
+    `SELECT r.src AS "fromFileId", r.dst AS "targetFileId"
+     FROM relation r
+     JOIN entity t ON t.id = r.dst
+     WHERE r.kind = 'IMPORTS' AND t.kind = 'file'`,
+  );
 
   const map = new Map<string, Set<string>>();
   for (const row of rows) {
-    const fromFileId   = row['fromFileId']   as string;
-    const targetFileId = row['targetFileId'] as string;
+    const fromFileId   = row.fromFileId;
+    const targetFileId = row.targetFileId;
     // Repo scope: only keep edges from files in this repo's index.
     if (!index.byId.has(fromFileId)) continue;
     // Cross-repo targets won't be in index.byId; skip them. Pass 2
@@ -718,20 +726,3 @@ function entityKey(lang: Language, kind: EntityKind, name: string): string {
   return `${lang}:${kind}:${name}`;
 }
 
-// ---------------------------------------------------------------------------
-// Kuzu helper -- prepare + execute + return rows
-// ---------------------------------------------------------------------------
-
-async function execGraph<T = Record<string, unknown>>(
-  db:    DbClient,
-  stmt:  string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  params: Record<string, any> = {},
-): Promise<T[]> {
-  const prepared = await db.graph.prepare(stmt);
-  const result   = await db.graph.execute(prepared, params);
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const qr = Array.isArray(result) ? result[0]! : result;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (qr as any).getAll() as Promise<T[]>;
-}

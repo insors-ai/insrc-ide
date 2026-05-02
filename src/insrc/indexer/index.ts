@@ -10,7 +10,6 @@ import { runCrossFileResolver } from './cross-file-resolver.js';
 import { detectSourceRoots } from './source-roots.js';
 import { deleteEntitiesForFile, getEntity } from '../db/entities.js';
 import { updateRepoStatus } from '../db/repos.js';
-import { shouldWriteKuzuGraph } from '../db/graph-dual-write.js';
 import { embedEntities, embedText } from './embedder.js';
 import { parseManifest } from './manifest.js';
 import { resolveRelations } from './resolver.js';
@@ -315,37 +314,9 @@ export class IndexerService {
           log.error({ file: filePath, err: msg }, 'full index: file error (skipping)');
           skipped++;
         }
-        // Periodic explicit CHECKPOINT every 50 files to bound Kuzu's
-        // buffer-pool pressure. Kuzu-specific: DuckDB uses transactional
-        // MVCC and has no equivalent (per plans/storage-migration-duckdb.md
-        // Phase A.7), so this whole block is gated on
-        // shouldWriteKuzuGraph(). When INSRC_GRAPH_BACKEND=duckdb (post-
-        // A.10 cutover), the gate is false and this becomes dead code that
-        // gets deleted in A.11.
-        //
-        // Background on the 50-file interval: auto-checkpoint at the
-        // configured WAL threshold cannot keep up on the hadoop workload
-        // (12k+ Java files) -- the buffer pool fills with dirty pages
-        // before the WAL reaches threshold and every subsequent write
-        // throws "Buffer manager exception: unable to allocate memory".
-        // The previous interval (every 200 files) was too coarse: the
-        // daemon ran cleanly through ~2600 files before per-file dirty-
-        // page volume grew and 200 files between flushes started
-        // overflowing the pool. Checkpoint duration climbed 187 ms ->
-        // 648 ms across the run, draining more dirty pages each time.
-        // 50 matches the progress-log cadence; each flush stays cheap
-        // (~500 ms even at the slow end). Best-effort: failure isn't
-        // fatal; next safe-point catches up.
-        if (shouldWriteKuzuGraph() && total > 0 && total % 50 === 0) {
-          try {
-            const tCp = Date.now();
-            await this.db.graph.query('CHECKPOINT;');
-            log.info({ repo: repoPath, atFile: total, elapsedMs: Date.now() - tCp }, 'kuzu periodic checkpoint');
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log.warn({ repo: repoPath, atFile: total, err: msg }, 'kuzu periodic checkpoint failed');
-          }
-        }
+        // (Periodic CHECKPOINT for Kuzu's buffer-pool pressure was here.
+        //  Removed in Phase A.11 with the rest of the Kuzu rip-out;
+        //  DuckDB uses transactional MVCC and needs no equivalent.)
       }
 
       // Emit DEPENDS_ON edges from repo manifest
@@ -366,21 +337,8 @@ export class IndexerService {
       const cf = await runCrossFileResolver({ db: this.db, repoRoot: repoPath, sourceRoots });
       log.info({ repo: repoPath, ...cf }, 'cross-file pass after full index');
 
-      // End-of-fullIndex CHECKPOINT: bounds Kuzu's WAL growth.
-      // Kuzu-specific (DuckDB has no equivalent); gated on
-      // shouldWriteKuzuGraph() per Phase A.7. Best-effort -- failure is
-      // non-fatal; WAL stays intact and the next safe-point checkpoint
-      // catches up.
-      if (shouldWriteKuzuGraph()) {
-        try {
-          const tCp = Date.now();
-          await this.db.graph.query('CHECKPOINT;');
-          log.info({ repo: repoPath, elapsedMs: Date.now() - tCp }, 'kuzu checkpoint complete');
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn({ repo: repoPath, err: msg }, 'kuzu checkpoint failed; WAL will be flushed at next safe point');
-        }
-      }
+      // (End-of-fullIndex CHECKPOINT for Kuzu's WAL was here. Removed
+      //  in Phase A.11; DuckDB has no equivalent.)
 
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       log.info({ repo: repoPath, fileCount, skipped, elapsed: `${elapsed}s` }, 'full index complete');

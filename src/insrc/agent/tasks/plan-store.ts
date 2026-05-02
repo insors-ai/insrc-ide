@@ -1,28 +1,19 @@
 import type { DbClient } from '../../db/client.js';
 import type { Plan, PlanStep, PlanStepStatus, PlanStatus } from '../../shared/types.js';
 
-/**
- * Execute a parameterized Kuzu query using prepare + execute.
- * Kuzu's `Connection.query()` doesn't accept params — must use prepare/execute.
- */
-async function queryWithParams(
-  graph: DbClient['graph'],
-  cypher: string,
-  params: Record<string, unknown>,
-): Promise<unknown> {
-  const stmt = await graph.prepare(cypher);
-  return graph.execute(stmt, params as Record<string, import('kuzu').KuzuValue>);
-}
-
 // ---------------------------------------------------------------------------
-// Plan persistence layer — Kuzu graph operations
+// Plan persistence layer -- DuckDB graph operations.
 //
-// Plans live in Kuzu indefinitely (NOT subject to session TTL).
+// Plans live in DuckDB indefinitely (NOT subject to session TTL).
 // Pruned only via explicit /plan delete.
 //
-// Graph shape:
-//   (Plan) -[CONTAINS]-> (PlanStep)
-//   (PlanStep) -[STEP_DEPENDS_ON]-> (PlanStep)
+// Graph shape (in the unified `relation` table):
+//   plan -> plan_step  via kind='CONTAINS'
+//   plan_step -> plan_step  via kind='STEP_DEPENDS_ON'
+//
+// Column-name mapping: JS-side types use camelCase; SQL columns are
+// snake_case (repoPath / repo_path, createdAt / created_at, etc.).
+// All mapping happens here so callers are unaware.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -48,64 +39,62 @@ export function isValidTransition(from: PlanStepStatus, to: PlanStepStatus): boo
 export async function savePlan(db: DbClient, plan: Plan): Promise<void> {
   const now = new Date().toISOString();
 
-  // Insert Plan node
-  await queryWithParams(db.graph,
-    `MERGE (p:Plan {id: $id})
-     SET p.repoPath = $repoPath, p.title = $title, p.status = $status,
-         p.createdAt = $createdAt, p.updatedAt = $updatedAt`,
-    {
-      id: plan.id,
-      repoPath: plan.repoPath,
-      title: plan.title,
-      status: plan.status,
-      createdAt: plan.createdAt || now,
-      updatedAt: now,
-    },
+  // Upsert Plan row
+  await db.duck.exec(
+    `INSERT INTO plan (id, repo_path, title, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET
+       repo_path = excluded.repo_path,
+       title = excluded.title,
+       status = excluded.status,
+       created_at = excluded.created_at,
+       updated_at = excluded.updated_at`,
+    [plan.id, plan.repoPath, plan.title, plan.status, plan.createdAt || now, now],
   );
 
-  // Insert PlanStep nodes + CONTAINS edges
+  // Upsert PlanStep rows + CONTAINS edges
   for (const step of plan.steps) {
-    await queryWithParams(db.graph,
-      `MERGE (s:PlanStep {id: $id})
-       SET s.planId = $planId, s.idx = $idx, s.title = $title,
-           s.description = $description, s.checkpoint = $checkpoint,
-           s.status = $status, s.complexity = $complexity,
-           s.fileHint = $fileHint, s.notes = $notes,
-           s.createdAt = $createdAt, s.updatedAt = $updatedAt,
-           s.startedAt = $startedAt, s.doneAt = $doneAt`,
-      {
-        id: step.id,
-        planId: plan.id,
-        idx: step.idx,
-        title: step.title,
-        description: step.description,
-        checkpoint: step.checkpoint,
-        status: step.status,
-        complexity: step.complexity,
-        fileHint: step.fileHint || '',
-        notes: step.notes || '',
-        createdAt: step.createdAt || now,
-        updatedAt: now,
-        startedAt: step.startedAt || '',
-        doneAt: step.doneAt || '',
-      },
+    await db.duck.exec(
+      `INSERT INTO plan_step
+         (id, plan_id, idx, title, description, checkpoint, status, complexity,
+          file_hint, notes, created_at, updated_at, started_at, done_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         plan_id = excluded.plan_id,
+         idx = excluded.idx,
+         title = excluded.title,
+         description = excluded.description,
+         checkpoint = excluded.checkpoint,
+         status = excluded.status,
+         complexity = excluded.complexity,
+         file_hint = excluded.file_hint,
+         notes = excluded.notes,
+         created_at = excluded.created_at,
+         updated_at = excluded.updated_at,
+         started_at = excluded.started_at,
+         done_at = excluded.done_at`,
+      [
+        step.id, plan.id, step.idx, step.title, step.description, step.checkpoint,
+        step.status, step.complexity, step.fileHint || '', step.notes || '',
+        step.createdAt || now, now, step.startedAt || '', step.doneAt || '',
+      ],
     );
 
-    // CONTAINS edge: Plan → PlanStep
-    await queryWithParams(db.graph,
-      `MATCH (p:Plan {id: $planId}), (s:PlanStep {id: $stepId})
-       MERGE (p)-[:CONTAINS]->(s)`,
-      { planId: plan.id, stepId: step.id },
+    // CONTAINS edge: plan -> plan_step
+    await db.duck.exec(
+      `INSERT INTO relation (src, dst, kind) VALUES (?, ?, 'CONTAINS')
+       ON CONFLICT (src, dst, kind) DO NOTHING`,
+      [plan.id, step.id],
     );
   }
 
-  // Insert STEP_DEPENDS_ON edges
+  // STEP_DEPENDS_ON edges: plan_step -> plan_step
   for (const step of plan.steps) {
     for (const depId of step.dependsOn) {
-      await queryWithParams(db.graph,
-        `MATCH (s:PlanStep {id: $fromId}), (d:PlanStep {id: $toId})
-         MERGE (s)-[:STEP_DEPENDS_ON]->(d)`,
-        { fromId: step.id, toId: depId },
+      await db.duck.exec(
+        `INSERT INTO relation (src, dst, kind) VALUES (?, ?, 'STEP_DEPENDS_ON')
+         ON CONFLICT (src, dst, kind) DO NOTHING`,
+        [step.id, depId],
       );
     }
   }
@@ -116,73 +105,75 @@ export async function savePlan(db: DbClient, plan: Plan): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function getPlan(db: DbClient, planId: string): Promise<Plan | null> {
-  // Fetch plan node
-  const planResult = await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $id}) RETURN p.id, p.repoPath, p.title, p.status, p.createdAt, p.updatedAt`,
-    { id: planId },
+  const planRows = await db.duck.query<{
+    id: string; repo_path: string; title: string; status: string;
+    created_at: string; updated_at: string;
+  }>(
+    `SELECT id, repo_path, title, status, created_at, updated_at
+     FROM plan WHERE id = ?`,
+    [planId],
   );
-
-  const planRows = await resultToRows(planResult);
   if (planRows.length === 0) return null;
-
   const pr = planRows[0]!;
   const plan: Plan = {
-    id:        pr['p.id'] as string,
-    repoPath:  pr['p.repoPath'] as string,
-    title:     pr['p.title'] as string,
-    status:    pr['p.status'] as PlanStatus,
+    id:        pr.id,
+    repoPath:  pr.repo_path,
+    title:     pr.title,
+    status:    pr.status as PlanStatus,
     steps:     [],
-    createdAt: pr['p.createdAt'] as string,
-    updatedAt: pr['p.updatedAt'] as string,
+    createdAt: pr.created_at,
+    updatedAt: pr.updated_at,
   };
 
-  // Fetch steps via CONTAINS
-  const stepResult = await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[:CONTAINS]->(s:PlanStep)
-     RETURN s.id, s.planId, s.idx, s.title, s.description, s.checkpoint,
-            s.status, s.complexity, s.fileHint, s.notes,
-            s.createdAt, s.updatedAt, s.startedAt, s.doneAt
+  // Steps via the CONTAINS edge
+  const stepRows = await db.duck.query<{
+    id: string; plan_id: string; idx: number; title: string; description: string;
+    checkpoint: boolean; status: string; complexity: string;
+    file_hint: string; notes: string;
+    created_at: string; updated_at: string; started_at: string; done_at: string;
+  }>(
+    `SELECT s.id, s.plan_id, s.idx, s.title, s.description, s.checkpoint,
+            s.status, s.complexity, s.file_hint, s.notes,
+            s.created_at, s.updated_at, s.started_at, s.done_at
+     FROM relation r
+     JOIN plan_step s ON s.id = r.dst
+     WHERE r.src = ? AND r.kind = 'CONTAINS'
      ORDER BY s.idx`,
-    { planId },
+    [planId],
   );
 
-  const stepRows = await resultToRows(stepResult);
-
-  // Fetch all dependency edges for this plan's steps
-  const depResult = await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[:CONTAINS]->(s:PlanStep)-[:STEP_DEPENDS_ON]->(d:PlanStep)
-     RETURN s.id AS fromId, d.id AS toId`,
-    { planId },
+  // Dependencies for this plan's steps (joined to bound the query)
+  const depRows = await db.duck.query<{ fromId: string; toId: string }>(
+    `SELECT dr.src AS "fromId", dr.dst AS "toId"
+     FROM relation cr
+     JOIN relation dr ON dr.src = cr.dst
+     WHERE cr.src = ? AND cr.kind = 'CONTAINS' AND dr.kind = 'STEP_DEPENDS_ON'`,
+    [planId],
   );
-  const depRows = await resultToRows(depResult);
 
-  // Build dependency map: stepId → [dependsOn IDs]
   const depMap = new Map<string, string[]>();
   for (const row of depRows) {
-    const fromId = row['fromId'] as string;
-    const toId = row['toId'] as string;
-    if (!depMap.has(fromId)) depMap.set(fromId, []);
-    depMap.get(fromId)!.push(toId);
+    if (!depMap.has(row.fromId)) depMap.set(row.fromId, []);
+    depMap.get(row.fromId)!.push(row.toId);
   }
 
   for (const sr of stepRows) {
-    const stepId = sr['s.id'] as string;
     plan.steps.push({
-      id:          stepId,
-      planId:      sr['s.planId'] as string,
-      idx:         sr['s.idx'] as number,
-      title:       sr['s.title'] as string,
-      description: sr['s.description'] as string,
-      checkpoint:  sr['s.checkpoint'] as boolean,
-      status:      sr['s.status'] as PlanStepStatus,
-      complexity:  sr['s.complexity'] as string as PlanStep['complexity'],
-      fileHint:    (sr['s.fileHint'] as string) || '',
-      notes:       sr['s.notes'] as string,
-      dependsOn:   depMap.get(stepId) ?? [],
-      createdAt:   sr['s.createdAt'] as string,
-      updatedAt:   sr['s.updatedAt'] as string,
-      startedAt:   (sr['s.startedAt'] as string) || undefined,
-      doneAt:      (sr['s.doneAt'] as string) || undefined,
+      id:          sr.id,
+      planId:      sr.plan_id,
+      idx:         sr.idx,
+      title:       sr.title,
+      description: sr.description,
+      checkpoint:  sr.checkpoint,
+      status:      sr.status as PlanStepStatus,
+      complexity:  sr.complexity as PlanStep['complexity'],
+      fileHint:    sr.file_hint || '',
+      notes:       sr.notes,
+      dependsOn:   depMap.get(sr.id) ?? [],
+      createdAt:   sr.created_at,
+      updatedAt:   sr.updated_at,
+      startedAt:   sr.started_at || undefined,
+      doneAt:      sr.done_at || undefined,
     });
   }
 
@@ -194,16 +185,14 @@ export async function getPlan(db: DbClient, planId: string): Promise<Plan | null
 // ---------------------------------------------------------------------------
 
 export async function getActivePlan(db: DbClient, repoPath: string): Promise<Plan | null> {
-  const result = await queryWithParams(db.graph,
-    `MATCH (p:Plan {repoPath: $repoPath, status: 'active'})
-     RETURN p.id ORDER BY p.createdAt DESC LIMIT 1`,
-    { repoPath },
+  const rows = await db.duck.query<{ id: string }>(
+    `SELECT id FROM plan
+     WHERE repo_path = ? AND status = 'active'
+     ORDER BY created_at DESC LIMIT 1`,
+    [repoPath],
   );
-
-  const rows = await resultToRows(result);
   if (rows.length === 0) return null;
-
-  return getPlan(db, rows[0]!['p.id'] as string);
+  return getPlan(db, rows[0]!.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,58 +205,61 @@ export async function updateStepState(
   newStatus: PlanStepStatus,
   note?: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  // Fetch current state
-  const result = await queryWithParams(db.graph,
-    `MATCH (s:PlanStep {id: $id}) RETURN s.status, s.notes`,
-    { id: stepId },
+  const rows = await db.duck.query<{ status: string; notes: string }>(
+    `SELECT status, notes FROM plan_step WHERE id = ?`,
+    [stepId],
   );
-  const rows = await resultToRows(result);
   if (rows.length === 0) return { ok: false, error: 'step not found' };
 
-  const currentStatus = rows[0]!['s.status'] as PlanStepStatus;
-
+  const currentStatus = rows[0]!.status as PlanStepStatus;
   if (!isValidTransition(currentStatus, newStatus)) {
     return { ok: false, error: `invalid transition: ${currentStatus} -> ${newStatus}` };
   }
 
   const now = new Date().toISOString();
-  const existingNotes = (rows[0]!['s.notes'] as string) || '';
+  const existingNotes = rows[0]!.notes || '';
   const updatedNotes = note
     ? existingNotes ? `${existingNotes}\n[${now}] ${note}` : `[${now}] ${note}`
     : existingNotes;
 
-  // Build SET clause with timestamp stamps
-  let setCypher = `SET s.status = $status, s.notes = $notes, s.updatedAt = $updatedAt`;
-  const params: Record<string, unknown> = {
-    id: stepId, status: newStatus, notes: updatedNotes, updatedAt: now,
-  };
-
-  // Stamp startedAt when entering in_progress
+  // Build SET fields conditionally on the new status. Each branch
+  // produces the minimal UPDATE; same row only touched once.
   if (newStatus === 'in_progress') {
-    setCypher += `, s.startedAt = $startedAt`;
-    params.startedAt = now;
+    await db.duck.exec(
+      `UPDATE plan_step
+       SET status = ?, notes = ?, updated_at = ?, started_at = ?
+       WHERE id = ?`,
+      [newStatus, updatedNotes, now, now, stepId],
+    );
+  } else if (newStatus === 'done' || newStatus === 'skipped') {
+    await db.duck.exec(
+      `UPDATE plan_step
+       SET status = ?, notes = ?, updated_at = ?, done_at = ?
+       WHERE id = ?`,
+      [newStatus, updatedNotes, now, now, stepId],
+    );
+  } else if (newStatus === 'pending') {
+    // Revert: clear started_at + done_at.
+    await db.duck.exec(
+      `UPDATE plan_step
+       SET status = ?, notes = ?, updated_at = ?, started_at = '', done_at = ''
+       WHERE id = ?`,
+      [newStatus, updatedNotes, now, stepId],
+    );
+  } else {
+    // failed
+    await db.duck.exec(
+      `UPDATE plan_step
+       SET status = ?, notes = ?, updated_at = ?
+       WHERE id = ?`,
+      [newStatus, updatedNotes, now, stepId],
+    );
   }
-
-  // Stamp doneAt when reaching a terminal state
-  if (newStatus === 'done' || newStatus === 'skipped') {
-    setCypher += `, s.doneAt = $doneAt`;
-    params.doneAt = now;
-  }
-
-  // Clear timestamps on revert to pending
-  if (newStatus === 'pending') {
-    setCypher += `, s.startedAt = $startedAt, s.doneAt = $doneAt`;
-    params.startedAt = '';
-    params.doneAt = '';
-  }
-
-  await queryWithParams(db.graph,`MATCH (s:PlanStep {id: $id}) ${setCypher}`, params);
 
   // If all steps are done/skipped, mark plan as completed
   if (newStatus === 'done' || newStatus === 'skipped') {
     await maybeCompletePlan(db, stepId);
   }
-
   // If reverting a step to pending, re-activate the plan
   if (newStatus === 'pending') {
     await reactivatePlan(db, stepId);
@@ -281,47 +273,51 @@ export async function updateStepState(
 // ---------------------------------------------------------------------------
 
 export async function getNextStep(db: DbClient, planId: string): Promise<PlanStep | null> {
-  // Get all pending steps ordered by idx
-  const result = await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[:CONTAINS]->(s:PlanStep {status: 'pending'})
-     RETURN s.id, s.planId, s.idx, s.title, s.description, s.checkpoint,
-            s.status, s.complexity, s.fileHint, s.notes,
-            s.createdAt, s.updatedAt, s.startedAt, s.doneAt
+  const pendingRows = await db.duck.query<{
+    id: string; plan_id: string; idx: number; title: string; description: string;
+    checkpoint: boolean; status: string; complexity: string;
+    file_hint: string; notes: string;
+    created_at: string; updated_at: string; started_at: string; done_at: string;
+  }>(
+    `SELECT s.id, s.plan_id, s.idx, s.title, s.description, s.checkpoint,
+            s.status, s.complexity, s.file_hint, s.notes,
+            s.created_at, s.updated_at, s.started_at, s.done_at
+     FROM relation r
+     JOIN plan_step s ON s.id = r.dst
+     WHERE r.src = ? AND r.kind = 'CONTAINS' AND s.status = 'pending'
      ORDER BY s.idx`,
-    { planId },
+    [planId],
   );
-  const pendingRows = await resultToRows(result);
 
   for (const sr of pendingRows) {
-    const stepId = sr['s.id'] as string;
-
-    // Check if all dependencies are terminal (done or skipped)
-    const depResult = await queryWithParams(db.graph,
-      `MATCH (s:PlanStep {id: $stepId})-[:STEP_DEPENDS_ON]->(d:PlanStep)
-       WHERE d.status <> 'done' AND d.status <> 'skipped'
-       RETURN count(d) AS blocking`,
-      { stepId },
+    // Count dependencies that are NOT yet terminal
+    const blockingRows = await db.duck.query<{ blocking: number }>(
+      `SELECT COUNT(*)::INTEGER AS blocking
+       FROM relation dr
+       JOIN plan_step d ON d.id = dr.dst
+       WHERE dr.src = ? AND dr.kind = 'STEP_DEPENDS_ON'
+         AND d.status <> 'done' AND d.status <> 'skipped'`,
+      [sr.id],
     );
-    const depRows = await resultToRows(depResult);
-    const blocking = (depRows[0]?.['blocking'] as number) ?? 0;
+    const blocking = Number(blockingRows[0]?.blocking ?? 0);
 
     if (blocking === 0) {
       return {
-        id:          stepId,
-        planId:      sr['s.planId'] as string,
-        idx:         sr['s.idx'] as number,
-        title:       sr['s.title'] as string,
-        description: sr['s.description'] as string,
-        checkpoint:  sr['s.checkpoint'] as boolean,
-        status:      sr['s.status'] as PlanStepStatus,
-        complexity:  sr['s.complexity'] as string as PlanStep['complexity'],
-        fileHint:    (sr['s.fileHint'] as string) || '',
-        notes:       sr['s.notes'] as string,
+        id:          sr.id,
+        planId:      sr.plan_id,
+        idx:         sr.idx,
+        title:       sr.title,
+        description: sr.description,
+        checkpoint:  sr.checkpoint,
+        status:      sr.status as PlanStepStatus,
+        complexity:  sr.complexity as PlanStep['complexity'],
+        fileHint:    sr.file_hint || '',
+        notes:       sr.notes,
         dependsOn:   [],  // not needed for next-step context
-        createdAt:   sr['s.createdAt'] as string,
-        updatedAt:   sr['s.updatedAt'] as string,
-        startedAt:   (sr['s.startedAt'] as string) || undefined,
-        doneAt:      (sr['s.doneAt'] as string) || undefined,
+        createdAt:   sr.created_at,
+        updatedAt:   sr.updated_at,
+        startedAt:   sr.started_at || undefined,
+        doneAt:      sr.done_at || undefined,
       };
     }
   }
@@ -334,31 +330,27 @@ export async function getNextStep(db: DbClient, planId: string): Promise<PlanSte
 // ---------------------------------------------------------------------------
 
 export async function deletePlan(db: DbClient, planId: string): Promise<void> {
-  // Delete STEP_DEPENDS_ON edges between steps of this plan
-  await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[:CONTAINS]->(s:PlanStep)-[r:STEP_DEPENDS_ON]->(d:PlanStep)
-     DELETE r`,
-    { planId },
+  // Delete STEP_DEPENDS_ON edges between steps of this plan. We need
+  // to identify the steps via the CONTAINS edge first.
+  await db.duck.exec(
+    `DELETE FROM relation WHERE kind = 'STEP_DEPENDS_ON' AND (
+        src IN (SELECT dst FROM relation WHERE src = ? AND kind = 'CONTAINS')
+        OR dst IN (SELECT dst FROM relation WHERE src = ? AND kind = 'CONTAINS')
+     )`,
+    [planId, planId],
   );
 
   // Delete CONTAINS edges
-  await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[r:CONTAINS]->(s:PlanStep)
-     DELETE r`,
-    { planId },
+  await db.duck.exec(
+    `DELETE FROM relation WHERE src = ? AND kind = 'CONTAINS'`,
+    [planId],
   );
 
-  // Delete step nodes
-  await queryWithParams(db.graph,
-    `MATCH (s:PlanStep {planId: $planId}) DELETE s`,
-    { planId },
-  );
+  // Delete step rows
+  await db.duck.exec(`DELETE FROM plan_step WHERE plan_id = ?`, [planId]);
 
-  // Delete plan node
-  await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId}) DELETE p`,
-    { planId },
-  );
+  // Delete plan row
+  await db.duck.exec(`DELETE FROM plan WHERE id = ?`, [planId]);
 }
 
 /**
@@ -367,14 +359,12 @@ export async function deletePlan(db: DbClient, planId: string): Promise<void> {
  * detached.
  */
 export async function deletePlansForRepo(db: DbClient, repoPath: string): Promise<void> {
-  const result = await queryWithParams(db.graph,
-    `MATCH (p:Plan {repoPath: $repoPath}) RETURN p.id`,
-    { repoPath },
+  const rows = await db.duck.query<{ id: string }>(
+    `SELECT id FROM plan WHERE repo_path = ?`,
+    [repoPath],
   );
-  const rows = await resultToRows(result);
   for (const row of rows) {
-    const planId = row['p.id'] as string;
-    await deletePlan(db, planId);
+    await deletePlan(db, row.id);
   }
 }
 
@@ -384,50 +374,45 @@ export async function deletePlansForRepo(db: DbClient, repoPath: string): Promis
 
 async function maybeCompletePlan(db: DbClient, stepId: string): Promise<void> {
   // Find the plan that contains this step
-  const result = await queryWithParams(db.graph,
-    `MATCH (s:PlanStep {id: $stepId}) RETURN s.planId`,
-    { stepId },
+  const rows = await db.duck.query<{ plan_id: string }>(
+    `SELECT plan_id FROM plan_step WHERE id = ?`,
+    [stepId],
   );
-  const rows = await resultToRows(result);
   if (rows.length === 0) return;
+  const planId = rows[0]!.plan_id;
 
-  const planId = rows[0]!['s.planId'] as string;
-
-  // Check if any steps are not terminal
-  const remaining = await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[:CONTAINS]->(s:PlanStep)
-     WHERE s.status <> 'done' AND s.status <> 'skipped'
-     RETURN count(s) AS remaining`,
-    { planId },
+  // Count steps not yet terminal
+  const remaining = await db.duck.query<{ remaining: number }>(
+    `SELECT COUNT(*)::INTEGER AS remaining
+     FROM relation r
+     JOIN plan_step s ON s.id = r.dst
+     WHERE r.src = ? AND r.kind = 'CONTAINS'
+       AND s.status <> 'done' AND s.status <> 'skipped'`,
+    [planId],
   );
-  const remRows = await resultToRows(remaining);
-  const count = (remRows[0]?.['remaining'] as number) ?? 0;
+  const count = Number(remaining[0]?.remaining ?? 0);
 
   if (count === 0) {
     const now = new Date().toISOString();
-    await queryWithParams(db.graph,
-      `MATCH (p:Plan {id: $planId}) SET p.status = 'completed', p.updatedAt = $now`,
-      { planId, now },
+    await db.duck.exec(
+      `UPDATE plan SET status = 'completed', updated_at = ? WHERE id = ?`,
+      [now, planId],
     );
   }
 }
 
 /** Re-activate a plan when a step is reverted to pending. */
 async function reactivatePlan(db: DbClient, stepId: string): Promise<void> {
-  const result = await queryWithParams(db.graph,
-    `MATCH (s:PlanStep {id: $stepId}) RETURN s.planId`,
-    { stepId },
+  const rows = await db.duck.query<{ plan_id: string }>(
+    `SELECT plan_id FROM plan_step WHERE id = ?`,
+    [stepId],
   );
-  const rows = await resultToRows(result);
   if (rows.length === 0) return;
-
-  const planId = rows[0]!['s.planId'] as string;
+  const planId = rows[0]!.plan_id;
   const now = new Date().toISOString();
-  await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})
-     WHERE p.status <> 'active'
-     SET p.status = 'active', p.updatedAt = $now`,
-    { planId, now },
+  await db.duck.exec(
+    `UPDATE plan SET status = 'active', updated_at = ? WHERE id = ? AND status <> 'active'`,
+    [now, planId],
   );
 }
 
@@ -437,34 +422,23 @@ async function reactivatePlan(db: DbClient, stepId: string): Promise<void> {
  */
 export async function resetStaleLocks(db: DbClient, planId: string): Promise<number> {
   const now = new Date().toISOString();
-  // Find all in_progress steps for this plan
-  const result = await queryWithParams(db.graph,
-    `MATCH (p:Plan {id: $planId})-[:CONTAINS]->(s:PlanStep {status: 'in_progress'})
-     RETURN s.id`,
-    { planId },
+  const stepRows = await db.duck.query<{ id: string }>(
+    `SELECT s.id
+     FROM relation r
+     JOIN plan_step s ON s.id = r.dst
+     WHERE r.src = ? AND r.kind = 'CONTAINS' AND s.status = 'in_progress'`,
+    [planId],
   );
-  const rows = await resultToRows(result);
 
-  for (const row of rows) {
-    const stepId = row['s.id'] as string;
-    await queryWithParams(db.graph,
-      `MATCH (s:PlanStep {id: $id})
-       SET s.status = 'pending', s.startedAt = '', s.updatedAt = $now,
-           s.notes = s.notes + $note`,
-      { id: stepId, now, note: `\n[${now}] reset stale in_progress lock` },
+  for (const row of stepRows) {
+    await db.duck.exec(
+      `UPDATE plan_step
+       SET status = 'pending', started_at = '', updated_at = ?,
+           notes = notes || ?
+       WHERE id = ?`,
+      [now, `\n[${now}] reset stale in_progress lock`, row.id],
     );
   }
 
-  return rows.length;
-}
-
-/** Convert Kuzu QueryResult to plain row objects. */
-async function resultToRows(result: unknown): Promise<Record<string, unknown>[]> {
-  // Kuzu Node.js API: result.getAll() returns Promise<Record<string, unknown>[]>
-  const qr = result as { getAll: () => Promise<Record<string, unknown>[]> };
-  try {
-    return await qr.getAll();
-  } catch {
-    return [];
-  }
+  return stepRows.length;
 }

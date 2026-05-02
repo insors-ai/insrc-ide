@@ -13,40 +13,13 @@
 import type { DbClient } from './client.js';
 import type { Entity } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
-import { shouldReadDuckGraph } from './graph-dual-write.js';
 
 const log = getLogger('search');
 
-// Maximum DEPENDS_ON traversal depth in resolveClosure. Matches the
-// `*0..10` cap in the existing Kuzu Cypher query; bounded to keep
-// pathological dependency graphs from blowing up the recursive CTE.
+// Maximum DEPENDS_ON traversal depth in resolveClosure. Bounded to
+// keep pathological dependency graphs from blowing up the recursive
+// CTE.
 const CLOSURE_MAX_DEPTH = 10;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// All queries in this module are read-only -- searchEntities,
-// findCallers, findCallees, findDefinedIn, findImports, resolveClosure
-// -- so the helper routes them through the dedicated read connection
-// (`db.graphReader`). That isolates analyzer / chat-side reads from
-// the indexer + cross-file resolver writers and gets the 30 s query
-// timeout guard for free. Plan F2 / F6 in
-// plans/analyzers/code-analyzer.md.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function kuzuQuery(db: DbClient, stmt: string, params?: any): Promise<Record<string, unknown>[]> {
-  let result;
-  if (params) {
-    const prepared = await db.graphReader.prepare(stmt);
-    result = await db.graphReader.execute(prepared, params);
-  } else {
-    result = await db.graphReader.query(stmt);
-  }
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const qr = Array.isArray(result) ? result[0]! : result;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (qr as any).getAll() as Record<string, unknown>[];
-}
 
 /** Map a raw LanceDB row back to an Entity (matches rowToEntity in entities.ts). */
 function rowToEntity(row: Record<string, unknown>): Entity {
@@ -85,48 +58,16 @@ async function getEntitiesTable(db: DbClient) {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the transitive DEPENDS_ON closure of repos reachable from `repoPath`.
- * Result always includes `repoPath` itself (as the first element).
+ * Returns the transitive DEPENDS_ON closure of repos reachable from
+ * `repoPath`. Result always includes `repoPath` itself (as the first
+ * element).
  *
- * Uses Kuzu variable-length path: DEPENDS_ON*1..10 (or DuckDB recursive
- * CTE post-A.9 read cutover). Returns only Repo node IDs (paths), not
- * Module stubs.
+ * Recursive CTE walks DEPENDS_ON edges in the unified `relation`
+ * table, capped at CLOSURE_MAX_DEPTH (10). Base case emits the root
+ * at depth 0; recursive step extends one edge at a time. SELECT
+ * DISTINCT collapses cycles. Returns only Repo node IDs (paths).
  */
 export async function resolveClosure(db: DbClient, repoPath: string): Promise<string[]> {
-  let ids: string[];
-  if (shouldReadDuckGraph()) {
-    ids = await resolveClosureDuck(db, repoPath);
-  } else {
-    // The Repo node id == path (see repos.ts addRepo → MERGE (r:Repo {id: $path}))
-    const rows = await kuzuQuery(
-      db,
-      `MATCH (root:Repo {id: $path})-[:DEPENDS_ON*0..10]->(dep:Repo)
-       RETURN DISTINCT dep.id AS id`,
-      { path: repoPath },
-    );
-    ids = rows.map(r => r['id'] as string).filter(Boolean);
-  }
-
-  // Ensure the root repo is always included (even if 0 hops matches nothing).
-  // Mirrors the long-standing Kuzu-side behaviour where the variable-length
-  // path can match zero rows on isolated repos.
-  if (!ids.includes(repoPath)) ids.unshift(repoPath);
-
-  log.debug({ repo: repoPath, closure: ids.length }, 'resolved dependency closure');
-  return ids;
-}
-
-/**
- * DuckDB-side resolveClosure (Phase A.6): recursive CTE that walks
- * DEPENDS_ON edges in the unified `relation` table, capped at
- * CLOSURE_MAX_DEPTH (10) to mirror Kuzu's `*0..10` semantics.
- *
- * The recursive part walks one edge per step; UNION ALL between the
- * base case (the root itself, depth 0) and the recursive step
- * accumulates all reachable destinations. SELECT DISTINCT collapses
- * the cycle case (a → b → a → b ...) into one row per node.
- */
-async function resolveClosureDuck(db: DbClient, repoPath: string): Promise<string[]> {
   const rows = await db.duck.query<{ id: string }>(
     `WITH RECURSIVE closure(id, depth) AS (
        SELECT ?, 0
@@ -139,7 +80,17 @@ async function resolveClosureDuck(db: DbClient, repoPath: string): Promise<strin
      SELECT DISTINCT id FROM closure WHERE id IS NOT NULL`,
     [repoPath, CLOSURE_MAX_DEPTH],
   );
-  return rows.map(r => r.id).filter(Boolean);
+  const ids = rows.map(r => r.id).filter(Boolean);
+
+  // Ensure the root repo is always included (even if 0 hops matches
+  // nothing). The recursive CTE base case emits the root at depth 0,
+  // so this is usually redundant -- but covers the edge case where
+  // the root has no DEPENDS_ON edges and the JOIN returns null in
+  // some intermediate step.
+  if (!ids.includes(repoPath)) ids.unshift(repoPath);
+
+  log.debug({ repo: repoPath, closure: ids.length }, 'resolved dependency closure');
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,15 +215,10 @@ export async function findImports(db: DbClient, fileEntityId: string): Promise<E
 }
 
 /**
- * Unified 1-hop neighbour lookup: collapses the four nearly-identical
- * MATCH queries above (CALLS predecessors, CALLS successors, DEFINES
- * outbound, IMPORTS outbound) into one helper. Direction `'inbound'`
- * means "edges pointing TO entityId"; `'outbound'` means "edges
- * pointing FROM entityId".
- *
- * Dispatches to Kuzu or DuckDB based on shouldReadDuckGraph(); both
- * paths return Entity IDs only (callers hydrate the full row from
- * LanceDB separately, same as the existing pre-migration flow).
+ * Unified 1-hop neighbour lookup over the DuckDB `relation` table.
+ * Direction `'inbound'` means "edges pointing TO entityId";
+ * `'outbound'` means "edges pointing FROM entityId". Callers hydrate
+ * the full Entity row from LanceDB separately (see hydrateIds).
  */
 type EdgeDirection = 'inbound' | 'outbound';
 
@@ -282,21 +228,15 @@ async function neighborIds(
   kind: string,
   direction: EdgeDirection,
 ): Promise<string[]> {
-  if (shouldReadDuckGraph()) {
-    // Single relation table; direction selects which column matches
-    // the input id and which column we return as the neighbour.
-    const matchCol  = direction === 'inbound' ? 'dst' : 'src';
-    const returnCol = direction === 'inbound' ? 'src' : 'dst';
-    const rows = await db.duck.query<{ id: string }>(
-      `SELECT ${returnCol} AS id FROM relation WHERE ${matchCol} = ? AND kind = ?`,
-      [entityId, kind],
-    );
-    return rows.map(r => r.id).filter(Boolean);
-  }
-  // Kuzu path: per-direction, per-kind Cypher.
-  const cypher = direction === 'inbound'
-    ? `MATCH (n:Entity)-[:${kind}]->(target:Entity {id: $id}) RETURN n.id AS id`
-    : `MATCH (source:Entity {id: $id})-[:${kind}]->(n:Entity) RETURN n.id AS id`;
-  const rows = await kuzuQuery(db, cypher, { id: entityId });
-  return rows.map(r => r['id'] as string).filter(Boolean);
+  // Single relation table; direction selects which column matches
+  // the input id and which column we return as the neighbour. The
+  // forward / reverse indexes (idx_relation_fwd / idx_relation_rev)
+  // make both directions index-served.
+  const matchCol  = direction === 'inbound' ? 'dst' : 'src';
+  const returnCol = direction === 'inbound' ? 'src' : 'dst';
+  const rows = await db.duck.query<{ id: string }>(
+    `SELECT ${returnCol} AS id FROM relation WHERE ${matchCol} = ? AND kind = ?`,
+    [entityId, kind],
+  );
+  return rows.map(r => r.id).filter(Boolean);
 }

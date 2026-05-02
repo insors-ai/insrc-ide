@@ -2,84 +2,27 @@ import { createHash } from 'node:crypto';
 import type { DbClient } from './client.js';
 import type { Relation, RelationKind } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
-import { shouldWriteDuckGraph, shouldWriteKuzuGraph } from './graph-dual-write.js';
 
 const log = getLogger('db.relations');
 
 /**
- * Wrap a DuckDB write so its failure is logged + counted but doesn't
- * abort the overall operation. Same pattern as entities.ts during the
- * dual-write phase (A.8); after A.10 cutover the Kuzu branch is gone
- * and DuckDB errors propagate naturally.
- */
-async function runDuckOrLog(
-  fn: () => Promise<void>,
-  ctx: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await fn();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.warn({ ...ctx, err: msg }, 'duck graph write failed (dual-write); continuing on Kuzu');
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function kuzuExec(db: DbClient, stmt: string, params: any): Promise<Record<string, unknown>[]> {
-  const prepared = await db.graph.prepare(stmt);
-  const result   = await db.graph.execute(prepared, params);
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const qr = Array.isArray(result) ? result[0]! : result;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (qr as any).getAll() as Promise<Record<string, unknown>[]>;
-}
-
-// Relation kind → Kuzu REL TABLE name (must match schema.ts)
-const REL_TABLE: Record<RelationKind, string> = {
-  DEFINES:    'DEFINES',
-  IMPORTS:    'IMPORTS',
-  CALLS:      'CALLS',
-  INHERITS:   'INHERITS',
-  IMPLEMENTS: 'IMPLEMENTS',
-  DEPENDS_ON: 'DEPENDS_ON',
-  EXPORTS:    'EXPORTS',
-  REFERENCES: 'REFERENCES',
-};
-
-/**
- * Upsert a graph relation edge between two Entity stubs in Kuzu.
- * Resolved relations land in the typed REL tables; unresolved ones go to
- * the UnresolvedRelation node table for the cross-file resolver pass to
- * pick up later. See plans/cross-file-references.md §0.1.
+ * Upsert a graph relation edge between two Entity stubs.
+ * Resolved relations land in the unified `relation(src, dst, kind)`
+ * table; unresolved ones go to `unresolved_relation` for the cross-
+ * file resolver pass to pick up later. See
+ * plans/cross-file-references.md §0.1.
  */
 export async function upsertRelation(db: DbClient, relation: Relation): Promise<void> {
   if (!relation.resolved) {
     await upsertUnresolvedRelation(db, relation);
     return;
   }
-
-  const rel = REL_TABLE[relation.kind];
-  if (shouldWriteKuzuGraph()) {
-    // MERGE prevents duplicate edges
-    await kuzuExec(
-      db,
-      `MATCH (a:Entity {id: $from}), (b:Entity {id: $to}) MERGE (a)-[:${rel}]->(b)`,
-      { from: relation.from, to: relation.to },
-    );
-  }
-  if (shouldWriteDuckGraph()) {
-    // DuckDB schema collapses Kuzu's typed REL tables into one
-    // `relation(src, dst, kind)`. The PRIMARY KEY (src, dst, kind)
-    // makes ON CONFLICT DO NOTHING the duplicate-guard equivalent of
-    // Cypher MERGE.
-    await runDuckOrLog(
-      () => db.duck.exec(
-        'INSERT INTO relation (src, dst, kind) VALUES (?, ?, ?) ON CONFLICT (src, dst, kind) DO NOTHING',
-        [relation.from, relation.to, relation.kind],
-      ),
-      { op: 'upsertRelation', kind: relation.kind, from: relation.from, to: relation.to },
-    );
-  }
+  // PRIMARY KEY (src, dst, kind) -- ON CONFLICT DO NOTHING is the
+  // duplicate-guard equivalent of Cypher MERGE.
+  await db.duck.exec(
+    'INSERT INTO relation (src, dst, kind) VALUES (?, ?, ?) ON CONFLICT (src, dst, kind) DO NOTHING',
+    [relation.from, relation.to, relation.kind],
+  );
 }
 
 /**
@@ -93,24 +36,25 @@ export async function upsertRelations(db: DbClient, relations: Relation[]): Prom
 
 /**
  * Delete all edges originating from entities in the given file.
- * In practice this is handled by DETACH DELETE in deleteEntitiesForFile(),
- * but kept for explicit call sites in the indexer pipeline.
+ * In practice this is handled by the relation cleanup inside
+ * deleteEntitiesForFile() (entities.ts), but kept for explicit call
+ * sites in the indexer pipeline.
  */
 export async function deleteRelationsForFile(_db: DbClient, _filePath: string): Promise<void> {
-  // Edges are removed automatically via DETACH DELETE on Entity stubs
-  // (see entities.ts deleteEntitiesForFile). No separate action needed.
+  // Edges are removed automatically when entity stubs are deleted via
+  // detachDeleteEntityStubs (entities.ts deleteEntitiesForFile). No
+  // separate action needed here.
 }
 
 /**
  * Delete all edges originating from entities in a repo.
  */
 export async function deleteRelationsForRepo(_db: DbClient, _repo: string): Promise<void> {
-  // Edges are removed automatically via DETACH DELETE on Entity stubs
-  // (see entities.ts deleteEntitiesForRepo). No separate action needed.
+  // Same as above; cleanup runs through deleteEntitiesForRepo.
 }
 
 // ---------------------------------------------------------------------------
-// Unresolved relations — persistence for the cross-file resolver pass.
+// Unresolved relations -- persistence for the cross-file resolver pass.
 // See plans/cross-file-references.md §0.
 // ---------------------------------------------------------------------------
 
@@ -157,38 +101,23 @@ async function upsertUnresolvedRelation(db: DbClient, relation: Relation): Promi
   const metaJson    = JSON.stringify(meta);
   const attemptedAt = new Date().toISOString();
 
-  if (shouldWriteKuzuGraph()) {
-    await kuzuExec(
-      db,
-      `MERGE (u:UnresolvedRelation {id: $id})
-       SET u.repo = $repo, u.fromEntity = $fromEntity, u.fromFile = $fromFile,
-           u.kind = $kind, u.rawTo = $rawTo, u.meta = $meta, u.attemptedAt = $attemptedAt`,
-      { id, repo, fromEntity: relation.from, fromFile,
-        kind: relation.kind, rawTo: relation.to, meta: metaJson, attemptedAt },
-    );
-  }
-  if (shouldWriteDuckGraph()) {
-    // unresolved_relation primary-keyed on id; upsert via ON CONFLICT
-    // DO UPDATE replicates the Kuzu MERGE+SET semantics. Note camelCase
-    // → snake_case column-name shift (fromEntity → from_entity etc.).
-    await runDuckOrLog(
-      () => db.duck.exec(
-        `INSERT INTO unresolved_relation
-           (id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET
-           repo = excluded.repo,
-           from_entity = excluded.from_entity,
-           from_file = excluded.from_file,
-           kind = excluded.kind,
-           raw_to = excluded.raw_to,
-           meta = excluded.meta,
-           attempted_at = excluded.attempted_at`,
-        [id, repo, relation.from, fromFile, relation.kind, relation.to, metaJson, attemptedAt],
-      ),
-      { op: 'upsertUnresolvedRelation', id },
-    );
-  }
+  // unresolved_relation primary-keyed on id; ON CONFLICT DO UPDATE
+  // replicates Cypher MERGE+SET semantics. Note camelCase →
+  // snake_case column-name shift (fromEntity → from_entity etc.).
+  await db.duck.exec(
+    `INSERT INTO unresolved_relation
+       (id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET
+       repo = excluded.repo,
+       from_entity = excluded.from_entity,
+       from_file = excluded.from_file,
+       kind = excluded.kind,
+       raw_to = excluded.raw_to,
+       meta = excluded.meta,
+       attempted_at = excluded.attempted_at`,
+    [id, repo, relation.from, fromFile, relation.kind, relation.to, metaJson, attemptedAt],
+  );
 }
 
 /**
@@ -200,16 +129,13 @@ export async function listUnresolvedRelations(
   repo: string,
   scopeFile?: string,
 ): Promise<UnresolvedRelation[]> {
-  const params: Record<string, string> = { repo };
-  let stmt = 'MATCH (u:UnresolvedRelation) WHERE u.repo = $repo';
-  if (scopeFile !== undefined) {
-    stmt += ' AND u.fromFile = $scopeFile';
-    params['scopeFile'] = scopeFile;
-  }
-  stmt += ` RETURN u.id AS id, u.repo AS repo, u.fromEntity AS fromEntity,
-                   u.fromFile AS fromFile, u.kind AS kind, u.rawTo AS rawTo,
-                   u.meta AS meta, u.attemptedAt AS attemptedAt`;
-  const rows = await kuzuExec(db, stmt, params);
+  const sql = scopeFile !== undefined
+    ? `SELECT id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at
+       FROM unresolved_relation WHERE repo = ? AND from_file = ?`
+    : `SELECT id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at
+       FROM unresolved_relation WHERE repo = ?`;
+  const params = scopeFile !== undefined ? [repo, scopeFile] : [repo];
+  const rows = await db.duck.query<Record<string, unknown>>(sql, params);
   return rows.map(rowToUnresolved);
 }
 
@@ -220,14 +146,14 @@ function rowToUnresolved(row: Record<string, unknown>): UnresolvedRelation {
     try { meta = JSON.parse(raw) as Record<string, unknown>; } catch { /* corrupt — leave empty */ }
   }
   return {
-    id:          row['id']          as string,
-    repo:        row['repo']        as string,
-    fromEntity:  row['fromEntity']  as string,
-    fromFile:    row['fromFile']    as string,
-    kind:        row['kind']        as RelationKind,
-    rawTo:       row['rawTo']       as string,
+    id:          row['id']           as string,
+    repo:        row['repo']         as string,
+    fromEntity:  row['from_entity']  as string,
+    fromFile:    row['from_file']    as string,
+    kind:        row['kind']         as RelationKind,
+    rawTo:       row['raw_to']       as string,
     meta,
-    attemptedAt: row['attemptedAt'] as string,
+    attemptedAt: row['attempted_at'] as string,
   };
 }
 
@@ -238,19 +164,7 @@ function rowToUnresolved(row: Record<string, unknown>): UnresolvedRelation {
  * canonical set.
  */
 export async function deleteUnresolvedForFile(db: DbClient, file: string): Promise<void> {
-  if (shouldWriteKuzuGraph()) {
-    await kuzuExec(
-      db,
-      'MATCH (u:UnresolvedRelation) WHERE u.fromFile = $file DETACH DELETE u',
-      { file },
-    );
-  }
-  if (shouldWriteDuckGraph()) {
-    await runDuckOrLog(
-      () => db.duck.exec('DELETE FROM unresolved_relation WHERE from_file = ?', [file]),
-      { op: 'deleteUnresolvedForFile', file },
-    );
-  }
+  await db.duck.exec('DELETE FROM unresolved_relation WHERE from_file = ?', [file]);
 }
 
 /**
@@ -259,58 +173,26 @@ export async function deleteUnresolvedForFile(db: DbClient, file: string): Promi
  * repo is detached from the registry.
  */
 export async function deleteUnresolvedForRepo(db: DbClient, repo: string): Promise<void> {
-  if (shouldWriteKuzuGraph()) {
-    await kuzuExec(
-      db,
-      'MATCH (u:UnresolvedRelation) WHERE u.repo = $repo DETACH DELETE u',
-      { repo },
-    );
-  }
-  if (shouldWriteDuckGraph()) {
-    await runDuckOrLog(
-      () => db.duck.exec('DELETE FROM unresolved_relation WHERE repo = ?', [repo]),
-      { op: 'deleteUnresolvedForRepo', repo },
-    );
-  }
+  await db.duck.exec('DELETE FROM unresolved_relation WHERE repo = ?', [repo]);
 }
 
 /**
  * On successful cross-file resolution: insert the typed REL edge and
- * delete the matching UnresolvedRelation row in a single logical step.
+ * delete the matching UnresolvedRelation row.
  */
 export async function promoteToResolved(
   db: DbClient,
   unresolved: UnresolvedRelation,
   targetEntityId: string,
 ): Promise<void> {
-  const rel = REL_TABLE[unresolved.kind];
-  if (shouldWriteKuzuGraph()) {
-    await kuzuExec(
-      db,
-      `MATCH (a:Entity {id: $from}), (b:Entity {id: $to}) MERGE (a)-[:${rel}]->(b)`,
-      { from: unresolved.fromEntity, to: targetEntityId },
-    );
-    await kuzuExec(
-      db,
-      'MATCH (u:UnresolvedRelation {id: $id}) DETACH DELETE u',
-      { id: unresolved.id },
-    );
-  }
-  if (shouldWriteDuckGraph()) {
-    await runDuckOrLog(
-      async () => {
-        // Insert resolved edge first; if that fails the unresolved row
-        // stays so the resolver can retry later. Same MERGE semantics
-        // via ON CONFLICT DO NOTHING.
-        await db.duck.exec(
-          'INSERT INTO relation (src, dst, kind) VALUES (?, ?, ?) ON CONFLICT (src, dst, kind) DO NOTHING',
-          [unresolved.fromEntity, targetEntityId, unresolved.kind],
-        );
-        await db.duck.exec('DELETE FROM unresolved_relation WHERE id = ?', [unresolved.id]);
-      },
-      { op: 'promoteToResolved', id: unresolved.id, kind: unresolved.kind },
-    );
-  }
+  // Insert resolved edge first; if that fails the unresolved row stays
+  // so the resolver can retry later. ON CONFLICT DO NOTHING replicates
+  // Cypher MERGE's dedupe.
+  await db.duck.exec(
+    'INSERT INTO relation (src, dst, kind) VALUES (?, ?, ?) ON CONFLICT (src, dst, kind) DO NOTHING',
+    [unresolved.fromEntity, targetEntityId, unresolved.kind],
+  );
+  await db.duck.exec('DELETE FROM unresolved_relation WHERE id = ?', [unresolved.id]);
 }
 
 /**
@@ -324,46 +206,27 @@ export async function updateUnresolvedMeta(
 ): Promise<void> {
   const metaJson = JSON.stringify(meta);
   const attemptedAt = new Date().toISOString();
-  if (shouldWriteKuzuGraph()) {
-    await kuzuExec(
-      db,
-      'MATCH (u:UnresolvedRelation {id: $id}) SET u.meta = $meta, u.attemptedAt = $attemptedAt',
-      { id, meta: metaJson, attemptedAt },
-    );
-  }
-  if (shouldWriteDuckGraph()) {
-    await runDuckOrLog(
-      () => db.duck.exec(
-        'UPDATE unresolved_relation SET meta = ?, attempted_at = ? WHERE id = ?',
-        [metaJson, attemptedAt, id],
-      ),
-      { op: 'updateUnresolvedMeta', id },
-    );
-  }
+  await db.duck.exec(
+    'UPDATE unresolved_relation SET meta = ?, attempted_at = ? WHERE id = ?',
+    [metaJson, attemptedAt, id],
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Batched cross-file-resolver writers
 //
 // Per-row promoteToResolved / updateUnresolvedMeta turn each accepted /
-// ambiguous resolution into 1-2 Kuzu auto-commit transactions, and each
-// transaction pays an fsync at the WAL (~11ms on the local NVMe per
-// iostat). For a Pass-2 walk over a few thousand rows that's tens of
-// seconds of fsync wait alone.
-//
-// These batch helpers collapse N writes into ceil(N/KUZU_BATCH) UNWIND
-// statements, one fsync per chunk. KUZU_BATCH = 500 matches eeae2ef7ac7's
-// chunk size for batched DETACH DELETE -- conservative enough to bound
-// prepared-statement parameter memory.
+// ambiguous resolution into a separate DuckDB call. These batch helpers
+// collapse N writes into ceil(N/CHUNK) bulk-INSERT statements.
+// CHUNK = 500 to bound the generated-SQL length on each round-trip.
 // ---------------------------------------------------------------------------
 
-const KUZU_BATCH = 500;
+const CHUNK_SIZE = 500;
 
 /**
- * Batched form of promoteToResolved. Groups by relation kind (each kind
- * has its own REL TABLE name in Cypher), UNWIND-batches the typed-rel
- * MERGE per kind, then UNWIND-batches the DETACH DELETE of all
- * unresolved rows together.
+ * Batched form of promoteToResolved. Groups by relation kind and
+ * issues one multi-VALUES INSERT per (kind, chunk), then one IN-list
+ * DELETE per chunk for the unresolved-row cleanup.
  */
 export async function promoteResolvedBatch(
   db: DbClient,
@@ -371,8 +234,9 @@ export async function promoteResolvedBatch(
 ): Promise<void> {
   if (items.length === 0) return;
 
-  // Group by kind -- the REL TABLE name in MERGE is interpolated, not
-  // parameterised, so each kind needs its own UNWIND statement.
+  // Group by kind so we can build per-kind multi-VALUES INSERTs
+  // (one INSERT can mix kinds in our schema, but bucketing makes the
+  // SQL marginally clearer and matches the previous Kuzu code shape).
   const byKind = new Map<RelationKind, { from: string; to: string }[]>();
   for (const item of items) {
     let arr = byKind.get(item.unresolved.kind);
@@ -381,54 +245,21 @@ export async function promoteResolvedBatch(
   }
 
   for (const [kind, rows] of byKind) {
-    const rel = REL_TABLE[kind];
-    for (let i = 0; i < rows.length; i += KUZU_BATCH) {
-      const chunk = rows.slice(i, i + KUZU_BATCH);
-      if (shouldWriteKuzuGraph()) {
-        await kuzuExec(
-          db,
-          `UNWIND $rows AS r
-           MATCH (a:Entity {id: r.from}), (b:Entity {id: r.to})
-           MERGE (a)-[:${rel}]->(b)`,
-          { rows: chunk },
-        );
-      }
-      if (shouldWriteDuckGraph()) {
-        // DuckDB equivalent of UNWIND: build one INSERT with multiple
-        // VALUES rows. ON CONFLICT DO NOTHING dedupes the same way
-        // Cypher MERGE does. Each chunk becomes one bulk insert.
-        await runDuckOrLog(
-          () => bulkInsertRelations(db, kind, chunk),
-          { op: 'promoteResolvedBatch:insert', kind, count: chunk.length },
-        );
-      }
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      await bulkInsertRelations(db, kind, chunk);
     }
   }
 
-  // Batch DETACH DELETE the unresolved rows. Same `WHERE id IN $ids`
-  // pattern as eeae2ef7ac7's batched entity DETACH DELETE.
+  // Batch DELETE the unresolved rows.
   const allIds = items.map(it => it.unresolved.id);
-  for (let i = 0; i < allIds.length; i += KUZU_BATCH) {
-    const chunk = allIds.slice(i, i + KUZU_BATCH);
-    if (shouldWriteKuzuGraph()) {
-      await kuzuExec(
-        db,
-        'MATCH (u:UnresolvedRelation) WHERE u.id IN $ids DETACH DELETE u',
-        { ids: chunk },
-      );
-    }
-    if (shouldWriteDuckGraph()) {
-      await runDuckOrLog(
-        async () => {
-          const placeholders = chunk.map(() => '?').join(', ');
-          await db.duck.exec(
-            `DELETE FROM unresolved_relation WHERE id IN (${placeholders})`,
-            chunk,
-          );
-        },
-        { op: 'promoteResolvedBatch:delete', count: chunk.length },
-      );
-    }
+  for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
+    const chunk = allIds.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map(() => '?').join(', ');
+    await db.duck.exec(
+      `DELETE FROM unresolved_relation WHERE id IN (${placeholders})`,
+      chunk,
+    );
   }
 }
 
@@ -453,10 +284,10 @@ async function bulkInsertRelations(
 }
 
 /**
- * Batched form of updateUnresolvedMeta. UNWIND-batches the SET of
- * meta + attemptedAt across many unresolved rows; each batch shares a
- * single `attemptedAt` timestamp (the resolver's wall-clock at flush
- * time, accurate to within one batch's worth of work).
+ * Batched form of updateUnresolvedMeta. DuckDB has no UNWIND-and-SET
+ * primitive; for a few hundred rows the per-row UPDATE cost is
+ * negligible (no fsync bottleneck in DuckDB's MVCC model the way Kuzu
+ * had).
  */
 export async function updateUnresolvedMetaBatch(
   db: DbClient,
@@ -468,38 +299,12 @@ export async function updateUnresolvedMetaBatch(
     id: it.id,
     meta: JSON.stringify(it.meta),
   }));
-  for (let i = 0; i < rows.length; i += KUZU_BATCH) {
-    const chunk = rows.slice(i, i + KUZU_BATCH);
-    if (shouldWriteKuzuGraph()) {
-      await kuzuExec(
-        db,
-        `UNWIND $rows AS r
-         MATCH (u:UnresolvedRelation {id: r.id})
-         SET u.meta = r.meta, u.attemptedAt = $attemptedAt`,
-        { rows: chunk, attemptedAt },
-      );
-    }
-    if (shouldWriteDuckGraph()) {
-      // DuckDB doesn't have a multi-row UPDATE syntax that mirrors
-      // Cypher's UNWIND-and-SET; the equivalent is one UPDATE per row.
-      // For a 500-row chunk that's still one chunk's worth of round-
-      // trips, well under the per-call SQL parse overhead since these
-      // are simple single-row statements.
-      //
-      // Alternative: a single UPDATE ... FROM (VALUES (...), (...))
-      // join-update could collapse it, but the syntax is fragile and
-      // the row-count we're targeting (a few hundred per resolver
-      // pass) doesn't justify the complexity.
-      await runDuckOrLog(
-        async () => {
-          for (const r of chunk) {
-            await db.duck.exec(
-              'UPDATE unresolved_relation SET meta = ?, attempted_at = ? WHERE id = ?',
-              [r.meta, attemptedAt, r.id],
-            );
-          }
-        },
-        { op: 'updateUnresolvedMetaBatch', count: chunk.length },
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + CHUNK_SIZE);
+    for (const r of chunk) {
+      await db.duck.exec(
+        'UPDATE unresolved_relation SET meta = ?, attempted_at = ? WHERE id = ?',
+        [r.meta, attemptedAt, r.id],
       );
     }
   }

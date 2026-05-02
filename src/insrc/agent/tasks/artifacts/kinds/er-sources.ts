@@ -199,10 +199,10 @@ export async function parseKuzuEntitiesSource(
 	// `Entity{id, kind}` so we can't filter by any richer predicate in
 	// Cypher; we fetch all REFERENCES edges (capped) and filter
 	// in-process against the selected id set.
-	const refs = await kuzuRows(
-		db,
-		'MATCH (a:Entity)-[:REFERENCES]->(b:Entity) RETURN a.id AS fromId, b.id AS toId LIMIT 2000',
-	);
+	const refs = await db.duck.query<{ fromId: string; toId: string }>(
+		`SELECT src AS "fromId", dst AS "toId"
+		 FROM relation WHERE kind = 'REFERENCES' LIMIT 2000`,
+	).catch(() => [] as { fromId: string; toId: string }[]);
 	for (const row of refs) {
 		const fromId = row['fromId'];
 		const toId = row['toId'];
@@ -387,21 +387,3 @@ export async function parseLiveDbSource(
 	};
 }
 
-// ---------------------------------------------------------------------------
-// Small Kuzu helper (mirrors the kuzuQuery pattern in db/search.ts
-// without importing the private helper)
-// ---------------------------------------------------------------------------
-
-async function kuzuRows(db: DbClient, stmt: string): Promise<Record<string, unknown>[]> {
-	try {
-		const result = await db.graph.query(stmt);
-		const qr = Array.isArray(result) ? result[0] : result;
-		if (qr === undefined) { return []; }
-		// kuzu QueryResult has a runtime `.getAll()` method; the type
-		// isn't exposed directly.
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		return await (qr as any).getAll() as Record<string, unknown>[];
-	} catch {
-		return [];
-	}
-}

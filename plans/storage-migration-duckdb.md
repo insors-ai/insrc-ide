@@ -58,11 +58,12 @@ storage engine for graph + vector + analytical + structured data.
 
 ## Status
 
-Phase A code work complete (A.0-A.7); operational steps A.8-A.10
-remain (run dual-write under load → read cutover → single-write
-cutover). A.11 cleanup follows the operational cutover. Phase B
-audit (B.0) starts now in parallel since it doesn't depend on
-A's operational steps.
+Phase A complete -- Kuzu has been ripped out of the codebase in
+one coordinated change (A.8-A.11 collapsed). User's call after
+the dual-write harness caught a real Kuzu segfault and the daemon
+kept hitting Kuzu buffer-pool OOMs on hadoop-12k+ repos: dual-write
+under load adds risk without value when the source-of-truth backend
+is the one that doesn't work. Phase B (LanceDB) is next.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -74,10 +75,7 @@ A's operational steps.
 | A.5 | `db/repos.ts` rewrite | done (`1af8b651fb6`) | addRepo, removeRepo, updateRepoStatus -- the simplest of the four. No relation-cleanup needed in removeRepo (Repo has no edges in the schema) |
 | A.6 | `db/search.ts` rewrite | done (`72c38bd5891`) | findCallers / findCallees / findDefinedIn / findImports collapsed into one neighborIds(db, id, kind, direction) helper -- four near-identical Cypher patterns become one parameterised SQL pattern. resolveClosure as recursive CTE walking DEPENDS_ON edges, depth ≤ 10, DISTINCT for cycle handling. Reads still gated on shouldReadDuckGraph() (default mode='kuzu') |
 | A.7 | Indexer integration | done (`dc47e098226`) | Both periodic CHECKPOINT (every 50 files) and end-of-fullIndex CHECKPOINT calls gated on shouldWriteKuzuGraph(). No behaviour change for current deploys; goes dead under mode='duckdb' (post-A.10); deleted entirely in A.11 |
-| A.8 | Side-by-side dual-write phase | pending (operational) | rebuild + restart daemon with INSRC_GRAPH_BACKEND=both; let it index + cross-file-resolve under real load; periodic snapshot/diff check via the A.0 comparison utility. Run for one daemon release; cutover only after diff stays empty for ~1 week. NO further code work needed for this phase |
-| A.9 | Read cutover | pending (operational) | flip INSRC_GRAPH_BACKEND=duckdb on a daemon that's been dual-writing. Reads now come from DuckDB; writes still go to both because shouldWriteKuzuGraph() returns true for both 'kuzu' and 'both' modes only -- mode='duckdb' makes Kuzu writes stop. Roll back is one env-var flip. Run for one release |
-| A.10 | Single-write cutover + Kuzu removal | pending (operational) | after A.9 stable: stop opening Kuzu in `db/client.ts` (no flag change; code change). Bump a cache-version field; delete `~/.insrc/graph*` on first DuckDB-only daemon boot. From here Kuzu code is dead weight |
-| A.11 | Cleanup -- files + deps | pending | delete the `kuzu` import from db/client.ts; remove the `if (shouldWriteKuzuGraph())` gates (they're always false now -- collapse to DuckDB-only branches); delete db/schema.ts (Kuzu DDL); remove `kuzu` from package.json; delete kuzuExec/kuzuQuery helpers in entities.ts/relations.ts/repos.ts/search.ts; trim graph-comparison.ts (drop snapshotKuzu); delete the harness's Kuzu side. Rough scope: ~500 LOC out, 0 LOC in |
+| A.8-A.11 | Rip-out -- collapsed into one change | done | dual-write phase skipped on user's call -- not interested in dual-write validation when the legacy backend (Kuzu) is the broken one. Removed: `kuzu` dep from package.json; `db/schema.ts`; `db/graph-dual-write.ts`; the Kuzu side of `db/__tests__/graph-migration-harness.test.ts`; all `kuzuExec`/`kuzuQuery` helpers and `if (shouldWriteKuzuGraph())` gates from db/entities.ts, db/relations.ts, db/repos.ts, db/search.ts; Cypher in agent/tasks/plan-store.ts (~25 queries → DuckDB SQL); Cypher in indexer/cross-file-resolver.ts (Pass 1 + Pass 2); Cypher in agent/tasks/artifacts/kinds/er-sources.ts; the LLM-facing `graph_query` (Cypher) tool replaced with `graph_sql` (DuckDB). Renamed dual-write tests dropped the "dual-write" suffix. `db/client.ts` now exposes `{ duck: GraphClient; lance: lancedb.Connection }` only. `daemon/index.ts` cleans up legacy `~/.insrc/graph*` on first DuckDB-only boot. tsc clean; all renamed graph tests + cross-file-resolver test pass |
 | B.0 | LanceDB usage audit | done | findings: 4 Lance call sites today -- entities (vector search YES), conversations (vector search YES on sessions + turns), config-store (vector search YES), todos (vector column always written as ZERO_VEC and never queried, NO real vector search). **No FTS / BM25 usage anywhere in the codebase** -- grep for `bm25 / fts / fullTextSearch / hybridSearch` finds zero callers. This significantly simplifies subsequent B slices: B.2 (FTS extension), B.4 (hybrid-search helper) drop entirely; B.3 schema needs vector + HNSW only |
 | B.1 | DuckDB VSS extension wiring | pending | install + load `vss` community extension at daemon startup; alongside `arrow`. Must run before `enable_external_access=false` (extension install needs filesystem access -- same lesson from `arrow` extension). HNSW persistence requires `SET hnsw_enable_experimental_persistence=true` for indexes to survive restart |
 | B.2 | ~~DuckDB FTS extension wiring~~ | **dropped** (B.0) | no callers use BM25; no need to install `fts` |

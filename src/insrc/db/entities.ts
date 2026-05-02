@@ -3,10 +3,6 @@ import type { Table } from '@lancedb/lancedb';
 import type { DbClient } from './client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
 import { loadConfig } from '../agent/config.js';
-import { shouldWriteDuckGraph, shouldWriteKuzuGraph } from './graph-dual-write.js';
-import { getLogger } from '../shared/logger.js';
-
-const log = getLogger('db:entities');
 
 const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 
@@ -49,121 +45,42 @@ async function getEntitiesTable(db: DbClient): Promise<Table | null> {
   return _table;
 }
 
-/** Helper: run a Kuzu query (with optional params) and return all rows. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function kuzuExec(db: DbClient, stmt: string, params?: any): Promise<Record<string, unknown>[]> {
-  let result;
-  if (params) {
-    const prepared = await db.graph.prepare(stmt);
-    result = await db.graph.execute(prepared, params);
-  } else {
-    result = await db.graph.query(stmt);
-  }
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  const qr = Array.isArray(result) ? result[0]! : result;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (qr as any).getAll() as Promise<Record<string, unknown>[]>;
-}
-
 // ---------------------------------------------------------------------------
-// Kuzu → DuckDB graph migration -- write-side dispatch helpers.
-// plans/storage-migration-duckdb.md Phase A.3.
-//
-// These helpers wrap each Kuzu write operation with an optional DuckDB
-// mirror call. The mode is set by env var INSRC_GRAPH_BACKEND
-// (kuzu|both|duckdb); see graph-dual-write.ts. Default (`kuzu`) is
-// today's behaviour exactly. `both` activates the dual-write for A.8
-// validation. `duckdb` cuts Kuzu writes after A.10.
-//
-// DuckDB write failures during dual-write are caught + logged but do
-// NOT fail the overall operation -- Kuzu remains source of truth
-// during A.8. After A.10 cutover, errors propagate (Kuzu writes are
-// already off, so no fallback exists).
+// Graph stub helpers -- DuckDB-backed (post Kuzu rip-out, Phase A.11).
 // ---------------------------------------------------------------------------
 
-/** MERGE the Entity stub node: insert if absent, otherwise update kind. */
+/** Upsert the Entity stub: insert if absent, otherwise update kind. */
 async function upsertEntityStub(db: DbClient, id: string, kind: string): Promise<void> {
-  if (shouldWriteKuzuGraph()) {
-    await kuzuExec(db, 'MERGE (n:Entity {id: $id}) SET n.kind = $kind', { id, kind });
-  }
-  if (shouldWriteDuckGraph()) {
-    await runDuckOrLog(
-      () => db.duck.exec(
-        'INSERT INTO entity (id, kind) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind',
-        [id, kind],
-      ),
-      { op: 'upsertEntityStub', id },
-    );
-  }
+  await db.duck.exec(
+    'INSERT INTO entity (id, kind) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind',
+    [id, kind],
+  );
 }
 
 /**
  * Batched DETACH-DELETE equivalent: remove the given entity ids from
- * the graph along with all incident edges. The Kuzu side runs one
- * `DETACH DELETE` per chunk; the DuckDB side runs a relation-cleanup
- * DELETE followed by an entity DELETE in a transaction so partial
- * failures don't leave dangling edges.
+ * the graph along with all incident edges. Relations first, then
+ * entities -- a partial failure between the two never leaves dangling
+ * edges. The opposite order would orphan edges; the chosen order
+ * leaves at most orphan entity rows without relations, which are
+ * harmless. No transaction wrapping because GraphClient acquires a
+ * fresh Connection per call (BEGIN/COMMIT across calls would land on
+ * different Connections).
  */
 const ENTITY_DELETE_CHUNK = 500;
 async function detachDeleteEntityStubs(db: DbClient, ids: readonly string[]): Promise<void> {
   if (ids.length === 0) return;
   for (let i = 0; i < ids.length; i += ENTITY_DELETE_CHUNK) {
     const chunk = ids.slice(i, i + ENTITY_DELETE_CHUNK);
-    if (shouldWriteKuzuGraph()) {
-      await kuzuExec(
-        db,
-        'MATCH (n:Entity) WHERE n.id IN $ids DETACH DELETE n',
-        { ids: chunk },
-      );
-    }
-    if (shouldWriteDuckGraph()) {
-      await runDuckOrLog(
-        async () => {
-          // Relations first so a partial-failure between the two
-          // statements never leaves dangling edges. The opposite order
-          // (entities first) would orphan edges -- worse than the
-          // alternative orphan: entity rows without incoming/outgoing
-          // edges, which are harmless until garbage-collected. We rely
-          // on this ordering instead of an explicit transaction
-          // because GraphClient acquires a fresh Connection per call;
-          // wrapping in BEGIN/COMMIT across calls breaks (the COMMIT
-          // would land on a different Connection than the BEGIN).
-          //
-          // DuckDB doesn't support `IN $array` named-binding the way Kuzu
-          // does; expand to positional placeholders. 500-chunk keeps the
-          // generated SQL bounded.
-          const placeholders = chunk.map(() => '?').join(', ');
-          await db.duck.exec(
-            `DELETE FROM relation WHERE src IN (${placeholders}) OR dst IN (${placeholders})`,
-            [...chunk, ...chunk],
-          );
-          await db.duck.exec(
-            `DELETE FROM entity WHERE id IN (${placeholders})`,
-            [...chunk],
-          );
-        },
-        { op: 'detachDeleteEntityStubs', count: chunk.length },
-      );
-    }
-  }
-}
-
-/**
- * Wrap a DuckDB write so its failure is logged + counted but doesn't
- * abort the overall operation. Used during the dual-write phase (A.8)
- * where Kuzu remains source of truth. Once we move to mode='duckdb'
- * (post-A.10), the dual-write helpers run only the DuckDB branch and
- * errors propagate naturally.
- */
-async function runDuckOrLog(
-  fn: () => Promise<void>,
-  ctx: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await fn();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.warn({ ...ctx, err: msg }, 'duck graph write failed (dual-write); continuing on Kuzu');
+    const placeholders = chunk.map(() => '?').join(', ');
+    await db.duck.exec(
+      `DELETE FROM relation WHERE src IN (${placeholders}) OR dst IN (${placeholders})`,
+      [...chunk, ...chunk],
+    );
+    await db.duck.exec(
+      `DELETE FROM entity WHERE id IN (${placeholders})`,
+      [...chunk],
+    );
   }
 }
 
@@ -248,7 +165,6 @@ export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<
 
   // Create lightweight Entity stubs in the graph for edge endpoints.
   // Dispatches to Kuzu, DuckDB, or both based on INSRC_GRAPH_BACKEND
-  // (see graph-dual-write.ts).
   for (const e of entities) {
     await upsertEntityStub(db, e.id, e.kind);
   }

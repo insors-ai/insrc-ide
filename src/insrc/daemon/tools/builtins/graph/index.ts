@@ -197,43 +197,48 @@ export const graphCallersTool = buildNeighborsTool('callers');
 export const graphCalleesTool = buildNeighborsTool('callees');
 
 // ---------------------------------------------------------------------------
-// graph:query -- arbitrary Cypher
+// graph:query -- arbitrary SQL over the DuckDB code knowledge graph
+// (was 'graph_query' running Cypher; renamed in Phase A.11 alongside
+// the Kuzu rip-out -- see plans/storage-migration-duckdb.md).
 // ---------------------------------------------------------------------------
 
-interface GraphQueryData {
-  cypher: string;
+interface GraphSqlData {
+  sql: string;
   rowCount: number;
   rows: readonly Record<string, unknown>[];
 }
 
 const MAX_QUERY_ROWS = 500;
 
-export const graphQueryTool: Tool = {
-  id: 'graph_query',
-  description: 'Run an arbitrary Cypher query against the Kuzu code knowledge graph. Read-only usage expected.',
+export const graphSqlTool: Tool = {
+  id: 'graph_sql',
+  description:
+    'Run an arbitrary read-only SQL query against the DuckDB code knowledge graph. ' +
+    'Tables: entity(id, kind), relation(src, dst, kind), repo(id, path, name, ...), ' +
+    'unresolved_relation(id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at), ' +
+    'plan(id, repo_path, title, status, ...), plan_step(id, plan_id, idx, title, ...). ' +
+    'Relation kinds: DEFINES | IMPORTS | CALLS | INHERITS | IMPLEMENTS | DEPENDS_ON | EXPORTS | REFERENCES | CONTAINS | STEP_DEPENDS_ON.',
   inputSchema: {
     type: 'object',
     properties: {
-      cypher: { type: 'string' },
+      sql: { type: 'string' },
     },
-    required: ['cypher'],
+    required: ['sql'],
     additionalProperties: false,
   },
   requiresApproval: false,
 
   async execute(input: ToolInput): Promise<ToolResult> {
-    const cypher = str(input, 'cypher');
-    if (!cypher) { return fail('graph_query', 'cypher required'); }
+    const sql = str(input, 'sql');
+    if (!sql) { return fail('graph_sql', 'sql required'); }
     const db = await getDb();
     try {
-      const result = await db.graph.query(cypher);
-      const qr = Array.isArray(result) ? result[0] : result;
-      const rows = (qr as { getAll(): unknown }).getAll() as Record<string, unknown>[];
+      const rows = await db.duck.query(sql);
       const capped = rows.slice(0, MAX_QUERY_ROWS);
-      const data: GraphQueryData = { cypher, rowCount: rows.length, rows: capped };
+      const data: GraphSqlData = { sql, rowCount: rows.length, rows: capped };
       return {
         output: [
-          `Cypher returned **${rows.length}** row(s)${rows.length > MAX_QUERY_ROWS ? ` (showing first ${MAX_QUERY_ROWS})` : ''}.`,
+          `SQL returned **${rows.length}** row(s)${rows.length > MAX_QUERY_ROWS ? ` (showing first ${MAX_QUERY_ROWS})` : ''}.`,
           '```json',
           JSON.stringify(capped, null, 2).slice(0, 12_000),
           '```',
@@ -241,7 +246,7 @@ export const graphQueryTool: Tool = {
         format: 'markdown', success: true, data,
       };
     } catch (err: unknown) {
-      return fail('graph_query', `cypher failed: ${err instanceof Error ? err.message : String(err)}`);
+      return fail('graph_sql', `sql failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };
@@ -255,5 +260,5 @@ export function registerGraphTools(): void {
   registerTool(graphSearchTool);
   registerTool(graphCallersTool);
   registerTool(graphCalleesTool);
-  registerTool(graphQueryTool);
+  registerTool(graphSqlTool);
 }
