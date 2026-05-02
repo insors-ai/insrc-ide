@@ -31,6 +31,9 @@ import { registerDataProfileBooleanRdbmsSkill } from './built-ins/data.profile.b
 import { registerDataQualityCompletenessRdbmsSkill } from './built-ins/data.quality.completeness.rdbms.js';
 import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.quality.uniqueness.rdbms.js';
 import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.detect-patterns.rdbms.js';
+import { registerDataProfileTemporalRdbmsSkill } from './built-ins/data.profile.temporal.rdbms.js';
+import { registerDataProfileTextRdbmsSkill } from './built-ins/data.profile.text.rdbms.js';
+import { registerDataProfileAutoRdbmsSkill } from './built-ins/data.profile.auto.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -51,11 +54,13 @@ export function registerAllSkills(): void {
   registerDataSourceKvScanKeysSkill();
   registerDataSourceKvGetValueSkill();
   registerDataSourceKvSampleShapeSkill();
-  // Phase 5a (Family-5 univariate profilers) -- foundational atomics
-  // first; profile.auto + temporal + text are follow-ups.
+  // Phase 5a (Family-5 univariate profilers). Atomics first, then
+  // the auto composite that dispatches by declared SQL type.
   registerDataProfileNumericRdbmsSkill();
   registerDataProfileCategoricalRdbmsSkill();
   registerDataProfileBooleanRdbmsSkill();
+  registerDataProfileTemporalRdbmsSkill();
+  registerDataProfileTextRdbmsSkill();
   // Phase 5d (quality scorecard) -- atomic dimensions land first;
   // the scorecard composite ships once validity / conformity /
   // consistency are also in.
@@ -65,7 +70,10 @@ export function registerAllSkills(): void {
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();
 
-  // Composite skills go here once any are registered. Empty in v1.
+  // Composite skills. Must register AFTER their atomic skillDeps.
+  // 5a.6 -- profile.auto dispatches to numeric / categorical /
+  // boolean / temporal / text by declared SQL type.
+  registerDataProfileAutoRdbmsSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }

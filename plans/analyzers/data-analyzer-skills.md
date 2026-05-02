@@ -88,10 +88,13 @@ in place. Phase 1.1 (`data.source.rdbms.describe-table`), Phase 1.3
 Phase 2.2 (all three KV sampling skills:
 `data.source.kv.scan-keys` / `get-value` / `sample-shape`), and
 Phase 2.3 (`data.source.file.sample-rows`,
-`data.source.file.sample-shape`) are landed. Phase 5a (univariate
-profilers) is partially landed: `profile.numeric.rdbms`,
-`profile.categorical.rdbms`, and `profile.boolean.rdbms` shipped;
-temporal / text / auto / file-side variants are follow-ups.
+`data.source.file.sample-shape`) are landed. Phase 5a (univariate profilers) is fully landed on the RDBMS side:
+`profile.numeric.rdbms`, `profile.categorical.rdbms`,
+`profile.boolean.rdbms`, `profile.temporal.rdbms`,
+`profile.text.rdbms`, and the `profile.auto.rdbms` composite that
+picks among them by declared SQL type. File-side variants are
+follow-ups; min/max temporal range + gap/period inference deferred
+until a type-aware aggregation surface exists.
 Phase 5d (quality scorecard) atomic dimensions are also partially
 landed: `quality.completeness.rdbms` (per-column null rate + table
 overall) and `quality.uniqueness.rdbms` (per-column distinct ratio
@@ -141,10 +144,10 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 4.7 | comparison-diff: range.expected-vs-live | pending | |
 | 5a.1 | quality-profile: profile.numeric | partial | `data.profile.numeric.rdbms` shipped (atomic; 10 server-side aggregates -- count / non-null / distinct + min / max / avg / stddev / variance + p50 / p95). File-side variant (`profile.numeric.file`) still pending; the underlying `db_file_aggregate` already exposes the same surface |
 | 5a.2 | quality-profile: profile.categorical | partial | `data.profile.categorical.rdbms` shipped (composite over `db_sql_aggregate` + `db_sql_distinct` -- count + null rate + cardinality + top-N + frequency). File-side variant pending |
-| 5a.3 | quality-profile: profile.temporal | pending | range, gap detection, period inference |
-| 5a.4 | quality-profile: profile.text | pending | length stats, encoding, regex pattern inference |
+| 5a.3 | quality-profile: profile.temporal | partial | `data.profile.temporal.rdbms` shipped (atomic; count + non-null + null + distinct count). Min / max range, gap detection, and period inference are deferred -- gated on a type-aware aggregation surface (current `db_sql_aggregate.values` is `Record<string, number \| null>`, can't return Date / timestamp values from min / max) |
+| 5a.4 | quality-profile: profile.text | partial | `data.profile.text.rdbms` shipped (atomic; server-side cardinality + null rate via `db_sql_aggregate`, sample-based length stats min / max / avg / median + empty-string count over up to 50 sampled values). Encoding detection deferred (driver-level byte access not exposed); generalized regex pattern inference covered by `pii.detect-patterns.rdbms` (5e.1) and a future general-pattern skill |
 | 5a.5 | quality-profile: profile.boolean | partial | `data.profile.boolean.rdbms` shipped (atomic; one `db_sql_distinct` round-trip + cross-dialect normalization for true / false / null / other counts plus true ratio). File-side variant pending |
-| 5a.6 | quality-profile: profile.auto | pending | composite -- picks profiler from declared type. Blocked on 5a.3 + 5a.4 (needs all six atomics) |
+| 5a.6 | quality-profile: profile.auto | done | `data.profile.auto.rdbms` shipped (composite over all 5 RDBMS profile atomics). Calls `db_sql_describe` to read the column's declared SQL type, classifies into `numeric / text / boolean / temporal / categorical` via lowercase substring rules, dispatches to the matching profiler via `runSkill`. Returns `{ declaredType, kind, profile }` so synthesise renderers branch without re-classifying |
 | 5b.1 | distribution: distribution.histogram | pending | |
 | 5b.2 | distribution: distribution.outliers-iqr | pending | |
 | 5b.3 | distribution: distribution.outliers-zscore | pending | |
