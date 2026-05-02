@@ -554,9 +554,10 @@ const fileAggregateTool: Tool = {
 	access: FILE_ACCESS,
 	id: 'db_file_aggregate',
 	description:
-		'Compute server-side numeric aggregates on a file connection (csv / tsv / jsonl / json / parquet / arrow). ' +
-		'Routes through the consolidated DuckDB-backed file driver: aggregation runs in the engine, not the LLM. ' +
-		'Same function set + result shape as db_sql_aggregate.',
+		'Compute server-side numeric aggregates on a file connection. Covers every file kind the data-driver ' +
+		'supports -- native (csv / tsv / jsonl / ndjson / json / parquet / arrow / feather) plus converted ' +
+		'(avro / bson / fixed-width / xlsx, which stage through a Parquet cache). Aggregation runs in DuckDB, ' +
+		'not the LLM. Same function set + result shape as db_sql_aggregate.',
 	inputSchema: {
 		type: 'object',
 		additionalProperties: false,
@@ -583,7 +584,7 @@ const fileAggregateTool: Tool = {
 		if (typeof fd.aggregate !== 'function') {
 			return fail(
 				this.id,
-				`file driver '${fd.kind}' does not implement aggregate(). Native formats (csv / tsv / jsonl / json / parquet / arrow) route through DuckDB; non-native formats (xlsx / avro / bson / fixed-width) need the Phase 2 converter from data-driver-duckdb-files.md.`,
+				`file driver '${fd.kind}' does not implement aggregate(). Every supported file kind routes through the DuckDB-backed driver and exposes aggregate; reaching this branch means an out-of-tree driver was registered.`,
 			);
 		}
 		try {

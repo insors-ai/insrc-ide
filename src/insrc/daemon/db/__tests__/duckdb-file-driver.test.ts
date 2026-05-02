@@ -20,12 +20,7 @@ const originalHome = process.env['HOME'];
 const tmpHome = mkdtempSync(join(tmpdir(), 'insrc-duckdb-file-'));
 process.env['HOME'] = tmpHome;
 
-// Self-registers via top-level import. duckdb-file.ts is imported
-// last to override the bespoke csv / json / etc. registrations.
-await import('../drivers/csv.js');
-await import('../drivers/json.js');
-await import('../drivers/jsonl.js');
-await import('../drivers/parquet.js');
+// Self-registers via top-level import.
 await import('../drivers/duckdb-file.js');
 
 const { DriverPool } = await import('../pool.js');
@@ -233,6 +228,22 @@ describe('DuckDBFileDriver -- directory connection (Phase 4)', () => {
 
 		await pool.closeAll();
 		try { rmSync(altRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+});
+
+describe('DuckDBFileDriver -- pool path-escape guard', () => {
+	it('rejects file paths that escape the repo root', async () => {
+		const badRoot = mkdtempSync(join(tmpdir(), 'insrc-duckdb-file-escape-'));
+		const altConfPath = connectionsPath(badRoot);
+		await mkdir(join(altConfPath, '..'), { recursive: true });
+		await writeFile(altConfPath, JSON.stringify({
+			connections: [{ id: 'escape', kind: 'csv', path: '../../etc/passwd' }],
+		}), 'utf8');
+		const pool = new DriverPool(badRoot);
+		await pool.reload();
+		await assert.rejects(pool.acquire('escape'), /resolves outside the repo root/);
+		await pool.closeAll();
+		try { rmSync(badRoot, { recursive: true, force: true }); } catch { /* ignore */ }
 	});
 });
 
