@@ -46,6 +46,7 @@ import { registerDataDistributionOutliersIqrRdbmsSkill } from './built-ins/data.
 import { registerDataDistributionOutliersZScoreRdbmsSkill } from './built-ins/data.distribution.outliers-zscore.rdbms.js';
 import { registerDataDistributionOutliersMadRdbmsSkill } from './built-ins/data.distribution.outliers-mad.rdbms.js';
 import { registerDataDependencyCoNullPatternRdbmsSkill } from './built-ins/data.dependency.co-null-pattern.rdbms.js';
+import { registerDataDependencyFunctionalRdbmsSkill } from './built-ins/data.dependency.functional.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -87,6 +88,7 @@ export function registerAllSkills(): void {
   registerDataDistributionOutliersMadRdbmsSkill();
   // Phase 5c (cross-column) -- pairwise dependency analyses.
   registerDataDependencyCoNullPatternRdbmsSkill();
+  registerDataDependencyFunctionalRdbmsSkill();
   // Phase 5e (sensitivity / PII) -- regex over sampled values;
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();

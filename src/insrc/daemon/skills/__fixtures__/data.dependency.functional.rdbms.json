@@ -1,0 +1,35 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.addresses",
+    "columns": ["zip", "city", "state"],
+    "sampleSize": 12
+  },
+  "fakeTools": {
+    "db_sql_sample": {
+      "content": "sample",
+      "isError": false,
+      "data": {
+        "target": "public.addresses",
+        "columns": ["zip", "city", "state"],
+        "rows": [
+          { "zip": "94102", "city": "San Francisco", "state": "CA" },
+          { "zip": "94102", "city": "San Francisco", "state": "CA" },
+          { "zip": "94103", "city": "San Francisco", "state": "CA" },
+          { "zip": "94103", "city": "San Francisco", "state": "CA" },
+          { "zip": "94104", "city": "San Francisco", "state": "CA" },
+          { "zip": "10001", "city": "New York",      "state": "NY" },
+          { "zip": "10001", "city": "New York",      "state": "NY" },
+          { "zip": "10002", "city": "New York",      "state": "NY" },
+          { "zip": "10002", "city": "New York",      "state": "NY" },
+          { "zip": "60601", "city": "Chicago",       "state": "IL" },
+          { "zip": "60601", "city": "Chicago",       "state": "IL" },
+          { "zip": "60602", "city": "Chicago",       "state": "IL" }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
