@@ -39,6 +39,8 @@ import { registerDataSynthFieldTableSkill } from './built-ins/data.synth.field-t
 import { registerDataSynthSampleTableSkill } from './built-ins/data.synth.sample-table.js';
 import { registerDataSynthProfileCardSkill } from './built-ins/data.synth.profile-card.js';
 import { registerDataSynthLineageFoldSkill } from './built-ins/data.synth.lineage-fold.js';
+import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality.scorecard.rdbms.js';
+import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -88,6 +90,11 @@ export function registerAllSkills(): void {
   registerDataSynthSampleTableSkill();
   registerDataSynthProfileCardSkill();
   registerDataSynthLineageFoldSkill();
+  // 5d.6 quality.scorecard composite -- must register AFTER its
+  // skillDeps (completeness + uniqueness atomics).
+  registerDataQualityScorecardRdbmsSkill();
+  // 6.8 synth.scorecard renders the scorecard composite's output.
+  registerDataSynthScorecardSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }

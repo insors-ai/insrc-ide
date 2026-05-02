@@ -165,7 +165,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5d.3 | quality scorecard: quality.validity | pending | matches declared type / domain / regex |
 | 5d.4 | quality scorecard: quality.conformity | pending | date / currency / country / postal formats |
 | 5d.5 | quality scorecard: quality.consistency | pending | cross-column agreements |
-| 5d.6 | quality scorecard: quality.scorecard | pending | composite rollup of 5d.1-5d.5 -- ships once 5d.3-5d.5 land |
+| 5d.6 | quality scorecard: quality.scorecard | partial | `data.quality.scorecard.rdbms` shipped (composite over 5d.1 + 5d.2 with weights completeness=0.6, uniqueness=0.4). Per-column composite scores + table overall + top-issues digest (composite < 0.7) + PK candidates. Validity / conformity / consistency dimensions (5d.3-5d.5) not yet weighted in -- the rendered output explicitly notes which dimensions are included so the half-rolled state is honest. Repo-overridable weights (`~/.insrc/data-analyzer/scorecard.json`) deferred per the open-question table |
 | 5e.1 | sensitivity: pii.detect-patterns | partial | `data.pii.detect-patterns.rdbms` shipped (samples up to 50 values via `db_sql_sample`, applies anchored regex set: email / ssn-us / phone-us / credit-card / jwt / ipv4 / iban / aws-access-key / github-token / uuid; returns per-pattern hit count + rate + up to 3 examples). Provider affinity `local`. File / KV variants pending; address detection skipped (no clean regex) |
 | 5e.2 | sensitivity: pii.column-classifier | done | `data.pii.column-classifier.rdbms` shipped (composite over `data.pii.detect-patterns.rdbms` + a 14-rule column-name heuristic). Returns one of `pii / likely-pii / not-pii` with explicit `evidence` strings. Surfaces both data-leak (PII values, generic name) and missing-data (named-PII column, empty sample) cases per the 2026-04-30 lessons-learned fix |
 | 5e.3 | sensitivity: sensitivity.policy-check | pending | vs connection's pii config |
@@ -183,7 +183,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 6.5 | synthesis: synth.sample-table | done | `data.synth.sample-table` ships -- renders sample-rows as markdown table; long values truncate at 80 chars; nested JSON-stringified |
 | 6.6 | synthesis: synth.lineage-fold | done | `data.synth.lineage-fold` ships -- groups call-sites by source-file path; classification badges + truncated snippets in fenced code blocks |
 | 6.7 | synthesis: synth.profile-card | done | `data.synth.profile-card` ships -- branches on `kind` (numeric / categorical / boolean / temporal / text), pairs with profile.auto.rdbms's output |
-| 6.8 | synthesis: synth.scorecard | pending | needs the 5d.6 quality.scorecard composite first |
+| 6.8 | synthesis: synth.scorecard | done | `data.synth.scorecard` ships -- markdown report card with overall score badge / weights / PK candidates / top-issues table / per-column detail. Pairs with `data.quality.scorecard.rdbms` |
 | 6.9 | synthesis: synth.histogram-block | pending | needs the 5b.1 histogram skill first |
 | 7.1 | meta: meta.classify-question | pending | which family answers this? |
 | 7.2 | meta: meta.select-scope | pending | pick connections / tables / files |
