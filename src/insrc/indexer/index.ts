@@ -460,30 +460,47 @@ export class IndexerService {
     repoPath:   string,
     cleanFirst: boolean,
   ): Promise<boolean> {
+    // TEMPORARY trace -- see plans/storage-migration-duckdb.md hang debug.
+    // Reverts after the indexer hang is diagnosed (commit-and-revert pattern).
+    const trace = (stage: string, extra?: Record<string, unknown>): void => {
+      log.info({ file: filePath, stage, ...extra }, 'indexFile trace');
+    };
+    const t0 = Date.now();
+    trace('start');
+
     const parser = getParser(filePath) ?? (basenameParser.handles(filePath) ? basenameParser : null);
-    if (!parser) return false;
+    if (!parser) { trace('no-parser-skip'); return false; }
+    trace('parser-resolved', { parser: parser.constructor.name });
 
     let source: string;
     try { source = readFileSync(filePath, 'utf8'); }
-    catch { return false; } // file disappeared between event and read
+    catch { trace('read-failed-skip'); return false; }
+    trace('read', { bytes: source.length });
 
     const hash = contentHash(source);
+    trace('hashed');
 
     // Skip if unchanged (handles editor save-without-change)
     if (!cleanFirst) {
+      trace('about-to-getEntity');
       const existing = await getEntity(this.db, makeEntityId(repoPath, filePath, 'file', filePath));
+      trace('getEntity-done', { existed: existing !== null, hashMatch: existing?.hash === hash });
       if (existing?.hash === hash) {
         log.debug({ file: filePath }, 'skipped (unchanged)');
         return false;
       }
     } else {
+      trace('about-to-clean');
       await deleteRelationsForFile(this.db, filePath);
       await deleteEntitiesForFile(this.db, filePath);
       await deleteUnresolvedForFile(this.db, filePath);
+      trace('clean-done');
     }
 
     // Parse
+    trace('about-to-parse');
     const result = parser.parse(filePath, source, repoPath);
+    trace('parse-done', { entities: result.entities.length, relations: result.relations.length });
 
     // Stamp hash on the File entity
     const fileEntity = result.entities.find(e => e.kind === 'file' && e.file === filePath);
@@ -492,13 +509,21 @@ export class IndexerService {
     // Resolve relative imports
     const resolved = resolveRelations(result.relations, filePath, repoPath, result.entities);
     const resolvedCount = resolved.filter(r => r.resolved).length;
+    trace('relations-resolved', { count: resolved.length, resolved: resolvedCount });
 
     // Embed entities (no-op if Ollama is unavailable)
+    trace('about-to-embed');
     await embedEntities(result.entities);
+    trace('embed-done');
 
     // Persist
+    trace('about-to-upsert-entities');
     await upsertEntities(this.db, result.entities);
+    trace('upsert-entities-done');
+
+    trace('about-to-upsert-relations');
     await upsertRelations(this.db, resolved);
+    trace('upsert-relations-done', { totalMs: Date.now() - t0 });
 
     log.debug(
       { file: filePath, entities: result.entities.length, relations: resolved.length, resolved: resolvedCount },
