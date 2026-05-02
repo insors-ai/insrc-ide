@@ -64,7 +64,9 @@ the fact.
 
 ## Status
 
-All slices pending. Skill core (skills-core.md) must land first.
+All slices pending except 3.4 (partial). Skill core (skills-core.md)
+has fully shipped, so the substrate is no longer a blocker. Phase 0
+(driver-tool substrate) is the next logical starting point.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|

@@ -12,6 +12,8 @@ import pgMod from 'pg';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
+	AggregateRequest,
+	AggregateResult,
 	ConnectionConfig,
 	RdbmsDriver,
 	SampleOpts,
@@ -26,7 +28,9 @@ import {
 	SAMPLE_TIMEOUT_MS,
 	buildExplainSql,
 	buildSampleSql,
+	compileAggregate,
 	quoteTarget,
+	readAggregateRow,
 	withTimeout,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
@@ -128,6 +132,19 @@ class PostgresDriver implements RdbmsDriver {
 				: res.rowCount === Math.min(opts.limit, SAMPLE_LIMIT),
 			metadata: { samplingMethod: 'first' },
 		};
+	}
+
+	async aggregate(target: string, request: AggregateRequest): Promise<AggregateResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileAggregate(target, request, cols, POSTGRES_DIALECT);
+		log.debug({ id: this.id, text: compiled.text }, 'aggregate query');
+		const res = await withTimeout(
+			this.pool.query(compiled.text, compiled.values as unknown[]),
+			SAMPLE_TIMEOUT_MS,
+		);
+		const row = res.rows[0] as Readonly<Record<string, unknown>> | undefined;
+		return { target, values: readAggregateRow(row, compiled.keys) };
 	}
 
 	async explain(queryAst: QueryAst): Promise<PlanResult> {

@@ -107,6 +107,77 @@ describe('SqliteDriver (via pool)', () => {
 		);
 		await pool.closeAll();
 	});
+
+	// -------------------------------------------------------------------------
+	// aggregate() -- Phase 0.1 of plans/analyzers/data-analyzer-skills.md
+	// -------------------------------------------------------------------------
+
+	it('aggregate count / sum / avg / min / max returns flat numeric record', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		const res = await (drv as {
+			aggregate: (t: string, r: unknown) => Promise<{ target: string; values: Record<string, number | null> }>;
+		}).aggregate('orders', {
+			aggregations: [
+				{ column: '*',      function: 'count' },
+				{ column: 'amount', function: 'sum' },
+				{ column: 'amount', function: 'avg' },
+				{ column: 'amount', function: 'min' },
+				{ column: 'amount', function: 'max' },
+				{ column: 'user_id', function: 'distinct_count' },
+				{ column: 'amount', function: 'count_non_null' },
+			],
+		});
+		assert.equal(res.target, 'orders');
+		assert.equal(res.values['*__count'], 3);
+		assert.equal(Math.round((res.values['amount__sum'] ?? 0) * 100), 11949); // 119.49
+		assert.equal(Math.round((res.values['amount__avg'] ?? 0) * 1000), 39830); // 39.83
+		assert.equal(res.values['amount__min'], 7);
+		assert.equal(res.values['amount__max'], 99.99);
+		assert.equal(res.values['user_id__distinct_count'], 2);
+		assert.equal(res.values['amount__count_non_null'], 3);
+		await pool.closeAll();
+	});
+
+	it('aggregate rejects unknown columns and invalid target', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		await assert.rejects(
+			(drv as { aggregate: (t: string, r: unknown) => Promise<unknown> }).aggregate(
+				'orders',
+				{ aggregations: [{ column: 'discount', function: 'avg' }] },
+			),
+			/unknown column 'discount'/,
+		);
+		await assert.rejects(
+			(drv as { aggregate: (t: string, r: unknown) => Promise<unknown> }).aggregate(
+				'orders; DROP TABLE',
+				{ aggregations: [{ column: '*', function: 'count' }] },
+			),
+			/invalid table identifier/,
+		);
+		await pool.closeAll();
+	});
+
+	it('aggregate stddev surfaces SQLite-no-such-function as a clean engine error', async () => {
+		// SQLite has no built-in STDDEV_SAMP; the engine error reaches
+		// the tool layer verbatim and surfaces as `success: false` to
+		// the LLM. Confirms the per-dialect coverage gap is honest
+		// rather than silently returning fabricated zeros.
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		await assert.rejects(
+			(drv as { aggregate: (t: string, r: unknown) => Promise<unknown> }).aggregate(
+				'orders',
+				{ aggregations: [{ column: 'amount', function: 'stddev' }] },
+			),
+			/no such function: STDDEV_SAMP/i,
+		);
+		await pool.closeAll();
+	});
 });
 
 after(() => {

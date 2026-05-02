@@ -15,6 +15,8 @@ import oracledb from 'oracledb';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
+	AggregateRequest,
+	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
 	RdbmsDriver,
@@ -27,7 +29,9 @@ import {
 	ORACLE_DIALECT,
 	SAMPLE_TIMEOUT_MS,
 	buildSampleSql,
+	compileAggregate,
 	quoteTarget,
+	readAggregateRow,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
@@ -139,6 +143,25 @@ class OracleDriver implements RdbmsDriver {
 			);
 			const lines = (res.rows ?? []).map(r => String(r['PLAN_TABLE_OUTPUT'] ?? ''));
 			return { plan: lines.join('\n') };
+		} finally {
+			await conn.close();
+		}
+	}
+
+	async aggregate(target: string, request: AggregateRequest): Promise<AggregateResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileAggregate(target, request, cols, ORACLE_DIALECT);
+		log.debug({ id: this.id, text: compiled.text }, 'aggregate query');
+		const pool = await this.poolPromise;
+		const conn = await pool.getConnection();
+		try {
+			const res = await conn.execute<Record<string, unknown>>(
+				compiled.text,
+				compiled.values as unknown[],
+				{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+			);
+			return { target, values: readAggregateRow((res.rows ?? [])[0], compiled.keys) };
 		} finally {
 			await conn.close();
 		}

@@ -14,6 +14,8 @@ import Database from 'better-sqlite3';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
+	AggregateRequest,
+	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
 	RdbmsDriver,
@@ -26,7 +28,9 @@ import {
 	SQLITE_DIALECT,
 	buildExplainSql,
 	buildSampleSql,
+	compileAggregate,
 	quoteTarget,
+	readAggregateRow,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
@@ -113,6 +117,20 @@ class SqliteDriver implements RdbmsDriver {
 		log.debug({ id: this.id, text }, 'explain query');
 		const rows = this.db.prepare(text).all(...values as unknown[]) as Record<string, unknown>[];
 		return { plan: rows.map(r => JSON.stringify(r)).join('\n') };
+	}
+
+	async aggregate(target: string, request: AggregateRequest): Promise<AggregateResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileAggregate(target, request, cols, SQLITE_DIALECT);
+		log.debug({ id: this.id, text: compiled.text }, 'aggregate query');
+		// SQLite has no built-in STDDEV / VARIANCE / PERCENTILE_CONT;
+		// the engine surfaces those as "no such function: ..." errors
+		// at run-time. The tool layer renders that as `success: false`
+		// without the daemon needing per-driver checks here.
+		const row = this.db.prepare(compiled.text)
+			.get(...compiled.values as unknown[]) as Record<string, unknown> | undefined;
+		return { target, values: readAggregateRow(row, compiled.keys) };
 	}
 
 	async close(): Promise<void> {

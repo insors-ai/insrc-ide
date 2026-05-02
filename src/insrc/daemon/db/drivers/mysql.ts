@@ -12,6 +12,8 @@ import type { Pool, PoolOptions } from 'mysql2/promise';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
+	AggregateRequest,
+	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
 	RdbmsDriver,
@@ -25,7 +27,9 @@ import {
 	SAMPLE_TIMEOUT_MS,
 	buildExplainSql,
 	buildSampleSql,
+	compileAggregate,
 	quoteTarget,
+	readAggregateRow,
 	withTimeout,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
@@ -117,6 +121,18 @@ class MysqlDriver implements RdbmsDriver {
 			SAMPLE_TIMEOUT_MS,
 		) as unknown as [Record<string, unknown>[], unknown];
 		return { plan: rows.map(r => JSON.stringify(r)).join('\n') };
+	}
+
+	async aggregate(target: string, request: AggregateRequest): Promise<AggregateResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileAggregate(target, request, cols, MYSQL_DIALECT);
+		log.debug({ id: this.id, text: compiled.text }, 'aggregate query');
+		const [rows] = await withTimeout(
+			this.pool.query(compiled.text, compiled.values as unknown[]),
+			SAMPLE_TIMEOUT_MS,
+		) as unknown as [Record<string, unknown>[], unknown];
+		return { target, values: readAggregateRow(rows[0], compiled.keys) };
 	}
 
 	async close(): Promise<void> {

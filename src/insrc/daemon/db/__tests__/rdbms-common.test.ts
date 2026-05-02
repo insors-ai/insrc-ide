@@ -16,10 +16,14 @@ import {
 	ORACLE_DIALECT,
 	POSTGRES_DIALECT,
 	SQLITE_DIALECT,
+	aggregateResultKey,
 	buildSampleSql,
+	compileAggregate,
+	compileAggregateExprs,
 	compileWhere,
 	looksLikeMutation,
 	quoteTarget,
+	readAggregateRow,
 	withTimeout,
 } from '../drivers/rdbms-common.js';
 
@@ -200,5 +204,184 @@ describe('withTimeout', () => {
 		const slow = new Promise<number>((resolve) => setTimeout(() => resolve(1), 500));
 		await assert.rejects(withTimeout(slow, 50, () => { aborted = true; }));
 		assert.equal(aborted, true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Aggregate compilation (Phase 0.1 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+
+describe('aggregateResultKey', () => {
+	it('formats <col>__<fn> for the simple cases', () => {
+		assert.equal(
+			aggregateResultKey({ column: 'price', function: 'avg' }),
+			'price__avg',
+		);
+		assert.equal(
+			aggregateResultKey({ column: 'id', function: 'distinct_count' }),
+			'id__distinct_count',
+		);
+	});
+
+	it('embeds the percentile fraction (with `.` -> `_`)', () => {
+		assert.equal(
+			aggregateResultKey({ column: 'price', function: 'percentile', args: { p: 0.95 } }),
+			'price__percentile_0_95',
+		);
+	});
+
+	it('rejects percentile spec missing args.p', () => {
+		assert.throws(
+			() => aggregateResultKey({ column: 'price', function: 'percentile' }),
+			/percentile spec missing args\.p/,
+		);
+	});
+});
+
+describe('compileAggregateExprs', () => {
+	it('emits one quoted-aliased expression per aggregation', () => {
+		const out = compileAggregateExprs(
+			{ aggregations: [
+				{ column: '*',     function: 'count' },
+				{ column: 'price', function: 'avg' },
+				{ column: 'price', function: 'percentile', args: { p: 0.5 } },
+			] },
+			['price', 'qty'],
+			POSTGRES_DIALECT,
+		);
+		assert.deepEqual([...out.keys], ['*__count', 'price__avg', 'price__percentile_0_5']);
+		assert.equal(out.exprs.length, 3);
+		assert.match(out.exprs[0]!, /^COUNT\(\*\) AS "\*__count"$/);
+		assert.match(out.exprs[1]!, /^AVG\("price"\) AS "price__avg"$/);
+		assert.match(out.exprs[2]!, /^PERCENTILE_CONT\(0\.5\) WITHIN GROUP \(ORDER BY "price"\) AS "price__percentile_0_5"$/);
+	});
+
+	it('rejects unknown columns (count exempt)', () => {
+		// `count` doesn't reference a real column, so any column string passes.
+		assert.doesNotThrow(() => compileAggregateExprs(
+			{ aggregations: [{ column: 'totalRows', function: 'count' }] },
+			['price'],
+			POSTGRES_DIALECT,
+		));
+		assert.throws(
+			() => compileAggregateExprs(
+				{ aggregations: [{ column: 'discount', function: 'avg' }] },
+				['price'],
+				POSTGRES_DIALECT,
+			),
+			/unknown column 'discount'/,
+		);
+	});
+
+	it('rejects duplicate result-keys', () => {
+		assert.throws(
+			() => compileAggregateExprs(
+				{ aggregations: [
+					{ column: 'price', function: 'avg' },
+					{ column: 'price', function: 'avg' },
+				] },
+				['price'],
+				POSTGRES_DIALECT,
+			),
+			/duplicate aggregate key 'price__avg'/,
+		);
+	});
+
+	it('rejects empty aggregations', () => {
+		assert.throws(
+			() => compileAggregateExprs({ aggregations: [] }, ['price'], POSTGRES_DIALECT),
+			/zero aggregations/,
+		);
+	});
+
+	it('uses dialect-specific stddev / variance for MSSQL', () => {
+		const out = compileAggregateExprs(
+			{ aggregations: [
+				{ column: 'price', function: 'stddev' },
+				{ column: 'price', function: 'variance' },
+			] },
+			['price'],
+			MSSQL_DIALECT,
+		);
+		assert.match(out.exprs[0]!, /^STDEV\(\[price\]\) AS \[price__stddev\]$/);
+		assert.match(out.exprs[1]!, /^VAR\(\[price\]\) AS \[price__variance\]$/);
+	});
+
+	it('uses STDDEV_SAMP / VAR_SAMP for the SQL-standard dialects', () => {
+		for (const d of [POSTGRES_DIALECT, MYSQL_DIALECT, ORACLE_DIALECT]) {
+			const out = compileAggregateExprs(
+				{ aggregations: [{ column: 'price', function: 'stddev' }] },
+				['price'],
+				d,
+			);
+			assert.match(out.exprs[0]!, /^STDDEV_SAMP\(/);
+		}
+	});
+
+	it('rejects out-of-range percentile p', () => {
+		assert.throws(
+			() => compileAggregateExprs(
+				{ aggregations: [{ column: 'price', function: 'percentile', args: { p: 1.5 } }] },
+				['price'],
+				POSTGRES_DIALECT,
+			),
+			/args\.p in \[0, 1\]/,
+		);
+	});
+});
+
+describe('compileAggregate', () => {
+	it('wraps exprs in a SELECT ... FROM <quotedTarget>', () => {
+		const out = compileAggregate(
+			'public.orders',
+			{ aggregations: [
+				{ column: '*',     function: 'count' },
+				{ column: 'total', function: 'sum' },
+			] },
+			['total'],
+			POSTGRES_DIALECT,
+		);
+		assert.equal(
+			out.text,
+			'SELECT COUNT(*) AS "*__count", SUM("total") AS "total__sum" FROM "public"."orders"',
+		);
+		assert.deepEqual([...out.values], []);
+		assert.deepEqual([...out.keys], ['*__count', 'total__sum']);
+	});
+
+	it('refuses suspicious target identifiers', () => {
+		assert.throws(
+			() => compileAggregate(
+				'orders; DROP TABLE',
+				{ aggregations: [{ column: '*', function: 'count' }] },
+				[],
+				POSTGRES_DIALECT,
+			),
+			/invalid table identifier/,
+		);
+	});
+});
+
+describe('readAggregateRow', () => {
+	it('coerces number / bigint / numeric-string / null', () => {
+		const out = readAggregateRow(
+			{ a__count: 42, a__sum: 1234567890123n, a__avg: '3.14', a__min: null, a__max: undefined },
+			['a__count', 'a__sum', 'a__avg', 'a__min', 'a__max'],
+		);
+		assert.equal(out['a__count'], 42);
+		assert.equal(out['a__sum'], Number(1234567890123n));
+		assert.equal(out['a__avg'], 3.14);
+		assert.equal(out['a__min'], null);
+		assert.equal(out['a__max'], null);
+	});
+
+	it('NaN / non-numeric / object becomes null', () => {
+		const out = readAggregateRow(
+			{ a__avg: 'not a number', b__sum: { whatever: true }, c__max: NaN },
+			['a__avg', 'b__sum', 'c__max'],
+		);
+		assert.equal(out['a__avg'], null);
+		assert.equal(out['b__sum'], null);
+		assert.equal(out['c__max'], null);
 	});
 });

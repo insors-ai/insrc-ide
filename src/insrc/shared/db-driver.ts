@@ -221,6 +221,52 @@ export interface PlanResult {
 }
 
 // ---------------------------------------------------------------------------
+// Aggregation (Phase 0.1 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Functions a driver may be asked to compute server-side. The skill /
+ * tool layer never invents these client-side -- the LLM produces a
+ * structured request, the driver compiles to SQL, the engine returns
+ * numbers. This is the "no-hallucinated-numbers" boundary.
+ */
+export type AggregateFunction =
+	| 'count'             // COUNT(*)
+	| 'count_non_null'    // COUNT(<col>)
+	| 'distinct_count'    // COUNT(DISTINCT <col>)
+	| 'sum'
+	| 'avg'
+	| 'stddev'            // sample stddev
+	| 'variance'          // sample variance
+	| 'min'
+	| 'max'
+	| 'percentile';       // requires args.p in [0, 1]
+
+export interface AggregateSpec {
+	/** Column to aggregate. Ignored by `count` (which is COUNT(*)) but
+	 *  still required so the result key is well-defined. */
+	readonly column: string;
+	readonly function: AggregateFunction;
+	readonly args?: { readonly p?: number };
+}
+
+export interface AggregateRequest {
+	readonly aggregations: readonly AggregateSpec[];
+}
+
+export interface AggregateResult {
+	readonly target: string;
+	/**
+	 * Flat numeric record keyed `<column>__<function>` (or
+	 * `<column>__percentile_<p>` for percentile to disambiguate
+	 * multiple percentile asks on the same column). Values are `null`
+	 * when the underlying engine returned NULL (e.g. AVG over an
+	 * empty table).
+	 */
+	readonly values: Readonly<Record<string, number | null>>;
+}
+
+// ---------------------------------------------------------------------------
 // Driver interfaces
 // ---------------------------------------------------------------------------
 
@@ -236,6 +282,14 @@ export interface RdbmsDriver extends BaseDriver {
 	describe(target: string): Promise<SchemaDescription>;
 	sample(target: string, opts: SampleOpts): Promise<SampleResult>;
 	explain?(queryAst: QueryAst): Promise<PlanResult>;
+	/**
+	 * Compute server-side aggregations and return a flat numeric
+	 * record. Drivers that cannot implement a particular function on
+	 * their dialect should throw a clear error -- the tool layer
+	 * surfaces it as `success: false` rather than papering over a
+	 * missing primitive.
+	 */
+	aggregate(target: string, request: AggregateRequest): Promise<AggregateResult>;
 }
 
 export interface KvDriver extends BaseDriver {
@@ -256,6 +310,11 @@ export interface FileDriver extends BaseDriver {
 	 *  kinds that want to expose nested-field shape inference. */
 	sampleShape?(opts: ScanOpts): Promise<ShapeReport>;
 	get?(path: string): Promise<KvValue>;
+	/** Optional. Tabular file kinds that route through DuckDB (parquet
+	 *  today; the data-driver-duckdb-files plan unifies the rest)
+	 *  expose this for Family 5 quality / distribution / dependency
+	 *  skills. Other file kinds throw. */
+	aggregate?(target: string | undefined, request: AggregateRequest): Promise<AggregateResult>;
 }
 
 export type Driver = RdbmsDriver | KvDriver | FileDriver;

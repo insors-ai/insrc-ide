@@ -11,7 +11,13 @@
  * statement text.
  */
 
-import type { SampleOpts, WhereClause } from '../../../shared/db-driver.js';
+import type {
+	AggregateFunction,
+	AggregateRequest,
+	AggregateSpec,
+	SampleOpts,
+	WhereClause,
+} from '../../../shared/db-driver.js';
 
 export const SAMPLE_LIMIT = 50;
 export const SAMPLE_TIMEOUT_MS = 5_000;
@@ -237,6 +243,215 @@ export function buildExplainSql(
 	}
 	// MSSQL + Oracle are handled by their drivers.
 	return inner;
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate SQL assembly (Phase 0.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-dialect rendering of an aggregate function. Returns the SQL
+ * expression to splice into the `SELECT` list. Some dialects don't
+ * support a given function natively (e.g. SQLite has no PERCENTILE);
+ * those throw.
+ *
+ * The `colSql` argument is the already-quoted column reference; the
+ * caller is responsible for passing a value that has been validated
+ * against the table's column list.
+ */
+function renderAggExpr(
+	fn: AggregateFunction,
+	colSql: string,
+	dialect: Dialect,
+	args?: AggregateSpec['args'],
+): string {
+	switch (fn) {
+		case 'count':
+			return 'COUNT(*)';
+		case 'count_non_null':
+			return `COUNT(${colSql})`;
+		case 'distinct_count':
+			return `COUNT(DISTINCT ${colSql})`;
+		case 'sum':
+			return `SUM(${colSql})`;
+		case 'avg':
+			return `AVG(${colSql})`;
+		case 'min':
+			return `MIN(${colSql})`;
+		case 'max':
+			return `MAX(${colSql})`;
+		case 'stddev':
+			// Sample stddev. Postgres / DuckDB / Oracle / Snowflake / Redshift
+			// all accept STDDEV_SAMP; MySQL has it too. SQLite has no
+			// stddev built-in -- the SQLite driver overrides this path
+			// (or throws). MSSQL uses `STDEV` not `STDDEV_SAMP` -- we
+			// branch on dialect.
+			if (dialect === MSSQL_DIALECT) return `STDEV(${colSql})`;
+			return `STDDEV_SAMP(${colSql})`;
+		case 'variance':
+			if (dialect === MSSQL_DIALECT) return `VAR(${colSql})`;
+			return `VAR_SAMP(${colSql})`;
+		case 'percentile': {
+			const p = args?.p;
+			if (typeof p !== 'number' || p < 0 || p > 1) {
+				throw new Error(
+					'data-driver: aggregate function "percentile" requires args.p in [0, 1]',
+				);
+			}
+			// PERCENTILE_CONT is the SQL standard; Postgres / Oracle /
+			// MSSQL / DuckDB accept the WITHIN GROUP form. MySQL 8+
+			// supports it; older MySQL / SQLite don't and the driver
+			// will need to throw. ClickHouse uses quantile(p)(col) --
+			// that's a per-driver override.
+			return `PERCENTILE_CONT(${p}) WITHIN GROUP (ORDER BY ${colSql})`;
+		}
+	}
+}
+
+/**
+ * Build the result-key for one aggregation. Stable + deterministic
+ * so callers can reference results by name without seeing the SQL.
+ *
+ *   count:                   <col>__count
+ *   percentile (p=0.5):      <col>__percentile_0_5
+ *   ...:                     <col>__<fn>
+ */
+export function aggregateResultKey(spec: AggregateSpec): string {
+	if (spec.function === 'percentile') {
+		const p = spec.args?.p;
+		if (typeof p !== 'number') {
+			throw new Error('data-driver: percentile spec missing args.p');
+		}
+		const pStr = String(p).replace('.', '_');
+		return `${spec.column}__percentile_${pStr}`;
+	}
+	return `${spec.column}__${spec.function}`;
+}
+
+export interface CompiledAggregate {
+	readonly text: string;
+	readonly values: readonly unknown[];
+	/** Result-key per aggregation in declaration order. The driver
+	 *  reads these out of the engine's first row to assemble
+	 *  `AggregateResult.values`. Each key is also used as the column
+	 *  alias in the emitted SQL, so the engine returns rows already
+	 *  keyed how we want. */
+	readonly keys: readonly string[];
+}
+
+export interface CompiledAggregateExprs {
+	/** Exprs ready to splice into a SELECT list, already aliased
+	 *  (e.g. `AVG("col") AS "col__avg"`). */
+	readonly exprs: readonly string[];
+	readonly keys: readonly string[];
+}
+
+/**
+ * Build the SELECT-list expressions + result-keys for an aggregate
+ * request, without committing to a FROM source. RDBMS drivers
+ * compose this with `quoteTarget(target, dialect)`; file drivers
+ * (parquet over DuckDB, etc.) compose with `read_parquet('path')`
+ * or similar table-function FROM clauses.
+ *
+ * Validates each spec's column against `knownColumns` (`count` is
+ * exempt -- COUNT(*) doesn't reference a column). Rejects duplicate
+ * result-keys.
+ */
+export function compileAggregateExprs(
+	request: AggregateRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+): CompiledAggregateExprs {
+	if (request.aggregations.length === 0) {
+		throw new Error('data-driver: aggregate request has zero aggregations');
+	}
+
+	const columnSet = new Set(knownColumns.map(c => c.toLowerCase()));
+	const seenKeys = new Set<string>();
+	const exprs: string[] = [];
+	const keys: string[] = [];
+
+	for (const spec of request.aggregations) {
+		// `count` is COUNT(*); the column name still flows through to
+		// the result-key for caller-side identification, so we don't
+		// validate against the table's columns.
+		if (spec.function !== 'count' && !columnSet.has(spec.column.toLowerCase())) {
+			throw new Error(
+				`data-driver: unknown column '${spec.column}' for aggregate '${spec.function}'`,
+			);
+		}
+		const colSql = spec.function === 'count' ? '*' : dialect.quoteIdent(spec.column);
+		const expr = renderAggExpr(spec.function, colSql, dialect, spec.args);
+		const key = aggregateResultKey(spec);
+		if (seenKeys.has(key)) {
+			throw new Error(
+				`data-driver: duplicate aggregate key '${key}'; pass distinct columns or different percentile args`,
+			);
+		}
+		seenKeys.add(key);
+		// Quote the alias so result-keys with `__` survive case-folding
+		// dialects (Postgres lowercases unquoted identifiers).
+		exprs.push(`${expr} AS ${dialect.quoteIdent(key)}`);
+		keys.push(key);
+	}
+
+	return { exprs, keys };
+}
+
+/**
+ * RDBMS-flavoured aggregate compiler: composes the expressions from
+ * `compileAggregateExprs` with a `quoteTarget(target)` FROM clause.
+ * Use this for any driver whose target is a SQL identifier (table
+ * name); use `compileAggregateExprs` directly when the FROM source
+ * is a table-function (e.g. `read_parquet('...')`).
+ */
+export function compileAggregate(
+	target: string,
+	request: AggregateRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+): CompiledAggregate {
+	const { exprs, keys } = compileAggregateExprs(request, knownColumns, dialect);
+	const quotedTarget = quoteTarget(target, dialect);
+	const text = `SELECT ${exprs.join(', ')} FROM ${quotedTarget}`;
+	if (looksLikeMutation(text)) {
+		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
+	}
+	return { text, values: [], keys };
+}
+
+/**
+ * Pull aggregate values out of the engine's first row and coerce to
+ * `number | null`. Most clients return numerics as JS `number` or
+ * `bigint`; some return strings (Postgres `numeric` ships as string
+ * to preserve precision). We coerce: bigint -> Number,
+ * string -> Number (NaN becomes null), other -> null.
+ *
+ * The driver passes the `keys` from `compileAggregate` so the order
+ * matches; we use bracket-access on the row rather than positional
+ * to handle drivers that return objects vs arrays interchangeably.
+ */
+export function readAggregateRow(
+	row: Readonly<Record<string, unknown>> | undefined,
+	keys: readonly string[],
+): Record<string, number | null> {
+	const out: Record<string, number | null> = {};
+	for (const k of keys) {
+		const raw = row?.[k];
+		if (raw === null || raw === undefined) {
+			out[k] = null;
+		} else if (typeof raw === 'number') {
+			out[k] = Number.isFinite(raw) ? raw : null;
+		} else if (typeof raw === 'bigint') {
+			out[k] = Number(raw);
+		} else if (typeof raw === 'string') {
+			const n = Number(raw);
+			out[k] = Number.isFinite(n) ? n : null;
+		} else {
+			out[k] = null;
+		}
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------

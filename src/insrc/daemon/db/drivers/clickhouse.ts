@@ -18,6 +18,8 @@ import type { ClickHouseClient } from '@clickhouse/client';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
+	AggregateRequest,
+	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
 	PlanResult,
@@ -114,6 +116,21 @@ class ClickHouseDriver implements RdbmsDriver {
 		const text = `EXPLAIN ${inner.text}`;
 		const rows = await withTimeout(this.runRows(text, inner.values), SAMPLE_TIMEOUT_MS);
 		return { plan: rows.map(r => String(r['explain'] ?? JSON.stringify(r))).join('\n') };
+	}
+
+	async aggregate(_target: string, _request: AggregateRequest): Promise<AggregateResult> {
+		// ClickHouse uses non-standard aggregate syntax (`quantile(p)(col)`,
+		// `stddevSamp`, `varSamp`) so the shared `compileAggregate`
+		// helper -- which targets SQL-standard PERCENTILE_CONT /
+		// STDDEV_SAMP / VAR_SAMP -- doesn't apply directly. A
+		// ClickHouse-aware compileAggregate variant is a follow-up;
+		// for now the tool surfaces this cleanly to the caller rather
+		// than emitting SQL the engine will reject.
+		throw new Error(
+			'data-driver: aggregate() not yet implemented for clickhouse driver -- ' +
+			'ClickHouse needs a per-dialect aggregate compiler (quantile/stddevSamp/varSamp). ' +
+			'Tracked in plans/analyzers/data-analyzer-skills.md Phase 0.1.',
+		);
 	}
 
 	async close(): Promise<void> {

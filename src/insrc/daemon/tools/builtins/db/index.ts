@@ -22,6 +22,8 @@ import { registerTool } from '../../registry.js';
 import type { Tool, ToolDeps, ToolInput, ToolResult } from '../../types.js';
 import { acquirePool } from '../../../db/pool-cache.js';
 import type {
+	AggregateRequest,
+	AggregateSpec,
 	ConnectionConfig,
 	Driver,
 	FileDriver,
@@ -365,6 +367,131 @@ const sqlSampleTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// db:sql:aggregate (Phase 0.1 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+//
+// Family-5 quality / distribution / dependency skills will hallucinate
+// numerical answers if asked to compute them in the LLM. This tool
+// pushes aggregation to the engine and returns a flat numeric record
+// the skill consumes verbatim. Server-side count / sum / avg / stddev
+// / variance / min / max / percentile / count_non_null / distinct_count.
+// Per-driver dialect handled by the existing driver dispatch.
+
+const AGGREGATE_FUNCTION_ENUM = [
+	'count', 'count_non_null', 'distinct_count',
+	'sum', 'avg', 'stddev', 'variance', 'min', 'max', 'percentile',
+] as const;
+
+const AGGREGATE_SPEC_SCHEMA = {
+	type: 'object',
+	required: ['column', 'function'],
+	additionalProperties: false,
+	properties: {
+		column:   { type: 'string', description: 'Column to aggregate. Ignored by `count` (COUNT(*)) but still required so the result key is well-defined.' },
+		function: { type: 'string', enum: AGGREGATE_FUNCTION_ENUM as readonly string[] },
+		args: {
+			type: 'object',
+			additionalProperties: false,
+			properties: {
+				p: { type: 'number', minimum: 0, maximum: 1, description: 'Percentile fraction in [0, 1]. Required when function = "percentile".' },
+			},
+		},
+	},
+} as const;
+
+function buildAggregateRequest(input: ToolInput): AggregateRequest | string {
+	const raw = input['aggregations'];
+	if (!Array.isArray(raw) || raw.length === 0) {
+		return '`aggregations` is required and must be a non-empty array';
+	}
+	const aggregations: AggregateSpec[] = [];
+	for (const item of raw) {
+		if (typeof item !== 'object' || item === null) {
+			return 'each aggregation must be an object { column, function, args? }';
+		}
+		const obj = item as Record<string, unknown>;
+		const column = obj['column'];
+		const fn = obj['function'];
+		if (typeof column !== 'string' || column.length === 0) {
+			return 'each aggregation must include a non-empty `column` string';
+		}
+		if (typeof fn !== 'string' || !(AGGREGATE_FUNCTION_ENUM as readonly string[]).includes(fn)) {
+			return `unknown aggregate function '${String(fn)}'; must be one of ${AGGREGATE_FUNCTION_ENUM.join(', ')}`;
+		}
+		const spec: AggregateSpec = { column, function: fn as AggregateSpec['function'] };
+		const argsRaw = obj['args'];
+		if (argsRaw !== undefined && argsRaw !== null) {
+			if (typeof argsRaw !== 'object') {
+				return '`args` must be an object when supplied';
+			}
+			const argsObj = argsRaw as Record<string, unknown>;
+			const p = argsObj['p'];
+			if (p !== undefined) {
+				if (typeof p !== 'number' || p < 0 || p > 1) {
+					return '`args.p` must be a number in [0, 1]';
+				}
+				(spec as { args?: { p?: number } }).args = { p };
+			}
+		}
+		if (spec.function === 'percentile' && spec.args?.p === undefined) {
+			return 'function "percentile" requires args.p in [0, 1]';
+		}
+		aggregations.push(spec);
+	}
+	return { aggregations };
+}
+
+function formatAggregateResult(target: string, values: Readonly<Record<string, number | null>>): string {
+	const rows = [`**Aggregates for \`${target}\`**`, '', '| key | value |', '|---|---|'];
+	for (const [k, v] of Object.entries(values)) {
+		rows.push(`| ${k} | ${v === null ? '_(null)_' : String(v)} |`);
+	}
+	return rows.join('\n');
+}
+
+const sqlAggregateTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_aggregate',
+	description:
+		'Compute server-side numeric aggregates on an RDBMS table / view. Supports count / count_non_null / ' +
+		'distinct_count / sum / avg / stddev / variance / min / max / percentile (args.p). Returns a flat ' +
+		'`<column>__<function>` keyed record. Use this whenever a Family-5 (quality / distribution / ' +
+		'dependency) skill needs a number: never compute aggregates client-side from a sample.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'aggregations'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string', description: 'Table or view name, with optional schema.' },
+			aggregations: {
+				type: 'array',
+				minItems: 1,
+				maxItems: 32,
+				items: AGGREGATE_SPEC_SCHEMA,
+			},
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') {
+			return fail(this.id, 'connectionId and target are required');
+		}
+		const reqOrErr = buildAggregateRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) { return driver; }
+		try {
+			const result = await (driver as RdbmsDriver).aggregate(target, reqOrErr);
+			return ok(formatAggregateResult(result.target, result.values), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
 // db:kv:scan + db:kv:get + db:kv:sample_shape
 // ---------------------------------------------------------------------------
 
@@ -692,6 +819,7 @@ export function registerDbTools(): void {
 	registerTool(sqlDescribeTool);
 	registerTool(sqlSampleTool);
 	registerTool(sqlExplainTool);
+	registerTool(sqlAggregateTool);
 	registerTool(kvScanTool);
 	registerTool(kvGetTool);
 	registerTool(kvSampleShapeTool);

@@ -21,6 +21,8 @@ interface ColumnValue {
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
+	AggregateRequest,
+	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
 	RdbmsDriver,
@@ -33,7 +35,9 @@ import {
 	MSSQL_DIALECT,
 	SAMPLE_TIMEOUT_MS,
 	buildSampleSql,
+	compileAggregate,
 	quoteTarget,
+	readAggregateRow,
 	withTimeout,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
@@ -170,6 +174,18 @@ class MssqlDriver implements RdbmsDriver {
 		} finally {
 			await this.run('SET SHOWPLAN_TEXT OFF', []).catch(() => { /* best-effort */ });
 		}
+	}
+
+	async aggregate(target: string, request: AggregateRequest): Promise<AggregateResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileAggregate(target, request, cols, MSSQL_DIALECT);
+		log.debug({ id: this.id, text: compiled.text }, 'aggregate query');
+		const rows = await withTimeout(
+			this.run(compiled.text, compiled.values as unknown[]),
+			SAMPLE_TIMEOUT_MS,
+		);
+		return { target, values: readAggregateRow(rows[0], compiled.keys) };
 	}
 
 	async close(): Promise<void> {
