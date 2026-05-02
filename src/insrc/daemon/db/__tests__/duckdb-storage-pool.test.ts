@@ -66,6 +66,48 @@ test('vss extension loaded on the storage pool; HNSW + array_distance both work'
   });
 });
 
+test('file-backed HNSW: CREATE INDEX works on a fresh connection after init', async () => {
+  // Regression for a daemon-startup crash: SET <flag> was connection-
+  // scoped, so the persistence flag set during init died with the init
+  // connection. The next CREATE INDEX (via the GraphClient -> a fresh
+  // Connection from withStorageConnection) hit "HNSW indexes can only
+  // be created in in-memory databases, or when the configuration
+  // option 'hnsw_enable_experimental_persistence' is set to true."
+  //
+  // The :memory: smoke test above does NOT catch this because :memory:
+  // is the OTHER condition that satisfies HNSW's check; the failure
+  // mode is file-backed-specific.
+  const tmp = mkdtempSync(join(tmpdir(), 'insrc-storage-pool-hnsw-'));
+  const path = join(tmp, 'duckdb.db');
+  try {
+    setStorageDuckDBPath(path);
+    await closeDuckDBStorage();
+
+    // Force pool init + close. Subsequent withStorageConnection calls
+    // get fresh connections that must still see the persistence flag.
+    await withStorageConnection(async (conn) => {
+      await conn.run('SELECT 1');
+    });
+
+    await withStorageConnection(async (conn) => {
+      await conn.run('CREATE TABLE hnsw_test (id INTEGER, embedding FLOAT[3])');
+      await conn.run(
+        "CREATE INDEX idx_hnsw_test ON hnsw_test USING HNSW (embedding) WITH (metric = 'cosine')",
+      );
+      await conn.run(
+        "INSERT INTO hnsw_test VALUES (1, [1.0, 0.0, 0.0]::FLOAT[3]), (2, [0.0, 1.0, 0.0]::FLOAT[3])",
+      );
+      const reader = await conn.runAndReadAll(
+        "SELECT id FROM hnsw_test ORDER BY array_distance(embedding, [1.0, 0.0, 0.0]::FLOAT[3]) LIMIT 1",
+      );
+      assert.equal(Number(reader.getRowObjects()[0]!['id']), 1);
+    });
+  } finally {
+    await closeDuckDBStorage();
+    try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+});
+
 test('file-backed mode persists data across close/reopen', async () => {
   // The whole point of this pool: state survives daemon restart.
   // Write a row, close the singleton, reopen, read the row back.

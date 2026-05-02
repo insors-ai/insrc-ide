@@ -127,15 +127,17 @@ export async function getDuckDBStorage(): Promise<DuckDBInstance> {
       }
       // VSS is the HNSW vector-index extension. Core extension as of
       // DuckDB 1.4 (was community before), so plain `INSTALL vss`
-      // suffices. The experimental-persistence flag is required for
-      // HNSW indexes to survive Connection boundaries -- without it
-      // the index is rebuilt on every Connection acquire, which is
-      // wasted work for our usage pattern (indexes outlive a single
-      // query).
+      // suffices. The experimental-persistence flag MUST be GLOBAL --
+      // file-backed databases reject HNSW index creation without it,
+      // and `SET <flag>` (without GLOBAL) is connection-scoped, so it
+      // would die when this init connection closes and any subsequent
+      // CREATE INDEX (initDb, schema apply, etc.) would error with
+      // "HNSW indexes can only be created in in-memory databases, or
+      // when the configuration option ... is set to true."
       try {
         await conn.run('INSTALL vss');
         await conn.run('LOAD vss');
-        await conn.run('SET hnsw_enable_experimental_persistence = true');
+        await conn.run('SET GLOBAL hnsw_enable_experimental_persistence = true');
       } catch (e) {
         log.warn(
           { err: errMessage(e) },
