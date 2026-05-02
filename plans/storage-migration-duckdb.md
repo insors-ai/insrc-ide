@@ -58,29 +58,33 @@ storage engine for graph + vector + analytical + structured data.
 
 ## Status
 
-All phases pending.
+Phase A code work complete (A.0-A.7); operational steps A.8-A.10
+remain (run dual-write under load → read cutover → single-write
+cutover). A.11 cleanup follows the operational cutover. Phase B
+audit (B.0) starts now in parallel since it doesn't depend on
+A's operational steps.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
-| A.0 | Migration plan + benchmark harness | pending | reproducible perf measurements before any cutover |
-| A.1 | DuckDB graph schema + DDL | pending | translate `db/schema.ts` from Cypher CREATE NODE TABLE → SQL CREATE TABLE; entity + relation tables + indexes |
-| A.2 | `db/client.ts` rewrite | pending | drop Kuzu connection wrapper; expose DuckDB-backed `graph` / `graphReader` shapes that match today's query API surface |
-| A.3 | `db/entities.ts` rewrite | pending | every Cypher MERGE / MATCH translated to DuckDB INSERT ... ON CONFLICT / SELECT |
-| A.4 | `db/relations.ts` rewrite | pending | same pattern; per-relation-kind upserts |
-| A.5 | `db/repos.ts` rewrite | pending | repo registry CRUD; lightest of the four |
-| A.6 | `db/search.ts` rewrite | pending | graph_callers / graph_callees / graph_closure as recursive CTEs |
-| A.7 | Indexer integration | pending | drop the explicit `CHECKPOINT` calls (DuckDB has no equivalent); revisit memory budget |
-| A.8 | Side-by-side dual-write phase | pending | one daemon release: writes go to both Kuzu and DuckDB; reads still come from Kuzu; comparison script verifies parity |
-| A.9 | Read cutover | pending | reads switch to DuckDB; writes still dual until next release |
-| A.10 | Single-write cutover + Kuzu removal | pending | drop Kuzu writes; remove `kuzu` dep; remove `~/.insrc/graph` directory; bump cache-version |
-| A.11 | Cleanup -- files + deps | pending | delete client.ts Kuzu paths; remove `kuzu` from package.json; remove the periodic-checkpoint scaffolding from indexer/index.ts |
-| B.0 | LanceDB usage audit | pending | clarify what's actually vector storage vs structured data masquerading as Lance tables (config-store, todos, conversations) |
-| B.1 | DuckDB VSS extension wiring | pending | install + load community extension at daemon startup; alongside `arrow` |
-| B.2 | DuckDB FTS extension wiring | pending | install + load `fts` core extension; build BM25 index per text column |
-| B.3 | Vector + FTS schema | pending | `entity` table gains `embedding FLOAT[N]` and FTS-indexed body column; HNSW index on embedding |
-| B.4 | Hybrid-search helper | pending | factor the vector + BM25 + filter combination into one daemon-side function so call sites stay one-liners |
-| B.5 | Non-vector Lance usage migration | pending | move config-store / todos / conversations off Lance onto plain DuckDB tables |
-| B.6 | Embedding-write path migration | pending | indexer + agent paths write to DuckDB instead of Lance |
+| A.0 | Migration plan + benchmark harness | done (`7bf90d42edb`) | `db/graph-comparison.ts` (snapshot/diff utilities) + `db/__tests__/graph-migration-harness.test.ts` (4-subtest end-to-end harness). Caught a real cross-backend semantic difference on first run (Kuzu silently drops MERGE edges whose endpoints aren't Entity nodes; DuckDB accepts them) -- exactly the validation A.0 is meant to provide. NOT wired to a CI npm script: the test process exits via Kuzu's native-binding segfault (db/client.ts:105-106 known issue; resolves once Kuzu is removed in A.10) |
+| A.1 | DuckDB graph schema + DDL | done (`b3f77c514be`) | `db/duckdb-graph-schema.ts` -- 6 tables (entity / repo / relation / unresolved_relation / plan / plan_step) + 4 indexes. Single `relation(src, dst, kind)` table replaces Kuzu's 8 typed REL TABLEs. Idempotent `IF NOT EXISTS` DDL |
+| A.2 | `db/client.ts` rewrite | done (`10f4b5776f6`) | `db/duckdb-graph-client.ts` -- GraphClient interface (query/exec, positional or named params), DuckDB impl using the daemon's withConnection. DbClients gains `duck: GraphClient` alongside existing graph/graphReader. initDb applies BOTH schemas during dual-track |
+| A.3 | `db/entities.ts` rewrite | done (`414230d001f`) | upsertEntityStub, detachDeleteEntityStubs gated on shouldWriteKuzuGraph/shouldWriteDuckGraph. INSERT ... ON CONFLICT DO UPDATE for MERGE; ordered-DELETE pattern for DETACH DELETE (no transaction wrapping -- GraphClient acquires fresh Connection per call, breaks BEGIN/COMMIT pairing) |
+| A.4 | `db/relations.ts` rewrite | done (`54b3a54b4d9`) | All 9 Kuzu writes mirrored: typed-edge upsert (collapses 8 Kuzu REL TABLEs into one INSERT), unresolved upsert/delete/promote/meta, batched promote + meta-update. UNWIND patterns become multi-VALUES INSERTs |
+| A.5 | `db/repos.ts` rewrite | done (`1af8b651fb6`) | addRepo, removeRepo, updateRepoStatus -- the simplest of the four. No relation-cleanup needed in removeRepo (Repo has no edges in the schema) |
+| A.6 | `db/search.ts` rewrite | done (`72c38bd5891`) | findCallers / findCallees / findDefinedIn / findImports collapsed into one neighborIds(db, id, kind, direction) helper -- four near-identical Cypher patterns become one parameterised SQL pattern. resolveClosure as recursive CTE walking DEPENDS_ON edges, depth ≤ 10, DISTINCT for cycle handling. Reads still gated on shouldReadDuckGraph() (default mode='kuzu') |
+| A.7 | Indexer integration | done (`dc47e098226`) | Both periodic CHECKPOINT (every 50 files) and end-of-fullIndex CHECKPOINT calls gated on shouldWriteKuzuGraph(). No behaviour change for current deploys; goes dead under mode='duckdb' (post-A.10); deleted entirely in A.11 |
+| A.8 | Side-by-side dual-write phase | pending (operational) | rebuild + restart daemon with INSRC_GRAPH_BACKEND=both; let it index + cross-file-resolve under real load; periodic snapshot/diff check via the A.0 comparison utility. Run for one daemon release; cutover only after diff stays empty for ~1 week. NO further code work needed for this phase |
+| A.9 | Read cutover | pending (operational) | flip INSRC_GRAPH_BACKEND=duckdb on a daemon that's been dual-writing. Reads now come from DuckDB; writes still go to both because shouldWriteKuzuGraph() returns true for both 'kuzu' and 'both' modes only -- mode='duckdb' makes Kuzu writes stop. Roll back is one env-var flip. Run for one release |
+| A.10 | Single-write cutover + Kuzu removal | pending (operational) | after A.9 stable: stop opening Kuzu in `db/client.ts` (no flag change; code change). Bump a cache-version field; delete `~/.insrc/graph*` on first DuckDB-only daemon boot. From here Kuzu code is dead weight |
+| A.11 | Cleanup -- files + deps | pending | delete the `kuzu` import from db/client.ts; remove the `if (shouldWriteKuzuGraph())` gates (they're always false now -- collapse to DuckDB-only branches); delete db/schema.ts (Kuzu DDL); remove `kuzu` from package.json; delete kuzuExec/kuzuQuery helpers in entities.ts/relations.ts/repos.ts/search.ts; trim graph-comparison.ts (drop snapshotKuzu); delete the harness's Kuzu side. Rough scope: ~500 LOC out, 0 LOC in |
+| B.0 | LanceDB usage audit | done | findings: 4 Lance call sites today -- entities (vector search YES), conversations (vector search YES on sessions + turns), config-store (vector search YES), todos (vector column always written as ZERO_VEC and never queried, NO real vector search). **No FTS / BM25 usage anywhere in the codebase** -- grep for `bm25 / fts / fullTextSearch / hybridSearch` finds zero callers. This significantly simplifies subsequent B slices: B.2 (FTS extension), B.4 (hybrid-search helper) drop entirely; B.3 schema needs vector + HNSW only |
+| B.1 | DuckDB VSS extension wiring | pending | install + load `vss` community extension at daemon startup; alongside `arrow`. Must run before `enable_external_access=false` (extension install needs filesystem access -- same lesson from `arrow` extension). HNSW persistence requires `SET hnsw_enable_experimental_persistence=true` for indexes to survive restart |
+| B.2 | ~~DuckDB FTS extension wiring~~ | **dropped** (B.0) | no callers use BM25; no need to install `fts` |
+| B.3 | Vector schema | pending | extend the entity table from A.1 with `embedding FLOAT[N]` column + HNSW index. Conversations / config-store gain their own DuckDB tables with the same column shape. No FTS columns / indexes anywhere |
+| B.4 | ~~Hybrid-search helper~~ | **dropped** (B.0) | no hybrid search used; pure vector search needs no helper beyond the existing one-liner |
+| B.5 | Non-vector Lance usage migration | pending | todos (always ZERO_VEC, never searched) moves to plain DuckDB tables -- drop vector columns entirely. The vector-shaped overhead today (Float32 zero-fill of EMBEDDING_DIM rows) is dead weight |
+| B.6 | Vector-search Lance usage migration | pending | entities + conversations + config-store: each gets a DuckDB table with `embedding FLOAT[N]` column + HNSW index. Read paths swap from `table.search(vec)` / `table.vectorSearch(vec)` to `ORDER BY array_distance(embedding, ?) LIMIT k`. Write paths swap from Arrow record batches to plain DuckDB INSERTs |
 | B.7 | Side-by-side dual-write phase | pending | mirror A.8 |
 | B.8 | Read cutover | pending | mirror A.9 |
 | B.9 | Single-write cutover + LanceDB removal | pending | mirror A.10; remove `@lancedb/lancedb` + `apache-arrow` (verify no other users) |
@@ -439,26 +443,47 @@ After A.9 is stable:
 
 ## Phase B -- LanceDB → DuckDB VSS + FTS
 
-### B.0 LanceDB usage audit
+### B.0 LanceDB usage audit -- DONE
 
-Before any rewrite, clarify what `@lancedb/lancedb` is actually
-backing today. From the audit at start of plan-writing, Lance
-shows up in:
+The audit landed in commit (this commit). Final findings from
+inspecting every Lance call site in the daemon:
 
-| File | Suspected use |
-|---|---|
-| `db/entities.ts` | entity embeddings + per-entity vector store -- the canonical "vector DB" use case |
-| `db/conversations.ts` | session storage; possibly *not* vector-shaped (just structured) |
-| `db/todos.ts` | todo entries; structured |
-| `config/store.ts` | config-store; structured |
-| `daemon/index.ts` | lance.connect() at startup |
-| `db/client.ts` | exposes `lance: lancedb.Connection` |
+| File | Vector search? | FTS / BM25? | Migration target |
+|---|---|---|---|
+| `db/entities.ts` | YES (`db/search.ts:190` calls `.vectorSearch(vec)` for entity ANN) | NO | DuckDB entity table + VSS HNSW index |
+| `db/conversations.ts` | YES (`.search(vec)` x2 -- session summaries via `seedFromPrior`, turns via the search-turns helper) | NO | DuckDB conversations tables + VSS |
+| `db/todos.ts` | NO -- `vector` column declared but writes always pass `ZERO_VEC`; no caller queries it | NO | Plain DuckDB tables, **drop the vector column entirely** |
+| `config/store.ts` | YES (`.vectorSearch(vec)` in `config/search.ts`) | NO | DuckDB config-store table + VSS |
 
-**B.0 audit confirms** which calls are vector-shaped (need VSS)
-and which are just "use Lance because we already have it as a
-table store." Structured-but-not-vector usage moves to **plain
-DuckDB tables**, not VSS. This is straightforward and eliminates
-the verbosity tax for those code paths.
+**Key finding: no FTS / BM25 usage anywhere in the codebase.** A
+grep for `bm25 / fts / fullTextSearch / hybridSearch / .search(`
+text-string-arg confirms zero callers. The original Phase B plan
+assumed we'd need BOTH the VSS extension (for vector ANN) and the
+FTS extension (for BM25), plus a hybrid-search helper to combine
+them. We need only VSS.
+
+**This drops two slices entirely:**
+
+- B.2 (DuckDB FTS extension wiring) -- no callers
+- B.4 (hybrid-search helper) -- no hybrid pattern used
+
+**And reshapes one:**
+
+- B.3 (was "Vector + FTS schema") -> "Vector schema". HNSW index
+  on the embedding column; no BM25 index, no FTS-indexed text
+  columns.
+
+The original B.5 (non-vector Lance migration) and B.6 (embedding-
+write path migration) split cleanly along the audit's vector /
+non-vector axis: todos to plain DuckDB tables (B.5); entities,
+conversations, config-store to DuckDB + VSS (B.6).
+
+**Side note: dead vector columns in todos.** Today's todos schema
+declares three vector columns (todo_lists, todo_items,
+todo_comments) sized at EMBEDDING_DIM (typically 768 or 2560
+Float32). Every write zero-fills those columns and never reads
+them. Migrating todos to plain DuckDB drops that overhead;
+storage shrinks by ~10-50 MB on a typical session-history.
 
 ### B.1 DuckDB VSS extension wiring
 
@@ -485,101 +510,92 @@ status and require `SET hnsw_enable_experimental_persistence=true`
 for indexes that survive across daemon restarts -- we set this
 during init alongside the `LOAD vss`.
 
-### B.2 DuckDB FTS extension wiring
+### B.2 ~~DuckDB FTS extension wiring~~ -- DROPPED
 
-FTS is a **core extension**, also installed at startup:
+Dropped per the B.0 audit. No callers use BM25 / full-text search;
+the daemon's text-side queries are all column predicates (`WHERE
+name = ?`) or vector ANN (`.search(vec)`). The `fts` extension
+would be dead weight.
 
-```sql
-INSTALL fts;
-LOAD fts;
-```
+### B.3 Vector schema
 
-After loading, the `fts_main_<schema>.match_bm25(...)` function
-becomes available. We build per-text-column BM25 indexes via:
-
-```sql
-PRAGMA create_fts_index('entity', 'id', 'name', 'body', stemmer='porter');
-```
-
-The PRAGMA call is idempotent; we run it after schema setup at
-daemon start.
-
-### B.3 Vector + FTS schema
-
-Extend the entity table from Phase A:
+Extend the entity table from Phase A.1 with the embedding column
+and HNSW index. Conversations and config-store get their own
+DuckDB tables with the same column shape (no shared `entity` table
+-- different row identity, different lifecycle, different
+retention).
 
 ```sql
-ALTER TABLE entity ADD COLUMN embedding FLOAT[?];   -- N = embedding dim, e.g. 768
--- Note: dim is fixed per the embedding model. If we change models,
--- we re-index from scratch (same as Lance today).
+ALTER TABLE entity ADD COLUMN embedding FLOAT[?];   -- N = embedding dim, e.g. 768 or 2560
+-- Note: dim is fixed per the active embedding model. If the model
+-- changes, we re-index from scratch (same as Lance today).
 
 CREATE INDEX idx_entity_emb ON entity USING HNSW (embedding) WITH (
   metric = 'cosine',
   ef_construction = 128,
   m = 16
 );
-
-PRAGMA create_fts_index('entity', 'id', 'name', 'body');
 ```
 
-HNSW parameters (`ef_construction`, `m`) match LanceDB's
-defaults; ef_construction = 128 / m = 16 is a reasonable
-quality-vs-build-time balance for our entity counts.
+HNSW parameters (`ef_construction = 128`, `m = 16`) are reasonable
+quality-vs-build-time defaults for our entity counts (100k-1M).
+LanceDB uses IVF-PQ rather than HNSW, so the parameter mapping
+isn't 1:1; if the harness benchmark in B.6 shows recall regression
+we'll tune.
 
-### B.4 Hybrid-search helper
+Conversations and config-store schemas mirror the same pattern --
+one `embedding FLOAT[?]` column + one HNSW index per table.
 
-The biggest practical gap with LanceDB is the verbose hybrid
-query. Wrap it once:
+No FTS columns / `create_fts_index` PRAGMAs anywhere -- the audit
+confirmed the daemon doesn't use BM25.
 
-```ts
-// daemon/db/search-hybrid.ts (new)
+### B.4 ~~Hybrid-search helper~~ -- DROPPED
 
-export interface HybridSearchOpts {
-  readonly query: string;
-  readonly embedding: number[];
-  readonly repo?: string;
-  readonly kind?: string;
-  readonly limit?: number;
-  readonly vectorWeight?: number;  // default 0.5
-  readonly bm25Weight?: number;    // default 0.5
-}
+Dropped per the B.0 audit. With no FTS, there's no hybrid (vector
++ BM25) score to combine. Pure vector search needs no helper
+beyond the one-liner DuckDB query:
 
-export async function hybridSearch(opts: HybridSearchOpts): Promise<EntityHit[]> {
-  return withConnection(async (conn) => {
-    const sql = buildHybridSQL(opts);
-    const reader = await conn.runAndReadAll(sql, [opts.embedding, opts.query, ...]);
-    return reader.getRowObjects().map(rowToHit);
-  });
-}
+```sql
+SELECT * FROM entity ORDER BY array_distance(embedding, ?) LIMIT ?
 ```
 
-Where `buildHybridSQL` produces the CTE that combines vector
-distance + BM25 scoring. Caller-side becomes:
+Each existing `.vectorSearch(vec)` / `.search(vec)` call site swaps
+to that one-liner; no central helper required.
 
-```ts
-const hits = await hybridSearch({ query, embedding, repo, limit: 10 });
-```
+### B.5 Non-vector Lance usage migration -- todos
 
-Same one-liner ergonomics LanceDB gave us; the SQL ugliness
-lives in one helper that rarely changes. This helper is the
-definitive replacement for every `lance.search(...)` call site.
+Per B.0, todos has dead vector columns (always written as
+`ZERO_VEC`, never queried). Migration is straightforward:
 
-### B.5 Non-vector Lance usage migration
+- Create plain DuckDB tables `todo_lists`, `todo_items`,
+  `todo_comments` with the existing column set MINUS the vector
+  column.
+- Rewrite `db/todos.ts` Lance read/write paths to plain DuckDB
+  SQL.
+- No HNSW index, no embedding column, no Arrow record-batch
+  marshalling.
 
-For files audited in B.0 as structured-but-not-vector
-(conversations / todos / config-store), the migration is just
-"create a DuckDB table with the right shape; rewrite the
-read/write helpers." No VSS / FTS involved. These can ship
-ahead of B.6 (the vector-write rewire) because they're
-independent of HNSW / BM25 wiring.
+This slice can ship ahead of B.6 (the vector migration paths) --
+todos is independent of VSS readiness.
 
-### B.6 Embedding-write path migration
+### B.6 Vector-search Lance usage migration
 
-The indexer + agent contexts that today call
-`lance.add(entity)` (or equivalent) get rewired to write into the
-DuckDB entity table's `embedding` column. The embedding
-generation pipeline (Ollama call + caching) is unchanged; only
-the persistence sink changes.
+The three real vector use cases per B.0:
+
+| Caller | Today | After |
+|---|---|---|
+| `db/entities.ts` + `db/search.ts:190` `.vectorSearch(vec)` | LanceDB Arrow records + IVF-PQ | DuckDB entity table + HNSW |
+| `db/conversations.ts` `.search(vec)` x2 (sessions, turns) | Lance tables + ANN | DuckDB conversations tables + HNSW |
+| `config/store.ts` `.vectorSearch(vec)` | Lance config-store table | DuckDB config-store table + HNSW |
+
+The pattern for each: create the DuckDB table with the embedding
+column (B.3), wire the write path through DuckDB INSERT (drops
+the Arrow record-batch construction code), wire the read path
+through `ORDER BY array_distance(embedding, ?) LIMIT ?` (drops
+the LanceDB `.search()` API call).
+
+Embedding generation (Ollama call + caching) is unchanged; only
+the persistence + retrieval sinks change.
 
 ### B.7 / B.8 / B.9 -- side-by-side validation, cutover, removal
 
