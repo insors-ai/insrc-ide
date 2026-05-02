@@ -88,7 +88,10 @@ in place. Phase 1.1 (`data.source.rdbms.describe-table`), Phase 1.3
 Phase 2.2 (all three KV sampling skills:
 `data.source.kv.scan-keys` / `get-value` / `sample-shape`), and
 Phase 2.3 (`data.source.file.sample-rows`,
-`data.source.file.sample-shape`) are landed. Phase 1.2
+`data.source.file.sample-shape`) are landed. Phase 5a (univariate
+profilers) is partially landed: `profile.numeric.rdbms`,
+`profile.categorical.rdbms`, and `profile.boolean.rdbms` shipped;
+temporal / text / auto / file-side variants are follow-ups. Phase 1.2
 (source-introspection: kv) is blocked on 0.7 / 0.8 (the
 `db_kv_list_namespaces` / `db_kv_describe_namespace` tools);
 Phase 1.4 / 2.4 (doc family) blocked on 0.9 naming
@@ -128,12 +131,12 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 4.5 | comparison-diff: mapping.csv-vs-dto | pending | |
 | 4.6 | comparison-diff: cardinality.expected-vs-live | pending | |
 | 4.7 | comparison-diff: range.expected-vs-live | pending | |
-| 5a.1 | quality-profile: profile.numeric | pending | uses db_sql_aggregate |
-| 5a.2 | quality-profile: profile.categorical | pending | distinct + top-N + length stats |
+| 5a.1 | quality-profile: profile.numeric | partial | `data.profile.numeric.rdbms` shipped (atomic; 10 server-side aggregates -- count / non-null / distinct + min / max / avg / stddev / variance + p50 / p95). File-side variant (`profile.numeric.file`) still pending; the underlying `db_file_aggregate` already exposes the same surface |
+| 5a.2 | quality-profile: profile.categorical | partial | `data.profile.categorical.rdbms` shipped (composite over `db_sql_aggregate` + `db_sql_distinct` -- count + null rate + cardinality + top-N + frequency). File-side variant pending |
 | 5a.3 | quality-profile: profile.temporal | pending | range, gap detection, period inference |
 | 5a.4 | quality-profile: profile.text | pending | length stats, encoding, regex pattern inference |
-| 5a.5 | quality-profile: profile.boolean | pending | |
-| 5a.6 | quality-profile: profile.auto | pending | composite -- picks profiler from declared type |
+| 5a.5 | quality-profile: profile.boolean | partial | `data.profile.boolean.rdbms` shipped (atomic; one `db_sql_distinct` round-trip + cross-dialect normalization for true / false / null / other counts plus true ratio). File-side variant pending |
+| 5a.6 | quality-profile: profile.auto | pending | composite -- picks profiler from declared type. Blocked on 5a.3 + 5a.4 (needs all six atomics) |
 | 5b.1 | distribution: distribution.histogram | pending | |
 | 5b.2 | distribution: distribution.outliers-iqr | pending | |
 | 5b.3 | distribution: distribution.outliers-zscore | pending | |

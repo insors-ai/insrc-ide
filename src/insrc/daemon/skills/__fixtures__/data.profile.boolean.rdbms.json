@@ -1,0 +1,24 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "column": "is_paid"
+  },
+  "fakeTools": {
+    "db_sql_distinct": {
+      "content": "**public.orders** -- column `is_paid`",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "column": "is_paid",
+        "distinctCount": 3,
+        "topValues": [
+          { "value": true,  "count": 720 },
+          { "value": false, "count": 250 },
+          { "value": null,  "count":  30 }
+        ]
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

@@ -1,0 +1,29 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "column": "amount"
+  },
+  "fakeTools": {
+    "db_sql_aggregate": {
+      "content": "**public.orders** -- 9 aggregates",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "values": {
+          "amount__count":           1000,
+          "amount__count_non_null":   985,
+          "amount__distinct_count":   872,
+          "amount__min":              0.01,
+          "amount__max":              9999.99,
+          "amount__avg":              42.17,
+          "amount__stddev":           18.04,
+          "amount__variance":        325.4,
+          "amount__percentile_0_5":   38.5,
+          "amount__percentile_0_95": 102.3
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

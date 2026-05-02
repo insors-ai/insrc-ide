@@ -25,6 +25,9 @@ import { registerDataSourceFileSampleShapeSkill } from './built-ins/data.source.
 import { registerDataSourceKvScanKeysSkill } from './built-ins/data.source.kv.scan-keys.js';
 import { registerDataSourceKvGetValueSkill } from './built-ins/data.source.kv.get-value.js';
 import { registerDataSourceKvSampleShapeSkill } from './built-ins/data.source.kv.sample-shape.js';
+import { registerDataProfileNumericRdbmsSkill } from './built-ins/data.profile.numeric.rdbms.js';
+import { registerDataProfileCategoricalRdbmsSkill } from './built-ins/data.profile.categorical.rdbms.js';
+import { registerDataProfileBooleanRdbmsSkill } from './built-ins/data.profile.boolean.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -45,6 +48,11 @@ export function registerAllSkills(): void {
   registerDataSourceKvScanKeysSkill();
   registerDataSourceKvGetValueSkill();
   registerDataSourceKvSampleShapeSkill();
+  // Phase 5a (Family-5 univariate profilers) -- foundational atomics
+  // first; profile.auto + temporal + text are follow-ups.
+  registerDataProfileNumericRdbmsSkill();
+  registerDataProfileCategoricalRdbmsSkill();
+  registerDataProfileBooleanRdbmsSkill();
 
   // Composite skills go here once any are registered. Empty in v1.
 
