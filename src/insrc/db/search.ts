@@ -21,7 +21,8 @@
 
 import { arrayValue } from '@duckdb/node-api';
 import type { DbClient } from './client.js';
-import type { Entity, EntityKind, Language } from '../shared/types.js';
+import type { Entity } from '../shared/types.js';
+import { rowToEntity } from './entities.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('search');
@@ -30,40 +31,6 @@ const log = getLogger('search');
 // keep pathological dependency graphs from blowing up the recursive
 // CTE.
 const CLOSURE_MAX_DEPTH = 10;
-
-/** Unwrap DuckDB's FLOAT[N] return shape ({items: number[]}) to plain number[]. */
-function unwrapEmbedding(raw: unknown): number[] {
-  if (raw === null || raw === undefined) return [];
-  if (Array.isArray(raw)) return raw as number[];
-  const inner = (raw as { items?: unknown }).items;
-  return Array.isArray(inner) ? (inner as number[]) : [];
-}
-
-/** Map a snake_case entity row back to an Entity (matches entities.ts). */
-function rowToEntity(row: Record<string, unknown>): Entity {
-  const entity: Entity = {
-    id:        row['id']         as string,
-    kind:      row['kind']       as EntityKind,
-    name:      (row['name']      as string) ?? '',
-    language:  (row['language']  as Language) ?? '',
-    repo:      (row['repo']      as string) ?? '',
-    file:      (row['file']      as string) ?? '',
-    startLine: Number(row['start_line'] ?? 0),
-    endLine:   Number(row['end_line']   ?? 0),
-    body:      (row['body']      as string) ?? '',
-    indexedAt: (row['indexed_at'] as string) ?? '',
-    embedding: unwrapEmbedding(row['embedding']),
-  };
-  const em = row['embedding_model'] as string; if (em) entity.embeddingModel = em;
-  if (row['is_exported'] === true) entity.isExported = true;
-  if (row['is_async']    === true) entity.isAsync    = true;
-  if (row['is_abstract'] === true) entity.isAbstract = true;
-  const sg = row['signature'] as string; if (sg) entity.signature = sg;
-  const hh = row['hash']      as string; if (hh) entity.hash      = hh;
-  const rp = row['root_path'] as string; if (rp) entity.rootPath  = rp;
-  if (row['artifact'] === true) entity.artifact = true;
-  return entity;
-}
 
 // ---------------------------------------------------------------------------
 // Closure resolution

@@ -39,8 +39,8 @@ export async function ensureAgentModel(
 // Session pruning job
 //
 // Deletes expired session summaries (30-day TTL) and caps at 20 per repo.
-// Plan/PlanStep nodes are NOT affected — they live in Kuzu only and are
-// pruned only via explicit /plan delete.
+// Plan/PlanStep rows are NOT affected — they live in the DuckDB plan/
+// plan_step tables and are pruned only via explicit /plan delete.
 //
 // Called by the daemon's nightly maintenance job (setInterval in daemon/index.ts).
 // Also exposed for the agent to trigger on session start as a best-effort cleanup.

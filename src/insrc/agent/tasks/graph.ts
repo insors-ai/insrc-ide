@@ -56,10 +56,16 @@ export function classifyGraphQuery(message: string): QueryMatch {
     return { type: 'interpretive', entityName: '', hops: 0 };
   }
 
-  // Raw Cypher query
-  if (/^(?:graph\s+)?query\s+/i.test(msg) || /^MATCH\s+/i.test(msg)) {
-    const cypher = msg.replace(/^(?:graph\s+)?query\s+/i, '').trim();
-    return { type: 'query', entityName: cypher, hops: 0 };
+  // Raw SQL query (graph backend is DuckDB post Phase B). Triggers
+  // on "query <SQL>", "sql <SQL>", or a bare SELECT/WITH prefix.
+  if (
+    /^(?:graph\s+)?query\s+/i.test(msg) ||
+    /^sql\s+/i.test(msg) ||
+    /^SELECT\s+/i.test(msg) ||
+    /^WITH\s+/i.test(msg)
+  ) {
+    const sql = msg.replace(/^(?:(?:graph\s+)?query|sql)\s+/i, '').trim();
+    return { type: 'query', entityName: sql, hops: 0 };
   }
 
   // "who/what calls X" → callers
@@ -153,7 +159,7 @@ export async function runGraphQuery(message: string): Promise<GraphResult> {
     case 'entity':
       return executeEntityLookup(match.entityName);
     case 'query':
-      return executeCypherQuery(match.entityName);
+      return executeSqlQuery(match.entityName);
     default:
       return {
         response: 'Could not determine graph query type.',
@@ -277,8 +283,8 @@ async function executeEntityLookup(entityName: string): Promise<GraphResult> {
   return { response: formatted, handled: true, queryType: 'entity', rawData: entity };
 }
 
-async function executeCypherQuery(cypher: string): Promise<GraphResult> {
-  const result = await mcpCall('graph_query', { cypher });
+async function executeSqlQuery(sql: string): Promise<GraphResult> {
+  const result = await mcpCall('graph_sql', { sql });
   if (result.isError) {
     return { response: `Graph error: ${result.content}`, handled: true, queryType: 'query', rawData: null };
   }

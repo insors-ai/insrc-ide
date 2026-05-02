@@ -66,7 +66,7 @@ Output ONLY valid JSON:
 }`;
 
 const INVESTIGATE_PROMPT = `You are a research investigator for a coding assistant.
-You have access to tools: Read, Grep, Glob, ListDirectory, Bash, graph_search, graph_query, WebSearch, WebFetch.
+You have access to tools: Read, Grep, Glob, ListDirectory, Bash, graph_search, graph_sql, WebSearch, WebFetch.
 
 Given a research plan step and the research goal, execute the step using the appropriate tool.
 After getting results, extract the relevant findings.

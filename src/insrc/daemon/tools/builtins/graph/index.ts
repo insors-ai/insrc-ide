@@ -1,7 +1,7 @@
 /**
  * Graph tools -- entity / search / callers / callees / query.
  *
- * Calls into the Kuzu + LanceDB layers directly; no legacy MCP
+ * Calls into the DuckDB storage layer directly; no legacy MCP
  * round-trip. Session.closureRepos scopes every search to the
  * active repo's dependency closure so results stay relevant.
  */

@@ -4,7 +4,7 @@
  * Source priority (first match wins):
  *   1. Caller-supplied `spec` -- rendered verbatim.
  *   2. `component` -- name of an in-tree React component. The
- *      walker (§4.1) looks the function up in Kuzu, reads its
+ *      walker (§4.1) looks the function up in the graph, reads its
  *      source body, and runs a fresh tree-sitter pass to derive
  *      a low-fi `WireframeSpec` from the JSX. Recursive descent
  *      into in-tree imports up to `depth` (default 3). Falls

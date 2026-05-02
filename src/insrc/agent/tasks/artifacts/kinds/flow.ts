@@ -12,7 +12,7 @@
  *      `flowchart TD` showing branches / loops / exception flow /
  *      terminators (plan §4.2). v1 covers TS / TSX / JS; Python and
  *      Go fall through to the next branch until those walkers land.
- *   3. Kuzu CALLS traversal -- broader-scoped call-graph approximation
+ *   3. CALLS traversal -- broader-scoped call-graph approximation
  *      from `entity` outward, rendered as a `flowchart LR`. This is
  *      the phase-1 behaviour, kept as a fallback for non-function
  *      entities and unsupported languages.
@@ -134,7 +134,7 @@ function codeFlowFromCallGraph(graph: CallGraph): string {
  * Try the on-demand CFG walk against a function-shaped entity. Returns
  * null on any failure (entity not found, wrong kind, language not yet
  * supported, body cap exceeded) so the caller falls through to the
- * Kuzu CALLS branch. Records human-readable warnings on failure so
+ * Graph CALLS branch. Records human-readable warnings on failure so
  * the user sees the fall-through reason.
  */
 async function tryCfgWalk(
@@ -214,25 +214,25 @@ export async function runFlow(opts: RunFlowOpts): Promise<ArtifactResult> {
 				...(opts.repoRoot !== undefined ? { repoPath: opts.repoRoot } : {}),
 			}).catch(err => {
 				warnings.push(
-					`Kuzu CALLS traversal failed for '${input.entity}': ${(err as Error).message}. ` +
+					`CALLS traversal failed for '${input.entity}': ${(err as Error).message}. ` +
 					'Returned a free-text scaffold instead.',
 				);
 				return null;
 			});
 			if (graph !== null && graph.nodes.length > 1) {
 				mermaidSource = codeFlowFromCallGraph(graph);
-				provenance = `Kuzu CALLS from '${graph.entry.name}' (CFG approximation)`;
+				provenance = `CALLS from '${graph.entry.name}' (CFG approximation)`;
 				confidence = 'medium';
 				metaExtra = ` · ${graph.nodes.length} nodes · ${graph.edges.length} edges`;
 			} else {
 				if (graph !== null && graph.nodes.length <= 1) {
 					warnings.push(
-						`Kuzu CALLS traversal from '${input.entity}' found no downstream calls. ` +
+						`CALLS traversal from '${input.entity}' found no downstream calls. ` +
 						'Returned a free-text scaffold instead.',
 					);
 				} else if (graph === null && warnings.length === 0) {
 					warnings.push(
-						`Kuzu could not resolve entity '${input.entity}'. ` +
+						`Could not resolve entity '${input.entity}'. ` +
 						'Returned a free-text scaffold instead.',
 					);
 				}

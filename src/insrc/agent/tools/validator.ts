@@ -19,7 +19,7 @@ export type ValidationResult =
 
 const READ_ONLY_TOOLS: Set<string> = new Set([
   'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
-  'graph_entity', 'graph_search', 'graph_callers', 'graph_callees', 'graph_query',
+  'graph_entity', 'graph_search', 'graph_callers', 'graph_callees', 'graph_sql',
   'plan_get',
 ]);
 

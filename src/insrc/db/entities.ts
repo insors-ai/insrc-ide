@@ -76,16 +76,23 @@ const INSERT_SQL = `
  * DuckDB returns FLOAT[N] columns as `{ items: number[] }` (the
  * DuckDBArrayValue runtime shape). Unwrap to a plain number[] for
  * the Entity contract; null becomes an empty array (entities
- * without an embedding yet).
+ * without an embedding yet). Exported so search.ts and any other
+ * downstream entity-row consumers share the same mapper.
  */
-function unwrapEmbedding(raw: unknown): number[] {
+export function unwrapEmbedding(raw: unknown): number[] {
   if (raw === null || raw === undefined) return [];
   if (Array.isArray(raw)) return raw as number[];
   const inner = (raw as { items?: unknown }).items;
   return Array.isArray(inner) ? (inner as number[]) : [];
 }
 
-function rowToEntity(row: Record<string, unknown>): Entity {
+/**
+ * Map a snake_case `entity` row from DuckDB back to the camelCase
+ * Entity domain shape. Optional fields stay `undefined` when their
+ * sentinel default (empty string / false) is observed -- matches
+ * the LanceDB-era contract so callers see the same object shape.
+ */
+export function rowToEntity(row: Record<string, unknown>): Entity {
   const entity: Entity = {
     id:        row['id']         as string,
     kind:      row['kind']       as EntityKind,

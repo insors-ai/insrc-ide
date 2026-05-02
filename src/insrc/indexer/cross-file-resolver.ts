@@ -23,22 +23,22 @@
  * Architectural notes (post-rewrite, per
  * plans/analyzers/code-analyzer.md F7 + the validation perf trip):
  *
- *  - Every Kuzu MATCH is repo-scoped (`f.repo = $repo`). Multi-repo
+ *  - Every read is repo-scoped (`WHERE e.repo = ?`). Multi-repo
  *    workspaces no longer pay for the union of all repos' edges per
  *    pass.
- *  - Pass 1's opening MATCH JOINs the module name + language so we
+ *  - Pass 1's opening SELECT JOINs the module name + language so we
  *    don't need a per-row getEntity fallback.
  *  - Pass 2 prefetches all (fromFile -> imported file paths) upfront
  *    into an in-memory map. Per-row resolveCall / resolveInheritance
- *    are pure-sync; no Kuzu calls inside the loop.
- *  - Writes go through UNWIND batches of KUZU_BATCH (=500), one
- *    auto-commit txn (= one fsync) per chunk.
+ *    are pure-sync; no DB calls inside the loop.
+ *  - Writes go through multi-VALUES INSERT batches of BATCH (=500),
+ *    one auto-commit per chunk.
  *  - Helpers in db/relations.ts (promoteResolvedBatch +
  *    updateUnresolvedMetaBatch) flush the accumulated Pass 2 intents.
  *
- * The pre-rewrite version had ~7 in-memory maps + per-row Kuzu
- * fallbacks + memoized read queries. This version drops to 4 maps +
- * 0 in-loop Kuzu calls + a constant number of upfront prefetches.
+ * The pre-rewrite version had ~7 in-memory maps + per-row DB fallbacks
+ * + memoized read queries. This version drops to 4 maps + 0 in-loop
+ * DB calls + a constant number of upfront prefetches.
  */
 
 import { existsSync, statSync, readdirSync } from 'node:fs';
@@ -58,7 +58,7 @@ import type { SourceRoots } from './source-roots.js';
 const log = getLogger('cross-file-resolver');
 
 /** UNWIND chunk size; matches eeae2ef7ac7's batched DETACH DELETE. */
-const KUZU_BATCH = 500;
+const BATCH_SIZE = 500;
 
 const CALL_TARGET_KINDS: readonly EntityKind[] = ['function', 'method', 'class'];
 
@@ -139,9 +139,9 @@ async function runPass1(
   index: EntityIndex,
 ): Promise<number> {
   // Step 1 -- opening lookup. Entity table is stub-only (id + kind);
-  // full entity data lives in LanceDB. Returns just (fromId, moduleId);
-  // repo scoping happens in-memory below against the LanceDB-loaded
-  // `index.byId`. Module name + language come from a batched LanceDB
+  // full entity data lives in the entity table. Returns just (fromId, moduleId);
+  // repo scoping happens in-memory below against the in-memory
+  // `index.byId`. Module name + language come from a batched
   // prefetch.
   const tMatch = Date.now();
   const rows = await opts.db.duck.query<{ fromId: string; moduleId: string }>(
@@ -157,10 +157,10 @@ async function runPass1(
   if (rows.length === 0) return 0;
 
   // Step 2 -- in-memory repo filter + collect unique moduleIds.
-  // Cypher can't filter by f.repo since `repo` isn't on the Kuzu
+  // The relation table is just (src,dst,kind), no per-edge repo column on the
   // Entity stub; index.byId was built from listEntitiesForRepo(repo)
   // and contains only this repo's entities, so .has(fromId) is the
-  // valid scope check. uniqueModuleIds drives the LanceDB prefetch
+  // valid scope check. uniqueModuleIds drives the entity prefetch
   // and dedupes the (typically ~200-500 unique modules across thousands
   // of edges).
   const tFilter = Date.now();
@@ -184,7 +184,7 @@ async function runPass1(
   );
   if (scopedRows.length === 0) return 0;
 
-  // Step 3 -- batched LanceDB prefetch for module name + language.
+  // Step 3 -- batched entity prefetch for module name + language.
   // Module-stub entities are created with repo='' so they don't
   // appear in listEntitiesForRepo(repo); fetch only the unique set
   // we actually need (1-2 chunks of 500 for typical repos).
@@ -201,10 +201,10 @@ async function runPass1(
       fetched: modulesById.size,
       elapsedMs: Date.now() - tPrefetch,
     },
-    'cross-file Pass 1: prefetched module entities (LanceDB)',
+    'cross-file Pass 1: prefetched module entities',
   );
 
-  // Step 4 -- in-memory resolve. No Kuzu calls in this loop.
+  // Step 4 -- in-memory resolve. No DB calls in this loop.
   const tResolve = Date.now();
   const rewires: Rewire[] = [];
   for (const row of scopedRows) {
@@ -227,8 +227,8 @@ async function runPass1(
   // Step 3 -- batched DELETE of the old module-stub IMPORTS edges.
   // Each chunk becomes one DELETE with WHERE (src, dst) IN ((?,?), ...).
   const tDelete = Date.now();
-  for (let i = 0; i < rewires.length; i += KUZU_BATCH) {
-    const chunk = rewires.slice(i, i + KUZU_BATCH);
+  for (let i = 0; i < rewires.length; i += BATCH_SIZE) {
+    const chunk = rewires.slice(i, i + BATCH_SIZE);
     const valuesSql = chunk.map(() => '(?, ?)').join(', ');
     const params: string[] = [];
     for (const r of chunk) { params.push(r.fromId, r.oldModuleId); }
@@ -241,7 +241,7 @@ async function runPass1(
   log.info(
     {
       repo: opts.repoRoot,
-      batches: Math.ceil(rewires.length / KUZU_BATCH),
+      batches: Math.ceil(rewires.length / BATCH_SIZE),
       elapsedMs: Date.now() - tDelete,
     },
     'cross-file Pass 1: DELETE complete',
@@ -251,8 +251,8 @@ async function runPass1(
   // ON CONFLICT DO NOTHING makes the operation idempotent (re-runs of
   // the resolver are safe). Each chunk is one multi-VALUES INSERT.
   const tMerge = Date.now();
-  for (let i = 0; i < rewires.length; i += KUZU_BATCH) {
-    const chunk = rewires.slice(i, i + KUZU_BATCH);
+  for (let i = 0; i < rewires.length; i += BATCH_SIZE) {
+    const chunk = rewires.slice(i, i + BATCH_SIZE);
     const valuesSql = chunk.map(() => "(?, ?, 'IMPORTS')").join(', ');
     const params: string[] = [];
     for (const r of chunk) { params.push(r.fromId, r.targetFileId); }
@@ -265,7 +265,7 @@ async function runPass1(
   log.info(
     {
       repo: opts.repoRoot,
-      batches: Math.ceil(rewires.length / KUZU_BATCH),
+      batches: Math.ceil(rewires.length / BATCH_SIZE),
       elapsedMs: Date.now() - tMerge,
     },
     'cross-file Pass 1: MERGE complete',
@@ -290,7 +290,7 @@ async function runPass2(
   index: EntityIndex,
 ): Promise<{ resolved: number; ambiguous: number; stillUnresolved: number }> {
   // Step 1 -- prefetch UnresolvedRelation rows + the file->file IMPORTS
-  // map (one Kuzu read each; per-row helpers below are pure-sync).
+  // map (one DB read each; per-row helpers below are pure-sync).
   const tList = Date.now();
   const unresolved = await listUnresolvedRelations(opts.db, opts.repoRoot, opts.scopeFile);
   log.info(
@@ -365,13 +365,13 @@ async function runPass2(
 /**
  * MATCH every (fromFile, importedFile) edge post-Pass-1, then build an
  * in-memory Map<fromFileEntityId, Set<importedFilePath>> so per-row
- * Pass 2 helpers can do O(1) lookups instead of issuing a Kuzu query
+ * Pass 2 helpers can do O(1) lookups instead of issuing a DB query
  * per from-entity.
  *
- * Repo scoping is in-memory (Kuzu's Entity table is stub-only; `f.repo`
+ * Repo scoping is in-memory (entity rows are stub-only for the resolver; `f.repo`
  * isn't a property). Target paths come from `index.byId` -- the
- * Kuzu MATCH only returns ids; we resolve to file paths via the
- * LanceDB-loaded entity index.
+ * the SELECT only returns ids; we resolve to file paths via the
+ * in-memory entity index.
  */
 async function prefetchImportsByFile(
   db:    DbClient,

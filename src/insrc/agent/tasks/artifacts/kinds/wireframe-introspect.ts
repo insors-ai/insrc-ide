@@ -3,7 +3,7 @@
  * kind (plan §4.1).
  *
  * Pipeline:
- *   1. Look up the component entity in Kuzu by name (existing
+ *   1. Look up the component entity in the graph by name (existing
  *      `findEntitiesByName`).
  *   2. Resolve `entity.file` + the source body (`entity.body`) --
  *      already extracted at index time, no graph schema changes.

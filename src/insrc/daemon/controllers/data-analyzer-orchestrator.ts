@@ -1027,7 +1027,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
    * `connections[]` and `targets[]`. We invoke one artifact per
    * connection, with the union of that connection's targets as the
    * `tables` payload. When scope.connections is unset, we fall
-   * through to the artifact's prisma / kuzu fallback (no `connection`
+   * through to the artifact's prisma / graph fallback (no `connection`
    * arg) -- the tool itself decides the source priority.
    */
   private async _appendErArtifactSection(
@@ -1044,7 +1044,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     for (const { task } of erTasks) {
       const groups = groupTablesByConnection(task);
       // No scope at all -- fall through to artifact_er's free-text
-      // / prisma / kuzu source chain with just the question.
+      // / prisma / graph source chain with just the question.
       if (groups.length === 0) {
         groups.push({ connection: undefined, tables: [] });
       }
@@ -1117,7 +1117,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       title: titleMatch?.[1] ?? 'ER diagram',
       provenance: group.connection !== undefined
         ? `connection=${group.connection}, ${group.tables.length} table${group.tables.length === 1 ? '' : 's'}`
-        : 'prisma / kuzu fallback',
+        : 'prisma / graph fallback',
     };
   }
 

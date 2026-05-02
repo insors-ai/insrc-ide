@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type { LLMProvider, LLMMessage, Plan, PlanStep, PlanStepComplexity } from '../../shared/types.js';
 
 // ---------------------------------------------------------------------------
-// Plan Pipeline — two-stage: local sketch -> Claude refine -> persist to Kuzu
+// Plan Pipeline — two-stage: local sketch -> Claude refine -> persist to DuckDB
 //
 // Pre-flight: checks L2 for [requirements] and [design] tags.
 // If missing, runs condensed local-only version.
@@ -69,7 +69,7 @@ Output ONLY the JSON array, no other text.`;
  * Pre-flight: checks for [requirements] and [design] in L2.
  * Stage 1: Local model produces ordered implementation checklist.
  * Stage 2: Claude refines — fills gaps, reorders, adds checkpoints.
- * Returns a Plan object ready for Kuzu persistence.
+ * Returns a Plan object ready for DuckDB persistence.
  */
 export async function runPlanPipeline(
   userMessage: string,

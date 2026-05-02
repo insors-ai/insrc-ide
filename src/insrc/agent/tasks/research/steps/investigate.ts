@@ -166,8 +166,8 @@ async function executePlanStep(step: PlanStep, repoPath: string): Promise<string
     case 'graph-search':
       return call('graph_search', { query: step.target, limit: 10 });
 
-    case 'graph-query':
-      return call('graph_query', { cypher: step.target });
+    case 'graph-sql':
+      return call('graph_sql', { sql: step.target });
 
     case 'web-search':
       return call('WebSearch', { query: step.target, limit: 5 });

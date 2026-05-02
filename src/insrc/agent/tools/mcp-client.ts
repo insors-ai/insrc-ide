@@ -99,7 +99,7 @@ export function isAvailable(): boolean | null {
 // Session lifecycle RPC helpers (Phase 5)
 // ---------------------------------------------------------------------------
 
-/** Persist a turn to daemon LanceDB (fire-and-forget). */
+/** Persist a turn to the daemon (fire-and-forget). */
 export async function sessionSave(turn: {
   sessionId: string; idx: number;
   user: string; assistant: string;
@@ -159,7 +159,7 @@ export async function sessionPrune(): Promise<{ expired: number; capped: number 
 
 import type { Plan, PlanStep, PlanStepStatus } from '../../shared/types.js';
 
-/** Persist a plan and its steps to Kuzu. */
+/** Persist a plan and its steps to the daemon. */
 export async function planSave(plan: Plan): Promise<void> {
   try { await rpcRaw('plan.save', plan); } catch { /* daemon may be down */ }
 }
@@ -223,7 +223,7 @@ export async function reindexFile(filePath: string): Promise<void> {
 
 import type { Entity } from '../../shared/types.js';
 
-/** Get all entities in a specific file from LanceDB. */
+/** Get all entities in a specific file. */
 export async function searchByFile(filePath: string): Promise<Entity[]> {
   try {
     return await rpcRaw<Entity[]>('search.by_file', { filePath });

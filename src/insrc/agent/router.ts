@@ -13,8 +13,8 @@
  *
  * Phase 2.B: `code-analysis` was previously a "no-LLM" intent that
  * bypassed provider routing entirely (the legacy CodeAnalysisController
- * answered structural queries from Kuzu / LanceDB without ever calling
- * an LLM). The new tier-aware orchestrator IS LLM-driven (cloud
+ * answered structural queries from the daemon's storage layer without
+ * ever calling an LLM). The new tier-aware orchestrator IS LLM-driven (cloud
  * planner + cloud reviewer + local analyzer), so the no-LLM
  * short-circuit is gone; `code-analysis` now follows the standard
  * active-provider cascade.

@@ -10,7 +10,7 @@
  *   3. Prisma `schema.prisma` parse -- hand-rolled regex parser
  *      emits an `erDiagram` with entity blocks + relation edges.
  *      No @prisma/internals dep.
- *   4. `tables` or `entityIds` against the Kuzu entity graph --
+ *   4. `tables` or `entityIds` against the code knowledge graph --
  *      picks up class / interface / type entities + their
  *      REFERENCES edges.
  *   5. Free-text `description` + optional `tables` -- default scaffold.
@@ -31,7 +31,7 @@ import {
 	type MermaidCommonInput,
 } from './shared-mermaid.js';
 import {
-	parseKuzuEntitiesSource,
+	parseGraphEntitiesSource,
 	parseLiveDbSource,
 	parsePrismaSource,
 } from './er-sources.js';
@@ -113,7 +113,7 @@ export async function runEr(opts: RunErOpts): Promise<ArtifactResult> {
 
 	// 2. Live DB via the data-driver pool. Only when both `connection`
 	// and `tables` are explicitly set. Probe / describe failure soft-
-	// falls through to the Prisma / Kuzu / scaffold chain.
+	// falls through to the Prisma / graph / scaffold chain.
 	if (
 		input.connection !== undefined && input.connection.trim() !== ''
 		&& input.tables !== undefined && input.tables.length > 0
@@ -126,7 +126,7 @@ export async function runEr(opts: RunErOpts): Promise<ArtifactResult> {
 		}).catch(err => {
 			warnings.push(
 				`Live DB ER for connection '${input.connection}' failed: ${(err as Error).message}. ` +
-				'Falling through to Prisma / Kuzu / scaffold.',
+				'Falling through to Prisma / graph / scaffold.',
 			);
 			return null;
 		});
@@ -142,7 +142,7 @@ export async function runEr(opts: RunErOpts): Promise<ArtifactResult> {
 		// surface the prereq so the LLM knows to retry with tables.
 		warnings.push(
 			`Live DB ER needs an explicit \`tables\` list (no \`db:sql:list_tables\` exists). ` +
-			'Falling through to Prisma / Kuzu / scaffold.',
+			'Falling through to Prisma / graph / scaffold.',
 		);
 	}
 
@@ -156,7 +156,7 @@ export async function runEr(opts: RunErOpts): Promise<ArtifactResult> {
 		).catch(err => {
 			warnings.push(
 				`Prisma schema parse failed: ${(err as Error).message}. ` +
-				'Falling through to Kuzu / scaffold.',
+				'Falling through to graph / scaffold.',
 			);
 			return null;
 		});
@@ -169,25 +169,25 @@ export async function runEr(opts: RunErOpts): Promise<ArtifactResult> {
 		}
 	}
 
-	// 4. Kuzu entity-graph traversal.
+	// 4. Code knowledge-graph traversal.
 	if ((input.entityIds !== undefined && input.entityIds.length > 0)
 		|| (input.tables !== undefined && input.tables.length > 0)) {
-		const kuzuResult = await parseKuzuEntitiesSource({
+		const graphResult = await parseGraphEntitiesSource({
 			...(input.entityIds !== undefined ? { entityIds: input.entityIds } : {}),
 			...(input.tables !== undefined ? { names: input.tables } : {}),
 			...(opts.repoRoot !== undefined ? { repoPath: opts.repoRoot } : {}),
 		}).catch(err => {
 			warnings.push(
-				`Kuzu entity-graph traversal failed: ${(err as Error).message}. ` +
+				`Graph entity traversal failed: ${(err as Error).message}. ` +
 				'Falling through to scaffold.',
 			);
 			return null;
 		});
-		if (kuzuResult !== null) {
-			mermaidSource = kuzuResult.mermaidSource;
-			provenance = kuzuResult.provenance;
+		if (graphResult !== null) {
+			mermaidSource = graphResult.mermaidSource;
+			provenance = graphResult.provenance;
 			confidence = 'medium';
-			metaLineSuffix = ` · ${kuzuResult.entityCount} entit${kuzuResult.entityCount === 1 ? 'y' : 'ies'}`;
+			metaLineSuffix = ` · ${graphResult.entityCount} entit${graphResult.entityCount === 1 ? 'y' : 'ies'}`;
 			return finalise();
 		}
 	}

@@ -6,7 +6,7 @@
  *   - Crashes mid-session → mark tools unavailable, attempt auto-restart,
  *     resume if successful within 10s
  *   - Stale graph → continue with stale data, annotate results with [stale]
- *   - Kuzu corruption → mark daemon unhealthy, print rebuild instruction
+ *   - DuckDB corruption → mark daemon unhealthy, print rebuild instruction
  *
  * Integration: works with mcp-client.ts's existing availability tracking
  * and the HealthMonitor state machine.
@@ -26,7 +26,7 @@ export type DaemonFaultKind =
   | 'not_running'     // ENOENT / ECONNREFUSED on socket
   | 'crashed'         // was healthy, now unreachable
   | 'stale_graph'     // index is older than working tree
-  | 'kuzu_corrupt'    // Kuzu open/query errors
+  | 'storage_error'   // DuckDB open/query errors
   | 'unknown';
 
 export interface DaemonFault {
@@ -52,10 +52,10 @@ export function classifyDaemonError(err: unknown): DaemonFault {
     };
   }
 
-  if (msg.includes('kuzu') || msg.includes('Kuzu') || msg.includes('database')) {
+  if (msg.includes('duckdb') || msg.includes('DuckDB') || msg.includes('database')) {
     return {
-      kind: 'kuzu_corrupt',
-      message: 'Kuzu database error detected.',
+      kind: 'storage_error',
+      message: 'DuckDB storage error detected.',
       recovery: 'Rebuild the index with: insrc repo reindex',
       disableTools: true,
     };

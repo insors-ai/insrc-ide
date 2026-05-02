@@ -479,7 +479,7 @@ export async function startRepl(cwd?: string): Promise<void> {
       // Track entity IDs for session close
       session.trackEntities(turn.entityIds);
 
-      // Persist turn to daemon LanceDB (fire-and-forget)
+      // Persist turn to the daemon (fire-and-forget)
       void sessionSave({
         sessionId: session.id,
         idx: session.turnIndex,
@@ -797,13 +797,13 @@ export async function startRepl(cwd?: string): Promise<void> {
         ctx.setTag(`[plan:${finalState.plan?.id ?? 'unknown'}]`, finalState.summary);
       }
 
-      // Persist plan to Kuzu if available
+      // Persist plan to the graph store if available
       if (finalState.plan) {
         try {
           await planSave(finalState.plan as unknown as import('../shared/types.js').Plan);
-          log.info(`[planner] Plan saved to Kuzu: ${finalState.plan.steps.length} steps`);
+          log.info(`[planner] Plan saved: ${finalState.plan.steps.length} steps`);
         } catch (err) {
-          log.debug(`[planner] Could not save plan to Kuzu: ${err instanceof Error ? err.message : String(err)}`);
+          log.debug(`[planner] Could not save plan: ${err instanceof Error ? err.message : String(err)}`);
         }
         printPlan(finalState.plan as unknown as import('../shared/types.js').Plan);
       }

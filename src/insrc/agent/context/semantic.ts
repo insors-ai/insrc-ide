@@ -11,7 +11,7 @@ import type { ConversationTurn } from './summary.js';
 // Skipped for the first MAX_RECENT (5) turns — recent turns are already
 // fully visible in L3a.
 //
-// Phase 5 will persist this to LanceDB via the daemon.
+// Phase 5 will persist this to the daemon's storage layer.
 // ---------------------------------------------------------------------------
 
 const TOP_K = 4;

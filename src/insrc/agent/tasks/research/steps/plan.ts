@@ -20,7 +20,7 @@ Available actions:
 - grep-search: Search file contents by regex pattern
 - glob-search: Find files by name pattern
 - graph-search: Semantic search over indexed code entities
-- graph-query: Cypher query against the code knowledge graph
+- graph-sql: Read-only DuckDB SQL query against the code knowledge graph (tables: entity, relation, repo, plan, plan_step; relation kinds: CALLS, DEFINES, IMPORTS, INHERITS, IMPLEMENTS, DEPENDS_ON, EXPORTS, REFERENCES, CONTAINS, STEP_DEPENDS_ON)
 - list-dir: List directory contents (use when path might be a directory)
 - web-search: Search the web for documentation/answers
 - git-log: Check git history for a file or repo

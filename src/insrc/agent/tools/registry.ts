@@ -28,7 +28,7 @@ const LEGACY_LLM_NAMES: ReadonlySet<string> = new Set([
   'Bash',
   'Diff', 'GitLog', 'GitBlame',
   'WebSearch', 'WebFetch',
-  'graph_entity', 'graph_search', 'graph_callers', 'graph_callees', 'graph_query',
+  'graph_entity', 'graph_search', 'graph_callers', 'graph_callees', 'graph_sql',
   'plan_get', 'plan_step_update', 'plan_next_step',
 ]);
 

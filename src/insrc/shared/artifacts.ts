@@ -185,12 +185,12 @@ export interface ErOptions extends ArtifactOptsCommon {
 	/** Subset of tables to include. When omitted, the kind picks a
 	 *  reasonable default (all tables in the targeted schema). */
 	readonly tables?: readonly string[] | undefined;
-	/** Graph-entity ids to include when the Kuzu source is used. */
+	/** Graph-entity ids to include when the code-graph source is used. */
 	readonly entityIds?: readonly string[] | undefined;
 }
 
 export interface SequenceOptions extends ArtifactOptsCommon {
-	/** Entry-point entity id for Kuzu CALLS traversal. */
+	/** Entry-point entity id for graph CALLS traversal. */
 	readonly entry?: string | undefined;
 	/** Traversal depth. Default 3. */
 	readonly depth?: number | undefined;
@@ -215,7 +215,7 @@ export interface WireframeOptions extends ArtifactOptsCommon {
 	readonly layout?: WireframeLayout | undefined;
 	/** Function / component entity name to introspect. When set, the
 	 *  kind tries the React-introspection branch (§4.1): looks up the
-	 *  function entity in Kuzu, reads its body, and walks the JSX
+	 *  function entity in the graph, reads its body, and walks the JSX
 	 *  subtree to derive a low-fi `WireframeSpec`. Falls through to
 	 *  free-text / LLM / default scaffold on any failure. */
 	readonly component?: string | undefined;

@@ -6,9 +6,9 @@
  *     sufficient for `model X { ... }` blocks + basic field types +
  *     relations. We deliberately skip the heavy `@prisma/internals`
  *     dep so users without Prisma installed pay nothing.
- *   - Kuzu entity-graph traversal -- pick up entities of kind
- *     'class' / 'interface' / 'type' and their REFERENCES edges
- *     as a cross-reference approximation.
+ *   - Code knowledge-graph traversal -- pick up entities of kind
+ *     'class' / 'interface' / 'type' from the DuckDB entity table
+ *     and their REFERENCES edges as a cross-reference approximation.
  *   - Live DB via the data-driver pool -- per-table `describe()`
  *     against an RDBMS connection, composed into a Mermaid
  *     `erDiagram`. This is plan §3.1's live-DB ER source.
@@ -127,7 +127,7 @@ export async function parsePrismaSource(
 }
 
 // ---------------------------------------------------------------------------
-// Kuzu entity-graph traversal
+// Code knowledge-graph traversal (DuckDB-backed)
 // ---------------------------------------------------------------------------
 
 /**
@@ -135,7 +135,7 @@ export async function parsePrismaSource(
  * (used when the caller supplied `tables` / `entityIds`). Produces a
  * small ER diagram with entity blocks + REFERENCES edges.
  */
-export async function parseKuzuEntitiesSource(
+export async function parseGraphEntitiesSource(
 	filters: {
 		readonly names?: readonly string[] | undefined;
 		readonly entityIds?: readonly string[] | undefined;
@@ -170,11 +170,11 @@ export async function parseKuzuEntitiesSource(
 		}
 	} else {
 		// No filter: bail -- we don't want to dump the whole graph.
-		throw new Error('Kuzu ER source needs at least one name or entity id to traverse');
+		throw new Error('Graph ER source needs at least one name or entity id to traverse');
 	}
 
 	if (selected.length === 0) {
-		throw new Error('Kuzu ER source found no matching entities');
+		throw new Error('Graph ER source found no matching entities');
 	}
 
 	const byId = new Map<string, Entity>();
@@ -195,10 +195,9 @@ export async function parseKuzuEntitiesSource(
 		lines.push('  }');
 	}
 
-	// REFERENCES edges between selected entities. Kuzu stores only
-	// `Entity{id, kind}` so we can't filter by any richer predicate in
-	// Cypher; we fetch all REFERENCES edges (capped) and filter
-	// in-process against the selected id set.
+	// REFERENCES edges between selected entities. The relation table is
+	// shape (src, dst, kind); we fetch the REFERENCES edges (capped at
+	// 2000) and filter in-process against the selected id set.
 	const refs = await db.duck.query<{ fromId: string; toId: string }>(
 		`SELECT src AS "fromId", dst AS "toId"
 		 FROM relation WHERE kind = 'REFERENCES' LIMIT 2000`,
@@ -216,9 +215,9 @@ export async function parseKuzuEntitiesSource(
 
 	return {
 		mermaidSource: lines.join('\n'),
-		provenance: `Kuzu entity graph (${selected.length} entit${selected.length === 1 ? 'y' : 'ies'})`,
+		provenance: `code knowledge graph (${selected.length} entit${selected.length === 1 ? 'y' : 'ies'})`,
 		entityCount: selected.length,
-		sourceKind: 'kuzu',
+		sourceKind: 'graph',
 	};
 }
 
@@ -320,7 +319,7 @@ export interface LiveDbErOpts {
  * error containing the per-table reasons -- so the caller can choose
  * to use the partial result or fall through.
  *
- * The kind module catches and falls through to Prisma / Kuzu /
+ * The kind module catches and falls through to Prisma / graph /
  * scaffold per plan §3.1 ("probe failure falls through to the existing
  * priority chain rather than erroring").
  */

@@ -25,7 +25,7 @@ export type PlanStepAction =
   | 'read-file'
   | 'grep-search'
   | 'glob-search'
-  | 'graph-query'
+  | 'graph-sql'
   | 'graph-search'
   | 'web-search'
   | 'list-dir'

@@ -3,7 +3,7 @@
  *
  * Source priority:
  *   1. Caller-supplied Mermaid `source` -- rendered verbatim.
- *   2. `entry` id/name -- walks the Kuzu CALLS relation up to `depth`
+ *   2. `entry` id/name -- walks the CALLS relation up to `depth`
  *      hops and emits a `sequenceDiagram` with one participant per
  *      unique entity and one message per CALLS edge.
  *   3. Free-text `description` -- two-actor scaffold fallback.
@@ -109,25 +109,25 @@ export async function runSequence(opts: RunSequenceOpts): Promise<ArtifactResult
 			...(opts.repoRoot !== undefined ? { repoPath: opts.repoRoot } : {}),
 		}).catch(err => {
 			warnings.push(
-				`Kuzu CALLS traversal failed for '${input.entry}': ${(err as Error).message}. ` +
+				`CALLS traversal failed for '${input.entry}': ${(err as Error).message}. ` +
 				'Returned a free-text scaffold instead.',
 			);
 			return null;
 		});
 		if (graph !== null && graph.nodes.length > 1) {
 			mermaidSource = sequenceFromCallGraph(graph);
-			provenance = `Kuzu CALLS from '${graph.entry.name}'`;
+			provenance = `CALLS from '${graph.entry.name}'`;
 			confidence = 'high';
 			metaLineSuffix = ` · ${graph.nodes.length} participants · ${graph.edges.length} calls`;
 		} else {
 			if (graph !== null && graph.nodes.length <= 1) {
 				warnings.push(
-					`Kuzu CALLS traversal from '${input.entry}' found no downstream calls. ` +
+					`CALLS traversal from '${input.entry}' found no downstream calls. ` +
 					'Returned a free-text scaffold instead.',
 				);
 			} else if (graph === null && warnings.length === 0) {
 				warnings.push(
-					`Kuzu could not resolve entry '${input.entry}'. ` +
+					`Could not resolve entry '${input.entry}'. ` +
 					'Returned a free-text scaffold instead.',
 				);
 			}

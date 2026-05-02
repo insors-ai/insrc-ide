@@ -10,7 +10,7 @@ import type { Intent, PersonaName } from '../../shared/types.js';
 //
 // Phase 2.B note: `code-analysis` was historically an orchestrator-direct
 // intent (the legacy CodeAnalysisController answered structural queries
-// from Kuzu/LanceDB without a persona). The new tier-aware orchestrator
+// from the daemon storage layer without a persona). The new tier-aware orchestrator
 // (CodeAnalyzerOrchestratorController) is its own family controller and
 // owns its plan/analyze/review/synthesise pipeline. It still doesn't
 // belong to any persona above; the case branch returns persona: null

@@ -4,7 +4,7 @@
  * Startup sequence:
  *  1. Check for existing daemon (stale PID cleanup)
  *  2. Ensure ~/.insrc/ directories exist
- *  3. Open Kuzu + LanceDB and run schema migrations
+ *  3. Open DuckDB and apply the schema (graph + vector tables)
  *  4. Bootstrap embedding model (non-blocking)
  *  5. Load registered repos, start watcher + queue
  *  6. Write PID file
@@ -1309,8 +1309,8 @@ async function main(): Promise<void> {
 		backstop.unref();
 		void queueDone.finally(async () => {
 			// Order: storage pool last so the WAL flushes after every
-			// other writer has closed. closeDb() handles LanceDB +
-			// graph-client reset; closeDuckDB() drops the in-memory
+			// other writer has closed. closeDb() resets the cached
+			// GraphClient handle; closeDuckDB() drops the in-memory
 			// query engine (no on-disk state); closeDuckDBStorage()
 			// flushes + closes ~/.insrc/duckdb.db.
 			await closeDb();

@@ -172,7 +172,7 @@ const ER_SCHEMA = {
 		entityIds: {
 			type: 'array',
 			items: { type: 'string' },
-			description: 'Kuzu graph entity ids (recognised but Kuzu traversal is a follow-up; falls through to the default scaffold with a warning).',
+			description: 'Code knowledge-graph entity ids (recognised but graph traversal is a follow-up; falls through to the default scaffold with a warning).',
 		},
 	},
 } as const;
@@ -185,7 +185,7 @@ const SEQUENCE_SCHEMA = {
 		...SOURCE_PROP,
 		entry: {
 			type: 'string',
-			description: 'Entry-point entity id for Kuzu CALLS traversal. Recognised but not yet wired; phase 1 falls through to the default scaffold with a warning.',
+			description: 'Entry-point entity id for graph CALLS traversal. Recognised but not yet wired; phase 1 falls through to the default scaffold with a warning.',
 		},
 		depth: {
 			type: 'number',

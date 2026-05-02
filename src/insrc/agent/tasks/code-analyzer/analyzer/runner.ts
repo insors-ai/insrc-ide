@@ -135,7 +135,7 @@ const ANALYZER_TOOLS: readonly ToolDefinition[] = [
   {
     name: 'graph_search',
     description:
-      'Vector similarity search (LanceDB ANN) over indexed code entities, ' +
+      'Vector similarity search (DuckDB VSS HNSW) over indexed code entities, ' +
       'scoped to the active repo dependency closure. Returns short entity ' +
       'stubs with relevance scores. Always the FIRST step on locate / ' +
       'free-form tasks.',

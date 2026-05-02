@@ -1,5 +1,5 @@
 /**
- * Shared Kuzu call-graph traversal used by sequence + flow (code
+ * Shared call-graph traversal used by sequence + flow (code
  * sub-kind).
  *
  * Given an entry point (entity id OR exact name), walk the CALLS
@@ -35,7 +35,7 @@ export interface CallGraph {
 /**
  * Resolve an entry identifier. Accepts either an entity id (hex-32,
  * matching the SHA256 convention) or a human-readable name. The id
- * path is preferred; name lookup widens to the Kuzu call-kinds
+ * path is preferred; name lookup widens to the graph call-kinds
  * (function / method / class / module) when ambiguous.
  */
 async function resolveEntry(

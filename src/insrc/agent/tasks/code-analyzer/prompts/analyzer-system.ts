@@ -72,7 +72,7 @@ export const HARD_RULES = `# Hard rules
 export const PER_KIND_PLAYBOOK = `# Tool list
 
 - graph_search(query, limit?, kind?)
-    Vector similarity search (LanceDB ANN) over indexed code entities,
+    Vector similarity search (DuckDB VSS HNSW) over indexed code entities,
     scoped to the active repo's dependency closure. Returns short
     entity stubs with a relevance score. Use as the FIRST step on
     locate / free-form tasks. A high-score hit is candidate-only --
@@ -301,7 +301,7 @@ findings. Adjust the per-kind sequences accordingly:
     not a code listing.
   - Findings describe the sub-system, not individual lines:
     "the auth sub-system owns session persistence + token
-    verification; depends on the storage layer (lance) for
+    verification; depends on the storage layer for
     session rows; consumers are the chat-handler and the
     daemon's startup path".
 

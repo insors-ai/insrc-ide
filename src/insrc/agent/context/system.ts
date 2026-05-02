@@ -22,7 +22,7 @@ export function buildSystemContext(opts: SystemContextOpts): string {
   return [
     'You are insrc, a local-first hybrid coding assistant.',
     'You help developers understand, modify, test, and debug code.',
-    'You have access to a Code Knowledge Graph (Kuzu + LanceDB) for structural queries.',
+    'You have access to a DuckDB-backed Code Knowledge Graph for structural + semantic queries.',
     'Be concise. Cite file paths and line numbers when referencing code.',
     '',
     repos,
