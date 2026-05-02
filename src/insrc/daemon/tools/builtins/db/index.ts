@@ -491,6 +491,65 @@ const sqlAggregateTool: Tool = {
 	},
 };
 
+const fileListFilesTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_list_files',
+	description:
+		'Enumerate the file paths a directory-connection points at. Respects the connection\'s `recursive` ' +
+		'option (default false = top-level only). Returns paths relative to the connection root + per-file ' +
+		'size + mtime. Hidden files (`.foo`) are skipped. For single-file connections, returns just that one ' +
+		'file. Use this when a Family-1 source-introspection skill needs to enumerate the dataset before ' +
+		'sampling.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Max files to enumerate. Default 200.' },
+			pattern: { type: 'string', description: 'Optional glob-style pattern (e.g. "*.csv") matched against the basename.' },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const repoPath = await requireRepoPath(this.id, deps);
+		if (typeof repoPath !== 'string') return repoPath;
+		const pool = await acquirePool(repoPath);
+		const config = pool.list().find(c => c.id === connectionId);
+		if (config === undefined) {
+			return fail(this.id, `Unknown connection '${connectionId}'`, 'UNKNOWN_CONNECTION');
+		}
+		if (config.family !== 'file' || config.path === undefined) {
+			return fail(this.id, `Connection '${connectionId}' is not a file connection`, 'FAMILY_MISMATCH');
+		}
+		const limit = Math.min(Math.max(1, Math.floor(Number(input['limit'] ?? 200))), 1000);
+		const pattern = typeof input['pattern'] === 'string' ? input['pattern'] : undefined;
+
+		try {
+			const { listFilesForConnection } = await import('../../../db/list-files.js');
+			const result = await listFilesForConnection(config.path, {
+				recursive: config.recursive === true,
+				...(pattern !== undefined ? { pattern } : {}),
+				limit,
+			});
+			const lines: string[] = [
+				`**${connectionId}** -- ${result.files.length} file${result.files.length === 1 ? '' : 's'}` +
+					(result.truncated ? ` (truncated at ${limit})` : ''),
+				'',
+				'| path | size | mtime |',
+				'|---|---|---|',
+			];
+			for (const f of result.files) {
+				lines.push(`| ${f.path} | ${f.size} | ${f.mtime} |`);
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
 const fileAggregateTool: Tool = {
 	access: FILE_ACCESS,
 	id: 'db_file_aggregate',
@@ -873,5 +932,6 @@ export function registerDbTools(): void {
 	registerTool(fileSampleTool);
 	registerTool(fileSampleShapeTool);
 	registerTool(fileAggregateTool);
+	registerTool(fileListFilesTool);
 	log.debug({ count: 10 }, 'data-driver tools registered');
 }

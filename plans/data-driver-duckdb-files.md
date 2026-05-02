@@ -60,42 +60,41 @@ DuckDB collapses this:
 
 ## Status
 
-All slices pending.
+Native-format consolidation + directory model done; legacy-format
+converters deferred. The data-analyzer-skills Phase 0 dependencies on
+`db_file_aggregate` (0.4) and `db_file_list_files` (0.10) are
+satisfied for csv / tsv / jsonl / ndjson / json / parquet / arrow /
+feather. The 4 non-native formats (xlsx / avro / bson / fixed-width)
+keep their bespoke drivers and don't yet route through DuckDB --
+Phase 2 / 3 / 4.5 / 7 stay open.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
-| 0.1 | `@duckdb/node-api` daemon dep + Node bindings | pending | add to `src/insrc/package.json`; native build verified on macOS arm64 + Linux x86_64 |
-| 0.2 | DuckDB singleton + memory budget | pending | one process-wide instance with `PRAGMA memory_limit='512MB'` default; sized alongside Kuzu's 1 GB pool |
-| 0.3 | Path-injection guard | pending | every file path passed to a `read_*` function flows through the existing connection root-scoping; no string-interpolated paths from user input |
-| 0.4 | Disabled-by-default extensions | pending | `enable_external_access=false`; whitelist only `arrow` (for `.arrow` files). NO `httpfs`, NO `postgres`/`mysql`/`sqlite` attachments in v1 |
-| 1.1 | New `duckdb-file` driver class | pending | implements `FileDriver` interface end-to-end |
-| 1.2 | Reader selection per kind | pending | csv → `read_csv_auto`, jsonl → `read_json_auto(format='newline_delimited')`, json → `read_json_auto`, parquet → `read_parquet`, arrow → `read_arrow_table` |
-| 1.3 | `describe()` via DuckDB DESCRIBE | pending | `DESCRIBE SELECT * FROM read_csv_auto(?)` returns column / type / nullability |
-| 1.4 | `sample()` + `sampleShape()` via DuckDB SELECT | pending | `LIMIT N` for sample; nested-shape inference for json/jsonl runs the existing shape-merge in skill body or uses `JSON_STRUCTURE` aggregate |
-| 1.5 | Driver registration -- 5 native kinds collapse to one factory | pending | `registerDriver({kind:'csv', factory})`, etc., all point at the same factory class |
-| 2.1 | Converter interface (single-file + directory) | pending | `ConvertResult: { parquetPath / parquetGlob, sourceCount, durationMs }` |
-| 2.2 | avro → Parquet | pending | `avsc` (already a dep) + Parquet writer; type fidelity high |
-| 2.3 | bson → Parquet | pending | `bson` (already a dep) + Parquet writer; Decimal128 / Date / ObjectId mapping decisions |
-| 2.4 | fixed-width → Parquet | pending | width spec from connection config; pure Node line reader → Parquet writer; trivial |
-| 2.5 | xlsx → Parquet (per sheet) | pending | `exceljs` (already a dep) → Parquet; one Parquet per sheet, mirrors today's per-sheet target model |
-| 2.6 | Parquet writer choice | pending | evaluate `parquetjs-lite` (already a dep, limited types) vs adding `@dsnp/parquetjs` (broader type support) |
-| 3.1 | Cache directory layout | pending | `~/.insrc/cache/file-converted/<connection-id>/files/<mirrored-tree>.parquet` |
-| 3.2 | Per-source-file invalidation | pending | cache key = SHA256(sourcePath, sourceMtime, sourceSize); changed files re-convert; unchanged stay |
-| 3.3 | LRU eviction + size cap | pending | default 5 GB cap per cache root; oldest-mtime first; cap configurable via daemon settings |
-| 3.4 | Concurrent-access guard | pending | per-connection conversion lock (in-memory mutex); avoids two parallel queries each converting the same source |
-| 4.1 | Connection schema gains `path-can-be-directory` semantics | pending | `connection.path` may be a file OR a directory; driver introspects via `fs.stat` |
-| 4.2 | `recursive` connection option | pending | `connection.recursive: boolean` (default false); when true, the converter walks all subdirectories |
-| 4.3 | Hive partition auto-detection | pending | `connection.partitioning: 'hive' \| 'none'`; default `'none'`. When `'hive'`, the driver passes `hive_partitioning=true` to DuckDB |
-| 4.4 | Native formats: glob pass-through | pending | csv/jsonl/parquet directories pass `'/path/**/*.csv'` directly into DuckDB read fn -- no per-file conversion |
-| 4.5 | Non-native formats: per-file conversion walk | pending | avro/bson/fixed-width/xlsx directories: walk source tree (recursive when set), convert each file to Parquet under the cache; query the cache glob |
-| 5.1 | `db_file_describe` rewires through new driver | pending | functionally identical for users; internals call DuckDB DESCRIBE |
-| 5.2 | `db_file_sample` rewires through new driver | pending | one SQL `SELECT ... LIMIT N` |
-| 5.3 | `db_file_sample_shape` rewires through new driver | pending | for json/jsonl, sample N docs, run shape merge in JS (existing logic stays) |
-| 6.1 | New `db_file_aggregate` tool | pending | thin wrapper over the new driver; the data-analyzer-skills Phase 0.4 dependency goes away |
-| 6.2 | New `db_file_list_files` tool | pending | enumerates files within a directory connection; data-analyzer-skills Phase 0.10 dependency goes away |
-| 7.1 | Remove old drivers (csv/jsonl/json/parquet/arrow) | pending | after side-by-side validation lands and one daemon release passes; the 4 bespoke kept (avro/bson/fixed-width/xlsx) only when they're the source format -- once cached as Parquet, the new driver handles everything |
-| 7.2 | Migrate existing connection configs | pending | one-time bump: `path` field stays compatible; new fields (`recursive`, `partitioning`) default-off so existing configs keep working |
-| 7.3 | Decide: keep or replace xlsx? | pending | DuckDB's xlsx support via the `spatial` extension is awkward; the converter path (xlsx → Parquet via `exceljs`) is cleaner. Default: keep xlsx as a converter, not a native DuckDB read |
+| 0.1 | `@duckdb/node-api` daemon dep + Node bindings | done | added during the storage-migration phase; verified on macOS arm64 |
+| 0.2 | DuckDB singleton + memory budget | done | two singletons exist: in-memory query pool (`daemon/db/duckdb-pool.ts`, 512 MB cap, used for file-driver `read_*` calls) + file-backed storage pool (`daemon/db/duckdb-storage-pool.ts`, 2 GB cap, used for graph + entity persistence) |
+| 0.3 | Path-injection guard | partial | file paths flow through the pool's existing root-scoping (`resolveAndCheckRepoPath` in `daemon/db/pool.ts`); they're then bound as DuckDB `?` parameters, never string-interpolated. The dedicated centralised path-validation helper from the plan's prose is not yet extracted -- pool's check is sufficient for the moment |
+| 0.4 | Disabled-by-default extensions | done | query pool sets `autoinstall_known_extensions=false` + `autoload_known_extensions=false`; only `arrow` and `vss` are pre-loaded. `httpfs` / `postgres` / `mysql` / `sqlite` extensions cannot be pulled in at runtime, so ATTACH against those types fails. (The query pool no longer sets `enable_external_access=false`; that flag also blocked legitimate `read_csv_auto` / `read_parquet` -- inappropriate for a pool whose job is reading user-configured files. The storage pool keeps the full lockdown.) |
+| 1.1 | New `duckdb-file` driver class | done | `daemon/db/drivers/duckdb-file.ts` -- implements `FileDriver` end-to-end |
+| 1.2 | Reader selection per kind | done | `read_csv_auto` / `read_json_auto` (newline_delimited / auto) / `read_parquet` / `read_arrow` per kind |
+| 1.3 | `describe()` via DuckDB DESCRIBE | done | `DESCRIBE SELECT * FROM read_xxx(?)` |
+| 1.4 | `sample()` + `sampleShape()` via DuckDB SELECT | done | `compileWhere` from rdbms-common reused for structured WHERE filtering; sampleShape pulls a sample via DuckDB then runs `inferShape` from `shape-common.ts` (DuckDB has no native nested-shape inference) |
+| 1.5 | Driver registration -- 8 native kinds collapse to one factory | done | `duckdb-file.ts` self-registers for csv / tsv / jsonl / ndjson / json / parquet / arrow / feather; imported LAST in `drivers/index.ts` so its registrations supersede the bespoke per-format drivers' registrations |
+| 2.1 | Converter interface (single-file + directory) | pending (deferred) | non-native formats (xlsx / avro / bson / fixed-width) keep their bespoke drivers for now; they don't yet expose `aggregate()`. Lifts when those formats need Family-5 skills coverage |
+| 2.2-2.6 | avro / bson / fixed-width / xlsx → Parquet + writer choice | pending (deferred) | requires 2.1 + Phase 3 cache layer; substantial standalone effort |
+| 3.1-3.4 | Cache layer (layout / invalidation / LRU / concurrent guard) | pending (deferred) | needed for 2.x. Single-file deps already cover today's data analysis use cases |
+| 4.1 | Connection schema gains `path-can-be-directory` semantics | done | `ConnectionConfig.path` may be a file OR a directory; `duckdb-file.ts` factory introspects via `fs.statSync` |
+| 4.2 | `recursive` connection option | done | `connection.recursive: boolean` added to `ConnectionConfig`; `duckdb-file.ts` switches to a `**/*.<ext>` glob when set |
+| 4.3 | Hive partition option | done | `connection.partitioning: 'hive' \| 'none'` added to `ConnectionConfig`; when `'hive'`, the driver appends `, hive_partitioning=true` to the reader call. Auto-detection on connection-create is not yet wired -- explicit opt-in only |
+| 4.4 | Native formats: glob pass-through | done | directory connections pass `<root>/*.<ext>` (or `<root>/**/<ext>` recursive) to DuckDB readers verbatim; no per-file walking in JS |
+| 4.5 | Non-native formats: per-file conversion walk | pending (deferred) | needs Phase 2 + 3 |
+| 5.1 | `db_file_describe` rewires through new driver | done | no code change needed -- `acquireDriver(...,'file')` goes through the registry; consolidated driver wins because of registration order |
+| 5.2 | `db_file_sample` rewires through new driver | done | same |
+| 5.3 | `db_file_sample_shape` rewires through new driver | done | same |
+| 6.1 | New `db_file_aggregate` tool | done | thin wrapper over the new driver's `aggregate()`. data-analyzer-skills Phase 0.4 dependency satisfied for native formats |
+| 6.2 | New `db_file_list_files` tool | done | enumerates files; respects `recursive`, optional basename glob, hidden-file skip; backed by `daemon/db/list-files.ts`. data-analyzer-skills Phase 0.10 dependency satisfied |
+| 7.1 | Remove old drivers (csv/jsonl/json/parquet/arrow) | pending (validation gate) | the new driver overrides registrations at runtime, but the bespoke modules stay in `drivers/index.ts` until validation gates pass on a real workload. Removing them is a one-shot delete once we're confident |
+| 7.2 | Migrate existing connection configs | n/a | `path` field stays single-file-compatible; new fields default-off, so no migration needed |
+| 7.3 | Decide: keep or replace xlsx? | pending (deferred) | bundled with 2.5 |
 
 ## Goals
 

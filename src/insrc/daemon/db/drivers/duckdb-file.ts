@@ -33,6 +33,7 @@
  */
 
 import { existsSync, statSync } from 'node:fs';
+import { join, sep } from 'node:path';
 
 import { getLogger } from '../../../shared/logger.js';
 import type {
@@ -81,36 +82,78 @@ const NATIVE_KINDS: readonly DuckDBFileKind[] = [
  * Per-kind reader-function syntax. The `?` is a literal placeholder
  * for the path parameter; the rest is dialect-fixed. Caller is
  * responsible for stitching in already-validated reader options.
+ *
+ * `extraSql` lets the caller append already-validated options like
+ * `, hive_partitioning=true` (per Phase 4.3) for directory-as-table
+ * connections. The CSV `optionsSql` and Phase-4 directory options
+ * compose by concatenation.
  */
-function readerExpression(kind: DuckDBFileKind, optionsSql: string): string {
+function readerExpression(kind: DuckDBFileKind, optionsSql: string, extraSql = ''): string {
 	switch (kind) {
 		case 'csv':
 			// `read_csv_auto` is the auto-detecting variant: it samples
 			// rows to infer types, handles quoting, and respects the
 			// header / delim options we splice in.
-			return `read_csv_auto(?${optionsSql})`;
+			return `read_csv_auto(?${optionsSql}${extraSql})`;
 		case 'tsv':
 			// TSV is just CSV with a tab delimiter; the connection's
 			// options carry user overrides (header, quote).
-			return `read_csv_auto(?, delim='\\t'${optionsSql})`;
+			return `read_csv_auto(?, delim='\\t'${optionsSql}${extraSql})`;
 		case 'jsonl':
 		case 'ndjson':
 			// `read_json_auto` with `format='newline_delimited'` reads
 			// one JSON value per line.
-			return `read_json_auto(?, format='newline_delimited')`;
+			return `read_json_auto(?, format='newline_delimited'${extraSql})`;
 		case 'json':
 			// Single-doc / array-of-docs; DuckDB auto-detects the shape.
-			return `read_json_auto(?)`;
+			return `read_json_auto(?${extraSql})`;
 		case 'parquet':
-			return `read_parquet(?)`;
+			return `read_parquet(?${extraSql})`;
 		case 'arrow':
 		case 'feather':
 			// `arrow` extension provides `read_arrow`. Best-effort: when
 			// the extension is unavailable (offline / 404), the engine
 			// surfaces a clean "function does not exist" error which the
 			// tool layer renders as success: false.
-			return `read_arrow(?)`;
+			return `read_arrow(?${extraSql})`;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Directory glob assembly (Phase 4.4 of plans/data-driver-duckdb-files.md)
+// ---------------------------------------------------------------------------
+
+/** File-extension glob pattern per kind, used when path is a directory. */
+function globExtensionFor(kind: DuckDBFileKind): string {
+	switch (kind) {
+		case 'csv':     return '*.csv';
+		case 'tsv':     return '*.tsv';
+		case 'jsonl':   return '*.jsonl';
+		case 'ndjson':  return '*.ndjson';
+		case 'json':    return '*.json';
+		case 'parquet': return '*.parquet';
+		case 'arrow':   return '*.arrow';
+		case 'feather': return '*.feather';
+	}
+}
+
+/**
+ * Resolve the path argument to feed into `read_xxx(?)`. For a
+ * single-file connection: just the absolute path. For a directory
+ * connection: a glob string DuckDB's readers accept directly
+ * (`/path/*.csv` or `/path/**\/*.csv` when recursive). DuckDB walks
+ * the tree itself; the driver doesn't pre-enumerate files.
+ */
+function resolveReaderPath(
+	kind: DuckDBFileKind,
+	rootPath: string,
+	isDirectory: boolean,
+	recursive: boolean,
+): string {
+	if (!isDirectory) return rootPath;
+	const ext = globExtensionFor(kind);
+	const middle = recursive ? `**${sep}${ext}` : ext;
+	return join(rootPath, middle);
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +233,9 @@ class DuckDBFileDriver implements FileDriver {
 		kind: DuckDBFileKind,
 		private readonly path: string,
 		private readonly csvOpts: ResolvedCsvOptions,
+		private readonly isDirectory: boolean,
+		private readonly recursive: boolean,
+		private readonly hivePartitioning: boolean,
 	) {
 		this.kind = kind;
 	}
@@ -205,12 +251,13 @@ class DuckDBFileDriver implements FileDriver {
 		const sql = `DESCRIBE SELECT * FROM ${expr}`;
 		log.debug({ id: this.id, sql }, 'describe');
 
+		const readPath = this.readerPath();
 		const rows = await withConnection(async (conn) => {
-			const reader = await conn.runAndReadAll(sql, [this.path]);
+			const reader = await conn.runAndReadAll(sql, [readPath]);
 			return reader.getRowObjects();
 		});
 		if (rows.length === 0) {
-			throw new Error(`data-driver: ${this.kind} '${this.path}' has no columns`);
+			throw new Error(`data-driver: ${this.kind} '${readPath}' has no columns`);
 		}
 
 		const columns: ColumnDescription[] = rows.map(r => ({
@@ -245,7 +292,7 @@ class DuckDBFileDriver implements FileDriver {
 		const sql = `SELECT * FROM ${expr}${whereText} LIMIT ${limit}`;
 		log.debug({ id: this.id, sql }, 'sample');
 
-		const params = [this.path, ...where.values];
+		const params = [this.readerPath(), ...where.values];
 		const rows = await withConnection(async (conn) => {
 			const reader = await conn.runAndReadAll(sql, params as never[]);
 			return reader.getRowObjects();
@@ -270,7 +317,7 @@ class DuckDBFileDriver implements FileDriver {
 		const expr = this.readerExpr();
 		const sql = `SELECT * FROM ${expr} LIMIT ${limit}`;
 		const rows = await withConnection(async (conn) => {
-			const reader = await conn.runAndReadAll(sql, [this.path]);
+			const reader = await conn.runAndReadAll(sql, [this.readerPath()]);
 			return reader.getRowObjects() as readonly unknown[];
 		});
 		return inferShape(rows);
@@ -285,7 +332,7 @@ class DuckDBFileDriver implements FileDriver {
 		log.debug({ id: this.id, sql }, 'aggregate');
 
 		const row = await withConnection(async (conn) => {
-			const reader = await conn.runAndReadAll(sql, [this.path]);
+			const reader = await conn.runAndReadAll(sql, [this.readerPath()]);
 			return reader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
 		});
 		return { target: this.path, values: readAggregateRow(row, keys) };
@@ -300,11 +347,19 @@ class DuckDBFileDriver implements FileDriver {
 	// Helpers
 	// ---------------------------------------------------------------------------
 
+	/** SQL `read_xxx(?, ...)` expression. The `?` binds to the
+	 *  caller-provided path / glob from `readerPath()`. */
 	private readerExpr(): string {
 		const optsSql = (this.kind === 'csv' || this.kind === 'tsv')
 			? csvOptionsSql(this.csvOpts)
 			: '';
-		return readerExpression(this.kind, optsSql);
+		const extra = this.hivePartitioning ? `, hive_partitioning=true` : '';
+		return readerExpression(this.kind, optsSql, extra);
+	}
+
+	/** Path / glob to bind as the reader's first parameter. */
+	private readerPath(): string {
+		return resolveReaderPath(this.kind, this.path, this.isDirectory, this.recursive);
 	}
 }
 
@@ -317,17 +372,24 @@ function makeFactory(kind: DuckDBFileKind) {
 		if (config.path === undefined) {
 			throw new Error(`data-driver: ${kind} connection '${config.id}' missing path`);
 		}
-		// Pool already resolved the path to absolute + verified existence,
-		// but a defensive stat catches the rare case where the file
-		// disappeared between pool build + factory call.
 		if (!existsSync(config.path)) {
 			throw new Error(`data-driver: ${kind} '${config.path}' does not exist`);
 		}
-		statSync(config.path);
+		// Phase 4.1 -- a connection's path may be a single file or a
+		// directory. Stat tells us which; downstream logic switches
+		// between absolute path and DuckDB-glob accordingly.
+		const stat = statSync(config.path);
+		const isDirectory = stat.isDirectory();
+		const recursive = config.recursive === true && isDirectory;
+		const hivePartitioning = config.partitioning === 'hive' && isDirectory;
+
 		const csvOpts = (kind === 'csv' || kind === 'tsv')
 			? resolveCsvOptions(config)
 			: { delimiter: undefined, header: undefined, quote: undefined };
-		return new DuckDBFileDriver(config.id, kind, config.path, csvOpts);
+		return new DuckDBFileDriver(
+			config.id, kind, config.path, csvOpts,
+			isDirectory, recursive, hivePartitioning,
+		);
 	};
 }
 

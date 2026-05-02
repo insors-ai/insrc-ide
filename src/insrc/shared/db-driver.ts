@@ -53,6 +53,20 @@ export interface ConnectionConfig {
 	/** Kind-specific extras (e.g. CSV delimiter, Cassandra
 	 *  keyspace + contactPoints, fixed-width column spec). */
 	readonly options?: Readonly<Record<string, unknown>>;
+	/** File kinds, directory-as-table support
+	 *  (plans/data-driver-duckdb-files.md Phase 4.2). When `path`
+	 *  points at a directory and `recursive` is true, the driver
+	 *  globs the whole subtree; when false (default), only files
+	 *  directly under `path` participate. Ignored for single-file
+	 *  connections. */
+	readonly recursive?: boolean;
+	/** File kinds, directory-as-table support
+	 *  (plans/data-driver-duckdb-files.md Phase 4.3). When set to
+	 *  `'hive'`, the driver passes `hive_partitioning=true` to
+	 *  DuckDB readers so `<key>=<value>/` directory components
+	 *  surface as columns. Default `'none'`. Ignored for single-file
+	 *  connections. */
+	readonly partitioning?: 'hive' | 'none';
 	/**
 	 * Session-scoped ephemeral connection. Set by the data-analyzer
 	 * (and future siblings) when registering a one-off local file the

@@ -186,6 +186,56 @@ describe('DuckDBFileDriver -- json', () => {
 	});
 });
 
+describe('DuckDBFileDriver -- directory connection (Phase 4)', () => {
+	it('aggregate over a directory of CSVs (recursive)', async () => {
+		// Pool requires connection paths under the repo root, so set
+		// up the directory tree INSIDE a tmp-repo.
+		const altRoot = mkdtempSync(join(tmpdir(), 'insrc-duckdb-dir-repo-'));
+		const dirRoot = join(altRoot, 'data');
+		const subDir  = join(dirRoot, 'sub');
+		await mkdir(subDir, { recursive: true });
+		writeFileSync(join(dirRoot, 'a.csv'), 'id,amount\n1,10\n2,20\n', 'utf8');
+		writeFileSync(join(subDir, 'b.csv'),  'id,amount\n3,30\n4,40\n', 'utf8');
+
+		const altConfPath = connectionsPath(altRoot);
+		await mkdir(join(altConfPath, '..'), { recursive: true });
+		await writeFile(altConfPath, JSON.stringify({
+			connections: [
+				{ id: 'flat', kind: 'csv', path: 'data'                  },
+				{ id: 'rec',  kind: 'csv', path: 'data', recursive: true },
+			],
+		}), 'utf8');
+
+		const pool = new DriverPool(altRoot);
+		await pool.reload();
+
+		// Non-recursive: only top-level a.csv counts (2 rows, sum=30).
+		const flat = await pool.acquire('flat');
+		const flatRes = await (flat as {
+			aggregate: (t: string | undefined, r: unknown) => Promise<{ values: Record<string, number | null> }>;
+		}).aggregate(undefined, { aggregations: [
+			{ column: '*',      function: 'count' },
+			{ column: 'amount', function: 'sum'   },
+		] });
+		assert.equal(flatRes.values['*__count'],     2);
+		assert.equal(flatRes.values['amount__sum'], 30);
+
+		// Recursive: both files (4 rows, sum=100).
+		const rec = await pool.acquire('rec');
+		const recRes = await (rec as {
+			aggregate: (t: string | undefined, r: unknown) => Promise<{ values: Record<string, number | null> }>;
+		}).aggregate(undefined, { aggregations: [
+			{ column: '*',      function: 'count' },
+			{ column: 'amount', function: 'sum'   },
+		] });
+		assert.equal(recRes.values['*__count'],      4);
+		assert.equal(recRes.values['amount__sum'], 100);
+
+		await pool.closeAll();
+		try { rmSync(altRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+	});
+});
+
 describe('DuckDBFileDriver -- option validation', () => {
 	it('rejects bad CSV delimiter at factory time', async () => {
 		const altRoot = mkdtempSync(join(tmpdir(), 'insrc-duckdb-file-bad-'));
