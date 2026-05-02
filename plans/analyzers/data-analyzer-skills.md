@@ -97,7 +97,9 @@ landed: `quality.completeness.rdbms` (per-column null rate + table
 overall) and `quality.uniqueness.rdbms` (per-column distinct ratio
 + single-column PK candidates) shipped. The remaining 5d atomics
 (validity, conformity, consistency) and the `quality.scorecard`
-composite are pending. Phase 1.2
+composite are pending. Phase 5e starts:
+`data.pii.detect-patterns.rdbms` ships -- regex over sampled values
+for the 10 most common PII / credentials shapes. Phase 1.2
 (source-introspection: kv) is blocked on 0.7 / 0.8 (the
 `db_kv_list_namespaces` / `db_kv_describe_namespace` tools);
 Phase 1.4 / 2.4 (doc family) blocked on 0.9 naming
@@ -161,7 +163,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5d.4 | quality scorecard: quality.conformity | pending | date / currency / country / postal formats |
 | 5d.5 | quality scorecard: quality.consistency | pending | cross-column agreements |
 | 5d.6 | quality scorecard: quality.scorecard | pending | composite rollup of 5d.1-5d.5 -- ships once 5d.3-5d.5 land |
-| 5e.1 | sensitivity: pii.detect-patterns | pending | email / ssn / phone / address / api-key / jwt / IBAN |
+| 5e.1 | sensitivity: pii.detect-patterns | partial | `data.pii.detect-patterns.rdbms` shipped (samples up to 50 values via `db_sql_sample`, applies anchored regex set: email / ssn-us / phone-us / credit-card / jwt / ipv4 / iban / aws-access-key / github-token / uuid; returns per-pattern hit count + rate + up to 3 examples). Provider affinity `local`. File / KV variants pending; address detection skipped (no clean regex) |
 | 5e.2 | sensitivity: pii.column-classifier | pending | regex + values + column-name heuristics |
 | 5e.3 | sensitivity: sensitivity.policy-check | pending | vs connection's pii config |
 | 5f.1 | drift over windows: drift.distribution | pending | KL / JS divergence between sample windows |

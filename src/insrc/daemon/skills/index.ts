@@ -30,6 +30,7 @@ import { registerDataProfileCategoricalRdbmsSkill } from './built-ins/data.profi
 import { registerDataProfileBooleanRdbmsSkill } from './built-ins/data.profile.boolean.rdbms.js';
 import { registerDataQualityCompletenessRdbmsSkill } from './built-ins/data.quality.completeness.rdbms.js';
 import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.quality.uniqueness.rdbms.js';
+import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.detect-patterns.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -60,6 +61,9 @@ export function registerAllSkills(): void {
   // consistency are also in.
   registerDataQualityCompletenessRdbmsSkill();
   registerDataQualityUniquenessRdbmsSkill();
+  // Phase 5e (sensitivity / PII) -- regex over sampled values;
+  // local-affinity (no LLM in the matching path).
+  registerDataPiiDetectPatternsRdbmsSkill();
 
   // Composite skills go here once any are registered. Empty in v1.
 

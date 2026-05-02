@@ -1,0 +1,33 @@
+{
+  "input": {
+    "connectionId": "pg-users",
+    "target": "public.users",
+    "column": "contact",
+    "sampleSize": 10
+  },
+  "fakeTools": {
+    "db_sql_sample": {
+      "content": "**public.users** -- 10 rows",
+      "isError": false,
+      "data": {
+        "target": "public.users",
+        "columns": ["id", "contact"],
+        "rows": [
+          { "id": 1,  "contact": "alice@example.com" },
+          { "id": 2,  "contact": "bob@example.com" },
+          { "id": 3,  "contact": "carol@example.com" },
+          { "id": 4,  "contact": "dan@example.com" },
+          { "id": 5,  "contact": "eve@example.com" },
+          { "id": 6,  "contact": "frank@example.com" },
+          { "id": 7,  "contact": "grace@example.com" },
+          { "id": 8,  "contact": "heidi@example.com" },
+          { "id": 9,  "contact": "ivan@example.com" },
+          { "id": 10, "contact": "judy@example.com" }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
