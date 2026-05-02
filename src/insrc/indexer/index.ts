@@ -58,6 +58,33 @@ const IGNORE_SET = new Set(IGNORE_DIRS);
  *
  * Falls back to the directory walker for non-git repos.
  */
+
+/**
+ * Skip patterns for generated / minified files. These have a parser
+ * (e.g. tree-sitter-typescript handles `.mjs`) but indexing them is
+ * unhelpful and pathologically expensive: a 1.5MB minified file
+ * produces thousands of fake-looking entities, each ~8KB long, and
+ * embedding 2548 entities × 16/batch × ~99s/batch on Ollama runs to
+ * 4+ hours per file. Better to drop them here than burn the daemon
+ * for an entire afternoon on a build artifact the user didn't want
+ * indexed in the first place. Tested against:
+ *
+ *   `pdf.worker.min.mjs`        -> match (.min.mjs)
+ *   `vendor.bundle.js`          -> match (.bundle.js)
+ *   `react.production.min.js`   -> match (.min.js)
+ *   `chunk-AB12CD.js`           -> no match (kept)
+ *   `Component.test.ts`         -> no match (kept)
+ */
+const GENERATED_FILE_PATTERN = /\.(min|bundle|dist|production|prod)\.(js|mjs|cjs|css|html|json)$|[-_]min\.(js|mjs|cjs|css)$/i;
+
+/**
+ * @returns true if the file should be skipped because it's a build
+ * artifact / minified output rather than source.
+ */
+function isGeneratedOrMinified(filePath: string): boolean {
+  return GENERATED_FILE_PATTERN.test(filePath);
+}
+
 function listRepoFiles(repoPath: string): string[] {
   if (!existsSync(join(repoPath, '.git'))) {
     log.debug({ repo: repoPath }, 'not a git repo, using directory walker');
@@ -294,12 +321,21 @@ export class IndexerService {
 
       const files = listRepoFiles(repoPath);
       const supported: string[] = [];
+      let skippedGenerated = 0;
       for (const filePath of files) {
         const ext = extname(filePath).toLowerCase();
         const hasParser = this.supported.has(ext) || basenameParser.handles(filePath);
-        if (hasParser) supported.push(filePath);
+        if (!hasParser) continue;
+        if (isGeneratedOrMinified(filePath)) {
+          skippedGenerated++;
+          continue;
+        }
+        supported.push(filePath);
       }
-      log.info({ repo: repoPath, total: files.length, supported: supported.length }, 'full index: files to process');
+      log.info(
+        { repo: repoPath, total: files.length, supported: supported.length, skippedGenerated },
+        'full index: files to process',
+      );
 
       for (const filePath of supported) {
         total++;
@@ -460,47 +496,30 @@ export class IndexerService {
     repoPath:   string,
     cleanFirst: boolean,
   ): Promise<boolean> {
-    // TEMPORARY trace -- see plans/storage-migration-duckdb.md hang debug.
-    // Reverts after the indexer hang is diagnosed (commit-and-revert pattern).
-    const trace = (stage: string, extra?: Record<string, unknown>): void => {
-      log.info({ file: filePath, stage, ...extra }, 'indexFile trace');
-    };
-    const t0 = Date.now();
-    trace('start');
-
     const parser = getParser(filePath) ?? (basenameParser.handles(filePath) ? basenameParser : null);
-    if (!parser) { trace('no-parser-skip'); return false; }
-    trace('parser-resolved', { parser: parser.constructor.name });
+    if (!parser) return false;
 
     let source: string;
     try { source = readFileSync(filePath, 'utf8'); }
-    catch { trace('read-failed-skip'); return false; }
-    trace('read', { bytes: source.length });
+    catch { return false; } // file disappeared between event and read
 
     const hash = contentHash(source);
-    trace('hashed');
 
     // Skip if unchanged (handles editor save-without-change)
     if (!cleanFirst) {
-      trace('about-to-getEntity');
       const existing = await getEntity(this.db, makeEntityId(repoPath, filePath, 'file', filePath));
-      trace('getEntity-done', { existed: existing !== null, hashMatch: existing?.hash === hash });
       if (existing?.hash === hash) {
         log.debug({ file: filePath }, 'skipped (unchanged)');
         return false;
       }
     } else {
-      trace('about-to-clean');
       await deleteRelationsForFile(this.db, filePath);
       await deleteEntitiesForFile(this.db, filePath);
       await deleteUnresolvedForFile(this.db, filePath);
-      trace('clean-done');
     }
 
     // Parse
-    trace('about-to-parse');
     const result = parser.parse(filePath, source, repoPath);
-    trace('parse-done', { entities: result.entities.length, relations: result.relations.length });
 
     // Stamp hash on the File entity
     const fileEntity = result.entities.find(e => e.kind === 'file' && e.file === filePath);
@@ -509,21 +528,13 @@ export class IndexerService {
     // Resolve relative imports
     const resolved = resolveRelations(result.relations, filePath, repoPath, result.entities);
     const resolvedCount = resolved.filter(r => r.resolved).length;
-    trace('relations-resolved', { count: resolved.length, resolved: resolvedCount });
 
     // Embed entities (no-op if Ollama is unavailable)
-    trace('about-to-embed');
     await embedEntities(result.entities);
-    trace('embed-done');
 
     // Persist
-    trace('about-to-upsert-entities');
     await upsertEntities(this.db, result.entities);
-    trace('upsert-entities-done');
-
-    trace('about-to-upsert-relations');
     await upsertRelations(this.db, resolved);
-    trace('upsert-relations-done', { totalMs: Date.now() - t0 });
 
     log.debug(
       { file: filePath, entities: result.entities.length, relations: resolved.length, resolved: resolvedCount },
