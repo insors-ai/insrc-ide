@@ -48,15 +48,24 @@ the fact.
   source-introspection / sampling / aggregation tools call into. This plan
   adds a new `db_aggregate_*` tool family on top of the driver.
 - [plans/data-driver-duckdb-files.md](../data-driver-duckdb-files.md) --
-  **hard prerequisite**, lands before this plan starts. Consolidates
-  the file driver layer onto a single DuckDB-backed driver with Parquet
-  converters for non-native formats and adds directory-as-table support
-  (recursive descent). By the time any slice in this plan begins,
-  `db_file_aggregate`, `db_file_list_files`, and the consolidated
-  `db_file_describe` / `db_file_sample` / `db_file_sample_shape` are
-  all in place; this plan does not re-implement them. File-flavoured
-  Family 5 (quality / distribution) skills consume those tools as
-  shipped primitives.
+  **shipped**, was a hard prerequisite for this plan and is now fully
+  done. Consolidated every file kind (csv / tsv / jsonl / ndjson /
+  json / parquet / arrow / feather / avro / bson / fixed-width / xlsx)
+  onto a single DuckDB-backed driver. Native kinds hit DuckDB's reader
+  functions directly; non-native kinds stage through Parquet
+  converters (`avsc` / `bson` / `exceljs` / streaming line reader)
+  into a per-source-file Parquet cache, then read via the same SQL
+  surface. Directory connections (with `recursive` + optional
+  `options.glob` filter) work for every kind. xlsx honors a sheet
+  `target` for per-sheet selection. The bespoke per-format file
+  drivers were deleted in Phase 7.1; `daemon/db/drivers/index.ts`
+  registers exactly one factory for the file family
+  (`duckdb-file.ts`). The tools `db_file_aggregate`,
+  `db_file_list_files`, and the consolidated `db_file_describe` /
+  `db_file_sample` / `db_file_sample_shape` are in place; this plan
+  does not re-implement them. File-flavoured Family 5 (quality /
+  distribution) skills consume those tools as shipped primitives,
+  with no per-kind branching at the skill layer.
 - [plans/access-gate.md](../access-gate.md) -- shipped; skill calls inherit
   the universal access gate via the tools they call.
 - [plans/content-generator.md](../content-generator.md) -- shipped; the
@@ -64,28 +73,36 @@ the fact.
 
 ## Status
 
-All slices pending except 3.4 (partial). Skill core (skills-core.md)
-has fully shipped, so the substrate is no longer a blocker. Phase 0
-(driver-tool substrate) is the next logical starting point.
+Phase 0 partially landed: 0.1 (`db_sql_aggregate` + `aggregate()` on
+RDBMS drivers and the consolidated DuckDB-backed file driver) and
+0.6 (sampling-confidence library) are done; 0.2-0.5 are deferred
+until the first Family-5 skill needs them; 0.7-0.9 (KV substrate +
+naming reconciliation) remain. The data-driver-duckdb-files
+prerequisite is **fully shipped** -- every file kind already routes
+through the consolidated DuckDB-backed driver with `db_file_*` tools
+in place. Slice 3.4 has a partial wrapper from skills-core 9. Skill
+core (skills-core.md) is fully shipped. Phase 1 (source-introspection
+skills) is the next logical starting point now that the file
+substrate is in.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
 | 0.1 | `db_sql_aggregate` tool | done | `daemon/tools/builtins/db/index.ts` + `compileAggregate(Exprs)` in `rdbms-common.ts` + `aggregate()` on `RdbmsDriver` (postgres / mysql / sqlite / mssql / oracle real impls; clickhouse throws for now) and on the new `DuckDBFileDriver`. 35 + 8 tests |
 | 0.2 | `db_sql_histogram` tool | pending | needs `histogram(target, opts)` driver method per dialect (`width_bucket` Postgres / DuckDB; `NTILE` fallback for SQLite / MySQL). Deferred until first Family-5 distribution skill needs it -- avoids speculative cross-dialect work |
 | 0.3 | `db_sql_distinct` tool | pending | needs `distinct(target, opts)` driver method (`COUNT(DISTINCT) + GROUP BY ... ORDER BY freq LIMIT N`). Deferred with same reasoning |
-| 0.4 | `db_correlation_matrix` tool | pending | needs `correlationMatrix(target, opts)` driver method (`corr(c1, c2)` pairwise). RDBMS + file (DuckDB has `corr` natively); KV/doc connections refuse via precondition. Deferred |
-| 0.5 | `db_outliers` tool | pending | composite over existing aggregate primitives (percentile for IQR; avg + stddev for Z-score) plus a new sample-with-comparison helper (`>=` / `<=` ops on WhereClause). Deferred |
+| 0.4 | `db_correlation_matrix` tool | pending | needs `correlationMatrix(target, opts)` driver method. RDBMS via per-dialect `corr(c1, c2)` (Postgres / DuckDB native; computed expression elsewhere); file connections route through the consolidated DuckDB-backed driver's `aggregate()` path which has `corr` natively. KV / doc connections refuse via precondition. Deferred |
+| 0.5 | `db_outliers` tool | pending | composite over existing aggregate primitives (percentile for IQR; avg + stddev for Z-score) plus a new sample-with-comparison helper (`>=` / `<=` ops on WhereClause). Works for both RDBMS and file (file path goes through `db_file_aggregate`). Deferred |
 | 0.6 | sampling-confidence library | done | `daemon/db/sampling-confidence.ts` -- `sampleSizeFor` + `confidenceFor` for mean / percentile / normality / correlation estimators; finite-population correction; 11-test suite |
 | 0.7 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
 | 0.8 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
 | 0.9 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
 | 1.1 | source-introspection: rdbms | pending | describe-table, list-tables, list-indexes |
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
-| 1.3 | source-introspection: file | pending | one variant per kind (csv, parquet, jsonl, ...) |
+| 1.3 | source-introspection: file | pending | one skill variant per file kind (csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx). All variants are thin wrappers over the consolidated `db_file_describe` tool -- the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently |
 | 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
 | 2.1 | source-sampling: rdbms | pending | sample-rows, sample-distinct |
 | 2.2 | source-sampling: kv | pending | scan-keys, get-value, sample-shape |
-| 2.3 | source-sampling: file | pending | sample-rows, sample-shape |
+| 2.3 | source-sampling: file | pending | sample-rows + sample-shape across all 12 file kinds, all routed through `db_file_sample` / `db_file_sample_shape` (which sit on the consolidated DuckDB-backed driver). For xlsx, `target` selects a sheet; for directory connections, the driver globs / walks-and-converts under the hood |
 | 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |
 | 3.1 | code-binding: class.extract-fields | pending | cross-owner into code-analyzer |
 | 3.2 | code-binding: class.locate-references | pending | |
@@ -181,9 +198,11 @@ has fully shipped, so the substrate is no longer a blocker. Phase 0
 - **No replacement of the data-analyzer orchestrator.** The pipeline stages
   (`planning -> reviewing -> synthesising`) stay. Only the per-task runner's
   internals change.
-- **No new data-driver families.** Skills consume the existing 29 driver
-  kinds. Adding new drivers is in [plans/data-driver.md](../data-driver.md)'s
-  scope.
+- **No new data-driver families.** Skills consume the existing driver
+  kinds shipped via [plans/data-driver.md](../data-driver.md) and
+  [plans/data-driver-duckdb-files.md](../data-driver-duckdb-files.md)
+  (12 file kinds + the RDBMS / KV roster). Adding new drivers is in
+  those plans' scope.
 - **No SQL-write capability.** Aggregation tools are read-only. The driver-
   side enforcement from data-driver stays the source of truth.
 - **No real-time / continuous quality monitoring.** Skills run inside a
@@ -210,20 +229,23 @@ two reasons:
    ship the **RDBMS aggregation** primitives. The **file-side aggregation**
    primitives (`db_file_aggregate`, `db_file_list_files`, the consolidated
    `db_file_describe` / `db_file_sample` / `db_file_sample_shape`,
-   directory-as-table semantics) are already in place by this point: the
+   directory-as-table semantics) are **already shipped** via the
    prerequisite plan
-   [data-driver-duckdb-files.md](../data-driver-duckdb-files.md) lands
-   first. **Skills in subsequent phases can assume the file tool surface
-   exists; this plan does not re-define it.**
+   [data-driver-duckdb-files.md](../data-driver-duckdb-files.md). All 12
+   file kinds (native + converted) flow through the same
+   `DuckDBFileDriver`, so file-flavoured Family 5 skills consume one
+   tool surface (`db_file_aggregate` / `db_file_sample` / etc.) with no
+   per-kind branching. **Skills in subsequent phases can assume the
+   file tool surface exists; this plan does not re-define it.**
 
 2. **Phase 1 / 2 introspection skills depend on KV-side tool primitives
    that are not yet registered.** The existing `db_*` family covers SQL
    describe / sample, KV scan / get / sample-shape, and (via the
-   DuckDB-backed driver) the full file query surface -- but NOT
-   keyspace / namespace enumeration on the KV side. Skills that need to
-   "tell me what collections / namespaces exist on this connection"
-   hard-fail on the `required-tools` precondition without these.
-   Slices 0.7-0.8 below close that gap.
+   consolidated DuckDB-backed file driver) the full file query surface
+   -- but NOT keyspace / namespace enumeration on the KV side. Skills
+   that need to "tell me what collections / namespaces exist on this
+   connection" hard-fail on the `required-tools` precondition without
+   these. Slices 0.7-0.8 below close that gap.
 
 Slice 0.9 is a naming reconciliation, not new code: the plan refers to a
 `doc` source family (Phase 1.4 / 2.4) but the data-driver classifies
@@ -490,24 +512,43 @@ Slices 4.1-4.7 each follow the composite pattern. Total skill count ~7.
 ## Phase 5 -- quality / statistical skills
 
 Largest phase. Sub-divided per the seven sub-families introduced in the
-discussion thread that preceded this plan:
+discussion thread that preceded this plan.
+
+**File vs RDBMS dispatch.** Tool names below (`db_sql_aggregate` /
+`db_sql_histogram` / `db_outliers` / `db_correlation_matrix`) are the
+RDBMS-side primitives. For file connections, every numerical skill
+routes through `db_file_aggregate` instead, which sits on the
+consolidated DuckDB-backed driver and exposes the same function set
+(count / sum / avg / stddev / variance / min / max / percentile /
+distinct_count / `corr` for the correlation skill, plus
+`approx_count_distinct` and the rest of DuckDB's analytical surface).
+Histogram / outliers / distinct skills compose `db_file_aggregate`
+queries (percentile bucketing, IQR / Z-score, GROUP BY top-N) without
+needing a separate `db_file_histogram` tool. Skill bodies branch on
+`connection.family` once at the top and pick the right tool; the rest
+of the logic is shared. Sub-families:
 
 - **5a univariate profiling** (6 skills) -- atomic, each backed by
-  `db_sql_aggregate` + `db_sql_distinct` calls. `profile.auto` is the only
-  composite in 5a; it picks the right profile skill from the declared
-  type.
+  `db_sql_aggregate` + `db_sql_distinct` (RDBMS) or `db_file_aggregate`
+  (file). `profile.auto` is the only composite in 5a; it picks the
+  right profile skill from the declared type.
 - **5b distribution shape** (7 skills) -- atomic, each backed by
-  `db_sql_aggregate` / `db_sql_histogram` / `db_outliers`. Heavy on
-  `min-sample-size` preconditions: e.g. `distribution.normality-test`
-  declares `n >= 50`, `distribution.heavy-tail-check` declares `n >= 200`.
+  `db_sql_aggregate` / `db_sql_histogram` / `db_outliers` for RDBMS,
+  `db_file_aggregate` for file (histogram via percentile bucketing,
+  outliers via IQR / Z-score expressions). Heavy on `min-sample-size`
+  preconditions: e.g. `distribution.normality-test` declares
+  `n >= 50`, `distribution.heavy-tail-check` declares `n >= 200`.
 - **5c cross-column** (5 skills) -- atomic, backed by
-  `db_correlation_matrix` and per-skill SQL queries (functional dependency
-  detection is one query; co-null patterns is another). The join-key
+  `db_correlation_matrix` (RDBMS path) and per-skill SQL queries
+  (functional dependency detection is one query; co-null patterns is
+  another). For file connections, correlation runs through
+  `db_file_aggregate` since DuckDB has `corr` natively. The join-key
   cardinality skill needs paired sampling across two tables.
 - **5d quality scorecard** (6 skills) -- 5 atomics + the `quality.scorecard`
-  composite. Atomic skills run cheap aggregations; the scorecard composes
-  them into a single typed rollup with weights per dimension (the rubric
-  is hard-coded; per-repo override is a follow-up).
+  composite. Atomic skills run cheap aggregations against either
+  driver family via the matching `db_*_aggregate` tool; the scorecard
+  composes them into a single typed rollup with weights per dimension
+  (the rubric is hard-coded; per-repo override is a follow-up).
 - **5e PII / sensitivity** (3 skills) -- `pii.detect-patterns` is atomic
   (regex over sampled values); `pii.column-classifier` composes 5e.1 with
   column-name heuristics; `sensitivity.policy-check` reads the connection's
