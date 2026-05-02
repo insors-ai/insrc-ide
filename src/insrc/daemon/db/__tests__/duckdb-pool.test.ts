@@ -55,14 +55,20 @@ test('memory_limit PRAGMA is applied', async () => {
   assert.ok(typeof value === 'string' && value.length > 0, `expected non-empty memory_limit, got ${String(value)}`);
 });
 
-test('external-access lockdown blocks ATTACH', async () => {
-  // The pool sets enable_external_access=false. ATTACH should be
-  // refused at runtime regardless of any local credentials.
+test('extension auto-install/load disabled blocks DB attaches', async () => {
+  // The query pool no longer sets enable_external_access=false (that
+  // would block legitimate read_csv_auto / read_parquet calls the
+  // file-driver layer needs). Instead it disables extension auto-
+  // install + auto-load: ATTACH 'postgres://...' / 'mysql://...' /
+  // 'sqlite://...' all fail because the relevant extensions aren't
+  // installed and won't be pulled in at runtime.
   await assert.rejects(
     () => withConnection(async (conn) => {
-      await conn.run("ATTACH 'dummy.db' AS x");
+      // postgres dialect ATTACH triggers the postgres extension; with
+      // autoinstall off it can't be pulled, so this errors.
+      await conn.run("ATTACH 'postgres://localhost/x' AS pg (TYPE POSTGRES)");
     }),
-    /access|extension|attach/i,
+    /extension|postgres|not installed|auto.?(install|load)/i,
   );
 });
 

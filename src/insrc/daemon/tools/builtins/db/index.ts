@@ -491,6 +491,52 @@ const sqlAggregateTool: Tool = {
 	},
 };
 
+const fileAggregateTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_aggregate',
+	description:
+		'Compute server-side numeric aggregates on a file connection (csv / tsv / jsonl / json / parquet / arrow). ' +
+		'Routes through the consolidated DuckDB-backed file driver: aggregation runs in the engine, not the LLM. ' +
+		'Same function set + result shape as db_sql_aggregate.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'aggregations'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			path: { type: 'string', description: 'Optional sub-path / sheet name. Most file kinds ignore this; multi-target kinds (xlsx) require it.' },
+			aggregations: {
+				type: 'array',
+				minItems: 1,
+				maxItems: 32,
+				items: AGGREGATE_SPEC_SCHEMA,
+			},
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const reqOrErr = buildAggregateRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'file');
+		if (!isDriver(driver)) { return driver; }
+		const fd = driver as FileDriver;
+		if (typeof fd.aggregate !== 'function') {
+			return fail(
+				this.id,
+				`file driver '${fd.kind}' does not implement aggregate(). Native formats (csv / tsv / jsonl / json / parquet / arrow) route through DuckDB; non-native formats (xlsx / avro / bson / fixed-width) need the Phase 2 converter from data-driver-duckdb-files.md.`,
+			);
+		}
+		try {
+			const path = typeof input['path'] === 'string' ? input['path'] : undefined;
+			const result = await fd.aggregate(path, reqOrErr);
+			return ok(formatAggregateResult(result.target, result.values), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
 // ---------------------------------------------------------------------------
 // db:kv:scan + db:kv:get + db:kv:sample_shape
 // ---------------------------------------------------------------------------
@@ -826,5 +872,6 @@ export function registerDbTools(): void {
 	registerTool(fileDescribeTool);
 	registerTool(fileSampleTool);
 	registerTool(fileSampleShapeTool);
+	registerTool(fileAggregateTool);
 	log.debug({ count: 10 }, 'data-driver tools registered');
 }

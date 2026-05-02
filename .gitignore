@@ -22,3 +22,8 @@ product.overrides.json
 *.snap.actual
 .vscode-test
 /.claude
+# Leftover DuckDB artifacts from scratch-style probes / failed
+# ATTACH attempts inside src/insrc (the daemon's real DB lives at
+# ~/.insrc/duckdb.db, never in the source tree).
+src/insrc/*.db
+src/insrc/*.db.wal

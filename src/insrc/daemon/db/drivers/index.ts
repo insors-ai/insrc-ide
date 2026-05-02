@@ -28,16 +28,25 @@ import './nats.js';
 import './dynamodb.js';
 import './etcd.js';
 import './memcached.js';
-// File
-import './csv.js';           // csv + tsv
-import './jsonl.js';         // jsonl + ndjson
-import './json.js';
-import './xlsx.js';
-import './avro.js';
-import './arrow.js';         // arrow + feather
-import './bson.js';
-import './fixed-width.js';
-import './parquet.js';
+// File -- bespoke per-format drivers. Kept registered first so
+// non-native formats (xlsx / avro / bson / fixed-width) keep their
+// implementations until the Phase 2 converters land. Native formats
+// (csv / tsv / jsonl / ndjson / json / parquet / arrow / feather)
+// are overridden by the consolidated DuckDB-backed driver imported
+// last in this list.
+import './csv.js';           // csv + tsv         (overridden by duckdb-file)
+import './jsonl.js';         // jsonl + ndjson    (overridden by duckdb-file)
+import './json.js';          //                   (overridden by duckdb-file)
+import './xlsx.js';          // bespoke for now -- Phase 2.5 converter
+import './avro.js';          // bespoke for now -- Phase 2.2 converter
+import './arrow.js';         // arrow + feather   (overridden by duckdb-file)
+import './bson.js';          // bespoke for now -- Phase 2.3 converter
+import './fixed-width.js';   // bespoke for now -- Phase 2.4 converter
+import './parquet.js';       //                   (overridden by duckdb-file)
+// Phase 1 of plans/data-driver-duckdb-files.md: consolidated
+// DuckDB-backed driver for native file kinds. Imported LAST so its
+// `registerDriver` calls overwrite the bespoke registrations above.
+import './duckdb-file.js';
 
 import { listRegisteredKinds } from '../registry.js';
 import { getLogger } from '../../../shared/logger.js';

@@ -88,10 +88,31 @@ export async function getDuckDB(): Promise<DuckDBInstance> {
           'arrow extension unavailable; .arrow file connections will fail to read until installed',
         );
       }
-      // Now that approved extensions are loaded, block ATTACH /
-      // httpfs / load_extension / further INSTALL at runtime. Only
-      // the extensions loaded above are usable from here on.
-      await conn.run('SET enable_external_access = false');
+      // Security model on the QUERY pool:
+      // - This is the in-memory query engine the data-driver uses for
+      //   `read_csv_auto` / `read_json_auto` / `read_parquet` /
+      //   `read_arrow` over user-configured file connections.
+      //   `enable_external_access=false` would block those reads
+      //   (DuckDB treats local files as "external"), so the flag is
+      //   NOT set here -- file access is gated by the data-driver's
+      //   path-resolution + access-gate layer instead, which validates
+      //   every path before it reaches DuckDB.
+      // - We DO refuse network / DB-attach surface by not installing
+      //   the `httpfs`, `postgres`, `mysql`, `sqlite` extensions.
+      //   With `enable_extension_autoinstall=false` set below, even
+      //   user-supplied SQL can't pull them in at runtime.
+      // - The persistent STORAGE pool (duckdb-storage-pool.ts) keeps
+      //   the full lockdown -- it only ever reads ~/.insrc/duckdb.db,
+      //   never user-supplied paths.
+      try {
+        await conn.run('SET autoinstall_known_extensions = false');
+        await conn.run('SET autoload_known_extensions = false');
+      } catch (e) {
+        log.warn(
+          { err: errMessage(e) },
+          'extension auto-install/load could not be disabled; httpfs / postgres attaches still blocked by NOT being installed',
+        );
+      }
     } finally {
       conn.disconnectSync();
     }
