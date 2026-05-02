@@ -41,6 +41,7 @@ import { registerDataSynthProfileCardSkill } from './built-ins/data.synth.profil
 import { registerDataSynthLineageFoldSkill } from './built-ins/data.synth.lineage-fold.js';
 import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality.scorecard.rdbms.js';
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
+import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -73,6 +74,7 @@ export function registerAllSkills(): void {
   // consistency are also in.
   registerDataQualityCompletenessRdbmsSkill();
   registerDataQualityUniquenessRdbmsSkill();
+  registerDataQualityValidityRdbmsSkill();
   // Phase 5e (sensitivity / PII) -- regex over sampled values;
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();
