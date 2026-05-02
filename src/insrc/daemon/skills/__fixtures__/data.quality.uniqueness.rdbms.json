@@ -1,0 +1,26 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "columns": ["id", "user_id", "amount"]
+  },
+  "fakeTools": {
+    "db_sql_aggregate": {
+      "content": "**public.orders** -- 7 aggregates",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "values": {
+          "*__count":                 1000,
+          "id__count_non_null":       1000,
+          "id__distinct_count":       1000,
+          "user_id__count_non_null":   995,
+          "user_id__distinct_count":   180,
+          "amount__count_non_null":   1000,
+          "amount__distinct_count":    872
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

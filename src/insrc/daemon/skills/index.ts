@@ -28,6 +28,8 @@ import { registerDataSourceKvSampleShapeSkill } from './built-ins/data.source.kv
 import { registerDataProfileNumericRdbmsSkill } from './built-ins/data.profile.numeric.rdbms.js';
 import { registerDataProfileCategoricalRdbmsSkill } from './built-ins/data.profile.categorical.rdbms.js';
 import { registerDataProfileBooleanRdbmsSkill } from './built-ins/data.profile.boolean.rdbms.js';
+import { registerDataQualityCompletenessRdbmsSkill } from './built-ins/data.quality.completeness.rdbms.js';
+import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.quality.uniqueness.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -53,6 +55,11 @@ export function registerAllSkills(): void {
   registerDataProfileNumericRdbmsSkill();
   registerDataProfileCategoricalRdbmsSkill();
   registerDataProfileBooleanRdbmsSkill();
+  // Phase 5d (quality scorecard) -- atomic dimensions land first;
+  // the scorecard composite ships once validity / conformity /
+  // consistency are also in.
+  registerDataQualityCompletenessRdbmsSkill();
+  registerDataQualityUniquenessRdbmsSkill();
 
   // Composite skills go here once any are registered. Empty in v1.
 

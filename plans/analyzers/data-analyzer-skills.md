@@ -91,7 +91,13 @@ Phase 2.3 (`data.source.file.sample-rows`,
 `data.source.file.sample-shape`) are landed. Phase 5a (univariate
 profilers) is partially landed: `profile.numeric.rdbms`,
 `profile.categorical.rdbms`, and `profile.boolean.rdbms` shipped;
-temporal / text / auto / file-side variants are follow-ups. Phase 1.2
+temporal / text / auto / file-side variants are follow-ups.
+Phase 5d (quality scorecard) atomic dimensions are also partially
+landed: `quality.completeness.rdbms` (per-column null rate + table
+overall) and `quality.uniqueness.rdbms` (per-column distinct ratio
++ single-column PK candidates) shipped. The remaining 5d atomics
+(validity, conformity, consistency) and the `quality.scorecard`
+composite are pending. Phase 1.2
 (source-introspection: kv) is blocked on 0.7 / 0.8 (the
 `db_kv_list_namespaces` / `db_kv_describe_namespace` tools);
 Phase 1.4 / 2.4 (doc family) blocked on 0.9 naming
@@ -149,12 +155,12 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5c.3 | dependency: dependency.functional | pending | does A determine B? |
 | 5c.4 | dependency: dependency.co-null-pattern | pending | |
 | 5c.5 | dependency: cardinality.join-key | pending | 1:1 / 1:N / N:M |
-| 5d.1 | quality scorecard: quality.completeness | pending | null-rate per column + table |
-| 5d.2 | quality scorecard: quality.uniqueness | pending | distinct/total per column; PK candidates |
+| 5d.1 | quality scorecard: quality.completeness | partial | `data.quality.completeness.rdbms` shipped (atomic; auto-discovers columns via `db_sql_describe`, packs `count(*)` + `count_non_null` per column into one `db_sql_aggregate` round-trip; up to 31 columns per call). File-side variant pending |
+| 5d.2 | quality scorecard: quality.uniqueness | partial | `data.quality.uniqueness.rdbms` shipped (atomic; per-column `distinctCount/nonNullCount` + single-column PK-candidate detector; cap at 15 columns per call due to `1 + 2N <= 32` aggregate-spec budget). Multi-column PK candidates + file-side variant pending |
 | 5d.3 | quality scorecard: quality.validity | pending | matches declared type / domain / regex |
 | 5d.4 | quality scorecard: quality.conformity | pending | date / currency / country / postal formats |
 | 5d.5 | quality scorecard: quality.consistency | pending | cross-column agreements |
-| 5d.6 | quality scorecard: quality.scorecard | pending | composite rollup of 5d.1-5d.5 |
+| 5d.6 | quality scorecard: quality.scorecard | pending | composite rollup of 5d.1-5d.5 -- ships once 5d.3-5d.5 land |
 | 5e.1 | sensitivity: pii.detect-patterns | pending | email / ssn / phone / address / api-key / jwt / IBAN |
 | 5e.2 | sensitivity: pii.column-classifier | pending | regex + values + column-name heuristics |
 | 5e.3 | sensitivity: sensitivity.policy-check | pending | vs connection's pii config |

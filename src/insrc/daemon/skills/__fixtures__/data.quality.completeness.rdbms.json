@@ -1,0 +1,24 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "columns": ["id", "user_id", "amount", "shipped_at"]
+  },
+  "fakeTools": {
+    "db_sql_aggregate": {
+      "content": "**public.orders** -- 5 aggregates",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "values": {
+          "*__count":                   1000,
+          "id__count_non_null":         1000,
+          "user_id__count_non_null":     995,
+          "amount__count_non_null":     1000,
+          "shipped_at__count_non_null":  720
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
