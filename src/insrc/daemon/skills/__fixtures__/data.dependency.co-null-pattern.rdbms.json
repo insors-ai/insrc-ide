@@ -1,0 +1,33 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "columns": ["shipping_address1", "shipping_address2", "shipping_zip", "billing_id"],
+    "sampleSize": 10
+  },
+  "fakeTools": {
+    "db_sql_sample": {
+      "content": "sample",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "columns": ["shipping_address1", "shipping_address2", "shipping_zip", "billing_id"],
+        "rows": [
+          { "shipping_address1": "1 Main St",  "shipping_address2": "Apt 1",  "shipping_zip": "94102", "billing_id": 100 },
+          { "shipping_address1": "2 Oak Ave",  "shipping_address2": null,     "shipping_zip": "94103", "billing_id": 101 },
+          { "shipping_address1": null,         "shipping_address2": null,     "shipping_zip": null,    "billing_id": 102 },
+          { "shipping_address1": "4 Pine Rd",  "shipping_address2": "Suite 2","shipping_zip": "94104", "billing_id": 103 },
+          { "shipping_address1": null,         "shipping_address2": null,     "shipping_zip": null,    "billing_id": 104 },
+          { "shipping_address1": "6 Elm St",   "shipping_address2": null,     "shipping_zip": "94105", "billing_id": 105 },
+          { "shipping_address1": null,         "shipping_address2": null,     "shipping_zip": null,    "billing_id": 106 },
+          { "shipping_address1": "8 Maple Ln", "shipping_address2": "Apt 3",  "shipping_zip": "94106", "billing_id": 107 },
+          { "shipping_address1": "9 Cedar Dr", "shipping_address2": null,     "shipping_zip": "94107", "billing_id": 108 },
+          { "shipping_address1": null,         "shipping_address2": null,     "shipping_zip": null,    "billing_id": 109 }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

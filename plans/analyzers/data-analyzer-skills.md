@@ -158,7 +158,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5c.1 | dependency: correlation.numeric-pairwise | pending | Pearson + Spearman |
 | 5c.2 | dependency: correlation.categorical-pairwise | pending | Cramér's V |
 | 5c.3 | dependency: dependency.functional | pending | does A determine B? |
-| 5c.4 | dependency: dependency.co-null-pattern | pending | |
+| 5c.4 | dependency: dependency.co-null-pattern | partial | `data.dependency.co-null-pattern.rdbms` shipped (atomic; pairwise null co-occurrence over 50-row sample). For each column pair returns `bothNull / aNullOnly / bNullOnly / neitherNull` bucket counts plus `jointNullRate` and `jaccardSimilarity` (1.0 = always null together; 0.0 = disjoint null sets). Sample-based -- precise full-table counts need a `count_where` aggregate not yet shipped. Cap: 15 columns / 105 pairs per call; output capped at 50 top-jaccard rows. Auto-discovers columns via `db_sql_describe`; pass explicit `columns` to slice |
 | 5c.5 | dependency: cardinality.join-key | pending | 1:1 / 1:N / N:M |
 | 5d.1 | quality scorecard: quality.completeness | partial | `data.quality.completeness.rdbms` shipped (atomic; auto-discovers columns via `db_sql_describe`, packs `count(*)` + `count_non_null` per column into one `db_sql_aggregate` round-trip; up to 31 columns per call). File-side variant pending |
 | 5d.2 | quality scorecard: quality.uniqueness | partial | `data.quality.uniqueness.rdbms` shipped (atomic; per-column `distinctCount/nonNullCount` + single-column PK-candidate detector; cap at 15 columns per call due to `1 + 2N <= 32` aggregate-spec budget). Multi-column PK candidates + file-side variant pending |
