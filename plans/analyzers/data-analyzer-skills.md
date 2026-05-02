@@ -167,7 +167,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5d.5 | quality scorecard: quality.consistency | pending | cross-column agreements |
 | 5d.6 | quality scorecard: quality.scorecard | pending | composite rollup of 5d.1-5d.5 -- ships once 5d.3-5d.5 land |
 | 5e.1 | sensitivity: pii.detect-patterns | partial | `data.pii.detect-patterns.rdbms` shipped (samples up to 50 values via `db_sql_sample`, applies anchored regex set: email / ssn-us / phone-us / credit-card / jwt / ipv4 / iban / aws-access-key / github-token / uuid; returns per-pattern hit count + rate + up to 3 examples). Provider affinity `local`. File / KV variants pending; address detection skipped (no clean regex) |
-| 5e.2 | sensitivity: pii.column-classifier | pending | regex + values + column-name heuristics |
+| 5e.2 | sensitivity: pii.column-classifier | done | `data.pii.column-classifier.rdbms` shipped (composite over `data.pii.detect-patterns.rdbms` + a 14-rule column-name heuristic). Returns one of `pii / likely-pii / not-pii` with explicit `evidence` strings. Surfaces both data-leak (PII values, generic name) and missing-data (named-PII column, empty sample) cases per the 2026-04-30 lessons-learned fix |
 | 5e.3 | sensitivity: sensitivity.policy-check | pending | vs connection's pii config |
 | 5f.1 | drift over windows: drift.distribution | pending | KL / JS divergence between sample windows |
 | 5f.2 | drift over windows: drift.volume | pending | row-count outlier vs cadence |

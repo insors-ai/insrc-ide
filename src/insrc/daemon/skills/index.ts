@@ -34,6 +34,7 @@ import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.de
 import { registerDataProfileTemporalRdbmsSkill } from './built-ins/data.profile.temporal.rdbms.js';
 import { registerDataProfileTextRdbmsSkill } from './built-ins/data.profile.text.rdbms.js';
 import { registerDataProfileAutoRdbmsSkill } from './built-ins/data.profile.auto.rdbms.js';
+import { registerDataPiiColumnClassifierRdbmsSkill } from './built-ins/data.pii.column-classifier.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -74,6 +75,9 @@ export function registerAllSkills(): void {
   // 5a.6 -- profile.auto dispatches to numeric / categorical /
   // boolean / temporal / text by declared SQL type.
   registerDataProfileAutoRdbmsSkill();
+  // 5e.2 -- pii.column-classifier composes pii.detect-patterns
+  // with column-name heuristics for a per-column PII verdict.
+  registerDataPiiColumnClassifierRdbmsSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
