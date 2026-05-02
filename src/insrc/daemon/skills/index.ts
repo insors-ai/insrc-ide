@@ -18,6 +18,7 @@ import { listSkills } from './registry.js';
 import { registerDataLineageSkill } from './built-ins/data-lineage.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsSampleRowsSkill } from './built-ins/data.source.rdbms.sample-rows.js';
+import { registerDataSourceRdbmsSampleDistinctSkill } from './built-ins/data.source.rdbms.sample-distinct.js';
 import { registerDataSourceFileDescribeSkill } from './built-ins/data.source.file.describe.js';
 import { registerDataSourceFileSampleRowsSkill } from './built-ins/data.source.file.sample-rows.js';
 import { registerDataSourceFileSampleShapeSkill } from './built-ins/data.source.file.sample-shape.js';
@@ -33,6 +34,7 @@ export function registerAllSkills(): void {
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsSampleRowsSkill();
+  registerDataSourceRdbmsSampleDistinctSkill();
   // Phase 1.3 + 2.3 -- one skill spans all 12 file kinds via the
   // consolidated DuckDB-backed driver.
   registerDataSourceFileDescribeSkill();

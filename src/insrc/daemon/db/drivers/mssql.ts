@@ -25,6 +25,8 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -36,8 +38,11 @@ import {
 	SAMPLE_TIMEOUT_MS,
 	buildSampleSql,
 	compileAggregate,
+	compileDistinct,
 	quoteTarget,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 	withTimeout,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
@@ -186,6 +191,23 @@ class MssqlDriver implements RdbmsDriver {
 			SAMPLE_TIMEOUT_MS,
 		);
 		return { target, values: readAggregateRow(rows[0], compiled.keys) };
+	}
+
+	async distinct(target: string, request: DistinctRequest): Promise<DistinctResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileDistinct(target, request, cols, MSSQL_DIALECT);
+		log.debug({ id: this.id }, 'distinct query');
+		const [countRows, valueRows] = await Promise.all([
+			withTimeout(this.run(compiled.distinctCountSql, []), SAMPLE_TIMEOUT_MS),
+			withTimeout(this.run(compiled.topValuesSql,    []), SAMPLE_TIMEOUT_MS),
+		]);
+		return {
+			target,
+			column: request.column,
+			distinctCount: readDistinctCount(countRows[0]),
+			topValues: readDistinctRows(valueRows),
+		};
 	}
 
 	async close(): Promise<void> {

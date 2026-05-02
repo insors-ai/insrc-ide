@@ -19,6 +19,8 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -30,8 +32,11 @@ import {
 	SAMPLE_TIMEOUT_MS,
 	buildSampleSql,
 	compileAggregate,
+	compileDistinct,
 	quoteTarget,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
@@ -162,6 +167,29 @@ class OracleDriver implements RdbmsDriver {
 				{ outFormat: oracledb.OUT_FORMAT_OBJECT },
 			);
 			return { target, values: readAggregateRow((res.rows ?? [])[0], compiled.keys) };
+		} finally {
+			await conn.close();
+		}
+	}
+
+	async distinct(target: string, request: DistinctRequest): Promise<DistinctResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileDistinct(target, request, cols, ORACLE_DIALECT);
+		log.debug({ id: this.id }, 'distinct query');
+		const pool = await this.poolPromise;
+		const conn = await pool.getConnection();
+		try {
+			const [countRes, valuesRes] = await Promise.all([
+				conn.execute<Record<string, unknown>>(compiled.distinctCountSql, [], { outFormat: oracledb.OUT_FORMAT_OBJECT }),
+				conn.execute<Record<string, unknown>>(compiled.topValuesSql,    [], { outFormat: oracledb.OUT_FORMAT_OBJECT }),
+			]);
+			return {
+				target,
+				column: request.column,
+				distinctCount: readDistinctCount((countRes.rows ?? [])[0]),
+				topValues: readDistinctRows(valuesRes.rows ?? []),
+			};
 		} finally {
 			await conn.close();
 		}

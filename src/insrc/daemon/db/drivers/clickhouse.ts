@@ -22,6 +22,8 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	PlanResult,
 	QueryAst,
 	RdbmsDriver,
@@ -130,6 +132,21 @@ class ClickHouseDriver implements RdbmsDriver {
 			'data-driver: aggregate() not yet implemented for clickhouse driver -- ' +
 			'ClickHouse needs a per-dialect aggregate compiler (quantile/stddevSamp/varSamp). ' +
 			'Tracked in plans/analyzers/data-analyzer-skills.md Phase 0.1.',
+		);
+	}
+
+	async distinct(_target: string, _request: DistinctRequest): Promise<DistinctResult> {
+		// ClickHouse aggregations follow custom syntax (see aggregate()
+		// note above); for distinct specifically the shared
+		// compileDistinct's COUNT(DISTINCT ...) + GROUP BY ... ORDER BY
+		// COUNT(*) DESC pattern is standard SQL and would in principle
+		// work, but the {p:String} placeholder shape this driver uses
+		// would need pass-through. Lift in the same follow-up that
+		// implements aggregate().
+		throw new Error(
+			'data-driver: distinct() not yet implemented for clickhouse driver -- ' +
+			'pairs with the aggregate() follow-up (Phase 0.1). ' +
+			'Tracked in plans/analyzers/data-analyzer-skills.md Phase 0.3.',
 		);
 	}
 

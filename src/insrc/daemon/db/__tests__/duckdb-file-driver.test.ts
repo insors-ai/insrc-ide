@@ -231,6 +231,44 @@ describe('DuckDBFileDriver -- directory connection (Phase 4)', () => {
 	});
 });
 
+describe('DuckDBFileDriver -- distinct (Phase 0.3)', () => {
+	it('returns top-N most-frequent values + distinct cardinality', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			distinct: (t: string | undefined, r: unknown) => Promise<{
+				column: string;
+				distinctCount: number;
+				topValues: { value: unknown; count: number }[];
+			}>;
+		}).distinct(undefined, { column: 'user_id', topN: 5 });
+
+		assert.equal(res.column, 'user_id');
+		assert.equal(res.distinctCount, 2);
+		// alice rows have user_id=1 (2 rows); bob has user_id=2 (1 row)
+		assert.equal(res.topValues.length, 2);
+		assert.equal(Number(res.topValues[0]!.value), 1);
+		assert.equal(res.topValues[0]!.count, 2);
+		assert.equal(Number(res.topValues[1]!.value), 2);
+		assert.equal(res.topValues[1]!.count, 1);
+		await pool.closeAll();
+	});
+
+	it('rejects unknown column', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		await assert.rejects(
+			(drv as { distinct: (t: string | undefined, r: unknown) => Promise<unknown> }).distinct(
+				undefined, { column: 'no_such', topN: 5 },
+			),
+			/unknown column 'no_such'/,
+		);
+		await pool.closeAll();
+	});
+});
+
 describe('DuckDBFileDriver -- pool path-escape guard', () => {
 	it('rejects file paths that escape the repo root', async () => {
 		const badRoot = mkdtempSync(join(tmpdir(), 'insrc-duckdb-file-escape-'));

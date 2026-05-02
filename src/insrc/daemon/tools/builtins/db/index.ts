@@ -25,6 +25,7 @@ import type {
 	AggregateRequest,
 	AggregateSpec,
 	ConnectionConfig,
+	DistinctRequest,
 	Driver,
 	FileDriver,
 	KvDriver,
@@ -491,6 +492,136 @@ const sqlAggregateTool: Tool = {
 	},
 };
 
+// ---------------------------------------------------------------------------
+// db:sql:distinct + db:file:distinct (Phase 0.3 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+//
+// Top-N distinct values for one column plus its overall distinct
+// cardinality. Drives the `data.source.rdbms.sample-distinct` skill
+// and downstream Family-5 categorical-profile skills (5a.2, 5d.2).
+// Server-side aggregation; never compute a top-N from row samples in
+// the LLM.
+
+const DISTINCT_TOP_N_DEFAULT = 20;
+const DISTINCT_TOP_N_MAX     = 1000;
+
+function buildDistinctRequest(input: ToolInput): DistinctRequest | string {
+	const column = input['column'];
+	if (typeof column !== 'string' || column.length === 0) {
+		return '`column` is required and must be a non-empty string';
+	}
+	const rawTopN = input['topN'];
+	let topN = DISTINCT_TOP_N_DEFAULT;
+	if (rawTopN !== undefined) {
+		if (typeof rawTopN !== 'number' || !Number.isFinite(rawTopN) || rawTopN < 1) {
+			return '`topN` must be a positive integer';
+		}
+		topN = Math.min(Math.floor(rawTopN), DISTINCT_TOP_N_MAX);
+	}
+	return { column, topN };
+}
+
+function formatDistinctResult(
+	target: string,
+	column: string,
+	distinctCount: number,
+	topValues: readonly { value: unknown; count: number }[],
+): string {
+	const lines: string[] = [
+		`**${target}** -- column \`${column}\``,
+		'',
+		`distinct values: **${distinctCount}**`,
+		`top ${topValues.length}:`,
+		'',
+		'| value | count |',
+		'|---|---|',
+	];
+	for (const v of topValues) {
+		const rendered = v.value === null || v.value === undefined ? '_(null)_' : String(v.value);
+		lines.push(`| ${rendered} | ${v.count} |`);
+	}
+	return lines.join('\n');
+}
+
+const sqlDistinctTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_distinct',
+	description:
+		'Top-N most-frequent distinct values for one RDBMS column, plus the column\'s overall distinct ' +
+		'cardinality. Use this whenever a categorical-profile skill (5a.2, 5d.2) needs the value distribution. ' +
+		'Order: count desc, value asc (deterministic). Default topN=20, max 1000.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'column'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string' },
+			column: { type: 'string' },
+			topN:   { type: 'integer', minimum: 1, maximum: DISTINCT_TOP_N_MAX, description: `Default ${DISTINCT_TOP_N_DEFAULT}.` },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') {
+			return fail(this.id, 'connectionId and target are required');
+		}
+		const reqOrErr = buildDistinctRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) { return driver; }
+		try {
+			const result = await (driver as RdbmsDriver).distinct(target, reqOrErr);
+			return ok(formatDistinctResult(result.target, result.column, result.distinctCount, result.topValues), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const fileDistinctTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_distinct',
+	description:
+		'Top-N most-frequent distinct values for one column on a file connection. Same semantics as ' +
+		'db_sql_distinct; routes through the consolidated DuckDB-backed file driver so it covers all 12 ' +
+		'file kinds. Default topN=20, max 1000.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'column'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			path:   { type: 'string', description: 'Optional. xlsx: sheet name. Other kinds ignore it.' },
+			column: { type: 'string' },
+			topN:   { type: 'integer', minimum: 1, maximum: DISTINCT_TOP_N_MAX, description: `Default ${DISTINCT_TOP_N_DEFAULT}.` },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const reqOrErr = buildDistinctRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'file');
+		if (!isDriver(driver)) { return driver; }
+		const fd = driver as FileDriver;
+		if (typeof fd.distinct !== 'function') {
+			return fail(
+				this.id,
+				`file driver '${fd.kind}' does not implement distinct(). Every supported file kind routes through the DuckDB-backed driver and exposes distinct; reaching this branch means an out-of-tree driver was registered.`,
+			);
+		}
+		try {
+			const path = typeof input['path'] === 'string' ? input['path'] : undefined;
+			const result = await fd.distinct(path, reqOrErr);
+			return ok(formatDistinctResult(result.target, result.column, result.distinctCount, result.topValues), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
 const fileListFilesTool: Tool = {
 	access: FILE_ACCESS,
 	id: 'db_file_list_files',
@@ -926,6 +1057,7 @@ export function registerDbTools(): void {
 	registerTool(sqlSampleTool);
 	registerTool(sqlExplainTool);
 	registerTool(sqlAggregateTool);
+	registerTool(sqlDistinctTool);
 	registerTool(kvScanTool);
 	registerTool(kvGetTool);
 	registerTool(kvSampleShapeTool);
@@ -933,6 +1065,7 @@ export function registerDbTools(): void {
 	registerTool(fileSampleTool);
 	registerTool(fileSampleShapeTool);
 	registerTool(fileAggregateTool);
+	registerTool(fileDistinctTool);
 	registerTool(fileListFilesTool);
 	log.debug({ count: 10 }, 'data-driver tools registered');
 }

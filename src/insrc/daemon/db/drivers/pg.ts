@@ -15,6 +15,8 @@ import type {
 	AggregateRequest,
 	AggregateResult,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -29,8 +31,11 @@ import {
 	buildExplainSql,
 	buildSampleSql,
 	compileAggregate,
+	compileDistinct,
 	quoteTarget,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 	withTimeout,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
@@ -145,6 +150,23 @@ class PostgresDriver implements RdbmsDriver {
 		);
 		const row = res.rows[0] as Readonly<Record<string, unknown>> | undefined;
 		return { target, values: readAggregateRow(row, compiled.keys) };
+	}
+
+	async distinct(target: string, request: DistinctRequest): Promise<DistinctResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileDistinct(target, request, cols, POSTGRES_DIALECT);
+		log.debug({ id: this.id, distinctCountSql: compiled.distinctCountSql, topValuesSql: compiled.topValuesSql }, 'distinct query');
+		const [countRes, valuesRes] = await Promise.all([
+			withTimeout(this.pool.query(compiled.distinctCountSql), SAMPLE_TIMEOUT_MS),
+			withTimeout(this.pool.query(compiled.topValuesSql), SAMPLE_TIMEOUT_MS),
+		]);
+		return {
+			target,
+			column: request.column,
+			distinctCount: readDistinctCount(countRes.rows[0] as Readonly<Record<string, unknown>> | undefined),
+			topValues: readDistinctRows(valuesRes.rows as readonly Readonly<Record<string, unknown>>[]),
+		};
 	}
 
 	async explain(queryAst: QueryAst): Promise<PlanResult> {

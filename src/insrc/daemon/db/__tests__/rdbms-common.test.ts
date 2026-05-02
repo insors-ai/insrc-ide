@@ -20,10 +20,13 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileAggregateExprs,
+	compileDistinct,
 	compileWhere,
 	looksLikeMutation,
 	quoteTarget,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 	withTimeout,
 } from '../drivers/rdbms-common.js';
 
@@ -383,5 +386,98 @@ describe('readAggregateRow', () => {
 		assert.equal(out['a__avg'], null);
 		assert.equal(out['b__sum'], null);
 		assert.equal(out['c__max'], null);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// compileDistinct + readDistinctRows + readDistinctCount
+// (Phase 0.3 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+
+describe('compileDistinct', () => {
+	it('produces a count-distinct + top-N pair for postgres', () => {
+		const out = compileDistinct(
+			'public.orders',
+			{ column: 'user_id', topN: 5 },
+			['id', 'user_id', 'amount'],
+			POSTGRES_DIALECT,
+		);
+		assert.equal(out.distinctCountSql, 'SELECT COUNT(DISTINCT "user_id") AS distinct_count FROM "public"."orders"');
+		assert.match(out.topValuesSql, /^SELECT "user_id" AS value, COUNT\(\*\) AS count FROM "public"\."orders" GROUP BY "user_id" ORDER BY COUNT\(\*\) DESC, "user_id" ASC LIMIT 5$/);
+		assert.equal(out.topN, 5);
+	});
+
+	it('switches to TOP N for MSSQL (no LIMIT clause)', () => {
+		const out = compileDistinct(
+			'orders',
+			{ column: 'status', topN: 10 },
+			['id', 'status'],
+			MSSQL_DIALECT,
+		);
+		assert.match(out.topValuesSql, /^SELECT TOP 10 \[status\] AS value, COUNT\(\*\) AS count FROM \[orders\]/);
+		assert.match(out.topValuesSql, /ORDER BY COUNT\(\*\) DESC, \[status\] ASC$/);
+	});
+
+	it('uses FETCH FIRST N ROWS ONLY for oracle', () => {
+		const out = compileDistinct(
+			'orders',
+			{ column: 'status', topN: 7 },
+			['id', 'status'],
+			ORACLE_DIALECT,
+		);
+		assert.match(out.topValuesSql, /FETCH FIRST 7 ROWS ONLY$/);
+	});
+
+	it('clamps topN to [1, 1000]', () => {
+		const small = compileDistinct('t', { column: 'c', topN: 0    }, ['c'], POSTGRES_DIALECT);
+		assert.equal(small.topN, 1);
+		const big = compileDistinct('t', { column: 'c', topN: 9_999 }, ['c'], POSTGRES_DIALECT);
+		assert.equal(big.topN, 1000);
+	});
+
+	it('rejects unknown columns', () => {
+		assert.throws(
+			() => compileDistinct('t', { column: 'mystery', topN: 5 }, ['known'], POSTGRES_DIALECT),
+			/unknown column 'mystery'/,
+		);
+	});
+
+	it('honors asTableExpr for non-identifier FROM (e.g. read_parquet(?))', () => {
+		const out = compileDistinct(
+			'/data/orders.csv',
+			{ column: 'id', topN: 3 },
+			['id', 'amount'],
+			POSTGRES_DIALECT,
+			{ asTableExpr: 'read_csv_auto(?)' },
+		);
+		assert.match(out.distinctCountSql, /FROM read_csv_auto\(\?\)$/);
+		assert.match(out.topValuesSql,    /FROM read_csv_auto\(\?\)/);
+	});
+});
+
+describe('readDistinctRows', () => {
+	it('coerces count to number across number / bigint / string ships', () => {
+		const out = readDistinctRows([
+			{ value: 'a', count: 12 },
+			{ value: 'b', count: 5n },
+			{ value: 'c', count: '3' },
+			{ value: null, count: 'NaN' },
+		]);
+		assert.deepEqual(out, [
+			{ value: 'a', count: 12 },
+			{ value: 'b', count: 5 },
+			{ value: 'c', count: 3 },
+			{ value: null, count: 0 },
+		]);
+	});
+});
+
+describe('readDistinctCount', () => {
+	it('reads the distinct_count scalar across coercion paths', () => {
+		assert.equal(readDistinctCount({ distinct_count: 42 }), 42);
+		assert.equal(readDistinctCount({ distinct_count: 9_999_999_999n }), 9_999_999_999);
+		assert.equal(readDistinctCount({ DISTINCT_COUNT: '7' }), 7);
+		assert.equal(readDistinctCount(undefined), 0);
+		assert.equal(readDistinctCount({ distinct_count: 'not a number' }), 0);
 	});
 });

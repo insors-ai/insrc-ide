@@ -15,6 +15,7 @@ import type {
 	AggregateFunction,
 	AggregateRequest,
 	AggregateSpec,
+	DistinctRequest,
 	SampleOpts,
 	WhereClause,
 } from '../../../shared/db-driver.js';
@@ -418,6 +419,96 @@ export function compileAggregate(
 		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
 	}
 	return { text, values: [], keys };
+}
+
+// ---------------------------------------------------------------------------
+// Distinct compilation (Phase 0.3 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+
+/** Hard cap on `topN`. The tool layer also clamps; this is a
+ *  belt-and-braces ceiling for a callsite that goes through
+ *  `compileDistinct` directly. */
+const DISTINCT_TOPN_MAX = 1000;
+
+/**
+ * Compile two SQL queries: one for `COUNT(DISTINCT col)` and one for
+ * the top-N values ordered by frequency desc, value asc. Returns both
+ * fragments; the driver runs them either as a sequence (separate
+ * round-trips) or fuses them via UNION ALL where the dialect benefits.
+ *
+ * Column name is validated against `knownColumns` to defend against
+ * identifier injection; the integer LIMIT is interpolated literally
+ * (clamped first) since most dialects can't bind LIMIT as a parameter.
+ */
+export interface CompiledDistinct {
+	readonly distinctCountSql: string;
+	readonly topValuesSql: string;
+	readonly topN: number;
+}
+
+export function compileDistinct(
+	target: string,
+	request: DistinctRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	{ asTableExpr }: { asTableExpr?: string } = {},
+): CompiledDistinct {
+	const columnSet = new Set(knownColumns.map(c => c.toLowerCase()));
+	if (!columnSet.has(request.column.toLowerCase())) {
+		throw new Error(`data-driver: unknown column '${request.column}'`);
+	}
+	const topN = Math.min(Math.max(1, Math.floor(request.topN)), DISTINCT_TOPN_MAX);
+	const fromClause = asTableExpr !== undefined
+		? asTableExpr
+		: quoteTarget(target, dialect);
+	const colSql = dialect.quoteIdent(request.column);
+
+	// MSSQL has TOP N + no LIMIT; everything else uses LIMIT/FETCH FIRST.
+	const limitClause = dialect.limitClause(topN);
+	const isMssqlLike = limitClause === '';
+	const distinctCountSql = `SELECT COUNT(DISTINCT ${colSql}) AS distinct_count FROM ${fromClause}`;
+	const topValuesSql = isMssqlLike
+		? `SELECT TOP ${topN} ${colSql} AS value, COUNT(*) AS count FROM ${fromClause}`
+			+ ` GROUP BY ${colSql} ORDER BY COUNT(*) DESC, ${colSql} ASC`
+		: `SELECT ${colSql} AS value, COUNT(*) AS count FROM ${fromClause}`
+			+ ` GROUP BY ${colSql} ORDER BY COUNT(*) DESC, ${colSql} ASC ${limitClause}`;
+
+	if (looksLikeMutation(distinctCountSql) || looksLikeMutation(topValuesSql)) {
+		throw new Error('data-driver: refused suspicious SQL in compileDistinct');
+	}
+	return { distinctCountSql, topValuesSql, topN };
+}
+
+/**
+ * Read the `{ value, count }` rows produced by the topValuesSql.
+ * Coerces count via the same path as `readAggregateRow` (some
+ * dialects ship counts as bigint or string).
+ */
+export function readDistinctRows(
+	rows: readonly Readonly<Record<string, unknown>>[],
+): { readonly value: unknown; readonly count: number }[] {
+	const out: { value: unknown; count: number }[] = [];
+	for (const r of rows) {
+		const raw = r['count'] ?? r['COUNT'] ?? r['Count'];
+		let count: number;
+		if (typeof raw === 'number') count = Number.isFinite(raw) ? raw : 0;
+		else if (typeof raw === 'bigint') count = Number(raw);
+		else if (typeof raw === 'string') { const n = Number(raw); count = Number.isFinite(n) ? n : 0; }
+		else count = 0;
+		out.push({ value: r['value'] ?? r['VALUE'] ?? r['Value'] ?? null, count });
+	}
+	return out;
+}
+
+/** Read the `distinct_count` scalar produced by `distinctCountSql`. */
+export function readDistinctCount(
+	row: Readonly<Record<string, unknown>> | undefined,
+): number {
+	const raw = row?.['distinct_count'] ?? row?.['DISTINCT_COUNT'] ?? row?.['Distinct_count'];
+	if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0;
+	if (typeof raw === 'bigint') return Number(raw);
+	if (typeof raw === 'string') { const n = Number(raw); return Number.isFinite(n) ? n : 0; }
+	return 0;
 }
 
 /**

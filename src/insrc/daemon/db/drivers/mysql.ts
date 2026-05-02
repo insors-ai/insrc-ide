@@ -16,6 +16,8 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -28,8 +30,11 @@ import {
 	buildExplainSql,
 	buildSampleSql,
 	compileAggregate,
+	compileDistinct,
 	quoteTarget,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 	withTimeout,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
@@ -133,6 +138,29 @@ class MysqlDriver implements RdbmsDriver {
 			SAMPLE_TIMEOUT_MS,
 		) as unknown as [Record<string, unknown>[], unknown];
 		return { target, values: readAggregateRow(rows[0], compiled.keys) };
+	}
+
+	async distinct(target: string, request: DistinctRequest): Promise<DistinctResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileDistinct(target, request, cols, MYSQL_DIALECT);
+		log.debug({ id: this.id }, 'distinct query');
+		const [[countRows], [valueRows]] = await Promise.all([
+			withTimeout(
+				this.pool.query(compiled.distinctCountSql),
+				SAMPLE_TIMEOUT_MS,
+			) as unknown as Promise<[Record<string, unknown>[], unknown]>,
+			withTimeout(
+				this.pool.query(compiled.topValuesSql),
+				SAMPLE_TIMEOUT_MS,
+			) as unknown as Promise<[Record<string, unknown>[], unknown]>,
+		]);
+		return {
+			target,
+			column: request.column,
+			distinctCount: readDistinctCount(countRows[0]),
+			topValues: readDistinctRows(valueRows),
+		};
 	}
 
 	async close(): Promise<void> {

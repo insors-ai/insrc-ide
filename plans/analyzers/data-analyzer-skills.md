@@ -74,16 +74,18 @@ the fact.
 ## Status
 
 Phase 0 partially landed: 0.1 (`db_sql_aggregate` + `aggregate()` on
-RDBMS drivers and the consolidated DuckDB-backed file driver) and
-0.6 (sampling-confidence library) are done; 0.2-0.5 are deferred
-until the first Family-5 skill needs them; 0.7-0.9 (KV substrate +
-naming reconciliation) remain. The data-driver-duckdb-files
+RDBMS drivers and the consolidated DuckDB-backed file driver), 0.3
+(`db_sql_distinct` + `db_file_distinct` + `distinct()` on every
+RDBMS driver and the file driver), and 0.6 (sampling-confidence
+library) are done; 0.2 / 0.4 / 0.5 deferred until the first
+Family-5 skill needs them; 0.7-0.9 (KV substrate + naming
+reconciliation) remain. The data-driver-duckdb-files
 prerequisite is **fully shipped** -- every file kind already routes
 through the consolidated DuckDB-backed driver with `db_file_*` tools
 in place. Phase 1.1 (`data.source.rdbms.describe-table`), Phase 1.3
-(`data.source.file.describe`), Phase 2.1
-(`data.source.rdbms.sample-rows`; `sample-distinct` blocked on
-0.3), Phase 2.2 (all three KV sampling skills:
+(`data.source.file.describe`), Phase 2.1 (both
+`data.source.rdbms.sample-rows` and `data.source.rdbms.sample-distinct`),
+Phase 2.2 (all three KV sampling skills:
 `data.source.kv.scan-keys` / `get-value` / `sample-shape`), and
 Phase 2.3 (`data.source.file.sample-rows`,
 `data.source.file.sample-shape`) are landed. Phase 1.2
@@ -99,7 +101,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 |---|---|---|---|
 | 0.1 | `db_sql_aggregate` tool | done | `daemon/tools/builtins/db/index.ts` + `compileAggregate(Exprs)` in `rdbms-common.ts` + `aggregate()` on `RdbmsDriver` (postgres / mysql / sqlite / mssql / oracle real impls; clickhouse throws for now) and on the new `DuckDBFileDriver`. 35 + 8 tests |
 | 0.2 | `db_sql_histogram` tool | pending | needs `histogram(target, opts)` driver method per dialect (`width_bucket` Postgres / DuckDB; `NTILE` fallback for SQLite / MySQL). Deferred until first Family-5 distribution skill needs it -- avoids speculative cross-dialect work |
-| 0.3 | `db_sql_distinct` tool | pending | needs `distinct(target, opts)` driver method (`COUNT(DISTINCT) + GROUP BY ... ORDER BY freq LIMIT N`). Deferred with same reasoning |
+| 0.3 | `db_sql_distinct` tool | done | `daemon/tools/builtins/db/index.ts` + `compileDistinct` in `rdbms-common.ts` + `distinct()` on `RdbmsDriver` (postgres / mysql / sqlite / mssql / oracle real impls; clickhouse throws for now -- pairs with the aggregate() follow-up) and on the consolidated `DuckDBFileDriver`. Sister tool `db_file_distinct` ships in the same change. Deterministic order (count desc, value asc); topN clamped [1, 1000] |
 | 0.4 | `db_correlation_matrix` tool | pending | needs `correlationMatrix(target, opts)` driver method. RDBMS via per-dialect `corr(c1, c2)` (Postgres / DuckDB native; computed expression elsewhere); file connections route through the consolidated DuckDB-backed driver's `aggregate()` path which has `corr` natively. KV / doc connections refuse via precondition. Deferred |
 | 0.5 | `db_outliers` tool | pending | composite over existing aggregate primitives (percentile for IQR; avg + stddev for Z-score) plus a new sample-with-comparison helper (`>=` / `<=` ops on WhereClause). Works for both RDBMS and file (file path goes through `db_file_aggregate`). Deferred |
 | 0.6 | sampling-confidence library | done | `daemon/db/sampling-confidence.ts` -- `sampleSizeFor` + `confidenceFor` for mean / percentile / normality / correlation estimators; finite-population correction; 11-test suite |
@@ -110,7 +112,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
 | 1.3 | source-introspection: file | done | `data.source.file.describe` shipped (`daemon/skills/built-ins/data.source.file.describe.ts`). One skill covers all 12 file kinds via `connection-family: ['file', csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx]` precondition. Thin wrapper over `db_file_describe`; the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently. xlsx target selects a sheet |
 | 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
-| 2.1 | source-sampling: rdbms | partial | `data.source.rdbms.sample-rows` shipped (`daemon/skills/built-ins/data.source.rdbms.sample-rows.ts`), thin wrapper over `db_sql_sample` with structured WHERE support. `sample-distinct` still pending -- blocked on `db_sql_distinct` (Phase 0.3) |
+| 2.1 | source-sampling: rdbms | done | Both atomic skills shipped: `data.source.rdbms.sample-rows` (over `db_sql_sample`, structured WHERE support) and `data.source.rdbms.sample-distinct` (over `db_sql_distinct`, top-N + distinct cardinality, deterministic order) |
 | 2.2 | source-sampling: kv | done | All three skills shipped: `data.source.kv.scan-keys` (over `db_kv_scan`), `data.source.kv.get-value` (over `db_kv_get`), `data.source.kv.sample-shape` (over `db_kv_sample_shape`). Covers redis / valkey / keydb / mongodb / cassandra / nats / dynamodb / etcd / memcached |
 | 2.3 | source-sampling: file | done | `data.source.file.sample-rows` and `data.source.file.sample-shape` shipped. Both are thin wrappers (`db_file_sample` / `db_file_sample_shape`) covering all 12 file kinds via the consolidated DuckDB-backed driver. xlsx target selects a sheet; directory connections glob / walk-and-convert transparently. WHERE clause supported on sample-rows; sample-shape pulls a sample then runs `inferShape` for nested types (json / jsonl / ndjson) |
 | 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |

@@ -41,6 +41,8 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	FileDriver,
 	SampleOpts,
 	SampleResult,
@@ -54,8 +56,11 @@ import { clampFileLimit } from './file-common.js';
 import {
 	POSTGRES_DIALECT,
 	compileAggregateExprs,
+	compileDistinct,
 	compileWhere,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 } from './rdbms-common.js';
 import { inferShape } from './shape-common.js';
 import { cacheDirFor, destForSource, ensureCached } from '../converter-cache.js';
@@ -401,6 +406,38 @@ class DuckDBFileDriver implements FileDriver {
 			return reader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
 		});
 		return { target: target ?? this.path, values: readAggregateRow(row, keys) };
+	}
+
+	async distinct(target: string | undefined, request: DistinctRequest): Promise<DistinctResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const readPath = await this.readerPath(target);
+		// FROM clause is the reader-function expression; pass it as
+		// `asTableExpr` so compileDistinct doesn't quote-target the
+		// connection path (which isn't a SQL identifier).
+		const compiled = compileDistinct(
+			target ?? this.path,
+			request,
+			cols,
+			POSTGRES_DIALECT,
+			{ asTableExpr: this.readerExpr() },
+		);
+		log.debug({ id: this.id }, 'distinct');
+
+		const [countRow, valueRows] = await withConnection(async (conn) => {
+			const cReader = await conn.runAndReadAll(compiled.distinctCountSql, [readPath]);
+			const vReader = await conn.runAndReadAll(compiled.topValuesSql,    [readPath]);
+			return [
+				cReader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined,
+				vReader.getRowObjects() as readonly Readonly<Record<string, unknown>>[],
+			] as const;
+		});
+		return {
+			target: target ?? this.path,
+			column: request.column,
+			distinctCount: readDistinctCount(countRow),
+			topValues: readDistinctRows(valueRows),
+		};
 	}
 
 	async close(): Promise<void> {

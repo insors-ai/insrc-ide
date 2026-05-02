@@ -280,6 +280,28 @@ export interface AggregateResult {
 	readonly values: Readonly<Record<string, number | null>>;
 }
 
+/**
+ * Top-N distinct value request. Returns the most frequent values for
+ * one column plus the column's overall distinct cardinality. Used by
+ * `db_sql_distinct` (Phase 0.3 of plans/analyzers/data-analyzer-skills.md)
+ * and the `data.source.rdbms.sample-distinct` skill.
+ *
+ * `topN` is clamped to [1, 1000] in the tool layer; results are
+ * ordered by frequency descending, ties broken by lexicographic
+ * order on the value (deterministic across re-runs, cache-friendly).
+ */
+export interface DistinctRequest {
+	readonly column: string;
+	readonly topN: number;
+}
+
+export interface DistinctResult {
+	readonly target: string;
+	readonly column: string;
+	readonly distinctCount: number;
+	readonly topValues: readonly { readonly value: unknown; readonly count: number }[];
+}
+
 // ---------------------------------------------------------------------------
 // Driver interfaces
 // ---------------------------------------------------------------------------
@@ -304,6 +326,12 @@ export interface RdbmsDriver extends BaseDriver {
 	 * missing primitive.
 	 */
 	aggregate(target: string, request: AggregateRequest): Promise<AggregateResult>;
+	/**
+	 * Top-N distinct values for one column plus overall distinct
+	 * cardinality. Drives `data.source.rdbms.sample-distinct` and
+	 * downstream Family-5 categorical-profile skills.
+	 */
+	distinct(target: string, request: DistinctRequest): Promise<DistinctResult>;
 }
 
 export interface KvDriver extends BaseDriver {
@@ -329,6 +357,10 @@ export interface FileDriver extends BaseDriver {
 	 *  expose this for Family 5 quality / distribution / dependency
 	 *  skills. Other file kinds throw. */
 	aggregate?(target: string | undefined, request: AggregateRequest): Promise<AggregateResult>;
+	/** Optional. Same shape as the RDBMS `distinct` method; the
+	 *  consolidated DuckDB-backed file driver implements it for the
+	 *  file family. Other file drivers throw. */
+	distinct?(target: string | undefined, request: DistinctRequest): Promise<DistinctResult>;
 }
 
 export type Driver = RdbmsDriver | KvDriver | FileDriver;

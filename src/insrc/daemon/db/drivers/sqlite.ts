@@ -18,6 +18,8 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	DistinctRequest,
+	DistinctResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -29,8 +31,11 @@ import {
 	buildExplainSql,
 	buildSampleSql,
 	compileAggregate,
+	compileDistinct,
 	quoteTarget,
 	readAggregateRow,
+	readDistinctCount,
+	readDistinctRows,
 } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
@@ -131,6 +136,23 @@ class SqliteDriver implements RdbmsDriver {
 		const row = this.db.prepare(compiled.text)
 			.get(...compiled.values as unknown[]) as Record<string, unknown> | undefined;
 		return { target, values: readAggregateRow(row, compiled.keys) };
+	}
+
+	async distinct(target: string, request: DistinctRequest): Promise<DistinctResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		const compiled = compileDistinct(target, request, cols, SQLITE_DIALECT);
+		log.debug({ id: this.id }, 'distinct query');
+		const countRow = this.db.prepare(compiled.distinctCountSql)
+			.get() as Record<string, unknown> | undefined;
+		const valueRows = this.db.prepare(compiled.topValuesSql)
+			.all() as Record<string, unknown>[];
+		return {
+			target,
+			column: request.column,
+			distinctCount: readDistinctCount(countRow),
+			topValues: readDistinctRows(valueRows),
+		};
 	}
 
 	async close(): Promise<void> {
