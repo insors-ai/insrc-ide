@@ -1,74 +1,146 @@
-import { Schema, Field, Utf8, Int32, Bool, Float32, FixedSizeList } from 'apache-arrow';
-import type { Table } from '@lancedb/lancedb';
+/**
+ * DuckDB-backed entity persistence (plans/storage-migration-duckdb.md
+ * Phase B.6). Replaces the LanceDB Arrow-record path with plain SQL
+ * against the `entity` table on the storage pool.
+ *
+ * The same `entity` table holds both the graph stub (id, kind --
+ * referenced by `relation.src/dst`) and the full entity row (body,
+ * embedding, etc.). A single upsert path keeps stubs and full rows in
+ * sync; columns absent from a stub upsert simply stay at their
+ * SQL-DEFAULT sentinels (empty string, 0, false). Vector search
+ * happens via `array_distance(embedding, ?)` against the HNSW index;
+ * brute-force fallback works on tables small enough to scan if the
+ * vss extension fails to load (logged at storage-pool init).
+ */
+
+import { arrayValue } from '@duckdb/node-api';
 import type { DbClient } from './client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
-import { loadConfig } from '../agent/config.js';
-
-const EMBEDDING_DIM = loadConfig().models.providers.local.embeddingDim;
 
 // ---------------------------------------------------------------------------
-// Apache Arrow schema for the LanceDB 'entities' table.
-// All fields are non-nullable — avoids Bool null-bitmap bugs and type-
-// inference failures on first insert. Empty string '' is the sentinel for
-// optional Utf8 fields that are absent; false for optional booleans.
+// Row <-> domain mapping (snake_case columns <-> camelCase Entity fields)
 // ---------------------------------------------------------------------------
-const ENTITIES_SCHEMA = new Schema([
-  new Field('id',             new Utf8(),   false),
-  new Field('kind',           new Utf8(),   false),
-  new Field('name',           new Utf8(),   false),
-  new Field('language',       new Utf8(),   false),
-  new Field('repo',           new Utf8(),   false),
-  new Field('file',           new Utf8(),   false),
-  new Field('startLine',      new Int32(),  false),
-  new Field('endLine',        new Int32(),  false),
-  new Field('body',           new Utf8(),   false),
-  new Field('indexedAt',      new Utf8(),   false),
-  new Field('embeddingModel', new Utf8(),   false),
-  new Field('isExported',     new Bool(),   false),
-  new Field('isAsync',        new Bool(),   false),
-  new Field('isAbstract',     new Bool(),   false),
-  new Field('signature',      new Utf8(),   false),
-  new Field('hash',           new Utf8(),   false),
-  new Field('rootPath',       new Utf8(),   false),
-  new Field('artifact',       new Bool(),   false),
-  new Field('vector', new FixedSizeList(EMBEDDING_DIM, new Field('item', new Float32(), true)), false),
-]);
 
-// Module-level cache — re-used across calls within the same daemon process
-let _table: Table | null = null;
+function entityToParams(entity: Entity): unknown[] {
+  return [
+    entity.id,
+    entity.kind,
+    entity.name,
+    entity.language,
+    entity.repo,
+    entity.file,
+    entity.startLine,
+    entity.endLine,
+    entity.body,
+    entity.indexedAt,
+    entity.embeddingModel ?? '',
+    entity.isExported  ?? false,
+    entity.isAsync     ?? false,
+    entity.isAbstract  ?? false,
+    entity.signature   ?? '',
+    entity.hash        ?? '',
+    entity.rootPath    ?? '',
+    entity.artifact    ?? false,
+    entity.embedding.length > 0 ? arrayValue(entity.embedding) : null,
+  ];
+}
 
-async function getEntitiesTable(db: DbClient): Promise<Table | null> {
-  if (_table !== null) return _table;
-  const names = await db.lance.tableNames();
-  if (!names.includes('entities')) return null;
-  _table = await db.lance.openTable('entities');
-  return _table;
+const INSERT_SQL = `
+  INSERT INTO entity (
+    id, kind, name, language, repo, file, start_line, end_line,
+    body, indexed_at, embedding_model,
+    is_exported, is_async, is_abstract,
+    signature, hash, root_path, artifact, embedding
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT (id) DO UPDATE SET
+    kind            = excluded.kind,
+    name            = excluded.name,
+    language        = excluded.language,
+    repo            = excluded.repo,
+    file            = excluded.file,
+    start_line      = excluded.start_line,
+    end_line        = excluded.end_line,
+    body            = excluded.body,
+    indexed_at      = excluded.indexed_at,
+    embedding_model = excluded.embedding_model,
+    is_exported     = excluded.is_exported,
+    is_async        = excluded.is_async,
+    is_abstract     = excluded.is_abstract,
+    signature       = excluded.signature,
+    hash            = excluded.hash,
+    root_path       = excluded.root_path,
+    artifact        = excluded.artifact,
+    embedding       = excluded.embedding`;
+
+/**
+ * DuckDB returns FLOAT[N] columns as `{ items: number[] }` (the
+ * DuckDBArrayValue runtime shape). Unwrap to a plain number[] for
+ * the Entity contract; null becomes an empty array (entities
+ * without an embedding yet).
+ */
+function unwrapEmbedding(raw: unknown): number[] {
+  if (raw === null || raw === undefined) return [];
+  if (Array.isArray(raw)) return raw as number[];
+  const inner = (raw as { items?: unknown }).items;
+  return Array.isArray(inner) ? (inner as number[]) : [];
+}
+
+function rowToEntity(row: Record<string, unknown>): Entity {
+  const entity: Entity = {
+    id:        row['id']         as string,
+    kind:      row['kind']       as EntityKind,
+    name:      (row['name']      as string) ?? '',
+    language:  (row['language']  as Language) ?? '',
+    repo:      (row['repo']      as string) ?? '',
+    file:      (row['file']      as string) ?? '',
+    startLine: Number(row['start_line'] ?? 0),
+    endLine:   Number(row['end_line']   ?? 0),
+    body:      (row['body']      as string) ?? '',
+    indexedAt: (row['indexed_at'] as string) ?? '',
+    embedding: unwrapEmbedding(row['embedding']),
+  };
+  const em = row['embedding_model'] as string; if (em) entity.embeddingModel = em;
+  if (row['is_exported'] === true) entity.isExported = true;
+  if (row['is_async']    === true) entity.isAsync    = true;
+  if (row['is_abstract'] === true) entity.isAbstract = true;
+  const sg = row['signature'] as string; if (sg) entity.signature = sg;
+  const hh = row['hash']      as string; if (hh) entity.hash      = hh;
+  const rp = row['root_path'] as string; if (rp) entity.rootPath  = rp;
+  if (row['artifact'] === true) entity.artifact = true;
+  return entity;
 }
 
 // ---------------------------------------------------------------------------
-// Graph stub helpers -- DuckDB-backed (post Kuzu rip-out, Phase A.11).
+// CRUD
 // ---------------------------------------------------------------------------
 
-/** Upsert the Entity stub: insert if absent, otherwise update kind. */
-async function upsertEntityStub(db: DbClient, id: string, kind: string): Promise<void> {
-  await db.duck.exec(
-    'INSERT INTO entity (id, kind) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET kind = excluded.kind',
-    [id, kind],
-  );
+/**
+ * Upsert a batch of entities. Replaces the LanceDB add() + Kuzu stub
+ * path with a single per-row INSERT ... ON CONFLICT DO UPDATE on the
+ * `entity` table. Embeddings travel through alongside row data; rows
+ * without embeddings (the indexer's first pass) get NULL in the
+ * embedding column and the embedder fills them in later.
+ *
+ * Per-row SQL avoids the Lance pre-delete pattern; ON CONFLICT covers
+ * re-indexing. The previous implementation pre-deleted file entities
+ * before insert; the new pattern leaves that responsibility to
+ * `deleteEntitiesForFile` for explicit purges.
+ */
+export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<void> {
+  if (entities.length === 0) return;
+  for (const e of entities) {
+    await db.duck.exec(INSERT_SQL, entityToParams(e) as never[]);
+  }
 }
 
 /**
- * Batched DETACH-DELETE equivalent: remove the given entity ids from
- * the graph along with all incident edges. Relations first, then
- * entities -- a partial failure between the two never leaves dangling
- * edges. The opposite order would orphan edges; the chosen order
- * leaves at most orphan entity rows without relations, which are
- * harmless. No transaction wrapping because GraphClient acquires a
- * fresh Connection per call (BEGIN/COMMIT across calls would land on
- * different Connections).
+ * Detach-delete pattern: edges first, then rows. Order matters so a
+ * partial failure never leaves dangling edges. Mirrors the helper
+ * semantics from the Phase A Kuzu rip-out (no transaction wrap --
+ * GraphClient acquires fresh Connection per call).
  */
 const ENTITY_DELETE_CHUNK = 500;
-async function detachDeleteEntityStubs(db: DbClient, ids: readonly string[]): Promise<void> {
+async function detachDeleteEntities(db: DbClient, ids: readonly string[]): Promise<void> {
   if (ids.length === 0) return;
   for (let i = 0; i < ids.length; i += ENTITY_DELETE_CHUNK) {
     const chunk = ids.slice(i, i + ENTITY_DELETE_CHUNK);
@@ -84,168 +156,59 @@ async function detachDeleteEntityStubs(db: DbClient, ids: readonly string[]): Pr
   }
 }
 
-// ---------------------------------------------------------------------------
-// Row ↔ Entity mapping
-// ---------------------------------------------------------------------------
-
-const ZERO_VEC = new Array<number>(EMBEDDING_DIM).fill(0);
-
-function entityToRow(entity: Entity): Record<string, unknown> {
-  return {
-    id:             entity.id,
-    kind:           entity.kind,
-    name:           entity.name,
-    language:       entity.language,
-    repo:           entity.repo,
-    file:           entity.file,
-    startLine:      entity.startLine,
-    endLine:        entity.endLine,
-    body:           entity.body,
-    indexedAt:      entity.indexedAt,
-    embeddingModel: entity.embeddingModel ?? '',
-    // Non-nullable with sentinels: false / '' for absent optional fields
-    isExported:     entity.isExported  ?? false,
-    isAsync:        entity.isAsync     ?? false,
-    isAbstract:     entity.isAbstract  ?? false,
-    signature:      entity.signature   ?? '',
-    hash:           entity.hash        ?? '',
-    rootPath:       entity.rootPath    ?? '',
-    artifact:       entity.artifact    ?? false,
-    vector:         entity.embedding.length === EMBEDDING_DIM ? entity.embedding : ZERO_VEC,
-  };
-}
-
-function rowToEntity(row: Record<string, unknown>): Entity {
-  const entity: Entity = {
-    id:        row['id']        as string,
-    kind:      row['kind']      as EntityKind,
-    name:      row['name']      as string,
-    language:  row['language']  as Language,
-    repo:      row['repo']      as string,
-    file:      row['file']      as string,
-    startLine: row['startLine'] as number,
-    endLine:   row['endLine']   as number,
-    body:      row['body']      as string,
-    indexedAt: row['indexedAt'] as string,
-    embedding: (row['vector']   as number[]) ?? [],
-  };
-  // Optional fields — '' / false are sentinels for "not set"
-  const em = row['embeddingModel'] as string;  if (em)           entity.embeddingModel = em;
-  if (row['isExported'] === true)  entity.isExported  = true;
-  if (row['isAsync']    === true)  entity.isAsync     = true;
-  if (row['isAbstract'] === true)  entity.isAbstract  = true;
-  const sg = row['signature'] as string;       if (sg)           entity.signature      = sg;
-  const hh = row['hash']      as string;       if (hh)           entity.hash           = hh;
-  const rp = row['rootPath']  as string;       if (rp)           entity.rootPath       = rp;
-  if (row['artifact'] === true) entity.artifact = true;
-  return entity;
-}
-
-// ---------------------------------------------------------------------------
-// CRUD
-// ---------------------------------------------------------------------------
-
 /**
- * Insert a batch of entities into LanceDB and create corresponding Kuzu
- * Entity stub nodes for graph traversal.
- * The indexer pre-deletes file entities before calling this, so add() suffices.
- */
-export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<void> {
-  if (entities.length === 0) return;
-  const rows = entities.map(entityToRow);
-
-  // Create table with explicit schema on first use, or append to existing
-  let table = await getEntitiesTable(db);
-  if (table === null) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _table = await (db.lance as any).createEmptyTable('entities', ENTITIES_SCHEMA);
-    table = _table!;
-  }
-  await table.add(rows);
-
-  // Create lightweight Entity stubs in the graph for edge endpoints.
-  // Dispatches to Kuzu, DuckDB, or both based on INSRC_GRAPH_BACKEND
-  for (const e of entities) {
-    await upsertEntityStub(db, e.id, e.kind);
-  }
-}
-
-/**
- * Delete all entity records whose `file` field matches the given path.
- * Also DETACH DELETEs the corresponding Kuzu stubs (removes connected edges too).
+ * Delete every entity row whose `file` matches the given path. Also
+ * removes incident edges so the graph stays clean.
  */
 export async function deleteEntitiesForFile(db: DbClient, filePath: string): Promise<void> {
-  const table = await getEntitiesTable(db);
-  if (table === null) return;
-
-  const safeFile = filePath.replace(/'/g, "''");
-  const rows = await table.query().where(`file = '${safeFile}'`).select(['id']).toArray();
-  await table.delete(`file = '${safeFile}'`);
-
-  await detachDeleteEntities(db, rows.map(r => r['id'] as string));
+  const rows = await db.duck.query<{ id: string }>(
+    'SELECT id FROM entity WHERE file = ?',
+    [filePath],
+  );
+  await detachDeleteEntities(db, rows.map(r => r.id));
 }
 
 /**
- * Delete all entity records belonging to a repo.
+ * Delete every entity row belonging to a repo. Used by `repo.remove`.
  */
 export async function deleteEntitiesForRepo(db: DbClient, repo: string): Promise<void> {
-  const table = await getEntitiesTable(db);
-  if (table === null) return;
-
-  const safeRepo = repo.replace(/'/g, "''");
-  const rows = await table.query().where(`repo = '${safeRepo}'`).select(['id']).toArray();
-  await table.delete(`repo = '${safeRepo}'`);
-
-  await detachDeleteEntities(db, rows.map(r => r['id'] as string));
+  const rows = await db.duck.query<{ id: string }>(
+    'SELECT id FROM entity WHERE repo = ?',
+    [repo],
+  );
+  await detachDeleteEntities(db, rows.map(r => r.id));
 }
 
-/**
- * Batch DETACH DELETE Entity stubs. One round-trip per chunk vs. one
- * round-trip per entity makes a 50k-entity repo purge drop from
- * ~40 s to <2 s. Dispatches to Kuzu, DuckDB, or both based on
- * INSRC_GRAPH_BACKEND.
- */
-async function detachDeleteEntities(db: DbClient, ids: readonly string[]): Promise<void> {
-  await detachDeleteEntityStubs(db, ids);
-}
-
-/**
- * Fetch a single entity by its stable ID. Returns null if not found.
- */
+/** Fetch a single entity by its stable ID. Returns null if not found. */
 export async function getEntity(db: DbClient, id: string): Promise<Entity | null> {
-  const table = await getEntitiesTable(db);
-  if (table === null) return null;
-  const safeId = id.replace(/'/g, "''");
-  const rows = await table.query().where(`id = '${safeId}'`).limit(1).toArray();
-  return rows[0] ? rowToEntity(rows[0] as Record<string, unknown>) : null;
+  const rows = await db.duck.query('SELECT * FROM entity WHERE id = ?', [id]);
+  if (rows.length === 0) return null;
+  return rowToEntity(rows[0]!);
 }
 
 /**
  * Batched form of getEntity. Returns the matched subset (no null
  * placeholders); ids that don't match are omitted. Order is not
- * preserved -- caller should re-key by id if it needs lookup.
- *
- * Chunked at 500 to bound the SQL string size + prepared-statement
- * parameter memory, matching eeae2ef7ac7's DETACH DELETE chunk size.
+ * preserved -- caller should re-key by id if it needs lookup. Chunked
+ * at 500 to bound the SQL string size + prepared-statement parameter
+ * memory.
  */
 export async function getEntitiesByIds(
   db: DbClient,
   ids: readonly string[],
 ): Promise<Entity[]> {
   if (ids.length === 0) return [];
-  const table = await getEntitiesTable(db);
-  if (table === null) return [];
 
   const CHUNK = 500;
   const out: Entity[] = [];
   for (let i = 0; i < ids.length; i += CHUNK) {
     const slice = ids.slice(i, i + CHUNK);
-    const safe = slice.map(id => id.replace(/'/g, "''"));
-    const inList = safe.map(id => `'${id}'`).join(', ');
-    const rows = await table.query().where(`id IN (${inList})`).toArray();
-    for (const r of rows) {
-      out.push(rowToEntity(r as Record<string, unknown>));
-    }
+    const placeholders = slice.map(() => '?').join(', ');
+    const rows = await db.duck.query(
+      `SELECT * FROM entity WHERE id IN (${placeholders})`,
+      [...slice],
+    );
+    for (const r of rows) out.push(rowToEntity(r));
   }
   return out;
 }
@@ -254,69 +217,56 @@ export async function getEntitiesByIds(
  * Find entities by name + kind filter. Intended for structured
  * lookups (e.g. the artifact:er kind resolving user-supplied table
  * names into Entity rows) where the caller knows the exact name but
- * not the id. Returns all matches up to `limit`. Optional `repo`
- * narrows the search to a single repo root.
- *
- * Uses a plain LanceDB filter -- no vector search, no embeddings
- * required.
+ * not the id. Returns all matches up to `limit`.
  */
 export async function findEntitiesByName(
   db: DbClient,
   names: readonly string[],
   opts: { readonly kinds?: readonly EntityKind[] | undefined; readonly repo?: string | undefined; readonly limit?: number | undefined } = {},
 ): Promise<Entity[]> {
-  if (names.length === 0) { return []; }
-  const table = await getEntitiesTable(db);
-  if (table === null) { return []; }
+  if (names.length === 0) return [];
 
-  const safeNames = names.map(n => n.replace(/'/g, "''"));
-  const nameFilter = safeNames.map(n => `'${n}'`).join(', ');
-  const conditions: string[] = [`name IN (${nameFilter})`];
+  const namePlaceholders = names.map(() => '?').join(', ');
+  const conditions: string[] = [`name IN (${namePlaceholders})`];
+  const params: unknown[] = [...names];
 
   if (opts.kinds !== undefined && opts.kinds.length > 0) {
-    const safeKinds = opts.kinds.map(k => k.replace(/'/g, "''"));
-    const kindFilter = safeKinds.map(k => `'${k}'`).join(', ');
-    conditions.push(`kind IN (${kindFilter})`);
+    const kindPlaceholders = opts.kinds.map(() => '?').join(', ');
+    conditions.push(`kind IN (${kindPlaceholders})`);
+    params.push(...opts.kinds);
   }
   if (opts.repo !== undefined) {
-    const safeRepo = opts.repo.replace(/'/g, "''");
-    conditions.push(`repo = '${safeRepo}'`);
+    conditions.push('repo = ?');
+    params.push(opts.repo);
   }
 
   const limit = opts.limit !== undefined ? opts.limit : 50;
-  const rows = await table.query()
-    .where(conditions.join(' AND '))
-    .limit(limit)
-    .toArray();
-  return rows.map(r => rowToEntity(r as Record<string, unknown>));
+  const rows = await db.duck.query(
+    `SELECT * FROM entity WHERE ${conditions.join(' AND ')} LIMIT ${limit}`,
+    params as never[],
+  );
+  return rows.map(rowToEntity);
 }
 
-/**
- * List all entities belonging to a repo.
- */
+/** List all entities belonging to a repo. */
 export async function listEntitiesForRepo(db: DbClient, repo: string): Promise<Entity[]> {
-  const table = await getEntitiesTable(db);
-  if (table === null) return [];
-  const safeRepo = repo.replace(/'/g, "''");
-  const rows = await table.query().where(`repo = '${safeRepo}'`).toArray();
-  return rows.map(r => rowToEntity(r as Record<string, unknown>));
+  const rows = await db.duck.query('SELECT * FROM entity WHERE repo = ?', [repo]);
+  return rows.map(rowToEntity);
 }
 
-/**
- * List entities not yet embedded (embeddingModel = '' sentinel).
- */
+/** List entities not yet embedded (embedding_model = '' sentinel). */
 export async function listUnembeddedEntities(db: DbClient, repo: string): Promise<Entity[]> {
-  const table = await getEntitiesTable(db);
-  if (table === null) return [];
-  const safeRepo = repo.replace(/'/g, "''");
-  const rows = await table.query()
-    .where(`repo = '${safeRepo}' AND embeddingModel = ''`)
-    .toArray();
-  return rows.map(r => rowToEntity(r as Record<string, unknown>));
+  const rows = await db.duck.query(
+    "SELECT * FROM entity WHERE repo = ? AND embedding_model = ''",
+    [repo],
+  );
+  return rows.map(rowToEntity);
 }
 
 /**
- * Update the embedding vector and model name for an entity (used by the reembed job).
+ * Update the embedding vector and model name for an entity (used by
+ * the reembed job). Assumes the row already exists; no-op if it
+ * doesn't (no UPSERT path -- `upsertEntities` covers full creation).
  */
 export async function updateEmbedding(
   db: DbClient,
@@ -324,13 +274,8 @@ export async function updateEmbedding(
   embedding: number[],
   embeddingModel: string,
 ): Promise<void> {
-  const table = await getEntitiesTable(db);
-  if (table === null) return;
-  const safeId = id.replace(/'/g, "''");
-  const rows = await table.query().where(`id = '${safeId}'`).limit(1).toArray();
-  if (rows.length === 0) return;
-
-  const updated = { ...(rows[0] as Record<string, unknown>), vector: embedding, embeddingModel };
-  await table.delete(`id = '${safeId}'`);
-  await table.add([updated]);
+  await db.duck.exec(
+    'UPDATE entity SET embedding = ?, embedding_model = ? WHERE id = ?',
+    [arrayValue(embedding), embeddingModel, id],
+  );
 }

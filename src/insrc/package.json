@@ -78,6 +78,7 @@
     "test:graph-repos": "tsx --test db/__tests__/duckdb-repos-write.test.ts",
     "test:graph-search": "tsx --test db/__tests__/duckdb-search-queries.test.ts",
     "test:todos": "tsx --test db/__tests__/todos-duckdb.test.ts",
+    "test:entities": "tsx --test db/__tests__/entities-duckdb.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }
