@@ -80,10 +80,15 @@ until the first Family-5 skill needs them; 0.7-0.9 (KV substrate +
 naming reconciliation) remain. The data-driver-duckdb-files
 prerequisite is **fully shipped** -- every file kind already routes
 through the consolidated DuckDB-backed driver with `db_file_*` tools
-in place. Slice 3.4 has a partial wrapper from skills-core 9. Skill
-core (skills-core.md) is fully shipped. Phase 1 (source-introspection
-skills) is the next logical starting point now that the file
-substrate is in.
+in place. Phase 1.1 (`data.source.rdbms.describe-table`) and Phase
+1.3 (`data.source.file.describe`) are landed; Phase 2.3
+(`data.source.file.sample-rows`, `data.source.file.sample-shape`)
+also landed in the same batch (the file-side sampling skills are
+unblocked once the file substrate is in). Phase 1.2 / 1.4 / 2.1 /
+2.2 / 2.4 still pending -- the KV substrate (0.7 / 0.8) and naming
+reconciliation (0.9) gate most of the remaining source-introspection
++ source-sampling work. Slice 3.4 has a partial wrapper from
+skills-core 9. Skill core (skills-core.md) is fully shipped.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -96,13 +101,13 @@ substrate is in.
 | 0.7 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
 | 0.8 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
 | 0.9 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
-| 1.1 | source-introspection: rdbms | pending | describe-table, list-tables, list-indexes |
+| 1.1 | source-introspection: rdbms | partial | `data.source.rdbms.describe-table` shipped (`daemon/skills/built-ins/data.source.rdbms.describe-table.ts`), thin wrapper over `db_sql_describe`. `list-tables` and `list-indexes` skills still pending -- their underlying tools (`db_sql_list_tables`, `db_sql_list_indexes`) don't exist yet; will land alongside those tools |
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
-| 1.3 | source-introspection: file | pending | one skill variant per file kind (csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx). All variants are thin wrappers over the consolidated `db_file_describe` tool -- the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently |
+| 1.3 | source-introspection: file | done | `data.source.file.describe` shipped (`daemon/skills/built-ins/data.source.file.describe.ts`). One skill covers all 12 file kinds via `connection-family: ['file', csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx]` precondition. Thin wrapper over `db_file_describe`; the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently. xlsx target selects a sheet |
 | 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
 | 2.1 | source-sampling: rdbms | pending | sample-rows, sample-distinct |
 | 2.2 | source-sampling: kv | pending | scan-keys, get-value, sample-shape |
-| 2.3 | source-sampling: file | pending | sample-rows + sample-shape across all 12 file kinds, all routed through `db_file_sample` / `db_file_sample_shape` (which sit on the consolidated DuckDB-backed driver). For xlsx, `target` selects a sheet; for directory connections, the driver globs / walks-and-converts under the hood |
+| 2.3 | source-sampling: file | done | `data.source.file.sample-rows` and `data.source.file.sample-shape` shipped. Both are thin wrappers (`db_file_sample` / `db_file_sample_shape`) covering all 12 file kinds via the consolidated DuckDB-backed driver. xlsx target selects a sheet; directory connections glob / walk-and-convert transparently. WHERE clause supported on sample-rows; sample-shape pulls a sample then runs `inferShape` for nested types (json / jsonl / ndjson) |
 | 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |
 | 3.1 | code-binding: class.extract-fields | pending | cross-owner into code-analyzer |
 | 3.2 | code-binding: class.locate-references | pending | |

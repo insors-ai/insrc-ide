@@ -1,0 +1,24 @@
+{
+  "input": {
+    "connectionId": "file-orders-csv",
+    "limit": 10
+  },
+  "fakeTools": {
+    "db_file_sample": {
+      "content": "**/data/orders.csv** -- 3 rows",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "columns": ["id", "user_id", "amount"],
+        "rows": [
+          { "id": 1, "user_id": 1, "amount": 12.5  },
+          { "id": 2, "user_id": 2, "amount": 7.0   },
+          { "id": 3, "user_id": 1, "amount": 99.99 }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

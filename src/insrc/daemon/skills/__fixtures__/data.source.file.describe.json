@@ -1,0 +1,22 @@
+{
+  "input": {
+    "connectionId": "file-orders-csv"
+  },
+  "fakeTools": {
+    "db_file_describe": {
+      "content": "**/data/orders.csv** (inferred)\n\n| column | type | nullable |\n|---|---|---|\n| id | INTEGER | no |\n| user_id | INTEGER | no |\n| amount | DOUBLE | no |\n| created_at | VARCHAR | yes |",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "columns": [
+          { "name": "id",         "type": "INTEGER", "nullable": false },
+          { "name": "user_id",    "type": "INTEGER", "nullable": false },
+          { "name": "amount",     "type": "DOUBLE",  "nullable": false },
+          { "name": "created_at", "type": "VARCHAR", "nullable": true  }
+        ],
+        "source": "inferred"
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

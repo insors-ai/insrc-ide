@@ -16,12 +16,23 @@
 import { getLogger } from '../../shared/logger.js';
 import { listSkills } from './registry.js';
 import { registerDataLineageSkill } from './built-ins/data-lineage.js';
+import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
+import { registerDataSourceFileDescribeSkill } from './built-ins/data.source.file.describe.js';
+import { registerDataSourceFileSampleRowsSkill } from './built-ins/data.source.file.sample-rows.js';
+import { registerDataSourceFileSampleShapeSkill } from './built-ins/data.source.file.sample-shape.js';
 
 const log = getLogger('skills-bootstrap');
 
 export function registerAllSkills(): void {
   // Atomic skills first.
   registerDataLineageSkill();
+  // Phase 1.1 -- data-analyzer-skills.md
+  registerDataSourceRdbmsDescribeTableSkill();
+  // Phase 1.3 + 2.3 -- one skill spans all 12 file kinds via the
+  // consolidated DuckDB-backed driver.
+  registerDataSourceFileDescribeSkill();
+  registerDataSourceFileSampleRowsSkill();
+  registerDataSourceFileSampleShapeSkill();
 
   // Composite skills go here once any are registered. Empty in v1.
 
