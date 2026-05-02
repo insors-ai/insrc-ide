@@ -17,22 +17,32 @@ import { getLogger } from '../../shared/logger.js';
 import { listSkills } from './registry.js';
 import { registerDataLineageSkill } from './built-ins/data-lineage.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
+import { registerDataSourceRdbmsSampleRowsSkill } from './built-ins/data.source.rdbms.sample-rows.js';
 import { registerDataSourceFileDescribeSkill } from './built-ins/data.source.file.describe.js';
 import { registerDataSourceFileSampleRowsSkill } from './built-ins/data.source.file.sample-rows.js';
 import { registerDataSourceFileSampleShapeSkill } from './built-ins/data.source.file.sample-shape.js';
+import { registerDataSourceKvScanKeysSkill } from './built-ins/data.source.kv.scan-keys.js';
+import { registerDataSourceKvGetValueSkill } from './built-ins/data.source.kv.get-value.js';
+import { registerDataSourceKvSampleShapeSkill } from './built-ins/data.source.kv.sample-shape.js';
 
 const log = getLogger('skills-bootstrap');
 
 export function registerAllSkills(): void {
   // Atomic skills first.
   registerDataLineageSkill();
-  // Phase 1.1 -- data-analyzer-skills.md
+  // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
+  registerDataSourceRdbmsSampleRowsSkill();
   // Phase 1.3 + 2.3 -- one skill spans all 12 file kinds via the
   // consolidated DuckDB-backed driver.
   registerDataSourceFileDescribeSkill();
   registerDataSourceFileSampleRowsSkill();
   registerDataSourceFileSampleShapeSkill();
+  // Phase 2.2 -- KV sampling (redis / valkey / keydb / mongodb /
+  // cassandra / nats / dynamodb / etcd / memcached).
+  registerDataSourceKvScanKeysSkill();
+  registerDataSourceKvGetValueSkill();
+  registerDataSourceKvSampleShapeSkill();
 
   // Composite skills go here once any are registered. Empty in v1.
 

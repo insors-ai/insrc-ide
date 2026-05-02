@@ -1,0 +1,18 @@
+{
+  "input": {
+    "connectionId": "redis-cache",
+    "prefix": "session:",
+    "limit": 100
+  },
+  "fakeTools": {
+    "db_kv_scan": {
+      "content": "3 keys",
+      "isError": false,
+      "data": {
+        "keys": ["session:abc", "session:def", "session:ghi"],
+        "truncated": false
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

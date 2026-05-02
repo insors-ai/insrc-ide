@@ -1,0 +1,18 @@
+{
+  "input": {
+    "connectionId": "redis-cache",
+    "key": "session:abc"
+  },
+  "fakeTools": {
+    "db_kv_get": {
+      "content": "**session:abc** (object)",
+      "isError": false,
+      "data": {
+        "key": "session:abc",
+        "value": { "userId": 42, "expiresAt": "2026-05-03T00:00:00Z" },
+        "type": "object"
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

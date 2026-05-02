@@ -80,14 +80,19 @@ until the first Family-5 skill needs them; 0.7-0.9 (KV substrate +
 naming reconciliation) remain. The data-driver-duckdb-files
 prerequisite is **fully shipped** -- every file kind already routes
 through the consolidated DuckDB-backed driver with `db_file_*` tools
-in place. Phase 1.1 (`data.source.rdbms.describe-table`) and Phase
-1.3 (`data.source.file.describe`) are landed; Phase 2.3
-(`data.source.file.sample-rows`, `data.source.file.sample-shape`)
-also landed in the same batch (the file-side sampling skills are
-unblocked once the file substrate is in). Phase 1.2 / 1.4 / 2.1 /
-2.2 / 2.4 still pending -- the KV substrate (0.7 / 0.8) and naming
-reconciliation (0.9) gate most of the remaining source-introspection
-+ source-sampling work. Slice 3.4 has a partial wrapper from
+in place. Phase 1.1 (`data.source.rdbms.describe-table`), Phase 1.3
+(`data.source.file.describe`), Phase 2.1
+(`data.source.rdbms.sample-rows`; `sample-distinct` blocked on
+0.3), Phase 2.2 (all three KV sampling skills:
+`data.source.kv.scan-keys` / `get-value` / `sample-shape`), and
+Phase 2.3 (`data.source.file.sample-rows`,
+`data.source.file.sample-shape`) are landed. Phase 1.2
+(source-introspection: kv) is blocked on 0.7 / 0.8 (the
+`db_kv_list_namespaces` / `db_kv_describe_namespace` tools);
+Phase 1.4 / 2.4 (doc family) blocked on 0.9 naming
+reconciliation -- though plan default is to collapse `doc` into
+`kv`, which the Phase 2.2 KV sampling skills already cover for
+mongo / cassandra. Slice 3.4 has a partial wrapper from
 skills-core 9. Skill core (skills-core.md) is fully shipped.
 
 | Phase | Slice | State | Notes |
@@ -105,8 +110,8 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
 | 1.3 | source-introspection: file | done | `data.source.file.describe` shipped (`daemon/skills/built-ins/data.source.file.describe.ts`). One skill covers all 12 file kinds via `connection-family: ['file', csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx]` precondition. Thin wrapper over `db_file_describe`; the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently. xlsx target selects a sheet |
 | 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
-| 2.1 | source-sampling: rdbms | pending | sample-rows, sample-distinct |
-| 2.2 | source-sampling: kv | pending | scan-keys, get-value, sample-shape |
+| 2.1 | source-sampling: rdbms | partial | `data.source.rdbms.sample-rows` shipped (`daemon/skills/built-ins/data.source.rdbms.sample-rows.ts`), thin wrapper over `db_sql_sample` with structured WHERE support. `sample-distinct` still pending -- blocked on `db_sql_distinct` (Phase 0.3) |
+| 2.2 | source-sampling: kv | done | All three skills shipped: `data.source.kv.scan-keys` (over `db_kv_scan`), `data.source.kv.get-value` (over `db_kv_get`), `data.source.kv.sample-shape` (over `db_kv_sample_shape`). Covers redis / valkey / keydb / mongodb / cassandra / nats / dynamodb / etcd / memcached |
 | 2.3 | source-sampling: file | done | `data.source.file.sample-rows` and `data.source.file.sample-shape` shipped. Both are thin wrappers (`db_file_sample` / `db_file_sample_shape`) covering all 12 file kinds via the consolidated DuckDB-backed driver. xlsx target selects a sheet; directory connections glob / walk-and-convert transparently. WHERE clause supported on sample-rows; sample-shape pulls a sample then runs `inferShape` for nested types (json / jsonl / ndjson) |
 | 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |
 | 3.1 | code-binding: class.extract-fields | pending | cross-owner into code-analyzer |
