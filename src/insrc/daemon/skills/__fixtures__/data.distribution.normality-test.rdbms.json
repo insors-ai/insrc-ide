@@ -1,0 +1,188 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "column": "amount"
+  },
+  "fakeTools": {
+    "db_sql_aggregate": {
+      "content": "agg",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "values": {
+          "amount__count_non_null": 1000,
+          "amount__avg": 50.0,
+          "amount__stddev": 10.0
+        }
+      }
+    },
+    "db_sql_sample": {
+      "content": "sample",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "columns": [
+          "amount"
+        ],
+        "rows": [
+          {
+            "amount": 59.34
+          },
+          {
+            "amount": 52.69
+          },
+          {
+            "amount": 46.52
+          },
+          {
+            "amount": 54.08
+          },
+          {
+            "amount": 62.91
+          },
+          {
+            "amount": 32.57
+          },
+          {
+            "amount": 58.51
+          },
+          {
+            "amount": 41.08
+          },
+          {
+            "amount": 35.27
+          },
+          {
+            "amount": 56.5
+          },
+          {
+            "amount": 47.9
+          },
+          {
+            "amount": 58.22
+          },
+          {
+            "amount": 48.47
+          },
+          {
+            "amount": 67.9
+          },
+          {
+            "amount": 45.43
+          },
+          {
+            "amount": 49.17
+          },
+          {
+            "amount": 61.01
+          },
+          {
+            "amount": 36.8
+          },
+          {
+            "amount": 45.5
+          },
+          {
+            "amount": 45.18
+          },
+          {
+            "amount": 58.02
+          },
+          {
+            "amount": 45.79
+          },
+          {
+            "amount": 52.43
+          },
+          {
+            "amount": 46.26
+          },
+          {
+            "amount": 43.71
+          },
+          {
+            "amount": 53.55
+          },
+          {
+            "amount": 64.98
+          },
+          {
+            "amount": 42.79
+          },
+          {
+            "amount": 47.54
+          },
+          {
+            "amount": 36.17
+          },
+          {
+            "amount": 49.07
+          },
+          {
+            "amount": 45.68
+          },
+          {
+            "amount": 50.95
+          },
+          {
+            "amount": 66.82
+          },
+          {
+            "amount": 48.31
+          },
+          {
+            "amount": 66.52
+          },
+          {
+            "amount": 47.97
+          },
+          {
+            "amount": 42.71
+          },
+          {
+            "amount": 45.91
+          },
+          {
+            "amount": 50.35
+          },
+          {
+            "amount": 49.14
+          },
+          {
+            "amount": 58.3
+          },
+          {
+            "amount": 52.6
+          },
+          {
+            "amount": 49.3
+          },
+          {
+            "amount": 70.95
+          },
+          {
+            "amount": 35.36
+          },
+          {
+            "amount": 43.97
+          },
+          {
+            "amount": 32.72
+          },
+          {
+            "amount": 49.13
+          },
+          {
+            "amount": 51.55
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "samplingMethod": "first"
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
