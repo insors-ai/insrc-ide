@@ -1,0 +1,48 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "leftTarget":  "public.orders",
+    "leftColumn":  "user_id",
+    "rightTarget": "public.users",
+    "rightColumn": "id",
+    "topN": 10
+  },
+  "fakeTools": {
+    "db_sql_aggregate": {
+      "content": "agg",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "values": {
+          "*__count":                 1000,
+          "user_id__count_non_null":   995,
+          "user_id__distinct_count":   180,
+          "id__count_non_null":        200,
+          "id__distinct_count":        200
+        }
+      }
+    },
+    "db_sql_distinct": {
+      "content": "dist",
+      "isError": false,
+      "data": {
+        "target": "public.users",
+        "column": "id",
+        "distinctCount": 200,
+        "topValues": [
+          { "value": 1,   "count": 1 },
+          { "value": 2,   "count": 1 },
+          { "value": 3,   "count": 1 },
+          { "value": 4,   "count": 1 },
+          { "value": 5,   "count": 1 },
+          { "value": 6,   "count": 1 },
+          { "value": 7,   "count": 1 },
+          { "value": 8,   "count": 1 },
+          { "value": 9,   "count": 1 },
+          { "value": 10,  "count": 1 }
+        ]
+      }
+    }
+  },
+  "expectedConfidenceFloor": "medium"
+}
