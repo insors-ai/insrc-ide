@@ -33,6 +33,26 @@ export async function upsertRelation(db: DbClient, relation: Relation): Promise<
 const RELATION_BULK_CHUNK = 200;
 
 /**
+ * Pre-INSERT dedupe by composite (src, dst, kind) primary key.
+ * Mirrors the dedupe in `upsertEntities` -- DuckDB's bulk
+ * multi-VALUES INSERT can fail before `ON CONFLICT` fires when two
+ * rows in the same VALUES clause share the primary key. The
+ * failure surfaces differently here (no HNSW wrapper on `relation`)
+ * but the safe pattern is the same.
+ */
+function dedupeRelationsByEdge(relations: readonly Relation[]): Relation[] {
+  const seen = new Set<string>();
+  const out: Relation[] = [];
+  for (const r of relations) {
+    const key = `${r.from}\x00${r.to}\x00${r.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
+/**
  * Upsert multiple relations. Splits resolved vs unresolved up-front
  * (different target tables, different shapes) and bulk-inserts each
  * group via a multi-VALUES INSERT chunked at RELATION_BULK_CHUNK.
@@ -41,6 +61,11 @@ const RELATION_BULK_CHUNK = 200;
  * indexing -- a typical TS file emits ~50-100 relation edges, and
  * one round-trip per edge dominated wall time. Bulk INSERT collapses
  * each chunk into a single Connection acquire + one statement.
+ *
+ * Resolved relations are deduped by (src, dst, kind) before chunking
+ * (see dedupeRelationsByEdge) so an intra-batch duplicate doesn't
+ * trip a PRIMARY KEY violation before the ON CONFLICT clause can
+ * fire. Same defense-in-depth pattern as the entity path.
  */
 export async function upsertRelations(db: DbClient, relations: Relation[]): Promise<void> {
   if (relations.length === 0) return;
@@ -52,8 +77,18 @@ export async function upsertRelations(db: DbClient, relations: Relation[]): Prom
   }
 
   // Resolved -> relation table. (src, dst, kind), ON CONFLICT DO NOTHING.
-  for (let i = 0; i < resolved.length; i += RELATION_BULK_CHUNK) {
-    const chunk = resolved.slice(i, i + RELATION_BULK_CHUNK);
+  // Dedupe BEFORE chunking; intra-batch duplicates are common for
+  // import edges where the same module is imported via two syntaxes.
+  const resolvedUnique = dedupeRelationsByEdge(resolved);
+  if (resolvedUnique.length < resolved.length) {
+    log.debug(
+      { original: resolved.length, kept: resolvedUnique.length },
+      'upsertRelations: collapsed duplicate (src, dst, kind) edges in input batch',
+    );
+  }
+
+  for (let i = 0; i < resolvedUnique.length; i += RELATION_BULK_CHUNK) {
+    const chunk = resolvedUnique.slice(i, i + RELATION_BULK_CHUNK);
     const placeholders = chunk.map(() => '(?, ?, ?)').join(', ');
     const params: unknown[] = [];
     for (const r of chunk) params.push(r.from, r.to, r.kind);
@@ -132,7 +167,10 @@ async function upsertUnresolvedRelations(db: DbClient, relations: Relation[]): P
   if (relations.length === 0) return;
 
   const attemptedAt = new Date().toISOString();
-  const tuples: unknown[][] = [];
+  // Keyed by id so an intra-batch duplicate (same repo + fromEntity +
+  // kind + rawTo) collapses to one row. Last-wins matches what
+  // ON CONFLICT (id) DO UPDATE would have done one-row-at-a-time.
+  const tupleById = new Map<string, unknown[]>();
   for (const r of relations) {
     const meta     = r.meta ?? {};
     const fromFile = typeof meta['file'] === 'string' ? meta['file'] as string : '';
@@ -146,8 +184,9 @@ async function upsertUnresolvedRelations(db: DbClient, relations: Relation[]): P
     }
     const id       = makeUnresolvedRelationId(repo, r.from, r.kind, r.to);
     const metaJson = JSON.stringify(meta);
-    tuples.push([id, repo, r.from, fromFile, r.kind, r.to, metaJson, attemptedAt]);
+    tupleById.set(id, [id, repo, r.from, fromFile, r.kind, r.to, metaJson, attemptedAt]);
   }
+  const tuples = [...tupleById.values()];
   if (tuples.length === 0) return;
 
   for (let i = 0; i < tuples.length; i += RELATION_BULK_CHUNK) {
@@ -317,8 +356,10 @@ export async function promoteResolvedBatch(
 
 /**
  * DuckDB-side bulk-insert relations. Builds a single INSERT statement
- * with N (?, ?, ?) tuples; ON CONFLICT DO NOTHING handles duplicates.
- * One round-trip per chunk vs. N separate INSERTs.
+ * with N (?, ?, ?) tuples; ON CONFLICT DO NOTHING handles duplicates
+ * across calls. Within a single call we dedupe (src, dst) intra-batch
+ * before building VALUES -- DuckDB's bulk INSERT can fail on a
+ * primary-key violation before the conflict clause fires.
  */
 async function bulkInsertRelations(
   db: DbClient,
@@ -326,9 +367,18 @@ async function bulkInsertRelations(
   rows: ReadonlyArray<{ from: string; to: string }>,
 ): Promise<void> {
   if (rows.length === 0) return;
-  const valuesSql = rows.map(() => '(?, ?, ?)').join(', ');
+  const seen = new Set<string>();
+  const unique: { from: string; to: string }[] = [];
+  for (const r of rows) {
+    const key = `${r.from}\x00${r.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
+  if (unique.length === 0) return;
+  const valuesSql = unique.map(() => '(?, ?, ?)').join(', ');
   const params: string[] = [];
-  for (const r of rows) { params.push(r.from, r.to, kind); }
+  for (const r of unique) { params.push(r.from, r.to, kind); }
   await db.duck.exec(
     `INSERT INTO relation (src, dst, kind) VALUES ${valuesSql} ON CONFLICT (src, dst, kind) DO NOTHING`,
     params,

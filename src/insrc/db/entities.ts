@@ -16,6 +16,9 @@
 import { arrayValue } from '@duckdb/node-api';
 import type { DbClient } from './client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
+import { getLogger } from '../shared/logger.js';
+
+const log = getLogger('db.entities');
 
 // ---------------------------------------------------------------------------
 // Row <-> domain mapping (snake_case columns <-> camelCase Entity fields)
@@ -131,6 +134,37 @@ export function rowToEntity(row: Record<string, unknown>): Entity {
 // ---------------------------------------------------------------------------
 
 /**
+ * Pre-INSERT dedupe by entity id. The bulk multi-VALUES INSERT path
+ * cannot rely on `ON CONFLICT DO UPDATE` to absorb intra-batch
+ * duplicates -- DuckDB's HNSW index wrapper validates uniqueness
+ * during statement execution, BEFORE the conflict clause fires.
+ * Two rows with the same id in one VALUES clause crash with
+ * "Duplicate keys not allowed in high-level wrappers" and
+ * invalidate the entire DuckDB instance for the rest of the
+ * process lifetime.
+ *
+ * Last-write-wins matches the semantics `ON CONFLICT (id) DO UPDATE`
+ * would have produced if the rows were issued one at a time. That's
+ * intentional: a duplicate in the input is a parser-side bug
+ * (typically Java/Scala/C++ method overloads collapsing into the
+ * same `SHA256(repo + file + kind + name)` -- the formula doesn't
+ * include signature), and the right v1 behavior is to keep one row
+ * + log a warning so we can investigate upstream.
+ */
+function dedupeEntitiesById(entities: readonly Entity[]): {
+  unique: Entity[];
+  duplicateIds: Map<string, number>;
+} {
+  const map = new Map<string, Entity>();
+  const dupCounts = new Map<string, number>();
+  for (const e of entities) {
+    if (map.has(e.id)) dupCounts.set(e.id, (dupCounts.get(e.id) ?? 1) + 1);
+    map.set(e.id, e);  // last-wins
+  }
+  return { unique: [...map.values()], duplicateIds: dupCounts };
+}
+
+/**
  * Upsert a batch of entities. Bulk multi-VALUES INSERT chunked at
  * ENTITY_BULK_CHUNK rows per call -- the prior per-row loop made one
  * round-trip + one Connection acquire per entity, which dominated the
@@ -140,15 +174,50 @@ export function rowToEntity(row: Record<string, unknown>): Entity {
  * pass) get NULL in the embedding column and the embedder fills
  * them in later.
  *
- * ON CONFLICT (id) DO UPDATE covers re-indexing; the previous
- * implementation pre-deleted file entities before insert, but the
- * new pattern leaves that to `deleteEntitiesForFile` for explicit
- * purges.
+ * ON CONFLICT (id) DO UPDATE covers re-indexing across calls; the
+ * previous implementation pre-deleted file entities before insert,
+ * but the new pattern leaves that to `deleteEntitiesForFile` for
+ * explicit purges.
+ *
+ * Within a single call the input is deduped by id BEFORE chunking
+ * (see dedupeEntitiesById) -- the HNSW index wrapper rejects
+ * intra-batch duplicates fatally. A duplicate id in the input
+ * usually means the parser emitted two entities with identical
+ * `(repo, file, kind, name)`; the fix at this layer keeps one row
+ * (last-wins) and logs a warning. Per-batch INSERTs are wrapped in
+ * try/catch so an unexpected duplicate (e.g. one slipping through
+ * a future parser change) produces actionable diagnostic output
+ * instead of a cryptic "database has been invalidated" cascade.
  */
 export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<void> {
   if (entities.length === 0) return;
-  for (let i = 0; i < entities.length; i += ENTITY_BULK_CHUNK) {
-    const chunk = entities.slice(i, i + ENTITY_BULK_CHUNK);
+
+  const { unique, duplicateIds } = dedupeEntitiesById(entities);
+  if (duplicateIds.size > 0) {
+    // Log a representative sample so the parser bug is investigable
+    // without flooding the log on a wide-fanout case.
+    const sample: { id: string; count: number; name: string; kind: string; file: string }[] = [];
+    for (const [id, count] of duplicateIds) {
+      const ent = unique.find(e => e.id === id);
+      if (ent === undefined) continue;
+      sample.push({ id, count, name: ent.name, kind: ent.kind, file: ent.file });
+      if (sample.length >= 5) break;
+    }
+    log.warn(
+      {
+        totalDuplicates: duplicateIds.size,
+        kept: unique.length,
+        original: entities.length,
+        sample,
+      },
+      'upsertEntities: collapsed duplicate entity ids in input batch (last-wins). ' +
+      'This usually indicates a parser emitting two entities with identical (repo, file, kind, name) -- ' +
+      'common for overloaded Java/Scala methods since the id formula doesn\'t include signature.',
+    );
+  }
+
+  for (let i = 0; i < unique.length; i += ENTITY_BULK_CHUNK) {
+    const chunk = unique.slice(i, i + ENTITY_BULK_CHUNK);
     const placeholders = chunk.map(() => ENTITY_PLACEHOLDER).join(', ');
     const params: unknown[] = [];
     for (const e of chunk) params.push(...entityToParams(e));
@@ -156,7 +225,36 @@ export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<
       `INSERT INTO entity (${ENTITY_COLUMNS.join(', ')})
        VALUES ${placeholders}
        ${ENTITY_ON_CONFLICT}`;
-    await db.duck.exec(sql, params as never[]);
+    try {
+      await db.duck.exec(sql, params as never[]);
+    } catch (err) {
+      // Defense-in-depth: dedupeEntitiesById should have caught any
+      // intra-batch duplicate, so reaching here means either an
+      // unrelated SQL error or an HNSW collision against an EXISTING
+      // row (which the wrapper apparently also rejects in some
+      // versions before ON CONFLICT can fire). Log structured info so
+      // the next failure is debuggable, then re-throw -- the caller's
+      // per-file try/catch handles the file-level skip.
+      const msg = err instanceof Error ? err.message : String(err);
+      const looksLikeHnswCollision = msg.includes('Duplicate keys not allowed')
+        || msg.includes('HNSW');
+      if (looksLikeHnswCollision) {
+        log.error(
+          {
+            chunkIndex: i / ENTITY_BULK_CHUNK,
+            chunkSize: chunk.length,
+            firstFile: chunk[0]?.file,
+            firstId: chunk[0]?.id,
+            sampleIds: chunk.slice(0, 3).map(e => ({ id: e.id, name: e.name, kind: e.kind })),
+            err: msg.slice(0, 500),
+          },
+          'upsertEntities: HNSW duplicate-key error from DuckDB; chunk rejected. ' +
+          'After-effects may include "database has been invalidated" on subsequent statements -- ' +
+          'a daemon restart is required if that surfaces.',
+        );
+      }
+      throw err;
+    }
   }
 }
 

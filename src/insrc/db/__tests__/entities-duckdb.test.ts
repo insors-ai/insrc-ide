@@ -234,6 +234,74 @@ test('searchEntities filter=code/artifact narrows by `artifact` flag', async () 
   assert.deepEqual(artOnly.map(e => e.id), ['art1']);
 });
 
+test('upsertEntities collapses intra-batch duplicate ids (last-wins)', async () => {
+  // The HNSW index wrapper rejects duplicate keys in a single VALUES
+  // clause BEFORE ON CONFLICT can fire, so an intra-batch duplicate
+  // crashes DuckDB and invalidates the whole instance. The dedupe
+  // path collapses duplicates to one row before the INSERT.
+  // Last-wins matches the per-row ON CONFLICT DO UPDATE semantic --
+  // the second occurrence of the same id replaces the first.
+  const db = await setup();
+  await upsertEntities(db, [
+    makeEntity({ id: 'e1', name: 'foo', body: 'overload-1', startLine: 10 }),
+    makeEntity({ id: 'e1', name: 'foo', body: 'overload-2', startLine: 20 }),
+    makeEntity({ id: 'e1', name: 'foo', body: 'overload-3', startLine: 30 }),
+    makeEntity({ id: 'e2', name: 'bar', body: 'distinct',   startLine: 40 }),
+  ]);
+  const all = await listEntitiesForRepo(db, '/repo');
+  assert.equal(all.length, 2, 'duplicates should collapse to one row each');
+  const e1 = all.find(e => e.id === 'e1');
+  assert.equal(e1?.body, 'overload-3', 'last-wins on duplicate id');
+  assert.equal(e1?.startLine, 30);
+});
+
+test('upsertRelations collapses intra-batch duplicate (src, dst, kind) edges', async () => {
+  // Symmetric test for the relation path. Same root cause as the
+  // entity dedupe: bulk INSERT with two rows sharing the primary
+  // key can fail before ON CONFLICT fires.
+  const db = await setup();
+  await upsertEntities(db, [
+    makeEntity({ id: 'a', name: 'a' }),
+    makeEntity({ id: 'b', name: 'b' }),
+  ]);
+  await upsertRelations(db, [
+    { from: 'a', to: 'b', kind: 'CALLS', resolved: true },
+    { from: 'a', to: 'b', kind: 'CALLS', resolved: true },
+    { from: 'a', to: 'b', kind: 'CALLS', resolved: true },
+    { from: 'a', to: 'b', kind: 'CALLS', resolved: true },
+  ]);
+  const rows = await db.duck.query<{ count: number }>(
+    "SELECT COUNT(*)::INTEGER AS count FROM relation WHERE src = 'a' AND dst = 'b'",
+  );
+  assert.equal(Number(rows[0]!.count), 1);
+});
+
+test('upsertEntities handles a chunk-spanning batch with intra-chunk duplicates', async () => {
+  // Build > ENTITY_BULK_CHUNK (100) entities with 5 distinct ids
+  // each repeated 30+ times. After dedup we expect exactly 5 rows
+  // and no DuckDB-level error (the HNSW wrapper would crash on the
+  // first chunk if dedup didn't fire).
+  const db = await setup();
+  const batch: Entity[] = [];
+  for (let i = 0; i < 150; i++) {
+    const ord = i % 5;  // 5 distinct ids cycling 30 times each
+    batch.push(makeEntity({
+      id: `e${ord}`,
+      name: `entity-${ord}`,
+      body: `iteration-${i}`,
+      startLine: i,
+    }));
+  }
+  await upsertEntities(db, batch);
+  const all = await listEntitiesForRepo(db, '/repo');
+  assert.equal(all.length, 5);
+  // Last occurrence of each id is the one with highest iteration --
+  // for id 'e0' that's i=145 (since 145 % 5 == 0).
+  const e0 = all.find(e => e.id === 'e0');
+  assert.equal(e0?.body, 'iteration-145');
+  assert.equal(e0?.startLine, 145);
+});
+
 test('1-hop graph queries via the entity table return hydrated rows', async () => {
   const db = await setup();
   await upsertEntities(db, [
