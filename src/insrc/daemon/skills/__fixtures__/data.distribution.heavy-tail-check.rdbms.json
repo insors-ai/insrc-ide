@@ -1,0 +1,189 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.events",
+    "column": "amount",
+    "threshold": 1.0
+  },
+  "fakeTools": {
+    "db_sql_aggregate": {
+      "content": "agg",
+      "isError": false,
+      "data": {
+        "target": "public.events",
+        "values": {
+          "amount__count_non_null": 10000,
+          "amount__avg": 50.0,
+          "amount__stddev": 12.5
+        }
+      }
+    },
+    "db_sql_sample": {
+      "content": "sample",
+      "isError": false,
+      "data": {
+        "target": "public.events",
+        "columns": [
+          "amount"
+        ],
+        "rows": [
+          {
+            "amount": 46.9107
+          },
+          {
+            "amount": 40.2513
+          },
+          {
+            "amount": 52.5661
+          },
+          {
+            "amount": 28.4089
+          },
+          {
+            "amount": 50.566
+          },
+          {
+            "amount": 47.7554
+          },
+          {
+            "amount": 22.8633
+          },
+          {
+            "amount": 50.1168
+          },
+          {
+            "amount": 7.7503
+          },
+          {
+            "amount": 48.9423
+          },
+          {
+            "amount": 27.5835
+          },
+          {
+            "amount": 32.9327
+          },
+          {
+            "amount": 48.7916
+          },
+          {
+            "amount": 58.2668
+          },
+          {
+            "amount": 37.7993
+          },
+          {
+            "amount": 44.0797
+          },
+          {
+            "amount": 52.116
+          },
+          {
+            "amount": 80.1621
+          },
+          {
+            "amount": 51.2354
+          },
+          {
+            "amount": 48.3176
+          },
+          {
+            "amount": 116.9026
+          },
+          {
+            "amount": 16.0781
+          },
+          {
+            "amount": 60.4942
+          },
+          {
+            "amount": 46.1118
+          },
+          {
+            "amount": 39.733
+          },
+          {
+            "amount": 37.111
+          },
+          {
+            "amount": 46.567
+          },
+          {
+            "amount": 57.6708
+          },
+          {
+            "amount": 42.1609
+          },
+          {
+            "amount": 51.3106
+          },
+          {
+            "amount": 52.332
+          },
+          {
+            "amount": 47.8809
+          },
+          {
+            "amount": 50.7556
+          },
+          {
+            "amount": 24.982
+          },
+          {
+            "amount": 23.6095
+          },
+          {
+            "amount": 43.3822
+          },
+          {
+            "amount": 53.1819
+          },
+          {
+            "amount": 48.8426
+          },
+          {
+            "amount": 46.6964
+          },
+          {
+            "amount": 51.3773
+          },
+          {
+            "amount": 49.2593
+          },
+          {
+            "amount": 46.3617
+          },
+          {
+            "amount": 56.6324
+          },
+          {
+            "amount": 53.6086
+          },
+          {
+            "amount": 44.811
+          },
+          {
+            "amount": 51.1908
+          },
+          {
+            "amount": 50.3966
+          },
+          {
+            "amount": 62.0858
+          },
+          {
+            "amount": 54.3926
+          },
+          {
+            "amount": 46.0695
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "samplingMethod": "first"
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

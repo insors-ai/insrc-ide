@@ -49,6 +49,7 @@ import { registerDataDependencyCoNullPatternRdbmsSkill } from './built-ins/data.
 import { registerDataDependencyFunctionalRdbmsSkill } from './built-ins/data.dependency.functional.rdbms.js';
 import { registerDataCardinalityJoinKeyRdbmsSkill } from './built-ins/data.cardinality.join-key.rdbms.js';
 import { registerDataDistributionNormalityTestRdbmsSkill } from './built-ins/data.distribution.normality-test.rdbms.js';
+import { registerDataDistributionHeavyTailCheckRdbmsSkill } from './built-ins/data.distribution.heavy-tail-check.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -89,6 +90,7 @@ export function registerAllSkills(): void {
   registerDataDistributionOutliersZScoreRdbmsSkill();
   registerDataDistributionOutliersMadRdbmsSkill();
   registerDataDistributionNormalityTestRdbmsSkill();
+  registerDataDistributionHeavyTailCheckRdbmsSkill();
   // Phase 5c (cross-column) -- pairwise dependency analyses.
   registerDataDependencyCoNullPatternRdbmsSkill();
   registerDataDependencyFunctionalRdbmsSkill();
