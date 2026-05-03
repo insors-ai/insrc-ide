@@ -1,0 +1,189 @@
+{
+  "input": {
+    "connectionId": "pg-events",
+    "target": "public.events",
+    "timestampColumn": "created_at",
+    "valueColumn": "amount",
+    "sampleSize": 40
+  },
+  "fakeTools": {
+    "db_sql_sample": {
+      "content": "sample",
+      "isError": false,
+      "data": {
+        "target": "public.events",
+        "columns": [
+          "created_at",
+          "amount"
+        ],
+        "rows": [
+          {
+            "created_at": "2026-04-01T12:00:00Z",
+            "amount": 44.61
+          },
+          {
+            "created_at": "2026-04-02T12:00:00Z",
+            "amount": 49.25
+          },
+          {
+            "created_at": "2026-04-03T12:00:00Z",
+            "amount": 52.4
+          },
+          {
+            "created_at": "2026-04-04T12:00:00Z",
+            "amount": 49.39
+          },
+          {
+            "created_at": "2026-04-05T12:00:00Z",
+            "amount": 50.47
+          },
+          {
+            "created_at": "2026-04-06T12:00:00Z",
+            "amount": 45.34
+          },
+          {
+            "created_at": "2026-04-07T12:00:00Z",
+            "amount": 49.23
+          },
+          {
+            "created_at": "2026-04-08T12:00:00Z",
+            "amount": 48.77
+          },
+          {
+            "created_at": "2026-04-09T12:00:00Z",
+            "amount": 52.91
+          },
+          {
+            "created_at": "2026-04-10T12:00:00Z",
+            "amount": 50.5
+          },
+          {
+            "created_at": "2026-04-11T12:00:00Z",
+            "amount": 49.95
+          },
+          {
+            "created_at": "2026-04-12T12:00:00Z",
+            "amount": 47.71
+          },
+          {
+            "created_at": "2026-04-13T12:00:00Z",
+            "amount": 47.38
+          },
+          {
+            "created_at": "2026-04-14T12:00:00Z",
+            "amount": 49.97
+          },
+          {
+            "created_at": "2026-04-15T12:00:00Z",
+            "amount": 54.11
+          },
+          {
+            "created_at": "2026-04-16T12:00:00Z",
+            "amount": 44.05
+          },
+          {
+            "created_at": "2026-04-17T12:00:00Z",
+            "amount": 41.21
+          },
+          {
+            "created_at": "2026-04-18T12:00:00Z",
+            "amount": 56.25
+          },
+          {
+            "created_at": "2026-04-19T12:00:00Z",
+            "amount": 55.08
+          },
+          {
+            "created_at": "2026-04-20T12:00:00Z",
+            "amount": 52.09
+          },
+          {
+            "created_at": "2026-04-21T12:00:00Z",
+            "amount": 101.22
+          },
+          {
+            "created_at": "2026-04-22T12:00:00Z",
+            "amount": 98.79
+          },
+          {
+            "created_at": "2026-04-23T12:00:00Z",
+            "amount": 98.94
+          },
+          {
+            "created_at": "2026-04-24T12:00:00Z",
+            "amount": 96.31
+          },
+          {
+            "created_at": "2026-04-25T12:00:00Z",
+            "amount": 101.98
+          },
+          {
+            "created_at": "2026-04-26T12:00:00Z",
+            "amount": 99.43
+          },
+          {
+            "created_at": "2026-04-27T12:00:00Z",
+            "amount": 93.99
+          },
+          {
+            "created_at": "2026-04-28T12:00:00Z",
+            "amount": 98.46
+          },
+          {
+            "created_at": "2026-04-29T12:00:00Z",
+            "amount": 98.34
+          },
+          {
+            "created_at": "2026-04-30T12:00:00Z",
+            "amount": 98.02
+          },
+          {
+            "created_at": "2026-05-01T12:00:00Z",
+            "amount": 106.19
+          },
+          {
+            "created_at": "2026-05-02T12:00:00Z",
+            "amount": 103.5
+          },
+          {
+            "created_at": "2026-05-03T12:00:00Z",
+            "amount": 90.09
+          },
+          {
+            "created_at": "2026-05-04T12:00:00Z",
+            "amount": 101.63
+          },
+          {
+            "created_at": "2026-05-05T12:00:00Z",
+            "amount": 103.45
+          },
+          {
+            "created_at": "2026-05-06T12:00:00Z",
+            "amount": 104.26
+          },
+          {
+            "created_at": "2026-05-07T12:00:00Z",
+            "amount": 102.61
+          },
+          {
+            "created_at": "2026-05-08T12:00:00Z",
+            "amount": 93.79
+          },
+          {
+            "created_at": "2026-05-09T12:00:00Z",
+            "amount": 102.88
+          },
+          {
+            "created_at": "2026-05-10T12:00:00Z",
+            "amount": 100.32
+          }
+        ],
+        "truncated": false,
+        "metadata": {
+          "samplingMethod": "first"
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
