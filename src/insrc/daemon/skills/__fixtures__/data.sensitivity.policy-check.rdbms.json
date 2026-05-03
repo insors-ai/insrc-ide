@@ -1,0 +1,29 @@
+{
+  "input": {
+    "connectionId": "pg-users",
+    "target": "public.users",
+    "columns": ["email", "id"],
+    "declaredPiiColumns": ["email"],
+    "sampleSize": 5
+  },
+  "fakeTools": {
+    "db_sql_sample": {
+      "content": "**public.users** -- 5 rows",
+      "isError": false,
+      "data": {
+        "target": "public.users",
+        "columns": ["id", "email"],
+        "rows": [
+          { "id": 1, "email": "alice@example.com" },
+          { "id": 2, "email": "bob@example.com" },
+          { "id": 3, "email": "carol@example.com" },
+          { "id": 4, "email": "dan@example.com" },
+          { "id": 5, "email": "eve@example.com" }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

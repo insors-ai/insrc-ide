@@ -50,6 +50,7 @@ import { registerDataDependencyFunctionalRdbmsSkill } from './built-ins/data.dep
 import { registerDataCardinalityJoinKeyRdbmsSkill } from './built-ins/data.cardinality.join-key.rdbms.js';
 import { registerDataDistributionNormalityTestRdbmsSkill } from './built-ins/data.distribution.normality-test.rdbms.js';
 import { registerDataDistributionHeavyTailCheckRdbmsSkill } from './built-ins/data.distribution.heavy-tail-check.rdbms.js';
+import { registerDataSensitivityPolicyCheckRdbmsSkill } from './built-ins/data.sensitivity.policy-check.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -117,6 +118,9 @@ export function registerAllSkills(): void {
   registerDataQualityScorecardRdbmsSkill();
   // 6.8 synth.scorecard renders the scorecard composite's output.
   registerDataSynthScorecardSkill();
+  // 5e.3 sensitivity.policy-check composes pii.column-classifier
+  // across columns vs the connection's declared PII list.
+  registerDataSensitivityPolicyCheckRdbmsSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
