@@ -53,6 +53,7 @@ import { registerDataDistributionHeavyTailCheckRdbmsSkill } from './built-ins/da
 import { registerDataSensitivityPolicyCheckRdbmsSkill } from './built-ins/data.sensitivity.policy-check.rdbms.js';
 import { registerDataDistributionModesRdbmsSkill } from './built-ins/data.distribution.modes.rdbms.js';
 import { registerDataQualityConformityRdbmsSkill } from './built-ins/data.quality.conformity.rdbms.js';
+import { registerDataQualityConsistencyRdbmsSkill } from './built-ins/data.quality.consistency.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -87,6 +88,7 @@ export function registerAllSkills(): void {
   registerDataQualityUniquenessRdbmsSkill();
   registerDataQualityValidityRdbmsSkill();
   registerDataQualityConformityRdbmsSkill();
+  registerDataQualityConsistencyRdbmsSkill();
   // Phase 5b (Family-5 distribution shape) -- outlier detection
   // variants. All hybrid: bounds from server-side aggregate,
   // examples + estimated counts from a 50-row sample.
