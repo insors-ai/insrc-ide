@@ -19,7 +19,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type { Skill, SkillResult } from '../types.js';
 
 /**
  * Two weight tables: one when validity isn't supplied, one when it

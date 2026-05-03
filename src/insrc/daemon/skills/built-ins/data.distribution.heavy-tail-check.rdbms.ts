@@ -24,7 +24,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillResult, SkillToolResult } from '../types.js';
 
 const SAMPLE_DEFAULT = 50;
 

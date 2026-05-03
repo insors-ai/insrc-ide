@@ -23,7 +23,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type { Skill, SkillResult } from '../types.js';
 
 interface ProfileTemporalInput {
 	readonly connectionId: string;

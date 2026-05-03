@@ -8,7 +8,7 @@
  * duplicate work, oldest-first eviction once the cap is hit).
  */
 
-import { readdir, stat } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 
 import type {

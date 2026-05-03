@@ -30,7 +30,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type { Skill, SkillResult } from '../types.js';
 
 interface PiiColumnClassifierInput {
 	readonly connectionId: string;
@@ -143,7 +143,6 @@ const skill: Skill<PiiColumnClassifierInput, PiiColumnClassifierOutput> = {
 			: [];
 
 		// Step 3: derive verdict from the two signals.
-		const nameSet = new Set(nameMatches);
 		const valueSet = new Set(valueMatches);
 		const intersection = nameMatches.filter(n => valueSet.has(n));
 		const evidence: string[] = [];

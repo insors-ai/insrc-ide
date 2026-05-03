@@ -30,7 +30,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type { Skill, SkillResult } from '../types.js';
 
 const SAMPLE_DEFAULT = 50;
 const VIOLATION_EXAMPLES = 3;

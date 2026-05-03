@@ -25,7 +25,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillResult, SkillToolResult } from '../types.js';
 
 const MAD_TO_SIGMA = 1 / 0.6745;  // ~1.4826
 

@@ -55,6 +55,7 @@ import { registerDataDistributionModesRdbmsSkill } from './built-ins/data.distri
 import { registerDataQualityConformityRdbmsSkill } from './built-ins/data.quality.conformity.rdbms.js';
 import { registerDataQualityConsistencyRdbmsSkill } from './built-ins/data.quality.consistency.rdbms.js';
 import { registerDataDriftDistributionRdbmsSkill } from './built-ins/data.drift.distribution.rdbms.js';
+import { registerDataTimeseriesTrendRdbmsSkill } from './built-ins/data.timeseries.trend.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -102,6 +103,9 @@ export function registerAllSkills(): void {
   // Phase 5f (drift over windows) -- compares two sample windows
   // of the same column.
   registerDataDriftDistributionRdbmsSkill();
+  // Phase 5g (timeseries) -- regression / seasonality / stationarity
+  // checks over a temporal axis.
+  registerDataTimeseriesTrendRdbmsSkill();
   // Phase 5c (cross-column) -- pairwise dependency analyses.
   registerDataDependencyCoNullPatternRdbmsSkill();
   registerDataDependencyFunctionalRdbmsSkill();
