@@ -18,8 +18,14 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	HistogramRequest,
+	HistogramResult,
+	OutlierRequest,
+	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -32,6 +38,9 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeCorrelationMatrix,
+	executeHistogram,
+	executeOutliers,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
@@ -153,6 +162,45 @@ class SqliteDriver implements RdbmsDriver {
 			distinctCount: readDistinctCount(countRow),
 			topValues: readDistinctRows(valueRows),
 		};
+	}
+
+	async histogram(target: string, request: HistogramRequest): Promise<HistogramResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeHistogram(request, {
+			target,
+			knownColumns: cols,
+			dialect: SQLITE_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) =>
+				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
+	}
+
+	async correlationMatrix(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeCorrelationMatrix(request, {
+			target,
+			knownColumns: cols,
+			dialect: SQLITE_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) =>
+				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
+	}
+
+	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeOutliers(request, {
+			target,
+			knownColumns: cols,
+			dialect: SQLITE_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) =>
+				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
 	}
 
 	async close(): Promise<void> {

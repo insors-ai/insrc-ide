@@ -25,10 +25,16 @@ import type {
 	AggregateRequest,
 	AggregateSpec,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMethod,
 	DistinctRequest,
 	Driver,
 	FileDriver,
+	HistogramMode,
+	HistogramRequest,
 	KvDriver,
+	OutlierMethod,
+	OutlierRequest,
 	RdbmsDriver,
 	SampleOpts,
 	ScanOpts,
@@ -756,6 +762,510 @@ const fileAggregateTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// db:sql:histogram + db:file:histogram (Phase 0.2)
+// ---------------------------------------------------------------------------
+
+const HISTOGRAM_BUCKETS_DEFAULT = 20;
+const HISTOGRAM_BUCKETS_MIN     = 4;
+const HISTOGRAM_BUCKETS_MAX     = 200;
+
+function buildHistogramRequest(input: ToolInput): HistogramRequest | string {
+	const column = input['column'];
+	if (typeof column !== 'string' || column.length === 0) {
+		return '`column` is required and must be a non-empty string';
+	}
+	const rawBuckets = input['buckets'];
+	let buckets = HISTOGRAM_BUCKETS_DEFAULT;
+	if (rawBuckets !== undefined) {
+		if (typeof rawBuckets !== 'number' || !Number.isFinite(rawBuckets)) {
+			return '`buckets` must be an integer';
+		}
+		buckets = Math.min(Math.max(HISTOGRAM_BUCKETS_MIN, Math.floor(rawBuckets)), HISTOGRAM_BUCKETS_MAX);
+	}
+	const rawMode = input['mode'];
+	let mode: HistogramMode = 'equal-width';
+	if (rawMode !== undefined) {
+		if (rawMode !== 'equal-width' && rawMode !== 'equal-frequency') {
+			return '`mode` must be "equal-width" or "equal-frequency"';
+		}
+		mode = rawMode;
+	}
+	const where = parseWhereInput(input['where']);
+	const out: HistogramRequest = where.length === 0
+		? { column, buckets, mode }
+		: { column, buckets, mode, where };
+	return out;
+}
+
+function formatHistogramResult(target: string, column: string, mode: string, buckets: readonly { lower: number; upper: number; count: number }[], nonNullCount: number, nullCount: number): string {
+	const lines: string[] = [
+		`**${target}** -- column \`${column}\` (${mode}, ${buckets.length} buckets, n=${nonNullCount} non-null${nullCount > 0 ? `, ${nullCount} null` : ''})`,
+		'',
+		'| bucket | range | count |',
+		'|---|---|---|',
+	];
+	for (let i = 0; i < buckets.length; i++) {
+		const b = buckets[i]!;
+		lines.push(`| ${i} | [${b.lower.toPrecision(6)}, ${b.upper.toPrecision(6)}${i === buckets.length - 1 ? ']' : ')'} | ${b.count} |`);
+	}
+	return lines.join('\n');
+}
+
+const HISTOGRAM_INPUT_PROPS = {
+	column: { type: 'string', description: 'Numeric column to bucket.' },
+	buckets: { type: 'integer', minimum: HISTOGRAM_BUCKETS_MIN, maximum: HISTOGRAM_BUCKETS_MAX, description: `Histogram bucket count. Default ${HISTOGRAM_BUCKETS_DEFAULT}.` },
+	mode: { type: 'string', enum: ['equal-width', 'equal-frequency'], description: 'Default equal-width.' },
+	where: WHERE_SCHEMA,
+} as const;
+
+const sqlHistogramTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_histogram',
+	description:
+		'Server-side histogram on a numeric RDBMS column. Equal-width uses min/max bounds + FLOOR arithmetic ' +
+		'(works on every dialect); equal-frequency uses NTILE() OVER (ORDER BY col) (Postgres / DuckDB / SQLite>=3.25 / ' +
+		'MySQL>=8 / MSSQL / Oracle). Default 20 buckets, capped at 200. ClickHouse not yet supported.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'column'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string' },
+			...HISTOGRAM_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') return fail(this.id, 'connectionId and target are required');
+		const reqOrErr = buildHistogramRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.histogram !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement histogram() yet`);
+		}
+		try {
+			const result = await rd.histogram(target, reqOrErr);
+			return ok(formatHistogramResult(result.target, result.column, result.mode, result.buckets, result.nonNullCount, result.nullCount), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const fileHistogramTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_histogram',
+	description:
+		'Server-side histogram on a numeric column of a file connection. Same shape as db_sql_histogram; ' +
+		'routes through the consolidated DuckDB-backed file driver (DuckDB has both equal-width arithmetic ' +
+		'and NTILE).',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'column'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string', description: 'Optional. xlsx: sheet name.' },
+			...HISTOGRAM_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const reqOrErr = buildHistogramRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'file');
+		if (!isDriver(driver)) return driver;
+		const fd = driver as FileDriver;
+		if (typeof fd.histogram !== 'function') {
+			return fail(this.id, `file driver '${fd.kind}' does not implement histogram(). All DuckDB-backed file kinds support it; reaching this branch means an out-of-tree driver was registered.`);
+		}
+		try {
+			const target = typeof input['target'] === 'string' ? input['target'] : undefined;
+			const result = await fd.histogram(target, reqOrErr);
+			return ok(formatHistogramResult(result.target, result.column, result.mode, result.buckets, result.nonNullCount, result.nullCount), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
+// db:sql:correlation_matrix + db:file:correlation_matrix (Phase 0.4)
+// ---------------------------------------------------------------------------
+
+const CORRELATION_MAX_COLUMNS = 10;
+
+function buildCorrelationRequest(input: ToolInput): CorrelationMatrixRequest | string {
+	const cols = input['columns'];
+	if (!Array.isArray(cols) || cols.length < 2) {
+		return '`columns` is required and must be an array of at least 2 column names';
+	}
+	if (cols.length > CORRELATION_MAX_COLUMNS) {
+		return `\`columns\` exceeds max ${CORRELATION_MAX_COLUMNS}`;
+	}
+	const columns: string[] = [];
+	for (const c of cols) {
+		if (typeof c !== 'string' || c.length === 0) return 'each entry in `columns` must be a non-empty string';
+		columns.push(c);
+	}
+	const rawMethod = input['method'];
+	let method: CorrelationMethod = 'pearson';
+	if (rawMethod !== undefined) {
+		if (rawMethod !== 'pearson' && rawMethod !== 'spearman') {
+			return '`method` must be "pearson" or "spearman"';
+		}
+		method = rawMethod;
+	}
+	const where = parseWhereInput(input['where']);
+	return where.length === 0 ? { columns, method } : { columns, method, where };
+}
+
+function formatCorrelationResult(target: string, columns: readonly string[], method: string, n: number, matrix: readonly (readonly (number | null)[])[]): string {
+	const lines: string[] = [
+		`**${target}** -- ${method} correlation, n=${n}`,
+		'',
+		`| | ${columns.join(' | ')} |`,
+		`|---|${columns.map(() => '---').join('|')}|`,
+	];
+	for (let i = 0; i < columns.length; i++) {
+		const row = matrix[i]!;
+		const cells = row.map(v => v === null ? '_(null)_' : v.toFixed(3));
+		lines.push(`| ${columns[i]} | ${cells.join(' | ')} |`);
+	}
+	return lines.join('\n');
+}
+
+const CORRELATION_INPUT_PROPS = {
+	columns: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: CORRELATION_MAX_COLUMNS, description: 'Numeric columns to correlate pairwise.' },
+	method: { type: 'string', enum: ['pearson', 'spearman'], description: 'Default pearson.' },
+	where: WHERE_SCHEMA,
+} as const;
+
+const sqlCorrelationMatrixTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_correlation_matrix',
+	description:
+		'Pairwise correlation matrix for an RDBMS table. Pearson uses native CORR() on Postgres / Oracle / DuckDB; ' +
+		'computed expression elsewhere. Spearman ranks each column with RANK() OVER (ORDER BY col) then correlates ' +
+		'the ranks. Pairwise complete observations (rows where every requested column is non-null). Capped at 10 ' +
+		'columns. ClickHouse not yet supported.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'columns'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string' },
+			...CORRELATION_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') return fail(this.id, 'connectionId and target are required');
+		const reqOrErr = buildCorrelationRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.correlationMatrix !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement correlationMatrix() yet`);
+		}
+		try {
+			const result = await rd.correlationMatrix(target, reqOrErr);
+			return ok(formatCorrelationResult(result.target, result.columns, result.method, result.nonNullCount, result.matrix), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const fileCorrelationMatrixTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_correlation_matrix',
+	description:
+		'Pairwise correlation matrix for a file connection. Same shape as db_sql_correlation_matrix; routes ' +
+		'through the consolidated DuckDB-backed file driver, which has native CORR() + RANK() window function.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'columns'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string', description: 'Optional. xlsx: sheet name.' },
+			...CORRELATION_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const reqOrErr = buildCorrelationRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'file');
+		if (!isDriver(driver)) return driver;
+		const fd = driver as FileDriver;
+		if (typeof fd.correlationMatrix !== 'function') {
+			return fail(this.id, `file driver '${fd.kind}' does not implement correlationMatrix(). All DuckDB-backed file kinds support it; reaching this branch means an out-of-tree driver was registered.`);
+		}
+		try {
+			const target = typeof input['target'] === 'string' ? input['target'] : undefined;
+			const result = await fd.correlationMatrix(target, reqOrErr);
+			return ok(formatCorrelationResult(result.target, result.columns, result.method, result.nonNullCount, result.matrix), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
+// db:sql:outliers + db:file:outliers (Phase 0.5)
+// ---------------------------------------------------------------------------
+
+const OUTLIER_EXAMPLES_DEFAULT = 20;
+const OUTLIER_EXAMPLES_MAX     = 50;
+
+function buildOutlierRequest(input: ToolInput): OutlierRequest | string {
+	const column = input['column'];
+	if (typeof column !== 'string' || column.length === 0) {
+		return '`column` is required and must be a non-empty string';
+	}
+	const rawMethod = input['method'];
+	let method: OutlierMethod = 'iqr';
+	if (rawMethod !== undefined) {
+		if (rawMethod !== 'iqr' && rawMethod !== 'zscore') {
+			return '`method` must be "iqr" or "zscore"';
+		}
+		method = rawMethod;
+	}
+	const out: { column: string; method: OutlierMethod; threshold?: number; examples?: number; where?: WhereClause[] } = { column, method };
+	const rawThreshold = input['threshold'];
+	if (rawThreshold !== undefined) {
+		if (typeof rawThreshold !== 'number' || !Number.isFinite(rawThreshold) || rawThreshold <= 0) {
+			return '`threshold` must be a positive number';
+		}
+		out.threshold = rawThreshold;
+	}
+	const rawExamples = input['examples'];
+	if (rawExamples !== undefined) {
+		if (typeof rawExamples !== 'number' || !Number.isFinite(rawExamples) || rawExamples < 1) {
+			return '`examples` must be a positive integer';
+		}
+		out.examples = Math.min(Math.floor(rawExamples), OUTLIER_EXAMPLES_MAX);
+	}
+	const where = parseWhereInput(input['where']);
+	if (where.length > 0) out.where = where;
+	return out as OutlierRequest;
+}
+
+function formatOutlierResult(
+	target: string, column: string, method: string, threshold: number, n: number,
+	below: number, above: number, total: number,
+	lower: number | null, upper: number | null, center: number | null, spread: number | null,
+	examples: readonly { value: number; side: string }[],
+): string {
+	const lines: string[] = [
+		`**${target}** -- column \`${column}\` (${method}, threshold=${threshold}, n=${n})`,
+		'',
+		`outliers: **${total}** (below=${below}, above=${above})`,
+		`bounds: lower=${lower === null ? '_(null)_' : lower.toPrecision(6)}, upper=${upper === null ? '_(null)_' : upper.toPrecision(6)}`,
+		`center: ${center === null ? '_(null)_' : center.toPrecision(6)}, spread: ${spread === null ? '_(null)_' : spread.toPrecision(6)}`,
+	];
+	if (examples.length > 0) {
+		lines.push('', '| value | side |', '|---|---|');
+		for (const e of examples) lines.push(`| ${e.value.toPrecision(6)} | ${e.side} |`);
+	}
+	return lines.join('\n');
+}
+
+const OUTLIER_INPUT_PROPS = {
+	column: { type: 'string', description: 'Numeric column to scan.' },
+	method: { type: 'string', enum: ['iqr', 'zscore'], description: 'Default iqr.' },
+	threshold: { type: 'number', exclusiveMinimum: 0, description: 'IQR multiplier (default 1.5) or zscore cutoff (default 3).' },
+	examples: { type: 'integer', minimum: 1, maximum: OUTLIER_EXAMPLES_MAX, description: `Up to ${OUTLIER_EXAMPLES_MAX} example outlier values; default ${OUTLIER_EXAMPLES_DEFAULT}.` },
+	where: WHERE_SCHEMA,
+} as const;
+
+const sqlOutliersTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_outliers',
+	description:
+		'Full-table outlier counts + examples for an RDBMS column. IQR: q1/q3 +/- threshold*(q3-q1). Z-score: ' +
+		'avg +/- threshold*stddev. Two phases: bounds via aggregate, counts + ordered examples via SUM(CASE) + ' +
+		'LIMIT. Replaces sample-based estimates in 5b.2 / 5b.3 outlier skills.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'column'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string' },
+			...OUTLIER_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') return fail(this.id, 'connectionId and target are required');
+		const reqOrErr = buildOutlierRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.outliers !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement outliers() yet`);
+		}
+		try {
+			const r = await rd.outliers(target, reqOrErr);
+			return ok(formatOutlierResult(r.target, r.column, r.method, r.threshold, r.nonNullCount, r.belowCount, r.aboveCount, r.outlierCount, r.lowerBound, r.upperBound, r.center, r.spread, r.examples), r);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const fileOutliersTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_outliers',
+	description:
+		'Full-table outlier counts + examples for a file connection column. Same shape as db_sql_outliers.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'column'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string', description: 'Optional. xlsx: sheet name.' },
+			...OUTLIER_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const reqOrErr = buildOutlierRequest(input);
+		if (typeof reqOrErr === 'string') return fail(this.id, reqOrErr);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'file');
+		if (!isDriver(driver)) return driver;
+		const fd = driver as FileDriver;
+		if (typeof fd.outliers !== 'function') {
+			return fail(this.id, `file driver '${fd.kind}' does not implement outliers(). All DuckDB-backed file kinds support it; reaching this branch means an out-of-tree driver was registered.`);
+		}
+		try {
+			const target = typeof input['target'] === 'string' ? input['target'] : undefined;
+			const r = await fd.outliers(target, reqOrErr);
+			return ok(formatOutlierResult(r.target, r.column, r.method, r.threshold, r.nonNullCount, r.belowCount, r.aboveCount, r.outlierCount, r.lowerBound, r.upperBound, r.center, r.spread, r.examples), r);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
+// db:kv:list_namespaces + db:kv:describe_namespace (Phase 0.7 + 0.8)
+// ---------------------------------------------------------------------------
+
+const kvListNamespacesTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_kv_list_namespaces',
+	description:
+		'Enumerate top-level namespaces on a KV connection: Mongo collections (`<db>.<coll>`), Cassandra tables ' +
+		'(`<keyspace>.<table>`), DynamoDB tables, NATS KV bucket, Redis / etcd scan-derived prefixes. Returns ' +
+		'`supported: false` for stores without a namespace concept (memcached). Required by Phase 1.2 ' +
+		'source-introspection skills.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Max namespaces to return; default 200.' },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const driver = await acquireDriver(this.id, deps, connectionId, 'kv');
+		if (!isDriver(driver)) return driver;
+		const kd = driver as KvDriver;
+		if (typeof kd.listNamespaces !== 'function') {
+			return fail(this.id, `KV driver '${kd.kind}' does not implement listNamespaces() yet`);
+		}
+		try {
+			const limit = typeof input['limit'] === 'number' ? Math.floor(input['limit']) : undefined;
+			const result = await kd.listNamespaces(limit !== undefined ? { limit } : undefined);
+			const lines: string[] = [
+				`**${connectionId}** -- ${result.namespaces.length} namespace${result.namespaces.length === 1 ? '' : 's'}` +
+					(result.truncated ? ' (truncated)' : '') +
+					(result.supported ? '' : ' (driver does not expose namespaces)'),
+			];
+			if (result.namespaces.length > 0) {
+				lines.push('', '| name | kind | approx count |', '|---|---|---|');
+				for (const ns of result.namespaces) {
+					lines.push(`| ${ns.name} | ${ns.kind ?? ''} | ${ns.approxCount ?? ''} |`);
+				}
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const kvDescribeNamespaceTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_kv_describe_namespace',
+	description:
+		'Shape + sample keys for one KV namespace. For Mongo / Cassandra / DynamoDB returns the engine\'s ' +
+		'native schema info; for Redis / etcd / NATS samples values under the namespace prefix and infers ' +
+		'a JSON shape. Pairs with db_kv_list_namespaces.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'namespace'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			namespace: { type: 'string' },
+			sampleSize: { type: 'integer', minimum: 1, maximum: 200, description: 'Sample size for shape inference; default 50.' },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const namespace = String(input['namespace'] ?? '');
+		if (connectionId === '' || namespace === '') return fail(this.id, 'connectionId and namespace are required');
+		const driver = await acquireDriver(this.id, deps, connectionId, 'kv');
+		if (!isDriver(driver)) return driver;
+		const kd = driver as KvDriver;
+		if (typeof kd.describeNamespace !== 'function') {
+			return fail(this.id, `KV driver '${kd.kind}' does not implement describeNamespace() yet`);
+		}
+		try {
+			const sampleSize = typeof input['sampleSize'] === 'number' ? Math.floor(input['sampleSize']) : undefined;
+			const result = await kd.describeNamespace(namespace, sampleSize !== undefined ? { sampleSize } : undefined);
+			const lines: string[] = [
+				`**${namespace}** (${result.kind ?? 'namespace'})` + (result.supported ? '' : ' -- driver does not expose namespace shape'),
+				`approxCount: ${result.approxCount ?? '_(unknown)_'}`,
+			];
+			if (result.sampleKeys.length > 0) {
+				lines.push('', '_sample keys_:', ...result.sampleKeys.map(k => `- \`${k}\``));
+			}
+			if (result.fields.length > 0) {
+				lines.push('', '| path | types | nullable | freq |', '|---|---|---|---|');
+				for (const f of result.fields) {
+					lines.push(`| ${f.path} | ${f.types.join(', ')} | ${f.nullable ? 'yes' : 'no'} | ${(f.frequency * 100).toFixed(0)}% |`);
+				}
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
 // db:kv:scan + db:kv:get + db:kv:sample_shape
 // ---------------------------------------------------------------------------
 
@@ -1069,14 +1579,22 @@ export function registerDbTools(): void {
 	registerTool(sqlExplainTool);
 	registerTool(sqlAggregateTool);
 	registerTool(sqlDistinctTool);
+	registerTool(sqlHistogramTool);
+	registerTool(sqlCorrelationMatrixTool);
+	registerTool(sqlOutliersTool);
 	registerTool(kvScanTool);
 	registerTool(kvGetTool);
 	registerTool(kvSampleShapeTool);
+	registerTool(kvListNamespacesTool);
+	registerTool(kvDescribeNamespaceTool);
 	registerTool(fileDescribeTool);
 	registerTool(fileSampleTool);
 	registerTool(fileSampleShapeTool);
 	registerTool(fileAggregateTool);
 	registerTool(fileDistinctTool);
+	registerTool(fileHistogramTool);
+	registerTool(fileCorrelationMatrixTool);
+	registerTool(fileOutliersTool);
 	registerTool(fileListFilesTool);
-	log.debug({ count: 10 }, 'data-driver tools registered');
+	log.debug({ count: 23 }, 'data-driver tools registered');
 }

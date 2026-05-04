@@ -311,6 +311,135 @@ export interface DistinctResult {
 }
 
 // ---------------------------------------------------------------------------
+// Histogram (Phase 0.2 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+
+export type HistogramMode = 'equal-width' | 'equal-frequency';
+
+export interface HistogramRequest {
+	readonly column: string;
+	readonly buckets: number;
+	readonly mode?: HistogramMode;
+	readonly where?: readonly WhereClause[];
+}
+
+export interface HistogramBucket {
+	readonly lower: number;
+	readonly upper: number;
+	readonly count: number;
+}
+
+export interface HistogramResult {
+	readonly target: string;
+	readonly column: string;
+	readonly mode: HistogramMode;
+	readonly bounds: { readonly lower: number | null; readonly upper: number | null };
+	readonly buckets: readonly HistogramBucket[];
+	readonly nonNullCount: number;
+	readonly nullCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Correlation matrix (Phase 0.4)
+// ---------------------------------------------------------------------------
+
+export type CorrelationMethod = 'pearson' | 'spearman';
+
+export interface CorrelationMatrixRequest {
+	readonly columns: readonly string[];
+	readonly method?: CorrelationMethod;
+	readonly where?: readonly WhereClause[];
+}
+
+export interface CorrelationMatrixResult {
+	readonly target: string;
+	readonly columns: readonly string[];
+	readonly method: CorrelationMethod;
+	/** Rows where every requested column is non-null (the basis for
+	 *  pairwise complete-observation correlation; one number for the
+	 *  whole matrix rather than per-pair). */
+	readonly nonNullCount: number;
+	/** N x N symmetric matrix; `null` when correlation is undefined
+	 *  (constant column, fewer than 2 non-null rows). Diagonal is 1
+	 *  unless the column is constant, in which case it's null. */
+	readonly matrix: readonly (readonly (number | null)[])[];
+}
+
+// ---------------------------------------------------------------------------
+// Outliers (Phase 0.5)
+// ---------------------------------------------------------------------------
+
+export type OutlierMethod = 'iqr' | 'zscore';
+
+export interface OutlierRequest {
+	readonly column: string;
+	readonly method: OutlierMethod;
+	/** IQR multiplier (default 1.5) or z-score threshold (default 3). */
+	readonly threshold?: number;
+	readonly where?: readonly WhereClause[];
+	/** Up to 50 example values from the outlier set; default 20. */
+	readonly examples?: number;
+}
+
+export interface OutlierResult {
+	readonly target: string;
+	readonly column: string;
+	readonly method: OutlierMethod;
+	readonly threshold: number;
+	readonly nonNullCount: number;
+	readonly lowerBound: number | null;
+	readonly upperBound: number | null;
+	readonly belowCount: number;
+	readonly aboveCount: number;
+	/** belowCount + aboveCount, computed once per request. */
+	readonly outlierCount: number;
+	/** Center of the distribution: `median` for IQR, `mean` for zscore. */
+	readonly center: number | null;
+	/** Spread: `iqr` for IQR, `stddev` for zscore. */
+	readonly spread: number | null;
+	readonly examples: readonly { readonly value: number; readonly side: 'below' | 'above' }[];
+}
+
+// ---------------------------------------------------------------------------
+// KV namespaces (Phase 0.7 + 0.8)
+// ---------------------------------------------------------------------------
+
+export interface KvNamespace {
+	readonly name: string;
+	/** Optional shape hint: 'collection' (Mongo), 'table' (Cassandra,
+	 *  DynamoDB), 'bucket' (NATS KV), 'prefix' (Redis SCAN-derived). */
+	readonly kind?: 'collection' | 'table' | 'bucket' | 'prefix';
+	/** Optional row / key count hint when the engine cheaply exposes it. */
+	readonly approxCount?: number;
+}
+
+export interface KvNamespaceList {
+	readonly namespaces: readonly KvNamespace[];
+	readonly truncated: boolean;
+	readonly supported: boolean;
+}
+
+export interface KvNamespaceDescription {
+	readonly name: string;
+	readonly kind?: 'collection' | 'table' | 'bucket' | 'prefix';
+	/** Approximate row / key count (engine-supplied; may be `null` if
+	 *  not cheaply available). */
+	readonly approxCount: number | null;
+	/** Sample keys (for stores with structured keys, this is the
+	 *  serialised form). */
+	readonly sampleKeys: readonly string[];
+	/** Field-level shape inference (when value introspection is
+	 *  feasible). Empty array when not applicable (raw KV stores). */
+	readonly fields: readonly {
+		readonly path: string;
+		readonly types: readonly string[];
+		readonly nullable: boolean;
+		readonly frequency: number;
+	}[];
+	readonly supported: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Driver interfaces
 // ---------------------------------------------------------------------------
 
@@ -340,6 +469,12 @@ export interface RdbmsDriver extends BaseDriver {
 	 * downstream Family-5 categorical-profile skills.
 	 */
 	distinct(target: string, request: DistinctRequest): Promise<DistinctResult>;
+	/** Phase 0.2 -- server-side histogram. */
+	histogram?(target: string, request: HistogramRequest): Promise<HistogramResult>;
+	/** Phase 0.4 -- pairwise correlation matrix over numeric columns. */
+	correlationMatrix?(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult>;
+	/** Phase 0.5 -- IQR / z-score outlier counts + examples. */
+	outliers?(target: string, request: OutlierRequest): Promise<OutlierResult>;
 }
 
 export interface KvDriver extends BaseDriver {
@@ -347,6 +482,13 @@ export interface KvDriver extends BaseDriver {
 	scan(opts: ScanOpts): Promise<KeyList>;
 	get(key: string | Readonly<Record<string, unknown>>): Promise<KvValue>;
 	sampleShape(opts: ScanOpts): Promise<ShapeReport>;
+	/** Phase 0.7 -- enumerate top-level namespaces (Mongo collections,
+	 *  Cassandra tables, DynamoDB tables, NATS KV buckets, Redis
+	 *  scan-derived prefixes). KV stores without a namespace concept
+	 *  return `{ namespaces: [], supported: false }`. */
+	listNamespaces?(opts?: { readonly limit?: number }): Promise<KvNamespaceList>;
+	/** Phase 0.8 -- shape + sample-keys for one namespace. */
+	describeNamespace?(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription>;
 }
 
 export interface FileDriver extends BaseDriver {
@@ -369,6 +511,12 @@ export interface FileDriver extends BaseDriver {
 	 *  consolidated DuckDB-backed file driver implements it for the
 	 *  file family. Other file drivers throw. */
 	distinct?(target: string | undefined, request: DistinctRequest): Promise<DistinctResult>;
+	/** Phase 0.2 -- server-side histogram (DuckDB-backed file driver). */
+	histogram?(target: string | undefined, request: HistogramRequest): Promise<HistogramResult>;
+	/** Phase 0.4 -- correlation matrix (DuckDB-backed file driver). */
+	correlationMatrix?(target: string | undefined, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult>;
+	/** Phase 0.5 -- outlier counts + examples (DuckDB-backed file driver). */
+	outliers?(target: string | undefined, request: OutlierRequest): Promise<OutlierResult>;
 }
 
 export type Driver = RdbmsDriver | KvDriver | FileDriver;

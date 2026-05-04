@@ -17,6 +17,9 @@ import type {
 	ConnectionConfig,
 	KeyList,
 	KvDriver,
+	KvNamespace,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -97,6 +100,49 @@ class NatsKvDriver implements KvDriver {
 			try { await (await this.ncPromise).close(); }
 			catch (err) { log.warn({ id: this.id, err: (err as Error).message }, 'nats close failed'); }
 		}
+	}
+
+	async listNamespaces(opts?: { readonly limit?: number }): Promise<KvNamespaceList> {
+		// NATS KV has multiple buckets per server. The connection config
+		// pins a single bucket, so for now we report just that bucket --
+		// listing all buckets across the JetStream cluster would need an
+		// explicit JSM call (jsm.streams.list filtered by KV_*) and is
+		// gated on whether the user actually wants cross-bucket listing.
+		const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 200)), 1000);
+		void limit;
+		return {
+			namespaces: [{ name: this.bucket, kind: 'bucket' }],
+			truncated: false,
+			supported: true,
+		};
+	}
+
+	async describeNamespace(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription> {
+		if (name !== this.bucket) {
+			return { name, kind: 'bucket', approxCount: null, sampleKeys: [], fields: [], supported: false };
+		}
+		const limit = Math.min(Math.max(1, Math.floor(opts?.sampleSize ?? 50)), 200);
+		const kv = await this.kv();
+		const keys: string[] = [];
+		const iter = await kv.keys('>');
+		for await (const k of iter) {
+			keys.push(k);
+			if (keys.length >= limit) break;
+		}
+		const values: unknown[] = [];
+		for (const k of keys) {
+			const entry = await kv.get(k);
+			if (entry === null) continue;
+			values.push(decodeMaybeJson(entry.value));
+		}
+		const shape = inferShape(values);
+		return {
+			name, kind: 'bucket',
+			approxCount: keys.length,
+			sampleKeys: keys.slice(0, 10),
+			fields: shape.fields,
+			supported: true,
+		};
 	}
 
 	// -------------------------------------------------------------------------

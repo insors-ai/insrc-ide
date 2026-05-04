@@ -150,6 +150,18 @@ class ClickHouseDriver implements RdbmsDriver {
 		);
 	}
 
+	async histogram(): Promise<never> {
+		throw new Error('data-driver: histogram() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
+	}
+
+	async correlationMatrix(): Promise<never> {
+		throw new Error('data-driver: correlationMatrix() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
+	}
+
+	async outliers(): Promise<never> {
+		throw new Error('data-driver: outliers() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
+	}
+
 	async close(): Promise<void> {
 		await this.client.close();
 	}

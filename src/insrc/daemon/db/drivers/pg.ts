@@ -15,8 +15,14 @@ import type {
 	AggregateRequest,
 	AggregateResult,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	HistogramRequest,
+	HistogramResult,
+	OutlierRequest,
+	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -32,12 +38,16 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeCorrelationMatrix,
+	executeHistogram,
+	executeOutliers,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
 	withTimeout,
 } from './rdbms-common.js';
+import type { OrchestratorDeps } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
@@ -166,6 +176,40 @@ class PostgresDriver implements RdbmsDriver {
 			column: request.column,
 			distinctCount: readDistinctCount(countRes.rows[0] as Readonly<Record<string, unknown>> | undefined),
 			topValues: readDistinctRows(valuesRes.rows as readonly Readonly<Record<string, unknown>>[]),
+		};
+	}
+
+	async histogram(target: string, request: HistogramRequest): Promise<HistogramResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeHistogram(request, this.orchestratorDeps(target, cols));
+	}
+
+	async correlationMatrix(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {
+		return {
+			target,
+			knownColumns: cols,
+			dialect: POSTGRES_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) => {
+				const res = await withTimeout(
+					this.pool.query(sql, values as unknown[]),
+					SAMPLE_TIMEOUT_MS,
+				);
+				return res.rows as readonly Readonly<Record<string, unknown>>[];
+			},
 		};
 	}
 

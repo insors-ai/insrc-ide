@@ -25,6 +25,8 @@ import type {
 	ConnectionConfig,
 	KvDriver,
 	KeyList,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -105,6 +107,22 @@ class MemcachedDriver implements KvDriver {
 	async close(): Promise<void> {
 		try { this.client.close(); }
 		catch (err) { log.warn({ id: this.id, err: (err as Error).message }, 'memcached close failed'); }
+	}
+
+	async listNamespaces(): Promise<KvNamespaceList> {
+		// Memcached has no namespace concept and no enumeration surface;
+		// `supported: false` lets the tool layer report it cleanly without
+		// failing the call.
+		return { namespaces: [], truncated: false, supported: false };
+	}
+
+	async describeNamespace(name: string): Promise<KvNamespaceDescription> {
+		return {
+			name, kind: 'prefix',
+			approxCount: null,
+			sampleKeys: [], fields: [],
+			supported: false,
+		};
 	}
 }
 

@@ -15,6 +15,9 @@ import type {
 	ConnectionConfig,
 	KvDriver,
 	KeyList,
+	KvNamespace,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -108,6 +111,45 @@ class MongoDriver implements KvDriver {
 		await this.client.close().catch((err: Error) => {
 			log.warn({ id: this.id, err: err.message }, 'mongo close failed');
 		});
+	}
+
+	async listNamespaces(opts?: { readonly limit?: number }): Promise<KvNamespaceList> {
+		const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 200)), 1000);
+		await this.client.connect();
+		const dbs = await this.client.db().admin().listDatabases();
+		const out: KvNamespace[] = [];
+		let truncated = false;
+		outer: for (const d of dbs.databases) {
+			if (d.name === 'admin' || d.name === 'config' || d.name === 'local') continue;
+			const collections = await this.client.db(d.name).listCollections({}, { nameOnly: true }).toArray();
+			for (const c of collections) {
+				if (out.length >= limit) { truncated = true; break outer; }
+				out.push({ name: `${d.name}.${c.name}`, kind: 'collection' });
+			}
+		}
+		return { namespaces: out, truncated, supported: true };
+	}
+
+	async describeNamespace(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription> {
+		const sample = Math.min(Math.max(1, Math.floor(opts?.sampleSize ?? 50)), 200);
+		const dot = name.indexOf('.');
+		if (dot < 1) throw new Error(`data-driver: mongodb namespace must be "<db>.<collection>"; got '${name}'`);
+		const db = name.slice(0, dot);
+		const collection = name.slice(dot + 1);
+		await this.client.connect();
+		const coll = this.client.db(db).collection(collection);
+		const approxCount = await coll.estimatedDocumentCount().catch(() => null);
+		const docs = await coll.find({}).limit(sample).toArray();
+		const sampleKeys = docs.slice(0, 10).map(d => JSON.stringify({ db, collection, _id: d._id }));
+		const shape = inferShape(docs);
+		return {
+			name,
+			kind: 'collection',
+			approxCount: approxCount ?? null,
+			sampleKeys,
+			fields: shape.fields,
+			supported: true,
+		};
 	}
 }
 

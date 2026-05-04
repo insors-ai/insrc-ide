@@ -25,8 +25,14 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	HistogramRequest,
+	HistogramResult,
+	OutlierRequest,
+	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -39,12 +45,16 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeCorrelationMatrix,
+	executeHistogram,
+	executeOutliers,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
 	withTimeout,
 } from './rdbms-common.js';
+import type { OrchestratorDeps } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
@@ -207,6 +217,35 @@ class MssqlDriver implements RdbmsDriver {
 			column: request.column,
 			distinctCount: readDistinctCount(countRows[0]),
 			topValues: readDistinctRows(valueRows),
+		};
+	}
+
+	async histogram(target: string, request: HistogramRequest): Promise<HistogramResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeHistogram(request, this.orchestratorDeps(target, cols));
+	}
+
+	async correlationMatrix(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {
+		return {
+			target,
+			knownColumns: cols,
+			dialect: MSSQL_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) =>
+				await withTimeout(this.run(sql, values as unknown[]), SAMPLE_TIMEOUT_MS),
 		};
 	}
 

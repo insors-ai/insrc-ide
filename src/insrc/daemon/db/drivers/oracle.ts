@@ -19,8 +19,14 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	HistogramRequest,
+	HistogramResult,
+	OutlierRequest,
+	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -33,11 +39,15 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeCorrelationMatrix,
+	executeHistogram,
+	executeOutliers,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
 } from './rdbms-common.js';
+import type { OrchestratorDeps } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
@@ -193,6 +203,46 @@ class OracleDriver implements RdbmsDriver {
 		} finally {
 			await conn.close();
 		}
+	}
+
+	async histogram(target: string, request: HistogramRequest): Promise<HistogramResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeHistogram(request, this.orchestratorDeps(target, cols));
+	}
+
+	async correlationMatrix(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {
+		return {
+			target,
+			knownColumns: cols,
+			dialect: ORACLE_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) => {
+				const pool = await this.poolPromise;
+				const conn = await pool.getConnection();
+				try {
+					const res = await conn.execute<Record<string, unknown>>(
+						sql, values as unknown[],
+						{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+					);
+					return res.rows ?? [];
+				} finally {
+					await conn.close();
+				}
+			},
+		};
 	}
 
 	async close(): Promise<void> {

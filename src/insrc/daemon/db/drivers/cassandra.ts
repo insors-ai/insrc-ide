@@ -19,6 +19,9 @@ import type {
 	ConnectionConfig,
 	KvDriver,
 	KeyList,
+	KvNamespace,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -149,6 +152,64 @@ class CassandraDriver implements KvDriver {
 		await this.client.shutdown().catch((err: Error) => {
 			log.warn({ id: this.id, err: err.message }, 'cassandra shutdown failed');
 		});
+	}
+
+	async listNamespaces(opts?: { readonly limit?: number }): Promise<KvNamespaceList> {
+		const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 200)), 1000);
+		const res = await this.client.execute(
+			`SELECT keyspace_name, table_name FROM system_schema.tables`,
+			[], { readTimeout: SCAN_TIMEOUT_MS },
+		);
+		const out: KvNamespace[] = [];
+		let truncated = false;
+		for (const r of res.rows) {
+			const ks = String(r['keyspace_name']);
+			if (ks === 'system' || ks === 'system_schema' || ks === 'system_auth' || ks === 'system_traces' || ks === 'system_distributed') continue;
+			if (out.length >= limit) { truncated = true; break; }
+			out.push({ name: `${ks}.${String(r['table_name'])}`, kind: 'table' });
+		}
+		return { namespaces: out, truncated, supported: true };
+	}
+
+	async describeNamespace(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription> {
+		const sample = Math.min(Math.max(1, Math.floor(opts?.sampleSize ?? 50)), 200);
+		const target = parseTarget(name, this.defaultKs);
+		const colRes = await this.client.execute(
+			`SELECT column_name, kind, type FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?`,
+			[target.keyspace, target.table],
+			{ prepare: true, readTimeout: SCAN_TIMEOUT_MS },
+		);
+		if (colRes.rows.length === 0) {
+			return {
+				name, kind: 'table',
+				approxCount: null,
+				sampleKeys: [], fields: [],
+				supported: false,
+			};
+		}
+		const fields = colRes.rows.map(r => ({
+			path: String(r['column_name']),
+			types: [String(r['type'])],
+			nullable: r['kind'] !== 'partition_key' && r['kind'] !== 'clustering',
+			frequency: 1,
+		}));
+		const sampleRes = await this.client.execute(
+			`SELECT * FROM ${quoteIdent(target.keyspace)}.${quoteIdent(target.table)} LIMIT ${sample}`,
+			[], { readTimeout: SCAN_TIMEOUT_MS },
+		);
+		const pkCols = await this.primaryKey(target);
+		const sampleKeys = sampleRes.rows.slice(0, 10).map(r => {
+			const k: Record<string, unknown> = { keyspace: target.keyspace, table: target.table };
+			for (const c of pkCols) k[c] = r[c];
+			return JSON.stringify(k);
+		});
+		return {
+			name, kind: 'table',
+			approxCount: null,  // Cassandra doesn't expose cheap row counts
+			sampleKeys,
+			fields,
+			supported: true,
+		};
 	}
 
 	// -------------------------------------------------------------------------

@@ -161,6 +161,77 @@ describe('SqliteDriver (via pool)', () => {
 		await pool.closeAll();
 	});
 
+	// -------------------------------------------------------------------------
+	// histogram() -- Phase 0.2
+	// -------------------------------------------------------------------------
+
+	it('histogram equal-width returns bucket counts spanning min..max', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		const res = await (drv as {
+			histogram: (t: string, r: unknown) => Promise<{ target: string; column: string; mode: string; bounds: { lower: number | null; upper: number | null }; buckets: { lower: number; upper: number; count: number }[]; nonNullCount: number; nullCount: number }>;
+		}).histogram('orders', { column: 'amount', buckets: 4, mode: 'equal-width' });
+		assert.equal(res.target, 'orders');
+		assert.equal(res.mode, 'equal-width');
+		assert.equal(res.buckets.length, 4);
+		assert.equal(res.bounds.lower, 7);
+		assert.equal(res.bounds.upper, 99.99);
+		assert.equal(res.nonNullCount, 3);
+		const total = res.buckets.reduce((a, b) => a + b.count, 0);
+		assert.equal(total, 3);
+		await pool.closeAll();
+	});
+
+	it('histogram equal-frequency uses NTILE and returns per-bucket bounds', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		const res = await (drv as {
+			histogram: (t: string, r: unknown) => Promise<{ buckets: { lower: number; upper: number; count: number }[]; mode: string; nonNullCount: number }>;
+		}).histogram('orders', { column: 'amount', buckets: 4, mode: 'equal-frequency' });
+		assert.equal(res.mode, 'equal-frequency');
+		// 3 non-null amounts split into 4 buckets -> one bucket may be empty.
+		const total = res.buckets.reduce((a, b) => a + b.count, 0);
+		assert.equal(total, 3);
+		await pool.closeAll();
+	});
+
+	// -------------------------------------------------------------------------
+	// correlationMatrix() -- Phase 0.4
+	// -------------------------------------------------------------------------
+
+	it('correlationMatrix pearson via portable formula', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		const res = await (drv as {
+			correlationMatrix: (t: string, r: unknown) => Promise<{ target: string; method: string; matrix: (number | null)[][]; nonNullCount: number }>;
+		}).correlationMatrix('orders', { columns: ['user_id', 'amount'], method: 'pearson' });
+		assert.equal(res.target, 'orders');
+		assert.equal(res.method, 'pearson');
+		assert.equal(res.matrix.length, 2);
+		assert.equal(res.matrix[0]?.[0], 1);
+		assert.equal(res.matrix[1]?.[1], 1);
+		// Symmetric.
+		assert.equal(res.matrix[0]?.[1], res.matrix[1]?.[0]);
+		// All three rows have user_id + amount non-null -> n = 3.
+		assert.equal(res.nonNullCount, 3);
+		await pool.closeAll();
+	});
+
+	it('correlationMatrix spearman ranks then correlates', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		const res = await (drv as {
+			correlationMatrix: (t: string, r: unknown) => Promise<{ method: string; matrix: (number | null)[][] }>;
+		}).correlationMatrix('orders', { columns: ['user_id', 'amount'], method: 'spearman' });
+		assert.equal(res.method, 'spearman');
+		assert.equal(res.matrix.length, 2);
+		await pool.closeAll();
+	});
+
 	it('aggregate stddev surfaces SQLite-no-such-function as a clean engine error', async () => {
 		// SQLite has no built-in STDDEV_SAMP; the engine error reaches
 		// the tool layer verbatim and surfaces as `success: false` to

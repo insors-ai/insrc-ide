@@ -19,6 +19,9 @@ import type {
 	ConnectionConfig,
 	KvDriver,
 	KeyList,
+	KvNamespace,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -103,6 +106,50 @@ class EtcdDriver implements KvDriver {
 	async close(): Promise<void> {
 		try { this.client.close(); }
 		catch (err) { log.warn({ id: this.id, err: (err as Error).message }, 'etcd close failed'); }
+	}
+
+	async listNamespaces(opts?: { readonly limit?: number }): Promise<KvNamespaceList> {
+		// etcd has no namespace concept; we derive prefixes by scanning
+		// keys and grouping by the first '/' separator (the canonical
+		// etcd path convention).
+		const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 200)), 1000);
+		const samplePool = Math.min(limit * 50, 5000);
+		const keys = await this.client.getAll().prefix('').keys();
+		const prefixes = new Map<string, number>();
+		for (let i = 0; i < Math.min(keys.length, samplePool); i++) {
+			const k = keys[i]!;
+			const trimmed = k.startsWith('/') ? k.slice(1) : k;
+			const sep = trimmed.indexOf('/');
+			const ns = sep > 0 ? '/' + trimmed.slice(0, sep) : '/' + trimmed;
+			prefixes.set(ns, (prefixes.get(ns) ?? 0) + 1);
+		}
+		const sorted = [...prefixes.entries()]
+			.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+			.slice(0, limit);
+		const namespaces: KvNamespace[] = sorted.map(([name, approxCount]) => ({
+			name, kind: 'prefix', approxCount,
+		}));
+		return { namespaces, truncated: keys.length > samplePool, supported: true };
+	}
+
+	async describeNamespace(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription> {
+		const limit = Math.min(Math.max(1, Math.floor(opts?.sampleSize ?? 50)), 200);
+		const prefix = name.endsWith('/') ? name : name + '/';
+		const all = await this.client.getAll().prefix(prefix).strings();
+		const entries = Object.entries(all).slice(0, limit);
+		const decoded: unknown[] = [];
+		for (const [, v] of entries) {
+			try { decoded.push(JSON.parse(v)); }
+			catch { decoded.push(v); }
+		}
+		const shape = inferShape(decoded);
+		return {
+			name, kind: 'prefix',
+			approxCount: entries.length,
+			sampleKeys: entries.slice(0, 10).map(([k]) => k),
+			fields: shape.fields,
+			supported: true,
+		};
 	}
 }
 

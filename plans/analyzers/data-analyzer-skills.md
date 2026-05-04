@@ -73,55 +73,54 @@ the fact.
 
 ## Status
 
-Phase 0 partially landed: 0.1 (`db_sql_aggregate` + `aggregate()` on
-RDBMS drivers and the consolidated DuckDB-backed file driver), 0.3
-(`db_sql_distinct` + `db_file_distinct` + `distinct()` on every
-RDBMS driver and the file driver), and 0.6 (sampling-confidence
-library) are done; 0.2 / 0.4 / 0.5 deferred until the first
-Family-5 skill needs them; 0.7-0.9 (KV substrate + naming
-reconciliation) remain. The data-driver-duckdb-files
+**Phase 0 is now fully shipped.** All nine slices are done (see the table
+below for per-slice evidence + tests). The completion landed as one PR
+extending the driver interface with `histogram()` / `correlationMatrix()`
+/ `outliers()` / `listNamespaces()` / `describeNamespace()`, with shared
+orchestrators in `rdbms-common.ts` (`executeHistogram` /
+`executeCorrelationMatrix` / `executeOutliers`) so each driver wires the
+new methods via a per-driver `runRows` callback. The data-driver-duckdb-files
 prerequisite is **fully shipped** -- every file kind already routes
-through the consolidated DuckDB-backed driver with `db_file_*` tools
-in place. Phase 1.1 (`data.source.rdbms.describe-table`), Phase 1.3
+through the consolidated DuckDB-backed driver with `db_file_*` tools in
+place. Currently **23 `db_*` tools** are registered:
+`db_list_connections`; SQL: `db_sql_describe` / `_sample` / `_explain` /
+`_aggregate` / `_distinct` / `_histogram` / `_correlation_matrix` /
+`_outliers`; KV: `db_kv_scan` / `_get` / `_sample_shape` /
+`_list_namespaces` / `_describe_namespace`; file: `db_file_describe` /
+`_sample` / `_sample_shape` / `_list_files` / `_aggregate` / `_distinct` /
+`_histogram` / `_correlation_matrix` / `_outliers`. Phase 1.1
+(`data.source.rdbms.describe-table`), Phase 1.3
 (`data.source.file.describe`), Phase 2.1 (both
 `data.source.rdbms.sample-rows` and `data.source.rdbms.sample-distinct`),
 Phase 2.2 (all three KV sampling skills:
 `data.source.kv.scan-keys` / `get-value` / `sample-shape`), and
 Phase 2.3 (`data.source.file.sample-rows`,
-`data.source.file.sample-shape`) are landed. Phase 5a (univariate profilers) is fully landed on the RDBMS side:
-`profile.numeric.rdbms`, `profile.categorical.rdbms`,
-`profile.boolean.rdbms`, `profile.temporal.rdbms`,
-`profile.text.rdbms`, and the `profile.auto.rdbms` composite that
-picks among them by declared SQL type. File-side variants are
-follow-ups; min/max temporal range + gap/period inference deferred
-until a type-aware aggregation surface exists.
-Phase 5d (quality scorecard) atomic dimensions are also partially
-landed: `quality.completeness.rdbms` (per-column null rate + table
-overall) and `quality.uniqueness.rdbms` (per-column distinct ratio
-+ single-column PK candidates) shipped. The remaining 5d atomics
-(validity, conformity, consistency) and the `quality.scorecard`
-composite are pending. Phase 5e starts:
-`data.pii.detect-patterns.rdbms` ships -- regex over sampled values
-for the 10 most common PII / credentials shapes. Phase 1.2
-(source-introspection: kv) is blocked on 0.7 / 0.8 (the
-`db_kv_list_namespaces` / `db_kv_describe_namespace` tools);
-Phase 1.4 / 2.4 (doc family) blocked on 0.9 naming
-reconciliation -- though plan default is to collapse `doc` into
-`kv`, which the Phase 2.2 KV sampling skills already cover for
-mongo / cassandra. Slice 3.4 has a partial wrapper from
-skills-core 9. Skill core (skills-core.md) is fully shipped.
+`data.source.file.sample-shape`) are landed. Phase 5a-5g
+(quality-profile / distribution / dependency / quality-scorecard /
+sensitivity / drift / timeseries) are fully shipped on the RDBMS side
+and Track A (file-side ports) is now complete: 22 file variants land
+across 5a (5 profilers), 5b (6 distribution), 5c (3 dependency), 5d
+(6 quality including the scorecard composite), 5e (1 PII), 5f (2 drift).
+Several rows stay `partial` because their full-table math has not yet
+been folded into the existing skills (transport ports are done; the
+math swap is mechanical now that the tools land). Phase 1.2
+(source-introspection: kv) is now unblocked -- `db_kv_list_namespaces`
++ `db_kv_describe_namespace` are registered. Phase 1.4 / 2.4 (doc
+family) is moot now that 0.9 reconciled to `kv`. Slice 3.4 has a
+partial wrapper from skills-core 9. Skill core (skills-core.md) is
+fully shipped.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
-| 0.1 | `db_sql_aggregate` tool | done | `daemon/tools/builtins/db/index.ts` + `compileAggregate(Exprs)` in `rdbms-common.ts` + `aggregate()` on `RdbmsDriver` (postgres / mysql / sqlite / mssql / oracle real impls; clickhouse throws for now) and on the new `DuckDBFileDriver`. 35 + 8 tests |
-| 0.2 | `db_sql_histogram` tool | pending | needs `histogram(target, opts)` driver method per dialect (`width_bucket` Postgres / DuckDB; `NTILE` fallback for SQLite / MySQL). Deferred until first Family-5 distribution skill needs it -- avoids speculative cross-dialect work |
-| 0.3 | `db_sql_distinct` tool | done | `daemon/tools/builtins/db/index.ts` + `compileDistinct` in `rdbms-common.ts` + `distinct()` on `RdbmsDriver` (postgres / mysql / sqlite / mssql / oracle real impls; clickhouse throws for now -- pairs with the aggregate() follow-up) and on the consolidated `DuckDBFileDriver`. Sister tool `db_file_distinct` ships in the same change. Deterministic order (count desc, value asc); topN clamped [1, 1000] |
-| 0.4 | `db_correlation_matrix` tool | pending | needs `correlationMatrix(target, opts)` driver method. RDBMS via per-dialect `corr(c1, c2)` (Postgres / DuckDB native; computed expression elsewhere); file connections route through the consolidated DuckDB-backed driver's `aggregate()` path which has `corr` natively. KV / doc connections refuse via precondition. Deferred |
-| 0.5 | `db_outliers` tool | pending | composite over existing aggregate primitives (percentile for IQR; avg + stddev for Z-score) plus a new sample-with-comparison helper (`>=` / `<=` ops on WhereClause). Works for both RDBMS and file (file path goes through `db_file_aggregate`). Deferred |
-| 0.6 | sampling-confidence library | done | `daemon/db/sampling-confidence.ts` -- `sampleSizeFor` + `confidenceFor` for mean / percentile / normality / correlation estimators; finite-population correction; 11-test suite |
-| 0.7 | `db_kv_list_namespaces` tool | pending | enumerate top-level keyspaces / Mongo collections / Cassandra column-families. Required by 1.2 |
-| 0.8 | `db_kv_describe_namespace` tool | pending | shape + key-prefix layout of one namespace. Required by 1.2 |
-| 0.9 | doc-family naming reconciliation | pending | driver today classifies MongoDB / Cassandra as `kv`; plan mentions a `doc` family. Decide: extend driver with `doc` family, or rename plan-side `doc` → `kv` and update Phase 1.4 / 2.4. Affects every doc-flavoured skill |
+| 0.1 | `db_sql_aggregate` + `db_file_aggregate` tool | done | Tools registered at [tools/builtins/db/index.ts:480 (sql) and the file-side counterpart](src/insrc/daemon/tools/builtins/db/index.ts). Helper `compileAggregate` in [rdbms-common.ts:409-424](src/insrc/daemon/db/drivers/rdbms-common.ts#L409-L424) (now compiles WHERE via `compileWhere`). Driver method `aggregate()`: real impl on [postgres](src/insrc/daemon/db/drivers/pg.ts#L142), [mysql](src/insrc/daemon/db/drivers/mysql.ts#L131), [sqlite](src/insrc/daemon/db/drivers/sqlite.ts#L127), [mssql](src/insrc/daemon/db/drivers/mssql.ts#L184), [oracle](src/insrc/daemon/db/drivers/oracle.ts#L156); [clickhouse](src/insrc/daemon/db/drivers/clickhouse.ts#L123-L135) throws-with-message (per-dialect `quantile()` / `stddevSamp` / `varSamp` follow-up). File path: [DuckDBFileDriver.aggregate()](src/insrc/daemon/db/drivers/duckdb-file.ts#L395). **WHERE support** added per the 5f.2 drift.volume fix -- both tools now accept `where: WHERE_SCHEMA`, threaded through `AggregateRequest.where` / `compileAggregate` / file-side `aggregate()` SQL builder. Coverage: `compileAggregate` table tests in [rdbms-common.test.ts](src/insrc/daemon/db/__tests__/rdbms-common.test.ts) (incl. 4 WHERE-on-aggregate cases) + sqlite / duckdb integration tests |
+| 0.2 | `db_sql_histogram` + `db_file_histogram` tool | done | Both tools registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts). Compile helpers `clampHistogramBuckets` / `histogramBoundsRequest` / `compileHistogramBuckets` / `readHistogramRows` + orchestrator `executeHistogram` in [rdbms-common.ts](src/insrc/daemon/db/drivers/rdbms-common.ts). Two-phase protocol: bounds via `aggregate(min/max/count_non_null/count)`, then a bucketed counts query. **Equal-width** uses `FLOOR((col - lower) / width)` arithmetic with a CASE clamp at the upper edge (every dialect supports it). **Equal-frequency** uses `NTILE(n) OVER (ORDER BY col)` (Postgres / DuckDB / SQLite>=3.25 / MySQL>=8.0 / MSSQL / Oracle). `histogram()` wired on every RDBMS driver except clickhouse (throws-with-message) + DuckDBFileDriver. Default 20 buckets, capped at 200. Coverage: 4 integration tests on duckdb-file (equal-width + equal-frequency) and sqlite (same). Unblocks the full-table upgrade for 5b.7 distribution.modes (skill swap pending in Track C) |
+| 0.3 | `db_sql_distinct` + `db_file_distinct` tool | done | Both tools registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts) (sql at line 574, file at 611). Helper [`compileDistinct` in rdbms-common.ts:451-482](src/insrc/daemon/db/drivers/rdbms-common.ts#L451-L482). Driver method `distinct()`: real impl on [postgres:155](src/insrc/daemon/db/drivers/pg.ts#L155), [mysql:143](src/insrc/daemon/db/drivers/mysql.ts#L143), [sqlite:141](src/insrc/daemon/db/drivers/sqlite.ts#L141), [mssql:196](src/insrc/daemon/db/drivers/mssql.ts#L196), [oracle:175](src/insrc/daemon/db/drivers/oracle.ts#L175); [clickhouse:138-150](src/insrc/daemon/db/drivers/clickhouse.ts#L138-L150) throws-with-message (paired with the aggregate() follow-up). File path: [DuckDBFileDriver.distinct() at duckdb-file.ts:416](src/insrc/daemon/db/drivers/duckdb-file.ts#L416). Deterministic order (count desc, value asc); topN clamped [1, 1000]. Coverage: 2 `compileDistinct` cases + `readDistinctCount` test + sqlite / duckdb integration |
+| 0.4 | `db_sql_correlation_matrix` + `db_file_correlation_matrix` tool | done | Both tools registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts). Helpers `compileCorrelationMatrix` + `readCorrelationRow` + orchestrator `executeCorrelationMatrix` in [rdbms-common.ts](src/insrc/daemon/db/drivers/rdbms-common.ts). Single SQL; one column per ordered upper-triangular pair plus a row-count column. **Pearson** uses native `CORR()` on Postgres / Oracle / DuckDB; portable expression `(N*sum(ab) - sum(a)*sum(b)) / sqrt((N*sum(a^2) - sum(a)^2)*(N*sum(b^2) - sum(b)^2))` with `NULLIF(..., 0)` zero-variance guard on dialects without `CORR()` (SQLite / MySQL / MSSQL). **Spearman** ranks each column with `RANK() OVER (ORDER BY col)` in a CTE-style subquery, then runs the same Pearson SQL on the ranks. Pairwise complete observations (rows where every requested column is non-null). Capped at 10 columns. Wired on every RDBMS driver except clickhouse + DuckDBFileDriver. Coverage: 4 integration tests on duckdb-file (Pearson + Spearman) and sqlite (same). Unblocks 5c.1 correlation.numeric-pairwise full-table math |
+| 0.5 | `db_sql_outliers` + `db_file_outliers` tool | done | Both tools registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts). Helpers `outlierBoundsRequest` + `compileOutlierCounts` + `compileOutlierExamples` + readers + orchestrator `executeOutliers` in [rdbms-common.ts](src/insrc/daemon/db/drivers/rdbms-common.ts). Two-phase protocol: bounds via `aggregate(percentile_0.25/0.5/0.75 + count_non_null)` for IQR or `aggregate(avg + stddev + count_non_null)` for zscore; then a counts query (`SUM(CASE WHEN col < lower THEN 1)` / `... > upper`) + an examples query (LIMIT N ordered by extremity descending). Default thresholds: IQR=1.5, zscore=3; default 20 / max 50 examples. Wired on every RDBMS driver that supports the underlying aggregate functions (clickhouse stub throws as before). DuckDBFileDriver works fully. Coverage: 2 integration tests on duckdb-file (IQR + zscore). Replaces sample-based math in 5b.2 / 5b.3 outlier skills (skill swap pending in Track C) |
+| 0.6 | sampling-confidence library | done | [`daemon/db/sampling-confidence.ts`](src/insrc/daemon/db/sampling-confidence.ts) -- exports `sampleSizeFor()` + `confidenceFor()` (with `Estimator` + `Confidence` types) for mean / percentile / normality / correlation estimators; finite-population correction; 13-test suite at [`daemon/db/__tests__/sampling-confidence.test.ts`](src/insrc/daemon/db/__tests__/sampling-confidence.test.ts). **Currently under-utilised**: most Family-5 skills hard-code 'high' / 'medium' / 'low' confidence rather than calling `confidenceFor(actualN, estimator, populationN)`. Threading this through the existing skills is a follow-up tracked separately from Phase 0 itself |
+| 0.7 | `db_kv_list_namespaces` tool | done | Tool registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts). `KvDriver.listNamespaces()` is now an interface member. Per-driver impls: **MongoDB** lists databases via `admin().listDatabases()` (filtering out admin/config/local) then collections via `db.listCollections({}, { nameOnly: true })`, returning `<db>.<coll>` names; **Cassandra** queries `system_schema.tables` filtering out the system keyspaces; **DynamoDB** uses `ListTablesCommand` with paginated `ExclusiveStartTableName`; **NATS KV** reports the connection-bound bucket; **Redis / etcd** SCAN a sample of keys (~5K) and group by the first separator (`:` for Redis, `/` for etcd) into `prefix` namespaces with approximate counts; **Memcached** returns `supported: false` (no enumeration surface). Result shape: `{ namespaces: [{ name, kind, approxCount }], truncated, supported }`. Unblocks Phase 1.2 source-introspection: kv |
+| 0.8 | `db_kv_describe_namespace` tool | done | Tool registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts). `KvDriver.describeNamespace(name, opts)` is now an interface member. **MongoDB** returns `estimatedDocumentCount()` + sample keys + shape inferred via `inferShape` over a doc sample; **Cassandra** returns native column types from `system_schema.columns` keyed on partition / clustering kind, plus a key-only sample of recent rows; **DynamoDB** returns `DescribeTableCommand.ItemCount` + a partition/sort-key sample + value-shape via `inferShape`; **NATS KV** scans the bucket's keys and infers a value shape; **Redis / etcd** scan the prefix and infer JSON shape; **Memcached** returns `supported: false`. Result shape: `{ name, kind, approxCount, sampleKeys, fields, supported }` |
+| 0.9 | doc-family naming reconciliation | done | Driver-side family enum at [`shared/db-driver.ts:14`](src/insrc/shared/db-driver.ts#L14) defines exactly `'rdbms' \| 'kv' \| 'file'` -- no `doc` family. [MongoDB at mongodb.ts:140](src/insrc/daemon/db/drivers/mongodb.ts#L140) and [Cassandra at cassandra.ts:198](src/insrc/daemon/db/drivers/cassandra.ts#L198) both report `kv`. The Phase 2.2 KV sampling skills already cover both. Plan-side rows for "doc" (1.4 / 2.4) are now obsolete -- they collapse into `kv`. Decision recorded: **`doc` references in this plan should be read as `kv`**; do not add a `doc` family to the driver |
 | 1.1 | source-introspection: rdbms | partial | `data.source.rdbms.describe-table` shipped (`daemon/skills/built-ins/data.source.rdbms.describe-table.ts`), thin wrapper over `db_sql_describe`. `list-tables` and `list-indexes` skills still pending -- their underlying tools (`db_sql_list_tables`, `db_sql_list_indexes`) don't exist yet; will land alongside those tools |
 | 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
 | 1.3 | source-introspection: file | done | `data.source.file.describe` shipped (`daemon/skills/built-ins/data.source.file.describe.ts`). One skill covers all 12 file kinds via `connection-family: ['file', csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx]` precondition. Thin wrapper over `db_file_describe`; the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently. xlsx target selects a sheet |
@@ -821,21 +820,32 @@ list alongside per-column problems. `synth.scorecard` (6.8)
 extended with a conditional conformity column + a new "Cross-column
 consistency" section.
 
-Doesn't unflip "partial" by itself (5d.6 still needs the file
-variant under Track A) but tightens the composite considerably.
+Track A is now complete -- 5d.6 file variant shipped (`data.quality.scorecard.file`)
+along with the rest of the 5d / 5e / 5f file ports.
 
-### Track C -- math improvements gated on Phase 0 tooling
+### Track C -- skill swaps that consume the new Phase 0 tools
 
-These rows stay "partial" until the listed Phase 0 tool lands. Skill
-code is fine; tool surface is the bottleneck:
+Phase 0 is now fully shipped (see status table at the top). What
+remains is folding the new tools into existing Family-5 skills so
+their math becomes full-table instead of sample-based. None of the
+items below are blocked on tooling now; each is a self-contained
+skill swap.
 
-| Skill | Gated on |
-|---|---|
-| 5a.3 profile.temporal -- min/max range, gaps, period inference | type-aware aggregate (return Date from min/max -- current `values: Record<string, number\|null>` can't carry temporals) |
-| 5b.5 distribution.normality-test -- server-side skewness/kurtosis | new aggregate functions on `db_sql_aggregate` |
-| 5b.7 distribution.modes -- full-table histogram | 0.2 `db_sql_histogram` |
-| 5c.1 correlation.numeric-pairwise -- full-table corr() | 0.4 `db_correlation_matrix` |
-| 5e.1 pii.detect-patterns -- KV variant | needs an iteration helper over `db_kv_sample` results |
+| Skill | Consumes | Remaining work |
+|---|---|---|
+| 5b.2 distribution.outliers-iqr -- full-table outlier counts + examples | 0.5 `db_sql_outliers` (method=iqr) | Replace the current sample-based example collection with a single `db_sql_outliers` call; result fields map 1:1 onto the existing output schema |
+| 5b.3 distribution.outliers-zscore -- full-table outlier counts + examples | 0.5 `db_sql_outliers` (method=zscore) | Same swap shape as 5b.2 |
+| 5b.7 distribution.modes -- full-table histogram | 0.2 `db_sql_histogram` (mode=equal-width) | Replace the sample histogram + smoothing with a `db_sql_histogram` call; the existing local-maxima / plateau-collapse math then runs over the precise full-table bins |
+| 5c.1 correlation.numeric-pairwise -- full-table corr() | 0.4 `db_correlation_matrix` | Drop the sample-based Pearson / Spearman computation; assemble the same output shape from the matrix the tool returns |
+| 5e.1 pii.detect-patterns -- KV variant | 0.7 `db_kv_list_namespaces` + 0.8 `db_kv_describe_namespace` + existing `db_kv_scan` / `db_kv_get` | Build `data.pii.detect-patterns.kv`: list namespaces, sample values from each, regex against the same PII catalog as the rdbms / file variants |
+| 5b.4 distribution.outliers-mad -- full-table MAD | 0.1 extension (two-pass) | Still gated on a tool change: MAD = median of \|x - median(x)\| needs a two-pass `median_abs_deviation` on `db_sql_aggregate`. Feasible follow-up in a 0.1.x mini-slice (Postgres + DuckDB have it natively; others need a CTE) |
+| 5b.5 distribution.normality-test -- server-side skewness / kurtosis | 0.1 extension (new fns) | Still gated: add `skewness` + `kurtosis` to `compileAggregate`'s function set (Postgres / DuckDB native; computed expression elsewhere) |
+| 5b.6 distribution.heavy-tail-check -- full-table kurtosis | 0.1 extension (new fns) | Reuses 5b.5's `kurtosis` aggregate |
+| 5a.3 profile.temporal -- min/max range, gaps, period inference | 0.1 extension (type-aware) | `compileAggregate` returns `values: Record<string, number\|null>`; needs to carry temporal min / max as ISO strings. Plumbing-only change in `rdbms-common.ts` + per-driver result mapping |
+| 5c.3 dependency.functional -- full-table FD | 0.1 extension (grouped distinct-count) | Needs `count_distinct(b) GROUP BY a` aggregate; current `compileAggregate` is flat per-column |
+| 5c.4 dependency.co-null-pattern -- full-table counts | 0.1 + new `count_where` | `where` is now plumbed; what's still missing is a `count_where(predicate)` aggregate function (vs the current `count_non_null` that ignores nulls but doesn't take a predicate beyond column-level) |
+| 5d.1 / 5d.2 quality.completeness / .uniqueness -- multi-column PK candidates | 0.1 extension (composite distinct) | Needs `count_distinct((c1, c2))` -- composite-key distinct count |
+| 5d.3 / 5d.5 quality.validity / .consistency -- full-table counts | 0.1 + new `count_where` | Same shape as 5c.4: per-rule `count(*) WHERE NOT (rule)` aggregate |
 
 ### Tool-surface inconsistencies surfaced during this review
 

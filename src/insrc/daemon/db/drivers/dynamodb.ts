@@ -26,6 +26,7 @@ import {
 	DynamoDBClient,
 	DescribeTableCommand,
 	GetItemCommand,
+	ListTablesCommand,
 	ScanCommand,
 } from '@aws-sdk/client-dynamodb';
 import { fromIni } from '@aws-sdk/credential-providers';
@@ -35,6 +36,9 @@ import type {
 	ConnectionConfig,
 	KvDriver,
 	KeyList,
+	KvNamespace,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -159,6 +163,50 @@ class DynamoDriver implements KvDriver {
 
 	async close(): Promise<void> {
 		this.client.destroy();
+	}
+
+	async listNamespaces(opts?: { readonly limit?: number }): Promise<KvNamespaceList> {
+		const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 200)), 1000);
+		const out: KvNamespace[] = [];
+		let lastEvaluated: string | undefined;
+		let truncated = false;
+		do {
+			const cmdInput: { ExclusiveStartTableName?: string; Limit?: number } = { Limit: Math.min(100, limit - out.length) };
+			if (lastEvaluated !== undefined) cmdInput.ExclusiveStartTableName = lastEvaluated;
+			const res = await this.client.send(new ListTablesCommand(cmdInput));
+			for (const name of res.TableNames ?? []) {
+				if (out.length >= limit) { truncated = true; break; }
+				out.push({ name, kind: 'table' });
+			}
+			lastEvaluated = res.LastEvaluatedTableName;
+			if (lastEvaluated !== undefined && out.length >= limit) truncated = true;
+		} while (lastEvaluated !== undefined && out.length < limit);
+		return { namespaces: out, truncated, supported: true };
+	}
+
+	async describeNamespace(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription> {
+		const sample = Math.min(Math.max(1, Math.floor(opts?.sampleSize ?? 50)), 200);
+		if (!TABLE_NAME_RE.test(name)) {
+			throw new Error(`data-driver: dynamodb table '${name}' has invalid characters`);
+		}
+		const desc = await this.client.send(new DescribeTableCommand({ TableName: name }));
+		const approxCount = desc.Table?.ItemCount ?? null;
+		const meta = await this.tableMeta(name);
+		const scanRes = await this.client.send(new ScanCommand({ TableName: name, Limit: sample }));
+		const items = (scanRes.Items ?? []).map(unmarshalItem);
+		const sampleKeys = items.slice(0, 10).map(it => {
+			const k: Record<string, unknown> = { table: name, [meta.partitionKey]: it[meta.partitionKey] };
+			if (meta.sortKey !== undefined) k[meta.sortKey] = it[meta.sortKey];
+			return JSON.stringify(k);
+		});
+		const shape = inferShape(items);
+		return {
+			name, kind: 'table',
+			approxCount,
+			sampleKeys,
+			fields: shape.fields,
+			supported: true,
+		};
 	}
 
 	private async tableMeta(table: string): Promise<TableMeta> {

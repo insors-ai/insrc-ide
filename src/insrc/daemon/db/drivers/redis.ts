@@ -17,6 +17,9 @@ import type {
 	ConnectionConfig,
 	KvDriver,
 	KeyList,
+	KvNamespace,
+	KvNamespaceDescription,
+	KvNamespaceList,
 	KvValue,
 	ScanOpts,
 	ShapeReport,
@@ -125,6 +128,65 @@ class RedisDriver implements KvDriver {
 
 	async close(): Promise<void> {
 		await this.client.quit();
+	}
+
+	async listNamespaces(opts?: { readonly limit?: number }): Promise<KvNamespaceList> {
+		// Redis has no native namespace concept; we derive one by
+		// SCANning a small sample of keys and grouping by the first
+		// `:` separator (a near-universal Redis convention).
+		const limit = Math.min(Math.max(1, Math.floor(opts?.limit ?? 200)), 1000);
+		const samplePool = Math.min(limit * 50, 5000);
+		const prefixes = new Map<string, number>();
+		let cursor = '0';
+		let scanned = 0;
+		do {
+			const [next, batch] = await this.client.scan(cursor, 'MATCH', '*', 'COUNT', 500);
+			cursor = next;
+			for (const k of batch) {
+				scanned++;
+				const sep = k.indexOf(':');
+				const ns = sep > 0 ? k.slice(0, sep) : k;
+				prefixes.set(ns, (prefixes.get(ns) ?? 0) + 1);
+				if (scanned >= samplePool) break;
+			}
+		} while (cursor !== '0' && scanned < samplePool);
+
+		const sorted = [...prefixes.entries()]
+			.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+			.slice(0, limit);
+		const namespaces: KvNamespace[] = sorted.map(([name, approxCount]) => ({
+			name, kind: 'prefix', approxCount,
+		}));
+		return { namespaces, truncated: scanned >= samplePool && cursor !== '0', supported: true };
+	}
+
+	async describeNamespace(name: string, opts?: { readonly sampleSize?: number }): Promise<KvNamespaceDescription> {
+		const limit = Math.min(Math.max(1, Math.floor(opts?.sampleSize ?? 50)), 200);
+		const pattern = `${name}:*`;
+		const keys: string[] = [];
+		let cursor = '0';
+		do {
+			const [next, batch] = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', Math.min(limit * 2, 500));
+			cursor = next;
+			for (const k of batch) {
+				keys.push(k);
+				if (keys.length >= limit) break;
+			}
+		} while (cursor !== '0' && keys.length < limit);
+		const values: unknown[] = [];
+		for (const k of keys) {
+			const raw = await this.client.get(k);
+			if (raw === null) continue;
+			try { values.push(JSON.parse(raw)); } catch { values.push(raw); }
+		}
+		const shape = inferShape(values);
+		return {
+			name, kind: 'prefix',
+			approxCount: keys.length,
+			sampleKeys: keys.slice(0, 10),
+			fields: shape.fields,
+			supported: true,
+		};
 	}
 }
 

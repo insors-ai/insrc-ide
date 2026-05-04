@@ -16,8 +16,14 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	HistogramRequest,
+	HistogramResult,
+	OutlierRequest,
+	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
@@ -31,12 +37,16 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeCorrelationMatrix,
+	executeHistogram,
+	executeOutliers,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
 	withTimeout,
 } from './rdbms-common.js';
+import type { OrchestratorDeps } from './rdbms-common.js';
 import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
@@ -160,6 +170,40 @@ class MysqlDriver implements RdbmsDriver {
 			column: request.column,
 			distinctCount: readDistinctCount(countRows[0]),
 			topValues: readDistinctRows(valueRows),
+		};
+	}
+
+	async histogram(target: string, request: HistogramRequest): Promise<HistogramResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeHistogram(request, this.orchestratorDeps(target, cols));
+	}
+
+	async correlationMatrix(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {
+		return {
+			target,
+			knownColumns: cols,
+			dialect: MYSQL_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) => {
+				const [rows] = await withTimeout(
+					this.pool.query(sql, values as unknown[]),
+					SAMPLE_TIMEOUT_MS,
+				) as unknown as [Record<string, unknown>[], unknown];
+				return rows;
+			},
 		};
 	}
 

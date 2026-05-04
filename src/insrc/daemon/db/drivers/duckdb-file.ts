@@ -41,9 +41,15 @@ import type {
 	AggregateResult,
 	ColumnDescription,
 	ConnectionConfig,
+	CorrelationMatrixRequest,
+	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
 	FileDriver,
+	HistogramRequest,
+	HistogramResult,
+	OutlierRequest,
+	OutlierResult,
 	SampleOpts,
 	SampleResult,
 	ScanOpts,
@@ -58,10 +64,14 @@ import {
 	compileAggregateExprs,
 	compileDistinct,
 	compileWhere,
+	executeCorrelationMatrix,
+	executeHistogram,
+	executeOutliers,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
 } from './rdbms-common.js';
+import type { OrchestratorDeps } from './rdbms-common.js';
 import { inferShape } from './shape-common.js';
 import { cacheDirFor, destForSource, ensureCached } from '../converter-cache.js';
 import { avroConverter } from './converters/avro.js';
@@ -442,6 +452,44 @@ class DuckDBFileDriver implements FileDriver {
 			column: request.column,
 			distinctCount: readDistinctCount(countRow),
 			topValues: readDistinctRows(valueRows),
+		};
+	}
+
+	async histogram(target: string | undefined, request: HistogramRequest): Promise<HistogramResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeHistogram(request, await this.orchestratorDeps(target, cols));
+	}
+
+	async correlationMatrix(target: string | undefined, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeCorrelationMatrix(request, await this.orchestratorDeps(target, cols));
+	}
+
+	async outliers(target: string | undefined, request: OutlierRequest): Promise<OutlierResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeOutliers(request, await this.orchestratorDeps(target, cols));
+	}
+
+	private async orchestratorDeps(target: string | undefined, cols: readonly string[]): Promise<OrchestratorDeps> {
+		const readPath = await this.readerPath(target);
+		const fromExpr = this.readerExpr();
+		return {
+			target: target ?? this.path,
+			knownColumns: cols,
+			dialect: POSTGRES_DIALECT,
+			asTableExpr: fromExpr,
+			paramStartIndex: 2,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) => {
+				const params = [readPath, ...values];
+				return await withConnection(async (conn) => {
+					const reader = await conn.runAndReadAll(sql, params as never[]);
+					return reader.getRowObjects() as readonly Readonly<Record<string, unknown>>[];
+				});
+			},
 		};
 	}
 

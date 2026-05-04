@@ -269,6 +269,94 @@ describe('DuckDBFileDriver -- distinct (Phase 0.3)', () => {
 	});
 });
 
+describe('DuckDBFileDriver -- histogram (Phase 0.2)', () => {
+	it('equal-width returns bucket counts spanning min..max', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			histogram: (t: string | undefined, r: unknown) => Promise<{ bounds: { lower: number | null; upper: number | null }; mode: string; buckets: { lower: number; upper: number; count: number }[]; nonNullCount: number }>;
+		}).histogram(undefined, { column: 'amount', buckets: 4, mode: 'equal-width' });
+		assert.equal(res.mode, 'equal-width');
+		assert.equal(res.buckets.length, 4);
+		assert.equal(res.bounds.lower, 7);
+		assert.equal(res.bounds.upper, 99.99);
+		assert.equal(res.buckets.reduce((a, b) => a + b.count, 0), 3);
+		await pool.closeAll();
+	});
+
+	it('equal-frequency uses NTILE', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			histogram: (t: string | undefined, r: unknown) => Promise<{ mode: string; buckets: { count: number }[] }>;
+		}).histogram(undefined, { column: 'amount', buckets: 4, mode: 'equal-frequency' });
+		assert.equal(res.mode, 'equal-frequency');
+		assert.equal(res.buckets.reduce((a, b) => a + b.count, 0), 3);
+		await pool.closeAll();
+	});
+});
+
+describe('DuckDBFileDriver -- correlation matrix (Phase 0.4)', () => {
+	it('pearson native CORR()', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			correlationMatrix: (t: string | undefined, r: unknown) => Promise<{ matrix: (number | null)[][]; method: string; nonNullCount: number }>;
+		}).correlationMatrix(undefined, { columns: ['user_id', 'amount'], method: 'pearson' });
+		assert.equal(res.method, 'pearson');
+		assert.equal(res.matrix[0]?.[0], 1);
+		assert.equal(res.matrix[1]?.[1], 1);
+		assert.equal(res.matrix[0]?.[1], res.matrix[1]?.[0]);
+		assert.equal(res.nonNullCount, 3);
+		await pool.closeAll();
+	});
+
+	it('spearman ranks then correlates', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			correlationMatrix: (t: string | undefined, r: unknown) => Promise<{ method: string; matrix: (number | null)[][] }>;
+		}).correlationMatrix(undefined, { columns: ['user_id', 'amount'], method: 'spearman' });
+		assert.equal(res.method, 'spearman');
+		assert.equal(res.matrix.length, 2);
+		await pool.closeAll();
+	});
+});
+
+describe('DuckDBFileDriver -- outliers (Phase 0.5)', () => {
+	it('iqr method returns counts + bounds + center + spread', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			outliers: (t: string | undefined, r: unknown) => Promise<{ method: string; threshold: number; nonNullCount: number; lowerBound: number | null; upperBound: number | null; belowCount: number; aboveCount: number; outlierCount: number; center: number | null; spread: number | null; examples: { value: number; side: string }[] }>;
+		}).outliers(undefined, { column: 'amount', method: 'iqr' });
+		assert.equal(res.method, 'iqr');
+		assert.equal(res.threshold, 1.5);
+		assert.equal(res.nonNullCount, 3);
+		assert.equal(typeof res.center, 'number');
+		assert.equal(typeof res.spread, 'number');
+		assert.equal(res.outlierCount, res.belowCount + res.aboveCount);
+		await pool.closeAll();
+	});
+
+	it('zscore method returns mean / stddev based bounds', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			outliers: (t: string | undefined, r: unknown) => Promise<{ method: string; threshold: number; center: number | null; spread: number | null }>;
+		}).outliers(undefined, { column: 'amount', method: 'zscore', threshold: 2 });
+		assert.equal(res.method, 'zscore');
+		assert.equal(res.threshold, 2);
+		await pool.closeAll();
+	});
+});
+
 describe('DuckDBFileDriver -- pool path-escape guard', () => {
 	it('rejects file paths that escape the repo root', async () => {
 		const badRoot = mkdtempSync(join(tmpdir(), 'insrc-duckdb-file-escape-'));
