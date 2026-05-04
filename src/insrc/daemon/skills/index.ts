@@ -48,6 +48,7 @@ import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataDistributionOutliersIqrRdbmsSkill } from './built-ins/data.distribution.outliers-iqr.rdbms.js';
+import { registerDataDistributionOutliersIqrFileSkill } from './built-ins/data.distribution.outliers-iqr.file.js';
 import { registerDataDistributionOutliersZScoreRdbmsSkill } from './built-ins/data.distribution.outliers-zscore.rdbms.js';
 import { registerDataDistributionOutliersMadRdbmsSkill } from './built-ins/data.distribution.outliers-mad.rdbms.js';
 import { registerDataDependencyCoNullPatternRdbmsSkill } from './built-ins/data.dependency.co-null-pattern.rdbms.js';
@@ -112,6 +113,7 @@ export function registerAllSkills(): void {
   // variants. All hybrid: bounds from server-side aggregate,
   // examples + estimated counts from a 50-row sample.
   registerDataDistributionOutliersIqrRdbmsSkill();
+  registerDataDistributionOutliersIqrFileSkill();
   registerDataDistributionOutliersZScoreRdbmsSkill();
   registerDataDistributionOutliersMadRdbmsSkill();
   registerDataDistributionNormalityTestRdbmsSkill();

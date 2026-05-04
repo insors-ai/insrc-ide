@@ -1,0 +1,47 @@
+{
+  "input": {
+    "connectionId": "csv-orders",
+    "column": "amount",
+    "sampleSize": 10
+  },
+  "fakeTools": {
+    "db_file_aggregate": {
+      "content": "agg",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "values": {
+          "amount__count":           1000,
+          "amount__count_non_null":   985,
+          "amount__min":              0.01,
+          "amount__max":              9999.99,
+          "amount__percentile_0_25":  20.0,
+          "amount__percentile_0_75":  60.0
+        }
+      }
+    },
+    "db_file_sample": {
+      "content": "sample",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "columns": ["amount"],
+        "rows": [
+          { "amount": 25 },
+          { "amount": 30 },
+          { "amount": 45 },
+          { "amount": 50 },
+          { "amount": 55 },
+          { "amount": 1500 },
+          { "amount": 9999.99 },
+          { "amount": 0.01 },
+          { "amount": 22 },
+          { "amount": 38 }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
