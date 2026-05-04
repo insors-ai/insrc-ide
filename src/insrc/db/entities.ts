@@ -75,6 +75,18 @@ const ENTITY_ON_CONFLICT = `ON CONFLICT (id) DO UPDATE SET
   artifact        = excluded.artifact,
   embedding       = excluded.embedding`;
 
+// Module entities are pure-stub graph nodes (file='', body='', embedding=[])
+// referenced by IMPORTS edges. The parser emits the same module stub once
+// per importing file -- the second-and-later sightings should be no-ops,
+// matching the parser's "ensure exists" intent. DO UPDATE here would
+// re-issue an INSERT against the embedding column and trip DuckDB's
+// experimental HNSW index ("Duplicate keys not allowed in high-level
+// wrappers") via WAL-replay on row ids that already exist. The cross-file
+// resolver later rewires in-tree module IMPORTS to point at the real file
+// entity (cross-file-resolver.ts Pass 1), so stub rows are never updated
+// after creation.
+const ENTITY_ON_CONFLICT_NOTHING = 'ON CONFLICT (id) DO NOTHING';
+
 /**
  * Cap on rows-per-INSERT for the bulk path. 100 rows × 19 columns =
  * 1.9k positional parameters, well below DuckDB's prepared-statement
@@ -216,15 +228,31 @@ export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<
     );
   }
 
-  for (let i = 0; i < unique.length; i += ENTITY_BULK_CHUNK) {
-    const chunk = unique.slice(i, i + ENTITY_BULK_CHUNK);
+  // Split: module stubs use DO NOTHING (ensure-exists), everything else
+  // uses DO UPDATE (re-parse may carry new body / signature / line range).
+  const modules: Entity[] = [];
+  const others:  Entity[] = [];
+  for (const e of unique) {
+    if (e.kind === 'module') modules.push(e); else others.push(e);
+  }
+  await runChunkedInsert(db, modules, ENTITY_ON_CONFLICT_NOTHING);
+  await runChunkedInsert(db, others,  ENTITY_ON_CONFLICT);
+}
+
+async function runChunkedInsert(
+  db: DbClient,
+  rows: Entity[],
+  conflictClause: string,
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += ENTITY_BULK_CHUNK) {
+    const chunk = rows.slice(i, i + ENTITY_BULK_CHUNK);
     const placeholders = chunk.map(() => ENTITY_PLACEHOLDER).join(', ');
     const params: unknown[] = [];
     for (const e of chunk) params.push(...entityToParams(e));
     const sql =
       `INSERT INTO entity (${ENTITY_COLUMNS.join(', ')})
        VALUES ${placeholders}
-       ${ENTITY_ON_CONFLICT}`;
+       ${conflictClause}`;
     try {
       await db.duck.exec(sql, params as never[]);
     } catch (err) {

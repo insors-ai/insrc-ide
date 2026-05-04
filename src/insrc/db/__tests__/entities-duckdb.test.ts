@@ -276,6 +276,44 @@ test('upsertRelations collapses intra-batch duplicate (src, dst, kind) edges', a
   assert.equal(Number(rows[0]!.count), 1);
 });
 
+test('module entities use ON CONFLICT DO NOTHING (idempotent across calls)', async () => {
+  // Repro for the cross-call HNSW crash: every Java/Python/Go file that
+  // imports `org.apache.hadoop.security` emits the same module stub
+  // entity (id keyed off ('', '', 'module', name) -- empty repo + file).
+  // The first INSERT lands cleanly; the second one previously crashed
+  // DuckDB's experimental HNSW with "Duplicate keys not allowed in
+  // high-level wrappers" via WAL replay. With DO NOTHING routing for
+  // module-kind rows, the second insert is a no-op.
+  const db = await setup();
+  const stub: Entity = {
+    id: 'mod1', kind: 'module', name: 'org.apache.hadoop.security',
+    language: 'java', repo: '', file: '',
+    startLine: 0, endLine: 0, body: '', indexedAt: NOW, embedding: [],
+  };
+  await upsertEntities(db, [stub]);                       // first sighting
+  await upsertEntities(db, [stub]);                       // second sighting (different file in real life)
+  await upsertEntities(db, [stub, stub, stub]);           // dedup + DO NOTHING
+
+  const rows = await db.duck.query<{ count: number }>(
+    "SELECT COUNT(*)::INTEGER AS count FROM entity WHERE id = 'mod1'",
+  );
+  assert.equal(Number(rows[0]!.count), 1, 'module stub should land exactly once');
+});
+
+test('non-module entities still UPDATE on conflict (re-parse refreshes body)', async () => {
+  // Make sure the DO NOTHING route didn't accidentally fire for non-stub
+  // kinds. A function entity inserted twice with different bodies should
+  // end up with the second body (DO UPDATE semantics, last-wins).
+  const db = await setup();
+  await upsertEntities(db, [makeEntity({ id: 'f1', name: 'foo', body: 'first', startLine: 1 })]);
+  await upsertEntities(db, [makeEntity({ id: 'f1', name: 'foo', body: 'second', startLine: 99 })]);
+
+  const all = await listEntitiesForRepo(db, '/repo');
+  const f1 = all.find(e => e.id === 'f1');
+  assert.equal(f1?.body, 'second', 'non-module entities still get DO UPDATE');
+  assert.equal(f1?.startLine, 99);
+});
+
 test('upsertEntities handles a chunk-spanning batch with intra-chunk duplicates', async () => {
   // Build > ENTITY_BULK_CHUNK (100) entities with 5 distinct ids
   // each repeated 30+ times. After dedup we expect exactly 5 rows
