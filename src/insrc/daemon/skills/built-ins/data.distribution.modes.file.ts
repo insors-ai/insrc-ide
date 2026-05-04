@@ -1,6 +1,6 @@
 /**
- * data.distribution.modes.rdbms -- Phase 5b.7 of
- * plans/analyzers/data-analyzer-skills.md.
+ * data.distribution.modes.file -- Phase 5b.7 of
+ * plans/analyzers/data-analyzer-skills.md (file-side variant).
  */
 
 import { registerSkill } from '../registry.js';
@@ -21,25 +21,26 @@ import {
 	isSampleResult,
 } from './data.distribution.outliers-iqr.algo.js';
 
-interface ModesInput {
+interface ModesFileInput {
 	readonly connectionId: string;
-	readonly target: string;
 	readonly column: string;
+	readonly target?: string;
 	readonly sampleSize?: number;
 	readonly bins?: number;
 	readonly minProminence?: number;
 }
 
-const RDBMS_FAMILY_TAGS = [
-	'rdbms', 'postgres', 'cockroachdb',
-	'mysql', 'mariadb', 'sqlite',
-	'mssql', 'oracle', 'clickhouse',
+const FILE_FAMILY_TAGS = [
+	'file',
+	'csv', 'tsv', 'jsonl', 'ndjson', 'json',
+	'parquet', 'arrow', 'feather',
+	'avro', 'bson', 'fixed-width', 'xlsx',
 ] as const;
 
-const skill: Skill<ModesInput, ModesOutput> = {
-	id: 'data.distribution.modes.rdbms',
-	name: 'Distribution: modes (RDBMS)',
-	description: 'Sample-based multimodal detection on a numeric column. Histogram + smoothing + peak detection. Default 10 bins, prominence 0.5.',
+const skill: Skill<ModesFileInput, ModesOutput> = {
+	id: 'data.distribution.modes.file',
+	name: 'Distribution: modes (file)',
+	description: 'Sample-based multimodal detection on a numeric column from a file connection. Same shape as the RDBMS variant.',
 	family: 'distribution',
 	owner: 'data-analyzer',
 	version: 1,
@@ -47,21 +48,21 @@ const skill: Skill<ModesInput, ModesOutput> = {
 		type: 'object',
 		properties: {
 			connectionId:  { type: 'string' },
-			target:        { type: 'string' },
 			column:        { type: 'string' },
+			target:        { type: 'string', description: 'Optional. xlsx: sheet name.' },
 			sampleSize:    { type: 'integer', minimum: 1, maximum: 50 },
 			bins:          { type: 'integer', minimum: 4, maximum: 50 },
 			minProminence: { type: 'number', minimum: 0.1, maximum: 1 },
 		},
-		required: ['connectionId', 'target', 'column'],
+		required: ['connectionId', 'column'],
 		additionalProperties: false,
 	},
 	outputs: MODES_OUTPUT_SCHEMA,
-	toolDeps: ['db_sql_aggregate', 'db_sql_sample'],
+	toolDeps: ['db_file_aggregate', 'db_file_sample'],
 	providerAffinity: 'auto',
 	preconditions: [
-		{ kind: 'required-tools', tools: ['db_sql_aggregate', 'db_sql_sample'], reason: 'aggregate gives min/max/mean for histogram framing; sample gives values to bin' },
-		{ kind: 'connection-family', families: RDBMS_FAMILY_TAGS, reason: 'RDBMS-only' },
+		{ kind: 'required-tools', tools: ['db_file_aggregate', 'db_file_sample'], reason: 'aggregate gives min/max/mean for histogram framing; sample gives values to bin' },
+		{ kind: 'connection-family', families: FILE_FAMILY_TAGS, reason: 'file-only' },
 	],
 
 	async execute(input, deps): Promise<SkillResult<ModesOutput>> {
@@ -69,31 +70,25 @@ const skill: Skill<ModesInput, ModesOutput> = {
 		const sampleSize = clampModesSample(input.sampleSize);
 		const binCount = clampModesBins(input.bins);
 		const minProminence = clampModesProminence(input.minProminence);
+		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
+
+		const aggInput: Record<string, unknown> = { connectionId: input.connectionId, aggregations: modesAggregationsFor(input.column) };
+		if (sheet !== undefined) aggInput['path'] = sheet;
+		const sampleInput: Record<string, unknown> = { connectionId: input.connectionId, limit: sampleSize };
+		if (sheet !== undefined) sampleInput['target'] = sheet;
 
 		const [aggTool, sampleTool] = await Promise.all([
-			deps.runTool({
-				id: `${callBase}-agg`,
-				name: 'db_sql_aggregate',
-				input: {
-					connectionId: input.connectionId,
-					target: input.target,
-					aggregations: modesAggregationsFor(input.column),
-				},
-			}),
-			deps.runTool({
-				id: `${callBase}-sample`,
-				name: 'db_sql_sample',
-				input: { connectionId: input.connectionId, target: input.target, limit: sampleSize },
-			}),
+			deps.runTool({ id: `${callBase}-agg`,    name: 'db_file_aggregate', input: aggInput }),
+			deps.runTool({ id: `${callBase}-sample`, name: 'db_file_sample',    input: sampleInput }),
 		]);
 
-		const errors = collectToolErrors([['db_sql_aggregate', aggTool], ['db_sql_sample', sampleTool]]);
+		const errors = collectToolErrors([['db_file_aggregate', aggTool], ['db_file_sample', sampleTool]]);
 		if (errors.length > 0) {
-			return { value: emptyModes(input.target, input.column), confidence: 'low', notes: errors, toolCalls: [] };
+			return { value: emptyModes(input.target ?? '', input.column), confidence: 'low', notes: errors, toolCalls: [] };
 		}
 		if (!isAggregateResult(aggTool.data) || !isSampleResult(sampleTool.data)) {
 			return {
-				value: emptyModes(input.target, input.column),
+				value: emptyModes(input.target ?? '', input.column),
 				confidence: 'low',
 				notes: ['modes: tool result missing structured data'],
 				toolCalls: [],
@@ -116,6 +111,6 @@ const skill: Skill<ModesInput, ModesOutput> = {
 	},
 };
 
-export function registerDataDistributionModesRdbmsSkill(): void {
+export function registerDataDistributionModesFileSkill(): void {
 	registerSkill(skill as unknown as Skill);
 }

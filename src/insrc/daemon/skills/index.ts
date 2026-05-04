@@ -49,6 +49,11 @@ import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecar
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataDistributionOutliersIqrRdbmsSkill } from './built-ins/data.distribution.outliers-iqr.rdbms.js';
 import { registerDataDistributionOutliersIqrFileSkill } from './built-ins/data.distribution.outliers-iqr.file.js';
+import { registerDataDistributionOutliersZScoreFileSkill } from './built-ins/data.distribution.outliers-zscore.file.js';
+import { registerDataDistributionOutliersMadFileSkill } from './built-ins/data.distribution.outliers-mad.file.js';
+import { registerDataDistributionNormalityTestFileSkill } from './built-ins/data.distribution.normality-test.file.js';
+import { registerDataDistributionHeavyTailCheckFileSkill } from './built-ins/data.distribution.heavy-tail-check.file.js';
+import { registerDataDistributionModesFileSkill } from './built-ins/data.distribution.modes.file.js';
 import { registerDataDistributionOutliersZScoreRdbmsSkill } from './built-ins/data.distribution.outliers-zscore.rdbms.js';
 import { registerDataDistributionOutliersMadRdbmsSkill } from './built-ins/data.distribution.outliers-mad.rdbms.js';
 import { registerDataDependencyCoNullPatternRdbmsSkill } from './built-ins/data.dependency.co-null-pattern.rdbms.js';
@@ -115,10 +120,15 @@ export function registerAllSkills(): void {
   registerDataDistributionOutliersIqrRdbmsSkill();
   registerDataDistributionOutliersIqrFileSkill();
   registerDataDistributionOutliersZScoreRdbmsSkill();
+  registerDataDistributionOutliersZScoreFileSkill();
   registerDataDistributionOutliersMadRdbmsSkill();
+  registerDataDistributionOutliersMadFileSkill();
   registerDataDistributionNormalityTestRdbmsSkill();
+  registerDataDistributionNormalityTestFileSkill();
   registerDataDistributionHeavyTailCheckRdbmsSkill();
+  registerDataDistributionHeavyTailCheckFileSkill();
   registerDataDistributionModesRdbmsSkill();
+  registerDataDistributionModesFileSkill();
   // Phase 5f (drift over windows) -- compares two sample windows
   // of the same column.
   registerDataDriftDistributionRdbmsSkill();
