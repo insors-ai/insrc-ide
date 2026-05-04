@@ -24,6 +24,8 @@ import { IInsrcDbConnectionsService } from '../common/dbConnectionsService.js';
 import { InsrcDbConnectionsServiceImpl } from '../browser/dbDrivers/insrcDbConnectionsServiceImpl.js';
 import { IInsrcAccessService } from '../common/accessService.js';
 import { InsrcAccessServiceImpl } from '../browser/access/accessServiceImpl.js';
+import { IInsrcDataAnalyzerService } from '../common/dataAnalyzerService.js';
+import { InsrcDataAnalyzerServiceImpl } from './dataAnalyzerServiceImpl.js';
 import { InsrcDaemonServiceImpl } from './daemonServiceImpl.js';
 import { InsrcSessionServiceImpl } from './sessionServiceImpl.js';
 import { InsrcWorkspaceServiceImpl } from './workspaceServiceImpl.js';
@@ -51,3 +53,4 @@ registerSingleton(IInsrcTodosService, InsrcTodosServiceImpl, InstantiationType.E
 registerSingleton(IInsrcArtifactsService, InsrcArtifactsServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcDbConnectionsService, InsrcDbConnectionsServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcAccessService, InsrcAccessServiceImpl, InstantiationType.Delayed);
+registerSingleton(IInsrcDataAnalyzerService, InsrcDataAnalyzerServiceImpl, InstantiationType.Delayed);

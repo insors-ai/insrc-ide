@@ -64,6 +64,11 @@ process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', r
 import { getDb, initDb, closeDb } from '../db/client.js';
 import { closeDuckDB } from './db/duckdb-pool.js';
 import { closeDuckDBStorage } from './db/duckdb-storage-pool.js';
+import {
+	analyzerStatus,
+	deleteAnalyzerDb,
+	closeAllAnalyzerPools,
+} from './db/duckdb-analyzer-pool.js';
 import { listRepos, addRepo, removeRepo } from '../db/repos.js';
 import { deleteEntitiesForRepo, findEntitiesByFile } from '../db/entities.js';
 import { deleteUnresolvedForRepo } from '../db/relations.js';
@@ -996,6 +1001,27 @@ async function main(): Promise<void> {
 			return { ok: true };
 		},
 
+		// Per-workspace data-analyzer DB introspection + reset. Backing
+		// pool lives at <workspaceRoot>/.insrc/data-analyzer.db. Status
+		// never lazy-inits the pool (read-only stat); reset closes the
+		// pool + deletes the .db + .db.wal so the next analyzer call
+		// recreates an empty DB.
+		'analyzer.status': async (params) => {
+			const { workspaceRoot } = params as { workspaceRoot: string };
+			if (typeof workspaceRoot !== 'string' || workspaceRoot.length === 0) {
+				return { error: 'workspaceRoot is required' };
+			}
+			return analyzerStatus(workspaceRoot);
+		},
+
+		'analyzer.reset': async (params) => {
+			const { workspaceRoot } = params as { workspaceRoot: string };
+			if (typeof workspaceRoot !== 'string' || workspaceRoot.length === 0) {
+				return { error: 'workspaceRoot is required' };
+			}
+			return deleteAnalyzerDb(workspaceRoot);
+		},
+
 		// Tool settings snapshot -- pushed by the IDE on connect and on
 		// settings changes. Daemon holds the snapshot in memory; tools
 		// and the tool-loop read via getToolSettings().
@@ -1315,6 +1341,7 @@ async function main(): Promise<void> {
 			// flushes + closes ~/.insrc/duckdb.db.
 			await closeDb();
 			await closeDuckDB();
+			await closeAllAnalyzerPools();
 			await closeDuckDBStorage();
 			clearPid();
 			log.info('bye');

@@ -265,6 +265,7 @@ import { DataAnalysisReportInput } from './data-analyzer/dataAnalysisReportInput
 import { DataAnalyzerFlowContribution } from './data-analyzer/dataAnalyzerFlowContribution.js';
 import { DataConnUriOpenerContribution } from './data-analyzer/dataConnUriOpener.js';
 import './data-analyzer/dataAnalyzerCommands.js';
+import './data-analyzer/dataAnalyzerDbCommands.js';
 editorPaneRegistry.registerEditorPane(
 	EditorPaneDescriptor.create(DataAnalysisReportPane, DataAnalysisReportPane.ID, 'Data Analysis Report'),
 	[new SyncDescriptor(DataAnalysisReportInput)],
