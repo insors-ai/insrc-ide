@@ -56,6 +56,7 @@ import { registerDataQualityConformityRdbmsSkill } from './built-ins/data.qualit
 import { registerDataQualityConsistencyRdbmsSkill } from './built-ins/data.quality.consistency.rdbms.js';
 import { registerDataDriftDistributionRdbmsSkill } from './built-ins/data.drift.distribution.rdbms.js';
 import { registerDataTimeseriesTrendRdbmsSkill } from './built-ins/data.timeseries.trend.rdbms.js';
+import { registerDataTimeseriesSeasonalityRdbmsSkill } from './built-ins/data.timeseries.seasonality.rdbms.js';
 import { registerDataAnomalyChangePointRdbmsSkill } from './built-ins/data.anomaly.change-point.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
@@ -108,6 +109,7 @@ export function registerAllSkills(): void {
   // Phase 5g (timeseries) -- regression / seasonality / stationarity
   // checks over a temporal axis.
   registerDataTimeseriesTrendRdbmsSkill();
+  registerDataTimeseriesSeasonalityRdbmsSkill();
   // Phase 5c (cross-column) -- pairwise dependency analyses.
   registerDataDependencyCoNullPatternRdbmsSkill();
   registerDataDependencyFunctionalRdbmsSkill();
