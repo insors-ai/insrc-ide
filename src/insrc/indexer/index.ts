@@ -350,9 +350,22 @@ export class IndexerService {
           log.error({ file: filePath, err: msg }, 'full index: file error (skipping)');
           skipped++;
         }
-        // (Periodic CHECKPOINT for Kuzu's buffer-pool pressure was here.
-        //  Removed in Phase A.11 with the rest of the Kuzu rip-out;
-        //  DuckDB uses transactional MVCC and needs no equivalent.)
+        // Periodic CHECKPOINT to flush the WAL + free buffer-pool pages.
+        // DuckDB's auto-checkpoint triggers on WAL size BETWEEN
+        // transactions, but bulk indexing batches fast enough that the
+        // buffer pool fills with dirty pages from prior auto-committed
+        // chunks before auto-checkpoint fires. Every 100 files the
+        // explicit CHECKPOINT compacts the WAL, evicts clean pages,
+        // and keeps the HNSW index updates incremental rather than
+        // queued. Best-effort; a CHECKPOINT failure (e.g. transient
+        // contention) just defers the next attempt.
+        if (total % 100 === 0) {
+          try {
+            await this.db.duck.exec('CHECKPOINT');
+          } catch (err) {
+            log.warn({ repo: repoPath, err: err instanceof Error ? err.message : String(err) }, 'periodic checkpoint failed (will retry on next interval)');
+          }
+        }
       }
 
       // Emit DEPENDS_ON edges from repo manifest
@@ -373,8 +386,16 @@ export class IndexerService {
       const cf = await runCrossFileResolver({ db: this.db, repoRoot: repoPath, sourceRoots });
       log.info({ repo: repoPath, ...cf }, 'cross-file pass after full index');
 
-      // (End-of-fullIndex CHECKPOINT for Kuzu's WAL was here. Removed
-      //  in Phase A.11; DuckDB has no equivalent.)
+      // End-of-fullIndex CHECKPOINT: forces a final WAL flush + page
+      // eviction so the storage file is in steady state when the next
+      // skill / query hits the pool. Best-effort; the daemon's
+      // graceful-shutdown path also closes the instance which flushes
+      // the WAL implicitly.
+      try {
+        await this.db.duck.exec('CHECKPOINT');
+      } catch (err) {
+        log.warn({ repo: repoPath, err: err instanceof Error ? err.message : String(err) }, 'end-of-index checkpoint failed (non-fatal)');
+      }
 
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       log.info({ repo: repoPath, fileCount, skipped, elapsed: `${elapsed}s` }, 'full index complete');

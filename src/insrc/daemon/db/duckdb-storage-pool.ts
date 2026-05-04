@@ -113,6 +113,15 @@ export async function getDuckDBStorage(): Promise<DuckDBInstance> {
     const conn = await instance.connect();
     try {
       await conn.run(`SET memory_limit = '${memoryMb}MB'`);
+      // Disable preserve_insertion_order. The buffer-pool pressure on
+      // bulk indexing workloads is dominated by ordering metadata that
+      // DuckDB retains for SELECT-without-ORDER-BY determinism. Every
+      // query that cares about row order in this codebase already uses
+      // an explicit ORDER BY (entity-by-id, search-by-distance,
+      // top-N-distinct, etc.) -- this flag costs us nothing and is the
+      // single biggest insert-time relief per the OOM error message
+      // DuckDB emits when the buffer pool fills.
+      await conn.run('SET preserve_insertion_order = false');
       // Load `arrow` first (Arrow IPC reads, used by data-driver
       // pipelines that flow Arrow record batches through the storage
       // layer). Best-effort; missing extension non-fatal at startup.
