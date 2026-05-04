@@ -59,6 +59,7 @@ import { registerDataTimeseriesTrendRdbmsSkill } from './built-ins/data.timeseri
 import { registerDataTimeseriesSeasonalityRdbmsSkill } from './built-ins/data.timeseries.seasonality.rdbms.js';
 import { registerDataTimeseriesStationarityRdbmsSkill } from './built-ins/data.timeseries.stationarity.rdbms.js';
 import { registerDataTimeseriesGapAnalysisRdbmsSkill } from './built-ins/data.timeseries.gap-analysis.rdbms.js';
+import { registerDataCorrelationNumericPairwiseRdbmsSkill } from './built-ins/data.correlation.numeric-pairwise.rdbms.js';
 import { registerDataAnomalyChangePointRdbmsSkill } from './built-ins/data.anomaly.change-point.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
@@ -118,6 +119,7 @@ export function registerAllSkills(): void {
   registerDataDependencyCoNullPatternRdbmsSkill();
   registerDataDependencyFunctionalRdbmsSkill();
   registerDataCardinalityJoinKeyRdbmsSkill();
+  registerDataCorrelationNumericPairwiseRdbmsSkill();
   // Phase 5e (sensitivity / PII) -- regex over sampled values;
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();
