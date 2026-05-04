@@ -42,6 +42,7 @@ export function heavyTailAggregationsFor(column: string): AggregateSpec[] {
 		{ column, function: 'count_non_null' },
 		{ column, function: 'avg' },
 		{ column, function: 'stddev' },
+		{ column, function: 'kurtosis' },
 	];
 }
 
@@ -49,12 +50,41 @@ export function buildHeavyTailCheck(
 	target: string,
 	column: string,
 	threshold: number,
-	aggValues: Readonly<Record<string, number | null>>,
+	aggValues: Readonly<Record<string, number | string | null>>,
 	sample: { columns: readonly string[]; rows: readonly Readonly<Record<string, unknown>>[] },
 ): HeavyTailOutput {
-	const count = aggValues[`${column}__count_non_null`] ?? null;
-	const mean = aggValues[`${column}__avg`] ?? null;
-	const stddev = aggValues[`${column}__stddev`] ?? null;
+	const count = numericFromAgg(aggValues[`${column}__count_non_null`]);
+	const mean = numericFromAgg(aggValues[`${column}__avg`]);
+	const stddev = numericFromAgg(aggValues[`${column}__stddev`]);
+	const serverKurtosis = numericFromAgg(aggValues[`${column}__kurtosis`]);
+
+	// DuckDB returns excess kurtosis already; if it's present and the
+	// row count clears the floor, use it directly instead of computing
+	// sample kurtosis.
+	if (serverKurtosis !== null && count !== null && count >= 50) {
+		const excessKurtosis = serverKurtosis;
+		const kurtosis = excessKurtosis + 3;
+		let verdict: HeavyTailVerdict;
+		let interpretation: string;
+		if (excessKurtosis > threshold) {
+			verdict = 'heavy-tailed';
+			interpretation = `excess kurtosis ${excessKurtosis.toFixed(2)} > +${threshold}; heavier tails than normal (full-table)`;
+		} else if (excessKurtosis < -threshold) {
+			verdict = 'light-tailed';
+			interpretation = `excess kurtosis ${excessKurtosis.toFixed(2)} < -${threshold}; lighter tails than normal (full-table)`;
+		} else {
+			verdict = 'mesokurtic';
+			interpretation = `excess kurtosis ${excessKurtosis.toFixed(2)} within ±${threshold}; normal-shaped tails (full-table)`;
+		}
+		return {
+			target, column,
+			sampleSize: count,
+			count, mean, stddev,
+			kurtosis, excessKurtosis,
+			threshold,
+			verdict, interpretation,
+		};
+	}
 
 	const values: number[] = [];
 	if (sample.columns.includes(column)) {
@@ -125,6 +155,13 @@ export function emptyHeavyTailCheck(target: string, column: string, threshold: n
 		threshold,
 		verdict: 'inconclusive', interpretation: '',
 	};
+}
+
+function numericFromAgg(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
 }
 
 export const HEAVY_TAIL_OUTPUT_SCHEMA: Record<string, unknown> = {

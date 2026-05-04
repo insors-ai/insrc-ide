@@ -9,6 +9,7 @@ import {
 	UNIQUENESS_COL_CAP,
 	UNIQUENESS_OUTPUT_SCHEMA,
 	buildUniqueness,
+	compositePkAggregationsFor,
 	emptyUniqueness,
 	uniquenessAggregationsFor,
 } from './data.quality.uniqueness.algo.js';
@@ -19,6 +20,7 @@ interface QualityUniquenessFileInput {
 	readonly connectionId: string;
 	readonly columns?: readonly string[];
 	readonly target?: string;
+	readonly compositePkCandidates?: readonly (readonly string[])[];
 }
 
 const FILE_FAMILY_TAGS = [
@@ -41,6 +43,13 @@ const skill: Skill<QualityUniquenessFileInput, QualityUniquenessOutput> = {
 			connectionId: { type: 'string' },
 			columns:      { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 15 },
 			target:       { type: 'string', description: 'Optional. xlsx: sheet name.' },
+			compositePkCandidates: {
+				type: 'array',
+				items: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 5 },
+				minItems: 1,
+				maxItems: 16,
+				description: 'Candidate composite PK tuples; each runs one composite_distinct_count aggregate.',
+			},
 		},
 		required: ['connectionId'],
 		additionalProperties: false,
@@ -66,7 +75,12 @@ const skill: Skill<QualityUniquenessFileInput, QualityUniquenessOutput> = {
 		const usedCols = truncated ? cols.slice(0, UNIQUENESS_COL_CAP) : cols;
 		if (truncated) notes.push(`uniqueness truncated: ${cols.length} columns -> profiling first ${UNIQUENESS_COL_CAP}.`);
 
-		const aggInput: Record<string, unknown> = { connectionId: input.connectionId, aggregations: uniquenessAggregationsFor(usedCols) };
+		const compositeCandidates = (input.compositePkCandidates ?? []).filter(t => t.length >= 2);
+		const aggregations = [
+			...uniquenessAggregationsFor(usedCols),
+			...compositePkAggregationsFor(compositeCandidates),
+		];
+		const aggInput: Record<string, unknown> = { connectionId: input.connectionId, aggregations };
 		if (sheet !== undefined) aggInput['path'] = sheet;
 		const aggResult = await deps.runTool({ id: `${callBase}-agg`, name: 'db_file_aggregate', input: aggInput });
 		if (aggResult.isError) {
@@ -81,7 +95,7 @@ const skill: Skill<QualityUniquenessFileInput, QualityUniquenessOutput> = {
 			};
 		}
 
-		const out = buildUniqueness(aggResult.data.target, usedCols, truncated, aggResult.data.values);
+		const out = buildUniqueness(aggResult.data.target, usedCols, truncated, aggResult.data.values, compositeCandidates);
 		return {
 			value: out,
 			confidence: out.totalRows !== null && out.totalRows > 0 ? 'high' : 'medium',

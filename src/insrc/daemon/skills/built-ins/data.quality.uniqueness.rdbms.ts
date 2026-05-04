@@ -10,6 +10,7 @@ import {
 	UNIQUENESS_COL_CAP,
 	UNIQUENESS_OUTPUT_SCHEMA,
 	buildUniqueness,
+	compositePkAggregationsFor,
 	emptyUniqueness,
 	uniquenessAggregationsFor,
 } from './data.quality.uniqueness.algo.js';
@@ -20,6 +21,11 @@ interface QualityUniquenessInput {
 	readonly connectionId: string;
 	readonly target: string;
 	readonly columns?: readonly string[];
+	/** Optional list of candidate composite PK tuples. Each entry must
+	 *  have >= 2 column names. Each tuple consumes one aggregation
+	 *  spec; up to 16 candidates fit alongside a 15-column single-PK
+	 *  scan. */
+	readonly compositePkCandidates?: readonly (readonly string[])[];
 }
 
 const RDBMS_FAMILY_TAGS = [
@@ -41,6 +47,13 @@ const skill: Skill<QualityUniquenessInput, QualityUniquenessOutput> = {
 			connectionId: { type: 'string' },
 			target:       { type: 'string' },
 			columns:      { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 15 },
+			compositePkCandidates: {
+				type: 'array',
+				items: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 5 },
+				minItems: 1,
+				maxItems: 16,
+				description: 'Candidate composite PK tuples; each runs one composite_distinct_count aggregate.',
+			},
 		},
 		required: ['connectionId', 'target'],
 		additionalProperties: false,
@@ -65,13 +78,18 @@ const skill: Skill<QualityUniquenessInput, QualityUniquenessOutput> = {
 		const usedCols = truncated ? cols.slice(0, UNIQUENESS_COL_CAP) : cols;
 		if (truncated) notes.push(`uniqueness truncated: ${cols.length} columns -> profiling first ${UNIQUENESS_COL_CAP}.`);
 
+		const compositeCandidates = (input.compositePkCandidates ?? []).filter(t => t.length >= 2);
+		const aggregations = [
+			...uniquenessAggregationsFor(usedCols),
+			...compositePkAggregationsFor(compositeCandidates),
+		];
 		const aggResult = await deps.runTool({
 			id: `${callBase}-agg`,
 			name: 'db_sql_aggregate',
 			input: {
 				connectionId: input.connectionId,
 				target: input.target,
-				aggregations: uniquenessAggregationsFor(usedCols),
+				aggregations,
 			},
 		});
 		if (aggResult.isError) {
@@ -86,7 +104,7 @@ const skill: Skill<QualityUniquenessInput, QualityUniquenessOutput> = {
 			};
 		}
 
-		const out = buildUniqueness(aggResult.data.target, usedCols, truncated, aggResult.data.values);
+		const out = buildUniqueness(aggResult.data.target, usedCols, truncated, aggResult.data.values, compositeCandidates);
 		return {
 			value: out,
 			confidence: out.totalRows !== null && out.totalRows > 0 ? 'high' : 'medium',

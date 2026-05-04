@@ -5,8 +5,14 @@
  * Jarque-Bera test:
  *   JB = n/6 * (S^2 + (K - 3)^2 / 4)
  * follows chi-squared(2) under the null. Closed-form p-value
- * `exp(-JB / 2)` -- no external stats library needed. Sample-based
- * skewness + kurtosis (server-side aggregates don't expose them yet).
+ * `exp(-JB / 2)` -- no external stats library needed.
+ *
+ * Skewness + kurtosis are now requested server-side (Phase 0.1.x
+ * extension) when the dialect supports them; the skill falls back to
+ * sample-based moments when the engine returns null (e.g. SQLite, or
+ * when the column has fewer than n=4 non-null values). `momentSource`
+ * records which path was used so the caller can distinguish
+ * full-table from sample-derived results.
  */
 
 interface AggregateSpec {
@@ -17,6 +23,7 @@ interface AggregateSpec {
 export const NORMALITY_TEST_SAMPLE_SIZE = 50;
 
 export type NormalityVerdict = 'normal' | 'non-normal' | 'inconclusive';
+export type MomentSource = 'sample' | 'server' | 'unknown';
 
 export interface NormalityTestOutput {
 	readonly target: string;
@@ -27,7 +34,7 @@ export interface NormalityTestOutput {
 	readonly stddev: number | null;
 	readonly skewness: number | null;
 	readonly kurtosis: number | null;
-	readonly momentSource: 'sample' | 'unknown';
+	readonly momentSource: MomentSource;
 	readonly alpha: number;
 	readonly jbStatistic: number | null;
 	readonly pValue: number | null;
@@ -45,6 +52,8 @@ export function normalityTestAggregationsFor(column: string): AggregateSpec[] {
 		{ column, function: 'count_non_null' },
 		{ column, function: 'avg' },
 		{ column, function: 'stddev' },
+		{ column, function: 'skewness' },
+		{ column, function: 'kurtosis' },
 	];
 }
 
@@ -52,13 +61,63 @@ export function buildNormalityTest(
 	target: string,
 	column: string,
 	alpha: number,
-	aggValues: Readonly<Record<string, number | null>>,
+	aggValues: Readonly<Record<string, number | string | null>>,
 	sample: { columns: readonly string[]; rows: readonly Readonly<Record<string, unknown>>[] },
 ): NormalityTestOutput {
-	const count = aggValues[`${column}__count_non_null`] ?? null;
-	const mean = aggValues[`${column}__avg`] ?? null;
-	const stddev = aggValues[`${column}__stddev`] ?? null;
+	const count = numericFromAgg(aggValues[`${column}__count_non_null`]);
+	const mean = numericFromAgg(aggValues[`${column}__avg`]);
+	const stddev = numericFromAgg(aggValues[`${column}__stddev`]);
+	// Phase 0.1.x: skewness + kurtosis come back from the engine on
+	// dialects that support them (DuckDB native; others: null).
+	const serverSkewness = numericFromAgg(aggValues[`${column}__skewness`]);
+	const serverKurtosis = numericFromAgg(aggValues[`${column}__kurtosis`]);
 
+	let skewness: number | null = null;
+	let kurtosis: number | null = null;
+	let jbStatistic: number | null = null;
+	let pValue: number | null = null;
+	let verdict: NormalityVerdict = 'inconclusive';
+	let interpretation = '';
+	let momentSource: MomentSource = 'unknown';
+
+	// DuckDB returns excess kurtosis already; we add 3 to match the
+	// Pearson-style kurtosis the rest of this module assumes.
+	const serverKurtosisPearson = serverKurtosis !== null ? serverKurtosis + 3 : null;
+
+	const haveServer = serverSkewness !== null && serverKurtosisPearson !== null
+		&& count !== null && count >= 4 && stddev !== null && stddev > 0;
+
+	if (haveServer) {
+		skewness = serverSkewness;
+		kurtosis = serverKurtosisPearson;
+		momentSource = 'server';
+		const n = count!;
+		if (n >= 50) {
+			jbStatistic = (n / 6) * (skewness! * skewness! + Math.pow(kurtosis! - 3, 2) / 4);
+			pValue = Math.exp(-jbStatistic / 2);
+			if (pValue >= alpha) {
+				verdict = 'normal';
+				interpretation = `JB statistic = ${jbStatistic.toFixed(2)}, p = ${pValue.toFixed(4)}; cannot reject normality at alpha=${alpha} (full-table moments)`;
+			} else {
+				verdict = 'non-normal';
+				interpretation = describeShape(skewness!, kurtosis!, jbStatistic, pValue, alpha) + ' (full-table moments)';
+			}
+		} else {
+			verdict = 'inconclusive';
+			interpretation = `n=${n} below the 50-row floor for Jarque-Bera; moments computed but verdict suppressed`;
+		}
+		return {
+			target, column,
+			sampleSize: n,
+			count, mean, stddev,
+			skewness, kurtosis, momentSource,
+			alpha, jbStatistic, pValue,
+			verdict, interpretation,
+		};
+	}
+
+	// Sample-based fallback: dialect doesn't support server-side
+	// skewness/kurtosis (SQLite / older MySQL etc).
 	const values: number[] = [];
 	if (sample.columns.includes(column)) {
 		for (const row of sample.rows) {
@@ -69,14 +128,6 @@ export function buildNormalityTest(
 		}
 	}
 	const n = values.length;
-
-	let skewness: number | null = null;
-	let kurtosis: number | null = null;
-	let jbStatistic: number | null = null;
-	let pValue: number | null = null;
-	let verdict: NormalityVerdict = 'inconclusive';
-	let interpretation = '';
-	let momentSource: 'sample' | 'unknown' = 'unknown';
 
 	if (n >= 4) {
 		const sampleMean = values.reduce((a, b) => a + b, 0) / n;
@@ -125,6 +176,13 @@ export function buildNormalityTest(
 	};
 }
 
+function numericFromAgg(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
+}
+
 function describeShape(skewness: number, kurtosis: number, jb: number, p: number, alpha: number): string {
 	const parts: string[] = [`JB statistic = ${jb.toFixed(2)}, p = ${p.toExponential(2)} (< alpha=${alpha})`];
 	if (Math.abs(skewness) > 1) parts.push(skewness > 0 ? 'right-skewed (positive skew)' : 'left-skewed (negative skew)');
@@ -158,7 +216,7 @@ export const NORMALITY_TEST_OUTPUT_SCHEMA: Record<string, unknown> = {
 		stddev:         { type: ['number', 'null'] },
 		skewness:       { type: ['number', 'null'] },
 		kurtosis:       { type: ['number', 'null'] },
-		momentSource:   { type: 'string', enum: ['sample', 'unknown'] },
+		momentSource:   { type: 'string', enum: ['sample', 'server', 'unknown'] },
 		alpha:          { type: 'number' },
 		jbStatistic:    { type: ['number', 'null'] },
 		pValue:         { type: ['number', 'null'] },

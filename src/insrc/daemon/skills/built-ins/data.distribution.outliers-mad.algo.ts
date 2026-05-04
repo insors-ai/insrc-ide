@@ -5,9 +5,11 @@
  * Modified Z-score outlier detection via MAD (median absolute
  * deviation). Best-fit for heavy-tailed columns where Z-score and
  * IQR under-detect. Bounds: median ± threshold × MAD × (1/0.6745);
- * default threshold 3.5. v1 computes MAD over the 50-row sample
- * (server-side MAD needs a two-pass aggregate not yet shipped) --
- * surfaced via `madSource: 'sample' | 'unknown'`.
+ * default threshold 3.5.
+ *
+ * Phase 0.1.x extension: MAD now requested server-side via the
+ * `mad` aggregate (DuckDB native). Falls back to sample-based MAD
+ * when the engine doesn't support it (madSource: 'sample').
  */
 
 interface AggregateSpec {
@@ -30,7 +32,7 @@ export interface OutliersMadOutput {
 	readonly threshold: number;
 	readonly median: number | null;
 	readonly mad: number | null;
-	readonly madSource: 'sample' | 'unknown';
+	readonly madSource: 'sample' | 'server' | 'unknown';
 	readonly lowerBound: number | null;
 	readonly upperBound: number | null;
 	readonly min: number | null;
@@ -58,6 +60,7 @@ export function outliersMadAggregationsFor(column: string): AggregateSpec[] {
 		{ column, function: 'min' },
 		{ column, function: 'max' },
 		{ column, function: 'percentile', args: { p: 0.5 } },
+		{ column, function: 'mad' },
 	];
 }
 
@@ -65,15 +68,15 @@ export function buildOutliersMad(
 	target: string,
 	column: string,
 	threshold: number,
-	aggValues: Readonly<Record<string, number | null>>,
+	aggValues: Readonly<Record<string, number | string | null>>,
 	sample: { columns: readonly string[]; rows: readonly Readonly<Record<string, unknown>>[] },
 ): OutliersMadOutput {
-	const v = aggValues;
-	const count = v[`${column}__count`] ?? null;
-	const nonNullCount = v[`${column}__count_non_null`] ?? null;
-	const min = v[`${column}__min`] ?? null;
-	const max = v[`${column}__max`] ?? null;
-	const median = v[`${column}__percentile_0_5`] ?? null;
+	const count = numericFromAgg(aggValues[`${column}__count`]);
+	const nonNullCount = numericFromAgg(aggValues[`${column}__count_non_null`]);
+	const min = numericFromAgg(aggValues[`${column}__min`]);
+	const max = numericFromAgg(aggValues[`${column}__max`]);
+	const median = numericFromAgg(aggValues[`${column}__percentile_0_5`]);
+	const serverMad = numericFromAgg(aggValues[`${column}__mad`]);
 
 	const sampleValues: number[] = [];
 	if (sample.columns.includes(column)) {
@@ -86,8 +89,11 @@ export function buildOutliersMad(
 	}
 
 	let mad: number | null = null;
-	let madSource: 'sample' | 'unknown' = 'unknown';
-	if (median !== null && sampleValues.length > 0) {
+	let madSource: 'sample' | 'server' | 'unknown' = 'unknown';
+	if (serverMad !== null) {
+		mad = serverMad;
+		madSource = 'server';
+	} else if (median !== null && sampleValues.length > 0) {
 		const deviations = sampleValues.map(x => Math.abs(x - median)).sort((a, b) => a - b);
 		const mid = Math.floor(deviations.length / 2);
 		mad = deviations.length % 2 === 0
@@ -151,6 +157,13 @@ export function emptyOutliersMad(target: string, column: string, threshold: numb
 	};
 }
 
+function numericFromAgg(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
+}
+
 const MAD_EXAMPLE_SCHEMA = {
 	type: 'object',
 	properties: { value: { type: 'number' }, modifiedZ: { type: 'number' } },
@@ -166,7 +179,7 @@ export const OUTLIERS_MAD_OUTPUT_SCHEMA: Record<string, unknown> = {
 		threshold:            { type: 'number' },
 		median:               { type: ['number', 'null'] },
 		mad:                  { type: ['number', 'null'] },
-		madSource:            { type: 'string', enum: ['sample', 'unknown'] },
+		madSource:            { type: 'string', enum: ['sample', 'server', 'unknown'] },
 		lowerBound:           { type: ['number', 'null'] },
 		upperBound:           { type: ['number', 'null'] },
 		min:                  { type: ['number', 'null'] },
