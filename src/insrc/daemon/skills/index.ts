@@ -38,6 +38,7 @@ import { registerDataQualityCompletenessFileSkill } from './built-ins/data.quali
 import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.quality.uniqueness.rdbms.js';
 import { registerDataQualityUniquenessFileSkill } from './built-ins/data.quality.uniqueness.file.js';
 import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.detect-patterns.rdbms.js';
+import { registerDataPiiDetectPatternsFileSkill } from './built-ins/data.pii.detect-patterns.file.js';
 import { registerDataProfileTemporalRdbmsSkill } from './built-ins/data.profile.temporal.rdbms.js';
 import { registerDataProfileTextRdbmsSkill } from './built-ins/data.profile.text.rdbms.js';
 import { registerDataProfileAutoRdbmsSkill } from './built-ins/data.profile.auto.rdbms.js';
@@ -73,7 +74,9 @@ import { registerDataQualityConformityFileSkill } from './built-ins/data.quality
 import { registerDataQualityConsistencyRdbmsSkill } from './built-ins/data.quality.consistency.rdbms.js';
 import { registerDataQualityConsistencyFileSkill } from './built-ins/data.quality.consistency.file.js';
 import { registerDataDriftDistributionRdbmsSkill } from './built-ins/data.drift.distribution.rdbms.js';
+import { registerDataDriftDistributionFileSkill } from './built-ins/data.drift.distribution.file.js';
 import { registerDataDriftVolumeRdbmsSkill } from './built-ins/data.drift.volume.rdbms.js';
+import { registerDataDriftVolumeFileSkill } from './built-ins/data.drift.volume.file.js';
 import { registerDataTimeseriesTrendRdbmsSkill } from './built-ins/data.timeseries.trend.rdbms.js';
 import { registerDataTimeseriesSeasonalityRdbmsSkill } from './built-ins/data.timeseries.seasonality.rdbms.js';
 import { registerDataTimeseriesStationarityRdbmsSkill } from './built-ins/data.timeseries.stationarity.rdbms.js';
@@ -146,7 +149,9 @@ export function registerAllSkills(): void {
   // Phase 5f (drift over windows) -- compares two sample windows
   // of the same column.
   registerDataDriftDistributionRdbmsSkill();
+  registerDataDriftDistributionFileSkill();
   registerDataDriftVolumeRdbmsSkill();
+  registerDataDriftVolumeFileSkill();
   registerDataAnomalyChangePointRdbmsSkill();
   // Phase 5g (timeseries) -- regression / seasonality / stationarity
   // checks over a temporal axis.
@@ -166,6 +171,7 @@ export function registerAllSkills(): void {
   // Phase 5e (sensitivity / PII) -- regex over sampled values;
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();
+  registerDataPiiDetectPatternsFileSkill();
 
   // Composite skills. Must register AFTER their atomic skillDeps.
   // 5a.6 -- profile.auto dispatches to numeric / categorical /

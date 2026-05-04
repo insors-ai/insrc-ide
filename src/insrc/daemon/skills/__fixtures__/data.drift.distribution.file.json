@@ -1,0 +1,32 @@
+{
+  "input": {
+    "connectionId": "csv-events",
+    "column": "amount",
+    "windowAWhere": [{ "column": "year", "op": "=", "value": 2025 }],
+    "windowBWhere": [{ "column": "year", "op": "=", "value": 2026 }],
+    "bins": 5
+  },
+  "fakeTools": {
+    "db_file_sample": {
+      "content": "**/data/events.csv** -- 8 rows",
+      "isError": false,
+      "data": {
+        "target": "/data/events.csv",
+        "columns": ["amount"],
+        "rows": [
+          { "amount": 10 },
+          { "amount": 15 },
+          { "amount": 20 },
+          { "amount": 25 },
+          { "amount": 30 },
+          { "amount": 35 },
+          { "amount": 40 },
+          { "amount": 45 }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
