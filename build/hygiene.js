@@ -35,13 +35,13 @@ function hygiene(some, linting = true) {
 	let errorCount = 0;
 
 	const productJson = es.through(function (file) {
-		const product = JSON.parse(file.contents.toString('utf8'));
-
-		if (product.extensionsGallery) {
-			console.error(`product.json: Contains 'extensionsGallery'`);
-			errorCount++;
-		}
-
+		// Upstream Microsoft hygiene banned `extensionsGallery` here so a
+		// fork couldn't accidentally ship pointing at the official MS
+		// marketplace (which is licensed to in-scope MS products only).
+		// Insrc IDE is a deliberate fork and explicitly wires its own
+		// gallery (Open VSX), so the check is no longer applicable.
+		// Keep the JSON-parse to validate the file is still well-formed.
+		JSON.parse(file.contents.toString('utf8'));
 		this.emit('data', file);
 	});
 
