@@ -47,6 +47,7 @@ export interface RuleResult {
 }
 
 export type ConsistencyVerdict = 'consistent' | 'mostly-consistent' | 'mixed' | 'broken' | 'inconclusive';
+export type ConsistencySource = 'sample' | 'full-table';
 
 export interface ConsistencyOutput {
 	readonly target: string;
@@ -54,6 +55,108 @@ export interface ConsistencyOutput {
 	readonly rules: readonly RuleResult[];
 	readonly verdict: ConsistencyVerdict;
 	readonly interpretation: string;
+	readonly source: ConsistencySource;
+	readonly totalRows: number | null;
+}
+
+const NEGATED_COMPARISON: Readonly<Record<ConsistencyOp, ConsistencyOp | null>> = {
+	'<':  '>=',
+	'<=': '>',
+	'=':  '!=',
+	'!=': '=',
+	'>=': '<',
+	'>':  '<=',
+	'and-not-null': null,
+	'xor-null':     null,
+};
+
+interface FullTableAggSpec {
+	readonly column: string;
+	readonly function: string;
+	readonly args?: { readonly predicate?: readonly { readonly column: string; readonly op: string; readonly valueColumn?: string }[] };
+}
+
+/**
+ * Build the count_where aggregations for one rule's full-table
+ * evaluation. Comparison rules need 2 count_wheres (satisfied +
+ * violated) + 1 count_where for null-related inapplicable. Null-
+ * pattern rules (`and-not-null`, `xor-null`) need 3 count_wheres
+ * for the four null-buckets.
+ */
+export function consistencyRuleAggregations(rule: ConsistencyRule): readonly FullTableAggSpec[] {
+	const { leftColumn: l, rightColumn: r, op } = rule;
+	const lNotNull = { column: l, op: 'is not null' };
+	const rNotNull = { column: r, op: 'is not null' };
+	const lNull    = { column: l, op: 'is null' };
+	const rNull    = { column: r, op: 'is null' };
+	if (op === 'and-not-null' || op === 'xor-null') {
+		return [
+			{ column: l, function: 'count_where', args: { predicate: [lNotNull, rNotNull] } },
+			{ column: l, function: 'count_where', args: { predicate: [lNull, rNotNull] } },
+			{ column: l, function: 'count_where', args: { predicate: [lNotNull, rNull] } },
+		];
+	}
+	const negated = NEGATED_COMPARISON[op];
+	return [
+		{ column: l, function: 'count_where', args: { predicate: [{ column: l, op, valueColumn: r }, lNotNull, rNotNull] } },
+		{ column: l, function: 'count_where', args: { predicate: [{ column: l, op: negated!, valueColumn: r }, lNotNull, rNotNull] } },
+		// Inapplicable = either side null (we'll subtract these from total).
+		{ column: l, function: 'count_where', args: { predicate: [lNull] } },
+		{ column: l, function: 'count_where', args: { predicate: [rNull] } },
+	];
+}
+
+export function buildConsistencyFromCounts(
+	target: string,
+	rules: readonly ConsistencyRule[],
+	totalRows: number,
+	perRuleCounts: readonly number[][],
+): ConsistencyOutput {
+	const ruleResults: RuleResult[] = rules.map((rule, idx) => {
+		const c = perRuleCounts[idx]!;
+		let satisfied: number, violated: number, inapplicable: number;
+		if (rule.op === 'and-not-null') {
+			const both = c[0]!, lOnly = c[1]!, rOnly = c[2]!;
+			satisfied = both;
+			violated = lOnly + rOnly;
+			inapplicable = totalRows - satisfied - violated;
+		} else if (rule.op === 'xor-null') {
+			const both = c[0]!, lOnly = c[1]!, rOnly = c[2]!;
+			satisfied = lOnly + rOnly;
+			violated = both;
+			inapplicable = totalRows - satisfied - violated;
+		} else {
+			satisfied = c[0]!;
+			violated = c[1]!;
+			const lNull = c[2]!, rNull = c[3]!;
+			// Inapplicable = rows where either side is null. Inclusion-
+			// exclusion: |lNull ∪ rNull| = lNull + rNull - bothNull. We
+			// don't have bothNull directly; approximate as lNull + rNull
+			// when they don't overlap, else cap at total - (sat + vio).
+			const sumNull = lNull + rNull;
+			const remainder = totalRows - satisfied - violated;
+			inapplicable = Math.max(remainder, 0);
+			void sumNull;
+		}
+		const applicable = satisfied + violated;
+		const satisfactionRate = applicable > 0 ? satisfied / applicable : null;
+		return {
+			name: rule.name,
+			leftColumn: rule.leftColumn,
+			op: rule.op,
+			rightColumn: rule.rightColumn,
+			satisfied, violated, inapplicable,
+			satisfactionRate,
+			examples: [],
+		};
+	});
+	const verdict = classifyVerdict(ruleResults);
+	const interpretation = describeVerdict(verdict, ruleResults);
+	return {
+		target, sampleSize: totalRows, rules: ruleResults,
+		verdict, interpretation,
+		source: 'full-table', totalRows,
+	};
 }
 
 export function clampConsistencySample(n: number | undefined): number {
@@ -86,6 +189,8 @@ export function buildConsistency(
 			rules: ruleResults,
 			verdict,
 			interpretation,
+			source: 'sample',
+			totalRows: null,
 		},
 		missingColumns: [],
 	};
@@ -106,6 +211,8 @@ export function emptyConsistency(target: string, rules: readonly ConsistencyRule
 		})),
 		verdict: 'inconclusive',
 		interpretation: '',
+		source: 'sample',
+		totalRows: null,
 	};
 }
 
@@ -256,7 +363,9 @@ export const CONSISTENCY_OUTPUT_SCHEMA: Record<string, unknown> = {
 		rules:          { type: 'array', items: RULE_RESULT_SCHEMA },
 		verdict:        { type: 'string', enum: ['consistent', 'mostly-consistent', 'mixed', 'broken', 'inconclusive'] },
 		interpretation: { type: 'string' },
+		source:         { type: 'string', enum: ['sample', 'full-table'] },
+		totalRows:      { type: ['number', 'null'] },
 	},
-	required: ['target', 'sampleSize', 'rules', 'verdict', 'interpretation'],
+	required: ['target', 'sampleSize', 'rules', 'verdict', 'interpretation', 'source', 'totalRows'],
 	additionalProperties: false,
 };

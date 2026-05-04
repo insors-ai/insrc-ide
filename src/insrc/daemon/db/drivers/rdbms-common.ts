@@ -150,13 +150,30 @@ export function compileWhere(
 		const col = dialect.quoteIdent(clause.column);
 		switch (clause.op) {
 			case '=':
-			case '!=': {
-				fragments.push(`${col} ${clause.op} ${dialect.placeholder(paramIndex++)}`);
-				values.push(clause.value);
+			case '!=':
+			case '<':
+			case '<=':
+			case '>':
+			case '>=': {
+				if (clause.valueColumn !== undefined) {
+					if (!columnSet.has(clause.valueColumn.toLowerCase())) {
+						throw new Error(
+							`data-driver: unknown valueColumn '${clause.valueColumn}' in where clause`,
+						);
+					}
+					fragments.push(`${col} ${clause.op} ${dialect.quoteIdent(clause.valueColumn)}`);
+				} else {
+					fragments.push(`${col} ${clause.op} ${dialect.placeholder(paramIndex++)}`);
+					values.push(clause.value);
+				}
 				break;
 			}
 			case 'is null': {
 				fragments.push(`${col} IS NULL`);
+				break;
+			}
+			case 'is not null': {
+				fragments.push(`${col} IS NOT NULL`);
 				break;
 			}
 			case 'in': {
@@ -172,6 +189,32 @@ export function compileWhere(
 					values.push(v);
 				}
 				fragments.push(`${col} IN (${placeholders.join(', ')})`);
+				break;
+			}
+			case 'between': {
+				if (!Array.isArray(clause.value) || clause.value.length !== 2) {
+					throw new Error(
+						`data-driver: 'between' op requires a 2-tuple value ` +
+						`(column '${clause.column}')`,
+					);
+				}
+				const lo = dialect.placeholder(paramIndex++);
+				const hi = dialect.placeholder(paramIndex++);
+				values.push(clause.value[0], clause.value[1]);
+				fragments.push(`${col} BETWEEN ${lo} AND ${hi}`);
+				break;
+			}
+			case 'like':
+			case 'not like': {
+				if (typeof clause.value !== 'string') {
+					throw new Error(
+						`data-driver: '${clause.op}' op requires a string value ` +
+						`(column '${clause.column}')`,
+					);
+				}
+				const sqlOp = clause.op === 'like' ? 'LIKE' : 'NOT LIKE';
+				fragments.push(`${col} ${sqlOp} ${dialect.placeholder(paramIndex++)}`);
+				values.push(clause.value);
 				break;
 			}
 		}

@@ -7,12 +7,17 @@ import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import {
 	type CoNullOutput,
+	type CoNullSource,
 	CO_NULL_COL_CAP,
 	CO_NULL_OUTPUT_SCHEMA,
+	CO_NULL_PAIRS_PER_BATCH,
 	buildCoNullOutput,
+	buildCoNullOutputFromCounts,
 	clampCoNullSample,
+	coNullPairAggregations,
 	emptyCoNullOutput,
 } from './data.dependency.co-null-pattern.algo.js';
+import { isAggregateResult } from './data.quality.completeness.algo.js';
 import {
 	isCorrelationSampleResult,
 	isDescribeResult,
@@ -23,6 +28,7 @@ interface CoNullFileInput {
 	readonly columns?: readonly string[];
 	readonly target?: string;
 	readonly sampleSize?: number;
+	readonly mode?: CoNullSource;
 }
 
 const FILE_FAMILY_TAGS = [
@@ -46,15 +52,16 @@ const skill: Skill<CoNullFileInput, CoNullOutput> = {
 			columns:      { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 15 },
 			target:       { type: 'string', description: 'Optional. xlsx: sheet name.' },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table uses count_where aggregates.' },
 		},
 		required: ['connectionId'],
 		additionalProperties: false,
 	},
 	outputs: CO_NULL_OUTPUT_SCHEMA,
-	toolDeps: ['db_file_describe', 'db_file_sample'],
+	toolDeps: ['db_file_describe', 'db_file_sample', 'db_file_aggregate'],
 	providerAffinity: 'auto',
 	preconditions: [
-		{ kind: 'required-tools', tools: ['db_file_describe', 'db_file_sample'], reason: 'describe gives the column list; sample gives the rows we partition by null pattern' },
+		{ kind: 'required-tools', tools: ['db_file_describe', 'db_file_sample', 'db_file_aggregate'], reason: 'describe gives the column list; sample (mode=sample) or aggregate (mode=full-table) supplies the counts' },
 		{ kind: 'connection-family', families: FILE_FAMILY_TAGS, reason: 'file-only' },
 	],
 
@@ -70,7 +77,7 @@ const skill: Skill<CoNullFileInput, CoNullOutput> = {
 		}
 		if (cols.length < 2) {
 			return {
-				value: { target: input.target ?? '', sampleSize: 0, columns: cols, pairs: [], truncated: false },
+				value: { target: input.target ?? '', sampleSize: 0, columns: cols, pairs: [], truncated: false, source: 'sample', totalRows: null },
 				confidence: 'medium',
 				notes: ['co-null-pattern needs at least 2 columns; nothing to compare'],
 				toolCalls: [],
@@ -81,6 +88,20 @@ const skill: Skill<CoNullFileInput, CoNullOutput> = {
 		const usedCols = truncated ? cols.slice(0, CO_NULL_COL_CAP) : cols;
 		if (truncated) {
 			notes.push(`co-null-pattern truncated: ${cols.length} columns -> profiling first ${CO_NULL_COL_CAP}.`);
+		}
+
+		if (input.mode === 'full-table') {
+			const fullResult = await runFullTable(input, deps, callBase, sheet, usedCols, truncated);
+			if (typeof fullResult === 'string') {
+				return { value: emptyCoNullOutput(input.target ?? ''), confidence: 'low', notes: [...notes, fullResult], toolCalls: [] };
+			}
+			const allNotes = [...notes, ...fullResult.notes];
+			return {
+				value: fullResult.output,
+				confidence: fullResult.anyNull ? 'high' : 'medium',
+				...(allNotes.length > 0 ? { notes: allNotes } : {}),
+				toolCalls: [],
+			};
 		}
 
 		const sampleInput: Record<string, unknown> = { connectionId: input.connectionId, limit: sampleSize };
@@ -108,6 +129,58 @@ const skill: Skill<CoNullFileInput, CoNullOutput> = {
 		};
 	},
 };
+
+async function runFullTable(
+	input: CoNullFileInput,
+	deps: SkillDeps,
+	callBase: string,
+	sheet: string | undefined,
+	usedCols: readonly string[],
+	truncated: boolean,
+): Promise<{ output: CoNullOutput; notes: readonly string[]; anyNull: boolean } | string> {
+	const totalInput: Record<string, unknown> = {
+		connectionId: input.connectionId,
+		aggregations: [{ column: '*', function: 'count' }],
+	};
+	if (sheet !== undefined) totalInput['path'] = sheet;
+	const totalRes = await deps.runTool({ id: `${callBase}-total`, name: 'db_file_aggregate', input: totalInput });
+	if (totalRes.isError) return `db_file_aggregate(count) error: ${totalRes.content.slice(0, 200)}`;
+	if (!isAggregateResult(totalRes.data)) return 'db_file_aggregate count returned a result without the expected structured data shape';
+	const totalRows = Number(totalRes.data.values['*__count'] ?? 0);
+
+	const pairs: { a: string; b: string }[] = [];
+	for (let i = 0; i < usedCols.length; i++) {
+		for (let j = i + 1; j < usedCols.length; j++) {
+			pairs.push({ a: usedCols[i]!, b: usedCols[j]! });
+		}
+	}
+
+	const counts: { columnA: string; columnB: string; bothNull: number; aNullOnly: number; bNullOnly: number; neitherNull: number }[] = [];
+	for (let off = 0; off < pairs.length; off += CO_NULL_PAIRS_PER_BATCH) {
+		const batch = pairs.slice(off, off + CO_NULL_PAIRS_PER_BATCH);
+		const aggregations = batch.flatMap(p => coNullPairAggregations(p.a, p.b));
+		const aggInput: Record<string, unknown> = { connectionId: input.connectionId, aggregations };
+		if (sheet !== undefined) aggInput['path'] = sheet;
+		const aggRes = await deps.runTool({ id: `${callBase}-pairs-${off}`, name: 'db_file_aggregate', input: aggInput });
+		if (aggRes.isError) return `db_file_aggregate(pairs) error: ${aggRes.content.slice(0, 200)}`;
+		if (!isAggregateResult(aggRes.data)) return 'db_file_aggregate pairs returned a result without the expected structured data shape';
+		for (const p of batch) {
+			const keys = coNullPairAggregations(p.a, p.b).map(spec => `${spec.column}__count_where_${[
+				...spec.args.predicate.map(c => `${c.column}_${c.op.replace(/[^a-z0-9]/gi, '')}`),
+			].join('__')}`);
+			const v = aggRes.data.values;
+			counts.push({
+				columnA: p.a, columnB: p.b,
+				bothNull:    Number(v[keys[0]!] ?? 0),
+				aNullOnly:   Number(v[keys[1]!] ?? 0),
+				bNullOnly:   Number(v[keys[2]!] ?? 0),
+				neitherNull: Number(v[keys[3]!] ?? 0),
+			});
+		}
+	}
+
+	return buildCoNullOutputFromCounts(input.target ?? '', usedCols, counts, totalRows, truncated);
+}
 
 async function resolveColumns(input: CoNullFileInput, deps: SkillDeps, callBase: string, sheet: string | undefined): Promise<readonly string[] | string> {
 	if (input.columns !== undefined && input.columns.length > 0) return input.columns;

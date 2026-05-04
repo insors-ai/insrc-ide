@@ -9,23 +9,28 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import {
 	type ConsistencyOutput,
 	type ConsistencyRule,
+	type ConsistencySource,
 	CONSISTENCY_OUTPUT_SCHEMA,
 	CONSISTENCY_RULE_SCHEMA,
 	buildConsistency,
+	buildConsistencyFromCounts,
 	clampConsistencySample,
+	consistencyRuleAggregations,
 	emptyConsistency,
 } from './data.quality.consistency.algo.js';
 import { isCorrelationSampleResult as isSampleResult } from './data.correlation.numeric-pairwise.algo.js';
+import { isAggregateResult } from './data.quality.completeness.algo.js';
 
 interface ConsistencyRdbmsInput {
 	readonly connectionId: string;
 	readonly target: string;
 	readonly rules: readonly ConsistencyRule[];
 	readonly sampleSize?: number;
+	readonly mode?: ConsistencySource;
 }
 
 const RDBMS_FAMILY_TAGS = [
@@ -54,21 +59,34 @@ const skill: Skill<ConsistencyRdbmsInput, ConsistencyOutput> = {
 			target:       { type: 'string' },
 			rules:        { type: 'array', items: CONSISTENCY_RULE_SCHEMA, minItems: 1, maxItems: 20 },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table issues count_where aggregates per rule.' },
 		},
 		required: ['connectionId', 'target', 'rules'],
 		additionalProperties: false,
 	},
 	outputs: CONSISTENCY_OUTPUT_SCHEMA,
-	toolDeps: ['db_sql_sample'],
+	toolDeps: ['db_sql_sample', 'db_sql_aggregate'],
 	providerAffinity: 'local',
 	preconditions: [
-		{ kind: 'required-tools', tools: ['db_sql_sample'], reason: 'sole tool that supplies the rows we evaluate rules over' },
+		{ kind: 'required-tools', tools: ['db_sql_sample', 'db_sql_aggregate'], reason: 'sample (mode=sample) or aggregate (mode=full-table) supplies the per-rule counts' },
 		{ kind: 'connection-family', families: RDBMS_FAMILY_TAGS, reason: 'RDBMS-only' },
 	],
 
 	async execute(input, deps): Promise<SkillResult<ConsistencyOutput>> {
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampConsistencySample(input.sampleSize);
+
+		if (input.mode === 'full-table') {
+			const fullResult = await runFullTable(input, deps, callId);
+			if (typeof fullResult === 'string') {
+				return { value: emptyConsistency(input.target, input.rules), confidence: 'low', notes: [fullResult], toolCalls: [] };
+			}
+			return {
+				value: fullResult,
+				confidence: fullResult.verdict === 'inconclusive' ? 'medium' : 'high',
+				toolCalls: [],
+			};
+		}
 
 		const tool = await deps.runTool({
 			id: callId,
@@ -103,6 +121,52 @@ const skill: Skill<ConsistencyRdbmsInput, ConsistencyOutput> = {
 		};
 	},
 };
+
+async function runFullTable(
+	input: ConsistencyRdbmsInput,
+	deps: SkillDeps,
+	callId: string,
+): Promise<ConsistencyOutput | string> {
+	const totalRes = await deps.runTool({
+		id: `${callId}-total`,
+		name: 'db_sql_aggregate',
+		input: {
+			connectionId: input.connectionId,
+			target: input.target,
+			aggregations: [{ column: '*', function: 'count' }],
+		},
+	});
+	if (totalRes.isError) return `db_sql_aggregate(count) error: ${totalRes.content.slice(0, 200)}`;
+	if (!isAggregateResult(totalRes.data)) return 'db_sql_aggregate count returned a result without the expected structured data shape';
+	const totalRows = Number(totalRes.data.values['*__count'] ?? 0);
+
+	// One aggregate call per rule (each rule fits in 3-4 specs).
+	const perRuleCounts: number[][] = [];
+	for (let i = 0; i < input.rules.length; i++) {
+		const rule = input.rules[i]!;
+		const aggregations = consistencyRuleAggregations(rule);
+		const aggRes = await deps.runTool({
+			id: `${callId}-rule-${i}`,
+			name: 'db_sql_aggregate',
+			input: {
+				connectionId: input.connectionId,
+				target: input.target,
+				aggregations,
+			},
+		});
+		if (aggRes.isError) return `db_sql_aggregate(rule '${rule.name}') error: ${aggRes.content.slice(0, 200)}`;
+		if (!isAggregateResult(aggRes.data)) return `db_sql_aggregate rule '${rule.name}' returned a result without the expected structured data shape`;
+		const counts: number[] = [];
+		for (const spec of aggregations) {
+			const sigParts = spec.args!.predicate!.map(c => `${c.column}_${c.op.replace(/[^a-z0-9]/gi, '')}`);
+			const key = `${spec.column}__count_where_${sigParts.join('__')}`;
+			counts.push(Number(aggRes.data.values[key] ?? 0));
+		}
+		perRuleCounts.push(counts);
+	}
+
+	return buildConsistencyFromCounts(input.target, input.rules, totalRows, perRuleCounts);
+}
 
 export function registerDataQualityConsistencyRdbmsSkill(): void {
 	registerSkill(skill as unknown as Skill);

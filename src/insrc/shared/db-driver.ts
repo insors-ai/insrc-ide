@@ -175,8 +175,14 @@ export interface SampleResult {
 
 export interface WhereClause {
 	readonly column: string;
-	readonly op: '=' | '!=' | 'in' | 'is null';
+	readonly op: '=' | '!=' | 'in' | 'is null' | 'is not null' | '<' | '<=' | '>' | '>=' | 'between' | 'like' | 'not like';
+	/** Literal value (or array for `in` / 2-tuple for `between`).
+	 *  Mutually exclusive with `valueColumn`. */
 	readonly value?: unknown;
+	/** Phase 0.1.x: compare to another column instead of a literal.
+	 *  Supported on the comparison ops (`= != < <= > >=`); ignored
+	 *  for `in` / `is null` / `is not null` / `between` / `like`. */
+	readonly valueColumn?: string;
 }
 
 export type SampleStrategy = 'first' | 'random' | 'stratified';

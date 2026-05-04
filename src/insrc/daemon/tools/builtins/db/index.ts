@@ -195,9 +195,10 @@ const WHERE_SCHEMA = {
 		required: ['column', 'op'],
 		additionalProperties: false,
 		properties: {
-			column: { type: 'string' },
-			op:     { type: 'string', enum: ['=', '!=', 'in', 'is null'] },
-			value:  {},
+			column:      { type: 'string' },
+			op:          { type: 'string', enum: ['=', '!=', '<', '<=', '>', '>=', 'in', 'is null', 'is not null', 'between', 'like', 'not like'] },
+			value:       {},
+			valueColumn: { type: 'string', description: 'Compare to another column instead of a literal value (mutually exclusive with `value`).' },
 		},
 	},
 } as const;
@@ -487,16 +488,23 @@ function buildAggregateRequest(input: ToolInput): AggregateRequest | string {
 function parseWhereInput(raw: unknown): WhereClause[] {
 	const out: WhereClause[] = [];
 	if (!Array.isArray(raw)) return out;
+	const allowedOps = new Set([
+		'=', '!=', '<', '<=', '>', '>=', 'in', 'is null', 'is not null', 'between', 'like', 'not like',
+	]);
 	for (const item of raw) {
 		if (item === null || typeof item !== 'object') continue;
 		const r = item as Record<string, unknown>;
 		const column = typeof r['column'] === 'string' ? r['column'] : '';
 		const op = r['op'];
 		if (column === '') continue;
-		if (op === '=' || op === '!=' || op === 'in' || op === 'is null') {
-			out.push(op === 'is null'
-				? { column, op }
-				: { column, op, value: r['value'] });
+		if (typeof op !== 'string' || !allowedOps.has(op)) continue;
+		if (op === 'is null' || op === 'is not null') {
+			out.push({ column, op } as WhereClause);
+		} else {
+			const clause: { column: string; op: typeof op; value?: unknown; valueColumn?: string } = { column, op };
+			if (typeof r['valueColumn'] === 'string') clause.valueColumn = r['valueColumn'];
+			else clause.value = r['value'];
+			out.push(clause as WhereClause);
 		}
 	}
 	return out;
