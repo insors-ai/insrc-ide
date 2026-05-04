@@ -269,6 +269,91 @@ describe('DuckDBFileDriver -- distinct (Phase 0.3)', () => {
 	});
 });
 
+describe('DuckDBFileDriver -- 0.1.x extended aggregates', () => {
+	it('skewness + kurtosis + mad return native DuckDB values', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			aggregate: (t: string | undefined, r: unknown) => Promise<{ values: Record<string, number | string | null> }>;
+		}).aggregate(undefined, {
+			aggregations: [
+				{ column: 'amount', function: 'skewness' },
+				{ column: 'amount', function: 'kurtosis' },
+				{ column: 'amount', function: 'mad' },
+			],
+		});
+		// DuckDB returns these as numeric scalars; readAggregateRow coerces.
+		// The 3-row sample's stddev_samp is degenerate for kurtosis but the
+		// result still types as number-or-null after coercion.
+		const sk = res.values['amount__skewness'];
+		const ku = res.values['amount__kurtosis'];
+		const md = res.values['amount__mad'];
+		assert.ok(sk === null || typeof sk === 'number', `skewness: ${typeof sk} ${JSON.stringify(sk)}`);
+		assert.ok(ku === null || typeof ku === 'number', `kurtosis: ${typeof ku} ${JSON.stringify(ku)}`);
+		assert.ok(md === null || typeof md === 'number', `mad: ${typeof md} ${JSON.stringify(md)}`);
+		await pool.closeAll();
+	});
+
+	it('count_where on a predicate', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			aggregate: (t: string | undefined, r: unknown) => Promise<{ values: Record<string, number | string | null> }>;
+		}).aggregate(undefined, {
+			aggregations: [
+				{
+					column: '*', function: 'count_where',
+					args: { predicate: [{ column: 'user_id', op: '=', value: 1 }] },
+				},
+			],
+		});
+		const key = Object.keys(res.values).find(k => k.startsWith('*__count_where_'));
+		assert.ok(key !== undefined);
+		// alice has 2 orders (user_id=1).
+		assert.equal(res.values[key!], 2);
+		await pool.closeAll();
+	});
+
+	it('count_where with the same predicate alongside global where', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			aggregate: (t: string | undefined, r: unknown) => Promise<{ values: Record<string, number | string | null> }>;
+		}).aggregate(undefined, {
+			where: [{ column: 'user_id', op: '!=', value: 999 }],  // matches all rows
+			aggregations: [
+				{
+					column: '*', function: 'count_where',
+					args: { predicate: [{ column: 'amount', op: '=', value: 12.5 }] },
+				},
+			],
+		});
+		const key = Object.keys(res.values).find(k => k.startsWith('*__count_where_'));
+		assert.equal(res.values[key!], 1);
+		await pool.closeAll();
+	});
+
+	it('composite_distinct_count counts unique (a, b) tuples', async () => {
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('csv-orders');
+		const res = await (drv as {
+			aggregate: (t: string | undefined, r: unknown) => Promise<{ values: Record<string, number | string | null> }>;
+		}).aggregate(undefined, {
+			aggregations: [
+				{ column: '*', function: 'composite_distinct_count', args: { columns: ['user_id', 'amount'] } },
+			],
+		});
+		const key = Object.keys(res.values).find(k => k.startsWith('*__composite_distinct_count_'));
+		// 3 rows; (1, 12.5), (2, 7.0), (1, 99.99) -> 3 unique tuples.
+		assert.equal(res.values[key!], 3);
+		await pool.closeAll();
+	});
+});
+
 describe('DuckDBFileDriver -- histogram (Phase 0.2)', () => {
 	it('equal-width returns bucket counts spanning min..max', async () => {
 		const pool = new DriverPool(repoRoot);

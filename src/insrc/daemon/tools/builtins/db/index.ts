@@ -385,8 +385,11 @@ const sqlSampleTool: Tool = {
 // Per-driver dialect handled by the existing driver dispatch.
 
 const AGGREGATE_FUNCTION_ENUM = [
-	'count', 'count_non_null', 'distinct_count',
-	'sum', 'avg', 'stddev', 'variance', 'min', 'max', 'percentile',
+	'count', 'count_non_null', 'count_where',
+	'distinct_count', 'composite_distinct_count',
+	'sum', 'avg', 'stddev', 'variance',
+	'skewness', 'kurtosis', 'mad',
+	'min', 'max', 'percentile',
 ] as const;
 
 const AGGREGATE_SPEC_SCHEMA = {
@@ -400,7 +403,9 @@ const AGGREGATE_SPEC_SCHEMA = {
 			type: 'object',
 			additionalProperties: false,
 			properties: {
-				p: { type: 'number', minimum: 0, maximum: 1, description: 'Percentile fraction in [0, 1]. Required when function = "percentile".' },
+				p:         { type: 'number', minimum: 0, maximum: 1, description: 'Percentile fraction in [0, 1]. Required when function = "percentile".' },
+				predicate: { ...WHERE_SCHEMA, description: 'WhereClause[] predicate for function = "count_where".' },
+				columns:   { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 10, description: 'Column list for function = "composite_distinct_count".' },
 			},
 		},
 	},
@@ -425,25 +430,49 @@ function buildAggregateRequest(input: ToolInput): AggregateRequest | string {
 		if (typeof fn !== 'string' || !(AGGREGATE_FUNCTION_ENUM as readonly string[]).includes(fn)) {
 			return `unknown aggregate function '${String(fn)}'; must be one of ${AGGREGATE_FUNCTION_ENUM.join(', ')}`;
 		}
-		const spec: AggregateSpec = { column, function: fn as AggregateSpec['function'] };
+		const spec: { column: string; function: AggregateSpec['function']; args?: AggregateSpec['args'] } = { column, function: fn as AggregateSpec['function'] };
 		const argsRaw = obj['args'];
 		if (argsRaw !== undefined && argsRaw !== null) {
 			if (typeof argsRaw !== 'object') {
 				return '`args` must be an object when supplied';
 			}
 			const argsObj = argsRaw as Record<string, unknown>;
+			const args: { p?: number; predicate?: WhereClause[]; columns?: string[] } = {};
 			const p = argsObj['p'];
 			if (p !== undefined) {
 				if (typeof p !== 'number' || p < 0 || p > 1) {
 					return '`args.p` must be a number in [0, 1]';
 				}
-				(spec as { args?: { p?: number } }).args = { p };
+				args.p = p;
 			}
+			const predicate = argsObj['predicate'];
+			if (predicate !== undefined) {
+				const parsed = parseWhereInput(predicate);
+				if (parsed.length === 0) return '`args.predicate` must be a non-empty array of WhereClause objects';
+				args.predicate = parsed;
+			}
+			const cols = argsObj['columns'];
+			if (cols !== undefined) {
+				if (!Array.isArray(cols) || cols.length < 2) return '`args.columns` must be an array with >= 2 entries';
+				const out: string[] = [];
+				for (const c of cols) {
+					if (typeof c !== 'string' || c.length === 0) return 'each entry in `args.columns` must be a non-empty string';
+					out.push(c);
+				}
+				args.columns = out;
+			}
+			if (Object.keys(args).length > 0) spec.args = args;
 		}
 		if (spec.function === 'percentile' && spec.args?.p === undefined) {
 			return 'function "percentile" requires args.p in [0, 1]';
 		}
-		aggregations.push(spec);
+		if (spec.function === 'count_where' && (spec.args?.predicate === undefined || spec.args.predicate.length === 0)) {
+			return 'function "count_where" requires args.predicate (non-empty WhereClause[])';
+		}
+		if (spec.function === 'composite_distinct_count' && (spec.args?.columns === undefined || spec.args.columns.length < 2)) {
+			return 'function "composite_distinct_count" requires args.columns with >= 2 entries';
+		}
+		aggregations.push(spec as AggregateSpec);
 	}
 	const where = parseWhereInput(input['where']);
 	return where.length === 0 ? { aggregations } : { aggregations, where };
@@ -473,7 +502,7 @@ function parseWhereInput(raw: unknown): WhereClause[] {
 	return out;
 }
 
-function formatAggregateResult(target: string, values: Readonly<Record<string, number | null>>): string {
+function formatAggregateResult(target: string, values: Readonly<Record<string, number | string | null>>): string {
 	const rows = [`**Aggregates for \`${target}\`**`, '', '| key | value |', '|---|---|'];
 	for (const [k, v] of Object.entries(values)) {
 		rows.push(`| ${k} | ${v === null ? '_(null)_' : String(v)} |`);

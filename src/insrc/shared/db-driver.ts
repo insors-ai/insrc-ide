@@ -247,21 +247,36 @@ export interface PlanResult {
 export type AggregateFunction =
 	| 'count'             // COUNT(*)
 	| 'count_non_null'    // COUNT(<col>)
+	| 'count_where'       // SUM(CASE WHEN <args.predicate> THEN 1 ELSE 0 END)
 	| 'distinct_count'    // COUNT(DISTINCT <col>)
+	| 'composite_distinct_count'  // COUNT(DISTINCT (<args.columns>))
 	| 'sum'
 	| 'avg'
 	| 'stddev'            // sample stddev
 	| 'variance'          // sample variance
+	| 'skewness'          // sample skewness (DuckDB native; others throw)
+	| 'kurtosis'          // excess kurtosis (DuckDB native; others throw)
+	| 'mad'               // median absolute deviation (DuckDB native; subquery on Postgres/Oracle)
 	| 'min'
 	| 'max'
 	| 'percentile';       // requires args.p in [0, 1]
 
 export interface AggregateSpec {
-	/** Column to aggregate. Ignored by `count` (which is COUNT(*)) but
-	 *  still required so the result key is well-defined. */
+	/** Column to aggregate. Ignored by `count` (which is COUNT(*)) and
+	 *  `count_where` (predicate-only); still required so the result key
+	 *  is well-defined. */
 	readonly column: string;
 	readonly function: AggregateFunction;
-	readonly args?: { readonly p?: number };
+	readonly args?: {
+		/** Percentile fraction in [0, 1] for `function: 'percentile'`. */
+		readonly p?: number;
+		/** Predicate clauses for `function: 'count_where'`. Same shape
+		 *  as the request-level WHERE; column refs validated against
+		 *  the table's known columns. */
+		readonly predicate?: readonly WhereClause[];
+		/** Column list for `function: 'composite_distinct_count'`. */
+		readonly columns?: readonly string[];
+	};
 }
 
 export interface AggregateRequest {
@@ -279,13 +294,14 @@ export interface AggregateRequest {
 export interface AggregateResult {
 	readonly target: string;
 	/**
-	 * Flat numeric record keyed `<column>__<function>` (or
+	 * Flat record keyed `<column>__<function>` (or
 	 * `<column>__percentile_<p>` for percentile to disambiguate
 	 * multiple percentile asks on the same column). Values are `null`
 	 * when the underlying engine returned NULL (e.g. AVG over an
-	 * empty table).
+	 * empty table). For temporal `min` / `max` the result may be a
+	 * string (ISO-formatted date / datetime) rather than a number.
 	 */
-	readonly values: Readonly<Record<string, number | null>>;
+	readonly values: Readonly<Record<string, number | string | null>>;
 }
 
 /**

@@ -405,22 +405,26 @@ class DuckDBFileDriver implements FileDriver {
 	async aggregate(target: string | undefined, request: AggregateRequest): Promise<AggregateResult> {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
-		const { exprs, keys } = compileAggregateExprs(request, cols, POSTGRES_DIALECT);
+		// Reader-path placeholder is `$1`; aggregate-introduced values
+		// (count_where predicates) start at $2; WHERE values follow.
+		// Using `$N` everywhere instead of mixing `?` + `$N` keeps DuckDB's
+		// parameter resolution unambiguous when the SELECT list contains
+		// `$N` references (count_where) before the FROM clause.
+		const aggExprs = compileAggregateExprs(request, cols, POSTGRES_DIALECT, 2);
 		const readPath = await this.readerPath(target);
-		const expr = this.readerExpr();
-		// WHERE compiled with the same helper sample() uses; reader-path
-		// `?` sits at parameter position 1, so WHERE values start at 2.
-		const where = compileWhere(request.where ?? [], cols, POSTGRES_DIALECT, 2);
+		const expr = this.readerExprWithPathParam('$1');
+		const whereStart = 2 + aggExprs.values.length;
+		const where = compileWhere(request.where ?? [], cols, POSTGRES_DIALECT, whereStart);
 		const whereClause = where.text === '' ? '' : ` ${where.text}`;
-		const sql = `SELECT ${exprs.join(', ')} FROM ${expr}${whereClause}`;
+		const sql = `SELECT ${aggExprs.exprs.join(', ')} FROM ${expr}${whereClause}`;
 		log.debug({ id: this.id, sql }, 'aggregate');
 
-		const params = [readPath, ...where.values];
+		const params = [readPath, ...aggExprs.values, ...where.values];
 		const row = await withConnection(async (conn) => {
 			const reader = await conn.runAndReadAll(sql, params as never[]);
 			return reader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
 		});
-		return { target: target ?? this.path, values: readAggregateRow(row, keys) };
+		return { target: target ?? this.path, values: readAggregateRow(row, aggExprs.keys) };
 	}
 
 	async distinct(target: string | undefined, request: DistinctRequest): Promise<DistinctResult> {
@@ -475,7 +479,7 @@ class DuckDBFileDriver implements FileDriver {
 
 	private async orchestratorDeps(target: string | undefined, cols: readonly string[]): Promise<OrchestratorDeps> {
 		const readPath = await this.readerPath(target);
-		const fromExpr = this.readerExpr();
+		const fromExpr = this.readerExprWithPathParam('$1');
 		return {
 			target: target ?? this.path,
 			knownColumns: cols,
@@ -510,6 +514,14 @@ class DuckDBFileDriver implements FileDriver {
 			: '';
 		const extra = this.hivePartitioning ? `, hive_partitioning=true` : '';
 		return readerExpression(this.kind, optsSql, extra);
+	}
+
+	/** Same as readerExpr but with the path placeholder substituted in
+	 *  place of the implicit `?` -- used when the SQL also references
+	 *  explicit `$N` placeholders so DuckDB's parameter numbering stays
+	 *  unambiguous. */
+	private readerExprWithPathParam(placeholder: string): string {
+		return this.readerExpr().replace('?', placeholder);
 	}
 
 	/**

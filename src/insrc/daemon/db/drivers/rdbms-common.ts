@@ -269,38 +269,98 @@ export function buildExplainSql(
  * caller is responsible for passing a value that has been validated
  * against the table's column list.
  */
+interface RenderedExpr {
+	readonly sql: string;
+	readonly values: readonly unknown[];
+}
+
 function renderAggExpr(
 	fn: AggregateFunction,
 	colSql: string,
 	dialect: Dialect,
-	args?: AggregateSpec['args'],
-): string {
+	args: AggregateSpec['args'] | undefined,
+	knownColumns: readonly string[],
+	paramStartIndex: number,
+): RenderedExpr {
 	switch (fn) {
 		case 'count':
-			return 'COUNT(*)';
+			return { sql: 'COUNT(*)', values: [] };
 		case 'count_non_null':
-			return `COUNT(${colSql})`;
+			return { sql: `COUNT(${colSql})`, values: [] };
 		case 'distinct_count':
-			return `COUNT(DISTINCT ${colSql})`;
+			return { sql: `COUNT(DISTINCT ${colSql})`, values: [] };
+		case 'composite_distinct_count': {
+			const cols = args?.columns;
+			if (!Array.isArray(cols) || cols.length < 2) {
+				throw new Error('data-driver: composite_distinct_count requires args.columns with >= 2 entries');
+			}
+			const known = new Set(knownColumns.map(c => c.toLowerCase()));
+			for (const c of cols) {
+				if (!known.has(c.toLowerCase())) {
+					throw new Error(`data-driver: unknown column '${c}' in composite_distinct_count`);
+				}
+			}
+			const quoted = cols.map(c => dialect.quoteIdent(c));
+			// Postgres / Oracle accept COUNT(DISTINCT (a, b)). MSSQL / SQLite /
+			// MySQL don't, so we fall back to a CONCAT-with-sentinel form.
+			if (dialect === POSTGRES_DIALECT || dialect === ORACLE_DIALECT) {
+				return { sql: `COUNT(DISTINCT (${quoted.join(', ')}))`, values: [] };
+			}
+			const concat = quoted
+				.map(q => `COALESCE(CAST(${q} AS VARCHAR), '__NULL__')`)
+				.join(" || '\\u0001' || ");
+			return { sql: `COUNT(DISTINCT ${concat})`, values: [] };
+		}
+		case 'count_where': {
+			const predicate = args?.predicate;
+			if (!Array.isArray(predicate) || predicate.length === 0) {
+				throw new Error('data-driver: count_where requires args.predicate (non-empty WhereClause[])');
+			}
+			const compiled = compileWhere(predicate, knownColumns, dialect, paramStartIndex);
+			// compileWhere emits "WHERE <fragments>"; strip the WHERE prefix
+			// for use inside CASE WHEN.
+			const fragmentsOnly = compiled.text.replace(/^WHERE\s+/, '');
+			return {
+				sql: `SUM(CASE WHEN ${fragmentsOnly} THEN 1 ELSE 0 END)`,
+				values: compiled.values,
+			};
+		}
 		case 'sum':
-			return `SUM(${colSql})`;
+			return { sql: `SUM(${colSql})`, values: [] };
 		case 'avg':
-			return `AVG(${colSql})`;
+			return { sql: `AVG(${colSql})`, values: [] };
 		case 'min':
-			return `MIN(${colSql})`;
+			return { sql: `MIN(${colSql})`, values: [] };
 		case 'max':
-			return `MAX(${colSql})`;
+			return { sql: `MAX(${colSql})`, values: [] };
 		case 'stddev':
 			// Sample stddev. Postgres / DuckDB / Oracle / Snowflake / Redshift
 			// all accept STDDEV_SAMP; MySQL has it too. SQLite has no
-			// stddev built-in -- the SQLite driver overrides this path
-			// (or throws). MSSQL uses `STDEV` not `STDDEV_SAMP` -- we
-			// branch on dialect.
-			if (dialect === MSSQL_DIALECT) return `STDEV(${colSql})`;
-			return `STDDEV_SAMP(${colSql})`;
+			// stddev built-in -- the engine surfaces "no such function"
+			// verbatim. MSSQL uses `STDEV`.
+			if (dialect === MSSQL_DIALECT) return { sql: `STDEV(${colSql})`, values: [] };
+			return { sql: `STDDEV_SAMP(${colSql})`, values: [] };
 		case 'variance':
-			if (dialect === MSSQL_DIALECT) return `VAR(${colSql})`;
-			return `VAR_SAMP(${colSql})`;
+			if (dialect === MSSQL_DIALECT) return { sql: `VAR(${colSql})`, values: [] };
+			return { sql: `VAR_SAMP(${colSql})`, values: [] };
+		case 'skewness':
+			// DuckDB has skewness() native (sample form). Postgres lacks
+			// it without an extension; SQLite / MySQL / MSSQL / Oracle
+			// likewise. The engine error surfaces as success: false.
+			return { sql: `SKEWNESS(${colSql})`, values: [] };
+		case 'kurtosis':
+			// DuckDB native (excess form). Same engine-error surfacing
+			// as skewness on dialects that lack it.
+			return { sql: `KURTOSIS(${colSql})`, values: [] };
+		case 'mad':
+			// Median absolute deviation. DuckDB has mad() native -- the
+			// idiomatic single-pass call. We emit MAD(col) on every
+			// dialect; engines without it surface "no such function".
+			// (Postgres / Oracle could express it via a percentile-of-
+			// abs-deviation subquery, but it requires re-shaping the
+			// SELECT to bind the inner median; deferred until a Postgres
+			// caller actually asks for MAD.)
+			return { sql: `MAD(${colSql})`, values: [] };
 		case 'percentile': {
 			const p = args?.p;
 			if (typeof p !== 'number' || p < 0 || p > 1) {
@@ -308,12 +368,7 @@ function renderAggExpr(
 					'data-driver: aggregate function "percentile" requires args.p in [0, 1]',
 				);
 			}
-			// PERCENTILE_CONT is the SQL standard; Postgres / Oracle /
-			// MSSQL / DuckDB accept the WITHIN GROUP form. MySQL 8+
-			// supports it; older MySQL / SQLite don't and the driver
-			// will need to throw. ClickHouse uses quantile(p)(col) --
-			// that's a per-driver override.
-			return `PERCENTILE_CONT(${p}) WITHIN GROUP (ORDER BY ${colSql})`;
+			return { sql: `PERCENTILE_CONT(${p}) WITHIN GROUP (ORDER BY ${colSql})`, values: [] };
 		}
 	}
 }
@@ -335,7 +390,31 @@ export function aggregateResultKey(spec: AggregateSpec): string {
 		const pStr = String(p).replace('.', '_');
 		return `${spec.column}__percentile_${pStr}`;
 	}
+	if (spec.function === 'count_where') {
+		// Distinguish multiple count_where calls on the same column by
+		// hashing the predicate. Caller can also override by setting
+		// distinct `column` values when reused.
+		const sig = countWhereSignature(spec.args?.predicate ?? []);
+		return `${spec.column}__count_where_${sig}`;
+	}
+	if (spec.function === 'composite_distinct_count') {
+		const cols = spec.args?.columns ?? [];
+		return `${spec.column}__composite_distinct_count_${cols.join('_')}`;
+	}
 	return `${spec.column}__${spec.function}`;
+}
+
+function countWhereSignature(predicate: readonly WhereClause[]): string {
+	// Stable, short, identifier-shaped signature for use as a result-key
+	// suffix. Falls back to a numeric index when the predicate is too
+	// weird to serialise.
+	const parts: string[] = [];
+	for (const c of predicate) {
+		const safeOp = c.op.replace(/[^a-z0-9]/gi, '');
+		const safeCol = c.column.replace(/[^A-Za-z0-9_]/g, '');
+		parts.push(`${safeCol}_${safeOp}`);
+	}
+	return parts.join('__') || 'p';
 }
 
 export interface CompiledAggregate {
@@ -354,6 +433,11 @@ export interface CompiledAggregateExprs {
 	 *  (e.g. `AVG("col") AS "col__avg"`). */
 	readonly exprs: readonly string[];
 	readonly keys: readonly string[];
+	/** Parameter values introduced by aggregations that carry their own
+	 *  predicates (currently only `count_where`). The driver must splice
+	 *  these into the parameter list BEFORE the request-level WHERE
+	 *  values, in declaration order. */
+	readonly values: readonly unknown[];
 }
 
 /**
@@ -371,6 +455,7 @@ export function compileAggregateExprs(
 	request: AggregateRequest,
 	knownColumns: readonly string[],
 	dialect: Dialect,
+	paramStartIndex = 1,
 ): CompiledAggregateExprs {
 	if (request.aggregations.length === 0) {
 		throw new Error('data-driver: aggregate request has zero aggregations');
@@ -380,18 +465,27 @@ export function compileAggregateExprs(
 	const seenKeys = new Set<string>();
 	const exprs: string[] = [];
 	const keys: string[] = [];
+	const values: unknown[] = [];
+	let paramIndex = paramStartIndex;
 
 	for (const spec of request.aggregations) {
-		// `count` is COUNT(*); the column name still flows through to
-		// the result-key for caller-side identification, so we don't
-		// validate against the table's columns.
-		if (spec.function !== 'count' && !columnSet.has(spec.column.toLowerCase())) {
+		// `count` and `count_where` are predicate-driven; `composite_distinct_count`
+		// validates inside renderAggExpr. Column-only aggregates validate here.
+		const skipColumnValidation =
+			spec.function === 'count' ||
+			spec.function === 'count_where' ||
+			spec.function === 'composite_distinct_count';
+		if (!skipColumnValidation && !columnSet.has(spec.column.toLowerCase())) {
 			throw new Error(
 				`data-driver: unknown column '${spec.column}' for aggregate '${spec.function}'`,
 			);
 		}
-		const colSql = spec.function === 'count' ? '*' : dialect.quoteIdent(spec.column);
-		const expr = renderAggExpr(spec.function, colSql, dialect, spec.args);
+		const colSql = spec.function === 'count' || spec.function === 'count_where'
+			? '*'
+			: dialect.quoteIdent(spec.column);
+		const rendered = renderAggExpr(spec.function, colSql, dialect, spec.args, knownColumns, paramIndex);
+		paramIndex += rendered.values.length;
+		values.push(...rendered.values);
 		const key = aggregateResultKey(spec);
 		if (seenKeys.has(key)) {
 			throw new Error(
@@ -401,11 +495,11 @@ export function compileAggregateExprs(
 		seenKeys.add(key);
 		// Quote the alias so result-keys with `__` survive case-folding
 		// dialects (Postgres lowercases unquoted identifiers).
-		exprs.push(`${expr} AS ${dialect.quoteIdent(key)}`);
+		exprs.push(`${rendered.sql} AS ${dialect.quoteIdent(key)}`);
 		keys.push(key);
 	}
 
-	return { exprs, keys };
+	return { exprs, keys, values };
 }
 
 /**
@@ -421,15 +515,22 @@ export function compileAggregate(
 	knownColumns: readonly string[],
 	dialect: Dialect,
 ): CompiledAggregate {
-	const { exprs, keys } = compileAggregateExprs(request, knownColumns, dialect);
+	const aggExprs = compileAggregateExprs(request, knownColumns, dialect, 1);
 	const quotedTarget = quoteTarget(target, dialect);
-	const where = compileWhere(request.where ?? [], knownColumns, dialect);
+	// WHERE values follow aggregate-introduced parameters (count_where
+	// predicates) so the placeholder indices line up.
+	const whereStart = 1 + aggExprs.values.length;
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, whereStart);
 	const whereClause = where.text === '' ? '' : ` ${where.text}`;
-	const text = `SELECT ${exprs.join(', ')} FROM ${quotedTarget}${whereClause}`;
+	const text = `SELECT ${aggExprs.exprs.join(', ')} FROM ${quotedTarget}${whereClause}`;
 	if (looksLikeMutation(text)) {
 		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
 	}
-	return { text, values: where.values, keys };
+	return {
+		text,
+		values: [...aggExprs.values, ...where.values],
+		keys: aggExprs.keys,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -524,10 +625,12 @@ export function readDistinctCount(
 
 /**
  * Pull aggregate values out of the engine's first row and coerce to
- * `number | null`. Most clients return numerics as JS `number` or
- * `bigint`; some return strings (Postgres `numeric` ships as string
- * to preserve precision). We coerce: bigint -> Number,
- * string -> Number (NaN becomes null), other -> null.
+ * `number | string | null`. Most clients return numerics as JS
+ * `number` or `bigint`; some return strings (Postgres `numeric`,
+ * temporal types). We coerce: bigint -> Number; numeric strings
+ * (parseable as finite Number) -> Number; non-numeric strings (ISO
+ * date / datetime) preserved as string for temporal min / max;
+ * Date objects -> ISO string; other -> null.
  *
  * The driver passes the `keys` from `compileAggregate` so the order
  * matches; we use bracket-access on the row rather than positional
@@ -536,8 +639,8 @@ export function readDistinctCount(
 export function readAggregateRow(
 	row: Readonly<Record<string, unknown>> | undefined,
 	keys: readonly string[],
-): Record<string, number | null> {
-	const out: Record<string, number | null> = {};
+): Record<string, number | string | null> {
+	const out: Record<string, number | string | null> = {};
 	for (const k of keys) {
 		const raw = row?.[k];
 		if (raw === null || raw === undefined) {
@@ -548,6 +651,24 @@ export function readAggregateRow(
 			out[k] = Number(raw);
 		} else if (typeof raw === 'string') {
 			const n = Number(raw);
+			if (Number.isFinite(n) && raw.trim() !== '') {
+				out[k] = n;
+			} else if (looksLikeIsoTemporal(raw)) {
+				// ISO-format date / datetime survives as string for
+				// temporal min / max aggregates.
+				out[k] = raw;
+			} else {
+				out[k] = null;
+			}
+		} else if (raw instanceof Date) {
+			out[k] = raw.toISOString();
+		} else if (typeof raw === 'object') {
+			// DuckDB ships HUGEINT / DECIMAL / numeric-aggregate results as
+			// objects with a `valueOf()` (e.g. DuckDBDecimalValue). Try
+			// coercing via String + Number so they degrade gracefully into
+			// the numeric path; otherwise null.
+			const asString = String(raw);
+			const n = Number(asString);
 			out[k] = Number.isFinite(n) ? n : null;
 		} else {
 			out[k] = null;
@@ -1022,6 +1143,27 @@ export function readOutlierExampleRows(
 // histogram() / correlationMatrix() / outliers() impl one line of glue.
 // ---------------------------------------------------------------------------
 
+/**
+ * Coerce an aggregate value (which may be number / string / null after
+ * the type-aware widening for temporal min / max) to `number | null`.
+ * Use this from any callsite that needs the value as a JS number --
+ * histogram bounds, outlier bounds, etc. Strings that don't parse as
+ * finite numbers come back as null.
+ */
+const ISO_TEMPORAL_RE =
+	/^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+
+function looksLikeIsoTemporal(s: string): boolean {
+	return ISO_TEMPORAL_RE.test(s);
+}
+
+export function asNumericValue(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
+}
+
 function buildOrchestratorOptions(deps: OrchestratorDeps): { asTableExpr?: string; paramStartIndex?: number } {
 	const out: { asTableExpr?: string; paramStartIndex?: number } = {};
 	if (deps.asTableExpr !== undefined) out.asTableExpr = deps.asTableExpr;
@@ -1047,10 +1189,10 @@ export async function executeHistogram(
 	const mode: HistogramMode = request.mode ?? 'equal-width';
 
 	const boundsResult = await deps.aggregate(histogramBoundsRequest(request));
-	const lower = boundsResult.values[`${request.column}__min`] ?? null;
-	const upper = boundsResult.values[`${request.column}__max`] ?? null;
-	const nonNullCount = boundsResult.values[`${request.column}__count_non_null`] ?? 0;
-	const totalCount = boundsResult.values['*__count'] ?? nonNullCount;
+	const lower = asNumericValue(boundsResult.values[`${request.column}__min`]);
+	const upper = asNumericValue(boundsResult.values[`${request.column}__max`]);
+	const nonNullCount = asNumericValue(boundsResult.values[`${request.column}__count_non_null`]) ?? 0;
+	const totalCount = asNumericValue(boundsResult.values['*__count']) ?? nonNullCount;
 	const nullCount = Math.max(0, totalCount - nonNullCount);
 
 	if (lower === null || upper === null || nonNullCount === 0) {
@@ -1104,16 +1246,16 @@ export async function executeOutliers(
 	const threshold = outlierThreshold(request);
 	const boundsResult = await deps.aggregate(outlierBoundsRequest(request));
 	const v = boundsResult.values;
-	const nonNullCount = v[`${request.column}__count_non_null`] ?? 0;
+	const nonNullCount = asNumericValue(v[`${request.column}__count_non_null`]) ?? 0;
 
 	let center: number | null;
 	let spread: number | null;
 	let lower: number | null;
 	let upper: number | null;
 	if (request.method === 'iqr') {
-		const q1 = v[`${request.column}__percentile_0_25`] ?? null;
-		const q2 = v[`${request.column}__percentile_0_5`] ?? null;
-		const q3 = v[`${request.column}__percentile_0_75`] ?? null;
+		const q1 = asNumericValue(v[`${request.column}__percentile_0_25`]);
+		const q2 = asNumericValue(v[`${request.column}__percentile_0_5`]);
+		const q3 = asNumericValue(v[`${request.column}__percentile_0_75`]);
 		center = q2;
 		spread = q1 !== null && q3 !== null ? q3 - q1 : null;
 		if (q1 !== null && q3 !== null && spread !== null) {
@@ -1121,8 +1263,8 @@ export async function executeOutliers(
 			upper = q3 + threshold * spread;
 		} else { lower = null; upper = null; }
 	} else {
-		const mean = v[`${request.column}__avg`] ?? null;
-		const sd = v[`${request.column}__stddev`] ?? null;
+		const mean = asNumericValue(v[`${request.column}__avg`]);
+		const sd = asNumericValue(v[`${request.column}__stddev`]);
 		center = mean;
 		spread = sd;
 		if (mean !== null && sd !== null && sd > 0) {

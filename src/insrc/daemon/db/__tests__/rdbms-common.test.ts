@@ -331,6 +331,99 @@ describe('compileAggregateExprs', () => {
 			/args\.p in \[0, 1\]/,
 		);
 	});
+
+	// Phase 0.1.x extensions ------------------------------------------------
+
+	it('renders skewness / kurtosis / mad as native function calls', () => {
+		const out = compileAggregateExprs(
+			{ aggregations: [
+				{ column: 'price', function: 'skewness' },
+				{ column: 'price', function: 'kurtosis' },
+				{ column: 'price', function: 'mad' },
+			] },
+			['price'],
+			POSTGRES_DIALECT,
+		);
+		assert.match(out.exprs[0]!, /^SKEWNESS\("price"\) AS "price__skewness"$/);
+		assert.match(out.exprs[1]!, /^KURTOSIS\("price"\) AS "price__kurtosis"$/);
+		assert.match(out.exprs[2]!, /^MAD\("price"\) AS "price__mad"$/);
+	});
+
+	it('count_where compiles SUM(CASE) with predicate parameters', () => {
+		const out = compileAggregateExprs(
+			{ aggregations: [{
+				column: '*',
+				function: 'count_where',
+				args: { predicate: [{ column: 'status', op: '=', value: 'shipped' }] },
+			}] },
+			['status'],
+			POSTGRES_DIALECT,
+		);
+		assert.match(out.exprs[0]!, /^SUM\(CASE WHEN "status" = \$1 THEN 1 ELSE 0 END\) AS "[*]__count_where_status_/);
+		assert.deepEqual([...out.values], ['shipped']);
+	});
+
+	it('count_where threads param indices via paramStartIndex', () => {
+		const out = compileAggregateExprs(
+			{ aggregations: [{
+				column: '*',
+				function: 'count_where',
+				args: { predicate: [{ column: 'status', op: '=', value: 'shipped' }] },
+			}] },
+			['status'],
+			POSTGRES_DIALECT,
+			5,
+		);
+		assert.match(out.exprs[0]!, /\$5/);
+	});
+
+	it('count_where rejects an empty predicate', () => {
+		assert.throws(
+			() => compileAggregateExprs(
+				{ aggregations: [{ column: '*', function: 'count_where', args: { predicate: [] } }] },
+				['status'],
+				POSTGRES_DIALECT,
+			),
+			/non-empty WhereClause/,
+		);
+	});
+
+	it('composite_distinct_count uses native (a, b) on Postgres', () => {
+		const out = compileAggregateExprs(
+			{ aggregations: [{ column: '*', function: 'composite_distinct_count', args: { columns: ['a', 'b'] } }] },
+			['a', 'b'],
+			POSTGRES_DIALECT,
+		);
+		assert.match(out.exprs[0]!, /^COUNT\(DISTINCT \("a", "b"\)\)/);
+	});
+
+	it('composite_distinct_count concats with sentinel on MySQL / SQLite / MSSQL', () => {
+		for (const d of [MYSQL_DIALECT, SQLITE_DIALECT, MSSQL_DIALECT]) {
+			const out = compileAggregateExprs(
+				{ aggregations: [{ column: '*', function: 'composite_distinct_count', args: { columns: ['a', 'b'] } }] },
+				['a', 'b'],
+				d,
+			);
+			assert.match(out.exprs[0]!, /CAST\(.*?\) \|\|.*?CAST\(.*?\)/);
+		}
+	});
+
+	it('composite_distinct_count rejects unknown columns + < 2 columns', () => {
+		assert.throws(
+			() => compileAggregateExprs(
+				{ aggregations: [{ column: '*', function: 'composite_distinct_count', args: { columns: ['a'] } }] },
+				['a', 'b'], POSTGRES_DIALECT,
+			),
+			/>= 2 entries/,
+		);
+		assert.throws(
+			() => compileAggregateExprs(
+				{ aggregations: [{ column: '*', function: 'composite_distinct_count', args: { columns: ['a', 'no_such'] } }] },
+				['a', 'b'], POSTGRES_DIALECT,
+			),
+			/unknown column 'no_such'/,
+		);
+	});
 });
 
 describe('compileAggregate', () => {
@@ -432,6 +525,20 @@ describe('readAggregateRow', () => {
 		assert.equal(out['a__avg'], null);
 		assert.equal(out['b__sum'], null);
 		assert.equal(out['c__max'], null);
+	});
+
+	it('preserves ISO date / datetime strings (temporal min/max)', () => {
+		const out = readAggregateRow(
+			{
+				created_at__min: '2026-05-04',
+				created_at__max: '2026-05-04T12:34:56Z',
+				updated_at__max: new Date('2026-05-04T12:34:56Z'),
+			},
+			['created_at__min', 'created_at__max', 'updated_at__max'],
+		);
+		assert.equal(out['created_at__min'], '2026-05-04');
+		assert.equal(out['created_at__max'], '2026-05-04T12:34:56Z');
+		assert.equal(out['updated_at__max'], '2026-05-04T12:34:56.000Z');
 	});
 });
 
