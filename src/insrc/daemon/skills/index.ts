@@ -34,7 +34,9 @@ import { registerDataProfileCategoricalRdbmsSkill } from './built-ins/data.profi
 import { registerDataProfileBooleanRdbmsSkill } from './built-ins/data.profile.boolean.rdbms.js';
 import { registerDataProfileBooleanFileSkill } from './built-ins/data.profile.boolean.file.js';
 import { registerDataQualityCompletenessRdbmsSkill } from './built-ins/data.quality.completeness.rdbms.js';
+import { registerDataQualityCompletenessFileSkill } from './built-ins/data.quality.completeness.file.js';
 import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.quality.uniqueness.rdbms.js';
+import { registerDataQualityUniquenessFileSkill } from './built-ins/data.quality.uniqueness.file.js';
 import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.detect-patterns.rdbms.js';
 import { registerDataProfileTemporalRdbmsSkill } from './built-ins/data.profile.temporal.rdbms.js';
 import { registerDataProfileTextRdbmsSkill } from './built-ins/data.profile.text.rdbms.js';
@@ -45,8 +47,10 @@ import { registerDataSynthSampleTableSkill } from './built-ins/data.synth.sample
 import { registerDataSynthProfileCardSkill } from './built-ins/data.synth.profile-card.js';
 import { registerDataSynthLineageFoldSkill } from './built-ins/data.synth.lineage-fold.js';
 import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality.scorecard.rdbms.js';
+import { registerDataQualityScorecardFileSkill } from './built-ins/data.quality.scorecard.file.js';
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
+import { registerDataQualityValidityFileSkill } from './built-ins/data.quality.validity.file.js';
 import { registerDataDistributionOutliersIqrRdbmsSkill } from './built-ins/data.distribution.outliers-iqr.rdbms.js';
 import { registerDataDistributionOutliersIqrFileSkill } from './built-ins/data.distribution.outliers-iqr.file.js';
 import { registerDataDistributionOutliersZScoreFileSkill } from './built-ins/data.distribution.outliers-zscore.file.js';
@@ -65,7 +69,9 @@ import { registerDataDistributionHeavyTailCheckRdbmsSkill } from './built-ins/da
 import { registerDataSensitivityPolicyCheckRdbmsSkill } from './built-ins/data.sensitivity.policy-check.rdbms.js';
 import { registerDataDistributionModesRdbmsSkill } from './built-ins/data.distribution.modes.rdbms.js';
 import { registerDataQualityConformityRdbmsSkill } from './built-ins/data.quality.conformity.rdbms.js';
+import { registerDataQualityConformityFileSkill } from './built-ins/data.quality.conformity.file.js';
 import { registerDataQualityConsistencyRdbmsSkill } from './built-ins/data.quality.consistency.rdbms.js';
+import { registerDataQualityConsistencyFileSkill } from './built-ins/data.quality.consistency.file.js';
 import { registerDataDriftDistributionRdbmsSkill } from './built-ins/data.drift.distribution.rdbms.js';
 import { registerDataDriftVolumeRdbmsSkill } from './built-ins/data.drift.volume.rdbms.js';
 import { registerDataTimeseriesTrendRdbmsSkill } from './built-ins/data.timeseries.trend.rdbms.js';
@@ -113,10 +119,15 @@ export function registerAllSkills(): void {
   // the scorecard composite ships once validity / conformity /
   // consistency are also in.
   registerDataQualityCompletenessRdbmsSkill();
+  registerDataQualityCompletenessFileSkill();
   registerDataQualityUniquenessRdbmsSkill();
+  registerDataQualityUniquenessFileSkill();
   registerDataQualityValidityRdbmsSkill();
+  registerDataQualityValidityFileSkill();
   registerDataQualityConformityRdbmsSkill();
+  registerDataQualityConformityFileSkill();
   registerDataQualityConsistencyRdbmsSkill();
+  registerDataQualityConsistencyFileSkill();
   // Phase 5b (Family-5 distribution shape) -- outlier detection
   // variants. All hybrid: bounds from server-side aggregate,
   // examples + estimated counts from a 50-row sample.
@@ -172,6 +183,7 @@ export function registerAllSkills(): void {
   // 5d.6 quality.scorecard composite -- must register AFTER its
   // skillDeps (completeness + uniqueness atomics).
   registerDataQualityScorecardRdbmsSkill();
+  registerDataQualityScorecardFileSkill();
   // 6.8 synth.scorecard renders the scorecard composite's output.
   registerDataSynthScorecardSkill();
   // 5e.3 sensitivity.policy-check composes pii.column-classifier

@@ -1,0 +1,31 @@
+{
+  "input": {
+    "connectionId": "csv-events",
+    "rules": [
+      { "name": "start_before_end",      "leftColumn": "start_at", "op": "<",            "rightColumn": "end_at" },
+      { "name": "discount_le_total",     "leftColumn": "discount", "op": "<=",           "rightColumn": "total" },
+      { "name": "either_email_or_phone", "leftColumn": "email",    "op": "and-not-null", "rightColumn": "phone" }
+    ]
+  },
+  "fakeTools": {
+    "db_file_sample": {
+      "content": "**/data/events.csv** -- 6 rows",
+      "isError": false,
+      "data": {
+        "target": "/data/events.csv",
+        "columns": ["start_at", "end_at", "discount", "total", "email", "phone"],
+        "rows": [
+          { "start_at": "2026-05-01T10:00:00Z", "end_at": "2026-05-01T11:00:00Z", "discount": 5,  "total": 50, "email": "a@x", "phone": "1234" },
+          { "start_at": "2026-05-02T09:00:00Z", "end_at": "2026-05-02T10:00:00Z", "discount": 0,  "total": 30, "email": "b@x", "phone": "5678" },
+          { "start_at": "2026-05-03T08:00:00Z", "end_at": "2026-05-03T09:00:00Z", "discount": 10, "total": 80, "email": "c@x", "phone": "9012" },
+          { "start_at": "2026-05-04T15:00:00Z", "end_at": "2026-05-04T16:00:00Z", "discount": 2,  "total": 20, "email": "d@x", "phone": "3456" },
+          { "start_at": "2026-05-05T12:00:00Z", "end_at": "2026-05-05T13:00:00Z", "discount": 0,  "total": 25, "email": "e@x", "phone": "7890" },
+          { "start_at": "2026-05-06T14:00:00Z", "end_at": "2026-05-06T15:00:00Z", "discount": 8,  "total": 60, "email": "f@x", "phone": "2345" }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

@@ -1,17 +1,10 @@
 /**
- * data.quality.scorecard.rdbms -- Phase 5d.6 of
- * plans/analyzers/data-analyzer-skills.md.
+ * data.quality.scorecard.file -- Phase 5d.6 (file-side variant).
  *
- * Composite skill: rolls up the 5d atomic dimensions
- * (`quality.completeness.rdbms` + `quality.uniqueness.rdbms` + the
- * opt-in `quality.validity.rdbms` / `quality.conformity.rdbms` /
- * `quality.consistency.rdbms`) into a single typed scorecard.
- * Per-column composite quality + table overall + a top-issues digest;
- * cross-column consistency reported alongside as its own block.
- *
- * Math is shared with `.file` via `data.quality.scorecard.algo`; this
- * variant only carries transport (RDBMS family + which sub-skill IDs
- * to call).
+ * Same composite contract as the RDBMS variant -- delegates to
+ * the file-side atomics (`completeness.file`, `uniqueness.file`,
+ * `validity.file`, `conformity.file`, `consistency.file`). Math
+ * is shared via `data.quality.scorecard.algo`.
  */
 
 import { registerSkill } from '../registry.js';
@@ -40,32 +33,31 @@ import {
 	pickWeights,
 } from './data.quality.scorecard.algo.js';
 
-interface QualityScorecardInput {
+interface QualityScorecardFileInput {
 	readonly connectionId: string;
-	readonly target: string;
+	readonly target?: string;
 	readonly columns?: readonly string[];
 	readonly validityPatterns?: Readonly<Record<string, string>>;
 	readonly conformityRules?: Readonly<Record<string, string>>;
 	readonly consistencyRules?: readonly ConsistencyRuleIn[];
 }
 
-const RDBMS_FAMILY_TAGS = [
-	'rdbms', 'postgres', 'cockroachdb',
-	'mysql', 'mariadb', 'sqlite',
-	'mssql', 'oracle', 'clickhouse',
+const FILE_FAMILY_TAGS = [
+	'file',
+	'csv', 'tsv', 'jsonl', 'ndjson', 'json',
+	'parquet', 'arrow', 'feather',
+	'avro', 'bson', 'fixed-width', 'xlsx',
 ] as const;
 
-const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
-	id: 'data.quality.scorecard.rdbms',
-	name: 'Quality: scorecard (RDBMS)',
+const skill: Skill<QualityScorecardFileInput, QualityScorecardOutput> = {
+	id: 'data.quality.scorecard.file',
+	name: 'Quality: scorecard (file)',
 	description:
-		'Composite skill: rolls up the 5d quality atomics into a per-column / table-level scorecard. ' +
-		'Always includes completeness + uniqueness; validity / conformity fold in per-column when the ' +
-		'caller supplies `validityPatterns` / `conformityRules`; consistency reports as a separate block ' +
-		'when `consistencyRules` is supplied. Weights pick a profile based on which dimensions are on; ' +
-		'missing per-column dimensions are excluded and remaining weights renormalize so a column without ' +
-		'a validity pattern isn\'t penalized for the absent dimension. Surfaces top issues (composite < 0.7) ' +
-		'+ primary-key candidates.',
+		'Composite scorecard for a file connection: rolls up the 5d quality atomics into a per-column / ' +
+		'table-level scorecard. Same shape and weight rules as the RDBMS variant. Always includes ' +
+		'completeness + uniqueness; validity / conformity fold in per-column when the caller supplies ' +
+		'`validityPatterns` / `conformityRules`; consistency reports as a separate block when ' +
+		'`consistencyRules` is supplied.',
 	family: 'quality-profile',
 	owner: 'data-analyzer',
 	version: 1,
@@ -73,56 +65,59 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 		type: 'object',
 		properties: {
 			connectionId:     { type: 'string' },
-			target:           { type: 'string' },
+			target:           { type: 'string', description: 'Optional. xlsx: sheet name.' },
 			columns:          { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 15 },
 			validityPatterns: {
 				type: 'object',
 				additionalProperties: { type: 'string', minLength: 1 },
-				description: 'Map of column name -> JS regex pattern. When supplied, validity.rdbms runs on those columns and folds into the composite.',
+				description: 'Map of column name -> JS regex pattern. When supplied, validity.file runs on those columns and folds into the composite.',
 			},
 			conformityRules: {
 				type: 'object',
 				additionalProperties: { type: 'string', minLength: 1 },
-				description: 'Map of column name -> format slug (e.g. iso-date, e164-phone, iso-country-2). When supplied, conformity.rdbms runs on those columns and folds into the composite.',
+				description: 'Map of column name -> format slug. When supplied, conformity.file runs on those columns and folds into the composite.',
 			},
 			consistencyRules: {
 				type: 'array',
 				items: CONSISTENCY_RULE_INPUT_SCHEMA,
-				description: 'Cross-column consistency rules. When supplied, consistency.rdbms runs once with the rule list and reports per-rule satisfaction in the top-level `consistency` block. Cross-column by nature -- does not enter the per-column composite.',
+				description: 'Cross-column consistency rules. When supplied, consistency.file runs once with the rule list and reports per-rule satisfaction in the top-level `consistency` block.',
 			},
 		},
-		required: ['connectionId', 'target'],
+		required: ['connectionId'],
 		additionalProperties: false,
 	},
 	outputs: SCORECARD_OUTPUT_SCHEMA,
 	toolDeps: [],
 	skillDeps: [
-		'data.quality.completeness.rdbms',
-		'data.quality.uniqueness.rdbms',
-		'data.quality.validity.rdbms',
-		'data.quality.conformity.rdbms',
-		'data.quality.consistency.rdbms',
+		'data.quality.completeness.file',
+		'data.quality.uniqueness.file',
+		'data.quality.validity.file',
+		'data.quality.conformity.file',
+		'data.quality.consistency.file',
 	],
 	providerAffinity: 'auto',
 	preconditions: [
-		{ kind: 'connection-family', families: RDBMS_FAMILY_TAGS, reason: 'RDBMS-only -- inherits from sub-skills' },
+		{ kind: 'connection-family', families: FILE_FAMILY_TAGS, reason: 'file-only -- inherits from sub-skills' },
 	],
 
 	async execute(input, deps): Promise<SkillResult<QualityScorecardOutput>> {
-		const subInput: Record<string, unknown> = {
-			connectionId: input.connectionId,
-			target:       input.target,
+		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
+		const buildSubInput = (extra: Record<string, unknown> = {}): Record<string, unknown> => {
+			const base: Record<string, unknown> = { connectionId: input.connectionId, ...extra };
+			if (sheet !== undefined) base['target'] = sheet;
+			return base;
 		};
-		if (input.columns !== undefined) subInput['columns'] = input.columns;
+
+		const baseInput = buildSubInput(input.columns !== undefined ? { columns: input.columns } : {});
 
 		const [compSub, uniqSub] = await Promise.all([
-			deps.runSkill<unknown, unknown>('data.quality.completeness.rdbms', subInput),
-			deps.runSkill<unknown, unknown>('data.quality.uniqueness.rdbms', subInput),
+			deps.runSkill<unknown, unknown>('data.quality.completeness.file', baseInput),
+			deps.runSkill<unknown, unknown>('data.quality.uniqueness.file', baseInput),
 		]);
 
 		if (!isCompletenessOutput(compSub.value) || !isUniquenessOutput(uniqSub.value)) {
 			return {
-				value: emptyScorecard(input.target),
+				value: emptyScorecard(input.target ?? ''),
 				confidence: 'low',
 				notes: ['scorecard: sub-skill returned a shape we could not parse'],
 				toolCalls: [],
@@ -147,13 +142,8 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 		if (includeValidity) {
 			const validitySubs = await Promise.all(
 				patternedCols.map(c => deps.runSkill<unknown, unknown>(
-					'data.quality.validity.rdbms',
-					{
-						connectionId: input.connectionId,
-						target:       input.target,
-						column:       c,
-						pattern:      patterns[c]!,
-					},
+					'data.quality.validity.file',
+					buildSubInput({ column: c, pattern: patterns[c]! }),
 				)),
 			);
 			for (let i = 0; i < patternedCols.length; i++) {
@@ -177,12 +167,8 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 		if (includeConformity) {
 			const conformitySubs = await Promise.all(
 				formattedCols.map(c => deps.runSkill<unknown, unknown>(
-					'data.quality.conformity.rdbms',
-					{
-						connectionId: input.connectionId,
-						target:       input.target,
-						column:       c,
-					},
+					'data.quality.conformity.file',
+					buildSubInput({ column: c }),
 				)),
 			);
 			for (let i = 0; i < formattedCols.length; i++) {
@@ -242,12 +228,8 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 		let consistency: ConsistencyBlock = EMPTY_CONSISTENCY_BLOCK;
 		if (consistencyRules.length > 0) {
 			const sub = await deps.runSkill<unknown, unknown>(
-				'data.quality.consistency.rdbms',
-				{
-					connectionId: input.connectionId,
-					target:       input.target,
-					rules:        consistencyRules,
-				},
+				'data.quality.consistency.file',
+				buildSubInput({ rules: consistencyRules }),
 			);
 			if (isConsistencyOutput(sub.value)) {
 				consistency = buildConsistencyBlockFromOutput(sub.value);
@@ -276,6 +258,6 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 	},
 };
 
-export function registerDataQualityScorecardRdbmsSkill(): void {
+export function registerDataQualityScorecardFileSkill(): void {
 	registerSkill(skill as unknown as Skill);
 }

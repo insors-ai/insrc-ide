@@ -1,0 +1,30 @@
+{
+  "input": {
+    "connectionId": "csv-orders",
+    "column": "created_at",
+    "sampleSize": 8
+  },
+  "fakeTools": {
+    "db_file_sample": {
+      "content": "**/data/orders.csv** -- 8 rows",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "columns": ["created_at"],
+        "rows": [
+          { "created_at": "2026-05-01" },
+          { "created_at": "2026-05-02" },
+          { "created_at": "2026-05-03" },
+          { "created_at": "2026-04-30" },
+          { "created_at": "2026-04-29" },
+          { "created_at": "2026-04-28" },
+          { "created_at": "2026-04-27" },
+          { "created_at": "2026-04-26" }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
