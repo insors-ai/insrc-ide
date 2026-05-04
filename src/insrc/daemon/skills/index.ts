@@ -26,8 +26,13 @@ import { registerDataSourceKvScanKeysSkill } from './built-ins/data.source.kv.sc
 import { registerDataSourceKvGetValueSkill } from './built-ins/data.source.kv.get-value.js';
 import { registerDataSourceKvSampleShapeSkill } from './built-ins/data.source.kv.sample-shape.js';
 import { registerDataProfileNumericRdbmsSkill } from './built-ins/data.profile.numeric.rdbms.js';
+import { registerDataProfileNumericFileSkill } from './built-ins/data.profile.numeric.file.js';
+import { registerDataProfileCategoricalFileSkill } from './built-ins/data.profile.categorical.file.js';
+import { registerDataProfileTemporalFileSkill } from './built-ins/data.profile.temporal.file.js';
+import { registerDataProfileTextFileSkill } from './built-ins/data.profile.text.file.js';
 import { registerDataProfileCategoricalRdbmsSkill } from './built-ins/data.profile.categorical.rdbms.js';
 import { registerDataProfileBooleanRdbmsSkill } from './built-ins/data.profile.boolean.rdbms.js';
+import { registerDataProfileBooleanFileSkill } from './built-ins/data.profile.boolean.file.js';
 import { registerDataQualityCompletenessRdbmsSkill } from './built-ins/data.quality.completeness.rdbms.js';
 import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.quality.uniqueness.rdbms.js';
 import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.detect-patterns.rdbms.js';
@@ -86,10 +91,15 @@ export function registerAllSkills(): void {
   // Phase 5a (Family-5 univariate profilers). Atomics first, then
   // the auto composite that dispatches by declared SQL type.
   registerDataProfileNumericRdbmsSkill();
+  registerDataProfileNumericFileSkill();
   registerDataProfileCategoricalRdbmsSkill();
+  registerDataProfileCategoricalFileSkill();
   registerDataProfileBooleanRdbmsSkill();
+  registerDataProfileBooleanFileSkill();
   registerDataProfileTemporalRdbmsSkill();
+  registerDataProfileTemporalFileSkill();
   registerDataProfileTextRdbmsSkill();
+  registerDataProfileTextFileSkill();
   // Phase 5d (quality scorecard) -- atomic dimensions land first;
   // the scorecard composite ships once validity / conformity /
   // consistency are also in.

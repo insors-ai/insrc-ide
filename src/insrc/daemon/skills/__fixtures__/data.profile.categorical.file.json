@@ -1,0 +1,36 @@
+{
+  "input": {
+    "connectionId": "csv-orders",
+    "column": "status",
+    "topN": 5
+  },
+  "fakeTools": {
+    "db_file_aggregate": {
+      "content": "**orders.csv** -- 2 aggregates",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "values": {
+          "status__count":           1000,
+          "status__count_non_null":   980
+        }
+      }
+    },
+    "db_file_distinct": {
+      "content": "**orders.csv** -- column `status`",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "column": "status",
+        "distinctCount": 4,
+        "topValues": [
+          { "value": "fulfilled", "count": 720 },
+          { "value": "pending",   "count": 200 },
+          { "value": "cancelled", "count":  50 },
+          { "value": "refunded",  "count":  10 }
+        ]
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

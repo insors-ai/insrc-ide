@@ -1,0 +1,28 @@
+{
+  "input": {
+    "connectionId": "csv-orders",
+    "column": "amount"
+  },
+  "fakeTools": {
+    "db_file_aggregate": {
+      "content": "**orders.csv** -- 10 aggregates",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "values": {
+          "amount__count":           1000,
+          "amount__count_non_null":   985,
+          "amount__distinct_count":   872,
+          "amount__min":              0.01,
+          "amount__max":              9999.99,
+          "amount__avg":              42.17,
+          "amount__stddev":           18.04,
+          "amount__variance":        325.4,
+          "amount__percentile_0_5":   38.5,
+          "amount__percentile_0_95": 102.3
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

@@ -1,0 +1,21 @@
+{
+  "input": {
+    "connectionId": "csv-orders",
+    "column": "created_at"
+  },
+  "fakeTools": {
+    "db_file_aggregate": {
+      "content": "**orders.csv** -- 3 aggregates",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "values": {
+          "created_at__count":           1000,
+          "created_at__count_non_null":  1000,
+          "created_at__distinct_count":   952
+        }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

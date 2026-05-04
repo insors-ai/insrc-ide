@@ -1,0 +1,23 @@
+{
+  "input": {
+    "connectionId": "csv-orders",
+    "column": "is_paid"
+  },
+  "fakeTools": {
+    "db_file_distinct": {
+      "content": "**orders.csv** -- column `is_paid`",
+      "isError": false,
+      "data": {
+        "target": "/data/orders.csv",
+        "column": "is_paid",
+        "distinctCount": 3,
+        "topValues": [
+          { "value": true,  "count": 720 },
+          { "value": false, "count": 250 },
+          { "value": null,  "count":  30 }
+        ]
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

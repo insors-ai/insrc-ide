@@ -1,0 +1,39 @@
+{
+  "input": {
+    "connectionId": "csv-users",
+    "column": "name",
+    "sampleSize": 5
+  },
+  "fakeTools": {
+    "db_file_aggregate": {
+      "content": "**users.csv** -- 3 aggregates",
+      "isError": false,
+      "data": {
+        "target": "/data/users.csv",
+        "values": {
+          "name__count":           1000,
+          "name__count_non_null":   980,
+          "name__distinct_count":   972
+        }
+      }
+    },
+    "db_file_sample": {
+      "content": "**users.csv** -- 5 rows",
+      "isError": false,
+      "data": {
+        "target": "/data/users.csv",
+        "columns": ["id", "name"],
+        "rows": [
+          { "id": 1, "name": "Alice" },
+          { "id": 2, "name": "Bob" },
+          { "id": 3, "name": "Charlie" },
+          { "id": 4, "name": "Dan" },
+          { "id": 5, "name": "Evangeline" }
+        ],
+        "truncated": false,
+        "metadata": { "samplingMethod": "first" }
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}
