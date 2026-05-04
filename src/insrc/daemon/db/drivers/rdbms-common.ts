@@ -414,11 +414,13 @@ export function compileAggregate(
 ): CompiledAggregate {
 	const { exprs, keys } = compileAggregateExprs(request, knownColumns, dialect);
 	const quotedTarget = quoteTarget(target, dialect);
-	const text = `SELECT ${exprs.join(', ')} FROM ${quotedTarget}`;
+	const where = compileWhere(request.where ?? [], knownColumns, dialect);
+	const whereClause = where.text === '' ? '' : ` ${where.text}`;
+	const text = `SELECT ${exprs.join(', ')} FROM ${quotedTarget}${whereClause}`;
 	if (looksLikeMutation(text)) {
 		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
 	}
-	return { text, values: [], keys };
+	return { text, values: where.values, keys };
 }
 
 // ---------------------------------------------------------------------------

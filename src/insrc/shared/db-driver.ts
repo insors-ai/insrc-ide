@@ -266,6 +266,14 @@ export interface AggregateSpec {
 
 export interface AggregateRequest {
 	readonly aggregations: readonly AggregateSpec[];
+	/**
+	 * Optional structured WHERE filter (mirrors `SampleOpts.where`).
+	 * Compiled via `compileWhere` in the driver layer with the same
+	 * column-validation + parameterised-value safety. Lets windowed-
+	 * count skills (e.g. `data.drift.volume`) constrain aggregates to
+	 * a subset of rows without falling back to client-side filtering.
+	 */
+	readonly where?: readonly WhereClause[];
 }
 
 export interface AggregateResult {

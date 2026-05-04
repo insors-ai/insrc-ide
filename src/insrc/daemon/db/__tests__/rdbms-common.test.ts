@@ -363,6 +363,52 @@ describe('compileAggregate', () => {
 			/invalid table identifier/,
 		);
 	});
+
+	it('compiles a structured WHERE clause when supplied', () => {
+		const out = compileAggregate(
+			'public.events',
+			{
+				aggregations: [{ column: 'id', function: 'count_non_null' }],
+				where: [
+					{ column: 'period', op: '=',  value: 'this_week' },
+					{ column: 'kind',   op: '!=', value: 'archived' },
+				],
+			},
+			['id', 'period', 'kind'],
+			POSTGRES_DIALECT,
+		);
+		assert.equal(
+			out.text,
+			'SELECT COUNT("id") AS "id__count_non_null" FROM "public"."events" WHERE "period" = $1 AND "kind" != $2',
+		);
+		assert.deepEqual([...out.values], ['this_week', 'archived']);
+	});
+
+	it('omits WHERE when the request has none (back-compat)', () => {
+		const out = compileAggregate(
+			'orders',
+			{ aggregations: [{ column: 'total', function: 'sum' }] },
+			['total'],
+			POSTGRES_DIALECT,
+		);
+		assert.equal(out.text, 'SELECT SUM("total") AS "total__sum" FROM "orders"');
+		assert.deepEqual([...out.values], []);
+	});
+
+	it('rejects WHERE on an unknown column', () => {
+		assert.throws(
+			() => compileAggregate(
+				'orders',
+				{
+					aggregations: [{ column: 'total', function: 'sum' }],
+					where: [{ column: 'phantom', op: '=', value: 1 }],
+				},
+				['total'],
+				POSTGRES_DIALECT,
+			),
+			/unknown column 'phantom'/,
+		);
+	});
 });
 
 describe('readAggregateRow', () => {

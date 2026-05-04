@@ -439,7 +439,32 @@ function buildAggregateRequest(input: ToolInput): AggregateRequest | string {
 		}
 		aggregations.push(spec);
 	}
-	return { aggregations };
+	const where = parseWhereInput(input['where']);
+	return where.length === 0 ? { aggregations } : { aggregations, where };
+}
+
+/**
+ * Shared WHERE-clause parser. Tolerant of malformed entries (skipped
+ * silently, matching `buildSampleOpts`'s shape) so a single-bad-clause
+ * input doesn't blow up the rest. Caller decides whether to short-
+ * circuit on an empty list.
+ */
+function parseWhereInput(raw: unknown): WhereClause[] {
+	const out: WhereClause[] = [];
+	if (!Array.isArray(raw)) return out;
+	for (const item of raw) {
+		if (item === null || typeof item !== 'object') continue;
+		const r = item as Record<string, unknown>;
+		const column = typeof r['column'] === 'string' ? r['column'] : '';
+		const op = r['op'];
+		if (column === '') continue;
+		if (op === '=' || op === '!=' || op === 'in' || op === 'is null') {
+			out.push(op === 'is null'
+				? { column, op }
+				: { column, op, value: r['value'] });
+		}
+	}
+	return out;
 }
 
 function formatAggregateResult(target: string, values: Readonly<Record<string, number | null>>): string {
@@ -471,6 +496,7 @@ const sqlAggregateTool: Tool = {
 				maxItems: 32,
 				items: AGGREGATE_SPEC_SCHEMA,
 			},
+			where: WHERE_SCHEMA,
 		},
 	},
 	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -702,6 +728,7 @@ const fileAggregateTool: Tool = {
 				maxItems: 32,
 				items: AGGREGATE_SPEC_SCHEMA,
 			},
+			where: WHERE_SCHEMA,
 		},
 	},
 	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -987,23 +1014,7 @@ const fileSampleShapeTool: Tool = {
 
 function buildSampleOpts(input: ToolInput): SampleOpts {
 	const limit = Math.min(Math.max(1, Number(input['limit'] ?? 10)), 50);
-	const rawWhere = input['where'];
-	const where: WhereClause[] = [];
-	if (Array.isArray(rawWhere)) {
-		for (const raw of rawWhere) {
-			if (raw === null || typeof raw !== 'object') { continue; }
-			const r = raw as Record<string, unknown>;
-			const column = typeof r['column'] === 'string' ? r['column'] : '';
-			const op = r['op'];
-			if (column === '') { continue; }
-			if (op === '=' || op === '!=' || op === 'in' || op === 'is null') {
-				const clause: WhereClause = op === 'is null'
-					? { column, op }
-					: { column, op, value: r['value'] };
-				where.push(clause);
-			}
-		}
-	}
+	const where = parseWhereInput(input['where']);
 	return where.length === 0 ? { limit } : { limit, where };
 }
 

@@ -32,6 +32,14 @@ import { registerAllSkills } from '../index.js';
 import { listSkills } from '../registry.js';
 import { runSkillIsolated, type FakeToolMap } from '../test-harness.js';
 import type { SkillConfidence } from '../types.js';
+// Register the real db tool definitions so the harness can validate
+// each skill's tool-call inputs against the actual inputSchemas. This
+// catches "skill passes a field the tool's schema doesn't accept"
+// regressions (e.g. the 5f.2 drift.volume bug where the skill
+// threaded `where` to a tool whose schema was `additionalProperties:
+// false`). Pure registrations -- no DB clients or other side effects.
+import { registerDbTools } from '../../tools/builtins/db/index.js';
+registerDbTools();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);

@@ -38,6 +38,7 @@ import {
 } from '../../shared/access.js';
 import { getTool, registerTool } from '../tools/registry.js';
 import type { Tool } from '../tools/types.js';
+import { validate } from './json-schema.js';
 import type {
   ProviderAffinity,
   RunSkillOpts,
@@ -160,10 +161,36 @@ async function dispatchFakeTool(
       isError: true,
     };
   }
+
+  // Validate the call's input against the registered tool's
+  // inputSchema when a real tool definition is available. This catches
+  // skills that pass schema-invalid inputs to tools (e.g. an extra
+  // `where` field on a tool whose schema is `additionalProperties:
+  // false`) -- the production tool-call layer would reject these at
+  // input-validation time but the harness used to relay everything
+  // through to the fake handler. The placeholder tools the harness
+  // auto-registers have a permissive schema (`additionalProperties:
+  // true`), so this only kicks in when the test setup imported the
+  // real tool registry first.
+  const tool = getTool(call.name);
+  if (tool !== undefined && !looksLikePlaceholder(tool)) {
+    const result = validate(call.input, tool.inputSchema as Record<string, unknown>);
+    if (!result.ok) {
+      return {
+        content: `[runSkillIsolated] tool '${call.name}' input schema rejected the call: ${result.errors.join('; ')}`,
+        isError: true,
+      };
+    }
+  }
+
   if (typeof handler === 'function') {
     return Promise.resolve(handler(call));
   }
   return handler;
+}
+
+function looksLikePlaceholder(tool: Tool): boolean {
+  return tool.description.startsWith('[runSkillIsolated placeholder for ');
 }
 
 /**

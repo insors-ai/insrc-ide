@@ -398,11 +398,16 @@ class DuckDBFileDriver implements FileDriver {
 		const { exprs, keys } = compileAggregateExprs(request, cols, POSTGRES_DIALECT);
 		const readPath = await this.readerPath(target);
 		const expr = this.readerExpr();
-		const sql = `SELECT ${exprs.join(', ')} FROM ${expr}`;
+		// WHERE compiled with the same helper sample() uses; reader-path
+		// `?` sits at parameter position 1, so WHERE values start at 2.
+		const where = compileWhere(request.where ?? [], cols, POSTGRES_DIALECT, 2);
+		const whereClause = where.text === '' ? '' : ` ${where.text}`;
+		const sql = `SELECT ${exprs.join(', ')} FROM ${expr}${whereClause}`;
 		log.debug({ id: this.id, sql }, 'aggregate');
 
+		const params = [readPath, ...where.values];
 		const row = await withConnection(async (conn) => {
-			const reader = await conn.runAndReadAll(sql, [readPath]);
+			const reader = await conn.runAndReadAll(sql, params as never[]);
 			return reader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
 		});
 		return { target: target ?? this.path, values: readAggregateRow(row, keys) };

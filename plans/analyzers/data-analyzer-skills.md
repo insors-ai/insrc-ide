@@ -170,7 +170,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5e.2 | sensitivity: pii.column-classifier | done | `data.pii.column-classifier.rdbms` shipped (composite over `data.pii.detect-patterns.rdbms` + a 14-rule column-name heuristic). Returns one of `pii / likely-pii / not-pii` with explicit `evidence` strings. Surfaces both data-leak (PII values, generic name) and missing-data (named-PII column, empty sample) cases per the 2026-04-30 lessons-learned fix |
 | 5e.3 | sensitivity: sensitivity.policy-check | done | `data.sensitivity.policy-check.rdbms` shipped (composite over `data.pii.column-classifier.rdbms`). Cross-references the per-column verdict against caller-supplied `declaredPiiColumns`. Per-column status: `declared-and-detected / declared-not-detected / undeclared-detected / undeclared-likely / clean`. Verdict ladder: `conformant` / `mismatch` (over-declared or review-needed) / `gaps` (missing PII declarations -- the security-relevant signal). Caller supplies the declared list; exposing the connection's `pii` field through a tool surface is a separate decision |
 | 5f.1 | drift over windows: drift.distribution | partial | `data.drift.distribution.rdbms` shipped (atomic; activates the `drift` family). Caller supplies two `WhereClause[]` filters defining the windows; skill samples 50 rows from each, builds shared-range histograms (default 10 bins), computes Jensen-Shannon divergence + per-direction KL (Laplace-smoothed). Returns `normalizedJs` (0=identical, 1=max divergent) + verdict (identical/similar/shifted/divergent/inconclusive). Sample-based; full-table KL/JS needs a server-side histogram tool (Phase 0.2). End-to-end verified: identical samples -> JS=0; window-A around 20 vs window-B around 80 -> normalizedJs=0.70, verdict 'divergent' |
-| 5f.2 | drift over windows: drift.volume | partial | `data.drift.volume.rdbms` shipped (atomic; row-volume comparison between two windows). Caller supplies two `WhereClause[]` filters defining windows A and B; skill issues two `db_sql_aggregate(count_non_null)` calls in parallel and returns absolute / relative / percent change + ratio + a verdict ladder (stable <10% / minor-change 10-25% / significant-drop <=-25% / significant-spike >=+25% / inconclusive when countA=0). `countColumn` auto-detected from describe -- prefers PK, falls back to first non-nullable column; caller can override. End-to-end verified: stable case (1000 -> 1000 rows -> percentChange=0%, verdict 'stable'). v1 limit: WHERE op enum currently only supports `=` / `!=` / `in` / `is null` (inherited from sample-rows skill); time-window `>=` / `<=` expressivity needs an upstream extension to `db_sql_aggregate`'s where compiler. Pairs with `data.drift.distribution.rdbms` (5f.1) -- volume drift = how much got produced; distribution drift = whether the shape of values changed. Together with 5f.3 anomaly.change-point, 5f family covers volume / shape / temporal-break drift |
+| 5f.2 | drift over windows: drift.volume | partial | `data.drift.volume.rdbms` shipped (atomic; row-volume comparison between two windows). Caller supplies two `WhereClause[]` filters defining windows A and B; skill issues two `db_sql_aggregate(count_non_null, where: ...)` calls in parallel and returns absolute / relative / percent change + ratio + a verdict ladder (stable <10% / minor-change 10-25% / significant-drop <=-25% / significant-spike >=+25% / inconclusive when countA=0). `countColumn` auto-detected from describe -- prefers PK, falls back to first non-nullable column. **Earlier bug fixed:** the original ship passed `where` to `db_sql_aggregate` whose input schema rejected it. Resolution: extended `db_sql_aggregate` (and `db_file_aggregate`) to accept `where: WHERE_SCHEMA`, threaded through `compileAggregate` -- benefits any future windowed skill. The smoke harness was also hardened to validate skill tool-call inputs against the registered tool's schema (would have caught this regression class; verified with a dedicated harness test that intentionally passes a phantom field). Pairs with `data.drift.distribution.rdbms` (5f.1) -- volume drift = how much got produced; distribution drift = whether the shape of values changed. |
 | 5f.3 | drift over windows: anomaly.change-point | partial | `data.anomaly.change-point.rdbms` shipped (atomic; single-change-point detection on sorted (timestamp, value) sample). For every interior split index k computes the standardised mean shift `|leftMean - rightMean| / pooledStddev`; returns the k that maximises it. Verdict: clear-change (>=2σ) / subtle-change (>=1σ) / no-change / inconclusive. Sample-based at n=50 (min n=10). End-to-end verified: synthetic step at index 20 (50 -> 100 with σ=3 noise) -> changePointIndex=20, leftMean=49.5, rightMean=99.2, standardisedShift=2.07σ, verdict 'clear-change'. Pairs with `drift.distribution.rdbms` (which compares two pre-chosen windows; this skill *finds* the best split) |
 | 5g.1 | timeseries: timeseries.trend | partial | `data.timeseries.trend.rdbms` shipped (atomic; activates the `timeseries` family). Least-squares linear regression of `valueColumn` over `timestampColumn`. Returns slope + slopePerDay (human-readable) + intercept + R-squared + direction (increasing / decreasing / flat) + strength (strong>=0.7 / moderate>=0.3 / weak / inconclusive). Pure-JS OLS over a 50-row sample (min n=10). End-to-end verified: synthetic linear data with slope=2/day -> recovered slopePerDay=2.0144, R²=0.97, verdict 'strong increasing'. Pairs with `drift.distribution.rdbms` for a complete temporal-analysis story (trend + drift) |
 | 5g.2 | timeseries: timeseries.seasonality | partial | `data.timeseries.seasonality.rdbms` shipped (atomic; autocorrelation-peak detection on a detrended sample). Pulls a 50-row (timestamp, value) sample, sorts by timestamp, removes the OLS trend, computes `r(k)` for k=2..n/2, finds local maxima above the 95% Bartlett band (1.96/sqrt(n)). **Lag 1 is excluded from peak detection** -- its implicit left-neighbor is `r(0)=1`, so for any smooth signal r(1) appears as a "peak" of smoothness, not periodicity. Returns top-5 peaks + best peak's lag + estimated time-span (lag × median timestamp-delta) + human-readable form ("approx. 1.0 days"). Verdict ladder: seasonal (\|r\|>=0.5) / weakly-seasonal (\|r\|>=0.3) / aperiodic / inconclusive (n<20 or constant residuals). Detrend is inlined (~10 lines of OLS) -- no sub-skill dep on 5g.1. End-to-end verified: synthetic 50-hour series with sin(2πt/10h) + small noise (5 full cycles) -> bestPeriodLag=10, bestPeriodSpan ≈ 10 hours, r=0.79, verdict 'seasonal'; also surfaces the lag-20 harmonic at r=0.59. Pairs with `data.timeseries.trend.rdbms` -- trend captures monotonic change, seasonality captures periodic structure |
@@ -748,6 +748,169 @@ does the per-skill cache become relevant. The cost of the per-skill cache
 is its complexity around invalidation; we'd skip it entirely if not for
 the high cost of repeating Family 5 statistical computations on the same
 target.
+
+## Open cleanup work
+
+This section tracks the "partial → done" work that doesn't need new
+skills, just port / refactor / fold-in work on what's already shipped.
+Three tracks; pick by appetite. Cross-references
+[plans/data-driver-duckdb-files.md](../data-driver-duckdb-files.md)
+since the consolidated DuckDB file driver unblocks most of Track A.
+
+### Track A -- file-side ports of the analytical families (~22 skills)
+
+Every analytical skill family currently has only its `*.rdbms` variant.
+The corresponding `*.file` variant is mechanical to add now that the
+consolidated DuckDB-backed file driver covers all 12 file kinds (per
+data-driver-duckdb-files.md, Phase 1 + 2 + 3 + 4 are all done). Same
+DuckDB SQL surface, same `SampleResult` / `AggregateResult` shapes
+(both halves go through `formatSample` / `formatAggregateResult` in
+`daemon/tools/builtins/db/index.ts`) -- the math is identical.
+
+**Refactor strategy: extract shared math, dispatch from both wrappers.**
+
+Per family, the algorithm becomes a pure function over already-fetched
+rows + columns + aggregates:
+
+```
+src/insrc/daemon/skills/built-ins/
+  data.X.algo.ts    # pure-JS math + verdict ladder, NO tool deps
+  data.X.rdbms.ts   # wrapper: db_sql_*  tools + RDBMS_FAMILY_TAGS + algo()
+  data.X.file.ts    # wrapper: db_file_* tools + FILE_FAMILY_TAGS  + algo()
+```
+
+Both wrappers ship together so the math has one source of truth.
+Existing `*.rdbms` skills get refactored to delegate; new `*.file`
+skills are ~80-line parallel wrappers.
+
+**Wrapper differences (both wrappers handle the same algo input):**
+
+|  | `.rdbms` | `.file` |
+|---|---|---|
+| Tool ids | `db_sql_describe`, `db_sql_sample`, `db_sql_aggregate`, `db_sql_distinct` | `db_file_describe`, `db_file_sample`, `db_file_aggregate`, `db_file_distinct` |
+| `target` field | required | optional (inferred from `connection.path`) |
+| Field name on `aggregate` / `distinct` calls | `target` | **`path`** (xlsx sheet selector; ignored elsewhere) |
+| `connection-family` precondition | `RDBMS_FAMILY_TAGS` | `['file', 'csv', 'tsv', 'jsonl', 'ndjson', 'json', 'parquet', 'arrow', 'feather', 'avro', 'bson', 'fixed-width', 'xlsx']` |
+| `providerAffinity` | unchanged from `.rdbms` |
+| Output schema | identical |
+| Smoke fixture | parallel structure with file driver shape |
+
+**Skills to port (~22):**
+
+- 5a (5): profile.numeric / .categorical / .temporal / .text / .boolean
+- 5b (6): outliers-iqr / -zscore / -mad / normality-test / heavy-tail-check / modes
+- 5c (3 plausible): correlation.numeric-pairwise / .categorical-pairwise / dependency.co-null-pattern. (5c.3 dependency.functional + 5c.5 cardinality.join-key are RDBMS-shaped multi-table queries; defer until file-side cross-table needs surface.)
+- 5d (5): completeness / uniqueness / validity / conformity / consistency. 5d.6 scorecard composite ports automatically once its 5 dimension atomics do.
+- 5e (1): pii.detect-patterns
+- 5f (2 plausible): drift.distribution / drift.volume (5f.3 anomaly.change-point assumes a temporal axis -- file analog plausible but lower priority)
+- 5g (0): timeseries skills assume an indexed temporal column on the source; file connections rarely fit that shape -- defer
+
+Synth renderers (6.x) are RDBMS / file-agnostic; no port needed.
+
+### Track B -- scorecard composite extension (1 skill + 1 renderer)
+
+`data.quality.scorecard.rdbms` (5d.6) currently weights only
+completeness + uniqueness + optional validity. Conformity (5d.4) and
+consistency (5d.5) landed after the composite shipped and were never
+folded in.
+
+Work:
+- Extend scorecard input with optional `conformityRules?` /
+  `consistencyRules?` (mirroring the existing `validityPatterns` opt-in)
+- Re-balance weights when those dimensions are supplied; missing
+  dimensions are still excluded + remaining weights renormalized
+- Update output schema with new dimension fields
+- Update `synth.scorecard` (6.8) renderer to render conditionally
+- Add fixture coverage exercising the new dimensions
+
+Single PR, ~250 lines. Doesn't unflip "partial" by itself (5d.6 still
+needs the file variant under Track A) but tightens the composite
+considerably and lets the analyzer report a fuller quality picture.
+
+### Track C -- math improvements gated on Phase 0 tooling
+
+These rows stay "partial" until the listed Phase 0 tool lands. Skill
+code is fine; tool surface is the bottleneck:
+
+| Skill | Gated on |
+|---|---|
+| 5a.3 profile.temporal -- min/max range, gaps, period inference | type-aware aggregate (return Date from min/max -- current `values: Record<string, number\|null>` can't carry temporals) |
+| 5b.5 distribution.normality-test -- server-side skewness/kurtosis | new aggregate functions on `db_sql_aggregate` |
+| 5b.7 distribution.modes -- full-table histogram | 0.2 `db_sql_histogram` |
+| 5c.1 correlation.numeric-pairwise -- full-table corr() | 0.4 `db_correlation_matrix` |
+| 5e.1 pii.detect-patterns -- KV variant | needs an iteration helper over `db_kv_sample` results |
+
+### Tool-surface inconsistencies surfaced during this review
+
+Documented for later Phase 0 cleanup. None block Track A by themselves,
+but ignoring them costs duplicate per-skill workarounds:
+
+1. **`target` vs `path` field name across file tools.**
+   `db_file_describe` and `db_file_sample` use `target`;
+   `db_file_aggregate` and `db_file_distinct` use `path`. Same
+   conceptual field (xlsx sheet selector for those kinds, ignored
+   elsewhere). Skills wrapping these have to remember which is which.
+   Recommend renaming to `target` everywhere; the breaking change is
+   small and one-shot.
+
+2. ~~**No `where` on `db_sql_aggregate` / `db_file_aggregate`.**~~
+   **Fixed.** Both tools now accept `where: WHERE_SCHEMA`;
+   `AggregateRequest.where` plumbs through `compileAggregate`
+   (RDBMS dialects via the existing `compileWhere` helper) and through
+   the `DuckDBFileDriver.aggregate()` SQL builder for file kinds.
+   `db_sql_distinct` / `db_file_distinct` still lack `where`; add
+   when a categorical-windowed skill needs it. (5f.2 drift.volume
+   now works correctly.)
+
+3. **Per-call `recursive` override on `db_file_*` tools.** Per
+   data-driver-duckdb-files.md §4.2, the connection-level flag works
+   but the per-call override the prose proposed isn't wired. Skills
+   that want to scope a query to a subset of a directory connection
+   currently must reconfigure the connection. Cheap to add when a
+   skill needs it.
+
+4. **WHERE op enum is narrow** (`= / != / in / is null`). Time-window
+   filters (`>= / <= / between`) need an extension to the
+   `WHERE_SCHEMA` enum + per-driver `compileWhere` plumbing. Affects
+   any skill that wants to express time-bounded queries via the
+   structured-WHERE surface (5f.2 drift.volume in particular).
+
+5. ~~**5f.2 drift.volume bug.**~~ **Fixed.** Took option (a) from
+   the original analysis: extended `db_sql_aggregate` and
+   `db_file_aggregate` to accept `where: WHERE_SCHEMA`, plumbed
+   through `compileAggregate` for RDBMS drivers + the
+   `DuckDBFileDriver.aggregate()` for file kinds. Also hardened the
+   smoke gate so `runSkillIsolated` validates each tool-call input
+   against the registered tool's actual `inputSchema` (looks up the
+   real tool definition via the registry; ignores placeholders).
+   Verified with a dedicated harness regression test that
+   intentionally passes a phantom field and asserts the gate
+   surfaces a schema-rejection note. Future tool-input mismatches
+   in any skill are now caught at the smoke gate.
+
+6. **`db_file_aggregate` / `db_file_distinct` `path` semantics.**
+   Plan documents this as "xlsx sheet name" but the field is generic
+   on the schema. For non-xlsx file kinds the field is ignored
+   entirely. File-side wrappers should pass `undefined` when the
+   connection isn't xlsx; only set when the caller explicitly
+   targeted a sheet.
+
+### Recommended order of operations
+
+1. ~~**Fix 5f.2 bug first.**~~ Done. Tool-extension path (option a)
+   shipped + smoke-gate input-validation hardening shipped.
+2. **Track B (scorecard)** -- small, immediately useful, isolates the
+   scorecard work from the file-port refactor.
+3. **Track A starting with 5a profilers** -- extract algo helpers,
+   refactor existing `.rdbms` skills, ship new `.file` skills together.
+   Sets the pattern for the rest of Track A.
+4. **Track A continuation** -- 5b → 5c → 5d → 5e → 5f, family by
+   family, applying the established pattern.
+5. **Track C** -- defer; lands when Phase 0 tooling work happens.
+6. **Tool-surface cleanups (#1, #3, #4 above)** -- batch into a single
+   Phase 0 tool refresh PR after Track A proves out the file-port
+   pattern; the rename in #1 is most easily done across all callers
+   simultaneously.
 
 ## LLM routing -- per-skill provider affinity
 
