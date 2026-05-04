@@ -39,6 +39,7 @@ import { registerDataQualityUniquenessRdbmsSkill } from './built-ins/data.qualit
 import { registerDataQualityUniquenessFileSkill } from './built-ins/data.quality.uniqueness.file.js';
 import { registerDataPiiDetectPatternsRdbmsSkill } from './built-ins/data.pii.detect-patterns.rdbms.js';
 import { registerDataPiiDetectPatternsFileSkill } from './built-ins/data.pii.detect-patterns.file.js';
+import { registerDataPiiDetectPatternsKvSkill } from './built-ins/data.pii.detect-patterns.kv.js';
 import { registerDataProfileTemporalRdbmsSkill } from './built-ins/data.profile.temporal.rdbms.js';
 import { registerDataProfileTextRdbmsSkill } from './built-ins/data.profile.text.rdbms.js';
 import { registerDataProfileAutoRdbmsSkill } from './built-ins/data.profile.auto.rdbms.js';
@@ -172,6 +173,7 @@ export function registerAllSkills(): void {
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();
   registerDataPiiDetectPatternsFileSkill();
+  registerDataPiiDetectPatternsKvSkill();
 
   // Composite skills. Must register AFTER their atomic skillDeps.
   // 5a.6 -- profile.auto dispatches to numeric / categorical /

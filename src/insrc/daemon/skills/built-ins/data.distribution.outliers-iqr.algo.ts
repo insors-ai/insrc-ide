@@ -15,6 +15,8 @@ interface AggregateSpec {
 	readonly args?: { readonly p?: number };
 }
 
+export type OutliersSource = 'sample' | 'full-table';
+
 export interface OutliersIqrOutput {
 	readonly target: string;
 	readonly column: string;
@@ -33,6 +35,11 @@ export interface OutliersIqrOutput {
 	readonly sampleOutlierCount: number;
 	readonly sampleOutlierRate: number | null;
 	readonly examples: { readonly low: readonly number[]; readonly high: readonly number[] };
+	readonly source: OutliersSource;
+	readonly fullTableBelowCount: number | null;
+	readonly fullTableAboveCount: number | null;
+	readonly fullTableOutlierCount: number | null;
+	readonly fullTableOutlierRate: number | null;
 }
 
 export const OUTLIERS_IQR_DEFAULT_K = 1.5;
@@ -63,16 +70,15 @@ export function buildOutliersIqr(
 	target: string,
 	column: string,
 	k: number,
-	aggValues: Readonly<Record<string, number | null>>,
+	aggValues: Readonly<Record<string, number | string | null>>,
 	sample: { columns: readonly string[]; rows: readonly Readonly<Record<string, unknown>>[] },
 ): OutliersIqrOutput {
-	const v = aggValues;
-	const count = v[`${column}__count`] ?? null;
-	const nonNullCount = v[`${column}__count_non_null`] ?? null;
-	const min = v[`${column}__min`] ?? null;
-	const max = v[`${column}__max`] ?? null;
-	const q1  = v[`${column}__percentile_0_25`] ?? null;
-	const q3  = v[`${column}__percentile_0_75`] ?? null;
+	const count = numericFromAgg(aggValues[`${column}__count`]);
+	const nonNullCount = numericFromAgg(aggValues[`${column}__count_non_null`]);
+	const min = numericFromAgg(aggValues[`${column}__min`]);
+	const max = numericFromAgg(aggValues[`${column}__max`]);
+	const q1  = numericFromAgg(aggValues[`${column}__percentile_0_25`]);
+	const q3  = numericFromAgg(aggValues[`${column}__percentile_0_75`]);
 
 	let iqr: number | null = null;
 	let lowerBound: number | null = null;
@@ -120,6 +126,53 @@ export function buildOutliersIqr(
 		sampleOutlierCount,
 		sampleOutlierRate,
 		examples: { low, high },
+		source: 'sample',
+		fullTableBelowCount: null,
+		fullTableAboveCount: null,
+		fullTableOutlierCount: null,
+		fullTableOutlierRate: null,
+	};
+}
+
+interface FullTableOutlierInput {
+	readonly target: string;
+	readonly column: string;
+	readonly threshold: number;
+	readonly nonNullCount: number;
+	readonly lowerBound: number | null;
+	readonly upperBound: number | null;
+	readonly belowCount: number;
+	readonly aboveCount: number;
+	readonly center: number | null;
+	readonly spread: number | null;
+	readonly examples: readonly { readonly value: number; readonly side: 'below' | 'above' }[];
+}
+
+/**
+ * Build an OutliersIqrOutput from a `db_sql_outliers` tool result.
+ * Drops the sample-based fields (set to 0/null) and populates the
+ * fullTable* fields with precise counts.
+ */
+export function buildOutliersIqrFromOutlierTool(o: FullTableOutlierInput): OutliersIqrOutput {
+	const total = o.belowCount + o.aboveCount;
+	const rate = o.nonNullCount > 0 ? total / o.nonNullCount : null;
+	const low = o.examples.filter(e => e.side === 'below').slice(0, 3).map(e => e.value);
+	const high = o.examples.filter(e => e.side === 'above').slice(0, 3).map(e => e.value);
+	// IQR semantics: center=median, spread=iqr.
+	return {
+		target: o.target, column: o.column, k: o.threshold,
+		q1: null, q3: null, iqr: o.spread,
+		lowerBound: o.lowerBound, upperBound: o.upperBound,
+		min: null, max: null,
+		count: o.nonNullCount, nonNullCount: o.nonNullCount,
+		hasFullTableOutliers: total > 0,
+		sampleSize: 0, sampleOutlierCount: 0, sampleOutlierRate: null,
+		examples: { low, high },
+		source: 'full-table',
+		fullTableBelowCount: o.belowCount,
+		fullTableAboveCount: o.aboveCount,
+		fullTableOutlierCount: total,
+		fullTableOutlierRate: rate,
 	};
 }
 
@@ -133,7 +186,17 @@ export function emptyOutliersIqr(target: string, column: string, k: number): Out
 		hasFullTableOutliers: null,
 		sampleSize: 0, sampleOutlierCount: 0, sampleOutlierRate: null,
 		examples: { low: [], high: [] },
+		source: 'sample',
+		fullTableBelowCount: null, fullTableAboveCount: null,
+		fullTableOutlierCount: null, fullTableOutlierRate: null,
 	};
+}
+
+function numericFromAgg(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
 }
 
 export const OUTLIERS_IQR_OUTPUT_SCHEMA: Record<string, unknown> = {
@@ -164,10 +227,17 @@ export const OUTLIERS_IQR_OUTPUT_SCHEMA: Record<string, unknown> = {
 			required: ['low', 'high'],
 			additionalProperties: false,
 		},
+		source:                { type: 'string', enum: ['sample', 'full-table'] },
+		fullTableBelowCount:   { type: ['number', 'null'] },
+		fullTableAboveCount:   { type: ['number', 'null'] },
+		fullTableOutlierCount: { type: ['number', 'null'] },
+		fullTableOutlierRate:  { type: ['number', 'null'] },
 	},
 	required: ['target', 'column', 'k', 'q1', 'q3', 'iqr', 'lowerBound', 'upperBound',
 	           'min', 'max', 'count', 'nonNullCount', 'hasFullTableOutliers',
-	           'sampleSize', 'sampleOutlierCount', 'sampleOutlierRate', 'examples'],
+	           'sampleSize', 'sampleOutlierCount', 'sampleOutlierRate', 'examples',
+	           'source', 'fullTableBelowCount', 'fullTableAboveCount',
+	           'fullTableOutlierCount', 'fullTableOutlierRate'],
 	additionalProperties: false,
 };
 

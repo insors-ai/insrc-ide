@@ -1,0 +1,27 @@
+{
+  "input": {
+    "connectionId": "redis-cache",
+    "namespace": "user",
+    "sampleSize": 5
+  },
+  "fakeTools": {
+    "db_kv_scan": {
+      "content": "5 keys",
+      "isError": false,
+      "data": {
+        "keys": ["user:1", "user:2", "user:3", "user:4", "user:5"],
+        "truncated": false
+      }
+    },
+    "db_kv_get": {
+      "content": "{}",
+      "isError": false,
+      "data": {
+        "key": "user:1",
+        "value": { "id": 1, "email": "alice@example.com", "phone": "alice-only" },
+        "type": "object"
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

@@ -13,8 +13,10 @@ import { registerSkill } from '../registry.js';
 import type { Skill, SkillResult } from '../types.js';
 import {
 	type OutliersIqrOutput,
+	type OutliersSource,
 	OUTLIERS_IQR_OUTPUT_SCHEMA,
 	buildOutliersIqr,
+	buildOutliersIqrFromOutlierTool,
 	clampIqrMultiplier,
 	clampSampleSize,
 	collectToolErrors,
@@ -30,6 +32,29 @@ interface OutliersIqrFileInput {
 	readonly target?: string;
 	readonly k?: number;
 	readonly sampleSize?: number;
+	readonly mode?: OutliersSource;
+}
+
+interface OutlierToolResultRaw {
+	readonly target: string;
+	readonly column: string;
+	readonly threshold: number;
+	readonly nonNullCount: number;
+	readonly lowerBound: number | null;
+	readonly upperBound: number | null;
+	readonly belowCount: number;
+	readonly aboveCount: number;
+	readonly center: number | null;
+	readonly spread: number | null;
+	readonly examples: readonly { value: number; side: 'below' | 'above' }[];
+}
+
+function isOutlierToolResult(v: unknown): v is OutlierToolResultRaw {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['target'] === 'string'
+		&& typeof o['column'] === 'string'
+		&& Array.isArray(o['examples']);
 }
 
 const FILE_FAMILY_TAGS = [
@@ -56,18 +81,19 @@ const skill: Skill<OutliersIqrFileInput, OutliersIqrOutput> = {
 			target:       { type: 'string', description: 'Optional. xlsx: sheet name.' },
 			k:            { type: 'number', minimum: 0.1, maximum: 10 },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table delegates to db_file_outliers.' },
 		},
 		required: ['connectionId', 'column'],
 		additionalProperties: false,
 	},
 	outputs: OUTLIERS_IQR_OUTPUT_SCHEMA,
-	toolDeps: ['db_file_aggregate', 'db_file_sample'],
+	toolDeps: ['db_file_aggregate', 'db_file_sample', 'db_file_outliers'],
 	providerAffinity: 'auto',
 	preconditions: [
 		{
 			kind: 'required-tools',
-			tools: ['db_file_aggregate', 'db_file_sample'],
-			reason: 'aggregate gives bounds; sample gives outlier examples',
+			tools: ['db_file_aggregate', 'db_file_sample', 'db_file_outliers'],
+			reason: 'sample mode: aggregate + sample. full-table mode: db_file_outliers',
 		},
 		{ kind: 'connection-family', families: FILE_FAMILY_TAGS, reason: 'file-only' },
 	],
@@ -77,6 +103,34 @@ const skill: Skill<OutliersIqrFileInput, OutliersIqrOutput> = {
 		const k = clampIqrMultiplier(input.k);
 		const sampleSize = clampSampleSize(input.sampleSize);
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
+
+		if (input.mode === 'full-table') {
+			const toolInput: Record<string, unknown> = {
+				connectionId: input.connectionId,
+				column: input.column,
+				method: 'iqr',
+				threshold: k,
+			};
+			if (sheet !== undefined) toolInput['target'] = sheet;
+			const tool = await deps.runTool({ id: `${callBase}-outliers`, name: 'db_file_outliers', input: toolInput });
+			if (tool.isError) {
+				return { value: emptyOutliersIqr(input.target ?? '', input.column, k), confidence: 'low', notes: [`db_file_outliers error: ${tool.content.slice(0, 200)}`], toolCalls: [] };
+			}
+			if (!isOutlierToolResult(tool.data)) {
+				return {
+					value: emptyOutliersIqr(input.target ?? '', input.column, k),
+					confidence: 'low',
+					notes: ['db_file_outliers returned a result without the expected structured data shape'],
+					toolCalls: [],
+				};
+			}
+			const out = buildOutliersIqrFromOutlierTool(tool.data);
+			return {
+				value: out,
+				confidence: out.lowerBound !== null && out.upperBound !== null ? 'high' : 'medium',
+				toolCalls: [],
+			};
+		}
 
 		const aggInput: Record<string, unknown> = {
 			connectionId: input.connectionId,

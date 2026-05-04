@@ -183,6 +183,55 @@ function toNumber(raw: unknown): number | null {
 	return null;
 }
 
+/**
+ * Build a CorrelationOutput from a `db_*_correlation_matrix` tool
+ * result. The tool returns a symmetric matrix; we flatten it back into
+ * the existing PairResult[] shape (Pearson + Spearman separately when
+ * the caller invoked both methods, otherwise the missing-method side
+ * stays null).
+ */
+export function buildCorrelationFromMatrix(
+	target: string,
+	evaluatedColumns: readonly string[],
+	truncatedColumns: boolean,
+	totalRows: number,
+	pearsonMatrix: readonly (readonly (number | null)[])[] | null,
+	spearmanMatrix: readonly (readonly (number | null)[])[] | null,
+): CorrelationOutput {
+	const pairs: PairResult[] = [];
+	for (let i = 0; i < evaluatedColumns.length; i++) {
+		for (let j = i + 1; j < evaluatedColumns.length; j++) {
+			const p = pearsonMatrix !== null ? (pearsonMatrix[i]?.[j] ?? null) : null;
+			const s = spearmanMatrix !== null ? (spearmanMatrix[i]?.[j] ?? null) : null;
+			pairs.push({
+				columnA: evaluatedColumns[i]!,
+				columnB: evaluatedColumns[j]!,
+				overlapN: totalRows,
+				pearson: p, spearman: s,
+				classification: classify(p),
+			});
+		}
+	}
+	const sortedPairs = [...pairs].sort((a, b) => {
+		const aR = a.pearson === null ? -1 : Math.abs(a.pearson);
+		const bR = b.pearson === null ? -1 : Math.abs(b.pearson);
+		return bR - aR;
+	});
+	const topPositive = sortedPairs.filter(p => p.pearson !== null && p.pearson > 0).slice(0, CORRELATION_TOP_K_REPORTED);
+	const topNegative = sortedPairs.filter(p => p.pearson !== null && p.pearson < 0).slice(0, CORRELATION_TOP_K_REPORTED);
+	const interpretation = describePairs(sortedPairs, evaluatedColumns.length) + ' (full-table)';
+	return {
+		target,
+		sampleSize: totalRows,
+		evaluatedColumns,
+		truncatedColumns,
+		pairs: sortedPairs,
+		topPositive,
+		topNegative,
+		interpretation,
+	};
+}
+
 export function emptyCorrelationOutput(target: string): CorrelationOutput {
 	return {
 		target,

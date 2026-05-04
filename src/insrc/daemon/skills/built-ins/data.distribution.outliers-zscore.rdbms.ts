@@ -14,9 +14,11 @@
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillResult } from '../types.js';
 import {
+	type OutliersSource,
 	type OutliersZScoreOutput,
 	OUTLIERS_ZSCORE_OUTPUT_SCHEMA,
 	buildOutliersZScore,
+	buildOutliersZScoreFromOutlierTool,
 	clampZScoreThreshold,
 	emptyOutliersZScore,
 	outliersZScoreAggregationsFor,
@@ -34,6 +36,29 @@ interface OutliersZScoreInput {
 	readonly column: string;
 	readonly threshold?: number;
 	readonly sampleSize?: number;
+	readonly mode?: OutliersSource;
+}
+
+interface OutlierToolResultRaw {
+	readonly target: string;
+	readonly column: string;
+	readonly threshold: number;
+	readonly nonNullCount: number;
+	readonly lowerBound: number | null;
+	readonly upperBound: number | null;
+	readonly belowCount: number;
+	readonly aboveCount: number;
+	readonly center: number | null;
+	readonly spread: number | null;
+	readonly examples: readonly { value: number; side: 'below' | 'above' }[];
+}
+
+function isOutlierToolResult(v: unknown): v is OutlierToolResultRaw {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['target'] === 'string'
+		&& typeof o['column'] === 'string'
+		&& Array.isArray(o['examples']);
 }
 
 const RDBMS_FAMILY_TAGS = [
@@ -60,15 +85,16 @@ const skill: Skill<OutliersZScoreInput, OutliersZScoreOutput> = {
 			column:       { type: 'string' },
 			threshold:    { type: 'number', minimum: 0.5, maximum: 10 },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table delegates to db_sql_outliers.' },
 		},
 		required: ['connectionId', 'target', 'column'],
 		additionalProperties: false,
 	},
 	outputs: OUTLIERS_ZSCORE_OUTPUT_SCHEMA,
-	toolDeps: ['db_sql_aggregate', 'db_sql_sample'],
+	toolDeps: ['db_sql_aggregate', 'db_sql_sample', 'db_sql_outliers'],
 	providerAffinity: 'auto',
 	preconditions: [
-		{ kind: 'required-tools', tools: ['db_sql_aggregate', 'db_sql_sample'], reason: 'aggregate gives mean/stddev; sample gives examples' },
+		{ kind: 'required-tools', tools: ['db_sql_aggregate', 'db_sql_sample', 'db_sql_outliers'], reason: 'sample mode: aggregate + sample. full-table mode: db_sql_outliers' },
 		{ kind: 'connection-family', families: RDBMS_FAMILY_TAGS, reason: 'RDBMS-only' },
 	],
 
@@ -76,6 +102,37 @@ const skill: Skill<OutliersZScoreInput, OutliersZScoreOutput> = {
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const threshold = clampZScoreThreshold(input.threshold);
 		const sampleSize = clampSampleSize(input.sampleSize);
+
+		if (input.mode === 'full-table') {
+			const tool = await deps.runTool({
+				id: `${callBase}-outliers`,
+				name: 'db_sql_outliers',
+				input: {
+					connectionId: input.connectionId,
+					target: input.target,
+					column: input.column,
+					method: 'zscore',
+					threshold,
+				},
+			});
+			if (tool.isError) {
+				return { value: emptyOutliersZScore(input.target, input.column, threshold), confidence: 'low', notes: [`db_sql_outliers error: ${tool.content.slice(0, 200)}`], toolCalls: [] };
+			}
+			if (!isOutlierToolResult(tool.data)) {
+				return {
+					value: emptyOutliersZScore(input.target, input.column, threshold),
+					confidence: 'low',
+					notes: ['db_sql_outliers returned a result without the expected structured data shape'],
+					toolCalls: [],
+				};
+			}
+			const out = buildOutliersZScoreFromOutlierTool(tool.data);
+			return {
+				value: out,
+				confidence: out.lowerBound !== null && out.upperBound !== null ? 'high' : 'medium',
+				toolCalls: [],
+			};
+		}
 
 		const [aggTool, sampleTool] = await Promise.all([
 			deps.runTool({

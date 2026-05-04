@@ -85,6 +85,40 @@ export function buildPiiDetections(
 	};
 }
 
+/**
+ * Run the PII catalog against a flat list of strings (for the KV
+ * variant where values aren't column-shaped). Returns the same
+ * detections shape as `buildPiiDetections`.
+ */
+export function buildPiiDetectionsFromValues(
+	target: string,
+	pseudoColumn: string,
+	values: readonly string[],
+): PiiDetectPatternsOutput {
+	const detections: PiiDetection[] = [];
+	const n = values.length;
+	for (const { name, re } of PII_PATTERNS) {
+		let hits = 0;
+		const examples: string[] = [];
+		for (const v of values) {
+			if (re.test(v)) {
+				hits++;
+				if (examples.length < 3) examples.push(v);
+			}
+		}
+		if (hits === 0) continue;
+		detections.push({
+			pattern: name,
+			hitCount: hits,
+			hitRate: n > 0 ? hits / n : 0,
+			examples,
+		});
+	}
+	detections.sort((a, b) => b.hitRate - a.hitRate || a.pattern.localeCompare(b.pattern));
+	const topPattern = detections.length > 0 ? detections[0]!.pattern : null;
+	return { target, column: pseudoColumn, sampleSize: n, detections, topPattern };
+}
+
 export function emptyPii(target: string, column: string, sampleSize: number): PiiDetectPatternsOutput {
 	return { target, column, sampleSize, detections: [], topPattern: null };
 }

@@ -74,12 +74,12 @@ export function buildModes(
 	column: string,
 	binCount: number,
 	minProminence: number,
-	aggValues: Readonly<Record<string, number | null>>,
+	aggValues: Readonly<Record<string, number | string | null>>,
 	sample: { columns: readonly string[]; rows: readonly Readonly<Record<string, unknown>>[] },
 ): ModesOutput {
-	const min = aggValues[`${column}__min`] ?? null;
-	const max = aggValues[`${column}__max`] ?? null;
-	const mean = aggValues[`${column}__avg`] ?? null;
+	const min = numericFromAgg(aggValues[`${column}__min`]);
+	const max = numericFromAgg(aggValues[`${column}__max`]);
+	const mean = numericFromAgg(aggValues[`${column}__avg`]);
 
 	const values: number[] = [];
 	if (sample.columns.includes(column)) {
@@ -184,6 +184,96 @@ export function buildModes(
 	};
 }
 
+/**
+ * Build a ModesOutput from pre-computed histogram bins (full-table
+ * variant). Skips the sample-based bin counting; the smoothing +
+ * local-maxima detection runs unchanged.
+ */
+export function buildModesFromHistogram(
+	target: string,
+	column: string,
+	bins: readonly { readonly lower: number; readonly upper: number; readonly count: number }[],
+	totalRows: number,
+	mean: number | null,
+	minProminence: number,
+): ModesOutput {
+	if (bins.length === 0 || totalRows === 0) {
+		return {
+			target, column,
+			sampleSize: totalRows,
+			min: bins.length > 0 ? bins[0]!.lower : null,
+			max: bins.length > 0 ? bins[bins.length - 1]!.upper : null,
+			mean,
+			bins: [], modes: [],
+			modality: 'inconclusive',
+			interpretation: 'no histogram bins; modality undefined',
+		};
+	}
+	const histBins: HistogramBin[] = bins.map(b => ({
+		lower: b.lower, upper: b.upper,
+		count: b.count,
+		density: totalRows > 0 ? b.count / totalRows : 0,
+	}));
+	const counts = bins.map(b => b.count);
+	const smoothed = smoothMovingAvg(counts);
+	const peakValue = smoothed.reduce((a, b) => Math.max(a, b), 0);
+	const minSmoothed = peakValue * minProminence;
+
+	const modes: ModePeak[] = [];
+	for (let i = 0; i < smoothed.length; i++) {
+		const cur = smoothed[i]!;
+		if (cur < minSmoothed) continue;
+		const left  = i > 0 ? smoothed[i - 1]! : -Infinity;
+		const right = i < smoothed.length - 1 ? smoothed[i + 1]! : -Infinity;
+		if (cur >= left && cur >= right && cur > 0) {
+			const bin = histBins[i]!;
+			modes.push({
+				binIndex: i,
+				lower: bin.lower,
+				upper: bin.upper,
+				count: bin.count,
+				prominence: peakValue > 0 ? cur / peakValue : 0,
+			});
+		}
+	}
+	const collapsed: ModePeak[] = [];
+	for (const m of modes) {
+		const prev = collapsed[collapsed.length - 1];
+		if (prev !== undefined && m.binIndex === prev.binIndex + 1) {
+			if (m.count > prev.count) collapsed[collapsed.length - 1] = m;
+		} else {
+			collapsed.push(m);
+		}
+	}
+
+	let modality: Modality;
+	let interpretation: string;
+	if (collapsed.length === 0) {
+		modality = 'inconclusive';
+		interpretation = `no peak above prominence threshold (full-table histogram, n=${totalRows}); the data may be uniform`;
+	} else if (collapsed.length === 1) {
+		modality = 'unimodal';
+		const m = collapsed[0]!;
+		interpretation = `single peak in [${m.lower.toFixed(2)}, ${m.upper.toFixed(2)}); typical of normally-distributed data (full-table)`;
+	} else if (collapsed.length === 2) {
+		modality = 'bimodal';
+		interpretation = `two peaks detected (full-table) -- the data may have hidden categories or come from two distinct populations`;
+	} else {
+		modality = 'multimodal';
+		interpretation = `${collapsed.length} peaks detected (full-table) -- complex distribution; consider profiling subgroups`;
+	}
+
+	return {
+		target, column,
+		sampleSize: totalRows,
+		min: bins[0]!.lower,
+		max: bins[bins.length - 1]!.upper,
+		mean,
+		bins: histBins, modes: collapsed,
+		modality, interpretation,
+	};
+}
+
 function smoothMovingAvg(counts: readonly number[]): number[] {
 	const out = new Array<number>(counts.length);
 	for (let i = 0; i < counts.length; i++) {
@@ -191,6 +281,13 @@ function smoothMovingAvg(counts: readonly number[]): number[] {
 		else out[i] = (counts[i - 1]! + counts[i]! + counts[i + 1]!) / 3;
 	}
 	return out;
+}
+
+function numericFromAgg(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
 }
 
 export function emptyModes(target: string, column: string): ModesOutput {

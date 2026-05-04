@@ -12,6 +12,7 @@ import {
 	type CorrelationOutput,
 	CORRELATION_MAX_COLUMNS,
 	CORRELATION_OUTPUT_SCHEMA,
+	buildCorrelationFromMatrix,
 	buildCorrelationOutput,
 	clampCorrelationSample,
 	emptyCorrelationOutput,
@@ -25,6 +26,23 @@ interface CorrelationInput {
 	readonly target: string;
 	readonly columns?: readonly string[];
 	readonly sampleSize?: number;
+	readonly mode?: 'sample' | 'full-table';
+}
+
+interface CorrelationMatrixToolResult {
+	readonly target: string;
+	readonly columns: readonly string[];
+	readonly method: 'pearson' | 'spearman';
+	readonly nonNullCount: number;
+	readonly matrix: readonly (readonly (number | null)[])[];
+}
+
+function isCorrelationMatrixToolResult(v: unknown): v is CorrelationMatrixToolResult {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['target'] === 'string'
+		&& Array.isArray(o['columns'])
+		&& Array.isArray(o['matrix']);
 }
 
 const RDBMS_FAMILY_TAGS = [
@@ -47,15 +65,16 @@ const skill: Skill<CorrelationInput, CorrelationOutput> = {
 			target:       { type: 'string' },
 			columns:      { type: 'array', items: { type: 'string' } },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table delegates to db_sql_correlation_matrix (one call per method).' },
 		},
 		required: ['connectionId', 'target'],
 		additionalProperties: false,
 	},
 	outputs: CORRELATION_OUTPUT_SCHEMA,
-	toolDeps: ['db_sql_describe', 'db_sql_sample'],
+	toolDeps: ['db_sql_describe', 'db_sql_sample', 'db_sql_correlation_matrix'],
 	providerAffinity: 'local',
 	preconditions: [
-		{ kind: 'required-tools', tools: ['db_sql_describe', 'db_sql_sample'], reason: 'describe gives the numeric column list; sample gives the rows we correlate over' },
+		{ kind: 'required-tools', tools: ['db_sql_describe', 'db_sql_sample', 'db_sql_correlation_matrix'], reason: 'sample mode: describe + sample. full-table mode: db_sql_correlation_matrix' },
 		{ kind: 'connection-family', families: RDBMS_FAMILY_TAGS, reason: 'RDBMS-only' },
 	],
 
@@ -76,6 +95,42 @@ const skill: Skill<CorrelationInput, CorrelationOutput> = {
 				confidence: 'medium',
 				toolCalls: [],
 			};
+		}
+
+		if (input.mode === 'full-table') {
+			// Cap at 10 columns for the correlation_matrix tool.
+			const matrixCols = evaluatedColumns.slice(0, 10);
+			const truncatedHere = evaluatedColumns.length > 10 || truncatedColumns;
+			const [pearsonRes, spearmanRes] = await Promise.all([
+				deps.runTool({
+					id: `${callBase}-corr-pearson`,
+					name: 'db_sql_correlation_matrix',
+					input: { connectionId: input.connectionId, target: input.target, columns: matrixCols, method: 'pearson' },
+				}),
+				deps.runTool({
+					id: `${callBase}-corr-spearman`,
+					name: 'db_sql_correlation_matrix',
+					input: { connectionId: input.connectionId, target: input.target, columns: matrixCols, method: 'spearman' },
+				}),
+			]);
+			if (pearsonRes.isError) {
+				return { value: emptyCorrelationOutput(input.target), confidence: 'low', notes: [`db_sql_correlation_matrix(pearson) error: ${pearsonRes.content.slice(0, 200)}`], toolCalls: [] };
+			}
+			if (!isCorrelationMatrixToolResult(pearsonRes.data)) {
+				return { value: emptyCorrelationOutput(input.target), confidence: 'low', notes: ['db_sql_correlation_matrix(pearson) returned a result without the expected structured data shape'], toolCalls: [] };
+			}
+			const spearmanMatrix = !spearmanRes.isError && isCorrelationMatrixToolResult(spearmanRes.data)
+				? spearmanRes.data.matrix
+				: null;
+			const out = buildCorrelationFromMatrix(
+				pearsonRes.data.target,
+				matrixCols,
+				truncatedHere,
+				pearsonRes.data.nonNullCount,
+				pearsonRes.data.matrix,
+				spearmanMatrix,
+			);
+			return { value: out, confidence: 'high', toolCalls: [] };
 		}
 
 		const sampleTool = await deps.runTool({

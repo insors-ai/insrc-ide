@@ -9,6 +9,7 @@ import {
 	type CorrelationOutput,
 	CORRELATION_MAX_COLUMNS,
 	CORRELATION_OUTPUT_SCHEMA,
+	buildCorrelationFromMatrix,
 	buildCorrelationOutput,
 	clampCorrelationSample,
 	emptyCorrelationOutput,
@@ -22,6 +23,23 @@ interface CorrelationFileInput {
 	readonly columns?: readonly string[];
 	readonly target?: string;
 	readonly sampleSize?: number;
+	readonly mode?: 'sample' | 'full-table';
+}
+
+interface CorrelationMatrixToolResult {
+	readonly target: string;
+	readonly columns: readonly string[];
+	readonly method: 'pearson' | 'spearman';
+	readonly nonNullCount: number;
+	readonly matrix: readonly (readonly (number | null)[])[];
+}
+
+function isCorrelationMatrixToolResult(v: unknown): v is CorrelationMatrixToolResult {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['target'] === 'string'
+		&& Array.isArray(o['columns'])
+		&& Array.isArray(o['matrix']);
 }
 
 const FILE_FAMILY_TAGS = [
@@ -45,15 +63,16 @@ const skill: Skill<CorrelationFileInput, CorrelationOutput> = {
 			columns:      { type: 'array', items: { type: 'string' } },
 			target:       { type: 'string', description: 'Optional. xlsx: sheet name.' },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table delegates to db_file_correlation_matrix.' },
 		},
 		required: ['connectionId'],
 		additionalProperties: false,
 	},
 	outputs: CORRELATION_OUTPUT_SCHEMA,
-	toolDeps: ['db_file_describe', 'db_file_sample'],
+	toolDeps: ['db_file_describe', 'db_file_sample', 'db_file_correlation_matrix'],
 	providerAffinity: 'local',
 	preconditions: [
-		{ kind: 'required-tools', tools: ['db_file_describe', 'db_file_sample'], reason: 'describe gives the numeric column list; sample gives the rows we correlate over' },
+		{ kind: 'required-tools', tools: ['db_file_describe', 'db_file_sample', 'db_file_correlation_matrix'], reason: 'sample mode: describe + sample. full-table mode: db_file_correlation_matrix' },
 		{ kind: 'connection-family', families: FILE_FAMILY_TAGS, reason: 'file-only' },
 	],
 
@@ -75,6 +94,42 @@ const skill: Skill<CorrelationFileInput, CorrelationOutput> = {
 				confidence: 'medium',
 				toolCalls: [],
 			};
+		}
+
+		if (input.mode === 'full-table') {
+			const matrixCols = evaluatedColumns.slice(0, 10);
+			const truncatedHere = evaluatedColumns.length > 10 || truncatedColumns;
+			const buildMatrixInput = (method: 'pearson' | 'spearman'): Record<string, unknown> => {
+				const base: Record<string, unknown> = {
+					connectionId: input.connectionId,
+					columns: matrixCols,
+					method,
+				};
+				if (sheet !== undefined) base['target'] = sheet;
+				return base;
+			};
+			const [pearsonRes, spearmanRes] = await Promise.all([
+				deps.runTool({ id: `${callBase}-corr-pearson`,  name: 'db_file_correlation_matrix', input: buildMatrixInput('pearson') }),
+				deps.runTool({ id: `${callBase}-corr-spearman`, name: 'db_file_correlation_matrix', input: buildMatrixInput('spearman') }),
+			]);
+			if (pearsonRes.isError) {
+				return { value: emptyCorrelationOutput(input.target ?? ''), confidence: 'low', notes: [`db_file_correlation_matrix(pearson) error: ${pearsonRes.content.slice(0, 200)}`], toolCalls: [] };
+			}
+			if (!isCorrelationMatrixToolResult(pearsonRes.data)) {
+				return { value: emptyCorrelationOutput(input.target ?? ''), confidence: 'low', notes: ['db_file_correlation_matrix(pearson) returned a result without the expected structured data shape'], toolCalls: [] };
+			}
+			const spearmanMatrix = !spearmanRes.isError && isCorrelationMatrixToolResult(spearmanRes.data)
+				? spearmanRes.data.matrix
+				: null;
+			const out = buildCorrelationFromMatrix(
+				pearsonRes.data.target,
+				matrixCols,
+				truncatedHere,
+				pearsonRes.data.nonNullCount,
+				pearsonRes.data.matrix,
+				spearmanMatrix,
+			);
+			return { value: out, confidence: 'high', toolCalls: [] };
 		}
 
 		const sampleInput: Record<string, unknown> = { connectionId: input.connectionId, limit: sampleSize };

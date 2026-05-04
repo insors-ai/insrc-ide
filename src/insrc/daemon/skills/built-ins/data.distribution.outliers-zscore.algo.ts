@@ -21,6 +21,8 @@ export interface ZScoreExample {
 	readonly z: number;
 }
 
+export type OutliersSource = 'sample' | 'full-table';
+
 export interface OutliersZScoreOutput {
 	readonly target: string;
 	readonly column: string;
@@ -38,6 +40,11 @@ export interface OutliersZScoreOutput {
 	readonly sampleOutlierCount: number;
 	readonly sampleOutlierRate: number | null;
 	readonly examples: { readonly low: readonly ZScoreExample[]; readonly high: readonly ZScoreExample[] };
+	readonly source: OutliersSource;
+	readonly fullTableBelowCount: number | null;
+	readonly fullTableAboveCount: number | null;
+	readonly fullTableOutlierCount: number | null;
+	readonly fullTableOutlierRate: number | null;
 }
 
 export const ZSCORE_DEFAULT_THRESHOLD = 3.0;
@@ -62,16 +69,15 @@ export function buildOutliersZScore(
 	target: string,
 	column: string,
 	threshold: number,
-	aggValues: Readonly<Record<string, number | null>>,
+	aggValues: Readonly<Record<string, number | string | null>>,
 	sample: { columns: readonly string[]; rows: readonly Readonly<Record<string, unknown>>[] },
 ): OutliersZScoreOutput {
-	const v = aggValues;
-	const count = v[`${column}__count`] ?? null;
-	const nonNullCount = v[`${column}__count_non_null`] ?? null;
-	const min = v[`${column}__min`] ?? null;
-	const max = v[`${column}__max`] ?? null;
-	const mean = v[`${column}__avg`] ?? null;
-	const stddev = v[`${column}__stddev`] ?? null;
+	const count = numericFromAgg(aggValues[`${column}__count`]);
+	const nonNullCount = numericFromAgg(aggValues[`${column}__count_non_null`]);
+	const min = numericFromAgg(aggValues[`${column}__min`]);
+	const max = numericFromAgg(aggValues[`${column}__max`]);
+	const mean = numericFromAgg(aggValues[`${column}__avg`]);
+	const stddev = numericFromAgg(aggValues[`${column}__stddev`]);
 
 	let lowerBound: number | null = null;
 	let upperBound: number | null = null;
@@ -118,6 +124,57 @@ export function buildOutliersZScore(
 		sampleOutlierCount,
 		sampleOutlierRate,
 		examples: { low, high },
+		source: 'sample',
+		fullTableBelowCount: null,
+		fullTableAboveCount: null,
+		fullTableOutlierCount: null,
+		fullTableOutlierRate: null,
+	};
+}
+
+interface FullTableOutlierInput {
+	readonly target: string;
+	readonly column: string;
+	readonly threshold: number;
+	readonly nonNullCount: number;
+	readonly lowerBound: number | null;
+	readonly upperBound: number | null;
+	readonly belowCount: number;
+	readonly aboveCount: number;
+	readonly center: number | null;
+	readonly spread: number | null;
+	readonly examples: readonly { readonly value: number; readonly side: 'below' | 'above' }[];
+}
+
+export function buildOutliersZScoreFromOutlierTool(o: FullTableOutlierInput): OutliersZScoreOutput {
+	const total = o.belowCount + o.aboveCount;
+	const rate = o.nonNullCount > 0 ? total / o.nonNullCount : null;
+	const lower = o.lowerBound;
+	const upper = o.upperBound;
+	const stddev = o.spread;
+	const mean = o.center;
+	const low = o.examples.filter(e => e.side === 'below').slice(0, 3).map(e => ({
+		value: e.value,
+		z: mean !== null && stddev !== null && stddev > 0 ? (e.value - mean) / stddev : NaN,
+	}));
+	const high = o.examples.filter(e => e.side === 'above').slice(0, 3).map(e => ({
+		value: e.value,
+		z: mean !== null && stddev !== null && stddev > 0 ? (e.value - mean) / stddev : NaN,
+	}));
+	return {
+		target: o.target, column: o.column, threshold: o.threshold,
+		mean, stddev,
+		lowerBound: lower, upperBound: upper,
+		min: null, max: null,
+		count: o.nonNullCount, nonNullCount: o.nonNullCount,
+		hasFullTableOutliers: total > 0,
+		sampleSize: 0, sampleOutlierCount: 0, sampleOutlierRate: null,
+		examples: { low, high },
+		source: 'full-table',
+		fullTableBelowCount: o.belowCount,
+		fullTableAboveCount: o.aboveCount,
+		fullTableOutlierCount: total,
+		fullTableOutlierRate: rate,
 	};
 }
 
@@ -131,7 +188,17 @@ export function emptyOutliersZScore(target: string, column: string, threshold: n
 		hasFullTableOutliers: null,
 		sampleSize: 0, sampleOutlierCount: 0, sampleOutlierRate: null,
 		examples: { low: [], high: [] },
+		source: 'sample',
+		fullTableBelowCount: null, fullTableAboveCount: null,
+		fullTableOutlierCount: null, fullTableOutlierRate: null,
 	};
+}
+
+function numericFromAgg(v: number | string | null | undefined): number | null {
+	if (v === null || v === undefined) return null;
+	if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+	const n = Number(v);
+	return Number.isFinite(n) ? n : null;
 }
 
 const Z_EXAMPLE_SCHEMA = {
@@ -171,9 +238,16 @@ export const OUTLIERS_ZSCORE_OUTPUT_SCHEMA: Record<string, unknown> = {
 			required: ['low', 'high'],
 			additionalProperties: false,
 		},
+		source:                { type: 'string', enum: ['sample', 'full-table'] },
+		fullTableBelowCount:   { type: ['number', 'null'] },
+		fullTableAboveCount:   { type: ['number', 'null'] },
+		fullTableOutlierCount: { type: ['number', 'null'] },
+		fullTableOutlierRate:  { type: ['number', 'null'] },
 	},
 	required: ['target', 'column', 'threshold', 'mean', 'stddev', 'lowerBound', 'upperBound',
 	           'min', 'max', 'count', 'nonNullCount', 'hasFullTableOutliers',
-	           'sampleSize', 'sampleOutlierCount', 'sampleOutlierRate', 'examples'],
+	           'sampleSize', 'sampleOutlierCount', 'sampleOutlierRate', 'examples',
+	           'source', 'fullTableBelowCount', 'fullTableAboveCount',
+	           'fullTableOutlierCount', 'fullTableOutlierRate'],
 	additionalProperties: false,
 };
