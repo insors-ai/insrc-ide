@@ -165,7 +165,7 @@ skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 5d.3 | quality scorecard: quality.validity | partial | `data.quality.validity.rdbms` shipped (atomic; caller-supplied JS regex pattern, samples up to 50 values, returns match / mismatch counts + match rate + up to 3 examples each). Pattern compiled once with `new RegExp(pattern)` so a malformed pattern fails fast. **Type / domain / CHECK-constraint** validity (the rest of the plan's row) deferred -- needs per-dialect catalog introspection. **Now integrated into 5d.6 scorecard** via the optional `validityPatterns` map -- columns the caller patterns get folded into the composite, others stay null and are excluded from the per-column score |
 | 5d.4 | quality scorecard: quality.conformity | partial | `data.quality.conformity.rdbms` shipped (atomic; built-in catalog of 13 canonical formats: iso-date, iso-datetime, us-date, eu-date, usd/eur/iso-currency, iso-country-2/3, us-zip, uk-postal, ca-postal, e164-phone). Returns per-format hit rates + best-fitting format + verdict (conformant >=95% / mostly-conformant >=70% / mixed / unrecognized / inconclusive). Sample-based (50 rows). Pairs with `quality.validity.rdbms` -- this skill picks a known format; validity validates a custom regex. Not yet folded into scorecard composite (5d.6) -- integration is a small follow-up |
 | 5d.5 | quality scorecard: quality.consistency | partial | `data.quality.consistency.rdbms` shipped (atomic; caller-supplied cross-column rules over 50-row sample). Operators: comparison (`< <= = != >= >`) with null-aware inapplicable handling, plus `and-not-null` (both filled) and `xor-null` (exactly one null). Per-rule satisfied / violated / inapplicable counts + satisfaction rate + up to 3 violation examples. Verdict ladder: consistent (>=95%) / mostly-consistent (>=70%) / mixed (>=50%) / broken (<50%) / inconclusive (no applicable rows). Sample-based; precise per-rule full-table counts need a count-where aggregate not yet shipped. Not folded into scorecard composite (5d.6) yet |
-| 5d.6 | quality scorecard: quality.scorecard | partial | `data.quality.scorecard.rdbms` shipped (composite over 5d.1 + 5d.2 + optionally 5d.3). Default weights: completeness=0.6, uniqueness=0.4 (validity not supplied). When the caller passes `validityPatterns: { col: regex }`, weights rebalance to completeness=0.5, uniqueness=0.3, validity=0.2 and the validity dimension folds into the per-column composite. Missing dimensions are excluded and remaining weights renormalized so columns without a validity pattern aren't penalized. Conformity / consistency dimensions (5d.4 / 5d.5) not yet weighted in. Repo-overridable weights (`~/.insrc/data-analyzer/scorecard.json`) deferred per the open-question table |
+| 5d.6 | quality scorecard: quality.scorecard | partial | `data.quality.scorecard.rdbms` shipped (composite over 5d.1 + 5d.2 + optionally 5d.3 + 5d.4 + 5d.5). All five dimensions opt in via caller-supplied input: `validityPatterns: { col: regex }` activates 5d.3; `conformityRules: { col: format-slug }` activates 5d.4; `consistencyRules: ConsistencyRule[]` activates 5d.5 (cross-column). Weight profile picked dynamically: base (completeness=0.6, uniqueness=0.4); +validity (0.5/0.3/0.2); +conformity (0.5/0.3/0.0/0.2); +both (0.4/0.25/0.175/0.175). Per-column composite excludes dimensions without scores so columns missing one opt-in aren't penalized. **Consistency reports as a separate top-level `consistency` block** (cross-column by nature; doesn't enter the per-column composite); per-rule satisfaction + verdict + mean satisfactionRate. Top-issues now also surface broken consistency rules below 0.7 satisfaction alongside per-column problems. Repo-overridable weights (`~/.insrc/data-analyzer/scorecard.json`) deferred per the open-question table. Coverage: 2 dedicated composite tests (validity+conformity+consistency all on; back-compat with no opt-ins). 6.8 synth.scorecard renderer also extended -- conditional conformity column + new "Cross-column consistency" section |
 | 5e.1 | sensitivity: pii.detect-patterns | partial | `data.pii.detect-patterns.rdbms` shipped (samples up to 50 values via `db_sql_sample`, applies anchored regex set: email / ssn-us / phone-us / credit-card / jwt / ipv4 / iban / aws-access-key / github-token / uuid; returns per-pattern hit count + rate + up to 3 examples). Provider affinity `local`. File / KV variants pending; address detection skipped (no clean regex) |
 | 5e.2 | sensitivity: pii.column-classifier | done | `data.pii.column-classifier.rdbms` shipped (composite over `data.pii.detect-patterns.rdbms` + a 14-rule column-name heuristic). Returns one of `pii / likely-pii / not-pii` with explicit `evidence` strings. Surfaces both data-leak (PII values, generic name) and missing-data (named-PII column, empty sample) cases per the 2026-04-30 lessons-learned fix |
 | 5e.3 | sensitivity: sensitivity.policy-check | done | `data.sensitivity.policy-check.rdbms` shipped (composite over `data.pii.column-classifier.rdbms`). Cross-references the per-column verdict against caller-supplied `declaredPiiColumns`. Per-column status: `declared-and-detected / declared-not-detected / undeclared-detected / undeclared-likely / clean`. Verdict ladder: `conformant` / `mismatch` (over-declared or review-needed) / `gaps` (missing PII declarations -- the security-relevant signal). Caller supplies the declared list; exposing the connection's `pii` field through a tool surface is a separate decision |
@@ -807,25 +807,22 @@ skills are ~80-line parallel wrappers.
 
 Synth renderers (6.x) are RDBMS / file-agnostic; no port needed.
 
-### Track B -- scorecard composite extension (1 skill + 1 renderer)
+### Track B -- scorecard composite extension (1 skill + 1 renderer) ✅ done
 
-`data.quality.scorecard.rdbms` (5d.6) currently weights only
-completeness + uniqueness + optional validity. Conformity (5d.4) and
-consistency (5d.5) landed after the composite shipped and were never
-folded in.
+Shipped. Conformity (5d.4) and consistency (5d.5) now fold into the
+5d.6 quality.scorecard composite via opt-in `conformityRules` /
+`consistencyRules` inputs (mirrors the existing `validityPatterns`
+shape). Weight profile picks one of four tables based on which
+dimensions are on; missing per-column dimensions still get
+renormalized weights so opt-in absence isn't punitive. Consistency
+reports as a separate top-level `consistency` block (cross-column by
+nature); broken consistency rules now surface in the top-issues
+list alongside per-column problems. `synth.scorecard` (6.8)
+extended with a conditional conformity column + a new "Cross-column
+consistency" section.
 
-Work:
-- Extend scorecard input with optional `conformityRules?` /
-  `consistencyRules?` (mirroring the existing `validityPatterns` opt-in)
-- Re-balance weights when those dimensions are supplied; missing
-  dimensions are still excluded + remaining weights renormalized
-- Update output schema with new dimension fields
-- Update `synth.scorecard` (6.8) renderer to render conditionally
-- Add fixture coverage exercising the new dimensions
-
-Single PR, ~250 lines. Doesn't unflip "partial" by itself (5d.6 still
-needs the file variant under Track A) but tightens the composite
-considerably and lets the analyzer report a fuller quality picture.
+Doesn't unflip "partial" by itself (5d.6 still needs the file
+variant under Track A) but tightens the composite considerably.
 
 ### Track C -- math improvements gated on Phase 0 tooling
 
@@ -899,8 +896,9 @@ but ignoring them costs duplicate per-skill workarounds:
 
 1. ~~**Fix 5f.2 bug first.**~~ Done. Tool-extension path (option a)
    shipped + smoke-gate input-validation hardening shipped.
-2. **Track B (scorecard)** -- small, immediately useful, isolates the
-   scorecard work from the file-port refactor.
+2. ~~**Track B (scorecard)**~~ Done. Conformity + consistency folded
+   into 5d.6; synth.scorecard (6.8) renderer extended; 2 dedicated
+   composite tests + smoke gate green.
 3. **Track A starting with 5a profilers** -- extract algo helpers,
    refactor existing `.rdbms` skills, ship new `.file` skills together.
    Sets the pattern for the rest of Track A.

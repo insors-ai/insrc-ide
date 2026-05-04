@@ -39,29 +39,55 @@ interface ValidityStats {
 	readonly sampleSize: number | null;
 }
 
+interface ConformityStats {
+	readonly score: number | null;
+	readonly format: string | null;
+	readonly bestFormat?: string | null;
+	readonly sampleSize?: number | null;
+}
+
 interface ColumnScorecard {
 	readonly name: string;
 	readonly completeness: DimensionStats;
 	readonly uniqueness: UniquenessStats;
 	readonly validity?: ValidityStats;
+	readonly conformity?: ConformityStats;
 	readonly compositeScore: number | null;
 }
 
 interface ScorecardIssue {
 	readonly column: string;
-	readonly dimension: 'completeness' | 'uniqueness' | 'validity' | 'composite';
+	readonly dimension: 'completeness' | 'uniqueness' | 'validity' | 'conformity' | 'consistency' | 'composite';
 	readonly score: number;
 	readonly detail: string;
+}
+
+interface ConsistencyRuleSummary {
+	readonly name: string;
+	readonly leftColumn: string;
+	readonly op: string;
+	readonly rightColumn: string;
+	readonly satisfactionRate: number | null;
+	readonly satisfied: number;
+	readonly violated: number;
+	readonly inapplicable: number;
+}
+
+interface ConsistencyBlock {
+	readonly rules: readonly ConsistencyRuleSummary[];
+	readonly overallScore: number | null;
+	readonly verdict: 'consistent' | 'mostly-consistent' | 'mixed' | 'broken' | 'inconclusive' | 'not-checked';
 }
 
 interface ScorecardInput {
 	readonly target: string;
 	readonly totalRows: number | null;
-	readonly weights: { readonly completeness: number; readonly uniqueness: number; readonly validity?: number };
+	readonly weights: { readonly completeness: number; readonly uniqueness: number; readonly validity?: number; readonly conformity?: number };
 	readonly columns: readonly ColumnScorecard[];
 	readonly primaryKeyCandidates: readonly string[];
 	readonly overallScore: number | null;
 	readonly topIssues: readonly ScorecardIssue[];
+	readonly consistency?: ConsistencyBlock;       // optional for back-compat with pre-Track-B inputs
 	readonly truncated?: boolean;
 }
 
@@ -89,6 +115,7 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 					completeness: { type: 'number' },
 					uniqueness:   { type: 'number' },
 					validity:     { type: 'number' },
+					conformity:   { type: 'number' },
 				},
 				required: ['completeness', 'uniqueness'],
 				additionalProperties: false,
@@ -97,6 +124,7 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 			primaryKeyCandidates: { type: 'array', items: { type: 'string' } },
 			overallScore:         { type: ['number', 'null'] },
 			topIssues:            { type: 'array' },
+			consistency:          { type: 'object' },
 			truncated:            { type: 'boolean' },
 		},
 		required: ['target', 'totalRows', 'weights', 'columns', 'primaryKeyCandidates',
@@ -115,16 +143,14 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 	async execute(input): Promise<SkillResult<ScorecardOutput>> {
 		const overallTag = scoreBadge(input.overallScore);
 		const truncTag = input.truncated === true ? ' (truncated)' : '';
-		const validityWeight = input.weights.validity ?? 0;
-		const validityIncluded = validityWeight > 0;
-		const weightLine = validityIncluded
-			? `weights: completeness ${formatWeight(input.weights.completeness)}, ` +
-			  `uniqueness ${formatWeight(input.weights.uniqueness)}, ` +
-			  `validity ${formatWeight(validityWeight)} ` +
-			  `_(conformity / consistency dimensions pending)_`
-			: `weights: completeness ${formatWeight(input.weights.completeness)}, ` +
-			  `uniqueness ${formatWeight(input.weights.uniqueness)} ` +
-			  `_(validity / conformity / consistency dimensions pending; supply \`validityPatterns\` to enable validity)_`;
+		const validityWeight   = input.weights.validity   ?? 0;
+		const conformityWeight = input.weights.conformity ?? 0;
+		const validityIncluded   = validityWeight > 0;
+		const conformityIncluded = conformityWeight > 0;
+		const consistencyChecked = input.consistency !== undefined && input.consistency.verdict !== 'not-checked';
+
+		const weightLine = renderWeightLine(input.weights, validityIncluded, conformityIncluded, consistencyChecked);
+
 		const lines: string[] = [
 			`## Quality scorecard: \`${input.target}\`${truncTag}`,
 			'',
@@ -158,40 +184,30 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 		lines.push('### Per-column detail', '');
 		if (input.columns.length === 0) {
 			lines.push('_(no columns)_');
-		} else if (validityIncluded) {
-			lines.push(
-				'| column | composite | completeness | null rate | uniqueness | distinct | validity | PK? |',
-				'|---|---|---|---|---|---|---|---|',
-			);
-			for (const c of input.columns) {
-				const composite = formatScore(c.compositeScore);
-				const cScore    = formatScore(c.completeness.score);
-				const nullPct   = formatPct(c.completeness.nullRate);
-				const uScore    = formatScore(c.uniqueness.score);
-				const distinct  = c.uniqueness.distinctCount !== null
-					? c.uniqueness.distinctCount.toLocaleString('en-US')
-					: '_null_';
-				const validity  = c.validity !== undefined && c.validity.score !== null
-					? `${formatScore(c.validity.score)} (\`${c.validity.pattern ?? '?'}\`)`
-					: '_n/a_';
-				const pk        = c.uniqueness.isPrimaryKeyCandidate ? 'yes' : '';
-				lines.push(`| \`${c.name}\` | ${composite} | ${cScore} | ${nullPct} | ${uScore} | ${distinct} | ${validity} | ${pk} |`);
-			}
 		} else {
-			lines.push(
-				'| column | composite | completeness | null rate | uniqueness | distinct | PK? |',
-				'|---|---|---|---|---|---|---|',
-			);
-			for (const c of input.columns) {
-				const composite = formatScore(c.compositeScore);
-				const cScore    = formatScore(c.completeness.score);
-				const nullPct   = formatPct(c.completeness.nullRate);
-				const uScore    = formatScore(c.uniqueness.score);
-				const distinct  = c.uniqueness.distinctCount !== null
-					? c.uniqueness.distinctCount.toLocaleString('en-US')
-					: '_null_';
-				const pk        = c.uniqueness.isPrimaryKeyCandidate ? 'yes' : '';
-				lines.push(`| \`${c.name}\` | ${composite} | ${cScore} | ${nullPct} | ${uScore} | ${distinct} | ${pk} |`);
+			renderColumnTable(input.columns, validityIncluded, conformityIncluded, lines);
+		}
+
+		// Cross-column consistency block (rendered only when the caller
+		// supplied rules; the `not-checked` verdict suppresses output).
+		if (consistencyChecked && input.consistency !== undefined) {
+			lines.push('', '### Cross-column consistency', '');
+			const c = input.consistency;
+			const headerScore = c.overallScore !== null ? `${(c.overallScore * 100).toFixed(1)}%` : '_(no applicable rows)_';
+			lines.push(`verdict: **${c.verdict}** -- mean satisfaction ${headerScore}`, '');
+			if (c.rules.length === 0) {
+				lines.push('_(no rule results)_');
+			} else {
+				lines.push(
+					'| rule | left | op | right | satisfaction | satisfied / violated / inapplicable |',
+					'|---|---|---|---|---|---|',
+				);
+				for (const r of c.rules) {
+					const sat = r.satisfactionRate !== null ? `${(r.satisfactionRate * 100).toFixed(1)}%` : '_n/a_';
+					lines.push(
+						`| ${escapePipes(r.name)} | \`${r.leftColumn}\` | ${r.op} | \`${r.rightColumn}\` | ${sat} | ${r.satisfied} / ${r.violated} / ${r.inapplicable} |`,
+					);
+				}
 			}
 		}
 
@@ -202,6 +218,69 @@ const skill: Skill<ScorecardInput, ScorecardOutput> = {
 		};
 	},
 };
+
+function renderWeightLine(
+	weights: ScorecardInput['weights'],
+	validityIncluded: boolean,
+	conformityIncluded: boolean,
+	consistencyChecked: boolean,
+): string {
+	const parts = [
+		`completeness ${formatWeight(weights.completeness)}`,
+		`uniqueness ${formatWeight(weights.uniqueness)}`,
+	];
+	if (validityIncluded)   parts.push(`validity ${formatWeight(weights.validity!)}`);
+	if (conformityIncluded) parts.push(`conformity ${formatWeight(weights.conformity!)}`);
+
+	const pendingHints: string[] = [];
+	if (!validityIncluded)   pendingHints.push('validity (supply `validityPatterns`)');
+	if (!conformityIncluded) pendingHints.push('conformity (supply `conformityRules`)');
+	if (!consistencyChecked) pendingHints.push('consistency (supply `consistencyRules`)');
+
+	const hint = pendingHints.length === 0
+		? ''
+		: ` _(opt-in: ${pendingHints.join(', ')})_`;
+	return `weights: ${parts.join(', ')}${hint}`;
+}
+
+function renderColumnTable(
+	columns: readonly ColumnScorecard[],
+	validityIncluded: boolean,
+	conformityIncluded: boolean,
+	out: string[],
+): void {
+	const header: string[] = ['column', 'composite', 'completeness', 'null rate', 'uniqueness', 'distinct'];
+	if (validityIncluded)   header.push('validity');
+	if (conformityIncluded) header.push('conformity');
+	header.push('PK?');
+	out.push(`| ${header.join(' | ')} |`);
+	out.push(`|${header.map(() => '---').join('|')}|`);
+
+	for (const c of columns) {
+		const composite = formatScore(c.compositeScore);
+		const cScore    = formatScore(c.completeness.score);
+		const nullPct   = formatPct(c.completeness.nullRate);
+		const uScore    = formatScore(c.uniqueness.score);
+		const distinct  = c.uniqueness.distinctCount !== null
+			? c.uniqueness.distinctCount.toLocaleString('en-US')
+			: '_null_';
+		const cells: string[] = [`\`${c.name}\``, composite, cScore, nullPct, uScore, distinct];
+		if (validityIncluded) {
+			const validity = c.validity !== undefined && c.validity.score !== null
+				? `${formatScore(c.validity.score)} (\`${c.validity.pattern ?? '?'}\`)`
+				: '_n/a_';
+			cells.push(validity);
+		}
+		if (conformityIncluded) {
+			const conformity = c.conformity !== undefined && c.conformity.score !== null
+				? `${formatScore(c.conformity.score)} (\`${c.conformity.format ?? '?'}\`)`
+				: '_n/a_';
+			cells.push(conformity);
+		}
+		cells.push(c.uniqueness.isPrimaryKeyCandidate ? 'yes' : '');
+		out.push(`| ${cells.join(' | ')} |`);
+	}
+}
 
 function scoreBadge(score: number | null): string {
 	if (score === null) return '_(not computed)_';
