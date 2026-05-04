@@ -57,6 +57,7 @@ import { registerDataDistributionModesFileSkill } from './built-ins/data.distrib
 import { registerDataDistributionOutliersZScoreRdbmsSkill } from './built-ins/data.distribution.outliers-zscore.rdbms.js';
 import { registerDataDistributionOutliersMadRdbmsSkill } from './built-ins/data.distribution.outliers-mad.rdbms.js';
 import { registerDataDependencyCoNullPatternRdbmsSkill } from './built-ins/data.dependency.co-null-pattern.rdbms.js';
+import { registerDataDependencyCoNullPatternFileSkill } from './built-ins/data.dependency.co-null-pattern.file.js';
 import { registerDataDependencyFunctionalRdbmsSkill } from './built-ins/data.dependency.functional.rdbms.js';
 import { registerDataCardinalityJoinKeyRdbmsSkill } from './built-ins/data.cardinality.join-key.rdbms.js';
 import { registerDataDistributionNormalityTestRdbmsSkill } from './built-ins/data.distribution.normality-test.rdbms.js';
@@ -72,7 +73,9 @@ import { registerDataTimeseriesSeasonalityRdbmsSkill } from './built-ins/data.ti
 import { registerDataTimeseriesStationarityRdbmsSkill } from './built-ins/data.timeseries.stationarity.rdbms.js';
 import { registerDataTimeseriesGapAnalysisRdbmsSkill } from './built-ins/data.timeseries.gap-analysis.rdbms.js';
 import { registerDataCorrelationNumericPairwiseRdbmsSkill } from './built-ins/data.correlation.numeric-pairwise.rdbms.js';
+import { registerDataCorrelationNumericPairwiseFileSkill } from './built-ins/data.correlation.numeric-pairwise.file.js';
 import { registerDataCorrelationCategoricalPairwiseRdbmsSkill } from './built-ins/data.correlation.categorical-pairwise.rdbms.js';
+import { registerDataCorrelationCategoricalPairwiseFileSkill } from './built-ins/data.correlation.categorical-pairwise.file.js';
 import { registerDataAnomalyChangePointRdbmsSkill } from './built-ins/data.anomaly.change-point.rdbms.js';
 
 const log = getLogger('skills-bootstrap');
@@ -142,10 +145,13 @@ export function registerAllSkills(): void {
   registerDataTimeseriesGapAnalysisRdbmsSkill();
   // Phase 5c (cross-column) -- pairwise dependency analyses.
   registerDataDependencyCoNullPatternRdbmsSkill();
+  registerDataDependencyCoNullPatternFileSkill();
   registerDataDependencyFunctionalRdbmsSkill();
   registerDataCardinalityJoinKeyRdbmsSkill();
   registerDataCorrelationNumericPairwiseRdbmsSkill();
+  registerDataCorrelationNumericPairwiseFileSkill();
   registerDataCorrelationCategoricalPairwiseRdbmsSkill();
+  registerDataCorrelationCategoricalPairwiseFileSkill();
   // Phase 5e (sensitivity / PII) -- regex over sampled values;
   // local-affinity (no LLM in the matching path).
   registerDataPiiDetectPatternsRdbmsSkill();
