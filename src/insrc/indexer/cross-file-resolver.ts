@@ -46,13 +46,22 @@ import { join, sep } from 'node:path';
 import { getLogger } from '../shared/logger.js';
 import type { DbClient } from '../db/client.js';
 import type { Entity, EntityKind, Language } from '../shared/types.js';
-import { listEntitiesForRepo, getEntitiesByIds } from '../db/entities.js';
 import {
+  listEntitiesForRepo,
+  listEntitiesByKind,
+  getEntitiesByIds,
+  entityU64ForId,
+  entityIdsByU64s,
+} from '../db/entities.js';
+import {
+  upsertRelations,
+  deleteResolvedRelations,
   listUnresolvedRelations,
   promoteResolvedBatch,
   updateUnresolvedMetaBatch,
   type UnresolvedRelation,
 } from '../db/relations.js';
+import { inNeighbors, outNeighbors } from '../db/graph/edges.js';
 import type { SourceRoots } from './source-roots.js';
 
 const log = getLogger('cross-file-resolver');
@@ -138,85 +147,54 @@ async function runPass1(
   opts:  CrossFileResolveOpts,
   index: EntityIndex,
 ): Promise<number> {
-  // Step 1 -- opening lookup. Entity table is stub-only (id + kind);
-  // full entity data lives in the entity table. Returns just (fromId, moduleId);
-  // repo scoping happens in-memory below against the in-memory
-  // `index.byId`. Module name + language come from a batched
-  // prefetch.
+  // Step 1 -- enumerate every module entity globally. Module stubs have
+  // repo='' so they don't appear in listEntitiesForRepo(repo); a single
+  // kind-filtered scan over the entity sub-DB is the LMDB equivalent
+  // of the old "JOIN entity m ON m.id = r.dst WHERE m.kind='module'".
   const tMatch = Date.now();
-  const rows = await opts.db.duck.query<{ fromId: string; moduleId: string }>(
-    `SELECT r.src AS "fromId", r.dst AS "moduleId"
-     FROM relation r
-     JOIN entity m ON m.id = r.dst
-     WHERE r.kind = 'IMPORTS' AND m.kind = 'module'`,
-  );
+  const allModules = await listEntitiesByKind(opts.db, 'module');
   log.info(
-    { repo: opts.repoRoot, rows: rows.length, elapsedMs: Date.now() - tMatch },
-    'cross-file Pass 1: opening MATCH done',
+    { repo: opts.repoRoot, modules: allModules.length, elapsedMs: Date.now() - tMatch },
+    'cross-file Pass 1: enumerated module entities',
   );
-  if (rows.length === 0) return 0;
 
-  // Step 2 -- in-memory repo filter + collect unique moduleIds.
-  // The relation table is just (src,dst,kind), no per-edge repo column on the
-  // Entity stub; index.byId was built from listEntitiesForRepo(repo)
-  // and contains only this repo's entities, so .has(fromId) is the
-  // valid scope check. uniqueModuleIds drives the entity prefetch
-  // and dedupes the (typically ~200-500 unique modules across thousands
-  // of edges).
-  const tFilter = Date.now();
-  const scopedRows: { fromId: string; moduleId: string }[] = [];
-  const uniqueModuleIds = new Set<string>();
-  for (const row of rows) {
-    const fromId   = row['fromId']   as string;
-    const moduleId = row['moduleId'] as string;
-    if (!index.byId.has(fromId)) continue;  // not in this repo
-    scopedRows.push({ fromId, moduleId });
-    uniqueModuleIds.add(moduleId);
+  // Step 2 -- for each module, walk IMPORTS in-edges to find files that
+  // import it. Filter the predecessor list to this repo's `index.byId`
+  // (the LMDB equivalent of the prior in-memory repo-scope check).
+  const tEdges = Date.now();
+  const scopedRows: { fromId: string; module: Entity }[] = [];
+  for (const m of allModules) {
+    const moduleU64 = await entityU64ForId(m.id);
+    if (moduleU64 === undefined) continue;
+    const fromU64s = await inNeighbors(moduleU64, { kindFilter: ['IMPORTS'] });
+    if (fromU64s.length === 0) continue;
+    const fromIdMap = await entityIdsByU64s(fromU64s);
+    for (const fU64 of fromU64s) {
+      const fromId = fromIdMap.get(fU64);
+      if (fromId === undefined) continue;
+      if (!index.byId.has(fromId)) continue;  // not in this repo
+      scopedRows.push({ fromId, module: m });
+    }
   }
   log.info(
     {
       repo: opts.repoRoot,
       scopedRows: scopedRows.length,
-      uniqueModules: uniqueModuleIds.size,
-      elapsedMs: Date.now() - tFilter,
+      elapsedMs: Date.now() - tEdges,
     },
-    'cross-file Pass 1: repo-scope filter + dedup done',
+    'cross-file Pass 1: collected IMPORTS-to-module edges in repo',
   );
   if (scopedRows.length === 0) return 0;
 
-  // Step 3 -- batched entity prefetch for module name + language.
-  // Module-stub entities are created with repo='' so they don't
-  // appear in listEntitiesForRepo(repo); fetch only the unique set
-  // we actually need (1-2 chunks of 500 for typical repos).
-  const tPrefetch = Date.now();
-  const moduleEntities = await getEntitiesByIds(opts.db, [...uniqueModuleIds]);
-  const modulesById = new Map<string, Entity>();
-  for (const m of moduleEntities) {
-    if (m.kind === 'module') modulesById.set(m.id, m);
-  }
-  log.info(
-    {
-      repo: opts.repoRoot,
-      requested: uniqueModuleIds.size,
-      fetched: modulesById.size,
-      elapsedMs: Date.now() - tPrefetch,
-    },
-    'cross-file Pass 1: prefetched module entities',
-  );
-
-  // Step 4 -- in-memory resolve. No DB calls in this loop.
+  // Step 3 -- in-memory resolve. No DB calls in this loop.
   const tResolve = Date.now();
   const rewires: Rewire[] = [];
   for (const row of scopedRows) {
-    const module = modulesById.get(row.moduleId);
-    if (module === undefined) continue;  // shouldn't happen post-prefetch
-
-    const targetPath = locateInTreeFile(module.name, module.language, opts.sourceRoots);
+    const targetPath = locateInTreeFile(row.module.name, row.module.language, opts.sourceRoots);
     if (targetPath === null) continue;
     const targetEntity = index.fileEntities.get(targetPath);
     if (targetEntity === undefined) continue;
-
-    rewires.push({ fromId: row.fromId, oldModuleId: row.moduleId, targetFileId: targetEntity.id });
+    rewires.push({ fromId: row.fromId, oldModuleId: row.module.id, targetFileId: targetEntity.id });
   }
   log.info(
     { repo: opts.repoRoot, rewires: rewires.length, elapsedMs: Date.now() - tResolve },
@@ -224,18 +202,13 @@ async function runPass1(
   );
   if (rewires.length === 0) return 0;
 
-  // Step 3 -- batched DELETE of the old module-stub IMPORTS edges.
-  // Each chunk becomes one DELETE with WHERE (src, dst) IN ((?,?), ...).
+  // Step 4 -- batched DELETE of (file -> module-stub) IMPORTS edges.
   const tDelete = Date.now();
   for (let i = 0; i < rewires.length; i += BATCH_SIZE) {
     const chunk = rewires.slice(i, i + BATCH_SIZE);
-    const valuesSql = chunk.map(() => '(?, ?)').join(', ');
-    const params: string[] = [];
-    for (const r of chunk) { params.push(r.fromId, r.oldModuleId); }
-    await opts.db.duck.exec(
-      `DELETE FROM relation
-       WHERE kind = 'IMPORTS' AND (src, dst) IN (VALUES ${valuesSql})`,
-      params,
+    await deleteResolvedRelations(
+      opts.db,
+      chunk.map(r => ({ from: r.fromId, kind: 'IMPORTS' as const, to: r.oldModuleId })),
     );
   }
   log.info(
@@ -247,20 +220,15 @@ async function runPass1(
     'cross-file Pass 1: DELETE complete',
   );
 
-  // Step 4 -- batched INSERT of the new file-target IMPORTS edges.
-  // ON CONFLICT DO NOTHING makes the operation idempotent (re-runs of
-  // the resolver are safe). Each chunk is one multi-VALUES INSERT.
+  // Step 5 -- batched INSERT of new (file -> file) IMPORTS edges.
+  // upsertRelations is idempotent (LMDB put on the same key is a no-op),
+  // matching the prior `ON CONFLICT DO NOTHING` semantics.
   const tMerge = Date.now();
   for (let i = 0; i < rewires.length; i += BATCH_SIZE) {
     const chunk = rewires.slice(i, i + BATCH_SIZE);
-    const valuesSql = chunk.map(() => "(?, ?, 'IMPORTS')").join(', ');
-    const params: string[] = [];
-    for (const r of chunk) { params.push(r.fromId, r.targetFileId); }
-    await opts.db.duck.exec(
-      `INSERT INTO relation (src, dst, kind) VALUES ${valuesSql}
-       ON CONFLICT (src, dst, kind) DO NOTHING`,
-      params,
-    );
+    await upsertRelations(opts.db, chunk.map(r => ({
+      kind: 'IMPORTS' as const, from: r.fromId, to: r.targetFileId, resolved: true,
+    })));
   }
   log.info(
     {
@@ -363,39 +331,40 @@ async function runPass2(
 }
 
 /**
- * MATCH every (fromFile, importedFile) edge post-Pass-1, then build an
- * in-memory Map<fromFileEntityId, Set<importedFilePath>> so per-row
- * Pass 2 helpers can do O(1) lookups instead of issuing a DB query
- * per from-entity.
+ * Build the in-memory Map<fromFileEntityId, Set<importedFilePath>> by
+ * walking each file entity's IMPORTS out-edges in LMDB and keeping
+ * only the targets that are file entities in this repo's index.
  *
- * Repo scoping is in-memory (entity rows are stub-only for the resolver; `f.repo`
- * isn't a property). Target paths come from `index.byId` -- the
- * the SELECT only returns ids; we resolve to file paths via the
- * in-memory entity index.
+ * Cross-repo targets (not in `index.byId`) are skipped: Pass 2 scope is
+ * single-repo; cross-repo CALLS / INHERITS resolution is out of scope.
  */
 async function prefetchImportsByFile(
-  db:    DbClient,
+  _db:    DbClient,
   index: EntityIndex,
 ): Promise<Map<string, Set<string>>> {
-  const rows = await db.duck.query<{ fromFileId: string; targetFileId: string }>(
-    `SELECT r.src AS "fromFileId", r.dst AS "targetFileId"
-     FROM relation r
-     JOIN entity t ON t.id = r.dst
-     WHERE r.kind = 'IMPORTS' AND t.kind = 'file'`,
-  );
+  // Collect every (fromFileId, targetU64) pair from out_edge with one
+  // pass over each file entity in this repo.
+  type Pair = { fromFileId: string; targetU64: bigint };
+  const pairs: Pair[] = [];
+  for (const [fromId, fromEntity] of index.byId) {
+    if (fromEntity.kind !== 'file') continue;
+    const fromU64 = await entityU64ForId(fromId);
+    if (fromU64 === undefined) continue;
+    const tos = await outNeighbors(fromU64, { kindFilter: ['IMPORTS'] });
+    for (const toU64 of tos) pairs.push({ fromFileId: fromId, targetU64: toU64 });
+  }
+  if (pairs.length === 0) return new Map();
+
+  // Bulk reverse-lookup all unique target u64s in one cursor pass.
+  const uniqueTargetU64s = [...new Set(pairs.map(p => p.targetU64))];
+  const idMap = await entityIdsByU64s(uniqueTargetU64s);
 
   const map = new Map<string, Set<string>>();
-  for (const row of rows) {
-    const fromFileId   = row.fromFileId;
-    const targetFileId = row.targetFileId;
-    // Repo scope: only keep edges from files in this repo's index.
-    if (!index.byId.has(fromFileId)) continue;
-    // Cross-repo targets won't be in index.byId; skip them. Pass 2
-    // scope is single-repo; cross-repo CALLS / INHERITS resolution
-    // is out of scope today.
-    const targetEntity = index.byId.get(targetFileId);
+  for (const { fromFileId, targetU64 } of pairs) {
+    const targetId = idMap.get(targetU64);
+    if (targetId === undefined) continue;
+    const targetEntity = index.byId.get(targetId);
     if (targetEntity === undefined || targetEntity.kind !== 'file') continue;
-
     let set = map.get(fromFileId);
     if (set === undefined) { set = new Set<string>(); map.set(fromFileId, set); }
     set.add(targetEntity.file);

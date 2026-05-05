@@ -477,6 +477,43 @@ export async function findEntitiesByName(
 	return out;
 }
 
+/**
+ * List entities filtered by kind. Optional `repo` further scopes to a
+ * single repo path. Used by the cross-file resolver to enumerate every
+ * `module` stub regardless of repo (module entities live with repo='').
+ *
+ * Linear scan over the entity sub-DB. For ≤ ~1M entities this is fast
+ * (mmap'd cursor); module-stub counts are typically O(100s).
+ */
+export async function listEntitiesByKind(
+	_db: DbClient,
+	kind: EntityKind,
+	opts: { readonly repo?: string | undefined } = {},
+): Promise<Entity[]> {
+	const store = await getGraphStore();
+	const kindByte = ENTITY_KIND_BYTE[kind as keyof typeof ENTITY_KIND_BYTE];
+	if (kindByte === undefined) return [];
+
+	let repoFilter: number | null = null;
+	if (opts.repo !== undefined) {
+		const id = repoIdByPathInTxn(store, opts.repo);
+		if (id === undefined) return [];
+		repoFilter = id;
+	}
+
+	const out: Entity[] = [];
+	const repoCache = new Map<number, string>();
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		if (ENTITY_KIND_BYTE[row.kind] !== kindByte) continue;
+		if (repoFilter !== null && row.repoId !== repoFilter) continue;
+		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
+		if (stringId === undefined) continue;
+		out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
+	}
+	return out;
+}
+
 export async function listEntitiesForRepo(_db: DbClient, repo: string): Promise<Entity[]> {
 	const store = await getGraphStore();
 	const repoId = repoIdByPathInTxn(store, repo);

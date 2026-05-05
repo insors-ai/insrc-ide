@@ -164,6 +164,35 @@ function dedupeResolvedRelations(relations: readonly Relation[]): Relation[] {
 	return out;
 }
 
+/**
+ * Remove specific resolved (from, kind, to) edges from both
+ * out_edge / in_edge mirrors in a single write txn. Used by the
+ * cross-file resolver Pass 1 to delete the (file → module-stub)
+ * IMPORTS edges before re-adding (file → file) IMPORTS edges to the
+ * located in-tree target.
+ *
+ * Edges whose endpoints aren't in `entity_id_by_string` (e.g. an
+ * already-cascaded entity) are silently skipped. Edges whose kind isn't
+ * in `RELATION_KIND_BYTE` (shouldn't happen at runtime) are skipped.
+ */
+export async function deleteResolvedRelations(
+	_db: DbClient,
+	items: ReadonlyArray<{ readonly from: string; readonly kind: RelationKind; readonly to: string }>,
+): Promise<void> {
+	if (items.length === 0) return;
+	await withWriteTxn(s => {
+		for (const r of items) {
+			const fromU64 = lookupU64ByStringId(s, r.from);
+			const toU64   = lookupU64ByStringId(s, r.to);
+			if (fromU64 === undefined || toU64 === undefined) continue;
+			const kindByte = RELATION_KIND_BYTE[r.kind as InternalRelationKind];
+			if (kindByte === undefined) continue;
+			s.outEdge.remove(encodeOutEdgeKey(fromU64, kindByte, toU64));
+			s.inEdge.remove(encodeInEdgeKey(toU64, kindByte, fromU64));
+		}
+	});
+}
+
 export async function deleteRelationsForFile(_db: DbClient, _filePath: string): Promise<void> {
 	// Resolved edges are removed automatically when entity rows are
 	// deleted via deleteEntitiesForFile (entities.ts cascade). No
