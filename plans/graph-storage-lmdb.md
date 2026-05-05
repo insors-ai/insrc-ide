@@ -1,7 +1,9 @@
 # Plan: Graph Storage Re-split -- Custom LMDB Layer + LanceDB Restore
 
-Reverse the DuckDB consolidation from
-[plans/storage-migration-duckdb.md](storage-migration-duckdb.md). End state:
+**Design doc.** Execution-side phasing lives in
+[plans/storage-migration-lmdb-lance.md](storage-migration-lmdb-lance.md).
+
+Reverse the prior DuckDB consolidation experiment. End state:
 **three substrates**, each doing what it's built for, instead of one substrate
 fighting three workloads.
 
@@ -97,10 +99,9 @@ space is mostly hobby projects.
 
 ## Related plans
 
-- [plans/storage-migration-duckdb.md](storage-migration-duckdb.md) -- the
-  consolidation this plan reverses. Phase B (LanceDB → DuckDB) is fully
-  rolled back; Phase A (Kuzu → DuckDB) is *partially* rolled back -- we
-  don't go back to Kuzu (deprecated), we land on LMDB instead.
+- [plans/storage-migration-lmdb-lance.md](storage-migration-lmdb-lance.md) --
+  execution plan for this design (phased work, gates, sequencing). This
+  doc is the *what* / *why*; the migration plan is the *how* / *when*.
 - [plans/data-driver-duckdb-files.md](data-driver-duckdb-files.md) --
   unaffected. The in-memory DuckDB query-engine pool stays as-is; this
   plan only removes the *file-backed storage pool* (`duckdb-storage-pool.ts`).
@@ -187,50 +188,111 @@ greenfield rebuild on a fresh substrate.
 ### Sub-DB layout
 
 LMDB exposes "sub-databases" (named keyspaces) within a single env. The
-graph layer uses six:
+storage layer uses thirteen, grouped by subsystem:
+
+**Graph (code knowledge graph):**
 
 | Sub-DB | Key | Value | Purpose |
 |---|---|---|---|
 | `meta` | utf8 string | varies | Schema version, ID counters, build metadata |
 | `repo` | u32 repo_id (BE) | msgpack(Repo) | Registered repo records |
-| `entity` | u64 entity_id (BE) | msgpack(Entity) | Entity bodies (name, kind, file path, range, language, summary, …) |
+| `entity` | u64 entity_id (BE) | msgpack(Entity) | Entity bodies (full schema below) |
 | `name_index` | (u32 repo, u8 kind, utf8 fqn) | u64 entity_id | "What's the ID of this entity by name?" -- used by re-index lookup |
 | `out_edge` | (u64 from, u8 kind, u64 to) | msgpack(EdgeProps) or empty | Outgoing edges; range-scan by `(from, kind)` gives all neighbors |
 | `in_edge` | (u64 to, u8 kind, u64 from) | empty | Incoming edges; mirror of `out_edge` for in-degree queries |
+| `unresolved` | u64 unresolved_id (BE) | msgpack(UnresolvedRelation) | Cross-file resolver queue: edges whose target couldn't be bound at parse time. Pass 2 of the resolver promotes these into `out_edge` / `in_edge` |
+| `unresolved_by_file` | (u32 repo, utf8 from_file) | dupsort u64 unresolved_id | Secondary index for "all unresolved-from this file" -- used on re-index to wipe stale unresolved rows |
 
-Big-endian u64 / u32 in keys ensures LMDB's lexicographic ordering matches
-numeric ordering -- critical for sequential ID inserts to land at the right
-edge of the B+ tree.
+**Plans (artifact framework):**
 
-The `out_edge` and `in_edge` sub-DBs duplicate the edge data. The cost is
-~2x edge keyspace; the benefit is symmetric O(degree) range-scan in either
-direction without a secondary index lookup. Worth it -- in-edge queries
-(who calls this function? who imports this module?) are common.
+| Sub-DB | Key | Value | Purpose |
+|---|---|---|---|
+| `plan` | utf8 plan_id | msgpack(Plan) | Plan headers (title, status, repo_path, timestamps) |
+| `plan_step` | (utf8 plan_id, u32 idx BE) | msgpack(PlanStep) | Per-step records; range-scan by `plan_id` returns steps in idx order |
+
+`STEP_DEPENDS_ON` edges between plan steps live in the unified `out_edge` /
+`in_edge` sub-DBs alongside code-graph edges (per current code). This
+keeps the cross-graph traversal API uniform.
+
+**Conversations:**
+
+| Sub-DB | Key | Value | Purpose |
+|---|---|---|---|
+| `conversation_session` | utf8 session_id | msgpack(SessionRow) | Session metadata (repo, summary, seen_entities, status, tier, created_at, last_activity_at, expires_at). Embedding lives in LanceDB keyed by session_id |
+| `conversation_turn` | (utf8 session_id, u32 idx BE) | msgpack(TurnRow) | Per-turn records; range-scan by session_id returns in idx order. Embedding lives in LanceDB keyed by turn_id |
+| `conversation_turn_by_repo` | (utf8 repo, utf8 turn_id) | empty | dupsort secondary index for `getAllTurnsForRepo` and per-repo searches |
+
+**Todos:**
+
+| Sub-DB | Key | Value | Purpose |
+|---|---|---|---|
+| `todo_list` | utf8 list_id | msgpack(TodoList) | Top-level lists |
+| `todo_list_by_session` | (utf8 session_id, utf8 list_id) | empty | dupsort index for `listForSession` |
+| `todo_item` | (utf8 list_id, utf8 order_key, utf8 item_id) | msgpack(TodoItem) | Per-item; range-scan by list_id returns in order_key order |
+| `todo_comment` | (utf8 item_id, utf8 comment_id) | msgpack(TodoComment) | Per-comment; range-scan by item_id returns all comments |
+
+**Config-store:**
+
+| Sub-DB | Key | Value | Purpose |
+|---|---|---|---|
+| `config_entry` | utf8 entry_id | msgpack(ConfigEntry) | Entry body. Embedding lives in LanceDB keyed by entry_id |
+| `config_by_scope` | (utf8 scope, utf8 namespace, utf8 category, utf8 entry_id) | empty | dupsort index for `find(scope, namespace, category)` |
+
+**Notes on conventions:**
+
+- Big-endian u64 / u32 in keys ensures LMDB's lexicographic ordering matches
+  numeric ordering -- critical for sequential ID inserts to land at the right
+  edge of the B+ tree.
+- The `out_edge` and `in_edge` sub-DBs duplicate the edge data. The cost is
+  ~2x edge keyspace; the benefit is symmetric O(degree) range-scan in either
+  direction without a secondary index lookup. Worth it -- in-edge queries
+  (who calls this function? who imports this module?) are common.
+- Several sub-DBs use LMDB's **dupsort** flag (multiple values per key) as
+  cheap secondary indexes. Avoids materializing separate index entries.
+- Where current DuckDB IDs are strings (plan_id, session_id, turn_id, list_id,
+  item_id, config entry_id), the LMDB layer keeps them as utf8 strings rather
+  than allocating new u64 IDs. Reasons: (a) these are not graph nodes (no
+  edge participation), (b) they're created/displayed by the application
+  layer, (c) keeping the existing IDs avoids an external-ID-to-internal-ID
+  translation table. **Only graph-participating IDs (entity, repo) get the
+  u64/u32 sequential treatment** -- because those are the ones in millions
+  of edge keys where the size matters.
 
 ### Entity schema
+
+Mirrors the current DuckDB `entity` table column-for-column (verified
+against `src/insrc/db/entities.ts`):
 
 ```ts
 interface Entity {
   // Identity (also encoded in name_index key)
-  repoId: number;           // u32
-  kind: EntityKind;         // enum: function, class, module, …
+  repoId: number;           // u32 (was VARCHAR repo in DuckDB)
+  kind: EntityKind;
   name: string;             // fully-qualified
 
   // Provenance
-  filePath: string;         // repo-relative
+  filePath: string;         // repo-relative (was `file` in DuckDB)
   startLine: number;
   endLine: number;
-  language: Language;       // enum: typescript, python, go, java, scala
+  language: Language;
+  rootPath: string;         // repo root, for closure resolution
 
-  // Optional fields (present on some kinds)
-  signature?: string;       // for functions / classes
-  summary?: string;         // LLM-generated; populated lazily
-  importedFrom?: string;    // for module entities
+  // Body / signature
+  body: string;             // entity source text (function body, class body, ...)
+  signature: string;        // for functions / classes (empty string for others)
+  summary: string;          // LLM-generated; populated lazily (empty string until then)
+
+  // Flags
+  isExported: boolean;
+  isAsync: boolean;
+  isAbstract: boolean;
+  artifact: boolean;        // true for synthetic artifact entities (call-graph nodes, ER-source rows, ...)
 
   // Bookkeeping
-  contentHash: string;      // hex(SHA256(source-text-of-entity)) -- used to short-circuit
-                            // re-indexing when the entity body hasn't changed
-  lastIndexedAt: number;    // unix ms
+  contentHash: string;      // hex(SHA256(body)) -- used to short-circuit re-indexing
+                            //   when the entity body hasn't changed (was `hash` in DuckDB)
+  embeddingModel: string;   // which embedding model produced the LanceDB row (empty until embedded)
+  indexedAt: number;        // unix ms (was VARCHAR ISO8601 in DuckDB)
 }
 
 type EntityKind =
@@ -241,34 +303,53 @@ type EntityKind =
 type Language = 'typescript' | 'python' | 'go' | 'java' | 'scala' | 'unknown';
 ```
 
-`Entity` is msgpack-encoded by `lmdb-js` (default codec). Typed decoder
-gates the read so callers get the right shape.
+**Sentinel-default convention.** The current DuckDB schema uses empty
+string / 0 / false defaults rather than NULL. The msgpack codec preserves
+this: missing fields decode to their type's zero value (empty string,
+0, false). Callers continue to distinguish "absent" from "present-but-
+empty" using the same sentinel logic.
+
+**Embedding column lives in LanceDB**, not in the entity row. The
+`embeddingModel` field in the entity row records which model populated
+the Lance row keyed by `entity_id` -- non-empty means "Lance has an
+embedding for this entity"; empty means "not yet embedded."
+
+**Module-stub semantics.** The current code splits the upsert path:
+module entities use `ON CONFLICT DO NOTHING` (ensure-exists), all other
+kinds use `DO UPDATE` (last-write-wins). The LMDB equivalent: `putEntity`
+takes a `mode: 'upsert' | 'ensure'` flag; `ensure` is a no-op if the
+entity already exists. The bulk indexer routes module entities through
+`ensure`, all others through `upsert`.
 
 ### Relation kinds
+
+Verified against `src/insrc/db/relations.ts`. Twelve kinds total at v1
+(eleven code-graph + one plan-graph):
 
 ```ts
 type RelationKind =
   // Code structure
   | 'CONTAINS'          // module → function, class → method
-  | 'EXTENDS'           // class → class, interface → interface
+  | 'DEFINES'           // file → function/class (entity-scoped containment)
+  | 'INHERITS'          // class → class, interface → interface
   | 'IMPLEMENTS'        // class → interface
   // Call graph
   | 'CALLS'             // function → function
-  | 'OVERRIDES'         // method → method
   // Imports + dependencies
   | 'IMPORTS'           // module → module
+  | 'EXPORTS'           // module → entity (re-export)
   | 'DEPENDS_ON'        // repo → repo (via package manifest)
   | 'REFERENCES'        // function/class → type/variable (general use)
-  // Data
-  | 'READS'             // function → table/column (data lineage)
+  // Data lineage
+  | 'READS'             // function → table/column
   | 'WRITES'            // function → table/column
-  // Test
-  | 'TESTS';            // test-function → function
+  // Plan graph (lives in same edge tables for traversal-API uniformity)
+  | 'STEP_DEPENDS_ON';  // plan_step → plan_step
 ```
 
-Encoded as a u8 in keys. The enum is fixed at v1; adding a kind requires
-a `schema_version` bump but is otherwise additive (existing keys don't
-move).
+Encoded as a u8 in keys. Adding a kind requires a `schema_version` bump
+but is otherwise additive (existing keys don't move). The u8 enum
+positions are fixed at v1 -- never reorder, never reuse a removed slot.
 
 ### Edge properties
 
@@ -276,27 +357,66 @@ Most edges have no payload (empty value). A few do:
 
 - `CALLS` edge value: `{ siteCount: u32 }` -- how many call sites in the source span
 - `READS` / `WRITES` edge value: `{ columns: string[] }` -- which columns are touched
+- `IMPORTS` edge value (when present): `{ rawTo: string }` -- preserves the raw module specifier (e.g. `'./foo'`, `'@scope/pkg/sub'`) for IDE-side display before resolution
 - All other edges: empty value
 
 Payload is msgpack when present; empty `Buffer.alloc(0)` otherwise.
-`lmdb-js` handles empty values cleanly.
+`lmdb-js` handles empty values cleanly. Edge-property schema per kind
+lives in `db/graph/edges.ts` as typed encoder/decoder pairs.
 
 ### Key encoding
 
 All composite keys are concatenations of fixed-width binary fields:
 
 ```
-out_edge key: [u64 from BE][u8 kind][u64 to BE]   // 17 bytes
-in_edge  key: [u64 to   BE][u8 kind][u64 from BE] // 17 bytes
-name_index:   [u32 repo BE][u8 kind][utf8 name]   // variable
-entity:       [u64 id BE]                          // 8 bytes
-repo:         [u32 id BE]                          // 4 bytes
-meta:         [utf8 string]                        // variable
+out_edge key:               [u64 from BE][u8 kind][u64 to BE]    // 17 bytes
+in_edge  key:               [u64 to   BE][u8 kind][u64 from BE]  // 17 bytes
+name_index:                 [u32 repo BE][u8 kind][utf8 name]    // variable
+entity:                     [u64 id BE]                           // 8 bytes
+repo:                       [u32 id BE]                           // 4 bytes
+unresolved:                 [u64 id BE]                           // 8 bytes
+unresolved_by_file:         [u32 repo BE][utf8 from_file]         // variable (dupsort: u64)
+plan_step:                  [utf8 plan_id][\0][u32 idx BE]        // variable
+conversation_turn:          [utf8 session_id][\0][u32 idx BE]     // variable
+conversation_turn_by_repo:  [utf8 repo][\0][utf8 turn_id]         // variable
+todo_list_by_session:       [utf8 session_id][\0][utf8 list_id]   // variable
+todo_item:                  [utf8 list_id][\0][utf8 order_key][\0][utf8 item_id] // variable
+todo_comment:               [utf8 item_id][\0][utf8 comment_id]   // variable
+config_entry:               [utf8 entry_id]                        // variable
+config_by_scope:            [utf8 scope][\0][utf8 namespace][\0][utf8 category][\0][utf8 entry_id]
+meta:                       [utf8 string]                          // variable
 ```
+
+`\0` is the null-byte separator between variable-length string segments
+in composite keys. UTF-8 strings cannot contain `\0`, so this is an
+unambiguous delimiter and preserves prefix-scan semantics: a range scan
+on `[utf8 list_id][\0]` returns exactly the items belonging to that
+list.
 
 Helper: `db/graph/keys.ts` exports `encodeOutEdgeKey(from, kind, to)`,
 `decodeOutEdgeKey(buf)`, etc. All key encoding goes through these helpers
 -- no ad-hoc concatenation in callers.
+
+### Cascade rules
+
+Current DuckDB code requires callers to coordinate cascade deletes
+manually (e.g. `removeRepo(path)` in repos.ts only deletes the repo row;
+the indexer separately calls `deleteEntitiesForRepo` and
+`deleteUnresolvedForRepo`). The LMDB store layer **enforces cascades
+internally** to remove this footgun. The rules:
+
+| Operation | Cascade |
+|---|---|
+| `deleteRepo(repoId)` | All entities in repo → all out/in edges with either endpoint in repo → all unresolved with that repo → all name-index entries → all conversation sessions for repo → all turns for those sessions |
+| `deleteEntity(entityId)` | All out/in edges touching entity → name-index entry → LanceDB row keyed by entity_id |
+| `deleteEntitiesForFile(repoId, filePath)` | Per-entity cascade above for each entity in the file → unresolved entries from that file |
+| `deleteSession(sessionId)` | All turns for session → LanceDB rows keyed by session_id and the turn_ids |
+| `deletePlan(planId)` | All plan_step rows → STEP_DEPENDS_ON edges between them |
+| `deleteList(listId)` | All items in list → all comments under those items |
+| `deleteItem(itemId)` | All comments on item |
+| `deleteScope(scope)` | All config_entry rows in scope → LanceDB rows keyed by entry_id |
+
+Tested in `db/graph/__tests__/cascade.test.ts` -- one test per row.
 
 ## API surface
 
@@ -331,9 +451,25 @@ interface GraphStore {
   outEdges(from: bigint, kind?: RelationKind): IterableIterator<EdgeRow>;
   inEdges(to: bigint, kind?: RelationKind): IterableIterator<EdgeRow>;
 
+  // Unresolved relations (cross-file resolver queue)
+  addUnresolved(unresolved: UnresolvedRelation): bigint;     // returns unresolved_id
+  getUnresolvedForRepo(repoId: number): IterableIterator<UnresolvedRelation>;
+  getUnresolvedForFile(repoId: number, filePath: string): IterableIterator<UnresolvedRelation>;
+  markUnresolvedAttempted(id: bigint, meta: Record<string, unknown>): void;
+  markUnresolvedResolved(id: bigint): void;                  // deletes the row
+  deleteUnresolvedForFile(repoId: number, filePath: string): void;
+
   // Bulk write (re-index)
   reindexFile(repoId: number, filePath: string, parsedEntities: ParsedEntity[]): void;
+
+  // Test injection (mirrors current `setStorageDuckDBPath`)
+  // Production code never calls this; test setup overrides the env path
+  // to a tmpdir or `:memory:`-equivalent (LMDB has no in-memory mode --
+  // tests use a tmpdir env that's deleted in teardown).
 }
+
+export function setGraphStorePath(path: string): void;       // test-only override
+export function closeGraphStore(): Promise<void>;            // shutdown handler hook
 ```
 
 Single-writer constraint: `addEdge` / `putEntity` / `reindexFile` all
@@ -422,9 +558,10 @@ is fine -- the parser is the bottleneck, not the storage.
 
 ## Vector layer (LanceDB restore)
 
-Per the Phase B.0 audit in `storage-migration-duckdb.md`:
+Per the audit performed prior to this plan (verified against the current
+`src/insrc/db/` codebase):
 
-- **Vector search USED:** entities, conversations, config-store
+- **Vector search USED:** entities, conversations (sessions + turns), config-store
 - **Vector search NOT USED:** todos (always written `ZERO_VEC`)
 - **FTS / BM25:** zero callers anywhere
 
@@ -442,7 +579,75 @@ So the restore is:
 Vector dim is unchanged (qwen3-embedding = 2560). HNSW index params
 unchanged from the previous Lance config.
 
+### LanceDB tables (4 total)
+
+| Table | Key column | Vector column | Other columns | Index |
+|---|---|---|---|---|
+| `entity_vec` | entity_id (u64 → string) | embedding FLOAT[2560] | repo (for filter), kind (for filter) | HNSW cosine |
+| `session_vec` | session_id (utf8) | embedding FLOAT[2560] | repo (for filter), status | HNSW cosine |
+| `turn_vec` | turn_id (utf8) | embedding FLOAT[2560] | repo (for filter), session_id, type, tier | HNSW cosine |
+| `config_vec` | entry_id (utf8) | embedding FLOAT[2560] | scope, namespace, category | HNSW cosine |
+
+Filter columns are duplicated from LMDB so Lance can scope ANN searches
+without a join. They're write-time-only -- no source-of-truth concerns
+(LMDB is canonical for the structured fields).
+
+### Hydration on read
+
+Vector search returns IDs + scores; the caller hydrates the structured
+entity / session / turn / config row from LMDB. Pattern:
+
+```ts
+async function searchEntities(query: number[], closure: number[], limit: number) {
+  const hits = await lance.entity_vec.search(query)
+    .where(`repo IN (${closure.join(',')})`)
+    .limit(limit)
+    .toArray();
+  return hits.map(h => ({ ...graph.getEntity(h.entity_id), score: h._distance }));
+}
+```
+
+### Brute-force fallback removal
+
+Current code falls back to a brute-force cosine scan when DuckDB's `vss`
+extension is unavailable (`db/search.ts` has the `try-catch` around HNSW).
+With LanceDB, ANN is built into the engine and the fallback path goes
+away. If LanceDB itself fails to load, we surface a hard error rather
+than degrade silently -- vector search is core to context-assembly and
+silent degradation produced confusing-but-not-erroring answers in the
+past.
+
+### Conversation compaction (`db/compaction.ts`)
+
+The 5-stage tiered-compression pipeline (directives → time-based tier
+ladder → semantic clustering via cosine on embeddings → archive →
+size-cap) keeps working post-restore. It already calls into
+`conversations.ts` for turn writes (no direct SQL); the Lance restore
+brings back the cosine-on-embedding side. No structural change to the
+pipeline -- only the storage backing.
+
 The `DbClients` shape becomes: `{ graph: GraphStore; lance: lancedb.Connection }`.
+
+## Non-graph subsystems on LMDB
+
+The graph layer is the headline -- but four other persistent subsystems
+move to LMDB alongside it. Each gets its own thin TypeScript module that
+sits on top of the same LMDB env (sub-DBs above) and presents the
+**same surface** as today's DuckDB-backed module to keep callers
+unchanged:
+
+| Module | Sub-DBs | Replaces | Notes |
+|---|---|---|---|
+| `db/repos.ts` | `repo` | DuckDB `repo` table | Surface unchanged: `addRepo / removeRepo / listRepos / updateRepoStatus` |
+| `db/conversations.ts` | `conversation_session`, `conversation_turn`, `conversation_turn_by_repo` + Lance `session_vec` / `turn_vec` | DuckDB `conversation_session` + `conversation_turn` + HNSW indexes | Surface unchanged: `addSession / addTurn / addCompactedTurns / updateSession / deleteSession / getTurnsForSession / searchTurnsByRepo / pruneConversations`. Search hydrates ID → row from LMDB |
+| `db/todos.ts` | `todo_list`, `todo_list_by_session`, `todo_item`, `todo_comment` | DuckDB `todo_list` + `todo_item` + `todo_comment` | Surface unchanged: `insertList / insertItem / insertComment / update* / delete* / getList / listForSession`. **No Lance** -- vectors were never used here |
+| `agent/tasks/plan-store.ts` | `plan`, `plan_step` + uses graph `out_edge` / `in_edge` for `STEP_DEPENDS_ON` | DuckDB `plan` + `plan_step` + `relation` (for STEP_DEPENDS_ON) | Surface unchanged: `savePlan / loadPlan / updatePlanStatus / updateStep / deletePlan / getPendingSteps / getBlockingSteps` |
+| `config/store.ts` | `config_entry`, `config_by_scope` + Lance `config_vec` | DuckDB `config_entry` + HNSW index | Surface unchanged: `put / delete / deleteScope / get / find / search`. Search hydrates ID → row from LMDB |
+
+Keeping the public surface unchanged means the *caller* layer
+(`indexer/`, `daemon/`, `agent/`, RPC handlers, tools) doesn't change
+during this migration -- only the storage backing. That bounds the
+blast radius of the change.
 
 ## DuckDB demotion
 

@@ -4,7 +4,7 @@
 
 **insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in a custom LMDB-backed graph layer and entity embeddings in LanceDB, then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and a user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral).
 
-> **Storage substrate is in transition (2026-05).** Code in `src/insrc/db/` currently reflects the DuckDB consolidation experiment ([plans/storage-migration-duckdb.md](plans/storage-migration-duckdb.md)) which is being reversed in favor of three purpose-built substrates ([plans/graph-storage-lmdb.md](plans/graph-storage-lmdb.md)). This file describes the *target* stack. When in doubt about which file is canonical, prefer the LMDB plan as the source of truth and treat any DuckDB-graph-* files as scheduled for removal.
+> **Storage substrate is in transition (2026-05).** Code in `src/insrc/db/` currently reflects a prior DuckDB consolidation experiment that is being reversed in favor of three purpose-built substrates. Design lives in [plans/graph-storage-lmdb.md](plans/graph-storage-lmdb.md); execution lives in [plans/storage-migration-lmdb-lance.md](plans/storage-migration-lmdb-lance.md). This file describes the *target* stack. When in doubt about which file is canonical, prefer the LMDB plan as the source of truth and treat any DuckDB-graph-* files as scheduled for removal.
 
 Repository: `github.com/insors-ai/insrc`
 
