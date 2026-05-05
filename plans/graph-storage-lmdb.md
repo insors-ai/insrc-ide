@@ -188,7 +188,8 @@ greenfield rebuild on a fresh substrate.
 ### Sub-DB layout
 
 LMDB exposes "sub-databases" (named keyspaces) within a single env. The
-storage layer uses thirteen, grouped by subsystem:
+storage layer uses nineteen sub-DBs (8 graph + 2 plans + 3 conversations
++ 4 todos + 2 config), grouped by subsystem:
 
 **Graph (code knowledge graph):**
 
