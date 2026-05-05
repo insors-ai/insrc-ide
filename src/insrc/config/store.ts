@@ -129,7 +129,18 @@ export class ConfigStore {
 				Buffer.alloc(0),
 			);
 		});
-		// Embedding will be persisted to Lance in Phase 3.4
+		// Phase 3.4: persist embedding to Lance after the LMDB commit
+		if (entry.embedding.length > 0) {
+			const { writeConfigEmbedding } = await import('../db/lance/config-vec.js');
+			await writeConfigEmbedding({
+				id:        entry.id,
+				embedding: new Float32Array(entry.embedding),
+				scope:     row.scope,
+				namespace: row.namespace,
+				category:  row.category,
+				language:  row.language,
+			});
+		}
 	}
 
 	async deleteEntry(id: string): Promise<void> {
@@ -143,6 +154,9 @@ export class ConfigStore {
 			);
 			s.configEntry.remove(id);
 		});
+		// Phase 3.4 cascade: drop the Lance row
+		const { deleteConfigVec } = await import('../db/lance/config-vec.js');
+		await deleteConfigVec(id);
 	}
 
 	async deleteByScope(scope: string): Promise<void> {
@@ -172,6 +186,9 @@ export class ConfigStore {
 				s.configEntry.remove(id);
 			}
 		});
+		// Phase 3.4 cascade: bulk-drop the Lance rows for this scope
+		const { deleteConfigVecsForScope } = await import('../db/lance/config-vec.js');
+		await deleteConfigVecsForScope(scope);
 	}
 
 	async getEntry(id: string): Promise<ConfigEntry | null> {
@@ -210,13 +227,31 @@ export class ConfigStore {
 	}
 
 	async vectorSearch(
-		_queryVec: number[],
-		_where?: string | undefined,
-		_limit = 10,
+		queryVec: number[],
+		where?: string | undefined,
+		limit = 10,
 	): Promise<Array<{ entry: ConfigEntry; distance: number }>> {
-		// Phase 3.4 wires LanceDB ANN. Until then, vector search returns
-		// no matches.
-		return [];
+		if (queryVec.length === 0) return [];
+		let hits;
+		try {
+			const { searchConfigVecs } = await import('../db/lance/config-vec.js');
+			hits = await searchConfigVecs(queryVec, where, limit);
+		} catch {
+			// Match the prior DuckDB-era behaviour: silently return [] when
+			// the vector store rejects the query (dim mismatch / bad
+			// where syntax / etc.).
+			return [];
+		}
+		if (hits.length === 0) return [];
+		const store = await getGraphStore();
+		const out: Array<{ entry: ConfigEntry; distance: number }> = [];
+		for (const h of hits) {
+			const buf = store.configEntry.get(h.id);
+			if (buf === undefined) continue;
+			const row = decodeConfigEntryRow(buf as Buffer);
+			out.push({ entry: rowToEntry(row), distance: h.distance });
+		}
+		return out;
 	}
 }
 

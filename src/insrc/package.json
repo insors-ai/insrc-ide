@@ -93,6 +93,8 @@
     "test:lance-session-vec": "tsx --test db/lance/__tests__/session-vec.test.ts",
     "test:lance-turn-vec": "tsx --test db/lance/__tests__/turn-vec.test.ts",
     "test:conversations-lance-integration": "tsx --test db/__tests__/conversations-lance-integration.test.ts",
+    "test:lance-config-vec": "tsx --test db/lance/__tests__/config-vec.test.ts",
+    "test:config-store-lance-integration": "tsx --test config/__tests__/store-lance-integration.test.ts",
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",
