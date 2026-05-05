@@ -22,8 +22,14 @@ const log = getLogger('config');
 // ---------------------------------------------------------------------------
 
 const DEFAULT_LOCAL_CORE  = 'qwen3-coder:latest';
-const DEFAULT_LOCAL_EMBED = 'qwen3-embedding:4b';
-const DEFAULT_LOCAL_EMBED_DIM = 2560;
+// qwen3-embedding:0.6b (1024-dim) is the v1 default for the LMDB+Lance
+// substrate. Storage / latency win is ~2.5x and ~40% respectively over
+// the 4b/2560-dim variant; quality is essentially neutral for code
+// retrieval (per plans/storage-migration-lmdb-lance.md Phase 0.2).
+// Users can override via the Model Providers pane to qwen3-embedding:4b
+// for higher fidelity.
+const DEFAULT_LOCAL_EMBED = 'qwen3-embedding:0.6b';
+const DEFAULT_LOCAL_EMBED_DIM = 1024;
 const DEFAULT_LOCAL_HOST = 'http://localhost:11434';
 const DEFAULT_LOCAL_PARAMS: ModelParams = { maxInputTokens: 16_384, maxOutputTokens: 8_192 };
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
