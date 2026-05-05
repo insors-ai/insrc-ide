@@ -649,6 +649,138 @@ Keeping the public surface unchanged means the *caller* layer
 during this migration -- only the storage backing. That bounds the
 blast radius of the change.
 
+## Durability, recovery, and operational handling
+
+LMDB's operational model is intentionally minimal -- no checkpoints, no
+WAL replay, no compaction daemon. But "minimal" doesn't mean "zero
+operational concerns"; just a different (smaller) set than DuckDB's. This
+section enumerates each one and pins the default.
+
+### Crash recovery (no work for us)
+
+LMDB has no WAL. Commit writes data pages directly using copy-on-write,
+then atomically toggles between two meta pages at the file head. On
+crash, env-open picks the meta page with the higher *valid* transaction
+ID (each carries a checksum); pages from the in-flight crashed
+transaction are unreachable from that root and become free pages on
+next write. **Recovery is O(1) at env-open time -- no scan, no replay,
+no rebuild step.** This is the failure mode that bit Kuzu and DuckDB
+("checkpoint OOM, database invalidated, restart required") and
+structurally cannot recur.
+
+### Sync / durability mode
+
+`lmdb-js` env-open exposes the `MDB_NOSYNC` / `MDB_NOMETASYNC` /
+`MDB_MAPASYNC` flags. **Default: all flags OFF (full durability).**
+Each commit calls `fsync()` on the data file and the meta page; survives
+power loss. The performance trade is real (each commit waits for
+`fsync`) but acceptable for our write rate (re-indexing batches at file
+boundaries, not per-entity). We never enable any of these flags.
+
+### `mapsize` and file growth
+
+The env's `mapsize` is the maximum file size, set at env open and
+**not growable mid-process** (raising it requires re-opening). Default:
+**1 TiB**. The file is sparse on disk -- LMDB only allocates pages it
+actually writes; `mapsize` just bounds the virtual address range. On
+64-bit systems the VM range is essentially free. 1 TiB gives us
+indefinite headroom for any plausible monorepo over the daemon's
+lifetime.
+
+### Reader-slot management
+
+The one real LMDB gotcha. Each open read transaction holds a reader slot
+in the lock file (`graph.lmdb-lock`) and pins a snapshot. While a
+reader is alive, free pages from concurrent writes can't be reclaimed
+-- file size grows. Worse, when a process dies without closing its
+reader (kill -9, segfault), the slot is *not* auto-cleaned and looks
+indistinguishable from a live reader to subsequent writes.
+
+Defaults:
+- **Read txns are short-lived.** All read code goes through a
+  `withReadTxn(fn)` helper that opens, runs, closes. No reader handle
+  ever escapes the helper. Linted via a typed API that doesn't expose
+  the raw reader.
+- **Daemon startup runs `mdb_reader_check()`.** Sweeps stale slots from
+  killed processes. Logged; non-fatal if it finds anything (informational
+  only).
+- **Periodic re-check.** A daemon-side timer (every 5 minutes) re-runs
+  `mdb_reader_check()` defensively. Cheap (just a lock-file scan).
+
+### Offline compaction
+
+LMDB reuses free pages but never returns them to the OS. After a large
+delete burst (e.g. `deleteRepo` on a 100k-entity repo, or a long-running
+reader that finally closed) the file size is pinned at the high-water
+mark even though the live data is much smaller.
+
+Mitigation: `mdb_env_copy2(env, target, MDB_CP_COMPACT)` writes a new
+file with no fragmentation -- effectively the LMDB equivalent of
+`pg_dump | pg_restore`. Daemon ships `insrc daemon compact` (Phase 7.4)
+which:
+1. Acquires a write lock (queues behind any in-flight write txn)
+2. Calls `mdb_env_copy2` to a sibling temp file
+3. Atomically renames temp → original
+4. Re-opens the env
+
+Not scheduled by default. Manual operation; surfacing the file-size
+delta in `insrc daemon status` lets the user decide when to run it.
+Most installs will never need to.
+
+### Disk-full handling
+
+When `mapsize` is exhausted (won't happen at 1 TiB without genuinely
+filling it) or the underlying disk is full, write returns
+`MDB_MAP_FULL` / `ENOSPC`. **Default: log + surface to caller; do not
+attempt to grow `mapsize` mid-process.** The daemon's write callers
+already handle `Promise.reject` cleanly (the indexer pauses; RPC
+handlers return error to caller). User has to free disk space and
+restart the daemon to recover.
+
+### Env-open failures
+
+Defined error paths at env-open:
+- **Lock-file conflict** (another process has the env open): hard-fail
+  with "another insrc daemon is running on this env path" message
+- **Corrupted meta pages** (both checksums invalid): hard-fail with
+  "graph store corrupted; restore from backup" -- never auto-rebuild
+- **`mapsize` smaller than existing file**: hard-fail with explicit
+  message; user can re-open with larger `mapsize` via env override
+- **Schema-version mismatch**: see next section
+
+Backups (Phase 7.1) are the recovery path for irrecoverable corruption.
+Without a backup, the user re-indexes from source code (acceptable --
+the graph is derived data).
+
+### Schema-version pre-flight
+
+`meta.schema_version` is a u32 written at env initialization. Pre-flight
+check at env-open:
+
+| Stored version | Daemon expected version | Behavior |
+|---|---|---|
+| same | same | proceed normally |
+| stored < expected | newer daemon | run forward migration (Phase 7.2 ships the runner; v1 has no migrations because v1 is the first version) |
+| stored > expected | older daemon | hard-fail: "graph store written by a newer daemon; upgrade or downgrade" -- never silently downgrade |
+| missing (empty env) | any | first boot; initialize schema, set version |
+
+Forward migrations are one-way only (per non-goals). Each migration is a
+function that runs in a single LMDB write txn and bumps
+`schema_version`. The runner is sequential and idempotent up to the
+recorded version.
+
+### Page-level integrity
+
+LMDB checksums the *meta pages* but not the *data pages*. If a disk
+corrupts a data page (bit-rot, drive failure, filesystem bug), LMDB
+reads garbage without complaint. **Mitigation strategy: rely on the
+filesystem.** ZFS / btrfs (Linux) and APFS (macOS) all checksum at the
+filesystem layer. We don't add a second layer of checksumming on top --
+not worth the per-read cost for a developer-tool workload that has
+backups as the recovery path.
+
+Documented in the operations playbook (Phase 7.5).
+
 ## DuckDB demotion
 
 Keep `db/duckdb-pool.ts` (in-memory query engine). Used by:
@@ -687,10 +819,102 @@ For users who had repos registered against the DuckDB build:
 - User runs `insrc repo reindex <path>` (or it auto-runs in the background
   -- decide in 4.1)
 
+## Scale validation strategy
+
+**Lesson from the DuckDB experience:** the substrate looked fine on
+small repos and during early integration. The failure mode (148 GiB
+file, fatal checkpoint OOM at 2 GiB pool, 2560-dim HNSW pressure) only
+showed up at realistic monorepo scale, *after* the migration was in
+production. The remediation cost was massive (full re-design, full
+re-implementation, no recoverable state). We don't repeat that.
+
+**Two levels of validation, gated at different points in the plan:**
+
+### Level 1 -- pre-migration derisking spike (Phase 0.4, *blocking*)
+
+Before any of Phases 1.x-2.x ship, build a minimal LMDB + Lance
+test-rig in `scripts/storage-spike/` that exercises both substrates
+against worst-case workloads. **No daemon code changed; no caller
+rewired.** The spike is a throw-away that answers one question: "do
+LMDB and Lance scale to our worst case before we commit?"
+
+| Test | Workload | Expected outcome |
+|---|---|---|
+| LMDB write throughput | Bulk-load 10M synthetic edges (CSR-style) into LMDB env in one txn; measure ms/M edges + final file size | < 10 GiB; < 5 minutes total |
+| LMDB random read | 100k random `outEdges(id, kind)` cursor scans across a 10M-edge env | p99 < 1 ms warm; p99 < 10 ms cold |
+| LMDB transitive closure | BFS from 100 random roots through DEPENDS_ON-equivalent edges to depth ∞ | < 5 seconds for any single closure on the 10M-edge env |
+| LMDB sustained write | 24-hour loop: write 100k edges, delete 50k edges, repeat. Monitor file size, RSS, page-faults per second | File size grows monotonically but bounded; RSS stable; no perf cliff |
+| Lance write throughput | Bulk-insert 1M qwen3-embedding-0.6B vectors (1024-dim) | < 30 minutes; < 10 GiB on disk |
+| Lance ANN throughput | 10k ANN queries against the 1M-vector index | p99 < 50 ms warm |
+| Lance index rebuild | Force HNSW index rebuild on 1M-vector table | Completes; no OOM at 4 GiB RSS budget |
+| **Hadoop-class realistic load** | Index actual hadoop YARN repo (~12.8k files) into LMDB + Lance via the spike's minimal write path | Completes without OOM, RSS stable, file sizes within projected bounds (~150 MiB LMDB graph, ~700 MiB Lance) |
+
+**The gate:** any test failing or producing results 2x worse than
+projected halts the migration. We then either tune the substrate
+(adjust `mapsize`, change Lance HNSW params, switch to a different
+embedding dim, etc.) or pick a different substrate before any caller
+code is rewritten. **This is the spike's whole point** -- find the
+substrate's failure modes before we depend on them, while the cost of
+backing out is hours rather than weeks.
+
+### Level 2 -- continuous regression gate (Phase 7.3, post-migration)
+
+Once the substrate is committed, the spike is replaced by a permanent
+benchmark suite that runs in CI on every storage-layer change:
+
+- Same workloads as the spike but parameterised across scales:
+  100k / 1M / 10M edges; 100k / 1M / 10M vectors
+- Tracks regressions in both latency (p50, p99) and resource ceilings
+  (peak RSS, file size, page-fault rate)
+- Fails the build if any metric regresses > 30% from baseline
+- Baselines refreshed quarterly with explicit reviewer sign-off
+
+This is the safety net for *future* work on the substrate. The Level 1
+spike is the safety net for *adopting* the substrate at all.
+
+### What we explicitly look for at each scale
+
+| Scale | Watch for |
+|---|---|
+| 100k edges / 100k vectors | Smoke functional correctness; RSS in MB |
+| 1M edges / 1M vectors | First scale where insert latency could degrade; RSS in low GB |
+| 10M edges / 10M vectors | First scale where ANN query latency matters; RSS approaches realistic monorepo ceiling |
+| Hadoop-realistic | The actual workload that broke DuckDB. If LMDB+Lance survives this, the substrate is validated for real use |
+
+The realistic load is the most important. Synthetic benchmarks miss
+shapes specific to real code graphs (high-degree hub nodes for shared
+modules; long tails of single-call functions; embedding clustering by
+repo). The Hadoop test is the closest stand-in we have for the
+historical failure case.
+
+### Test-rig pseudocode for the spike
+
+```ts
+// scripts/storage-spike/lmdb-edge-throughput.ts
+import { open } from 'lmdb';
+
+const env = open({ path: '/tmp/lmdb-spike', mapSize: 100 * 1024 ** 3 });
+const out = env.openDB({ name: 'out_edge', encoding: 'binary' });
+
+const t0 = Date.now();
+await env.transactionAsync(() => {
+  for (let i = 0; i < 10_000_000; i++) {
+    const key = encodeOutEdgeKey(BigInt(i % 1_000_000), 1, BigInt((i + 1) % 1_000_000));
+    out.put(key, Buffer.alloc(0));
+  }
+});
+console.log('10M edges in', Date.now() - t0, 'ms; file size:', statSync('/tmp/lmdb-spike/data.mdb').size);
+```
+
+Each spike test is similarly minimal -- ~50 lines per test. The
+goal isn't to write production code; it's to put real numbers on the
+substrate's behavior at our scale.
+
 ## Sized work
 
 Total estimate: **~5 weeks of focused work** for a production-ready v1
-that lands the dead-code skill.
+that lands the dead-code skill (assumes Phase 0.4 spike passes; if it
+fails, additional time required to remediate or pivot).
 
 | Track | Work | Estimate |
 |---|---|---|
@@ -715,6 +939,9 @@ daemon to come back up at all.
 | Migration friction (users re-index everything) | Acceptable: users already had to wipe their store. Communicate via release notes |
 | Performance regression vs DuckDB-graph | Unlikely (LMDB cursor scans are mmap-fast vs DuckDB B-tree walks), but 6.1 benchmark suite catches it |
 | LMDB max key size (511 bytes by default; configurable to 1024 in `lmdb-js`) | Our keys are bounded: out_edge / in_edge = 17 bytes, name_index ≤ ~256 bytes (long FQNs). Set MDB_MAXKEYSIZE = 1024 at env open to be safe |
+| Stale reader slots from killed daemon processes | `mdb_reader_check()` at daemon startup + periodic re-check. See "Reader-slot management" |
+| Page-level corruption (LMDB checksums meta only, not data) | Rely on filesystem checksums (ZFS / btrfs / APFS); backup as recovery path. Documented in operations playbook (Phase 7.5) |
+| Substrate doesn't scale at production load (the failure mode that bit DuckDB) | **Phase 0.4 derisking spike is a hard gate before any caller code is rewired.** See "Scale validation strategy" |
 
 ## Open questions
 

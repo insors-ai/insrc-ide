@@ -24,10 +24,12 @@ Pre-implementation. The on-disk DuckDB store has been wiped
 | 0.1 | `lmdb-js` version pin + macOS arm64 / linux x64 / linux arm64 build verification | pending | |
 | 0.2 | **Embedding dim downshift to 1024** (qwen3-embedding 4B → 0.6B) | pending | See dedicated section below |
 | 0.3 | LanceDB version pin (re-add the dep at the version we last shipped on) | pending | |
+| **0.4** | **Substrate scale-validation spike** -- LMDB write/read/closure throughput at 10M edges + Lance ANN at 1M vectors + Hadoop-realistic run | **pending (HARD GATE)** | Throw-away `scripts/storage-spike/` rig. Failure halts migration until remediated or substrate re-evaluated. See design doc "Scale validation strategy" |
 | 1.1 | LMDB env + 13 sub-DB scaffolding | pending | per design doc Schema section |
 | 1.2 | ID allocator (u64 entity, u32 repo) + atomic counter in `meta` sub-DB | pending | |
 | 1.3 | Codec (msgpack via `msgpackr`; typed encoder/decoder per record type) | pending | |
 | 1.4 | Test path injection (`setGraphStorePath()` to tmpdir) | pending | parity with current `setStorageDuckDBPath()` |
+| **1.5** | **LMDB env operational config** -- sync flags (full durability, no `MDB_NOSYNC`), `mapsize` 1 TiB, `MDB_MAXKEYSIZE` 1024, env-open error paths | pending | per design doc "Durability, recovery, and operational handling" |
 | 2.1 | `db/repos.ts` -- repo sub-DB CRUD; surface unchanged | pending | |
 | 2.2 | `db/entities.ts` (LMDB side) -- entity sub-DB + name-index; module-stub `ensure` mode | pending | |
 | 2.3 | Edges -- `out_edge` / `in_edge` sub-DBs; `addEdge` / `removeEdge` / `outEdges` / `inEdges` | pending | |
@@ -50,21 +52,29 @@ Pre-implementation. The on-disk DuckDB store has been wiped
 | 5.2 | `indexer/cross-file-resolver.ts` rewrite -- Pass 1 + Pass 2 on LMDB unresolved sub-DB | pending | |
 | 5.3 | All RPC handlers + LLM-facing tools rewired (`db-rpc`, `todos-rpc`, `chat-sessions`, `tools/builtins/graph/`, etc.) | pending | broad caller sweep |
 | 5.4 | LLM-facing graph tool: `graph_sql` (DuckDB) → `graph_query` (typed API) | pending | decision in design doc open-questions |
+| **5.5** | **Daemon-startup `mdb_reader_check()`** + periodic re-check timer (5 min) | pending | clears stale reader slots from killed processes |
 | 6.1 | Delete `db/duckdb-storage-pool.ts`, `db/duckdb-graph-client.ts`, `db/duckdb-graph-schema.ts`, `db/graph-comparison.ts`, `db/__tests__/todos-duckdb.test.ts` | pending | |
 | 6.2 | Remove DuckDB `vss` extension load (storage pool gone); audit `arrow` extension load on remaining in-memory pool | pending | |
 | 6.3 | Source-file header comments updated -- drop dangling `plans/storage-migration-duckdb.md` references | pending | 10 files per audit |
 | 6.4 | CLAUDE.md + design-doc updates (drop "in-transition" banner once landed) | pending | |
 | 7.1 | Hot-backup CLI -- `insrc daemon backup <path>` | pending | LMDB file copy under snapshot read txn |
 | 7.2 | Schema-version field in `meta` sub-DB + pre-flight version check at env open | pending | |
-| 7.3 | Benchmark suite (synthetic 100k / 1M / 10M edges; point-lookup + 1-hop + transitive-closure latency) | pending | regression gate |
+| 7.3 | Benchmark suite (CI-resident regression gate) -- parameterised across 100k / 1M / 10M edges + 100k / 1M / 10M vectors; latency p50/p99 + RSS + file-size; fails CI on > 30% regression | pending | promotes the Phase 0.4 spike from throw-away to permanent gate; baselines refreshed quarterly with reviewer sign-off |
+| **7.4** | **Offline-compact CLI** -- `insrc daemon compact` runs `mdb_env_copy2(MDB_CP_COMPACT)`; surfaces file-size delta in `daemon status` so user knows when to run it | pending | manual op; not scheduled; needed after large delete bursts (e.g. `deleteRepo` on a 100k-entity repo) |
+| **7.5** | **Operations playbook docs** -- env-open error matrix (corrupted meta, mapsize-too-small, schema-version mismatch), recovery procedures, backup-restore flow, page-corruption mitigation guidance (recommend ZFS / btrfs / APFS) | pending | docs-only |
 | 8.1 | `data.code.dead-code` skill on top of `unreachable()` | pending | the new feature this migration unblocks |
 
 ## Phase intent (skeleton -- expand per phase as work starts)
 
 - **Phase 0 -- Decisions before code.** Pin versions, take the embedding-
-  dim downshift, lock in the substrate.
+  dim downshift, lock in the substrate. **Phase 0.4 is a HARD GATE** --
+  scale-validation spike before any caller code is touched. The lesson
+  from the DuckDB consolidation is that "looks fine on small repos" is
+  not a substrate validation; we must measure at realistic monorepo
+  scale (10M edges, Hadoop YARN class) before committing.
 - **Phase 1 -- LMDB foundation.** Env, sub-DBs, codec, ID allocator,
-  test injection. No domain logic yet.
+  test injection, **operational config** (sync flags, mapsize, env-open
+  error paths). No domain logic yet.
 - **Phase 2 -- Subsystem migration.** Each persistent module
   (entities / edges / unresolved / repos / plans / conversations /
   todos / config) gets a LMDB-backed implementation behind its
@@ -75,11 +85,14 @@ Pre-implementation. The on-disk DuckDB store has been wiped
 - **Phase 4 -- Traversal layer.** Pure-JS BFS / DFS / closure / SCC /
   unreachable on top of the LMDB cursor API. The new capability ceiling.
 - **Phase 5 -- Indexer + caller wiring.** indexer + cross-file-resolver
-  + RPC handlers + LLM tools rewired. The daemon comes back up.
+  + RPC handlers + LLM tools rewired. Daemon-startup adds
+  `mdb_reader_check()` to clear stale reader slots from any
+  killed-process predecessors. The daemon comes back up.
 - **Phase 6 -- Cleanup.** Delete dead DuckDB-storage code, source-file
   comments, in-transition CLAUDE.md banner.
 - **Phase 7 -- Polish.** Backup CLI, schema-version pre-flight,
-  benchmark suite as a regression gate.
+  benchmark suite as a regression gate (promotes the Phase 0.4 spike
+  to permanent CI), offline-compact CLI, operations playbook docs.
 - **Phase 8 -- Dead-code skill.** The first new feature on the new
   substrate; demonstrates the traversal layer end-to-end.
 
