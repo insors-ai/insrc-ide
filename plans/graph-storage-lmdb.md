@@ -834,7 +834,11 @@ re-implementation, no recoverable state). We don't repeat that.
 
 Before any of Phases 1.x-2.x ship, build a minimal LMDB + Lance
 test-rig in `scripts/storage-spike/` that exercises both substrates
-against worst-case workloads. **No daemon code changed; no caller
+against worst-case workloads. Note: a synthetic 24-hour sustained-
+write test was originally listed but dropped per user direction --
+"the problem is not the time, but the size; hence the full hadoop
+test." The size axis is what validates the substrate; the Hadoop
+realistic-load test below covers it. **No daemon code changed; no caller
 rewired.** The spike is a throw-away that answers one question: "do
 LMDB and Lance scale to our worst case before we commit?"
 
@@ -843,7 +847,6 @@ LMDB and Lance scale to our worst case before we commit?"
 | LMDB write throughput | Bulk-load 10M synthetic edges (CSR-style) into LMDB env in one txn; measure ms/M edges + final file size | < 10 GiB; < 5 minutes total |
 | LMDB random read | 100k random `outEdges(id, kind)` cursor scans across a 10M-edge env | p99 < 1 ms warm; p99 < 10 ms cold |
 | LMDB transitive closure | BFS from 100 random roots through DEPENDS_ON-equivalent edges to depth ∞ | < 5 seconds for any single closure on the 10M-edge env |
-| LMDB sustained write | 24-hour loop: write 100k edges, delete 50k edges, repeat. Monitor file size, RSS, page-faults per second | File size grows monotonically but bounded; RSS stable; no perf cliff |
 | Lance write throughput | Bulk-insert 1M qwen3-embedding-0.6B vectors (1024-dim) | < 30 minutes; < 10 GiB on disk |
 | Lance ANN throughput | 10k ANN queries against the 1M-vector index | p99 < 50 ms warm |
 | Lance index rebuild | Force HNSW index rebuild on 1M-vector table | Completes; no OOM at 4 GiB RSS budget |
