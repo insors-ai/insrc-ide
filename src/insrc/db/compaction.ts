@@ -16,7 +16,7 @@
 import type { DbClient } from './client.js';
 import type { TurnRecord, ConversationTier } from './conversations.js';
 import {
-  getAllTurns, getAllTurnsForRepo,
+  getAllTurnsWithVectorsForRepo,
   deleteTurnsByIds, addCompactedTurns,
 } from './conversations.js';
 import { isDirective, extractDirectiveText } from './directives.js';
@@ -74,10 +74,12 @@ export async function compactConversations(
     capped: 0,
   };
 
-  // Load all turns
-  const allTurns = opts?.repo
-    ? await getAllTurnsForRepo(db, opts.repo)
-    : await getAllTurns(db);
+  // Load all turns WITH their vectors (compaction needs them for
+  // clustering / centroid / dedup). The helper joins the Lance
+  // turn_vec table; falls back to vector-less turns if Lance is
+  // unavailable, in which case the vector-dependent steps no-op
+  // gracefully.
+  const allTurns = await getAllTurnsWithVectorsForRepo(db, opts?.repo);
 
   if (allTurns.length === 0) return result;
 

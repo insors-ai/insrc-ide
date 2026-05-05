@@ -124,6 +124,28 @@ export async function searchTurnVecs(
 	}));
 }
 
+/**
+ * Bulk-fetch turn embeddings by id. Returns a map id -> Float32Array;
+ * ids without a Lance row are absent from the result.
+ *
+ * Used by `db/conversations.ts:getAllTurnsWithVectorsForRepo` to hydrate
+ * vectors back onto the LMDB-side TurnRecord when the caller needs
+ * them (e.g. compaction's clustering / centroid / dedup steps).
+ */
+export async function getTurnVecsByIds(ids: readonly string[]): Promise<Map<string, Float32Array>> {
+	const out = new Map<string, Float32Array>();
+	if (ids.length === 0) return out;
+	const table = await getTurnVecTable();
+	const idList = ids.map(id => `'${escapeLanceString(id)}'`).join(', ');
+	const rows = await table.query().where(`id IN (${idList})`).toArray();
+	for (const r of rows) {
+		const raw = r['embedding'] as ArrayLike<number> | Float32Array;
+		const vec = raw instanceof Float32Array ? raw : new Float32Array(Array.from(raw));
+		out.set(r['id'] as string, vec);
+	}
+	return out;
+}
+
 // ---------------------------------------------------------------------------
 // Delete
 // ---------------------------------------------------------------------------

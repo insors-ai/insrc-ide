@@ -750,6 +750,38 @@ export async function getAllTurns(_db: DbClient): Promise<TurnRecord[]> {
 	return out;
 }
 
+/**
+ * Same shape as `getAllTurnsForRepo` / `getAllTurns` but joins each
+ * turn's embedding from the Lance `turn_vec` table. Used by the
+ * conversation compaction pipeline (`db/compaction.ts`) where
+ * clustering / centroid / dedup all depend on real vectors.
+ *
+ * Other callers should NOT use this -- the per-call cost is O(N)
+ * Lance lookups, and most read paths don't need vectors. This helper
+ * is gated to compaction explicitly.
+ */
+export async function getAllTurnsWithVectorsForRepo(
+	_db: DbClient,
+	repo?: string,
+): Promise<TurnRecord[]> {
+	const turns = repo !== undefined ? await getAllTurnsForRepo(_db, repo) : await getAllTurns(_db);
+	if (turns.length === 0) return turns;
+	const ids = turns.map(t => turnIdFor(t.sessionId, t.idx));
+	try {
+		const { getTurnVecsByIds } = await import('./lance/turn-vec.js');
+		const vecs = await getTurnVecsByIds(ids);
+		return turns.map(t => {
+			const v = vecs.get(turnIdFor(t.sessionId, t.idx));
+			return v !== undefined ? { ...t, vector: Array.from(v) } : t;
+		});
+	} catch {
+		// Lance unavailable / dim mismatch / etc.: fall back to vectors-
+		// less turns. Compaction's vector-dependent steps will skip; the
+		// directive-scan + time-based-tiering + size-cap steps still run.
+		return turns;
+	}
+}
+
 export async function getConversationStats(
 	_db: DbClient,
 	repo?: string,
