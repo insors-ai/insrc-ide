@@ -100,7 +100,7 @@ export async function closeLanceConn(): Promise<void> {
  * only when creating the table (Lance requires schema inference from
  * a sample row); on subsequent opens the seed is ignored.
  */
-export async function openOrCreateTable<T extends Record<string, unknown>>(
+export async function openOrCreateTable<T>(
 	conn: lancedb.Connection,
 	name: string,
 	seedIfMissing: () => T[],
@@ -116,5 +116,8 @@ export async function openOrCreateTable<T extends Record<string, unknown>>(
 			`Lance needs a sample row to infer the schema`,
 		);
 	}
-	return conn.createTable(name, seed);
+	// Lance's createTable typing requires Record<string, unknown>[] but
+	// accepts any plain-object row at runtime. The cast is safe for
+	// our typed seed rows.
+	return conn.createTable(name, seed as unknown as Record<string, unknown>[]);
 }

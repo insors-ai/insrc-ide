@@ -1,8 +1,8 @@
 /**
  * Search layer — vector ANN + graph queries scoped to a repo's
- * dependency closure (plans/storage-migration-duckdb.md Phase B.6).
+ * dependency closure.
  *
- * Public API (unchanged from Lance days):
+ * Public API (preserved across the LMDB+Lance migration):
  *   resolveClosure  — transitive DEPENDS_ON repos from a root repo
  *   searchEntities  — vector ANN search scoped to closure repos
  *   findCallers     — graph: 1-hop CALLS predecessors
@@ -10,19 +10,18 @@
  *   findDefinedIn   — graph: all entities DEFINED IN a file
  *   findImports     — graph: all files/modules a file IMPORTS
  *
- * All queries route through DuckDB (graph + vector now live in the
- * same `entity` / `relation` tables on the storage pool). Vector
- * search uses `array_distance(embedding, ?)` with cosine metric;
- * the HNSW index from B.3 makes ORDER BY ... LIMIT k index-served
- * in the configured-VSS path. If vss failed to load at startup
- * (logged on the storage pool), the planner falls back to a
- * brute-force scan -- correct, just O(N) instead of O(log N).
+ * Phase 3.2 status:
+ *   - searchEntities now routes ANN through LanceDB's `entity_vec`
+ *     table; hits are hydrated to full Entity objects from LMDB.
+ *   - resolveClosure / findCallers / findCallees / findDefinedIn /
+ *     findImports still call into the legacy `db.duck` path. They
+ *     return [] until Phase 4.2 wires them to the LMDB graph.
  */
 
-import { arrayValue } from '@duckdb/node-api';
 import type { DbClient } from './client.js';
 import type { Entity } from '../shared/types.js';
-import { rowToEntity } from './entities.js';
+import { rowToEntity, getEntitiesByIds } from './entities.js';
+import { searchEntityVecs, type EntityVecFilter } from './lance/entity-vec.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('search');
@@ -84,7 +83,7 @@ export async function resolveClosure(db: DbClient, repoPath: string): Promise<st
 export type SearchFilter = 'all' | 'code' | 'artifact';
 
 export async function searchEntities(
-  db:           DbClient,
+  _db:          DbClient,
   queryVec:     number[],
   closureRepos: string[],
   limit         = 10,
@@ -95,28 +94,38 @@ export async function searchEntities(
     return [];
   }
 
-  const repoPlaceholders = closureRepos.map(() => '?').join(', ');
-  const conditions: string[] = [
-    'embedding IS NOT NULL',
-    `repo IN (${repoPlaceholders})`,
-  ];
-  if (filter === 'code')     conditions.push('artifact = FALSE');
-  if (filter === 'artifact') conditions.push('artifact = TRUE');
-
-  const params: unknown[] = [...closureRepos, arrayValue(queryVec), limit];
+  // Two-step: ANN against the Lance entity_vec table for hits +
+  // distances, then hydrate full Entity rows from LMDB by id. The
+  // hydration step also serves as a consistency check -- if Lance
+  // has a row whose LMDB counterpart was tombstoned in a prior
+  // cascade, the hydration silently drops it.
   const t0 = Date.now();
-  const rows = await db.duck.query(
-    `SELECT * FROM entity
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY array_distance(embedding, ?::FLOAT[${queryVec.length}])
-     LIMIT ?`,
-    params as never[],
+  const hits = await searchEntityVecs(
+    queryVec,
+    closureRepos,
+    limit,
+    filter as EntityVecFilter,
   );
-  const results = rows.map(rowToEntity);
+  const ids = hits.map(h => h.id);
+  const entities = await getEntitiesByIds(_db, ids);
+
+  // Preserve the Lance-side ranking. getEntitiesByIds doesn't
+  // guarantee order; reorder by hits[].
+  const byId = new Map<string, Entity>();
+  for (const e of entities) byId.set(e.id, e);
+  const ordered: Entity[] = [];
+  for (const h of hits) {
+    const e = byId.get(h.id);
+    if (e !== undefined) ordered.push(e);
+  }
+
   const elapsed = `${Date.now() - t0}ms`;
-  log.info({ hits: results.length, limit, filter, elapsed }, 'vector search');
-  log.debug({ names: results.map(e => `${e.kind}:${e.name}`), elapsed }, 'vector search details');
-  return results;
+  log.info({ hits: ordered.length, limit, filter, elapsed }, 'vector search');
+  log.debug(
+    { names: ordered.map(e => `${e.kind}:${e.name}`), elapsed },
+    'vector search details',
+  );
+  return ordered;
 }
 
 // ---------------------------------------------------------------------------

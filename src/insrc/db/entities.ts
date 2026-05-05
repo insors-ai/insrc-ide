@@ -285,6 +285,7 @@ export async function reindexFile(
 		);
 	}
 
+	const toLanceDelete: string[] = [];
 	await withWriteTxn(s => {
 		// Resolve / allocate the repoId for this path (cache it for
 		// the rest of the pass)
@@ -354,12 +355,23 @@ export async function reindexFile(
 		}
 
 		// 3. Tombstone unseen (= deleted from the file).
+		for (const u64 of existing) {
+			if (!seen.has(u64)) {
+				const sid = lookupStringIdByU64(s, u64);
+				if (sid !== undefined) toLanceDelete.push(sid);
+			}
+		}
 		const toDelete: bigint[] = [];
 		for (const u64 of existing) {
 			if (!seen.has(u64)) toDelete.push(u64);
 		}
 		detachDeleteEntitiesInTxn(s, toDelete);
 	});
+	// After LMDB commits, drop Lance rows for the tombstoned entities.
+	if (toLanceDelete.length > 0) {
+		const { deleteEntityVecsByIds } = await import('./lance/entity-vec.js');
+		await deleteEntityVecsByIds(toLanceDelete);
+	}
 }
 
 export async function deleteEntitiesForFile(_db: DbClient, filePath: string): Promise<void> {
@@ -388,6 +400,12 @@ export async function deleteEntitiesForRepo(_db: DbClient, repo: string): Promis
 	if (repoId === undefined) return;
 	const ids = await collectEntityU64sByRepo(store, repoId);
 	await detachDeleteEntities(store, ids);
+	// Repo-scoped Lance cleanup: belt-and-suspenders alongside the
+	// per-id cleanup detachDeleteEntities does. Catches any rows whose
+	// LMDB string-id mapping was already missing (e.g. corruption-
+	// recovery paths).
+	const { deleteEntityVecsForRepo } = await import('./lance/entity-vec.js');
+	await deleteEntityVecsForRepo(repo);
 }
 
 export async function getEntity(_db: DbClient, id: string): Promise<Entity | null> {
@@ -513,13 +531,18 @@ export async function listUnembeddedEntities(_db: DbClient, repo: string): Promi
 export async function updateEmbedding(
 	_db: DbClient,
 	id: string,
-	_embedding: number[],
+	embedding: number[],
 	embeddingModel: string,
 ): Promise<void> {
-	// Phase 3.2 wires the actual vector to LanceDB. For Phase 2.2 we
-	// only update the EntityRow's `embeddingModel` field so the
-	// "is this entity embedded?" predicate (`embeddingModel !== ''`)
-	// behaves correctly during the migration.
+	// Two-step write: update the LMDB row first (sync inside a write
+	// txn), then persist the vector to Lance. Lance write happens after
+	// the LMDB commit so a Lance failure leaves the EntityRow's
+	// `embeddingModel` advertising "embedded" -- caller can re-run.
+	let repoId = -1;
+	let repoPath = '';
+	let kind = '';
+	let artifact = false;
+	let touched = false;
 	await withWriteTxn(s => {
 		const u64 = s.entityIdByString.get(id) as bigint | number | undefined;
 		if (u64 === undefined) return; // no-op (matches prior DuckDB UPDATE behaviour)
@@ -527,8 +550,24 @@ export async function updateEmbedding(
 		if (row === null) return;
 		const next: EntityRow = { ...row, embeddingModel };
 		s.entity.put(encodeEntityKey(toBigInt(u64)), encodeEntityRow(next));
+		repoId = row.repoId;
+		kind = row.kind;
+		artifact = row.artifact;
+		touched = true;
 	});
-	// _embedding will be persisted to Lance in Phase 3.2.
+	if (!touched) return;
+	if (embedding.length > 0) {
+		const store = await getGraphStore();
+		repoPath = readRepoPath(store, repoId) ?? '';
+		const { writeEntityEmbedding } = await import('./lance/entity-vec.js');
+		await writeEntityEmbedding({
+			id,
+			embedding: new Float32Array(embedding),
+			repo: repoPath,
+			kind,
+			artifact,
+		});
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -635,8 +674,19 @@ async function collectEntityU64sByRepo(store: GraphStore, repoId: number): Promi
  */
 async function detachDeleteEntities(store: GraphStore, u64s: readonly bigint[]): Promise<void> {
 	if (u64s.length === 0) return;
-	void store;
+	// Capture string IDs BEFORE the delete (we lose the entity_id_by_string
+	// mapping inside the txn). After LMDB commits, drop the corresponding
+	// Lance rows.
+	const stringIds: string[] = [];
+	for (const u64 of u64s) {
+		const sid = lookupStringIdByU64(store, u64);
+		if (sid !== undefined) stringIds.push(sid);
+	}
 	await withWriteTxn(s => detachDeleteEntitiesInTxn(s, u64s));
+	if (stringIds.length > 0) {
+		const { deleteEntityVecsByIds } = await import('./lance/entity-vec.js');
+		await deleteEntityVecsByIds(stringIds);
+	}
 }
 
 /**
