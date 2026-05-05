@@ -59,7 +59,7 @@ import { PATHS } from '../../shared/paths.js';
 const log = getLogger('graph-store');
 
 // ---------------------------------------------------------------------------
-// Env config (Phase 1.5 will tune these formally)
+// Env config (per design doc "Durability, recovery, and operational handling")
 // ---------------------------------------------------------------------------
 
 /**
@@ -80,6 +80,83 @@ const MAX_DBS = 32;
 // `MDB_MAXKEYSIZE=0` (compile-time unlimited). Keys can run up to
 // ~8000 bytes. Our key shapes are well under this -- name_index is
 // the longest at (u32 + u8 + utf8 name); long Java FQNs fit easily.
+
+/**
+ * Schema version stored under `meta.schema_version`. Bumped only when
+ * the on-disk wire format changes in a non-additive way (e.g. an enum
+ * slot is removed or repurposed). Adding a new sub-DB or a new field
+ * to a record value is additive and does NOT bump the version.
+ *
+ * Pre-flight policy at env-open:
+ *   stored == expected -> proceed
+ *   stored <  expected -> run forward migration (none yet at v1)
+ *   stored >  expected -> hard-fail (newer daemon wrote it; never
+ *                         silently downgrade)
+ *   missing            -> first boot; write the version
+ */
+export const SCHEMA_VERSION = 1;
+
+const META_SCHEMA_VERSION = 'schema_version';
+
+// ---------------------------------------------------------------------------
+// Custom error classes for env-open failure paths
+// ---------------------------------------------------------------------------
+
+export class LmdbStoreError extends Error {
+	constructor(message: string, readonly cause?: unknown) {
+		super(message);
+		this.name = 'LmdbStoreError';
+	}
+}
+
+export class LmdbStoreLockConflict extends LmdbStoreError {
+	constructor(path: string, cause?: unknown) {
+		super(
+			`LMDB env at '${path}' is locked by another process. ` +
+			`Stop the running daemon (or remove the lock if it crashed) ` +
+			`before retrying.`,
+			cause,
+		);
+		this.name = 'LmdbStoreLockConflict';
+	}
+}
+
+export class LmdbStoreCorrupted extends LmdbStoreError {
+	constructor(path: string, cause?: unknown) {
+		super(
+			`LMDB env at '${path}' appears corrupted (both meta pages ` +
+			`invalid). Restore from backup or delete the file to ` +
+			`re-index from source. Never auto-rebuild -- the user must ` +
+			`acknowledge data loss.`,
+			cause,
+		);
+		this.name = 'LmdbStoreCorrupted';
+	}
+}
+
+export class LmdbStoreMapsizeTooSmall extends LmdbStoreError {
+	constructor(path: string, requestedGiB: number, cause?: unknown) {
+		super(
+			`LMDB env at '${path}' is larger than the requested mapsize ` +
+			`(${requestedGiB} GiB). Re-open with INSRC_LMDB_MAPSIZE_GIB ` +
+			`set to at least the existing file size.`,
+			cause,
+		);
+		this.name = 'LmdbStoreMapsizeTooSmall';
+	}
+}
+
+export class LmdbStoreSchemaVersionMismatch extends LmdbStoreError {
+	constructor(stored: number, expected: number) {
+		super(
+			`LMDB graph store was written by a newer daemon ` +
+			`(schema_version ${stored}) than this one expects ` +
+			`(${expected}). Upgrade the daemon, or downgrade by ` +
+			`wiping the env and re-indexing -- never silently downgrade.`,
+		);
+		this.name = 'LmdbStoreSchemaVersionMismatch';
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Sub-DB shape definitions
@@ -168,14 +245,20 @@ export async function getGraphStore(): Promise<GraphStore> {
 			mkdirSync(parent, { recursive: true });
 		}
 
-		const root = open({
-			path:      _path,
-			mapSize:   mapsizeBytes,
-			maxDbs:    MAX_DBS,
-			// Full durability default (no MDB_NOSYNC / MDB_NOMETASYNC /
-			// MDB_MAPASYNC) -- per design doc "Sync / durability mode".
-			// Phase 1.5 lands this formally with override-via-env-var.
-		});
+		// Wrap the lmdb-js open() with classified error mapping per the
+		// design doc "Env-open failures" matrix. Full durability default
+		// (no MDB_NOSYNC / MDB_NOMETASYNC / MDB_MAPASYNC) -- the spike
+		// validated this is plenty fast at our write rate.
+		let root: RootDatabase;
+		try {
+			root = open({
+				path:    _path,
+				mapSize: mapsizeBytes,
+				maxDbs:  MAX_DBS,
+			});
+		} catch (e) {
+			throw classifyOpenError(e, _path, mapsizeBytes / 1024 ** 3);
+		}
 
 		const open_ = (name: string, opts: { dupSort?: boolean } = {}): AnyDb => root.openDB({
 			name,
@@ -219,8 +302,27 @@ export async function getGraphStore(): Promise<GraphStore> {
 			configByScope:      open_('config_by_scope', { dupSort: true }),
 		};
 
+		// Schema-version pre-flight check. Wrapped in a write txn so the
+		// first-boot write commits before any caller can read.
+		const stored = readSchemaVersion(store);
+		if (stored === undefined) {
+			// First boot: write the version
+			await root.transaction(() => writeSchemaVersion(store, SCHEMA_VERSION));
+		} else if (stored > SCHEMA_VERSION) {
+			await root.close();
+			throw new LmdbStoreSchemaVersionMismatch(stored, SCHEMA_VERSION);
+		}
+		// stored < SCHEMA_VERSION would trigger forward migrations
+		// (Phase 7.2 ships the runner; v1 has no migrations because v1
+		// is the first version)
+
 		log.info(
-			{ initMs: Date.now() - t0, mapsizeGiB: mapsizeBytes / 1024 ** 3, path: _path },
+			{
+				initMs:        Date.now() - t0,
+				mapsizeGiB:    mapsizeBytes / 1024 ** 3,
+				schemaVersion: SCHEMA_VERSION,
+				path:          _path,
+			},
 			'lmdb graph store initialised',
 		);
 		_instance = store;
@@ -296,4 +398,49 @@ function readMapsizeBytes(): number {
 
 function errMessage(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Map raw lmdb-js open() errors onto our typed error classes per the
+ * design doc "Env-open failures" matrix.
+ */
+function classifyOpenError(e: unknown, path: string, requestedGiB: number): LmdbStoreError {
+	const msg = errMessage(e).toLowerCase();
+	// Lock conflict -- another process already has the env open
+	if (msg.includes('resource temporarily unavailable')
+	 || msg.includes('busy')
+	 || msg.includes('lock')) {
+		return new LmdbStoreLockConflict(path, e);
+	}
+	// Mapsize too small for existing file
+	if (msg.includes('mdb_map_full')
+	 || msg.includes('map_full')
+	 || msg.includes('map size limit')) {
+		return new LmdbStoreMapsizeTooSmall(path, requestedGiB, e);
+	}
+	// Corrupted meta pages -- catch the LMDB "invalid argument" /
+	// "page is corrupted" / "MDB_VERSION_MISMATCH" / "MDB_INVALID"
+	// family of errors
+	if (msg.includes('mdb_invalid')
+	 || msg.includes('mdb_version_mismatch')
+	 || msg.includes('not an lmdb')
+	 || msg.includes('corrupt')
+	 || msg.includes('invalid file')) {
+		return new LmdbStoreCorrupted(path, e);
+	}
+	// Unknown -- preserve the original error message inside our class
+	return new LmdbStoreError(`failed to open LMDB env at '${path}': ${errMessage(e)}`, e);
+}
+
+function readSchemaVersion(store: GraphStore): number | undefined {
+	// `meta` sub-DB uses default (msgpack) value encoding -- numbers
+	// round-trip cleanly without manual buffer packing.
+	const v = store.meta.get(META_SCHEMA_VERSION);
+	if (v === undefined) return undefined;
+	if (typeof v === 'number') return v;
+	throw new LmdbStoreError(`meta.schema_version has unexpected type: ${typeof v}`);
+}
+
+function writeSchemaVersion(store: GraphStore, version: number): void {
+	void store.meta.put(META_SCHEMA_VERSION, version);
 }

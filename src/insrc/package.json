@@ -77,6 +77,7 @@
     "test:graph-store": "tsx --test db/graph/__tests__/store.test.ts",
     "test:graph-ids": "tsx --test db/graph/__tests__/ids.test.ts",
     "test:graph-codec": "tsx --test db/graph/__tests__/codec.test.ts",
+    "test:graph-ops": "tsx --test db/graph/__tests__/operational.test.ts",
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",
