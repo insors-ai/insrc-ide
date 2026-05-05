@@ -242,6 +242,126 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 	});
 }
 
+/**
+ * Atomic re-index of a single file. Phase 2.9 of the LMDB+Lance
+ * migration: snapshot the file's existing entities, upsert each
+ * parsed entity (allocating new u64 IDs as needed), then tombstone
+ * any entities that disappeared from the parse. All in one LMDB
+ * write transaction so readers never see a half-state.
+ *
+ * Compared to calling `deleteEntitiesForFile` followed by
+ * `upsertEntities`:
+ *   - Atomic: no window where rows are deleted but new ones not yet
+ *     written.
+ *   - Idempotent: parsing the same file twice produces the same row
+ *     set (same SHA → same u64 → same EntityRow).
+ *   - Body-write short-circuit: rows whose `contentHash` matches the
+ *     prior parse are skipped (typical re-index hits this for
+ *     unchanged entities).
+ *   - Cascade: tombstoned entities take their incident edges with
+ *     them via the same prefix-scan logic used by
+ *     `deleteEntitiesForFile`.
+ *
+ * `repoPath` is the repo root path (e.g. `/repo/foo`); `filePath` is
+ * the absolute path of the file being re-parsed (matches the prior
+ * call shape used by the indexer). Caller passes the parsed entities
+ * exactly as returned by the parser (`Entity[]` with string SHA ids).
+ *
+ * Auto-allocates a u32 repoId for `repoPath` if the repo isn't
+ * registered yet (matches the existing `upsertEntities` behaviour).
+ */
+export async function reindexFile(
+	_db: DbClient,
+	repoPath: string,
+	filePath: string,
+	parsed: Entity[],
+): Promise<void> {
+	// Dedupe by SHA id (same protective pass `upsertEntities` does)
+	const { unique, duplicateIds } = dedupeEntitiesById(parsed);
+	if (duplicateIds.size > 0) {
+		log.warn(
+			{ totalDuplicates: duplicateIds.size, kept: unique.length, original: parsed.length, file: filePath },
+			'reindexFile: collapsed duplicate entity ids in input batch (last-wins)',
+		);
+	}
+
+	await withWriteTxn(s => {
+		// Resolve / allocate the repoId for this path (cache it for
+		// the rest of the pass)
+		let repoId = repoIdByPathInTxn(s, repoPath);
+		if (repoId === undefined) {
+			repoId = allocateRepoIdInTxn(s);
+			const row: RepoRow = {
+				id:          repoId,
+				path:        repoPath,
+				name:        '',
+				addedAt:     Date.now(),
+				lastIndexed: 0,
+				status:      'pending',
+				errorMsg:    '',
+			};
+			s.repo.put(encodeRepoKey(repoId), encodeRepoRow(row));
+		}
+
+		// 1. Snapshot existing entities for this (repoId, filePath).
+		//    Scan the entity sub-DB; cheap at typical scale (a few
+		//    dozen entities per file).
+		const existing: bigint[] = [];
+		for (const { key, value } of s.entity.getRange()) {
+			const row = decodeEntityRow(value as Buffer);
+			if (row.repoId !== repoId) continue;
+			if (toAbsolutePath(row.filePath, repoPath) !== filePath) continue;
+			existing.push(decodeKeyU64(key as Buffer));
+		}
+
+		// 2. Upsert each parsed entity, tracking which u64s we touched.
+		const seen = new Set<bigint>();
+		for (const e of unique) {
+			let u64 = lookupU64ByStringId(s, e.id);
+			if (u64 === undefined) {
+				u64 = allocateEntityIdInTxn(s);
+				s.entityIdByString.put(e.id, u64);
+			}
+
+			// Module-stub semantics: don't overwrite an existing module
+			// (matches the prior DuckDB ON CONFLICT DO NOTHING split).
+			const prevBuf = s.entity.get(encodeEntityKey(u64));
+			if (prevBuf !== undefined && e.kind === 'module') {
+				seen.add(u64);
+				continue;
+			}
+
+			// Body-write short-circuit: skip the put if everything that
+			// would change is identical. We compare contentHash + body
+			// (contentHash alone is a hash collision risk but body adds
+			// the actual-bytes safety net).
+			const newRow = entityToRow(e, repoId, repoPath);
+			if (prevBuf !== undefined) {
+				const prev = decodeEntityRow(prevBuf as Buffer);
+				if (prev.contentHash === newRow.contentHash
+				 && prev.body === newRow.body
+				 && prev.startLine === newRow.startLine
+				 && prev.endLine === newRow.endLine
+				 && prev.signature === newRow.signature
+				 && prev.embeddingModel === newRow.embeddingModel) {
+					seen.add(u64);
+					continue; // unchanged -- skip write
+				}
+			}
+
+			s.entity.put(encodeEntityKey(u64), encodeEntityRow(newRow));
+			seen.add(u64);
+		}
+
+		// 3. Tombstone unseen (= deleted from the file).
+		const toDelete: bigint[] = [];
+		for (const u64 of existing) {
+			if (!seen.has(u64)) toDelete.push(u64);
+		}
+		detachDeleteEntitiesInTxn(s, toDelete);
+	});
+}
+
 export async function deleteEntitiesForFile(_db: DbClient, filePath: string): Promise<void> {
 	const store = await getGraphStore();
 	const ids = await collectEntityU64sByFile(store, filePath);
@@ -464,6 +584,10 @@ const encodeRepoKey = (id: number): Buffer => {
 };
 
 async function collectEntityU64sByFile(store: GraphStore, file: string): Promise<bigint[]> {
+	return collectEntityU64sByFileInTxn(store, file);
+}
+
+function collectEntityU64sByFileInTxn(store: GraphStore, file: string): bigint[] {
 	const out: bigint[] = [];
 	const repoCache = new Map<number, string>();
 	for (const { key, value } of store.entity.getRange()) {
@@ -497,24 +621,33 @@ async function collectEntityU64sByRepo(store: GraphStore, repoId: number): Promi
  */
 async function detachDeleteEntities(store: GraphStore, u64s: readonly bigint[]): Promise<void> {
 	if (u64s.length === 0) return;
-	await withWriteTxn(s => {
-		for (const u64 of u64s) {
-			// Forward direction: edges where this entity is the `from`.
-			// Walk out_edge by prefix(u64), removing both the out_edge
-			// entry and the matching in_edge mirror at (to, kind, u64).
-			sweepOutgoingEdges(s, u64);
-			// Reverse direction: edges where this entity is the `to`.
-			// Walk in_edge by prefix(u64), removing both the in_edge
-			// entry and the matching out_edge mirror at (from, kind, u64).
-			sweepIncomingEdges(s, u64);
-			// Entity row + string-id index
-			const stringId = lookupStringIdByU64(s, u64);
-			if (stringId !== undefined) {
-				s.entityIdByString.remove(stringId);
-			}
-			s.entity.remove(encodeEntityKey(u64));
+	void store;
+	await withWriteTxn(s => detachDeleteEntitiesInTxn(s, u64s));
+}
+
+/**
+ * Sync, in-txn variant of `detachDeleteEntities`. Used by the bulk
+ * `reindexFile` helper (Phase 2.9) so the snapshot + upsert + tombstone
+ * pass commits as a single LMDB transaction.
+ */
+function detachDeleteEntitiesInTxn(s: GraphStore, u64s: readonly bigint[]): void {
+	if (u64s.length === 0) return;
+	for (const u64 of u64s) {
+		// Forward direction: edges where this entity is the `from`.
+		// Walk out_edge by prefix(u64), removing both the out_edge
+		// entry and the matching in_edge mirror at (to, kind, u64).
+		sweepOutgoingEdges(s, u64);
+		// Reverse direction: edges where this entity is the `to`.
+		// Walk in_edge by prefix(u64), removing both the in_edge
+		// entry and the matching out_edge mirror at (from, kind, u64).
+		sweepIncomingEdges(s, u64);
+		// Entity row + string-id index
+		const stringId = lookupStringIdByU64(s, u64);
+		if (stringId !== undefined) {
+			s.entityIdByString.remove(stringId);
 		}
-	});
+		s.entity.remove(encodeEntityKey(u64));
+	}
 }
 
 function sweepOutgoingEdges(s: GraphStore, u64: bigint): void {
