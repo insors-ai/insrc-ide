@@ -1,0 +1,22 @@
+{
+  "input": {
+    "connectionId": "pg-prod",
+    "schema": "public"
+  },
+  "fakeTools": {
+    "db_sql_list_tables": {
+      "content": "**pg-prod** -- 3 tables",
+      "isError": false,
+      "data": {
+        "target": "postgres",
+        "tables": [
+          { "name": "orders", "schema": "public", "kind": "table" },
+          { "name": "users",  "schema": "public", "kind": "table" },
+          { "name": "v_revenue_by_user", "schema": "public", "kind": "view" }
+        ],
+        "truncated": false
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

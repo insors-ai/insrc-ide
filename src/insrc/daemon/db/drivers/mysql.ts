@@ -22,12 +22,14 @@ import type {
 	DistinctResult,
 	HistogramRequest,
 	HistogramResult,
+	IndexListing,
 	OutlierRequest,
 	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
 	SchemaDescription,
+	TableListing,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -53,6 +55,11 @@ import { prismaSchemaDescription } from './rdbms-prisma.js';
 const log = getLogger('db-mysql');
 
 const POOL_MAX = 3;
+
+function clampListLimit(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return 500;
+	return Math.min(Math.max(1, Math.floor(n)), 5000);
+}
 
 class MysqlDriver implements RdbmsDriver {
 	readonly family = 'rdbms' as const;
@@ -189,6 +196,77 @@ class MysqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {
+		const cap = clampListLimit(opts?.limit);
+		const params: unknown[] = [];
+		let where = `WHERE table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')`;
+		if (typeof opts?.schema === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.schema)) {
+			params.push(opts.schema);
+			where += ` AND table_schema = ?`;
+		}
+		const sql = `SELECT table_schema, table_name, table_type FROM information_schema.tables ${where} ORDER BY table_schema, table_name LIMIT ${cap + 1}`;
+		const [rows] = await withTimeout(
+			this.pool.query(sql, params as unknown[]),
+			SAMPLE_TIMEOUT_MS,
+		) as unknown as [{ TABLE_SCHEMA?: string; table_schema?: string; TABLE_NAME?: string; table_name?: string; TABLE_TYPE?: string; table_type?: string }[], unknown];
+		const truncated = rows.length > cap;
+		const sliced = truncated ? rows.slice(0, cap) : rows;
+		return {
+			target: 'mysql',
+			tables: sliced.map(r => {
+				const schema = String(r.TABLE_SCHEMA ?? r.table_schema ?? '');
+				const name = String(r.TABLE_NAME ?? r.table_name ?? '');
+				const type = String(r.TABLE_TYPE ?? r.table_type ?? '');
+				return {
+					name,
+					schema,
+					kind: type === 'VIEW' ? 'view' : 'table' as 'table' | 'view',
+				};
+			}),
+			truncated,
+		};
+	}
+
+	async listIndexes(target: string): Promise<IndexListing> {
+		quoteTarget(target, MYSQL_DIALECT);
+		// Default to current schema; allow `schema.table` form.
+		let schema: string | null = null;
+		let table = target;
+		const dot = target.indexOf('.');
+		if (dot > 0) { schema = target.slice(0, dot); table = target.slice(dot + 1); }
+		const sql = schema !== null
+			? `SELECT index_name, non_unique,
+			          GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols
+			   FROM information_schema.statistics
+			   WHERE table_schema = ? AND table_name = ?
+			   GROUP BY index_name, non_unique
+			   ORDER BY index_name`
+			: `SELECT index_name, non_unique,
+			          GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols
+			   FROM information_schema.statistics
+			   WHERE table_schema = DATABASE() AND table_name = ?
+			   GROUP BY index_name, non_unique
+			   ORDER BY index_name`;
+		const params = schema !== null ? [schema, table] : [table];
+		const [rows] = await withTimeout(
+			this.pool.query(sql, params),
+			SAMPLE_TIMEOUT_MS,
+		) as unknown as [{ INDEX_NAME?: string; index_name?: string; NON_UNIQUE?: number; non_unique?: number; cols?: string }[], unknown];
+		return {
+			target,
+			indexes: rows.map(r => {
+				const name = String(r.INDEX_NAME ?? r.index_name ?? '');
+				const nonUnique = Number(r.NON_UNIQUE ?? r.non_unique ?? 1);
+				return {
+					name,
+					columns: String(r.cols ?? '').split(',').filter(c => c.length > 0),
+					unique: nonUnique === 0,
+					primaryKey: name === 'PRIMARY',
+				};
+			}),
+		};
 	}
 
 	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {

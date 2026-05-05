@@ -31,12 +31,14 @@ import type {
 	DistinctResult,
 	HistogramRequest,
 	HistogramResult,
+	IndexListing,
 	OutlierRequest,
 	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
 	SchemaDescription,
+	TableListing,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -59,6 +61,11 @@ import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-mssql');
+
+function clampMssqlListLimit(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return 500;
+	return Math.min(Math.max(1, Math.floor(n)), 5000);
+}
 
 interface MssqlParams {
 	readonly host: string;
@@ -236,6 +243,85 @@ class MssqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {
+		const cap = clampMssqlListLimit(opts?.limit);
+		// MSSQL: union sys.tables + sys.views, exclude sys schemas.
+		// schema filter is bound; the LIMIT-equivalent is TOP at SELECT.
+		const params: unknown[] = [];
+		let schemaWhere = `s.name NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')`;
+		if (typeof opts?.schema === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.schema)) {
+			params.push(opts.schema);
+			schemaWhere += ` AND s.name = @p1`;
+		}
+		const sql = `
+			SELECT TOP ${cap + 1} schema_name, name, kind
+			FROM (
+				SELECT s.name AS schema_name, t.name AS name, 'table' AS kind
+				FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id
+				UNION ALL
+				SELECT s.name AS schema_name, v.name AS name, 'view' AS kind
+				FROM sys.views v JOIN sys.schemas s ON s.schema_id = v.schema_id
+			) AS u
+			WHERE ${schemaWhere.replace(/s\.name/g, 'u.schema_name')}
+			ORDER BY u.schema_name, u.name
+		`;
+		const rows = await withTimeout(this.run(sql, params as unknown[]), SAMPLE_TIMEOUT_MS);
+		const truncated = rows.length > cap;
+		const sliced = truncated ? rows.slice(0, cap) : rows;
+		return {
+			target: 'mssql',
+			tables: sliced.map(r => ({
+				name: String(r['name'] ?? ''),
+				schema: String(r['schema_name'] ?? ''),
+				kind: r['kind'] === 'view' ? 'view' : 'table',
+			})),
+			truncated,
+		};
+	}
+
+	async listIndexes(target: string): Promise<IndexListing> {
+		quoteTarget(target, MSSQL_DIALECT);
+		let schema: string | null = null;
+		let table = target;
+		const dot = target.indexOf('.');
+		if (dot > 0) { schema = target.slice(0, dot); table = target.slice(dot + 1); }
+		const sql = `
+			SELECT i.name AS index_name,
+			       i.is_unique,
+			       i.is_primary_key,
+			       c.name AS column_name,
+			       ic.key_ordinal
+			FROM sys.indexes i
+			JOIN sys.tables tb ON tb.object_id = i.object_id
+			JOIN sys.schemas s ON s.schema_id = tb.schema_id
+			JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+			JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+			WHERE tb.name = @p1
+			  AND s.name = COALESCE(@p2, SCHEMA_NAME())
+			  AND i.name IS NOT NULL
+			ORDER BY i.name, ic.key_ordinal
+		`;
+		const rows = await withTimeout(this.run(sql, [table, schema] as unknown[]), SAMPLE_TIMEOUT_MS);
+		const byIndex = new Map<string, { unique: boolean; pk: boolean; cols: { ord: number; name: string }[] }>();
+		for (const r of rows) {
+			const name = String(r['index_name'] ?? '');
+			const unique = r['is_unique'] === true || r['is_unique'] === 1;
+			const pk = r['is_primary_key'] === true || r['is_primary_key'] === 1;
+			let entry = byIndex.get(name);
+			if (entry === undefined) {
+				entry = { unique, pk, cols: [] };
+				byIndex.set(name, entry);
+			}
+			entry.cols.push({ ord: Number(r['key_ordinal'] ?? 0), name: String(r['column_name'] ?? '') });
+		}
+		const indexes: { name: string; columns: string[]; unique: boolean; primaryKey: boolean }[] = [];
+		for (const [name, entry] of byIndex) {
+			entry.cols.sort((a, b) => a.ord - b.ord);
+			indexes.push({ name, columns: entry.cols.map(c => c.name), unique: entry.unique, primaryKey: entry.pk });
+		}
+		return { target, indexes };
 	}
 
 	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {

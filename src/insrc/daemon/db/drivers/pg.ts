@@ -21,6 +21,7 @@ import type {
 	DistinctResult,
 	HistogramRequest,
 	HistogramResult,
+	IndexListing,
 	OutlierRequest,
 	OutlierResult,
 	RdbmsDriver,
@@ -28,6 +29,7 @@ import type {
 	SampleResult,
 	SchemaDescription,
 	ColumnDescription,
+	TableListing,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -56,6 +58,11 @@ const { Pool } = pgMod;
 const log = getLogger('db-pg');
 
 const POOL_MAX = 3;
+
+function clampListLimit(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return 500;
+	return Math.min(Math.max(1, Math.floor(n)), 5000);
+}
 const IDLE_TIMEOUT_MS = 30_000;
 
 // ---------------------------------------------------------------------------
@@ -195,6 +202,67 @@ class PostgresDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {
+		const cap = clampListLimit(opts?.limit);
+		const schemaFilter = typeof opts?.schema === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.schema)
+			? opts.schema : null;
+		const params: unknown[] = [];
+		let where = `WHERE table_schema NOT IN ('pg_catalog', 'information_schema')`;
+		if (schemaFilter !== null) {
+			params.push(schemaFilter);
+			where += ` AND table_schema = $1`;
+		}
+		const sql = `SELECT table_schema, table_name, table_type FROM information_schema.tables ${where} ORDER BY table_schema, table_name LIMIT ${cap + 1}`;
+		const res = await withTimeout(this.pool.query(sql, params as unknown[]), SAMPLE_TIMEOUT_MS);
+		const rows = res.rows as { table_schema: string; table_name: string; table_type: string }[];
+		const truncated = rows.length > cap;
+		const sliced = truncated ? rows.slice(0, cap) : rows;
+		return {
+			target: 'postgres',
+			tables: sliced.map(r => ({
+				name: r.table_name,
+				schema: r.table_schema,
+				kind: r.table_type === 'VIEW' ? 'view' : 'table',
+			})),
+			truncated,
+		};
+	}
+
+	async listIndexes(target: string): Promise<IndexListing> {
+		quoteTarget(target, POSTGRES_DIALECT);
+		// Accept either `schema.table` or bare `table` (default schema).
+		let schema = 'public';
+		let table = target;
+		const dot = target.indexOf('.');
+		if (dot > 0) { schema = target.slice(0, dot); table = target.slice(dot + 1); }
+		const sql = `
+			SELECT i.relname AS index_name,
+			       ix.indisunique AS is_unique,
+			       ix.indisprimary AS is_pk,
+			       array_agg(a.attname ORDER BY ord.ord) AS columns
+			FROM pg_index ix
+			JOIN pg_class i ON i.oid = ix.indexrelid
+			JOIN pg_class t ON t.oid = ix.indrelid
+			JOIN pg_namespace n ON n.oid = t.relnamespace
+			JOIN unnest(ix.indkey) WITH ORDINALITY AS ord(attnum, ord) ON true
+			JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ord.attnum
+			WHERE t.relname = $1 AND n.nspname = $2
+			GROUP BY i.relname, ix.indisunique, ix.indisprimary
+			ORDER BY i.relname
+		`;
+		const res = await withTimeout(this.pool.query(sql, [table, schema]), SAMPLE_TIMEOUT_MS);
+		const rows = res.rows as { index_name: string; is_unique: boolean; is_pk: boolean; columns: string[] }[];
+		return {
+			target,
+			indexes: rows.map(r => ({
+				name: r.index_name,
+				columns: r.columns,
+				unique: r.is_unique,
+				primaryKey: r.is_pk,
+			})),
+		};
 	}
 
 	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {

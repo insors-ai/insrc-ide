@@ -17,6 +17,8 @@ import { getLogger } from '../../shared/logger.js';
 import { listSkills } from './registry.js';
 import { registerDataLineageSkill } from './built-ins/data-lineage.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
+import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
+import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
 import { registerDataSourceRdbmsSampleRowsSkill } from './built-ins/data.source.rdbms.sample-rows.js';
 import { registerDataSourceRdbmsSampleDistinctSkill } from './built-ins/data.source.rdbms.sample-distinct.js';
 import { registerDataSourceFileDescribeSkill } from './built-ins/data.source.file.describe.js';
@@ -95,6 +97,8 @@ export function registerAllSkills(): void {
   registerDataLineageSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
+  registerDataSourceRdbmsListTablesSkill();
+  registerDataSourceRdbmsListIndexesSkill();
   registerDataSourceRdbmsSampleRowsSkill();
   registerDataSourceRdbmsSampleDistinctSkill();
   // Phase 1.3 + 2.3 -- one skill spans all 12 file kinds via the

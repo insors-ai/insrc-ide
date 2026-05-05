@@ -799,6 +799,100 @@ const fileAggregateTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// db:sql:list_tables + db:sql:list_indexes (Phase 1.1)
+// ---------------------------------------------------------------------------
+
+const sqlListTablesTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_list_tables',
+	description:
+		'Enumerate base tables + views on an RDBMS connection (excluding system schemas). Optional `schema` filter. ' +
+		'Returns `{ target, tables: [{ name, schema, kind, approxRowCount? }], truncated }`. Default limit 500, capped at 5000.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			schema: { type: 'string', description: 'Optional schema filter (Postgres/MSSQL/Oracle owners; MySQL databases).' },
+			limit:  { type: 'integer', minimum: 1, maximum: 5000, description: 'Default 500.' },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.listTables !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement listTables() yet`);
+		}
+		try {
+			const opts: { schema?: string; limit?: number } = {};
+			if (typeof input['schema'] === 'string') opts.schema = input['schema'];
+			if (typeof input['limit'] === 'number')  opts.limit = Math.floor(input['limit']);
+			const result = await rd.listTables(opts);
+			const lines: string[] = [
+				`**${connectionId}** -- ${result.tables.length} table${result.tables.length === 1 ? '' : 's'}` +
+				(result.truncated ? ' (truncated)' : ''),
+			];
+			if (result.tables.length > 0) {
+				lines.push('', '| schema | name | kind |', '|---|---|---|');
+				for (const t of result.tables) {
+					lines.push(`| ${t.schema ?? ''} | ${t.name} | ${t.kind} |`);
+				}
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const sqlListIndexesTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_list_indexes',
+	description:
+		'List indexes on one RDBMS table: name + columns (in key order) + unique flag + primary-key flag. ' +
+		'Useful for verifying that filter / join columns are indexed before recommending query rewrites.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string', description: 'Table identifier; `schema.table` accepted.' },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') return fail(this.id, 'connectionId and target are required');
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.listIndexes !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement listIndexes() yet`);
+		}
+		try {
+			const result = await rd.listIndexes(target);
+			const lines: string[] = [
+				`**${target}** -- ${result.indexes.length} index${result.indexes.length === 1 ? '' : 'es'}`,
+			];
+			if (result.indexes.length > 0) {
+				lines.push('', '| name | columns | unique | pk |', '|---|---|---|---|');
+				for (const idx of result.indexes) {
+					lines.push(`| ${idx.name} | ${idx.columns.join(', ')} | ${idx.unique ? 'yes' : 'no'} | ${idx.primaryKey ? 'yes' : 'no'} |`);
+				}
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
 // db:sql:histogram + db:file:histogram (Phase 0.2)
 // ---------------------------------------------------------------------------
 
@@ -1616,6 +1710,8 @@ export function registerDbTools(): void {
 	registerTool(sqlExplainTool);
 	registerTool(sqlAggregateTool);
 	registerTool(sqlDistinctTool);
+	registerTool(sqlListTablesTool);
+	registerTool(sqlListIndexesTool);
 	registerTool(sqlHistogramTool);
 	registerTool(sqlCorrelationMatrixTool);
 	registerTool(sqlOutliersTool);
@@ -1633,5 +1729,5 @@ export function registerDbTools(): void {
 	registerTool(fileCorrelationMatrixTool);
 	registerTool(fileOutliersTool);
 	registerTool(fileListFilesTool);
-	log.debug({ count: 23 }, 'data-driver tools registered');
+	log.debug({ count: 25 }, 'data-driver tools registered');
 }

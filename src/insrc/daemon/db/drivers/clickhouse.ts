@@ -150,6 +150,14 @@ class ClickHouseDriver implements RdbmsDriver {
 		);
 	}
 
+	async listTables(): Promise<never> {
+		throw new Error('data-driver: listTables() not yet implemented for clickhouse -- queries against system.tables work but the per-engine schema-filter logic differs (Atomic vs Ordinary databases). Tracked alongside the broader clickhouse-dialect follow-up (Phase 0.1).');
+	}
+
+	async listIndexes(): Promise<never> {
+		throw new Error('data-driver: listIndexes() not yet implemented for clickhouse -- ClickHouse uses ORDER BY / PRIMARY KEY / data-skipping indexes via system.tables.engine_full and system.data_skipping_indices, not the SQL-standard sys.indexes shape. Per-engine follow-up.');
+	}
+
 	async histogram(): Promise<never> {
 		throw new Error('data-driver: histogram() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
 	}

@@ -25,12 +25,14 @@ import type {
 	DistinctResult,
 	HistogramRequest,
 	HistogramResult,
+	IndexListing,
 	OutlierRequest,
 	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
 	SchemaDescription,
+	TableListing,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -52,6 +54,11 @@ import type { PlanResult, QueryAst } from '../../../shared/db-driver.js';
 import { prismaSchemaDescription } from './rdbms-prisma.js';
 
 const log = getLogger('db-oracle');
+
+function clampOracleListLimit(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return 500;
+	return Math.min(Math.max(1, Math.floor(n)), 5000);
+}
 
 oracledb.fetchAsString = [oracledb.CLOB];
 oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
@@ -221,6 +228,101 @@ class OracleDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {
+		const cap = clampOracleListLimit(opts?.limit);
+		const params: unknown[] = [];
+		// Excluded owners: Oracle's standard system schemas. Customer schemas live elsewhere.
+		const exclusions = `'SYS','SYSTEM','XDB','OUTLN','MDSYS','CTXSYS','EXFSYS','DBSNMP','APPQOSSYS','GSMADMIN_INTERNAL','LBACSYS','OJVMSYS','ORDDATA','ORDPLUGINS','ORDSYS','SI_INFORMTN_SCHEMA','WMSYS','REMOTE_SCHEDULER_AGENT','OLAPSYS','GSMUSER','ANONYMOUS','APEX_PUBLIC_USER','APEX_INSTANCE_ADMIN_USER','GSMCATUSER','SYSBACKUP','SYSDG','SYSKM','SYSRAC'`;
+		let where = `WHERE owner NOT IN (${exclusions})`;
+		if (typeof opts?.schema === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(opts.schema)) {
+			params.push(opts.schema.toUpperCase());
+			where += ` AND owner = :1`;
+		}
+		const sql = `
+			SELECT * FROM (
+				SELECT owner, table_name AS name, 'table' AS kind FROM all_tables ${where}
+				UNION ALL
+				SELECT owner, view_name AS name, 'view' AS kind FROM all_views ${where}
+			) ORDER BY owner, name FETCH FIRST ${cap + 1} ROWS ONLY
+		`;
+		const pool = await this.poolPromise;
+		const conn = await pool.getConnection();
+		try {
+			const res = await conn.execute<Record<string, unknown>>(
+				sql, params as unknown[],
+				{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+			);
+			const rows = res.rows ?? [];
+			const truncated = rows.length > cap;
+			const sliced = truncated ? rows.slice(0, cap) : rows;
+			return {
+				target: 'oracle',
+				tables: sliced.map(r => ({
+					name: String(r['NAME'] ?? ''),
+					schema: String(r['OWNER'] ?? ''),
+					kind: r['KIND'] === 'view' ? 'view' : 'table',
+				})),
+				truncated,
+			};
+		} finally {
+			await conn.close();
+		}
+	}
+
+	async listIndexes(target: string): Promise<IndexListing> {
+		quoteTarget(target, ORACLE_DIALECT);
+		// Oracle is case-sensitive within quoted identifiers but reports
+		// uppercase in all_* views by default; match against UPPER(table).
+		let owner: string | null = null;
+		let table = target;
+		const dot = target.indexOf('.');
+		if (dot > 0) { owner = target.slice(0, dot).toUpperCase(); table = target.slice(dot + 1); }
+		const sql = `
+			SELECT i.index_name,
+			       i.uniqueness,
+			       c.column_name,
+			       c.column_position,
+			       (CASE WHEN cc.constraint_type = 'P' THEN 'Y' ELSE 'N' END) AS is_pk
+			FROM all_ind_columns c
+			JOIN all_indexes i
+			     ON i.index_name = c.index_name AND i.owner = c.index_owner
+			LEFT JOIN all_constraints cc
+			     ON cc.index_name = i.index_name AND cc.owner = i.owner
+			WHERE c.table_name = UPPER(:1)
+			  AND (:2 IS NULL OR c.table_owner = :2)
+			ORDER BY i.index_name, c.column_position
+		`;
+		const pool = await this.poolPromise;
+		const conn = await pool.getConnection();
+		try {
+			const res = await conn.execute<Record<string, unknown>>(
+				sql, [table.toUpperCase(), owner] as unknown[],
+				{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+			);
+			const rows = res.rows ?? [];
+			const byIndex = new Map<string, { unique: boolean; pk: boolean; cols: { ord: number; name: string }[] }>();
+			for (const r of rows) {
+				const name = String(r['INDEX_NAME'] ?? '');
+				const unique = String(r['UNIQUENESS'] ?? '') === 'UNIQUE';
+				const pk = String(r['IS_PK'] ?? 'N') === 'Y';
+				let entry = byIndex.get(name);
+				if (entry === undefined) {
+					entry = { unique, pk, cols: [] };
+					byIndex.set(name, entry);
+				}
+				entry.cols.push({ ord: Number(r['COLUMN_POSITION'] ?? 0), name: String(r['COLUMN_NAME'] ?? '') });
+			}
+			const indexes: { name: string; columns: string[]; unique: boolean; primaryKey: boolean }[] = [];
+			for (const [name, entry] of byIndex) {
+				entry.cols.sort((a, b) => a.ord - b.ord);
+				indexes.push({ name, columns: entry.cols.map(c => c.name), unique: entry.unique, primaryKey: entry.pk });
+			}
+			return { target, indexes };
+		} finally {
+			await conn.close();
+		}
 	}
 
 	private orchestratorDeps(target: string, cols: readonly string[]): OrchestratorDeps {

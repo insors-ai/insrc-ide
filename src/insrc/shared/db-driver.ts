@@ -333,6 +333,31 @@ export interface DistinctResult {
 }
 
 // ---------------------------------------------------------------------------
+// Catalog enumeration (Phase 1.1 of plans/analyzers/data-analyzer-skills.md)
+// ---------------------------------------------------------------------------
+
+export interface TableListing {
+	readonly target: string;
+	readonly tables: readonly {
+		readonly name: string;
+		readonly schema?: string;
+		readonly kind: 'table' | 'view' | 'unknown';
+		readonly approxRowCount?: number;
+	}[];
+	readonly truncated: boolean;
+}
+
+export interface IndexListing {
+	readonly target: string;
+	readonly indexes: readonly {
+		readonly name: string;
+		readonly columns: readonly string[];
+		readonly unique: boolean;
+		readonly primaryKey: boolean;
+	}[];
+}
+
+// ---------------------------------------------------------------------------
 // Histogram (Phase 0.2 of plans/analyzers/data-analyzer-skills.md)
 // ---------------------------------------------------------------------------
 
@@ -491,6 +516,11 @@ export interface RdbmsDriver extends BaseDriver {
 	 * downstream Family-5 categorical-profile skills.
 	 */
 	distinct(target: string, request: DistinctRequest): Promise<DistinctResult>;
+	/** Phase 1.1 -- enumerate tables / views (excluding system schemas).
+	 *  Optional `schema` filter narrows to a single schema. */
+	listTables?(opts?: { readonly schema?: string; readonly limit?: number }): Promise<TableListing>;
+	/** Phase 1.1 -- list indexes on one table. */
+	listIndexes?(target: string): Promise<IndexListing>;
 	/** Phase 0.2 -- server-side histogram. */
 	histogram?(target: string, request: HistogramRequest): Promise<HistogramResult>;
 	/** Phase 0.4 -- pairwise correlation matrix over numeric columns. */

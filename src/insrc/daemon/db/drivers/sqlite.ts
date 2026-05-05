@@ -24,12 +24,14 @@ import type {
 	DistinctResult,
 	HistogramRequest,
 	HistogramResult,
+	IndexListing,
 	OutlierRequest,
 	OutlierResult,
 	RdbmsDriver,
 	SampleOpts,
 	SampleResult,
 	SchemaDescription,
+	TableListing,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -190,6 +192,54 @@ class SqliteDriver implements RdbmsDriver {
 		});
 	}
 
+	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {
+		const cap = clampListLimit(opts?.limit);
+		// SQLite has a single schema (`main`); the optional `schema`
+		// filter is honored only when the user types `main`.
+		if (opts?.schema !== undefined && opts.schema !== 'main') {
+			return { target: 'sqlite:main', tables: [], truncated: false };
+		}
+		const rows = this.db.prepare(
+			`SELECT type, name FROM sqlite_master
+			 WHERE type IN ('table', 'view')
+			   AND name NOT LIKE 'sqlite_%'
+			 ORDER BY name
+			 LIMIT ?`,
+		).all(cap + 1) as { type: string; name: string }[];
+		const truncated = rows.length > cap;
+		const sliced = truncated ? rows.slice(0, cap) : rows;
+		return {
+			target: 'sqlite:main',
+			tables: sliced.map(r => ({
+				name: r.name,
+				kind: r.type === 'view' ? 'view' : 'table',
+			})),
+			truncated,
+		};
+	}
+
+	async listIndexes(target: string): Promise<IndexListing> {
+		quoteTarget(target, SQLITE_DIALECT);
+		// `PRAGMA index_list(<table>)` returns: seq, name, unique, origin, partial
+		// where origin = 'pk' for the implicit PK index, 'u' for UNIQUE,
+		// 'c' for explicit CREATE INDEX. Identifier already validated by
+		// quoteTarget above; concatenation safe.
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const idxRows = this.db.prepare(`PRAGMA index_list(${target})`).all() as any[];
+		const indexes: { name: string; columns: string[]; unique: boolean; primaryKey: boolean }[] = [];
+		for (const r of idxRows) {
+			const cols = this.db.prepare(`PRAGMA index_info(${quoteIdentForPragma(String(r.name))})`)
+				.all() as { name: string }[];
+			indexes.push({
+				name: String(r.name),
+				columns: cols.map(c => c.name),
+				unique: r.unique === 1,
+				primaryKey: r.origin === 'pk',
+			});
+		}
+		return { target, indexes };
+	}
+
 	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
@@ -209,6 +259,20 @@ class SqliteDriver implements RdbmsDriver {
 }
 
 // ---------------------------------------------------------------------------
+
+// PRAGMA index_info needs a bare identifier; quote it lightweight here
+// (sqlite accepts double-quoted identifiers in PRAGMA arguments).
+function quoteIdentForPragma(name: string): string {
+	if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+		throw new Error(`data-driver: invalid index identifier '${name}'`);
+	}
+	return `"${name}"`;
+}
+
+function clampListLimit(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return 500;
+	return Math.min(Math.max(1, Math.floor(n)), 5000);
+}
 
 function pathOf(config: ConnectionConfig): string {
 	// Accept either url=file:///path or plain `path:` on the config.
