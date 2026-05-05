@@ -75,6 +75,7 @@
     "test:lmdb-smoke": "tsx --test db/__tests__/lmdb-smoke.test.ts",
     "test:lance-smoke": "tsx --test db/__tests__/lancedb-smoke.test.ts",
     "test:graph-store": "tsx --test db/graph/__tests__/store.test.ts",
+    "test:graph-ids": "tsx --test db/graph/__tests__/ids.test.ts",
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",
