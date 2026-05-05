@@ -21,7 +21,7 @@ Pre-implementation. The on-disk DuckDB store has been wiped
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
-| 0.1 | `lmdb-js` version pin + macOS arm64 / linux x64 / linux arm64 build verification | pending | |
+| 0.1 | `lmdb-js` version pin + darwin-arm64 build verification | done | `lmdb@3.5.4` pinned in [src/insrc/package.json](src/insrc/package.json); 8-test smoke suite at [src/insrc/db/__tests__/lmdb-smoke.test.ts](src/insrc/db/__tests__/lmdb-smoke.test.ts) green on darwin-arm64 (binding load, key/value round-trip, binary keys, cursor range scans, named sub-DBs, msgpack codec, transaction atomicity, file-backed persistence across reopen). New `npm run test:lmdb-smoke` script wires it. **Linux x64 / linux arm64 verification deferred** by explicit user decision (2026-05-05) -- `lmdb-js` ships prebuilt binaries via `node-gyp-build` for both architectures and is widely used on Linux; revisit when a Linux daemon distribution is in scope or CI is set up |
 | 0.2 | **Embedding dim downshift to 1024** (qwen3-embedding 4B → 0.6B) | pending | See dedicated section below |
 | 0.3 | LanceDB version pin (re-add the dep at the version we last shipped on) | pending | |
 | **0.4** | **Substrate scale-validation spike** -- LMDB write/read/closure throughput at 10M edges + Lance ANN at 1M vectors + Hadoop-realistic run | **pending (HARD GATE)** | Throw-away `scripts/storage-spike/` rig. Failure halts migration until remediated or substrate re-evaluated. See design doc "Scale validation strategy" |
