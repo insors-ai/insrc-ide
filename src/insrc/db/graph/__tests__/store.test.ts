@@ -202,7 +202,7 @@ test('utf8 segment with null byte is rejected', () => {
 // Env scaffolding (route through HOME override to land at our tmpdir)
 // ---------------------------------------------------------------------------
 
-test('all 19 sub-DBs open and accept basic put/get', async () => {
+test('all 20 sub-DBs open and accept basic put/get', async () => {
 
 	process.env['INSRC_LMDB_MAPSIZE_GIB'] = '1';
 	const store = await getGraphStore();
@@ -211,6 +211,7 @@ test('all 19 sub-DBs open and accept basic put/get', async () => {
 		['meta',                store.meta],
 		['repo',                store.repo],
 		['entity',              store.entity],
+		['entityIdByString',    store.entityIdByString],
 		['nameIndex',           store.nameIndex],
 		['outEdge',             store.outEdge],
 		['inEdge',              store.inEdge],
@@ -229,11 +230,14 @@ test('all 19 sub-DBs open and accept basic put/get', async () => {
 		['configByScope',       store.configByScope],
 	] as const;
 
-	assert.equal(handles.length, 19, 'expected 19 sub-DBs');
+	assert.equal(handles.length, 20, 'expected 20 sub-DBs');
 
-	// Validate each sub-DB by writing a sentinel value + reading it back
+	// Validate each sub-DB by writing a sentinel value + reading it back.
+	// `meta` and `entityIdByString` use ordered-binary key encoding which
+	// accepts plain strings; everything else uses binary (Buffer keys).
+	const stringKeyDbs = new Set(['meta', 'entityIdByString']);
 	for (const [name, db] of handles) {
-		const key = name === 'meta' ? `sentinel-${name}` : Buffer.from(`k-${name}`);
+		const key = stringKeyDbs.has(name) ? `sentinel-${name}` : Buffer.from(`k-${name}`);
 		const value = Buffer.from(`v-${name}`);
 		await db.put(key as never, value as never);
 		const got = db.get(key as never);

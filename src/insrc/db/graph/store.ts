@@ -177,6 +177,7 @@ export interface GraphStore {
 	meta:                AnyDb;
 	repo:                AnyDb;
 	entity:              AnyDb;
+	entityIdByString:    AnyDb;
 	nameIndex:           AnyDb;
 	outEdge:             AnyDb;
 	inEdge:              AnyDb;
@@ -276,6 +277,7 @@ export async function getGraphStore(): Promise<GraphStore> {
 			meta:               root.openDB({ name: 'meta', keyEncoding: 'ordered-binary' }),
 			repo:               open_('repo'),
 			entity:             open_('entity'),
+			entityIdByString:   root.openDB({ name: 'entity_id_by_string', keyEncoding: 'ordered-binary' }),
 			nameIndex:          open_('name_index'),
 			outEdge:            open_('out_edge'),
 			inEdge:             open_('in_edge'),

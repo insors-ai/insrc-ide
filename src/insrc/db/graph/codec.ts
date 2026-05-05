@@ -25,7 +25,8 @@
 
 import { Packr, Unpackr } from 'msgpackr';
 
-import type { EntityKind, RelationKind } from './keys.js';
+import type { RelationKind } from './keys.js';
+import type { EntityKind, Language } from '../../shared/types.js';
 
 // ---------------------------------------------------------------------------
 // Shared codec instance
@@ -100,7 +101,7 @@ export interface EntityRow {
 	indexedAt:      number;     // unix ms
 }
 
-export type Language = 'typescript' | 'python' | 'go' | 'java' | 'scala' | 'unknown';
+export type { Language };
 
 export const encodeEntityRow = (r: EntityRow): Buffer => encode(r);
 export const decodeEntityRow = (b: Buffer): EntityRow => decode(b);

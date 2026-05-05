@@ -188,7 +188,7 @@ greenfield rebuild on a fresh substrate.
 ### Sub-DB layout
 
 LMDB exposes "sub-databases" (named keyspaces) within a single env. The
-storage layer uses nineteen sub-DBs (8 graph + 2 plans + 3 conversations
+storage layer uses twenty sub-DBs (9 graph + 2 plans + 3 conversations
 + 4 todos + 2 config), grouped by subsystem:
 
 **Graph (code knowledge graph):**
@@ -198,6 +198,7 @@ storage layer uses nineteen sub-DBs (8 graph + 2 plans + 3 conversations
 | `meta` | utf8 string | varies | Schema version, ID counters, build metadata |
 | `repo` | u32 repo_id (BE) | msgpack(Repo) | Registered repo records |
 | `entity` | u64 entity_id (BE) | msgpack(Entity) | Entity bodies (full schema below) |
+| `entity_id_by_string` | utf8 string (32-char SHA hex) | u64 entity_id | "What's the u64 for this caller-supplied string ID?" -- preserves the existing string-SHA caller surface (`Entity.id: string` from the daemon's domain type) while the storage layer uses u64 internally for edge-key compactness |
 | `name_index` | (u32 repo, u8 kind, utf8 fqn) | u64 entity_id | "What's the ID of this entity by name?" -- used by re-index lookup |
 | `out_edge` | (u64 from, u8 kind, u64 to) | msgpack(EdgeProps) or empty | Outgoing edges; range-scan by `(from, kind)` gives all neighbors |
 | `in_edge` | (u64 to, u8 kind, u64 from) | empty | Incoming edges; mirror of `out_edge` for in-degree queries |

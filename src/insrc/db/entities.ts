@@ -1,440 +1,620 @@
 /**
- * DuckDB-backed entity persistence (plans/storage-migration-duckdb.md
- * Phase B.6). Replaces the LanceDB Arrow-record path with plain SQL
- * against the `entity` table on the storage pool.
+ * LMDB-backed entity persistence. Phase 2.2 of
+ * plans/storage-migration-lmdb-lance.md.
  *
- * The same `entity` table holds both the graph stub (id, kind --
- * referenced by `relation.src/dst`) and the full entity row (body,
- * embedding, etc.). A single upsert path keeps stubs and full rows in
- * sync; columns absent from a stub upsert simply stay at their
- * SQL-DEFAULT sentinels (empty string, 0, false). Vector search
- * happens via `array_distance(embedding, ?)` against the HNSW index;
- * brute-force fallback works on tables small enough to scan if the
- * vss extension fails to load (logged at storage-pool init).
+ * Public surface preserved verbatim from the prior DuckDB-backed
+ * implementation: callers (`indexer/`, `daemon/`, `agent/tasks/`,
+ * RPC handlers) keep using `upsertEntities / getEntity / ...` with
+ * the same signatures. The `db: DbClient` parameter is retained but
+ * unused -- Phase 5.x removes it from callers.
+ *
+ * Storage model:
+ *   - `entity` sub-DB: u64 BE -> msgpack(EntityRow). u64 because
+ *     edges reference entities by u64 (10x edge:entity ratio makes
+ *     8-byte vs 32-byte IDs the dominant storage win).
+ *   - `entity_id_by_string` sub-DB: utf8 SHA-32 string -> u64. Used
+ *     to translate the daemon's domain `Entity.id: string` (kept for
+ *     caller back-compat) to/from the internal u64.
+ *   - `repo` sub-DB: u32 BE -> RepoRow. Linear scan for path<->id
+ *     translation (~hundreds of repos at most).
+ *   - Embedding vectors do NOT live in LMDB -- they go to LanceDB
+ *     keyed by entity_id (Phase 3.2). For now `updateEmbedding()`
+ *     records only the model name; vector writes land in Phase 3.2.
+ *     `getEntity()` returns `embedding: []` until Phase 3.2 wires
+ *     Lance reads.
+ *
+ * Module-stub semantics: module entities use "ensure exists" (no-op
+ * if already present); other kinds use full upsert (overwrite). The
+ * DuckDB era used `ON CONFLICT DO NOTHING` vs `DO UPDATE`; LMDB
+ * achieves the same via an explicit pre-check.
+ *
+ * Cascade on delete: incident edges in `out_edge` / `in_edge`
+ * sub-DBs are also removed. Phase 2.10 will hoist this into a
+ * shared cascade helper; for Phase 2.2 we do the prefix-scan
+ * inline.
  */
 
-import { arrayValue } from '@duckdb/node-api';
-import type { DbClient } from './client.js';
+import { relative } from 'node:path';
+
 import type { Entity, EntityKind, Language } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
+import {
+	getGraphStore,
+	withWriteTxn,
+	type GraphStore,
+} from './graph/store.js';
+import { allocateEntityIdInTxn, allocateRepoIdInTxn } from './graph/ids.js';
+import {
+	encodeEntityKey,
+	encodeOutEdgePrefix,
+	encodeInEdgePrefix,
+	prefixSuccessor,
+	ENTITY_KIND_BYTE,
+} from './graph/keys.js';
+import {
+	decodeEntityRow,
+	decodeRepoRow,
+	encodeEntityRow,
+	encodeRepoRow,
+	type EntityRow,
+	type RepoRow,
+} from './graph/codec.js';
 
 const log = getLogger('db.entities');
 
+/**
+ * Vestigial `DbClient` param shape -- kept until Phase 5.x removes
+ * the unused argument from callers.
+ */
+type DbClient = unknown;
+
 // ---------------------------------------------------------------------------
-// Row <-> domain mapping (snake_case columns <-> camelCase Entity fields)
+// Domain <-> row mapping
 // ---------------------------------------------------------------------------
 
-function entityToParams(entity: Entity): unknown[] {
-  return [
-    entity.id,
-    entity.kind,
-    entity.name,
-    entity.language,
-    entity.repo,
-    entity.file,
-    entity.startLine,
-    entity.endLine,
-    entity.body,
-    entity.indexedAt,
-    entity.embeddingModel ?? '',
-    entity.isExported  ?? false,
-    entity.isAsync     ?? false,
-    entity.isAbstract  ?? false,
-    entity.signature   ?? '',
-    entity.hash        ?? '',
-    entity.rootPath    ?? '',
-    entity.artifact    ?? false,
-    entity.embedding.length > 0 ? arrayValue(entity.embedding) : null,
-  ];
+function entityToRow(e: Entity, repoId: number, repoRoot: string): EntityRow {
+	return {
+		repoId,
+		kind:           e.kind,
+		name:           e.name,
+		filePath:       toRepoRelative(e.file, repoRoot),
+		startLine:      e.startLine,
+		endLine:        e.endLine,
+		language:       e.language,
+		rootPath:       e.rootPath ?? repoRoot,
+		body:           e.body,
+		signature:      e.signature ?? '',
+		summary:        '',
+		isExported:     e.isExported ?? false,
+		isAsync:        e.isAsync    ?? false,
+		isAbstract:     e.isAbstract ?? false,
+		artifact:       e.artifact   ?? false,
+		contentHash:    e.hash       ?? '',
+		embeddingModel: e.embeddingModel ?? '',
+		indexedAt:      parseTimestamp(e.indexedAt),
+	};
 }
 
-const ENTITY_COLUMNS = [
-  'id', 'kind', 'name', 'language', 'repo', 'file', 'start_line', 'end_line',
-  'body', 'indexed_at', 'embedding_model',
-  'is_exported', 'is_async', 'is_abstract',
-  'signature', 'hash', 'root_path', 'artifact', 'embedding',
-] as const;
-const ENTITY_PLACEHOLDER = `(${ENTITY_COLUMNS.map(() => '?').join(', ')})`;
-const ENTITY_ON_CONFLICT = `ON CONFLICT (id) DO UPDATE SET
-  kind            = excluded.kind,
-  name            = excluded.name,
-  language        = excluded.language,
-  repo            = excluded.repo,
-  file            = excluded.file,
-  start_line      = excluded.start_line,
-  end_line        = excluded.end_line,
-  body            = excluded.body,
-  indexed_at      = excluded.indexed_at,
-  embedding_model = excluded.embedding_model,
-  is_exported     = excluded.is_exported,
-  is_async        = excluded.is_async,
-  is_abstract     = excluded.is_abstract,
-  signature       = excluded.signature,
-  hash            = excluded.hash,
-  root_path       = excluded.root_path,
-  artifact        = excluded.artifact,
-  embedding       = excluded.embedding`;
-
-// Module entities are pure-stub graph nodes (file='', body='', embedding=[])
-// referenced by IMPORTS edges. The parser emits the same module stub once
-// per importing file -- the second-and-later sightings should be no-ops,
-// matching the parser's "ensure exists" intent. DO UPDATE here would
-// re-issue an INSERT against the embedding column and trip DuckDB's
-// experimental HNSW index ("Duplicate keys not allowed in high-level
-// wrappers") via WAL-replay on row ids that already exist. The cross-file
-// resolver later rewires in-tree module IMPORTS to point at the real file
-// entity (cross-file-resolver.ts Pass 1), so stub rows are never updated
-// after creation.
-const ENTITY_ON_CONFLICT_NOTHING = 'ON CONFLICT (id) DO NOTHING';
-
-/**
- * Cap on rows-per-INSERT for the bulk path. 100 rows × 19 columns =
- * 1.9k positional parameters, well below DuckDB's prepared-statement
- * cap. Tuned for the indexer's typical per-file entity count
- * (5-200); chunked above this so the parameter array doesn't grow
- * unboundedly on full-repo upserts.
- */
-const ENTITY_BULK_CHUNK = 100;
-
-/**
- * DuckDB returns FLOAT[N] columns as `{ items: number[] }` (the
- * DuckDBArrayValue runtime shape). Unwrap to a plain number[] for
- * the Entity contract; null becomes an empty array (entities
- * without an embedding yet). Exported so search.ts and any other
- * downstream entity-row consumers share the same mapper.
- */
-export function unwrapEmbedding(raw: unknown): number[] {
-  if (raw === null || raw === undefined) return [];
-  if (Array.isArray(raw)) return raw as number[];
-  const inner = (raw as { items?: unknown }).items;
-  return Array.isArray(inner) ? (inner as number[]) : [];
+function rowToDomainEntity(id: string, row: EntityRow, repoRoot: string): Entity {
+	const e: Entity = {
+		id,
+		kind:      row.kind,
+		name:      row.name,
+		language:  row.language,
+		repo:      repoRoot,
+		file:      toAbsolutePath(row.filePath, repoRoot),
+		startLine: row.startLine,
+		endLine:   row.endLine,
+		body:      row.body,
+		// Embedding lives in LanceDB; Phase 3.2 wires the read path.
+		embedding: [],
+		indexedAt: formatTimestamp(row.indexedAt),
+	};
+	if (row.embeddingModel !== '') e.embeddingModel = row.embeddingModel;
+	if (row.isExported) e.isExported = true;
+	if (row.isAsync)    e.isAsync    = true;
+	if (row.isAbstract) e.isAbstract = true;
+	if (row.signature !== '') e.signature = row.signature;
+	if (row.contentHash !== '') e.hash = row.contentHash;
+	if (row.rootPath !== '' && row.rootPath !== repoRoot) e.rootPath = row.rootPath;
+	if (row.artifact) e.artifact = true;
+	return e;
 }
 
 /**
- * Map a snake_case `entity` row from DuckDB back to the camelCase
- * Entity domain shape. Optional fields stay `undefined` when their
- * sentinel default (empty string / false) is observed -- matches
- * the LanceDB-era contract so callers see the same object shape.
+ * Legacy DuckDB-era row mapper. The new code path produces Entity
+ * via `rowToDomainEntity`; this function is kept exported only because
+ * `db/search.ts` still imports it. When `db/search.ts` is rewired in
+ * Phase 4.2, this export goes away.
+ *
+ * @deprecated Use the LMDB read path instead.
  */
 export function rowToEntity(row: Record<string, unknown>): Entity {
-  const entity: Entity = {
-    id:        row['id']         as string,
-    kind:      row['kind']       as EntityKind,
-    name:      (row['name']      as string) ?? '',
-    language:  (row['language']  as Language) ?? '',
-    repo:      (row['repo']      as string) ?? '',
-    file:      (row['file']      as string) ?? '',
-    startLine: Number(row['start_line'] ?? 0),
-    endLine:   Number(row['end_line']   ?? 0),
-    body:      (row['body']      as string) ?? '',
-    indexedAt: (row['indexed_at'] as string) ?? '',
-    embedding: unwrapEmbedding(row['embedding']),
-  };
-  const em = row['embedding_model'] as string; if (em) entity.embeddingModel = em;
-  if (row['is_exported'] === true) entity.isExported = true;
-  if (row['is_async']    === true) entity.isAsync    = true;
-  if (row['is_abstract'] === true) entity.isAbstract = true;
-  const sg = row['signature'] as string; if (sg) entity.signature = sg;
-  const hh = row['hash']      as string; if (hh) entity.hash      = hh;
-  const rp = row['root_path'] as string; if (rp) entity.rootPath  = rp;
-  if (row['artifact'] === true) entity.artifact = true;
-  return entity;
+	const e: Entity = {
+		id:        row['id']         as string,
+		kind:      row['kind']       as EntityKind,
+		name:      (row['name']      as string) ?? '',
+		language:  (row['language']  as Language) ?? '',
+		repo:      (row['repo']      as string) ?? '',
+		file:      (row['file']      as string) ?? '',
+		startLine: Number(row['start_line'] ?? 0),
+		endLine:   Number(row['end_line']   ?? 0),
+		body:      (row['body']      as string) ?? '',
+		indexedAt: (row['indexed_at'] as string) ?? '',
+		embedding: unwrapEmbedding(row['embedding']),
+	};
+	const em = row['embedding_model'] as string; if (em) e.embeddingModel = em;
+	if (row['is_exported'] === true) e.isExported = true;
+	if (row['is_async']    === true) e.isAsync    = true;
+	if (row['is_abstract'] === true) e.isAbstract = true;
+	const sg = row['signature'] as string; if (sg) e.signature = sg;
+	const hh = row['hash']      as string; if (hh) e.hash      = hh;
+	const rp = row['root_path'] as string; if (rp) e.rootPath  = rp;
+	if (row['artifact'] === true) e.artifact = true;
+	return e;
+}
+
+/**
+ * @deprecated DuckDB-era helper. The LMDB path stores embeddings in
+ * Lance, not in the entity row. Kept exported only for back-compat
+ * with `db/search.ts`.
+ */
+export function unwrapEmbedding(raw: unknown): number[] {
+	if (raw === null || raw === undefined) return [];
+	if (Array.isArray(raw)) return raw as number[];
+	const inner = (raw as { items?: unknown }).items;
+	return Array.isArray(inner) ? (inner as number[]) : [];
 }
 
 // ---------------------------------------------------------------------------
-// CRUD
+// Public API (signatures unchanged from the DuckDB era)
 // ---------------------------------------------------------------------------
 
-/**
- * Pre-INSERT dedupe by entity id. The bulk multi-VALUES INSERT path
- * cannot rely on `ON CONFLICT DO UPDATE` to absorb intra-batch
- * duplicates -- DuckDB's HNSW index wrapper validates uniqueness
- * during statement execution, BEFORE the conflict clause fires.
- * Two rows with the same id in one VALUES clause crash with
- * "Duplicate keys not allowed in high-level wrappers" and
- * invalidate the entire DuckDB instance for the rest of the
- * process lifetime.
- *
- * Last-write-wins matches the semantics `ON CONFLICT (id) DO UPDATE`
- * would have produced if the rows were issued one at a time. That's
- * intentional: a duplicate in the input is a parser-side bug
- * (typically Java/Scala/C++ method overloads collapsing into the
- * same `SHA256(repo + file + kind + name)` -- the formula doesn't
- * include signature), and the right v1 behavior is to keep one row
- * + log a warning so we can investigate upstream.
- */
-function dedupeEntitiesById(entities: readonly Entity[]): {
-  unique: Entity[];
-  duplicateIds: Map<string, number>;
-} {
-  const map = new Map<string, Entity>();
-  const dupCounts = new Map<string, number>();
-  for (const e of entities) {
-    if (map.has(e.id)) dupCounts.set(e.id, (dupCounts.get(e.id) ?? 1) + 1);
-    map.set(e.id, e);  // last-wins
-  }
-  return { unique: [...map.values()], duplicateIds: dupCounts };
+export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise<void> {
+	if (entities.length === 0) return;
+
+	const { unique, duplicateIds } = dedupeEntitiesById(entities);
+	if (duplicateIds.size > 0) {
+		const sample: { id: string; count: number; name: string; kind: string; file: string }[] = [];
+		for (const [id, count] of duplicateIds) {
+			const ent = unique.find(x => x.id === id);
+			if (ent === undefined) continue;
+			sample.push({ id, count, name: ent.name, kind: ent.kind, file: ent.file });
+			if (sample.length >= 5) break;
+		}
+		log.warn(
+			{ totalDuplicates: duplicateIds.size, kept: unique.length, original: entities.length, sample },
+			'upsertEntities: collapsed duplicate entity ids in input batch (last-wins). ' +
+			'This usually indicates a parser emitting two entities with identical (repo, file, kind, name) -- ' +
+			'common for overloaded Java/Scala methods since the id formula doesn\'t include signature.',
+		);
+	}
+
+	await withWriteTxn(s => {
+		// Resolve / allocate repo IDs once per batch (one path -> one id).
+		const repoIdCache = new Map<string, number>();
+		const ensureRepo = (path: string): number => {
+			const cached = repoIdCache.get(path);
+			if (cached !== undefined) return cached;
+			const existing = repoIdByPathInTxn(s, path);
+			if (existing !== undefined) {
+				repoIdCache.set(path, existing);
+				return existing;
+			}
+			// First time we've seen this repo path -- allocate. Matches
+			// the prior DuckDB behaviour where the entity table held a
+			// `repo` string and didn't require a separate registration
+			// step. Phase 5.x will tighten this so callers must register
+			// repos via `addRepo` before indexing.
+			const id = allocateRepoIdInTxn(s);
+			const row: RepoRow = {
+				id,
+				path,
+				name:        '', // back-fill happens via addRepo / first indexer call
+				addedAt:     Date.now(),
+				lastIndexed: 0,
+				status:      'pending',
+				errorMsg:    '',
+			};
+			s.repo.put(encodeRepoKey(id), encodeRepoRow(row));
+			repoIdCache.set(path, id);
+			return id;
+		};
+
+		for (const e of unique) {
+			const repoId = ensureRepo(e.repo);
+			const existingU64 = lookupU64ByStringId(s, e.id);
+
+			if (existingU64 !== undefined) {
+				// Module entities are ensure-exists: don't overwrite.
+				if (e.kind === 'module') continue;
+				const row = entityToRow(e, repoId, e.repo);
+				s.entity.put(encodeEntityKey(existingU64), encodeEntityRow(row));
+				continue;
+			}
+
+			// New entity: allocate u64, write the row + the string-id index
+			const u64 = allocateEntityIdInTxn(s);
+			const row = entityToRow(e, repoId, e.repo);
+			s.entity.put(encodeEntityKey(u64), encodeEntityRow(row));
+			s.entityIdByString.put(e.id, u64);
+		}
+	});
 }
 
-/**
- * Upsert a batch of entities. Bulk multi-VALUES INSERT chunked at
- * ENTITY_BULK_CHUNK rows per call -- the prior per-row loop made one
- * round-trip + one Connection acquire per entity, which dominated the
- * indexer's per-file cost (50-200 entities × ~1ms/row vs ~10ms for
- * the whole batch in one statement). Embeddings travel through
- * alongside row data; rows without embeddings (the indexer's first
- * pass) get NULL in the embedding column and the embedder fills
- * them in later.
- *
- * ON CONFLICT (id) DO UPDATE covers re-indexing across calls; the
- * previous implementation pre-deleted file entities before insert,
- * but the new pattern leaves that to `deleteEntitiesForFile` for
- * explicit purges.
- *
- * Within a single call the input is deduped by id BEFORE chunking
- * (see dedupeEntitiesById) -- the HNSW index wrapper rejects
- * intra-batch duplicates fatally. A duplicate id in the input
- * usually means the parser emitted two entities with identical
- * `(repo, file, kind, name)`; the fix at this layer keeps one row
- * (last-wins) and logs a warning. Per-batch INSERTs are wrapped in
- * try/catch so an unexpected duplicate (e.g. one slipping through
- * a future parser change) produces actionable diagnostic output
- * instead of a cryptic "database has been invalidated" cascade.
- */
-export async function upsertEntities(db: DbClient, entities: Entity[]): Promise<void> {
-  if (entities.length === 0) return;
-
-  const { unique, duplicateIds } = dedupeEntitiesById(entities);
-  if (duplicateIds.size > 0) {
-    // Log a representative sample so the parser bug is investigable
-    // without flooding the log on a wide-fanout case.
-    const sample: { id: string; count: number; name: string; kind: string; file: string }[] = [];
-    for (const [id, count] of duplicateIds) {
-      const ent = unique.find(e => e.id === id);
-      if (ent === undefined) continue;
-      sample.push({ id, count, name: ent.name, kind: ent.kind, file: ent.file });
-      if (sample.length >= 5) break;
-    }
-    log.warn(
-      {
-        totalDuplicates: duplicateIds.size,
-        kept: unique.length,
-        original: entities.length,
-        sample,
-      },
-      'upsertEntities: collapsed duplicate entity ids in input batch (last-wins). ' +
-      'This usually indicates a parser emitting two entities with identical (repo, file, kind, name) -- ' +
-      'common for overloaded Java/Scala methods since the id formula doesn\'t include signature.',
-    );
-  }
-
-  // Split: module stubs use DO NOTHING (ensure-exists), everything else
-  // uses DO UPDATE (re-parse may carry new body / signature / line range).
-  const modules: Entity[] = [];
-  const others:  Entity[] = [];
-  for (const e of unique) {
-    if (e.kind === 'module') modules.push(e); else others.push(e);
-  }
-  await runChunkedInsert(db, modules, ENTITY_ON_CONFLICT_NOTHING);
-  await runChunkedInsert(db, others,  ENTITY_ON_CONFLICT);
+export async function deleteEntitiesForFile(_db: DbClient, filePath: string): Promise<void> {
+	const store = await getGraphStore();
+	const ids = await collectEntityU64sByFile(store, filePath);
+	await detachDeleteEntities(store, ids);
 }
 
-async function runChunkedInsert(
-  db: DbClient,
-  rows: Entity[],
-  conflictClause: string,
-): Promise<void> {
-  for (let i = 0; i < rows.length; i += ENTITY_BULK_CHUNK) {
-    const chunk = rows.slice(i, i + ENTITY_BULK_CHUNK);
-    const placeholders = chunk.map(() => ENTITY_PLACEHOLDER).join(', ');
-    const params: unknown[] = [];
-    for (const e of chunk) params.push(...entityToParams(e));
-    const sql =
-      `INSERT INTO entity (${ENTITY_COLUMNS.join(', ')})
-       VALUES ${placeholders}
-       ${conflictClause}`;
-    try {
-      await db.duck.exec(sql, params as never[]);
-    } catch (err) {
-      // Defense-in-depth: dedupeEntitiesById should have caught any
-      // intra-batch duplicate, so reaching here means either an
-      // unrelated SQL error or an HNSW collision against an EXISTING
-      // row (which the wrapper apparently also rejects in some
-      // versions before ON CONFLICT can fire). Log structured info so
-      // the next failure is debuggable, then re-throw -- the caller's
-      // per-file try/catch handles the file-level skip.
-      const msg = err instanceof Error ? err.message : String(err);
-      const looksLikeHnswCollision = msg.includes('Duplicate keys not allowed')
-        || msg.includes('HNSW');
-      if (looksLikeHnswCollision) {
-        log.error(
-          {
-            chunkIndex: i / ENTITY_BULK_CHUNK,
-            chunkSize: chunk.length,
-            firstFile: chunk[0]?.file,
-            firstId: chunk[0]?.id,
-            sampleIds: chunk.slice(0, 3).map(e => ({ id: e.id, name: e.name, kind: e.kind })),
-            err: msg.slice(0, 500),
-          },
-          'upsertEntities: HNSW duplicate-key error from DuckDB; chunk rejected. ' +
-          'After-effects may include "database has been invalidated" on subsequent statements -- ' +
-          'a daemon restart is required if that surfaces.',
-        );
-      }
-      throw err;
-    }
-  }
+export async function deleteEntitiesForRepo(_db: DbClient, repo: string): Promise<void> {
+	const store = await getGraphStore();
+	const repoId = await withReadTxn(store, () => repoIdByPathInTxn(store, repo));
+	if (repoId === undefined) return;
+	const ids = await collectEntityU64sByRepo(store, repoId);
+	await detachDeleteEntities(store, ids);
 }
 
-/**
- * Detach-delete pattern: edges first, then rows. Order matters so a
- * partial failure never leaves dangling edges. Mirrors the helper
- * semantics from the Phase A Kuzu rip-out (no transaction wrap --
- * GraphClient acquires fresh Connection per call).
- */
-const ENTITY_DELETE_CHUNK = 500;
-async function detachDeleteEntities(db: DbClient, ids: readonly string[]): Promise<void> {
-  if (ids.length === 0) return;
-  for (let i = 0; i < ids.length; i += ENTITY_DELETE_CHUNK) {
-    const chunk = ids.slice(i, i + ENTITY_DELETE_CHUNK);
-    const placeholders = chunk.map(() => '?').join(', ');
-    await db.duck.exec(
-      `DELETE FROM relation WHERE src IN (${placeholders}) OR dst IN (${placeholders})`,
-      [...chunk, ...chunk],
-    );
-    await db.duck.exec(
-      `DELETE FROM entity WHERE id IN (${placeholders})`,
-      [...chunk],
-    );
-  }
+export async function getEntity(_db: DbClient, id: string): Promise<Entity | null> {
+	const store = await getGraphStore();
+	const u64 = store.entityIdByString.get(id) as bigint | number | undefined;
+	if (u64 === undefined) return null;
+	const row = readEntityRow(store, u64);
+	if (row === null) return null;
+	const repoPath = readRepoPath(store, row.repoId);
+	return rowToDomainEntity(id, row, repoPath ?? '');
 }
 
-/**
- * Delete every entity row whose `file` matches the given path. Also
- * removes incident edges so the graph stays clean.
- */
-export async function deleteEntitiesForFile(db: DbClient, filePath: string): Promise<void> {
-  const rows = await db.duck.query<{ id: string }>(
-    'SELECT id FROM entity WHERE file = ?',
-    [filePath],
-  );
-  await detachDeleteEntities(db, rows.map(r => r.id));
+export async function getEntitiesByIds(_db: DbClient, ids: readonly string[]): Promise<Entity[]> {
+	if (ids.length === 0) return [];
+	const store = await getGraphStore();
+	const repoCache = new Map<number, string>();
+	const out: Entity[] = [];
+	for (const id of ids) {
+		const u64 = store.entityIdByString.get(id) as bigint | number | undefined;
+		if (u64 === undefined) continue;
+		const row = readEntityRow(store, u64);
+		if (row === null) continue;
+		out.push(rowToDomainEntity(id, row, lookupRepoPath(store, row.repoId, repoCache)));
+	}
+	return out;
 }
 
-/**
- * Delete every entity row belonging to a repo. Used by `repo.remove`.
- */
-export async function deleteEntitiesForRepo(db: DbClient, repo: string): Promise<void> {
-  const rows = await db.duck.query<{ id: string }>(
-    'SELECT id FROM entity WHERE repo = ?',
-    [repo],
-  );
-  await detachDeleteEntities(db, rows.map(r => r.id));
-}
-
-/** Fetch a single entity by its stable ID. Returns null if not found. */
-export async function getEntity(db: DbClient, id: string): Promise<Entity | null> {
-  const rows = await db.duck.query('SELECT * FROM entity WHERE id = ?', [id]);
-  if (rows.length === 0) return null;
-  return rowToEntity(rows[0]!);
-}
-
-/**
- * Batched form of getEntity. Returns the matched subset (no null
- * placeholders); ids that don't match are omitted. Order is not
- * preserved -- caller should re-key by id if it needs lookup. Chunked
- * at 500 to bound the SQL string size + prepared-statement parameter
- * memory.
- */
-export async function getEntitiesByIds(
-  db: DbClient,
-  ids: readonly string[],
-): Promise<Entity[]> {
-  if (ids.length === 0) return [];
-
-  const CHUNK = 500;
-  const out: Entity[] = [];
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const slice = ids.slice(i, i + CHUNK);
-    const placeholders = slice.map(() => '?').join(', ');
-    const rows = await db.duck.query(
-      `SELECT * FROM entity WHERE id IN (${placeholders})`,
-      [...slice],
-    );
-    for (const r of rows) out.push(rowToEntity(r));
-  }
-  return out;
-}
-
-/**
- * Find entities by name + kind filter. Intended for structured
- * lookups (e.g. the artifact:er kind resolving user-supplied table
- * names into Entity rows) where the caller knows the exact name but
- * not the id. Returns all matches up to `limit`.
- */
 export async function findEntitiesByName(
-  db: DbClient,
-  names: readonly string[],
-  opts: { readonly kinds?: readonly EntityKind[] | undefined; readonly repo?: string | undefined; readonly limit?: number | undefined } = {},
+	_db: DbClient,
+	names: readonly string[],
+	opts: {
+		readonly kinds?: readonly EntityKind[] | undefined;
+		readonly repo?: string | undefined;
+		readonly limit?: number | undefined;
+	} = {},
 ): Promise<Entity[]> {
-  if (names.length === 0) return [];
+	if (names.length === 0) return [];
 
-  const namePlaceholders = names.map(() => '?').join(', ');
-  const conditions: string[] = [`name IN (${namePlaceholders})`];
-  const params: unknown[] = [...names];
+	const store = await getGraphStore();
+	const limit = opts.limit ?? 50;
+	const nameSet = new Set(names);
+	const kindFilter = opts.kinds !== undefined && opts.kinds.length > 0
+		? new Set(opts.kinds.map(k => ENTITY_KIND_BYTE[k as keyof typeof ENTITY_KIND_BYTE]))
+		: null;
+	let repoFilter: number | null = null;
+	if (opts.repo !== undefined) {
+		const id = repoIdByPathInTxn(store, opts.repo);
+		if (id === undefined) return []; // unknown repo -> no matches
+		repoFilter = id;
+	}
 
-  if (opts.kinds !== undefined && opts.kinds.length > 0) {
-    const kindPlaceholders = opts.kinds.map(() => '?').join(', ');
-    conditions.push(`kind IN (${kindPlaceholders})`);
-    params.push(...opts.kinds);
-  }
-  if (opts.repo !== undefined) {
-    conditions.push('repo = ?');
-    params.push(opts.repo);
-  }
+	const out: Entity[] = [];
+	const repoCache = new Map<number, string>();
 
-  const limit = opts.limit !== undefined ? opts.limit : 50;
-  const rows = await db.duck.query(
-    `SELECT * FROM entity WHERE ${conditions.join(' AND ')} LIMIT ${limit}`,
-    params as never[],
-  );
-  return rows.map(rowToEntity);
+	// Linear scan of the entity sub-DB. For ≤ ~1M entities this is fast
+	// (mmap'd cursor). Tier-2 perf optimisation: a `name -> u64` secondary
+	// sub-DB; not built for v1 since the call frequency is low (artifact
+	// generation, not hot-path).
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		if (!nameSet.has(row.name)) continue;
+		if (kindFilter !== null && !kindFilter.has(ENTITY_KIND_BYTE[row.kind])) continue;
+		if (repoFilter !== null && row.repoId !== repoFilter) continue;
+		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
+		if (stringId === undefined) continue;
+		out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
+		if (out.length >= limit) break;
+	}
+	return out;
 }
 
-/** List all entities belonging to a repo. */
-export async function listEntitiesForRepo(db: DbClient, repo: string): Promise<Entity[]> {
-  const rows = await db.duck.query('SELECT * FROM entity WHERE repo = ?', [repo]);
-  return rows.map(rowToEntity);
+export async function listEntitiesForRepo(_db: DbClient, repo: string): Promise<Entity[]> {
+	const store = await getGraphStore();
+	const repoId = repoIdByPathInTxn(store, repo);
+	if (repoId === undefined) return [];
+	const out: Entity[] = [];
+	const repoCache = new Map<number, string>([[repoId, repo]]);
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		if (row.repoId !== repoId) continue;
+		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
+		if (stringId === undefined) continue;
+		out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
+	}
+	return out;
 }
 
-/** List all entities defined in a single file (used by search.by_file IPC). */
-export async function findEntitiesByFile(db: DbClient, file: string): Promise<Entity[]> {
-  const rows = await db.duck.query('SELECT * FROM entity WHERE file = ?', [file]);
-  return rows.map(rowToEntity);
+export async function findEntitiesByFile(_db: DbClient, file: string): Promise<Entity[]> {
+	const store = await getGraphStore();
+	// `file` from callers is an absolute path; rows store the
+	// repo-relative `filePath`. We resolve the row's repo root via its
+	// repoId, recompute the absolute, and compare.
+	const out: Entity[] = [];
+	const repoCache = new Map<number, string>();
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		const repoPath = lookupRepoPath(store, row.repoId, repoCache);
+		if (toAbsolutePath(row.filePath, repoPath) !== file) continue;
+		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
+		if (stringId === undefined) continue;
+		out.push(rowToDomainEntity(stringId, row, repoPath));
+	}
+	return out;
 }
 
-/** List entities not yet embedded (embedding_model = '' sentinel). */
-export async function listUnembeddedEntities(db: DbClient, repo: string): Promise<Entity[]> {
-  const rows = await db.duck.query(
-    "SELECT * FROM entity WHERE repo = ? AND embedding_model = ''",
-    [repo],
-  );
-  return rows.map(rowToEntity);
+export async function listUnembeddedEntities(_db: DbClient, repo: string): Promise<Entity[]> {
+	const store = await getGraphStore();
+	const repoId = repoIdByPathInTxn(store, repo);
+	if (repoId === undefined) return [];
+	const out: Entity[] = [];
+	const repoCache = new Map<number, string>([[repoId, repo]]);
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		if (row.repoId !== repoId) continue;
+		if (row.embeddingModel !== '') continue; // already embedded
+		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
+		if (stringId === undefined) continue;
+		out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
+	}
+	return out;
+}
+
+export async function updateEmbedding(
+	_db: DbClient,
+	id: string,
+	_embedding: number[],
+	embeddingModel: string,
+): Promise<void> {
+	// Phase 3.2 wires the actual vector to LanceDB. For Phase 2.2 we
+	// only update the EntityRow's `embeddingModel` field so the
+	// "is this entity embedded?" predicate (`embeddingModel !== ''`)
+	// behaves correctly during the migration.
+	await withWriteTxn(s => {
+		const u64 = s.entityIdByString.get(id) as bigint | number | undefined;
+		if (u64 === undefined) return; // no-op (matches prior DuckDB UPDATE behaviour)
+		const row = readEntityRowSync(s, u64);
+		if (row === null) return;
+		const next: EntityRow = { ...row, embeddingModel };
+		s.entity.put(encodeEntityKey(toBigInt(u64)), encodeEntityRow(next));
+	});
+	// _embedding will be persisted to Lance in Phase 3.2.
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+const repoIdByPathInTxn = (s: GraphStore, path: string): number | undefined => {
+	for (const { key, value } of s.repo.getRange()) {
+		const row = decodeRepoRow(value as Buffer);
+		if (row.path === path) {
+			return (key as Buffer).readUInt32BE(0);
+		}
+	}
+	return undefined;
+};
+
+const lookupU64ByStringId = (s: GraphStore, id: string): bigint | undefined => {
+	const v = s.entityIdByString.get(id) as bigint | number | undefined;
+	if (v === undefined) return undefined;
+	return toBigInt(v);
+};
+
+const lookupStringIdByU64 = (s: GraphStore, u64: bigint): string | undefined => {
+	// Reverse-lookup is O(N) over the index; cached per-call by callers
+	// where it matters. Tier-2: secondary `u64 -> string` sub-DB if this
+	// becomes hot.
+	for (const { key, value } of s.entityIdByString.getRange()) {
+		const v = toBigInt(value as bigint | number);
+		if (v === u64) return key as string;
+	}
+	return undefined;
+};
+
+const readEntityRow = (s: GraphStore, u64: bigint | number): EntityRow | null => {
+	const buf = s.entity.get(encodeEntityKey(toBigInt(u64)));
+	if (buf === undefined) return null;
+	return decodeEntityRow(buf as Buffer);
+};
+
+const readEntityRowSync = readEntityRow;
+
+const lookupRepoPath = (
+	s: GraphStore,
+	repoId: number,
+	cache: Map<number, string>,
+): string => {
+	const cached = cache.get(repoId);
+	if (cached !== undefined) return cached;
+	const path = readRepoPath(s, repoId);
+	const out = path ?? '';
+	cache.set(repoId, out);
+	return out;
+};
+
+const readRepoPath = (s: GraphStore, repoId: number): string | undefined => {
+	const buf = s.repo.get(encodeRepoKey(repoId));
+	if (buf === undefined) return undefined;
+	return decodeRepoRow(buf as Buffer).path;
+};
+
+const decodeKeyU64 = (buf: Buffer): bigint => buf.readBigUInt64BE(0);
+
+const encodeRepoKey = (id: number): Buffer => {
+	const b = Buffer.alloc(4);
+	b.writeUInt32BE(id, 0);
+	return b;
+};
+
+async function collectEntityU64sByFile(store: GraphStore, file: string): Promise<bigint[]> {
+	const out: bigint[] = [];
+	const repoCache = new Map<number, string>();
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		const repoPath = lookupRepoPath(store, row.repoId, repoCache);
+		if (toAbsolutePath(row.filePath, repoPath) === file) {
+			out.push(decodeKeyU64(key as Buffer));
+		}
+	}
+	return out;
+}
+
+async function collectEntityU64sByRepo(store: GraphStore, repoId: number): Promise<bigint[]> {
+	const out: bigint[] = [];
+	for (const { key, value } of store.entity.getRange()) {
+		const row = decodeEntityRow(value as Buffer);
+		if (row.repoId !== repoId) continue;
+		out.push(decodeKeyU64(key as Buffer));
+	}
+	return out;
 }
 
 /**
- * Update the embedding vector and model name for an entity (used by
- * the reembed job). Assumes the row already exists; no-op if it
- * doesn't (no UPSERT path -- `upsertEntities` covers full creation).
+ * Detach-delete pattern: incident edges first, then the entity row +
+ * its string-id index entry. Wrapped in one txn so partial failure
+ * never leaves dangling edges or orphaned index entries.
+ *
+ * Phase 2.10 will hoist this into a shared cascade helper using the
+ * Phase 2.3 edge API; for Phase 2.2 we do raw key-range scans on the
+ * out_edge / in_edge sub-DBs.
  */
-export async function updateEmbedding(
-  db: DbClient,
-  id: string,
-  embedding: number[],
-  embeddingModel: string,
-): Promise<void> {
-  await db.duck.exec(
-    'UPDATE entity SET embedding = ?, embedding_model = ? WHERE id = ?',
-    [arrayValue(embedding), embeddingModel, id],
-  );
+async function detachDeleteEntities(store: GraphStore, u64s: readonly bigint[]): Promise<void> {
+	if (u64s.length === 0) return;
+	await withWriteTxn(s => {
+		for (const u64 of u64s) {
+			// Forward direction: edges where this entity is the `from`.
+			// Walk out_edge by prefix(u64), removing both the out_edge
+			// entry and the matching in_edge mirror at (to, kind, u64).
+			sweepOutgoingEdges(s, u64);
+			// Reverse direction: edges where this entity is the `to`.
+			// Walk in_edge by prefix(u64), removing both the in_edge
+			// entry and the matching out_edge mirror at (from, kind, u64).
+			sweepIncomingEdges(s, u64);
+			// Entity row + string-id index
+			const stringId = lookupStringIdByU64(s, u64);
+			if (stringId !== undefined) {
+				s.entityIdByString.remove(stringId);
+			}
+			s.entity.remove(encodeEntityKey(u64));
+		}
+	});
 }
+
+function sweepOutgoingEdges(s: GraphStore, u64: bigint): void {
+	const prefix = encodeOutEdgePrefix(u64);
+	const succ = prefixSuccessor(prefix);
+	const collected: Array<{ kind: number; to: bigint }> = [];
+	for (const { key } of s.outEdge.getRange({ start: prefix, end: succ })) {
+		const k = key as Buffer;
+		collected.push({ kind: k.readUInt8(8), to: k.readBigUInt64BE(9) });
+	}
+	for (const { kind, to } of collected) {
+		const outKey = Buffer.alloc(17);
+		outKey.writeBigUInt64BE(u64, 0);
+		outKey.writeUInt8(kind, 8);
+		outKey.writeBigUInt64BE(to, 9);
+		s.outEdge.remove(outKey);
+
+		const inKey = Buffer.alloc(17);
+		inKey.writeBigUInt64BE(to, 0);
+		inKey.writeUInt8(kind, 8);
+		inKey.writeBigUInt64BE(u64, 9);
+		s.inEdge.remove(inKey);
+	}
+}
+
+function sweepIncomingEdges(s: GraphStore, u64: bigint): void {
+	const prefix = encodeInEdgePrefix(u64);
+	const succ = prefixSuccessor(prefix);
+	const collected: Array<{ kind: number; from: bigint }> = [];
+	for (const { key } of s.inEdge.getRange({ start: prefix, end: succ })) {
+		const k = key as Buffer;
+		collected.push({ kind: k.readUInt8(8), from: k.readBigUInt64BE(9) });
+	}
+	for (const { kind, from } of collected) {
+		const inKey = Buffer.alloc(17);
+		inKey.writeBigUInt64BE(u64, 0);
+		inKey.writeUInt8(kind, 8);
+		inKey.writeBigUInt64BE(from, 9);
+		s.inEdge.remove(inKey);
+
+		const outKey = Buffer.alloc(17);
+		outKey.writeBigUInt64BE(from, 0);
+		outKey.writeUInt8(kind, 8);
+		outKey.writeBigUInt64BE(u64, 9);
+		s.outEdge.remove(outKey);
+	}
+}
+
+function dedupeEntitiesById(entities: readonly Entity[]): {
+	unique: Entity[];
+	duplicateIds: Map<string, number>;
+} {
+	const map = new Map<string, Entity>();
+	const dupCounts = new Map<string, number>();
+	for (const e of entities) {
+		if (map.has(e.id)) dupCounts.set(e.id, (dupCounts.get(e.id) ?? 1) + 1);
+		map.set(e.id, e);
+	}
+	return { unique: [...map.values()], duplicateIds: dupCounts };
+}
+
+// ---------------------------------------------------------------------------
+// Path / timestamp helpers
+// ---------------------------------------------------------------------------
+
+function toRepoRelative(absoluteOrRelative: string, repoRoot: string): string {
+	if (repoRoot === '' || !absoluteOrRelative.startsWith(repoRoot)) {
+		// Already relative, or repo root unknown -- keep as-is
+		return absoluteOrRelative;
+	}
+	const rel = relative(repoRoot, absoluteOrRelative);
+	return rel === '' ? '.' : rel;
+}
+
+function toAbsolutePath(filePath: string, repoRoot: string): string {
+	if (filePath.startsWith('/') || repoRoot === '') return filePath;
+	return repoRoot.endsWith('/') ? `${repoRoot}${filePath}` : `${repoRoot}/${filePath}`;
+}
+
+function parseTimestamp(s: string | undefined): number {
+	if (s === undefined || s === '') return 0;
+	const n = Date.parse(s);
+	return Number.isFinite(n) ? n : 0;
+}
+
+function formatTimestamp(ms: number): string {
+	if (ms === 0) return '';
+	return new Date(ms).toISOString();
+}
+
+function toBigInt(v: bigint | number): bigint {
+	return typeof v === 'bigint' ? v : BigInt(v);
+}
+
+// withReadTxn is a thin wrapper for read-only call sites that want to
+// preserve a snapshot. lmdb-js allows direct .get / .getRange calls
+// outside any explicit txn (each acquires its own read snapshot per
+// call), so for the get-then-act pattern we accept the slight
+// mismatched-snapshot risk as acceptable for v1.
+async function withReadTxn<T>(_store: GraphStore, fn: () => T | Promise<T>): Promise<T> {
+	return fn();
+}
+

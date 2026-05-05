@@ -57,16 +57,21 @@ export function kindByteToName(b: number): RelationKind {
 // ---------------------------------------------------------------------------
 
 export const ENTITY_KIND_BYTE = {
-	function:  1,
-	class:     2,
-	method:    3,
-	interface: 4,
-	module:    5,
-	type:      6,
-	enum:      7,
-	variable:  8,
-	repo:      9,
-	file:      10,
+	// Aligned with the domain EntityKind enum in shared/types.ts.
+	// u8 slot positions are fixed: never reorder, never reuse a removed
+	// slot (additive-only changes; bump SCHEMA_VERSION when adding).
+	repo:      1,
+	file:      2,
+	module:    3,
+	function:  4,
+	method:    5,
+	class:     6,
+	interface: 7,
+	type:      8,
+	variable:  9,
+	document:  10,
+	section:   11,
+	config:    12,
 } as const;
 
 export type EntityKind = keyof typeof ENTITY_KIND_BYTE;
