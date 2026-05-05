@@ -87,6 +87,7 @@
     "test:config-store-lmdb": "tsx --test config/__tests__/store-lmdb.test.ts",
     "test:reindex-file-lmdb": "tsx --test db/__tests__/reindex-file-lmdb.test.ts",
     "test:cascade-rules-lmdb": "tsx --test db/__tests__/cascade-rules-lmdb.test.ts",
+    "test:lance-conn": "tsx --test db/lance/__tests__/conn.test.ts",
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",
