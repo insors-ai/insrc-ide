@@ -20,6 +20,8 @@ import type {
 	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	FunctionalDependencyRequest,
+	FunctionalDependencyResult,
 	HistogramRequest,
 	HistogramResult,
 	IndexListing,
@@ -40,6 +42,7 @@ import {
 	compileAggregate,
 	compileDistinct,
 	executeCorrelationMatrix,
+	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
 	quoteTarget,
@@ -190,6 +193,23 @@ class MysqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeFunctionalDependency(request, {
+			target,
+			knownColumns: cols,
+			dialect: MYSQL_DIALECT,
+			runRows: async (sql, values) => {
+				const [rows] = await withTimeout(
+					this.pool.query(sql, values as unknown[]),
+					SAMPLE_TIMEOUT_MS,
+				) as unknown as [Record<string, unknown>[], unknown];
+				return rows;
+			},
+		});
 	}
 
 	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {

@@ -22,6 +22,8 @@ import type {
 	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	FunctionalDependencyRequest,
+	FunctionalDependencyResult,
 	HistogramRequest,
 	HistogramResult,
 	IndexListing,
@@ -41,6 +43,7 @@ import {
 	compileAggregate,
 	compileDistinct,
 	executeCorrelationMatrix,
+	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
 	quoteTarget,
@@ -238,6 +241,18 @@ class SqliteDriver implements RdbmsDriver {
 			});
 		}
 		return { target, indexes };
+	}
+
+	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeFunctionalDependency(request, {
+			target,
+			knownColumns: cols,
+			dialect: SQLITE_DIALECT,
+			runRows: async (sql, values) =>
+				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
 	}
 
 	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {

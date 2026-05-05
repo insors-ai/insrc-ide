@@ -20,6 +20,8 @@ import type {
 	CorrelationMatrixResult,
 	CorrelationMethod,
 	DistinctRequest,
+	FunctionalDependencyRequest,
+	FunctionalDependencyResult,
 	HistogramMode,
 	HistogramRequest,
 	HistogramResult,
@@ -1178,6 +1180,178 @@ export function readOutlierExampleRows(
 		out.push({ value: v, side });
 	}
 	return out;
+}
+
+// ---------------------------------------------------------------------------
+// Functional dependency (Phase 5c.3) -- per-(from, to) grouped check
+// ---------------------------------------------------------------------------
+
+const FD_VIOLATIONS_DEFAULT = 3;
+const FD_VIOLATIONS_MAX = 20;
+const FD_TO_SAMPLE_LIMIT = 5;
+
+export function clampFdViolations(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return FD_VIOLATIONS_DEFAULT;
+	return Math.min(Math.max(1, Math.floor(n)), FD_VIOLATIONS_MAX);
+}
+
+/**
+ * Build the stats SQL (1 row, columns total_groups / consistent_groups
+ * / informative_groups / max_distinct_to / avg_distinct_to). This SQL
+ * shape is portable: GROUP BY + COUNT(DISTINCT) + a SUM(CASE...) wrap.
+ */
+export function compileFdStats(
+	target: string,
+	request: FunctionalDependencyRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	{ paramStartIndex = 1 }: { paramStartIndex?: number } = {},
+): { text: string; values: readonly unknown[] } {
+	const columnSet = new Set(knownColumns.map(c => c.toLowerCase()));
+	if (!columnSet.has(request.fromColumn.toLowerCase())) {
+		throw new Error(`data-driver: unknown column '${request.fromColumn}' in functional-dependency`);
+	}
+	if (!columnSet.has(request.toColumn.toLowerCase())) {
+		throw new Error(`data-driver: unknown column '${request.toColumn}' in functional-dependency`);
+	}
+	const fromSql = dialect.quoteIdent(request.fromColumn);
+	const toSql = dialect.quoteIdent(request.toColumn);
+	const targetSql = quoteTarget(target, dialect);
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, paramStartIndex);
+	const fromNotNull = `${fromSql} IS NOT NULL`;
+	const innerWhere = where.text === ''
+		? `WHERE ${fromNotNull}`
+		: `${where.text} AND ${fromNotNull}`;
+	const text =
+		`SELECT COUNT(*) AS total_groups,` +
+		`  SUM(CASE WHEN distinct_to = 1 THEN 1 ELSE 0 END) AS consistent_groups,` +
+		`  SUM(CASE WHEN group_size >= 2 THEN 1 ELSE 0 END) AS informative_groups,` +
+		`  COALESCE(MAX(distinct_to), 0) AS max_distinct_to,` +
+		`  COALESCE(AVG(CAST(distinct_to AS DOUBLE PRECISION)), 0) AS avg_distinct_to` +
+		` FROM (SELECT ${fromSql} AS from_v, COUNT(*) AS group_size, COUNT(DISTINCT ${toSql}) AS distinct_to` +
+		`        FROM ${targetSql} ${innerWhere}` +
+		`        GROUP BY ${fromSql}) AS gd`;
+	if (looksLikeMutation(text)) {
+		throw new Error('data-driver: refused suspicious SQL in compileFdStats');
+	}
+	return { text, values: where.values };
+}
+
+/**
+ * Build the violations SQL: top-N (from_v, distinct_to) where the
+ * group has > 1 distinct to-value. Caller fetches per-violation
+ * to-samples in a follow-up.
+ */
+export function compileFdViolations(
+	target: string,
+	request: FunctionalDependencyRequest,
+	limit: number,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	{ paramStartIndex = 1 }: { paramStartIndex?: number } = {},
+): { text: string; values: readonly unknown[] } {
+	const fromSql = dialect.quoteIdent(request.fromColumn);
+	const toSql = dialect.quoteIdent(request.toColumn);
+	const targetSql = quoteTarget(target, dialect);
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, paramStartIndex);
+	const fromNotNull = `${fromSql} IS NOT NULL`;
+	const innerWhere = where.text === ''
+		? `WHERE ${fromNotNull}`
+		: `${where.text} AND ${fromNotNull}`;
+	const topClause = dialect === MSSQL_DIALECT ? ` TOP ${limit}` : '';
+	const tailLimit = dialect === MSSQL_DIALECT ? '' : ' ' + dialect.limitClause(limit);
+	const text =
+		`SELECT${topClause} from_v, distinct_to FROM (` +
+		`SELECT ${fromSql} AS from_v, COUNT(DISTINCT ${toSql}) AS distinct_to` +
+		` FROM ${targetSql} ${innerWhere}` +
+		` GROUP BY ${fromSql} HAVING COUNT(DISTINCT ${toSql}) > 1` +
+		`) v ORDER BY distinct_to DESC, from_v ASC${tailLimit}`;
+	if (looksLikeMutation(text)) {
+		throw new Error('data-driver: refused suspicious SQL in compileFdViolations');
+	}
+	return { text, values: where.values };
+}
+
+/**
+ * Build the per-violation to-sample SQL: up to FD_TO_SAMPLE_LIMIT
+ * distinct to-values for one specific from-value. Caller binds the
+ * from-value at the first parameter slot.
+ */
+export function compileFdToSample(
+	target: string,
+	request: FunctionalDependencyRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	{ paramStartIndex = 1 }: { paramStartIndex?: number } = {},
+): { text: string } {
+	const fromSql = dialect.quoteIdent(request.fromColumn);
+	const toSql = dialect.quoteIdent(request.toColumn);
+	const targetSql = quoteTarget(target, dialect);
+	void knownColumns;
+	const topClause = dialect === MSSQL_DIALECT ? ` TOP ${FD_TO_SAMPLE_LIMIT}` : '';
+	const tailLimit = dialect === MSSQL_DIALECT ? '' : ' ' + dialect.limitClause(FD_TO_SAMPLE_LIMIT);
+	const text =
+		`SELECT${topClause} DISTINCT ${toSql} AS to_v FROM ${targetSql}` +
+		` WHERE ${fromSql} = ${dialect.placeholder(paramStartIndex)}${tailLimit}`;
+	if (looksLikeMutation(text)) {
+		throw new Error('data-driver: refused suspicious SQL in compileFdToSample');
+	}
+	return { text };
+}
+
+export interface FdOrchestratorDeps {
+	readonly target: string;
+	readonly knownColumns: readonly string[];
+	readonly dialect: Dialect;
+	readonly runRows: (sql: string, values: readonly unknown[]) => Promise<readonly Readonly<Record<string, unknown>>[]>;
+}
+
+export async function executeFunctionalDependency(
+	request: FunctionalDependencyRequest,
+	deps: FdOrchestratorDeps,
+): Promise<FunctionalDependencyResult> {
+	const violationsLimit = clampFdViolations(request.topViolations);
+	const stats = compileFdStats(deps.target, request, deps.knownColumns, deps.dialect);
+	const statsRows = await deps.runRows(stats.text, stats.values);
+	const statsRow = statsRows[0] ?? {};
+	const totalGroups = numericFromRaw(statsRow['total_groups'] ?? statsRow['TOTAL_GROUPS']) ?? 0;
+	const consistentGroups = numericFromRaw(statsRow['consistent_groups'] ?? statsRow['CONSISTENT_GROUPS']) ?? 0;
+	const informativeGroups = numericFromRaw(statsRow['informative_groups'] ?? statsRow['INFORMATIVE_GROUPS']) ?? 0;
+	const maxDistinctTo = numericFromRaw(statsRow['max_distinct_to'] ?? statsRow['MAX_DISTINCT_TO']) ?? 0;
+	const avgDistinctTo = numericFromRaw(statsRow['avg_distinct_to'] ?? statsRow['AVG_DISTINCT_TO']) ?? 0;
+	const determinationScore = totalGroups > 0 ? consistentGroups / totalGroups : 0;
+
+	const topViolations: { fromValue: unknown; distinctToCount: number; toSample: unknown[] }[] = [];
+	if (totalGroups > consistentGroups) {
+		const vSql = compileFdViolations(deps.target, request, violationsLimit, deps.knownColumns, deps.dialect);
+		const vRows = await deps.runRows(vSql.text, vSql.values);
+		const violations: { fromValue: unknown; distinctToCount: number }[] = [];
+		for (const r of vRows) {
+			const fromValue = r['from_v'] ?? r['FROM_V'] ?? null;
+			const distinctToCount = numericFromRaw(r['distinct_to'] ?? r['DISTINCT_TO']) ?? 0;
+			violations.push({ fromValue, distinctToCount });
+		}
+		const sampleSql = compileFdToSample(deps.target, request, deps.knownColumns, deps.dialect);
+		for (const v of violations) {
+			const toRows = await deps.runRows(sampleSql.text, [v.fromValue]);
+			const toSample = toRows.map(r => r['to_v'] ?? r['TO_V'] ?? null);
+			topViolations.push({
+				fromValue: v.fromValue,
+				distinctToCount: v.distinctToCount,
+				toSample,
+			});
+		}
+	}
+
+	return {
+		target: deps.target,
+		fromColumn: request.fromColumn,
+		toColumn: request.toColumn,
+		totalGroups, consistentGroups, informativeGroups,
+		maxDistinctTo, avgDistinctTo,
+		determinationScore,
+		topViolations,
+	};
 }
 
 // ---------------------------------------------------------------------------

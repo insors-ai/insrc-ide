@@ -29,6 +29,8 @@ import type {
 	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	FunctionalDependencyRequest,
+	FunctionalDependencyResult,
 	HistogramRequest,
 	HistogramResult,
 	IndexListing,
@@ -48,6 +50,7 @@ import {
 	compileAggregate,
 	compileDistinct,
 	executeCorrelationMatrix,
+	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
 	quoteTarget,
@@ -237,6 +240,18 @@ class MssqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeFunctionalDependency(request, {
+			target,
+			knownColumns: cols,
+			dialect: MSSQL_DIALECT,
+			runRows: async (sql, values) =>
+				await withTimeout(this.run(sql, values as unknown[]), SAMPLE_TIMEOUT_MS),
+		});
 	}
 
 	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {

@@ -158,6 +158,10 @@ class ClickHouseDriver implements RdbmsDriver {
 		throw new Error('data-driver: listIndexes() not yet implemented for clickhouse -- ClickHouse uses ORDER BY / PRIMARY KEY / data-skipping indexes via system.tables.engine_full and system.data_skipping_indices, not the SQL-standard sys.indexes shape. Per-engine follow-up.');
 	}
 
+	async functionalDependency(): Promise<never> {
+		throw new Error('data-driver: functionalDependency() not yet implemented for clickhouse -- the GROUP BY + COUNT(DISTINCT) shape works but the {p:String} parameter style needs the clickhouse-dialect compileWhere binding follow-up. Tracked alongside the broader clickhouse-dialect work (Phase 0.1).');
+	}
+
 	async histogram(): Promise<never> {
 		throw new Error('data-driver: histogram() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
 	}

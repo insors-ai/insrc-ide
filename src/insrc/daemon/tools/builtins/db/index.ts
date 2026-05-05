@@ -30,6 +30,7 @@ import type {
 	DistinctRequest,
 	Driver,
 	FileDriver,
+	FunctionalDependencyRequest,
 	HistogramMode,
 	HistogramRequest,
 	KvDriver,
@@ -893,6 +894,73 @@ const sqlListIndexesTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// db:sql:functional_dependency (Phase 5c.3)
+// ---------------------------------------------------------------------------
+
+const sqlFunctionalDependencyTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_functional_dependency',
+	description:
+		'Full-table functional-dependency check for one ordered (from, to) pair on an RDBMS table. Issues GROUP BY + COUNT(DISTINCT) ' +
+		'queries to compute totalGroups / consistentGroups / informativeGroups / max+avg distinctTo / determinationScore + top-N violation examples. ' +
+		'Use this when the precise full-table answer matters; the sample-based 5c.3 skill is the cheap default.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'fromColumn', 'toColumn'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target:        { type: 'string' },
+			fromColumn:    { type: 'string', description: 'Determinant column ("does this determine toColumn?").' },
+			toColumn:      { type: 'string', description: 'Dependent column.' },
+			topViolations: { type: 'integer', minimum: 1, maximum: 20, description: 'Default 3.' },
+			where:         WHERE_SCHEMA,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		const fromColumn = String(input['fromColumn'] ?? '');
+		const toColumn = String(input['toColumn'] ?? '');
+		if (connectionId === '' || target === '' || fromColumn === '' || toColumn === '') {
+			return fail(this.id, 'connectionId, target, fromColumn and toColumn are required');
+		}
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.functionalDependency !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement functionalDependency() yet`);
+		}
+		try {
+			const where = parseWhereInput(input['where']);
+			const req: FunctionalDependencyRequest = where.length === 0
+				? (typeof input['topViolations'] === 'number'
+					? { fromColumn, toColumn, topViolations: Math.floor(input['topViolations']) }
+					: { fromColumn, toColumn })
+				: (typeof input['topViolations'] === 'number'
+					? { fromColumn, toColumn, topViolations: Math.floor(input['topViolations']), where }
+					: { fromColumn, toColumn, where });
+			const result = await rd.functionalDependency(target, req);
+			const lines: string[] = [
+				`**${target}** -- \`${fromColumn}\` -> \`${toColumn}\``,
+				'',
+				`totalGroups: ${result.totalGroups} | consistent: ${result.consistentGroups} | informative: ${result.informativeGroups}`,
+				`maxDistinctTo: ${result.maxDistinctTo} | avgDistinctTo: ${result.avgDistinctTo.toFixed(2)} | determinationScore: ${result.determinationScore.toFixed(3)}`,
+			];
+			if (result.topViolations.length > 0) {
+				lines.push('', '_top violations:_', '| from | distinct to | sample to-values |', '|---|---|---|');
+				for (const v of result.topViolations) {
+					lines.push(`| ${String(v.fromValue)} | ${v.distinctToCount} | ${v.toSample.map(s => String(s)).join(', ')} |`);
+				}
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
 // db:sql:histogram + db:file:histogram (Phase 0.2)
 // ---------------------------------------------------------------------------
 
@@ -1712,6 +1780,7 @@ export function registerDbTools(): void {
 	registerTool(sqlDistinctTool);
 	registerTool(sqlListTablesTool);
 	registerTool(sqlListIndexesTool);
+	registerTool(sqlFunctionalDependencyTool);
 	registerTool(sqlHistogramTool);
 	registerTool(sqlCorrelationMatrixTool);
 	registerTool(sqlOutliersTool);
@@ -1729,5 +1798,5 @@ export function registerDbTools(): void {
 	registerTool(fileCorrelationMatrixTool);
 	registerTool(fileOutliersTool);
 	registerTool(fileListFilesTool);
-	log.debug({ count: 25 }, 'data-driver tools registered');
+	log.debug({ count: 26 }, 'data-driver tools registered');
 }

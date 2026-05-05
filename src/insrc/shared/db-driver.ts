@@ -333,6 +333,37 @@ export interface DistinctResult {
 }
 
 // ---------------------------------------------------------------------------
+// Functional dependency (Phase 5c.3)
+// ---------------------------------------------------------------------------
+
+export interface FunctionalDependencyRequest {
+	readonly fromColumn: string;
+	readonly toColumn: string;
+	/** Default 3. */
+	readonly topViolations?: number;
+	readonly where?: readonly WhereClause[];
+}
+
+export interface FunctionalDependencyViolation {
+	readonly fromValue: unknown;
+	readonly distinctToCount: number;
+	readonly toSample: readonly unknown[];
+}
+
+export interface FunctionalDependencyResult {
+	readonly target: string;
+	readonly fromColumn: string;
+	readonly toColumn: string;
+	readonly totalGroups: number;
+	readonly consistentGroups: number;
+	readonly informativeGroups: number;
+	readonly maxDistinctTo: number;
+	readonly avgDistinctTo: number;
+	readonly determinationScore: number;
+	readonly topViolations: readonly FunctionalDependencyViolation[];
+}
+
+// ---------------------------------------------------------------------------
 // Catalog enumeration (Phase 1.1 of plans/analyzers/data-analyzer-skills.md)
 // ---------------------------------------------------------------------------
 
@@ -521,6 +552,8 @@ export interface RdbmsDriver extends BaseDriver {
 	listTables?(opts?: { readonly schema?: string; readonly limit?: number }): Promise<TableListing>;
 	/** Phase 1.1 -- list indexes on one table. */
 	listIndexes?(target: string): Promise<IndexListing>;
+	/** Phase 5c.3 -- full-table functional dependency check for one (from, to) pair. */
+	functionalDependency?(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult>;
 	/** Phase 0.2 -- server-side histogram. */
 	histogram?(target: string, request: HistogramRequest): Promise<HistogramResult>;
 	/** Phase 0.4 -- pairwise correlation matrix over numeric columns. */

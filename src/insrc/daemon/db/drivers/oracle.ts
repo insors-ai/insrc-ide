@@ -23,6 +23,8 @@ import type {
 	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	FunctionalDependencyRequest,
+	FunctionalDependencyResult,
 	HistogramRequest,
 	HistogramResult,
 	IndexListing,
@@ -42,6 +44,7 @@ import {
 	compileAggregate,
 	compileDistinct,
 	executeCorrelationMatrix,
+	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
 	quoteTarget,
@@ -222,6 +225,29 @@ class OracleDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeFunctionalDependency(request, {
+			target,
+			knownColumns: cols,
+			dialect: ORACLE_DIALECT,
+			runRows: async (sql, values) => {
+				const pool = await this.poolPromise;
+				const conn = await pool.getConnection();
+				try {
+					const res = await conn.execute<Record<string, unknown>>(
+						sql, values as unknown[],
+						{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+					);
+					return res.rows ?? [];
+				} finally {
+					await conn.close();
+				}
+			},
+		});
 	}
 
 	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {

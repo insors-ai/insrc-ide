@@ -19,6 +19,8 @@ import type {
 	CorrelationMatrixResult,
 	DistinctRequest,
 	DistinctResult,
+	FunctionalDependencyRequest,
+	FunctionalDependencyResult,
 	HistogramRequest,
 	HistogramResult,
 	IndexListing,
@@ -41,6 +43,7 @@ import {
 	compileAggregate,
 	compileDistinct,
 	executeCorrelationMatrix,
+	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
 	quoteTarget,
@@ -196,6 +199,20 @@ class PostgresDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeFunctionalDependency(request, {
+			target,
+			knownColumns: cols,
+			dialect: POSTGRES_DIALECT,
+			runRows: async (sql, values) => {
+				const res = await withTimeout(this.pool.query(sql, values as unknown[]), SAMPLE_TIMEOUT_MS);
+				return res.rows as readonly Readonly<Record<string, unknown>>[];
+			},
+		});
 	}
 
 	async outliers(target: string, request: OutlierRequest): Promise<OutlierResult> {

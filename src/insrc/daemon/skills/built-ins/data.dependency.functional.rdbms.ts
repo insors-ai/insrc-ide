@@ -40,6 +40,31 @@ interface FunctionalDepInput {
 	readonly target: string;
 	readonly columns?: readonly string[];
 	readonly sampleSize?: number;
+	/** Default 'sample'; 'full-table' issues db_sql_functional_dependency
+	 *  per pair (one round-trip per pair plus violation queries). */
+	readonly mode?: 'sample' | 'full-table';
+}
+
+interface FdToolResult {
+	readonly target: string;
+	readonly fromColumn: string;
+	readonly toColumn: string;
+	readonly totalGroups: number;
+	readonly consistentGroups: number;
+	readonly informativeGroups: number;
+	readonly maxDistinctTo: number;
+	readonly avgDistinctTo: number;
+	readonly determinationScore: number;
+	readonly topViolations: readonly { fromValue: unknown; distinctToCount: number; toSample: readonly unknown[] }[];
+}
+
+function isFdToolResult(v: unknown): v is FdToolResult {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['fromColumn'] === 'string'
+		&& typeof o['toColumn'] === 'string'
+		&& typeof o['determinationScore'] === 'number'
+		&& Array.isArray(o['topViolations']);
 }
 
 interface FdViolation {
@@ -122,6 +147,7 @@ const skill: Skill<FunctionalDepInput, FunctionalDepOutput> = {
 			target:       { type: 'string' },
 			columns:      { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 10 },
 			sampleSize:   { type: 'integer', minimum: 1, maximum: 50 },
+			mode:         { type: 'string', enum: ['sample', 'full-table'], description: 'Default sample. full-table delegates to db_sql_functional_dependency per pair.' },
 		},
 		required: ['connectionId', 'target'],
 		additionalProperties: false,
@@ -138,13 +164,13 @@ const skill: Skill<FunctionalDepInput, FunctionalDepOutput> = {
 		required: ['target', 'sampleSize', 'columns', 'fds', 'truncated'],
 		additionalProperties: false,
 	},
-	toolDeps: ['db_sql_describe', 'db_sql_sample'],
+	toolDeps: ['db_sql_describe', 'db_sql_sample', 'db_sql_functional_dependency'],
 	providerAffinity: 'auto',
 	preconditions: [
 		{
 			kind: 'required-tools',
-			tools: ['db_sql_describe', 'db_sql_sample'],
-			reason: 'describe gives the column list; sample gives the rows we group by',
+			tools: ['db_sql_describe', 'db_sql_sample', 'db_sql_functional_dependency'],
+			reason: 'sample mode: describe + sample. full-table mode: db_sql_functional_dependency per pair',
 		},
 		{
 			kind: 'connection-family',
@@ -178,6 +204,72 @@ const skill: Skill<FunctionalDepInput, FunctionalDepOutput> = {
 				`functional dependency truncated: ${cols.length} columns -> profiling first ${COL_CAP}. ` +
 				`Pass explicit \`columns\` to slice differently.`,
 			);
+		}
+
+		if (input.mode === 'full-table') {
+			const fds: FdResult[] = [];
+			for (const from of usedCols) {
+				for (const to of usedCols) {
+					if (from === to) continue;
+					const tool = await deps.runTool({
+						id: `${callBase}-fd-${from}-${to}`,
+						name: 'db_sql_functional_dependency',
+						input: {
+							connectionId: input.connectionId,
+							target: input.target,
+							fromColumn: from,
+							toColumn: to,
+						},
+					});
+					if (tool.isError) {
+						notes.push(`db_sql_functional_dependency(${from}->${to}) error: ${tool.content.slice(0, 200)}`);
+						continue;
+					}
+					if (!isFdToolResult(tool.data)) {
+						notes.push(`db_sql_functional_dependency(${from}->${to}) returned a result without the expected structured data shape`);
+						continue;
+					}
+					const r = tool.data;
+					fds.push({
+						from, to,
+						fromDistinctCount: r.totalGroups,
+						informativeGroups: r.informativeGroups,
+						avgValuesPerFrom: r.avgDistinctTo,
+						maxValuesPerFrom: r.maxDistinctTo,
+						determinationScore: r.determinationScore,
+						determines: r.determinationScore >= DETERMINES_THRESHOLD && r.informativeGroups >= MIN_INFORMATIVE_GROUPS,
+						violations: r.topViolations.map(v => ({
+							fromValue: v.fromValue,
+							toValues: [...v.toSample],
+						})),
+					});
+				}
+			}
+			fds.sort((a, b) => {
+				if (a.determines !== b.determines) return a.determines ? -1 : 1;
+				if (a.determinationScore !== b.determinationScore) return b.determinationScore - a.determinationScore;
+				if (a.informativeGroups !== b.informativeGroups) return b.informativeGroups - a.informativeGroups;
+				return `${a.from}->${a.to}`.localeCompare(`${b.from}->${b.to}`);
+			});
+			const cappedFds = fds.length > PAIR_OUTPUT_CAP ? fds.slice(0, PAIR_OUTPUT_CAP) : fds;
+			if (fds.length > PAIR_OUTPUT_CAP) {
+				notes.push(`functional dependency: ${fds.length} ordered pairs computed; output capped at ${PAIR_OUTPUT_CAP}`);
+			}
+			const totalRows = fds.length > 0 ? fds[0]!.fromDistinctCount : 0;
+			void totalRows;
+			const anyInformative = fds.some(f => f.informativeGroups > 0);
+			return {
+				value: {
+					target: input.target,
+					sampleSize: 0,  // full-table: sampleSize is meaningless; consumers use determinationScore
+					columns: usedCols,
+					fds: cappedFds,
+					truncated,
+				},
+				confidence: anyInformative ? 'high' : 'medium',
+				...(notes.length > 0 ? { notes } : {}),
+				toolCalls: [],
+			};
 		}
 
 		const sampleResult = await deps.runTool({
