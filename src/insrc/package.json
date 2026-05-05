@@ -78,6 +78,7 @@
     "test:graph-ids": "tsx --test db/graph/__tests__/ids.test.ts",
     "test:graph-codec": "tsx --test db/graph/__tests__/codec.test.ts",
     "test:graph-ops": "tsx --test db/graph/__tests__/operational.test.ts",
+    "test:graph-traversal": "tsx --test db/graph/__tests__/traversal.test.ts",
     "test:repos-lmdb": "tsx --test db/__tests__/repos-lmdb.test.ts",
     "test:entities-lmdb": "tsx --test db/__tests__/entities-lmdb.test.ts",
     "test:relations-lmdb": "tsx --test db/__tests__/relations-lmdb.test.ts",
