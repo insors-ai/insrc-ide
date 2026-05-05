@@ -161,8 +161,11 @@ test('todo_list row round-trip', () => {
 	const l: TodoListRow = {
 		id: 'list-1', sessionId: 'session-x', parentListId: '',
 		title: 'Tasks', description: '', status: 'active',
-		owner: '', source: 'agent',
-		transfers: [], body: '',
+		owner: 'user', source: 'user',
+		transfers: [
+			{ from: 'user', to: 'planner', reason: 'created', at: '2026-01-01T00:00:00.000Z', initiator: 'user' },
+		],
+		body: '',
 		createdAt: 1000, updatedAt: 1000,
 	};
 	assert.deepEqual(decodeTodoListRow(encodeTodoListRow(l)), l);
@@ -172,7 +175,7 @@ test('todo_item row round-trip with tags + meta', () => {
 	const i: TodoItemRow = {
 		id: 'item-1', listId: 'list-1',
 		title: 'Do it', description: '',
-		status: 'pending', orderKey: 'a01',
+		status: 'pending', order: 100,
 		createdAt: 1000, updatedAt: 1000, completedAt: 0,
 		blockedReason: '',
 		tags: ['urgent', 'blocked'],

@@ -33,6 +33,12 @@ import type {
 	PlanStepStatus as DomainPlanStepStatus,
 	PlanStepComplexity as DomainPlanStepComplexity,
 } from '../../shared/types.js';
+import type {
+	TodoListStatus as DomainTodoListStatus,
+	TodoItemStatus as DomainTodoItemStatus,
+	TodoOwner as DomainTodoOwner,
+	TodoTransfer as DomainTodoTransfer,
+} from '../../shared/todos.js';
 
 // ---------------------------------------------------------------------------
 // Shared codec instance
@@ -273,19 +279,23 @@ export const decodeTurnRow = (b: Buffer): TurnRow => decode(b);
 // Todo rows
 // ---------------------------------------------------------------------------
 
-export type TodoListStatus = 'active' | 'completed' | 'archived';
-export type TodoItemStatus = 'pending' | 'in_progress' | 'completed' | 'blocked';
+// Re-export the domain enums so the LMDB row types stay aligned with
+// the daemon's `shared/todos.ts` source-of-truth.
+export type TodoListStatus = DomainTodoListStatus;
+export type TodoItemStatus = DomainTodoItemStatus;
+export type TodoOwner      = DomainTodoOwner;
+export type TodoTransfer   = DomainTodoTransfer;
 
 export interface TodoListRow {
 	id:           string;
 	sessionId:    string;
-	parentListId: string;         // empty if top-level
+	parentListId: string;          // empty if top-level (matches the empty-string sentinel convention)
 	title:        string;
 	description:  string;
 	status:       TodoListStatus;
-	owner:        string;
-	source:       string;
-	transfers:    string[];
+	owner:        TodoOwner;
+	source:       TodoOwner;
+	transfers:    TodoTransfer[];
 	body:         string;
 	createdAt:    number;
 	updatedAt:    number;
@@ -296,11 +306,14 @@ export const decodeTodoListRow = (b: Buffer): TodoListRow => decode(b);
 
 export interface TodoItemRow {
 	id:            string;
-	listId:        string;          // also encoded in key
+	listId:        string;
 	title:         string;
 	description:   string;
 	status:        TodoItemStatus;
-	orderKey:      string;          // also encoded in key
+	// Fractional ordering: per-list relative position. The LMDB key is
+	// just `id`; we scan a list's items by filtering on `listId` and
+	// sort by `order` in memory (small N per list).
+	order:         number;
 	createdAt:     number;
 	updatedAt:     number;
 	completedAt:   number;          // 0 if not completed
@@ -315,7 +328,7 @@ export const decodeTodoItemRow = (b: Buffer): TodoItemRow => decode(b);
 export interface TodoCommentRow {
 	id:                string;
 	itemId:            string;          // also encoded in key
-	author:            string;
+	author:            TodoOwner | 'user';
 	body:              string;
 	createdAt:         number;
 	editedAt:          number;          // 0 if not edited

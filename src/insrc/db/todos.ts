@@ -1,130 +1,62 @@
 /**
- * DuckDB persistence for the session-scoped TODO framework.
+ * LMDB-backed persistence for the session-scoped TODO framework.
  *
- * See plans/todo-framework.md (Phase 1) and plans/storage-migration-
- * duckdb.md Phase B.5. Three tables on the storage pool:
+ * Phase 2.7 of plans/storage-migration-lmdb-lance.md. Public surface
+ * preserved verbatim from the prior DuckDB-backed implementation so
+ * callers (`daemon/todos-api.ts`, `daemon/todos-rpc.ts`, etc.) don't
+ * change in this phase. The `db: DbClient` parameter is retained but
+ * unused.
  *
- *   todo_list    -- one row per list, keyed by id. Owns `session_id` +
- *                   optional `parent_list_id` (tree within a session).
- *                   Items are stored separately; populated on read.
- *   todo_item    -- one row per item, keyed by id. Foreign key `list_id`.
- *   todo_comment -- one row per comment, keyed by id. Foreign key
- *                   `item_id`.
+ * Storage:
+ *   - `todo_list` sub-DB: utf8 list_id -> msgpack(TodoListRow)
+ *   - `todo_list_by_session` sub-DB: dupsort (utf8 session_id) -> utf8 list_id
+ *   - `todo_item` sub-DB: utf8 item_id -> msgpack(TodoItemRow with `order: number`)
+ *     Per-list scan iterates the whole sub-DB filtering by listId; sort
+ *     by `order` in memory (small N per list -- typically dozens).
+ *   - `todo_comment` sub-DB: composite (utf8 item_id, \0, utf8 comment_id)
+ *     -> msgpack(TodoCommentRow). Per-item range scan via prefix(item_id).
  *
- * No vector / embedding columns: the B.0 audit confirmed every Lance
- * write zero-filled the vector column and no caller ever queried it,
- * so the migration drops the column entirely.
- *
- * SQL hygiene: every write goes through parameterized statements
- * (`?` positional binding) so we don't need to maintain a sqlStr
- * helper or worry about the LanceDB `values:` vs `valuesSql:`
- * gotcha that bit us repeatedly during the Lance era.
+ * **No Lance involvement** -- the prior B.0 audit confirmed the todos
+ * vector column was always zero-filled and never queried.
  */
 
-import type { DbClient } from './client.js';
+import {
+	getGraphStore,
+	withWriteTxn,
+} from './graph/store.js';
+import {
+	encodeTodoCommentKey,
+	encodeTodoCommentPrefix,
+	encodeTodoListBySessionKey,
+	encodeTodoListBySessionPrefix,
+	prefixSuccessor,
+} from './graph/keys.js';
+import {
+	encodeTodoListRow,
+	decodeTodoListRow,
+	encodeTodoItemRow,
+	decodeTodoItemRow,
+	encodeTodoCommentRow,
+	decodeTodoCommentRow,
+	type TodoListRow,
+	type TodoItemRow,
+	type TodoCommentRow,
+} from './graph/codec.js';
 import type {
-  TodoComment, TodoItem, TodoItemStatus, TodoList, TodoListStatus, TodoOwner,
-  TodoTransfer,
+	TodoComment, TodoItem, TodoItemStatus, TodoList, TodoListStatus, TodoOwner,
+	TodoTransfer,
 } from '../shared/todos.js';
-import { canTransitionItem, canTransitionList } from '../shared/todos.js';
-import { isValidTodoOwner } from '../shared/todos.js';
+import { canTransitionItem, canTransitionList, isValidTodoOwner } from '../shared/todos.js';
 
-/**
- * Called once at daemon startup. The schema apply already provisions
- * the three tables in `initDb`, so this is just a no-op kept for
- * back-compat with daemon/index.ts. Removing the call sites is a
- * follow-up in Phase B.10 cleanup.
- */
+type DbClient = unknown;
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
 export async function initTodosTables(_db: DbClient): Promise<void> {
-  // schema apply happens in db/client.ts initDb -- nothing to do here
-}
-
-// ---------------------------------------------------------------------------
-// Row <-> domain mapping
-// ---------------------------------------------------------------------------
-
-function listRowToDomain(row: Record<string, unknown>, items: readonly TodoItem[]): TodoList {
-  const transfers = parseJsonArrayAs<TodoTransfer>(row['transfers_json'] as string);
-  const parent = row['parent_list_id'] as string;
-  const description = row['description'] as string;
-  const body = row['body'] as string;
-  return {
-    id:           row['id']         as string,
-    sessionId:    row['session_id'] as string,
-    parentListId: parent.length > 0 ? parent : undefined,
-    title:        row['title']      as string,
-    description:  description.length > 0 ? description : undefined,
-    status:       row['status']     as TodoListStatus,
-    owner:        row['owner']      as TodoOwner,
-    source:       row['source']     as TodoOwner,
-    transfers,
-    body:         body.length > 0 ? body : undefined,
-    createdAt:    row['created_at'] as string,
-    updatedAt:    row['updated_at'] as string,
-    items,
-  };
-}
-
-function itemRowToDomain(
-  row: Record<string, unknown>,
-  comments: readonly TodoComment[] | undefined,
-): TodoItem {
-  const description = row['description'] as string;
-  const completedAt = row['completed_at'] as string;
-  const blockedReason = row['blocked_reason'] as string;
-  const tags = parseJsonArrayAs<string>(row['tags_json'] as string);
-  const meta = parseJsonObject(row['meta_json'] as string);
-  return {
-    id:            row['id']            as string,
-    listId:        row['list_id']       as string,
-    title:         row['title']         as string,
-    description:   description.length > 0 ? description : undefined,
-    status:        row['status']        as TodoItemStatus,
-    order:         Number(row['order_key']),
-    createdAt:     row['created_at']    as string,
-    updatedAt:     row['updated_at']    as string,
-    completedAt:   completedAt.length > 0 ? completedAt : undefined,
-    blockedReason: blockedReason.length > 0 ? blockedReason : undefined,
-    tags:          tags.length > 0 ? tags : undefined,
-    meta:          meta !== undefined ? meta : undefined,
-    comments,
-  };
-}
-
-function commentRowToDomain(row: Record<string, unknown>): TodoComment {
-  const editedAt = row['edited_at'] as string;
-  return {
-    id:                 row['id']                 as string,
-    itemId:             row['item_id']            as string,
-    author:             row['author']             as TodoOwner | 'user',
-    body:               row['body']               as string,
-    createdAt:          row['created_at']         as string,
-    editedAt:           editedAt.length > 0 ? editedAt : undefined,
-    agentAcknowledged:  row['agent_acknowledged'] as boolean,
-  };
-}
-
-function parseJsonArrayAs<T>(raw: string): T[] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseJsonObject(raw: string): Record<string, unknown> | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
+	// LMDB sub-DBs are created at env open (in store.ts); nothing to do
+	// here. Kept for back-compat with daemon/index.ts call site.
 }
 
 // ---------------------------------------------------------------------------
@@ -132,140 +64,136 @@ function parseJsonObject(raw: string): Record<string, unknown> | undefined {
 // ---------------------------------------------------------------------------
 
 export interface InsertListOpts {
-  readonly id:            string;
-  readonly sessionId:     string;
-  readonly parentListId?: string | undefined;
-  readonly title:         string;
-  readonly description?:  string | undefined;
-  readonly owner:         TodoOwner;
-  readonly source:        TodoOwner;
-  readonly body?:         string | undefined;
-  readonly createdAt:     string;
+	readonly id:            string;
+	readonly sessionId:     string;
+	readonly parentListId?: string | undefined;
+	readonly title:         string;
+	readonly description?:  string | undefined;
+	readonly owner:         TodoOwner;
+	readonly source:        TodoOwner;
+	readonly body?:         string | undefined;
+	readonly createdAt:     string;
 }
 
-/**
- * Create a new list row. Seeds `status = 'active'`, `transfers` with
- * a single entry recording the creator, and `updated_at = created_at`.
- * Validates owner / source against the family registry; rejects
- * parent cycles (caller is responsible for passing a valid parent
- * that already exists in the same session).
- */
-export async function insertList(db: DbClient, opts: InsertListOpts): Promise<TodoList> {
-  if (!isValidTodoOwner(opts.owner)) {
-    throw new Error(`insertList: unknown owner '${opts.owner}'`);
-  }
-  if (!isValidTodoOwner(opts.source)) {
-    throw new Error(`insertList: unknown source '${opts.source}'`);
-  }
+export async function insertList(_db: DbClient, opts: InsertListOpts): Promise<TodoList> {
+	if (!isValidTodoOwner(opts.owner)) {
+		throw new Error(`insertList: unknown owner '${opts.owner}'`);
+	}
+	if (!isValidTodoOwner(opts.source)) {
+		throw new Error(`insertList: unknown source '${opts.source}'`);
+	}
 
-  if (opts.parentListId !== undefined) {
-    await assertParentAllowed(db, opts.parentListId, opts.id, opts.sessionId);
-  }
+	if (opts.parentListId !== undefined) {
+		await assertParentAllowed(_db, opts.parentListId, opts.id, opts.sessionId);
+	}
 
-  const seedTransfer: TodoTransfer = {
-    from: opts.source,
-    to: opts.owner,
-    reason: 'created',
-    at: opts.createdAt,
-    initiator: opts.source,
-  };
+	const seedTransfer: TodoTransfer = {
+		from:      opts.source,
+		to:        opts.owner,
+		reason:    'created',
+		at:        opts.createdAt,
+		initiator: opts.source,
+	};
 
-  await db.duck.exec(
-    `INSERT INTO todo_list
-       (id, session_id, parent_list_id, title, description, status, owner, source,
-        transfers_json, body, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
-    [
-      opts.id,
-      opts.sessionId,
-      opts.parentListId ?? '',
-      opts.title,
-      opts.description ?? '',
-      opts.owner,
-      opts.source,
-      JSON.stringify([seedTransfer]),
-      opts.body ?? '',
-      opts.createdAt,
-      opts.createdAt,
-    ],
-  );
+	const createdAtMs = parseTs(opts.createdAt);
+	const row: TodoListRow = {
+		id:           opts.id,
+		sessionId:    opts.sessionId,
+		parentListId: opts.parentListId ?? '',
+		title:        opts.title,
+		description:  opts.description ?? '',
+		status:       'active',
+		owner:        opts.owner,
+		source:       opts.source,
+		transfers:    [seedTransfer],
+		body:         opts.body ?? '',
+		createdAt:    createdAtMs,
+		updatedAt:    createdAtMs,
+	};
+	await withWriteTxn(s => {
+		s.todoList.put(row.id, encodeTodoListRow(row));
+		s.todoListBySession.put(
+			encodeTodoListBySessionKey(row.sessionId, row.id),
+			Buffer.alloc(0),
+		);
+	});
 
-  const list = await getList(db, opts.id);
-  if (list === null) {
-    throw new Error(`insertList: failed to read back list '${opts.id}' after insert`);
-  }
-  return list;
+	const list = await getList(_db, opts.id);
+	if (list === null) {
+		throw new Error(`insertList: failed to read back list '${opts.id}' after insert`);
+	}
+	return list;
 }
 
 export interface InsertItemOpts {
-  readonly id:             string;
-  readonly listId:         string;
-  readonly title:          string;
-  readonly description?:   string | undefined;
-  readonly orderKey:       number;
-  readonly tags?:          readonly string[] | undefined;
-  readonly meta?:          Readonly<Record<string, unknown>> | undefined;
-  readonly createdAt:      string;
+	readonly id:             string;
+	readonly listId:         string;
+	readonly title:          string;
+	readonly description?:   string | undefined;
+	readonly orderKey:       number;
+	readonly tags?:          readonly string[] | undefined;
+	readonly meta?:          Readonly<Record<string, unknown>> | undefined;
+	readonly createdAt:      string;
 }
 
-/**
- * Create a new item row under an existing list. Seeds
- * `status = 'pending'` and `updated_at = created_at`. Caller picks
- * `order_key` (use `betweenOrderKeys` from `shared/todos.ts` for
- * insert-between placement).
- */
-export async function insertItem(db: DbClient, opts: InsertItemOpts): Promise<TodoItem> {
-  const list = await getList(db, opts.listId, { withItems: false });
-  if (list === null) {
-    throw new Error(`insertItem: list '${opts.listId}' does not exist`);
-  }
+export async function insertItem(_db: DbClient, opts: InsertItemOpts): Promise<TodoItem> {
+	const list = await getList(_db, opts.listId, { withItems: false });
+	if (list === null) {
+		throw new Error(`insertItem: list '${opts.listId}' does not exist`);
+	}
+	const createdAtMs = parseTs(opts.createdAt);
+	const row: TodoItemRow = {
+		id:            opts.id,
+		listId:        opts.listId,
+		title:         opts.title,
+		description:   opts.description ?? '',
+		status:        'pending',
+		order:         opts.orderKey,
+		createdAt:     createdAtMs,
+		updatedAt:     createdAtMs,
+		completedAt:   0,
+		blockedReason: '',
+		tags:          [...(opts.tags ?? [])],
+		meta:          opts.meta !== undefined ? { ...opts.meta } : {},
+	};
+	await withWriteTxn(s => {
+		s.todoItem.put(opts.id, encodeTodoItemRow(row));
+	});
 
-  await db.duck.exec(
-    `INSERT INTO todo_item
-       (id, list_id, title, description, status, order_key, created_at, updated_at,
-        completed_at, blocked_reason, tags_json, meta_json)
-     VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, '', '', ?, ?)`,
-    [
-      opts.id,
-      opts.listId,
-      opts.title,
-      opts.description ?? '',
-      opts.orderKey,
-      opts.createdAt,
-      opts.createdAt,
-      JSON.stringify(opts.tags ?? []),
-      JSON.stringify(opts.meta ?? {}),
-    ],
-  );
-
-  const item = await getItem(db, opts.id);
-  if (item === null) {
-    throw new Error(`insertItem: failed to read back item '${opts.id}' after insert`);
-  }
-  return item;
+	const item = await getItem(_db, opts.id);
+	if (item === null) {
+		throw new Error(`insertItem: failed to read back item '${opts.id}' after insert`);
+	}
+	return item;
 }
 
 export interface InsertCommentOpts {
-  readonly id:         string;
-  readonly itemId:     string;
-  readonly author:     TodoOwner | 'user';
-  readonly body:       string;
-  readonly createdAt:  string;
+	readonly id:         string;
+	readonly itemId:     string;
+	readonly author:     TodoOwner | 'user';
+	readonly body:       string;
+	readonly createdAt:  string;
 }
 
-export async function insertComment(db: DbClient, opts: InsertCommentOpts): Promise<TodoComment> {
-  await db.duck.exec(
-    `INSERT INTO todo_comment
-       (id, item_id, author, body, created_at, edited_at, agent_acknowledged)
-     VALUES (?, ?, ?, ?, ?, '', FALSE)`,
-    [opts.id, opts.itemId, opts.author, opts.body, opts.createdAt],
-  );
+export async function insertComment(_db: DbClient, opts: InsertCommentOpts): Promise<TodoComment> {
+	const row: TodoCommentRow = {
+		id:                opts.id,
+		itemId:            opts.itemId,
+		author:            opts.author,
+		body:              opts.body,
+		createdAt:         parseTs(opts.createdAt),
+		editedAt:          0,
+		agentAcknowledged: false,
+	};
+	await withWriteTxn(s => {
+		s.todoComment.put(encodeTodoCommentKey(opts.itemId, opts.id), encodeTodoCommentRow(row));
+	});
 
-  const comment = await getComment(db, opts.id);
-  if (comment === null) {
-    throw new Error(`insertComment: failed to read back comment '${opts.id}' after insert`);
-  }
-  return comment;
+	const comment = await getComment(_db, opts.id);
+	if (comment === null) {
+		throw new Error(`insertComment: failed to read back comment '${opts.id}' after insert`);
+	}
+	return comment;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,217 +201,201 @@ export async function insertComment(db: DbClient, opts: InsertCommentOpts): Prom
 // ---------------------------------------------------------------------------
 
 export interface GetListOpts {
-  /** Include items on the returned list. Default true. */
-  readonly withItems?: boolean;
-  /** Include comments on each included item. Default true -- the RPC
-   *  layer + browser UI always want comments attached, and the cost is
-   *  low (typically 0 rows). Pass `false` explicitly when only the
-   *  list shape is needed (e.g. ownership checks). */
-  readonly withComments?: boolean;
+	readonly withItems?: boolean;
+	readonly withComments?: boolean;
 }
 
 export async function getList(
-  db: DbClient,
-  listId: string,
-  opts: GetListOpts = {},
+	_db: DbClient,
+	listId: string,
+	opts: GetListOpts = {},
 ): Promise<TodoList | null> {
-  const rows = await db.duck.query(
-    'SELECT * FROM todo_list WHERE id = ?',
-    [listId],
-  );
-  if (rows.length === 0) return null;
-  const row = rows[0]!;
+	const store = await getGraphStore();
+	const buf = store.todoList.get(listId);
+	if (buf === undefined) return null;
+	const row = decodeTodoListRow(buf as Buffer);
 
-  const includeComments = opts.withComments !== false;
-  const items = opts.withItems === false
-    ? []
-    : await listItems(db, listId, includeComments);
-  return listRowToDomain(row, items);
+	const includeComments = opts.withComments !== false;
+	const items = opts.withItems === false
+		? []
+		: await listItems(_db, listId, includeComments);
+	return rowToList(row, items);
 }
 
-export async function getItem(db: DbClient, itemId: string): Promise<TodoItem | null> {
-  const rows = await db.duck.query('SELECT * FROM todo_item WHERE id = ?', [itemId]);
-  if (rows.length === 0) return null;
-  return itemRowToDomain(rows[0]!, undefined);
+export async function getItem(_db: DbClient, itemId: string): Promise<TodoItem | null> {
+	const store = await getGraphStore();
+	const buf = store.todoItem.get(itemId);
+	if (buf === undefined) return null;
+	return rowToItem(decodeTodoItemRow(buf as Buffer), undefined);
 }
 
-export async function getComment(db: DbClient, commentId: string): Promise<TodoComment | null> {
-  const rows = await db.duck.query('SELECT * FROM todo_comment WHERE id = ?', [commentId]);
-  if (rows.length === 0) return null;
-  return commentRowToDomain(rows[0]!);
+export async function getComment(_db: DbClient, commentId: string): Promise<TodoComment | null> {
+	const store = await getGraphStore();
+	// Comments are keyed by (item_id, comment_id) -- O(N) scan to find
+	// by comment_id alone. Comment counts are typically a handful per
+	// item; full table scan stays fast.
+	for (const { value } of store.todoComment.getRange()) {
+		const row = decodeTodoCommentRow(value as Buffer);
+		if (row.id === commentId) return rowToComment(row);
+	}
+	return null;
 }
 
-/** List all items belonging to a list, ordered by fractional `order_key`. */
 export async function listItems(
-  db: DbClient,
-  listId: string,
-  withComments: boolean,
+	_db: DbClient,
+	listId: string,
+	withComments: boolean,
 ): Promise<readonly TodoItem[]> {
-  const rows = await db.duck.query(
-    'SELECT * FROM todo_item WHERE list_id = ? ORDER BY order_key',
-    [listId],
-  );
+	const store = await getGraphStore();
+	const rows: TodoItemRow[] = [];
+	for (const { value } of store.todoItem.getRange()) {
+		const row = decodeTodoItemRow(value as Buffer);
+		if (row.listId === listId) rows.push(row);
+	}
+	rows.sort((a, b) => a.order - b.order);
 
-  if (!withComments) {
-    return rows.map(r => itemRowToDomain(r, undefined));
-  }
+	if (!withComments) return rows.map(r => rowToItem(r, undefined));
 
-  const itemIds = rows.map(r => r['id'] as string);
-  const commentsByItem = await listCommentsByItems(db, itemIds);
-  return rows.map(r => {
-    const id = r['id'] as string;
-    return itemRowToDomain(r, commentsByItem.get(id) ?? []);
-  });
+	const itemIds = rows.map(r => r.id);
+	const commentsByItem = await listCommentsByItems(itemIds);
+	return rows.map(r => rowToItem(r, commentsByItem.get(r.id) ?? []));
 }
 
-async function listCommentsByItems(
-  db: DbClient,
-  itemIds: readonly string[],
-): Promise<Map<string, TodoComment[]>> {
-  const by = new Map<string, TodoComment[]>();
-  if (itemIds.length === 0) return by;
-
-  const placeholders = itemIds.map(() => '?').join(', ');
-  const rows = await db.duck.query(
-    `SELECT * FROM todo_comment
-     WHERE item_id IN (${placeholders})
-     ORDER BY created_at`,
-    [...itemIds],
-  );
-  for (const row of rows) {
-    const comment = commentRowToDomain(row);
-    const bucket = by.get(comment.itemId) ?? [];
-    bucket.push(comment);
-    by.set(comment.itemId, bucket);
-  }
-  return by;
+async function listCommentsByItems(itemIds: readonly string[]): Promise<Map<string, TodoComment[]>> {
+	const by = new Map<string, TodoComment[]>();
+	if (itemIds.length === 0) return by;
+	const store = await getGraphStore();
+	const wantSet = new Set(itemIds);
+	const collected: TodoCommentRow[] = [];
+	for (const itemId of wantSet) {
+		const prefix = encodeTodoCommentPrefix(itemId);
+		const succ = prefixSuccessor(prefix);
+		for (const { value } of store.todoComment.getRange({ start: prefix, end: succ })) {
+			collected.push(decodeTodoCommentRow(value as Buffer));
+		}
+	}
+	collected.sort((a, b) => a.createdAt - b.createdAt);
+	for (const row of collected) {
+		const list = by.get(row.itemId);
+		if (list === undefined) by.set(row.itemId, [rowToComment(row)]);
+		else list.push(rowToComment(row));
+	}
+	return by;
 }
 
-/**
- * List every list across all sessions, optionally filtered by status /
- * source / updated_at cutoff. Used by the retention sweep + any other
- * daemon-side maintenance that walks the full table. Prefer
- * `listListsBySession` when you can -- this one table-scans.
- */
 export async function listAllLists(
-  db: DbClient,
-  filter: {
-    readonly statuses?: readonly TodoListStatus[];
-    readonly sources?: readonly TodoOwner[];
-    /** ISO timestamp -- return lists whose `updated_at < updatedBefore`. */
-    readonly updatedBefore?: string;
-  } = {},
+	_db: DbClient,
+	filter: {
+		readonly statuses?: readonly TodoListStatus[];
+		readonly sources?: readonly TodoOwner[];
+		readonly updatedBefore?: string;
+	} = {},
 ): Promise<readonly TodoList[]> {
-  const whereParts: string[] = [];
-  const params: unknown[] = [];
+	const store = await getGraphStore();
+	const wantStatuses = filter.statuses && filter.statuses.length > 0
+		? new Set(filter.statuses)
+		: null;
+	const wantSources = filter.sources && filter.sources.length > 0
+		? new Set(filter.sources)
+		: null;
+	const updatedBefore = filter.updatedBefore !== undefined ? parseTs(filter.updatedBefore) : null;
 
-  if (filter.statuses !== undefined && filter.statuses.length > 0) {
-    const placeholders = filter.statuses.map(() => '?').join(', ');
-    whereParts.push(`status IN (${placeholders})`);
-    params.push(...filter.statuses);
-  }
-  if (filter.sources !== undefined && filter.sources.length > 0) {
-    const placeholders = filter.sources.map(() => '?').join(', ');
-    whereParts.push(`source IN (${placeholders})`);
-    params.push(...filter.sources);
-  }
-  if (filter.updatedBefore !== undefined) {
-    whereParts.push('updated_at < ?');
-    params.push(filter.updatedBefore);
-  }
-
-  const where = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
-  const rows = await db.duck.query(`SELECT * FROM todo_list ${where}`, params as never[]);
-
-  const out: TodoList[] = [];
-  for (const row of rows) {
-    const items = await listItems(db, row['id'] as string, true);
-    out.push(listRowToDomain(row, items));
-  }
-  return out;
+	const matched: TodoListRow[] = [];
+	for (const { value } of store.todoList.getRange()) {
+		const row = decodeTodoListRow(value as Buffer);
+		if (wantStatuses !== null && !wantStatuses.has(row.status)) continue;
+		if (wantSources  !== null && !wantSources.has(row.source))   continue;
+		if (updatedBefore !== null && row.updatedAt >= updatedBefore) continue;
+		matched.push(row);
+	}
+	const out: TodoList[] = [];
+	for (const row of matched) {
+		const items = await listItems(_db, row.id, true);
+		out.push(rowToList(row, items));
+	}
+	return out;
 }
 
-/** List every list in a session, ordered root-first then by creation time. */
 export async function listListsBySession(
-  db: DbClient,
-  sessionId: string,
-  opts: { includeArchived?: boolean } = {},
+	_db: DbClient,
+	sessionId: string,
+	opts: { includeArchived?: boolean } = {},
 ): Promise<readonly TodoList[]> {
-  const archivedClause = opts.includeArchived === true
-    ? ''
-    : "AND status != 'archived'";
+	const store = await getGraphStore();
+	// Walk the (sessionId, listId) dupsort index for O(matches)
+	const prefix = encodeTodoListBySessionPrefix(sessionId);
+	const succ = prefixSuccessor(prefix);
+	const ids: string[] = [];
+	for (const { key } of store.todoListBySession.getRange({ start: prefix, end: succ })) {
+		const k = key as Buffer;
+		const sep = k.indexOf(0);
+		if (sep < 0) continue;
+		ids.push(k.subarray(sep + 1).toString('utf8'));
+	}
 
-  // ORDER BY puts roots (parent_list_id == '') ahead of children, then
-  // by createdAt for stable ordering within each level.
-  const rows = await db.duck.query(
-    `SELECT * FROM todo_list
-     WHERE session_id = ? ${archivedClause}
-     ORDER BY CASE WHEN parent_list_id = '' THEN 0 ELSE 1 END, created_at`,
-    [sessionId],
-  );
+	const rows: TodoListRow[] = [];
+	for (const id of ids) {
+		const buf = store.todoList.get(id);
+		if (buf === undefined) continue;
+		const row = decodeTodoListRow(buf as Buffer);
+		if (opts.includeArchived !== true && row.status === 'archived') continue;
+		rows.push(row);
+	}
 
-  const out: TodoList[] = [];
-  for (const row of rows) {
-    const items = await listItems(db, row['id'] as string, true);
-    out.push(listRowToDomain(row, items));
-  }
-  return out;
+	// Roots first (parentListId = ''), then children; secondary sort by createdAt
+	rows.sort((a, b) => {
+		const aRoot = a.parentListId === '' ? 0 : 1;
+		const bRoot = b.parentListId === '' ? 0 : 1;
+		if (aRoot !== bRoot) return aRoot - bRoot;
+		return a.createdAt - b.createdAt;
+	});
+
+	const out: TodoList[] = [];
+	for (const row of rows) {
+		const items = await listItems(_db, row.id, true);
+		out.push(rowToList(row, items));
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------
-// Cycle detection for parent-child hierarchy
+// Cycle detection
 // ---------------------------------------------------------------------------
 
-/**
- * Walk up from `proposedParentId` following `parent_list_id` and reject if
- * the walk reaches `childId` (would form a cycle). Also rejects if
- * `proposedParentId` doesn't exist or sits in a different session than
- * `childSessionId`. Idempotent: safe to call before every reparent /
- * insert-with-parent op.
- *
- * Throws on any violation. Returns silently on success.
- */
 export async function assertParentAllowed(
-  db: DbClient,
-  proposedParentId: string,
-  childId: string,
-  childSessionId: string,
+	_db: DbClient,
+	proposedParentId: string,
+	childId: string,
+	childSessionId: string,
 ): Promise<void> {
-  const seen = new Set<string>();
-  let cursor: string | null = proposedParentId;
-  let depth = 0;
-  const MAX_DEPTH = 1024;
+	const store = await getGraphStore();
+	const seen = new Set<string>();
+	let cursor: string | null = proposedParentId;
+	let depth = 0;
+	const MAX_DEPTH = 1024;
 
-  while (cursor !== null) {
-    if (cursor === childId) {
-      throw new Error(
-        `parent-cycle: list '${proposedParentId}' is a descendant of '${childId}'`,
-      );
-    }
-    if (seen.has(cursor)) {
-      throw new Error(`parent-cycle: pre-existing cycle detected at '${cursor}'`);
-    }
-    if (depth++ > MAX_DEPTH) {
-      throw new Error(`parent-depth-exceeded: walking '${proposedParentId}' reached max depth`);
-    }
-    seen.add(cursor);
+	while (cursor !== null) {
+		if (cursor === childId) {
+			throw new Error(`parent-cycle: list '${proposedParentId}' is a descendant of '${childId}'`);
+		}
+		if (seen.has(cursor)) {
+			throw new Error(`parent-cycle: pre-existing cycle detected at '${cursor}'`);
+		}
+		if (depth++ > MAX_DEPTH) {
+			throw new Error(`parent-depth-exceeded: walking '${proposedParentId}' reached max depth`);
+		}
+		seen.add(cursor);
 
-    const rows: Array<{ session_id: string; parent_list_id: string }> =
-      await db.duck.query<{ session_id: string; parent_list_id: string }>(
-        'SELECT session_id, parent_list_id FROM todo_list WHERE id = ?',
-        [cursor],
-      );
-    if (rows.length === 0) {
-      throw new Error(`parent-missing: list '${cursor}' does not exist`);
-    }
-    const row = rows[0]!;
-    if (row.session_id !== childSessionId) {
-      throw new Error(
-        `parent-session-mismatch: parent '${cursor}' is in a different session`,
-      );
-    }
-    cursor = row.parent_list_id.length > 0 ? row.parent_list_id : null;
-  }
+		const buf = store.todoList.get(cursor);
+		if (buf === undefined) {
+			throw new Error(`parent-missing: list '${cursor}' does not exist`);
+		}
+		const row = decodeTodoListRow(buf as Buffer);
+		if (row.sessionId !== childSessionId) {
+			throw new Error(`parent-session-mismatch: parent '${cursor}' is in a different session`);
+		}
+		cursor = row.parentListId !== '' ? row.parentListId : null;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -491,267 +403,351 @@ export async function assertParentAllowed(
 // ---------------------------------------------------------------------------
 
 export interface UpdateListFields {
-  readonly title?:       string | undefined;
-  readonly description?: string | undefined;
-  readonly status?:      TodoListStatus | undefined;
-  readonly body?:        string | undefined;
+	readonly title?:       string | undefined;
+	readonly description?: string | undefined;
+	readonly status?:      TodoListStatus | undefined;
+	readonly body?:        string | undefined;
 }
 
-/**
- * Patch a list. Validates status transitions against the list-status
- * state machine; rejects illegal arcs. Bumps `updated_at`.
- */
 export async function updateList(
-  db: DbClient,
-  listId: string,
-  fields: UpdateListFields,
-  now: string,
+	_db: DbClient,
+	listId: string,
+	fields: UpdateListFields,
+	now: string,
 ): Promise<TodoList> {
-  const existing = await getList(db, listId, { withItems: false });
-  if (existing === null) {
-    throw new Error(`updateList: list '${listId}' does not exist`);
-  }
+	const store = await getGraphStore();
+	const buf = store.todoList.get(listId);
+	if (buf === undefined) throw new Error(`updateList: list '${listId}' does not exist`);
+	const cur = decodeTodoListRow(buf as Buffer);
 
-  if (fields.status !== undefined && !canTransitionList(existing.status, fields.status)) {
-    throw new Error(
-      `updateList: illegal list-status transition '${existing.status}' -> '${fields.status}'`,
-    );
-  }
+	if (fields.status !== undefined && !canTransitionList(cur.status, fields.status)) {
+		throw new Error(`updateList: illegal list-status transition '${cur.status}' -> '${fields.status}'`);
+	}
 
-  const sets: string[] = ['updated_at = ?'];
-  const params: unknown[] = [now];
-  if (fields.title       !== undefined) { sets.push('title = ?');       params.push(fields.title); }
-  if (fields.description !== undefined) { sets.push('description = ?'); params.push(fields.description); }
-  if (fields.status      !== undefined) { sets.push('status = ?');      params.push(fields.status); }
-  if (fields.body        !== undefined) { sets.push('body = ?');        params.push(fields.body); }
-  params.push(listId);
+	const next: TodoListRow = {
+		...cur,
+		updatedAt: parseTs(now),
+		...(fields.title       !== undefined ? { title:       fields.title } : {}),
+		...(fields.description !== undefined ? { description: fields.description } : {}),
+		...(fields.status      !== undefined ? { status:      fields.status } : {}),
+		...(fields.body        !== undefined ? { body:        fields.body } : {}),
+	};
+	await withWriteTxn(s => {
+		s.todoList.put(listId, encodeTodoListRow(next));
+	});
 
-  await db.duck.exec(
-    `UPDATE todo_list SET ${sets.join(', ')} WHERE id = ?`,
-    params as never[],
-  );
-
-  const updated = await getList(db, listId);
-  if (updated === null) throw new Error(`updateList: list '${listId}' vanished during update`);
-  return updated;
+	const refreshed = await getList(_db, listId);
+	if (refreshed === null) throw new Error(`updateList: list '${listId}' vanished during update`);
+	return refreshed;
 }
 
 export interface UpdateItemFields {
-  readonly title?:         string | undefined;
-  readonly description?:   string | undefined;
-  readonly status?:        TodoItemStatus | undefined;
-  readonly blockedReason?: string | undefined;
-  readonly tags?:          readonly string[] | undefined;
-  readonly meta?:          Readonly<Record<string, unknown>> | undefined;
-  readonly orderKey?:      number | undefined;
+	readonly title?:         string | undefined;
+	readonly description?:   string | undefined;
+	readonly status?:        TodoItemStatus | undefined;
+	readonly blockedReason?: string | undefined;
+	readonly tags?:          readonly string[] | undefined;
+	readonly meta?:          Readonly<Record<string, unknown>> | undefined;
+	readonly orderKey?:      number | undefined;
 }
 
-/**
- * Patch an item. Enforces item status transitions, the
- * blocked-requires-reason rule, and sets `completed_at` automatically
- * when status moves to `completed`.
- */
 export async function updateItem(
-  db: DbClient,
-  itemId: string,
-  fields: UpdateItemFields,
-  now: string,
+	_db: DbClient,
+	itemId: string,
+	fields: UpdateItemFields,
+	now: string,
 ): Promise<TodoItem> {
-  const existing = await getItem(db, itemId);
-  if (existing === null) {
-    throw new Error(`updateItem: item '${itemId}' does not exist`);
-  }
+	const store = await getGraphStore();
+	const buf = store.todoItem.get(itemId);
+	if (buf === undefined) throw new Error(`updateItem: item '${itemId}' does not exist`);
+	const cur = decodeTodoItemRow(buf as Buffer);
 
-  if (fields.status !== undefined && !canTransitionItem(existing.status, fields.status)) {
-    throw new Error(
-      `updateItem: illegal item-status transition '${existing.status}' -> '${fields.status}'`,
-    );
-  }
+	if (fields.status !== undefined && !canTransitionItem(cur.status, fields.status)) {
+		throw new Error(`updateItem: illegal item-status transition '${cur.status}' -> '${fields.status}'`);
+	}
+	if (fields.status === 'blocked') {
+		const reason = fields.blockedReason ?? cur.blockedReason ?? '';
+		if (reason.trim().length === 0) {
+			throw new Error(`updateItem: transition to 'blocked' requires a non-empty blockedReason`);
+		}
+	}
 
-  if (fields.status === 'blocked') {
-    const reason = fields.blockedReason ?? existing.blockedReason ?? '';
-    if (reason.trim().length === 0) {
-      throw new Error(`updateItem: transition to 'blocked' requires a non-empty blockedReason`);
-    }
-  }
+	const nowMs = parseTs(now);
+	const next: TodoItemRow = {
+		...cur,
+		updatedAt: nowMs,
+		...(fields.title         !== undefined ? { title:         fields.title } : {}),
+		...(fields.description   !== undefined ? { description:   fields.description } : {}),
+		...(fields.status        !== undefined ? { status:        fields.status } : {}),
+		...(fields.blockedReason !== undefined ? { blockedReason: fields.blockedReason } : {}),
+		...(fields.tags          !== undefined ? { tags:          [...fields.tags] } : {}),
+		...(fields.meta          !== undefined ? { meta:          { ...fields.meta } } : {}),
+		...(fields.orderKey      !== undefined ? { order:         fields.orderKey } : {}),
+		...(fields.status === 'completed' ? { completedAt: nowMs } : {}),
+	};
+	await withWriteTxn(s => {
+		s.todoItem.put(itemId, encodeTodoItemRow(next));
+	});
 
-  const sets: string[] = ['updated_at = ?'];
-  const params: unknown[] = [now];
-  if (fields.title         !== undefined) { sets.push('title = ?');          params.push(fields.title); }
-  if (fields.description   !== undefined) { sets.push('description = ?');    params.push(fields.description); }
-  if (fields.status        !== undefined) { sets.push('status = ?');         params.push(fields.status); }
-  if (fields.blockedReason !== undefined) { sets.push('blocked_reason = ?'); params.push(fields.blockedReason); }
-  if (fields.tags          !== undefined) { sets.push('tags_json = ?');      params.push(JSON.stringify(fields.tags)); }
-  if (fields.meta          !== undefined) { sets.push('meta_json = ?');      params.push(JSON.stringify(fields.meta)); }
-  if (fields.orderKey      !== undefined) { sets.push('order_key = ?');      params.push(fields.orderKey); }
-  if (fields.status === 'completed') { sets.push('completed_at = ?'); params.push(now); }
-  params.push(itemId);
-
-  await db.duck.exec(
-    `UPDATE todo_item SET ${sets.join(', ')} WHERE id = ?`,
-    params as never[],
-  );
-
-  const updated = await getItem(db, itemId);
-  if (updated === null) throw new Error(`updateItem: item '${itemId}' vanished during update`);
-  return updated;
+	const refreshed = await getItem(_db, itemId);
+	if (refreshed === null) throw new Error(`updateItem: item '${itemId}' vanished during update`);
+	return refreshed;
 }
 
-/**
- * Transfer a list to a new owner family. Caller-authorization happens
- * at the RPC boundary (Phase 2); this helper just applies the change,
- * appends a transfer history entry, and bumps `updated_at`.
- */
 export async function transferList(
-  db: DbClient,
-  listId: string,
-  to: TodoOwner,
-  reason: string,
-  now: string,
-  initiator?: TodoOwner,
+	_db: DbClient,
+	listId: string,
+	to: TodoOwner,
+	reason: string,
+	now: string,
+	initiator?: TodoOwner,
 ): Promise<TodoList> {
-  if (!isValidTodoOwner(to)) {
-    throw new Error(`transferList: unknown target owner '${to}'`);
-  }
-  const existing = await getList(db, listId, { withItems: false });
-  if (existing === null) {
-    throw new Error(`transferList: list '${listId}' does not exist`);
-  }
+	if (!isValidTodoOwner(to)) throw new Error(`transferList: unknown target owner '${to}'`);
+	const store = await getGraphStore();
+	const buf = store.todoList.get(listId);
+	if (buf === undefined) throw new Error(`transferList: list '${listId}' does not exist`);
+	const cur = decodeTodoListRow(buf as Buffer);
 
-  const entry: TodoTransfer = {
-    from: existing.owner,
-    to,
-    reason,
-    at: now,
-    initiator: initiator ?? existing.owner,
-  };
-  const transfers = [...existing.transfers, entry];
+	const entry: TodoTransfer = {
+		from:      cur.owner,
+		to,
+		reason,
+		at:        now,
+		initiator: initiator ?? cur.owner,
+	};
+	const next: TodoListRow = {
+		...cur,
+		owner:     to,
+		transfers: [...cur.transfers, entry],
+		updatedAt: parseTs(now),
+	};
+	await withWriteTxn(s => {
+		s.todoList.put(listId, encodeTodoListRow(next));
+	});
 
-  await db.duck.exec(
-    `UPDATE todo_list
-     SET owner = ?, transfers_json = ?, updated_at = ?
-     WHERE id = ?`,
-    [to, JSON.stringify(transfers), now, listId],
-  );
-
-  const updated = await getList(db, listId);
-  if (updated === null) throw new Error(`transferList: list '${listId}' vanished during transfer`);
-  return updated;
+	const refreshed = await getList(_db, listId);
+	if (refreshed === null) throw new Error(`transferList: list '${listId}' vanished during transfer`);
+	return refreshed;
 }
 
-/**
- * Reparent a list. Pass `null` as `newParentListId` to promote the
- * list to a root. Validates session match + cycle freedom via
- * `assertParentAllowed`.
- */
 export async function reparentList(
-  db: DbClient,
-  listId: string,
-  newParentListId: string | null,
-  now: string,
+	_db: DbClient,
+	listId: string,
+	newParentListId: string | null,
+	now: string,
 ): Promise<TodoList> {
-  const existing = await getList(db, listId, { withItems: false });
-  if (existing === null) {
-    throw new Error(`reparentList: list '${listId}' does not exist`);
-  }
-  if (newParentListId !== null) {
-    await assertParentAllowed(db, newParentListId, listId, existing.sessionId);
-  }
+	const store = await getGraphStore();
+	const buf = store.todoList.get(listId);
+	if (buf === undefined) throw new Error(`reparentList: list '${listId}' does not exist`);
+	const cur = decodeTodoListRow(buf as Buffer);
 
-  await db.duck.exec(
-    'UPDATE todo_list SET parent_list_id = ?, updated_at = ? WHERE id = ?',
-    [newParentListId ?? '', now, listId],
-  );
+	if (newParentListId !== null) {
+		await assertParentAllowed(_db, newParentListId, listId, cur.sessionId);
+	}
 
-  const updated = await getList(db, listId);
-  if (updated === null) throw new Error(`reparentList: list '${listId}' vanished during reparent`);
-  return updated;
+	const next: TodoListRow = {
+		...cur,
+		parentListId: newParentListId ?? '',
+		updatedAt:    parseTs(now),
+	};
+	await withWriteTxn(s => {
+		s.todoList.put(listId, encodeTodoListRow(next));
+	});
+
+	const refreshed = await getList(_db, listId);
+	if (refreshed === null) throw new Error(`reparentList: list '${listId}' vanished during reparent`);
+	return refreshed;
 }
 
 // ---------------------------------------------------------------------------
-// Comment helpers (Phase 5d)
+// Comments
 // ---------------------------------------------------------------------------
 
 export interface UpdateCommentFields {
-  readonly body?: string | undefined;
-  readonly agentAcknowledged?: boolean | undefined;
-  /** Caller supplies the editedAt timestamp (bumped on body change). */
-  readonly editedAt?: string | undefined;
+	readonly body?: string | undefined;
+	readonly agentAcknowledged?: boolean | undefined;
+	readonly editedAt?: string | undefined;
 }
 
-/** Update a comment row. Returns the refreshed comment. */
 export async function updateComment(
-  db: DbClient,
-  commentId: string,
-  fields: UpdateCommentFields,
+	_db: DbClient,
+	commentId: string,
+	fields: UpdateCommentFields,
 ): Promise<TodoComment> {
-  const existing = await getComment(db, commentId);
-  if (existing === null) {
-    throw new Error(`updateComment: comment '${commentId}' does not exist`);
-  }
+	const store = await getGraphStore();
+	// Find the comment row + its key
+	let foundKey: Buffer | null = null;
+	let cur: TodoCommentRow | null = null;
+	for (const { key, value } of store.todoComment.getRange()) {
+		const row = decodeTodoCommentRow(value as Buffer);
+		if (row.id === commentId) {
+			foundKey = key as Buffer;
+			cur = row;
+			break;
+		}
+	}
+	if (cur === null || foundKey === null) {
+		throw new Error(`updateComment: comment '${commentId}' does not exist`);
+	}
 
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  if (fields.body              !== undefined) { sets.push('body = ?');               params.push(fields.body); }
-  if (fields.editedAt          !== undefined) { sets.push('edited_at = ?');          params.push(fields.editedAt); }
-  if (fields.agentAcknowledged !== undefined) { sets.push('agent_acknowledged = ?'); params.push(fields.agentAcknowledged); }
-  if (sets.length === 0) return existing;
-  params.push(commentId);
+	let mutated = false;
+	const next: TodoCommentRow = { ...cur };
+	if (fields.body !== undefined) { next.body = fields.body; mutated = true; }
+	if (fields.editedAt !== undefined) { next.editedAt = parseTs(fields.editedAt); mutated = true; }
+	if (fields.agentAcknowledged !== undefined) { next.agentAcknowledged = fields.agentAcknowledged; mutated = true; }
+	if (!mutated) return rowToComment(cur);
 
-  await db.duck.exec(
-    `UPDATE todo_comment SET ${sets.join(', ')} WHERE id = ?`,
-    params as never[],
-  );
-
-  const refreshed = await getComment(db, commentId);
-  if (refreshed === null) {
-    throw new Error(`updateComment: comment '${commentId}' vanished during update`);
-  }
-  return refreshed;
+	await withWriteTxn(s => {
+		s.todoComment.put(foundKey as Buffer, encodeTodoCommentRow(next));
+	});
+	return rowToComment(next);
 }
 
-export async function deleteComment(db: DbClient, commentId: string): Promise<void> {
-  await db.duck.exec('DELETE FROM todo_comment WHERE id = ?', [commentId]);
+export async function deleteComment(_db: DbClient, commentId: string): Promise<void> {
+	const store = await getGraphStore();
+	let foundKey: Buffer | null = null;
+	for (const { key, value } of store.todoComment.getRange()) {
+		const row = decodeTodoCommentRow(value as Buffer);
+		if (row.id === commentId) { foundKey = key as Buffer; break; }
+	}
+	if (foundKey === null) return;
+	await withWriteTxn(s => { s.todoComment.remove(foundKey as Buffer); });
 }
 
-/** List every comment on a given item, sorted by created_at ascending. */
 export async function listCommentsForItem(
-  db: DbClient,
-  itemId: string,
+	_db: DbClient,
+	itemId: string,
 ): Promise<readonly TodoComment[]> {
-  const rows = await db.duck.query(
-    'SELECT * FROM todo_comment WHERE item_id = ? ORDER BY created_at',
-    [itemId],
-  );
-  return rows.map(commentRowToDomain);
+	const store = await getGraphStore();
+	const prefix = encodeTodoCommentPrefix(itemId);
+	const succ = prefixSuccessor(prefix);
+	const rows: TodoCommentRow[] = [];
+	for (const { value } of store.todoComment.getRange({ start: prefix, end: succ })) {
+		rows.push(decodeTodoCommentRow(value as Buffer));
+	}
+	rows.sort((a, b) => a.createdAt - b.createdAt);
+	return rows.map(rowToComment);
 }
 
 // ---------------------------------------------------------------------------
-// Delete helpers
+// Deletes
 // ---------------------------------------------------------------------------
 
-export async function deleteItem(db: DbClient, itemId: string): Promise<void> {
-  await db.duck.exec('DELETE FROM todo_comment WHERE item_id = ?', [itemId]);
-  await db.duck.exec('DELETE FROM todo_item WHERE id = ?', [itemId]);
+export async function deleteItem(_db: DbClient, itemId: string): Promise<void> {
+	await withWriteTxn(s => {
+		// Drop all comments on the item
+		const prefix = encodeTodoCommentPrefix(itemId);
+		const succ = prefixSuccessor(prefix);
+		const commentKeys: Buffer[] = [];
+		for (const { key } of s.todoComment.getRange({ start: prefix, end: succ })) {
+			commentKeys.push(key as Buffer);
+		}
+		for (const k of commentKeys) s.todoComment.remove(k);
+		s.todoItem.remove(itemId);
+	});
 }
 
-export async function deleteList(db: DbClient, listId: string): Promise<void> {
-  // Delete comments on items in this list, then items, then the list.
-  // No FK constraints in DuckDB tables; ordering matters for atomicity
-  // expectations of callers (they don't see dangling rows).
-  await db.duck.exec(
-    `DELETE FROM todo_comment
-     WHERE item_id IN (SELECT id FROM todo_item WHERE list_id = ?)`,
-    [listId],
-  );
-  await db.duck.exec('DELETE FROM todo_item WHERE list_id = ?', [listId]);
-  await db.duck.exec('DELETE FROM todo_list WHERE id = ?', [listId]);
+export async function deleteList(_db: DbClient, listId: string): Promise<void> {
+	const store = await getGraphStore();
+	// Collect item ids belonging to this list
+	const itemIds: string[] = [];
+	for (const { value } of store.todoItem.getRange()) {
+		const row = decodeTodoItemRow(value as Buffer);
+		if (row.listId === listId) itemIds.push(row.id);
+	}
+
+	// Get the session_id so we can clean the by_session index
+	const buf = store.todoList.get(listId);
+	const sessionId = buf !== undefined ? decodeTodoListRow(buf as Buffer).sessionId : null;
+
+	await withWriteTxn(s => {
+		for (const itemId of itemIds) {
+			const prefix = encodeTodoCommentPrefix(itemId);
+			const succ = prefixSuccessor(prefix);
+			const commentKeys: Buffer[] = [];
+			for (const { key } of s.todoComment.getRange({ start: prefix, end: succ })) {
+				commentKeys.push(key as Buffer);
+			}
+			for (const k of commentKeys) s.todoComment.remove(k);
+			s.todoItem.remove(itemId);
+		}
+		s.todoList.remove(listId);
+		if (sessionId !== null) {
+			s.todoListBySession.remove(
+				encodeTodoListBySessionKey(sessionId, listId),
+				Buffer.alloc(0),
+			);
+		}
+	});
 }
 
-export async function deleteListsBySession(db: DbClient, sessionId: string): Promise<number> {
-  const lists = await listListsBySession(db, sessionId, { includeArchived: true });
-  for (const list of lists) {
-    await deleteList(db, list.id);
-  }
-  return lists.length;
+export async function deleteListsBySession(_db: DbClient, sessionId: string): Promise<number> {
+	const lists = await listListsBySession(_db, sessionId, { includeArchived: true });
+	for (const list of lists) {
+		await deleteList(_db, list.id);
+	}
+	return lists.length;
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+function rowToList(row: TodoListRow, items: readonly TodoItem[]): TodoList {
+	return {
+		id:           row.id,
+		sessionId:    row.sessionId,
+		...(row.parentListId !== '' ? { parentListId: row.parentListId } : {}),
+		title:        row.title,
+		...(row.description !== '' ? { description: row.description } : {}),
+		status:       row.status,
+		owner:        row.owner,
+		source:       row.source,
+		transfers:    row.transfers,
+		...(row.body !== '' ? { body: row.body } : {}),
+		createdAt:    formatTs(row.createdAt),
+		updatedAt:    formatTs(row.updatedAt),
+		items,
+	};
+}
+
+function rowToItem(row: TodoItemRow, comments: readonly TodoComment[] | undefined): TodoItem {
+	return {
+		id:            row.id,
+		listId:        row.listId,
+		title:         row.title,
+		...(row.description !== '' ? { description: row.description } : {}),
+		status:        row.status,
+		order:         row.order,
+		createdAt:     formatTs(row.createdAt),
+		updatedAt:     formatTs(row.updatedAt),
+		...(row.completedAt > 0 ? { completedAt: formatTs(row.completedAt) } : {}),
+		...(row.blockedReason !== '' ? { blockedReason: row.blockedReason } : {}),
+		...(row.tags.length > 0 ? { tags: row.tags } : {}),
+		...(Object.keys(row.meta).length > 0 ? { meta: row.meta } : {}),
+		...(comments !== undefined ? { comments } : {}),
+	};
+}
+
+function rowToComment(row: TodoCommentRow): TodoComment {
+	return {
+		id:                 row.id,
+		itemId:             row.itemId,
+		author:             row.author,
+		body:               row.body,
+		createdAt:          formatTs(row.createdAt),
+		...(row.editedAt > 0 ? { editedAt: formatTs(row.editedAt) } : {}),
+		agentAcknowledged:  row.agentAcknowledged,
+	};
+}
+
+function parseTs(s: string | undefined): number {
+	if (s === undefined || s === '') return 0;
+	const n = Date.parse(s);
+	return Number.isFinite(n) ? n : 0;
+}
+
+function formatTs(ms: number): string {
+	if (ms === 0) return '';
+	return new Date(ms).toISOString();
 }

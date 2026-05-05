@@ -238,7 +238,8 @@ test('all 20 sub-DBs open and accept basic put/get', async () => {
 	// (Buffer keys).
 	const stringKeyDbs = new Set([
 		'meta', 'entityIdByString', 'unresolved',
-		'plan', 'conversationSession', 'todoList', 'configEntry',
+		'plan', 'conversationSession',
+		'todoList', 'todoItem', 'configEntry',
 	]);
 	for (const [name, db] of handles) {
 		const key = stringKeyDbs.has(name) ? `sentinel-${name}` : Buffer.from(`k-${name}`);

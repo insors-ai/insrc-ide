@@ -295,10 +295,12 @@ export async function getGraphStore(): Promise<GraphStore> {
 			conversationTurn:       open_('conversation_turn'),
 			conversationTurnByRepo: open_('conversation_turn_by_repo', { dupSort: true }),
 
-			// Todos -- todoList is utf8 id keyed
+			// Todos -- todoList + todoItem are utf8 id keyed; todoComment
+			// uses a composite (item_id, comment_id) key for per-item
+			// range scans.
 			todoList:           root.openDB({ name: 'todo_list', keyEncoding: 'ordered-binary' }),
 			todoListBySession:  open_('todo_list_by_session', { dupSort: true }),
-			todoItem:           open_('todo_item'),
+			todoItem:           root.openDB({ name: 'todo_item', keyEncoding: 'ordered-binary' }),
 			todoComment:        open_('todo_comment'),
 
 			// Config -- configEntry is utf8 id keyed
