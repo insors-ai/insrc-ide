@@ -219,6 +219,8 @@ function parseTs(s: string | undefined): number {
 export async function saveTurn(_db: DbClient, turn: TurnRecord): Promise<void> {
 	const id = turnIdFor(turn.sessionId, turn.idx);
 	const now = Date.now();
+	const type = coerceTurnType(turn.type);
+	const tier = coerceTier(turn.tier);
 	await withWriteTxn(s => {
 		const row: TurnRow = {
 			id,
@@ -229,8 +231,8 @@ export async function saveTurn(_db: DbClient, turn: TurnRecord): Promise<void> {
 			entities:    turn.entities,
 			createdAt:   parseTs(turn.createdAt) || now,
 			repo:        turn.repo,
-			type:        coerceTurnType(turn.type),
-			tier:        coerceTier(turn.tier),
+			type,
+			tier,
 			compactedAt: parseTs(turn.compactedAt),
 			sourceIds:   turn.sourceIds ?? [],
 			format:      coerceFormat(turn.format),
@@ -238,14 +240,32 @@ export async function saveTurn(_db: DbClient, turn: TurnRecord): Promise<void> {
 		writeTurnInTxn(s, row);
 		bumpSessionActivityInTxn(s, turn.sessionId, now);
 	});
+	// Phase 3.3: persist embedding to Lance after the LMDB commit
+	if (turn.vector.length > 0 && turn.repo !== '') {
+		const { writeTurnEmbedding } = await import('./lance/turn-vec.js');
+		await writeTurnEmbedding({
+			id,
+			embedding: new Float32Array(turn.vector),
+			repo:      turn.repo,
+			sessionId: turn.sessionId,
+			type,
+			tier,
+		});
+	}
 }
 
 export async function addCompactedTurns(_db: DbClient, turns: TurnRecord[]): Promise<void> {
 	if (turns.length === 0) return;
 	const now = Date.now();
+	const lanceWrites: Array<{
+		id: string; embedding: Float32Array;
+		repo: string; sessionId: string; type: string; tier: string;
+	}> = [];
 	await withWriteTxn(s => {
 		for (const t of turns) {
 			const id = turnIdFor(t.sessionId, t.idx);
+			const type = coerceTurnType(t.type ?? 'merged');
+			const tier = coerceTier(t.tier ?? 'cold');
 			const row: TurnRow = {
 				id,
 				sessionId:   t.sessionId,
@@ -255,15 +275,29 @@ export async function addCompactedTurns(_db: DbClient, turns: TurnRecord[]): Pro
 				entities:    t.entities,
 				createdAt:   now,
 				repo:        t.repo,
-				type:        coerceTurnType(t.type ?? 'merged'),
-				tier:        coerceTier(t.tier ?? 'cold'),
+				type,
+				tier,
 				compactedAt: now,
 				sourceIds:   t.sourceIds ?? [],
 				format:      coerceFormat(t.format),
 			};
 			writeTurnInTxn(s, row);
+			if (t.vector.length > 0 && t.repo !== '') {
+				lanceWrites.push({
+					id,
+					embedding: new Float32Array(t.vector),
+					repo:      t.repo,
+					sessionId: t.sessionId,
+					type,
+					tier,
+				});
+			}
 		}
 	});
+	if (lanceWrites.length > 0) {
+		const { writeTurnEmbeddings } = await import('./lance/turn-vec.js');
+		await writeTurnEmbeddings(lanceWrites);
+	}
 }
 
 function writeTurnInTxn(s: GraphStore, row: TurnRow): void {
@@ -282,7 +316,7 @@ function writeTurnInTxn(s: GraphStore, row: TurnRow): void {
 export async function closeSession(
 	_db: DbClient,
 	session: { id: string; repo: string; summary: string; seenEntities: string[] },
-	_summaryVector: number[],
+	summaryVector: number[],
 ): Promise<void> {
 	const now = Date.now();
 	const expiresAt = now + 30 * 86_400_000;
@@ -316,6 +350,16 @@ export async function closeSession(
 		};
 		s.conversationSession.put(session.id, encodeSessionRow(fresh));
 	});
+	// Phase 3.3: persist summary embedding to Lance
+	if (summaryVector.length > 0 && session.repo !== '') {
+		const { writeSessionEmbedding } = await import('./lance/session-vec.js');
+		await writeSessionEmbedding({
+			id:        session.id,
+			embedding: new Float32Array(summaryVector),
+			repo:      session.repo,
+			status:    'archived',
+		});
+	}
 }
 
 export async function saveSession(
@@ -328,10 +372,11 @@ export async function saveSession(
 		category?: string;
 		status?: SessionStatus;
 	},
-	_vector?: number[] | undefined,
+	vector?: number[] | undefined,
 ): Promise<void> {
 	const now = Date.now();
 	const expiresAt = now + 30 * 86_400_000;
+	let writtenStatus: string = 'active';
 	await withWriteTxn(s => {
 		const buf = s.conversationSession.get(session.id);
 		if (buf !== undefined) {
@@ -345,6 +390,7 @@ export async function saveSession(
 				...(session.status   !== undefined ? { status:   publicToRowStatus(session.status) } : {}),
 			};
 			s.conversationSession.put(session.id, encodeSessionRow(next));
+			writtenStatus = next.status;
 			return;
 		}
 		const fresh: SessionRow = {
@@ -361,7 +407,18 @@ export async function saveSession(
 			tier:           'hot',
 		};
 		s.conversationSession.put(session.id, encodeSessionRow(fresh));
+		writtenStatus = fresh.status;
 	});
+	// Phase 3.3: persist summary embedding to Lance if provided
+	if (vector !== undefined && vector.length > 0 && session.repo !== '') {
+		const { writeSessionEmbedding } = await import('./lance/session-vec.js');
+		await writeSessionEmbedding({
+			id:        session.id,
+			embedding: new Float32Array(vector),
+			repo:      session.repo,
+			status:    writtenStatus,
+		});
+	}
 }
 
 export async function setSessionAgent(
@@ -432,11 +489,19 @@ export async function deleteSession(
 		turnRows = deleteTurnsForSessionInTxn(s, sessionId);
 	});
 	void store;
+	// Phase 3.3 cascade: drop Lance rows for the session + its turns
+	const { deleteSessionVec }       = await import('./lance/session-vec.js');
+	const { deleteTurnVecsBySessionId } = await import('./lance/turn-vec.js');
+	await deleteSessionVec(sessionId);
+	await deleteTurnVecsBySessionId(sessionId);
 	return { sessionRows, turnRows };
 }
 
 export async function deleteTurnsForSession(_db: DbClient, sessionId: string): Promise<void> {
 	await withWriteTxn(s => deleteTurnsForSessionInTxn(s, sessionId));
+	// Phase 3.3 cascade: drop Lance turn rows for this session
+	const { deleteTurnVecsBySessionId } = await import('./lance/turn-vec.js');
+	await deleteTurnVecsBySessionId(sessionId);
 }
 
 function deleteTurnsForSessionInTxn(s: GraphStore, sessionId: string): number {
@@ -464,6 +529,10 @@ export async function deleteSessionRecord(_db: DbClient, sessionId: string): Pro
 	await withWriteTxn(s => {
 		s.conversationSession.remove(sessionId);
 	});
+	// Phase 3.3 cascade: drop the Lance session row (turns are not
+	// touched -- this function only removes the session row, not turns).
+	const { deleteSessionVec } = await import('./lance/session-vec.js');
+	await deleteSessionVec(sessionId);
 }
 
 export async function deleteSessionsForRepo(_db: DbClient, repo: string): Promise<void> {
@@ -475,14 +544,18 @@ export async function deleteSessionsForRepo(_db: DbClient, repo: string): Promis
 	}
 	if (ids.length === 0) return;
 	// Cascade: each session brings its turns + by_repo index entries
-	// with it (Phase 2.10 cascade rules -- previously this was a session-
-	// row-only delete, leaving orphan turns).
+	// with it.
 	await withWriteTxn(s => {
 		for (const id of ids) {
 			deleteTurnsForSessionInTxn(s, id);
 			s.conversationSession.remove(id);
 		}
 	});
+	// Phase 3.3 cascade: drop Lance rows in bulk by repo
+	const { deleteSessionVecsForRepo } = await import('./lance/session-vec.js');
+	const { deleteTurnVecsForRepo }    = await import('./lance/turn-vec.js');
+	await deleteSessionVecsForRepo(repo);
+	await deleteTurnVecsForRepo(repo);
 }
 
 export async function deleteTurnsForRepo(_db: DbClient, repo: string): Promise<void> {
@@ -502,6 +575,12 @@ export async function deleteTurnsForRepo(_db: DbClient, repo: string): Promise<v
 	}
 	if (turnIds.length === 0) return;
 	await deleteTurnsByIds(_db, turnIds);
+	// Phase 3.3 cascade: also drop the Lance rows by repo. The per-id
+	// deleteTurnsByIds drains Lance per-row above; this is belt-and-
+	// suspenders to catch any rows whose LMDB-side index was already
+	// stale.
+	const { deleteTurnVecsForRepo } = await import('./lance/turn-vec.js');
+	await deleteTurnVecsForRepo(repo);
 }
 
 export async function deleteTurnsByIds(_db: DbClient, ids: string[]): Promise<void> {
@@ -523,6 +602,9 @@ export async function deleteTurnsByIds(_db: DbClient, ids: string[]): Promise<vo
 			}
 		}
 	});
+	// Phase 3.3 cascade: drop the corresponding Lance rows
+	const { deleteTurnVecsByIds } = await import('./lance/turn-vec.js');
+	await deleteTurnVecsByIds(ids);
 }
 
 // ---------------------------------------------------------------------------
@@ -581,23 +663,59 @@ export async function pruneConversations(
 
 export async function searchTurnsByRepo(
 	_db: DbClient,
-	_repo: string,
-	_queryVector: number[],
-	_limit = 20,
+	repo: string,
+	queryVector: number[],
+	limit = 20,
 ): Promise<TurnRecord[]> {
-	// Phase 3.3 wires LanceDB ANN. Until then, vector search returns
-	// no matches (callers fall back to most-recent / per-session).
-	return [];
+	if (queryVector.length === 0 || repo === '') return [];
+	let hits;
+	try {
+		const { searchTurnVecs } = await import('./lance/turn-vec.js');
+		hits = await searchTurnVecs(queryVector, { repo, limit });
+	} catch {
+		// Match the prior DuckDB-era behaviour: silently return [] when
+		// the vector store rejects the query (dim mismatch / table not
+		// yet seeded / underlying error). Callers fall back to recency-
+		// based ordering when vector search comes up empty.
+		return [];
+	}
+	if (hits.length === 0) return [];
+	const store = await getGraphStore();
+	const out: TurnRecord[] = [];
+	for (const h of hits) {
+		const parsed = parseTurnId(h.id);
+		if (parsed === null) continue;
+		const buf = store.conversationTurn.get(encodeConversationTurnKey(parsed.sessionId, parsed.idx));
+		if (buf === undefined) continue;
+		out.push(rowToTurnRecord(decodeTurnRow(buf as Buffer)));
+	}
+	return out;
 }
 
 export async function seedFromPrior(
 	_db: DbClient,
-	_repo: string,
-	_queryVector: number[],
-	_limit = 3,
+	repo: string,
+	queryVector: number[],
+	limit = 3,
 ): Promise<SessionRecord[]> {
-	// Phase 3.3 wires LanceDB ANN.
-	return [];
+	if (queryVector.length === 0 || repo === '') return [];
+	let hits;
+	try {
+		const { searchSessionVecs } = await import('./lance/session-vec.js');
+		hits = await searchSessionVecs(queryVector, { repo, limit, notExpired: true });
+	} catch {
+		return [];
+	}
+	if (hits.length === 0) return [];
+	const store = await getGraphStore();
+	const out: SessionRecord[] = [];
+	for (const h of hits) {
+		const buf = store.conversationSession.get(h.id);
+		if (buf === undefined) continue;
+		out.push(rowToSessionRecord(decodeSessionRow(buf as Buffer)));
+	}
+	out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+	return out;
 }
 
 // ---------------------------------------------------------------------------
