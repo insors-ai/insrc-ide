@@ -366,6 +366,20 @@ export async function deleteEntitiesForFile(_db: DbClient, filePath: string): Pr
 	const store = await getGraphStore();
 	const ids = await collectEntityU64sByFile(store, filePath);
 	await detachDeleteEntities(store, ids);
+	// Phase 2.10 cascade: also wipe unresolved relations whose `from_file`
+	// matches. The cross-file resolver writes these per source-file; when
+	// the file is being purged the unresolved queue entries should go
+	// too. Imported here (rather than callers chaining the two) so the
+	// cascade is centralized.
+	await deleteUnresolvedForFileCascade(filePath);
+}
+
+// Forward-declare the unresolved cascade helper; the real implementation
+// lives in db/relations.ts and is imported lazily to avoid a circular
+// import (entities.ts <-> relations.ts).
+async function deleteUnresolvedForFileCascade(filePath: string): Promise<void> {
+	const { deleteUnresolvedForFile } = await import('./relations.js');
+	await deleteUnresolvedForFile(null, filePath);
 }
 
 export async function deleteEntitiesForRepo(_db: DbClient, repo: string): Promise<void> {

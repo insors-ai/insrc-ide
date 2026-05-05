@@ -474,8 +474,14 @@ export async function deleteSessionsForRepo(_db: DbClient, repo: string): Promis
 		if (row.repo === repo) ids.push(key as string);
 	}
 	if (ids.length === 0) return;
+	// Cascade: each session brings its turns + by_repo index entries
+	// with it (Phase 2.10 cascade rules -- previously this was a session-
+	// row-only delete, leaving orphan turns).
 	await withWriteTxn(s => {
-		for (const id of ids) s.conversationSession.remove(id);
+		for (const id of ids) {
+			deleteTurnsForSessionInTxn(s, id);
+			s.conversationSession.remove(id);
+		}
 	});
 }
 

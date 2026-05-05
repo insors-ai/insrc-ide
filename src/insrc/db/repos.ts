@@ -66,12 +66,28 @@ export async function addRepo(_db: DbClient, repo: RegisteredRepo): Promise<void
 }
 
 export async function removeRepo(_db: DbClient, path: string): Promise<void> {
+	// Phase 2.10 cascade: delete entities (which transitively cascades
+	// to out_edge / in_edge mirrors + entity_id_by_string + name_index),
+	// then unresolved relations for the repo, then conversation sessions
+	// for the repo (which transitively cascades to turns + by_repo
+	// index entries), then plans for the repo, then the repo row itself.
+	//
+	// LanceDB row cleanup (entity_vec / session_vec / turn_vec / config_
+	// vec for entries belonging to this repo) is wired in Phase 3.x.
+	const { deleteEntitiesForRepo } = await import('./entities.js');
+	const { deleteUnresolvedForRepo } = await import('./relations.js');
+	const { deleteSessionsForRepo } = await import('./conversations.js');
+	const { deletePlansForRepo } = await import('../agent/tasks/plan-store.js');
+
+	await deleteEntitiesForRepo(null, path);
+	await deleteUnresolvedForRepo(null, path);
+	await deleteSessionsForRepo(null, path);
+	await deletePlansForRepo(null, path);
+
 	await withWriteTxn(s => {
 		const id = findRepoIdByPath(s, path);
 		if (id === undefined) return;
 		s.repo.remove(encodeRepoKey(id));
-		// Phase 2.10 cascade lands here: delete entities + edges +
-		// name-index + unresolved + sessions / turns belonging to repo
 	});
 }
 
