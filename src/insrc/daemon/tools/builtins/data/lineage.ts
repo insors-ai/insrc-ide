@@ -50,12 +50,33 @@ const log = getLogger('data:lineage');
  *
  * The choice of vocabulary is deliberately conservative -- we'd
  * rather classify uncertain hits as `ambiguous` than misattribute a
- * read site as a write. ORM-typed identifier matching (Prisma's
- * `prisma.user.create({...})` pattern) is a follow-up that lives
- * alongside Phase 3.2's expected-shape resolver.
+ * read site as a write.
+ *
+ * Two pattern families per side:
+ *   - Plain SQL keywords (free-form text): `insert`, `select`, etc.
+ *   - ORM-typed call patterns (`.create(`, `.findOne(`, etc.) covering
+ *     Prisma / TypeORM / Sequelize / SQLAlchemy / Hibernate / ActiveRecord.
+ *     The leading `.` requirement disambiguates real method calls from
+ *     identifier substrings (a variable named `update_count` doesn't
+ *     trigger the writer classifier).
+ *
+ * Phase 3.2 / 3.3 will add type-resolved identifier matching (Prisma
+ * schema -> model -> table mapping); that work tightens accuracy on
+ * cases where the table name doesn't appear verbatim in the body.
+ * The regex layer here covers the high-frequency case where the
+ * literal name DOES appear (the indexer's vector neighbour selection
+ * already filtered to those).
  */
-const WRITE_PATTERN = /\b(insert|update|delete|upsert|save|create|set|write|put|merge)\b/i;
-const READ_PATTERN = /\b(select|find|get|query|where|fetch|read|scan|first|all|count)\b/i;
+const WRITE_PATTERN = /\b(insert|update|delete|upsert|save|create|set|write|put|merge|truncate|drop)\b/i;
+const READ_PATTERN = /\b(select|find|get|query|where|fetch|read|scan|first|all|count|exists|join)\b/i;
+/**
+ * ORM call shapes: `.method(`. Matches Prisma `.create / .findUnique`,
+ * TypeORM `.save / .findOne`, Sequelize `.create / .destroy`,
+ * SQLAlchemy `.add / .query`, Hibernate `.persist / .createQuery`,
+ * ActiveRecord `.where.update_all`, etc.
+ */
+const ORM_WRITE_PATTERN = /\.\s*(create|createMany|insert|insertOne|insertMany|save|saveAll|update|updateOne|updateMany|update_all|upsert|delete|deleteOne|deleteMany|delete_all|destroy|destroy_all|remove|removeOne|merge|put|push|set|add|persist|attach|truncate|drop)\s*\(/i;
+const ORM_READ_PATTERN = /\.\s*(find|findOne|findMany|findUnique|findFirst|findById|findAll|findOrFail|firstOrFail|firstOrCreate|get|getOne|getMany|getRawOne|getRawMany|query|where|having|select|fetch|fetchAll|first|last|count|all|exists|exists\?|pluck|aggregate|join|innerJoin|leftJoin)\s*\(/i;
 
 type Classification = 'reader' | 'writer' | 'ambiguous';
 
@@ -169,14 +190,18 @@ export const dataLineageTool: Tool = {
 		const overfetch = Math.min(MAX_LIMIT * VECTOR_OVERFETCH_FACTOR, limit * VECTOR_OVERFETCH_FACTOR);
 		const candidates = await searchEntities(db, queryVec, [...closure], overfetch, 'code');
 
-		const literal = target.toLowerCase();
+		// Generate name variants so ORM-style identifiers also match.
+		// Examples: target='users' also matches `User`, `users_repository`,
+		// `UsersService`. Lowercased + word-boundary tested in the body
+		// search so a substring like "userspace" never triggers.
+		const variants = nameVariants(target);
 		const hits: LineageHit[] = [];
 		for (const entity of candidates) {
 			const body = entity.body ?? '';
 			if (body.length === 0) continue;
-			const matchIdx = body.toLowerCase().indexOf(literal);
-			if (matchIdx === -1) continue;     // vector neighbour without literal mention; drop
-			hits.push(buildHit(entity, body, matchIdx, target));
+			const matchIdx = findFirstVariantMatch(body, variants);
+			if (matchIdx === null) continue;
+			hits.push(buildHit(entity, body, matchIdx.idx, matchIdx.matchLen));
 			if (hits.length >= limit) break;
 		}
 		const truncated = candidates.length === overfetch && hits.length === limit;
@@ -208,19 +233,17 @@ function fail(msg: string): ToolResult {
 	return { output: `[data_lineage] ${msg}`, format: 'text', success: false, error: msg };
 }
 
-function buildHit(entity: Entity, body: string, matchIdx: number, target: string): LineageHit {
-	// 80-char window centred on the match (40 each side, clamped).
-	const winRadius = 40;
+function buildHit(entity: Entity, body: string, matchIdx: number, matchLen: number): LineageHit {
+	// 200-char window centred on the match (100 each side, clamped).
+	// Wider than the 80-char v1 to catch ORM call shapes where the
+	// `.method(` is several tokens away from the literal name match
+	// (e.g. `prisma.users.where(...).update(...)` chains).
+	const winRadius = 100;
 	const start = Math.max(0, matchIdx - winRadius);
-	const end = Math.min(body.length, matchIdx + target.length + winRadius);
+	const end = Math.min(body.length, matchIdx + matchLen + winRadius);
 	const window = body.slice(start, end).replace(/\s+/g, ' ').trim();
 
-	const writer = WRITE_PATTERN.test(window);
-	const reader = READ_PATTERN.test(window);
-	const classification: Classification =
-		writer && !reader ? 'writer'
-			: reader && !writer ? 'reader'
-				: 'ambiguous';
+	const classification = classifyWindow(window);
 
 	return {
 		entityId: entity.id,
@@ -236,6 +259,103 @@ function buildHit(entity: Entity, body: string, matchIdx: number, target: string
 		classification,
 		snippet: window,
 	};
+}
+
+/**
+ * Generate ORM-friendly name variants for a target. Covers the cases
+ * where the literal target string doesn't appear verbatim but a
+ * recognisable variant does:
+ *   - Singularised (Rails-style: `users` -> `User`)
+ *   - PascalCase (`user_profile` -> `UserProfile`)
+ *   - camelCase (`UserProfile` -> `userProfile`)
+ *   - snake_case (`UserProfile` -> `user_profile`)
+ *
+ * Singularisation is naive ('s' removal) -- a proper inflector would
+ * use a vocabulary, but the false-negative cost is bounded since the
+ * vector neighbour search already pre-selected entities semantically
+ * close to the target.
+ */
+export function _nameVariantsForTest(target: string): string[] { return nameVariants(target); }
+export function _findFirstVariantMatchForTest(body: string, variants: readonly string[]): { idx: number; matchLen: number } | null {
+	return findFirstVariantMatch(body, variants);
+}
+export function _classifyWindowForTest(window: string): Classification {
+	return classifyWindow(window);
+}
+
+/**
+ * Classify a body window as reader / writer / ambiguous.
+ *
+ * Precedence:
+ *   1. ORM_WRITE -- `.create(`, `.save(`, `.update_all(`, etc.
+ *      Any ORM write match wins (ORM chains build queries then call a
+ *      terminal write method; the build steps may include reader-shaped
+ *      `.where(`, but the operation is a write).
+ *   2. ORM_READ  -- `.findOne(`, `.query(`, `.where(` etc, when no
+ *      write pattern was present.
+ *   3. SQL keyword fallback -- raw-SQL string literals where the ORM
+ *      shape doesn't apply.
+ *
+ * Anchoring on a leading `.` for ORM patterns avoids false-positives
+ * from identifier substrings (a variable named `update_count` doesn't
+ * trigger the writer classifier).
+ */
+function classifyWindow(window: string): Classification {
+	if (ORM_WRITE_PATTERN.test(window)) return 'writer';
+	if (ORM_READ_PATTERN.test(window))  return 'reader';
+	const writer = WRITE_PATTERN.test(window);
+	const reader = READ_PATTERN.test(window);
+	if (writer && !reader) return 'writer';
+	if (reader && !writer) return 'reader';
+	return 'ambiguous';
+}
+
+function nameVariants(target: string): string[] {
+	const variants = new Set<string>();
+	const add = (s: string) => { if (s.length > 0) variants.add(s); };
+	add(target);
+	add(target.toLowerCase());
+	add(target.toUpperCase());
+	// Naive singular form (Rails / ActiveRecord style).
+	if (target.toLowerCase().endsWith('s') && target.length > 1) {
+		add(target.slice(0, -1));
+		add(target.slice(0, -1).toLowerCase());
+	}
+	// snake_case / kebab-case -> PascalCase + camelCase.
+	const parts = target.split(/[_-]+/).filter(p => p.length > 0);
+	if (parts.length > 1) {
+		const pascal = parts.map(p => p[0]!.toUpperCase() + p.slice(1).toLowerCase()).join('');
+		add(pascal);
+		add(pascal[0]!.toLowerCase() + pascal.slice(1));
+	}
+	// PascalCase / camelCase -> snake_case.
+	const snake = target.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
+	if (snake !== target.toLowerCase()) add(snake);
+	return [...variants];
+}
+
+/**
+ * Find the first word-boundary-anchored occurrence of any variant in
+ * `body`. Returns the offset + matched length so `buildHit` can frame
+ * the snippet window. Returns null when no variant matches.
+ */
+function findFirstVariantMatch(body: string, variants: readonly string[]): { idx: number; matchLen: number } | null {
+	let best: { idx: number; matchLen: number } | null = null;
+	for (const v of variants) {
+		// Word-boundary regex; case-sensitive for the original variant
+		// (so PascalCase `User` matches but lowercase `users` requires
+		// a separate lowercase variant entry to match `users`).
+		const re = new RegExp(`(^|[^A-Za-z0-9_])${escapeRegex(v)}([^A-Za-z0-9_]|$)`);
+		const m = re.exec(body);
+		if (m === null) continue;
+		const idx = (m.index ?? 0) + m[1]!.length;
+		if (best === null || idx < best.idx) best = { idx, matchLen: v.length };
+	}
+	return best;
+}
+
+function escapeRegex(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function relativeForRepo(absPath: string, repoPath: string): string {
