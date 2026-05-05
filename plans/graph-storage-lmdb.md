@@ -212,9 +212,17 @@ storage layer uses twenty sub-DBs (9 graph + 2 plans + 3 conversations
 | `plan` | utf8 plan_id | msgpack(Plan) | Plan headers (title, status, repo_path, timestamps) |
 | `plan_step` | (utf8 plan_id, u32 idx BE) | msgpack(PlanStep) | Per-step records; range-scan by `plan_id` returns steps in idx order |
 
-`STEP_DEPENDS_ON` edges between plan steps live in the unified `out_edge` /
-`in_edge` sub-DBs alongside code-graph edges (per current code). This
-keeps the cross-graph traversal API uniform.
+**Plan-graph edges are NOT in the unified `out_edge` / `in_edge` sub-DBs.**
+Those sub-DBs are keyed by u64 entity IDs; plans and plan steps use utf8
+string IDs and don't participate in entity-graph traversal. Instead:
+- CONTAINS (plan → step) is implicit in the `plan_step` composite key
+  `(plan_id, idx)` -- a prefix scan returns all steps for a plan.
+- STEP_DEPENDS_ON is stored as a `dependsOn: string[]` field on the
+  PlanStepRow itself.
+
+If we ever need cross-graph traversal mixing plan steps with code
+entities, the right answer is a typed adapter -- not collapsing the
+two ID spaces into one.
 
 **Conversations:**
 

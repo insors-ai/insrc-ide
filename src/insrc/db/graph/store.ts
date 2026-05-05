@@ -284,23 +284,25 @@ export async function getGraphStore(): Promise<GraphStore> {
 			unresolved:         root.openDB({ name: 'unresolved', keyEncoding: 'ordered-binary' }),
 			unresolvedByFile:   open_('unresolved_by_file', { dupSort: true }),
 
-			// Plans
-			plan:               open_('plan'),
+			// Plans -- `plan` is utf8 id keyed; planStep keys are pre-
+			// encoded composite Buffers so binary is fine
+			plan:               root.openDB({ name: 'plan', keyEncoding: 'ordered-binary' }),
 			planStep:           open_('plan_step'),
 
-			// Conversations
-			conversationSession:    open_('conversation_session'),
+			// Conversations -- session is utf8 id keyed; turn keys are
+			// pre-encoded composite Buffers
+			conversationSession:    root.openDB({ name: 'conversation_session', keyEncoding: 'ordered-binary' }),
 			conversationTurn:       open_('conversation_turn'),
 			conversationTurnByRepo: open_('conversation_turn_by_repo', { dupSort: true }),
 
-			// Todos
-			todoList:           open_('todo_list'),
+			// Todos -- todoList is utf8 id keyed
+			todoList:           root.openDB({ name: 'todo_list', keyEncoding: 'ordered-binary' }),
 			todoListBySession:  open_('todo_list_by_session', { dupSort: true }),
 			todoItem:           open_('todo_item'),
 			todoComment:        open_('todo_comment'),
 
-			// Config
-			configEntry:        open_('config_entry'),
+			// Config -- configEntry is utf8 id keyed
+			configEntry:        root.openDB({ name: 'config_entry', keyEncoding: 'ordered-binary' }),
 			configByScope:      open_('config_by_scope', { dupSort: true }),
 		};
 

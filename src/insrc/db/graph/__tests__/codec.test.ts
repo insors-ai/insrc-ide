@@ -119,12 +119,13 @@ test('plan row round-trip', () => {
 	assert.deepEqual(decodePlanRow(encodePlanRow(p)), p);
 });
 
-test('plan_step row round-trip with sentinel timestamps', () => {
+test('plan_step row round-trip with sentinel timestamps + dependsOn', () => {
 	const s: PlanStepRow = {
 		id: 'step-1', planId: 'plan-abc', idx: 0,
 		title: 'Step 1', description: 'Do thing', checkpoint: false,
 		status: 'pending', complexity: 'small',
 		fileHint: 'foo.ts', notes: '',
+		dependsOn: ['step-0a', 'step-0b'],
 		createdAt: 1000, updatedAt: 1000,
 		startedAt: 0, doneAt: 0,
 	};

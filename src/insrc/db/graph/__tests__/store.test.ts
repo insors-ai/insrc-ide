@@ -236,7 +236,10 @@ test('all 20 sub-DBs open and accept basic put/get', async () => {
 	// `meta`, `entityIdByString`, and `unresolved` use ordered-binary key
 	// encoding which accepts plain strings; everything else uses binary
 	// (Buffer keys).
-	const stringKeyDbs = new Set(['meta', 'entityIdByString', 'unresolved']);
+	const stringKeyDbs = new Set([
+		'meta', 'entityIdByString', 'unresolved',
+		'plan', 'conversationSession', 'todoList', 'configEntry',
+	]);
 	for (const [name, db] of handles) {
 		const key = stringKeyDbs.has(name) ? `sentinel-${name}` : Buffer.from(`k-${name}`);
 		const value = Buffer.from(`v-${name}`);

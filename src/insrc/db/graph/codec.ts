@@ -26,7 +26,13 @@
 import { Packr, Unpackr } from 'msgpackr';
 
 import type { RelationKind } from './keys.js';
-import type { EntityKind, Language } from '../../shared/types.js';
+import type {
+	EntityKind,
+	Language,
+	PlanStatus as DomainPlanStatus,
+	PlanStepStatus as DomainPlanStepStatus,
+	PlanStepComplexity as DomainPlanStepComplexity,
+} from '../../shared/types.js';
 
 // ---------------------------------------------------------------------------
 // Shared codec instance
@@ -174,7 +180,11 @@ export const decodeUnresolvedRow = (b: Buffer): UnresolvedRow => decode(b);
 // Plan + plan_step rows
 // ---------------------------------------------------------------------------
 
-export type PlanStatus = 'active' | 'completed' | 'abandoned';
+// Re-export the domain enums so the LMDB row types stay aligned with
+// the daemon's `shared/types.ts` source-of-truth.
+export type PlanStatus         = DomainPlanStatus;
+export type PlanStepStatus     = DomainPlanStepStatus;
+export type PlanStepComplexity = DomainPlanStepComplexity;
 
 export interface PlanRow {
 	id:        string;          // utf8; also encoded in the key
@@ -188,9 +198,6 @@ export interface PlanRow {
 export const encodePlanRow = (r: PlanRow): Buffer => encode(r);
 export const decodePlanRow = (b: Buffer): PlanRow => decode(b);
 
-export type PlanStepStatus     = 'pending' | 'in_progress' | 'completed' | 'blocked';
-export type PlanStepComplexity = 'trivial' | 'small' | 'medium' | 'large';
-
 export interface PlanStepRow {
 	id:          string;
 	planId:      string;        // also encoded in the key
@@ -202,6 +209,11 @@ export interface PlanStepRow {
 	complexity:  PlanStepComplexity;
 	fileHint:    string;
 	notes:       string;
+	// STEP_DEPENDS_ON edges live on the row as a list of step IDs;
+	// plan-graph edges are NOT mirrored into the unified out_edge /
+	// in_edge sub-DBs (those are keyed by u64 entity IDs and plans /
+	// steps don't participate in entity traversal).
+	dependsOn:   string[];
 	createdAt:   number;
 	updatedAt:   number;
 	startedAt:   number;        // 0 if not started
