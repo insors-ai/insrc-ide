@@ -528,6 +528,53 @@ export async function listUnembeddedEntities(_db: DbClient, repo: string): Promi
 	return out;
 }
 
+/**
+ * Translate a public-API string entity ID (SHA-32 hex) to its internal
+ * u64. Returns `undefined` if the entity isn't known. Lets graph-layer
+ * callers cross the string↔u64 boundary without reaching into the
+ * sub-DBs directly.
+ */
+export async function entityU64ForId(id: string): Promise<bigint | undefined> {
+	const store = await getGraphStore();
+	const v = store.entityIdByString.get(id) as bigint | number | undefined;
+	if (v === undefined) return undefined;
+	return toBigInt(v);
+}
+
+/**
+ * Reverse of `entityU64ForId`. Linear scan over `entity_id_by_string`
+ * (O(N)); callers that look up many u64s in a row should batch via
+ * `entityIdsByU64s` to share one scan.
+ */
+export async function entityIdByU64(u64: bigint): Promise<string | undefined> {
+	const store = await getGraphStore();
+	for (const { key, value } of store.entityIdByString.getRange()) {
+		const v = toBigInt(value as bigint | number);
+		if (v === u64) return key as string;
+	}
+	return undefined;
+}
+
+/**
+ * Bulk reverse-lookup: u64 → string id for many ids at once. One
+ * O(N) pass over `entity_id_by_string` resolves them all. Returns a
+ * `Map<bigint, string>`; missing u64s are simply absent from the map.
+ */
+export async function entityIdsByU64s(u64s: readonly bigint[]): Promise<Map<bigint, string>> {
+	const out = new Map<bigint, string>();
+	if (u64s.length === 0) return out;
+	const store = await getGraphStore();
+	const wanted = new Set<bigint>(u64s);
+	for (const { key, value } of store.entityIdByString.getRange()) {
+		const v = toBigInt(value as bigint | number);
+		if (wanted.has(v)) {
+			out.set(v, key as string);
+			if (out.size === wanted.size) break;
+		}
+	}
+	return out;
+}
+
 export async function updateEmbedding(
 	_db: DbClient,
 	id: string,

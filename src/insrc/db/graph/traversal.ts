@@ -21,14 +21,9 @@
  * descent below that node.
  */
 
-import {
-	encodeOutEdgePrefix,
-	encodeInEdgePrefix,
-	prefixSuccessor,
-	RELATION_KIND_BYTE,
-	type RelationKind,
-} from './keys.js';
-import { getGraphStore, type GraphStore } from './store.js';
+import { type RelationKind } from './keys.js';
+import { getGraphStore } from './store.js';
+import { compileKindFilter, neighborsSync } from './edges.js';
 
 export interface TraversalOpts {
 	/**
@@ -239,45 +234,6 @@ export async function scc(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-function compileKindFilter(
-	filter: TraversalOpts['kindFilter'],
-): Set<number> | null {
-	if (filter === undefined) return null;
-	const set = new Set<number>();
-	const kinds = filter instanceof Set ? filter : new Set(filter);
-	for (const k of kinds) {
-		const byte = RELATION_KIND_BYTE[k as keyof typeof RELATION_KIND_BYTE];
-		if (byte !== undefined) set.add(byte);
-	}
-	return set;
-}
-
-/**
- * Synchronous neighbor iterator. Reads the lmdb-js cursor inside the
- * current read snapshot (each `getRange` call is auto-snapshotted).
- *
- * Returns an iterable of distinct u64 neighbors filtered by `kindBytes`
- * if non-null; if null, all kinds are included.
- */
-function* neighborsSync(
-	store: GraphStore,
-	from: bigint,
-	direction: 'out' | 'in',
-	kindBytes: Set<number> | null,
-): Generator<bigint> {
-	const prefix = direction === 'out'
-		? encodeOutEdgePrefix(from)
-		: encodeInEdgePrefix(from);
-	const succ = prefixSuccessor(prefix);
-	const db = direction === 'out' ? store.outEdge : store.inEdge;
-	for (const { key } of db.getRange({ start: prefix, end: succ })) {
-		const k = key as Buffer;
-		const kind = k.readUInt8(8);
-		if (kindBytes !== null && !kindBytes.has(kind)) continue;
-		// (out_edge: from at offset 0, to at offset 9)
-		// (in_edge:  to   at offset 0, from at offset 9)
-		// In both cases, the "neighbor" is at offset 9.
-		yield k.readBigUInt64BE(9);
-	}
-}
+// Neighbor scan + kind filter live in `./edges.ts` so 1-hop callers
+// (search.ts domain wrappers) can reuse them without dragging in
+// BFS / SCC machinery.

@@ -10,25 +10,29 @@
  *   findDefinedIn   — graph: all entities DEFINED IN a file
  *   findImports     — graph: all files/modules a file IMPORTS
  *
- * Phase 3.2 status:
- *   - searchEntities now routes ANN through LanceDB's `entity_vec`
- *     table; hits are hydrated to full Entity objects from LMDB.
- *   - resolveClosure / findCallers / findCallees / findDefinedIn /
- *     findImports still call into the legacy `db.duck` path. They
- *     return [] until Phase 4.2 wires them to the LMDB graph.
+ * Phase 4.2: searchEntities uses Lance (Phase 3.2). The graph queries
+ * now route through `db/graph/edges.ts` (1-hop) and `db/graph/traversal.ts`
+ * (transitiveClosure for resolveClosure), with string↔u64 ID
+ * translation via `entityU64ForId` / `entityIdsByU64s` from
+ * `db/entities.ts`.
  */
 
 import type { DbClient } from './client.js';
 import type { Entity } from '../shared/types.js';
-import { rowToEntity, getEntitiesByIds } from './entities.js';
+import {
+	entityU64ForId,
+	entityIdsByU64s,
+	getEntitiesByIds,
+} from './entities.js';
 import { searchEntityVecs, type EntityVecFilter } from './lance/entity-vec.js';
+import { outNeighbors, inNeighbors } from './graph/edges.js';
+import { transitiveClosure } from './graph/traversal.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('search');
 
 // Maximum DEPENDS_ON traversal depth in resolveClosure. Bounded to
-// keep pathological dependency graphs from blowing up the recursive
-// CTE.
+// keep pathological dependency graphs from blowing up.
 const CLOSURE_MAX_DEPTH = 10;
 
 // ---------------------------------------------------------------------------
@@ -36,36 +40,77 @@ const CLOSURE_MAX_DEPTH = 10;
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the transitive DEPENDS_ON closure of repos reachable from
- * `repoPath`. Result always includes `repoPath` itself (as the first
- * element).
+ * Returns the transitive DEPENDS_ON closure of repo paths reachable
+ * from `repoPath`. Result always includes `repoPath` itself (as the
+ * first element).
  *
- * Recursive CTE walks DEPENDS_ON edges in the unified `relation`
- * table, capped at CLOSURE_MAX_DEPTH (10). SELECT DISTINCT collapses
- * cycles. Returns only Repo node IDs (paths).
+ * Resolution path:
+ *   1. Map `repoPath` to its repo entity ID via `makeEntityId(repoPath, '', 'repo', repoPath)`,
+ *      then translate that string to its internal u64.
+ *   2. BFS-walk DEPENDS_ON outgoing edges up to `CLOSURE_MAX_DEPTH`.
+ *   3. For each reachable u64, look up the matching string entity id;
+ *      keep only the ones that are repo entities (filter applied via
+ *      `getEntitiesByIds` + `kind === 'repo'`).
+ *
+ * In the current indexer flow `repo --DEPENDS_ON--> module`, so the
+ * BFS frontier saturates after one hop and the result is typically
+ * `[repoPath]` plus any other repos this repo depends on. The
+ * `unshift(repoPath)` guarantees the root is present.
  */
-export async function resolveClosure(db: DbClient, repoPath: string): Promise<string[]> {
-  const rows = await db.duck.query<{ id: string }>(
-    `WITH RECURSIVE closure(id, depth) AS (
-       SELECT ?, 0
-       UNION ALL
-       SELECT r.dst, c.depth + 1
-       FROM closure c
-       JOIN relation r ON r.src = c.id
-       WHERE r.kind = 'DEPENDS_ON' AND c.depth < ?
-     )
-     SELECT DISTINCT id FROM closure WHERE id IS NOT NULL`,
-    [repoPath, CLOSURE_MAX_DEPTH],
-  );
-  const ids = rows.map(r => r.id).filter(Boolean);
+export async function resolveClosure(_db: DbClient, repoPath: string): Promise<string[]> {
+	const rootStringId = await makeRepoEntityIdLazy(repoPath);
+	const rootU64 = await entityU64ForId(rootStringId);
 
-  // Ensure the root repo is always included (even if 0 hops matches
-  // nothing). The recursive CTE base case emits the root at depth 0,
-  // so this is usually redundant.
-  if (!ids.includes(repoPath)) ids.unshift(repoPath);
+	if (rootU64 === undefined) {
+		// Root repo entity not in LMDB yet (indexer hasn't materialised
+		// it, or test fixture didn't seed). Fall back to the path-only
+		// answer to preserve the prior contract.
+		log.debug({ repo: repoPath }, 'resolveClosure: root not in graph, returning [root]');
+		return [repoPath];
+	}
 
-  log.debug({ repo: repoPath, closure: ids.length }, 'resolved dependency closure');
-  return ids;
+	const reachableU64s = await transitiveClosure([rootU64], {
+		kindFilter: ['DEPENDS_ON'],
+		direction:  'out',
+		maxDepth:   CLOSURE_MAX_DEPTH,
+	});
+
+	const u64Array = [...reachableU64s];
+	const idMap = await entityIdsByU64s(u64Array);
+	const stringIds: string[] = [];
+	for (const u of u64Array) {
+		const sid = idMap.get(u);
+		if (sid !== undefined) stringIds.push(sid);
+	}
+
+	// Hydrate to Entity rows so we can filter by kind and emit `repo`.
+	const entities = await getEntitiesByIds(_db, stringIds);
+	const paths: string[] = [];
+	for (const e of entities) {
+		if (e.kind !== 'repo') continue;
+		// Repo entities use their absolute path as the repo column. Fall
+		// back to `e.repo` if `rootPath` isn't set.
+		const path = e.rootPath ?? e.repo;
+		if (path !== '' && !paths.includes(path)) paths.push(path);
+	}
+
+	if (!paths.includes(repoPath)) paths.unshift(repoPath);
+
+	log.debug({ repo: repoPath, closure: paths.length }, 'resolved dependency closure');
+	return paths;
+}
+
+/**
+ * Compute the deterministic repo entity ID for a path. Mirrors the
+ * indexer's `makeEntityId(repoPath, '', 'repo', repoPath)` so that
+ * `resolveClosure(repoPath)` lines up with the rows the indexer wrote.
+ *
+ * Imported lazily to avoid pulling indexer code into the daemon's read
+ * path at module load.
+ */
+async function makeRepoEntityIdLazy(repoPath: string): Promise<string> {
+	const { makeEntityId } = await import('../indexer/parser/base.js');
+	return makeEntityId(repoPath, '', 'repo', repoPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,118 +128,114 @@ export async function resolveClosure(db: DbClient, repoPath: string): Promise<st
 export type SearchFilter = 'all' | 'code' | 'artifact';
 
 export async function searchEntities(
-  _db:          DbClient,
-  queryVec:     number[],
-  closureRepos: string[],
-  limit         = 10,
-  filter:       SearchFilter = 'all',
+	_db:          DbClient,
+	queryVec:     number[],
+	closureRepos: string[],
+	limit         = 10,
+	filter:       SearchFilter = 'all',
 ): Promise<Entity[]> {
-  if (queryVec.length === 0 || closureRepos.length === 0) {
-    log.debug('searchEntities: empty query vector or closure');
-    return [];
-  }
+	if (queryVec.length === 0 || closureRepos.length === 0) {
+		log.debug('searchEntities: empty query vector or closure');
+		return [];
+	}
 
-  // Two-step: ANN against the Lance entity_vec table for hits +
-  // distances, then hydrate full Entity rows from LMDB by id. The
-  // hydration step also serves as a consistency check -- if Lance
-  // has a row whose LMDB counterpart was tombstoned in a prior
-  // cascade, the hydration silently drops it.
-  const t0 = Date.now();
-  const hits = await searchEntityVecs(
-    queryVec,
-    closureRepos,
-    limit,
-    filter as EntityVecFilter,
-  );
-  const ids = hits.map(h => h.id);
-  const entities = await getEntitiesByIds(_db, ids);
+	// Two-step: ANN against the Lance entity_vec table for hits +
+	// distances, then hydrate full Entity rows from LMDB by id. The
+	// hydration step also serves as a consistency check -- if Lance
+	// has a row whose LMDB counterpart was tombstoned in a prior
+	// cascade, the hydration silently drops it.
+	const t0 = Date.now();
+	const hits = await searchEntityVecs(
+		queryVec,
+		closureRepos,
+		limit,
+		filter as EntityVecFilter,
+	);
+	const ids = hits.map(h => h.id);
+	const entities = await getEntitiesByIds(_db, ids);
 
-  // Preserve the Lance-side ranking. getEntitiesByIds doesn't
-  // guarantee order; reorder by hits[].
-  const byId = new Map<string, Entity>();
-  for (const e of entities) byId.set(e.id, e);
-  const ordered: Entity[] = [];
-  for (const h of hits) {
-    const e = byId.get(h.id);
-    if (e !== undefined) ordered.push(e);
-  }
+	// Preserve the Lance-side ranking. getEntitiesByIds doesn't
+	// guarantee order; reorder by hits[].
+	const byId = new Map<string, Entity>();
+	for (const e of entities) byId.set(e.id, e);
+	const ordered: Entity[] = [];
+	for (const h of hits) {
+		const e = byId.get(h.id);
+		if (e !== undefined) ordered.push(e);
+	}
 
-  const elapsed = `${Date.now() - t0}ms`;
-  log.info({ hits: ordered.length, limit, filter, elapsed }, 'vector search');
-  log.debug(
-    { names: ordered.map(e => `${e.kind}:${e.name}`), elapsed },
-    'vector search details',
-  );
-  return ordered;
+	const elapsed = `${Date.now() - t0}ms`;
+	log.info({ hits: ordered.length, limit, filter, elapsed }, 'vector search');
+	log.debug(
+		{ names: ordered.map(e => `${e.kind}:${e.name}`), elapsed },
+		'vector search details',
+	);
+	return ordered;
 }
 
 // ---------------------------------------------------------------------------
 // Graph queries
 // ---------------------------------------------------------------------------
 
-/** Hydrate full Entity rows from ids -- one IN-list query. */
-async function hydrateIds(db: DbClient, ids: string[]): Promise<Entity[]> {
-  if (ids.length === 0) return [];
-  const placeholders = ids.map(() => '?').join(', ');
-  const rows = await db.duck.query(
-    `SELECT * FROM entity WHERE id IN (${placeholders})`,
-    [...ids],
-  );
-  return rows.map(rowToEntity);
-}
-
 /** Find all entities that directly call the entity with the given id. */
 export async function findCallers(db: DbClient, entityId: string): Promise<Entity[]> {
-  const ids = await neighborIds(db, entityId, 'CALLS', 'inbound');
-  const results = await hydrateIds(db, ids);
-  log.debug({ entity: entityId, callers: results.length }, 'findCallers');
-  return results;
+	const results = await neighborEntities(db, entityId, 'CALLS', 'in');
+	log.debug({ entity: entityId, callers: results.length }, 'findCallers');
+	return results;
 }
 
 /** Find all entities directly called by the entity with the given id. */
 export async function findCallees(db: DbClient, entityId: string): Promise<Entity[]> {
-  const ids = await neighborIds(db, entityId, 'CALLS', 'outbound');
-  const results = await hydrateIds(db, ids);
-  log.debug({ entity: entityId, callees: results.length }, 'findCallees');
-  return results;
+	const results = await neighborEntities(db, entityId, 'CALLS', 'out');
+	log.debug({ entity: entityId, callees: results.length }, 'findCallees');
+	return results;
 }
 
 /** Find all entities defined in a file (DEFINES edges from File). */
 export async function findDefinedIn(db: DbClient, fileEntityId: string): Promise<Entity[]> {
-  const ids = await neighborIds(db, fileEntityId, 'DEFINES', 'outbound');
-  const results = await hydrateIds(db, ids);
-  log.debug({ file: fileEntityId, defined: results.length }, 'findDefinedIn');
-  return results;
+	const results = await neighborEntities(db, fileEntityId, 'DEFINES', 'out');
+	log.debug({ file: fileEntityId, defined: results.length }, 'findDefinedIn');
+	return results;
 }
 
 /** Find all files/modules a file imports (IMPORTS edges). */
 export async function findImports(db: DbClient, fileEntityId: string): Promise<Entity[]> {
-  const ids = await neighborIds(db, fileEntityId, 'IMPORTS', 'outbound');
-  const results = await hydrateIds(db, ids);
-  log.debug({ file: fileEntityId, imports: results.length }, 'findImports');
-  return results;
+	const results = await neighborEntities(db, fileEntityId, 'IMPORTS', 'out');
+	log.debug({ file: fileEntityId, imports: results.length }, 'findImports');
+	return results;
 }
 
 /**
- * Unified 1-hop neighbour lookup over the DuckDB `relation` table.
- * `'inbound'` returns nodes with edges pointing TO entityId;
- * `'outbound'` returns nodes with edges pointing FROM entityId. The
- * idx_relation_fwd / idx_relation_rev indexes make both directions
- * index-served.
+ * Internal: 1-hop neighbour query that returns hydrated `Entity` rows.
+ * Pipeline:
+ *   string id → u64 → outNeighbors / inNeighbors (kind-filtered)
+ *   → bulk reverse lookup u64 → string ids
+ *   → hydrate via getEntitiesByIds
+ *
+ * If the source entity isn't known to LMDB, returns []. If a neighbor
+ * u64 has no corresponding string id (shouldn't happen under normal
+ * cascade rules but possible if a write was partial), it's silently
+ * dropped during reverse-mapping.
  */
-type EdgeDirection = 'inbound' | 'outbound';
+async function neighborEntities(
+	db: DbClient,
+	entityId: string,
+	kind: 'CALLS' | 'DEFINES' | 'IMPORTS',
+	direction: 'in' | 'out',
+): Promise<Entity[]> {
+	const u64 = await entityU64ForId(entityId);
+	if (u64 === undefined) return [];
 
-async function neighborIds(
-  db: DbClient,
-  entityId: string,
-  kind: string,
-  direction: EdgeDirection,
-): Promise<string[]> {
-  const matchCol  = direction === 'inbound' ? 'dst' : 'src';
-  const returnCol = direction === 'inbound' ? 'src' : 'dst';
-  const rows = await db.duck.query<{ id: string }>(
-    `SELECT ${returnCol} AS id FROM relation WHERE ${matchCol} = ? AND kind = ?`,
-    [entityId, kind],
-  );
-  return rows.map(r => r.id).filter(Boolean);
+	const neighborU64s = direction === 'out'
+		? await outNeighbors(u64, { kindFilter: [kind] })
+		: await inNeighbors(u64, { kindFilter: [kind] });
+	if (neighborU64s.length === 0) return [];
+
+	const idMap = await entityIdsByU64s(neighborU64s);
+	const stringIds: string[] = [];
+	for (const u of neighborU64s) {
+		const sid = idMap.get(u);
+		if (sid !== undefined) stringIds.push(sid);
+	}
+	return getEntitiesByIds(db, stringIds);
 }
