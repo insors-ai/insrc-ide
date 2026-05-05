@@ -15,13 +15,19 @@
  *   dfs(roots, opts)               -> Iterable<bigint>  (DFS-ordered)
  *   transitiveClosure(roots, opts) -> Set<bigint>       (all reachable)
  *   scc(roots, opts)               -> bigint[][]        (Tarjan's algorithm)
+ *   unreachable(roots, kinds, opts) -> Iterable<bigint> (dead-code precondition)
  *
  * All iterators yield the root ids first (depth 0), then expand. The
  * `visitor` opt lets callers prune subtrees: returning `false` prevents
  * descent below that node.
  */
 
-import { type RelationKind } from './keys.js';
+import {
+	type RelationKind,
+	type EntityKind,
+	ENTITY_KIND_BYTE,
+} from './keys.js';
+import { decodeEntityRow } from './codec.js';
 import { getGraphStore } from './store.js';
 import { compileKindFilter, neighborsSync } from './edges.js';
 
@@ -229,6 +235,57 @@ export async function scc(
 	}
 
 	return components;
+}
+
+// ---------------------------------------------------------------------------
+// Reachability inverse (dead-code precondition)
+// ---------------------------------------------------------------------------
+
+/**
+ * Yield u64 entity IDs that match `candidateKinds` and are NOT in the
+ * transitive closure of `roots`. This is the precondition for
+ * dead-code analysis: callers seed `roots` with entry points (exported
+ * symbols, test files, build targets) and ask "what entities of these
+ * kinds is nothing reaching?".
+ *
+ * Pipeline:
+ *   1. `transitiveClosure(roots, opts)` materialises the reachable set.
+ *   2. Linear scan of the `entity` sub-DB; per row, check the kind
+ *      byte against `candidateKinds` and skip if the u64 is in the
+ *      reachable set.
+ *
+ * Repo scoping is intentionally NOT done here -- this is the
+ * pure-graph layer (operates on bigint + EntityKind only). Domain
+ * wrappers in Phase 5+ will scope by repo path.
+ *
+ * Empty `candidateKinds` is a no-op (yields nothing). Empty `roots`
+ * with non-empty kinds yields every entity of those kinds.
+ */
+export async function* unreachable(
+	roots: readonly bigint[],
+	candidateKinds: readonly EntityKind[],
+	opts: TraversalOpts = {},
+): AsyncGenerator<bigint> {
+	if (candidateKinds.length === 0) return;
+
+	const candidateBytes = new Set<number>();
+	for (const k of candidateKinds) {
+		const b = ENTITY_KIND_BYTE[k as keyof typeof ENTITY_KIND_BYTE];
+		if (b !== undefined) candidateBytes.add(b);
+	}
+	if (candidateBytes.size === 0) return;
+
+	const reachable = await transitiveClosure(roots, opts);
+
+	const store = await getGraphStore();
+	for (const { key, value } of store.entity.getRange()) {
+		const u64 = (key as Buffer).readBigUInt64BE(0);
+		if (reachable.has(u64)) continue;
+		const row = decodeEntityRow(value as Buffer);
+		const kindByte = ENTITY_KIND_BYTE[row.kind as keyof typeof ENTITY_KIND_BYTE];
+		if (kindByte === undefined || !candidateBytes.has(kindByte)) continue;
+		yield u64;
+	}
 }
 
 // ---------------------------------------------------------------------------

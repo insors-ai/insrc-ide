@@ -1,5 +1,7 @@
 /**
- * Phase 4.1 tests for the LMDB graph traversal primitives.
+ * Phase 4.1 + 4.3 tests for the LMDB graph traversal primitives.
+ *   bfs / dfs / transitiveClosure / scc      — Phase 4.1
+ *   unreachable                              — Phase 4.3 (dead-code precondition)
  */
 
 import { test } from 'node:test';
@@ -10,12 +12,15 @@ import { join } from 'node:path';
 
 import { closeGraphStore, getGraphStore, setGraphStorePath, withWriteTxn } from '../store.js';
 import {
+	encodeEntityKey,
 	encodeOutEdgeKey,
 	encodeInEdgeKey,
 	RELATION_KIND_BYTE,
+	type EntityKind,
 	type RelationKind,
 } from '../keys.js';
-import { bfs, dfs, transitiveClosure, scc } from '../traversal.js';
+import { encodeEntityRow, type EntityRow } from '../codec.js';
+import { bfs, dfs, transitiveClosure, scc, unreachable } from '../traversal.js';
 
 let dir: string;
 
@@ -48,6 +53,36 @@ async function collect<T>(gen: AsyncIterable<T>): Promise<T[]> {
 	const out: T[] = [];
 	for await (const v of gen) out.push(v);
 	return out;
+}
+
+/**
+ * Write a minimal entity row keyed by `u64`. Only `kind` matters for
+ * the unreachable() tests -- everything else is sentinel.
+ */
+async function wireEntity(u64: bigint, kind: EntityKind): Promise<void> {
+	const row: EntityRow = {
+		repoId:          1,
+		kind,
+		name:            `e${u64}`,
+		filePath:        '',
+		startLine:       0,
+		endLine:         0,
+		language:        'typescript',
+		rootPath:        '',
+		body:            '',
+		signature:       '',
+		summary:         '',
+		isExported:      false,
+		isAsync:         false,
+		isAbstract:      false,
+		artifact:        false,
+		contentHash:     '',
+		embeddingModel:  '',
+		indexedAt:       0,
+	};
+	await withWriteTxn(s => {
+		s.entity.put(encodeEntityKey(u64), encodeEntityRow(row));
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -271,4 +306,139 @@ test('traversal results survive close + reopen', async () => {
 	await closeGraphStore();
 	const c = await transitiveClosure([1n]);
 	assert.equal(c.size, 3);
+});
+
+// ---------------------------------------------------------------------------
+// unreachable (Phase 4.3)
+// ---------------------------------------------------------------------------
+
+test('unreachable: every entity outside the closure is yielded', async () => {
+	await getGraphStore();
+	// 1 (entry) -> 2 -> 3,  4 isolated, 5 isolated
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEntity(3n, 'function');
+	await wireEntity(4n, 'function');
+	await wireEntity(5n, 'function');
+	await wireEdge(1n, 'CALLS', 2n);
+	await wireEdge(2n, 'CALLS', 3n);
+
+	const got = await collect(unreachable([1n], ['function']));
+	assert.deepEqual(got.sort(), [4n, 5n]);
+});
+
+test('unreachable respects candidateKinds (only those kinds yielded)', async () => {
+	await getGraphStore();
+	await wireEntity(1n, 'function'); // root, reachable
+	await wireEntity(2n, 'function'); // unreachable function
+	await wireEntity(3n, 'class');    // unreachable class
+	await wireEntity(4n, 'variable'); // unreachable variable
+
+	const fns  = await collect(unreachable([1n], ['function']));
+	assert.deepEqual(fns, [2n]);
+	const cls  = await collect(unreachable([1n], ['class']));
+	assert.deepEqual(cls, [3n]);
+	const both = await collect(unreachable([1n], ['function', 'class']));
+	assert.deepEqual(both.sort(), [2n, 3n]);
+});
+
+test('unreachable: empty roots yields every entity of the candidate kinds', async () => {
+	await getGraphStore();
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEntity(3n, 'class');
+
+	const fns = await collect(unreachable([], ['function']));
+	assert.deepEqual(fns.sort(), [1n, 2n]);
+});
+
+test('unreachable: all roots, all reachable -> empty', async () => {
+	await getGraphStore();
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEdge(1n, 'CALLS', 2n);
+
+	const got = await collect(unreachable([1n], ['function']));
+	assert.deepEqual(got, []);
+});
+
+test('unreachable: empty candidateKinds is a no-op', async () => {
+	await getGraphStore();
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+
+	const got = await collect(unreachable([], []));
+	assert.deepEqual(got, []);
+});
+
+test('unreachable handles cycles in the reachable subgraph', async () => {
+	await getGraphStore();
+	// 1 <-> 2 cycle, 3 isolated
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEntity(3n, 'function');
+	await wireEdge(1n, 'CALLS', 2n);
+	await wireEdge(2n, 'CALLS', 1n);
+
+	const got = await collect(unreachable([1n], ['function']));
+	assert.deepEqual(got, [3n]);
+});
+
+test('unreachable respects kindFilter on the closure traversal', async () => {
+	await getGraphStore();
+	// 1 -CALLS-> 2,  1 -IMPORTS-> 3
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEntity(3n, 'function');
+	await wireEdge(1n, 'CALLS',   2n);
+	await wireEdge(1n, 'IMPORTS', 3n);
+
+	// Only CALLS expansion -> 3 stays unreachable
+	const callsOnly = await collect(unreachable(
+		[1n],
+		['function'],
+		{ kindFilter: ['CALLS'] },
+	));
+	assert.deepEqual(callsOnly, [3n]);
+
+	// Both kinds -> nothing unreachable
+	const bothKinds = await collect(unreachable(
+		[1n],
+		['function'],
+		{ kindFilter: ['CALLS', 'IMPORTS'] },
+	));
+	assert.deepEqual(bothKinds, []);
+});
+
+test('unreachable respects direction=in (reverse reachability)', async () => {
+	await getGraphStore();
+	// 1 -CALLS-> 2 -CALLS-> 3.  Forward from 1 covers all; reverse from
+	// 1 only covers 1 itself, so 2 and 3 should be unreachable.
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEntity(3n, 'function');
+	await wireEdge(1n, 'CALLS', 2n);
+	await wireEdge(2n, 'CALLS', 3n);
+
+	const reverse = await collect(unreachable(
+		[1n],
+		['function'],
+		{ direction: 'in' },
+	));
+	assert.deepEqual(reverse.sort(), [2n, 3n]);
+});
+
+test('unreachable respects maxDepth', async () => {
+	await getGraphStore();
+	// 1 -> 2 -> 3 -> 4
+	await wireEntity(1n, 'function');
+	await wireEntity(2n, 'function');
+	await wireEntity(3n, 'function');
+	await wireEntity(4n, 'function');
+	await wireEdge(1n, 'CALLS', 2n);
+	await wireEdge(2n, 'CALLS', 3n);
+	await wireEdge(3n, 'CALLS', 4n);
+
+	const d1 = await collect(unreachable([1n], ['function'], { maxDepth: 1 }));
+	assert.deepEqual(d1.sort(), [3n, 4n]);
 });
