@@ -16,6 +16,8 @@ import type {
 	AggregateRequest,
 	AggregateResult,
 	AggregateSpec,
+	AntiJoinRequest,
+	AntiJoinResult,
 	CorrelationMatrixRequest,
 	CorrelationMatrixResult,
 	CorrelationMethod,
@@ -1351,6 +1353,126 @@ export async function executeFunctionalDependency(
 		maxDistinctTo, avgDistinctTo,
 		determinationScore,
 		topViolations,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Anti-join (Phase 5c.5) -- exact full-table orphan count via NOT EXISTS
+// ---------------------------------------------------------------------------
+
+const ANTI_JOIN_EXAMPLES_DEFAULT = 5;
+const ANTI_JOIN_EXAMPLES_MAX = 50;
+
+export function clampAntiJoinExamples(n: number | undefined): number {
+	if (typeof n !== 'number' || !Number.isFinite(n)) return ANTI_JOIN_EXAMPLES_DEFAULT;
+	return Math.min(Math.max(0, Math.floor(n)), ANTI_JOIN_EXAMPLES_MAX);
+}
+
+/**
+ * Build the orphan-count SQL: number of distinct left-side values
+ * with no match on the right side. NULLs on the left are excluded
+ * (a NULL FK isn't an orphan -- it's an unknown).
+ *
+ * Uses NOT EXISTS rather than NOT IN: NOT EXISTS is universally
+ * portable, doesn't materialise the right side as a subquery, and
+ * lets the optimizer use the right column's index directly. NULL
+ * semantics on the right side don't poison the result the way NOT IN
+ * does (NOT IN returns UNKNOWN -> false for every left row when the
+ * right side contains a single NULL).
+ */
+export function compileAntiJoinCount(
+	request: AntiJoinRequest,
+	leftKnownColumns: readonly string[],
+	rightKnownColumns: readonly string[],
+	dialect: Dialect,
+): { text: string; values: readonly unknown[] } {
+	const leftCols = new Set(leftKnownColumns.map(c => c.toLowerCase()));
+	const rightCols = new Set(rightKnownColumns.map(c => c.toLowerCase()));
+	if (!leftCols.has(request.leftColumn.toLowerCase())) {
+		throw new Error(`data-driver: unknown column '${request.leftColumn}' in anti-join (left)`);
+	}
+	if (!rightCols.has(request.rightColumn.toLowerCase())) {
+		throw new Error(`data-driver: unknown column '${request.rightColumn}' in anti-join (right)`);
+	}
+	const leftSql = quoteTarget(request.leftTarget, dialect);
+	const rightSql = quoteTarget(request.rightTarget, dialect);
+	const leftCol = dialect.quoteIdent(request.leftColumn);
+	const rightCol = dialect.quoteIdent(request.rightColumn);
+	const text =
+		`SELECT COUNT(*) AS orphan_count FROM (` +
+		`SELECT DISTINCT ${leftCol} AS v FROM ${leftSql} WHERE ${leftCol} IS NOT NULL` +
+		`) o WHERE NOT EXISTS (SELECT 1 FROM ${rightSql} r WHERE r.${rightCol} = o.v)`;
+	if (looksLikeMutation(text)) {
+		throw new Error('data-driver: refused suspicious SQL in compileAntiJoinCount');
+	}
+	return { text, values: [] };
+}
+
+/**
+ * Build the orphan-examples SQL: up to N distinct left-side values
+ * that have no match on the right side. Same NOT EXISTS shape as
+ * compileAntiJoinCount but returns the values themselves.
+ */
+export function compileAntiJoinExamples(
+	request: AntiJoinRequest,
+	limit: number,
+	leftKnownColumns: readonly string[],
+	rightKnownColumns: readonly string[],
+	dialect: Dialect,
+): { text: string; values: readonly unknown[] } {
+	void leftKnownColumns; void rightKnownColumns;
+	const leftSql = quoteTarget(request.leftTarget, dialect);
+	const rightSql = quoteTarget(request.rightTarget, dialect);
+	const leftCol = dialect.quoteIdent(request.leftColumn);
+	const rightCol = dialect.quoteIdent(request.rightColumn);
+	const topClause = dialect === MSSQL_DIALECT ? ` TOP ${limit}` : '';
+	const tailLimit = dialect === MSSQL_DIALECT ? '' : ' ' + dialect.limitClause(limit);
+	const text =
+		`SELECT${topClause} v FROM (` +
+		`SELECT DISTINCT ${leftCol} AS v FROM ${leftSql} WHERE ${leftCol} IS NOT NULL` +
+		`) o WHERE NOT EXISTS (SELECT 1 FROM ${rightSql} r WHERE r.${rightCol} = o.v)` +
+		` ORDER BY v${tailLimit}`;
+	if (looksLikeMutation(text)) {
+		throw new Error('data-driver: refused suspicious SQL in compileAntiJoinExamples');
+	}
+	return { text, values: [] };
+}
+
+export interface AntiJoinOrchestratorDeps {
+	readonly dialect: Dialect;
+	readonly describe: (target: string) => Promise<{ readonly columns: readonly { readonly name: string }[] }>;
+	readonly runRows: (sql: string, values: readonly unknown[]) => Promise<readonly Readonly<Record<string, unknown>>[]>;
+}
+
+export async function executeAntiJoin(
+	request: AntiJoinRequest,
+	deps: AntiJoinOrchestratorDeps,
+): Promise<AntiJoinResult> {
+	const examplesLimit = clampAntiJoinExamples(request.exampleLimit);
+	const [leftSchema, rightSchema] = await Promise.all([
+		deps.describe(request.leftTarget),
+		deps.describe(request.rightTarget),
+	]);
+	const leftCols = leftSchema.columns.map(c => c.name);
+	const rightCols = rightSchema.columns.map(c => c.name);
+	const countSql = compileAntiJoinCount(request, leftCols, rightCols, deps.dialect);
+	const countRows = await deps.runRows(countSql.text, countSql.values);
+	const orphanCount = numericFromRaw(countRows[0]?.['orphan_count'] ?? countRows[0]?.['ORPHAN_COUNT']) ?? 0;
+
+	let examples: unknown[] = [];
+	if (orphanCount > 0 && examplesLimit > 0) {
+		const exSql = compileAntiJoinExamples(request, examplesLimit, leftCols, rightCols, deps.dialect);
+		const exRows = await deps.runRows(exSql.text, exSql.values);
+		examples = exRows.map(r => r['v'] ?? r['V'] ?? null);
+	}
+
+	return {
+		leftTarget: request.leftTarget,
+		leftColumn: request.leftColumn,
+		rightTarget: request.rightTarget,
+		rightColumn: request.rightColumn,
+		orphanCount,
+		examples,
 	};
 }
 

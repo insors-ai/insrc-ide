@@ -4,8 +4,7 @@
     "leftTarget":  "public.orders",
     "leftColumn":  "user_id",
     "rightTarget": "public.users",
-    "rightColumn": "id",
-    "topN": 10
+    "rightColumn": "id"
   },
   "fakeTools": {
     "db_sql_aggregate": {
@@ -22,27 +21,18 @@
         }
       }
     },
-    "db_sql_distinct": {
-      "content": "dist",
+    "db_sql_anti_join": {
+      "content": "anti-join",
       "isError": false,
       "data": {
-        "target": "public.users",
-        "column": "id",
-        "distinctCount": 200,
-        "topValues": [
-          { "value": 1,   "count": 1 },
-          { "value": 2,   "count": 1 },
-          { "value": 3,   "count": 1 },
-          { "value": 4,   "count": 1 },
-          { "value": 5,   "count": 1 },
-          { "value": 6,   "count": 1 },
-          { "value": 7,   "count": 1 },
-          { "value": 8,   "count": 1 },
-          { "value": 9,   "count": 1 },
-          { "value": 10,  "count": 1 }
-        ]
+        "leftTarget":  "public.orders",
+        "leftColumn":  "user_id",
+        "rightTarget": "public.users",
+        "rightColumn": "id",
+        "orphanCount": 3,
+        "examples":    [991, 992, 993]
       }
     }
   },
-  "expectedConfidenceFloor": "medium"
+  "expectedConfidenceFloor": "high"
 }

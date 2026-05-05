@@ -14,6 +14,8 @@ import { getLogger } from '../../../shared/logger.js';
 import type {
 	AggregateRequest,
 	AggregateResult,
+	AntiJoinRequest,
+	AntiJoinResult,
 	ColumnDescription,
 	ConnectionConfig,
 	CorrelationMatrixRequest,
@@ -41,6 +43,7 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeAntiJoin,
 	executeCorrelationMatrix,
 	executeFunctionalDependency,
 	executeHistogram,
@@ -193,6 +196,20 @@ class MysqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async antiJoin(request: AntiJoinRequest): Promise<AntiJoinResult> {
+		return executeAntiJoin(request, {
+			dialect: MYSQL_DIALECT,
+			describe: (t) => this.describe(t).then(s => ({ columns: s.columns })),
+			runRows: async (sql, values) => {
+				const [rows] = await withTimeout(
+					this.pool.query(sql, values as unknown[]),
+					SAMPLE_TIMEOUT_MS,
+				) as unknown as [Record<string, unknown>[], unknown];
+				return rows;
+			},
+		});
 	}
 
 	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {

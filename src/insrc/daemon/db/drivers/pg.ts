@@ -14,6 +14,8 @@ import { getLogger } from '../../../shared/logger.js';
 import type {
 	AggregateRequest,
 	AggregateResult,
+	AntiJoinRequest,
+	AntiJoinResult,
 	ConnectionConfig,
 	CorrelationMatrixRequest,
 	CorrelationMatrixResult,
@@ -42,6 +44,7 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeAntiJoin,
 	executeCorrelationMatrix,
 	executeFunctionalDependency,
 	executeHistogram,
@@ -199,6 +202,17 @@ class PostgresDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async antiJoin(request: AntiJoinRequest): Promise<AntiJoinResult> {
+		return executeAntiJoin(request, {
+			dialect: POSTGRES_DIALECT,
+			describe: (t) => this.describe(t).then(s => ({ columns: s.columns })),
+			runRows: async (sql, values) => {
+				const res = await withTimeout(this.pool.query(sql, values as unknown[]), SAMPLE_TIMEOUT_MS);
+				return res.rows as readonly Readonly<Record<string, unknown>>[];
+			},
+		});
 	}
 
 	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {

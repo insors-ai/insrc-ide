@@ -17,6 +17,8 @@ import { getLogger } from '../../../shared/logger.js';
 import type {
 	AggregateRequest,
 	AggregateResult,
+	AntiJoinRequest,
+	AntiJoinResult,
 	ColumnDescription,
 	ConnectionConfig,
 	CorrelationMatrixRequest,
@@ -43,6 +45,7 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeAntiJoin,
 	executeCorrelationMatrix,
 	executeFunctionalDependency,
 	executeHistogram,
@@ -225,6 +228,26 @@ class OracleDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeCorrelationMatrix(request, this.orchestratorDeps(target, cols));
+	}
+
+	async antiJoin(request: AntiJoinRequest): Promise<AntiJoinResult> {
+		return executeAntiJoin(request, {
+			dialect: ORACLE_DIALECT,
+			describe: (t) => this.describe(t).then(s => ({ columns: s.columns })),
+			runRows: async (sql, values) => {
+				const pool = await this.poolPromise;
+				const conn = await pool.getConnection();
+				try {
+					const res = await conn.execute<Record<string, unknown>>(
+						sql, values as unknown[],
+						{ outFormat: oracledb.OUT_FORMAT_OBJECT },
+					);
+					return res.rows ?? [];
+				} finally {
+					await conn.close();
+				}
+			},
+		});
 	}
 
 	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {

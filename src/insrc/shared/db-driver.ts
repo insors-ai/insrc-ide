@@ -333,6 +333,32 @@ export interface DistinctResult {
 }
 
 // ---------------------------------------------------------------------------
+// Anti-join (Phase 5c.5)
+// ---------------------------------------------------------------------------
+
+export interface AntiJoinRequest {
+	readonly leftTarget: string;
+	readonly leftColumn: string;
+	readonly rightTarget: string;
+	readonly rightColumn: string;
+	/** Up to N orphan-value examples to surface (default 5, max 50). */
+	readonly exampleLimit?: number;
+}
+
+export interface AntiJoinResult {
+	readonly leftTarget: string;
+	readonly leftColumn: string;
+	readonly rightTarget: string;
+	readonly rightColumn: string;
+	/** Distinct left-side values that have no matching right-side value
+	 *  (NULLs on the left side are excluded -- a NULL FK isn't an
+	 *  orphan, it's an unknown). Exact full-table count, not a sample. */
+	readonly orphanCount: number;
+	/** Up to `exampleLimit` orphan values for diagnosis. */
+	readonly examples: readonly unknown[];
+}
+
+// ---------------------------------------------------------------------------
 // Functional dependency (Phase 5c.3)
 // ---------------------------------------------------------------------------
 
@@ -554,6 +580,9 @@ export interface RdbmsDriver extends BaseDriver {
 	listIndexes?(target: string): Promise<IndexListing>;
 	/** Phase 5c.3 -- full-table functional dependency check for one (from, to) pair. */
 	functionalDependency?(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult>;
+	/** Phase 5c.5 -- exact full-table orphan count via server-side
+	 *  NOT EXISTS anti-join, plus up to N orphan examples. */
+	antiJoin?(request: AntiJoinRequest): Promise<AntiJoinResult>;
 	/** Phase 0.2 -- server-side histogram. */
 	histogram?(target: string, request: HistogramRequest): Promise<HistogramResult>;
 	/** Phase 0.4 -- pairwise correlation matrix over numeric columns. */

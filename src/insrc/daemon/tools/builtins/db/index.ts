@@ -24,6 +24,7 @@ import { acquirePool } from '../../../db/pool-cache.js';
 import type {
 	AggregateRequest,
 	AggregateSpec,
+	AntiJoinRequest,
 	ConnectionConfig,
 	CorrelationMatrixRequest,
 	CorrelationMethod,
@@ -885,6 +886,65 @@ const sqlListIndexesTool: Tool = {
 				for (const idx of result.indexes) {
 					lines.push(`| ${idx.name} | ${idx.columns.join(', ')} | ${idx.unique ? 'yes' : 'no'} | ${idx.primaryKey ? 'yes' : 'no'} |`);
 				}
+			}
+			return ok(lines.join('\n'), result);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
+// db:sql:anti_join (Phase 5c.5)
+// ---------------------------------------------------------------------------
+
+const sqlAntiJoinTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_anti_join',
+	description:
+		'Exact full-table orphan count for `left.col` values that have no match in `right.col`. ' +
+		'Server-side NOT EXISTS anti-join -- no value-set cap, no truncation. Returns the count + ' +
+		'up to N example orphan values. Same connection only; pass two table names that live on the same RDBMS connection.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'leftTarget', 'leftColumn', 'rightTarget', 'rightColumn'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			leftTarget:    { type: 'string' },
+			leftColumn:    { type: 'string' },
+			rightTarget:   { type: 'string' },
+			rightColumn:   { type: 'string' },
+			exampleLimit:  { type: 'integer', minimum: 0, maximum: 50, description: 'Default 5.' },
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const leftTarget = String(input['leftTarget'] ?? '');
+		const leftColumn = String(input['leftColumn'] ?? '');
+		const rightTarget = String(input['rightTarget'] ?? '');
+		const rightColumn = String(input['rightColumn'] ?? '');
+		if (connectionId === '' || leftTarget === '' || leftColumn === '' || rightTarget === '' || rightColumn === '') {
+			return fail(this.id, 'connectionId, leftTarget, leftColumn, rightTarget, rightColumn are required');
+		}
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.antiJoin !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement antiJoin() yet`);
+		}
+		try {
+			const req: AntiJoinRequest = typeof input['exampleLimit'] === 'number'
+				? { leftTarget, leftColumn, rightTarget, rightColumn, exampleLimit: Math.floor(input['exampleLimit']) }
+				: { leftTarget, leftColumn, rightTarget, rightColumn };
+			const result = await rd.antiJoin(req);
+			const lines: string[] = [
+				`**${leftTarget}.${leftColumn}** -> **${rightTarget}.${rightColumn}**`,
+				'',
+				`orphan count: **${result.orphanCount}**`,
+			];
+			if (result.examples.length > 0) {
+				lines.push('', '_orphan examples:_', ...result.examples.map(e => `- \`${String(e)}\``));
 			}
 			return ok(lines.join('\n'), result);
 		} catch (err) {
@@ -1781,6 +1841,7 @@ export function registerDbTools(): void {
 	registerTool(sqlListTablesTool);
 	registerTool(sqlListIndexesTool);
 	registerTool(sqlFunctionalDependencyTool);
+	registerTool(sqlAntiJoinTool);
 	registerTool(sqlHistogramTool);
 	registerTool(sqlCorrelationMatrixTool);
 	registerTool(sqlOutliersTool);
@@ -1798,5 +1859,5 @@ export function registerDbTools(): void {
 	registerTool(fileCorrelationMatrixTool);
 	registerTool(fileOutliersTool);
 	registerTool(fileListFilesTool);
-	log.debug({ count: 26 }, 'data-driver tools registered');
+	log.debug({ count: 27 }, 'data-driver tools registered');
 }

@@ -16,6 +16,8 @@ import { getLogger } from '../../../shared/logger.js';
 import type {
 	AggregateRequest,
 	AggregateResult,
+	AntiJoinRequest,
+	AntiJoinResult,
 	ColumnDescription,
 	ConnectionConfig,
 	CorrelationMatrixRequest,
@@ -42,6 +44,7 @@ import {
 	buildSampleSql,
 	compileAggregate,
 	compileDistinct,
+	executeAntiJoin,
 	executeCorrelationMatrix,
 	executeFunctionalDependency,
 	executeHistogram,
@@ -241,6 +244,15 @@ class SqliteDriver implements RdbmsDriver {
 			});
 		}
 		return { target, indexes };
+	}
+
+	async antiJoin(request: AntiJoinRequest): Promise<AntiJoinResult> {
+		return executeAntiJoin(request, {
+			dialect: SQLITE_DIALECT,
+			describe: (t) => this.describe(t).then(s => ({ columns: s.columns })),
+			runRows: async (sql, values) =>
+				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
 	}
 
 	async functionalDependency(target: string, request: FunctionalDependencyRequest): Promise<FunctionalDependencyResult> {
