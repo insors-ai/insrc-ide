@@ -151,10 +151,16 @@ export const decodeImportsEdge = (b: Buffer): ImportsEdgeProps => decodeEdgeProp
 // ---------------------------------------------------------------------------
 
 export interface UnresolvedRow {
-	id:           bigint;       // u64; also encoded in the key
-	repoId:       number;       // u32
-	fromEntity:   bigint;       // u64 entity_id of the source
-	fromFile:     string;       // repo-relative path of the source
+	// SHA-32 string id, encoded in the `unresolved` sub-DB key. We
+	// preserve string IDs here (matching the caller-facing
+	// `UnresolvedRelation.id`) rather than translating to u64 -- the
+	// row count is bounded (~10-30% of edges, transient until the
+	// resolver pass) so the edge-key compactness argument doesn't
+	// apply.
+	id:           string;
+	repoId:       number;       // u32 internal repo ID
+	fromEntity:   string;       // SHA-32 string id of the source entity
+	fromFile:     string;       // repo-relative source path
 	kind:         RelationKind; // CALLS / IMPORTS / INHERITS / etc.
 	rawTo:        string;       // unresolved target (raw import specifier or symbol name)
 	meta:         Record<string, unknown>;

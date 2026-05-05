@@ -281,7 +281,7 @@ export async function getGraphStore(): Promise<GraphStore> {
 			nameIndex:          open_('name_index'),
 			outEdge:            open_('out_edge'),
 			inEdge:             open_('in_edge'),
-			unresolved:         open_('unresolved'),
+			unresolved:         root.openDB({ name: 'unresolved', keyEncoding: 'ordered-binary' }),
 			unresolvedByFile:   open_('unresolved_by_file', { dupSort: true }),
 
 			// Plans

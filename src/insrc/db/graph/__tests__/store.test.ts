@@ -233,9 +233,10 @@ test('all 20 sub-DBs open and accept basic put/get', async () => {
 	assert.equal(handles.length, 20, 'expected 20 sub-DBs');
 
 	// Validate each sub-DB by writing a sentinel value + reading it back.
-	// `meta` and `entityIdByString` use ordered-binary key encoding which
-	// accepts plain strings; everything else uses binary (Buffer keys).
-	const stringKeyDbs = new Set(['meta', 'entityIdByString']);
+	// `meta`, `entityIdByString`, and `unresolved` use ordered-binary key
+	// encoding which accepts plain strings; everything else uses binary
+	// (Buffer keys).
+	const stringKeyDbs = new Set(['meta', 'entityIdByString', 'unresolved']);
 	for (const [name, db] of handles) {
 		const key = stringKeyDbs.has(name) ? `sentinel-${name}` : Buffer.from(`k-${name}`);
 		const value = Buffer.from(`v-${name}`);

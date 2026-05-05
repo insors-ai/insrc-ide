@@ -80,6 +80,7 @@
     "test:graph-ops": "tsx --test db/graph/__tests__/operational.test.ts",
     "test:repos-lmdb": "tsx --test db/__tests__/repos-lmdb.test.ts",
     "test:entities-lmdb": "tsx --test db/__tests__/entities-lmdb.test.ts",
+    "test:relations-lmdb": "tsx --test db/__tests__/relations-lmdb.test.ts",
     "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
     "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
     "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",

@@ -202,8 +202,8 @@ storage layer uses twenty sub-DBs (9 graph + 2 plans + 3 conversations
 | `name_index` | (u32 repo, u8 kind, utf8 fqn) | u64 entity_id | "What's the ID of this entity by name?" -- used by re-index lookup |
 | `out_edge` | (u64 from, u8 kind, u64 to) | msgpack(EdgeProps) or empty | Outgoing edges; range-scan by `(from, kind)` gives all neighbors |
 | `in_edge` | (u64 to, u8 kind, u64 from) | empty | Incoming edges; mirror of `out_edge` for in-degree queries |
-| `unresolved` | u64 unresolved_id (BE) | msgpack(UnresolvedRelation) | Cross-file resolver queue: edges whose target couldn't be bound at parse time. Pass 2 of the resolver promotes these into `out_edge` / `in_edge` |
-| `unresolved_by_file` | (u32 repo, utf8 from_file) | dupsort u64 unresolved_id | Secondary index for "all unresolved-from this file" -- used on re-index to wipe stale unresolved rows |
+| `unresolved` | utf8 string id (32-char SHA hex) | msgpack(UnresolvedRelation) | Cross-file resolver queue: edges whose target couldn't be bound at parse time. Pass 2 of the resolver promotes these into `out_edge` / `in_edge`. Keyed by the existing string SHA id (matches the caller surface; row count is bounded so the u64 compactness argument doesn't apply) |
+| `unresolved_by_file` | (u32 repo, utf8 from_file) | dupsort utf8 unresolved_id | Secondary index for "all unresolved-from this file" -- used on re-index to wipe stale unresolved rows |
 
 **Plans (artifact framework):**
 

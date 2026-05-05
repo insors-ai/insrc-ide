@@ -1,413 +1,453 @@
+/**
+ * LMDB-backed graph relations + cross-file-resolver queue.
+ *
+ * Phase 2.3 (resolved edges) + Phase 2.4 (unresolved queue) of
+ * plans/storage-migration-lmdb-lance.md, landed in one file because
+ * the surfaces are tangled in the existing caller code.
+ *
+ * Surface preserved verbatim from the prior DuckDB-backed
+ * implementation:
+ *   - upsertRelation / upsertRelations: dispatch by `resolved` flag
+ *   - deleteRelationsForFile / deleteRelationsForRepo: no-ops (entity
+ *     cascade in db/entities.ts handles incident edges)
+ *   - listUnresolvedRelations: by repo (+ optional file scope)
+ *   - deleteUnresolvedForFile / deleteUnresolvedForRepo
+ *   - promoteToResolved / promoteResolvedBatch: cross-file resolver
+ *     accept path
+ *   - updateUnresolvedMeta / updateUnresolvedMetaBatch: ambiguous /
+ *     retry path
+ *
+ * Storage:
+ *   - Resolved edges land in `out_edge` + `in_edge` sub-DBs (mirrored
+ *     for symmetric O(degree) range scans). u64 entity IDs from
+ *     `entity_id_by_string`. Edge value: empty Buffer (most kinds);
+ *     Phase 1.3's CallsEdgeProps / ReadsEdgeProps / WritesEdgeProps /
+ *     ImportsEdgeProps round-trip via msgpack when callers populate
+ *     `Relation.meta`. Initial port keeps all edge values empty
+ *     (matches prior DuckDB schema where `relation` had no value
+ *     column); per-kind props writing lands when callers start
+ *     supplying meta.
+ *   - Unresolved rows land in `unresolved` sub-DB keyed by string SHA
+ *     id (matches the public surface). Secondary `unresolved_by_file`
+ *     dupsort index keyed by (repoId, fromFile) -> id for efficient
+ *     per-file queries.
+ *
+ * The `db: DbClient` parameter is retained but unused -- Phase 5.x
+ * removes it from callers.
+ */
+
 import { createHash } from 'node:crypto';
-import type { DbClient } from './client.js';
+
 import type { Relation, RelationKind } from '../shared/types.js';
 import { getLogger } from '../shared/logger.js';
+import {
+	getGraphStore,
+	withWriteTxn,
+	type GraphStore,
+} from './graph/store.js';
+import {
+	encodeOutEdgeKey,
+	encodeInEdgeKey,
+	encodeUnresolvedByFileKey,
+	prefixSuccessor,
+	RELATION_KIND_BYTE,
+	type RelationKind as InternalRelationKind,
+} from './graph/keys.js';
+import {
+	encodeUnresolvedRow,
+	decodeUnresolvedRow,
+	decodeRepoRow,
+	type UnresolvedRow,
+} from './graph/codec.js';
 
 const log = getLogger('db.relations');
 
-/**
- * Upsert a graph relation edge between two Entity stubs.
- * Resolved relations land in the unified `relation(src, dst, kind)`
- * table; unresolved ones go to `unresolved_relation` for the cross-
- * file resolver pass to pick up later. See
- * plans/cross-file-references.md §0.1.
- */
-export async function upsertRelation(db: DbClient, relation: Relation): Promise<void> {
-  if (!relation.resolved) {
-    await upsertUnresolvedRelation(db, relation);
-    return;
-  }
-  // PRIMARY KEY (src, dst, kind) -- ON CONFLICT DO NOTHING is the
-  // duplicate-guard equivalent of Cypher MERGE.
-  await db.duck.exec(
-    'INSERT INTO relation (src, dst, kind) VALUES (?, ?, ?) ON CONFLICT (src, dst, kind) DO NOTHING',
-    [relation.from, relation.to, relation.kind],
-  );
-}
-
-/**
- * Bulk-row chunk size for the multi-VALUES INSERT path. Sized so the
- * positional-parameter array stays well under DuckDB's prepared-
- * statement cap on per-file relation counts (typically <500 per file).
- */
-const RELATION_BULK_CHUNK = 200;
-
-/**
- * Pre-INSERT dedupe by composite (src, dst, kind) primary key.
- * Mirrors the dedupe in `upsertEntities` -- DuckDB's bulk
- * multi-VALUES INSERT can fail before `ON CONFLICT` fires when two
- * rows in the same VALUES clause share the primary key. The
- * failure surfaces differently here (no HNSW wrapper on `relation`)
- * but the safe pattern is the same.
- */
-function dedupeRelationsByEdge(relations: readonly Relation[]): Relation[] {
-  const seen = new Set<string>();
-  const out: Relation[] = [];
-  for (const r of relations) {
-    const key = `${r.from}\x00${r.to}\x00${r.kind}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(r);
-  }
-  return out;
-}
-
-/**
- * Upsert multiple relations. Splits resolved vs unresolved up-front
- * (different target tables, different shapes) and bulk-inserts each
- * group via a multi-VALUES INSERT chunked at RELATION_BULK_CHUNK.
- *
- * The prior per-row loop was a measurable hot path during full
- * indexing -- a typical TS file emits ~50-100 relation edges, and
- * one round-trip per edge dominated wall time. Bulk INSERT collapses
- * each chunk into a single Connection acquire + one statement.
- *
- * Resolved relations are deduped by (src, dst, kind) before chunking
- * (see dedupeRelationsByEdge) so an intra-batch duplicate doesn't
- * trip a PRIMARY KEY violation before the ON CONFLICT clause can
- * fire. Same defense-in-depth pattern as the entity path.
- */
-export async function upsertRelations(db: DbClient, relations: Relation[]): Promise<void> {
-  if (relations.length === 0) return;
-
-  const resolved: Relation[] = [];
-  const unresolved: Relation[] = [];
-  for (const r of relations) {
-    if (r.resolved) resolved.push(r); else unresolved.push(r);
-  }
-
-  // Resolved -> relation table. (src, dst, kind), ON CONFLICT DO NOTHING.
-  // Dedupe BEFORE chunking; intra-batch duplicates are common for
-  // import edges where the same module is imported via two syntaxes.
-  const resolvedUnique = dedupeRelationsByEdge(resolved);
-  if (resolvedUnique.length < resolved.length) {
-    log.debug(
-      { original: resolved.length, kept: resolvedUnique.length },
-      'upsertRelations: collapsed duplicate (src, dst, kind) edges in input batch',
-    );
-  }
-
-  for (let i = 0; i < resolvedUnique.length; i += RELATION_BULK_CHUNK) {
-    const chunk = resolvedUnique.slice(i, i + RELATION_BULK_CHUNK);
-    const placeholders = chunk.map(() => '(?, ?, ?)').join(', ');
-    const params: unknown[] = [];
-    for (const r of chunk) params.push(r.from, r.to, r.kind);
-    await db.duck.exec(
-      `INSERT INTO relation (src, dst, kind) VALUES ${placeholders}
-       ON CONFLICT (src, dst, kind) DO NOTHING`,
-      params as never[],
-    );
-  }
-
-  // Unresolved -> unresolved_relation table. Per-row meta-validation
-  // (file/repo presence) means we still iterate, but the INSERT itself
-  // batches.
-  await upsertUnresolvedRelations(db, unresolved);
-}
-
-/**
- * Delete all edges originating from entities in the given file.
- * In practice this is handled by the relation cleanup inside
- * deleteEntitiesForFile() (entities.ts), but kept for explicit call
- * sites in the indexer pipeline.
- */
-export async function deleteRelationsForFile(_db: DbClient, _filePath: string): Promise<void> {
-  // Edges are removed automatically when entity stubs are deleted via
-  // detachDeleteEntityStubs (entities.ts deleteEntitiesForFile). No
-  // separate action needed here.
-}
-
-/**
- * Delete all edges originating from entities in a repo.
- */
-export async function deleteRelationsForRepo(_db: DbClient, _repo: string): Promise<void> {
-  // Same as above; cleanup runs through deleteEntitiesForRepo.
-}
+type DbClient = unknown;
 
 // ---------------------------------------------------------------------------
-// Unresolved relations -- persistence for the cross-file resolver pass.
-// See plans/cross-file-references.md §0.
+// Public types -- preserved from the prior DuckDB-backed implementation
 // ---------------------------------------------------------------------------
 
 export interface UnresolvedRelation {
-  id:          string;
-  repo:        string;
-  fromEntity:  string;
-  fromFile:    string;
-  kind:        RelationKind;
-  rawTo:       string;
-  meta:        Record<string, unknown>;
-  attemptedAt: string;
+	id:          string;
+	repo:        string;
+	fromEntity:  string;
+	fromFile:    string;
+	kind:        RelationKind;
+	rawTo:       string;
+	meta:        Record<string, unknown>;
+	attemptedAt: string;
 }
 
-/** Deterministic id — re-parsing the same file produces the same row id. */
+/** Deterministic id -- re-parsing the same file produces the same row id. */
 export function makeUnresolvedRelationId(
-  repo: string,
-  fromEntity: string,
-  kind: RelationKind,
-  rawTo: string,
+	repo: string,
+	fromEntity: string,
+	kind: RelationKind,
+	rawTo: string,
 ): string {
-  return createHash('sha256')
-    .update(`${repo}\x00${fromEntity}\x00${kind}\x00${rawTo}`)
-    .digest('hex')
-    .slice(0, 32);
+	return createHash('sha256')
+		.update(`${repo}\x00${fromEntity}\x00${kind}\x00${rawTo}`)
+		.digest('hex')
+		.slice(0, 32);
 }
 
-async function upsertUnresolvedRelation(db: DbClient, relation: Relation): Promise<void> {
-  await upsertUnresolvedRelations(db, [relation]);
+// ---------------------------------------------------------------------------
+// Resolved edges
+// ---------------------------------------------------------------------------
+
+export async function upsertRelation(_db: DbClient, relation: Relation): Promise<void> {
+	if (!relation.resolved) {
+		await upsertUnresolvedRelations([relation]);
+		return;
+	}
+	await upsertResolvedRelations([relation]);
 }
 
-/**
- * Bulk variant. Validates meta + builds the row tuples up-front,
- * then issues one chunked multi-VALUES INSERT per RELATION_BULK_CHUNK
- * group. Drops rows missing meta.file/meta.repo with a debug log
- * (parser invariant -- programming error if it fires).
- */
-async function upsertUnresolvedRelations(db: DbClient, relations: Relation[]): Promise<void> {
-  if (relations.length === 0) return;
+export async function upsertRelations(_db: DbClient, relations: Relation[]): Promise<void> {
+	if (relations.length === 0) return;
 
-  const attemptedAt = new Date().toISOString();
-  // Keyed by id so an intra-batch duplicate (same repo + fromEntity +
-  // kind + rawTo) collapses to one row. Last-wins matches what
-  // ON CONFLICT (id) DO UPDATE would have done one-row-at-a-time.
-  const tupleById = new Map<string, unknown[]>();
-  for (const r of relations) {
-    const meta     = r.meta ?? {};
-    const fromFile = typeof meta['file'] === 'string' ? meta['file'] as string : '';
-    const repo     = typeof meta['repo'] === 'string' ? meta['repo'] as string : '';
-    if (!fromFile || !repo) {
-      log.debug(
-        { kind: r.kind, from: r.from, to: r.to },
-        'unresolved relation missing meta.file/meta.repo — dropping',
-      );
-      continue;
-    }
-    const id       = makeUnresolvedRelationId(repo, r.from, r.kind, r.to);
-    const metaJson = JSON.stringify(meta);
-    tupleById.set(id, [id, repo, r.from, fromFile, r.kind, r.to, metaJson, attemptedAt]);
-  }
-  const tuples = [...tupleById.values()];
-  if (tuples.length === 0) return;
-
-  for (let i = 0; i < tuples.length; i += RELATION_BULK_CHUNK) {
-    const chunk = tuples.slice(i, i + RELATION_BULK_CHUNK);
-    const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
-    const params: unknown[] = [];
-    for (const t of chunk) params.push(...t);
-    await db.duck.exec(
-      `INSERT INTO unresolved_relation
-         (id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at)
-       VALUES ${placeholders}
-       ON CONFLICT (id) DO UPDATE SET
-         repo = excluded.repo,
-         from_entity = excluded.from_entity,
-         from_file = excluded.from_file,
-         kind = excluded.kind,
-         raw_to = excluded.raw_to,
-         meta = excluded.meta,
-         attempted_at = excluded.attempted_at`,
-      params as never[],
-    );
-  }
+	const resolved: Relation[] = [];
+	const unresolved: Relation[] = [];
+	for (const r of relations) {
+		if (r.resolved) resolved.push(r); else unresolved.push(r);
+	}
+	if (resolved.length > 0) await upsertResolvedRelations(resolved);
+	if (unresolved.length > 0) await upsertUnresolvedRelations(unresolved);
 }
 
-/**
- * Load unresolved-relation rows for a repo, optionally scoped to a single
- * source file (used by the incremental settle path).
- */
+async function upsertResolvedRelations(relations: Relation[]): Promise<void> {
+	const unique = dedupeResolvedRelations(relations);
+	if (unique.length < relations.length) {
+		log.debug(
+			{ original: relations.length, kept: unique.length },
+			'upsertRelations: collapsed duplicate (src, dst, kind) edges in input batch',
+		);
+	}
+	if (unique.length === 0) return;
+
+	let skipped = 0;
+	await withWriteTxn(s => {
+		for (const r of unique) {
+			const fromU64 = lookupU64ByStringId(s, r.from);
+			const toU64   = lookupU64ByStringId(s, r.to);
+			if (fromU64 === undefined || toU64 === undefined) {
+				skipped++;
+				continue;
+			}
+			const kindByte = RELATION_KIND_BYTE[r.kind as InternalRelationKind];
+			if (kindByte === undefined) {
+				skipped++;
+				continue;
+			}
+			s.outEdge.put(encodeOutEdgeKey(fromU64, kindByte, toU64), Buffer.alloc(0));
+			s.inEdge.put(encodeInEdgeKey(toU64, kindByte, fromU64), Buffer.alloc(0));
+		}
+	});
+	if (skipped > 0) {
+		log.debug(
+			{ skipped, total: unique.length },
+			'upsertResolvedRelations: skipped edges with missing endpoints or unknown kind',
+		);
+	}
+}
+
+function dedupeResolvedRelations(relations: readonly Relation[]): Relation[] {
+	const seen = new Set<string>();
+	const out: Relation[] = [];
+	for (const r of relations) {
+		const key = `${r.from}\x00${r.to}\x00${r.kind}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(r);
+	}
+	return out;
+}
+
+export async function deleteRelationsForFile(_db: DbClient, _filePath: string): Promise<void> {
+	// Resolved edges are removed automatically when entity rows are
+	// deleted via deleteEntitiesForFile (entities.ts cascade). No
+	// separate action needed here.
+}
+
+export async function deleteRelationsForRepo(_db: DbClient, _repo: string): Promise<void> {
+	// Same as above; cleanup runs through deleteEntitiesForRepo.
+}
+
+// ---------------------------------------------------------------------------
+// Unresolved relations -- cross-file resolver queue
+// ---------------------------------------------------------------------------
+
+async function upsertUnresolvedRelations(relations: Relation[]): Promise<void> {
+	if (relations.length === 0) return;
+
+	const attemptedAt = Date.now();
+
+	// De-duplicate within the batch (last-wins by computed id)
+	type Tuple = { id: string; row: UnresolvedRow; repoPath: string };
+	const tupleById = new Map<string, Tuple>();
+	for (const r of relations) {
+		const meta     = r.meta ?? {};
+		const fromFile = typeof meta['file'] === 'string' ? meta['file'] as string : '';
+		const repo     = typeof meta['repo'] === 'string' ? meta['repo'] as string : '';
+		if (fromFile === '' || repo === '') {
+			log.debug(
+				{ kind: r.kind, from: r.from, to: r.to },
+				'unresolved relation missing meta.file/meta.repo -- dropping',
+			);
+			continue;
+		}
+		const id = makeUnresolvedRelationId(repo, r.from, r.kind, r.to);
+		// repoId resolved per-row inside the txn (it's not on the
+		// public Relation type; we look up by path)
+		const row: UnresolvedRow = {
+			id,
+			repoId:      0, // back-filled inside the txn
+			fromEntity:  r.from,
+			fromFile,
+			kind:        r.kind,
+			rawTo:       r.to,
+			meta,
+			attemptedAt,
+		};
+		tupleById.set(id, { id, row, repoPath: repo });
+	}
+	if (tupleById.size === 0) return;
+
+	await withWriteTxn(s => {
+		const repoIdCache = new Map<string, number>();
+		for (const t of tupleById.values()) {
+			let repoId = repoIdCache.get(t.repoPath);
+			if (repoId === undefined) {
+				const found = repoIdByPathInTxn(s, t.repoPath);
+				if (found === undefined) {
+					// No registered repo. Skip rather than auto-allocate
+					// here: upsertEntities is the canonical creation
+					// point in the indexer flow, so by the time we hit
+					// unresolved relations the repo should exist.
+					log.debug(
+						{ repo: t.repoPath, id: t.id },
+						'upsertUnresolvedRelations: repo not registered; dropping',
+					);
+					continue;
+				}
+				repoId = found;
+				repoIdCache.set(t.repoPath, repoId);
+			}
+			const row: UnresolvedRow = { ...t.row, repoId };
+			// Write the canonical row
+			s.unresolved.put(t.id, encodeUnresolvedRow(row));
+			// Maintain the (repoId, fromFile) -> id dupsort index
+			const idxKey = encodeUnresolvedByFileKey(repoId, row.fromFile);
+			s.unresolvedByFile.put(idxKey, Buffer.from(t.id, 'utf8'));
+		}
+	});
+}
+
 export async function listUnresolvedRelations(
-  db: DbClient,
-  repo: string,
-  scopeFile?: string,
+	_db: DbClient,
+	repo: string,
+	scopeFile?: string,
 ): Promise<UnresolvedRelation[]> {
-  const sql = scopeFile !== undefined
-    ? `SELECT id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at
-       FROM unresolved_relation WHERE repo = ? AND from_file = ?`
-    : `SELECT id, repo, from_entity, from_file, kind, raw_to, meta, attempted_at
-       FROM unresolved_relation WHERE repo = ?`;
-  const params = scopeFile !== undefined ? [repo, scopeFile] : [repo];
-  const rows = await db.duck.query<Record<string, unknown>>(sql, params);
-  return rows.map(rowToUnresolved);
+	const store = await getGraphStore();
+	const repoId = repoIdByPathInTxn(store, repo);
+	if (repoId === undefined) return [];
+
+	const out: UnresolvedRelation[] = [];
+
+	if (scopeFile !== undefined) {
+		// Use the (repoId, fromFile) dupsort index for an O(matches) scan.
+		const idxKey = encodeUnresolvedByFileKey(repoId, scopeFile);
+		for (const value of store.unresolvedByFile.getValues(idxKey)) {
+			const id = (value as Buffer).toString('utf8');
+			const buf = store.unresolved.get(id);
+			if (buf === undefined) continue;
+			const row = decodeUnresolvedRow(buf as Buffer);
+			out.push(rowToUnresolved(row, repo));
+		}
+		return out;
+	}
+
+	// No file scope: scan the whole `unresolved` sub-DB filtering by
+	// repoId. O(N) over unresolved rows; acceptable for the cross-file-
+	// resolver call frequency.
+	for (const { value } of store.unresolved.getRange()) {
+		const row = decodeUnresolvedRow(value as Buffer);
+		if (row.repoId !== repoId) continue;
+		out.push(rowToUnresolved(row, repo));
+	}
+	return out;
 }
 
-function rowToUnresolved(row: Record<string, unknown>): UnresolvedRelation {
-  let meta: Record<string, unknown> = {};
-  const raw = row['meta'];
-  if (typeof raw === 'string' && raw.length > 0) {
-    try { meta = JSON.parse(raw) as Record<string, unknown>; } catch { /* corrupt — leave empty */ }
-  }
-  return {
-    id:          row['id']           as string,
-    repo:        row['repo']         as string,
-    fromEntity:  row['from_entity']  as string,
-    fromFile:    row['from_file']    as string,
-    kind:        row['kind']         as RelationKind,
-    rawTo:       row['raw_to']       as string,
-    meta,
-    attemptedAt: row['attempted_at'] as string,
-  };
+export async function deleteUnresolvedForFile(_db: DbClient, file: string): Promise<void> {
+	const store = await getGraphStore();
+	// We don't know the repoId from `file` alone (file is an absolute
+	// path; the index is (repoId, fromFile)). The fromFile in the index
+	// is repo-relative *or* absolute -- the existing DuckDB code stored
+	// whatever `meta.file` was, which the parser populates. To preserve
+	// the lookup semantics, we scan all repos.
+	const repos: number[] = [];
+	for (const { key } of store.repo.getRange()) {
+		repos.push((key as Buffer).readUInt32BE(0));
+	}
+	const idsToDelete: string[] = [];
+	for (const repoId of repos) {
+		const idxKey = encodeUnresolvedByFileKey(repoId, file);
+		for (const value of store.unresolvedByFile.getValues(idxKey)) {
+			idsToDelete.push((value as Buffer).toString('utf8'));
+		}
+	}
+	if (idsToDelete.length === 0) return;
+	await withWriteTxn(s => {
+		for (const id of idsToDelete) {
+			deleteUnresolvedRowInTxn(s, id);
+		}
+	});
 }
 
-/**
- * Drop all UnresolvedRelation rows whose source file matches. Called on
- * per-file re-index alongside deleteEntitiesForFile so that stale rows
- * from a previous parse don't linger when the parser re-emits the
- * canonical set.
- */
-export async function deleteUnresolvedForFile(db: DbClient, file: string): Promise<void> {
-  await db.duck.exec('DELETE FROM unresolved_relation WHERE from_file = ?', [file]);
+export async function deleteUnresolvedForRepo(_db: DbClient, repo: string): Promise<void> {
+	const store = await getGraphStore();
+	const repoId = repoIdByPathInTxn(store, repo);
+	if (repoId === undefined) return;
+
+	// Collect ids to delete
+	const ids: string[] = [];
+	for (const { key, value } of store.unresolved.getRange()) {
+		const row = decodeUnresolvedRow(value as Buffer);
+		if (row.repoId === repoId) ids.push(key as string);
+	}
+	if (ids.length === 0) return;
+
+	await withWriteTxn(s => {
+		for (const id of ids) {
+			deleteUnresolvedRowInTxn(s, id);
+		}
+	});
 }
 
-/**
- * Drop all UnresolvedRelation rows belonging to a repo. Used by the
- * `repo.remove` cleanup so unresolved edges don't linger when the
- * repo is detached from the registry.
- */
-export async function deleteUnresolvedForRepo(db: DbClient, repo: string): Promise<void> {
-  await db.duck.exec('DELETE FROM unresolved_relation WHERE repo = ?', [repo]);
-}
-
-/**
- * On successful cross-file resolution: insert the typed REL edge and
- * delete the matching UnresolvedRelation row.
- */
 export async function promoteToResolved(
-  db: DbClient,
-  unresolved: UnresolvedRelation,
-  targetEntityId: string,
+	_db: DbClient,
+	unresolved: UnresolvedRelation,
+	targetEntityId: string,
 ): Promise<void> {
-  // Insert resolved edge first; if that fails the unresolved row stays
-  // so the resolver can retry later. ON CONFLICT DO NOTHING replicates
-  // Cypher MERGE's dedupe.
-  await db.duck.exec(
-    'INSERT INTO relation (src, dst, kind) VALUES (?, ?, ?) ON CONFLICT (src, dst, kind) DO NOTHING',
-    [unresolved.fromEntity, targetEntityId, unresolved.kind],
-  );
-  await db.duck.exec('DELETE FROM unresolved_relation WHERE id = ?', [unresolved.id]);
+	await withWriteTxn(s => {
+		const fromU64 = lookupU64ByStringId(s, unresolved.fromEntity);
+		const toU64   = lookupU64ByStringId(s, targetEntityId);
+		const kindByte = RELATION_KIND_BYTE[unresolved.kind as InternalRelationKind];
+		if (fromU64 !== undefined && toU64 !== undefined && kindByte !== undefined) {
+			s.outEdge.put(encodeOutEdgeKey(fromU64, kindByte, toU64), Buffer.alloc(0));
+			s.inEdge.put(encodeInEdgeKey(toU64, kindByte, fromU64), Buffer.alloc(0));
+		} else {
+			log.debug(
+				{ unresolvedId: unresolved.id, fromEntity: unresolved.fromEntity, targetEntityId, kind: unresolved.kind },
+				'promoteToResolved: missing endpoint or unknown kind; resolved edge skipped (unresolved row still removed)',
+			);
+		}
+		deleteUnresolvedRowInTxn(s, unresolved.id);
+	});
 }
 
-/**
- * Update the meta JSON on an unresolved row (e.g. to record an ambiguous
- * candidate set) without resolving it. Re-stamps `attemptedAt`.
- */
 export async function updateUnresolvedMeta(
-  db: DbClient,
-  id: string,
-  meta: Record<string, unknown>,
+	_db: DbClient,
+	id: string,
+	meta: Record<string, unknown>,
 ): Promise<void> {
-  const metaJson = JSON.stringify(meta);
-  const attemptedAt = new Date().toISOString();
-  await db.duck.exec(
-    'UPDATE unresolved_relation SET meta = ?, attempted_at = ? WHERE id = ?',
-    [metaJson, attemptedAt, id],
-  );
+	const attemptedAt = Date.now();
+	await withWriteTxn(s => {
+		const buf = s.unresolved.get(id);
+		if (buf === undefined) return;
+		const row = decodeUnresolvedRow(buf as Buffer);
+		const next: UnresolvedRow = { ...row, meta, attemptedAt };
+		s.unresolved.put(id, encodeUnresolvedRow(next));
+	});
 }
 
-// ---------------------------------------------------------------------------
-// Batched cross-file-resolver writers
-//
-// Per-row promoteToResolved / updateUnresolvedMeta turn each accepted /
-// ambiguous resolution into a separate DuckDB call. These batch helpers
-// collapse N writes into ceil(N/CHUNK) bulk-INSERT statements.
-// CHUNK = 500 to bound the generated-SQL length on each round-trip.
-// ---------------------------------------------------------------------------
-
-const CHUNK_SIZE = 500;
-
-/**
- * Batched form of promoteToResolved. Groups by relation kind and
- * issues one multi-VALUES INSERT per (kind, chunk), then one IN-list
- * DELETE per chunk for the unresolved-row cleanup.
- */
 export async function promoteResolvedBatch(
-  db: DbClient,
-  items: ReadonlyArray<{ unresolved: UnresolvedRelation; targetEntityId: string }>,
+	_db: DbClient,
+	items: ReadonlyArray<{ unresolved: UnresolvedRelation; targetEntityId: string }>,
 ): Promise<void> {
-  if (items.length === 0) return;
-
-  // Group by kind so we can build per-kind multi-VALUES INSERTs
-  // (one INSERT can mix kinds in our schema, but bucketing makes the
-  // SQL marginally clearer and matches the previous Kuzu code shape).
-  const byKind = new Map<RelationKind, { from: string; to: string }[]>();
-  for (const item of items) {
-    let arr = byKind.get(item.unresolved.kind);
-    if (arr === undefined) { arr = []; byKind.set(item.unresolved.kind, arr); }
-    arr.push({ from: item.unresolved.fromEntity, to: item.targetEntityId });
-  }
-
-  for (const [kind, rows] of byKind) {
-    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-      const chunk = rows.slice(i, i + CHUNK_SIZE);
-      await bulkInsertRelations(db, kind, chunk);
-    }
-  }
-
-  // Batch DELETE the unresolved rows.
-  const allIds = items.map(it => it.unresolved.id);
-  for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
-    const chunk = allIds.slice(i, i + CHUNK_SIZE);
-    const placeholders = chunk.map(() => '?').join(', ');
-    await db.duck.exec(
-      `DELETE FROM unresolved_relation WHERE id IN (${placeholders})`,
-      chunk,
-    );
-  }
+	if (items.length === 0) return;
+	await withWriteTxn(s => {
+		for (const item of items) {
+			const { unresolved, targetEntityId } = item;
+			const fromU64 = lookupU64ByStringId(s, unresolved.fromEntity);
+			const toU64   = lookupU64ByStringId(s, targetEntityId);
+			const kindByte = RELATION_KIND_BYTE[unresolved.kind as InternalRelationKind];
+			if (fromU64 !== undefined && toU64 !== undefined && kindByte !== undefined) {
+				s.outEdge.put(encodeOutEdgeKey(fromU64, kindByte, toU64), Buffer.alloc(0));
+				s.inEdge.put(encodeInEdgeKey(toU64, kindByte, fromU64), Buffer.alloc(0));
+			}
+			deleteUnresolvedRowInTxn(s, unresolved.id);
+		}
+	});
 }
 
-/**
- * DuckDB-side bulk-insert relations. Builds a single INSERT statement
- * with N (?, ?, ?) tuples; ON CONFLICT DO NOTHING handles duplicates
- * across calls. Within a single call we dedupe (src, dst) intra-batch
- * before building VALUES -- DuckDB's bulk INSERT can fail on a
- * primary-key violation before the conflict clause fires.
- */
-async function bulkInsertRelations(
-  db: DbClient,
-  kind: RelationKind,
-  rows: ReadonlyArray<{ from: string; to: string }>,
-): Promise<void> {
-  if (rows.length === 0) return;
-  const seen = new Set<string>();
-  const unique: { from: string; to: string }[] = [];
-  for (const r of rows) {
-    const key = `${r.from}\x00${r.to}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    unique.push(r);
-  }
-  if (unique.length === 0) return;
-  const valuesSql = unique.map(() => '(?, ?, ?)').join(', ');
-  const params: string[] = [];
-  for (const r of unique) { params.push(r.from, r.to, kind); }
-  await db.duck.exec(
-    `INSERT INTO relation (src, dst, kind) VALUES ${valuesSql} ON CONFLICT (src, dst, kind) DO NOTHING`,
-    params,
-  );
-}
-
-/**
- * Batched form of updateUnresolvedMeta. DuckDB has no UNWIND-and-SET
- * primitive; for a few hundred rows the per-row UPDATE cost is
- * negligible (no fsync bottleneck in DuckDB's MVCC model the way Kuzu
- * had).
- */
 export async function updateUnresolvedMetaBatch(
-  db: DbClient,
-  items: ReadonlyArray<{ id: string; meta: Record<string, unknown> }>,
+	_db: DbClient,
+	items: ReadonlyArray<{ id: string; meta: Record<string, unknown> }>,
 ): Promise<void> {
-  if (items.length === 0) return;
-  const attemptedAt = new Date().toISOString();
-  const rows = items.map(it => ({
-    id: it.id,
-    meta: JSON.stringify(it.meta),
-  }));
-  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + CHUNK_SIZE);
-    for (const r of chunk) {
-      await db.duck.exec(
-        'UPDATE unresolved_relation SET meta = ?, attempted_at = ? WHERE id = ?',
-        [r.meta, attemptedAt, r.id],
-      );
-    }
-  }
+	if (items.length === 0) return;
+	const attemptedAt = Date.now();
+	await withWriteTxn(s => {
+		for (const { id, meta } of items) {
+			const buf = s.unresolved.get(id);
+			if (buf === undefined) continue;
+			const row = decodeUnresolvedRow(buf as Buffer);
+			const next: UnresolvedRow = { ...row, meta, attemptedAt };
+			s.unresolved.put(id, encodeUnresolvedRow(next));
+		}
+	});
 }
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+function deleteUnresolvedRowInTxn(s: GraphStore, id: string): void {
+	const buf = s.unresolved.get(id);
+	if (buf === undefined) return;
+	const row = decodeUnresolvedRow(buf as Buffer);
+	const idxKey = encodeUnresolvedByFileKey(row.repoId, row.fromFile);
+	// Remove the specific id from the dupsort index (other ids under
+	// the same key persist).
+	s.unresolvedByFile.remove(idxKey, Buffer.from(id, 'utf8'));
+	s.unresolved.remove(id);
+}
+
+function repoIdByPathInTxn(s: GraphStore, path: string): number | undefined {
+	for (const { key, value } of s.repo.getRange()) {
+		const row = decodeRepoRow(value as Buffer);
+		if (row.path === path) {
+			return (key as Buffer).readUInt32BE(0);
+		}
+	}
+	return undefined;
+}
+
+function lookupU64ByStringId(s: GraphStore, id: string): bigint | undefined {
+	const v = s.entityIdByString.get(id) as bigint | number | undefined;
+	if (v === undefined) return undefined;
+	return typeof v === 'bigint' ? v : BigInt(v);
+}
+
+function rowToUnresolved(row: UnresolvedRow, repoPath: string): UnresolvedRelation {
+	return {
+		id:          row.id,
+		repo:        repoPath,
+		fromEntity:  row.fromEntity,
+		fromFile:    row.fromFile,
+		// LMDB-side RelationKind is a superset of the domain enum
+		// (it includes CONTAINS / READS / WRITES / STEP_DEPENDS_ON
+		// for future use). Cast back to the domain type; if a row was
+		// somehow written with one of the extra kinds we surface it
+		// as the LMDB string -- callers expecting a narrower union
+		// should validate at their boundary.
+		kind:        row.kind as RelationKind,
+		rawTo:       row.rawTo,
+		meta:        row.meta,
+		attemptedAt: row.attemptedAt > 0 ? new Date(row.attemptedAt).toISOString() : '',
+	};
+}
+
+// Suppress unused-imports
+void prefixSuccessor;

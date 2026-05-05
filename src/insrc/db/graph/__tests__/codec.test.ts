@@ -94,9 +94,9 @@ test('edge props: IMPORTS shape round-trips', () => {
 
 test('unresolved row round-trip', () => {
 	const u: UnresolvedRow = {
-		id: 42n,
+		id: 'a'.repeat(32),
 		repoId: 3,
-		fromEntity: 100n,
+		fromEntity: 'b'.repeat(32),
 		fromFile: 'src/main.ts',
 		kind: 'IMPORTS',
 		rawTo: './foo',
@@ -104,8 +104,8 @@ test('unresolved row round-trip', () => {
 		attemptedAt: Date.now(),
 	};
 	const round = decodeUnresolvedRow(encodeUnresolvedRow(u));
-	assert.equal(round.id, 42n);
-	assert.equal(round.fromEntity, 100n);
+	assert.equal(round.id, 'a'.repeat(32));
+	assert.equal(round.fromEntity, 'b'.repeat(32));
 	assert.deepEqual(round.meta, u.meta);
 	assert.deepEqual(round, u);
 });
