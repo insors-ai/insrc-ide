@@ -2,7 +2,9 @@
 
 ## Project overview
 
-**insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in Kuzu (graph DB) and entity embeddings in LanceDB (vector DB), then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and a user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral).
+**insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in a custom LMDB-backed graph layer and entity embeddings in LanceDB, then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and a user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral).
+
+> **Storage substrate is in transition (2026-05).** Code in `src/insrc/db/` currently reflects the DuckDB consolidation experiment ([plans/storage-migration-duckdb.md](plans/storage-migration-duckdb.md)) which is being reversed in favor of three purpose-built substrates ([plans/graph-storage-lmdb.md](plans/graph-storage-lmdb.md)). This file describes the *target* stack. When in doubt about which file is canonical, prefer the LMDB plan as the source of truth and treat any DuckDB-graph-* files as scheduled for removal.
 
 Repository: `github.com/insors-ai/insrc`
 
@@ -11,7 +13,7 @@ Repository: `github.com/insors-ai/insrc`
 - **Language**: TypeScript (strict mode, ESM-only via `"type": "module"`)
 - **Runtime**: Node.js 20+, executed with `tsx` during development
 - **Module system**: NodeNext (`"module": "nodenext"` in tsconfig)
-- **Databases**: Kuzu (embedded graph DB, Cypher queries), LanceDB (embedded vector DB)
+- **Databases**: LMDB via `lmdb-js` (embedded KV store; substrate for the custom graph layer in `db/graph/`), LanceDB (embedded vector DB; entity embeddings + ANN search), DuckDB via `@duckdb/node-api` (in-memory query engine *only* -- backs the data-driver `db_file_*` tools for CSV / Parquet / JSONL attaches; **not** used for persistent storage)
 - **Parsing**: tree-sitter (TypeScript, Python, Go, Java, Scala)
 - **LLM providers**: Ollama (local -- qwen3-coder, qwen3-embedding) + one active cloud provider (OpenAI, Anthropic, Gemini, Mistral). Managed via the Model Providers pane (command `insrc.openModelProviders`); API keys live in the OS keychain.
 - **Logging**: pino + pino-pretty (CLI) + pino-roll (file rotation)
@@ -32,14 +34,18 @@ src/
     resolver.ts    Import resolution
     embedder.ts    Ollama embedding generation
     watcher.ts     @parcel/watcher file system watcher
-  db/              Database access layer
-    schema.ts      Kuzu DDL statements
-    client.ts      Kuzu client wrapper
-    entities.ts    LanceDB entity CRUD
-    relations.ts   Kuzu relation CRUD
-    repos.ts       Repo registry operations
-    search.ts      Hybrid vector + FTS search
-    conversations.ts  Session persistence
+  db/              Database access layer (target post-resplit; see plans/graph-storage-lmdb.md)
+    graph/         Custom LMDB-backed graph layer
+      store.ts     LMDB env, sub-DB handles, codec, txn helpers
+      keys.ts      Binary key encoding (u64 BE entity IDs, edge keys, name-index)
+      entities.ts  Entity CRUD + name-index lookup
+      edges.ts     out_edges / in_edges via cursor range-scan
+      bulk.ts      Re-index transaction helpers
+      traversal.ts BFS / DFS / transitive-closure / SCC / unreachable
+    entities.ts    LanceDB entity-embedding write path
+    search.ts      LanceDB ANN search (entities, conversations, config-store)
+    repos.ts       Repo registry (LMDB)
+    conversations.ts  Session persistence (LMDB structured + LanceDB vectors)
   daemon/          Background daemon process
     server.ts      JSON-RPC over Unix socket
     lifecycle.ts   Start/stop/PID management
@@ -143,7 +149,7 @@ source ~/.insors && npx tsx scripts/test-ollama-bash.ts     # ollama tool-callin
 
 ### IPC
 - Daemon communicates via JSON-RPC over Unix socket at `~/.insrc/daemon.sock`
-- CLI/agent never opens Kuzu or LanceDB directly — always goes through daemon IPC
+- CLI/agent never opens LMDB or LanceDB directly — always goes through daemon IPC
 
 ### Context management
 - 5-layer budget system (L1 system, L2 summary, L3a recent, L3b semantic, L4 task, L5 response)
@@ -188,7 +194,7 @@ Supported intents: `implement`, `refactor`, `test`, `debug`, `review`, `document
 1. **Daemon owns all DB access** — agent/CLI communicate via IPC only
 2. **Local-first** -- Ollama is always available (embeddings are local-only). Cloud providers are opt-in: pick one via the Model Providers pane and add its API key (stored in the OS keychain)
 3. **Dependency-closure scoping** — searches span only transitive `DEPENDS_ON` closure of active repo
-4. **Graph + vector** — structural queries use Kuzu Cypher; semantic queries use LanceDB ANN/FTS
+4. **Graph + vector** — structural queries use the LMDB graph layer's typed JS API (`findCallers / findCallees / outEdges / inEdges / transitiveClosure / unreachable`); semantic queries use LanceDB ANN. No Cypher / GQL / SQL exposed for graph traversal -- internal callers and the LLM-facing `graph_query` tool both go through the typed API. No FTS / BM25 (audit confirmed zero callers)
 5. **No raw file dumps** — context is always structured entity summaries + relations from the graph
 6. **Test agent never modifies impl code** — hands off to Pair agent (debug mode) for implementation bugs
 
