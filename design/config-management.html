@@ -303,7 +303,7 @@
 ├── config.json                        # AgentConfig (models.{activeProvider, visionDefault,
 │                                      #   providers, agents}, permissions, logLevel;
 │                                      #   API keys NOT stored here -- see OS keychain)
-├── graph/                             # Kuzu (existing)
+├── graph/                             # legacy: Kuzu (cleaned up on first post-LMDB boot)
 ├── lance/                             # LanceDB — code entities (existing)
 ├── config-store/                      # LanceDB — config vector store (NEW)
 ├── daemon.pid                         # (existing)
@@ -532,7 +532,7 @@ type IndexJob =
 <p>The <code>IndexerService</code> constructor receives both store handles:</p>
 
 <pre><code>class IndexerService {
-  private readonly db:          DbClient;      // Kuzu + code LanceDB (existing)
+  private readonly db:          DbClient;      // LMDB + Lance (post-substrate-migration; sentinel post Phase 6.1)
   private readonly configStore: ConfigStore;    // Config LanceDB (new)
   private readonly queue:       IndexQueue;
   private readonly watcher:     Watcher;

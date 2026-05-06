@@ -237,8 +237,8 @@
 
 <ul>
   <li><strong>ER diagram</strong> — entities + relationships, sourced from live DB / Prisma
-    schema / Kuzu graph / free-text.</li>
-  <li><strong>Sequence diagram</strong> — call / message sequence, sourced from Kuzu
+    schema / code knowledge graph / free-text.</li>
+  <li><strong>Sequence diagram</strong> — call / message sequence, sourced from the code knowledge graph
     <code>CALLS</code> traversal or free-text.</li>
   <li><strong>Flow diagram</strong> — code-flow (graph-sourced) or business / process flow
     (free-text).</li>
@@ -338,7 +338,7 @@
   <tr><th>Sources (priority order)</th><td>
     live DB (phase-3 driver) &rarr;
     <code>schema.prisma</code> parse &rarr;
-    Kuzu entity graph (entities + <code>REFERENCES</code>) &rarr;
+    LMDB entity graph (entities + <code>REFERENCES</code> edges) &rarr;
     free-text
   </td></tr>
   <tr><th>Inputs</th><td>
@@ -354,7 +354,7 @@
 
 <table>
   <tr><th>Sources (priority order)</th><td>
-    Kuzu <code>CALLS</code> traversal starting at a named entry point &rarr;
+    LMDB <code>CALLS</code> traversal starting at a named entry point &rarr;
     free-text
   </td></tr>
   <tr><th>Inputs</th><td>
@@ -375,7 +375,7 @@
 
 <table>
   <tr><th>Code-flow sub-kind</th><td>
-    Kuzu-backed. Sources: function-level CFG approximation from the graph's
+    LMDB-backed. Sources: function-level CFG approximation from the graph's
     <code>CONTROLS</code> / <code>BRANCHES</code> relations (when parser emits them) or a
     light tool-loop that reads the function body and emits a flowchart.
   </td></tr>
@@ -412,7 +412,7 @@
 
 <table>
   <tr><th>Sources</th><td>Free-text description (phase 1). React component introspection via
-    Kuzu (phase 4+).</td></tr>
+    LMDB graph (phase 4+).</td></tr>
   <tr><th>Inputs</th><td>
     <code>artifact.wireframe({ description: '...', layout: 'desktop' | 'mobile' })</code>.
   </td></tr>
@@ -478,7 +478,7 @@
        |
        v
   [1. source-fetch]   kind-specific
-       |              pulls from live DB / Prisma / Kuzu / config files / free-text
+       |              pulls from live DB / Prisma / LMDB graph / config files / free-text
        |              returns a structured model (tables, entities, nodes, steps, ...)
        v
   [2. source-render]  kind-specific
@@ -915,7 +915,7 @@ Include the many-to-many through table, but skip the audit fields.</code></pre>
       <li>Slash commands <code>/erd</code>, <code>/seq</code>, <code>/flow</code>,
         <code>/deploy-diagram</code>, <code>/wireframe</code>.</li>
       <li>Persistence as <code>TodoItem</code>s on an auto-created Artifacts list.</li>
-      <li>Data sources: Kuzu graph, <code>schema.prisma</code> parse, <code>docker-compose.yml</code>,
+      <li>Data sources: LMDB graph, <code>schema.prisma</code> parse, <code>docker-compose.yml</code>,
         k8s manifests, free-text.</li>
       <li>Embed targets: chat inline + all existing insrc panes that render markdown.</li>
     </ul>
@@ -941,7 +941,7 @@ Include the many-to-many through table, but skip the audit fields.</code></pre>
   </li>
   <li><strong>Phase 4 — Advanced sources + extensibility.</strong>
     <ul>
-      <li>React component introspection for wireframes (Kuzu-backed).</li>
+      <li>React component introspection for wireframes (LMDB-backed).</li>
       <li>CFG-based flow diagrams from the graph's <code>BRANCHES</code> relation.</li>
       <li>Community-contributed template kinds + driver kinds via a small plugin contract.</li>
     </ul>

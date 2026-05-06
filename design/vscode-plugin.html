@@ -229,7 +229,7 @@
   │  - Local LLM routing (Ollama / qwen3-coder)           │
   │  - Claude escalation (@anthropic-ai/sdk)              │
   │  - Tool execution + call validation                   │
-  │  - Kuzu graph + LanceDB vector store                  │
+  │  - LMDB graph + LanceDB vectors                  │
   │  - Session memory                                     │
   └───────────────────────────────────────────────────────┘</code></pre>
 
@@ -360,7 +360,7 @@ function waitForSocket(path: string, timeoutMs: number): Promise&lt;void&gt; {
     <thead><tr><th>Component</th><th>Bundled in VSIX?</th><th>Install strategy</th></tr></thead>
     <tbody>
       <tr><td>insrc daemon (Node.js)</td><td><span class="badge badge-ok">Yes</span></td><td>Extracted to <code>~/.insrc/daemon/</code> on first activation</td></tr>
-      <tr><td>Kuzu + LanceDB</td><td><span class="badge badge-ok">Yes</span></td><td>npm dependencies bundled with daemon</td></tr>
+      <tr><td>LMDB + LanceDB</td><td><span class="badge badge-ok">Yes</span></td><td>npm dependencies bundled with daemon</td></tr>
       <tr><td>Ollama binary</td><td><span class="badge badge-warn">No</span></td><td>Detected; setup wizard links to <code>ollama.com/download</code> or runs install script</td></tr>
       <tr><td>qwen3-coder model</td><td><span class="badge badge-warn">No</span></td><td>Pulled automatically via <code>ollama pull</code> once Ollama is present; progress shown in extension</td></tr>
       <tr><td>qwen3-embedding:4b model</td><td><span class="badge badge-warn">No</span></td><td>Pulled automatically alongside qwen3-coder; required for graph search and session memory embeddings</td></tr>
@@ -989,7 +989,7 @@ await vscode.commands.executeCommand('vscode.diff',
   <h3>graph</h3>
   <p>Primary artifact: <strong>graph query result</strong></p>
   <ul>
-    <li>No LLM involved — results rendered directly from Kuzu query output</li>
+    <li>No LLM involved — results rendered directly from the typed graph_query output</li>
     <li>Tree view for callers/callees/dependents: expandable nodes, file path and
     line number on each</li>
     <li>Tabular view for multi-column Cypher query results (entity name, kind, file)</li>

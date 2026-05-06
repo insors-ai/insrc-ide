@@ -338,7 +338,7 @@
     a task list, reviews each analyzer response, decides the next task, and finally assembles the
     full report.</li>
   <li>An <strong>Analyzer</strong> on the local Ollama model answers one unit task at a time by
-    querying Kuzu / LanceDB, reading relevant code, and returning a cited finding.</li>
+    querying the LMDB graph + LanceDB, reading relevant code, and returning a cited finding.</li>
 </ul>
 
 <p>
@@ -1330,7 +1330,7 @@ interface CodeCitation {
   </tr>
   <tr>
     <td><code>graph.search</code></td>
-    <td>Kuzu lookup by name / kind / relation</td>
+    <td>LMDB lookup by name / kind / relation</td>
     <td>Already exposed via daemon RPC. Results capped at 50 entities.</td>
   </tr>
   <tr>
@@ -1494,7 +1494,7 @@ interface CodeCitation {
 </div>
 
 <p>
-  Why this rule matters: the embeddings + graph stubs in LanceDB / Kuzu carry summaries and
+  Why this rule matters: the embeddings + graph stubs in LanceDB / LMDB carry summaries and
   metadata, not full source. A vector hit on "auth refresh" might surface a function whose
   doc-string mentions auth but whose body has nothing to do with refresh; a graph
   CALLS-edge tells you A invokes B but not what either does. The analyzer's value-add over
@@ -1536,7 +1536,7 @@ time and produce a structured AnalyzerResult.
     candidate-only -- still requires a code-read before citing.
 
 - graph.search(query, kind?, repo?)
-    Kuzu lookup by name / kind / relation. Returns up to 50 entities.
+    LMDB lookup by name / kind / relation. Returns up to 50 entities.
     Use when the user named a specific symbol (case-sensitive) and
     vector wasn't precise enough.
 

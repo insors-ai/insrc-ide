@@ -162,7 +162,7 @@
     The indexer is the foundational subsystem of the insrc coding agent. Its responsibility is to
     parse source code across one or more repositories, extract meaningful code entities and their
     relationships, embed them for semantic search, and persist everything into two complementary
-    embedded databases: <strong>Kuzu</strong> for the property graph (structural relationships)
+    embedded databases: <strong>LMDB</strong> (via the custom graph layer in <code>db/graph/</code>) for the property graph (structural relationships)
     and <strong>LanceDB</strong> for entity storage with vector and full-text search.
   </p>
   <p>
@@ -194,7 +194,7 @@
     This includes the embedded database, daemon runtime files, and logs.
   </p>
   <pre><code>~/.insrc/
-  graph/         &larr; Kuzu embedded graph database (Code Knowledge Graph)
+  graph.lmdb     &larr; LMDB env (Code Knowledge Graph + plans + conversations + todos + config)
   lance/         &larr; LanceDB embedded vector + FTS store (entities + embeddings)
   daemon.pid     &larr; PID of the running background indexer process
   daemon.sock    &larr; Unix domain socket for CLI &harr; daemon IPC
@@ -202,18 +202,18 @@
     daemon.log   &larr; indexer daemon output</code></pre>
 
   <div class="callout info">
-    Kuzu and LanceDB are opened exclusively by the daemon process. The CLI communicates with them
+    LMDB and LanceDB are opened exclusively by the daemon process. The CLI communicates with them
     indirectly via the Unix socket &mdash; it never opens either database directly.
   </div>
 
   <h2>Repo Registry</h2>
   <p>
     Users register local repositories for indexing. The registry is stored as a
-    <code>Repo</code> node table in Kuzu, so it persists alongside the index itself.
+    <code>repo</code> sub-DB in LMDB, so it persists alongside the index itself.
     No separate config file is needed.
   </p>
 
-  <pre><code>-- Kuzu: repo registry node table
+  <pre><code>-- LMDB `repo` sub-DB (u32 id -> msgpack(RepoRow))
 CREATE NODE TABLE Repo (
   id        STRING,
   path      STRING,          -- absolute path on disk
@@ -283,9 +283,9 @@ CREATE NODE TABLE Repo (
     <text x="487" y="268" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="13" font-weight="600">Parser &#x2192; Resolver &#x2192; Embedder</text>
     <text x="487" y="287" text-anchor="middle" fill="#8b8fa8" font-family="system-ui,sans-serif" font-size="10">tree-sitter &#xB7; import linking &#xB7; Ollama embeddings</text>
     <line x1="487" y1="300" x2="487" y2="333" stroke="#4fc3f7" stroke-width="1.5" marker-end="url(#da-arr)"/>
-    <!-- Inner Box 4: Kuzu + LanceDB -->
+    <!-- Inner Box 4: LMDB + LanceDB -->
     <rect x="305" y="333" width="365" height="56" rx="5" fill="#12151e" stroke="#4caf7d" stroke-width="1"/>
-    <text x="487" y="357" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="13" font-weight="600">Kuzu + LanceDB</text>
+    <text x="487" y="357" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="13" font-weight="600">LMDB + LanceDB</text>
     <text x="487" y="376" text-anchor="middle" fill="#8b8fa8" font-family="system-ui,sans-serif" font-size="10">graph store (~/.insrc/graph/) &#xB7; vector+FTS store (~/.insrc/lance/)</text>
   </svg>
 
@@ -304,7 +304,7 @@ CREATE NODE TABLE Repo (
   <h3>Daemon Lifecycle</h3>
   <ol>
     <li><code>insrc daemon start</code> forks a detached child process (<code>process.detach()</code>), redirects stdio to <code>~/.insrc/logs/daemon.log</code>, writes PID to <code>daemon.pid</code></li>
-    <li>Daemon opens Kuzu at <code>~/.insrc/graph/</code> and LanceDB at <code>~/.insrc/lance/</code></li>
+    <li>Daemon opens LMDB at <code>~/.insrc/graph.lmdb</code> and LanceDB at <code>~/.insrc/lance/</code></li>
     <li><strong>Daemon checks Ollama availability and ensures the embedding model is installed</strong> (see below)</li>
     <li>Daemon reads all <code>registered_repo</code> rows, starts <code>@parcel/watcher</code> on each</li>
     <li>Daemon runs an initial full index on any repo with <code>status = 'pending'</code></li>
@@ -413,9 +413,9 @@ async function ensureEmbeddingModel(ollama: Ollama): Promise&lt;void&gt; {
     <text x="657" y="71" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="13" font-weight="600">Embedder</text>
     <text x="657" y="89" text-anchor="middle" fill="#8b8fa8" font-family="system-ui,sans-serif" font-size="10">add vectors via Ollama</text>
     <line x1="657" y1="110" x2="657" y2="132" stroke="#4fc3f7" stroke-width="1.5" marker-end="url(#pip-arr)"/>
-    <!-- Kuzu + LanceDB -->
+    <!-- LMDB + LanceDB -->
     <rect x="580" y="132" width="155" height="68" rx="6" fill="#1a1d27" stroke="#4caf7d" stroke-width="1.5"/>
-    <text x="657" y="157" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="12" font-weight="600">Kuzu + LanceDB</text>
+    <text x="657" y="157" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="12" font-weight="600">LMDB + LanceDB</text>
     <text x="657" y="173" text-anchor="middle" fill="#8b8fa8" font-family="system-ui,sans-serif" font-size="9">graph/ &amp; lance/ (embedded)</text>
   </svg>
 
@@ -426,7 +426,7 @@ async function ensureEmbeddingModel(ollama: Ollama): Promise&lt;void&gt; {
       <tr><td><strong>Parser</strong></td><td>Parse files via tree-sitter, extract entities and raw relations per language</td></tr>
       <tr><td><strong>Resolver</strong></td><td>Match unresolved import/call targets to known graph nodes</td></tr>
       <tr><td><strong>Embedder</strong></td><td>Generate vector embeddings for entities via Ollama</td></tr>
-      <tr><td><strong>DB Layer</strong></td><td>Persist graph edges in Kuzu (Cypher); persist entity records + vectors in LanceDB (ANN + FTS)</td></tr>
+      <tr><td><strong>DB Layer</strong></td><td>Persist graph edges in LMDB (typed JS API: findCallers / findCallees / transitiveClosure / etc.); persist entity records + vectors in LanceDB (ANN + FTS)</td></tr>
     </tbody>
   </table>
 
@@ -486,7 +486,7 @@ async function ensureEmbeddingModel(ollama: Ollama): Promise&lt;void&gt; {
 }</code></pre>
 
   <h3>Relation (Edge) Types</h3>
-  <p>Edges are Kuzu relation tables connecting entity node tables. Queried with Cypher.</p>
+  <p>Edges live in <code>out_edge</code> / <code>in_edge</code> sub-DBs (mirrored for symmetric O(degree) range scans). Queried via the typed JS API.</p>
 
   <table>
     <thead><tr><th>Relation</th><th>From</th><th>To</th><th>Notes</th></tr></thead>
@@ -600,7 +600,7 @@ async function ensureEmbeddingModel(ollama: Ollama): Promise&lt;void&gt; {
 
   <h2>Database Schemas</h2>
 
-  <h3>Kuzu — Graph Schema</h3>
+  <h3>LMDB — Graph Schema</h3>
   <p>Node tables hold entity identity and location. Relation tables hold the graph edges.</p>
 
   <pre><code>-- Entity node tables (one per kind)
@@ -667,7 +667,7 @@ await entityTable.createIndex('body', { config: lancedb.Index.fts() });  // BM25
     to collect all transitively reachable repos. This is a one-time startup cost, cached for the
     session duration.
   </p>
-  <pre><code>// Resolve all repos reachable via DEPENDS_ON from the current repo (Kuzu Cypher)
+  <pre><code>// Resolve all repos reachable via DEPENDS_ON from the current repo (resolveClosure typed API)
 MATCH (current:Repo {id: $currentRepoId})-[:DEPENDS_ON*1..10]->(dep:Repo)
 RETURN DISTINCT dep.id
 
@@ -719,7 +719,7 @@ const ftsResults = await entityTable.search(queryText)
   <h2>Query Patterns</h2>
 
   <h3>Semantic Search (Vector + BM25 Hybrid, Closure-Scoped)</h3>
-  <pre><code>// closureRepos resolved at session start via Kuzu DEPENDS_ON traversal
+  <pre><code>// closureRepos resolved at session start via resolveClosure() over LMDB DEPENDS_ON edges
 const scopeFilter = `repo IN (${closureRepos.map(r => `'${r}'`).join(',')})`;
 
 // Tier 1a: vector ANN search
@@ -733,7 +733,7 @@ const ftsHits = await entityTable.search(queryText)
 // Merge and rerank (RRF or score blend)
 const ranked = reciprocalRankFusion(vecHits, ftsHits).slice(0, 10);</code></pre>
 
-  <h3>Find All Callers of a Function (Kuzu)</h3>
+  <h3>Find All Callers of a Function (LMDB)</h3>
   <pre><code>MATCH (caller:Function)-[:CALLS]->(target:Function {id: $targetId})
 RETURN caller.name, caller.file, caller.startLine</code></pre>
 
@@ -742,7 +742,7 @@ RETURN caller.name, caller.file, caller.startLine</code></pre>
 RETURN DISTINCT dep.name, dep.file</code></pre>
 
   <h3>Cross-Repo Impact (Who Uses This Exported Type?)</h3>
-  <pre><code>// Scoped to closure repos for relevance (Kuzu)
+  <pre><code>// Scoped to closure repos for relevance (LMDB)
 MATCH (user:Function)-[:CALLS]->(fn:Function)-[:DEFINES]->(t:TypeAlias {id: $typeId})
 WHERE user.repo IN $closureRepos
 RETURN user.name, user.file</code></pre>
@@ -752,7 +752,7 @@ RETURN user.name, user.file</code></pre>
 const seedHits = await entityTable.vectorSearch(queryVec)
   .where(scopeFilter).distanceType('cosine').limit(5).toArray();
 
-// Tier 2: expand to graph neighbors (Kuzu)
+// Tier 2: expand to graph neighbors (LMDB)
 for (const hit of seedHits) {
   const neighbors = await conn.query(`
     MATCH (f:Function {id: '${hit.id}'})-[:CALLS|IMPORTS*1..2]->(n)
@@ -872,12 +872,11 @@ const queryVec = await ollama.embed({ model: 'qwen3-embedding:0.6b', input: quer
       registry.ts         -- Maps file extension to parser instance
 
   db/
-    client.ts             -- Kuzu + LanceDB connection init (daemon-exclusive)
-    kuzu.ts               -- Kuzu connection + node/relation table setup
+    client.ts             -- sentinel DbClient (LMDB + Lance lazy-init via graph/store.ts and lance/conn.ts)
     entities.ts           -- LanceDB entity CRUD (upsert, delete, get by id)
-    relations.ts          -- Kuzu relation CRUD (CALLS, IMPORTS, DEFINES, etc.)
-    repos.ts              -- Kuzu Repo node CRUD + DEPENDS_ON edges
-    search.ts             -- Hybrid vector (LanceDB) + graph (Kuzu) query API
+    relations.ts          -- LMDB resolved + unresolved edges (CALLS, IMPORTS, DEFINES, etc.)
+    repos.ts              -- LMDB repo registry + DEPENDS_ON edges
+    search.ts             -- Hybrid vector (LanceDB) + graph (LMDB) query API
 
   agent/
     index.ts              -- Agent loop (Phase 6)
@@ -893,7 +892,7 @@ const queryVec = await ollama.embed({ model: 'qwen3-embedding:0.6b', input: quer
       <h4><span class="badge badge-phase">Phase 1</span> DB Schema + TS/JS Parser</h4>
       <ul>
         <li>Define <code>~/.insrc/</code> directory layout (<code>graph/</code> + <code>lance/</code>)</li>
-        <li>Kuzu node/relation tables + LanceDB entities table + <code>db/</code> layer</li>
+        <li>LMDB sub-DBs + LanceDB entity_vec table + <code>db/</code> layer</li>
         <li>Implement <code>parser/typescript.ts</code></li>
         <li>Verify graph queries (callers, imports, defines) with Cypher</li>
       </ul>
@@ -1146,7 +1145,7 @@ See also [retry.ts](../src/network/retry.ts).
     <line x1="635" y1="76" x2="655" y2="76" stroke="#4fc3f7" stroke-width="1.5" marker-end="url(#doc-arr)"/>
     <!-- DB -->
     <rect x="655" y="42" width="90" height="68" rx="6" fill="#1a1d27" stroke="#4caf7d" stroke-width="1.5"/>
-    <text x="700" y="68" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="11" font-weight="600">Kuzu</text>
+    <text x="700" y="68" text-anchor="middle" fill="#e2e4ed" font-family="system-ui,sans-serif" font-size="11" font-weight="600">LMDB</text>
     <text x="700" y="85" text-anchor="middle" fill="#8b8fa8" font-family="system-ui,sans-serif" font-size="9">+ LanceDB</text>
     <!-- Code parser feedback arrow -->
     <rect x="350" y="140" width="155" height="55" rx="6" fill="#1a1d27" stroke="#f5c842" stroke-width="1.5"/>
@@ -1235,7 +1234,7 @@ WHERE NOT EXISTS { MATCH (r)<-[:SATISFIES]-() }
 RETURN r.reqId, r.name, r.documentId
 
 -- Semantic search across code + docs
--- (hybrid: vector similarity in LanceDB + graph traversal in Kuzu)
+-- (hybrid: vector similarity in LanceDB + graph traversal in LMDB)
 -- 1. LanceDB ANN query returns entity IDs ranked by similarity
 -- 2. Kupher query expands neighbors via TRACES_TO / SATISFIES edges</code></pre>
 
@@ -1257,7 +1256,7 @@ RETURN r.reqId, r.name, r.documentId
     <div class="phase-card">
       <h4><span class="badge badge-phase">Phase 8</span> Document Entity Schema</h4>
       <ul>
-        <li>Add <code>Document</code>, <code>Section</code>, <code>Requirement</code>, <code>Decision</code> node tables to Kuzu</li>
+        <li>Add <code>Document</code>, <code>Section</code>, <code>Requirement</code>, <code>Decision</code> entity kinds to LMDB</li>
         <li>Add traceability relation tables (<code>TRACES_TO</code>, <code>SATISFIES</code>, <code>REFERENCES_DOC</code>, etc.)</li>
         <li>Extend <code>EntityKind</code> union in shared types</li>
         <li>Extend LanceDB entities table to accept new kinds</li>
@@ -1346,7 +1345,7 @@ RETURN r.reqId, r.name, r.documentId
       <code>daemon start</code> first? Auto-start is more ergonomic but harder to reason about.
     </li>
     <li>
-      <strong>Exclusive DB access</strong> &mdash; Kuzu uses a single-process embedded model; concurrent
+      <strong>Exclusive DB access</strong> &mdash; LMDB uses a single-writer/multi-reader model; concurrent
       writers will corrupt the database. LanceDB supports concurrent readers but single writer per table.
       The daemon is the sole writer for both; the CLI must never open either DB directly. Enforced
       architecturally: only <code>daemon/</code> imports <code>db/client.ts</code>.
