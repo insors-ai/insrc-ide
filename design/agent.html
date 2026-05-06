@@ -500,7 +500,7 @@
 
   <div class="callout info">
     <strong>Cross-cutting intents:</strong> <code>graph</code> is pure infrastructure &mdash; no
-    agent is involved; the orchestrator resolves it directly from Kuzu. <code>research</code> can
+    agent is involved; the orchestrator resolves it directly from the LMDB graph. <code>research</code> can
     be invoked by any agent as a sub-task, but when it is the primary intent it is routed to the
     Developer agent.
   </div>
@@ -673,7 +673,7 @@ interface AgentResult {
 
   <div class="callout local">
     <strong>Graph queries are free:</strong> Tasks like "find all callers of X" or "what does this
-    repo depend on" are answered directly from Kuzu with no LLM involved. The agent resolves these
+    repo depend on" are answered directly from the LMDB graph layer with no LLM involved. The agent resolves these
     as pure graph traversals and formats the result for the user.
   </div>
 
@@ -1106,7 +1106,7 @@ Cost if logs are large    ~$0.080+            ~$0.0008  (cost stays flat)</code>
     <tr><td><code>graph_search</code></td><td>Vector similarity search over entity embeddings in LanceDB; returns ranked entities with scores</td><td>research, implement, debug</td></tr>
     <tr><td><code>graph_callers</code></td><td>Return entities that call a given entity up to N hops; signatures by default, full bodies on request</td><td>research, refactor, debug</td></tr>
     <tr><td><code>graph_callees</code></td><td>Return entities called by a given entity up to N hops</td><td>research, implement, debug</td></tr>
-    <tr><td><code>graph_query</code></td><td>Execute an arbitrary Cypher query against the Kuzu graph for structural queries the above tools do not cover</td><td>graph, research</td></tr>
+    <tr><td><code>graph_query</code></td><td>Typed graph query (op = closure | defined_in | imports | unreachable | scc) for structural queries the above tools do not cover</td><td>graph, research</td></tr>
     <tr><td><code>plan_get</code></td><td>Fetch the active plan and its steps with current state for a repo</td><td>implement, test, debug</td></tr>
     <tr><td><code>plan_step_update</code></td><td>Transition a plan step state (<code>pending → in_progress → done/failed/skipped</code>)</td><td>implement, test, debug</td></tr>
   </table>
@@ -1257,7 +1257,7 @@ Cost if logs are large    ~$0.080+            ~$0.0008  (cost stays flat)</code>
     <tr><td>Claude tier</td><td>fast (Haiku) for diff validation, tool-call validation, and stuck escalation; standard (Sonnet) for research escalation</td></tr>
     <tr><td>Output formats</td><td>Unified diff (implement, refactor, document), text answer (research, debug)</td></tr>
     <tr><td>Tool usage</td><td>Full tool set &mdash; read-only tools (auto-execute) + mutating tools (Claude-validated): Write, Edit, Bash, git, kubectl</td></tr>
-    <tr><td>Plan integration</td><td>Reads active plan step from Kuzu; transitions step state on completion; respects checkpoint gates</td></tr>
+    <tr><td>Plan integration</td><td>Reads active plan step from the plan + plan_step LMDB sub-DBs; transitions step state on completion; respects checkpoint gates</td></tr>
   </table>
 
   <h4>Capabilities</h4>
@@ -1338,7 +1338,7 @@ Cost if logs are large    ~$0.080+            ~$0.0008  (cost stays flat)</code>
 
   <p>
     The <code>graph</code> intent does not route to any agent persona. The orchestrator handles
-    it directly as a pure structural query against Kuzu and LanceDB &mdash; no LLM is involved.
+    it directly as a pure structural query against the LMDB graph + LanceDB &mdash; no LLM is involved.
   </p>
 
   <table>
@@ -1348,7 +1348,7 @@ Cost if logs are large    ~$0.080+            ~$0.0008  (cost stays flat)</code>
     <tr><td>"what depends on X"</td><td><code>graph_callers(X, hops=N)</code></td><td>Full transitive caller closure</td></tr>
     <tr><td>"find X"</td><td><code>graph_search(query)</code></td><td>Top-K entities by vector similarity</td></tr>
     <tr><td>"show X"</td><td><code>graph_entity(id)</code></td><td>Full entity body, signature, metadata</td></tr>
-    <tr><td>structural / relational</td><td><code>graph_query(cypher)</code></td><td>Raw Kuzu result rows</td></tr>
+    <tr><td>structural / relational</td><td><code>graph_query(op, ...)</code></td><td>Hydrated Entity rows or component arrays</td></tr>
   </table>
   <p>
     If the question cannot be answered structurally (e.g. "why does X call Y?"), the orchestrator
@@ -1654,7 +1654,7 @@ function selectProvider(task: Task, config: AgentConfig): LLMProvider {
   </p>
 
   <div class="callout info">
-    <strong>The index is the memory.</strong> The Kuzu Code Knowledge Graph is the agent's
+    <strong>The index is the memory.</strong> The LMDB-backed Code Knowledge Graph is the agent's
     persistent long-term memory for code structure. The context window only needs to hold what is
     immediately relevant to the current turn &mdash; everything else is re-queryable on demand.
   </div>
@@ -2004,7 +2004,7 @@ async function ensureModels(ollama: Ollama): Promise&lt;void&gt; {
       <tr><td>Local task (qwen3-coder)</td><td>No &mdash; stays on machine</td></tr>
       <tr><td>Claude task</td><td>Yes &mdash; structured context sent to Anthropic API</td></tr>
       <tr><td>Embeddings</td><td>No &mdash; always via Ollama locally</td></tr>
-      <tr><td>Graph queries</td><td>No &mdash; Kuzu (local) + LanceDB (local), never leaves machine</td></tr>
+      <tr><td>Graph queries</td><td>No &mdash; LMDB + LanceDB (local), never leaves machine</td></tr>
     </tbody>
   </table>
 
@@ -2106,7 +2106,7 @@ async function ensureModels(ollama: Ollama): Promise&lt;void&gt; {
     <div class="phase-card">
       <h4><span class="badge badge-phase">Phase 2</span> Developer Agent</h4>
       <ul>
-        <li>Plan intent: local draft + Claude enhancement + Kuzu persistence</li>
+        <li>Plan intent: local draft + Claude enhancement + LMDB persistence</li>
         <li>Implement intent: local diff + Claude validation + retry loop</li>
         <li>Refactor intent: behaviour-equivalence pipeline</li>
         <li>Debug intent: tool loop + stuck escalation</li>
@@ -2212,8 +2212,8 @@ async function ensureModels(ollama: Ollama): Promise&lt;void&gt; {
         <td>Print: <em>"Graph index is behind HEAD by N commits. Re-index with <code>insrc index</code>."</em> Continue with stale graph; annotate graph results with <em>"[stale — may not reflect recent changes]"</em>.</td>
       </tr>
       <tr>
-        <td>Kuzu DB corruption</td>
-        <td>Kuzu query throws schema error or SIGABRT in daemon</td>
+        <td>LMDB env corruption</td>
+        <td>LMDB schema-version mismatch or env-open error in daemon</td>
         <td>Daemon marks itself unhealthy. CLI prints: <em>"Graph database may be corrupted. Run <code>insrc index --rebuild</code> to rebuild from source."</em></td>
       </tr>
     </tbody>
@@ -2229,7 +2229,7 @@ async function ensureModels(ollama: Ollama): Promise&lt;void&gt; {
     <li><strong>Scope estimate</strong> — count files, repos, and estimate token budget for the full plan context</li>
     <li><strong>Local sketch</strong> — local model generates a rough ordered list of steps (~200 tokens) to give Claude a starting structure</li>
     <li><strong>Claude enhancement</strong> — Claude receives: user request + entity signatures + local sketch; produces the final plan with dependencies, estimates, and ordered steps</li>
-    <li><strong>Plan persisted</strong> — plan written to Kuzu <code>Plan</code> / <code>PlanStep</code> tables via <code>plan_step_update</code></li>
+    <li><strong>Plan persisted</strong> — plan written to the <code>plan</code> + <code>plan_step</code> LMDB sub-DBs via <code>plan_step_update</code></li>
   </ol>
   <p>
     If Ollama is unavailable, step 3 is skipped and Claude receives only steps 1–2 output.

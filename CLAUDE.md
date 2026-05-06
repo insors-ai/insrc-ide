@@ -4,8 +4,6 @@
 
 **insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in a custom LMDB-backed graph layer and entity embeddings in LanceDB, then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and a user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral).
 
-> **Storage substrate is in transition (2026-05).** Code in `src/insrc/db/` currently reflects a prior DuckDB consolidation experiment that is being reversed in favor of three purpose-built substrates. Design lives in [plans/graph-storage-lmdb.md](plans/graph-storage-lmdb.md); execution lives in [plans/storage-migration-lmdb-lance.md](plans/storage-migration-lmdb-lance.md). This file describes the *target* stack. When in doubt about which file is canonical, prefer the LMDB plan as the source of truth and treat any DuckDB-graph-* files as scheduled for removal.
-
 Repository: `github.com/insors-ai/insrc`
 
 ## Tech stack
@@ -34,18 +32,28 @@ src/
     resolver.ts    Import resolution
     embedder.ts    Ollama embedding generation
     watcher.ts     @parcel/watcher file system watcher
-  db/              Database access layer (target post-resplit; see plans/graph-storage-lmdb.md)
+  db/              Database access layer (LMDB graph + Lance vectors)
+    client.ts      Sentinel DbClient (kept for caller back-compat; substrate is opened lazily by graph/store.ts and lance/conn.ts)
     graph/         Custom LMDB-backed graph layer
-      store.ts     LMDB env, sub-DB handles, codec, txn helpers
-      keys.ts      Binary key encoding (u64 BE entity IDs, edge keys, name-index)
-      entities.ts  Entity CRUD + name-index lookup
-      edges.ts     out_edges / in_edges via cursor range-scan
-      bulk.ts      Re-index transaction helpers
-      traversal.ts BFS / DFS / transitive-closure / SCC / unreachable
-    entities.ts    LanceDB entity-embedding write path
-    search.ts      LanceDB ANN search (entities, conversations, config-store)
+      store.ts     LMDB env, 20 sub-DBs, txn helpers, runReaderCheck()
+      keys.ts      Binary key encoding (u64 BE entity IDs, edge keys, name-index, kind bytes)
+      ids.ts       u64 / u32 sequential ID allocators (in-txn variants)
+      codec.ts     Typed msgpack encoder/decoder pairs for every row type
+      edges.ts     1-hop primitive: outNeighbors / inNeighbors over out_edge / in_edge
+      traversal.ts bfs / dfs / transitiveClosure / scc / unreachable (over u64 ids)
+    lance/         LanceDB tables + per-table CRUD + ANN
+      conn.ts      Lazy-init connection singleton, openOrCreateTable helper
+      entity-vec.ts   entity_vec table (entity embeddings, repo+kind+artifact filters)
+      session-vec.ts  session_vec table (session embeddings)
+      turn-vec.ts     turn_vec table (turn embeddings, tier/type filters)
+      config-vec.ts   config_vec table (config-store embeddings)
+    entities.ts    Entity CRUD + name-index lookup + string<->u64 helpers (LMDB row + Lance vector cascade)
+    relations.ts   Resolved + unresolved edges, deleteResolvedRelations
     repos.ts       Repo registry (LMDB)
-    conversations.ts  Session persistence (LMDB structured + LanceDB vectors)
+    conversations.ts  Session + turn persistence (LMDB structured + Lance vectors)
+    todos.ts       TODO list / item / comment storage (LMDB)
+    search.ts      Domain wrappers: searchEntities (Lance ANN), findCallers/Callees/DefinedIn/Imports, resolveClosure, closureEntities, unreachableEntities, sccEntities
+    compaction.ts  Conversation compaction (directive/warm/archive/dedup) on the LMDB+Lance pair
   daemon/          Background daemon process
     server.ts      JSON-RPC over Unix socket
     lifecycle.ts   Start/stop/PID management
