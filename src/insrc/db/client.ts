@@ -1,62 +1,50 @@
-import { buildDuckDBSchema } from './duckdb-graph-schema.js';
-import {
-  getDuckDBGraphClient,
-  resetDuckDBGraphClient,
-  type GraphClient,
-} from './duckdb-graph-client.js';
-import { loadConfig } from '../agent/config.js';
-
 /**
  * Daemon-side database client.
  *
- * Post-Lance migration (plans/storage-migration-duckdb.md Phase
- * B.10): the only persistence layer is DuckDB. Graph + entity bodies
- * + embeddings + conversations + config-store + todos all live on
- * the file-backed storage pool (`daemon/db/duckdb-storage-pool.ts`).
- * The legacy `lance` field is gone.
+ * Post-LMDB-migration this module is a thin sentinel. The actual
+ * persistence layer lives in:
+ *   - `db/graph/store.ts`   -- LMDB env + sub-DBs (graph + plans +
+ *     conversations + todos + config)
+ *   - `db/lance/conn.ts`    -- LanceDB connection (entity / session /
+ *     turn / config vectors)
+ *
+ * Every public DB function (`upsertEntities`, `upsertRelations`,
+ * `saveSession`, `getEntity`, ...) opens its own substrate handle
+ * lazily via `getGraphStore()` / `getLanceConn()`. The `DbClient`
+ * argument they accept is now an opaque sentinel kept only so callers
+ * (indexer, RPC handlers, tools) don't need a coordinated signature
+ * sweep at the same time as the substrate move.
+ *
+ * Phase 6.1 of plans/storage-migration-lmdb-lance.md gutted this file:
+ * the legacy `DbClients { duck: GraphClient }` shape, the DuckDB
+ * schema bootstrap in `initDb`, and the matching `closeDb` cache
+ * reset are gone. `getDb`/`initDb`/`closeDb` survive as no-ops so the
+ * caller-arg sweep can run on its own schedule.
  */
-export interface DbClients {
-  /**
-   * DuckDB-backed graph + storage client. One client for both reads
-   * and writes; DuckDB's MVCC makes a separate reader connection
-   * unnecessary.
-   */
-  duck: GraphClient;
-}
-
-export type DbClient = DbClients;
-
-let _clients: DbClients | null = null;
 
 /**
- * Returns the cached daemon-side DB client. Lazy-init on first call.
- * Only the daemon should call this -- the CLI communicates via IPC.
+ * Opaque sentinel. Public DB functions accept `DbClient | null`; the
+ * value is unused. Phase 5.x deferred work removes it from caller
+ * signatures entirely.
  */
-export async function getDb(): Promise<DbClients> {
-  if (_clients !== null) return _clients;
-  const duck = getDuckDBGraphClient();
-  _clients = { duck };
-  return _clients;
+export type DbClient = unknown;
+
+/** Back-compat alias for code that imported `DbClients` (always shape-equivalent to `DbClient`). */
+export type DbClients = DbClient;
+
+const SENTINEL: DbClient = Object.freeze({});
+
+/** Return the sentinel client. The actual substrates lazy-init on first use. */
+export async function getDb(): Promise<DbClient> {
+	return SENTINEL;
 }
 
-/**
- * Apply the DuckDB schema (graph + vector tables). Idempotent --
- * safe to call on every daemon startup.
- */
-export async function initDb(db: DbClients): Promise<void> {
-  const dim = loadConfig().models.providers.local.embeddingDim;
-  for (const stmt of buildDuckDBSchema(dim)) {
-    await db.duck.exec(stmt);
-  }
+/** No-op. The LMDB env applies its own schema-version check on open. */
+export async function initDb(_db: DbClient): Promise<void> {
+	/* no-op */
 }
 
-/**
- * Clears the singleton references. The underlying DuckDB instance is
- * closed separately by `closeDuckDBStorage` in
- * daemon/db/duckdb-storage-pool.ts via the daemon's graceful-shutdown
- * handler; we just clear the cached GraphClient handle here.
- */
+/** No-op. Substrate close is handled by the daemon's shutdown handler via `closeGraphStore` + `closeLanceConn`. */
 export async function closeDb(): Promise<void> {
-  _clients = null;
-  resetDuckDBGraphClient();
+	/* no-op */
 }

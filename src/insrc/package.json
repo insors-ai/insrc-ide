@@ -71,7 +71,6 @@
     "test:artifacts:smoke": "tsx agent/tasks/artifacts/__tests__/smoke.ts",
     "test:data-driver": "tsx --test daemon/db/__tests__/*.test.ts",
     "test:duckdb": "tsx --test daemon/db/__tests__/duckdb-pool.test.ts",
-    "test:duckdb-storage": "tsx --test daemon/db/__tests__/duckdb-storage-pool.test.ts",
     "test:lmdb-smoke": "tsx --test db/__tests__/lmdb-smoke.test.ts",
     "test:lance-smoke": "tsx --test db/__tests__/lancedb-smoke.test.ts",
     "test:graph-store": "tsx --test db/graph/__tests__/store.test.ts",
@@ -100,15 +99,6 @@
     "test:lance-config-vec": "tsx --test db/lance/__tests__/config-vec.test.ts",
     "test:config-store-lance-integration": "tsx --test config/__tests__/store-lance-integration.test.ts",
     "test:compaction-lmdb-lance": "tsx --test db/__tests__/compaction-lmdb-lance.test.ts",
-    "test:graph-schema": "tsx --test db/__tests__/duckdb-graph-schema.test.ts",
-    "test:graph-client": "tsx --test db/__tests__/duckdb-graph-client.test.ts",
-    "test:graph-entities": "tsx --test db/__tests__/duckdb-entities-stub.test.ts",
-    "test:graph-relations": "tsx --test db/__tests__/duckdb-relations-write.test.ts",
-    "test:graph-repos": "tsx --test db/__tests__/duckdb-repos-write.test.ts",
-    "test:graph-search": "tsx --test db/__tests__/duckdb-search-queries.test.ts",
-    "test:todos": "tsx --test db/__tests__/todos-duckdb.test.ts",
-    "test:entities": "tsx --test db/__tests__/entities-duckdb.test.ts",
-    "test:conversations": "tsx --test db/__tests__/conversations-duckdb.test.ts",
     "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
   }
 }

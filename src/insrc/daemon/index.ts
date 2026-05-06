@@ -63,7 +63,6 @@ process.on('unhandledRejection', (reason) => reportFatal('unhandledRejection', r
 
 import { getDb, initDb, closeDb } from '../db/client.js';
 import { closeDuckDB } from './db/duckdb-pool.js';
-import { closeDuckDBStorage } from './db/duckdb-storage-pool.js';
 import {
 	analyzerStatus,
 	deleteAnalyzerDb,
@@ -1354,15 +1353,18 @@ async function main(): Promise<void> {
 		}, HARD_EXIT_MS);
 		backstop.unref();
 		void queueDone.finally(async () => {
-			// Order: storage pool last so the WAL flushes after every
-			// other writer has closed. closeDb() resets the cached
-			// GraphClient handle; closeDuckDB() drops the in-memory
-			// query engine (no on-disk state); closeDuckDBStorage()
-			// flushes + closes ~/.insrc/duckdb.db.
+			// closeDb() is a no-op post-LMDB migration (kept for
+			// caller back-compat). The in-memory DuckDB pool +
+			// per-source analyzer pools still hold connections that
+			// need to drain. The LMDB env + Lance connection close
+			// alongside via closeGraphStore / closeLanceConn.
+			const { closeGraphStore } = await import('../db/graph/store.js');
+			const { closeLanceConn  } = await import('../db/lance/conn.js');
 			await closeDb();
 			await closeDuckDB();
 			await closeAllAnalyzerPools();
-			await closeDuckDBStorage();
+			await closeGraphStore();
+			await closeLanceConn();
 			clearPid();
 			log.info('bye');
 			clearTimeout(backstop);
