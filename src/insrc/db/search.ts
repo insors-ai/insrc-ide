@@ -18,7 +18,7 @@
  */
 
 import type { DbClient } from './client.js';
-import type { Entity } from '../shared/types.js';
+import type { Entity, EntityKind } from '../shared/types.js';
 import {
 	entityU64ForId,
 	entityIdsByU64s,
@@ -26,7 +26,12 @@ import {
 } from './entities.js';
 import { searchEntityVecs, type EntityVecFilter } from './lance/entity-vec.js';
 import { outNeighbors, inNeighbors } from './graph/edges.js';
-import { transitiveClosure } from './graph/traversal.js';
+import {
+	transitiveClosure,
+	scc,
+	unreachable,
+	type TraversalOpts,
+} from './graph/traversal.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('search');
@@ -203,6 +208,108 @@ export async function findImports(db: DbClient, fileEntityId: string): Promise<E
 	const results = await neighborEntities(db, fileEntityId, 'IMPORTS', 'out');
 	log.debug({ file: fileEntityId, imports: results.length }, 'findImports');
 	return results;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-hop / reachability domain wrappers
+// ---------------------------------------------------------------------------
+
+/**
+ * Hydrate a list of u64 IDs to `Entity` rows in the original order.
+ * u64s with no string-id mapping (shouldn't happen under normal cascade
+ * rules) are silently dropped.
+ */
+async function hydrateU64s(db: DbClient, u64s: readonly bigint[]): Promise<Entity[]> {
+	if (u64s.length === 0) return [];
+	const idMap = await entityIdsByU64s(u64s);
+	const stringIds: string[] = [];
+	for (const u of u64s) {
+		const sid = idMap.get(u);
+		if (sid !== undefined) stringIds.push(sid);
+	}
+	const entities = await getEntitiesByIds(db, stringIds);
+	const byId = new Map<string, Entity>();
+	for (const e of entities) byId.set(e.id, e);
+	const ordered: Entity[] = [];
+	for (const u of u64s) {
+		const sid = idMap.get(u);
+		if (sid === undefined) continue;
+		const e = byId.get(sid);
+		if (e !== undefined) ordered.push(e);
+	}
+	return ordered;
+}
+
+/**
+ * Translate a list of public string entity IDs to internal u64s,
+ * dropping entries we can't resolve.
+ */
+async function rootStringsToU64s(rootIds: readonly string[]): Promise<bigint[]> {
+	const out: bigint[] = [];
+	for (const id of rootIds) {
+		const u = await entityU64ForId(id);
+		if (u !== undefined) out.push(u);
+	}
+	return out;
+}
+
+/**
+ * Generic transitive closure over the entity graph: BFS from `rootIds`
+ * across the LMDB out_edge / in_edge sub-DBs, returning the reachable
+ * set hydrated as `Entity` rows. Roots are included in the result.
+ *
+ * Used by the LLM-facing `graph_query` tool and by domain skills
+ * (Phase 8.1 dead-code) that need a string-id ↔ Entity round-trip
+ * around the pure-graph traversal layer.
+ */
+export async function closureEntities(
+	db:       DbClient,
+	rootIds:  readonly string[],
+	opts:     TraversalOpts = {},
+): Promise<Entity[]> {
+	const u64Roots = await rootStringsToU64s(rootIds);
+	if (u64Roots.length === 0) return [];
+	const reachable = await transitiveClosure(u64Roots, opts);
+	return hydrateU64s(db, [...reachable]);
+}
+
+/**
+ * Domain wrapper around `traversal.unreachable`. Returns hydrated
+ * Entity rows whose kind matches `candidateKinds` and which are NOT
+ * in the transitive closure of `rootIds`.
+ */
+export async function unreachableEntities(
+	db:              DbClient,
+	rootIds:         readonly string[],
+	candidateKinds:  readonly EntityKind[],
+	opts:            TraversalOpts = {},
+): Promise<Entity[]> {
+	const u64Roots = await rootStringsToU64s(rootIds);
+	const u64s: bigint[] = [];
+	for await (const u of unreachable(u64Roots, candidateKinds, opts)) {
+		u64s.push(u);
+	}
+	return hydrateU64s(db, u64s);
+}
+
+/**
+ * Domain wrapper around `traversal.scc`. Returns each strongly
+ * connected component as an array of hydrated `Entity` rows. Empty
+ * `rootIds` returns an empty array.
+ */
+export async function sccEntities(
+	db:       DbClient,
+	rootIds:  readonly string[],
+	opts:     TraversalOpts = {},
+): Promise<Entity[][]> {
+	const u64Roots = await rootStringsToU64s(rootIds);
+	if (u64Roots.length === 0) return [];
+	const components = await scc(u64Roots, opts);
+	const out: Entity[][] = [];
+	for (const comp of components) {
+		out.push(await hydrateU64s(db, comp));
+	}
+	return out;
 }
 
 /**
