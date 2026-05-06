@@ -33,6 +33,12 @@
  */
 
 import { getLogger } from '../../shared/logger.js';
+import {
+	encodeEntityKey,
+	encodeNameIndexKey,
+	ENTITY_KIND_BYTE,
+} from './keys.js';
+import { decodeEntityRow } from './codec.js';
 import type { GraphStore } from './store.js';
 
 const log = getLogger('graph-migrations');
@@ -57,16 +63,73 @@ export class MigrationPathError extends Error {
 	}
 }
 
+// (Migration registry constant defined further down, after the
+// individual Migration values.)
 /**
- * Production migration registry. Empty for v1. Add new entries here
- * as new SCHEMA_VERSION bumps land; never edit or remove an
+ * v1 → v2: backfill the derived indices that v1 didn't populate.
+ *
+ *   - `entity_string_by_u64` -- reverse of `entity_id_by_string`.
+ *     v1 stored only the forward direction, forcing every reverse
+ *     lookup to do a full cursor scan (O(N)). v2 maintains the
+ *     mirror on every write; this migration walks the forward
+ *     sub-DB once and seeds the reverse one.
+ *
+ *   - `name_index` -- (repoId, kindByte, name) → u64. Sub-DB
+ *     existed in v1 but was never written to, so
+ *     `findEntitiesByName` did a full `entity` table scan. This
+ *     migration walks `entity` and seeds the index.
+ *
+ * Both writes are idempotent (re-running the migration would
+ * overwrite the same key→value pairs). The migration runs inside
+ * a single write txn -- safe at our table sizes (≤ a few million
+ * rows; LMDB has no inherent txn-size cap, just the env mapsize).
+ */
+const MIGRATION_V1_TO_V2: Migration = {
+	from: 1,
+	to:   2,
+	description: 'backfill entity_string_by_u64 + name_index from existing entity rows',
+	async run(store: GraphStore): Promise<void> {
+		// 1. Backfill the reverse u64→string index from the forward
+		//    string→u64 sub-DB. Single cursor pass.
+		let reverseSeeded = 0;
+		for (const { key, value } of store.entityIdByString.getRange()) {
+			const stringId = key as string;
+			const v = value as bigint | number;
+			const u64 = typeof v === 'bigint' ? v : BigInt(v);
+			store.entityStringByU64.put(encodeEntityKey(u64), stringId);
+			reverseSeeded++;
+		}
+
+		// 2. Backfill name_index from the entity table.
+		let nameSeeded = 0;
+		for (const { key, value } of store.entity.getRange()) {
+			const u64 = (key as Buffer).readBigUInt64BE(0);
+			const row = decodeEntityRow(value as Buffer);
+			const kindByte = ENTITY_KIND_BYTE[row.kind];
+			if (kindByte === undefined) continue;
+			store.nameIndex.put(encodeNameIndexKey(row.repoId, kindByte, row.name), encodeEntityKey(u64));
+			nameSeeded++;
+		}
+
+		log.info(
+			{ reverseSeeded, nameSeeded },
+			'v1->v2: derived-index backfill done',
+		);
+	},
+};
+
+/**
+ * Production migration registry. Add new entries here as new
+ * SCHEMA_VERSION bumps land; never edit or remove an
  * already-shipped entry.
  *
  * Convention: contiguous `from = N`, `to = N+1` per step. Multi-jump
  * migrations (e.g. 1→3 fast path) are allowed but should always have
  * a corresponding 1→2 + 2→3 chain so older clients can step through.
  */
-export const MIGRATIONS: readonly Migration[] = [];
+export const MIGRATIONS: readonly Migration[] = [
+	MIGRATION_V1_TO_V2,
+];
 
 /**
  * Apply registered migrations to advance `stored` → `target`. Each

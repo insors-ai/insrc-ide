@@ -171,6 +171,68 @@ export async function writeEntityEmbeddings(rows: readonly EntityVecRow[]): Prom
 }
 
 // ---------------------------------------------------------------------------
+// Index management
+// ---------------------------------------------------------------------------
+
+/**
+ * Row-count threshold above which `optimizeEntityVecIndex()` will
+ * actually build the HNSW index. Below this, brute-force scan is
+ * cheaper than a HNSW build + maintenance.
+ */
+const HNSW_THRESHOLD = 50_000;
+
+/**
+ * Build (or rebuild) the HNSW index on the embedding column when the
+ * row count is large enough to make it worthwhile.
+ *
+ * Without an index, `searchEntityVecs` does an exact KNN scan over
+ * every row. At 1M rows × 1024 dims × 4 bytes = 4 GiB scanned per
+ * query (~860 ms p99 on a 2026 dev box). After indexing, p99 drops
+ * to ~10-50 ms.
+ *
+ * Called by:
+ *   - indexer/index.ts at the end of a full repo index
+ *   - bench/ops/vectors.ts after the bulk-insert phase
+ *   - manual: `insrc daemon optimize` (Phase 7.x ops tool, future)
+ *
+ * Uses Lance's `hnswSq` (Scalar Quantization HNSW): faster to build
+ * + smaller on-disk index than `hnswPq` (Product Quantization),
+ * with comparable recall at our 1024-dim scale.
+ *
+ * Idempotent: if an index already exists and `force` isn't set, the
+ * call returns `built: false` quickly. With `force: true`, the
+ * existing index is rebuilt.
+ *
+ * Below `HNSW_THRESHOLD` rows the call is a no-op (returns
+ * `built: false`). The threshold avoids paying the build cost on
+ * small repos where brute-force is already milliseconds.
+ */
+export async function optimizeEntityVecIndex(
+	opts: { force?: boolean } = {},
+): Promise<{ built: boolean; rowCount: number; elapsedMs: number }> {
+	const t0 = Date.now();
+	const table = await getEntityVecTable();
+	const rowCount = await table.countRows();
+
+	if (!opts.force && rowCount < HNSW_THRESHOLD) {
+		return { built: false, rowCount, elapsedMs: Date.now() - t0 };
+	}
+
+	if (!opts.force) {
+		const existing = await table.listIndices();
+		if (existing.some(i => i.columns.includes('embedding'))) {
+			return { built: false, rowCount, elapsedMs: Date.now() - t0 };
+		}
+	}
+
+	await table.createIndex('embedding', {
+		config: lancedb.Index.hnswSq({}),
+		replace: opts.force ?? false,
+	});
+	return { built: true, rowCount, elapsedMs: Date.now() - t0 };
+}
+
+// ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
 

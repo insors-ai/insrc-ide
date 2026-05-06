@@ -77,7 +77,7 @@ test('re-open with stored > expected hard-fails with LmdbStoreSchemaVersionMisma
 		getGraphStore(),
 		(err: unknown) => {
 			assert.ok(err instanceof LmdbStoreSchemaVersionMismatch);
-			assert.match((err as Error).message, /schema_version 2/);
+			assert.match((err as Error).message, new RegExp(`schema_version ${SCHEMA_VERSION + 1}`));
 			return true;
 		},
 	);
@@ -139,7 +139,7 @@ test('opening a non-LMDB file at the env path surfaces a typed error', async () 
 
 test('SCHEMA_VERSION constant is exported and stable', () => {
 	assert.ok(typeof SCHEMA_VERSION === 'number');
-	assert.equal(SCHEMA_VERSION, 1);
+	assert.equal(SCHEMA_VERSION, 2);
 });
 
 // ---------------------------------------------------------------------------

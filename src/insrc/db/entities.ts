@@ -48,6 +48,8 @@ import {
 	encodeEntityKey,
 	encodeOutEdgePrefix,
 	encodeInEdgePrefix,
+	encodeNameIndexKey,
+	encodeNameIndexPrefix,
 	prefixSuccessor,
 	ENTITY_KIND_BYTE,
 } from './graph/keys.js';
@@ -229,15 +231,24 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 				// Module entities are ensure-exists: don't overwrite.
 				if (e.kind === 'module') continue;
 				const row = entityToRow(e, repoId, e.repo);
+				const prevBuf = s.entity.get(encodeEntityKey(existingU64));
+				const prev = prevBuf !== undefined ? decodeEntityRow(prevBuf as Buffer) : null;
 				s.entity.put(encodeEntityKey(existingU64), encodeEntityRow(row));
+				// Reconcile name_index: drop the prior (repo, kind, name)
+				// entry if any of those identity fields changed, then
+				// rewrite the new one. Idempotent for unchanged rows.
+				rewireNameIndexInTxn(s, existingU64, prev, row);
 				continue;
 			}
 
-			// New entity: allocate u64, write the row + the string-id index
+			// New entity: allocate u64, write the row + index entries
 			const u64 = allocateEntityIdInTxn(s);
 			const row = entityToRow(e, repoId, e.repo);
 			s.entity.put(encodeEntityKey(u64), encodeEntityRow(row));
 			s.entityIdByString.put(e.id, u64);
+			s.entityStringByU64.put(encodeEntityKey(u64), e.id);
+			// dupsort put: multiple entities can share (repo, kind, name)
+			s.nameIndex.put(encodeNameIndexKey(repoId, ENTITY_KIND_BYTE[row.kind], row.name), encodeEntityKey(u64));
 		}
 	});
 }
@@ -319,9 +330,12 @@ export async function reindexFile(
 		const seen = new Set<bigint>();
 		for (const e of unique) {
 			let u64 = lookupU64ByStringId(s, e.id);
+			let isNew = false;
 			if (u64 === undefined) {
 				u64 = allocateEntityIdInTxn(s);
 				s.entityIdByString.put(e.id, u64);
+				s.entityStringByU64.put(encodeEntityKey(u64), e.id);
+				isNew = true;
 			}
 
 			// Module-stub semantics: don't overwrite an existing module
@@ -350,7 +364,10 @@ export async function reindexFile(
 				}
 			}
 
+			const prev = prevBuf !== undefined ? decodeEntityRow(prevBuf as Buffer) : null;
 			s.entity.put(encodeEntityKey(u64), encodeEntityRow(newRow));
+			rewireNameIndexInTxn(s, u64, prev, newRow);
+			void isNew; // silence unused-var; the rewire helper handles both
 			seen.add(u64);
 		}
 
@@ -446,33 +463,54 @@ export async function findEntitiesByName(
 
 	const store = await getGraphStore();
 	const limit = opts.limit ?? 50;
-	const nameSet = new Set(names);
-	const kindFilter = opts.kinds !== undefined && opts.kinds.length > 0
-		? new Set(opts.kinds.map(k => ENTITY_KIND_BYTE[k as keyof typeof ENTITY_KIND_BYTE]))
-		: null;
-	let repoFilter: number | null = null;
+	const repoCache = new Map<number, string>();
+
+	// Resolve the repo set we'll probe. With `opts.repo` set, that's
+	// just the one repoId; without it, we have to probe every
+	// registered repo (the name_index key is repo-scoped).
+	const repoIds: number[] = [];
 	if (opts.repo !== undefined) {
 		const id = repoIdByPathInTxn(store, opts.repo);
 		if (id === undefined) return []; // unknown repo -> no matches
-		repoFilter = id;
+		repoIds.push(id);
+	} else {
+		for (const { key } of store.repo.getRange()) {
+			repoIds.push((key as Buffer).readUInt32BE(0));
+		}
 	}
 
-	const out: Entity[] = [];
-	const repoCache = new Map<number, string>();
+	// Resolve the kind set. Default = every candidate kind (we still
+	// need to probe per-kind because name_index is repo+kind+name).
+	const kinds = opts.kinds !== undefined && opts.kinds.length > 0
+		? opts.kinds
+		: (Object.keys(ENTITY_KIND_BYTE) as EntityKind[]);
 
-	// Linear scan of the entity sub-DB. For ≤ ~1M entities this is fast
-	// (mmap'd cursor). Tier-2 perf optimisation: a `name -> u64` secondary
-	// sub-DB; not built for v1 since the call frequency is low (artifact
-	// generation, not hot-path).
-	for (const { key, value } of store.entity.getRange()) {
-		const row = decodeEntityRow(value as Buffer);
-		if (!nameSet.has(row.name)) continue;
-		if (kindFilter !== null && !kindFilter.has(ENTITY_KIND_BYTE[row.kind])) continue;
-		if (repoFilter !== null && row.repoId !== repoFilter) continue;
-		const stringId = lookupStringIdByU64(store, decodeKeyU64(key as Buffer));
-		if (stringId === undefined) continue;
-		out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
-		if (out.length >= limit) break;
+	// Probe name_index by exact key per (repoId, kindByte, name). O(K)
+	// where K = repos × kinds × names. For typical artifact lookups
+	// (one repo, a handful of kinds, a handful of names) this is
+	// dozens of point-lookups; the prior linear scan over `entity`
+	// scanned every row (millions at scale).
+	const out: Entity[] = [];
+	for (const repoId of repoIds) {
+		for (const k of kinds) {
+			const kindByte = ENTITY_KIND_BYTE[k as keyof typeof ENTITY_KIND_BYTE];
+			if (kindByte === undefined) continue;
+			for (const name of names) {
+				// dupsort: getValues returns all u64s sharing this
+				// (repo, kind, name) tuple.
+				const u64Iter = store.nameIndex.getValues(encodeNameIndexKey(repoId, kindByte, name));
+				for (const valBuf of u64Iter) {
+					const u64Big = (valBuf as Buffer).readBigUInt64BE(0);
+					const rowBuf = store.entity.get(encodeEntityKey(u64Big));
+					if (rowBuf === undefined) continue;
+					const row = decodeEntityRow(rowBuf as Buffer);
+					const stringId = lookupStringIdByU64(store, u64Big);
+					if (stringId === undefined) continue;
+					out.push(rowToDomainEntity(stringId, row, lookupRepoPath(store, row.repoId, repoCache)));
+					if (out.length >= limit) return out;
+				}
+			}
+		}
 	}
 	return out;
 }
@@ -579,35 +617,29 @@ export async function entityU64ForId(id: string): Promise<bigint | undefined> {
 }
 
 /**
- * Reverse of `entityU64ForId`. Linear scan over `entity_id_by_string`
- * (O(N)); callers that look up many u64s in a row should batch via
- * `entityIdsByU64s` to share one scan.
+ * Reverse of `entityU64ForId`. O(1) via the maintained
+ * `entity_string_by_u64` sub-DB (schema_version 2). On v1 envs the
+ * v1→v2 migration backfills the index before this is reachable.
  */
 export async function entityIdByU64(u64: bigint): Promise<string | undefined> {
 	const store = await getGraphStore();
-	for (const { key, value } of store.entityIdByString.getRange()) {
-		const v = toBigInt(value as bigint | number);
-		if (v === u64) return key as string;
-	}
-	return undefined;
+	const v = store.entityStringByU64.get(encodeEntityKey(u64));
+	return typeof v === 'string' ? v : undefined;
 }
 
 /**
- * Bulk reverse-lookup: u64 → string id for many ids at once. One
- * O(N) pass over `entity_id_by_string` resolves them all. Returns a
- * `Map<bigint, string>`; missing u64s are simply absent from the map.
+ * Bulk reverse-lookup: u64 → string id for many ids at once. O(K)
+ * via the `entity_string_by_u64` sub-DB (one point-lookup per id);
+ * pre-migration this required an O(N) cursor scan over the forward
+ * sub-DB.
  */
 export async function entityIdsByU64s(u64s: readonly bigint[]): Promise<Map<bigint, string>> {
 	const out = new Map<bigint, string>();
 	if (u64s.length === 0) return out;
 	const store = await getGraphStore();
-	const wanted = new Set<bigint>(u64s);
-	for (const { key, value } of store.entityIdByString.getRange()) {
-		const v = toBigInt(value as bigint | number);
-		if (wanted.has(v)) {
-			out.set(v, key as string);
-			if (out.size === wanted.size) break;
-		}
+	for (const u of u64s) {
+		const v = store.entityStringByU64.get(encodeEntityKey(u));
+		if (typeof v === 'string') out.set(u, v);
 	}
 	return out;
 }
@@ -688,15 +720,45 @@ const lookupU64ByStringId = (s: GraphStore, id: string): bigint | undefined => {
 };
 
 const lookupStringIdByU64 = (s: GraphStore, u64: bigint): string | undefined => {
-	// Reverse-lookup is O(N) over the index; cached per-call by callers
-	// where it matters. Tier-2: secondary `u64 -> string` sub-DB if this
-	// becomes hot.
-	for (const { key, value } of s.entityIdByString.getRange()) {
-		const v = toBigInt(value as bigint | number);
-		if (v === u64) return key as string;
-	}
-	return undefined;
+	// O(1) via the maintained reverse index `entity_string_by_u64`
+	// (populated on every entity write since schema_version 2).
+	// On v1 envs the v1→v2 migration backfills it before this code
+	// path runs, so a missing entry is always real-deletion, never
+	// a missing-backfill bug.
+	const v = s.entityStringByU64.get(encodeEntityKey(u64));
+	return typeof v === 'string' ? v : undefined;
 };
+
+/**
+ * Reconcile `name_index` for an entity write:
+ *   - drop the prior (repoId, kind, name) entry if any of those
+ *     identity fields changed (rename / move / kind change)
+ *   - write the new (repoId, kind, name) -> u64 entry
+ *
+ * Idempotent for unchanged rows (the put just rewrites the same
+ * value). Called by every code path that does `entity.put`.
+ */
+function rewireNameIndexInTxn(
+	s: GraphStore,
+	u64: bigint,
+	prev: EntityRow | null,
+	next: EntityRow,
+): void {
+	const nextKey = encodeNameIndexKey(next.repoId, ENTITY_KIND_BYTE[next.kind], next.name);
+	const u64Buf  = encodeEntityKey(u64);
+	if (prev !== null) {
+		const prevKey = encodeNameIndexKey(prev.repoId, ENTITY_KIND_BYTE[prev.kind], prev.name);
+		if (!prevKey.equals(nextKey)) {
+			// Drop only THIS entity's u64 from the prior dup set; other
+			// entities sharing the same (repo, kind, name) keep their
+			// entries.
+			s.nameIndex.remove(prevKey, u64Buf);
+		}
+	}
+	// dupsort put: idempotent for (key, value) pairs already present;
+	// adds a new value to the dup set if not.
+	s.nameIndex.put(nextKey, u64Buf);
+}
 
 const readEntityRow = (s: GraphStore, u64: bigint | number): EntityRow | null => {
 	const buf = s.entity.get(encodeEntityKey(toBigInt(u64)));
@@ -802,10 +864,24 @@ function detachDeleteEntitiesInTxn(s: GraphStore, u64s: readonly bigint[]): void
 		// Walk in_edge by prefix(u64), removing both the in_edge
 		// entry and the matching out_edge mirror at (from, kind, u64).
 		sweepIncomingEdges(s, u64);
-		// Entity row + string-id index
-		const stringId = lookupStringIdByU64(s, u64);
+		// Drop derived indices BEFORE the row itself so we have the
+		// row's (repoId, kind, name) available for the name_index
+		// lookup. Reverse-lookup via entityStringByU64 is O(1).
+		const stringId = s.entityStringByU64.get(encodeEntityKey(u64)) as string | undefined;
+		const rowBuf = s.entity.get(encodeEntityKey(u64));
+		if (rowBuf !== undefined) {
+			const row = decodeEntityRow(rowBuf as Buffer);
+			// dupsort remove(key, value): drop only this entity's u64 from
+			// the dup set, leaving other entities that share (repo, kind,
+			// name) untouched.
+			s.nameIndex.remove(
+				encodeNameIndexKey(row.repoId, ENTITY_KIND_BYTE[row.kind], row.name),
+				encodeEntityKey(u64),
+			);
+		}
 		if (stringId !== undefined) {
 			s.entityIdByString.remove(stringId);
+			s.entityStringByU64.remove(encodeEntityKey(u64));
 		}
 		s.entity.remove(encodeEntityKey(u64));
 	}

@@ -47,8 +47,10 @@ async function readVersion(store: GraphStore): Promise<number | undefined> {
 // Production registry shape
 // ---------------------------------------------------------------------------
 
-test('production MIGRATIONS registry is empty for v1', () => {
-	assert.equal(MIGRATIONS.length, 0);
+test('production MIGRATIONS registry has the v1->v2 entry', () => {
+	const v1to2 = MIGRATIONS.find(m => m.from === 1 && m.to === 2);
+	assert.ok(v1to2, 'expected a 1->2 migration registered');
+	assert.match(v1to2.description, /entity_string_by_u64|name_index/);
 });
 
 // ---------------------------------------------------------------------------

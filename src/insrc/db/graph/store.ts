@@ -11,11 +11,13 @@
  *
  * Sub-DB layout (per design doc graph-storage-lmdb.md "Sub-DB layout"):
  *
- *   Graph (8):
+ *   Graph (10):
  *     meta                         utf8 string  -> mixed (schema_version, ID counters)
  *     repo                         u32 BE       -> msgpack(Repo)
  *     entity                       u64 BE       -> msgpack(Entity)
- *     name_index                   (u32+u8+utf8) -> u64 entity_id
+ *     entity_id_by_string          utf8         -> u64 entity_id      (forward)
+ *     entity_string_by_u64         u64 BE       -> utf8 entity id     (reverse, schema_version >= 2)
+ *     name_index                   (u32+u8+utf8) -> dupsort u64 entity_id  (multi-valued; multiple entities can share (repo, kind, name) -- e.g. functions of the same name in different files. Populated since schema_version 2)
  *     out_edge                     (u64+u8+u64) -> msgpack(EdgeProps) | empty
  *     in_edge                      (u64+u8+u64) -> empty
  *     unresolved                   u64 BE       -> msgpack(UnresolvedRelation)
@@ -71,7 +73,8 @@ const log = getLogger('graph-store');
 const DEFAULT_MAPSIZE_GIB = 1024;
 
 /**
- * Number of named sub-DBs the env can hold. We have 19; pad to 32 for
+ * Number of named sub-DBs the env can hold. We have 21 in
+ * schema_version 2 (added entity_string_by_u64); pad to 32 for
  * future additions without an env-level migration.
  */
 const MAX_DBS = 32;
@@ -94,7 +97,21 @@ const MAX_DBS = 32;
  *                         silently downgrade)
  *   missing            -> first boot; write the version
  */
-export const SCHEMA_VERSION = 1;
+/**
+ * Version history:
+ *   v1 -- initial LMDB substrate.
+ *   v2 -- added derived indices populated on writes:
+ *         - `entity_string_by_u64` (reverse u64→string lookup,
+ *            replaces O(N) cursor scan in lookups)
+ *         - `name_index` populated (was opened in v1 but never
+ *            written; replaces O(N) entity-table scan in
+ *            findEntitiesByName)
+ *         The forward sub-DBs (entity / entity_id_by_string)
+ *         remain authoritative; the reverse + name indices are
+ *         derived and rebuilt by the v1→v2 migration on existing
+ *         envs.
+ */
+export const SCHEMA_VERSION = 2;
 
 const META_SCHEMA_VERSION = 'schema_version';
 
@@ -178,6 +195,7 @@ export interface GraphStore {
 	repo:                AnyDb;
 	entity:              AnyDb;
 	entityIdByString:    AnyDb;
+	entityStringByU64:   AnyDb;
 	nameIndex:           AnyDb;
 	outEdge:             AnyDb;
 	inEdge:              AnyDb;
@@ -278,7 +296,12 @@ export async function getGraphStore(): Promise<GraphStore> {
 			repo:               open_('repo'),
 			entity:             open_('entity'),
 			entityIdByString:   root.openDB({ name: 'entity_id_by_string', keyEncoding: 'ordered-binary' }),
-			nameIndex:          open_('name_index'),
+			entityStringByU64:  root.openDB({
+				name:        'entity_string_by_u64',
+				keyEncoding: 'binary',
+				encoding:    'ordered-binary',  // string values
+			}),
+			nameIndex:          open_('name_index', { dupSort: true }),
 			outEdge:            open_('out_edge'),
 			inEdge:             open_('in_edge'),
 			unresolved:         root.openDB({ name: 'unresolved', keyEncoding: 'ordered-binary' }),

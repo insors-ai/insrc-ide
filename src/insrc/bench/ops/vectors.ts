@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { closeLanceConn, setLanceConnPath } from '../../db/lance/conn.js';
 import {
 	addEntityEmbeddings,
+	optimizeEntityVecIndex,
 	searchEntityVecs,
 	_resetEntityVecCache,
 	type EntityVecRow,
@@ -70,7 +71,18 @@ export async function benchVectors(bench: Bench, tier: Tier): Promise<void> {
 			await bulkInsertVectors(params);
 		});
 
-		// 2. ANN search. Reuse a small pool of pre-generated query
+		// 2. Build the HNSW index. Production indexer calls this at
+		//    end-of-full-index; the bench mirrors that path so the
+		//    recorded search latencies reflect the indexed steady
+		//    state, not the brute-force-scan transient.
+		await bench.runOnce(`vectors.optimizeIndex`, async () => {
+			const r = await optimizeEntityVecIndex({ force: true });
+			if (!r.built) {
+				throw new Error(`optimizeEntityVecIndex did not build (rowCount=${r.rowCount})`);
+			}
+		});
+
+		// 3. ANN search. Reuse a small pool of pre-generated query
 		//    vectors so each call hits the index, not the embed stub.
 		const queries = makeQueryVectors(64);
 		await bench.run(`vectors.searchEntityVecs (limit=${params.searchLimit})`, params.searchSamples, async () => {
@@ -78,7 +90,7 @@ export async function benchVectors(bench: Bench, tier: Tier): Promise<void> {
 			await searchEntityVecs(q, [REPO], params.searchLimit, 'all');
 		});
 
-		// 3. Final on-disk size.
+		// 4. Final on-disk size.
 		const lanceMb = Math.round(directorySize(lancePath) / 1024 / 1024);
 		bench.recordFileSizeMb('lance.entity_vec', lanceMb);
 	} finally {
