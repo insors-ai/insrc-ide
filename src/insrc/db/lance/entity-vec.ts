@@ -190,6 +190,15 @@ export async function writeEntityEmbeddings(rows: readonly EntityVecRow[]): Prom
  * incrementally update existing indices). Cheap when nothing's
  * accumulated; the caller decides cadence.
  *
+ * Aggressive cleanup: `cleanupOlderThan: new Date()` + `deleteUnverified:
+ * true` together mean "drop every version except the current one,
+ * even files newer than 7 days." Lance's default keeps 7 days of
+ * version history because in-progress transactions can reference
+ * recent files; we override because the daemon's indexer is the
+ * only writer + drives this call from the per-file loop where no
+ * concurrent Lance writes are in-flight (each indexFile() awaits
+ * its full upsertEntities() round-trip before the next iteration).
+ *
  * Indexer's full-index loop calls this every 500 files. Errors are
  * non-fatal -- compaction is housekeeping, not load-bearing.
  */
@@ -200,7 +209,10 @@ export async function compactEntityVecTable(): Promise<{
 }> {
 	const t0 = Date.now();
 	const table = await getEntityVecTable();
-	const stats = await table.optimize();
+	const stats = await table.optimize({
+		cleanupOlderThan: new Date(),
+		deleteUnverified: true,
+	});
 	const compaction = stats.compaction;
 	return {
 		fragmentsRemoved: compaction?.fragmentsRemoved ?? 0,

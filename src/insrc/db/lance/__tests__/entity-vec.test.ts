@@ -16,11 +16,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { existsSync, readdirSync } from 'node:fs';
+
 import { closeLanceConn, setLanceConnPath } from '../conn.js';
 import {
+	addEntityEmbeddings,
 	writeEntityEmbedding,
 	writeEntityEmbeddings,
 	searchEntityVecs,
+	compactEntityVecTable,
 	deleteEntityVec,
 	deleteEntityVecsByIds,
 	deleteEntityVecsForRepo,
@@ -223,4 +227,93 @@ test('rows survive close + reopen', async () => {
 	const hits = await searchEntityVecs(Array.from(vec(1)), ['/repo/foo'], 5);
 	assert.equal(hits.length, 1);
 	assert.equal(hits[0]!.id, 'persist');
+});
+
+// ---------------------------------------------------------------------------
+// compactEntityVecTable
+// ---------------------------------------------------------------------------
+//
+// Models the indexer's per-source-file pattern: many small
+// addEntityEmbeddings() calls each producing a separate transaction +
+// data file. After a long pass the manifest accumulates and per-write
+// fsync time climbs (real-world Hadoop signal: 3.8 -> 5.1 s/file).
+// compactEntityVecTable wraps Lance's table.optimize() (compaction +
+// version pruning + index update). Tests below verify it actually
+// reduces the on-disk fragment count + preserves all rows + survives
+// close/reopen.
+
+const dataDir = (): string => join(dir, 'lance', 'entity_vec.lance', 'data');
+
+test('compactEntityVecTable reduces on-disk fragment count', async () => {
+	// Simulate 30 small per-file batches like the indexer does.
+	for (let batch = 0; batch < 30; batch++) {
+		const rows = Array.from({ length: 5 }, (_, i) => ({
+			id:        `e${batch}-${i}`,
+			embedding: vec(batch * 1000 + i),
+			repo:      '/repo/foo',
+			kind:      'function',
+			artifact:  false,
+		}));
+		await addEntityEmbeddings(rows);
+	}
+	assert.ok(existsSync(dataDir()));
+	const before = readdirSync(dataDir()).length;
+	assert.ok(before >= 30, `expected >= 30 fragments before compact; got ${before}`);
+
+	const stats = await compactEntityVecTable();
+	assert.equal(typeof stats.fragmentsRemoved, 'number');
+	assert.equal(typeof stats.filesRemoved,     'number');
+	assert.equal(typeof stats.elapsedMs,        'number');
+	assert.ok(stats.fragmentsRemoved >= 1, `compact should reclaim fragments; got ${JSON.stringify(stats)}`);
+
+	const after = readdirSync(dataDir()).length;
+	assert.ok(after < before, `expected fewer data files after compact (${before} -> ${after})`);
+});
+
+test('compactEntityVecTable preserves all rows + searchability', async () => {
+	const N = 50;
+	for (let i = 0; i < N; i++) {
+		await addEntityEmbeddings([{
+			id:        `keep-${i}`,
+			embedding: vec(i),
+			repo:      '/repo/foo',
+			kind:      'function',
+			artifact:  false,
+		}]);
+	}
+	const beforeHits = await searchEntityVecs(Array.from(vec(7)), ['/repo/foo'], N + 5);
+	assert.equal(beforeHits.length, N, 'all rows present pre-compact');
+
+	await compactEntityVecTable();
+
+	const afterHits = await searchEntityVecs(Array.from(vec(7)), ['/repo/foo'], N + 5);
+	assert.equal(afterHits.length, N, 'all rows still present post-compact');
+	const ids = new Set(afterHits.map(h => h.id));
+	for (let i = 0; i < N; i++) assert.ok(ids.has(`keep-${i}`));
+});
+
+test('compactEntityVecTable on a fresh / single-fragment table is a cheap no-op', async () => {
+	// Bootstrap row only -- nothing to compact.
+	const stats = await compactEntityVecTable();
+	assert.equal(typeof stats.fragmentsRemoved, 'number');
+	assert.ok(stats.elapsedMs < 5_000, `expected fast no-op; got ${stats.elapsedMs} ms`);
+});
+
+test('compactEntityVecTable result survives close + reopen', async () => {
+	for (let batch = 0; batch < 10; batch++) {
+		await addEntityEmbeddings([{
+			id:        `surv-${batch}`,
+			embedding: vec(batch),
+			repo:      '/repo/foo',
+			kind:      'function',
+			artifact:  false,
+		}]);
+	}
+	await compactEntityVecTable();
+
+	await closeLanceConn();
+	_resetEntityVecCache();
+
+	const hits = await searchEntityVecs(Array.from(vec(3)), ['/repo/foo'], 20);
+	assert.equal(hits.length, 10, 'all 10 rows still findable after compact + reopen');
 });
