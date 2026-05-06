@@ -82,6 +82,59 @@ test.afterEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
+// upsertEntities pushes vectors to Lance when the entity carries one
+// (the indexer's primary write path -- embedEntities fills the
+// in-memory `embedding` field, then upsertEntities is responsible for
+// persisting both LMDB structural data + the Lance vector. Regression
+// test: this gap was missed in the migration and only surfaced under
+// real-world testing on a 3,378-entity repo where Lance ended up
+// empty post-index.)
+// ---------------------------------------------------------------------------
+
+test('upsertEntities persists vectors to entity_vec when embedding is non-empty', async () => {
+	const a = makeEntity({ name: 'a' });
+	a.embedding = vec(1);
+	a.embeddingModel = 'qwen3-embedding:0.6b';
+	const b = makeEntity({ name: 'b' });
+	b.embedding = vec(2);
+	b.embeddingModel = 'qwen3-embedding:0.6b';
+
+	await upsertEntities(null, [a, b]);
+
+	const hitsA = await searchEntityVecs(vec(1), [REPO], 5);
+	const hitsB = await searchEntityVecs(vec(2), [REPO], 5);
+	assert.equal(hitsA.length, 2);
+	assert.equal(hitsB.length, 2);
+	const ids = new Set([...hitsA, ...hitsB].map(h => h.id));
+	assert.ok(ids.has(a.id));
+	assert.ok(ids.has(b.id));
+});
+
+test('upsertEntities skips Lance write when embedding is empty', async () => {
+	const e = makeEntity();
+	// Default makeEntity has embedding: [] -- ensure no Lance row.
+	await upsertEntities(null, [e]);
+	const hits = await searchEntityVecs(vec(1), [REPO], 5);
+	assert.equal(hits.length, 0);
+});
+
+test('upsertEntities re-embed (existing entity, new vector) replaces the Lance row', async () => {
+	const e = makeEntity();
+	e.embedding = vec(1);
+	e.embeddingModel = 'qwen3-embedding:0.6b';
+	await upsertEntities(null, [e]);
+
+	// Re-embed with a new vector
+	const e2: Entity = { ...e, embedding: vec(99), embeddingModel: 'qwen3-embedding:0.6b' };
+	await upsertEntities(null, [e2]);
+
+	// Old vector shouldn't match anymore; new one should be a top hit.
+	const hits = await searchEntityVecs(vec(99), [REPO], 5);
+	assert.equal(hits.length, 1);
+	assert.equal(hits[0]!.id, e.id);
+});
+
+// ---------------------------------------------------------------------------
 // updateEmbedding writes to Lance
 // ---------------------------------------------------------------------------
 

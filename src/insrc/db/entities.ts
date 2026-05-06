@@ -191,6 +191,13 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 		);
 	}
 
+	// Collect (entity, was-new-or-re-embed) tuples for the post-commit
+	// Lance write step. Filled inside the txn so we have prior-row
+	// state available; flushed to Lance after the LMDB commit so a
+	// Lance failure doesn't block the structural write.
+	type LanceWrite = { entity: Entity; firstEmbed: boolean };
+	const lanceWrites: LanceWrite[] = [];
+
 	await withWriteTxn(s => {
 		// Resolve / allocate repo IDs once per batch (one path -> one id).
 		const repoIdCache = new Map<string, number>();
@@ -237,6 +244,12 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 				// entry if any of those identity fields changed, then
 				// rewrite the new one. Idempotent for unchanged rows.
 				rewireNameIndexInTxn(s, existingU64, prev, row);
+				if (e.embedding !== undefined && e.embedding.length > 0) {
+					lanceWrites.push({
+						entity: e,
+						firstEmbed: prev === null || prev.embeddingModel === '',
+					});
+				}
 				continue;
 			}
 
@@ -248,8 +261,47 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 			s.entityStringByU64.put(encodeEntityKey(u64), e.id);
 			// dupsort put: multiple entities can share (repo, kind, name)
 			s.nameIndex.put(encodeNameIndexKey(repoId, ENTITY_KIND_BYTE[row.kind], row.name), encodeEntityKey(u64));
+			if (e.embedding !== undefined && e.embedding.length > 0) {
+				lanceWrites.push({ entity: e, firstEmbed: true });
+			}
 		}
 	});
+
+	// Push vectors to Lance after the LMDB commit. Two paths:
+	//   - firstEmbed:  use addEntityEmbeddings (raw .add(), no JOIN).
+	//                  Indexer's bulk first-index hits this path for
+	//                  every entity -- O(N) total instead of the
+	//                  O(N²) cost of mergeInsert at scale.
+	//   - re-embed:    use writeEntityEmbeddings (mergeInsert) so the
+	//                  prior Lance row is replaced.
+	// Lance failure is non-fatal: the LMDB row's `embeddingModel`
+	// already reflects the intent; a `daemon reembed` (Phase 9.x or
+	// manual) replays the missing vectors.
+	if (lanceWrites.length > 0) {
+		try {
+			const lance = await import('./lance/entity-vec.js');
+			type Row = Parameters<typeof lance.addEntityEmbeddings>[0][number];
+			const adds:    Row[] = [];
+			const upserts: Row[] = [];
+			for (const w of lanceWrites) {
+				const row: Row = {
+					id:        w.entity.id,
+					embedding: new Float32Array(w.entity.embedding),
+					repo:      w.entity.repo,
+					kind:      w.entity.kind as string,
+					artifact:  w.entity.artifact ?? false,
+				};
+				if (w.firstEmbed) adds.push(row); else upserts.push(row);
+			}
+			if (adds.length > 0)    await lance.addEntityEmbeddings(adds);
+			if (upserts.length > 0) await lance.writeEntityEmbeddings(upserts);
+		} catch (err) {
+			log.warn(
+				{ count: lanceWrites.length, err: err instanceof Error ? err.message : String(err) },
+				'upsertEntities: Lance write failed after LMDB commit -- vectors not persisted; rerun reembed to backfill',
+			);
+		}
+	}
 }
 
 /**
@@ -296,6 +348,8 @@ export async function reindexFile(
 	}
 
 	const toLanceDelete: string[] = [];
+	type LanceWrite = { entity: Entity; firstEmbed: boolean };
+	const lanceWrites: LanceWrite[] = [];
 	await withWriteTxn(s => {
 		// Resolve / allocate the repoId for this path (cache it for
 		// the rest of the pass)
@@ -366,7 +420,12 @@ export async function reindexFile(
 			const prev = prevBuf !== undefined ? decodeEntityRow(prevBuf as Buffer) : null;
 			s.entity.put(encodeEntityKey(u64), encodeEntityRow(newRow));
 			rewireNameIndexInTxn(s, u64, prev, newRow);
-			void isNew; // silence unused-var; the rewire helper handles both
+			if (e.embedding !== undefined && e.embedding.length > 0) {
+				lanceWrites.push({
+					entity: e,
+					firstEmbed: isNew || prev === null || prev.embeddingModel === '',
+				});
+			}
 			seen.add(u64);
 		}
 
@@ -387,6 +446,34 @@ export async function reindexFile(
 	if (toLanceDelete.length > 0) {
 		const { deleteEntityVecsByIds } = await import('./lance/entity-vec.js');
 		await deleteEntityVecsByIds(toLanceDelete);
+	}
+	// Push vectors for newly-parsed / re-embedded entities. Same
+	// dispatch as upsertEntities -- addEntityEmbeddings for first-
+	// embed (no JOIN), writeEntityEmbeddings for re-embed (mergeInsert).
+	if (lanceWrites.length > 0) {
+		try {
+			const lance = await import('./lance/entity-vec.js');
+			type Row = Parameters<typeof lance.addEntityEmbeddings>[0][number];
+			const adds:    Row[] = [];
+			const upserts: Row[] = [];
+			for (const w of lanceWrites) {
+				const row: Row = {
+					id:        w.entity.id,
+					embedding: new Float32Array(w.entity.embedding),
+					repo:      w.entity.repo,
+					kind:      w.entity.kind as string,
+					artifact:  w.entity.artifact ?? false,
+				};
+				if (w.firstEmbed) adds.push(row); else upserts.push(row);
+			}
+			if (adds.length > 0)    await lance.addEntityEmbeddings(adds);
+			if (upserts.length > 0) await lance.writeEntityEmbeddings(upserts);
+		} catch (err) {
+			log.warn(
+				{ count: lanceWrites.length, err: err instanceof Error ? err.message : String(err) },
+				'reindexFile: Lance write failed after LMDB commit -- vectors not persisted; rerun reembed to backfill',
+			);
+		}
 	}
 }
 
