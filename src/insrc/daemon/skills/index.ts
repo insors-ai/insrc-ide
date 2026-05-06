@@ -16,6 +16,7 @@
 import { getLogger } from '../../shared/logger.js';
 import { listSkills } from './registry.js';
 import { registerDataLineageSkill } from './built-ins/data-lineage.js';
+import { registerDataCodeDeadCodeSkill } from './built-ins/data.code.dead-code.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -95,6 +96,11 @@ const log = getLogger('skills-bootstrap');
 export function registerAllSkills(): void {
   // Atomic skills first.
   registerDataLineageSkill();
+  // Phase 8.1 of plans/storage-migration-lmdb-lance.md -- the
+  // headline value-delivery the LMDB substrate move was built to
+  // unblock. Pure-graph reachability over the typed unreachable()
+  // primitive.
+  registerDataCodeDeadCodeSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();

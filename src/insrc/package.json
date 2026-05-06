@@ -106,6 +106,7 @@
     "test:lance-config-vec": "tsx --test db/lance/__tests__/config-vec.test.ts",
     "test:config-store-lance-integration": "tsx --test config/__tests__/store-lance-integration.test.ts",
     "test:compaction-lmdb-lance": "tsx --test db/__tests__/compaction-lmdb-lance.test.ts",
-    "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts"
+    "test:skills": "tsx --test daemon/skills/__tests__/*.test.ts",
+    "test:dead-code-skill": "tsx --test daemon/skills/__tests__/data.code.dead-code.test.ts"
   }
 }
