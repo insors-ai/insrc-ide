@@ -352,6 +352,24 @@ export class IndexerService {
         }
         // (LMDB substrate: no periodic checkpoint needed -- there's no
         // buffer pool to evict and msync runs at every txn commit.)
+
+        // Periodic Lance compaction. addEntityEmbeddings creates a
+        // new transaction + data file per source file; over a long
+        // pass the manifest version count grows linearly and per-
+        // commit fsync time grows with it. Empirically: Hadoop run
+        // degraded from 3.8 to 5.1 s/file by file 2000. Every 500
+        // files, run the VACUUM-equivalent so the per-write cost
+        // stays flat. Cheap when nothing's accumulated; non-fatal on
+        // error.
+        if (total % 500 === 0) {
+          try {
+            const { compactEntityVecTable } = await import('../db/lance/entity-vec.js');
+            const r = await compactEntityVecTable();
+            log.info({ repo: repoPath, progress: total, ...r }, 'lance entity_vec compacted');
+          } catch (err) {
+            log.warn({ repo: repoPath, progress: total, err: err instanceof Error ? err.message : String(err) }, 'lance compact failed (non-fatal)');
+          }
+        }
       }
 
       // Emit DEPENDS_ON edges from repo manifest

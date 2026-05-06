@@ -171,6 +171,45 @@ export async function writeEntityEmbeddings(rows: readonly EntityVecRow[]): Prom
 }
 
 // ---------------------------------------------------------------------------
+// Periodic compaction
+// ---------------------------------------------------------------------------
+
+/**
+ * Lance creates a new transaction + data file per `addEntityEmbeddings`
+ * call. Over a long indexing pass that adds up:
+ *
+ *   - Hadoop indexing (~13k files, ~1 entity-batch per file) accumulates
+ *     ~13k transaction files + ~13k data files.
+ *   - Each commit's manifest scan + version write costs more as the
+ *     transaction history grows. Real-world observation on the
+ *     post-Phase-9 Hadoop run: per-file rate degraded from 3.8 s to
+ *     5.1 s/file by the 2k-file mark.
+ *
+ * `compactEntityVecTable()` wraps `table.optimize()` -- runs Lance's
+ * VACUUM-equivalent (compact small fragments, prune old versions,
+ * incrementally update existing indices). Cheap when nothing's
+ * accumulated; the caller decides cadence.
+ *
+ * Indexer's full-index loop calls this every 500 files. Errors are
+ * non-fatal -- compaction is housekeeping, not load-bearing.
+ */
+export async function compactEntityVecTable(): Promise<{
+	fragmentsRemoved: number;
+	filesRemoved:     number;
+	elapsedMs:        number;
+}> {
+	const t0 = Date.now();
+	const table = await getEntityVecTable();
+	const stats = await table.optimize();
+	const compaction = stats.compaction;
+	return {
+		fragmentsRemoved: compaction?.fragmentsRemoved ?? 0,
+		filesRemoved:     compaction?.filesRemoved     ?? 0,
+		elapsedMs:        Date.now() - t0,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Index management
 // ---------------------------------------------------------------------------
 
