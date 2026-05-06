@@ -49,7 +49,6 @@ import {
 	encodeOutEdgePrefix,
 	encodeInEdgePrefix,
 	encodeNameIndexKey,
-	encodeNameIndexPrefix,
 	prefixSuccessor,
 	ENTITY_KIND_BYTE,
 } from './graph/keys.js';

@@ -17,7 +17,6 @@ import type {
 	ConnectionConfig,
 	KeyList,
 	KvDriver,
-	KvNamespace,
 	KvNamespaceDescription,
 	KvNamespaceList,
 	KvValue,

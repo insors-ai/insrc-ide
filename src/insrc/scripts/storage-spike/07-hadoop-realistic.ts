@@ -13,7 +13,7 @@
  * direct successor to "the workload that broke DuckDB at 148 GiB."
  */
 
-import { readFileSync, statSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';

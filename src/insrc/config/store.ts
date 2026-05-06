@@ -22,7 +22,6 @@
  */
 
 import type {
-	ConfigCategory,
 	ConfigEntry,
 	ConfigNamespace,
 	Language,

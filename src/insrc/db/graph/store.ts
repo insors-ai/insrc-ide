@@ -120,7 +120,7 @@ const META_SCHEMA_VERSION = 'schema_version';
 // ---------------------------------------------------------------------------
 
 export class LmdbStoreError extends Error {
-	constructor(message: string, readonly cause?: unknown) {
+	constructor(message: string, override readonly cause?: unknown) {
 		super(message);
 		this.name = 'LmdbStoreError';
 	}

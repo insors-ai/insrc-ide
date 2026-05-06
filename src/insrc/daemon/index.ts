@@ -93,7 +93,7 @@ import {
 	savePlan, getPlan, getActivePlan, updateStepState, getNextStep, deletePlan, deletePlansForRepo, resetStaleLocks,
 } from '../agent/tasks/plan-store.js';
 import type { RegisteredRepo, DaemonStatus, Entity, Plan, PlanStepStatus, ConfigScope, ConfigSearchOpts, TemplateQuery } from '../shared/types.js';
-import { basename, dirname } from 'node:path';
+import { basename } from 'node:path';
 import { ConfigStore } from '../config/store.js';
 import { searchConfig, resolveTemplate } from '../config/search.js';
 import * as todosRpc from './todos-rpc.js';

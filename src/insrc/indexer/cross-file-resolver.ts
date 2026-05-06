@@ -49,7 +49,6 @@ import type { Entity, EntityKind, Language } from '../shared/types.js';
 import {
   listEntitiesForRepo,
   listEntitiesByKind,
-  getEntitiesByIds,
   entityU64ForId,
   entityIdsByU64s,
 } from '../db/entities.js';
