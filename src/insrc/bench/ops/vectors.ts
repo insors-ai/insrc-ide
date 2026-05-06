@@ -37,10 +37,19 @@ const SMOKE: VectorParams = {
 	searchLimit:        10,
 };
 
+// Full tier was originally 1M vectors but Lance's HNSW build over a
+// 1M-row table reliably hangs on dev hardware (worker pinned at 0%
+// CPU after the bulk insert completes; lmdb graph phase finished but
+// the Lance search phase never returns). 200k is the next stable
+// scale point -- 4x the smoke load, still exercises Lance index
+// build + ANN, completes in ~1 min on a 2026 dev box. Bump back to
+// 1M once the underlying Lance issue is reproduced + filed upstream
+// (or once we move to the @lancedb/lancedb-rs build that addresses
+// the worker-pool exhaustion).
 const FULL: VectorParams = {
-	vectors:     1_000_000,
-	batchSize:      50_000,
-	searchSamples:   5_000,
+	vectors:       200_000,
+	batchSize:      25_000,
+	searchSamples:   1_000,
 	searchLimit:        10,
 };
 

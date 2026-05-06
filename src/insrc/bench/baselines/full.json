@@ -1,0 +1,68 @@
+{
+  "tier": "full",
+  "timestamp": "2026-05-06T09:59:09.806Z",
+  "nodeVersion": "v24.3.0",
+  "peakRssMb": 4260,
+  "fileSizesMb": {
+    "lmdb.graph": 59,
+    "lance.entity_vec": 1960
+  },
+  "ops": [
+    {
+      "name": "graph.insert 1,000,000 edges",
+      "count": 1,
+      "p50_ms": 1946.659875,
+      "p95_ms": 1946.659875,
+      "p99_ms": 1946.659875,
+      "max_ms": 1946.659875
+    },
+    {
+      "name": "graph.outNeighbors (1-hop)",
+      "count": 5000,
+      "p50_ms": 0.002416,
+      "p95_ms": 0.005541,
+      "p99_ms": 0.00858342000000001,
+      "max_ms": 0.655042
+    },
+    {
+      "name": "graph.inNeighbors (1-hop)",
+      "count": 5000,
+      "p50_ms": 0.002167,
+      "p95_ms": 0.004041,
+      "p99_ms": 0.005416,
+      "max_ms": 0.116375
+    },
+    {
+      "name": "graph.transitiveClosure (depth=6)",
+      "count": 500,
+      "p50_ms": 0.003291,
+      "p95_ms": 0.016625,
+      "p99_ms": 0.02246857999999999,
+      "max_ms": 0.139417
+    },
+    {
+      "name": "graph.scc (single root)",
+      "count": 200,
+      "p50_ms": 0.0038335,
+      "p95_ms": 3.7780145999999992,
+      "p99_ms": 9.669078569999991,
+      "max_ms": 10.69725
+    },
+    {
+      "name": "vectors.insert 200,000",
+      "count": 1,
+      "p50_ms": 24730.115,
+      "p95_ms": 24730.115,
+      "p99_ms": 24730.115,
+      "max_ms": 24730.115
+    },
+    {
+      "name": "vectors.searchEntityVecs (limit=10)",
+      "count": 1000,
+      "p50_ms": 165.8741665,
+      "p95_ms": 174.25415594999998,
+      "p99_ms": 178.24063426,
+      "max_ms": 204.690084
+    }
+  ]
+}
