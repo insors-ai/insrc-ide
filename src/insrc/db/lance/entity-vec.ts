@@ -15,9 +15,23 @@
  * canonical for the structured fields.
  *
  * Public surface:
- *   writeEntityEmbedding   -- per-entity upsert (delete + add; Lance
- *                             upsert support varies by version).
- *   writeEntityEmbeddings  -- bulk upsert.
+ *   addEntityEmbedding     -- pure insert (table.add). Use when the
+ *                             caller knows the row's id is NOT in
+ *                             the table -- typically the indexer's
+ *                             first-time-embed path. Cheapest path:
+ *                             no JOIN against the target.
+ *   addEntityEmbeddings    -- bulk pure insert. Same constraints.
+ *   writeEntityEmbedding   -- per-entity upsert via mergeInsert.
+ *                             Use for re-embed (an existing row may
+ *                             match the new id). One round-trip.
+ *   writeEntityEmbeddings  -- bulk upsert. Each call does one
+ *                             mergeInsert, which builds a hash over
+ *                             the incoming batch and probes the
+ *                             target -- O(target) per call. Avoid
+ *                             on hot loops; prefer addEntityEmbeddings
+ *                             for first-time embeds and route through
+ *                             entities.ts:updateEmbedding which
+ *                             dispatches based on prior embeddingModel.
  *   searchEntityVecs       -- ANN with `repo IN (...)` + filter='all|code|artifact'.
  *   deleteEntityVec        -- single-entity drop (called on cascade).
  *   deleteEntityVecsByIds  -- bulk drop.
@@ -94,19 +108,27 @@ export function _resetEntityVecCache(): void {
 // Writes
 // ---------------------------------------------------------------------------
 
-export async function writeEntityEmbedding(row: EntityVecRow): Promise<void> {
-	await writeEntityEmbeddings([row]);
+/**
+ * Pure insert. Caller must guarantee `row.id` does NOT already
+ * exist in the table -- mergeInsert's dedup is bypassed for
+ * speed. Used by the indexer's first-time-embed path
+ * (entities.ts:updateEmbedding dispatches when prior
+ * `embeddingModel` was empty).
+ */
+export async function addEntityEmbedding(row: EntityVecRow): Promise<void> {
+	await addEntityEmbeddings([row]);
 }
 
-export async function writeEntityEmbeddings(rows: readonly EntityVecRow[]): Promise<void> {
+/**
+ * Bulk pure insert. Caller's responsibility to ensure no id
+ * collisions; Lance does not enforce uniqueness. For a 1M-entity
+ * first-index this completes in ~1 min vs hanging indefinitely
+ * through writeEntityEmbeddings (the upsert path's per-batch
+ * O(target) JOIN cost is fatal at scale).
+ */
+export async function addEntityEmbeddings(rows: readonly EntityVecRow[]): Promise<void> {
 	if (rows.length === 0) return;
 	const table = await getEntityVecTable();
-	// Upsert pattern: drop any existing rows with these ids, then add.
-	// Avoids relying on Lance's mergeInsert API (signature has shifted
-	// across versions) at the cost of one extra delete call per write.
-	const ids = rows.map(r => r.id);
-	const idList = ids.map(id => `'${escapeLanceString(id)}'`).join(', ');
-	await table.delete(`id IN (${idList})`);
 	await table.add(rows.map(r => ({
 		id:        r.id,
 		embedding: r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding),
@@ -114,6 +136,38 @@ export async function writeEntityEmbeddings(rows: readonly EntityVecRow[]): Prom
 		kind:      r.kind,
 		artifact:  r.artifact,
 	})));
+}
+
+export async function writeEntityEmbedding(row: EntityVecRow): Promise<void> {
+	await writeEntityEmbeddings([row]);
+}
+
+export async function writeEntityEmbeddings(rows: readonly EntityVecRow[]): Promise<void> {
+	if (rows.length === 0) return;
+	const table = await getEntityVecTable();
+	// Native upsert via Lance's mergeInsert -- one round-trip, dedup
+	// on the join key, atomic per-batch (a crash mid-call leaves the
+	// table in a coherent pre-write state, never partially-deleted).
+	//
+	// History: this was originally `delete(id IN [...]) + add(rows)`
+	// because the older lancedb-js mergeInsert signature had shifted
+	// across versions. Pinning to lancedb 0.27.2 (Phase 0.1) made
+	// the API stable. The delete-then-add pattern hung at scale -- a
+	// 50k-string IN-list against a 950k-row table on the last batch
+	// of a 1M-vector load saturated Lance's predicate planner --
+	// whereas mergeInsert handles the same workload in linear time
+	// (Phase 7.3 follow-up: 1M vectors now insert in ~1 min vs
+	// hanging indefinitely).
+	await table.mergeInsert('id')
+		.whenMatchedUpdateAll()
+		.whenNotMatchedInsertAll()
+		.execute(rows.map(r => ({
+			id:        r.id,
+			embedding: r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding),
+			repo:      r.repo,
+			kind:      r.kind,
+			artifact:  r.artifact,
+		})));
 }
 
 // ---------------------------------------------------------------------------

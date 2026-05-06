@@ -66,14 +66,17 @@ export async function writeSessionEmbedding(row: SessionVecRow): Promise<void> {
 export async function writeSessionEmbeddings(rows: readonly SessionVecRow[]): Promise<void> {
 	if (rows.length === 0) return;
 	const table = await getSessionVecTable();
-	const idList = rows.map(r => `'${escapeLanceString(r.id)}'`).join(', ');
-	await table.delete(`id IN (${idList})`);
-	await table.add(rows.map(r => ({
-		id:        r.id,
-		embedding: r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding),
-		repo:      r.repo,
-		status:    r.status,
-	})));
+	// Native upsert via mergeInsert -- see entity-vec.ts:writeEntityEmbeddings
+	// for the full rationale (Phase 7.3 follow-up).
+	await table.mergeInsert('id')
+		.whenMatchedUpdateAll()
+		.whenNotMatchedInsertAll()
+		.execute(rows.map(r => ({
+			id:        r.id,
+			embedding: r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding),
+			repo:      r.repo,
+			status:    r.status,
+		})));
 }
 
 // ---------------------------------------------------------------------------

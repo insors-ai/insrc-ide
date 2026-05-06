@@ -75,16 +75,19 @@ export async function writeConfigEmbedding(row: ConfigVecRow): Promise<void> {
 export async function writeConfigEmbeddings(rows: readonly ConfigVecRow[]): Promise<void> {
 	if (rows.length === 0) return;
 	const table = await getConfigVecTable();
-	const idList = rows.map(r => `'${escapeLanceString(r.id)}'`).join(', ');
-	await table.delete(`id IN (${idList})`);
-	await table.add(rows.map(r => ({
-		id:        r.id,
-		embedding: r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding),
-		scope:     r.scope,
-		namespace: r.namespace,
-		category:  r.category,
-		language:  r.language,
-	})));
+	// Native upsert via mergeInsert -- see entity-vec.ts:writeEntityEmbeddings
+	// for the full rationale (Phase 7.3 follow-up).
+	await table.mergeInsert('id')
+		.whenMatchedUpdateAll()
+		.whenNotMatchedInsertAll()
+		.execute(rows.map(r => ({
+			id:        r.id,
+			embedding: r.embedding instanceof Float32Array ? r.embedding : new Float32Array(r.embedding),
+			scope:     r.scope,
+			namespace: r.namespace,
+			category:  r.category,
+			language:  r.language,
+		})));
 }
 
 // ---------------------------------------------------------------------------

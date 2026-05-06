@@ -622,16 +622,28 @@ export async function updateEmbedding(
 	// txn), then persist the vector to Lance. Lance write happens after
 	// the LMDB commit so a Lance failure leaves the EntityRow's
 	// `embeddingModel` advertising "embedded" -- caller can re-run.
+	//
+	// Dispatch the Lance side based on whether this is a first-time
+	// embed or a re-embed. First-time = prior `embeddingModel` was
+	// empty; we know the entity has no existing Lance row, so we can
+	// use the fast `addEntityEmbedding` (table.add, no JOIN). Re-embed
+	// = prior model non-empty; the row may already exist, so we must
+	// upsert via `writeEntityEmbedding` (mergeInsert). This matters at
+	// scale: the indexer reembeds 1M entities through this path
+	// serially; mergeInsert against a growing target is O(target) per
+	// call and goes quadratic, while pure add stays linear.
 	let repoId = -1;
 	let repoPath = '';
 	let kind = '';
 	let artifact = false;
 	let touched = false;
+	let isFirstEmbed = false;
 	await withWriteTxn(s => {
 		const u64 = s.entityIdByString.get(id) as bigint | number | undefined;
 		if (u64 === undefined) return; // no-op (matches prior DuckDB UPDATE behaviour)
 		const row = readEntityRowSync(s, u64);
 		if (row === null) return;
+		isFirstEmbed = row.embeddingModel === '';
 		const next: EntityRow = { ...row, embeddingModel };
 		s.entity.put(encodeEntityKey(toBigInt(u64)), encodeEntityRow(next));
 		repoId = row.repoId;
@@ -643,8 +655,9 @@ export async function updateEmbedding(
 	if (embedding.length > 0) {
 		const store = await getGraphStore();
 		repoPath = readRepoPath(store, repoId) ?? '';
-		const { writeEntityEmbedding } = await import('./lance/entity-vec.js');
-		await writeEntityEmbedding({
+		const lance = await import('./lance/entity-vec.js');
+		const writer = isFirstEmbed ? lance.addEntityEmbedding : lance.writeEntityEmbedding;
+		await writer({
 			id,
 			embedding: new Float32Array(embedding),
 			repo: repoPath,

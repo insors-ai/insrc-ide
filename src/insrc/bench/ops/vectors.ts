@@ -15,7 +15,7 @@ import { join } from 'node:path';
 
 import { closeLanceConn, setLanceConnPath } from '../../db/lance/conn.js';
 import {
-	writeEntityEmbeddings,
+	addEntityEmbeddings,
 	searchEntityVecs,
 	_resetEntityVecCache,
 	type EntityVecRow,
@@ -37,18 +37,17 @@ const SMOKE: VectorParams = {
 	searchLimit:        10,
 };
 
-// Full tier was originally 1M vectors but Lance's HNSW build over a
-// 1M-row table reliably hangs on dev hardware (worker pinned at 0%
-// CPU after the bulk insert completes; lmdb graph phase finished but
-// the Lance search phase never returns). 200k is the next stable
-// scale point -- 4x the smoke load, still exercises Lance index
-// build + ANN, completes in ~1 min on a 2026 dev box. Bump back to
-// 1M once the underlying Lance issue is reproduced + filed upstream
-// (or once we move to the @lancedb/lancedb-rs build that addresses
-// the worker-pool exhaustion).
+// 1M vectors. Driven through `addEntityEmbeddings` (the first-time
+// embed fast path). The original full-tier attempt hung at 1M because
+// the bench called `writeEntityEmbeddings` (the upsert path), which
+// runs an O(target) JOIN per batch -- pathological at scale. The
+// dispatch in `entities.ts:updateEmbedding` routes the production
+// first-index loop to `addEntityEmbedding` automatically when the
+// prior `embeddingModel` was empty, so this bench measures the
+// realistic production load.
 const FULL: VectorParams = {
-	vectors:       200_000,
-	batchSize:      25_000,
+	vectors:     1_000_000,
+	batchSize:      50_000,
 	searchSamples:   1_000,
 	searchLimit:        10,
 };
@@ -107,7 +106,11 @@ async function bulkInsertVectors(params: VectorParams): Promise<void> {
 				artifact:  false,
 			};
 		}
-		await writeEntityEmbeddings(rows);
+		// First-time embed only -- bench fixture has unique ids per
+		// row, so we don't need the upsert-path (mergeInsert) cost.
+		// Production indexer's first-index path is the same shape and
+		// dispatches the same way via entities.ts:updateEmbedding.
+		await addEntityEmbeddings(rows);
 	}
 }
 
