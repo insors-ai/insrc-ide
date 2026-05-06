@@ -458,6 +458,11 @@ export interface DaemonStatus {
   embeddingsPending: number;
   modelPullStatus?:  'pulling' | 'ready';
   modelPullPct?:     number;
+  /** Current LMDB env file size in MiB (`~/.insrc/graph.lmdb`).
+   *  Compare to actual data volume to spot when `insrc daemon compact`
+   *  would reclaim space (LMDB never returns freed pages to the OS;
+   *  large delete bursts inflate the file until compact-and-replace). */
+  lmdbFileSizeMb?:   number;
 }
 
 // ---------------------------------------------------------------------------

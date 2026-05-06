@@ -48,7 +48,7 @@
  * `db/graph/{entities,edges,traversal,bulk}.ts` (Phase 2.x).
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { open, type Database, type RootDatabase } from 'lmdb';
@@ -392,6 +392,113 @@ export function runReaderCheck(reason: string): number {
 		log.warn({ err: errMessage(e), reason }, 'lmdb readerCheck failed');
 		return 0;
 	}
+}
+
+export interface CompactResult {
+	readonly beforeBytes: number;
+	readonly afterBytes:  number;
+	readonly savedBytes:  number;
+	readonly elapsedMs:   number;
+}
+
+/**
+ * Offline compaction (Phase 7.4). LMDB never returns freed pages to
+ * the OS -- they're tracked on a per-env free-list and reused for
+ * new writes. After a large delete burst (e.g. `deleteRepo` on a
+ * 100k-entity repo) the file stays inflated. `compactGraphStore`
+ * reclaims that space:
+ *
+ *   1. `root.backup(<env>.compact, compact: true)` writes a
+ *      defragged copy (mdb_env_copy2(MDB_CP_COMPACT)). Concurrent
+ *      reads + writes are safe; the snapshot reflects state at
+ *      backup-start.
+ *   2. Close the env (drains in-flight readers; serialises against
+ *      any writer that landed between steps 1 and 2 -- those writes
+ *      are lost; caller is expected to quiesce the system before
+ *      compact, see the daemon-side check).
+ *   3. Atomic rename: original → `.bak`, `.compact` → original.
+ *   4. Re-open the env at the original path.
+ *   5. Best-effort delete `.bak` on success. Left in place on rename
+ *      failure so the user can manually recover.
+ *
+ * Returns size delta in bytes. Throws `LmdbStoreError` on any step.
+ */
+export async function compactGraphStore(): Promise<CompactResult> {
+	const inst = _instance;
+	if (inst === null) {
+		throw new LmdbStoreError('cannot compact: graph store is not open');
+	}
+	const t0 = Date.now();
+	const originalPath = _path;
+	const compactPath  = `${originalPath}.compact`;
+	const bakPath      = `${originalPath}.bak`;
+	const lockPath     = `${originalPath}-lock`;
+
+	if (!existsSync(originalPath)) {
+		throw new LmdbStoreError(`compact: source env '${originalPath}' missing`);
+	}
+	const beforeBytes = statSync(originalPath).size;
+
+	// Pre-clear any leftover .compact / .bak from a prior aborted run.
+	if (existsSync(compactPath)) rmSync(compactPath, { force: true });
+	if (existsSync(bakPath))     rmSync(bakPath,     { force: true });
+
+	// Step 1: write the compacted copy. Don't go through `backupGraphStore`
+	// because it asserts _instance != null -- which we'll need to clear
+	// in step 2 before the rename. Inline the call so the same `inst`
+	// is reused.
+	await inst.root.backup(compactPath, true);
+
+	// Step 2: close the env so the file isn't held open during rename.
+	_instance = null;
+	_initPromise = null;
+	try {
+		await inst.root.close();
+	} catch (e) {
+		// Reset partial state, then bubble up.
+		_instance = null;
+		throw new LmdbStoreError(`compact: close failed: ${errMessage(e)}`, e);
+	}
+
+	// Step 3: atomic rename. If anything fails here, the .bak + .compact
+	// files stay on disk for manual recovery.
+	try {
+		renameSync(originalPath, bakPath);
+		renameSync(compactPath, originalPath);
+		// Lock files are a leftover from the previous open; LMDB
+		// recreates them on the next open. Best-effort cleanup.
+		if (existsSync(lockPath)) rmSync(lockPath, { force: true });
+	} catch (e) {
+		// Try to roll back to a usable state. If `.bak` exists but
+		// `original` doesn't, restore it.
+		if (existsSync(bakPath) && !existsSync(originalPath)) {
+			try { renameSync(bakPath, originalPath); } catch { /* ignore */ }
+		}
+		throw new LmdbStoreError(`compact: rename failed: ${errMessage(e)}`, e);
+	}
+
+	// Step 4: re-open the env at the original path.
+	await getGraphStore();
+
+	// Step 5: best-effort cleanup of .bak (the pre-compact original).
+	const afterBytes = statSync(originalPath).size;
+	if (existsSync(bakPath)) {
+		try {
+			rmSync(bakPath, { force: true });
+		} catch (e) {
+			log.warn(
+				{ path: bakPath, err: errMessage(e) },
+				'compact succeeded but .bak cleanup failed; remove manually',
+			);
+		}
+	}
+
+	return {
+		beforeBytes,
+		afterBytes,
+		savedBytes: beforeBytes - afterBytes,
+		elapsedMs:  Date.now() - t0,
+	};
 }
 
 /**

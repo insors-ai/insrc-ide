@@ -583,6 +583,13 @@ async function main(): Promise<void> {
 				modelPullStatus: modelState.status === 'pulling' ? 'pulling' : 'ready',
 				...(modelState.pct !== undefined && { modelPullPct: modelState.pct }),
 			};
+			// LMDB env file size for compact-when-needed surfacing.
+			try {
+				const { existsSync, statSync } = await import('node:fs');
+				if (existsSync(PATHS.lmdb)) {
+					status.lmdbFileSizeMb = Math.round(statSync(PATHS.lmdb).size / 1024 / 1024);
+				}
+			} catch { /* best-effort; status should never throw */ }
 			return status;
 		},
 
@@ -1029,6 +1036,24 @@ async function main(): Promise<void> {
 			}
 			const { backupAll } = await import('./backup.js');
 			return await backupAll(path);
+		},
+
+		'daemon.compact': async () => {
+			// Refuse if the indexer queue is busy. Compact closes +
+			// reopens the env, so any in-flight indexer write loses its
+			// state. The user is expected to wait until the daemon is
+			// idle (queue depth 0, no job processing) before triggering.
+			if (queue.depth > 0 || queue.isProcessing) {
+				throw new Error(
+					`daemon.compact: indexer is busy (queue=${queue.depth}, ` +
+					`processing=${queue.isProcessing}). Wait for indexing to ` +
+					`drain before compacting.`,
+				);
+			}
+			const { compactGraphStore } = await import('../db/graph/store.js');
+			const result = await compactGraphStore();
+			log.info({ ...result }, 'lmdb env compacted');
+			return result;
 		},
 
 		// Per-workspace data-analyzer DB introspection + reset. Backing

@@ -37,6 +37,11 @@ export function registerDaemonCommands(program: Command): void {
     .command('backup <path>')
     .description('snapshot LMDB + Lance into <path> while the daemon stays running')
     .action(cmdBackup);
+
+  daemon
+    .command('compact')
+    .description('reclaim freed pages in the LMDB env (mdb_env_copy2 + atomic swap; daemon must be idle)')
+    .action(cmdCompact);
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +118,29 @@ interface BackupResult {
   elapsedMs:  number;
 }
 
+interface CompactResult {
+  beforeBytes: number;
+  afterBytes:  number;
+  savedBytes:  number;
+  elapsedMs:   number;
+}
+
+async function cmdCompact(): Promise<void> {
+  try {
+    const result = await rpc<CompactResult>('daemon.compact');
+    log.info(`compact complete in ${(result.elapsedMs / 1000).toFixed(2)} s`);
+    log.info(`  before: ${formatBytes(result.beforeBytes)}`);
+    log.info(`  after:  ${formatBytes(result.afterBytes)}`);
+    const pctSaved = result.beforeBytes === 0
+      ? 0
+      : (result.savedBytes / result.beforeBytes) * 100;
+    log.info(`  saved:  ${formatBytes(result.savedBytes)} (${pctSaved.toFixed(1)}%)`);
+  } catch (err) {
+    log.error(String(err));
+    process.exitCode = 1;
+  }
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0)    return '0 B';
   if (bytes < 1024)   return `${bytes} B`;
@@ -133,6 +161,9 @@ async function cmdStatus(): Promise<void> {
       log.info(`model:   pulling ${status.modelPullPct ?? 0}%`);
     } else {
       log.info(`model:   ready`);
+    }
+    if (status.lmdbFileSizeMb !== undefined) {
+      log.info(`lmdb:    ${status.lmdbFileSizeMb} MiB on disk  (run 'insrc daemon compact' to reclaim freed pages)`);
     }
     if (status.repos.length === 0) {
       log.info('repos:   none registered');
