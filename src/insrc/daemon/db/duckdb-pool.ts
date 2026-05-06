@@ -10,18 +10,20 @@
  * disposable. Persistence would just bloat the file with stale
  * cached views.
  *
- * **NOT for storage.** Graph data + entity rows + conversations + todos
- * + config-store all live in the file-backed *storage* DuckDB exposed
- * via `daemon/db/duckdb-storage-pool.ts`. Picking the wrong pool will
- * silently lose data on daemon restart.
+ * **NOT for storage.** Graph + entity rows + conversations + todos +
+ * config-store live in LMDB (`db/graph/store.ts`); embeddings live in
+ * LanceDB (`db/lance/conn.ts`). DuckDB no longer has a persistent
+ * substrate role -- this singleton is read-only ad-hoc query against
+ * user-supplied files.
  *
  * Lifecycle: lazy-init singleton, daemon-lifetime. The first call to
  * `getDuckDB()` opens an in-memory DuckDB instance, sets the memory
- * cap (`PRAGMA memory_limit`), loads the `arrow` + `vss` extensions,
- * then locks down further extension installs / network access.
- * Subsequent calls share the instance; concurrent first-callers
- * collapse onto the same init promise. Closed in the daemon's
- * graceful-shutdown handler.
+ * cap (`PRAGMA memory_limit`), loads the `arrow` extension (used by
+ * the data-driver's `.arrow` file reader -- see
+ * `daemon/db/drivers/duckdb-file.ts`), then locks down further
+ * extension installs / network access. Subsequent calls share the
+ * instance; concurrent first-callers collapse onto the same init
+ * promise. Closed in the daemon's graceful-shutdown handler.
  *
  * Per-query: `withConnection<T>(fn)` is the canonical entry point.
  * DuckDB Connections are sub-millisecond; we acquire a fresh one per
@@ -101,9 +103,10 @@ export async function getDuckDB(): Promise<DuckDBInstance> {
       //   the `httpfs`, `postgres`, `mysql`, `sqlite` extensions.
       //   With `enable_extension_autoinstall=false` set below, even
       //   user-supplied SQL can't pull them in at runtime.
-      // - The persistent STORAGE pool (duckdb-storage-pool.ts) keeps
-      //   the full lockdown -- it only ever reads ~/.insrc/duckdb.db,
-      //   never user-supplied paths.
+      // - There's no persistent DuckDB pool any more (LMDB + Lance
+      //   handle storage post-Phase-6.1). This is the only DuckDB
+      //   instance left; its sole job is read-only attaches against
+      //   user files.
       try {
         await conn.run('SET autoinstall_known_extensions = false');
         await conn.run('SET autoload_known_extensions = false');
