@@ -72,7 +72,7 @@ export const HARD_RULES = `# Hard rules
 export const PER_KIND_PLAYBOOK = `# Tool list
 
 - graph_search(query, limit?, kind?)
-    Vector similarity search (DuckDB VSS HNSW) over indexed code entities,
+    Vector similarity search (LanceDB HNSW ANN) over indexed code entities,
     scoped to the active repo's dependency closure. Returns short
     entity stubs with a relevance score. Use as the FIRST step on
     locate / free-form tasks. A high-score hit is candidate-only --

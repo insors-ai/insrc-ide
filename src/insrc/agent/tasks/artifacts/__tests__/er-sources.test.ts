@@ -1,8 +1,8 @@
 /**
  * Tests for agent/tasks/artifacts/kinds/er-sources.ts.
  *
- * Scope: Prisma schema regex parser. The Kuzu entity-graph branch
- * needs a live Kuzu fixture and is covered by the smoke script.
+ * Scope: Prisma schema regex parser. The graph entity-graph branch
+ * needs a live LMDB fixture and is covered by the smoke script.
  */
 
 import { describe, it } from 'node:test';

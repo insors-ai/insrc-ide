@@ -110,17 +110,30 @@ async function main(): Promise<void> {
 	}
 
 	// 2. Ensure directories
-	mkdirSync(dirname(PATHS.duckdb), { recursive: true });
+	mkdirSync(PATHS.insrc, { recursive: true });
 
-	// One-time cleanup of orphaned legacy on-disk state from before the
-	// storage migration. Removes Kuzu (post Phase A.11) and LanceDB
-	// (post Phase B.10) directories. Idempotent: silently no-ops once
-	// the files are gone.
+	// One-time cleanup of orphaned legacy on-disk state from prior
+	// storage substrates. Idempotent: silently no-ops once the files
+	// are gone.
+	//
+	//   PATHS.graph        -- old Kuzu DB directory (replaced by LMDB)
+	//   PATHS.duckdb       -- old file-backed DuckDB consolidation
+	//                         experiment (replaced by LMDB + Lance)
+	//   PATHS.configStore  -- old Lance config-store directory
+	//                         (config vectors now live as a table
+	//                         inside PATHS.lance alongside the
+	//                         entity / session / turn vectors)
+	//
+	// PATHS.lance is the ACTIVE Lance store and must NOT be in this
+	// list -- a regression that wiped it on every boot landed alongside
+	// the DuckDB-storage delete and was caught during the Phase 6.3
+	// header sweep.
 	for (const stale of [
 		PATHS.graph,
 		`${PATHS.graph}.wal`,
 		`${PATHS.graph}.shadow`,
-		PATHS.lance,
+		PATHS.duckdb,
+		`${PATHS.duckdb}.wal`,
 		PATHS.configStore,
 	]) {
 		try {

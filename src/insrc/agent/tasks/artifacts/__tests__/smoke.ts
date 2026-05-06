@@ -3,9 +3,9 @@
  *
  * Exercises the full pipeline (source-fetch -> source-render ->
  * template-bind) for every kind, against deterministic fixtures or
- * a mock LLM provider. No Kuzu DB required: kinds that would hit
- * Kuzu (sequence / flow code / ER Kuzu branch) run here in their
- * free-text-scaffold mode.
+ * a mock LLM provider. No live graph required: kinds that would
+ * hit the graph (sequence / flow code / ER graph branch) run here
+ * in their free-text-scaffold mode.
  *
  * Usage:
  *     cd /path/to/insrc-ide
@@ -190,7 +190,7 @@ async function runCases(): Promise<CaseResult[]> {
 		});
 		results.push(checkArtifact('wireframe (no-provider scaffold)', wfScaffold));
 
-		// ----- Sequence (scaffold only; Kuzu path needs a real DB) ---------
+		// ----- Sequence (scaffold only; graph path needs a real DB) -------
 
 		const seqScaffold = await runSequence({
 			sessionId: SESSION_ID,

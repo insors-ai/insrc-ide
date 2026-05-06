@@ -7,11 +7,11 @@ const LOG_DIR   = join('/tmp', '.insrc');
 export const PATHS = {
   insrc:       INSRC_DIR,
   config:      join(INSRC_DIR, 'config.json'),
-  duckdb:      join(INSRC_DIR, 'duckdb.db'),    // legacy: DuckDB consolidation (cleaned up on first post-LMDB boot)
-  lmdb:        join(INSRC_DIR, 'graph.lmdb'),   // LMDB graph + repo + plans + conversations + todos + config (post-resplit)
-  graph:       join(INSRC_DIR, 'graph'),        // legacy: Kuzu DB (cleaned up on first DuckDB-only boot)
+  duckdb:      join(INSRC_DIR, 'duckdb.db'),    // legacy: file-backed DuckDB consolidation (cleaned up on boot)
+  lmdb:        join(INSRC_DIR, 'graph.lmdb'),   // LMDB: graph + repo + plans + conversations + todos + config
+  graph:       join(INSRC_DIR, 'graph'),        // legacy: Kuzu DB directory (cleaned up on boot)
   lance:       join(INSRC_DIR, 'lance'),        // LanceDB store (entity + session + turn + config vectors)
-  configStore: join(INSRC_DIR, 'config-store'), // legacy: LanceDB config-store (cleaned up on first post-B.10 boot)
+  configStore: join(INSRC_DIR, 'config-store'), // legacy: standalone Lance config-store (now folded into PATHS.lance; cleaned up on boot)
   templates:   join(INSRC_DIR, 'templates'),    // global config templates
   feedback:    join(INSRC_DIR, 'feedback'),     // global config feedback
   conventions: join(INSRC_DIR, 'conventions'),  // global config conventions

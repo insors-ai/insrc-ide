@@ -191,11 +191,11 @@ model definitions, and ORM/query builder usage that might need extension.`,
 
   'persistence-vector': {
     searchPlanPrompt: `Generate 2-3 search queries to find vector store schemas, embedding usage,
-graph database queries (DuckDB SQL), HNSW vector tables, and search/retrieval patterns relevant to this requirement.`,
+graph traversal calls (typed JS API: findCallers / findCallees / transitiveClosure / etc.), Lance vector tables, and search/retrieval patterns relevant to this requirement.`,
     analysisPrompt: `Analyze existing vector/graph DB usage. For this requirement:
-- What existing vector tables or graph nodes/edges are relevant?
+- What existing Lance tables or LMDB graph entities/edges are relevant?
 - What embedding model and dimensions are used?
-- What search patterns (HNSW ANN, recursive CTE traversal) apply?
+- What search patterns (HNSW ANN over Lance, BFS / SCC over the LMDB graph) apply?
 - Should this extend an existing store or create a new one?`,
     defaultFilter: 'code',
     maxSearches: 3,

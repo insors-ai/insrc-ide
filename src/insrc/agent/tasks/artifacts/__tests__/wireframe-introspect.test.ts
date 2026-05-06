@@ -5,7 +5,7 @@
  * string + import map directly, no DB / no fs).
  *
  * The DB-aware `introspectComponent` entry point isn't unit-tested
- * here -- it does a live Kuzu lookup + file read; covered later by
+ * here -- it does a live graph lookup + file read; covered later by
  * the smoke script when a real graph is available.
  */
 

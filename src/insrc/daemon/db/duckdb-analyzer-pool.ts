@@ -1,8 +1,7 @@
 /**
  * Per-workspace DuckDB pool for the data-analyzer subsystem.
  *
- * Lifetime + isolation rules differ from the core storage pool
- * (`duckdb-storage-pool.ts`):
+ * Lifetime + isolation rules:
  *
  *   - One DB *per workspace*, not one process-wide singleton. The
  *     backing file lives at `<workspaceRoot>/.insrc/data-analyzer.db`
@@ -11,10 +10,11 @@
  *   - Analyzer state (sample-row cache, profile cards, scorecards,
  *     skill audit log, ...) is regenerable from data sources, so the
  *     entire DB can be wiped without losing anything irreversible.
- *   - Zero coupling to the core DB. Analyzer code paths never JOIN
- *     against `entity` / `relation` / sessions / etc. -- they ask the
- *     daemon for a connection by id and operate against THAT data
- *     source. So no ATTACH, no cross-DB queries, no shared schema.
+ *   - Zero coupling to the core knowledge graph (LMDB) or vector
+ *     store (Lance). Analyzer code paths never JOIN against the
+ *     code-graph entities -- they ask the daemon for a connection by
+ *     id and operate against THAT data source. So no ATTACH, no
+ *     cross-DB queries, no shared schema.
  *
  * Lifecycle: lazy. The pool for a workspace is created the first
  * time any analyzer call references it; tests can pre-create via
@@ -117,7 +117,7 @@ export async function getAnalyzerPool(workspaceRoot: string): Promise<DuckDBInst
 
 /**
  * Acquire a fresh Connection on the workspace's analyzer instance,
- * run `fn`, close the Connection. Mirror of `withStorageConnection`.
+ * run `fn`, close the Connection.
  */
 export async function withAnalyzerConnection<T>(
 	workspaceRoot: string,

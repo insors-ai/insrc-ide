@@ -69,8 +69,8 @@ export async function getDuckDB(): Promise<DuckDBInstance> {
     const t0 = Date.now();
     const memoryMb = readMemoryBudget();
     // `:memory:` ensures no on-disk DuckDB state is created. The
-    // file-backed storage layer for graph + user state is a separate
-    // singleton (duckdb-storage-pool.ts).
+    // file-backed storage layer for graph + user state is LMDB +
+    // Lance (db/graph/store.ts + db/lance/conn.ts).
     const instance = await DuckDBInstance.create(':memory:');
     const conn = await instance.connect();
     try {
