@@ -43,6 +43,11 @@ export function setLanceConnPath(path: string): void {
 	_path = path;
 }
 
+/** Current backing-directory path (post any test override). */
+export function getLanceConnPath(): string {
+	return _path;
+}
+
 /**
  * Lazy-init the LanceDB connection. Concurrent first-callers share
  * the same init promise; on init failure the cached promise is

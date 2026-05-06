@@ -78,6 +78,7 @@
     "test:graph-codec": "tsx --test db/graph/__tests__/codec.test.ts",
     "test:graph-ops": "tsx --test db/graph/__tests__/operational.test.ts",
     "test:graph-traversal": "tsx --test db/graph/__tests__/traversal.test.ts",
+    "test:graph-migrations": "tsx --test db/graph/__tests__/migrations.test.ts",
     "test:search-lmdb": "tsx --test db/__tests__/search-lmdb.test.ts",
     "test:cross-file-resolver-lmdb": "tsx --test indexer/__tests__/cross-file-resolver-lmdb.test.ts",
     "test:graph-query": "tsx --test daemon/tools/builtins/graph/__tests__/graph-query.test.ts",

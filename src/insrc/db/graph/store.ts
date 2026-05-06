@@ -317,10 +317,23 @@ export async function getGraphStore(): Promise<GraphStore> {
 		} else if (stored > SCHEMA_VERSION) {
 			await root.close();
 			throw new LmdbStoreSchemaVersionMismatch(stored, SCHEMA_VERSION);
+		} else if (stored < SCHEMA_VERSION) {
+			// Forward-migration path. Phase 7.2 ships the runner with
+			// an empty registry (v1 is the first version); the moment
+			// a v2 migration is added, this path activates without any
+			// further env-open changes.
+			const { runMigrations } = await import('./migrations.js');
+			try {
+				const applied = await runMigrations(store, stored, SCHEMA_VERSION);
+				log.info(
+					{ stored, target: SCHEMA_VERSION, applied },
+					'forward migrations complete',
+				);
+			} catch (e) {
+				await root.close();
+				throw e;
+			}
 		}
-		// stored < SCHEMA_VERSION would trigger forward migrations
-		// (Phase 7.2 ships the runner; v1 has no migrations because v1
-		// is the first version)
 
 		log.info(
 			{

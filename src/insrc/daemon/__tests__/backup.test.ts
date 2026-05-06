@@ -24,6 +24,7 @@ import {
 	getGraphStore,
 	setGraphStorePath,
 } from '../../db/graph/store.js';
+import { closeLanceConn, setLanceConnPath } from '../../db/lance/conn.js';
 import { upsertEntities, getEntity } from '../../db/entities.js';
 import { backupAll } from '../backup.js';
 import type { Entity, EntityKind } from '../../shared/types.js';
@@ -32,11 +33,17 @@ let dir: string;
 
 test.beforeEach(async () => {
 	await closeGraphStore();
+	await closeLanceConn();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-backup-7.1-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	// Critical: override the Lance path to a tmpdir so the backup
+	// doesn't touch the user's real ~/.insrc/lance directory (which
+	// other concurrent test runners may be mutating).
+	setLanceConnPath(join(dir, 'lance'));
 });
 test.afterEach(async () => {
 	await closeGraphStore();
+	await closeLanceConn();
 	rmSync(dir, { recursive: true, force: true });
 });
 
@@ -141,14 +148,13 @@ test('backupAll skips Lance when the source directory is absent', async () => {
 	await upsertEntities(null, [makeEntity('a')]);
 
 	const target = join(dir, 'no-lance');
+	// Lance path was overridden to <dir>/lance in beforeEach but the
+	// directory hasn't been created yet (no Lance writes happened in
+	// this test). Skip path should kick in.
 	const result = await backupAll(target);
 
-	// The current PATHS.lance points at ~/.insrc/lance which may or
-	// may not exist on the test machine. Either path is fine: the
-	// LMDB side still succeeds, and lanceBytes reflects whatever
-	// got copied (possibly 0).
 	assert.ok(result.lmdbBytes > 0);
-	assert.ok(result.lanceBytes >= 0);
+	assert.equal(result.lanceBytes, 0);
 });
 
 test('backupGraphStore throws when env is not open', async () => {

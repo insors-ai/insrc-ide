@@ -29,8 +29,8 @@ import { cp } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { getLogger } from '../shared/logger.js';
-import { PATHS } from '../shared/paths.js';
 import { backupGraphStore } from '../db/graph/store.js';
+import { getLanceConnPath } from '../db/lance/conn.js';
 
 const log = getLogger('backup');
 
@@ -73,7 +73,7 @@ export async function backupAll(targetDir: string): Promise<BackupResult> {
 	//    comment for atomicity reasoning). Skip if the source dir
 	//    doesn't exist (fresh-install daemon with nothing embedded
 	//    yet) -- nothing to back up but the LMDB side still succeeds.
-	const lanceSource = PATHS.lance;
+	const lanceSource = getLanceConnPath();
 	const lanceTarget = join(targetDir, 'lance');
 	let lanceBytes = 0;
 	if (existsSync(lanceSource)) {
