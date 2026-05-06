@@ -183,6 +183,15 @@ async function main(): Promise<void> {
 	await initTodosTables(db);
 	log.info('database ready');
 
+	// 3b. LMDB reader-table sweep at boot. Killed daemons leave their
+	//     reader-slot occupied, which pins the writer's free-list and
+	//     bloats the file until the slot is released. mdb_reader_check
+	//     drops slots whose PID no longer exists. Cheap; non-fatal if
+	//     it finds anything.
+	const { getGraphStore, runReaderCheck } = await import('../db/graph/store.js');
+	await getGraphStore();   // ensure env is open
+	runReaderCheck('startup');
+
 	// 4. Bootstrap embedding model (async, non-blocking)
 	void bootstrapEmbeddingModel();
 
@@ -1285,6 +1294,16 @@ async function main(): Promise<void> {
 	// untouched for 90 days.
 	const stopTodosRetention = todosRpc.scheduleTodosRetention(db);
 
+	// 8c. Periodic LMDB reader-table re-check. Defensive sweep every
+	//     5 minutes for slots left over from a daemon process that
+	//     died between boots without graceful shutdown. Cheap (a
+	//     lock-file scan); see plans/storage-migration-lmdb-lance.md
+	//     Phase 5.5.
+	const READER_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+	const readerCheckTimer = setInterval(() => {
+		runReaderCheck('periodic');
+	}, READER_CHECK_INTERVAL);
+
 	// 9. Graceful shutdown on signals
 	// Shutdown handler. Race between two timelines:
 	//
@@ -1319,6 +1338,7 @@ async function main(): Promise<void> {
 		// best-effort bookend matching the daemon-crash handler.
 		log.info({ signal }, 'shutdown signal received; draining...');
 		clearInterval(pruneTimer);
+		clearInterval(readerCheckTimer);
 		stopTodosRetention();
 		queue.stop();
 		void disposeChatHandlers();

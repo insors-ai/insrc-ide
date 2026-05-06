@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import {
 	closeGraphStore,
 	getGraphStore,
+	runReaderCheck,
 	setGraphStorePath,
 	SCHEMA_VERSION,
 	LmdbStoreError,
@@ -139,4 +140,28 @@ test('opening a non-LMDB file at the env path surfaces a typed error', async () 
 test('SCHEMA_VERSION constant is exported and stable', () => {
 	assert.ok(typeof SCHEMA_VERSION === 'number');
 	assert.equal(SCHEMA_VERSION, 1);
+});
+
+// ---------------------------------------------------------------------------
+// runReaderCheck (Phase 5.5)
+// ---------------------------------------------------------------------------
+
+test('runReaderCheck returns 0 on a fresh env (no stale slots)', async () => {
+	await getGraphStore();
+	const cleared = runReaderCheck('test');
+	assert.equal(cleared, 0);
+});
+
+test('runReaderCheck is a no-op when env is closed', async () => {
+	// Don't open the env first.
+	const cleared = runReaderCheck('test');
+	assert.equal(cleared, 0);
+});
+
+test('runReaderCheck is safe to call repeatedly', async () => {
+	await getGraphStore();
+	for (let i = 0; i < 5; i++) {
+		const cleared = runReaderCheck(`test-${i}`);
+		assert.equal(cleared, 0);
+	}
 });

@@ -344,6 +344,44 @@ export async function getGraphStore(): Promise<GraphStore> {
 }
 
 /**
+ * Sweep stale reader slots from the LMDB lock-file -- killed daemons
+ * leave their reader-table slot occupied, which pins the writer's
+ * free-list and bloats the file until the slot is released.
+ *
+ * `mdb_reader_check()` (lmdb-js: `root.readerCheck()`) walks the lock
+ * table, drops slots whose PID no longer exists, and returns the count
+ * cleared. Cheap (a lock-file scan); safe to call any time.
+ *
+ * No-op when the env isn't open (don't force a lazy open just to
+ * readerCheck). Errors are logged and swallowed -- this is a defensive
+ * housekeeping op and a transient failure shouldn't cascade.
+ *
+ * Daemon startup runs this once via `runReaderCheck('startup')`, then a
+ * 5-min timer runs `runReaderCheck('periodic')`. See Phase 5.5 of
+ * plans/storage-migration-lmdb-lance.md and the "Stale reader slots"
+ * row in plans/graph-storage-lmdb.md's risk table.
+ */
+export function runReaderCheck(reason: string): number {
+	const inst = _instance;
+	if (inst === null) return 0;
+	try {
+		const cleared = inst.root.readerCheck();
+		if (cleared > 0) {
+			log.warn(
+				{ cleared, reason, readers: inst.root.readerList() },
+				'lmdb readerCheck cleared stale reader slots',
+			);
+		} else {
+			log.debug({ reason }, 'lmdb readerCheck: no stale slots');
+		}
+		return cleared;
+	} catch (e) {
+		log.warn({ err: errMessage(e), reason }, 'lmdb readerCheck failed');
+		return 0;
+	}
+}
+
+/**
  * Close the env. Called by the daemon's graceful-shutdown handler.
  * Errors are logged but not re-thrown (the daemon is on the way down).
  */
