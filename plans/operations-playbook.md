@@ -226,6 +226,50 @@ level), restoration is the same as LMDB: replace from backup, or
 delete the directory and accept embedding-loss (the indexer
 re-embeds entities lazily on the next index pass).
 
+### Storage budget — plan for ~10–13 GiB per million indexed code entities
+
+The on-disk size of `~/.insrc/lance/entity_vec.lance/` scales roughly
+linearly with the number of indexed code entities. From the Phase 9.1
+full-tier benchmark run:
+
+| Layer | Size at 1M entities |
+|---|---:|
+| Raw vector data (1024 dims × 4 B per row) | ~3.8 GiB |
+| Lance row metadata + filter columns (id / repo / kind / artifact) | ~6 GiB |
+| HNSW index files (Scalar Quantization, built once at end-of-full-index) | ~2.5 GiB |
+| **Total** | **~12.3 GiB** |
+
+What this means in practice:
+
+- A 100 k-entity repo lives in ~1–1.5 GiB. Trivially small.
+- A 200 k-entity repo (a typical large project) lives in ~2.5 GiB. Fine.
+- A 1 M-entity repo (large monorepo) lives in ~12 GiB. Workable but
+  not free — make sure `$HOME` has the headroom before adding the
+  repo.
+- Reading the daemon log: the `entity_vec HNSW index built` line
+  emitted at end-of-full-index is the moment Lance writes the
+  ~2.5 GiB index. Expect a one-shot disk-write spike there.
+
+Two operational levers if the size becomes a problem:
+
+1. `insrc repo remove <path>` drops every entity belonging to that
+   repo, including its Lance rows. Followed by `insrc daemon
+   compact` to reclaim LMDB pages. Lance's own compaction reclaims
+   the dropped vector rows on its next background pass.
+2. The HNSW index variant is currently `hnswSq` (Scalar
+   Quantization) — chosen for build speed and acceptable recall. If
+   the index size becomes the dominant cost, switching to `hnswPq`
+   (Product Quantization) in
+   [`db/lance/entity-vec.ts:optimizeEntityVecIndex`](../src/insrc/db/lance/entity-vec.ts)
+   gives ~2–4× index-size reduction at some recall cost. Not
+   currently the default because the 51 ms p99 search latency
+   already meets the perf target.
+
+> **Note**: the LMDB graph file (`~/.insrc/graph.lmdb`) is much
+> smaller — at 1 M entities + ~10 M edges it's ~60 MiB. Lance
+> dominates the storage budget; the LMDB env is a rounding error
+> next to it.
+
 ## Quick-reference command summary
 
 | Command | What it does |
