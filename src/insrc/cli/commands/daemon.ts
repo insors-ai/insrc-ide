@@ -2,7 +2,7 @@ import { spawn }      from 'node:child_process';
 import { existsSync, openSync } from 'node:fs';
 import { mkdirSync }  from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Command } from 'commander';
 import { rpc } from '../client.js';
 import { PATHS } from '../../shared/paths.js';
@@ -32,6 +32,11 @@ export function registerDaemonCommands(program: Command): void {
     .command('status')
     .description('show daemon health and indexing queue')
     .action(cmdStatus);
+
+  daemon
+    .command('backup <path>')
+    .description('snapshot LMDB + Lance into <path> while the daemon stays running')
+    .action(cmdBackup);
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +90,37 @@ async function cmdStop(): Promise<void> {
   } catch (err) {
     log.error(String(err));
   }
+}
+
+async function cmdBackup(path: string): Promise<void> {
+  const target = isAbsolute(path) ? path : resolve(process.cwd(), path);
+  try {
+    const result = await rpc<BackupResult>('daemon.backup', { path: target });
+    log.info(`backup written to ${result.targetDir}`);
+    log.info(`  lmdb:  ${formatBytes(result.lmdbBytes)}`);
+    log.info(`  lance: ${formatBytes(result.lanceBytes)}`);
+    log.info(`  took:  ${(result.elapsedMs / 1000).toFixed(2)} s`);
+  } catch (err) {
+    log.error(String(err));
+    process.exitCode = 1;
+  }
+}
+
+interface BackupResult {
+  targetDir:  string;
+  lmdbBytes:  number;
+  lanceBytes: number;
+  elapsedMs:  number;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0)    return '0 B';
+  if (bytes < 1024)   return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024)      return `${kb.toFixed(1)} KiB`;
+  const mb = kb / 1024;
+  if (mb < 1024)      return `${mb.toFixed(1)} MiB`;
+  return `${(mb / 1024).toFixed(2)} GiB`;
 }
 
 async function cmdStatus(): Promise<void> {

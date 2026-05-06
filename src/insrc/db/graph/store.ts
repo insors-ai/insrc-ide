@@ -382,6 +382,31 @@ export function runReaderCheck(reason: string): number {
 }
 
 /**
+ * Hot backup: snapshot the LMDB env file to `targetPath` while the
+ * daemon is still serving reads / writes.
+ *
+ * Wraps `root.backup()` (lmdb-js's surface for `mdb_env_copy2`):
+ * opens a snapshot read txn under the hood and copies the full env
+ * file -- meta page + all sub-DBs -- atomically. Concurrent writers
+ * can keep going; they just won't appear in the snapshot.
+ *
+ * `compact: true` strips dead pages while copying (slower, smaller
+ * file). Hot backups want speed, so the default is `false`. The
+ * Phase 7.4 `insrc daemon compact` CLI uses `compact: true` to
+ * produce a defragged copy.
+ */
+export async function backupGraphStore(
+	targetPath: string,
+	opts: { compact?: boolean } = {},
+): Promise<void> {
+	const inst = _instance;
+	if (inst === null) {
+		throw new LmdbStoreError('cannot backup: graph store is not open');
+	}
+	await inst.root.backup(targetPath, opts.compact ?? false);
+}
+
+/**
  * Close the env. Called by the daemon's graceful-shutdown handler.
  * Errors are logged but not re-thrown (the daemon is on the way down).
  */

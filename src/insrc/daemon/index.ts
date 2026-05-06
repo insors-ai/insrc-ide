@@ -1022,6 +1022,15 @@ async function main(): Promise<void> {
 			return { ok: true };
 		},
 
+		'daemon.backup': async (params) => {
+			const { path } = params as { path: string };
+			if (typeof path !== 'string' || path.length === 0) {
+				throw new Error('daemon.backup: target path required');
+			}
+			const { backupAll } = await import('./backup.js');
+			return await backupAll(path);
+		},
+
 		// Per-workspace data-analyzer DB introspection + reset. Backing
 		// pool lives at <workspaceRoot>/.insrc/data-analyzer.db. Status
 		// never lazy-inits the pool (read-only stat); reset closes the

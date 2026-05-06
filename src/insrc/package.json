@@ -81,6 +81,7 @@
     "test:search-lmdb": "tsx --test db/__tests__/search-lmdb.test.ts",
     "test:cross-file-resolver-lmdb": "tsx --test indexer/__tests__/cross-file-resolver-lmdb.test.ts",
     "test:graph-query": "tsx --test daemon/tools/builtins/graph/__tests__/graph-query.test.ts",
+    "test:backup": "tsx --test daemon/__tests__/backup.test.ts",
     "test:repos-lmdb": "tsx --test db/__tests__/repos-lmdb.test.ts",
     "test:entities-lmdb": "tsx --test db/__tests__/entities-lmdb.test.ts",
     "test:relations-lmdb": "tsx --test db/__tests__/relations-lmdb.test.ts",
