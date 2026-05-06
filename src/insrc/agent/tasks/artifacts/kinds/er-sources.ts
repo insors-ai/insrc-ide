@@ -19,7 +19,13 @@ import { isAbsolute, resolve } from 'node:path';
 import { getLogger } from '../../../../shared/logger.js';
 import type { DbClient } from '../../../../db/client.js';
 import { getDb } from '../../../../db/client.js';
-import { findEntitiesByName, getEntity } from '../../../../db/entities.js';
+import {
+	findEntitiesByName,
+	getEntity,
+	entityU64ForId,
+	entityIdsByU64s,
+} from '../../../../db/entities.js';
+import { outNeighbors } from '../../../../db/graph/edges.js';
 import { acquirePool } from '../../../../daemon/db/pool-cache.js';
 import type {
 	RdbmsDriver,
@@ -195,22 +201,28 @@ export async function parseGraphEntitiesSource(
 		lines.push('  }');
 	}
 
-	// REFERENCES edges between selected entities. The relation table is
-	// shape (src, dst, kind); we fetch the REFERENCES edges (capped at
-	// 2000) and filter in-process against the selected id set.
-	const refs = await db.duck.query<{ fromId: string; toId: string }>(
-		`SELECT src AS "fromId", dst AS "toId"
-		 FROM relation WHERE kind = 'REFERENCES' LIMIT 2000`,
-	).catch(() => [] as { fromId: string; toId: string }[]);
-	for (const row of refs) {
-		const fromId = row['fromId'];
-		const toId = row['toId'];
-		if (typeof fromId !== 'string' || typeof toId !== 'string') { continue; }
-		if (!byId.has(fromId) || !byId.has(toId)) { continue; }
-		const from = nameToErName.get(fromId);
-		const to = nameToErName.get(toId);
-		if (from === undefined || to === undefined) { continue; }
-		lines.push(`  ${from} ||--o{ ${to} : references`);
+	// REFERENCES edges between selected entities. Walk each selected
+	// entity's REFERENCES out-edges via the LMDB graph layer, then keep
+	// only the edges whose target is also in `byId`. This is more
+	// selective than the prior "fetch all REFERENCES, filter
+	// in-process" approach (which capped at 2000 edges as a safety
+	// rail) -- we only touch the rows we actually care about.
+	for (const e of selected) {
+		const u64 = await entityU64ForId(e.id).catch(() => undefined);
+		if (u64 === undefined) { continue; }
+		const targetU64s = await outNeighbors(u64, { kindFilter: ['REFERENCES'] });
+		if (targetU64s.length === 0) { continue; }
+		const idMap = await entityIdsByU64s(targetU64s);
+		const from = nameToErName.get(e.id);
+		if (from === undefined) { continue; }
+		for (const tU64 of targetU64s) {
+			const toId = idMap.get(tU64);
+			if (toId === undefined) { continue; }
+			if (!byId.has(toId)) { continue; }
+			const to = nameToErName.get(toId);
+			if (to === undefined) { continue; }
+			lines.push(`  ${from} ||--o{ ${to} : references`);
+		}
 	}
 
 	return {
