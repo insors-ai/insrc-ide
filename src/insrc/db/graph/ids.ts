@@ -23,7 +23,27 @@
  * not id=42.
  */
 
+import { WORKSPACE_REPO_ID_MAX } from '../../shared/repo-namespaces.js';
 import { getGraphStore, withWriteTxn, type GraphStore } from './store.js';
+
+/**
+ * Hard cap on the workspace repoId allocator. The Phase 5.x strict
+ * contract reserves the top of u32 space for shared-modules
+ * registry rows; the workspace allocator must never reach those.
+ * 4 billion is a structurally-impossible workspace count, so this
+ * is a safety bound, not a real limit.
+ */
+class RepoIdSpaceExhausted extends Error {
+	constructor(next: number) {
+		super(
+			`Workspace repoId allocator reached ${next}, beyond the cap ` +
+			`${WORKSPACE_REPO_ID_MAX}. The reserved top-of-u32 range is for ` +
+			`shared-modules namespace rows. This is structurally impossible ` +
+			`under any realistic workload -- check for a counter-corruption bug.`,
+		);
+		this.name = 'RepoIdSpaceExhausted';
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Meta keys (utf8 strings; meta sub-DB uses ordered-binary key encoding)
@@ -91,6 +111,9 @@ export async function allocateRepoId(): Promise<number> {
 
 export function allocateRepoIdInTxn(store: GraphStore): number {
 	const cur = readU32(store, META_NEXT_REPO_ID, INITIAL_REPO_ID);
+	if (cur > WORKSPACE_REPO_ID_MAX) {
+		throw new RepoIdSpaceExhausted(cur);
+	}
 	const next = cur + 1;
 	writeU32(store, META_NEXT_REPO_ID, next);
 	return cur;

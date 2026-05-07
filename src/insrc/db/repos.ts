@@ -165,6 +165,7 @@ export async function addRepo(_db: DbClient, repo: RegisteredRepo): Promise<void
 		const id = existing ?? allocateRepoIdInTxn(s);
 		const row: RepoRow = {
 			id,
+			kind:        'workspace',
 			path:        normalisedPath,
 			name,
 			addedAt:     parseTimestamp(repo.addedAt),

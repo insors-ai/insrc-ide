@@ -110,8 +110,22 @@ const MAX_DBS = 32;
  *         remain authoritative; the reverse + name indices are
  *         derived and rebuilt by the v1→v2 migration on existing
  *         envs.
+ *   v3 -- repo-registry strict contract
+ *         (plans/repo-registry-strict-contract.md):
+ *         - RepoRow gains a `kind: RepoKind` discriminator
+ *           ('workspace' | 'shared-modules') and an optional
+ *           `namespace: SharedModulesNamespace` field for
+ *           shared-modules rows.
+ *         - Shared-modules reserved registry rows are pre-allocated
+ *           at fixed reserved IDs at the top of u32 space (see
+ *           SHARED_MODULES_REPO_ID).
+ *         - The v2 → v3 forward migration provisions the reserved
+ *           rows, rewires existing module entities (kind='module')
+ *           to point at the matching namespace row, drops phantom
+ *           workspace rows whose path is empty / banned / non-
+ *           existent, and bumps the version.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const META_SCHEMA_VERSION = 'schema_version';
 

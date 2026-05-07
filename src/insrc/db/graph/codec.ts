@@ -66,9 +66,34 @@ function decode<T>(buf: Buffer): T {
 
 export type RepoStatus = 'pending' | 'indexing' | 'ready' | 'error';
 
+/**
+ * Phase 5.x strict-contract: discriminates user-registered workspace
+ * repos from synthetic shared-module-namespace rows. Workspace rows
+ * are allocated monotonically by `addRepo()`; shared-modules rows
+ * are pre-allocated at fixed reserved IDs at the top of u32 space
+ * by the v2 -> v3 schema migration. See
+ * plans/repo-registry-strict-contract.md.
+ */
+export type RepoKind = 'workspace' | 'shared-modules';
+
+/**
+ * Initial set of namespaces for shared-modules rows. Each namespace
+ * groups languages whose import-resolution rules share a module
+ * space (JVM languages share class-paths, npm packages share npm,
+ * etc.). Adding a new ecosystem appends here + to
+ * `SHARED_MODULES_REPO_ID` + to `SHARED_MODULES_NAMESPACE_BY_LANG`.
+ */
+export type SharedModulesNamespace = 'jvm' | 'npm' | 'python' | 'go';
+
 export interface RepoRow {
 	id:           number;       // u32, also encoded in the key
-	path:         string;       // absolute filesystem path
+	/** Discriminator. Pre-v3 rows (decoded from older codec output)
+	 *  default to 'workspace' since that's the only kind the v1 / v2
+	 *  schema knew about. */
+	kind:         RepoKind;
+	/** Required when `kind === 'shared-modules'`; absent otherwise. */
+	namespace?:   SharedModulesNamespace;
+	path:         string;       // absolute filesystem path; '' for shared-modules
 	name:         string;       // display name
 	addedAt:      number;       // unix ms
 	lastIndexed:  number;       // unix ms; 0 if never indexed
@@ -77,7 +102,28 @@ export interface RepoRow {
 }
 
 export const encodeRepoRow = (r: RepoRow): Buffer => encode(r);
-export const decodeRepoRow = (b: Buffer): RepoRow => decode(b);
+
+/**
+ * Decode a stored row, defaulting `kind: 'workspace'` for pre-v3
+ * rows that didn't carry the discriminator. The v2 -> v3 migration
+ * rewrites every row in-place so this default fires only during
+ * the migration's own scan; post-migration every row carries an
+ * explicit `kind`.
+ */
+export const decodeRepoRow = (b: Buffer): RepoRow => {
+	const raw = decode<Partial<RepoRow> & { id: number; path: string; name: string; addedAt: number; lastIndexed: number; status: RepoStatus; errorMsg: string }>(b);
+	return {
+		id:          raw.id,
+		kind:        raw.kind ?? 'workspace',
+		...(raw.namespace !== undefined ? { namespace: raw.namespace } : {}),
+		path:        raw.path,
+		name:        raw.name,
+		addedAt:     raw.addedAt,
+		lastIndexed: raw.lastIndexed,
+		status:      raw.status,
+		errorMsg:    raw.errorMsg,
+	};
+};
 
 // ---------------------------------------------------------------------------
 // Entity row -- value of `entity` sub-DB (key: u64 BE entity_id)

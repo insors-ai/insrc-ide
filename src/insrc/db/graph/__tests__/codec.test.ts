@@ -33,8 +33,18 @@ import {
 
 test('repo row round-trip', () => {
 	const r: RepoRow = {
-		id: 1, path: '/repo/foo', name: 'foo',
+		id: 1, kind: 'workspace', path: '/repo/foo', name: 'foo',
 		addedAt: Date.now(), lastIndexed: Date.now(),
+		status: 'ready', errorMsg: '',
+	};
+	assert.deepEqual(decodeRepoRow(encodeRepoRow(r)), r);
+});
+
+test('repo row round-trip -- shared-modules kind with namespace', () => {
+	const r: RepoRow = {
+		id: 0xFFFFFFFE, kind: 'shared-modules', namespace: 'jvm',
+		path: '', name: 'shared-modules:jvm',
+		addedAt: Date.now(), lastIndexed: 0,
 		status: 'ready', errorMsg: '',
 	};
 	assert.deepEqual(decodeRepoRow(encodeRepoRow(r)), r);

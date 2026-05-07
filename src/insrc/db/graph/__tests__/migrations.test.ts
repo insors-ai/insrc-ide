@@ -53,6 +53,12 @@ test('production MIGRATIONS registry has the v1->v2 entry', () => {
 	assert.match(v1to2.description, /entity_string_by_u64|name_index/);
 });
 
+test('production MIGRATIONS registry has the v2->v3 entry', () => {
+	const v2to3 = MIGRATIONS.find(m => m.from === 2 && m.to === 3);
+	assert.ok(v2to3, 'expected a 2->3 migration registered');
+	assert.match(v2to3.description, /repo-registry|strict contract|shared-modules/i);
+});
+
 // ---------------------------------------------------------------------------
 // Runner: no-op paths
 // ---------------------------------------------------------------------------

@@ -283,6 +283,12 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 			const id = allocateRepoIdInTxn(s);
 			const row: RepoRow = {
 				id,
+				// Pre-Phase-5 callers can still hit this path (the strict
+				// contract isn't enforced until Phase 3.2 lands). Default
+				// to 'workspace' kind for back-compat. Module-namespace
+				// rows go through the v2->v3 migration's reserved-id
+				// allocation, not here.
+				kind:        'workspace',
 				path:        lookupPath,
 				name:        lookupPath === EXTERNAL_MODULES_REPO_PATH ? 'external-modules' : '',
 				addedAt:     Date.now(),
@@ -446,6 +452,7 @@ export async function reindexFile(
 			repoId = allocateRepoIdInTxn(s);
 			const row: RepoRow = {
 				id:          repoId,
+				kind:        'workspace',
 				path:        repoPath,
 				name:        '',
 				addedAt:     Date.now(),
