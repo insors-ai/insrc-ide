@@ -55,6 +55,8 @@ import type {
 	ScanOpts,
 	SchemaDescription,
 	ShapeReport,
+	TemporalTrendRequest,
+	TemporalTrendResult,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import { withConnection } from '../duckdb-pool.js';
@@ -67,6 +69,7 @@ import {
 	executeCorrelationMatrix,
 	executeHistogram,
 	executeOutliers,
+	executeTemporalTrend,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
@@ -475,6 +478,12 @@ class DuckDBFileDriver implements FileDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeOutliers(request, await this.orchestratorDeps(target, cols));
+	}
+
+	async temporalTrend(target: string | undefined, request: TemporalTrendRequest): Promise<TemporalTrendResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeTemporalTrend({ ...await this.orchestratorDeps(target, cols), request });
 	}
 
 	private async orchestratorDeps(target: string | undefined, cols: readonly string[]): Promise<OrchestratorDeps> {

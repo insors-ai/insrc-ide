@@ -178,6 +178,10 @@ class ClickHouseDriver implements RdbmsDriver {
 		throw new Error('data-driver: outliers() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
 	}
 
+	async temporalTrend(): Promise<never> {
+		throw new Error('data-driver: temporalTrend() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
+	}
+
 	async close(): Promise<void> {
 		await this.client.close();
 	}

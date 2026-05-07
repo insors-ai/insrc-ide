@@ -34,6 +34,8 @@ import type {
 	SampleResult,
 	SchemaDescription,
 	TableListing,
+	TemporalTrendRequest,
+	TemporalTrendResult,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -48,6 +50,7 @@ import {
 	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
+	executeTemporalTrend,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
@@ -233,6 +236,12 @@ class MysqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeOutliers(request, this.orchestratorDeps(target, cols));
+	}
+
+	async temporalTrend(target: string, request: TemporalTrendRequest): Promise<TemporalTrendResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeTemporalTrend({ ...this.orchestratorDeps(target, cols), request });
 	}
 
 	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {

@@ -264,6 +264,48 @@ describe('SqliteDriver (via pool)', () => {
 		await pool.closeAll();
 	});
 
+	it('temporalTrend recovers slope/intercept/R² via expression-based regression (Phase 5g.1)', async () => {
+		// Seed a small (timestamp, value) table where value = 2 + 3 * (epoch_seconds_since_t0).
+		// SQLite has no native REGR_*; the driver takes the expression-based
+		// path (SUM moments + JS computation) and the slope should recover
+		// to ~3 per second. Datetimes stored as ISO strings so SQLite's
+		// `unixepoch()` works.
+		const tsPath = join(repoRoot, 'ts.sqlite');
+		const seedTs = new BetterSqlite3(tsPath);
+		seedTs.exec(`
+			CREATE TABLE events (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, val REAL NOT NULL);
+		`);
+		const t0 = 1735689600; // 2025-01-01 00:00 UTC
+		const ins = seedTs.prepare('INSERT INTO events (id, ts, val) VALUES (?, ?, ?)');
+		for (let i = 0; i < 10; i++) {
+			const ts = new Date((t0 + i) * 1000).toISOString();
+			const val = 2 + 3 * i;  // exact line: intercept depends on t0
+			ins.run(i + 1, ts, val);
+		}
+		seedTs.close();
+
+		const p = connectionsPath(repoRoot);
+		await mkdir(join(p, '..'), { recursive: true });
+		await writeFile(p, JSON.stringify({
+			connections: [{ id: 'ts', kind: 'sqlite', path: 'ts.sqlite' }],
+		}), 'utf8');
+
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('ts');
+		const r = await (drv as { temporalTrend: (t: string, req: unknown) => Promise<{ n: number; slope: number; intercept: number; r2: number; minTimestampEpoch: number; maxTimestampEpoch: number }> }).temporalTrend(
+			'events', { timestampColumn: 'ts', valueColumn: 'val' },
+		);
+		assert.equal(r.n, 10);
+		// slope = 3 per second (val grows by 3 each second of epoch)
+		assert.ok(Math.abs(r.slope - 3) < 1e-6, `expected slope ~3 per sec, got ${r.slope}`);
+		// R² = 1 (perfect line)
+		assert.ok(Math.abs(r.r2 - 1) < 1e-6, `expected R² ~1, got ${r.r2}`);
+		assert.equal(r.minTimestampEpoch, t0);
+		assert.equal(r.maxTimestampEpoch, t0 + 9);
+		await pool.closeAll();
+	});
+
 	it('aggregate stddev surfaces SQLite-no-such-function as a clean engine error', async () => {
 		// SQLite has no built-in STDDEV_SAMP; the engine error reaches
 		// the tool layer verbatim and surfaces as `success: false` to

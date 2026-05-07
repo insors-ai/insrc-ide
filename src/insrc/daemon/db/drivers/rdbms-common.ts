@@ -30,6 +30,8 @@ import type {
 	OutlierRequest,
 	OutlierResult,
 	SampleOpts,
+	TemporalTrendRequest,
+	TemporalTrendResult,
 	WhereClause,
 } from '../../../shared/db-driver.js';
 
@@ -67,6 +69,23 @@ export interface Dialect {
 	 * Gap 1 (plans/analyzers/data-analyzer-skills.md).
 	 */
 	readonly regexPredicate?: (col: string, placeholder: string, negate: boolean) => string;
+	/**
+	 * Convert a timestamp / date-time column expression to numeric
+	 * epoch-seconds. `col` is already quoted. Used by Phase 5g.1
+	 * temporal-trend regression and any other skill that needs to
+	 * regress against a temporal axis. Every shipped dialect can
+	 * express this; the per-dialect SQL is the only difference.
+	 */
+	readonly epochExpr: (col: string) => string;
+	/**
+	 * True if the dialect has native `REGR_SLOPE` / `REGR_INTERCEPT`
+	 * / `REGR_R2` aggregate functions (Postgres, DuckDB, Oracle).
+	 * False on dialects that need expression-based regression
+	 * (MySQL, SQLite, MSSQL). When false, `executeTemporalTrend`
+	 * pulls the six SUMs + N + min/max in one query and computes
+	 * slope / intercept / r² in JS.
+	 */
+	readonly supportsNativeRegr: boolean;
 }
 
 export const POSTGRES_DIALECT: Dialect = {
@@ -74,6 +93,8 @@ export const POSTGRES_DIALECT: Dialect = {
 	placeholder: (i) => `$${i}`,
 	limitClause: (n) => `LIMIT ${n}`,
 	regexPredicate: (col, ph, negate) => `${col} ${negate ? '!~' : '~'} ${ph}`,
+	epochExpr: (col) => `EXTRACT(EPOCH FROM ${col})`,
+	supportsNativeRegr: true,
 };
 
 export const MYSQL_DIALECT: Dialect = {
@@ -81,6 +102,8 @@ export const MYSQL_DIALECT: Dialect = {
 	placeholder: () => '?',
 	limitClause: (n) => `LIMIT ${n}`,
 	regexPredicate: (col, ph, negate) => `${col} ${negate ? 'NOT REGEXP' : 'REGEXP'} ${ph}`,
+	epochExpr: (col) => `UNIX_TIMESTAMP(${col})`,
+	supportsNativeRegr: false,
 };
 
 /**
@@ -93,6 +116,14 @@ export const SQLITE_DIALECT: Dialect = {
 	placeholder: () => '?',
 	limitClause: (n) => `LIMIT ${n}`,
 	regexPredicate: (col, ph, negate) => `${col} ${negate ? 'NOT REGEXP' : 'REGEXP'} ${ph}`,
+	// SQLite stores datetimes as ISO-8601 strings or numeric Julian
+	// days; `unixepoch()` (3.38+) converts both to epoch seconds.
+	// Older SQLite would need `strftime('%s', col)`; we target a
+	// recent enough SQLite that `unixepoch()` is available since
+	// every other Phase 0 primitive (MAD, percentile_cont, NTILE)
+	// already requires it.
+	epochExpr: (col) => `unixepoch(${col})`,
+	supportsNativeRegr: false,
 };
 
 /**
@@ -106,6 +137,11 @@ export const MSSQL_DIALECT: Dialect = {
 	quoteIdent: (p) => `[${p.replace(/]/g, ']]')}]`,
 	placeholder: (i) => `@p${i}`,
 	limitClause: () => '', // uses TOP; see buildSampleSql
+	// T-SQL: DATEDIFF is the standard epoch-seconds idiom; uses BIGINT
+	// to avoid the INT-second overflow at 2038. DATEDIFF_BIG is the
+	// 64-bit variant on SQL Server 2016+.
+	epochExpr: (col) => `DATEDIFF_BIG(SECOND, '1970-01-01', ${col})`,
+	supportsNativeRegr: false,
 };
 
 export const ORACLE_DIALECT: Dialect = {
@@ -113,6 +149,9 @@ export const ORACLE_DIALECT: Dialect = {
 	placeholder: (i) => `:${i}`,
 	limitClause: (n) => `FETCH FIRST ${n} ROWS ONLY`,
 	regexPredicate: (col, ph, negate) => `${negate ? 'NOT ' : ''}REGEXP_LIKE(${col}, ${ph})`,
+	// Oracle: subtract the epoch DATE and multiply by seconds-per-day.
+	epochExpr: (col) => `((${col} - DATE '1970-01-01') * 86400)`,
+	supportsNativeRegr: true,
 };
 
 /**
@@ -127,6 +166,9 @@ export const CLICKHOUSE_DIALECT: Dialect = {
 	placeholder: (i) => `{p${i}:String}`,
 	limitClause: (n) => `LIMIT ${n}`,
 	regexPredicate: (col, ph, negate) => `${negate ? 'NOT ' : ''}match(${col}, ${ph})`,
+	// ClickHouse: toUnixTimestamp accepts both DateTime and Date.
+	epochExpr: (col) => `toUnixTimestamp(${col})`,
+	supportsNativeRegr: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -1693,6 +1735,208 @@ export async function executeOutliers(
 		center, spread,
 		examples,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Temporal trend (Phase 5g.1 substrate)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the SQL for a temporal-trend regression query. Two paths
+ * branch on `dialect.supportsNativeRegr`:
+ *
+ *   - Native path (Postgres / DuckDB / Oracle): single-row SELECT
+ *     using `REGR_SLOPE(y, x)` etc. directly.
+ *   - Expression path (MySQL / SQLite / MSSQL / ClickHouse): single-
+ *     row SELECT returning N + sum(x) + sum(y) + sum(x*x) + sum(y*y)
+ *     + sum(x*y) + min(x) + max(x); the orchestrator computes slope /
+ *     intercept / r² from those moments in JS.
+ *
+ * In both paths X is the timestamp column converted to epoch-seconds
+ * via `dialect.epochExpr`.
+ */
+export interface CompiledTemporalTrend {
+	readonly text: string;
+	readonly values: readonly unknown[];
+	/** True when the SQL emits direct REGR_* aggregates; false when it
+	 *  emits the SUM-based moments for JS-side computation. */
+	readonly native: boolean;
+}
+
+export function compileTemporalTrend(
+	target: string,
+	request: TemporalTrendRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	opts?: { asTableExpr?: string; paramStartIndex?: number },
+): CompiledTemporalTrend {
+	const tsCol = quoteAndValidateColumn(request.timestampColumn, knownColumns, dialect);
+	const yCol  = quoteAndValidateColumn(request.valueColumn,    knownColumns, dialect);
+	const xExpr = dialect.epochExpr(tsCol);
+	const tableExpr = opts?.asTableExpr ?? quoteTarget(target, dialect);
+	const startIdx = opts?.paramStartIndex ?? 1;
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, startIdx);
+	const whereClause = where.text === '' ? '' : ` ${where.text}`;
+
+	const text = dialect.supportsNativeRegr
+		? buildNativeRegrSql(yCol, xExpr, tableExpr, whereClause)
+		: buildExpressionRegrSql(yCol, xExpr, tableExpr, whereClause);
+
+	if (looksLikeMutation(text)) {
+		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
+	}
+	return { text, values: where.values, native: dialect.supportsNativeRegr };
+}
+
+function quoteAndValidateColumn(name: string, known: readonly string[], dialect: Dialect): string {
+	if (!known.map(c => c.toLowerCase()).includes(name.toLowerCase())) {
+		throw new Error(`data-driver: unknown column '${name}' in temporalTrend request`);
+	}
+	return dialect.quoteIdent(name);
+}
+
+function buildNativeRegrSql(yCol: string, xExpr: string, quotedTarget: string, whereClause: string): string {
+	return [
+		'SELECT',
+		`  REGR_SLOPE(${yCol}, ${xExpr})     AS slope,`,
+		`  REGR_INTERCEPT(${yCol}, ${xExpr}) AS intercept,`,
+		`  REGR_R2(${yCol}, ${xExpr})        AS r2,`,
+		`  REGR_COUNT(${yCol}, ${xExpr})     AS n,`,
+		`  MIN(CASE WHEN ${yCol} IS NOT NULL AND ${xExpr} IS NOT NULL THEN ${xExpr} END) AS min_x,`,
+		`  MAX(CASE WHEN ${yCol} IS NOT NULL AND ${xExpr} IS NOT NULL THEN ${xExpr} END) AS max_x`,
+		`FROM ${quotedTarget}${whereClause}`,
+	].join(' ');
+}
+
+function buildExpressionRegrSql(yCol: string, xExpr: string, quotedTarget: string, whereClause: string): string {
+	// `x*y` (and the other products) are NULL when either side is NULL,
+	// so SUM ignores them naturally -- but we wrap the linear sums in
+	// a CASE so SUM(x), SUM(y), SUM(x*x), SUM(y*y) are also restricted
+	// to the pair-non-null subset (otherwise SUM(x) would include rows
+	// where x is non-null but y is null, giving inconsistent moments).
+	const pair = `${yCol} IS NOT NULL AND ${xExpr} IS NOT NULL`;
+	return [
+		'SELECT',
+		`  SUM(CASE WHEN ${pair} THEN 1 ELSE 0 END)                  AS n,`,
+		`  SUM(CASE WHEN ${pair} THEN ${xExpr}                  END) AS sx,`,
+		`  SUM(CASE WHEN ${pair} THEN ${yCol}                   END) AS sy,`,
+		`  SUM(CASE WHEN ${pair} THEN ${xExpr} * ${xExpr}       END) AS sxx,`,
+		`  SUM(CASE WHEN ${pair} THEN ${yCol} * ${yCol}         END) AS syy,`,
+		`  SUM(CASE WHEN ${pair} THEN ${xExpr} * ${yCol}        END) AS sxy,`,
+		`  MIN(CASE WHEN ${pair} THEN ${xExpr}                  END) AS min_x,`,
+		`  MAX(CASE WHEN ${pair} THEN ${xExpr}                  END) AS max_x`,
+		`FROM ${quotedTarget}${whereClause}`,
+	].join(' ');
+}
+
+/**
+ * Build a TemporalTrendResult from one row of the engine's response.
+ * Branches on `native`: native rows have slope/intercept/r²/n
+ * directly; expression rows have the SUM moments and we compute
+ * slope/intercept/r² in JS.
+ */
+export function readTemporalTrendRow(
+	row: Readonly<Record<string, unknown>> | undefined,
+	target: string,
+	timestampColumn: string,
+	valueColumn: string,
+	native: boolean,
+): TemporalTrendResult {
+	if (row === undefined) {
+		return {
+			target, timestampColumn, valueColumn,
+			n: 0, slope: null, slopePerDay: null,
+			intercept: null, r2: null,
+			minTimestampEpoch: null, maxTimestampEpoch: null,
+		};
+	}
+
+	const minX = asNumericValue(row['min_x'] as number | string | null | undefined);
+	const maxX = asNumericValue(row['max_x'] as number | string | null | undefined);
+
+	if (native) {
+		const slope     = asNumericValue(row['slope']     as number | string | null | undefined);
+		const intercept = asNumericValue(row['intercept'] as number | string | null | undefined);
+		const r2        = asNumericValue(row['r2']        as number | string | null | undefined);
+		const n         = Math.max(0, Math.floor(asNumericValue(row['n'] as number | string | null | undefined) ?? 0));
+		return {
+			target, timestampColumn, valueColumn,
+			n,
+			slope,
+			slopePerDay: slope !== null ? slope * 86400 : null,
+			intercept, r2,
+			minTimestampEpoch: minX, maxTimestampEpoch: maxX,
+		};
+	}
+
+	const n   = Math.max(0, Math.floor(asNumericValue(row['n']   as number | string | null | undefined) ?? 0));
+	const sx  = asNumericValue(row['sx']  as number | string | null | undefined);
+	const sy  = asNumericValue(row['sy']  as number | string | null | undefined);
+	const sxx = asNumericValue(row['sxx'] as number | string | null | undefined);
+	const syy = asNumericValue(row['syy'] as number | string | null | undefined);
+	const sxy = asNumericValue(row['sxy'] as number | string | null | undefined);
+
+	if (n < 2 || sx === null || sy === null || sxx === null || syy === null || sxy === null) {
+		return {
+			target, timestampColumn, valueColumn,
+			n,
+			slope: null, slopePerDay: null,
+			intercept: null, r2: null,
+			minTimestampEpoch: minX, maxTimestampEpoch: maxX,
+		};
+	}
+
+	// Sxx, Sxy, Syy in centred form for numerical stability.
+	const Sxx = sxx - (sx * sx) / n;
+	const Syy = syy - (sy * sy) / n;
+	const Sxy = sxy - (sx * sy) / n;
+
+	let slope: number | null;
+	let intercept: number | null;
+	let r2: number | null;
+	if (Sxx > 0) {
+		slope     = Sxy / Sxx;
+		intercept = (sy - slope * sx) / n;
+		r2        = Syy > 0 ? (Sxy * Sxy) / (Sxx * Syy) : null;
+	} else {
+		// Zero variance in X: regression slope is undefined.
+		slope = null;
+		intercept = null;
+		r2 = null;
+	}
+
+	return {
+		target, timestampColumn, valueColumn,
+		n,
+		slope,
+		slopePerDay: slope !== null ? slope * 86400 : null,
+		intercept, r2,
+		minTimestampEpoch: minX, maxTimestampEpoch: maxX,
+	};
+}
+
+export interface TemporalTrendOrchestratorDeps extends OrchestratorDeps {
+	readonly request: TemporalTrendRequest;
+}
+
+export async function executeTemporalTrend(
+	deps: TemporalTrendOrchestratorDeps,
+): Promise<TemporalTrendResult> {
+	const compiled = compileTemporalTrend(
+		deps.target,
+		deps.request,
+		deps.knownColumns,
+		deps.dialect,
+		buildOrchestratorOptions(deps),
+	);
+	const rows = await deps.runRows(compiled.text, compiled.values);
+	return readTemporalTrendRow(
+		rows[0],
+		deps.target,
+		deps.request.timestampColumn,
+		deps.request.valueColumn,
+		compiled.native,
+	);
 }
 
 // ---------------------------------------------------------------------------

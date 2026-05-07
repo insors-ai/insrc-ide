@@ -40,6 +40,8 @@ import type {
 	RdbmsDriver,
 	SampleOpts,
 	ScanOpts,
+	TemporalTrendRequest,
+	TemporalTrendResult,
 	WhereClause,
 } from '../../../../shared/db-driver.js';
 import type { AccessPolicy, AccessPolicyContext } from '../../../../shared/access.js';
@@ -1424,6 +1426,122 @@ const fileOutliersTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// db:sql:temporal_trend + db:file:temporal_trend (Phase 5g.1 substrate)
+// ---------------------------------------------------------------------------
+
+function buildTemporalTrendRequest(input: ToolInput): { request: TemporalTrendRequest; error?: undefined } | { error: string } {
+	const timestampColumn = String(input['timestampColumn'] ?? '');
+	const valueColumn     = String(input['valueColumn']     ?? '');
+	if (timestampColumn === '' || valueColumn === '') {
+		return { error: 'timestampColumn and valueColumn are required' };
+	}
+	const where = parseWhereInput(input['where']);
+	const out: TemporalTrendRequest = where.length > 0
+		? { timestampColumn, valueColumn, where }
+		: { timestampColumn, valueColumn };
+	return { request: out };
+}
+
+function formatTemporalTrendResult(r: TemporalTrendResult): string {
+	const lines: string[] = [
+		`**${r.target}** -- regress \`${r.valueColumn}\` on \`${r.timestampColumn}\` (n=${r.n})`,
+		'',
+		`slope: ${r.slope === null ? '_(null)_' : r.slope.toPrecision(6)} per second`,
+		`slopePerDay: ${r.slopePerDay === null ? '_(null)_' : r.slopePerDay.toPrecision(6)}`,
+		`intercept: ${r.intercept === null ? '_(null)_' : r.intercept.toPrecision(6)}`,
+		`R²: ${r.r2 === null ? '_(null)_' : r.r2.toPrecision(4)}`,
+	];
+	if (r.minTimestampEpoch !== null && r.maxTimestampEpoch !== null) {
+		lines.push(`time range: epoch ${r.minTimestampEpoch} .. ${r.maxTimestampEpoch}`);
+	}
+	return lines.join('\n');
+}
+
+const TEMPORAL_TREND_INPUT_PROPS = {
+	timestampColumn: { type: 'string', description: 'Temporal column used as the X axis. Server converts to epoch-seconds via dialect-specific SQL.' },
+	valueColumn:     { type: 'string', description: 'Numeric column used as the Y axis.' },
+	where:           WHERE_SCHEMA,
+} as const;
+
+const sqlTemporalTrendTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_temporal_trend',
+	description:
+		'Server-side OLS regression of valueColumn on timestampColumn (Phase 5g.1 substrate). Returns slope ' +
+		'(per second of epoch), slopePerDay (slope * 86400), intercept, R², n (count of non-null pairs), and ' +
+		'min/max timestampEpoch. Postgres / DuckDB / Oracle use native REGR_SLOPE / REGR_INTERCEPT / REGR_R2; ' +
+		'MySQL / SQLite / MSSQL pull SUM moments and the orchestrator computes slope/intercept/R² in JS. ' +
+		'ClickHouse stub throws.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'timestampColumn', 'valueColumn'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string' },
+			...TEMPORAL_TREND_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		if (connectionId === '' || target === '') return fail(this.id, 'connectionId and target are required');
+		const reqOrErr = buildTemporalTrendRequest(input);
+		if (reqOrErr.error !== undefined) return fail(this.id, reqOrErr.error);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.temporalTrend !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement temporalTrend() yet`);
+		}
+		try {
+			const r = await rd.temporalTrend(target, reqOrErr.request);
+			return ok(formatTemporalTrendResult(r), r);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+const fileTemporalTrendTool: Tool = {
+	access: FILE_ACCESS,
+	id: 'db_file_temporal_trend',
+	description:
+		'Server-side OLS regression on a file connection (DuckDB-backed). Same shape as db_sql_temporal_trend ' +
+		'with `path` for the optional xlsx sheet selector. DuckDB has native REGR_* aggregates so this always ' +
+		'takes the native path.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'timestampColumn', 'valueColumn'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target: { type: 'string', description: 'Optional. xlsx: sheet name.' },
+			...TEMPORAL_TREND_INPUT_PROPS,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		if (connectionId === '') return fail(this.id, 'connectionId is required');
+		const reqOrErr = buildTemporalTrendRequest(input);
+		if (reqOrErr.error !== undefined) return fail(this.id, reqOrErr.error);
+		const driver = await acquireDriver(this.id, deps, connectionId, 'file');
+		if (!isDriver(driver)) return driver;
+		const fd = driver as FileDriver;
+		if (typeof fd.temporalTrend !== 'function') {
+			return fail(this.id, `file driver '${fd.kind}' does not implement temporalTrend(). All DuckDB-backed file kinds support it.`);
+		}
+		try {
+			const target = typeof input['target'] === 'string' ? input['target'] : undefined;
+			const r = await fd.temporalTrend(target, reqOrErr.request);
+			return ok(formatTemporalTrendResult(r), r);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
 // db:kv:list_namespaces + db:kv:describe_namespace (Phase 0.7 + 0.8)
 // ---------------------------------------------------------------------------
 
@@ -1845,6 +1963,7 @@ export function registerDbTools(): void {
 	registerTool(sqlHistogramTool);
 	registerTool(sqlCorrelationMatrixTool);
 	registerTool(sqlOutliersTool);
+	registerTool(sqlTemporalTrendTool);
 	registerTool(kvScanTool);
 	registerTool(kvGetTool);
 	registerTool(kvSampleShapeTool);
@@ -1858,6 +1977,7 @@ export function registerDbTools(): void {
 	registerTool(fileHistogramTool);
 	registerTool(fileCorrelationMatrixTool);
 	registerTool(fileOutliersTool);
+	registerTool(fileTemporalTrendTool);
 	registerTool(fileListFilesTool);
 	log.debug({ count: 27 }, 'data-driver tools registered');
 }

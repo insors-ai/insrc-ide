@@ -21,12 +21,14 @@ import {
 	compileAggregate,
 	compileAggregateExprs,
 	compileDistinct,
+	compileTemporalTrend,
 	compileWhere,
 	looksLikeMutation,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
 	readDistinctRows,
+	readTemporalTrendRow,
 	withTimeout,
 } from '../drivers/rdbms-common.js';
 
@@ -729,5 +731,165 @@ describe('readDistinctCount', () => {
 		assert.equal(readDistinctCount({ DISTINCT_COUNT: '7' }), 7);
 		assert.equal(readDistinctCount(undefined), 0);
 		assert.equal(readDistinctCount({ distinct_count: 'not a number' }), 0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// compileTemporalTrend + readTemporalTrendRow (Phase 5g.1 substrate)
+// ---------------------------------------------------------------------------
+
+describe('compileTemporalTrend', () => {
+	it('postgres uses native REGR_* with EXTRACT(EPOCH FROM ts)', () => {
+		const r = compileTemporalTrend(
+			'public.events',
+			{ timestampColumn: 'ts', valueColumn: 'val' },
+			['id', 'ts', 'val'],
+			POSTGRES_DIALECT,
+		);
+		assert.equal(r.native, true);
+		assert.match(r.text, /REGR_SLOPE\("val", EXTRACT\(EPOCH FROM "ts"\)\)/);
+		assert.match(r.text, /REGR_INTERCEPT\("val"/);
+		assert.match(r.text, /REGR_R2\("val"/);
+		assert.match(r.text, /REGR_COUNT\("val"/);
+		assert.match(r.text, /FROM "public"\."events"/);
+		assert.deepEqual(r.values, []);
+	});
+
+	it('mysql takes the expression-based path with UNIX_TIMESTAMP', () => {
+		const r = compileTemporalTrend(
+			'events',
+			{ timestampColumn: 'ts', valueColumn: 'val' },
+			['ts', 'val'],
+			MYSQL_DIALECT,
+		);
+		assert.equal(r.native, false);
+		// Six SUM-of-CASE moments + min/max
+		assert.match(r.text, /SUM\(CASE WHEN .* THEN 1 ELSE 0 END\) +AS n/);
+		assert.match(r.text, /SUM\(CASE WHEN .* THEN UNIX_TIMESTAMP\(`ts`\) +END\) +AS sx/);
+		assert.match(r.text, /SUM\(CASE WHEN .* THEN UNIX_TIMESTAMP\(`ts`\) \* `val` +END\) +AS sxy/);
+		assert.match(r.text, /MIN\(CASE WHEN .*\) +AS min_x/);
+		assert.match(r.text, /MAX\(CASE WHEN .*\) +AS max_x/);
+	});
+
+	it('sqlite uses unixepoch()', () => {
+		const r = compileTemporalTrend(
+			'events',
+			{ timestampColumn: 'ts', valueColumn: 'val' },
+			['ts', 'val'],
+			SQLITE_DIALECT,
+		);
+		assert.equal(r.native, false);
+		assert.match(r.text, /unixepoch\("ts"\)/);
+	});
+
+	it('oracle uses native REGR_* with date-arithmetic epoch', () => {
+		const r = compileTemporalTrend(
+			'events',
+			{ timestampColumn: 'ts', valueColumn: 'val' },
+			['ts', 'val'],
+			ORACLE_DIALECT,
+		);
+		assert.equal(r.native, true);
+		assert.match(r.text, /\(\("ts" - DATE '1970-01-01'\) \* 86400\)/);
+	});
+
+	it('mssql uses DATEDIFF_BIG (expression path; T-SQL has no REGR_*)', () => {
+		const r = compileTemporalTrend(
+			'events',
+			{ timestampColumn: 'ts', valueColumn: 'val' },
+			['ts', 'val'],
+			MSSQL_DIALECT,
+		);
+		assert.equal(r.native, false);
+		assert.match(r.text, /DATEDIFF_BIG\(SECOND, '1970-01-01', \[ts\]\)/);
+	});
+
+	it('threads request-level WHERE through compileWhere', () => {
+		const r = compileTemporalTrend(
+			'public.events',
+			{
+				timestampColumn: 'ts',
+				valueColumn: 'val',
+				where: [{ column: 'category', op: '=', value: 'A' }],
+			},
+			['ts', 'val', 'category'],
+			POSTGRES_DIALECT,
+		);
+		assert.match(r.text, /WHERE "category" = \$1/);
+		assert.deepEqual(r.values, ['A']);
+	});
+
+	it('rejects unknown timestamp / value columns', () => {
+		assert.throws(
+			() => compileTemporalTrend('events', { timestampColumn: 'no_such', valueColumn: 'val' }, ['ts', 'val'], POSTGRES_DIALECT),
+			/unknown column 'no_such'/,
+		);
+		assert.throws(
+			() => compileTemporalTrend('events', { timestampColumn: 'ts', valueColumn: 'no_such' }, ['ts', 'val'], POSTGRES_DIALECT),
+			/unknown column 'no_such'/,
+		);
+	});
+});
+
+describe('readTemporalTrendRow', () => {
+	it('reads a native REGR_* row directly', () => {
+		const r = readTemporalTrendRow(
+			{ slope: 3, intercept: 2, r2: 1, n: 10, min_x: 1735689600, max_x: 1735689609 },
+			'events', 'ts', 'val', /* native */ true,
+		);
+		assert.equal(r.n, 10);
+		assert.equal(r.slope, 3);
+		assert.equal(r.slopePerDay, 3 * 86400);
+		assert.equal(r.intercept, 2);
+		assert.equal(r.r2, 1);
+		assert.equal(r.minTimestampEpoch, 1735689600);
+		assert.equal(r.maxTimestampEpoch, 1735689609);
+	});
+
+	it('computes slope/intercept/R² from SUM moments (expression path) -- perfect line', () => {
+		// Constructed: 10 points where val = 2 + 3 * x for x in [0..9].
+		// val: [2, 5, 8, 11, 14, 17, 20, 23, 26, 29]
+		//   n  = 10
+		//   sx = 0+1+...+9               = 45
+		//   sy = 2+5+...+29              = 155
+		//   sxx = 0+1+4+...+81           = 285
+		//   syy = 4+25+64+...+841        = 3145
+		//   sxy = 0+5+16+33+56+...+261   = 945
+		const r = readTemporalTrendRow(
+			{ n: 10, sx: 45, sy: 155, sxx: 285, syy: 3145, sxy: 945, min_x: 0, max_x: 9 },
+			'events', 'ts', 'val', /* native */ false,
+		);
+		assert.equal(r.n, 10);
+		assert.ok(Math.abs(r.slope! - 3) < 1e-9, `slope=${r.slope}`);
+		assert.ok(Math.abs(r.intercept! - 2) < 1e-9, `intercept=${r.intercept}`);
+		assert.ok(Math.abs(r.r2! - 1) < 1e-9, `r2=${r.r2}`);
+	});
+
+	it('returns null slope/r² when X variance is zero (expression path)', () => {
+		// All x at the same value -> Sxx = 0 -> regression undefined.
+		const r = readTemporalTrendRow(
+			{ n: 5, sx: 25, sy: 30, sxx: 125, syy: 200, sxy: 150, min_x: 5, max_x: 5 },
+			'events', 'ts', 'val', false,
+		);
+		assert.equal(r.n, 5);
+		assert.equal(r.slope, null);
+		assert.equal(r.intercept, null);
+		assert.equal(r.r2, null);
+	});
+
+	it('handles n < 2 (expression path)', () => {
+		const r = readTemporalTrendRow(
+			{ n: 1, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0, min_x: 0, max_x: 0 },
+			'events', 'ts', 'val', false,
+		);
+		assert.equal(r.n, 1);
+		assert.equal(r.slope, null);
+	});
+
+	it('returns empty result for undefined row', () => {
+		const r = readTemporalTrendRow(undefined, 'events', 'ts', 'val', true);
+		assert.equal(r.n, 0);
+		assert.equal(r.slope, null);
+		assert.equal(r.minTimestampEpoch, null);
 	});
 });

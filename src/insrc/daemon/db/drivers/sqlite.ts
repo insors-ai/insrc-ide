@@ -36,6 +36,8 @@ import type {
 	SampleResult,
 	SchemaDescription,
 	TableListing,
+	TemporalTrendRequest,
+	TemporalTrendResult,
 } from '../../../shared/db-driver.js';
 import { registerDriver } from '../registry.js';
 import {
@@ -49,6 +51,7 @@ import {
 	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
+	executeTemporalTrend,
 	quoteTarget,
 	readAggregateRow,
 	readDistinctCount,
@@ -291,6 +294,20 @@ class SqliteDriver implements RdbmsDriver {
 			target,
 			knownColumns: cols,
 			dialect: SQLITE_DIALECT,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) =>
+				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
+	}
+
+	async temporalTrend(target: string, request: TemporalTrendRequest): Promise<TemporalTrendResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeTemporalTrend({
+			target,
+			knownColumns: cols,
+			dialect: SQLITE_DIALECT,
+			request,
 			aggregate: (req) => this.aggregate(target, req),
 			runRows: async (sql, values) =>
 				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],

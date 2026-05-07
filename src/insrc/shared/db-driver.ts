@@ -544,6 +544,34 @@ export interface KvNamespaceDescription {
 }
 
 // ---------------------------------------------------------------------------
+// Temporal trend (Phase 5g.1 substrate)
+// ---------------------------------------------------------------------------
+
+export interface TemporalTrendRequest {
+	/** Timestamp / temporal column used as the X axis (epoch-converted server-side). */
+	readonly timestampColumn: string;
+	/** Numeric column used as the Y axis. */
+	readonly valueColumn: string;
+	readonly where?: readonly WhereClause[];
+}
+
+export interface TemporalTrendResult {
+	readonly target: string;
+	readonly timestampColumn: string;
+	readonly valueColumn: string;
+	/** Count of rows where both timestamp and value are non-null. */
+	readonly n: number;
+	/** Slope per second of epoch (NULL if N < 2 or X variance is zero). */
+	readonly slope: number | null;
+	/** slope * 86400 -- human-readable Y change per day. */
+	readonly slopePerDay: number | null;
+	readonly intercept: number | null;
+	readonly r2: number | null;
+	readonly minTimestampEpoch: number | null;
+	readonly maxTimestampEpoch: number | null;
+}
+
+// ---------------------------------------------------------------------------
 // Driver interfaces
 // ---------------------------------------------------------------------------
 
@@ -589,6 +617,11 @@ export interface RdbmsDriver extends BaseDriver {
 	correlationMatrix?(target: string, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult>;
 	/** Phase 0.5 -- IQR / z-score outlier counts + examples. */
 	outliers?(target: string, request: OutlierRequest): Promise<OutlierResult>;
+	/** Phase 5g.1 -- server-side temporal-trend regression
+	 *  (REGR_SLOPE / REGR_INTERCEPT / REGR_R2 with epoch conversion on
+	 *  the timestamp column). Optional: drivers without the regression
+	 *  primitives or epoch conversion can leave it undefined. */
+	temporalTrend?(target: string, request: TemporalTrendRequest): Promise<TemporalTrendResult>;
 }
 
 export interface KvDriver extends BaseDriver {
@@ -631,6 +664,9 @@ export interface FileDriver extends BaseDriver {
 	correlationMatrix?(target: string | undefined, request: CorrelationMatrixRequest): Promise<CorrelationMatrixResult>;
 	/** Phase 0.5 -- outlier counts + examples (DuckDB-backed file driver). */
 	outliers?(target: string | undefined, request: OutlierRequest): Promise<OutlierResult>;
+	/** Phase 5g.1 -- server-side temporal-trend regression on a file
+	 *  connection (DuckDB-backed; same semantics as the RDBMS variant). */
+	temporalTrend?(target: string | undefined, request: TemporalTrendRequest): Promise<TemporalTrendResult>;
 }
 
 export type Driver = RdbmsDriver | KvDriver | FileDriver;
