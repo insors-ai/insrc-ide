@@ -57,6 +57,8 @@ import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality
 import { registerDataQualityScorecardFileSkill } from './built-ins/data.quality.scorecard.file.js';
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
 import { registerDataSynthHistogramBlockSkill } from './built-ins/data.synth.histogram-block.js';
+import { registerDataMetaFeasibilityCheckSkill } from './built-ins/data.meta.feasibility-check.js';
+import { registerDataMetaCalibrateConfidenceSkill } from './built-ins/data.meta.calibrate-confidence.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataQualityValidityFileSkill } from './built-ins/data.quality.validity.file.js';
 import { registerDataDistributionHistogramRdbmsSkill } from './built-ins/data.distribution.histogram.rdbms.js';
@@ -222,6 +224,10 @@ export function registerAllSkills(): void {
   // 5e.3 sensitivity.policy-check composes pii.column-classifier
   // across columns vs the connection's declared PII list.
   registerDataSensitivityPolicyCheckRdbmsSkill();
+  // Phase 7 meta skills -- deterministic helpers consumed by the
+  // future planner rewrite (Phase 8.1).
+  registerDataMetaFeasibilityCheckSkill();
+  registerDataMetaCalibrateConfidenceSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }

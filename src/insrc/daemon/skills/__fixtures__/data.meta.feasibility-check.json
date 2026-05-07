@@ -1,0 +1,10 @@
+{
+  "input": {
+    "skillIds": [
+      "data.synth.field-table",
+      "data.synth.histogram-block",
+      "data.no.such.skill.id"
+    ]
+  },
+  "expectedConfidenceFloor": "high"
+}

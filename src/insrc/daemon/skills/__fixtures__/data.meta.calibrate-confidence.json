@@ -1,0 +1,11 @@
+{
+  "input": {
+    "question": "What does the orders.line_items collection look like?",
+    "findings": [
+      { "skillId": "data.source.kv.list-namespaces",   "confidence": "high"   },
+      { "skillId": "data.source.kv.describe-namespace","confidence": "medium" }
+    ],
+    "toolErrorTrace": []
+  },
+  "expectedConfidenceFloor": "high"
+}
