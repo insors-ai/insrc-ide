@@ -232,6 +232,38 @@ describe('SqliteDriver (via pool)', () => {
 		await pool.closeAll();
 	});
 
+	it('count_where with regex op uses the registered REGEXP function (Phase 5d.3 Gap 1)', async () => {
+		// SQLite's REGEXP operator is unimplemented by default --
+		// `WHERE col REGEXP pattern` errors with "no such function:
+		// REGEXP". The driver registers a JS implementation at connect
+		// time; this test confirms a count_where aggregate using
+		// `regex` reaches the JS function and returns a plausible
+		// match count. Pattern matches a@x (the one non-null email);
+		// the other row's email is NULL, so we expect matchCount=1.
+		const pool = new DriverPool(repoRoot);
+		await pool.reload();
+		const drv = await pool.acquire('app');
+		const res = await (drv as { aggregate: (t: string, r: unknown) => Promise<unknown> }).aggregate(
+			'users',
+			{
+				aggregations: [
+					{ column: 'email', function: 'count' },
+					{ column: 'email', function: 'count_non_null' },
+					{
+						column: 'email',
+						function: 'count_where',
+						args: { predicate: [{ column: 'email', op: 'regex', value: '^.+@.+$' }] },
+					},
+				],
+			},
+		);
+		const values = (res as { values: Record<string, number> }).values;
+		assert.equal(values['email__count'], 2);
+		assert.equal(values['email__count_non_null'], 1);
+		assert.equal(values['email__count_where_email_regex'], 1);
+		await pool.closeAll();
+	});
+
 	it('aggregate stddev surfaces SQLite-no-such-function as a clean engine error', async () => {
 		// SQLite has no built-in STDDEV_SAMP; the engine error reaches
 		// the tool layer verbatim and surfaces as `success: false` to

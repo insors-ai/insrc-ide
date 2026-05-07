@@ -131,6 +131,103 @@ describe('compileWhere', () => {
 		);
 		assert.equal(r.text, 'WHERE "Id" = $1');
 	});
+
+	// Phase 5d.3 Gap 1 -- regex / not regex predicates per dialect.
+	describe('regex / not regex (Phase 5d.3 Gap 1)', () => {
+		it('postgres uses ~ for regex and !~ for not regex', () => {
+			const r = compileWhere(
+				[{ column: 'email', op: 'regex', value: '^.+@.+$' }],
+				['email'],
+				POSTGRES_DIALECT,
+			);
+			assert.equal(r.text, 'WHERE "email" ~ $1');
+			assert.deepEqual(r.values, ['^.+@.+$']);
+
+			const n = compileWhere(
+				[{ column: 'email', op: 'not regex', value: '^.+@.+$' }],
+				['email'],
+				POSTGRES_DIALECT,
+			);
+			assert.equal(n.text, 'WHERE "email" !~ $1');
+		});
+
+		it('mysql uses REGEXP / NOT REGEXP', () => {
+			const r = compileWhere(
+				[{ column: 'email', op: 'regex', value: '^.+@.+$' }],
+				['email'],
+				MYSQL_DIALECT,
+			);
+			assert.equal(r.text, 'WHERE `email` REGEXP ?');
+
+			const n = compileWhere(
+				[{ column: 'email', op: 'not regex', value: '^.+@.+$' }],
+				['email'],
+				MYSQL_DIALECT,
+			);
+			assert.equal(n.text, 'WHERE `email` NOT REGEXP ?');
+		});
+
+		it('sqlite uses REGEXP / NOT REGEXP (driver registers the function)', () => {
+			const r = compileWhere(
+				[{ column: 'email', op: 'regex', value: '^.+@.+$' }],
+				['email'],
+				SQLITE_DIALECT,
+			);
+			assert.equal(r.text, 'WHERE "email" REGEXP ?');
+		});
+
+		it('oracle uses REGEXP_LIKE function syntax', () => {
+			const r = compileWhere(
+				[{ column: 'email', op: 'regex', value: '^.+@.+$' }],
+				['email'],
+				ORACLE_DIALECT,
+			);
+			assert.equal(r.text, 'WHERE REGEXP_LIKE("email", :1)');
+
+			const n = compileWhere(
+				[{ column: 'email', op: 'not regex', value: '^.+@.+$' }],
+				['email'],
+				ORACLE_DIALECT,
+			);
+			assert.equal(n.text, 'WHERE NOT REGEXP_LIKE("email", :1)');
+		});
+
+		it('mssql throws -- no portable native regex (caller must avoid this op)', () => {
+			assert.throws(
+				() => compileWhere(
+					[{ column: 'email', op: 'regex', value: '^.+@.+$' }],
+					['email'],
+					MSSQL_DIALECT,
+				),
+				/'regex' op is not supported on this dialect/,
+			);
+		});
+
+		it('rejects non-string regex values', () => {
+			assert.throws(
+				() => compileWhere(
+					// @ts-expect-error -- intentionally bad value type
+					[{ column: 'email', op: 'regex', value: 42 }],
+					['email'],
+					POSTGRES_DIALECT,
+				),
+				/'regex' op requires a string value/,
+			);
+		});
+
+		it('regex predicates compose with other clauses (parameter index shared)', () => {
+			const r = compileWhere(
+				[
+					{ column: 'active', op: '=', value: true },
+					{ column: 'email',  op: 'regex', value: '^.+@.+$' },
+				],
+				['active', 'email'],
+				POSTGRES_DIALECT,
+			);
+			assert.equal(r.text, 'WHERE "active" = $1 AND "email" ~ $2');
+			assert.deepEqual(r.values, [true, '^.+@.+$']);
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------

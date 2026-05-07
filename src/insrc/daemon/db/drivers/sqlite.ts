@@ -71,6 +71,23 @@ class SqliteDriver implements RdbmsDriver {
 		this.db = new Database(filename, { readonly: true, fileMustExist: true });
 		this.db.pragma('query_only = ON');
 		this.prismaPath = prismaPath;
+		// SQLite ships with the REGEXP operator surface but no
+		// implementation -- without registration `col REGEXP pattern`
+		// errors with "no such function: REGEXP". Plumb in a JS
+		// implementation so Phase 5d.3 quality.validity (and any other
+		// caller using WhereClause `regex`) works on SQLite. Returns
+		// 0 on null inputs / malformed patterns rather than throwing
+		// to mirror the behaviour of native engines.
+		// SQLite REGEXP convention: `value REGEXP pattern` calls
+		// regexp(pattern, value), so the JS args are (pattern, value).
+		this.db.function('REGEXP', { deterministic: true }, (pattern, value) => {
+			if (typeof pattern !== 'string' || typeof value !== 'string') return 0;
+			try {
+				return new RegExp(pattern).test(value) ? 1 : 0;
+			} catch {
+				return 0;
+			}
+		});
 	}
 
 	async describe(target: string): Promise<SchemaDescription> {

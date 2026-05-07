@@ -56,26 +56,52 @@ export interface Dialect {
 	readonly quoteIdent: (part: string) => string;
 	readonly placeholder: (index: number) => string;
 	readonly limitClause: (limit: number) => string;
+	/**
+	 * Build a regex predicate fragment. `col` is already quoted;
+	 * `placeholder` is a parametrised placeholder (e.g. `$1`, `?`,
+	 * `:1`). When `negate` is true, builds the "not match" form.
+	 *
+	 * Dialects that don't support regex (MSSQL native T-SQL has no
+	 * portable regex) leave this undefined; `compileWhere` raises a
+	 * clear error rather than emitting an invalid query. Phase 5d.3
+	 * Gap 1 (plans/analyzers/data-analyzer-skills.md).
+	 */
+	readonly regexPredicate?: (col: string, placeholder: string, negate: boolean) => string;
 }
 
 export const POSTGRES_DIALECT: Dialect = {
 	quoteIdent: (p) => `"${p.replace(/"/g, '""')}"`,
 	placeholder: (i) => `$${i}`,
 	limitClause: (n) => `LIMIT ${n}`,
+	regexPredicate: (col, ph, negate) => `${col} ${negate ? '!~' : '~'} ${ph}`,
 };
 
 export const MYSQL_DIALECT: Dialect = {
 	quoteIdent: (p) => `\`${p.replace(/`/g, '``')}\``,
 	placeholder: () => '?',
 	limitClause: (n) => `LIMIT ${n}`,
+	regexPredicate: (col, ph, negate) => `${col} ${negate ? 'NOT REGEXP' : 'REGEXP'} ${ph}`,
 };
 
+/**
+ * SQLite REGEXP is a user-defined function the driver registers at
+ * connection open (see `daemon/db/drivers/sqlite.ts`). Without that
+ * registration the engine errors with "no such function: REGEXP".
+ */
 export const SQLITE_DIALECT: Dialect = {
 	quoteIdent: (p) => `"${p.replace(/"/g, '""')}"`,
 	placeholder: () => '?',
 	limitClause: (n) => `LIMIT ${n}`,
+	regexPredicate: (col, ph, negate) => `${col} ${negate ? 'NOT REGEXP' : 'REGEXP'} ${ph}`,
 };
 
+/**
+ * MSSQL has no portable native regex (LIKE_REGEX from SQL/XML is not
+ * implemented in T-SQL; `master.dbo.fn_regex_match` requires SQLCLR
+ * configuration we don't assume). Leaving regexPredicate undefined
+ * surfaces a clear error from compileWhere instead of generating an
+ * invalid query.
+ */
 export const MSSQL_DIALECT: Dialect = {
 	quoteIdent: (p) => `[${p.replace(/]/g, ']]')}]`,
 	placeholder: (i) => `@p${i}`,
@@ -86,6 +112,7 @@ export const ORACLE_DIALECT: Dialect = {
 	quoteIdent: (p) => `"${p.replace(/"/g, '""')}"`,
 	placeholder: (i) => `:${i}`,
 	limitClause: (n) => `FETCH FIRST ${n} ROWS ONLY`,
+	regexPredicate: (col, ph, negate) => `${negate ? 'NOT ' : ''}REGEXP_LIKE(${col}, ${ph})`,
 };
 
 /**
@@ -99,6 +126,7 @@ export const CLICKHOUSE_DIALECT: Dialect = {
 	quoteIdent: (p) => `\`${p.replace(/`/g, '``')}\``,
 	placeholder: (i) => `{p${i}:String}`,
 	limitClause: (n) => `LIMIT ${n}`,
+	regexPredicate: (col, ph, negate) => `${negate ? 'NOT ' : ''}match(${col}, ${ph})`,
 };
 
 // ---------------------------------------------------------------------------
@@ -218,6 +246,25 @@ export function compileWhere(
 				}
 				const sqlOp = clause.op === 'like' ? 'LIKE' : 'NOT LIKE';
 				fragments.push(`${col} ${sqlOp} ${dialect.placeholder(paramIndex++)}`);
+				values.push(clause.value);
+				break;
+			}
+			case 'regex':
+			case 'not regex': {
+				if (typeof clause.value !== 'string') {
+					throw new Error(
+						`data-driver: '${clause.op}' op requires a string value ` +
+						`(column '${clause.column}')`,
+					);
+				}
+				if (dialect.regexPredicate === undefined) {
+					throw new Error(
+						`data-driver: '${clause.op}' op is not supported on this dialect`,
+					);
+				}
+				fragments.push(
+					dialect.regexPredicate(col, dialect.placeholder(paramIndex++), clause.op === 'not regex'),
+				);
 				values.push(clause.value);
 				break;
 			}
