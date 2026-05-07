@@ -207,10 +207,16 @@ export function getProvidersConfig(): AgentConfig['models'] {
  * to reload in-memory config. Special handling for active-provider
  * changes: clears `agents` and `visionDefault` wholesale (plan locked
  * behavior).
+ *
+ * When the local embedding model changes, probe Ollama for the model's
+ * actual output dim and overwrite `embeddingDim` from the probe.
+ * Without this, switching from e.g. qwen3-embedding:4b (2560-d) to
+ * qwen3-embedding:0.6b (1024-d) leaves a stale dim in config and Lance
+ * rejects every subsequent write.
  */
-export function setProvidersConfig(
+export async function setProvidersConfig(
   patch: Partial<AgentConfig['models']>,
-): { ok: true; models: AgentConfig['models'] } {
+): Promise<{ ok: true; models: AgentConfig['models'] }> {
   const rawOnDisk: Record<string, unknown> = existsSync(PATHS.config)
     ? (() => {
         try { return JSON.parse(readFileSync(PATHS.config, 'utf8')) as Record<string, unknown>; }
@@ -236,12 +242,42 @@ export function setProvidersConfig(
     );
   }
 
+  const oldEmbedModel = current.models.providers.local.embeddingModel;
+  const newEmbedModel = nextModels.providers.local.embeddingModel;
+  if (oldEmbedModel !== newEmbedModel && newEmbedModel) {
+    const dim = await probeEmbeddingDim(nextModels.providers.local.host, newEmbedModel);
+    if (dim > 0) {
+      nextModels.providers.local.embeddingDim = dim;
+      log.info(
+        { from: oldEmbedModel, to: newEmbedModel, dim },
+        'embedding model changed -- updated embeddingDim from probe',
+      );
+    } else {
+      log.warn(
+        { from: oldEmbedModel, to: newEmbedModel, staleDim: nextModels.providers.local.embeddingDim },
+        'embedding dim probe failed -- leaving stale embeddingDim (Lance writes will fail until corrected)',
+      );
+    }
+  }
+
   rawOnDisk['models'] = nextModels as unknown as Record<string, unknown>;
   // Never write `keys` back -- keychain is authoritative.
   if ('keys' in rawOnDisk) delete rawOnDisk['keys'];
   writeFileSync(PATHS.config, JSON.stringify(rawOnDisk, null, 2) + '\n', 'utf8');
 
   return { ok: true, models: nextModels };
+}
+
+async function probeEmbeddingDim(host: string, model: string): Promise<number> {
+  try {
+    const ollama = new Ollama({ host });
+    const result = await ollama.embed({ model, input: '.' });
+    const vec = result.embeddings[0];
+    return Array.isArray(vec) ? vec.length : 0;
+  } catch (err) {
+    log.warn({ err: errMsg(err), model }, 'ollama embed probe threw');
+    return 0;
+  }
 }
 
 function mergeModelsPatch(

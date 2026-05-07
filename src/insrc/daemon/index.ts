@@ -1112,7 +1112,7 @@ async function main(): Promise<void> {
 		'providers.setConfig': async (params) => {
 			const { setProvidersConfig } = await import('./providers.js');
 			const patch = (params ?? {}) as Partial<import('../shared/types.js').AgentConfig['models']>;
-			const result = setProvidersConfig(patch);
+			const result = await setProvidersConfig(patch);
 			await reloadChatConfig();
 			return result;
 		},
