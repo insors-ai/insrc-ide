@@ -23,7 +23,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { closeGraphStore, setGraphStorePath } from '../graph/store.js';
-import { addRepo, removeRepo, listRepos, updateRepoStatus } from '../repos.js';
+import {
+	addRepo, removeRepo, listRepos, updateRepoStatus,
+	InvalidRepoPathError, validateRepoPath, validateRepoPathShape,
+} from '../repos.js';
 import type { RegisteredRepo } from '../../shared/types.js';
 
 let dir: string;
@@ -201,4 +204,81 @@ test('addRepo updates status without losing addedAt', async () => {
 	const list = await listRepos(null);
 	assert.equal(list[0]!.status, 'ready');
 	assert.equal(list[0]!.addedAt, LATER, 'addRepo overwrites addedAt (matches prior behaviour)');
+});
+
+// ---------------------------------------------------------------------------
+// Path-validation guardrail (2026-05-07): the phantom-empty-repo bug.
+// addRepo / validateRepoPath{Shape,} reject empty / non-absolute /
+// system-root paths before any LMDB write so a buggy IPC caller can't
+// pollute the registry with an unindexable repo.
+// ---------------------------------------------------------------------------
+
+test('validateRepoPathShape rejects empty string', () => {
+	assert.throws(() => validateRepoPathShape(''), InvalidRepoPathError);
+	assert.throws(() => validateRepoPathShape(''), /cannot be empty/);
+});
+
+test('validateRepoPathShape rejects non-string input', () => {
+	assert.throws(() => validateRepoPathShape(null), /must be a string/);
+	assert.throws(() => validateRepoPathShape(undefined), /must be a string/);
+	assert.throws(() => validateRepoPathShape(42 as unknown), /must be a string/);
+});
+
+test('validateRepoPathShape rejects relative paths', () => {
+	assert.throws(() => validateRepoPathShape('foo/bar'), /must be absolute/);
+	assert.throws(() => validateRepoPathShape('./relative'), /must be absolute/);
+});
+
+test('validateRepoPathShape rejects filesystem root + system / volatile dirs', () => {
+	for (const banned of ['/', '/tmp', '/var', '/usr', '/etc', '/Users', '/home', '/private', '/Library', '/System', '/Applications']) {
+		assert.throws(
+			() => validateRepoPathShape(banned),
+			/system \/ volatile directory/,
+			`expected '${banned}' to be rejected`,
+		);
+	}
+});
+
+test('validateRepoPathShape normalises trailing-slash + .. segments', () => {
+	assert.equal(validateRepoPathShape('/Users/me/proj/'), '/Users/me/proj');
+	assert.equal(validateRepoPathShape('/Users/me/proj/sub/..'), '/Users/me/proj');
+});
+
+test('validateRepoPathShape rejects normalised banned root (e.g. `/Users/.`)', () => {
+	assert.throws(() => validateRepoPathShape('/Users/.'), /system \/ volatile directory/);
+	assert.throws(() => validateRepoPathShape('/tmp/..'), /system \/ volatile directory/);
+});
+
+test('validateRepoPath (full) accepts an existing temp directory', () => {
+	// `dir` is the per-test mkdtempSync directory created in beforeEach;
+	// resolves to /private/var/folders/... on macOS or /tmp/... on Linux.
+	const result = validateRepoPath(dir);
+	// The normalised form may differ from input on macOS due to
+	// /tmp -> /private/tmp symlink resolution by `resolve()`.
+	assert.ok(result.length > 0);
+});
+
+test('validateRepoPath (full) rejects non-existent path', () => {
+	assert.throws(
+		() => validateRepoPath('/Users/nobody/this-definitely-does-not-exist-12345'),
+		/does not exist or is not accessible/,
+	);
+});
+
+test('addRepo rejects empty / banned-root paths via shape validation', async () => {
+	await assert.rejects(
+		addRepo(null, makeRepo({ path: '' })),
+		InvalidRepoPathError,
+	);
+	await assert.rejects(
+		addRepo(null, makeRepo({ path: '/' })),
+		/system \/ volatile/,
+	);
+	await assert.rejects(
+		addRepo(null, makeRepo({ path: '/tmp' })),
+		/system \/ volatile/,
+	);
+	// Confirm registry is empty after rejected attempts.
+	const list = await listRepos(null);
+	assert.equal(list.length, 0);
 });

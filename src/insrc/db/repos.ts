@@ -20,7 +20,8 @@
  *     lands in Phase 2.10 once the other CRUD modules exist.
  */
 
-import { basename } from 'node:path';
+import { statSync } from 'node:fs';
+import { basename, isAbsolute, resolve } from 'node:path';
 
 import type { RegisteredRepo } from '../shared/types.js';
 import {
@@ -38,6 +39,111 @@ import {
 } from './graph/codec.js';
 
 /**
+ * Paths we refuse to register as a repo. Includes filesystem root,
+ * OS-level system dirs, volatile / temp dirs, and the parent dirs
+ * that contain user homes (`/Users`, `/home`, `/root`). Registering
+ * any of these as a repo would have the indexer scan a huge subtree
+ * containing zero source code and many unrelated manifest files
+ * (this caused the 2026-05-07 phantom-empty-repo bug where 14k
+ * entities got attached to `repo=""`).
+ *
+ * Compared post-`path.resolve` so trailing slashes / `..` segments
+ * normalise to the canonical form. Caller can still pass any
+ * subdirectory under `/Users/<name>/...` -- only the bare prefixes
+ * are banned.
+ */
+const BANNED_REPO_ROOTS = new Set([
+	'/',
+	'/tmp',
+	'/var',
+	'/usr',
+	'/bin',
+	'/sbin',
+	'/etc',
+	'/sys',
+	'/proc',
+	'/dev',
+	'/root',
+	'/Users',
+	'/home',
+	'/private',
+	'/private/tmp',
+	'/private/var',
+	'/Library',
+	'/System',
+	'/Applications',
+	'/Volumes',
+	'/opt',
+	'/Network',
+	'/run',
+	'/boot',
+	'/srv',
+	'/mnt',
+	'/media',
+]);
+
+export class InvalidRepoPathError extends Error {
+	constructor(message: string, override readonly cause?: unknown) {
+		super(message);
+		this.name = 'InvalidRepoPathError';
+	}
+}
+
+/**
+ * Shape-only validation: empty / absolute / banned-root checks.
+ * No filesystem access -- safe to call against synthetic paths in
+ * tests. Returns the normalised path on success.
+ *
+ * Throws `InvalidRepoPathError` on rejection. Used by `addRepo()`
+ * (which can be called with synthetic paths in tests) as a defense-
+ * in-depth check after the IPC handler's full validation.
+ */
+export function validateRepoPathShape(path: unknown): string {
+	if (typeof path !== 'string') {
+		throw new InvalidRepoPathError(`repo path must be a string (got ${typeof path})`);
+	}
+	if (path.length === 0) {
+		throw new InvalidRepoPathError('repo path cannot be empty');
+	}
+	if (!isAbsolute(path)) {
+		throw new InvalidRepoPathError(`repo path must be absolute: '${path}'`);
+	}
+	// `resolve` collapses trailing slashes, `.`, `..`, and on macOS
+	// also normalises `/private/var/folders/...` -- canonical form is
+	// what we compare to BANNED_REPO_ROOTS.
+	const normalised = resolve(path);
+	if (BANNED_REPO_ROOTS.has(normalised)) {
+		throw new InvalidRepoPathError(
+			`'${normalised}' is a system / volatile directory and cannot be registered as a repo`,
+		);
+	}
+	return normalised;
+}
+
+/**
+ * Full validation: shape + filesystem existence + isDirectory check.
+ * Throws `InvalidRepoPathError` on rejection. Used by the `repo.add`
+ * IPC handler so a bad path can never reach the LMDB registry.
+ * Idempotent + side-effect-free; safe to call multiple times.
+ */
+export function validateRepoPath(path: unknown): string {
+	const normalised = validateRepoPathShape(path);
+	let stat: ReturnType<typeof statSync>;
+	try {
+		stat = statSync(normalised);
+	} catch (err) {
+		throw new InvalidRepoPathError(
+			`'${normalised}' does not exist or is not accessible: ${(err as Error).message}`,
+			err,
+		);
+	}
+	if (!stat.isDirectory()) {
+		throw new InvalidRepoPathError(`'${normalised}' is not a directory`);
+	}
+	return normalised;
+}
+
+/**
  * Vestigial `DbClient` param shape. Kept until Phase 5.x updates the
  * callers to drop the now-unused argument.
  */
@@ -48,13 +154,18 @@ type DbClient = unknown;
 // ---------------------------------------------------------------------------
 
 export async function addRepo(_db: DbClient, repo: RegisteredRepo): Promise<void> {
-	const name = repo.name || basename(repo.path);
+	// Defense in depth -- shape-only validation here (no filesystem
+	// existence check) so synthetic-path tests still work. The IPC
+	// handler at `daemon/index.ts:repo.add` does the full validation
+	// (shape + statSync) on the live path before any DB write.
+	const normalisedPath = validateRepoPathShape(repo.path);
+	const name = repo.name || basename(normalisedPath);
 	await withWriteTxn(s => {
-		const existing = findRepoIdByPath(s, repo.path);
+		const existing = findRepoIdByPath(s, normalisedPath);
 		const id = existing ?? allocateRepoIdInTxn(s);
 		const row: RepoRow = {
 			id,
-			path:        repo.path,
+			path:        normalisedPath,
 			name,
 			addedAt:     parseTimestamp(repo.addedAt),
 			lastIndexed: parseOptionalTimestamp(repo.lastIndexed),

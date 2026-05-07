@@ -68,7 +68,10 @@ import {
 	deleteAnalyzerDb,
 	closeAllAnalyzerPools,
 } from './db/duckdb-analyzer-pool.js';
-import { listRepos, addRepo, removeRepo } from '../db/repos.js';
+import {
+	listRepos, addRepo, removeRepo,
+	InvalidRepoPathError, validateRepoPath,
+} from '../db/repos.js';
 import { deleteEntitiesForRepo, findEntitiesByFile } from '../db/entities.js';
 import { deleteUnresolvedForRepo } from '../db/relations.js';
 import { Watcher } from '../indexer/watcher.js';
@@ -260,15 +263,31 @@ async function main(): Promise<void> {
 	// 7. Start IPC server
 	const server = new IpcServer({
 		'repo.add': async (params) => {
-			const { path } = params as { path: string };
+			const rawPath = (params as { path?: unknown })?.path;
+			let normalisedPath: string;
+			try {
+				normalisedPath = validateRepoPath(rawPath);
+			} catch (err) {
+				const reason = err instanceof InvalidRepoPathError
+					? err.message
+					: `unexpected validation error: ${(err as Error).message}`;
+				log.warn(
+					{ rawPath, reason, type: typeof rawPath },
+					'rejected repo.add: invalid path',
+				);
+				// Structured error reaches the IDE through the IPC layer;
+				// the existing `repoServiceImpl.addRepo` rethrows and the
+				// `insrc.addRepo` command handler shows a notification.
+				throw new Error(`Cannot add repository: ${reason}`);
+			}
 			const repo: RegisteredRepo = {
-				path,
-				name: basename(path),
+				path: normalisedPath,
+				name: basename(normalisedPath),
 				addedAt: new Date().toISOString(),
 				status: 'pending',
 			};
 			await addRepo(db, repo);
-			await indexer.addRepo(path);
+			await indexer.addRepo(normalisedPath);
 			return { ok: true };
 		},
 
