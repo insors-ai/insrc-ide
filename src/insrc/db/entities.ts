@@ -65,6 +65,17 @@ import { validateRepoPathShape } from './repos.js';
 const log = getLogger('db.entities');
 
 /**
+ * Reserved Repo registry path used as the destination for `module`
+ * entities that carry the intentional `repo: ''` sentinel (modules
+ * shared across repos). Storing them under a non-empty path keeps
+ * the registry from accumulating phantom empty-path rows. The path
+ * is chosen to be obviously synthetic + sortable to the top of any
+ * `listRepos()` output, and is excluded from the indexer's recovery
+ * path (see `indexer/index.ts` start()).
+ */
+export const EXTERNAL_MODULES_REPO_PATH = '<external-modules>';
+
+/**
  * Vestigial `DbClient` param shape -- kept until Phase 5.x removes
  * the unused argument from callers.
  */
@@ -199,11 +210,19 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 	// guardrail (entities arriving from a parser / pipeline with an
 	// empty / banned-root `repo` string would silently create a
 	// Repo registry entry, e.g. `repo=""` indexing 14k orphans).
-	// Reject the whole batch with a stack trace so the upstream
-	// caller is identifiable.
+	//
+	// Module entities (`kind: 'module'`) are explicitly allowed to
+	// carry `repo: ''` -- this is an intentional sentinel meaning
+	// "external / shared across repos". `ensureRepo()` below redirects
+	// this sentinel to the reserved synthetic Repo row at
+	// EXTERNAL_MODULES_REPO_PATH so it doesn't auto-allocate a phantom.
 	const filteredOut: { id: string; repo: string; file: string; reason: string }[] = [];
 	const accepted: Entity[] = [];
 	for (const e of unique) {
+		if (e.kind === 'module' && e.repo === '') {
+			accepted.push(e);
+			continue;
+		}
 		try {
 			validateRepoPathShape(e.repo);
 			accepted.push(e);
@@ -227,8 +246,7 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 			},
 			'upsertEntities: dropped entities with invalid repo paths -- empty / non-absolute / system-root. ' +
 			'These would have auto-allocated phantom Repo registry rows. The stack trace points to the upstream ' +
-			'caller -- usually the indexer parser pipeline. See plans/analyzers (no plan section yet) and ' +
-			'guardrail commit ad2fb453b8a.',
+			'caller. See guardrail commits ad2fb453b8a + 81dcb360b07.',
 		);
 	}
 	if (accepted.length === 0) return;
@@ -244,11 +262,17 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 		// Resolve / allocate repo IDs once per batch (one path -> one id).
 		const repoIdCache = new Map<string, number>();
 		const ensureRepo = (path: string): number => {
-			const cached = repoIdCache.get(path);
+			// Empty `path` is the intentional `kind: 'module'` sentinel
+			// (shared / external modules). Redirect to the reserved
+			// synthetic Repo row instead of allocating a phantom
+			// empty-path row. Other empty-path callers were rejected
+			// at the upsertEntities boundary above.
+			const lookupPath = path === '' ? EXTERNAL_MODULES_REPO_PATH : path;
+			const cached = repoIdCache.get(lookupPath);
 			if (cached !== undefined) return cached;
-			const existing = repoIdByPathInTxn(s, path);
+			const existing = repoIdByPathInTxn(s, lookupPath);
 			if (existing !== undefined) {
-				repoIdCache.set(path, existing);
+				repoIdCache.set(lookupPath, existing);
 				return existing;
 			}
 			// First time we've seen this repo path -- allocate. Matches
@@ -259,15 +283,15 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 			const id = allocateRepoIdInTxn(s);
 			const row: RepoRow = {
 				id,
-				path,
-				name:        '', // back-fill happens via addRepo / first indexer call
+				path:        lookupPath,
+				name:        lookupPath === EXTERNAL_MODULES_REPO_PATH ? 'external-modules' : '',
 				addedAt:     Date.now(),
 				lastIndexed: 0,
 				status:      'pending',
 				errorMsg:    '',
 			};
 			s.repo.put(encodeRepoKey(id), encodeRepoRow(row));
-			repoIdCache.set(path, id);
+			repoIdCache.set(lookupPath, id);
 			return id;
 		};
 
@@ -384,6 +408,9 @@ export async function reindexFile(
 	// invalid repo paths. Same intent as the upsertEntities check --
 	// don't let an empty / banned-root repoPath silently auto-allocate
 	// a phantom Repo registry row through `allocateRepoIdInTxn` below.
+	// Unlike upsertEntities, reindexFile has no kind-module fallback
+	// path (it's whole-file replacement); empty repoPath here is
+	// always a bug.
 	try {
 		validateRepoPathShape(repoPath);
 	} catch (err) {

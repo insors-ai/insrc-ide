@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { join, extname, resolve } from 'node:path';
 import type { DbClient } from '../db/client.js';
 import type { RegisteredRepo, IndexJob, ConfigScope } from '../shared/types.js';
-import { upsertEntities } from '../db/entities.js';
+import { upsertEntities, EXTERNAL_MODULES_REPO_PATH } from '../db/entities.js';
 import { upsertRelations, deleteRelationsForFile, deleteUnresolvedForFile } from '../db/relations.js';
 import { runCrossFileResolver } from './cross-file-resolver.js';
 import { detectSourceRoots } from './source-roots.js';
@@ -147,6 +147,18 @@ export class IndexerService {
   private readonly settleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private readonly settleScopeFiles: Map<string, Set<string>> = new Map();
 
+  /**
+   * Set of registered repo root paths -- the source of truth for
+   * `repoForFile()`. Maintained in lockstep with `watcher.addRepo()`
+   * / `removeRepo()`. The earlier `repoForFile()` walked up the
+   * filesystem looking for `.git / package.json / go.mod` markers,
+   * which silently picked up nested package.json files (e.g.
+   * `src/insrc/package.json` under the IDE workspace) and
+   * auto-allocated phantom Repo registry entries for the subdir
+   * paths. Now we restrict to the explicitly-registered roots.
+   */
+  private readonly registeredRepos: Set<string> = new Set();
+
   /** How long to wait after the last file event before kicking the
    *  cross-file pass on the incremental path. Sits *on top of* the
    *  watcher's existing 200 ms event-debounce. */
@@ -194,6 +206,17 @@ export class IndexerService {
     });
 
     for (const repo of repos) {
+      // Skip the synthetic shared-modules row -- it's not a real
+      // filesystem repo, just the destination for `kind: 'module'`
+      // entities that intentionally carry `repo: ''`. The watcher
+      // would fail subscribe() on a non-path, and the recovery path
+      // would loop trying to fullIndex it forever.
+      if (repo.path === EXTERNAL_MODULES_REPO_PATH) {
+        log.debug({ repo: repo.path }, 'skipping synthetic external-modules registry row');
+        continue;
+      }
+
+      this.registeredRepos.add(repo.path);
       await this.watcher.addRepo(repo.path);
 
       if (
@@ -276,6 +299,7 @@ export class IndexerService {
   /** Add a repo: start watching + enqueue full index. */
   async addRepo(repoPath: string): Promise<void> {
     log.info({ repo: repoPath }, 'repo added, enqueuing full index');
+    this.registeredRepos.add(repoPath);
     await this.watcher.addRepo(repoPath);
     this.queue.enqueue({ kind: 'full', repoPath });
 
@@ -290,6 +314,7 @@ export class IndexerService {
   /** Remove a repo: stop watching. (DB cleanup handled by repos.removeRepo caller.) */
   async removeRepo(repoPath: string): Promise<void> {
     log.info({ repo: repoPath }, 'repo removed');
+    this.registeredRepos.delete(repoPath);
     await this.watcher.removeRepo(repoPath);
   }
 
@@ -423,6 +448,14 @@ export class IndexerService {
   ): Promise<void> {
     log.debug({ file: filePath, event }, 'file event');
     const repoPath = this.repoForFile(filePath);
+    if (repoPath === '') {
+      // File isn't inside any registered repo -- skip silently.
+      // Most often a stale watcher event after the repo was removed,
+      // or a config-dir event the watcher forwarded outside the
+      // classifyConfigPath() short-circuit at the top of onEvents().
+      log.debug({ file: filePath, event }, 'file event skipped: not in any registered repo');
+      return;
+    }
     if (event === 'delete') {
       await deleteRelationsForFile(this.db, filePath);
       await deleteEntitiesForFile(this.db, filePath);
@@ -585,6 +618,12 @@ export class IndexerService {
     const repoId   = makeEntityId(repoPath, '', 'repo', repoPath);
 
     for (const dep of deps) {
+      // Module entities are shared across repos by design (same dep
+      // imported from many repos -> single moduleId). They use an
+      // intentional `repo: ''` sentinel that the LMDB layer maps to
+      // a reserved synthetic Repo row (`<external-modules>`) instead
+      // of auto-allocating a phantom path-empty row. See
+      // `db/entities.ts:ensureRepo` for the redirect.
       const moduleId = makeEntityId('', '', 'module', dep.name);
       await upsertEntities(this.db, [{
         id: moduleId, kind: 'module', name: dep.name, language: 'typescript',
@@ -735,19 +774,29 @@ export class IndexerService {
     return results;
   }
 
-  // Infer repo root from a file path (walks up to find package.json / go.mod / .git)
+  /**
+   * Return the registered repo root that `filePath` belongs to, or
+   * `''` if the file isn't inside any registered repo. Longest-prefix
+   * match handles the nested-repo case (rare but legitimate -- e.g.
+   * a sub-monorepo registered alongside its parent).
+   *
+   * Replaces an earlier walk-up-looking-for-markers implementation
+   * that incorrectly treated any directory containing
+   * `.git / package.json / go.mod / pyproject.toml` as a repo root,
+   * silently auto-allocating phantom Repo registry rows for
+   * subdirectories like `src/insrc/` that happened to ship their
+   * own package.json.
+   */
   private repoForFile(filePath: string): string {
-    let dir = filePath;
-    while (true) {
-      const parent = join(dir, '..');
-      if (parent === dir) return dir;
-      dir = parent;
-      try {
-        const entries = readdirSync(dir);
-        if (entries.some(e => ['.git', 'package.json', 'go.mod', 'pyproject.toml'].includes(e))) {
-          return dir;
-        }
-      } catch { continue; }
+    let best = '';
+    for (const root of this.registeredRepos) {
+      // Match either an exact equality or a strict child path
+      // (`<root>/...`) -- not a sibling that shares a prefix
+      // (e.g. `/foo` should NOT match `/foobar/x`).
+      if (filePath === root || filePath.startsWith(root + '/')) {
+        if (root.length > best.length) best = root;
+      }
     }
+    return best;
   }
 }
