@@ -1,0 +1,31 @@
+{
+  "input": {
+    "connectionId": "pg-orders",
+    "target": "public.orders",
+    "column": "amount",
+    "buckets": 5,
+    "mode": "equal-width"
+  },
+  "fakeTools": {
+    "db_sql_histogram": {
+      "content": "5 buckets",
+      "isError": false,
+      "data": {
+        "target": "public.orders",
+        "column": "amount",
+        "mode": "equal-width",
+        "bounds": { "lower": 0,    "upper": 100 },
+        "buckets": [
+          { "lower":  0, "upper": 20, "count": 312 },
+          { "lower": 20, "upper": 40, "count": 287 },
+          { "lower": 40, "upper": 60, "count": 198 },
+          { "lower": 60, "upper": 80, "count": 121 },
+          { "lower": 80, "upper": 100,"count":  67 }
+        ],
+        "nonNullCount": 985,
+        "nullCount":     15
+      }
+    }
+  },
+  "expectedConfidenceFloor": "high"
+}

@@ -73,19 +73,62 @@ the fact.
 
 ## Status
 
-> **Blocked-on (2026-05-05): daemon storage substrate.** The daemon's
-> DuckDB storage pool wedged with a fatal checkpoint OOM (`~/.insrc/duckdb.db`
-> grew to 148 GiB; HNSW index over 2560-dim qwen3 embeddings + columnar
-> co-tenancy with the graph workload). Decision in progress to re-split the
-> substrate: SQLite for graph + metadata, LanceDB back for vectors, DuckDB
-> demoted to the in-memory analytical query-engine substrate only (the
-> `db_file_*` data-driver pool, where it actually shines). Skill smoke runs
-> are paused until the daemon comes back up on a stable substrate. Skill
-> code is **substrate-independent** (skills hit the data-driver pool, not
-> the storage pool), so this plan's remaining work is unblocked at the
-> code-change level -- but the smoke harness, fixture replays, and any
-> end-to-end verification will fail against the broken daemon. A separate
-> plan doc for the storage re-split is pending.
+> **Storage substrate (2026-05-07): unblocked.** The 2026-05-05 DuckDB
+> checkpoint-OOM that paused this plan is resolved. The substrate has been
+> re-split as anticipated, with LMDB substituted for SQLite (decision
+> driven by the existing graph workload's u64-keyed binary access pattern
+> and the desire for a custom graph layer over a high-throughput KV
+> substrate): **LMDB for graph + metadata** (`db/graph/`, 20 sub-DBs,
+> typed JS API for traversal), **LanceDB for entity embeddings** (one
+> `entity_vec` table; ANN + repo / kind / artifact filters; periodic
+> compaction during fullIndex), **DuckDB demoted** to the in-memory
+> analytical query-engine substrate only -- exactly the `db_file_*`
+> data-driver pool this plan's Family-5 file-side skills consume. The
+> daemon is operational on the new substrate; skill smoke runs, fixture
+> replays, and end-to-end verification are unblocked. Skill code remains
+> substrate-independent (skills hit the data-driver pool, not the
+> storage pool), so the only follow-up cost from the substrate work is
+> verifying the smoke harness against the LMDB+Lance daemon before
+> resuming Phase-by-Phase work below.
+
+> ### ⚠️ Deferred -- code-analyzer prerequisites required
+>
+> **Phase 3 code-binding skills (3.1, 3.2, 3.3, 3.5) are deferred** until
+> the code-analyzer-side skills they cross-call into are implemented.
+> Each data-analyzer-side wrapper is structurally a thin
+> `runSkill('code.<...>', ...)` dispatch under the cross-owner depth cap;
+> the dispatch target does not yet exist in the registry, so the skills
+> would hard-fail their `required-tools: ['code_locate', 'code_describe']`
+> precondition on every invocation today.
+>
+> | Deferred slice | Cross-calls into (code-analyzer-side) |
+> |---|---|
+> | 3.1 `data.code.class.extract-fields` | `code.class.extract-fields` |
+> | 3.2 `data.code.class.locate-references` | `code.class.locate-references` |
+> | 3.3 `data.code.orm.resolve-model` | `code.orm.resolve-model` (Prisma / TypeORM / SQLAlchemy / Hibernate dialects) |
+> | 3.5 `data.code.migration.extract-history` | `code.migration.extract-history` |
+>
+> **Transitive impact -- Phase 4 composites (4.1-4.5) are also deferred**:
+> `drift.prisma-vs-live` / `drift.typeorm-vs-live` /
+> `drift.sqlalchemy-vs-live` cannot resolve the schema side without 3.3;
+> `mapping.json-vs-class` / `mapping.csv-vs-dto` cannot resolve the
+> class side without 3.1. 4.6 `cardinality.expected-vs-live` and 4.7
+> `range.expected-vs-live` could plausibly accept caller-supplied
+> "expected" values directly and ship independently of code-binding;
+> deferring them with the rest of Phase 4 for now to keep the
+> comparison-diff family landing as one coherent batch when the
+> prerequisites arrive.
+>
+> **Action when code-analyzer skills land:** revisit
+> [plans/analyzers/code-analyzer.md](./code-analyzer.md) for the slice
+> that registers the four `code.<...>` skills above; once those land,
+> the data-analyzer wrappers (3.1 / 3.2 / 3.3 / 3.5) are mechanical
+> follow-ups (~80 lines each, identical structure to 3.4 lineage).
+> Phase 4 composites land next on top of those. The hallucinated-class
+> regression test from 2026-04-30 (per "Lessons baked in" §1) MUST go
+> green before the deferral is closed -- a wrapper that papers over a
+> missing class side with an empty diff is the failure mode this plan
+> exists to prevent.
 
 **Phase 0 is now fully shipped.** All nine slices are done (see the table
 below for per-slice evidence + tests). The completion landed as one PR
@@ -118,11 +161,13 @@ across 5a (5 profilers), 5b (6 distribution), 5c (3 dependency), 5d
 Several rows stay `partial` because their full-table math has not yet
 been folded into the existing skills (transport ports are done; the
 math swap is mechanical now that the tools land). Phase 1.2
-(source-introspection: kv) is now unblocked -- `db_kv_list_namespaces`
-+ `db_kv_describe_namespace` are registered. Phase 1.4 / 2.4 (doc
-family) is moot now that 0.9 reconciled to `kv`. Slice 3.4 has a
-partial wrapper from skills-core 9. Skill core (skills-core.md) is
-fully shipped.
+(source-introspection: kv) is **done** -- both skills shipped:
+`data.source.kv.list-namespaces` and
+`data.source.kv.describe-namespace` (atomic thin wrappers over
+`db_kv_list_namespaces` / `db_kv_describe_namespace`; memcached's
+`supported: false` clamps to `low`). Phase 1.4 / 2.4 (doc family) is
+moot now that 0.9 reconciled to `kv`. Slice 3.4 has a partial wrapper
+from skills-core 9. Skill core (skills-core.md) is fully shipped.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -136,32 +181,32 @@ fully shipped.
 | 0.8 | `db_kv_describe_namespace` tool | done | Tool registered in [tools/builtins/db/index.ts](src/insrc/daemon/tools/builtins/db/index.ts). `KvDriver.describeNamespace(name, opts)` is now an interface member. **MongoDB** returns `estimatedDocumentCount()` + sample keys + shape inferred via `inferShape` over a doc sample; **Cassandra** returns native column types from `system_schema.columns` keyed on partition / clustering kind, plus a key-only sample of recent rows; **DynamoDB** returns `DescribeTableCommand.ItemCount` + a partition/sort-key sample + value-shape via `inferShape`; **NATS KV** scans the bucket's keys and infers a value shape; **Redis / etcd** scan the prefix and infer JSON shape; **Memcached** returns `supported: false`. Result shape: `{ name, kind, approxCount, sampleKeys, fields, supported }` |
 | 0.9 | doc-family naming reconciliation | done | Driver-side family enum at [`shared/db-driver.ts:14`](src/insrc/shared/db-driver.ts#L14) defines exactly `'rdbms' \| 'kv' \| 'file'` -- no `doc` family. [MongoDB at mongodb.ts:140](src/insrc/daemon/db/drivers/mongodb.ts#L140) and [Cassandra at cassandra.ts:198](src/insrc/daemon/db/drivers/cassandra.ts#L198) both report `kv`. The Phase 2.2 KV sampling skills already cover both. Plan-side rows for "doc" (1.4 / 2.4) are now obsolete -- they collapse into `kv`. Decision recorded: **`doc` references in this plan should be read as `kv`**; do not add a `doc` family to the driver |
 | 1.1 | source-introspection: rdbms | done | All three skills shipped: `data.source.rdbms.describe-table` (over `db_sql_describe`), `data.source.rdbms.list-tables` (over the new `db_sql_list_tables` tool, returns base tables + views excluding system schemas; optional `schema` filter; default limit 500 / cap 5000), `data.source.rdbms.list-indexes` (over the new `db_sql_list_indexes` tool, returns name + columns + unique flag + PK flag). Driver methods `listTables()` / `listIndexes()` real impls on Postgres / MySQL / SQLite / MSSQL / Oracle; ClickHouse stubs throw with a per-engine follow-up note (system.tables / system.data_skipping_indices have a different shape) |
-| 1.2 | source-introspection: kv | pending | list-namespaces, describe-namespace |
+| 1.2 | source-introspection: kv | done | Both skills shipped: `data.source.kv.list-namespaces` (over `db_kv_list_namespaces`) and `data.source.kv.describe-namespace` (over `db_kv_describe_namespace`). Atomic thin wrappers; `supported: false` (memcached) clamps confidence to `low` with a "driver does not expose namespaces / namespace shape" note. Covers redis / valkey / keydb / mongodb / cassandra / nats / dynamodb / etcd / memcached. Coverage: smoke fixtures land high-confidence on Mongo-shaped data |
 | 1.3 | source-introspection: file | done | `data.source.file.describe` shipped (`daemon/skills/built-ins/data.source.file.describe.ts`). One skill covers all 12 file kinds via `connection-family: ['file', csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx]` precondition. Thin wrapper over `db_file_describe`; the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently. xlsx target selects a sheet |
 | 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
 | 2.1 | source-sampling: rdbms | done | Both atomic skills shipped: `data.source.rdbms.sample-rows` (over `db_sql_sample`, structured WHERE support) and `data.source.rdbms.sample-distinct` (over `db_sql_distinct`, top-N + distinct cardinality, deterministic order) |
 | 2.2 | source-sampling: kv | done | All three skills shipped: `data.source.kv.scan-keys` (over `db_kv_scan`), `data.source.kv.get-value` (over `db_kv_get`), `data.source.kv.sample-shape` (over `db_kv_sample_shape`). Covers redis / valkey / keydb / mongodb / cassandra / nats / dynamodb / etcd / memcached |
 | 2.3 | source-sampling: file | done | `data.source.file.sample-rows` and `data.source.file.sample-shape` shipped. Both are thin wrappers (`db_file_sample` / `db_file_sample_shape`) covering all 12 file kinds via the consolidated DuckDB-backed driver. xlsx target selects a sheet; directory connections glob / walk-and-convert transparently. WHERE clause supported on sample-rows; sample-shape pulls a sample then runs `inferShape` for nested types (json / jsonl / ndjson) |
 | 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |
-| 3.1 | code-binding: class.extract-fields | pending | cross-owner into code-analyzer |
-| 3.2 | code-binding: class.locate-references | pending | |
-| 3.3 | code-binding: orm.resolve-model | pending | Prisma / TypeORM / SQLAlchemy / Hibernate |
+| 3.1 | code-binding: class.extract-fields | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.class.extract-fields` registration in code-analyzer; see "Deferred -- code-analyzer prerequisites required" callout above |
+| 3.2 | code-binding: class.locate-references | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.class.locate-references`; see callout above |
+| 3.3 | code-binding: orm.resolve-model | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.orm.resolve-model` (Prisma / TypeORM / SQLAlchemy / Hibernate dialects); see callout above |
 | 3.4 | code-binding: lineage.read-write-callsites | done | `data.lineage.read-write-callsites` skill wraps the `data_lineage` tool. Tool upgraded with: (a) ORM-typed call-pattern recognition (`.create(`, `.findOne(`, `.update_all(`, etc.) covering Prisma / TypeORM / Sequelize / SQLAlchemy / Hibernate / ActiveRecord -- the leading-`.` requirement avoids identifier-substring false positives like `update_count`; (b) name-variant matching on the literal target (lowercase / UPPERCASE / Rails-singularised / PascalCase / camelCase / snake_case) so `users` also matches `User.create(...)` and `user_profile` matches `UserProfile.find(...)`; (c) wider classification window (200 chars vs the v1 80) to catch ORM chains where `.method(` is several tokens past the literal name. ORM-write precedence: when both write and read patterns match (e.g. `User.where(...).update_all(...)`) the operation is classified as writer, since ORM chains build queries then call a terminal write method. 22 unit tests in `daemon/tools/builtins/data/__tests__/lineage.test.ts`. The Phase 3.2 / 3.3 type-resolved identifier path (Prisma schema -> model -> table mapping) is a complementary follow-up that lands with the rest of code-binding. |
-| 3.5 | code-binding: migration.extract-history | pending | |
-| 4.1 | comparison-diff: drift.prisma-vs-live | pending | composite over rdbms.describe-table |
-| 4.2 | comparison-diff: drift.typeorm-vs-live | pending | |
-| 4.3 | comparison-diff: drift.sqlalchemy-vs-live | pending | |
-| 4.4 | comparison-diff: mapping.json-vs-class | pending | composite (class.extract-fields + file.sample-shape) |
-| 4.5 | comparison-diff: mapping.csv-vs-dto | pending | |
-| 4.6 | comparison-diff: cardinality.expected-vs-live | pending | |
-| 4.7 | comparison-diff: range.expected-vs-live | pending | |
+| 3.5 | code-binding: migration.extract-history | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.migration.extract-history`; see callout above |
+| 4.1 | comparison-diff: drift.prisma-vs-live | **deferred** -- transitive on Phase 3 | Composite over rdbms.describe-table + 3.3 orm.resolve-model (Prisma); deferred with the rest of Phase 4 until code-analyzer prerequisites land. See callout above |
+| 4.2 | comparison-diff: drift.typeorm-vs-live | **deferred** -- transitive on Phase 3 | Same shape as 4.1 over the TypeORM dialect of 3.3 |
+| 4.3 | comparison-diff: drift.sqlalchemy-vs-live | **deferred** -- transitive on Phase 3 | Same shape as 4.1 over the SQLAlchemy dialect of 3.3 |
+| 4.4 | comparison-diff: mapping.json-vs-class | **deferred** -- transitive on Phase 3 | Composite (3.1 class.extract-fields + 2.3 file.sample-shape); deferred until 3.1 lands. The hallucinated-class regression test from 2026-04-30 must go green before this slice ships |
+| 4.5 | comparison-diff: mapping.csv-vs-dto | **deferred** -- transitive on Phase 3 | Composite (3.1 class.extract-fields on the DTO + 2.3 file.sample-shape on the CSV) |
+| 4.6 | comparison-diff: cardinality.expected-vs-live | **deferred** -- batched with Phase 4 | Could plausibly ship independently with caller-supplied "expected" values; deferred to keep the comparison-diff family landing as one coherent batch when 3.x prerequisites arrive |
+| 4.7 | comparison-diff: range.expected-vs-live | **deferred** -- batched with Phase 4 | Same rationale as 4.6 |
 | 5a.1 | quality-profile: profile.numeric | done (modulo helper-extraction follow-up) | Both `data.profile.numeric.rdbms` and `data.profile.numeric.file` shipped. Math + output schema lifted into `data.profile.numeric.algo.ts`; both wrappers delegate. `.rdbms` calls `db_sql_aggregate`; `.file` calls `db_file_aggregate` (xlsx sheet selection via the optional `target` field, mapped to the file-tool's `path` parameter at the boundary). Both fixtures green |
 | 5a.2 | quality-profile: profile.categorical | done | Both `.rdbms` and `.file` shipped. Math lives in `data.profile.categorical.algo.ts`. `.rdbms` uses `db_sql_aggregate` + `db_sql_distinct`; `.file` uses `db_file_aggregate` + `db_file_distinct` (xlsx sheet selection via optional `target` field) |
 | 5a.3 | quality-profile: profile.temporal | done | Both `.rdbms` and `.file` shipped (count + non-null + null + distinct cardinality + temporal min/max + range span). Math in `data.profile.temporal.algo.ts`. Phase 0.1.x type-aware aggregate values now carry temporal min/max as ISO strings; output includes `minValue` / `maxValue` / `rangeSpanMs` / `rangeSpanDays`. Gap-detection / period-inference left for a future skill |
 | 5a.4 | quality-profile: profile.text | done | Both `.rdbms` and `.file` shipped. Math in `data.profile.text.algo.ts`. Server-side cardinality + null rate + distinct count via aggregate; sample-based length stats (min / max / avg / median) + empty-string count + **encoding signals** (asciiOnly / nonAsciiRate / astralPresent / controlCharCount / bomCount / mojibakeSuspectCount + `verdict` rolling them up to one of `ascii` / `utf8-clean` / `has-bom` / `control-chars-present` / `mojibake-suspect` / `inconclusive`). Mojibake detection catches Latin-1-decoded-as-UTF-8 byte sequences (`Ã©`, `â€™`, `Â£`) that survive the driver decode -- a tell-tale sign of double-decoding. 11 unit tests in `daemon/skills/__tests__/profile-text-encoding.test.ts`. Generalized regex pattern inference is intentionally out of scope (covered by 5e.1 `pii.detect-patterns` for canonical PII shapes; a future general-pattern skill could ship as a follow-up if a caller actually needs it). |
 | 5a.5 | quality-profile: profile.boolean | done | Both `.rdbms` and `.file` shipped. Math in `data.profile.boolean.algo.ts` (one `db_*_distinct` round-trip + dialect-tolerant true / false / null / other normaliser; true ratio over non-null observations). xlsx sheet selection on the file variant via optional `target` field |
 | 5a.6 | quality-profile: profile.auto | done | `data.profile.auto.rdbms` shipped (composite over all 5 RDBMS profile atomics). Calls `db_sql_describe` to read the column's declared SQL type, classifies into `numeric / text / boolean / temporal / categorical` via lowercase substring rules, dispatches to the matching profiler via `runSkill`. Returns `{ declaredType, kind, profile }` so synthesise renderers branch without re-classifying |
-| 5b.1 | distribution: distribution.histogram | pending | |
+| 5b.1 | distribution: distribution.histogram | done | Both `.rdbms` and `.file` shipped. Math is entirely server-side (Phase 0.2 `db_sql_histogram` / `db_file_histogram`); skill is a pass-through wrapper that normalises the tool result into a typed output and stamps a top-level verdict (`has-data` / `empty` / `inconclusive`). Default 20 buckets, capped at 200; modes `equal-width` (every dialect) / `equal-frequency` (NTILE-supporting dialects). xlsx sheet selection on file variant via optional `target` field. Output: `{ target, column, mode, bucketsRequested, bounds, nonNullCount, nullCount, buckets, verdict }`. Unblocks 6.9 synth.histogram-block. |
 | 5b.2 | distribution: distribution.outliers-iqr | done | Both `.rdbms` and `.file` shipped. Math in `data.distribution.outliers-iqr.algo.ts` (Tukey-IQR; default k=1.5; Q1/Q3/IQR + bounds from server-side aggregate; sample-based outlier examples + estimated count over 50 rows; `hasFullTableOutliers` precise from min/max vs bounds). `.file` uses xlsx sheet selection via optional `target` field |
 | 5b.3 | distribution: distribution.outliers-zscore | done | Both `.rdbms` and `.file` shipped. Math in `data.distribution.outliers-zscore.algo.ts`. Same Z-score model both sides; mean/stddev from server-side aggregate, examples from sample. |
 | 5b.4 | distribution: distribution.outliers-mad | done | Both `.rdbms` and `.file` shipped. Math in `data.distribution.outliers-mad.algo.ts` (modified Z-score via MAD; default threshold 3.5). Phase 0.1.x: server-side `mad` aggregate is now consumed automatically when the engine supports it (DuckDB native); falls back to sample-based MAD on dialects that don't. `madSource` reports `'server' \| 'sample' \| 'unknown'`. |

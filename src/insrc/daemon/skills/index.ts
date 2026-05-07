@@ -28,6 +28,8 @@ import { registerDataSourceFileSampleShapeSkill } from './built-ins/data.source.
 import { registerDataSourceKvScanKeysSkill } from './built-ins/data.source.kv.scan-keys.js';
 import { registerDataSourceKvGetValueSkill } from './built-ins/data.source.kv.get-value.js';
 import { registerDataSourceKvSampleShapeSkill } from './built-ins/data.source.kv.sample-shape.js';
+import { registerDataSourceKvListNamespacesSkill } from './built-ins/data.source.kv.list-namespaces.js';
+import { registerDataSourceKvDescribeNamespaceSkill } from './built-ins/data.source.kv.describe-namespace.js';
 import { registerDataProfileNumericRdbmsSkill } from './built-ins/data.profile.numeric.rdbms.js';
 import { registerDataProfileNumericFileSkill } from './built-ins/data.profile.numeric.file.js';
 import { registerDataProfileCategoricalFileSkill } from './built-ins/data.profile.categorical.file.js';
@@ -56,6 +58,8 @@ import { registerDataQualityScorecardFileSkill } from './built-ins/data.quality.
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataQualityValidityFileSkill } from './built-ins/data.quality.validity.file.js';
+import { registerDataDistributionHistogramRdbmsSkill } from './built-ins/data.distribution.histogram.rdbms.js';
+import { registerDataDistributionHistogramFileSkill } from './built-ins/data.distribution.histogram.file.js';
 import { registerDataDistributionOutliersIqrRdbmsSkill } from './built-ins/data.distribution.outliers-iqr.rdbms.js';
 import { registerDataDistributionOutliersIqrFileSkill } from './built-ins/data.distribution.outliers-iqr.file.js';
 import { registerDataDistributionOutliersZScoreFileSkill } from './built-ins/data.distribution.outliers-zscore.file.js';
@@ -117,6 +121,9 @@ export function registerAllSkills(): void {
   registerDataSourceKvScanKeysSkill();
   registerDataSourceKvGetValueSkill();
   registerDataSourceKvSampleShapeSkill();
+  // Phase 1.2 -- KV introspection (list / describe namespaces).
+  registerDataSourceKvListNamespacesSkill();
+  registerDataSourceKvDescribeNamespaceSkill();
   // Phase 5a (Family-5 univariate profilers). Atomics first, then
   // the auto composite that dispatches by declared SQL type.
   registerDataProfileNumericRdbmsSkill();
@@ -142,9 +149,13 @@ export function registerAllSkills(): void {
   registerDataQualityConformityFileSkill();
   registerDataQualityConsistencyRdbmsSkill();
   registerDataQualityConsistencyFileSkill();
-  // Phase 5b (Family-5 distribution shape) -- outlier detection
-  // variants. All hybrid: bounds from server-side aggregate,
-  // examples + estimated counts from a 50-row sample.
+  // Phase 5b (Family-5 distribution shape) -- histogram + outlier
+  // detection variants. Histogram is a thin pass-through over the
+  // server-side `db_*_histogram` tools (Phase 0.2). Outlier skills
+  // are hybrid: bounds from server-side aggregate, examples +
+  // estimated counts from a 50-row sample.
+  registerDataDistributionHistogramRdbmsSkill();
+  registerDataDistributionHistogramFileSkill();
   registerDataDistributionOutliersIqrRdbmsSkill();
   registerDataDistributionOutliersIqrFileSkill();
   registerDataDistributionOutliersZScoreRdbmsSkill();
