@@ -60,6 +60,7 @@ import {
 	type EntityRow,
 	type RepoRow,
 } from './graph/codec.js';
+import { validateRepoPathShape } from './repos.js';
 
 const log = getLogger('db.entities');
 
@@ -191,6 +192,47 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 		);
 	}
 
+	// Phase 2.10 / 2026-05-07 guardrail: forensic check + reject any
+	// entity whose `repo` would auto-allocate a phantom Repo registry
+	// row through `ensureRepo()` below. The IPC `repo.add` path
+	// already validates -- this is the OTHER path that bypassed the
+	// guardrail (entities arriving from a parser / pipeline with an
+	// empty / banned-root `repo` string would silently create a
+	// Repo registry entry, e.g. `repo=""` indexing 14k orphans).
+	// Reject the whole batch with a stack trace so the upstream
+	// caller is identifiable.
+	const filteredOut: { id: string; repo: string; file: string; reason: string }[] = [];
+	const accepted: Entity[] = [];
+	for (const e of unique) {
+		try {
+			validateRepoPathShape(e.repo);
+			accepted.push(e);
+		} catch (err) {
+			filteredOut.push({
+				id: e.id,
+				repo: e.repo,
+				file: e.file,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+	if (filteredOut.length > 0) {
+		log.warn(
+			{
+				dropped:       filteredOut.length,
+				kept:          accepted.length,
+				original:      unique.length,
+				sample:        filteredOut.slice(0, 5),
+				stackHint:     new Error('upsertEntities caller stack').stack?.split('\n').slice(2, 7),
+			},
+			'upsertEntities: dropped entities with invalid repo paths -- empty / non-absolute / system-root. ' +
+			'These would have auto-allocated phantom Repo registry rows. The stack trace points to the upstream ' +
+			'caller -- usually the indexer parser pipeline. See plans/analyzers (no plan section yet) and ' +
+			'guardrail commit ad2fb453b8a.',
+		);
+	}
+	if (accepted.length === 0) return;
+
 	// Collect (entity, was-new-or-re-embed) tuples for the post-commit
 	// Lance write step. Filled inside the txn so we have prior-row
 	// state available; flushed to Lance after the LMDB commit so a
@@ -229,7 +271,7 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 			return id;
 		};
 
-		for (const e of unique) {
+		for (const e of accepted) {
 			const repoId = ensureRepo(e.repo);
 			const existingU64 = lookupU64ByStringId(s, e.id);
 
@@ -338,6 +380,25 @@ export async function reindexFile(
 	filePath: string,
 	parsed: Entity[],
 ): Promise<void> {
+	// Phase 2.10 / 2026-05-07 guardrail: reject reindex calls with
+	// invalid repo paths. Same intent as the upsertEntities check --
+	// don't let an empty / banned-root repoPath silently auto-allocate
+	// a phantom Repo registry row through `allocateRepoIdInTxn` below.
+	try {
+		validateRepoPathShape(repoPath);
+	} catch (err) {
+		log.warn(
+			{
+				repoPath,
+				filePath,
+				reason: err instanceof Error ? err.message : String(err),
+				stackHint: new Error('reindexFile caller stack').stack?.split('\n').slice(2, 7),
+			},
+			'reindexFile: rejected -- invalid repoPath. Caller should be passing the registered repo root, not a derived / empty / system path.',
+		);
+		return;
+	}
+
 	// Dedupe by SHA id (same protective pass `upsertEntities` does)
 	const { unique, duplicateIds } = dedupeEntitiesById(parsed);
 	if (duplicateIds.size > 0) {
