@@ -1,0 +1,20 @@
+{
+  "input": {
+    "target": "public.orders",
+    "column": "amount",
+    "mode": "equal-width",
+    "bucketsRequested": 5,
+    "bounds": { "lower": 0, "upper": 100 },
+    "nonNullCount": 985,
+    "nullCount": 15,
+    "buckets": [
+      { "lower":  0, "upper":  20, "count": 312 },
+      { "lower": 20, "upper":  40, "count": 287 },
+      { "lower": 40, "upper":  60, "count": 198 },
+      { "lower": 60, "upper":  80, "count": 121 },
+      { "lower": 80, "upper": 100, "count":  67 }
+    ],
+    "verdict": "has-data"
+  },
+  "expectedConfidenceFloor": "high"
+}

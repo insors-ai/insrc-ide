@@ -56,6 +56,7 @@ import { registerDataSynthLineageFoldSkill } from './built-ins/data.synth.lineag
 import { registerDataQualityScorecardRdbmsSkill } from './built-ins/data.quality.scorecard.rdbms.js';
 import { registerDataQualityScorecardFileSkill } from './built-ins/data.quality.scorecard.file.js';
 import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecard.js';
+import { registerDataSynthHistogramBlockSkill } from './built-ins/data.synth.histogram-block.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataQualityValidityFileSkill } from './built-ins/data.quality.validity.file.js';
 import { registerDataDistributionHistogramRdbmsSkill } from './built-ins/data.distribution.histogram.rdbms.js';
@@ -215,6 +216,9 @@ export function registerAllSkills(): void {
   registerDataQualityScorecardFileSkill();
   // 6.8 synth.scorecard renders the scorecard composite's output.
   registerDataSynthScorecardSkill();
+  // 6.9 synth.histogram-block renders the 5b.1 histogram output as
+  // an ASCII bar chart inside a fenced code block.
+  registerDataSynthHistogramBlockSkill();
   // 5e.3 sensitivity.policy-check composes pii.column-classifier
   // across columns vs the connection's declared PII list.
   registerDataSensitivityPolicyCheckRdbmsSkill();
