@@ -182,6 +182,14 @@ class ClickHouseDriver implements RdbmsDriver {
 		throw new Error('data-driver: temporalTrend() not yet implemented for clickhouse -- pairs with aggregate() follow-up (Phase 0.1).');
 	}
 
+	async dickeyFuller(): Promise<never> {
+		throw new Error('data-driver: dickeyFuller() not yet implemented for clickhouse -- needs CTE/LAG translation to ClickHouse window-function syntax.');
+	}
+
+	async temporalGapStats(): Promise<never> {
+		throw new Error('data-driver: temporalGapStats() not yet implemented for clickhouse -- needs CTE/LAG translation to ClickHouse window-function syntax.');
+	}
+
 	async close(): Promise<void> {
 		await this.client.close();
 	}

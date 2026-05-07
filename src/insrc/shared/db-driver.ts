@@ -572,6 +572,72 @@ export interface TemporalTrendResult {
 }
 
 // ---------------------------------------------------------------------------
+// Dickey-Fuller stationarity test (Phase 5g.3 substrate)
+// ---------------------------------------------------------------------------
+
+export interface DickeyFullerRequest {
+	readonly valueColumn: string;
+	readonly timestampColumn: string;
+	readonly where?: readonly WhereClause[];
+}
+
+export interface DickeyFullerResult {
+	readonly target: string;
+	readonly valueColumn: string;
+	readonly timestampColumn: string;
+	/** Count of (y_t, y_lag1) pairs with both sides non-null. */
+	readonly n: number;
+	/** Slope coefficient β in the regression Δy[t] = α + β·y[t-1] + ε. */
+	readonly beta: number | null;
+	/** Standard error of β. */
+	readonly seBeta: number | null;
+	/** t-statistic = β / SE(β). Compare to MacKinnon critical values
+	 *  at the asymptotic distribution for large n. */
+	readonly tStat: number | null;
+	/** Centred-form Sxx (Σ(x - x̄)²). */
+	readonly sxx: number | null;
+	/** Sum of squared residuals from the lagged regression. */
+	readonly ssRes: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Temporal gap stats (Phase 5g.4 substrate)
+// ---------------------------------------------------------------------------
+
+export interface TemporalGapStatsRequest {
+	readonly timestampColumn: string;
+	readonly where?: readonly WhereClause[];
+	/** Multiplier for "gap" detection vs median delta. Default 2. */
+	readonly gapRatio?: number;
+	/** How many top gaps to return. Default 10. */
+	readonly topGaps?: number;
+}
+
+export interface TemporalGapEntry {
+	readonly fromEpoch: number;
+	readonly toEpoch: number;
+	readonly deltaSeconds: number;
+	readonly ratio: number;
+}
+
+export interface TemporalGapStatsResult {
+	readonly target: string;
+	readonly timestampColumn: string;
+	/** Total non-null timestamps. */
+	readonly n: number;
+	/** Median consecutive delta in seconds (the inferred cadence). */
+	readonly medianDeltaSeconds: number | null;
+	/** Fraction of consecutive deltas within ±50% of the median. */
+	readonly regularityScore: number | null;
+	/** Total count of deltas exceeding gapRatio × median. */
+	readonly gapCount: number;
+	/** Top-N gaps by ratio descending. */
+	readonly topGaps: readonly TemporalGapEntry[];
+	readonly minTimestampEpoch: number | null;
+	readonly maxTimestampEpoch: number | null;
+}
+
+// ---------------------------------------------------------------------------
 // Driver interfaces
 // ---------------------------------------------------------------------------
 
@@ -622,6 +688,15 @@ export interface RdbmsDriver extends BaseDriver {
 	 *  the timestamp column). Optional: drivers without the regression
 	 *  primitives or epoch conversion can leave it undefined. */
 	temporalTrend?(target: string, request: TemporalTrendRequest): Promise<TemporalTrendResult>;
+	/** Phase 5g.3 -- server-side Dickey-Fuller stationarity test.
+	 *  Internally uses LAG window function (CTE) + the same SUM-of-
+	 *  moments regression as temporalTrend to derive β + SE(β) +
+	 *  t-statistic. Drivers without LAG support leave undefined. */
+	dickeyFuller?(target: string, request: DickeyFullerRequest): Promise<DickeyFullerResult>;
+	/** Phase 5g.4 -- server-side temporal gap statistics: median
+	 *  cadence + top-N gaps + regularity score, computed via LAG
+	 *  window function over the sorted timestamp column. */
+	temporalGapStats?(target: string, request: TemporalGapStatsRequest): Promise<TemporalGapStatsResult>;
 }
 
 export interface KvDriver extends BaseDriver {

@@ -27,9 +27,14 @@ import type {
 	HistogramMode,
 	HistogramRequest,
 	HistogramResult,
+	DickeyFullerRequest,
+	DickeyFullerResult,
 	OutlierRequest,
 	OutlierResult,
 	SampleOpts,
+	TemporalGapEntry,
+	TemporalGapStatsRequest,
+	TemporalGapStatsResult,
 	TemporalTrendRequest,
 	TemporalTrendResult,
 	WhereClause,
@@ -1937,6 +1942,313 @@ export async function executeTemporalTrend(
 		deps.request.valueColumn,
 		compiled.native,
 	);
+}
+
+// ---------------------------------------------------------------------------
+// Dickey-Fuller stationarity test (Phase 5g.3 substrate)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the SQL for a Dickey-Fuller test: regress Δy[t] = α + β·y[t-1] + ε
+ * via a CTE that materialises (y, y_lag1) pairs through the LAG
+ * window function. Returns a single row with n + the six SUM moments
+ * needed to derive β + SE(β) + t-statistic in JS.
+ *
+ * Universally supported on every modern dialect with CTE + LAG
+ * (PG / DuckDB / MySQL 8+ / SQLite >=3.25 / MSSQL / Oracle).
+ * ClickHouse uses different window-function syntax; left undefined
+ * there.
+ */
+export function compileDickeyFuller(
+	target: string,
+	request: DickeyFullerRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	opts?: { asTableExpr?: string; paramStartIndex?: number },
+): { readonly text: string; readonly values: readonly unknown[] } {
+	const yCol  = quoteAndValidateColumn(request.valueColumn,     knownColumns, dialect);
+	const tsCol = quoteAndValidateColumn(request.timestampColumn, knownColumns, dialect);
+	const tableExpr = opts?.asTableExpr ?? quoteTarget(target, dialect);
+	const startIdx = opts?.paramStartIndex ?? 1;
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, startIdx);
+	const whereClause = where.text === '' ? '' : ` ${where.text}`;
+	const pair = `y_lag1 IS NOT NULL AND y IS NOT NULL`;
+	const text = [
+		`WITH lagged AS (`,
+		`  SELECT ${yCol} AS y, LAG(${yCol}) OVER (ORDER BY ${tsCol}) AS y_lag1`,
+		`  FROM ${tableExpr}${whereClause}`,
+		`)`,
+		'SELECT',
+		`  SUM(CASE WHEN ${pair} THEN 1 ELSE 0 END)              AS n,`,
+		`  SUM(CASE WHEN ${pair} THEN y_lag1                END) AS sx,`,
+		`  SUM(CASE WHEN ${pair} THEN (y - y_lag1)          END) AS sy,`,
+		`  SUM(CASE WHEN ${pair} THEN y_lag1 * y_lag1       END) AS sxx,`,
+		`  SUM(CASE WHEN ${pair} THEN (y - y_lag1)*(y - y_lag1) END) AS syy,`,
+		`  SUM(CASE WHEN ${pair} THEN y_lag1 * (y - y_lag1) END) AS sxy`,
+		'FROM lagged',
+	].join(' ');
+	if (looksLikeMutation(text)) {
+		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
+	}
+	return { text, values: where.values };
+}
+
+export function readDickeyFullerRow(
+	row: Readonly<Record<string, unknown>> | undefined,
+	target: string,
+	valueColumn: string,
+	timestampColumn: string,
+): DickeyFullerResult {
+	if (row === undefined) {
+		return { target, valueColumn, timestampColumn, n: 0, beta: null, seBeta: null, tStat: null, sxx: null, ssRes: null };
+	}
+	const n   = Math.max(0, Math.floor(asNumericValue(row['n']   as number | string | null | undefined) ?? 0));
+	const sx  = asNumericValue(row['sx']  as number | string | null | undefined);
+	const sy  = asNumericValue(row['sy']  as number | string | null | undefined);
+	const sxx = asNumericValue(row['sxx'] as number | string | null | undefined);
+	const syy = asNumericValue(row['syy'] as number | string | null | undefined);
+	const sxy = asNumericValue(row['sxy'] as number | string | null | undefined);
+	if (n < 3 || sx === null || sy === null || sxx === null || syy === null || sxy === null) {
+		return { target, valueColumn, timestampColumn, n, beta: null, seBeta: null, tStat: null, sxx: null, ssRes: null };
+	}
+	const Sxx = sxx - (sx * sx) / n;
+	const Syy = syy - (sy * sy) / n;
+	const Sxy = sxy - (sx * sy) / n;
+	if (Sxx <= 0) {
+		return { target, valueColumn, timestampColumn, n, beta: null, seBeta: null, tStat: null, sxx: 0, ssRes: null };
+	}
+	const beta = Sxy / Sxx;
+	const ssRes = Math.max(0, Syy - beta * Sxy);
+	if (n < 3) {
+		return { target, valueColumn, timestampColumn, n, beta, seBeta: null, tStat: null, sxx: Sxx, ssRes };
+	}
+	const sigma2 = ssRes / (n - 2);
+	const seBeta = sigma2 > 0 ? Math.sqrt(sigma2) / Math.sqrt(Sxx) : null;
+	const tStat  = seBeta !== null && seBeta > 0 ? beta / seBeta : null;
+	return { target, valueColumn, timestampColumn, n, beta, seBeta, tStat, sxx: Sxx, ssRes };
+}
+
+export interface DickeyFullerOrchestratorDeps extends OrchestratorDeps {
+	readonly request: DickeyFullerRequest;
+}
+
+export async function executeDickeyFuller(
+	deps: DickeyFullerOrchestratorDeps,
+): Promise<DickeyFullerResult> {
+	const compiled = compileDickeyFuller(
+		deps.target,
+		deps.request,
+		deps.knownColumns,
+		deps.dialect,
+		buildOrchestratorOptions(deps),
+	);
+	const rows = await deps.runRows(compiled.text, compiled.values);
+	return readDickeyFullerRow(rows[0], deps.target, deps.request.valueColumn, deps.request.timestampColumn);
+}
+
+// ---------------------------------------------------------------------------
+// Temporal gap statistics (Phase 5g.4 substrate)
+// ---------------------------------------------------------------------------
+
+/**
+ * Two-phase protocol for gap stats:
+ *
+ *   1. compileGapStatsBaseline: returns a CTE-based SELECT that
+ *      aggregates the per-row consecutive deltas into n_deltas +
+ *      median_delta + min_epoch + max_epoch.
+ *
+ *   2. compileGapStatsBuckets: with the median known, count regular
+ *      deltas (within ±50% of median) and gap deltas (> gapRatio ×
+ *      median). Pulls the top-N gap deltas as rows.
+ *
+ * Median uses PERCENTILE_CONT(0.5) WITHIN GROUP, which is supported
+ * on Postgres / DuckDB / Oracle / SQLite >=3.25 / MSSQL 2017+ /
+ * MySQL 8+.
+ */
+export interface CompiledGapStatsBaseline {
+	readonly text: string;
+	readonly values: readonly unknown[];
+}
+
+export function compileGapStatsBaseline(
+	target: string,
+	request: TemporalGapStatsRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	opts?: { asTableExpr?: string; paramStartIndex?: number },
+): CompiledGapStatsBaseline {
+	const tsCol = quoteAndValidateColumn(request.timestampColumn, knownColumns, dialect);
+	const tsExpr = dialect.epochExpr(tsCol);
+	const tableExpr = opts?.asTableExpr ?? quoteTarget(target, dialect);
+	const startIdx = opts?.paramStartIndex ?? 1;
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, startIdx);
+	// Always exclude null timestamps from the source set (the LAG
+	// would otherwise produce noise).
+	const whereCombined = where.text === ''
+		? `WHERE ${tsCol} IS NOT NULL`
+		: `${where.text} AND ${tsCol} IS NOT NULL`;
+	// Use SUM(CASE WHEN ...) instead of COUNT(*) FILTER -- the latter
+	// is PG/DuckDB-specific. PERCENTILE_CONT(...) WITHIN GROUP is
+	// supported on every shipped dialect that already passes the
+	// existing `percentile` aggregate function (PG / DuckDB / Oracle /
+	// MySQL 8+ / SQLite >=3.25 / MSSQL 2017+).
+	const text = [
+		`WITH ordered AS (`,
+		`  SELECT ${tsExpr} AS ts_epoch,`,
+		`         LAG(${tsExpr}) OVER (ORDER BY ${tsCol}) AS prev_epoch`,
+		`  FROM ${tableExpr} ${whereCombined}`,
+		`)`,
+		'SELECT',
+		'  SUM(CASE WHEN prev_epoch IS NOT NULL THEN 1 ELSE 0 END) AS n_deltas,',
+		'  COUNT(*) AS n_total,',
+		'  PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY (ts_epoch - prev_epoch)) AS median_delta,',
+		'  MIN(ts_epoch) AS min_epoch,',
+		'  MAX(ts_epoch) AS max_epoch',
+		'FROM ordered',
+	].join(' ');
+	if (looksLikeMutation(text)) {
+		throw new Error(`data-driver: refused suspicious SQL: ${text}`);
+	}
+	return { text, values: where.values };
+}
+
+export interface CompiledGapStatsBuckets {
+	readonly countsSql: string;
+	readonly countsValues: readonly unknown[];
+	readonly topGapsSql: string;
+	readonly topGapsValues: readonly unknown[];
+}
+
+export function compileGapStatsBuckets(
+	target: string,
+	request: TemporalGapStatsRequest,
+	knownColumns: readonly string[],
+	dialect: Dialect,
+	median: number,
+	gapRatio: number,
+	topN: number,
+	opts?: { asTableExpr?: string; paramStartIndex?: number },
+): CompiledGapStatsBuckets {
+	const tsCol = quoteAndValidateColumn(request.timestampColumn, knownColumns, dialect);
+	const tsExpr = dialect.epochExpr(tsCol);
+	const tableExpr = opts?.asTableExpr ?? quoteTarget(target, dialect);
+	const startIdx = opts?.paramStartIndex ?? 1;
+	const where = compileWhere(request.where ?? [], knownColumns, dialect, startIdx);
+	const whereCombined = where.text === ''
+		? `WHERE ${tsCol} IS NOT NULL`
+		: `${where.text} AND ${tsCol} IS NOT NULL`;
+	const lowerRegular = median * 0.5;
+	const upperRegular = median * 1.5;
+	const gapThreshold = median * gapRatio;
+	// Counts query: regular deltas (within ±50% of median) +
+	// gap deltas (> gapRatio * median). All literals interpolated
+	// since they're caller-controlled numerics validated upstream.
+	const countsSql = [
+		`WITH ordered AS (`,
+		`  SELECT ${tsExpr} AS ts_epoch, LAG(${tsExpr}) OVER (ORDER BY ${tsCol}) AS prev_epoch`,
+		`  FROM ${tableExpr} ${whereCombined}`,
+		`),`,
+		'deltas AS (',
+		'  SELECT ts_epoch - prev_epoch AS d FROM ordered WHERE prev_epoch IS NOT NULL',
+		')',
+		'SELECT',
+		`  SUM(CASE WHEN d >= ${lowerRegular} AND d <= ${upperRegular} THEN 1 ELSE 0 END) AS regular_count,`,
+		`  SUM(CASE WHEN d >  ${gapThreshold} THEN 1 ELSE 0 END) AS gap_count,`,
+		'  COUNT(*) AS total_deltas',
+		'FROM deltas',
+	].join(' ');
+	const topGapsSql = [
+		`WITH ordered AS (`,
+		`  SELECT ${tsExpr} AS ts_epoch, LAG(${tsExpr}) OVER (ORDER BY ${tsCol}) AS prev_epoch`,
+		`  FROM ${tableExpr} ${whereCombined}`,
+		`)`,
+		'SELECT prev_epoch AS from_epoch, ts_epoch AS to_epoch, (ts_epoch - prev_epoch) AS delta_seconds',
+		`FROM ordered`,
+		`WHERE prev_epoch IS NOT NULL AND (ts_epoch - prev_epoch) > ${gapThreshold}`,
+		`ORDER BY (ts_epoch - prev_epoch) DESC`,
+		dialect.limitClause(topN),
+	].filter(s => s !== '').join(' ');
+	if (looksLikeMutation(countsSql) || looksLikeMutation(topGapsSql)) {
+		throw new Error('data-driver: refused suspicious gap-stats SQL');
+	}
+	return {
+		countsSql,
+		countsValues: where.values,
+		topGapsSql,
+		topGapsValues: where.values,
+	};
+}
+
+export interface TemporalGapStatsOrchestratorDeps extends OrchestratorDeps {
+	readonly request: TemporalGapStatsRequest;
+}
+
+export async function executeTemporalGapStats(
+	deps: TemporalGapStatsOrchestratorDeps,
+): Promise<TemporalGapStatsResult> {
+	const request = deps.request;
+	const gapRatio = typeof request.gapRatio === 'number' && request.gapRatio > 1 ? request.gapRatio : 2;
+	const topN = Math.min(Math.max(1, Math.floor(typeof request.topGaps === 'number' ? request.topGaps : 10)), 50);
+
+	// Phase 1: baseline.
+	const baseline = compileGapStatsBaseline(
+		deps.target, request, deps.knownColumns, deps.dialect, buildOrchestratorOptions(deps),
+	);
+	const baselineRows = await deps.runRows(baseline.text, baseline.values);
+	const b = baselineRows[0];
+	const nTotal = Math.max(0, Math.floor(asNumericValue(b?.['n_total']  as number | string | null | undefined) ?? 0));
+	const nDeltas = Math.max(0, Math.floor(asNumericValue(b?.['n_deltas'] as number | string | null | undefined) ?? 0));
+	const median  = asNumericValue(b?.['median_delta'] as number | string | null | undefined);
+	const minEpoch = asNumericValue(b?.['min_epoch']  as number | string | null | undefined);
+	const maxEpoch = asNumericValue(b?.['max_epoch']  as number | string | null | undefined);
+
+	if (median === null || median <= 0 || nDeltas === 0) {
+		return {
+			target: deps.target,
+			timestampColumn: request.timestampColumn,
+			n: nTotal,
+			medianDeltaSeconds: median,
+			regularityScore: null,
+			gapCount: 0,
+			topGaps: [],
+			minTimestampEpoch: minEpoch,
+			maxTimestampEpoch: maxEpoch,
+		};
+	}
+
+	// Phase 2: bucket counts + top gaps.
+	const buckets = compileGapStatsBuckets(
+		deps.target, request, deps.knownColumns, deps.dialect,
+		median, gapRatio, topN, buildOrchestratorOptions(deps),
+	);
+	const [countsRows, topRows] = await Promise.all([
+		deps.runRows(buckets.countsSql,  buckets.countsValues),
+		deps.runRows(buckets.topGapsSql, buckets.topGapsValues),
+	]);
+	const c = countsRows[0];
+	const regular = asNumericValue(c?.['regular_count'] as number | string | null | undefined) ?? 0;
+	const total   = asNumericValue(c?.['total_deltas']  as number | string | null | undefined) ?? 0;
+	const gaps    = Math.max(0, Math.floor(asNumericValue(c?.['gap_count'] as number | string | null | undefined) ?? 0));
+	const regularityScore = total > 0 ? regular / total : null;
+
+	const topGaps: TemporalGapEntry[] = topRows.map(r => ({
+		fromEpoch:    asNumericValue(r['from_epoch']    as number | string | null | undefined) ?? 0,
+		toEpoch:      asNumericValue(r['to_epoch']      as number | string | null | undefined) ?? 0,
+		deltaSeconds: asNumericValue(r['delta_seconds'] as number | string | null | undefined) ?? 0,
+		ratio: ((asNumericValue(r['delta_seconds'] as number | string | null | undefined) ?? 0) / median),
+	}));
+
+	return {
+		target: deps.target,
+		timestampColumn: request.timestampColumn,
+		n: nTotal,
+		medianDeltaSeconds: median,
+		regularityScore,
+		gapCount: gaps,
+		topGaps,
+		minTimestampEpoch: minEpoch,
+		maxTimestampEpoch: maxEpoch,
+	};
 }
 
 // ---------------------------------------------------------------------------

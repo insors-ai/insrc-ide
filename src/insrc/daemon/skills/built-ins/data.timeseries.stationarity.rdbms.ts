@@ -38,7 +38,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
 
 const SAMPLE_DEFAULT = 50;
 const MIN_SAMPLE     = 20;
@@ -52,12 +52,24 @@ const CV_50 = {
 	pct10: -2.60,
 } as const;
 
+// MacKinnon (1996) asymptotic critical values for the constant-only
+// Dickey-Fuller model. Used by full-table mode where n is the entire
+// (paired) population.
+const CV_ASYMPTOTIC = {
+	pct1:  -3.43,
+	pct5:  -2.86,
+	pct10: -2.57,
+} as const;
+
+type StationarityMode = 'sample' | 'full-table';
+
 interface TimeseriesStationarityInput {
 	readonly connectionId: string;
 	readonly target: string;
 	readonly timestampColumn: string;
 	readonly valueColumn: string;
 	readonly sampleSize?: number;
+	readonly mode?: StationarityMode;
 }
 
 type Verdict = 'stationary' | 'non-stationary' | 'inconclusive';
@@ -78,6 +90,7 @@ interface TimeseriesStationarityOutput {
 	readonly rejectsAtLevel: '1%' | '5%' | '10%' | 'none';
 	readonly verdict: Verdict;
 	readonly interpretation: string;
+	readonly source: StationarityMode;
 }
 
 const RDBMS_FAMILY_TAGS = [
@@ -105,6 +118,11 @@ const skill: Skill<TimeseriesStationarityInput, TimeseriesStationarityOutput> = 
 			timestampColumn: { type: 'string' },
 			valueColumn:     { type: 'string' },
 			sampleSize:      { type: 'integer', minimum: MIN_SAMPLE, maximum: 50, description: 'Min 20 (DF unstable below); default 50.' },
+			mode: {
+				type: 'string',
+				enum: ['sample', 'full-table'],
+				description: 'Default sample. full-table delegates to db_sql_dickey_fuller (CTE + LAG); compares t-stat to asymptotic MacKinnon critical values.',
+			},
 		},
 		required: ['connectionId', 'target', 'timestampColumn', 'valueColumn'],
 		additionalProperties: false,
@@ -127,20 +145,21 @@ const skill: Skill<TimeseriesStationarityInput, TimeseriesStationarityOutput> = 
 			rejectsAtLevel:           { type: 'string', enum: ['1%', '5%', '10%', 'none'] },
 			verdict:                  { type: 'string', enum: ['stationary', 'non-stationary', 'inconclusive'] },
 			interpretation:           { type: 'string' },
+			source:                   { type: 'string', enum: ['sample', 'full-table'] },
 		},
 		required: ['target', 'timestampColumn', 'valueColumn', 'sampleSize',
 		           'count', 'tStatistic', 'beta', 'betaStdErr', 'alpha',
 		           'criticalValue1pct', 'criticalValue5pct', 'criticalValue10pct',
-		           'rejectsAtLevel', 'verdict', 'interpretation'],
+		           'rejectsAtLevel', 'verdict', 'interpretation', 'source'],
 		additionalProperties: false,
 	},
-	toolDeps: ['db_sql_aggregate', 'db_sql_sample'],
+	toolDeps: ['db_sql_aggregate', 'db_sql_sample', 'db_sql_dickey_fuller'],
 	providerAffinity: 'local',
 	preconditions: [
 		{
 			kind: 'required-tools',
-			tools: ['db_sql_aggregate', 'db_sql_sample'],
-			reason: 'aggregate gives count for context; sample gives the (timestamp, value) pairs',
+			tools: ['db_sql_aggregate', 'db_sql_sample', 'db_sql_dickey_fuller'],
+			reason: 'sample mode: aggregate + sample. full-table mode: db_sql_dickey_fuller (CTE + LAG).',
 		},
 		{
 			kind: 'connection-family',
@@ -152,6 +171,10 @@ const skill: Skill<TimeseriesStationarityInput, TimeseriesStationarityOutput> = 
 	async execute(input, deps): Promise<SkillResult<TimeseriesStationarityOutput>> {
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampSample(input.sampleSize);
+
+		if (input.mode === 'full-table') {
+			return runFullTable(input, deps, callBase);
+		}
 
 		const [aggTool, sampleTool] = await Promise.all([
 			deps.runTool({
@@ -310,12 +333,148 @@ const skill: Skill<TimeseriesStationarityInput, TimeseriesStationarityOutput> = 
 				rejectsAtLevel,
 				verdict,
 				interpretation,
+				source: 'sample',
 			},
 			confidence: 'high',
 			toolCalls: [],
 		};
 	},
 };
+
+/**
+ * Phase 5g.3 Track-C full-table mode. Delegates the lagged regression
+ * to db_sql_dickey_fuller (server-side LAG + OLS); compares the
+ * resulting t-statistic to MacKinnon asymptotic critical values
+ * (-3.43 / -2.86 / -2.57) since for full-table n is the entire
+ * paired population.
+ */
+async function runFullTable(
+	input: TimeseriesStationarityInput,
+	deps: SkillDeps,
+	callBase: string,
+): Promise<SkillResult<TimeseriesStationarityOutput>> {
+	const [dfTool, aggTool] = await Promise.all([
+		deps.runTool({
+			id: `${callBase}-df`,
+			name: 'db_sql_dickey_fuller',
+			input: {
+				connectionId: input.connectionId,
+				target: input.target,
+				valueColumn: input.valueColumn,
+				timestampColumn: input.timestampColumn,
+			},
+		}),
+		deps.runTool({
+			id: `${callBase}-agg`,
+			name: 'db_sql_aggregate',
+			input: {
+				connectionId: input.connectionId,
+				target: input.target,
+				aggregations: [{ column: input.valueColumn, function: 'count_non_null' }],
+			},
+		}),
+	]);
+
+	const errors = collectToolErrors([['db_sql_dickey_fuller', dfTool], ['db_sql_aggregate', aggTool]]);
+	if (errors.length > 0) {
+		return { value: { ...empty(input), source: 'full-table' }, confidence: 'low', notes: errors, toolCalls: [] };
+	}
+	if (!isDickeyFullerResult(dfTool.data) || !isAggregateResult(aggTool.data)) {
+		return {
+			value: { ...empty(input), source: 'full-table' },
+			confidence: 'low',
+			notes: ['timeseries.stationarity (full-table): tool result missing structured data'],
+			toolCalls: [],
+		};
+	}
+
+	const df = dfTool.data;
+	const count = aggTool.data.values[`${input.valueColumn}__count_non_null`] ?? null;
+
+	if (df.n < MIN_SAMPLE) {
+		return {
+			value: {
+				...empty(input),
+				count,
+				source: 'full-table',
+				interpretation: `paired population too small (n=${df.n}); need at least ${MIN_SAMPLE} (y[t], y[t-1]) pairs for a meaningful DF test`,
+			},
+			confidence: 'medium',
+			toolCalls: [],
+		};
+	}
+	if (df.tStat === null || df.beta === null) {
+		return {
+			value: {
+				...empty(input),
+				count,
+				source: 'full-table',
+				interpretation: 'Dickey-Fuller test undefined: zero variance in y[t-1] or zero residual SE -- series is deterministic / constant',
+			},
+			confidence: 'medium',
+			toolCalls: [],
+		};
+	}
+
+	let rejectsAtLevel: '1%' | '5%' | '10%' | 'none';
+	if (df.tStat < CV_ASYMPTOTIC.pct1)       rejectsAtLevel = '1%';
+	else if (df.tStat < CV_ASYMPTOTIC.pct5)  rejectsAtLevel = '5%';
+	else if (df.tStat < CV_ASYMPTOTIC.pct10) rejectsAtLevel = '10%';
+	else                                      rejectsAtLevel = 'none';
+
+	const verdict: Verdict = rejectsAtLevel === 'none' ? 'non-stationary' : 'stationary';
+	const interpretation = describeAsymptotic(verdict, rejectsAtLevel, df.tStat, df.n);
+
+	return {
+		value: {
+			target: df.target,
+			timestampColumn: input.timestampColumn,
+			valueColumn: input.valueColumn,
+			sampleSize: 0,
+			count,
+			tStatistic: df.tStat,
+			beta: df.beta, betaStdErr: df.seBeta, alpha: null,
+			criticalValue1pct:  CV_ASYMPTOTIC.pct1,
+			criticalValue5pct:  CV_ASYMPTOTIC.pct5,
+			criticalValue10pct: CV_ASYMPTOTIC.pct10,
+			rejectsAtLevel, verdict, interpretation,
+			source: 'full-table',
+		},
+		confidence: 'high',
+		toolCalls: [],
+	};
+}
+
+function describeAsymptotic(
+	verdict: Verdict,
+	level: '1%' | '5%' | '10%' | 'none',
+	t: number,
+	n: number,
+): string {
+	if (verdict === 'non-stationary') {
+		return `non-stationary (full-table): t-statistic ${t.toFixed(3)} > asymptotic critical value ${CV_ASYMPTOTIC.pct10} (10% level); fails to reject the unit-root null. Series may need differencing before regression / ARMA modelling. (n=${n})`;
+	}
+	const cv = level === '1%' ? CV_ASYMPTOTIC.pct1 : level === '5%' ? CV_ASYMPTOTIC.pct5 : CV_ASYMPTOTIC.pct10;
+	return `stationary at the ${level} level (full-table): t-statistic ${t.toFixed(3)} < asymptotic critical value ${cv}; rejects the unit-root null. (n=${n})`;
+}
+
+interface DickeyFullerResultRaw {
+	readonly target: string;
+	readonly valueColumn: string;
+	readonly timestampColumn: string;
+	readonly n: number;
+	readonly beta: number | null;
+	readonly seBeta: number | null;
+	readonly tStat: number | null;
+}
+
+function isDickeyFullerResult(v: unknown): v is DickeyFullerResultRaw {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['n'] === 'number'
+		&& (o['beta']    === null || typeof o['beta']    === 'number')
+		&& (o['tStat']   === null || typeof o['tStat']   === 'number');
+}
 
 function describe(
 	verdict: Verdict,
@@ -364,6 +523,7 @@ function empty(input: TimeseriesStationarityInput): TimeseriesStationarityOutput
 		rejectsAtLevel: 'none',
 		verdict: 'inconclusive',
 		interpretation: '',
+		source: 'sample',
 	};
 }
 

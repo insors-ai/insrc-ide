@@ -33,7 +33,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
 
 const SAMPLE_DEFAULT     = 50;
 const MIN_SAMPLE         = 10;
@@ -41,12 +41,15 @@ const DEFAULT_GAP_RATIO  = 2;       // delta > k × median = "gap"
 const REGULARITY_BAND    = 0.5;     // deltas within ±50% of median count as regular
 const TOP_K_GAPS         = 10;
 
+type GapMode = 'sample' | 'full-table';
+
 interface TimeseriesGapAnalysisInput {
 	readonly connectionId: string;
 	readonly target: string;
 	readonly timestampColumn: string;
 	readonly sampleSize?: number;
 	readonly gapRatio?: number;       // delta > gapRatio × median = gap; default 2
+	readonly mode?: GapMode;
 }
 
 type Verdict = 'regular' | 'mostly-regular' | 'has-gaps' | 'sparse' | 'inconclusive';
@@ -70,6 +73,7 @@ interface TimeseriesGapAnalysisOutput {
 	readonly topGaps: readonly GapEntry[];
 	readonly verdict: Verdict;
 	readonly interpretation: string;
+	readonly source: GapMode;
 }
 
 const RDBMS_FAMILY_TAGS = [
@@ -99,6 +103,11 @@ const skill: Skill<TimeseriesGapAnalysisInput, TimeseriesGapAnalysisOutput> = {
 			timestampColumn: { type: 'string' },
 			sampleSize:      { type: 'integer', minimum: MIN_SAMPLE, maximum: 50, description: 'Min 10; default 50.' },
 			gapRatio:        { type: 'number', minimum: 1.5, description: 'A delta > gapRatio × median is flagged as a gap. Default 2.' },
+			mode: {
+				type: 'string',
+				enum: ['sample', 'full-table'],
+				description: 'Default sample. full-table delegates to db_sql_temporal_gap_stats (CTE + LAG).',
+			},
 		},
 		required: ['connectionId', 'target', 'timestampColumn'],
 		additionalProperties: false,
@@ -130,19 +139,20 @@ const skill: Skill<TimeseriesGapAnalysisInput, TimeseriesGapAnalysisOutput> = {
 			},
 			verdict:        { type: 'string', enum: ['regular', 'mostly-regular', 'has-gaps', 'sparse', 'inconclusive'] },
 			interpretation: { type: 'string' },
+			source:         { type: 'string', enum: ['sample', 'full-table'] },
 		},
 		required: ['target', 'timestampColumn', 'sampleSize', 'count', 'medianSpacingMs',
 		           'cadenceHumanReadable', 'regularityScore', 'gapCount', 'topGaps',
-		           'verdict', 'interpretation'],
+		           'verdict', 'interpretation', 'source'],
 		additionalProperties: false,
 	},
-	toolDeps: ['db_sql_aggregate', 'db_sql_sample'],
+	toolDeps: ['db_sql_aggregate', 'db_sql_sample', 'db_sql_temporal_gap_stats'],
 	providerAffinity: 'local',
 	preconditions: [
 		{
 			kind: 'required-tools',
-			tools: ['db_sql_aggregate', 'db_sql_sample'],
-			reason: 'aggregate gives count for context; sample gives the timestamps',
+			tools: ['db_sql_aggregate', 'db_sql_sample', 'db_sql_temporal_gap_stats'],
+			reason: 'sample mode: aggregate + sample. full-table mode: db_sql_temporal_gap_stats (CTE + LAG + PERCENTILE_CONT).',
 		},
 		{
 			kind: 'connection-family',
@@ -156,6 +166,10 @@ const skill: Skill<TimeseriesGapAnalysisInput, TimeseriesGapAnalysisOutput> = {
 		const sampleSize = clampSample(input.sampleSize);
 		const gapRatio   = input.gapRatio !== undefined && Number.isFinite(input.gapRatio) && input.gapRatio >= 1.5
 			? input.gapRatio : DEFAULT_GAP_RATIO;
+
+		if (input.mode === 'full-table') {
+			return runFullTable(input, deps, callBase, gapRatio);
+		}
 
 		const [aggTool, sampleTool] = await Promise.all([
 			deps.runTool({
@@ -281,12 +295,125 @@ const skill: Skill<TimeseriesGapAnalysisInput, TimeseriesGapAnalysisOutput> = {
 				topGaps,
 				verdict,
 				interpretation,
+				source: 'sample',
 			},
 			confidence: 'high',
 			toolCalls: [],
 		};
 	},
 };
+
+/**
+ * Phase 5g.4 Track-C full-table mode. Delegates to db_sql_temporal_gap_stats
+ * (server-side LAG + PERCENTILE_CONT for the median; bucket counts for
+ * regularity score; ORDER BY delta DESC + LIMIT for top-N gaps).
+ */
+async function runFullTable(
+	input: TimeseriesGapAnalysisInput,
+	deps: SkillDeps,
+	callBase: string,
+	gapRatio: number,
+): Promise<SkillResult<TimeseriesGapAnalysisOutput>> {
+	const tool = await deps.runTool({
+		id: `${callBase}-gaps`,
+		name: 'db_sql_temporal_gap_stats',
+		input: {
+			connectionId: input.connectionId,
+			target: input.target,
+			timestampColumn: input.timestampColumn,
+			gapRatio,
+			topGaps: TOP_K_GAPS,
+		},
+	});
+	if (tool.isError) {
+		return {
+			value: { ...empty(input), source: 'full-table' },
+			confidence: 'low',
+			notes: [`db_sql_temporal_gap_stats error: ${tool.content.slice(0, 200)}`],
+			toolCalls: [],
+		};
+	}
+	if (!isGapStatsResult(tool.data)) {
+		return {
+			value: { ...empty(input), source: 'full-table' },
+			confidence: 'low',
+			notes: ['timeseries.gap-analysis (full-table): tool result missing structured data'],
+			toolCalls: [],
+		};
+	}
+
+	const t = tool.data;
+	if (t.medianDeltaSeconds === null || t.regularityScore === null || t.n < MIN_SAMPLE) {
+		return {
+			value: {
+				...empty(input),
+				count: t.n,
+				medianSpacingMs: t.medianDeltaSeconds !== null ? t.medianDeltaSeconds * 1000 : null,
+				gapCount: t.gapCount,
+				source: 'full-table',
+				interpretation: t.n < MIN_SAMPLE
+					? `population too small (n=${t.n}); need at least ${MIN_SAMPLE} timestamps`
+					: 'cadence undefined: median delta is zero or negative -- duplicate / non-monotonic timestamps',
+			},
+			confidence: 'medium',
+			toolCalls: [],
+		};
+	}
+
+	const medianSpacingMs = t.medianDeltaSeconds * 1000;
+	const cadenceHumanReadable = humanReadableSpan(medianSpacingMs);
+	const verdict: Verdict = t.regularityScore >= 0.9 ? 'regular'
+		: t.regularityScore >= 0.7 ? 'mostly-regular'
+		: t.regularityScore >= 0.5 ? 'has-gaps'
+		: 'sparse';
+	const topGaps: GapEntry[] = t.topGaps.map(g => ({
+		startTimestamp: new Date(g.fromEpoch * 1000).toISOString(),
+		endTimestamp:   new Date(g.toEpoch   * 1000).toISOString(),
+		durationMs:     g.deltaSeconds * 1000,
+		ratioToMedian:  g.ratio,
+	}));
+
+	const interpretation = describe(verdict, t.regularityScore, cadenceHumanReadable, t.gapCount, t.n) + ' (full-table)';
+
+	return {
+		value: {
+			target: t.target,
+			timestampColumn: input.timestampColumn,
+			sampleSize: 0,
+			count: t.n,
+			medianSpacingMs,
+			cadenceHumanReadable,
+			regularityScore: t.regularityScore,
+			gapCount: t.gapCount,
+			topGaps,
+			verdict,
+			interpretation,
+			source: 'full-table',
+		},
+		confidence: 'high',
+		toolCalls: [],
+	};
+}
+
+interface GapStatsResultRaw {
+	readonly target: string;
+	readonly timestampColumn: string;
+	readonly n: number;
+	readonly medianDeltaSeconds: number | null;
+	readonly regularityScore: number | null;
+	readonly gapCount: number;
+	readonly topGaps: readonly { fromEpoch: number; toEpoch: number; deltaSeconds: number; ratio: number }[];
+}
+
+function isGapStatsResult(v: unknown): v is GapStatsResultRaw {
+	if (typeof v !== 'object' || v === null) return false;
+	const o = v as Record<string, unknown>;
+	return typeof o['n'] === 'number'
+		&& typeof o['gapCount'] === 'number'
+		&& Array.isArray(o['topGaps'])
+		&& (o['medianDeltaSeconds'] === null || typeof o['medianDeltaSeconds'] === 'number')
+		&& (o['regularityScore']    === null || typeof o['regularityScore']    === 'number');
+}
 
 function describe(
 	verdict: Verdict,
@@ -367,6 +494,7 @@ function empty(input: TimeseriesGapAnalysisInput): TimeseriesGapAnalysisOutput {
 		topGaps: [],
 		verdict: 'inconclusive',
 		interpretation: '',
+		source: 'sample',
 	};
 }
 

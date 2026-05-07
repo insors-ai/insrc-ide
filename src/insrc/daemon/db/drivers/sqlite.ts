@@ -35,7 +35,11 @@ import type {
 	SampleOpts,
 	SampleResult,
 	SchemaDescription,
+	DickeyFullerRequest,
+	DickeyFullerResult,
 	TableListing,
+	TemporalGapStatsRequest,
+	TemporalGapStatsResult,
 	TemporalTrendRequest,
 	TemporalTrendResult,
 } from '../../../shared/db-driver.js';
@@ -48,9 +52,11 @@ import {
 	compileDistinct,
 	executeAntiJoin,
 	executeCorrelationMatrix,
+	executeDickeyFuller,
 	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
+	executeTemporalGapStats,
 	executeTemporalTrend,
 	quoteTarget,
 	readAggregateRow,
@@ -311,6 +317,26 @@ class SqliteDriver implements RdbmsDriver {
 			aggregate: (req) => this.aggregate(target, req),
 			runRows: async (sql, values) =>
 				this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
+	}
+
+	async dickeyFuller(target: string, request: DickeyFullerRequest): Promise<DickeyFullerResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeDickeyFuller({
+			target, knownColumns: cols, dialect: SQLITE_DIALECT, request,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) => this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
+		});
+	}
+
+	async temporalGapStats(target: string, request: TemporalGapStatsRequest): Promise<TemporalGapStatsResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeTemporalGapStats({
+			target, knownColumns: cols, dialect: SQLITE_DIALECT, request,
+			aggregate: (req) => this.aggregate(target, req),
+			runRows: async (sql, values) => this.db.prepare(sql).all(...values as unknown[]) as Record<string, unknown>[],
 		});
 	}
 

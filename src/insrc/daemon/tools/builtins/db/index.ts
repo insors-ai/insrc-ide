@@ -35,11 +35,15 @@ import type {
 	HistogramMode,
 	HistogramRequest,
 	KvDriver,
+	DickeyFullerRequest,
+	DickeyFullerResult,
 	OutlierMethod,
 	OutlierRequest,
 	RdbmsDriver,
 	SampleOpts,
 	ScanOpts,
+	TemporalGapStatsRequest,
+	TemporalGapStatsResult,
 	TemporalTrendRequest,
 	TemporalTrendResult,
 	WhereClause,
@@ -1542,6 +1546,139 @@ const fileTemporalTrendTool: Tool = {
 };
 
 // ---------------------------------------------------------------------------
+// db:sql:dickey_fuller (Phase 5g.3 substrate)
+// ---------------------------------------------------------------------------
+
+const sqlDickeyFullerTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_dickey_fuller',
+	description:
+		'Server-side Dickey-Fuller stationarity test (Phase 5g.3). Internally uses LAG window function in a ' +
+		'CTE to materialise (y[t], y[t-1]) pairs ordered by timestampColumn, then aggregates the SUM moments ' +
+		'needed to derive β + SE(β) + t-statistic for the regression Δy[t] = α + β·y[t-1] + ε. The skill ' +
+		'compares t against MacKinnon critical values to verdict stationary vs non-stationary. Universally ' +
+		'supported on dialects with CTE + LAG (PG / DuckDB / MySQL 8+ / SQLite >=3.25 / MSSQL / Oracle); ' +
+		'ClickHouse stub throws.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'valueColumn', 'timestampColumn'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target:          { type: 'string' },
+			valueColumn:     { type: 'string' },
+			timestampColumn: { type: 'string' },
+			where:           WHERE_SCHEMA,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		const valueColumn = String(input['valueColumn'] ?? '');
+		const timestampColumn = String(input['timestampColumn'] ?? '');
+		if (connectionId === '' || target === '' || valueColumn === '' || timestampColumn === '') {
+			return fail(this.id, 'connectionId, target, valueColumn, timestampColumn are required');
+		}
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.dickeyFuller !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement dickeyFuller() yet`);
+		}
+		const where = parseWhereInput(input['where']);
+		const req: DickeyFullerRequest = where.length > 0
+			? { valueColumn, timestampColumn, where }
+			: { valueColumn, timestampColumn };
+		try {
+			const r = await rd.dickeyFuller(target, req);
+			const lines: string[] = [
+				`**${r.target}** -- Dickey-Fuller on \`${r.valueColumn}\` (sorted by \`${r.timestampColumn}\`, n=${r.n})`,
+				'',
+				`β = ${fmtNullable(r.beta)}`,
+				`SE(β) = ${fmtNullable(r.seBeta)}`,
+				`t-stat = ${fmtNullable(r.tStat)}`,
+			];
+			return ok(lines.join('\n'), r);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+// ---------------------------------------------------------------------------
+// db:sql:temporal_gap_stats (Phase 5g.4 substrate)
+// ---------------------------------------------------------------------------
+
+const sqlTemporalGapStatsTool: Tool = {
+	access: CONNECTION_ACCESS,
+	id: 'db_sql_temporal_gap_stats',
+	description:
+		'Server-side temporal gap statistics (Phase 5g.4). Two-phase protocol: (1) baseline aggregates ' +
+		'count + median delta + min/max epoch via PERCENTILE_CONT over consecutive timestamp deltas ' +
+		'(LAG window function); (2) bucket counts (regular = within ±50% of median, gap = > gapRatio ' +
+		'× median) + top-N gap deltas. Returns medianDeltaSeconds + regularityScore + gapCount + topGaps. ' +
+		'Universally supported on dialects with CTE + LAG + PERCENTILE_CONT; ClickHouse stub throws.',
+	inputSchema: {
+		type: 'object',
+		additionalProperties: false,
+		required: ['connectionId', 'target', 'timestampColumn'],
+		properties: {
+			...CONNECTION_ID_PROP,
+			target:          { type: 'string' },
+			timestampColumn: { type: 'string' },
+			gapRatio:        { type: 'number', exclusiveMinimum: 1, description: 'Multiplier vs median for "gap" detection. Default 2.' },
+			topGaps:         { type: 'integer', minimum: 1, maximum: 50, description: 'How many top gaps to return. Default 10.' },
+			where:           WHERE_SCHEMA,
+		},
+	},
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
+		const connectionId = String(input['connectionId'] ?? '');
+		const target = String(input['target'] ?? '');
+		const timestampColumn = String(input['timestampColumn'] ?? '');
+		if (connectionId === '' || target === '' || timestampColumn === '') {
+			return fail(this.id, 'connectionId, target, timestampColumn are required');
+		}
+		const driver = await acquireDriver(this.id, deps, connectionId, 'rdbms');
+		if (!isDriver(driver)) return driver;
+		const rd = driver as RdbmsDriver;
+		if (typeof rd.temporalGapStats !== 'function') {
+			return fail(this.id, `RDBMS driver '${rd.kind}' does not implement temporalGapStats() yet`);
+		}
+		const where = parseWhereInput(input['where']);
+		const req: TemporalGapStatsRequest = {
+			timestampColumn,
+			...(where.length > 0 ? { where } : {}),
+			...(typeof input['gapRatio'] === 'number' ? { gapRatio: input['gapRatio'] } : {}),
+			...(typeof input['topGaps']  === 'number' ? { topGaps:  Math.floor(input['topGaps']) } : {}),
+		};
+		try {
+			const r = await rd.temporalGapStats(target, req);
+			const lines: string[] = [
+				`**${r.target}** -- gap stats on \`${r.timestampColumn}\` (n=${r.n})`,
+				'',
+				`median Δ: ${r.medianDeltaSeconds === null ? '_(null)_' : `${r.medianDeltaSeconds.toPrecision(6)}s`}`,
+				`regularity: ${r.regularityScore === null ? '_(null)_' : (r.regularityScore * 100).toFixed(1) + '%'}`,
+				`gap count: ${r.gapCount}`,
+			];
+			if (r.topGaps.length > 0) {
+				lines.push('', '| from epoch | to epoch | Δs | ratio |', '|---|---|---|---|');
+				for (const g of r.topGaps) {
+					lines.push(`| ${g.fromEpoch} | ${g.toEpoch} | ${g.deltaSeconds.toPrecision(4)} | ${g.ratio.toPrecision(4)} |`);
+				}
+			}
+			return ok(lines.join('\n'), r);
+		} catch (err) {
+			return fail(this.id, (err as Error).message);
+		}
+	},
+};
+
+function fmtNullable(v: number | null): string {
+	if (v === null || !Number.isFinite(v)) return '_(null)_';
+	return v.toPrecision(6);
+}
+
+// ---------------------------------------------------------------------------
 // db:kv:list_namespaces + db:kv:describe_namespace (Phase 0.7 + 0.8)
 // ---------------------------------------------------------------------------
 
@@ -1964,6 +2101,8 @@ export function registerDbTools(): void {
 	registerTool(sqlCorrelationMatrixTool);
 	registerTool(sqlOutliersTool);
 	registerTool(sqlTemporalTrendTool);
+	registerTool(sqlDickeyFullerTool);
+	registerTool(sqlTemporalGapStatsTool);
 	registerTool(kvScanTool);
 	registerTool(kvGetTool);
 	registerTool(kvSampleShapeTool);

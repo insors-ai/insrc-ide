@@ -7,6 +7,11 @@
     "sampleSize": 50
   },
   "fakeTools": {
+    "db_sql_dickey_fuller": {
+      "content": "_unused-in-sample-mode-but-required-by-precondition_",
+      "isError": false,
+      "data": null
+    },
     "db_sql_aggregate": {
       "content": "agg",
       "isError": false,

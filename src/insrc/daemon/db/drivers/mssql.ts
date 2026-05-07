@@ -42,7 +42,11 @@ import type {
 	SampleOpts,
 	SampleResult,
 	SchemaDescription,
+	DickeyFullerRequest,
+	DickeyFullerResult,
 	TableListing,
+	TemporalGapStatsRequest,
+	TemporalGapStatsResult,
 	TemporalTrendRequest,
 	TemporalTrendResult,
 } from '../../../shared/db-driver.js';
@@ -55,9 +59,11 @@ import {
 	compileDistinct,
 	executeAntiJoin,
 	executeCorrelationMatrix,
+	executeDickeyFuller,
 	executeFunctionalDependency,
 	executeHistogram,
 	executeOutliers,
+	executeTemporalGapStats,
 	executeTemporalTrend,
 	quoteTarget,
 	readAggregateRow,
@@ -279,6 +285,18 @@ class MssqlDriver implements RdbmsDriver {
 		const schema = await this.describe(target);
 		const cols = schema.columns.map(c => c.name);
 		return executeTemporalTrend({ ...this.orchestratorDeps(target, cols), request });
+	}
+
+	async dickeyFuller(target: string, request: DickeyFullerRequest): Promise<DickeyFullerResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeDickeyFuller({ ...this.orchestratorDeps(target, cols), request });
+	}
+
+	async temporalGapStats(target: string, request: TemporalGapStatsRequest): Promise<TemporalGapStatsResult> {
+		const schema = await this.describe(target);
+		const cols = schema.columns.map(c => c.name);
+		return executeTemporalGapStats({ ...this.orchestratorDeps(target, cols), request });
 	}
 
 	async listTables(opts?: { schema?: string; limit?: number }): Promise<TableListing> {
