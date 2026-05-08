@@ -309,12 +309,7 @@ async function main(): Promise<void> {
 		},
 
 		'repo.list': async () => {
-			// Filter out synthetic shared-modules registry rows --
-			// they're an implementation detail and shouldn't appear
-			// in the IDE's "Repositories" panel. Phase 5.x strict-
-			// contract: only kind='workspace' rows are user-facing.
-			const all = await listRepos(db);
-			return all.filter(r => r.kind === undefined || r.kind === 'workspace');
+			return await listRepos(db);
 		},
 
 		'repo.reindex': async (params) => {

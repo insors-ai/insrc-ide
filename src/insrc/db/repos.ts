@@ -203,11 +203,22 @@ export async function removeRepo(_db: DbClient, path: string): Promise<void> {
 	});
 }
 
+/**
+ * List all user-facing (workspace) repos. The four reserved
+ * `kind: 'shared-modules'` rows (provisioned at first boot / by the
+ * v2->v3 migration) are an implementation detail of the
+ * repo-registry-strict-contract design and never appear here.
+ *
+ * Internal callers that need to see those rows iterate
+ * `store.repo` directly inside a txn (see the v2->v3 migration in
+ * `db/graph/migrations.ts` for the canonical pattern).
+ */
 export async function listRepos(_db: DbClient): Promise<RegisteredRepo[]> {
 	const store = await getGraphStore();
 	const out: RegisteredRepo[] = [];
 	for (const { value } of store.repo.getRange()) {
 		const row = decodeRepoRow(value as Buffer);
+		if (row.kind !== 'workspace') continue;
 		out.push(rowToRepo(row));
 	}
 	return out;

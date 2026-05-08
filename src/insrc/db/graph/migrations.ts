@@ -167,33 +167,50 @@ const MIGRATION_V1_TO_V2: Migration = {
  *   4. Bump `meta.schema_version` to 3 (handled by the runner
  *      after `run()` returns).
  */
+/**
+ * Provision all four reserved shared-modules registry rows
+ * (`SHARED_MODULES_REPO_ID.{jvm,npm,python,go}`) if absent. Idempotent:
+ * existing rows are left untouched, so this is safe to call from both
+ * the v2->v3 migration (where it backfills onto a populated env) and
+ * the fresh-first-boot path in `getGraphStore()` (where the env is
+ * empty and the rows are written for the first time).
+ *
+ * Returns the count of rows actually written this call (0 when all
+ * four already existed).
+ *
+ * Caller controls the write txn.
+ */
+export function provisionSharedModulesRows(store: GraphStore): number {
+	let provisioned = 0;
+	const now = Date.now();
+	for (const [namespace, reservedId] of Object.entries(SHARED_MODULES_REPO_ID) as [SharedModulesNamespace, number][]) {
+		const existing = store.repo.get(encodeRepoKey(reservedId));
+		if (existing !== undefined) continue;
+		const row: RepoRow = {
+			id:           reservedId,
+			kind:         'shared-modules',
+			namespace,
+			path:         '',
+			name:         SHARED_MODULES_NAME[namespace],
+			addedAt:      now,
+			lastIndexed:  0,
+			status:       'ready',
+			errorMsg:     '',
+		};
+		store.repo.put(encodeRepoKey(reservedId), encodeRepoRow(row));
+		provisioned++;
+	}
+	return provisioned;
+}
+
 const MIGRATION_V2_TO_V3: Migration = {
 	from: 2,
 	to:   3,
 	description: 'repo-registry strict contract: provision shared-modules rows, rewire module entities, drop phantom workspace rows',
 	async run(store: GraphStore): Promise<void> {
-		// 1. Provision reserved shared-modules rows. Idempotent --
-		//    skip if already present (re-running the migration on a
-		//    half-applied state is safe).
-		let provisioned = 0;
-		const now = Date.now();
-		for (const [namespace, reservedId] of Object.entries(SHARED_MODULES_REPO_ID) as [SharedModulesNamespace, number][]) {
-			const existing = store.repo.get(encodeRepoKey(reservedId));
-			if (existing !== undefined) continue;
-			const row: RepoRow = {
-				id:           reservedId,
-				kind:         'shared-modules',
-				namespace,
-				path:         '',
-				name:         SHARED_MODULES_NAME[namespace],
-				addedAt:      now,
-				lastIndexed:  0,
-				status:       'ready',
-				errorMsg:     '',
-			};
-			store.repo.put(encodeRepoKey(reservedId), encodeRepoRow(row));
-			provisioned++;
-		}
+		// 1. Provision reserved shared-modules rows. Shared with the
+		//    fresh-first-boot path; idempotent.
+		const provisioned = provisionSharedModulesRows(store);
 
 		// 2. Rewire module entities. Walk all entity rows looking
 		//    for kind='module'; for each, derive the namespace from

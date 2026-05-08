@@ -28,7 +28,8 @@ import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
 import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
 
-const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.go;
+const MODULE_NAMESPACE = 'go' as const;
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID[MODULE_NAMESPACE];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -278,7 +279,7 @@ function extractImport(
     const importPath = stripGoString(pathNode.text);
     if (!importPath) continue;
 
-    const moduleId = makeEntityId('', '', 'module', importPath);
+    const moduleId = makeEntityId(MODULE_NAMESPACE, '', 'module', importPath);
     if (!entities.some(e => e.id === moduleId)) {
       entities.push({
         id: moduleId, kind: 'module', name: importPath, language: 'go',

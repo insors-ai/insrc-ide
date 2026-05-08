@@ -643,7 +643,7 @@ export class IndexerService {
       // v2->v3 migration); their `repo: ''` field stays for hash
       // compatibility but `repoId` is the structurally-enforced
       // handle.
-      const moduleId = makeEntityId('', '', 'module', dep.name);
+      const moduleId = makeEntityId('npm', '', 'module', dep.name);
       await upsertEntities(this.db, [{
         id: moduleId, kind: 'module', name: dep.name, language: 'typescript',
         repoId: moduleNamespace, repo: '', file: '', startLine: 0, endLine: 0,

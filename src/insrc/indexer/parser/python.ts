@@ -24,7 +24,8 @@ import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
 import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
 
-const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.python;
+const MODULE_NAMESPACE = 'python' as const;
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID[MODULE_NAMESPACE];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -212,7 +213,7 @@ function walkPythonNode(
         }
         if (!modName) continue;
 
-        const moduleId = makeEntityId('', '', 'module', modName);
+        const moduleId = makeEntityId(MODULE_NAMESPACE, '', 'module', modName);
         if (!entities.some(e => e.id === moduleId)) {
           entities.push({
             id: moduleId, kind: 'module', name: modName, language: 'python',
@@ -243,7 +244,7 @@ function walkPythonNode(
           meta:     { file: filePath, repo, isRelative: true },
         });
       } else {
-        const moduleId = makeEntityId('', '', 'module', modText);
+        const moduleId = makeEntityId(MODULE_NAMESPACE, '', 'module', modText);
         if (!entities.some(e => e.id === moduleId)) {
           entities.push({
             id: moduleId, kind: 'module', name: modText, language: 'python',

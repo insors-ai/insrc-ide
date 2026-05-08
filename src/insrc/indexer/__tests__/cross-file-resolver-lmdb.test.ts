@@ -215,7 +215,7 @@ describe('runCrossFileResolver (LMDB) -- module-stub IMPORTS rewiring', () => {
 		const fooFileEnt  = mkEntity(repo, fooFile,  'file', fooFile);
 		const userFileEnt = mkEntity(repo, userFile, 'file', userFile);
 		const moduleStub: Entity = {
-			id: makeEntityId('', '', 'module', 'com.example.Foo'),
+			id: makeEntityId('jvm', '', 'module', 'com.example.Foo'),
 			kind: 'module', name: 'com.example.Foo', language: 'java',
 			repoId: SHARED_MODULES_REPO_ID.jvm,
 			repo: '', file: '', startLine: 0, endLine: 0,
@@ -247,7 +247,7 @@ describe('runCrossFileResolver (LMDB) -- module-stub IMPORTS rewiring', () => {
 		);
 
 		assert.equal(await countEdge(userFileId, fooFileId, 'IMPORTS'), 1);
-		const stubId = makeEntityId('', '', 'module', 'com.example.Foo');
+		const stubId = makeEntityId('jvm', '', 'module', 'com.example.Foo');
 		assert.equal(await countEdge(userFileId, stubId, 'IMPORTS'), 0);
 	});
 });
@@ -270,7 +270,7 @@ describe('runCrossFileResolver (LMDB) -- external-dep stays as module stub', () 
 		const appFile = join(javaRoot, 'App.java');
 		const appFileEnt = mkEntity(repo, appFile, 'file', appFile);
 		const moduleStub: Entity = {
-			id: makeEntityId('', '', 'module', 'org.springframework.boot.SpringApplication'),
+			id: makeEntityId('jvm', '', 'module', 'org.springframework.boot.SpringApplication'),
 			kind: 'module', name: 'org.springframework.boot.SpringApplication', language: 'java',
 			repoId: SHARED_MODULES_REPO_ID.jvm,
 			repo: '', file: '', startLine: 0, endLine: 0,
@@ -292,7 +292,7 @@ describe('runCrossFileResolver (LMDB) -- external-dep stays as module stub', () 
 		assert.equal(result.importsRewired, 0,
 			`expected no rewires for external deps; got: ${JSON.stringify(result)}`);
 
-		const stubId = makeEntityId('', '', 'module', 'org.springframework.boot.SpringApplication');
+		const stubId = makeEntityId('jvm', '', 'module', 'org.springframework.boot.SpringApplication');
 		const appFileId = makeEntityId(
 			repo, join(repo, 'src/main/java/app/App.java'), 'file',
 			join(repo, 'src/main/java/app/App.java'),

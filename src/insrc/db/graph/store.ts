@@ -349,8 +349,17 @@ export async function getGraphStore(): Promise<GraphStore> {
 		// first-boot write commits before any caller can read.
 		const stored = readSchemaVersion(store);
 		if (stored === undefined) {
-			// First boot: write the version
-			await root.transaction(() => writeSchemaVersion(store, SCHEMA_VERSION));
+			// First boot at the current schema -- write the version AND
+			// provision the reserved shared-modules registry rows. The
+			// v2->v3 migration also provisions them, but it only fires
+			// when migrating an existing v2 env; a fresh-boot env never
+			// hits the migration path, so without this call the four
+			// `kind: 'shared-modules'` rows would be missing.
+			const { provisionSharedModulesRows } = await import('./migrations.js');
+			await root.transaction(() => {
+				writeSchemaVersion(store, SCHEMA_VERSION);
+				provisionSharedModulesRows(store);
+			});
 		} else if (stored > SCHEMA_VERSION) {
 			await root.close();
 			throw new LmdbStoreSchemaVersionMismatch(stored, SCHEMA_VERSION);

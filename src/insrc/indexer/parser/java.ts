@@ -41,7 +41,8 @@ import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
 import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
 
-const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.jvm;
+const MODULE_NAMESPACE = 'jvm' as const;
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID[MODULE_NAMESPACE];
 
 type SyntaxNode = import('tree-sitter').SyntaxNode;
 
@@ -173,7 +174,7 @@ function handlePackage(node: SyntaxNode, ctx: WalkCtx): void {
 	);
 	if (nameNode === undefined) { return; }
 	const moduleName = nameNode.text;
-	const moduleId = makeEntityId('', '', 'module', moduleName);
+	const moduleId = makeEntityId(MODULE_NAMESPACE, '', 'module', moduleName);
 	if (!ctx.entities.some(e => e.id === moduleId)) {
 		ctx.entities.push({
 			id: moduleId, kind: 'module', name: moduleName,
@@ -205,7 +206,7 @@ function handleImport(node: SyntaxNode, ctx: WalkCtx): void {
 	const isWildcard = node.children.some(c => c.type === 'asterisk');
 	if (isWildcard) { importPath = `${importPath}.*`; }
 
-	const moduleId = makeEntityId('', '', 'module', importPath);
+	const moduleId = makeEntityId(MODULE_NAMESPACE, '', 'module', importPath);
 	if (!ctx.entities.some(e => e.id === moduleId)) {
 		ctx.entities.push({
 			id: moduleId, kind: 'module', name: importPath,

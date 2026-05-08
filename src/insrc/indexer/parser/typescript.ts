@@ -29,7 +29,8 @@ import type { Entity, Relation, Language } from '../../shared/types.js';
 import { registerParser } from './registry.js';
 import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
 
-const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.npm;
+const MODULE_NAMESPACE = 'npm' as const;
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID[MODULE_NAMESPACE];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -567,8 +568,10 @@ function extractImport(
   } else {
     // External module — create a Module stub entity and an IMPORTS edge.
     // Module entities live under the namespace-keyed shared-modules row
-    // (jvm / npm / python / go); for TS/JS that's npm.
-    const moduleId = makeEntityId(repo, '', 'module', specifier);
+    // (jvm / npm / python / go); for TS/JS that's npm. The hash uses
+    // the namespace as the first arg so cross-namespace name collisions
+    // (e.g. a Python `foo.bar` and a JS `foo.bar`) get distinct IDs.
+    const moduleId = makeEntityId(MODULE_NAMESPACE, '', 'module', specifier);
     if (!entities.some(e => e.id === moduleId)) {
       entities.push({
         id:        moduleId,
