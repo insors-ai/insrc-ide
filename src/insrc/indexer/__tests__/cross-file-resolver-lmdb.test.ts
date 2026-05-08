@@ -27,6 +27,7 @@ import {
 	type RelationKind,
 } from '../../db/graph/keys.js';
 import { upsertEntities, entityU64ForId } from '../../db/entities.js';
+import { addRepo } from '../../db/repos.js';
 import {
 	upsertRelations,
 	listUnresolvedRelations,
@@ -146,6 +147,7 @@ describe('runCrossFileResolver (LMDB) -- INHERITS in same package', () => {
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-mvn-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const javaRoot = join(repo, 'src', 'main', 'java', 'com', 'example');
 		mkdirSync(javaRoot, { recursive: true });
 		writeFileSync(join(javaRoot, 'Foo.java'), 'package com.example;\npublic class Foo {}');
@@ -197,6 +199,7 @@ describe('runCrossFileResolver (LMDB) -- module-stub IMPORTS rewiring', () => {
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-imports-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const javaRoot = join(repo, 'src', 'main', 'java', 'com', 'example');
 		mkdirSync(javaRoot, { recursive: true });
 		writeFileSync(join(javaRoot, 'Foo.java'), 'package com.example;\npublic class Foo {}');
@@ -256,6 +259,7 @@ describe('runCrossFileResolver (LMDB) -- external-dep stays as module stub', () 
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-ext-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const javaRoot = join(repo, 'src', 'main', 'java', 'app');
 		mkdirSync(javaRoot, { recursive: true });
 		writeFileSync(join(javaRoot, 'App.java'),
@@ -303,6 +307,7 @@ describe('runCrossFileResolver (LMDB) -- CALLS resolves to exported function in 
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-calls-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const helpersFile = join(repo, 'helpers.py');
 		const mainFile    = join(repo, 'main.py');
 		writeFileSync(helpersFile, 'def validate(x):\n    return x is not None\n');
@@ -351,6 +356,7 @@ describe('runCrossFileResolver (LMDB) -- CALLS to non-exported target stays unre
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-priv-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const helpersFile = join(repo, 'helpers.py');
 		const mainFile    = join(repo, 'main.py');
 		writeFileSync(helpersFile, 'def _internal(x):\n    return x\n');
@@ -393,6 +399,7 @@ describe('runCrossFileResolver (LMDB) -- CALLS marks ambiguous when two imported
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-amb-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const aFile  = join(repo, 'a.py');
 		const bFile  = join(repo, 'b.py');
 		const main   = join(repo, 'main.py');
@@ -442,6 +449,7 @@ describe('runCrossFileResolver (LMDB) -- idempotency', () => {
 
 	before(async () => {
 		repo = mkdtempSync(join(tmpdir(), 'insrc-cfr-lmdb-idem-'));
+		await addRepo(null, { path: repo, name: '', addedAt: new Date().toISOString(), status: 'pending' });
 		const javaRoot = join(repo, 'src', 'main', 'java', 'com', 'example');
 		mkdirSync(javaRoot, { recursive: true });
 		writeFileSync(join(javaRoot, 'Foo.java'), 'package com.example;\npublic class Foo {}');

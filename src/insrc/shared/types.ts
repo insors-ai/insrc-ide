@@ -333,6 +333,19 @@ export interface Relation {
 // ---------------------------------------------------------------------------
 
 export interface RegisteredRepo {
+  /**
+   * Phase 5.x strict-contract discriminator. 'workspace' is the
+   * default and the only kind the IDE / IPC surface care about.
+   * 'shared-modules' rows are synthetic registry slots for
+   * external modules (npm / jvm / python / go); they're filtered
+   * out of `repo.list` and are never returned to user-facing UI.
+   */
+  kind?:        'workspace' | 'shared-modules';
+  /**
+   * Namespace for `kind === 'shared-modules'` rows; absent
+   * otherwise. Possible values: 'jvm' | 'npm' | 'python' | 'go'.
+   */
+  namespace?:   string;
   path:         string;
   name:         string;
   addedAt:      string;

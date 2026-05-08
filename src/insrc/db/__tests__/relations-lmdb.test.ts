@@ -45,6 +45,10 @@ test.beforeEach(async () => {
 	await closeGraphStore();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-relations-lmdb-2.3-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	const { addRepo } = await import('../repos.js');
+	for (const path of ['/repo/foo', '/repo/nonexistent']) {
+		await addRepo(null, { path, name: '', addedAt: new Date().toISOString(), status: 'pending' });
+	}
 });
 test.afterEach(async () => {
 	await closeGraphStore();

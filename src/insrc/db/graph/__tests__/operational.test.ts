@@ -139,7 +139,10 @@ test('opening a non-LMDB file at the env path surfaces a typed error', async () 
 
 test('SCHEMA_VERSION constant is exported and stable', () => {
 	assert.ok(typeof SCHEMA_VERSION === 'number');
-	assert.equal(SCHEMA_VERSION, 2);
+	// v3 added by plans/repo-registry-strict-contract.md (RepoKind
+	// discriminator + namespace-keyed shared-modules rows + the
+	// v2->v3 forward migration).
+	assert.equal(SCHEMA_VERSION, 3);
 });
 
 // ---------------------------------------------------------------------------

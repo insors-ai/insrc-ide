@@ -43,7 +43,7 @@ import {
 	withWriteTxn,
 	type GraphStore,
 } from './graph/store.js';
-import { allocateEntityIdInTxn, allocateRepoIdInTxn } from './graph/ids.js';
+import { allocateEntityIdInTxn } from './graph/ids.js';
 import {
 	encodeEntityKey,
 	encodeOutEdgePrefix,
@@ -58,22 +58,18 @@ import {
 	encodeEntityRow,
 	encodeRepoRow,
 	type EntityRow,
-	type RepoRow,
 } from './graph/codec.js';
-import { validateRepoPathShape } from './repos.js';
+import {
+	UnregisteredRepoError,
+	lookupRepoIdInTxn,
+	validateRepoPathShape,
+} from './repos.js';
+import {
+	SHARED_MODULES_NAMESPACE_BY_LANG,
+	SHARED_MODULES_REPO_ID,
+} from '../shared/repo-namespaces.js';
 
 const log = getLogger('db.entities');
-
-/**
- * Reserved Repo registry path used as the destination for `module`
- * entities that carry the intentional `repo: ''` sentinel (modules
- * shared across repos). Storing them under a non-empty path keeps
- * the registry from accumulating phantom empty-path rows. The path
- * is chosen to be obviously synthetic + sortable to the top of any
- * `listRepos()` output, and is excluded from the indexer's recovery
- * path (see `indexer/index.ts` start()).
- */
-export const EXTERNAL_MODULES_REPO_PATH = '<external-modules>';
 
 /**
  * Vestigial `DbClient` param shape -- kept until Phase 5.x removes
@@ -203,54 +199,6 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 		);
 	}
 
-	// Phase 2.10 / 2026-05-07 guardrail: forensic check + reject any
-	// entity whose `repo` would auto-allocate a phantom Repo registry
-	// row through `ensureRepo()` below. The IPC `repo.add` path
-	// already validates -- this is the OTHER path that bypassed the
-	// guardrail (entities arriving from a parser / pipeline with an
-	// empty / banned-root `repo` string would silently create a
-	// Repo registry entry, e.g. `repo=""` indexing 14k orphans).
-	//
-	// Module entities (`kind: 'module'`) are explicitly allowed to
-	// carry `repo: ''` -- this is an intentional sentinel meaning
-	// "external / shared across repos". `ensureRepo()` below redirects
-	// this sentinel to the reserved synthetic Repo row at
-	// EXTERNAL_MODULES_REPO_PATH so it doesn't auto-allocate a phantom.
-	const filteredOut: { id: string; repo: string; file: string; reason: string }[] = [];
-	const accepted: Entity[] = [];
-	for (const e of unique) {
-		if (e.kind === 'module' && e.repo === '') {
-			accepted.push(e);
-			continue;
-		}
-		try {
-			validateRepoPathShape(e.repo);
-			accepted.push(e);
-		} catch (err) {
-			filteredOut.push({
-				id: e.id,
-				repo: e.repo,
-				file: e.file,
-				reason: err instanceof Error ? err.message : String(err),
-			});
-		}
-	}
-	if (filteredOut.length > 0) {
-		log.warn(
-			{
-				dropped:       filteredOut.length,
-				kept:          accepted.length,
-				original:      unique.length,
-				sample:        filteredOut.slice(0, 5),
-				stackHint:     new Error('upsertEntities caller stack').stack?.split('\n').slice(2, 7),
-			},
-			'upsertEntities: dropped entities with invalid repo paths -- empty / non-absolute / system-root. ' +
-			'These would have auto-allocated phantom Repo registry rows. The stack trace points to the upstream ' +
-			'caller. See guardrail commits ad2fb453b8a + 81dcb360b07.',
-		);
-	}
-	if (accepted.length === 0) return;
-
 	// Collect (entity, was-new-or-re-embed) tuples for the post-commit
 	// Lance write step. Filled inside the txn so we have prior-row
 	// state available; flushed to Lance after the LMDB commit so a
@@ -259,50 +207,44 @@ export async function upsertEntities(_db: DbClient, entities: Entity[]): Promise
 	const lanceWrites: LanceWrite[] = [];
 
 	await withWriteTxn(s => {
-		// Resolve / allocate repo IDs once per batch (one path -> one id).
+		// Phase 5.x strict-contract resolver. The storage layer no
+		// longer auto-allocates Repo registry rows -- callers must
+		// have registered the workspace via `addRepo()` first, or
+		// (for `kind: 'module'` entities) use the empty-string
+		// sentinel which routes to the matching namespace's
+		// reserved row provisioned by the v2->v3 migration.
+		//
+		// `repoIdCache` short-circuits the per-path lookup once
+		// per batch.
 		const repoIdCache = new Map<string, number>();
-		const ensureRepo = (path: string): number => {
-			// Empty `path` is the intentional `kind: 'module'` sentinel
-			// (shared / external modules). Redirect to the reserved
-			// synthetic Repo row instead of allocating a phantom
-			// empty-path row. Other empty-path callers were rejected
-			// at the upsertEntities boundary above.
-			const lookupPath = path === '' ? EXTERNAL_MODULES_REPO_PATH : path;
-			const cached = repoIdCache.get(lookupPath);
-			if (cached !== undefined) return cached;
-			const existing = repoIdByPathInTxn(s, lookupPath);
-			if (existing !== undefined) {
-				repoIdCache.set(lookupPath, existing);
-				return existing;
+		const resolveRepoId = (e: Entity): number => {
+			// Module-entity sentinel: empty repo + namespace lookup
+			// from language. Modules are shared external references
+			// (no specific workspace); they live under reserved
+			// namespace-keyed rows.
+			if (e.kind === 'module' && e.repo === '') {
+				const namespace = SHARED_MODULES_NAMESPACE_BY_LANG[e.language];
+				if (namespace === undefined) {
+					throw new UnregisteredRepoError(
+						`module entity '${e.name}' (language=${e.language}) has no shared-modules namespace mapping`,
+					);
+				}
+				return SHARED_MODULES_REPO_ID[namespace];
 			}
-			// First time we've seen this repo path -- allocate. Matches
-			// the prior DuckDB behaviour where the entity table held a
-			// `repo` string and didn't require a separate registration
-			// step. Phase 5.x will tighten this so callers must register
-			// repos via `addRepo` before indexing.
-			const id = allocateRepoIdInTxn(s);
-			const row: RepoRow = {
-				id,
-				// Pre-Phase-5 callers can still hit this path (the strict
-				// contract isn't enforced until Phase 3.2 lands). Default
-				// to 'workspace' kind for back-compat. Module-namespace
-				// rows go through the v2->v3 migration's reserved-id
-				// allocation, not here.
-				kind:        'workspace',
-				path:        lookupPath,
-				name:        lookupPath === EXTERNAL_MODULES_REPO_PATH ? 'external-modules' : '',
-				addedAt:     Date.now(),
-				lastIndexed: 0,
-				status:      'pending',
-				errorMsg:    '',
-			};
-			s.repo.put(encodeRepoKey(id), encodeRepoRow(row));
-			repoIdCache.set(lookupPath, id);
-			return id;
+
+			// Workspace entities: pre-registered path required.
+			const cached = repoIdCache.get(e.repo);
+			if (cached !== undefined) return cached;
+			const existing = lookupRepoIdInTxn(s, e.repo);
+			if (existing === undefined) {
+				throw new UnregisteredRepoError(e.repo);
+			}
+			repoIdCache.set(e.repo, existing);
+			return existing;
 		};
 
-		for (const e of accepted) {
-			const repoId = ensureRepo(e.repo);
+		for (const e of unique) {
+			const repoId = resolveRepoId(e);
 			const existingU64 = lookupU64ByStringId(s, e.id);
 
 			if (existingU64 !== undefined) {
@@ -445,22 +387,13 @@ export async function reindexFile(
 	type LanceWrite = { entity: Entity; firstEmbed: boolean };
 	const lanceWrites: LanceWrite[] = [];
 	await withWriteTxn(s => {
-		// Resolve / allocate the repoId for this path (cache it for
-		// the rest of the pass)
-		let repoId = repoIdByPathInTxn(s, repoPath);
+		// Phase 5.x strict-contract: repo must be pre-registered.
+		// reindexFile is only ever called for files inside a known
+		// workspace, so the lookup should always succeed; throw
+		// otherwise to surface the programming error loudly.
+		const repoId = lookupRepoIdInTxn(s, repoPath);
 		if (repoId === undefined) {
-			repoId = allocateRepoIdInTxn(s);
-			const row: RepoRow = {
-				id:          repoId,
-				kind:        'workspace',
-				path:        repoPath,
-				name:        '',
-				addedAt:     Date.now(),
-				lastIndexed: 0,
-				status:      'pending',
-				errorMsg:    '',
-			};
-			s.repo.put(encodeRepoKey(repoId), encodeRepoRow(row));
+			throw new UnregisteredRepoError(repoPath);
 		}
 
 		// 1. Snapshot existing entities for this (repoId, filePath).
@@ -594,7 +527,7 @@ async function deleteUnresolvedForFileCascade(filePath: string): Promise<void> {
 
 export async function deleteEntitiesForRepo(_db: DbClient, repo: string): Promise<void> {
 	const store = await getGraphStore();
-	const repoId = await withReadTxn(store, () => repoIdByPathInTxn(store, repo));
+	const repoId = await withReadTxn(store, () => lookupRepoIdInTxn(store, repo));
 	if (repoId === undefined) return;
 	const ids = await collectEntityU64sByRepo(store, repoId);
 	await detachDeleteEntities(store, ids);
@@ -651,7 +584,7 @@ export async function findEntitiesByName(
 	// registered repo (the name_index key is repo-scoped).
 	const repoIds: number[] = [];
 	if (opts.repo !== undefined) {
-		const id = repoIdByPathInTxn(store, opts.repo);
+		const id = lookupRepoIdInTxn(store, opts.repo);
 		if (id === undefined) return []; // unknown repo -> no matches
 		repoIds.push(id);
 	} else {
@@ -715,7 +648,7 @@ export async function listEntitiesByKind(
 
 	let repoFilter: number | null = null;
 	if (opts.repo !== undefined) {
-		const id = repoIdByPathInTxn(store, opts.repo);
+		const id = lookupRepoIdInTxn(store, opts.repo);
 		if (id === undefined) return [];
 		repoFilter = id;
 	}
@@ -735,7 +668,7 @@ export async function listEntitiesByKind(
 
 export async function listEntitiesForRepo(_db: DbClient, repo: string): Promise<Entity[]> {
 	const store = await getGraphStore();
-	const repoId = repoIdByPathInTxn(store, repo);
+	const repoId = lookupRepoIdInTxn(store, repo);
 	if (repoId === undefined) return [];
 	const out: Entity[] = [];
 	const repoCache = new Map<number, string>([[repoId, repo]]);
@@ -769,7 +702,7 @@ export async function findEntitiesByFile(_db: DbClient, file: string): Promise<E
 
 export async function listUnembeddedEntities(_db: DbClient, repo: string): Promise<Entity[]> {
 	const store = await getGraphStore();
-	const repoId = repoIdByPathInTxn(store, repo);
+	const repoId = lookupRepoIdInTxn(store, repo);
 	if (repoId === undefined) return [];
 	const out: Entity[] = [];
 	const repoCache = new Map<number, string>([[repoId, repo]]);
@@ -883,16 +816,6 @@ export async function updateEmbedding(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-const repoIdByPathInTxn = (s: GraphStore, path: string): number | undefined => {
-	for (const { key, value } of s.repo.getRange()) {
-		const row = decodeRepoRow(value as Buffer);
-		if (row.path === path) {
-			return (key as Buffer).readUInt32BE(0);
-		}
-	}
-	return undefined;
-};
 
 const lookupU64ByStringId = (s: GraphStore, id: string): bigint | undefined => {
 	const v = s.entityIdByString.get(id) as bigint | number | undefined;

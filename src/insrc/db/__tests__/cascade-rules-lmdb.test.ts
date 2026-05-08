@@ -86,6 +86,10 @@ test.beforeEach(async () => {
 	await closeGraphStore();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-cascade-2.10-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	// cascade-rules tests do their own addRepo calls per-test (and
+	// assert on listRepos counts), so we DON'T pre-register here
+	// like the entities-lmdb suite does. Tests that upsert entities
+	// for additional paths register those paths inline.
 });
 test.afterEach(async () => {
 	await closeGraphStore();
@@ -233,6 +237,7 @@ test('cascade: removeRepo only affects the targeted repo', async () => {
 // ---------------------------------------------------------------------------
 
 test('cascade: deleting an entity clears name_index + entity_id_by_string', async () => {
+	await addRepo(null, { path: REPO, name: 'foo', addedAt: NOW, status: 'pending' });
 	const a = makeEntity({ name: 'a' });
 	await upsertEntities(null, [a]);
 	const aU64 = await getU64(a.id);

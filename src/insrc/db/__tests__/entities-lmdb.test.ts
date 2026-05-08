@@ -46,14 +46,37 @@ import {
 	listUnembeddedEntities,
 	updateEmbedding,
 } from '../entities.js';
-import type { Entity, EntityKind } from '../../shared/types.js';
+import { addRepo } from '../repos.js';
+import type { Entity, EntityKind, RegisteredRepo } from '../../shared/types.js';
 
 let dir: string;
+
+/**
+ * Phase 5.x strict-contract: storage layer no longer auto-allocates
+ * Repo registry rows. Tests must pre-register synthetic paths via
+ * `addRepo()` before upserting entities for that path. This helper
+ * batch-registers the well-known synthetic paths used across this
+ * file so individual tests don't have to.
+ */
+const TEST_REPO_PATHS = [
+	'/repo/foo', '/repo/x', '/repo/y', '/repo/a', '/repo/b', '/repo/c',
+	'/repo/nonexistent', '/path/to/myrepo',
+] as const;
+
+async function registerTestRepos(...paths: readonly string[]): Promise<void> {
+	for (const path of paths) {
+		const repo: RegisteredRepo = {
+			path, name: '', addedAt: new Date().toISOString(), status: 'pending',
+		};
+		await addRepo(null, repo);
+	}
+}
 
 test.beforeEach(async () => {
 	await closeGraphStore();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-entities-lmdb-2.2-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	await registerTestRepos(...TEST_REPO_PATHS);
 });
 test.afterEach(async () => {
 	await closeGraphStore();

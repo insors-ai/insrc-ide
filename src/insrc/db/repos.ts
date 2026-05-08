@@ -264,15 +264,63 @@ function findRepoIdByPath(store: GraphStore, path: string): number | undefined {
 	return undefined;
 }
 
+/**
+ * Phase 5.x strict-contract: in-txn repoId lookup. Returns the
+ * matching repoId or `undefined` if no row has this path.
+ *
+ * Use from inside a `withWriteTxn` / `withReadTxn` / `transaction`
+ * callback. For non-txn callers use `lookupRepoId()` below (which
+ * opens its own read txn).
+ *
+ * Linear scan of the repo sub-DB; cheap at typical scale (registry
+ * holds < 100 rows in any realistic deployment).
+ */
+export function lookupRepoIdInTxn(store: GraphStore, path: string): number | undefined {
+	return findRepoIdByPath(store, path);
+}
+
+/**
+ * Phase 5.x strict-contract: standalone repoId lookup. Returns the
+ * matching repoId or `undefined` if no row has this path. Opens
+ * its own read txn; safe to call outside any other txn.
+ */
+export async function lookupRepoId(path: string): Promise<number | undefined> {
+	if (typeof path !== 'string' || path.length === 0) return undefined;
+	const store = await getGraphStore();
+	return findRepoIdByPath(store, path);
+}
+
+/**
+ * Thrown when a caller hands a `repoId` (or a `repo` path that
+ * resolves to none) to a write site that requires the repo to be
+ * pre-registered. The Phase 5.x strict-contract design makes
+ * `addRepo()` the sole allocator; storage-layer auto-allocation
+ * (the old `ensureRepo()` helper) is gone, so an unregistered
+ * repo is a programming error -- the caller forgot to call
+ * `addRepo()` first.
+ */
+export class UnregisteredRepoError extends Error {
+	constructor(public readonly repo: string | number) {
+		super(
+			typeof repo === 'string'
+				? `repo path '${repo}' is not registered (call addRepo() first)`
+				: `repoId ${repo} is not registered (no row in the repo sub-DB)`,
+		);
+		this.name = 'UnregisteredRepoError';
+	}
+}
+
 function rowToRepo(row: RepoRow): RegisteredRepo {
 	const r: RegisteredRepo = {
+		kind:    row.kind,
 		path:    row.path,
 		name:    row.name,
 		addedAt: formatTimestamp(row.addedAt),
 		status:  row.status,
 	};
-	if (row.lastIndexed > 0) r.lastIndexed = formatTimestamp(row.lastIndexed);
-	if (row.errorMsg !== '') r.errorMsg    = row.errorMsg;
+	if (row.namespace !== undefined) r.namespace   = row.namespace;
+	if (row.lastIndexed > 0)         r.lastIndexed = formatTimestamp(row.lastIndexed);
+	if (row.errorMsg !== '')         r.errorMsg    = row.errorMsg;
 	return r;
 }
 

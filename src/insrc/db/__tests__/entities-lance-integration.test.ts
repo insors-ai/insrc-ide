@@ -73,6 +73,17 @@ test.beforeEach(async () => {
 	dir = mkdtempSync(join(tmpdir(), 'insrc-entities-lance-3.2-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
 	setLanceConnPath(join(dir, 'lance'));
+
+	// Phase 5.x strict-contract: pre-register the synthetic repos
+	// used across this file so upsertEntities's lookup-or-throw
+	// passes. The set covers every repo path mentioned in the
+	// fixtures below.
+	const { addRepo } = await import('../repos.js');
+	for (const path of ['/repo/foo', '/repo/bar', '/repo/x', '/repo/y']) {
+		await addRepo(null, {
+			path, name: '', addedAt: new Date().toISOString(), status: 'pending',
+		});
+	}
 });
 test.afterEach(async () => {
 	await closeGraphStore();

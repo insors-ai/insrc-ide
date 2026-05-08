@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { join, extname, resolve } from 'node:path';
 import type { DbClient } from '../db/client.js';
 import type { RegisteredRepo, IndexJob, ConfigScope } from '../shared/types.js';
-import { upsertEntities, EXTERNAL_MODULES_REPO_PATH } from '../db/entities.js';
+import { upsertEntities } from '../db/entities.js';
 import { upsertRelations, deleteRelationsForFile, deleteUnresolvedForFile } from '../db/relations.js';
 import { runCrossFileResolver } from './cross-file-resolver.js';
 import { detectSourceRoots } from './source-roots.js';
@@ -206,13 +206,15 @@ export class IndexerService {
     });
 
     for (const repo of repos) {
-      // Skip the synthetic shared-modules row -- it's not a real
-      // filesystem repo, just the destination for `kind: 'module'`
-      // entities that intentionally carry `repo: ''`. The watcher
-      // would fail subscribe() on a non-path, and the recovery path
-      // would loop trying to fullIndex it forever.
-      if (repo.path === EXTERNAL_MODULES_REPO_PATH) {
-        log.debug({ repo: repo.path }, 'skipping synthetic external-modules registry row');
+      // Skip synthetic shared-modules rows -- they're not real
+      // filesystem repos, just registry slots for `kind: 'module'`
+      // entities that carry `repo: ''`. The watcher would fail
+      // subscribe() on the empty path; the recovery path would
+      // loop trying to fullIndex forever. Phase 5.x replaces the
+      // earlier path-based check (EXTERNAL_MODULES_REPO_PATH) with
+      // a kind-based one since v3 has multiple namespace-keyed rows.
+      if (repo.kind === 'shared-modules') {
+        log.debug({ namespace: repo.namespace }, 'skipping synthetic shared-modules registry row');
         continue;
       }
 
