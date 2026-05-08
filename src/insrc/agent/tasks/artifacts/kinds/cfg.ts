@@ -168,6 +168,13 @@ function walkBlock(block: SyntaxNode, ctx: WalkCtx): CfgStep[] {
 	for (let i = 0; i < block.namedChildCount; i++) {
 		const stmt = block.namedChild(i);
 		if (stmt === null) { continue; }
+		// tree-sitter-go wraps a block's statements in an intermediate
+		// `statement_list` node (block -> statement_list -> stmt*).
+		// Flatten it so the walker sees the real statements.
+		if (stmt.type === 'statement_list') {
+			out.push(...walkBlock(stmt, ctx));
+			continue;
+		}
 		const step = walkStatement(stmt, ctx);
 		if (step === null) { continue; }
 		if (Array.isArray(step)) { out.push(...step); }
