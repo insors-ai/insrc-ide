@@ -139,35 +139,38 @@ orchestrators in `rdbms-common.ts` (`executeHistogram` /
 new methods via a per-driver `runRows` callback. The data-driver-duckdb-files
 prerequisite is **fully shipped** -- every file kind already routes
 through the consolidated DuckDB-backed driver with `db_file_*` tools in
-place. Currently **23 `db_*` tools** are registered:
-`db_list_connections`; SQL: `db_sql_describe` / `_sample` / `_explain` /
-`_aggregate` / `_distinct` / `_histogram` / `_correlation_matrix` /
-`_outliers`; KV: `db_kv_scan` / `_get` / `_sample_shape` /
-`_list_namespaces` / `_describe_namespace`; file: `db_file_describe` /
-`_sample` / `_sample_shape` / `_list_files` / `_aggregate` / `_distinct` /
-`_histogram` / `_correlation_matrix` / `_outliers`. Phase 1.1
-(`data.source.rdbms.describe-table`), Phase 1.3
-(`data.source.file.describe`), Phase 2.1 (both
-`data.source.rdbms.sample-rows` and `data.source.rdbms.sample-distinct`),
-Phase 2.2 (all three KV sampling skills:
-`data.source.kv.scan-keys` / `get-value` / `sample-shape`), and
-Phase 2.3 (`data.source.file.sample-rows`,
+place. Currently **31 `db_*` tools** are registered:
+`db_list_connections`; SQL (16): `db_sql_describe` / `_sample` /
+`_explain` / `_aggregate` / `_distinct` / `_list_tables` /
+`_list_indexes` / `_anti_join` / `_functional_dependency` /
+`_histogram` / `_correlation_matrix` / `_outliers` /
+`_temporal_trend` / `_dickey_fuller` / `_temporal_gap_stats`;
+KV (5): `db_kv_scan` / `_get` / `_sample_shape` /
+`_list_namespaces` / `_describe_namespace`;
+file (10): `db_file_describe` / `_sample` / `_sample_shape` /
+`_list_files` / `_aggregate` / `_distinct` / `_histogram` /
+`_correlation_matrix` / `_outliers` / `_temporal_trend`. Phase 1.1
+(`data.source.rdbms.describe-table` / `list-tables` /
+`list-indexes`), Phase 1.3 (`data.source.file.describe`), Phase 2.1
+(`data.source.rdbms.sample-rows` / `sample-distinct`), Phase 2.2 (all
+three KV sampling skills: `data.source.kv.scan-keys` / `get-value` /
+`sample-shape`), and Phase 2.3 (`data.source.file.sample-rows`,
 `data.source.file.sample-shape`) are landed. Phase 5a-5g
 (quality-profile / distribution / dependency / quality-scorecard /
 sensitivity / drift / timeseries) are fully shipped on the RDBMS side
-and Track A (file-side ports) is now complete: 22 file variants land
-across 5a (5 profilers), 5b (6 distribution), 5c (3 dependency), 5d
-(6 quality including the scorecard composite), 5e (1 PII), 5f (2 drift).
-Several rows stay `partial` because their full-table math has not yet
-been folded into the existing skills (transport ports are done; the
-math swap is mechanical now that the tools land). Phase 1.2
+and Track A (file-side ports) is now complete: **24 file variants**
+land across 5a (5 profilers), 5b (7 distribution -- includes
+`distribution.histogram.file`), 5c (3 dependency: numeric-pairwise /
+categorical-pairwise / co-null-pattern), 5d (6 quality including the
+scorecard composite), 5e (1 PII), 5f (2 drift). Phase 1.2
 (source-introspection: kv) is **done** -- both skills shipped:
 `data.source.kv.list-namespaces` and
 `data.source.kv.describe-namespace` (atomic thin wrappers over
 `db_kv_list_namespaces` / `db_kv_describe_namespace`; memcached's
-`supported: false` clamps to `low`). Phase 1.4 / 2.4 (doc family) is
-moot now that 0.9 reconciled to `kv`. Slice 3.4 has a partial wrapper
-from skills-core 9. Skill core (skills-core.md) is fully shipped.
+`supported: false` clamps to `low`). Phase 1.4 / 2.4 (doc family)
+collapse into kv per the 0.9 reconciliation; the table marks them
+`n/a`. Slice 3.4 (`data.lineage.read-write-callsites`) shipped fully
+in skills-core 9. Skill core (skills-core.md) is fully shipped.
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -183,11 +186,11 @@ from skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 1.1 | source-introspection: rdbms | done | All three skills shipped: `data.source.rdbms.describe-table` (over `db_sql_describe`), `data.source.rdbms.list-tables` (over the new `db_sql_list_tables` tool, returns base tables + views excluding system schemas; optional `schema` filter; default limit 500 / cap 5000), `data.source.rdbms.list-indexes` (over the new `db_sql_list_indexes` tool, returns name + columns + unique flag + PK flag). Driver methods `listTables()` / `listIndexes()` real impls on Postgres / MySQL / SQLite / MSSQL / Oracle; ClickHouse stubs throw with a per-engine follow-up note (system.tables / system.data_skipping_indices have a different shape) |
 | 1.2 | source-introspection: kv | done | Both skills shipped: `data.source.kv.list-namespaces` (over `db_kv_list_namespaces`) and `data.source.kv.describe-namespace` (over `db_kv_describe_namespace`). Atomic thin wrappers; `supported: false` (memcached) clamps confidence to `low` with a "driver does not expose namespaces / namespace shape" note. Covers redis / valkey / keydb / mongodb / cassandra / nats / dynamodb / etcd / memcached. Coverage: smoke fixtures land high-confidence on Mongo-shaped data |
 | 1.3 | source-introspection: file | done | `data.source.file.describe` shipped (`daemon/skills/built-ins/data.source.file.describe.ts`). One skill covers all 12 file kinds via `connection-family: ['file', csv / tsv / jsonl / ndjson / json / parquet / arrow / feather / avro / bson / fixed-width / xlsx]` precondition. Thin wrapper over `db_file_describe`; the underlying DuckDB-backed driver dispatches to native readers or staged-Parquet readers transparently. xlsx target selects a sheet |
-| 1.4 | source-introspection: doc | pending | describe-collection, list-collections |
+| 1.4 | source-introspection: doc | n/a -- moot per 0.9 | The `doc` family was reconciled into `kv` in 0.9. MongoDB / Cassandra / DynamoDB / Mongo-shaped stores all report `family: 'kv'`; their describe / list surface is covered by 1.2 (`data.source.kv.list-namespaces` / `describe-namespace`). No separate doc skill ships |
 | 2.1 | source-sampling: rdbms | done | Both atomic skills shipped: `data.source.rdbms.sample-rows` (over `db_sql_sample`, structured WHERE support) and `data.source.rdbms.sample-distinct` (over `db_sql_distinct`, top-N + distinct cardinality, deterministic order) |
 | 2.2 | source-sampling: kv | done | All three skills shipped: `data.source.kv.scan-keys` (over `db_kv_scan`), `data.source.kv.get-value` (over `db_kv_get`), `data.source.kv.sample-shape` (over `db_kv_sample_shape`). Covers redis / valkey / keydb / mongodb / cassandra / nats / dynamodb / etcd / memcached |
 | 2.3 | source-sampling: file | done | `data.source.file.sample-rows` and `data.source.file.sample-shape` shipped. Both are thin wrappers (`db_file_sample` / `db_file_sample_shape`) covering all 12 file kinds via the consolidated DuckDB-backed driver. xlsx target selects a sheet; directory connections glob / walk-and-convert transparently. WHERE clause supported on sample-rows; sample-shape pulls a sample then runs `inferShape` for nested types (json / jsonl / ndjson) |
-| 2.4 | source-sampling: doc | pending | sample-docs, sample-shape |
+| 2.4 | source-sampling: doc | n/a -- moot per 0.9 | Same rationale as 1.4. Sampling for doc-shaped stores is covered by 2.2 (`data.source.kv.scan-keys` / `get-value` / `sample-shape`). No separate doc skill ships |
 | 3.1 | code-binding: class.extract-fields | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.class.extract-fields` registration in code-analyzer; see "Deferred -- code-analyzer prerequisites required" callout above |
 | 3.2 | code-binding: class.locate-references | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.class.locate-references`; see callout above |
 | 3.3 | code-binding: orm.resolve-model | **deferred** -- needs code-analyzer prerequisites | Blocked on `code.orm.resolve-model` (Prisma / TypeORM / SQLAlchemy / Hibernate dialects); see callout above |
@@ -913,7 +916,7 @@ scan; seasonality's per-lag autocorrelation).
 | 5d.1 / 5d.2 quality.uniqueness | 0.1.x `composite_distinct_count` | done. New optional `compositePkCandidates: string[][]` input + `compositePkCandidates` output field; each candidate runs one composite_distinct_count aggregate. |
 | 5d.5 quality.consistency | 0.1.x `count_where` + WhereClause column-to-column comparisons | done. Opt-in `mode: 'full-table'` issues per-rule count_where aggregates; comparison rules use `valueColumn` for `left op right` predicates, null-pattern rules use null-flag combinations. |
 | 5e.1 pii.detect-patterns -- KV variant | 0.7 `db_kv_list_namespaces` + `db_kv_scan` + `db_kv_get` | done. New `data.pii.detect-patterns.kv` skill. Lists namespaces (or takes a specific one), scans values, walks nested document leaves, regex-matches against the same PII catalog as the rdbms / file variants. |
-| 5c.3 dependency.functional -- full-table FD | needs grouped distinct-count | **deferred**. Requires `count_distinct(b) GROUP BY a` -- not currently expressible via `compileAggregate`'s flat-per-column shape. Tracked as a future 0.1.x extension. |
+| 5c.3 dependency.functional -- full-table FD | new `db_sql_functional_dependency` tool | **done**. Skill gained opt-in `mode: 'full-table'` that delegates to the dedicated tool (one round-trip per pair plus a violations query). Driver method `functionalDependency()` real impls on Postgres / MySQL / SQLite / MSSQL / Oracle (clickhouse stub throws); compile helpers `compileFdStats` / `compileFdViolations` / `compileFdToSample` + orchestrator `executeFunctionalDependency` in `rdbms-common.ts`. Cap: 10 columns / 90 ordered pairs per call. Same FdResult shape in both modes (full-table sets `sampleSize=0` sentinel). Sidesteps the grouped-distinct-count gap by issuing a per-pair query rather than packing it into the flat aggregate shape. |
 | 5d.3 quality.validity -- full-table regex match-rate | per-dialect `regex_like` SQL | **done (2026-05-07)**. WhereClause op enum gained `regex` / `not regex`; `Dialect.regexPredicate` wired per-dialect (PG `~`, MySQL/SQLite `REGEXP`, Oracle `REGEXP_LIKE`, ClickHouse `match`); MSSQL leaves it undefined and compileWhere errors clearly. SQLite driver registers a JS REGEXP user function via `db.function` so the operator resolves. Skill gained opt-in `mode: 'full-table'` using count + count_non_null + count_where(regex). |
 | 5f.1 drift.distribution -- full-table JS divergence | shipped count_where with shared bucket edges | **done (2026-05-07)**. 4-call protocol: parallel min/max/count_non_null per window, then parallel N count_where bucket aggregates per window over shared edges from joint min/max. Synthetic `bucket_<i>` column tags disambiguate the count_where result keys (countWhereSignature strips literal values, so without the tag prefix all N specs would have identical signatures). DriftWhereClauseIn op enum widened to include `<` / `<=` / `>` / `>=` / `between` / `is not null` for time-bounded windowing. |
 | 5f.3 anomaly.change-point -- full-table | needs cumulative-sum / running-mean window-function aggregate | **deferred (substrate work)**. Single-change-point detection is fundamentally a multi-pass scan over a sorted axis; doesn't decompose into the existing flat aggregate primitives. Two paths if needed: (a) new `cumulative_sum` / `running_mean` window-function aggregate so per-split-mean delta is computable in SQL, (b) skill issues O(n) count_where aggregates over different cut points (prohibitive at scale). |
@@ -927,13 +930,14 @@ scan; seasonality's per-lag autocorrelation).
 Documented for later Phase 0 cleanup. None block Track A by themselves,
 but ignoring them costs duplicate per-skill workarounds:
 
-1. **`target` vs `path` field name across file tools.**
-   `db_file_describe` and `db_file_sample` use `target`;
-   `db_file_aggregate` and `db_file_distinct` use `path`. Same
-   conceptual field (xlsx sheet selector for those kinds, ignored
-   elsewhere). Skills wrapping these have to remember which is which.
-   Recommend renaming to `target` everywhere; the breaking change is
-   small and one-shot.
+1. **`target` vs `path` field name across file tools.** **Partially
+   resolved.** Seven of the nine file tools converged on `target`
+   (`db_file_describe` / `_sample` / `_sample_shape` / `_histogram` /
+   `_correlation_matrix` / `_outliers` / `_temporal_trend`); the two
+   stragglers `db_file_aggregate` and `db_file_distinct` still use
+   `path` for the xlsx sheet selector. Recommend a one-shot rename of
+   those two to converge the surface; small breaking change for the
+   skill files that already wrap them.
 
 2. ~~**No `where` on `db_sql_aggregate` / `db_file_aggregate`.**~~
    **Fixed.** Both tools now accept `where: WHERE_SCHEMA`;
@@ -951,11 +955,17 @@ but ignoring them costs duplicate per-skill workarounds:
    currently must reconfigure the connection. Cheap to add when a
    skill needs it.
 
-4. **WHERE op enum is narrow** (`= / != / in / is null`). Time-window
-   filters (`>= / <= / between`) need an extension to the
-   `WHERE_SCHEMA` enum + per-driver `compileWhere` plumbing. Affects
-   any skill that wants to express time-bounded queries via the
-   structured-WHERE surface (5f.2 drift.volume in particular).
+4. ~~**WHERE op enum is narrow** (`= / != / in / is null`).~~
+   **Fixed.** `WhereClause.op` at
+   [shared/db-driver.ts:178](src/insrc/shared/db-driver.ts#L178) now
+   covers the original five plus `<` / `<=` / `>` / `>=` /
+   `between` / `like` / `not like` / `regex` / `not regex` -- nine
+   additional ops. Per-dialect `compileWhere` + `Dialect.regexPredicate`
+   plumbing landed alongside; SQLite registers a JS REGEXP user
+   function on connect. Time-window filters (5f.2 drift.volume,
+   timeseries trend / drift, etc.) and pattern-match validity
+   (5d.3 quality.validity full-table) all express via the structured
+   WHERE surface now.
 
 5. ~~**5f.2 drift.volume bug.**~~ **Fixed.** Took option (a) from
    the original analysis: extended `db_sql_aggregate` and
@@ -979,21 +989,38 @@ but ignoring them costs duplicate per-skill workarounds:
 
 ### Recommended order of operations
 
-1. ~~**Fix 5f.2 bug first.**~~ Done. Tool-extension path (option a)
+The original ordering shipped:
+
+1. ~~**5f.2 drift.volume bug**~~ -- done. Tool-extension path (option a)
    shipped + smoke-gate input-validation hardening shipped.
-2. ~~**Track B (scorecard)**~~ Done. Conformity + consistency folded
-   into 5d.6; synth.scorecard (6.8) renderer extended; 2 dedicated
+2. ~~**Track B (scorecard)**~~ -- done. Conformity + consistency folded
+   into 5d.6; `synth.scorecard` (6.8) renderer extended; 2 dedicated
    composite tests + smoke gate green.
-3. **Track A starting with 5a profilers** -- extract algo helpers,
-   refactor existing `.rdbms` skills, ship new `.file` skills together.
-   Sets the pattern for the rest of Track A.
-4. **Track A continuation** -- 5b → 5c → 5d → 5e → 5f, family by
-   family, applying the established pattern.
-5. **Track C** -- defer; lands when Phase 0 tooling work happens.
-6. **Tool-surface cleanups (#1, #3, #4 above)** -- batch into a single
-   Phase 0 tool refresh PR after Track A proves out the file-port
-   pattern; the rename in #1 is most easily done across all callers
-   simultaneously.
+3. ~~**Track A** (file-side ports)~~ -- done. 24 file-variant skills
+   shipped across 5a / 5b / 5c / 5d / 5e / 5f via the
+   `data.X.algo.ts` + `.rdbms.ts` + `.file.ts` triple-file pattern.
+4. ~~**Track C** (skill swaps onto Phase 0 tools)~~ -- mostly done
+   (16 of 19 swap rows landed). Three rows remain by design:
+   5c.3 functional FD (sidestepped via dedicated tool),
+   5f.3 anomaly.change-point full-table (substrate-blocked: needs
+   cumulative-sum / running-mean window aggregate), 5g.2 timeseries
+   seasonality full-table (out-of-scope: needs FFT primitive no
+   shipped engine surfaces uniformly).
+
+**Remaining open in this section** (small, none on a critical path):
+
+- Tool-surface #1 -- rename `path` → `target` on `db_file_aggregate`
+  and `db_file_distinct` to match the seven other file tools.
+- Tool-surface #3 -- per-call `recursive` override on `db_file_*`
+  tools (cheap to add when a skill actually needs sub-tree scoping).
+- Tool-surface #6 -- file-side wrappers should pass `undefined`
+  for the xlsx-sheet selector when the connection isn't xlsx
+  (skill-side cleanup, not tool-surface).
+
+The substantive next-step work in this plan now lives outside this
+section -- Phase 6.1 (open question), Phase 7.1 / 7.2 (need design),
+Phase 8 (planner / runner / reviewer rewrite), Phase 9 / 10
+(back-compat + telemetry + per-skill smoke fixtures).
 
 ## LLM routing -- per-skill provider affinity
 
