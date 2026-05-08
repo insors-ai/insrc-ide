@@ -13,7 +13,6 @@ import type { Skill, SkillResult } from '../types.js';
 import {
 	type HistogramMode,
 	type HistogramOutput,
-	HISTOGRAM_DEFAULT_BUCKETS,
 	HISTOGRAM_OUTPUT_SCHEMA,
 	buildHistogramOutput,
 	clampBuckets,

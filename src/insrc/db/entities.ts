@@ -57,7 +57,6 @@ import {
 	decodeEntityRow,
 	decodeRepoRow,
 	encodeEntityRow,
-	encodeRepoRow,
 	type EntityRow,
 } from './graph/codec.js';
 import {
