@@ -256,7 +256,7 @@ export async function scc(
  *
  * Repo scoping is intentionally NOT done here -- this is the
  * pure-graph layer (operates on bigint + EntityKind only). Domain
- * wrappers in Phase 5+ will scope by repo path.
+ * wrappers in `db/search.ts` scope by repo path / repoId.
  *
  * Empty `candidateKinds` is a no-op (yields nothing). Empty `roots`
  * with non-empty kinds yields every entity of those kinds.

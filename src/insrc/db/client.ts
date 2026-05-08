@@ -23,9 +23,9 @@
  */
 
 /**
- * Opaque sentinel. Public DB functions accept `DbClient | null`; the
- * value is unused. Phase 5.x deferred work removes it from caller
- * signatures entirely.
+ * Opaque sentinel. Public DB functions accept `DbClient | null`;
+ * the value is unused. Kept for caller back-compat -- callers can be
+ * migrated to drop the argument on their own schedule.
  */
 export type DbClient = unknown;
 

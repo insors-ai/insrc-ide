@@ -205,6 +205,7 @@ Supported intents: `implement`, `refactor`, `test`, `debug`, `review`, `document
 4. **Graph + vector** — structural queries use the LMDB graph layer's typed JS API (`findCallers / findCallees / outEdges / inEdges / transitiveClosure / unreachable`); semantic queries use LanceDB ANN. No Cypher / GQL / SQL exposed for graph traversal -- internal callers and the LLM-facing `graph_query` tool both go through the typed API. No FTS / BM25 (audit confirmed zero callers)
 5. **No raw file dumps** — context is always structured entity summaries + relations from the graph
 6. **Test agent never modifies impl code** — hands off to Pair agent (debug mode) for implementation bugs
+7. **Repo registry is the contract** — workspace registry membership is established exclusively via the `repo.add` IPC (which calls `addRepo()`). The storage layer (`db/entities.ts`, `db/relations.ts`, etc.) never auto-allocates registry rows; an `Entity` whose `repo` path isn't registered fails the upsert with `UnregisteredRepoError`. Module entities (`kind: 'module'`) are the sole exception -- they route to one of four reserved namespace rows (`jvm` / `npm` / `python` / `go`), provisioned at first boot. See `plans/repo-registry-strict-contract.md`
 
 ## Design documents
 

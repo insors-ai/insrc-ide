@@ -100,8 +100,8 @@ function formatTs(ms: number): string {
 
 export class ConfigStore {
 	constructor(_db: DbClient) {
-		// `db` retained for caller back-compat; unused. Phase 5.x removes
-		// the parameter from the daemon-side call sites.
+		// `db` retained for caller back-compat; unused. The LMDB
+		// substrate is opened lazily by `db/graph/store.ts`.
 		void _db;
 	}
 

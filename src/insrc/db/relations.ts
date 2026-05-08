@@ -32,8 +32,9 @@
  *     dupsort index keyed by (repoId, fromFile) -> id for efficient
  *     per-file queries.
  *
- * The `db: DbClient` parameter is retained but unused -- Phase 5.x
- * removes it from callers.
+ * The `db: DbClient` parameter is retained (vestigial) for caller
+ * back-compat; the LMDB substrate is opened lazily by
+ * `db/graph/store.ts`.
  */
 
 import { createHash } from 'node:crypto';

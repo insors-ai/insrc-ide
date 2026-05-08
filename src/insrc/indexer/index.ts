@@ -207,13 +207,12 @@ export class IndexerService {
     });
 
     for (const repo of repos) {
-      // Skip synthetic shared-modules rows -- they're not real
-      // filesystem repos, just registry slots for `kind: 'module'`
-      // entities that carry `repo: ''`. The watcher would fail
-      // subscribe() on the empty path; the recovery path would
-      // loop trying to fullIndex forever. Phase 5.x replaces the
-      // earlier path-based check (EXTERNAL_MODULES_REPO_PATH) with
-      // a kind-based one since v3 has multiple namespace-keyed rows.
+      // Defense-in-depth: `listRepos()` already filters out
+      // `kind: 'shared-modules'` rows, but the indexer is also fed
+      // by direct registry pokes (tests, recovery hooks) so we
+      // re-check here. shared-modules rows have `path: ''` -- the
+      // watcher would fail `subscribe()` on it, and the recovery
+      // path would loop trying to `fullIndex()` a non-directory.
       if (repo.kind === 'shared-modules') {
         log.debug({ namespace: repo.namespace }, 'skipping synthetic shared-modules registry row');
         continue;

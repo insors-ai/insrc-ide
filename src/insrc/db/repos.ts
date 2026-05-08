@@ -5,9 +5,9 @@
  * Surface preserved verbatim: callers (`daemon/index.ts`,
  * `indexer/index.ts`, RPC handlers) keep using `addRepo / removeRepo /
  * listRepos / updateRepoStatus` with the same parameter shapes. The
- * `db: DbClient` parameter is retained but unused -- Phase 5.x drops
- * it from callers. Internally we route through the LMDB module
- * singleton (`getGraphStore`).
+ * `db: DbClient` parameter is retained (vestigial) for caller back-
+ * compat. Internally we route through the LMDB module singleton
+ * (`getGraphStore`).
  *
  * Internal model:
  *   - Public API uses `path` as the externally-visible repo identifier
@@ -143,10 +143,7 @@ export function validateRepoPath(path: unknown): string {
 	return normalised;
 }
 
-/**
- * Vestigial `DbClient` param shape. Kept until Phase 5.x updates the
- * callers to drop the now-unused argument.
- */
+/** Vestigial `DbClient` param shape, kept for caller back-compat. */
 type DbClient = unknown;
 
 // ---------------------------------------------------------------------------

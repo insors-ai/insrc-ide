@@ -5,8 +5,9 @@
  * Public surface preserved verbatim from the prior DuckDB-backed
  * implementation: callers (`indexer/`, `daemon/`, `agent/tasks/`,
  * RPC handlers) keep using `upsertEntities / getEntity / ...` with
- * the same signatures. The `db: DbClient` parameter is retained but
- * unused -- Phase 5.x removes it from callers.
+ * the same signatures. The `db: DbClient` parameter is retained
+ * (vestigial) for caller back-compat; the LMDB substrate is opened
+ * lazily by `db/graph/store.ts`.
  *
  * Storage model:
  *   - `entity` sub-DB: u64 BE -> msgpack(EntityRow). u64 because
@@ -71,10 +72,7 @@ import {
 
 const log = getLogger('db.entities');
 
-/**
- * Vestigial `DbClient` param shape -- kept until Phase 5.x removes
- * the unused argument from callers.
- */
+/** Vestigial `DbClient` param shape, kept for caller back-compat. */
 type DbClient = unknown;
 
 // ---------------------------------------------------------------------------

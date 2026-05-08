@@ -22,8 +22,8 @@
  *   - STEP_DEPENDS_ON is the `dependsOn: string[]` array stored on the
  *     PlanStepRow itself.
  *
- * The `db: DbClient` parameter is kept (vestigial) -- Phase 5.x removes
- * it from callers.
+ * The `db: DbClient` parameter is kept (vestigial) for caller back-
+ * compat; the LMDB substrate is opened lazily by graph/store.ts.
  */
 
 import type { Plan, PlanStep, PlanStepStatus, PlanStatus } from '../../shared/types.js';
