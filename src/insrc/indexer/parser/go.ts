@@ -26,6 +26,9 @@ import type { CodeParser, ParseResult } from './base.js';
 import { makeEntityId } from './base.js';
 import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
+import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
+
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.go;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,6 +72,7 @@ function receiverTypeName(receiverNode: SyntaxNode): string {
 function extractFunction(
   node:      SyntaxNode,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   fileId:    string,
   now:       string,
@@ -90,6 +94,7 @@ function extractFunction(
     kind:       'function',
     name,
     language:   'go',
+    repoId,
     repo,
     file:       filePath,
     startLine:  node.startPosition.row + 1,
@@ -107,6 +112,7 @@ function extractFunction(
 function extractMethod(
   node:      SyntaxNode,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   fileId:    string,
   now:       string,
@@ -132,6 +138,7 @@ function extractMethod(
     kind:       'method',
     name:       methodName,
     language:   'go',
+    repoId,
     repo,
     file:       filePath,
     startLine:  node.startPosition.row + 1,
@@ -155,6 +162,7 @@ function extractMethod(
 function extractTypeSpec(
   node:      SyntaxNode,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   fileId:    string,
   now:       string,
@@ -175,6 +183,7 @@ function extractTypeSpec(
       kind:       'class',
       name,
       language:   'go',
+      repoId,
       repo,
       file:       filePath,
       startLine:  node.startPosition.row + 1,
@@ -205,6 +214,7 @@ function extractTypeSpec(
       kind:       'interface',
       name,
       language:   'go',
+      repoId,
       repo,
       file:       filePath,
       startLine:  node.startPosition.row + 1,
@@ -226,6 +236,7 @@ function extractTypeSpec(
       kind:       'type',
       name,
       language:   'go',
+      repoId,
       repo,
       file:       filePath,
       startLine:  node.startPosition.row + 1,
@@ -271,6 +282,7 @@ function extractImport(
     if (!entities.some(e => e.id === moduleId)) {
       entities.push({
         id: moduleId, kind: 'module', name: importPath, language: 'go',
+        repoId: MODULE_REPO_ID,
         repo: '', file: '', startLine: 0, endLine: 0,
         body: '', embedding: [], indexedAt: now,
       });
@@ -286,6 +298,7 @@ function extractImport(
 function walkGoNode(
   node:      SyntaxNode,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   fileId:    string,
   now:       string,
@@ -295,18 +308,18 @@ function walkGoNode(
   switch (node.type) {
 
     case 'function_declaration':
-      extractFunction(node, repo, filePath, fileId, now, entities, relations);
+      extractFunction(node, repo, repoId, filePath, fileId, now, entities, relations);
       return;
 
     case 'method_declaration':
-      extractMethod(node, repo, filePath, fileId, now, entities, relations);
+      extractMethod(node, repo, repoId, filePath, fileId, now, entities, relations);
       return;
 
     case 'type_declaration':
       // May contain multiple type_spec children
       for (const child of node.namedChildren) {
         if (child.type === 'type_spec') {
-          extractTypeSpec(child, repo, filePath, fileId, now, entities, relations);
+          extractTypeSpec(child, repo, repoId, filePath, fileId, now, entities, relations);
         }
       }
       return;
@@ -318,7 +331,7 @@ function walkGoNode(
 
   // Walk top-level declarations only (don't descend into function bodies)
   for (const child of node.namedChildren) {
-    walkGoNode(child, repo, filePath, fileId, now, entities, relations);
+    walkGoNode(child, repo, repoId, filePath, fileId, now, entities, relations);
   }
 }
 
@@ -337,7 +350,7 @@ class GoParser implements CodeParser {
     (this.tsParser as { setLanguage(l: unknown): void }).setLanguage(GoGrammar);
   }
 
-  parse(filePath: string, source: string, repo: string): ParseResult {
+  parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
     const tree = (this.tsParser as { parse(s: string): { rootNode: SyntaxNode } }).parse(source);
     const now  = new Date().toISOString();
 
@@ -350,6 +363,7 @@ class GoParser implements CodeParser {
       kind:      'file',
       name:      filePath,
       language:  'go',
+      repoId,
       repo,
       file:      filePath,
       startLine: 1,
@@ -361,7 +375,7 @@ class GoParser implements CodeParser {
 
     // Walk top-level declarations
     for (const child of tree.rootNode.namedChildren) {
-      walkGoNode(child, repo, filePath, fileId, now, entities, relations);
+      walkGoNode(child, repo, repoId, filePath, fileId, now, entities, relations);
     }
 
     return { entities, relations };

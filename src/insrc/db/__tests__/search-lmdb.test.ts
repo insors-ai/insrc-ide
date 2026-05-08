@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 import { closeGraphStore, setGraphStorePath } from '../graph/store.js';
 import { upsertEntities } from '../entities.js';
 import { upsertRelations } from '../relations.js';
+import { addRepo } from '../repos.js';
 import {
 	findCallers,
 	findCallees,
@@ -35,6 +36,13 @@ test.beforeEach(async () => {
 	await closeGraphStore();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-search-lmdb-4.2-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	// Pre-register every synthetic repo path the suite uses -- the
+	// Phase 5.x strict-contract resolver throws if the path isn't in
+	// the registry.
+	const now = new Date().toISOString();
+	for (const path of [REPO, '/a', '/b', '/c']) {
+		await addRepo(null, { path, name: '', addedAt: now, status: 'pending' });
+	}
 });
 test.afterEach(async () => {
 	await closeGraphStore();
@@ -62,6 +70,7 @@ function makeEntity(
 		kind,
 		name,
 		language:  'typescript',
+		repoId:    1,
 		repo,
 		file,
 		startLine: 1, endLine: 5,
@@ -83,6 +92,7 @@ function makeRepoEntity(repoPath: string): Entity {
 		kind:      'repo',
 		name:      repoPath,
 		language:  'typescript',
+		repoId:    1,
 		repo:      repoPath,
 		file:      '',
 		startLine: 0, endLine: 0,

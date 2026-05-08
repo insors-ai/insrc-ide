@@ -49,7 +49,13 @@ export interface CodeParser {
    *
    * @param filePath  Absolute path to the file on disk
    * @param source    Full source text of the file
-   * @param repo      Absolute path to the repo root
+   * @param repo      Absolute path to the repo root (still used as input
+   *                  to `makeEntityId` so the SHA-32 entity hash stays
+   *                  stable across the Phase 5.x type change).
+   * @param repoId    u32 Repo registry id for the workspace -- the
+   *                  Phase 5.x strict-contract handle. Parsers stamp
+   *                  this onto every emitted Entity so storage doesn't
+   *                  do a path -> id translation on every upsert.
    */
-  parse(filePath: string, source: string, repo: string): ParseResult;
+  parse(filePath: string, source: string, repo: string, repoId: number): ParseResult;
 }

@@ -14,6 +14,7 @@ import { scalaParser } from '../scala.js';
 import type { Entity, Relation } from '../../../shared/types.js';
 
 const REPO = '/repo';
+const REPO_ID = 1;
 const FILE = '/repo/src/main/scala/example/Foo.scala';
 
 interface Result {
@@ -22,7 +23,7 @@ interface Result {
 }
 
 function parse(source: string): Result {
-	return scalaParser.parse(FILE, source, REPO);
+	return scalaParser.parse(FILE, source, REPO, REPO_ID);
 }
 
 function findEntity(r: Result, name: string, kind?: Entity['kind']): Entity | undefined {

@@ -40,6 +40,8 @@ test.beforeEach(async () => {
 	// doesn't touch the user's real ~/.insrc/lance directory (which
 	// other concurrent test runners may be mutating).
 	setLanceConnPath(join(dir, 'lance'));
+	const { addRepo } = await import('../../db/repos.js');
+	await addRepo(null, { path: '/repo/foo', name: '', addedAt: new Date().toISOString(), status: 'pending' });
 });
 test.afterEach(async () => {
 	await closeGraphStore();
@@ -62,6 +64,7 @@ function makeEntity(name: string, kind: EntityKind = 'function'): Entity {
 		id:        makeEntityId(REPO, file, kind, name),
 		kind, name,
 		language:  'typescript',
+		repoId:    1,
 		repo:      REPO,
 		file,
 		startLine: 1, endLine: 5,

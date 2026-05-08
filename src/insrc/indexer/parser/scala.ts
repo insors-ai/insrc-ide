@@ -59,6 +59,9 @@ import type { CodeParser, ParseResult } from './base.js';
 import { makeEntityId } from './base.js';
 import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
+import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
+
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.jvm;
 
 type SyntaxNode = import('tree-sitter').SyntaxNode;
 
@@ -210,6 +213,7 @@ function baseTypeName(text: string): string {
 
 interface WalkCtx {
 	readonly repo: string;
+	readonly repoId: number;
 	readonly filePath: string;
 	readonly fileId: string;
 	readonly now: string;
@@ -293,6 +297,7 @@ function handlePackage(node: SyntaxNode, ctx: WalkCtx): void {
 	if (!ctx.entities.some(e => e.id === moduleId)) {
 		ctx.entities.push({
 			id: moduleId, kind: 'module', name: moduleName, language: 'scala',
+			repoId: MODULE_REPO_ID,
 			repo: '', file: '', startLine: 0, endLine: 0,
 			body: '', embedding: [], indexedAt: ctx.now,
 		});
@@ -347,6 +352,7 @@ function emitImportEdge(ctx: WalkCtx, moduleName: string, alias?: string | undef
 	if (!ctx.entities.some(e => e.id === moduleId)) {
 		ctx.entities.push({
 			id: moduleId, kind: 'module', name: moduleName, language: 'scala',
+			repoId: MODULE_REPO_ID,
 			repo: '', file: '', startLine: 0, endLine: 0,
 			body: '', embedding: [], indexedAt: ctx.now,
 		});
@@ -404,6 +410,7 @@ function handleClassLike(
 		kind: entityKind,
 		name: qualName,
 		language: 'scala',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -512,6 +519,7 @@ function handleMethodOrFunction(
 		kind,
 		name: qualName,
 		language: 'scala',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -562,6 +570,7 @@ function handleValVar(
 		kind: 'variable',
 		name: qualName,
 		language: 'scala',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -602,6 +611,7 @@ function handleTypeAlias(
 		kind: 'type',
 		name: qualName,
 		language: 'scala',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -647,6 +657,7 @@ function handleGiven(
 		kind: 'variable',
 		name: qualName,
 		language: 'scala',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -697,6 +708,7 @@ function handleExtension(
 			kind: 'method',
 			name: qualName,
 			language: 'scala',
+			repoId: ctx.repoId,
 			repo: ctx.repo,
 			file: ctx.filePath,
 			startLine: inner.startPosition.row + 1,
@@ -756,7 +768,7 @@ class ScalaParser implements CodeParser {
 		(this.tsParser as { setLanguage(l: unknown): void }).setLanguage(ScalaGrammar);
 	}
 
-	parse(filePath: string, source: string, repo: string): ParseResult {
+	parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
 		const tree = (this.tsParser as { parse(s: string): { rootNode: SyntaxNode } }).parse(source);
 		const now = new Date().toISOString();
 
@@ -769,6 +781,7 @@ class ScalaParser implements CodeParser {
 			kind: 'file',
 			name: filePath,
 			language: 'scala',
+			repoId,
 			repo,
 			file: filePath,
 			startLine: 1,
@@ -780,7 +793,7 @@ class ScalaParser implements CodeParser {
 		});
 
 		const ctx: WalkCtx = {
-			repo, filePath, fileId, now, entities, relations,
+			repo, repoId, filePath, fileId, now, entities, relations,
 			fileClassNames: new Set<string>(),
 		};
 		walkProgram(tree.rootNode, ctx);

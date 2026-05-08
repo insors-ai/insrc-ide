@@ -9,7 +9,8 @@ import { upsertRelations, deleteRelationsForFile, deleteUnresolvedForFile } from
 import { runCrossFileResolver } from './cross-file-resolver.js';
 import { detectSourceRoots } from './source-roots.js';
 import { deleteEntitiesForFile, getEntity } from '../db/entities.js';
-import { updateRepoStatus } from '../db/repos.js';
+import { updateRepoStatus, lookupRepoId, UnregisteredRepoError } from '../db/repos.js';
+import { SHARED_MODULES_REPO_ID } from '../shared/repo-namespaces.js';
 import { embedEntities, embedText } from './embedder.js';
 import { parseManifest } from './manifest.js';
 import { resolveRelations } from './resolver.js';
@@ -583,8 +584,17 @@ export class IndexerService {
       await deleteUnresolvedForFile(this.db, filePath);
     }
 
+    // Phase 5.x strict-contract: resolve the repoId once per file
+    // and hand it to the parser. Lookup throws if the repo isn't
+    // registered -- the indexer should always have called addRepo()
+    // for any path it's indexing.
+    const repoId = await lookupRepoId(repoPath);
+    if (repoId === undefined) {
+      throw new UnregisteredRepoError(repoPath);
+    }
+
     // Parse
-    const result = parser.parse(filePath, source, repoPath);
+    const result = parser.parse(filePath, source, repoPath, repoId);
 
     // Stamp hash on the File entity
     const fileEntity = result.entities.find(e => e.kind === 'file' && e.file === filePath);
@@ -616,26 +626,36 @@ export class IndexerService {
     }
     log.info({ repo: repoPath, deps: deps.length }, 'indexing manifest dependencies');
 
-    const now      = new Date().toISOString();
-    const repoId   = makeEntityId(repoPath, '', 'repo', repoPath);
+    // Phase 5.x strict-contract: resolve the workspace's u32 repoId
+    // and the npm namespace's reserved repoId for the module entities.
+    // package.json deps are TypeScript / JavaScript ecosystem -> npm.
+    const workspaceRepoId = await lookupRepoId(repoPath);
+    if (workspaceRepoId === undefined) throw new UnregisteredRepoError(repoPath);
+
+    const now             = new Date().toISOString();
+    const repoEntityId    = makeEntityId(repoPath, '', 'repo', repoPath);
+    const moduleNamespace = SHARED_MODULES_REPO_ID.npm;
 
     for (const dep of deps) {
       // Module entities are shared across repos by design (same dep
-      // imported from many repos -> single moduleId). They use an
-      // intentional `repo: ''` sentinel that the LMDB layer maps to
-      // a reserved synthetic Repo row (`<external-modules>`) instead
-      // of auto-allocating a phantom path-empty row. See
-      // `db/entities.ts:ensureRepo` for the redirect.
+      // imported from many repos -> single moduleId). They route to
+      // the reserved npm-namespace registry row (provisioned by the
+      // v2->v3 migration); their `repo: ''` field stays for hash
+      // compatibility but `repoId` is the structurally-enforced
+      // handle.
       const moduleId = makeEntityId('', '', 'module', dep.name);
       await upsertEntities(this.db, [{
         id: moduleId, kind: 'module', name: dep.name, language: 'typescript',
-        repo: '', file: '', startLine: 0, endLine: 0,
+        repoId: moduleNamespace, repo: '', file: '', startLine: 0, endLine: 0,
         body: '', embedding: [], indexedAt: now,
       }]);
       await upsertRelations(this.db, [{
-        kind: 'DEPENDS_ON', from: repoId, to: moduleId, resolved: true,
+        kind: 'DEPENDS_ON', from: repoEntityId, to: moduleId, resolved: true,
       }]);
     }
+    void workspaceRepoId;  // not directly referenced in this loop, but
+                           // the lookup serves as the strict-contract
+                           // guard for the manifest path.
   }
 
   // -------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import { javaParser } from '../java.js';
 import type { Entity, Relation } from '../../../shared/types.js';
 
 const REPO = '/repo';
+const REPO_ID = 1;
 const FILE = '/repo/src/main/java/com/example/Foo.java';
 
 interface Result {
@@ -22,7 +23,7 @@ interface Result {
 }
 
 function parse(source: string): Result {
-	return javaParser.parse(FILE, source, REPO);
+	return javaParser.parse(FILE, source, REPO, REPO_ID);
 }
 
 function findEntity(r: Result, name: string, kind?: Entity['kind']): Entity | undefined {

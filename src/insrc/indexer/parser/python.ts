@@ -22,6 +22,9 @@ import type { CodeParser, ParseResult } from './base.js';
 import { makeEntityId } from './base.js';
 import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
+import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
+
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.python;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,6 +64,7 @@ function collectDunderAll(root: SyntaxNode): Set<string> | null {
 function walkPythonNode(
   node:       SyntaxNode,
   repo:       string,
+  repoId:     number,
   filePath:   string,
   fileId:     string,
   now:        string,
@@ -96,6 +100,7 @@ function walkPythonNode(
         kind,
         name,
         language:   'python',
+        repoId,
         repo,
         file:       filePath,
         startLine:  node.startPosition.row + 1,
@@ -128,6 +133,7 @@ function walkPythonNode(
         kind:       'class',
         name,
         language:   'python',
+        repoId,
         repo,
         file:       filePath,
         startLine:  node.startPosition.row + 1,
@@ -164,7 +170,7 @@ function walkPythonNode(
       if (body) {
         for (const member of body.namedChildren) {
           walkPythonNode(
-            member, repo, filePath, fileId, now,
+            member, repo, repoId, filePath, fileId, now,
             entities, relations,
             null, false, false,
             id, name,
@@ -185,7 +191,7 @@ function walkPythonNode(
       }
       if (inner) {
         walkPythonNode(
-          inner, repo, filePath, fileId, now,
+          inner, repo, repoId, filePath, fileId, now,
           entities, relations,
           allNames, hasAll, isTopLevel,
           classId, className,
@@ -210,6 +216,7 @@ function walkPythonNode(
         if (!entities.some(e => e.id === moduleId)) {
           entities.push({
             id: moduleId, kind: 'module', name: modName, language: 'python',
+            repoId: MODULE_REPO_ID,
             repo: '', file: '', startLine: 0, endLine: 0,
             body: '', embedding: [], indexedAt: now,
           });
@@ -240,6 +247,7 @@ function walkPythonNode(
         if (!entities.some(e => e.id === moduleId)) {
           entities.push({
             id: moduleId, kind: 'module', name: modText, language: 'python',
+            repoId: MODULE_REPO_ID,
             repo: '', file: '', startLine: 0, endLine: 0,
             body: '', embedding: [], indexedAt: now,
           });
@@ -254,7 +262,7 @@ function walkPythonNode(
       if (isTopLevel) {
         for (const child of node.namedChildren) {
           walkPythonNode(
-            child, repo, filePath, fileId, now,
+            child, repo, repoId, filePath, fileId, now,
             entities, relations,
             allNames, hasAll, false,
           );
@@ -279,7 +287,7 @@ class PythonParser implements CodeParser {
     (this.tsParser as { setLanguage(l: unknown): void }).setLanguage(PythonGrammar);
   }
 
-  parse(filePath: string, source: string, repo: string): ParseResult {
+  parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
     const tree = (this.tsParser as { parse(s: string): { rootNode: SyntaxNode } }).parse(source);
     const now  = new Date().toISOString();
 
@@ -292,6 +300,7 @@ class PythonParser implements CodeParser {
       kind:      'file',
       name:      filePath,
       language:  'python',
+      repoId,
       repo,
       file:      filePath,
       startLine: 1,
@@ -307,7 +316,7 @@ class PythonParser implements CodeParser {
 
     for (const child of tree.rootNode.namedChildren) {
       walkPythonNode(
-        child, repo, filePath, fileId, now,
+        child, repo, repoId, filePath, fileId, now,
         entities, relations,
         allNames, hasAll, true,
       );

@@ -50,6 +50,7 @@ function makeEntity(overrides: Partial<Entity> = {}): Entity {
 		id:        overrides.id ?? makeEntityId(repo, file, kind, name),
 		kind, name,
 		language:  overrides.language ?? 'typescript',
+		repoId:    overrides.repoId ?? 1,
 		repo, file,
 		startLine: 1, endLine: 5,
 		body:      `function ${name}() {}`,

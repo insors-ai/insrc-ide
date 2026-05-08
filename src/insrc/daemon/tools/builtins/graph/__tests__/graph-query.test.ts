@@ -28,6 +28,8 @@ test.beforeEach(async () => {
 	await closeGraphStore();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-graph-query-5.4-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	const { addRepo } = await import('../../../../../db/repos.js');
+	await addRepo(null, { path: '/repo/foo', name: '', addedAt: new Date().toISOString(), status: 'pending' });
 });
 test.afterEach(async () => {
 	await closeGraphStore();
@@ -53,6 +55,7 @@ function makeEntity(
 		id: makeEntityId(REPO, file, kind, name),
 		kind, name,
 		language: 'typescript',
+		repoId: 1,
 		repo: REPO,
 		file,
 		startLine: 1, endLine: 5,

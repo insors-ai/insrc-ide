@@ -57,6 +57,7 @@ function makeEntity(name: string, kind: EntityKind = 'function', file = `${REPO}
 		id:        makeEntityId(REPO, file, kind, name),
 		kind, name,
 		language:  'typescript',
+		repoId:    1,
 		repo:      REPO,
 		file,
 		startLine: 1, endLine: 5,

@@ -295,6 +295,15 @@ export interface Entity {
   kind:       EntityKind;
   name:       string;
   language:   Language;
+  /**
+   * u32 Repo registry id (Phase 5.x strict-contract). Allocated by
+   * `addRepo()` for workspace repos; reserved top-of-u32 IDs for
+   * shared-modules namespace rows (jvm / npm / python / go).
+   * Storage layer uses this exclusively; the `repo` string below
+   * stays for display + entity-id-hash compatibility but is
+   * derivable from `repoId` via `lookupRepoPath()`.
+   */
+  repoId:     number;
   repo:       string;   // repo root absolute path
   file:       string;   // absolute file path
   startLine:  number;

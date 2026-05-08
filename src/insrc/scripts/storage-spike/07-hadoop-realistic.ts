@@ -160,7 +160,9 @@ async function main(): Promise<SpikeResult> {
 			continue;
 		}
 		try {
-			const result = parser.parse(filePath, source, HADOOP_PATH);
+			// Spike uses a synthetic repoId (1) -- no registry interaction
+			// in the benchmark fixture.
+			const result = parser.parse(filePath, source, HADOOP_PATH, 1);
 			filesParsed++;
 
 			for (const e of result.entities) {

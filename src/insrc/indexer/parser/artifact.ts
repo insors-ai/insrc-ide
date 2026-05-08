@@ -110,7 +110,7 @@ class ArtifactParser implements CodeParser {
   // Language is determined per-file, not per-parser
   readonly language = 'config' as Language;
 
-  parse(filePath: string, source: string, repo: string): ParseResult {
+  parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
     const name = basename(filePath);
 
     // Skip lock files and oversized files
@@ -128,6 +128,7 @@ class ArtifactParser implements CodeParser {
       kind:      'file',
       name,
       language:  lang,
+      repoId,
       repo,
       file:      filePath,
       startLine: 1,
@@ -153,7 +154,7 @@ class ArtifactParser implements CodeParser {
 
     if (lang === 'markdown') {
       // Split markdown on headings into sections
-      const sections = parseMarkdownSections(source, filePath, repo, lang, now);
+      const sections = parseMarkdownSections(source, filePath, repo, repoId, lang, now);
       if (sections.length > 0) {
         for (const sec of sections) {
           entities.push(sec);
@@ -161,7 +162,7 @@ class ArtifactParser implements CodeParser {
         }
       } else {
         // No headings — index whole file as a single document entity
-        const doc = makeDocEntity(filePath, repo, name, lang, source, 1, lines.length, now);
+        const doc = makeDocEntity(filePath, repo, repoId, name, lang, source, 1, lines.length, now);
         entities.push(doc);
         define(doc);
       }
@@ -173,6 +174,7 @@ class ArtifactParser implements CodeParser {
         kind,
         name,
         language:  lang,
+        repoId,
         repo,
         file:      filePath,
         startLine: 1,
@@ -204,6 +206,7 @@ function parseMarkdownSections(
   source: string,
   filePath: string,
   repo: string,
+  repoId: number,
   lang: Language,
   now: string,
 ): Entity[] {
@@ -239,6 +242,7 @@ function parseMarkdownSections(
       kind:      'section',
       name:      h.title,
       language:  lang,
+      repoId,
       repo,
       file:      filePath,
       startLine,
@@ -262,6 +266,7 @@ function parseMarkdownSections(
 function makeDocEntity(
   filePath: string,
   repo: string,
+  repoId: number,
   name: string,
   lang: Language,
   source: string,
@@ -274,6 +279,7 @@ function makeDocEntity(
     kind:      'document',
     name,
     language:  lang,
+    repoId,
     repo,
     file:      filePath,
     startLine,
@@ -310,7 +316,7 @@ class BaseNameArtifactParser implements CodeParser {
     return basename(filePath) in BASENAME_LANGUAGE;
   }
 
-  parse(filePath: string, source: string, repo: string): ParseResult {
+  parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
     const name = basename(filePath);
     if (SKIP_BASENAMES.has(name)) return { entities: [], relations: [] };
     if (source.length > MAX_SIZE) return { entities: [], relations: [] };
@@ -324,6 +330,7 @@ class BaseNameArtifactParser implements CodeParser {
       kind:      'file',
       name,
       language:  lang,
+      repoId,
       repo,
       file:      filePath,
       startLine: 1,
@@ -340,6 +347,7 @@ class BaseNameArtifactParser implements CodeParser {
       kind,
       name,
       language:  lang,
+      repoId,
       repo,
       file:      filePath,
       startLine: 1,

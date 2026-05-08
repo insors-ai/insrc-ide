@@ -50,6 +50,7 @@ function makeFileEntity(filePath: string): Entity {
 	const id = makeEntityId(repo, filePath, 'file', filePath);
 	return {
 		id, kind: 'file', name: filePath, language: 'python',
+		repoId: 1,
 		repo, file: filePath, startLine: 0, endLine: 0,
 		body: '', embedding: [], indexedAt: new Date().toISOString(),
 	};

@@ -33,6 +33,7 @@ import {
 	listUnresolvedRelations,
 } from '../../db/relations.js';
 import type { Entity, Relation } from '../../shared/types.js';
+import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
 import { makeEntityId } from '../parser/base.js';
 import { runCrossFileResolver } from '../cross-file-resolver.js';
 import { detectSourceRoots } from '../source-roots.js';
@@ -69,7 +70,7 @@ function mkEntity(
 ): Entity {
 	return {
 		id:        makeEntityId(repo, file, kind, name),
-		kind, name, language, repo, file,
+		kind, name, language, repoId: extra.repoId ?? 1, repo, file,
 		startLine: 0, endLine: 0,
 		body: '', embedding: [], indexedAt: new Date().toISOString(),
 		...extra,
@@ -216,6 +217,7 @@ describe('runCrossFileResolver (LMDB) -- module-stub IMPORTS rewiring', () => {
 		const moduleStub: Entity = {
 			id: makeEntityId('', '', 'module', 'com.example.Foo'),
 			kind: 'module', name: 'com.example.Foo', language: 'java',
+			repoId: SHARED_MODULES_REPO_ID.jvm,
 			repo: '', file: '', startLine: 0, endLine: 0,
 			body: '', embedding: [], indexedAt: new Date().toISOString(),
 		};
@@ -270,6 +272,7 @@ describe('runCrossFileResolver (LMDB) -- external-dep stays as module stub', () 
 		const moduleStub: Entity = {
 			id: makeEntityId('', '', 'module', 'org.springframework.boot.SpringApplication'),
 			kind: 'module', name: 'org.springframework.boot.SpringApplication', language: 'java',
+			repoId: SHARED_MODULES_REPO_ID.jvm,
 			repo: '', file: '', startLine: 0, endLine: 0,
 			body: '', embedding: [], indexedAt: new Date().toISOString(),
 		};

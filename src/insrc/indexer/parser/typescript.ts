@@ -27,6 +27,9 @@ import type { CodeParser, ParseResult } from './base.js';
 import { makeEntityId } from './base.js';
 import type { Entity, Relation, Language } from '../../shared/types.js';
 import { registerParser } from './registry.js';
+import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
+
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.npm;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,7 +88,7 @@ class TypeScriptParser implements CodeParser {
     (this.jsParser as { setLanguage(l: unknown): void }).setLanguage(JSGrammar);
   }
 
-  parse(filePath: string, source: string, repo: string): ParseResult {
+  parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
     const isTsx  = filePath.endsWith('.tsx');
     const isJS   = filePath.endsWith('.js') || filePath.endsWith('.jsx') ||
                    filePath.endsWith('.mjs') || filePath.endsWith('.cjs');
@@ -113,6 +116,7 @@ class TypeScriptParser implements CodeParser {
       kind:      'file',
       name:      filePath,
       language:  lang,
+      repoId,
       repo,
       file:      filePath,
       startLine: 1,
@@ -123,7 +127,7 @@ class TypeScriptParser implements CodeParser {
     });
 
     // Walk the AST
-    walkNode(tree.rootNode, source, repo, filePath, lang, fileId, now, entities, relations);
+    walkNode(tree.rootNode, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
 
     return { entities, relations };
   }
@@ -137,6 +141,7 @@ function walkNode(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -151,38 +156,38 @@ function walkNode(
 
     case 'function_declaration':
     case 'generator_function_declaration':
-      extractFunction(node, source, repo, filePath, lang, fileId, now, entities, relations);
+      extractFunction(node, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
       break;
 
     case 'class_declaration':
-      extractClass(node, source, repo, filePath, lang, fileId, now, entities, relations);
+      extractClass(node, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
       return; // class walker handles children
 
     case 'interface_declaration':
-      extractInterface(node, source, repo, filePath, lang, fileId, now, entities, relations);
+      extractInterface(node, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
       return;
 
     case 'type_alias_declaration':
-      extractTypeAlias(node, source, repo, filePath, lang, fileId, now, entities, relations);
+      extractTypeAlias(node, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
       return;
 
     case 'lexical_declaration':
     case 'variable_declaration':
-      extractArrowFunction(node, source, repo, filePath, lang, fileId, now, entities, relations);
+      extractArrowFunction(node, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
       break;
 
     case 'export_statement': {
       // Recurse into the exported declaration
       const decl = node.childForFieldName('declaration');
       if (decl) {
-        walkNode(decl, source, repo, filePath, lang, fileId, now, entities, relations);
+        walkNode(decl, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
       }
       return;
     }
   }
 
   for (const child of node.namedChildren) {
-    walkNode(child, source, repo, filePath, lang, fileId, now, entities, relations);
+    walkNode(child, source, repo, repoId, filePath, lang, fileId, now, entities, relations);
   }
 }
 
@@ -194,6 +199,7 @@ function extractFunction(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -219,6 +225,7 @@ function extractFunction(
     kind:       kind,
     name,
     language:   lang,
+    repoId,
     repo,
     file:       filePath,
     startLine:  node.startPosition.row + 1,
@@ -247,6 +254,7 @@ function extractClass(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -266,6 +274,7 @@ function extractClass(
     kind:       'class',
     name,
     language:   lang,
+    repoId,
     repo,
     file:       filePath,
     startLine:  node.startPosition.row + 1,
@@ -290,7 +299,7 @@ function extractClass(
   if (body) {
     for (const member of body.namedChildren) {
       if (member.type === 'method_definition' || member.type === 'method_signature') {
-        extractMethod(member, source, repo, filePath, lang, fileId, id, name, now, entities, relations);
+        extractMethod(member, source, repo, repoId, filePath, lang, fileId, id, name, now, entities, relations);
       }
     }
   }
@@ -341,6 +350,7 @@ function extractMethod(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -370,6 +380,7 @@ function extractMethod(
     kind:      'method',
     name:      methodName,
     language:  lang,
+    repoId,
     repo,
     file:      filePath,
     startLine: node.startPosition.row + 1,
@@ -395,6 +406,7 @@ function extractInterface(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -414,6 +426,7 @@ function extractInterface(
     kind:       'interface',
     name,
     language:   lang,
+    repoId,
     repo,
     file:       filePath,
     startLine:  node.startPosition.row + 1,
@@ -431,6 +444,7 @@ function extractTypeAlias(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -450,6 +464,7 @@ function extractTypeAlias(
     kind:       'type',
     name,
     language:   lang,
+    repoId,
     repo,
     file:       filePath,
     startLine:  node.startPosition.row + 1,
@@ -467,6 +482,7 @@ function extractArrowFunction(
   node:      SyntaxNode,
   source:    string,
   repo:      string,
+  repoId:    number,
   filePath:  string,
   lang:      Language,
   fileId:    string,
@@ -497,6 +513,7 @@ function extractArrowFunction(
       kind:       'function',
       name,
       language:   lang,
+      repoId,
       repo,
       file:       filePath,
       startLine:  node.startPosition.row + 1,
@@ -548,7 +565,9 @@ function extractImport(
       meta:     { file: filePath, repo, isRelative: true },
     });
   } else {
-    // External module — create a Module stub entity and an IMPORTS edge
+    // External module — create a Module stub entity and an IMPORTS edge.
+    // Module entities live under the namespace-keyed shared-modules row
+    // (jvm / npm / python / go); for TS/JS that's npm.
     const moduleId = makeEntityId(repo, '', 'module', specifier);
     if (!entities.some(e => e.id === moduleId)) {
       entities.push({
@@ -556,6 +575,7 @@ function extractImport(
         kind:      'module',
         name:      specifier,
         language:  lang,
+        repoId:    MODULE_REPO_ID,
         repo:      '',  // external — no repo
         file:      '',
         startLine: 0,

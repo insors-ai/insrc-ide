@@ -104,6 +104,7 @@ function makeEntity(overrides: Partial<Entity> = {}): Entity {
 		kind,
 		name,
 		language:  overrides.language ?? 'typescript',
+		repoId:    overrides.repoId   ?? 1,
 		repo,
 		file,
 		startLine: overrides.startLine ?? 1,

@@ -44,6 +44,10 @@ test.beforeEach(async () => {
 	await closeGraphStore();
 	dir = mkdtempSync(join(tmpdir(), 'insrc-deadcode-skill-8.1-'));
 	setGraphStorePath(join(dir, 'graph.lmdb'));
+	const { addRepo } = await import('../../../db/repos.js');
+	for (const path of ['/repo/foo', '/repo/bar']) {
+		await addRepo(null, { path, name: '', addedAt: new Date().toISOString(), status: 'pending' });
+	}
 });
 test.afterEach(async () => {
 	await closeGraphStore();
@@ -61,7 +65,7 @@ function makeEntityId(repo: string, file: string, kind: string, name: string): s
 
 function makeEntity(
 	name: string,
-	opts: { repo?: string; file?: string; kind?: EntityKind; isExported?: boolean } = {},
+	opts: { repo?: string; file?: string; kind?: EntityKind; isExported?: boolean; repoId?: number } = {},
 ): Entity {
 	const repo = opts.repo ?? REPO;
 	const kind = opts.kind ?? 'function';
@@ -70,6 +74,7 @@ function makeEntity(
 		id:        makeEntityId(repo, file, kind, name),
 		kind, name,
 		language:  'typescript',
+		repoId:    opts.repoId ?? 1,
 		repo, file,
 		startLine: 1, endLine: 5,
 		body:      `function ${name}() {}`,

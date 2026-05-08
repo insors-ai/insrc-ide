@@ -39,6 +39,9 @@ import type { CodeParser, ParseResult } from './base.js';
 import { makeEntityId } from './base.js';
 import type { Entity, Relation } from '../../shared/types.js';
 import { registerParser } from './registry.js';
+import { SHARED_MODULES_REPO_ID } from '../../shared/repo-namespaces.js';
+
+const MODULE_REPO_ID = SHARED_MODULES_REPO_ID.jvm;
 
 type SyntaxNode = import('tree-sitter').SyntaxNode;
 
@@ -121,6 +124,7 @@ function baseTypeName(text: string): string {
 
 interface WalkCtx {
 	readonly repo: string;
+	readonly repoId: number;
 	readonly filePath: string;
 	readonly fileId: string;
 	readonly now: string;
@@ -174,6 +178,7 @@ function handlePackage(node: SyntaxNode, ctx: WalkCtx): void {
 		ctx.entities.push({
 			id: moduleId, kind: 'module', name: moduleName,
 			language: 'java',
+			repoId: MODULE_REPO_ID,
 			repo: '', file: '', startLine: 0, endLine: 0,
 			body: '', embedding: [], indexedAt: ctx.now,
 		});
@@ -205,6 +210,7 @@ function handleImport(node: SyntaxNode, ctx: WalkCtx): void {
 		ctx.entities.push({
 			id: moduleId, kind: 'module', name: importPath,
 			language: 'java',
+			repoId: MODULE_REPO_ID,
 			repo: '', file: '', startLine: 0, endLine: 0,
 			body: '', embedding: [], indexedAt: ctx.now,
 		});
@@ -250,6 +256,7 @@ function handleClassLike(
 		kind: 'class',
 		name: qualName,
 		language: 'java',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -325,6 +332,7 @@ function handleInterface(
 		kind: 'interface',
 		name: qualName,
 		language: 'java',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -446,6 +454,7 @@ function handleMethod(
 		kind,
 		name: qualName,
 		language: 'java',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -488,6 +497,7 @@ function handleConstructor(
 		kind: 'method',
 		name: qualName,
 		language: 'java',
+		repoId: ctx.repoId,
 		repo: ctx.repo,
 		file: ctx.filePath,
 		startLine: node.startPosition.row + 1,
@@ -535,6 +545,7 @@ function handleField(
 			kind: 'variable',
 			name: qualName,
 			language: 'java',
+			repoId: ctx.repoId,
 			repo: ctx.repo,
 			file: ctx.filePath,
 			startLine: node.startPosition.row + 1,
@@ -564,6 +575,7 @@ function handleField(
 				kind: 'function',
 				name: lambdaQual,
 				language: 'java',
+				repoId: ctx.repoId,
 				repo: ctx.repo,
 				file: ctx.filePath,
 				startLine: valueNode.startPosition.row + 1,
@@ -649,7 +661,7 @@ class JavaParser implements CodeParser {
 		(this.tsParser as { setLanguage(l: unknown): void }).setLanguage(JavaGrammar);
 	}
 
-	parse(filePath: string, source: string, repo: string): ParseResult {
+	parse(filePath: string, source: string, repo: string, repoId: number): ParseResult {
 		const tree = (this.tsParser as { parse(s: string): { rootNode: SyntaxNode } }).parse(source);
 		const now = new Date().toISOString();
 
@@ -662,6 +674,7 @@ class JavaParser implements CodeParser {
 			kind: 'file',
 			name: filePath,
 			language: 'java',
+			repoId,
 			repo,
 			file: filePath,
 			startLine: 1,
@@ -683,7 +696,7 @@ class JavaParser implements CodeParser {
 		}
 
 		const ctx: WalkCtx = {
-			repo, filePath, fileId, now, entities, relations, packageName,
+			repo, repoId, filePath, fileId, now, entities, relations, packageName,
 		};
 		walkProgram(tree.rootNode, ctx);
 
