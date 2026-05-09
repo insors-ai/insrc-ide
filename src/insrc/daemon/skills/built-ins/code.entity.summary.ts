@@ -24,6 +24,15 @@ const BODY_MAX_CHARS  = 800;
 
 interface SummaryInput {
 	readonly entityId: string;
+	/**
+	 * Optional cap on the body excerpt's character length. Defaults to
+	 * BODY_MAX_CHARS (800). The legacy `code_describe` cross-agent tool
+	 * passes a larger cap (4000) so back-compat callers see the same
+	 * body slice they used to. Floors the value at 1 char (defensive
+	 * against zero / negative); the upper bound is the entity body
+	 * length itself.
+	 */
+	readonly excerptMaxChars?: number;
 }
 
 type SummaryOutput =
@@ -61,6 +70,7 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 		type: 'object',
 		properties: {
 			entityId: { type: 'string', description: '32-char hex entity id from another lookup skill.', minLength: 32, maxLength: 32 },
+			excerptMaxChars: { type: 'number', description: 'Optional cap on body excerpt chars; default 800.', minimum: 1, maximum: 65536 },
 		},
 		required: ['entityId'],
 		additionalProperties: false,
@@ -114,7 +124,10 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 			};
 		}
 
-		const { excerpt, truncated } = buildExcerpt(e.body);
+		const maxChars = typeof input.excerptMaxChars === 'number' && input.excerptMaxChars >= 1
+			? input.excerptMaxChars
+			: BODY_MAX_CHARS;
+		const { excerpt, truncated } = buildExcerpt(e.body, maxChars);
 		const out = assembleFound(e, excerpt, truncated);
 		return {
 			value: out,
@@ -125,15 +138,15 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 	},
 };
 
-function buildExcerpt(body: string): { excerpt: string; truncated: boolean } {
+function buildExcerpt(body: string, maxChars: number = BODY_MAX_CHARS): { excerpt: string; truncated: boolean } {
 	if (body.length === 0) return { excerpt: '', truncated: false };
 	const lines = body.split('\n').slice(0, BODY_HEAD_LINES);
 	const head  = lines.join('\n');
-	if (head.length <= BODY_MAX_CHARS && lines.length === body.split('\n').length) {
+	if (head.length <= maxChars && lines.length === body.split('\n').length) {
 		return { excerpt: head, truncated: false };
 	}
-	if (head.length > BODY_MAX_CHARS) {
-		return { excerpt: head.slice(0, BODY_MAX_CHARS) + '\n... <truncated>', truncated: true };
+	if (head.length > maxChars) {
+		return { excerpt: head.slice(0, maxChars) + '\n... <truncated>', truncated: true };
 	}
 	return { excerpt: head + '\n... <truncated>', truncated: true };
 }

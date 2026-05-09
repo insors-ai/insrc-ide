@@ -25,6 +25,7 @@ interface NeighborEntry {
 	readonly language:  Language;
 	readonly file:      string;
 	readonly startLine: number;
+	readonly endLine:   number;
 	readonly signature?: string;
 }
 
@@ -43,6 +44,7 @@ function toEntry(e: Entity): NeighborEntry {
 		language:  e.language,
 		file:      e.file,
 		startLine: e.startLine,
+		endLine:   e.endLine,
 	};
 	return e.signature !== undefined && e.signature.length > 0
 		? { ...x, signature: e.signature }

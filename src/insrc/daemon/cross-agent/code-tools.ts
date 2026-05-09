@@ -25,17 +25,18 @@
  */
 
 import { getDb } from '../../db/client.js';
-import { searchEntities, findCallers, findCallees } from '../../db/search.js';
-import { getEntity } from '../../db/entities.js';
+import { searchEntities } from '../../db/search.js';
 import { embedQuery } from '../../indexer/embedder.js';
 import { registerTool } from '../tools/registry.js';
+import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import {
 	CROSS_AGENT_DEPTH_FIELD,
 	exceedsCrossAgentDepth,
 	readCrossAgentDepth,
 	toolUnavailable,
 } from '../../shared/cross-agent.js';
-import type { Entity } from '../../shared/types.js';
+import type { Entity, LLMProvider } from '../../shared/types.js';
+import type { ProviderAffinity } from '../skills/types.js';
 import type { Tool, ToolDeps, ToolInput, ToolResult } from '../tools/types.js';
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,37 @@ function lineLoc(e: Entity): string {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 9.2 -- skill-shim plumbing
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a `SkillRunnerDeps` from the cross-agent tool's `ToolDeps`.
+ * Mirrors the resolver pattern in `tools/builtins/skills/invoke-skill.ts`
+ * so cross-agent tools route through the skill runner with the same
+ * provider-affinity contract.
+ */
+function buildSkillRunnerDeps(deps: ToolDeps): SkillRunnerDeps {
+	const session = deps.session;
+	const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
+		switch (affinity) {
+			case 'local': return session.ollamaProvider;
+			case 'cloud': return session.claudeProvider ?? session.ollamaProvider;
+			case 'auto':  return session.resolver.resolve('skill', 'default');
+		}
+	};
+	return {
+		session,
+		resolveProvider,
+		toolExecCtx: {
+			...(deps.send !== undefined ? { send: deps.send } : {}),
+			...(deps.channel !== undefined ? { channel: deps.channel } : {}),
+			...(deps.requestId !== undefined ? { requestId: deps.requestId } : {}),
+		},
+		...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // code:locate -- vector + entity lookup
 // ---------------------------------------------------------------------------
 
@@ -137,7 +169,12 @@ export const codeLocateTool: Tool = {
 			return fail('code_locate', 'failed to embed query (Ollama unavailable?)');
 		}
 		const hits = await searchEntities(db, vec, closure, k);
-		const data: CodeLocateData = { query, results: hits.map(shortEntity) };
+		// Phase 9.2: code_locate is the only cross-agent tool not yet
+		// shimmed -- there's no `code.entity.search-by-vector` skill
+		// in the v1 catalog. Adding one is a follow-up; until then
+		// `_shim: false` lets telemetry distinguish unshimmed callers
+		// from the shimmed `code_trace` / `code_describe` paths.
+		const data: CodeLocateData & { _shim: false } = { query, results: hits.map(shortEntity), _shim: false };
 		const rendered = hits.length === 0
 			? '_no matches_'
 			: hits.map((e, i) => `${i + 1}. **${e.kind}** \`${e.name}\` (${lineLoc(e)})`).join('\n');
@@ -187,7 +224,7 @@ export const codeTraceTool: Tool = {
 	},
 	requiresApproval: false,
 
-	async execute(input: ToolInput): Promise<ToolResult> {
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
 		const depth = readCrossAgentDepth(input);
 		if (exceedsCrossAgentDepth(depth)) {
 			return unavailableResult('code_trace', 'cross_agent_depth_exceeded');
@@ -200,21 +237,40 @@ export const codeTraceTool: Tool = {
 		if (direction !== 'callers' && direction !== 'callees' && direction !== 'both') {
 			return fail('code_trace', 'direction must be one of callers | callees | both');
 		}
-		const db = await getDb();
+
+		// Phase 9.2 shim: forward to code.entity.callers / code.entity.callees
+		// instead of hitting the DB directly. Same data shape preserved
+		// (lineRange.end depends on the skill output's `endLine` field
+		// added in step 9.2 alongside the shim).
+		const runnerDeps = buildSkillRunnerDeps(deps);
 		const neighbours: CodeTraceNeighbour[] = [];
 		if (direction === 'callers' || direction === 'both') {
-			const callers = await findCallers(db, entityId);
-			for (const e of callers) {
-				neighbours.push({ ...toNeighbour(e), edge: 'callers', hop: 1 });
+			const r = await runSkill<{ entityId: string }, NeighborSkillOutput>(
+				'code.entity.callers',
+				{ entityId },
+				runnerDeps,
+			);
+			for (const n of r.value.neighbors) {
+				neighbours.push(neighbourFromSkill(n, 'callers'));
 			}
 		}
 		if (direction === 'callees' || direction === 'both') {
-			const callees = await findCallees(db, entityId);
-			for (const e of callees) {
-				neighbours.push({ ...toNeighbour(e), edge: 'callees', hop: 1 });
+			const r = await runSkill<{ entityId: string }, NeighborSkillOutput>(
+				'code.entity.callees',
+				{ entityId },
+				runnerDeps,
+			);
+			for (const n of r.value.neighbors) {
+				neighbours.push(neighbourFromSkill(n, 'callees'));
 			}
 		}
-		const data: CodeTraceData = { entityId, direction: direction as 'callers' | 'callees' | 'both', neighbours };
+
+		const data: CodeTraceData & { _shim?: true } = {
+			entityId,
+			direction: direction as 'callers' | 'callees' | 'both',
+			neighbours,
+			_shim: true,    // Phase 9.2 telemetry marker; gates eventual deletion
+		};
 		const rendered = neighbours.length === 0
 			? '_no neighbours_'
 			: neighbours.map(n => `- ${n.edge === 'callers' ? '<-' : '->'} **${n.kind}** \`${n.name}\` (${n.path}:${n.lineRange.start})`).join('\n');
@@ -227,13 +283,32 @@ export const codeTraceTool: Tool = {
 	},
 };
 
-function toNeighbour(e: Entity): Omit<CodeTraceNeighbour, 'edge' | 'hop'> {
+interface NeighborSkillOutput {
+	readonly entityId:   string;
+	readonly neighbors:  readonly {
+		readonly id:        string;
+		readonly name:      string;
+		readonly kind:      string;
+		readonly file:      string;
+		readonly startLine: number;
+		readonly endLine:   number;
+	}[];
+	readonly truncated:  boolean;
+	readonly direction:  'callers' | 'callees';
+}
+
+function neighbourFromSkill(
+	n: NeighborSkillOutput['neighbors'][number],
+	edge: 'callers' | 'callees',
+): CodeTraceNeighbour {
 	return {
-		entityId: e.id,
-		name:     e.name,
-		kind:     e.kind,
-		path:     e.file,
-		lineRange: { start: e.startLine, end: e.endLine },
+		entityId:  n.id,
+		name:      n.name,
+		kind:      n.kind,
+		path:      n.file,
+		lineRange: { start: n.startLine, end: n.endLine },
+		edge,
+		hop:       1,
 	};
 }
 
@@ -269,7 +344,7 @@ export const codeDescribeTool: Tool = {
 	},
 	requiresApproval: false,
 
-	async execute(input: ToolInput): Promise<ToolResult> {
+	async execute(input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
 		const depth = readCrossAgentDepth(input);
 		if (exceedsCrossAgentDepth(depth)) {
 			return unavailableResult('code_describe', 'cross_agent_depth_exceeded');
@@ -278,29 +353,59 @@ export const codeDescribeTool: Tool = {
 		if (!entityId) {
 			return fail('code_describe', 'entityId required');
 		}
-		const db = await getDb();
-		const entity = await getEntity(db, entityId);
-		if (!entity) {
+
+		// Phase 9.2 shim: forward to code.entity.summary +
+		// code.entity.callers + code.entity.callees. Body cap stays at
+		// the legacy 4000 via the new `excerptMaxChars` input on
+		// code.entity.summary.
+		const runnerDeps = buildSkillRunnerDeps(deps);
+
+		type SummaryFound = {
+			readonly found: true;
+			readonly name: string;
+			readonly kind: string;
+			readonly file: string;
+			readonly startLine: number;
+			readonly endLine: number;
+			readonly signature?: string;
+			readonly excerpt: string;
+		};
+		type SummaryMiss = { readonly found: false; readonly reason: string };
+		type SummaryOutput = SummaryFound | SummaryMiss;
+
+		const summaryResult = await runSkill<{ entityId: string; excerptMaxChars: number }, SummaryOutput>(
+			'code.entity.summary',
+			{ entityId, excerptMaxChars: 4000 },
+			runnerDeps,
+		);
+		if (!summaryResult.value.found) {
 			return fail('code_describe', `no entity with id ${entityId}`);
 		}
-		const [callers, callees] = await Promise.all([
-			findCallers(db, entityId),
-			findCallees(db, entityId),
+		const summary = summaryResult.value;
+
+		const [callersResult, calleesResult] = await Promise.all([
+			runSkill<{ entityId: string }, NeighborSkillOutput>('code.entity.callers', { entityId }, runnerDeps),
+			runSkill<{ entityId: string }, NeighborSkillOutput>('code.entity.callees', { entityId }, runnerDeps),
 		]);
-		const data: CodeDescribeData = {
+		const callers = callersResult.value.neighbors;
+		const callees = calleesResult.value.neighbors;
+
+		const data: CodeDescribeData & { _shim?: true } = {
 			entityId,
-			...(entity.signature !== undefined ? { signature: entity.signature } : {}),
-			...(entity.body !== undefined ? { body: entity.body.slice(0, 4000) } : {}),
-			path: entity.file,
-			lineRange: { start: entity.startLine, end: entity.endLine },
+			...(summary.signature !== undefined ? { signature: summary.signature } : {}),
+			...(summary.excerpt.length > 0 ? { body: summary.excerpt } : {}),
+			path: summary.file,
+			lineRange: { start: summary.startLine, end: summary.endLine },
 			neighbours: {
-				callers: callers.map(e => ({ entityId: e.id, name: e.name })),
-				callees: callees.map(e => ({ entityId: e.id, name: e.name })),
+				callers: callers.map(c => ({ entityId: c.id, name: c.name })),
+				callees: callees.map(c => ({ entityId: c.id, name: c.name })),
 			},
+			_shim: true,    // Phase 9.2 telemetry marker
 		};
+		const lineLocStr = `${summary.file}:${summary.startLine}${summary.endLine > summary.startLine ? '-' + summary.endLine : ''}`;
 		const rendered = [
-			`**${entity.kind}** \`${entity.name}\` (${lineLoc(entity)})`,
-			entity.signature ? `\`${entity.signature}\`` : '',
+			`**${summary.kind}** \`${summary.name}\` (${lineLocStr})`,
+			summary.signature ? `\`${summary.signature}\`` : '',
 			'',
 			callers.length > 0 ? `**Callers (${callers.length}):** ${callers.map(c => `\`${c.name}\``).join(', ')}` : '',
 			callees.length > 0 ? `**Callees (${callees.length}):** ${callees.map(c => `\`${c.name}\``).join(', ')}` : '',
