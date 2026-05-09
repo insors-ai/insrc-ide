@@ -24,6 +24,12 @@ import { registerCodeMigrationExtractHistorySkill } from './built-ins/code.migra
 import { registerCodeSourceFileDescribeSkill } from './built-ins/code.source.file.describe.js';
 import { registerCodeSourceModuleDescribeSkill } from './built-ins/code.source.module.describe.js';
 import { registerCodeSourceRepoDescribeSkill } from './built-ins/code.source.repo.describe.js';
+import { registerCodeEntityLocateByNameSkill } from './built-ins/code.entity.locate-by-name.js';
+import { registerCodeEntitySummarySkill } from './built-ins/code.entity.summary.js';
+import {
+  registerCodeEntityCallersSkill,
+  registerCodeEntityCalleesSkill,
+} from './built-ins/code.entity.callers.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -145,6 +151,12 @@ export function registerAllSkills(): void {
   registerCodeSourceFileDescribeSkill();
   registerCodeSourceModuleDescribeSkill();
   registerCodeSourceRepoDescribeSkill();
+  // code-analyzer-skills.md Phase 2 -- entity-lookup skills.
+  // Owner-facing typed wrappers over the shipped graph helpers.
+  registerCodeEntityLocateByNameSkill();
+  registerCodeEntitySummarySkill();
+  registerCodeEntityCallersSkill();
+  registerCodeEntityCalleesSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
