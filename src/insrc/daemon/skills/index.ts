@@ -30,6 +30,10 @@ import {
   registerCodeEntityCallersSkill,
   registerCodeEntityCalleesSkill,
 } from './built-ins/code.entity.callers.js';
+import { registerCodeQualityUnusedExportsSkill } from './built-ins/code.quality.unused-exports.js';
+import { registerCodeQualityCyclicDepsSkill } from './built-ins/code.quality.cyclic-deps.js';
+import { registerCodeQualityComplexitySkill } from './built-ins/code.quality.complexity.js';
+import { registerCodeQualityDuplicationSkill } from './built-ins/code.quality.duplication.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -157,6 +161,13 @@ export function registerAllSkills(): void {
   registerCodeEntitySummarySkill();
   registerCodeEntityCallersSkill();
   registerCodeEntityCalleesSkill();
+  // code-analyzer-skills.md Phase 5 -- quality / metrics skills.
+  // Atomic, deterministic, no LLM. 5.2 (dead-code) is already shipped
+  // as data.code.dead-code; rename + reparent in Phase 6.x cleanup.
+  registerCodeQualityComplexitySkill();
+  registerCodeQualityDuplicationSkill();
+  registerCodeQualityUnusedExportsSkill();
+  registerCodeQualityCyclicDepsSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
