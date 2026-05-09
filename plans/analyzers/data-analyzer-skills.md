@@ -40,10 +40,20 @@ the fact.
   data-analyzer. Orchestrator stays; per-task runner becomes a skill
   composer. The `db_*` tool surface stays as the primitive layer skills
   call into.
-- [plans/analyzers/code-analyzer.md](./code-analyzer.md) -- exposes its
-  first batch of skills (`code.class.extract-fields`, `code.lineage.callers`)
-  via the cross-owner skill mechanism. Without these, data-analyzer's
-  code-binding family hard-fails the `required-tools` precondition.
+- [plans/analyzers/code-analyzer-skills.md](./code-analyzer-skills.md) --
+  decomposes the code-analyzer the same way this plan decomposes the
+  data-analyzer. Its Phase 3 (code-binding skills:
+  `code.class.extract-fields` / `code.class.locate-references` /
+  `code.orm.resolve-model` / `code.migration.extract-history`) is
+  the prerequisite for **this plan's Phase 3 + 4 deferred slices**.
+  Cross-owner skill calls land via the registry's depth-cap mechanism
+  once both sides ship; without the code-side skills, this plan's
+  code-binding wrappers hard-fail the `required-tools` precondition.
+- [plans/analyzers/code-analyzer.md](./code-analyzer.md) -- the
+  code-analyzer's substrate / product surface plan (the older
+  pre-skills plan). Phase 1's analyzer runner + cross-agent
+  `code:locate` / `code:trace` / `code:describe` tools that
+  code-analyzer-skills consumes as primitives.
 - [plans/data-driver.md](../data-driver.md) -- shipped; the substrate the
   source-introspection / sampling / aggregation tools call into. This plan
   adds a new `db_aggregate_*` tool family on top of the driver.
@@ -119,16 +129,21 @@ the fact.
 > comparison-diff family landing as one coherent batch when the
 > prerequisites arrive.
 >
-> **Action when code-analyzer skills land:** revisit
-> [plans/analyzers/code-analyzer.md](./code-analyzer.md) for the slice
-> that registers the four `code.<...>` skills above; once those land,
+> **Action when code-analyzer skills land:** the prerequisite work
+> is scoped in
+> [plans/analyzers/code-analyzer-skills.md](./code-analyzer-skills.md)
+> (drafted 2026-05-09). That plan's Phase 0.1 / 0.2 / 0.3 / 0.4 / 0.5
+> ship the underlying tools; its Phase 3.1 / 3.2 / 3.3 / 3.5 ship the
+> matching `code.<...>` skills. The "Sequencing recommendation"
+> section in that plan calls out a 9-commit critical path that
+> unblocks this plan's Phase 3 + 4 specifically. Once those land,
 > the data-analyzer wrappers (3.1 / 3.2 / 3.3 / 3.5) are mechanical
 > follow-ups (~80 lines each, identical structure to 3.4 lineage).
 > Phase 4 composites land next on top of those. The hallucinated-class
 > regression test from 2026-04-30 (per "Lessons baked in" §1) MUST go
-> green before the deferral is closed -- a wrapper that papers over a
-> missing class side with an empty diff is the failure mode this plan
-> exists to prevent.
+> green on the code-analyzer-skills side BEFORE this plan's deferral
+> is closed -- a wrapper that papers over a missing class side with
+> an empty diff is the failure mode this plan exists to prevent.
 
 **Phase 0 is now fully shipped.** All nine slices are done (see the table
 below for per-slice evidence + tests). The completion landed as one PR
@@ -549,8 +564,11 @@ family-gate disabled), the skill fails the `required-tools: ['code_locate',
 Each is the same shape: cross-owner atomic skill, narrow tool deps, hard
 fail on precondition miss. Implementations live mostly inside the code-
 analyzer; this plan ships only the data-analyzer-side typed wrappers and
-their preconditions. The code-analyzer-side skills are tracked as a
-prerequisite work item in [code-analyzer.md](./code-analyzer.md).
+their preconditions. The code-analyzer-side skills are scoped in
+[plans/analyzers/code-analyzer-skills.md](./code-analyzer-skills.md)
+under that plan's Phase 3 (`code.class.extract-fields` /
+`code.class.locate-references` / `code.orm.resolve-model` /
+`code.migration.extract-history`).
 
 ## Phase 4 -- comparison / diff skills (composite)
 
