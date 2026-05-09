@@ -39,6 +39,9 @@ import { registerCodeSynthFindingsTableSkill } from './built-ins/code.synth.find
 import { registerCodeSynthCallgraphMermaidSkill } from './built-ins/code.synth.callgraph-mermaid.js';
 import { registerCodeSynthModuleTreeSkill } from './built-ins/code.synth.module-tree.js';
 import { registerCodeSynthArchitectureOverviewSkill } from './built-ins/code.synth.architecture-overview.js';
+import { registerCodeCompareSignatureSkill } from './built-ins/code.compare.signature.js';
+import { registerCodeCompareImplVsDocSkill } from './built-ins/code.compare.impl-vs-doc.js';
+import { registerCodeCompareEntityVersionsSkill } from './built-ins/code.compare.entity-versions.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -181,6 +184,12 @@ export function registerAllSkills(): void {
   registerCodeSynthCallgraphMermaidSkill();
   registerCodeSynthModuleTreeSkill();
   registerCodeSynthArchitectureOverviewSkill();
+  // code-analyzer-skills.md Phase 4 -- comparison composites.
+  // Must register AFTER their atomic skillDeps (entity.summary,
+  // class.extract-fields).
+  registerCodeCompareSignatureSkill();
+  registerCodeCompareImplVsDocSkill();
+  registerCodeCompareEntityVersionsSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
