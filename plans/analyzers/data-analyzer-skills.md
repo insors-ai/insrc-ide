@@ -246,8 +246,8 @@ in skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 6.7 | synthesis: synth.profile-card | done | `data.synth.profile-card` ships -- branches on `kind` (numeric / categorical / boolean / temporal / text), pairs with profile.auto.rdbms's output |
 | 6.8 | synthesis: synth.scorecard | done | `data.synth.scorecard` ships -- markdown report card with overall score badge / weights / PK candidates / top-issues table / per-column detail. Pairs with `data.quality.scorecard.rdbms`. Renders an extra `validity` column in the per-column table when the scorecard included a validity dimension (i.e. the caller supplied `validityPatterns`); falls back to the original 7-column layout otherwise |
 | 6.9 | synthesis: synth.histogram-block | done | `data.synth.histogram-block` ships -- pure-template renderer over the 5b.1 `HistogramOutput` shape. Header (target / column / mode), one-line summary (non-null / null / bucket-count / range), and an ASCII bar chart inside a fenced code block (proportional widths, max 40 chars). Verdict-aware: `empty` and `inconclusive` render a one-line note instead of an empty chart |
-| 7.1 | meta: meta.classify-question | pending -- **needs design** | LLM-routed (cloud). The skill catalog the LLM sees is now ~80 skills; prompt structure / catalog format / model affinity / how to surface preconditions to the LLM are real design choices that should land before implementation. Tracked separately to avoid bikeshedding on the smaller items |
-| 7.2 | meta: meta.select-scope | pending -- **needs design** | LLM-routed (cloud). Same design questions as 7.1; both are typically reviewed together since their outputs feed Phase 8 sequentially |
+| 7.1 | meta: meta.classify-question | design landed (2026-05-09); ready to implement | Skill contract + four design decisions (catalog format / prompt structure / model affinity / preconditions) resolved in the §7.1 body below. Implementation order: ship `describe_skill` tool → ship the skill (~250 lines incl. few-shot examples). Blocks Phase 8.1 planner |
+| 7.2 | meta: meta.select-scope | design landed (2026-05-09); ready to implement | Skill contract + design decisions resolved in the §7.2 body below. Implementation: ~200 lines after 7.1 lands. Blocks Phase 8.1 planner |
 | 7.3 | meta: meta.feasibility-check | done | `data.meta.feasibility-check` ships -- pure helper over `assertFeasible`. Walks a candidate list of skill ids, buckets each into `feasible` / `infeasible` (with structured `{preconditionKind, detail}` reasons) / `missing` (unregistered). No LLM, no tools, no preconditions on the helper itself (it's the bedrock). The future planner rewrite (8.1) calls this AFTER `meta.classify-question` to drop infeasible ids before any execution starts |
 | 7.4 | meta: meta.calibrate-confidence | done | `data.meta.calibrate-confidence` ships -- atomic deterministic post-processing. Calibration rules: empty findings -> `low`; otherwise start at min(finding.confidence) across all findings; clamp to `low` on any "feasibility-rejection:" / "schema-rejection:" note (defensive restatement of the registry's per-skill clamp); downgrade one rung on tool-error trace. Output exposes the `rationale` chain so the reviewer can audit the calibration. Mitigates the 2026-05-01 over-acceptance failure mode by giving the cloud reviewer a hard prior |
 | 8.1 | planner rewrite | pending | emits skill invocations, not DataAnalysisTask kinds |
@@ -675,18 +675,214 @@ renderer per major output shape. Total skill count 9.
 
 ### 7.1 `meta.classify-question`
 
-LLM-routed (cloud affinity). Input: the user's question + the available
-connection roster. Output: a list of skill ids the planner should invoke,
-ordered by priority. This is the skill the planner-rewrite (8.1) calls
-first; its output is the skeleton of the per-task plan.
+LLM-routed (cloud affinity). The first call in the planner pipeline.
+Maps a free-form user question + connection roster → an ordered list of
+candidate skill ids the planner should invoke, plus a coarse question
+type for downstream routing. Designed so the LLM cost is amortised: one
+small classify call per question, not per skill.
+
+**Skill contract**:
+
+```ts
+interface ClassifyInput {
+  question:     string;
+  connections:  ConnectionInfo[];   // from db_list_connections
+  priorContext?: { repoPath?: string; sessionTags?: string[] };
+}
+
+interface ClassifyOutput {
+  questionType: 'describe-schema' | 'sample-data' | 'profile-quality'
+              | 'compare-shapes'  | 'drift-analysis' | 'lineage'
+              | 'sensitivity'     | 'timeseries'    | 'free-form';
+  candidates:   readonly Candidate[];   // ordered, most likely first
+  fallbacks:    readonly string[];      // skill ids to try on first-pass failure
+  uncertaintyNotes: readonly string[];
+}
+
+interface Candidate {
+  skillId:        string;
+  rationale:      string;       // user-visible "why this skill"
+  mustHaveScope:  'connection' | 'connection+target' | 'connection+target+columns' | 'none';
+}
+```
+
+**Design decisions** (resolved 2026-05-09):
+
+1. **Catalog format → server-side prefilter + 1-line-per-skill catalog
+   + on-demand `describe_skill` tool.** Dumping all 82 skill schemas
+   raw is 30–50K tokens per classify call -- prohibitive at typical
+   turn rates. Instead:
+   - Prefilter by **`connection-family`** of the available connections
+     (e.g. KV-only roster drops every `*.rdbms` skill before the
+     prompt is built).
+   - Pass the survivors as a **`{ id, family, oneLineSummary }`**
+     catalog (~100 chars per skill, typically 10–30 survivors after
+     family filter).
+   - Expose **`describe_skill(id) → SkillManifest`** as a tool so the
+     LLM can pull a full input/output schema on demand when the
+     one-liner isn't enough.
+
+   Cost target: <2K tokens for the catalog on the typical question.
+   Worst case (multi-family connection roster, 80 survivors) stays
+   under 8K which is still cheap on small-tier cloud models.
+
+2. **Prompt structure → structured-output JSON, schema-validated, with
+   5–7 few-shot examples in the system prompt.** Few-shot lives in the
+   *system* slot (cacheable on Anthropic + OpenAI) so the per-call
+   prompt is just question + catalog + connection roster. The output
+   schema mirrors `ClassifyOutput` above; on schema-rejection the
+   runner retries once with the rejection text appended (the standard
+   `runSkill` JSON-parse-retry path applies).
+
+3. **Model affinity → smallest/fastest cloud tier per active provider.**
+   Defaults:
+
+   | Provider  | Default model           | Fallback (on 2x schema-reject) |
+   |-----------|-------------------------|--------------------------------|
+   | OpenAI    | `gpt-4o-mini`           | `gpt-4o`                       |
+   | Anthropic | `claude-haiku-4-5`      | `claude-sonnet-4-6`            |
+   | Gemini    | `gemini-2.5-flash`      | `gemini-2.5-pro`               |
+   | Mistral   | `mistral-small-latest`  | `mistral-large-latest`         |
+
+   Rationale: high-volume call (every user turn), latency-sensitive,
+   judgment shape is "pattern-match question to skill family +
+   filter by connection capability" which small tiers handle
+   reliably. Reserves the larger tiers for the analysis itself.
+   Routing follows the per-skill-affinity table at the bottom of this
+   plan; user's `@mention` overrides win as usual.
+
+4. **Preconditions → server-side prefilter; LLM only sees feasible
+   skills.** Run `meta.feasibility-check` (7.3, already shipped)
+   against every catalog candidate before building the prompt; drop
+   skills whose `connection-family` / `connection-kind` /
+   `cross-owner-allowed` precondition can't be satisfied with the
+   current roster + agent permissions. The candidate list the LLM
+   sees is **already pre-feasible** for those static-context
+   preconditions. Execute-time preconditions (`min-sample-size`,
+   data-shape checks) still surface at execution; the planner
+   re-runs `meta.feasibility-check` with execution context after
+   `meta.select-scope` populates concrete inputs.
+
+**Tool deps**:
+
+- `db_list_connections` -- read the available connection roster.
+- `describe_skill(id) → SkillManifest` -- **new tool**; thin wrapper
+  over `getSkill(id)` from the registry. Lives in
+  `daemon/tools/builtins/meta/describe-skill.ts`. Stripped manifest:
+  `{ id, family, owner, version, description, inputs, outputs,
+  preconditions, providerAffinity }`.
+
+**Family**: `meta`. **Owner**: `data-analyzer`. **Provider affinity**:
+`cloud`.
 
 ### 7.2 `meta.select-scope`
 
-LLM-routed (cloud affinity). Input: the user's question. Output: a list
-of `{connectionId, target?}` scoping the rest of the run. Preconditions:
-`required-tools: ['db_list_connections']`. The current orchestrator's
-`_registerEphemeralFromPrompt` plus `_loadConnections` lift moves into
-this skill.
+LLM-routed (cloud affinity). The second call in the planner pipeline.
+Takes the candidates from 7.1 and the question, and produces concrete
+`{ skillId, args }` invocations the planner can execute. Resolves
+target names ("the orders table") to real connection + table refs and
+fills out optional skill inputs from question context.
+
+**Skill contract**:
+
+```ts
+interface SelectScopeInput {
+  question:    string;
+  candidates:  readonly Candidate[];   // from meta.classify-question
+  connections: readonly ConnectionInfo[];
+}
+
+interface SelectScopeOutput {
+  scoped: readonly ScopedInvocation[];
+  notes:  readonly string[];
+}
+
+interface ScopedInvocation {
+  skillId:       string;
+  args:          Record<string, unknown>;   // schema-validated against the skill's inputSchema
+  resolvedScope: { connectionId: string; target?: string; columns?: readonly string[] };
+  ambiguity?:    { kind: 'multiple-matches' | 'no-match'; alternatives?: readonly string[] };
+}
+```
+
+**Design decisions**:
+
+1. **Catalog format → reuse the candidate list from 7.1, but include
+   each skill's full `inputSchema` inline.** The candidate list is
+   already small (typically 3–7), so per-skill `inputSchema` (~200
+   chars after pruning descriptions) fits well under 4K tokens total.
+   The LLM doesn't need `describe_skill` here -- everything it needs
+   is in the prompt.
+
+2. **Prompt structure → structured output; per-candidate the LLM
+   fills `args` against the schema.** Validation runs server-side
+   after the LLM returns: each `ScopedInvocation.args` is checked
+   against its skill's `inputSchema`; failures get retried once with
+   the validation error appended. Three failures in a row → degrade
+   to `confidence: 'low'` and surface the unfilled candidates in
+   `notes` so the user sees which part the LLM couldn't pin down.
+
+3. **Model affinity → same cloud-small-tier as 7.1.** Same fallback
+   ladder. Total LLM round-trips per turn: 2 (classify + select-scope)
+   plus N skill executions. The two meta calls together should
+   typically cost <5¢ on the small-tier defaults.
+
+4. **Connection / target resolution → fuzzy, with explicit
+   ambiguity surfacing.** When the question references "the orders
+   table", the LLM picks from the connection roster + tables it knows
+   about (via `db_list_connections` enumeration). If multiple
+   connections have an `orders` table → the candidate is emitted N
+   times (one per connection) with `ambiguity: { kind: 'multiple-
+   matches', alternatives: [<connectionId>, ...] }`. The planner
+   asks the user via a gate before proceeding. If zero connections
+   match → emit with `confidence: 'low'`, `ambiguity: { kind: 'no-
+   match' }`, and skip execution.
+
+   This is the codified version of the 2026-04-30 lesson: never
+   silently pick a default scope when the question is ambiguous;
+   always surface the choice.
+
+**Tool deps**:
+
+- `db_list_connections`
+- `db_sql_describe` / `db_kv_list_namespaces` / `db_file_describe` --
+  to verify a candidate target actually exists on the matched
+  connection before emitting the invocation.
+
+**Family**: `meta`. **Owner**: `data-analyzer`. **Provider affinity**:
+`cloud`.
+
+### Joint 7.1 + 7.2 design notes
+
+- **Why two skills not one combined call?** Latency case for
+  combining is ~300-500ms on small-tier models. But keeping them
+  separate lets the planner re-run scope-select with a different
+  connection roster (e.g. user adds an ephemeral connection mid-
+  session) without re-classifying. The split also makes per-skill
+  caching simpler -- classify caches keyed on
+  `(question, family-roster)`; scope-select caches keyed on
+  `(candidates, connections)`. Default: stay split. Revisit if
+  per-turn latency telemetry (Phase 10.1) shows the LLM round-trip
+  pair is the dominant cost.
+
+- **Catalog hot-reload**: classify-question reads the skill registry
+  at boot; new skills registered after boot won't appear in the
+  catalog until the daemon restarts. Acceptable for v1 since
+  registration only happens during the daemon's startup sequence
+  today. If runtime registration arrives later (Phase 10's
+  workbench-side skill installer, say), classify-question's catalog
+  builder needs an invalidation hook.
+
+- **Catalog versioning**: when a skill ships a v2 with new optional
+  inputs, classify-question's catalog reads the highest registered
+  version; the LLM sees the v2 description automatically. No
+  manual list-of-versions to maintain.
+
+- **Implementation order**: (a) ship `describe_skill` tool first
+  (single file, ~50 lines), (b) ship `meta.classify-question` with
+  catalog+prefilter (single file, ~250 lines including the few-shot
+  examples), (c) ship `meta.select-scope` (~200 lines). Then 8.1
+  planner-rewrite can call them.
 
 ### 7.3 `meta.feasibility-check`
 
