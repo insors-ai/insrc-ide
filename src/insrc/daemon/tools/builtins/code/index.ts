@@ -16,7 +16,9 @@
  */
 
 import { registerCodeClassLocateTool } from './class-locate.js';
+import { registerCodeClassFieldsTool } from './class-fields.js';
 
 export function registerCodeTools(): void {
 	registerCodeClassLocateTool();
+	registerCodeClassFieldsTool();
 }
