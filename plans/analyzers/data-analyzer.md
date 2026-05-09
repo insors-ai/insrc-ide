@@ -1368,7 +1368,7 @@ Phase 0  ──>  Phase 1  ──>  Phase 2  ──>  Phase 3 (partial)  ──>
 Per-cutover ordering (each step is a separate commit, smallest unit
 that keeps the system green):
 
-1. **Land `describe_skill` tool** (skills-plan §7.1 dependency).
+1. **Land `skill_describe` tool** (skills-plan §7.1 dependency).
 2. **Land `meta.classify-question`** -- still wired to legacy
    runner; new path is logged but not consumed.
 3. **Land `meta.select-scope`** -- same: logged, not consumed.

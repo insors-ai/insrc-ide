@@ -1,8 +1,8 @@
 /**
- * skill_invoke -- the LLM-facing meta-tool for skill dispatch.
+ * Skills meta-tools: `skill_invoke` + `skill_describe`.
  *
- * Plans/analyzers/skills-core.md, Phase 3.3. Analyzers that want
- * LLM-driven skill dispatch advertise THIS single tool to the model
+ * `skill_invoke` (skills-core §3.3): the LLM-facing meta-tool for
+ * skill dispatch. Analyzers advertise THIS single tool to the model
  * (instead of advertising every registered skill as its own tool,
  * which costs ~3000+ tokens for a 30-skill set). The closed list of
  * skill ids the model is allowed to pick from is rendered into the
@@ -10,10 +10,20 @@
  * `skill_invoke({skillId, args})`, and gets the typed SkillResult
  * rendered back.
  *
- * Tool id: `skill_invoke`. The first underscore-segment is `skill`,
- * which gets added to `ALL_CATEGORIES` in tools/config.ts so the
- * registry's category gate doesn't silently blackhole the tool
- * (mirrors the 2026-04-30 cross-agent-tool oversight fix).
+ * `skill_describe` (data-analyzer-skills §7.1): the on-demand
+ * catalog-detail tool used by `meta.classify-question`. Returns a
+ * stripped `SkillManifest` -- `{ id, name, family, owner, version,
+ * description, inputs, outputs, preconditions, providerAffinity }` --
+ * so the classifier prompt stays small (one-line catalog) and the LLM
+ * pulls the full schema only when ambiguous. (The plan referred to
+ * this as `describe_skill`; renamed to `skill_describe` so its
+ * first-underscore-segment is `skill`, matching the existing meta
+ * category and avoiding the category-gate's silent blackhole.)
+ *
+ * Both tools live under the `skill` first-underscore-segment which is
+ * registered in `ALL_CATEGORIES` (tools/config.ts) so the registry's
+ * category gate doesn't silently blackhole them (mirrors the
+ * 2026-04-30 cross-agent-tool oversight fix).
  */
 
 import { getLogger } from '../../../../shared/logger.js';
@@ -213,6 +223,98 @@ function safePreview(value: unknown): string {
   return json.slice(0, 4096) + '\n... <truncated>';
 }
 
+// ---------------------------------------------------------------------------
+// skill_describe -- catalog-detail tool used by meta.classify-question
+// ---------------------------------------------------------------------------
+
+const skillDescribeTool: Tool = {
+  id: 'skill_describe',
+  description:
+    'Look up a registered skill\'s manifest by id. Returns the skill\'s ' +
+    'description, family, owner, version, input / output JSON schemas, ' +
+    'preconditions, and provider affinity. Used by meta.classify-question ' +
+    'and meta.select-scope to pull full schema detail on demand when the ' +
+    'one-line catalog summary isn\'t enough. Pure registry read; no side ' +
+    'effects, no approval gate.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description:
+          'The skill\'s canonical dotted-lowercase id, e.g. ' +
+          '\'data.profile.numeric.rdbms\'.',
+      },
+      version: {
+        type: 'number',
+        description:
+          'Optional version pin. Defaults to the highest registered ' +
+          'version that respects the family-enabled gate.',
+        minimum: 1,
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+  requiresApproval: false,
+
+  async execute(input: ToolInput, _deps: ToolDeps): Promise<ToolResult> {
+    const id = typeof input['id'] === 'string' ? input['id'] : '';
+    if (id.length === 0) {
+      return {
+        output: '[skill_describe] id required',
+        format: 'text',
+        success: false,
+        error: 'id required',
+      };
+    }
+    const version = typeof input['version'] === 'number' ? input['version'] : undefined;
+
+    // Use the family-gate-respecting lookup. A skill whose family is
+    // disabled in the active settings is treated as not-registered
+    // here -- matches the contract every other public skill API
+    // observes (registry.getSkill / listSkills / runSkill).
+    const skill = getSkill(id, version);
+    if (skill === undefined) {
+      const where = version === undefined ? id : `${id}@${version}`;
+      return {
+        output: `[skill_describe] no skill registered with id '${where}'`,
+        format: 'text',
+        success: false,
+        error: `unknown skill: ${where}`,
+      };
+    }
+
+    const manifest = {
+      id:               skill.id,
+      name:             skill.name,
+      family:           skill.family,
+      owner:            skill.owner,
+      version:          skill.version,
+      description:      skill.description,
+      inputs:           skill.inputs,
+      outputs:          skill.outputs,
+      providerAffinity: skill.providerAffinity,
+      preconditions:    skill.preconditions ?? [],
+      toolDeps:         skill.toolDeps,
+      ...(skill.skillDeps !== undefined ? { skillDeps: skill.skillDeps } : {}),
+    };
+
+    const output =
+      `**skill:${skill.id}** v${skill.version} (${skill.family} / ${skill.owner})\n\n` +
+      `${skill.description}\n\n` +
+      `\`\`\`json\n${safePreview(manifest)}\n\`\`\``;
+
+    return {
+      output,
+      format: 'markdown',
+      success: true,
+      data: manifest,
+    };
+  },
+};
+
 export function registerSkillTools(): void {
   registerTool(skillInvokeTool);
+  registerTool(skillDescribeTool);
 }

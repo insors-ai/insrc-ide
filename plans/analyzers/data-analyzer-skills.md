@@ -246,7 +246,7 @@ in skills-core 9. Skill core (skills-core.md) is fully shipped.
 | 6.7 | synthesis: synth.profile-card | done | `data.synth.profile-card` ships -- branches on `kind` (numeric / categorical / boolean / temporal / text), pairs with profile.auto.rdbms's output |
 | 6.8 | synthesis: synth.scorecard | done | `data.synth.scorecard` ships -- markdown report card with overall score badge / weights / PK candidates / top-issues table / per-column detail. Pairs with `data.quality.scorecard.rdbms`. Renders an extra `validity` column in the per-column table when the scorecard included a validity dimension (i.e. the caller supplied `validityPatterns`); falls back to the original 7-column layout otherwise |
 | 6.9 | synthesis: synth.histogram-block | done | `data.synth.histogram-block` ships -- pure-template renderer over the 5b.1 `HistogramOutput` shape. Header (target / column / mode), one-line summary (non-null / null / bucket-count / range), and an ASCII bar chart inside a fenced code block (proportional widths, max 40 chars). Verdict-aware: `empty` and `inconclusive` render a one-line note instead of an empty chart |
-| 7.1 | meta: meta.classify-question | design landed (2026-05-09); ready to implement | Skill contract + four design decisions (catalog format / prompt structure / model affinity / preconditions) resolved in the §7.1 body below. Implementation order: ship `describe_skill` tool → ship the skill (~250 lines incl. few-shot examples). Blocks Phase 8.1 planner |
+| 7.1 | meta: meta.classify-question | design landed (2026-05-09); ready to implement | Skill contract + four design decisions (catalog format / prompt structure / model affinity / preconditions) resolved in the §7.1 body below. Implementation order: ship `skill_describe` tool → ship the skill (~250 lines incl. few-shot examples). Blocks Phase 8.1 planner |
 | 7.2 | meta: meta.select-scope | design landed (2026-05-09); ready to implement | Skill contract + design decisions resolved in the §7.2 body below. Implementation: ~200 lines after 7.1 lands. Blocks Phase 8.1 planner |
 | 7.3 | meta: meta.feasibility-check | done | `data.meta.feasibility-check` ships -- pure helper over `assertFeasible`. Walks a candidate list of skill ids, buckets each into `feasible` / `infeasible` (with structured `{preconditionKind, detail}` reasons) / `missing` (unregistered). No LLM, no tools, no preconditions on the helper itself (it's the bedrock). The future planner rewrite (8.1) calls this AFTER `meta.classify-question` to drop infeasible ids before any execution starts |
 | 7.4 | meta: meta.calibrate-confidence | done | `data.meta.calibrate-confidence` ships -- atomic deterministic post-processing. Calibration rules: empty findings -> `low`; otherwise start at min(finding.confidence) across all findings; clamp to `low` on any "feasibility-rejection:" / "schema-rejection:" note (defensive restatement of the registry's per-skill clamp); downgrade one rung on tool-error trace. Output exposes the `rationale` chain so the reviewer can audit the calibration. Mitigates the 2026-05-01 over-acceptance failure mode by giving the cloud reviewer a hard prior |
@@ -709,7 +709,7 @@ interface Candidate {
 **Design decisions** (resolved 2026-05-09):
 
 1. **Catalog format → server-side prefilter + 1-line-per-skill catalog
-   + on-demand `describe_skill` tool.** Dumping all 82 skill schemas
+   + on-demand `skill_describe` tool.** Dumping all 82 skill schemas
    raw is 30–50K tokens per classify call -- prohibitive at typical
    turn rates. Instead:
    - Prefilter by **`connection-family`** of the available connections
@@ -718,7 +718,7 @@ interface Candidate {
    - Pass the survivors as a **`{ id, family, oneLineSummary }`**
      catalog (~100 chars per skill, typically 10–30 survivors after
      family filter).
-   - Expose **`describe_skill(id) → SkillManifest`** as a tool so the
+   - Expose **`skill_describe(id) → SkillManifest`** as a tool so the
      LLM can pull a full input/output schema on demand when the
      one-liner isn't enough.
 
@@ -766,11 +766,16 @@ interface Candidate {
 **Tool deps**:
 
 - `db_list_connections` -- read the available connection roster.
-- `describe_skill(id) → SkillManifest` -- **new tool**; thin wrapper
-  over `getSkill(id)` from the registry. Lives in
-  `daemon/tools/builtins/meta/describe-skill.ts`. Stripped manifest:
-  `{ id, family, owner, version, description, inputs, outputs,
-  preconditions, providerAffinity }`.
+- `skill_describe(id) → SkillManifest` -- **shipped 2026-05-09** in
+  `daemon/tools/builtins/skills/invoke-skill.ts`, alongside the
+  existing `skill_invoke` meta-tool (both live in the same file so
+  the `skill` first-underscore-segment category gate enables them
+  as a unit). Thin wrapper over `getSkill(id, version?)` from the
+  registry. Stripped manifest: `{ id, name, family, owner, version,
+  description, inputs, outputs, providerAffinity, preconditions,
+  toolDeps, skillDeps? }`. The plan originally called this tool
+  `describe_skill`; renamed to `skill_describe` for category-gate
+  consistency with `skill_invoke`.
 
 **Family**: `meta`. **Owner**: `data-analyzer`. **Provider affinity**:
 `cloud`.
@@ -811,7 +816,7 @@ interface ScopedInvocation {
    each skill's full `inputSchema` inline.** The candidate list is
    already small (typically 3–7), so per-skill `inputSchema` (~200
    chars after pruning descriptions) fits well under 4K tokens total.
-   The LLM doesn't need `describe_skill` here -- everything it needs
+   The LLM doesn't need `skill_describe` here -- everything it needs
    is in the prompt.
 
 2. **Prompt structure → structured output; per-candidate the LLM
@@ -878,7 +883,7 @@ interface ScopedInvocation {
   version; the LLM sees the v2 description automatically. No
   manual list-of-versions to maintain.
 
-- **Implementation order**: (a) ship `describe_skill` tool first
+- **Implementation order**: (a) ship `skill_describe` tool first
   (single file, ~50 lines), (b) ship `meta.classify-question` with
   catalog+prefilter (single file, ~250 lines including the few-shot
   examples), (c) ship `meta.select-scope` (~200 lines). Then 8.1
