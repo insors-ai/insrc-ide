@@ -9,6 +9,17 @@ added late or rediscovered as bugs there are landed up-front here.
 
 ## Related plans
 
+- [plans/analyzers/data-analyzer-skills.md](./data-analyzer-skills.md) --
+  **the analyzer-logic layer.** This plan owns the operational surface
+  (orchestrator, pane, slash, checkpoint, save / re-run / drill-down,
+  cache layering, cross-agent entrypoints); the skills plan owns the
+  per-task analyzer logic (atomic + composite skills, the meta-skills
+  that route questions, the registry, the per-skill cache and smoke
+  gate). See "Relationship to data-analyzer-skills.md" below for the
+  per-section split.
+- [plans/analyzers/skills-core.md](./skills-core.md) -- registry +
+  `runSkill` + feasibility infrastructure the analyzer-logic plan
+  depends on. Shipped.
 - [plans/analyzers/code-analyzer.md](./code-analyzer.md) -- sibling family;
   shares orchestrator-pipeline skeleton, citation invariant, gate widget,
   and per-task cache pattern.
@@ -21,9 +32,47 @@ added late or rediscovered as bugs there are landed up-front here.
   multi-pass synthesis infrastructure the data-analyzer's `synthesise` step
   rides on (no new content-gen code needed).
 
+## Relationship to data-analyzer-skills.md
+
+This plan was written when the analyzer was a single per-kind tool
+loop. The **skills** plan replaces that inline logic with composed
+skill invocations. Both plans now coexist; this plan owns the
+**substrate** and **product surface**; the skills plan owns the
+**analyzer logic**.
+
+Concretely:
+
+| Layer | Owned by | Lives in |
+|---|---|---|
+| Slash command + family + intent registration | this plan §0 | shared/agent-registry, slash-commands |
+| Orchestrator controller (run lifecycle, plan/review/synthesise dispatch) | this plan §1.2 / §1.3 | `daemon/controllers/data-analyzer-orchestrator.ts` |
+| Per-task runner (the loop body) | **skills plan §8.2** | `runSkill()` dispatch via `invoke_skill` |
+| Routing decisions (which skill(s) for this question) | **skills plan §7.1 / §7.2** | `meta.classify-question`, `meta.select-scope` |
+| Atomic + composite analyzer skills (introspection, sampling, profiling, lineage, drift, PII, drift-windows, timeseries) | **skills plan §1-§5** | `daemon/skills/built-ins/data.*.ts` |
+| Synthesis renderers (markdown templates per output shape) | **skills plan §6** | `daemon/skills/built-ins/data.synth.*.ts` |
+| Confidence calibration + feasibility | **skills plan §7.3 / §7.4** | `data.meta.feasibility-check`, `data.meta.calibrate-confidence` |
+| Citations invariant | this plan §1.5 | `agent/tasks/data-analyzer/analyzer/citations.ts` |
+| Checkpoint / resume | this plan §1.9 | orchestrator state machine |
+| Report pane + save + drill-down + diff + rerun | this plan §2 / §5 | workbench `data-analyzer/*.ts` |
+| Per-task cache (outer) | this plan §2.4 | `~/.insrc/cache/data-analysis/` |
+| Per-skill cache (inner) | **skills plan §10.2** | `~/.insrc/cache/skills/` |
+| Cross-agent entrypoint (`data:analyze`) | this plan §4.3 | `daemon/cross-agent/data-analyze.ts` |
+| Cross-agent tool surface (`data:*` legacy wrappers) | this plan §4.1 → migrating to **skills plan §9.2** | `daemon/cross-agent/data-tools.ts` |
+
+**What "refactored to use skills" means in practice:** the plan
+sections that used to describe inline analyzer logic
+(§1.4 analyzer runner, §1.10 scope-tier classifier, §3.1 lineage,
+§3.2 schema-drift, §3.3 ER, §4.1 cross-agent `data:*`,
+§5.5 PII overrides) now describe **the skill that owns that logic +
+the integration point** -- they no longer re-spec the inline code.
+The shipped inline code stays where it is until the skills-plan
+cutover lands; this plan tracks the cutover as a slice rather than
+hiding it.
+
 ## Status
 
-Phases 0, 1, 2 shipped. Phases 3, 4, 5 pending.
+Phases 0, 1, 2 shipped. Phases 3, 4, 5 partly shipped (with skills-
+plan supersessions noted per row).
 
 | Phase | Slice | State | Notes |
 |---|---|---|---|
@@ -31,22 +80,22 @@ Phases 0, 1, 2 shipped. Phases 3, 4, 5 pending.
 | 1.1 | types.ts | shipped | |
 | 1.2 | orchestrator | shipped | `daemon/controllers/data-analyzer-orchestrator.ts` |
 | 1.3 | prompts | shipped | plan / analyzer-system / synthesise-multipass / review |
-| 1.4 | analyzer runner | shipped | `agent/tasks/data-analyzer/analyzer/runner.ts` |
+| 1.4 | analyzer runner (per-task tool loop) | shipped (legacy) -- skills-plan §8.2 supersedes | `agent/tasks/data-analyzer/analyzer/runner.ts` runs the inline 8-call tool loop with per-kind playbooks. **Cutover planned**: when skills-plan §7.1 / §7.2 / §8.1 land, the runner becomes a thin `runSkill(invocation.skillId, invocation.args, deps)` dispatcher. The inline tool list, per-kind playbook nudges, and JSON-parse-retry move into the skill-registry's `runSkill` machinery (skills-core 3.1 / 3.7). The legacy runner stays compiled until skills-plan §9.1 maps every `DataAnalysisKind` to a default skill invocation |
 | 1.5 | citations invariant | shipped | one retry, then downgrade-to-low |
 | 1.6 | connection-approval gate | superseded | replaced by the universal access gate (plans/access-gate.md Phases 4-5); the orchestrator seeds `Session.access` for ephemeral connections at task start, the dispatcher in `agent/tools/executor.ts` handles UI gating uniformly. `agent/tasks/data-analyzer/access-gate.ts` is now an orphan reserved for future PII / schema-drift gate types per its docstring. |
 | 1.7 | `data-conn:` URI scheme | shape only | types.ts emits the scheme; click-handler wiring is Phase 5.6 |
 | 1.8 | slash dispatch | shipped | |
 | 1.9 | checkpoint / resume | shipped | restoreState + buildResumeTask + afterResumeBootstrap |
-| 1.10 | scope-tier classification | shipped | per-tier prompt addenda + plan-size approval gate |
+| 1.10 | scope-tier classification | shipped (legacy) -- skills-plan §7.1 / §7.2 supersede | `agent/tasks/data-analyzer/scope.ts` ships per-tier (`single-table` / `multi-table` / `cross-conn` / `audit`) prompt addenda + a plan-size approval gate. **Cutover planned**: replaced by the meta-skills `meta.classify-question` (returns the structured `questionType` enum the orchestrator routes on) + `meta.select-scope` (resolves connection / target / columns from question text). The plan-size approval gate stays here -- it's a UX gate, not a routing decision -- but reads off the post-classify candidate count instead of the legacy tier label |
 | 1.H | ephemeral connections from prompt | shipped | `_registerEphemeralFromPrompt` registers JSON / CSV paths typed by the user; auto-approved via `Session.access` seeding |
 | 2.1 | DataAnalysisReportPane | shipped | flow contribution auto-opens on `list.body` write; Save... uses shared `rewriteCustomUrisForSave` helper. Drill-down footer rendering deferred to 5.3. |
 | 2.2 | annotation manager | deferred | existing `InsrcAnnotationContribution` already covers code-citation annotation through `path:` link → source-file open. Pane-internal "highlight finding → batch to chat" needs a separate UI surface (DOM text-selection + report-anchored annotation kind); not a "reuse" of the existing manager. |
 | 2.3 | mid-flight cancel | shipped | `deps.abortController.signal` plumbed through runner + multipass; framework's pipeline already breaks on `signal.aborted`. No analyzer-specific gate is required. |
-| 2.4 | per-task on-disk cache | shipped (with deferred fingerprint) | `~/.insrc/cache/data-analysis/`, 200-entry LRU, mtime eviction, atomic writes; `dataAnalyzer.clearCache` RPC + palette command. **`connection-fingerprint` is currently a roster-level hash** (sorted scope + sorted full session connection list summary). Schema drift on an unchanged connection is NOT detected; the proper `getSchemaFingerprint(connectionId, target)` driver helper called out in this plan's "Driver gap" section is deferred to a follow-up because driver-family dispatch (RDBMS describe / KV sample-shape / file describe) and `SchemaDescription` canonicalisation are their own slice. Workaround: `insrc.dataAnalyzer.clearCache`. |
-| 3.1 | data_lineage tool | shipped | `daemon/tools/builtins/data/lineage.ts`. v1 uses literal-name matching + keyword-near-literal classification (insert/select/etc.). ORM-typed-identifier matching deferred. |
-| 3.2 | data_schema-drift tool | shipped (Prisma fast-path only) | `daemon/tools/builtins/data/schema-drift.ts`. Diffs Prisma vs live RDBMS. ORM model resolvers (TypeORM / Sequelize / Mongoose) and static query-builder analysis are deferred follow-ups; the tool returns confidence:'low' for connections without `schemaSource.type === 'prisma'`. |
-| 3.3 | ER artifact integration | shipped | Orchestrator's `_appendErArtifactSection` walks accepted tasks for `kind === 'er'`, invokes `artifact_er` per (connection, tables) group, appends a "## ER Diagrams" section to the report. |
-| 4.1 | data_* cross-agent wrappers | shipped | `daemon/cross-agent/data-tools.ts`: pure-namespace forwarders (data_list_connections / data_scan / data_get / data_explain) + family-dispatch wrappers (data_describe / data_sample / data_sample_shape). All depth-check via `_crossAgentDepth`. data_lineage + data_schema-drift gained inline depth checks in their existing tool definitions. |
+| 2.4 | per-task on-disk cache (outer) | shipped (with deferred fingerprint) | `~/.insrc/cache/data-analysis/`, 200-entry LRU, mtime eviction, atomic writes; `dataAnalyzer.clearCache` RPC + palette command. Outer cache layer; the inner per-skill cache (skills-plan §10.2, deferred) sits below this. Lookup order: per-task cache first (cheap), per-skill cache second (per-invocation). **`connection-fingerprint` is currently a roster-level hash** -- schema drift on an unchanged connection is NOT detected. The proper `getSchemaFingerprint(connectionId, target)` driver helper called out in the "Driver gap" section is deferred -- it's shared by both cache layers, so landing it once benefits both. Workaround: `insrc.dataAnalyzer.clearCache`. |
+| 3.1 | data_lineage tool | shipped; skills-plan §3.4 owns the analyzer-facing surface | `daemon/tools/builtins/data/lineage.ts` (the tool) is wrapped by `data.lineage.read-write-callsites` (the skill, registered in `daemon/skills/built-ins/data-lineage.ts`). The skill is what callers should invoke; the tool stays as the implementation primitive. Tool v1 uses literal-name matching + keyword-near-literal classification (insert/select/etc.); ORM-typed-identifier matching deferred. |
+| 3.2 | data_schema-drift tool | shipped (Prisma fast-path only); skills-plan §4.1-§4.3 supersede when ready | `daemon/tools/builtins/data/schema-drift.ts` ships a Prisma-vs-live RDBMS diff. **Skills-plan §4.1 / 4.2 / 4.3** (`drift.prisma-vs-live` / `drift.typeorm-vs-live` / `drift.sqlalchemy-vs-live`) are the comprehensive replacement; they're currently deferred on Phase 3 code-binding skills (`code.orm.resolve-model`). Until those land, `data_schema-drift` stays as the only drift surface; `confidence: 'low'` for non-Prisma connections. |
+| 3.3 | ER artifact integration | shipped; skills-plan §6.4 owns the renderer rewrite | Orchestrator's `_appendErArtifactSection` walks accepted tasks for `kind === 'er'`, invokes `artifact_er` per (connection, tables) group, appends "## ER Diagrams" to the report. **Skills-plan §6.4** `synth.er-diagram` is the planned skill replacement (deferred -- transitive on Phase 4 since it composes Phase 4's drift output for cross-table topology). The current inline integration stays until §6.4 ships. |
+| 4.1 | data_* cross-agent wrappers | shipped; skills-plan §9.2 owns the cutover | `daemon/cross-agent/data-tools.ts`: pure-namespace forwarders (data_list_connections / data_scan / data_get / data_explain) + family-dispatch wrappers (data_describe / data_sample / data_sample_shape). All depth-check via `_crossAgentDepth`. `data_lineage` + `data_schema-drift` gained inline depth checks. **Cutover planned (skills-plan §9.2)**: cross-agent calls migrate to direct `runSkill('data.X', ...)` invocations under the cross-owner depth cap; `data:*` wrappers become legacy shims that forward to the matching skill. Stays on this layer until skills-plan §8 + §9 land; deletion gated on telemetry showing zero non-shim callers. |
 | 4.2 | bidirectional cross-agent inventory | shipped | data-analyzer's runner advertises `code_locate` / `code_trace` / `code_describe`; code-analyzer's runner advertises `data_lineage` / `data_schema-drift`. Both directions respect the single-hop depth cap. |
 | 4.3 | data_analyze Flow-2 dispatch | shipped | `daemon/cross-agent/data-analyze.ts` mirrors `code_analyze`: 16-task soft cap, 60s envelope, 45s per-task; runs through the data-analyzer's tool loop; returns stitched markdown + findings + citations. |
 | 4.4 | @data-analyzer mention routing | shipped (Phase 1) | Already wired in `chat-handler.ts:parseAnalyzerMention` -- routes through `runDataAnalyzerSlash`. |
@@ -54,7 +103,7 @@ Phases 0, 1, 2 shipped. Phases 3, 4, 5 pending.
 | 5.2 | insrc.dataAnalyzer.diffWithPrevious | shipped | `daemon/data-analyzer-diff.ts` matches findings across two completed lists by primary citation (rdbms / kv / file-source / code-ref) with concern+issue fallback. `dataAnalyzer.diffRuns` RPC + workbench command + tmp-file editor open. |
 | 5.3 | drill-down chain | shipped | `parseDrillDownFooter` factored to `browser/shared/`; data-analyzer pane gains clickable footer buttons; `insrc.dataAnalyzer.drillDown` command threads parentListId through chat.send to `runDataAnalyzerSlash` -> orchestrator's createList. |
 | 5.4 | save discoverability + lastSavedAt | deferred | Save... button already shipped in Phase 2.1. Palette discoverability (`insrc.dataAnalyzer.saveReport` is in the palette) suffices. The `lastSavedAt` annotation on list.meta is genuinely optional and can land if usage data justifies it. |
-| 5.5 | PII pattern overrides | deferred | `<repo>/.insrc/data-analyzer/pii.json` loader. The bundled pattern library handles the email / password / ssn / tax_id cases; per-repo overrides only matter once a real user has a custom pattern they want enforced. Tracked as a follow-up. |
+| 5.5 | PII pattern overrides | superseded by skills-plan §5e | The bundled pattern-library + override file approach is replaced by the shipped 5e skills: `data.pii.detect-patterns.{rdbms,file,kv}` (anchored regex catalog), `data.pii.column-classifier.rdbms` (composite returning `pii / likely-pii / not-pii`), and `data.sensitivity.policy-check.rdbms` (cross-references caller-supplied `declaredPiiColumns` against detected). Repo-level pattern overrides come back as a future input to `data.pii.detect-patterns.*` (caller passes `extraPatterns: [{ name, regex, severity }]`); tracked under skills-plan as a follow-up to 5e.1 if a real user case lands. |
 | 5.6 | data-conn: URI opener | shipped (v1) | `dataConnUriOpener.ts` + `DataConnUriOpenerContribution`. Parses `data-conn:<conn>(/<schema>)?/<table>(?col=&pk=)?`, opens Data Sources pane, surfaces citation as info notification. Auto-expand of the cited connection + pk-driven row fetch are deferred until dbDriversPane exposes a reveal API. |
 
 The data-driver shipped earlier (see [plans/data-driver.md](../data-driver.md))
@@ -279,37 +328,53 @@ Analyzer rollout. Hard-wire them into the Data Analyzer's first commits.
 
 ## File structure (target)
 
+Files marked `[skills]` are owned by [data-analyzer-skills.md](./data-analyzer-skills.md);
+files marked `[legacy]` stay until the skills-plan cutover lands.
+
 ```
 src/insrc/
   shared/
-    slash-commands.ts                     # add /data-analyze entry
+    slash-commands.ts                     # /data-analyze entry
   daemon/
     controllers/
       data-analyzer-orchestrator.ts       # main controller; mirrors code-analyzer-orchestrator
     cross-agent/
-      data-tools.ts                       # data:* registrations (mirror of code-tools.ts)
+      data-tools.ts                       # data:* registrations [legacy → skills-plan §9.2]
     db/
-      index.ts                            # (deferred) +getSchemaFingerprint helper (~30 lines)
+      index.ts                            # (deferred) +getSchemaFingerprint helper -- shared by both cache layers
+    skills/
+      built-ins/
+        data.*.ts                         # [skills] every analytical skill (~80 files); see data-analyzer-skills.md
+        data.synth.*.ts                   # [skills] synthesis renderers
+        data.meta.*.ts                    # [skills] classify-question / select-scope / feasibility / calibrate
+      registry.ts / index.ts              # [skills-core] registerSkill, runSkill, listSkills
+    tools/
+      builtins/
+        data/
+          lineage.ts                      # data_lineage tool (skill-wrapped via data.lineage.read-write-callsites)
+          schema-drift.ts                 # data_schema-drift tool [legacy fast-path → skills-plan §4.1-§4.3]
+        meta/
+          describe-skill.ts               # [planned, skills-plan §7.1] catalog-detail tool for classify-question
+        db/
+          index.ts                        # registerDbTools (db_sql_* / db_kv_* / db_file_*; ~31 tools)
   agent/
     tasks/
       _shared/
-        json-extract.ts                   # stripFences extracted from code-analyzer (Phase 1.4)
+        json-extract.ts                   # stripFences (shared with code-analyzer)
       data-analyzer/
         types.ts                          # DataAnalysisTask, DataAnalyzerResult, citation kinds
         prompts/
           plan.ts                         # buildPlanSystemPrompt + renderPlanUserMessage
-          analyzer-system.ts              # HARD_RULES + per-kind playbook + tool list
-          synthesise-multipass.ts         # outline + section + stitch (rides content-gen)
+          analyzer-system.ts              # HARD_RULES + tool list  [legacy: per-kind playbook strips at cutover]
+          synthesise-multipass.ts         # outline + section + stitch
           review.ts                       # cloud reviewer system prompt
         analyzer/
-          runner.ts                       # tool loop (mirrors code-analyzer/analyzer/runner.ts)
+          runner.ts                       # [legacy] inline tool loop → skills-plan §8.2 dispatcher rewrites
           result-parser.ts                # uses _shared/json-extract
-          citations.ts                    # citation invariant validator
-        lineage.ts                        # data:lineage tool implementation
-        drift.ts                          # data:schema-drift tool implementation
+          citations.ts                    # citation invariant validator [stays here post-cutover]
         access-gate.ts                    # connection-approval + sample-review gates
-        cache.ts                          # per-task cache keyed on connection-version
-        scope.ts                          # sizing classifier (single-table .. multi-conn audit)
+        cache.ts                          # per-task cache (outer); per-skill cache (inner) lands separately
+        scope.ts                          # [legacy] sizing classifier → deletable when skills-plan §7.1/§7.2 land
 
 src/vs/workbench/contrib/insrc/browser/
   data-analyzer/
@@ -325,8 +390,10 @@ src/vs/workbench/contrib/insrc/browser/
   insrc.contribution.ts                   # register pane + flow contribution
 ```
 
-`~/.insrc/data-analyzer/` (user-overridable prompts) and
-`~/.insrc/cache/data-analysis/` are created on first run by the controller.
+`~/.insrc/data-analyzer/` (user-overridable prompts),
+`~/.insrc/cache/data-analysis/` (per-task cache outer layer), and
+`~/.insrc/cache/skills/` (per-skill cache inner layer; deferred per
+skills-plan §10.2) are created on first run by the controller.
 
 ## Phase 0 -- Family registration + slash entry
 
@@ -480,34 +547,86 @@ User overrides land in `~/.insrc/data-analyzer/<name>.md`; the loader
 (`agent/tasks/data-analyzer/prompts/index.ts`) merges with the bundled
 defaults the same way the Code Analyzer does.
 
-### 1.4 Analyzer tool loop -- `analyzer/runner.ts`
+### 1.4 Per-task runner -- `analyzer/runner.ts`
 
-Mirror code-analyzer's runner. Differences:
+> **This section describes the shipped legacy runner (the inline tool
+> loop) AND the planned cutover to skill dispatch.** The legacy runner
+> stays compiled until skills-plan §8.2 lands; both code paths
+> coexist during the transition. See skills-plan §8 for the full
+> contract.
 
-- **Tool inventory uses the shipped `db_*` builtins**, not the design's
-  `data:*` names. The full list:
-  - `db_list_connections` -- enumerate registered connections
-  - `db_sql_describe` -- RDBMS introspection (uses Prisma fast-path
-    when a Prisma schema is present per `daemon/db/drivers/rdbms-prisma.ts`)
-  - `db_sql_sample` -- row sample with structured `where` (no raw SQL)
-  - `db_sql_explain` -- per-dialect query plan
-  - `db_kv_scan` -- key scan with namespace allow-list
-  - `db_kv_get` -- per-key fetch
-  - `db_kv_sample_shape` -- value-shape inference via `inferShape`
-  - `db_file_describe` / `db_file_sample` / `db_file_sample_shape` --
-    file-driver introspection
-  - `submit_analysis` -- the analyzer's finishing tool (mirror of the
-    code-analyzer's, returns a `DataAnalyzerResult`)
-- Cross-agent `code:*` (and future `deploy:*`) are added in Phase 4 --
-  not part of Phase 1's inventory.
-- The connection-approval gate fires inline -- before the first tool call
-  that targets a connection not yet approved in the session.
-- Sample-review gate fires inline before any `db_sql_sample` /
-  `db_kv_get` / `db_file_sample` call against a connection flagged
-  `prod` whose result contains unmasked PII columns.
-- Result parser uses the SAME `stripFences` helper as code-analyzer
-  (extract `{...}` span, ignore preamble). Factor the helper out to
-  `agent/tasks/_shared/json-extract.ts` so both analyzers consume it.
+#### 1.4-legacy: shipped per-kind tool loop (current state)
+
+`agent/tasks/data-analyzer/analyzer/runner.ts` runs an 8-call tool
+loop per task with per-kind playbook nudges. Tool inventory uses the
+shipped `db_*` builtins:
+
+- `db_list_connections` -- enumerate registered connections
+- `db_sql_describe` / `db_sql_sample` / `db_sql_explain` -- RDBMS
+  (Prisma fast-path on describe when present per
+  `daemon/db/drivers/rdbms-prisma.ts`)
+- `db_kv_scan` / `db_kv_get` / `db_kv_sample_shape` -- KV
+- `db_file_describe` / `db_file_sample` / `db_file_sample_shape` --
+  file
+- `submit_analysis` -- finishing tool returning a `DataAnalyzerResult`
+
+Cross-agent `code:*` (and future `deploy:*`) are added in Phase 4 --
+not part of Phase 1's inventory. Inline gates: connection-approval
+before the first tool call against a not-yet-approved connection;
+sample-review before `db_sql_sample` / `db_kv_get` / `db_file_sample`
+on a `prod`-flagged connection whose result contains unmasked PII.
+Result parser uses `stripFences` shared with code-analyzer via
+`agent/tasks/_shared/json-extract.ts`.
+
+This per-kind tool loop is the structural failure mode the skills
+plan exists to fix (see "Why decompose?" in skills-plan): one
+prompt switching behaviour by `task.kind` ends up with behaviour
+leaking across kinds and an ever-growing tool list.
+
+#### 1.4-skills: planned skill-dispatch runner (skills-plan §8.2)
+
+Replaces the inline 8-call loop with a thin skill dispatcher:
+
+```ts
+// pseudocode -- full contract in skills-plan §8.2
+async function runDataAnalyzerTask(
+  task: DataAnalysisTask,
+  session: Session,
+  deps: RunnerDeps,
+): Promise<DataAnalyzerResult> {
+  // Routing already happened upstream:
+  //   plan step → meta.classify-question → meta.select-scope → meta.feasibility-check
+  // task.skillInvocation is the concrete (skillId, args) the planner emitted.
+  const result = await runSkill(task.skillInvocation.skillId,
+                                task.skillInvocation.args, deps);
+
+  // Stream the resulting toolCalls as liveStep events (same transcript
+  // pattern as today, sourced from the SkillResult).
+  for (const tc of result.toolCalls) deps.liveStep(tc);
+
+  // The existing JSON-parse retry / citations-invariant retry / runner-
+  // confidence-downgrade now live in the registry's runSkill machinery
+  // (skills-core 3.1 / 3.7) -- they apply to every skill, not just
+  // data-analyzer skills.
+  return adaptSkillResultToDataAnalyzerResult(result, task);
+}
+```
+
+What stays here vs moves to skills:
+
+| Concern | Where it lives after cutover |
+|---|---|
+| Tool inventory + per-kind playbooks | **gone** -- skills own their own preconditions + tool-call sequences |
+| `submit_analysis` finishing tool | **gone** -- the skill's `SkillResult.value` is the typed answer |
+| Connection-approval gate | stays here (inline before `runSkill`) -- it's a UX gate, not analyzer logic |
+| Sample-review gate (PII on prod) | partly stays, partly skills-side -- the gate trigger lives in the runner; the PII detection moves into skills-plan §5e (`data.pii.detect-patterns.*`) which the gate consults |
+| `stripFences` JSON parsing | moves into `runSkill` -- shared across every skill |
+| Citations invariant | stays here (post-skill validation against `result.citations`); the skill fills citations into the `SkillResult` |
+| Tool-error gate (Continue / Abort prompt) | moves into `runSkill` per skills-core 3.7 |
+
+The legacy runner stays alongside until skills-plan §9.1 ships the
+`DataAnalysisTask kind → default skill invocation` shim that
+unifies cached-plan replay across the cutover.
 
 ### 1.5 Citations invariant -- `analyzer/citations.ts`
 
@@ -690,114 +809,66 @@ The reset happens once at resume entry, in `afterResumeBootstrap`'s
 `analyzing` branch -- not on every `next()` call, to avoid trampling
 items the controller is mid-transition on.
 
-### 1.10 Scope-tier classification + per-tier playbook
+### 1.10 Question routing + sizing
 
-The Code Analyzer added tier-awareness as Phase 5, late, after broad-
-scope queries (XL+ on a multi-module repo) routinely returned
-under-detailed reports. Bake-in cost is small for data-analyzer; do
-it now.
+> **This section describes the shipped legacy scope-tier classifier
+> AND the planned cutover to skill-based routing.** The legacy
+> classifier (`scope.ts` + per-tier prompt addenda) stays compiled
+> until skills-plan §7.1 / §7.2 land; both code paths coexist during
+> the transition.
 
-#### 1.10.a Tier mapping
+#### 1.10-legacy: shipped scope-tier classifier (current state)
 
-Reuses the shipped `classifyScope` verbatim. The tier names map to
-data altitudes:
+`agent/tasks/data-analyzer/scope.ts` runs `classifyScope` (the
+shipped generic classifier in `agent/classify/scope.ts`) and clamps
+the result to the data-altitude S/M/L/XL band. Each tier injects
+prompt addenda into `plan.ts`, `analyzer-system.ts`, and
+`synthesise-multipass.ts` to push the LLM toward the right altitude
+of detail (per-column at S → connection-level at XL). Per-tier
+soft/hard task caps gate plan approval + follow-up generation.
 
-| Tier | Data altitude | Typical query | Default `softTaskCap / hardTaskCap` |
-|---|---|---|---|
-| `S` | single column / single key pattern | "what columns does the `email` column on `users` actually carry now?" | 2 / 4 |
-| `M` | single table / single key namespace | "audit `orders` for nullability + index drift" | 4 / 6 |
-| `L` | single connection (full audit) | "walk every table in `primary` for PII + drift" | 6 / 10 |
-| `XL` | multi-connection (cross-DB sweep) | "find shape drift across all connections registered for the active repo" | 8 / 12 |
+This shipped today and works for the existing per-kind tool-loop
+runner; it's the routing layer the legacy runner consumes. The
+mechanism leaks the same per-kind playbook problem the skills plan
+exists to fix -- routing happens via prompt-string concatenation,
+not via a typed contract -- so the cutover replaces it wholesale.
 
-`XXL` and above are not used -- the data altitude doesn't extend
-above multi-connection. The classifier will still emit `XXL` for
-unusually-broad questions; the orchestrator clamps anything above
-`XL` down to `XL` before applying caps.
+#### 1.10-skills: planned classify-question + select-scope (skills-plan §7.1 / §7.2)
 
-#### 1.10.b Wiring the classifier
+`meta.classify-question` (skills-plan §7.1, design landed) replaces
+the entire scope-tier classifier. Concretely:
 
-Mirror code-analyzer's chat-handler integration:
+| Legacy concept | Skill-based replacement |
+|---|---|
+| `ScopeSize` enum (S / M / L / XL) | `questionType` enum (`describe-schema` / `sample-data` / `profile-quality` / `compare-shapes` / `drift-analysis` / `lineage` / `sensitivity` / `timeseries` / `free-form`) |
+| Per-tier prompt addenda in `plan.ts` / `analyzer-system.ts` / `synthesise-multipass.ts` | The catalog the LLM sees is already pre-feasibility-filtered + scoped to the question type; per-altitude prompt addenda are gone |
+| `capsForTier(tier)` (soft / hard task caps) | `candidates.length` from classify-question is the natural plan-size signal; the gate stays here as a UX gate but reads off candidate count instead of tier label |
+| `agent/tasks/data-analyzer/scope.ts` (`clampToDataAltitude`) | **deletable** when 7.1 lands; no tier label survives the cutover |
+| `agent/classify/scope.ts` (the generic classifier) | Stays for code-analyzer's use; data-analyzer stops calling it |
 
-1. `daemon/chat-handler.ts` `runDataAnalyzerSlash`: before constructing
-   the orchestrator, call `classifyScope(message, ...)` to size the
-   request. Same call shape code-analyzer uses; reuses the same
-   provider resolver (`'classifier' / 'scope'`).
-2. The result lands in `ControllerInput.classification.scope`.
-3. `DataAnalyzerOrchestratorController.attachInput` reads
-   `input.classification?.scope ?? 'M'` into `this._tier` and
-   persists it in `K_STATE` so resume picks it up.
-4. The user sees the classified tier emitted as a progress event:
-   `[code-analyze] scope classifier emitted tier` -> mirror as
-   `[data-analyze] scope classifier emitted tier` (matches the
-   monitor pattern code-analyzer logs throughout this session).
+`meta.select-scope` (skills-plan §7.2) takes the candidate list and
+fills in concrete `(connectionId, target?, columns?)` per
+invocation, codifying the 2026-04-30 lesson that ambiguous question
+scope must surface to the user instead of being silently defaulted.
 
-#### 1.10.c Per-tier task caps -- `capsForTier`
+#### Cutover plan
 
-Helper at the top of the orchestrator file:
+When skills-plan §7.1 + §7.2 ship:
 
-```ts
-function capsForTier(tier: ScopeSize): { softTaskCap: number; hardTaskCap: number } {
-  switch (tier) {
-    case 'S':                    return { softTaskCap: 2, hardTaskCap: 4 };
-    case 'M':                    return { softTaskCap: 4, hardTaskCap: 6 };
-    case 'L':                    return { softTaskCap: 6, hardTaskCap: 10 };
-    case 'XL':
-    case 'XXL':
-    case 'XXXL':
-    case 'XXXXL':                return { softTaskCap: 8, hardTaskCap: 12 };
-  }
-}
-```
-
-Caps apply at plan-approval (offer the user "trim to softTaskCap" as
-a gate action) and at follow-up generation (reviewer can't add a
-follow-up that would push the live count past `hardTaskCap`).
-
-#### 1.10.d Per-tier prompt addenda
-
-Each prompt builder takes a `tier` argument and appends an addendum:
-
-- **`prompts/plan.ts`** -- `buildPlanSystemPrompt(tier)`. Addendum
-  tells the planner what altitude to plan at:
-  - S: "1-2 highly-targeted tasks. NO multi-table audits."
-  - M: "3-4 tasks scoped to a single table / namespace. Pull
-    full describe + a sample-shape if useful."
-  - L: "Plan the audit at connection level. Group by table; cap at
-    one task per table."
-  - XL: "Plan AT THE CONNECTION LEVEL, not the table level. One
-    task per connection (file-level citations are fine). NO
-    per-table tasks."
-
-- **`prompts/analyzer-system.ts`** -- `buildAnalyzerSystemPrompt(tier)`.
-  Addendum tells the runner what altitude to read at:
-  - S/M: read full describe + samples; per-row / per-column citations.
-  - L: prefer `db_sql_describe` + targeted `db_sql_sample` (10 rows).
-    Don't dump full table data.
-  - XL: stay at file/connection level; a single `db_sql_sample` per
-    connection is enough; cite at the connection level.
-
-- **`prompts/synthesise-multipass.ts`** -- per-tier outline brief.
-  Mirrors the code-analyzer's L/XL/XXL outline briefs:
-  - S/M: prose findings with per-citation drill-in.
-  - L: module-overview-style table per connection + per-table summary.
-  - XL: connection-overview table + cross-connection drift table; NO
-    per-row content.
-
-User-overridable via `~/.insrc/data-analyzer/<file>.md`; the loader
-merges per-tier addenda the same way code-analyzer does.
-
-#### 1.10.e File: `scope.ts`
-
-The file structure block lists `agent/tasks/data-analyzer/scope.ts`.
-Its job is small: a single function `clampToDataAltitude(tier:
-ScopeSize): ScopeSize` that maps `XXL`/`XXXL`/`XXXXL` down to `XL`
-(per 1.10.a -- data altitude tops out at XL). Called by the
-orchestrator on `attachInput`, before threading into `K_STATE`.
-
-The classifier itself stays at `agent/classify/scope.ts` (shipped,
-generic). No data-specific classifier is needed -- the same prompt
-sizes data questions just as well as code questions; only the
-post-processing differs.
+1. **Replace, don't coexist.** The plan recommendation is to delete
+   `scope.ts` + the per-tier prompt addenda outright once the new
+   routing path is wired through the orchestrator. Keeping two
+   routing paths during the §8 cutover risks divergence (the legacy
+   path would have to learn the new `questionType` enum to keep
+   prompts consistent across runs).
+2. **Keep the plan-size approval gate**, but reading off
+   `candidates.length` from classify-question's output instead of
+   `capsForTier(tier)`. UX is identical; signal is cleaner.
+3. **The four prompts** (`plan.ts`, `analyzer-system.ts`,
+   `synthesise-multipass.ts`, `review.ts`) keep their non-tier
+   bodies. The `tier`-conditional addenda at the bottom of each get
+   deleted; the catalog the planner sees comes from
+   classify-question's output.
 
 ### Phase 1 acceptance
 
@@ -845,41 +916,52 @@ chat message.
 Reuse the code-analyzer's `mid-flight-cancel` gate verbatim. Wires through
 the orchestrator's `abortController`.
 
-### 2.4 Per-task caching -- `cache.ts` + driver helper
+### 2.4 Per-task caching (outer layer) -- `cache.ts`
 
-On-disk cache at `~/.insrc/cache/data-analysis/`.
+On-disk cache at `~/.insrc/cache/data-analysis/`. **Outer cache
+layer** -- sits above the per-skill cache (skills-plan §10.2,
+deferred) which lives at `~/.insrc/cache/skills/`. Both layers
+coexist by design once §10.2 lands:
 
-Cache key (per design §14):
+```
+runDataAnalyzerTask(task) →
+   per-task cache lookup (this layer, key = question + scope + roster fingerprint)
+   ├─ HIT  → return cached SkillResult; no skill execution
+   └─ MISS → runSkill(task.skillInvocation) →
+                per-skill cache lookup (skills-plan §10.2,
+                  key = skill.id + skill.version + canonicalised args)
+                ├─ HIT  → return cached SkillResult; no tool calls
+                └─ MISS → execute skill tool calls; populate both layers
+```
+
+Per-task cache key (per design §14):
 
 ```
 SHA256(task.question + normalize(scope) + connection-version)
 ```
 
 Where `connection-version` is a small fingerprint per connection:
+
 - **RDBMS**: hash of the `db_sql_describe` result for the cited
-  table(s). Stable across queries; changes only when the table's
-  introspection differs (column added / removed, type changed).
+  table(s).
 - **KV**: hash of the `db_kv_sample_shape` result merged from a fixed
-  sample size (e.g. 50 values). Stable when the document shape is
-  stable.
+  sample size (50 values).
 - **File**: hash of the `db_file_describe` result.
 
-**Driver gap (still open as of the shipped Phase 2.4)**: there is no
-centralised `getSchemaFingerprint(connectionId, target)` helper on the
-data-driver -- per-driver `describe()` returns a `SchemaDescription`,
-but no shared pipeline canonicalises + hashes it. The shipped Phase
-2.4 cache module (`agent/tasks/data-analyzer/cache.ts`) uses a
-roster-level stand-in via `buildConnectionFingerprint` -- it hashes
-the sorted scope.connections + a summary of every registered
-connection (id + kind + family) -- so the cache invalidates on
-roster changes but NOT on schema drift against an unchanged
-connection. Workaround until the proper helper lands: clear the cache
-via `insrc.dataAnalyzer.clearCache`.
-
-The proper helper lands in a follow-up slice (~30 lines in
-`daemon/db/index.ts`):
+**Driver gap (still open)**: there is no centralised
+`getSchemaFingerprint(connectionId, target)` helper. Per-driver
+`describe()` returns a `SchemaDescription`, but no shared pipeline
+canonicalises + hashes it. The shipped cache module
+(`agent/tasks/data-analyzer/cache.ts`) uses a roster-level stand-in
+via `buildConnectionFingerprint` -- the cache invalidates on roster
+changes but NOT on schema drift against an unchanged connection.
+**This gap is now shared with the per-skill cache** (skills-plan
+§10.2 needs the same helper to detect schema drift in skill input
+fingerprints), so the proper helper benefits both layers when
+landed:
 
 ```ts
+// ~30 lines in daemon/db/index.ts -- shared between both cache layers
 export async function getSchemaFingerprint(
   connectionId: string,
   target: string,
@@ -887,21 +969,26 @@ export async function getSchemaFingerprint(
   const desc = await describeAny(connectionId, target);
   // Canonicalise: sort columns by name, drop ordinals, drop
   // database-version metadata. Stable across DB engine restarts.
-  const canonical = canonicaliseDescription(desc);
-  return sha256(JSON.stringify(canonical));
+  return sha256(JSON.stringify(canonicaliseDescription(desc)));
 }
 ```
 
-When wired, the cache layer would call it lazily on first cache
-lookup per (connection, target) and memoise the result for the
-session. Recomputed when the session's `db_list_connections` reports
-a connection-changed event (driver already emits this when a
-connection's pool is reset).
+When wired, the per-task cache + per-skill cache both call it lazily
+on first lookup per (connection, target) and memoise per session;
+recomputed when the session's `db_list_connections` emits a
+connection-changed event.
 
-LRU at 200 entries (matches code-analyzer's policy).
-`dataAnalyzer.clearCache` command + IPC handler. `data-conn:<id>` URIs
-in the rendered report do NOT invalidate the cache (they're navigation
-anchors).
+**Invalidation scope**:
+
+| Layer | Invalidates on |
+|---|---|
+| Per-task (this layer) | Question text change, scope change, roster change. With `getSchemaFingerprint` wired: also schema drift |
+| Per-skill (skills-plan §10.2) | Skill version bump, skill arg change, connection-version change |
+
+LRU at 200 entries on the per-task layer (matches code-analyzer's
+policy). `dataAnalyzer.clearCache` clears both layers.
+`data-conn:<id>` URIs in the rendered report do NOT invalidate
+either layer (they're navigation anchors).
 
 ### Phase 2 acceptance
 
@@ -916,46 +1003,102 @@ The first Data-Analyzer-distinctive phase. Lineage = cross-link DB
 target to code that reads/writes it; drift = expected (Prisma / ORM /
 static analysis) vs live introspection.
 
-### 3.1 `data:lineage` tool
+### 3.1 Lineage -- `data.lineage.read-write-callsites` skill
 
-Implementation:
+The shipped `daemon/tools/builtins/data/lineage.ts` tool stays as
+the primitive; analyzer-facing logic lives in the
+**`data.lineage.read-write-callsites` skill** (skills-plan §3.4,
+shipped). The skill wraps the tool with a typed contract:
+
+```
+Input:  { connectionId, table }
+Output: { readers: CodeCitation[], writers: CodeCitation[], ambiguous: CodeCitation[] }
+```
+
+Tool implementation (under the skill):
 
 1. Take a `(connectionId, table)` pair.
-2. Look up the connection's expected schema (Prisma fast-path / ORM model /
-   none).
-3. Query the Code Knowledge Graph for `CALLS` edges that mention the table
-   name as a string literal or as a typed identifier (when ORM types are
-   known).
-4. Return `{ readers, writers, ambiguous }` -- each entry is a code
-   citation (path / line) plus a confidence based on match precision
+2. Look up the connection's expected schema (Prisma fast-path /
+   ORM model / none).
+3. Query the LMDB Code Knowledge Graph for `CALLS` edges that
+   mention the table name as a string literal or a typed
+   identifier. v1 uses literal-name matching + keyword-near-literal
+   classification (`insert` / `select` / `update` / `delete`
+   tokens within 200 chars of the literal); ORM-write precedence
+   when both write + read patterns match.
+4. Return `{ readers, writers, ambiguous }`. Each entry is a code
+   citation (path / line) plus per-match confidence
    (typed > literal > heuristic).
 
-Lineage findings emit BOTH `DataCitation` (the table) AND code-style
-`path:` citations (the call sites). Renderer shows both kinds inline.
+Lineage findings emit BOTH `DataCitation` (the table) AND code-
+style `path:` citations (the call sites). Renderer shows both kinds
+inline.
 
-### 3.2 `data:schema-drift` tool
+**ORM-typed identifier matching** (Prisma / TypeORM / Sequelize /
+SQLAlchemy / Hibernate / ActiveRecord) is shipped at the tool layer
+via call-pattern recognition (`.create(`, `.findOne(`, `.update_all(`,
+etc.). The complementary type-resolved path (Prisma schema → model →
+table mapping) is a follow-up that lands with skills-plan §3.3
+(`data.code.orm.resolve-model`) when code-analyzer prerequisites
+ship.
 
-1. Resolve the expected shape for `(connectionId, table)`:
-   - Prisma schema (when present) -- preferred.
-   - ORM model file (TypeORM / Sequelize / Mongoose) -- second choice.
-   - Static analysis of query-builder usage in the code -- last resort.
-2. Resolve the live shape via `data:describe-table` (RDBMS) or
-   `data:sample-shape` over many values (KV).
-3. Diff: missing-column, extra-column, type-mismatch, nullable-mismatch,
-   pk-changed, fk-changed.
-4. Return findings with `concern: 'schema-drift'`, severity by drift kind
-   (extra-column = info; missing-column = error; type-mismatch = warn).
+### 3.2 Schema drift -- `data:schema-drift` tool (legacy) → skills-plan §4.1-§4.3
 
-When the expected shape can't be resolved (no Prisma, no ORM, no static
-hits), drift task downgrades to `confidence: 'low'` and answer "no static
-schema source found; emit `inspect-schema` for live snapshot".
+`daemon/tools/builtins/data/schema-drift.ts` is the shipped legacy
+tool (Prisma fast-path only). It diffs Prisma vs live RDBMS:
 
-### 3.3 ER artifact integration
+1. Resolve the expected shape for `(connectionId, table)` via the
+   nearest `schema.prisma` to the file referencing the connection.
+2. Resolve the live shape via `db_sql_describe`.
+3. Diff: missing-column / extra-column / type-mismatch /
+   nullable-mismatch / pk-changed / fk-changed.
+4. Severity: extra-column = info; missing-column = error;
+   type-mismatch = warn.
 
-Lineage findings can render an ER diagram for the affected tables. The
-`artifacts/kinds/er.ts` is shipped; the data-analyzer's controller
-generates an ER-artifact alongside the report when `kind === 'er'` is in
-the plan, embedding the artifact link in the report's relevant section.
+When the expected shape can't be resolved (non-Prisma connection,
+or no schema.prisma found): the tool returns
+`confidence: 'low'` with a "no static schema source found" note.
+
+**Replacement (skills-plan §4.1 / §4.2 / §4.3)**: comprehensive
+drift composites land as skills:
+
+| Skill | ORM dialect |
+|---|---|
+| `data.drift.prisma-vs-live` | Prisma |
+| `data.drift.typeorm-vs-live` | TypeORM |
+| `data.drift.sqlalchemy-vs-live` | SQLAlchemy |
+
+All three are deferred on Phase 3 code-binding skills
+(`code.orm.resolve-model`, blocked on code-analyzer prerequisites).
+Until those land:
+
+- The shipped `data:schema-drift` tool stays as the only drift
+  surface for Prisma users.
+- Non-Prisma users see `confidence: 'low'` and a "drift detection
+  for <orm> not yet shipped" note.
+
+When the §4 composites land, `data:schema-drift` becomes a thin
+shim that forwards to `data.drift.prisma-vs-live` (preserving
+cross-agent + cached-plan back-compat per skills-plan §9.1).
+
+### 3.3 ER artifact integration -- `synth.er-diagram` (skills-plan §6.4 deferred)
+
+Currently shipped: orchestrator's `_appendErArtifactSection` walks
+accepted tasks for `kind === 'er'`, invokes `artifact_er` per
+(connection, tables) group, appends a "## ER Diagrams" section to
+the report.
+
+**Replacement (skills-plan §6.4)**: `data.synth.er-diagram` skill
+takes the cross-table topology output from §4's drift composites
+and renders a Mermaid ER diagram via the existing `artifact_er`
+infrastructure. Currently deferred because §6.4 composes §4's
+output, which is itself deferred on Phase 3 code-binding.
+
+Until §6.4 lands, the inline integration stays. Cutover plan: when
+§6.4 ships, the orchestrator stops calling `_appendErArtifactSection`
+inline; the skill's output is rendered into the report by the
+generic synth-renderer pipeline (`data.synth.scorecard` + others
+already follow this pattern).
 
 ### Phase 3 acceptance
 
@@ -971,15 +1114,21 @@ the plan, embedding the artifact link in the report's relevant section.
 
 Mirror code-analyzer Phase 3.
 
-### 4.1 Register `data:*` cross-agent tools
+### 4.1 Cross-agent surface -- `data:*` (legacy) → skill cross-calls
 
-New file `daemon/cross-agent/data-tools.ts` (mirroring the shipped
-`daemon/cross-agent/code-tools.ts`). Exports
-`registerDataAnalyzerCrossAgentTools()` that registers:
+> **Shipped**: `daemon/cross-agent/data-tools.ts` registers the
+> `data:*` wrapper set below. **Cutover planned**: skills-plan §9.2
+> migrates cross-agent calls to direct `runSkill('data.X', ...)`
+> invocations under the cross-owner depth cap; the wrappers stay as
+> legacy shims until telemetry shows zero non-shim callers.
+
+Shipped `data:*` tool registrations (in
+`daemon/cross-agent/data-tools.ts`, mirror of the shipped
+`daemon/cross-agent/code-tools.ts`):
 
 - `data:list-connections`  -- thin wrapper over `db_list_connections`
-- `data:describe-table`    -- routes RDBMS / KV / file family on the
-                              fly via the connection's family
+- `data:describe-table`    -- routes RDBMS / KV / file family via
+                              the connection's family
 - `data:sample`            -- routes to `db_sql_sample` /
                               `db_kv_get` / `db_file_sample`
 - `data:scan`              -- thin wrapper over `db_kv_scan`
@@ -987,20 +1136,33 @@ New file `daemon/cross-agent/data-tools.ts` (mirroring the shipped
 - `data:sample-shape`      -- routes to `db_kv_sample_shape` /
                               `db_file_sample_shape`
 - `data:explain`           -- thin wrapper over `db_sql_explain`
-- `data:lineage`           -- the analyzer's own (Phase 3.1)
-- `data:schema-drift`      -- the analyzer's own (Phase 3.2)
+- `data:lineage`           -- analyzer-native (wraps the Phase 3.1
+                              `data_lineage` tool / `data.lineage.read-
+                              write-callsites` skill)
+- `data:schema-drift`      -- analyzer-native (wraps the Phase 3.2
+                              tool; will forward to `data.drift.*-vs-
+                              live` skills when §4 composites land)
 - `data:analyze`           -- Flow 2 entry (Phase 4.3)
 
-The wrappers exist because (a) the design's documented cross-agent
-namespace is `data:*` not `db_*`, (b) some calls dispatch over the
-connection family at the cross-agent layer so callers don't need to
-know whether a target is RDBMS / KV / file, and (c) the analyzer
-adds tools (`lineage`, `schema-drift`, `analyze`) that have no
-driver-side equivalent.
-
-Registration is wired into `daemon/index.ts` alongside the existing
-`registerCodeAnalyzerCrossAgentTools()` call, gated on
+Registration is wired into `daemon/index.ts` alongside the
+existing `registerCodeAnalyzerCrossAgentTools()` call, gated on
 `insrc.analyzers.enabled`.
+
+**Why the wrappers exist (legacy rationale)**: (a) the design's
+documented cross-agent namespace is `data:*` not `db_*`; (b) some
+calls dispatch over the connection family at the cross-agent layer
+so callers don't need to know whether a target is RDBMS / KV /
+file; (c) `lineage`, `schema-drift`, and `analyze` have no
+driver-level equivalent.
+
+**Cutover plan (skills-plan §9.2)**: code-analyzer + deploy-
+analyzer invocations migrate from `data:*` tool calls to
+`runSkill('data.X.<variant>', args)` via the cross-owner depth-cap
+mechanism the registry already enforces. Each `data:*` wrapper
+becomes a back-compat shim that internally forwards to the
+matching skill, so existing cross-agent callers keep working.
+Deletion gated on telemetry showing zero non-shim callers; until
+then, both surfaces coexist.
 
 ### 4.2 Wire `code:*` and `deploy:*` into the data-analyzer's tool list
 
@@ -1069,19 +1231,36 @@ Already in Phase 2.1's saveReport path; this slice adds discoverability
 (palette command + Report Pane button) and a `lastSavedAt` annotation on
 the list `meta`.
 
-### 5.5 PII pattern library overrides
+### 5.5 PII detection -- skills-plan §5e (shipped)
 
-Per-repo PII pattern overrides land in `<repo>/.insrc/data-analyzer/pii.json`. Format:
+The original §5.5 design (per-repo `<repo>/.insrc/data-analyzer/pii.json`
+loader merged with a bundled pattern library) is **superseded by
+the shipped §5e skill family**. The replacement surface:
 
-```jsonc
-{
-  "patterns": [
-    { "name": "internal-employee-id", "regex": "^E\\d{6}$", "severity": "warn" }
-  ]
-}
-```
+- **`data.pii.detect-patterns.{rdbms, file, kv}`** -- anchored regex
+  catalog (email / ssn-us / phone-us / credit-card / jwt / ipv4 /
+  iban / aws-access-key / github-token / uuid). Each variant walks
+  the connection family's sample surface (rows / files / scanned
+  values) and runs the same catalog.
 
-Loaded at controller init alongside the bundled pattern library.
+- **`data.pii.column-classifier.rdbms`** -- composite combining
+  `detect-patterns` with a 14-rule column-name heuristic to return
+  `pii / likely-pii / not-pii` per column with explicit
+  `evidence` strings. Surfaces both data-leak (PII values, generic
+  name) and missing-data (named-PII column, empty sample) cases
+  per the 2026-04-30 lessons-learned fix.
+
+- **`data.sensitivity.policy-check.rdbms`** -- composite over
+  `column-classifier` that cross-references caller-supplied
+  `declaredPiiColumns` against detected. Verdict ladder:
+  `conformant` / `mismatch` / `gaps` (security-relevant signal).
+
+**Per-repo pattern overrides** are deferred as a follow-up to
+`data.pii.detect-patterns.*` -- caller passes
+`extraPatterns: [{ name, regex, severity }]` per invocation. The
+`<repo>/.insrc/data-analyzer/pii.json` file format remains a
+plausible config surface if a real user case justifies it; tracked
+under skills-plan §5e (open follow-up to 5e.1).
 
 ### 5.6 `data-conn:` opener -- table focus
 
@@ -1165,26 +1344,63 @@ sensitive).
 
 ## Sequencing recommendation
 
+The original v1 ladder shipped:
+
 ```
-Phase 0  ──>  Phase 1  ──>  Phase 2  ──>  Phase 3  ──>  Phase 4  ──>  Phase 5
-(family       (orchestrator (pane +       (lineage     (cross-agent  (polish:
- + slash)      + analyzer    cache)        + drift)     bidirectional) re-run,
-                + report                                                drill-
-                draft)                                                  down,
-                                                                        PII
-                                                                        overrides)
+Phase 0  ──>  Phase 1  ──>  Phase 2  ──>  Phase 3 (partial)  ──>  Phase 4  ──>  Phase 5
+(family       (orchestrator (pane +       (lineage tool +        (cross-agent   (polish:
+ + slash)      + legacy      cache,        Prisma drift            bidirectional) re-run,
+                runner +     outer         fast-path; skills                       drill-
+                report        layer)       wrap)                                    down)
+                draft)
 ```
 
-**Don't** try to ship Phase 3 (lineage + drift) before Phase 2 -- the
-report pane is the only meaningful surface to validate lineage findings
-in. The Code Analyzer's experience showed that tier-conditional
-behaviour rediscovered as bugs costs more than landing the surface
-first.
+**Cutover ahead** (after skills-plan §7 + §8 land):
 
-**Do** land Phase 0 + slash entry + family registration as a single
-small commit before Phase 1 begins, so the slash typo guard works for
-users running `/data-analyze` while Phase 1 is in flight (it'll emit a
-"command not yet registered" message instead of mis-routing).
+```
+[shipped v1]  ──>  skills §7.1/§7.2  ──>  skills §8.1/§8.2/§8.3  ──>  skills §9
+                   (classify +              (planner + per-task        (legacy DataAnalysisTask
+                    select-scope            runner + reviewer            shim → cross-agent
+                    replace                 use SkillResult              data:* shims forward
+                    scope.ts)               instead of free-form)        to runSkill)
+```
+
+Per-cutover ordering (each step is a separate commit, smallest unit
+that keeps the system green):
+
+1. **Land `describe_skill` tool** (skills-plan §7.1 dependency).
+2. **Land `meta.classify-question`** -- still wired to legacy
+   runner; new path is logged but not consumed.
+3. **Land `meta.select-scope`** -- same: logged, not consumed.
+4. **Wire orchestrator to consume classify+select output** instead
+   of `scope.ts`'s tier label. Delete `scope.ts` + per-tier prompt
+   addenda in the same commit (they'd be dead code once the
+   orchestrator stops calling them).
+5. **Land skills-plan §8.2 per-task runner rewrite** -- runner
+   becomes a `runSkill()` dispatcher. Legacy `analyzer/runner.ts`
+   stays compiled but unused; gated removal in a follow-up commit
+   once telemetry confirms zero callers.
+6. **Land skills-plan §9.1 DataAnalysisTask shim** for cached-plan
+   replay. Cache entries from before the cutover keep working.
+7. **Land skills-plan §10.2 per-skill cache** as the inner layer
+   below this plan's §2.4 per-task cache. Both layers active.
+8. **Migrate `data:*` cross-agent wrappers** to forward to skill
+   cross-calls (skills-plan §9.2). Wrappers stay as back-compat
+   shims; deletion gated on telemetry showing zero non-shim
+   callers.
+
+**Don't** try to ship the per-task runner rewrite (step 5) before
+classify-question + select-scope (steps 2-4) are wired in -- the
+runner needs the new routing layer to call into. The order matters
+because the plan-step prompt (`prompts/plan.ts`) currently emits
+`DataAnalysisKind`-keyed tasks; it transitions to emitting
+`SkillInvocation`-shaped tasks at step 4, and the runner has to
+already know how to consume both shapes by step 5.
+
+**Do** keep both code paths live during steps 2-3 so a regression
+in classify-question doesn't break running flows. A feature flag
+(`insrc.dataAnalyzer.skillsRouting`) gates the new path; default
+off until step 4 wires it through.
 
 ## Future work (post v1)
 
