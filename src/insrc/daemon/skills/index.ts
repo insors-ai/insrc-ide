@@ -21,6 +21,9 @@ import { registerCodeClassExtractFieldsSkill } from './built-ins/code.class.extr
 import { registerCodeClassLocateReferencesSkill } from './built-ins/code.class.locate-references.js';
 import { registerCodeOrmResolveModelSkill } from './built-ins/code.orm.resolve-model.js';
 import { registerCodeMigrationExtractHistorySkill } from './built-ins/code.migration.extract-history.js';
+import { registerCodeSourceFileDescribeSkill } from './built-ins/code.source.file.describe.js';
+import { registerCodeSourceModuleDescribeSkill } from './built-ins/code.source.module.describe.js';
+import { registerCodeSourceRepoDescribeSkill } from './built-ins/code.source.repo.describe.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -135,6 +138,13 @@ export function registerAllSkills(): void {
   // the prerequisites blocking data-analyzer skills routing
   // flag-default-on cutover.
   registerCodeMigrationExtractHistorySkill();
+  // code-analyzer-skills.md Phase 1 -- source-introspection skills.
+  // Pure-graph wrappers; the indexer is the source of truth and
+  // these expose typed views on top of it for the future Phase 7.1 /
+  // 7.2 LLM-routed planner.
+  registerCodeSourceFileDescribeSkill();
+  registerCodeSourceModuleDescribeSkill();
+  registerCodeSourceRepoDescribeSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
