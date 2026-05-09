@@ -42,6 +42,8 @@ import { registerCodeSynthArchitectureOverviewSkill } from './built-ins/code.syn
 import { registerCodeCompareSignatureSkill } from './built-ins/code.compare.signature.js';
 import { registerCodeCompareImplVsDocSkill } from './built-ins/code.compare.impl-vs-doc.js';
 import { registerCodeCompareEntityVersionsSkill } from './built-ins/code.compare.entity-versions.js';
+import { registerCodeMetaClassifyQuestionSkill } from './built-ins/code.meta.classify-question.js';
+import { registerCodeMetaSelectScopeSkill } from './built-ins/code.meta.select-scope.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -190,6 +192,13 @@ export function registerAllSkills(): void {
   registerCodeCompareSignatureSkill();
   registerCodeCompareImplVsDocSkill();
   registerCodeCompareEntityVersionsSkill();
+  // code-analyzer-skills.md Phase 7 -- LLM-routed meta skills.
+  // Owner-scoped mirrors of data-analyzer-skills' 7.1 / 7.2; the
+  // shared 7.3 / 7.4 (feasibility-check / calibrate-confidence) are
+  // already registered in the data-analyzer block above and serve
+  // both owners.
+  registerCodeMetaClassifyQuestionSkill();
+  registerCodeMetaSelectScopeSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
