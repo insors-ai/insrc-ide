@@ -59,6 +59,7 @@ import { registerDataSynthScorecardSkill } from './built-ins/data.synth.scorecar
 import { registerDataSynthHistogramBlockSkill } from './built-ins/data.synth.histogram-block.js';
 import { registerDataMetaFeasibilityCheckSkill } from './built-ins/data.meta.feasibility-check.js';
 import { registerDataMetaCalibrateConfidenceSkill } from './built-ins/data.meta.calibrate-confidence.js';
+import { registerDataMetaClassifyQuestionSkill } from './built-ins/data.meta.classify-question.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataQualityValidityFileSkill } from './built-ins/data.quality.validity.file.js';
 import { registerDataDistributionHistogramRdbmsSkill } from './built-ins/data.distribution.histogram.rdbms.js';
@@ -224,10 +225,12 @@ export function registerAllSkills(): void {
   // 5e.3 sensitivity.policy-check composes pii.column-classifier
   // across columns vs the connection's declared PII list.
   registerDataSensitivityPolicyCheckRdbmsSkill();
-  // Phase 7 meta skills -- deterministic helpers consumed by the
-  // future planner rewrite (Phase 8.1).
+  // Phase 7 meta skills -- 7.3 / 7.4 are deterministic helpers; 7.1
+  // (classify-question) is the LLM-routed router consumed by the
+  // planner rewrite (Phase 8.1) when it lands.
   registerDataMetaFeasibilityCheckSkill();
   registerDataMetaCalibrateConfidenceSkill();
+  registerDataMetaClassifyQuestionSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
