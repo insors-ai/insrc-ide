@@ -475,23 +475,39 @@ function safePreview(value: unknown): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Read site for `insrc.dataAnalyzer.skillsRouting`. Returns true when
- * the orchestrator should use the skills-routing path instead of the
- * legacy plan + per-task runner. Default: false.
+ * Read site for the skills-routing feature flag. Two sources, in
+ * precedence order:
  *
- * The flag lives in `state.skillsRouting` on the run state so a
- * re-run of an old report keeps the original routing behaviour even
- * if the user has flipped the flag in the meantime. Step 4b wires
- * this; v1 returns false unconditionally.
+ *   1. `state.skillsRouting` -- captured at orchestrator-run start
+ *      so a re-run of an old report keeps the original routing
+ *      behaviour even if the toggle source has flipped in the
+ *      meantime.
  *
- * In step 4b the orchestrator persists the captured value into
- * `K_STATE.skillsRouting` at run start; a follow-up surfaces the
- * flag through `tools.config.set` IPC and the Model Providers
- * pane settings UI.
+ *   2. `INSRC_DATA_ANALYZER_SKILLS_ROUTING` env var -- read at
+ *      orchestrator-run start when `state.skillsRouting` is unset.
+ *      Truthy values: '1', 'true', 'on' (case-insensitive). Lets a
+ *      developer flip the flag without IDE-side IPC plumbing.
+ *
+ * IDE-side toggle through `tools.config.set` is a follow-up; the
+ * env-var path is the v1 control surface.
  */
 export function isSkillsRoutingEnabled(state: DataAnalysisState | undefined): boolean {
 	const ss = state as DataAnalysisState & { readonly skillsRouting?: boolean } | undefined;
-	return ss?.skillsRouting === true;
+	if (ss?.skillsRouting === true)  { return true; }
+	if (ss?.skillsRouting === false) { return false; }
+	return readSkillsRoutingFromEnv();
+}
+
+/**
+ * Read the env-var fallback. Exported for the orchestrator to
+ * snapshot at run start (so the captured value persists into
+ * `state.skillsRouting` and survives env-var flips mid-session).
+ */
+export function readSkillsRoutingFromEnv(): boolean {
+	const raw = process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'];
+	if (raw === undefined) { return false; }
+	const v = raw.trim().toLowerCase();
+	return v === '1' || v === 'true' || v === 'on';
 }
 
 // ---------------------------------------------------------------------------

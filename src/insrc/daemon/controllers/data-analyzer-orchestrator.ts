@@ -59,10 +59,16 @@ import {
   K_ACCEPTED,
   K_HISTORY,
   RESUME_BOOTSTRAP_MARKER,
+  SKILLS_ROUTING_BOOTSTRAP_MARKER,
   type DataAnalysisState,
   type DataAnalyzerPhase,
   type AcceptedTask,
 } from '../../agent/tasks/data-analyzer/state.js';
+import {
+  pipelineResultToAcceptedTasks,
+  readSkillsRoutingFromEnv,
+  runSkillsPipeline,
+} from '../../agent/tasks/data-analyzer/skills-pipeline.js';
 import type {
   ConnectionSummary,
   DataAnalysisTask,
@@ -200,6 +206,30 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       }];
     }
 
+    // data-analyzer-skills.md step 4b: skills-routing path -- when
+    // the feature flag is on, emit a bootstrap pass-through task; the
+    // orchestrator's `next()` detects the marker and runs the skills
+    // pipeline (classify → select → runSkill per scoped → calibrate)
+    // inline, then queues the legacy synthesise step. The legacy plan
+    // LLM call + per-task analyzer runner are bypassed entirely. The
+    // flag is also captured in `state.skillsRouting` (via
+    // `ensureStateInitialized`) so a resume of an in-flight run
+    // dispatches consistently regardless of env-var changes.
+    if (readSkillsRoutingFromEnv()) {
+      log.info({ }, 'data-analyzer: skills-routing path enabled via env var');
+      return [{
+        index: 0,
+        description: 'Data Analyzer: routing question through skills pipeline...',
+        kind: 'transform',
+        intent: 'data-analysis',
+        passThrough: true,
+        userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+        outputFormat: 'text',
+        stateKey: K_PLAN_RESULT,
+        persisted: true,
+      }];
+    }
+
     return [{
       index: 0,
       description: `Data Analyzer: planning tasks (tier ${this._tier})...`,
@@ -325,6 +355,10 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       childListIds: [],
       truncated:    false,
       cancelled:    false,
+      // data-analyzer-skills.md step 4b: capture the routing flag at
+      // run start so a re-run / resume keeps the original behaviour
+      // even if the env var has flipped in the meantime.
+      skillsRouting: readSkillsRoutingFromEnv(),
     };
     state.set(K_STATE, initial);
     state.set(K_PHASE, 'planning' as DataAnalyzerPhase);
@@ -357,6 +391,13 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     // items and skip straight to beginAnalysis.
     if (this._rerunFromListId !== undefined && completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
       return this.afterRerunBootstrap(state);
+    }
+
+    // data-analyzer-skills.md step 4b: skills-routing path.
+    // buildInitialTasks emitted SKILLS_ROUTING_BOOTSTRAP_MARKER;
+    // run the meta-skills pipeline inline + queue synthesise.
+    if (completed.output.trim() === SKILLS_ROUTING_BOOTSTRAP_MARKER) {
+      return this.afterSkillsRoutingBootstrap(state);
     }
 
     switch (phase) {
@@ -574,6 +615,142 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     state.set(K_PLAN_TASKS, reconstructed);
     await this._persistTaskList(reconstructed, state);
     return this.beginAnalysis(reconstructed, state);
+  }
+
+  // -- skills-routing bootstrap (data-analyzer-skills.md step 4b) ----------
+
+  /**
+   * Skills-routing path. The bootstrap pass-through emitted by
+   * `buildInitialTasks` lands here; we run `runSkillsPipeline`
+   * inline (classify-question → select-scope → runSkill per scoped
+   * → calibrate-confidence), adapt the result to the legacy
+   * `AcceptedTask[]` + `DataAnalyzerResult[]` shape via
+   * `pipelineResultToAcceptedTasks`, persist the TodoList, and
+   * queue the legacy synthesise step.
+   *
+   * The legacy plan + per-task analyzer runner are bypassed
+   * entirely. Review is also skipped: the per-task review prompt
+   * expects an LLM-generated DataAnalyzerResult shape; skill-derived
+   * results carry their own confidence + notes that calibrate-
+   * confidence already rolled into a final verdict.
+   */
+  private async afterSkillsRoutingBootstrap(state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps === undefined) {
+      log.error('afterSkillsRoutingBootstrap: deps missing');
+      return null;
+    }
+    if (this._request === undefined || this._request.length === 0) {
+      log.error('afterSkillsRoutingBootstrap: request missing');
+      return null;
+    }
+
+    const ca = state.get<DataAnalysisState>(K_STATE)!;
+    log.info(
+      { connections: this._connections.length, tier: this._tier },
+      'afterSkillsRoutingBootstrap: running meta-skills pipeline',
+    );
+
+    const session = this.deps.session;
+    const pipelineResult = await runSkillsPipeline(
+      { question: this._request, connections: this._connections },
+      {
+        session,
+        resolveProvider: (affinity) => {
+          // Skills-plan §7.1: cloud affinity → active cloud
+          // provider's small/fast tier. The session resolver
+          // ('skill', 'meta') returns whatever the user has bound
+          // for the meta step; falls back to the active provider's
+          // default. For local affinity we reach into ollamaProvider
+          // directly since the resolver doesn't gate on local.
+          if (affinity === 'local') return session.ollamaProvider;
+          if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
+          return session.resolver.resolve('data-analyzer', 'meta');
+        },
+        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+      },
+    );
+
+    log.info(
+      {
+        aborted: pipelineResult.aborted,
+        executions: pipelineResult.executions.length,
+        finalConfidence: pipelineResult.finalConfidence,
+        notes: pipelineResult.notes.slice(0, 3),
+      },
+      'afterSkillsRoutingBootstrap: pipeline complete',
+    );
+
+    // Aborted run → mark cancelled + finalise. The pipeline's notes
+    // surface in the report's empty-state body via the synthesise
+    // step (which still runs, producing a minimal report explaining
+    // why the pipeline aborted).
+    if (pipelineResult.aborted) {
+      state.set(K_STATE, { ...ca, cancelled: false });    // not user-cancelled; pipeline declined to proceed
+      state.set(K_PLAN_TASKS, []);
+      state.set(K_ACCEPTED, [] as AcceptedTask[]);
+      state.set(K_HISTORY, [] as DataAnalyzerResult[]);
+      // Stash pipeline notes as the synthesise step's input so the
+      // report body explains the abort reason instead of being
+      // silently empty.
+      state.set('skills-pipeline-notes' as string as never, pipelineResult.notes);
+      return this.queueSynthesise(state);
+    }
+
+    // Adapt pipeline → legacy shapes the synthesise step consumes.
+    const itemPrefix = `dr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
+    const planned: DataAnalysisTask[] = accepted.map(a => a.task);
+    const history: DataAnalyzerResult[] = accepted.map(a => a.result);
+
+    state.set(K_PLAN_TASKS, planned);
+    state.set(K_ACCEPTED, accepted);
+    state.set(K_HISTORY, history);
+
+    // Create the TodoList + items so the user sees the per-skill
+    // runs in the chat panel. `_persistTaskList` walks `planned`,
+    // calls addItem per task, and stamps the resulting framework-
+    // assigned ids back onto K_PLAN_TASKS. After it returns we
+    // re-stamp the matching `AcceptedTask` records so synthesise
+    // sees consistent itemIds.
+    await this._persistTaskList(planned, state);
+    const stampedPlan = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? planned;
+    const stampedAccepted: AcceptedTask[] = stampedPlan.map((task, i) => ({
+      task,
+      result: { ...accepted[i]!.result, itemId: task.itemId },
+    }));
+    state.set(K_ACCEPTED, stampedAccepted);
+    state.set(K_HISTORY, stampedAccepted.map(a => a.result));
+
+    // Stamp per-skill metadata onto each TodoItem so the pane row
+    // renderer + drill-down footer have something to show. Mark
+    // each item complete since the skill already ran.
+    if (this.deps.todos !== undefined) {
+      for (const a of stampedAccepted) {
+        try {
+          await this.deps.todos.updateItemMeta(a.task.itemId, {
+            kind: a.task.kind,
+            ...(a.task.scope !== undefined ? { scope: a.task.scope } : {}),
+            origin: a.task.origin,
+            retryCount: 0,
+            answer:    a.result.answer,
+            findings:  a.result.findings,
+            citations: a.result.citations,
+            confidence: a.result.confidence,
+            toolCalls:  a.result.toolCalls,
+            ...(a.result.truncated      ? { truncated: true } : {}),
+            ...(a.result.blockedReason !== undefined ? { blockedReason: a.result.blockedReason } : {}),
+          });
+          await this.deps.todos.markComplete(a.task.itemId);
+        } catch (err) {
+          log.warn({ err, itemId: a.task.itemId }, 'skills-routing: updateItemMeta / markComplete failed');
+        }
+      }
+    }
+
+    // Skills-routing skips the legacy review step (per-task review
+    // prompt assumes an LLM-generated analyzer output; skill results
+    // come pre-calibrated). Jump straight to synthesise.
+    return this.queueSynthesise(state);
   }
 
   // -- analyze + review ----------------------------------------------------
