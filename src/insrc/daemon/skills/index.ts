@@ -18,6 +18,7 @@ import { listSkills } from './registry.js';
 import { registerDataLineageSkill } from './built-ins/data-lineage.js';
 import { registerDataCodeDeadCodeSkill } from './built-ins/data.code.dead-code.js';
 import { registerCodeClassExtractFieldsSkill } from './built-ins/code.class.extract-fields.js';
+import { registerCodeClassLocateReferencesSkill } from './built-ins/code.class.locate-references.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -116,6 +117,10 @@ export function registerAllSkills(): void {
   // typed `{ found, nearest }` discriminator codifies the
   // 2026-04-30 hallucinated-class fix structurally.
   registerCodeClassExtractFieldsSkill();
+  // code-analyzer-skills.md Phase 3.2 -- the second cross-owner
+  // code-binding skill. Composes code_class_locate +
+  // code_class_references; same typed-refusal discriminator as §3.1.
+  registerCodeClassLocateReferencesSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
