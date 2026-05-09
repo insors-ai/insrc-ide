@@ -20,6 +20,7 @@ import { registerDataCodeDeadCodeSkill } from './built-ins/data.code.dead-code.j
 import { registerCodeClassExtractFieldsSkill } from './built-ins/code.class.extract-fields.js';
 import { registerCodeClassLocateReferencesSkill } from './built-ins/code.class.locate-references.js';
 import { registerCodeOrmResolveModelSkill } from './built-ins/code.orm.resolve-model.js';
+import { registerCodeMigrationExtractHistorySkill } from './built-ins/code.migration.extract-history.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -128,6 +129,12 @@ export function registerAllSkills(): void {
   // (lineage / cardinality / quality skills that need a model ->
   // table -> column mapping).
   registerCodeOrmResolveModelSkill();
+  // code-analyzer-skills.md Phase 3.5 -- migration history extraction.
+  // Wraps code_migration_walk with a typed { found, reason } refusal
+  // shape. Last cross-owner skill on the critical path -- closes out
+  // the prerequisites blocking data-analyzer skills routing
+  // flag-default-on cutover.
+  registerCodeMigrationExtractHistorySkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
