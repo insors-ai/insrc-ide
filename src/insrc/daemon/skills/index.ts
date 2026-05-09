@@ -60,6 +60,7 @@ import { registerDataSynthHistogramBlockSkill } from './built-ins/data.synth.his
 import { registerDataMetaFeasibilityCheckSkill } from './built-ins/data.meta.feasibility-check.js';
 import { registerDataMetaCalibrateConfidenceSkill } from './built-ins/data.meta.calibrate-confidence.js';
 import { registerDataMetaClassifyQuestionSkill } from './built-ins/data.meta.classify-question.js';
+import { registerDataMetaSelectScopeSkill } from './built-ins/data.meta.select-scope.js';
 import { registerDataQualityValidityRdbmsSkill } from './built-ins/data.quality.validity.rdbms.js';
 import { registerDataQualityValidityFileSkill } from './built-ins/data.quality.validity.file.js';
 import { registerDataDistributionHistogramRdbmsSkill } from './built-ins/data.distribution.histogram.rdbms.js';
@@ -231,6 +232,7 @@ export function registerAllSkills(): void {
   registerDataMetaFeasibilityCheckSkill();
   registerDataMetaCalibrateConfidenceSkill();
   registerDataMetaClassifyQuestionSkill();
+  registerDataMetaSelectScopeSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
