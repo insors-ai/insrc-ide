@@ -19,10 +19,12 @@ import { registerCodeClassLocateTool } from './class-locate.js';
 import { registerCodeClassFieldsTool } from './class-fields.js';
 import { registerCodeClassReferencesTool } from './class-references.js';
 import { registerCodeOrmScanTool } from './orm-scan.js';
+import { registerCodeMigrationWalkTool } from './migration-walk.js';
 
 export function registerCodeTools(): void {
 	registerCodeClassLocateTool();
 	registerCodeClassFieldsTool();
 	registerCodeClassReferencesTool();
 	registerCodeOrmScanTool();
+	registerCodeMigrationWalkTool();
 }
