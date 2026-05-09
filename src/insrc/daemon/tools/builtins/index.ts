@@ -29,6 +29,7 @@ import { registerPlanTools } from './plan/index.js';
 import { registerArtifactTools } from './artifact/index.js';
 import { registerDbTools } from './db/index.js';
 import { registerDataTools } from './data/index.js';
+import { registerCodeTools } from './code/index.js';
 import { registerSkillTools } from './skills/invoke-skill.js';
 import { registerLlmAliases } from './llm-aliases.js';
 
@@ -54,6 +55,7 @@ const CATEGORIES: Readonly<Record<string, () => void>> = {
   artifact: registerArtifactTools,
   db:       registerDbTools,
   data:     registerDataTools,
+  code:     registerCodeTools,
   skill:    registerSkillTools,
 };
 
