@@ -34,6 +34,11 @@ import { registerCodeQualityUnusedExportsSkill } from './built-ins/code.quality.
 import { registerCodeQualityCyclicDepsSkill } from './built-ins/code.quality.cyclic-deps.js';
 import { registerCodeQualityComplexitySkill } from './built-ins/code.quality.complexity.js';
 import { registerCodeQualityDuplicationSkill } from './built-ins/code.quality.duplication.js';
+import { registerCodeSynthEntityCardSkill } from './built-ins/code.synth.entity-card.js';
+import { registerCodeSynthFindingsTableSkill } from './built-ins/code.synth.findings-table.js';
+import { registerCodeSynthCallgraphMermaidSkill } from './built-ins/code.synth.callgraph-mermaid.js';
+import { registerCodeSynthModuleTreeSkill } from './built-ins/code.synth.module-tree.js';
+import { registerCodeSynthArchitectureOverviewSkill } from './built-ins/code.synth.architecture-overview.js';
 import { registerDataSourceRdbmsDescribeTableSkill } from './built-ins/data.source.rdbms.describe-table.js';
 import { registerDataSourceRdbmsListTablesSkill } from './built-ins/data.source.rdbms.list-tables.js';
 import { registerDataSourceRdbmsListIndexesSkill } from './built-ins/data.source.rdbms.list-indexes.js';
@@ -168,6 +173,14 @@ export function registerAllSkills(): void {
   registerCodeQualityDuplicationSkill();
   registerCodeQualityUnusedExportsSkill();
   registerCodeQualityCyclicDepsSkill();
+  // code-analyzer-skills.md Phase 6 -- synthesis renderers.
+  // Pure templates; consume the typed outputs of upstream skills
+  // and emit report-ready markdown. No LLM, no tool calls.
+  registerCodeSynthEntityCardSkill();
+  registerCodeSynthFindingsTableSkill();
+  registerCodeSynthCallgraphMermaidSkill();
+  registerCodeSynthModuleTreeSkill();
+  registerCodeSynthArchitectureOverviewSkill();
   // Phase 1.1 + 2.1 -- RDBMS source-introspection + sampling.
   registerDataSourceRdbmsDescribeTableSkill();
   registerDataSourceRdbmsListTablesSkill();
