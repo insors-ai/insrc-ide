@@ -24,9 +24,6 @@
  * `_crossAgentDepth` field.
  */
 
-import { getDb } from '../../db/client.js';
-import { searchEntities } from '../../db/search.js';
-import { embedQuery } from '../../indexer/embedder.js';
 import { registerTool } from '../tools/registry.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import {
@@ -35,7 +32,7 @@ import {
 	readCrossAgentDepth,
 	toolUnavailable,
 } from '../../shared/cross-agent.js';
-import type { Entity, LLMProvider } from '../../shared/types.js';
+import type { LLMProvider } from '../../shared/types.js';
 import type { ProviderAffinity } from '../skills/types.js';
 import type { Tool, ToolDeps, ToolInput, ToolResult } from '../tools/types.js';
 
@@ -73,20 +70,14 @@ function unavailableResult(id: string, reason: 'cross_agent_depth_exceeded', not
 	};
 }
 
-function shortEntity(e: Entity): Record<string, unknown> {
-	return {
-		entityId: e.id,
-		name:     e.name,
-		kind:     e.kind,
-		path:     e.file,
-		lineRange: { start: e.startLine, end: e.endLine },
-		repo:     e.repo,
-		signature: e.signature,
-	};
-}
-
-function lineLoc(e: Entity): string {
-	return `${e.file}:${e.startLine}${e.endLine > e.startLine ? '-' + e.endLine : ''}`;
+interface CodeLocateResult {
+	readonly entityId: string;
+	readonly name:     string;
+	readonly kind:     string;
+	readonly path:     string;
+	readonly lineRange: { readonly start: number; readonly end: number };
+	readonly repo:     string;
+	readonly signature?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,7 +117,7 @@ function buildSkillRunnerDeps(deps: ToolDeps): SkillRunnerDeps {
 
 interface CodeLocateData {
 	readonly query: string;
-	readonly results: ReturnType<typeof shortEntity>[];
+	readonly results: readonly CodeLocateResult[];
 }
 
 export const codeLocateTool: Tool = {
@@ -163,23 +154,47 @@ export const codeLocateTool: Tool = {
 		if (closure.length === 0) {
 			return fail('code_locate', 'session has no closure repos initialized');
 		}
-		const db = await getDb();
-		const vec = await embedQuery(query);
-		if (vec.length === 0) {
-			return fail('code_locate', 'failed to embed query (Ollama unavailable?)');
-		}
-		const hits = await searchEntities(db, vec, closure, k);
-		// Phase 9.2: code_locate is the only cross-agent tool not yet
-		// shimmed -- there's no `code.entity.search-by-vector` skill
-		// in the v1 catalog. Adding one is a follow-up; until then
-		// `_shim: false` lets telemetry distinguish unshimmed callers
-		// from the shimmed `code_trace` / `code_describe` paths.
-		const data: CodeLocateData & { _shim: false } = { query, results: hits.map(shortEntity), _shim: false };
-		const rendered = hits.length === 0
+
+		// Phase 9.2 shim (extended): forward to
+		// `code.entity.search-by-vector` instead of running the embed +
+		// ANN inline. Same data shape preserved: `{ query, results: [...] }`
+		// with `_shim: true` for telemetry parity with code_trace +
+		// code_describe.
+		const runnerDeps = buildSkillRunnerDeps(deps);
+		type SearchHit = {
+			readonly id:        string;
+			readonly name:      string;
+			readonly kind:      string;
+			readonly file:      string;
+			readonly startLine: number;
+			readonly endLine:   number;
+			readonly signature?: string;
+			readonly repo:      string;
+		};
+		type SearchOutput = {
+			readonly query: string;
+			readonly hits:  readonly SearchHit[];
+		};
+		const r = await runSkill<{ query: string; closureRepos: readonly string[]; limit: number }, SearchOutput>(
+			'code.entity.search-by-vector',
+			{ query, closureRepos: closure, limit: k },
+			runnerDeps,
+		);
+		const results = r.value.hits.map(h => ({
+			entityId:  h.id,
+			name:      h.name,
+			kind:      h.kind,
+			path:      h.file,
+			lineRange: { start: h.startLine, end: h.endLine },
+			repo:      h.repo,
+			signature: h.signature,
+		}));
+		const data: CodeLocateData & { _shim: true } = { query, results, _shim: true };
+		const rendered = results.length === 0
 			? '_no matches_'
-			: hits.map((e, i) => `${i + 1}. **${e.kind}** \`${e.name}\` (${lineLoc(e)})`).join('\n');
+			: results.map((e, i) => `${i + 1}. **${e.kind}** \`${e.name}\` (${e.path}:${e.lineRange.start}${e.lineRange.end > e.lineRange.start ? '-' + e.lineRange.end : ''})`).join('\n');
 		return {
-			output: `**code:locate** -- ${hits.length} hit(s) for \`${query}\`.\n\n${rendered}`,
+			output: `**code:locate** -- ${results.length} hit(s) for \`${query}\`.\n\n${rendered}`,
 			format: 'markdown',
 			success: true,
 			data,

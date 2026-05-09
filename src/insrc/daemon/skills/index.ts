@@ -30,6 +30,7 @@ import {
   registerCodeEntityCallersSkill,
   registerCodeEntityCalleesSkill,
 } from './built-ins/code.entity.callers.js';
+import { registerCodeEntitySearchByVectorSkill } from './built-ins/code.entity.search-by-vector.js';
 import { registerCodeQualityUnusedExportsSkill } from './built-ins/code.quality.unused-exports.js';
 import { registerCodeQualityCyclicDepsSkill } from './built-ins/code.quality.cyclic-deps.js';
 import { registerCodeQualityComplexitySkill } from './built-ins/code.quality.complexity.js';
@@ -171,6 +172,7 @@ export function registerAllSkills(): void {
   registerCodeEntitySummarySkill();
   registerCodeEntityCallersSkill();
   registerCodeEntityCalleesSkill();
+  registerCodeEntitySearchByVectorSkill();
   // code-analyzer-skills.md Phase 5 -- quality / metrics skills.
   // Atomic, deterministic, no LLM. 5.2 (dead-code) is already shipped
   // as data.code.dead-code; rename + reparent in Phase 6.x cleanup.

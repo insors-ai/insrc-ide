@@ -226,14 +226,21 @@ test('code_describe shim: missing entity returns error result', async () => {
 // code_locate marker only (no shim conversion in v1)
 // ---------------------------------------------------------------------------
 
-test('code_locate: data carries _shim: false marker (no skill equivalent yet)', async () => {
-	// Skip the actual vector search (would require Ollama); just check
-	// that the tool's empty-closure branch still runs and the marker
-	// is on the failure-path data shape... actually code_locate fails
-	// up-front when closureRepos is empty. Check the marker via a
-	// successful hit instead -- requires no-ORM fixture. The simpler
-	// assertion: the registered tool exists and its description hints
-	// at the unshimmed status documented in code-tools.ts.
-	const t = getTool('code_locate');
-	assert.ok(t);
+test('code_locate shim: registered (now forwards through code.entity.search-by-vector)', async () => {
+	// Full e2e against the vector skill would require an Ollama embed
+	// + populated entity_vec table; deferred to integration. Here we
+	// just confirm the shim is registered and that the up-front
+	// closure-repo guard still fires before any embed call. Empty
+	// closure -> failure with a clear error.
+	const locate = getTool('code_locate');
+	assert.ok(locate);
+	const r = await locate.execute(
+		{ query: 'auth' },
+		{
+			...stubDeps,
+			session: { ...stubDeps.session, closureRepos: [] } as ToolDeps['session'],
+		},
+	);
+	assert.equal(r.success, false);
+	assert.match(r.error ?? '', /closure repos/);
 });
