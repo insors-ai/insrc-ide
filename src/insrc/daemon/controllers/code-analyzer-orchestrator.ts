@@ -53,6 +53,13 @@ import type {
   ReviewerDecision,
   RepoSummary,
 } from '../../agent/tasks/code-analyzer/types.js';
+import {
+  SKILLS_ROUTING_BOOTSTRAP_MARKER,
+  pipelineResultToAcceptedTasks,
+  readSkillsRoutingFromEnv,
+  repoContextFromSummary,
+  runSkillsPipeline,
+} from '../../agent/tasks/code-analyzer/skills-pipeline.js';
 import type {
   ControllerInput,
   FinalizeResult,
@@ -240,6 +247,30 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }];
     }
 
+    // code-analyzer-skills.md Phase 8: skills-routing path -- when
+    // the feature flag is on, emit a bootstrap pass-through task; the
+    // orchestrator's `next()` detects the marker and runs the skills
+    // pipeline (classify -> select-scope -> per-skill exec ->
+    // calibrate) inline, then queues the legacy synthesise step. The
+    // legacy plan LLM call + per-task analyzer + review steps are
+    // bypassed entirely. The flag is also captured in
+    // `state.skillsRouting` so a resume of an in-flight run dispatches
+    // consistently regardless of env-var changes.
+    if (readSkillsRoutingFromEnv()) {
+      log.info({ }, 'code-analyzer: skills-routing path enabled via env var');
+      return [{
+        index: 0,
+        description: 'Code Analyzer: routing question through skills pipeline...',
+        kind: 'transform',
+        intent: 'code-analysis',
+        passThrough: true,
+        userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+        outputFormat: 'text',
+        stateKey: K_PLAN_RESULT,
+        persisted: true,
+      }];
+    }
+
     return [{
       index: 0,
       description: `Code Analyzer: planning tasks (tier ${this._tier})...`,
@@ -280,6 +311,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       truncated:    false,
       cancelled:    false,
       approvedDirs: [],
+      // code-analyzer-skills.md Phase 8: capture routing flag at
+      // run start so a re-run / resume keeps the original behaviour
+      // even if the env var has flipped in the meantime.
+      skillsRouting: readSkillsRoutingFromEnv(),
     };
     state.set(K_STATE, initialState);
     state.set(K_PHASE, 'planning' as Phase);
@@ -331,6 +366,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // current phase value (which is whatever was checkpointed).
     if (completed.output.trim() === RESUME_BOOTSTRAP_MARKER) {
       return this.afterResumeBootstrap(state, phase);
+    }
+
+    // code-analyzer-skills.md Phase 8: skills-routing path.
+    // buildInitialTasks emitted SKILLS_ROUTING_BOOTSTRAP_MARKER; run
+    // the meta-skills pipeline inline + queue synthesise.
+    if (completed.output.trim() === SKILLS_ROUTING_BOOTSTRAP_MARKER) {
+      return this.afterSkillsRoutingBootstrap(state);
     }
 
     switch (phase) {
@@ -739,6 +781,157 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     state.set(K_LIST_ID, list.id);
 
     return await this.runNextAnalyzerTask(state);
+  }
+
+  // -- skills-routing bootstrap (code-analyzer-skills.md Phase 8) ----------
+
+  /**
+   * Skills-routing path. The bootstrap pass-through emitted by
+   * `buildInitialTasks` lands here; we run `runSkillsPipeline`
+   * inline (classify-question -> select-scope -> runSkill per scoped
+   * -> calibrate-confidence), adapt the result to the legacy
+   * `{ task, result }[]` shape via `pipelineResultToAcceptedTasks`,
+   * persist the TodoList, and queue the legacy synthesise step.
+   *
+   * The legacy plan + per-task analyzer + review steps are bypassed
+   * entirely. Skill-derived results carry their own confidence +
+   * notes that calibrate-confidence already rolled into a final
+   * verdict; the legacy reviewer's per-task contract doesn't fit
+   * one-shot skill results.
+   */
+  private async afterSkillsRoutingBootstrap(state: TaskStateStore): Promise<Task[] | null> {
+    if (this.deps === undefined) {
+      log.error('afterSkillsRoutingBootstrap: deps missing');
+      return null;
+    }
+    if (this._request === undefined || this._request.length === 0) {
+      log.error('afterSkillsRoutingBootstrap: request missing');
+      return null;
+    }
+    if (this._repoSummary === undefined) {
+      log.error('afterSkillsRoutingBootstrap: repoSummary missing');
+      return null;
+    }
+
+    const ca = state.get<CodeAnalysisState>(K_STATE);
+    log.info(
+      { repo: this._repoSummary.rootPath, tier: this._tier },
+      'afterSkillsRoutingBootstrap: running meta-skills pipeline',
+    );
+
+    const session = this.deps.session;
+    const pipelineResult = await runSkillsPipeline(
+      {
+        question: this._request,
+        repo:     repoContextFromSummary(this._repoSummary),
+      },
+      {
+        session,
+        resolveProvider: (affinity) => {
+          // code-analyzer-skills §7.1: cloud affinity -> active cloud
+          // provider's small/fast tier. Match the data-orchestrator's
+          // shape: local -> ollama; cloud -> claude (fallback ollama);
+          // auto -> session resolver for the meta step.
+          if (affinity === 'local') return session.ollamaProvider;
+          if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
+          return session.resolver.resolve('code-analyzer', 'plan');
+        },
+        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+      },
+    );
+
+    log.info(
+      {
+        aborted:         pipelineResult.aborted,
+        executions:      pipelineResult.executions.length,
+        finalConfidence: pipelineResult.finalConfidence,
+        notes:           pipelineResult.notes.slice(0, 3),
+      },
+      'afterSkillsRoutingBootstrap: pipeline complete',
+    );
+
+    if (pipelineResult.aborted) {
+      // Pipeline declined to proceed -- mark not-cancelled (the user
+      // didn't cancel) and queue synthesise so the report body
+      // explains the abort reason.
+      if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: false });
+      state.set(K_PLAN_TASKS, [] as AnalysisTask[]);
+      state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
+      state.set(K_HISTORY, [] as AnalyzerResult[]);
+      return this.queueSynthesise(state);
+    }
+
+    // Adapt pipeline -> legacy shapes the synthesise step consumes.
+    const itemPrefix = `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
+    const planned: AnalysisTask[] = accepted.map(a => a.task);
+    const history: AnalyzerResult[] = accepted.map(a => a.result);
+
+    state.set(K_PLAN_TASKS, planned);
+    state.set(K_ACCEPTED, accepted);
+    state.set(K_HISTORY, history);
+
+    // Persist the TodoList + items so the user sees the per-skill
+    // runs in the chat panel. This duplicates the begin-of-
+    // beginAnalysis() block; small enough to inline here without
+    // factoring it out, since the skills branch doesn't need the
+    // analyzer queue / runner.
+    if (this.deps.todos !== undefined && ca !== undefined) {
+      const list = await this.deps.todos.createList({
+        sessionId: this.deps.session.id,
+        title: `Code Analysis: ${truncateTitle(ca.request)}`,
+        description: ca.request,
+        ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
+      });
+      const stamped: AnalysisTask[] = [];
+      for (let i = 0; i < planned.length; i++) {
+        const t = planned[i]!;
+        const item = await this.deps.todos.addItem(list.id, {
+          title: shortTitleFor(t),
+          description: t.question,
+          meta: {
+            kind: t.kind,
+            ...(t.scope !== undefined ? { scope: t.scope } : {}),
+            origin: t.origin,
+            retryCount: t.retryCount,
+          },
+        });
+        // Stamp per-skill metadata + mark the item complete since
+        // the skill already ran.
+        try {
+          const r = accepted[i]!.result;
+          await this.deps.todos.updateItemMeta(item.id, {
+            kind: t.kind,
+            ...(t.scope !== undefined ? { scope: t.scope } : {}),
+            origin: t.origin,
+            retryCount: 0,
+            answer:     r.answer,
+            findings:   r.findings,
+            citations:  r.citations,
+            confidence: r.confidence,
+            toolCalls:  r.toolCalls,
+          });
+          await this.deps.todos.markComplete(item.id);
+        } catch (err) {
+          log.warn(
+            { err: (err as Error).message, itemId: item.id },
+            'afterSkillsRoutingBootstrap: failed to stamp item meta',
+          );
+        }
+        stamped.push({ ...t, itemId: item.id });
+      }
+      state.set(K_PLAN_TASKS, stamped);
+      const stampedAccepted = stamped.map((task, i) => ({
+        task,
+        result: { ...accepted[i]!.result, itemId: task.itemId },
+      }));
+      state.set(K_ACCEPTED, stampedAccepted);
+      state.set(K_HISTORY, stampedAccepted.map(a => a.result));
+      state.set(K_STATE, { ...ca, listId: list.id });
+      state.set(K_LIST_ID, list.id);
+    }
+
+    return this.queueSynthesise(state);
   }
 
   /**
