@@ -2,23 +2,16 @@
  * Skill registry.
  *
  * One place to register, look up, and list skills. Mirrors the tool
- * registry in `daemon/tools/registry.ts` -- same lookup-time settings
- * gate pattern (so IDE-pushed `enabledSkillFamilies` changes take
- * effect without daemon restart) and same `_resetRegistryForTests`
- * escape hatch.
+ * registry in `daemon/tools/registry.ts`.
  *
  * Registration is strict: id format violations, sub-skill cycle
  * detection, missing sub-skill deps, and cross-owner-dep violations
  * all throw at registration time. These are programmer errors; the
  * daemon should fail to start on a misregistered skill rather than
- * silently swallow the misconfiguration. Mirrors the `data` /
- * `code` enabledCategories oversight from 2026-04-30 -- catch the
- * mistake at build, not at runtime when the LLM has already
- * fabricated an answer around the missing tool.
+ * silently swallow the misconfiguration.
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { getToolSettings } from '../tools/config.js';
 import { ALL_SKILL_FAMILIES } from './families.js';
 import type { Skill, SkillFamily, SkillOwner } from './types.js';
 
@@ -189,58 +182,32 @@ function rebuildIndices(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Lookup (settings-gated)
+// Lookup
 // ---------------------------------------------------------------------------
 
-/**
- * Resolve a skill id (optionally version-pinned). Honors the
- * settings-time family gate -- a skill in a disabled family looks
- * unregistered. This is the same pattern the tool registry uses so an
- * IDE settings push immediately cuts off skills without restarting
- * the daemon.
- *
- * Distinct from the cross-agent-tool oversight from 2026-04-30: the
- * default-enabled family list (config.ts `enabledSkillFamilies`)
- * ships with EVERY family in `ALL_SKILL_FAMILIES`. CI gate enforces
- * the two stay in sync.
- */
+/** Resolve a skill id (optionally version-pinned). */
 export function getSkill(id: string, version?: number): Skill | undefined {
-  const skill = version !== undefined
-    ? byIdAndVersion.get(`${id}@${version}`)
-    : byId.get(id);
-  if (skill === undefined) { return undefined; }
-  if (!isFamilyEnabled(skill.family)) { return undefined; }
-  return skill;
-}
-
-/** Bypasses the settings gate. Used by registration-time integrity checks. */
-export function getSkillUnchecked(id: string, version?: number): Skill | undefined {
   return version !== undefined
     ? byIdAndVersion.get(`${id}@${version}`)
     : byId.get(id);
 }
 
+/** Alias for `getSkill` kept for callers that historically distinguished
+ *  the gated-vs-bypass paths. The gate is gone; both paths are identical now. */
+export function getSkillUnchecked(id: string, version?: number): Skill | undefined {
+  return getSkill(id, version);
+}
+
 export function listSkillsByFamily(family: SkillFamily): Skill[] {
-  if (!isFamilyEnabled(family)) { return []; }
   return [...(byFamily.get(family) ?? [])];
 }
 
 export function listSkillsByOwner(owner: SkillOwner): Skill[] {
-  return (byOwner.get(owner) ?? []).filter(s => isFamilyEnabled(s.family));
+  return [...(byOwner.get(owner) ?? [])];
 }
 
 export function listSkills(): Skill[] {
-  return [...byId.values()].filter(s => isFamilyEnabled(s.family));
-}
-
-function isFamilyEnabled(family: SkillFamily): boolean {
-  const enabled = getToolSettings().enabledSkillFamilies;
-  // When the settings haven't been pushed yet, the field is undefined;
-  // default to enabled-for-all. The settings setter writes the
-  // ALL_SKILL_FAMILIES default at startup so this branch is the
-  // pre-startup fallback.
-  if (enabled === undefined || enabled.length === 0) { return true; }
-  return enabled.includes(family);
+  return [...byId.values()];
 }
 
 // ---------------------------------------------------------------------------

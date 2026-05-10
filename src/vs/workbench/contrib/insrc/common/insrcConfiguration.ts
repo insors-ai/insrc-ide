@@ -112,41 +112,12 @@ configurationRegistry.registerConfiguration({
 // config-driven lookup. See plans/multi-provider-models.md.
 
 // ---------------------------------------------------------------------------
-// Insrc > Tools (parent for the tool subsystem; top-level: category gate)
+// Insrc > Tools (parent block; the historical `enabledCategories`
+// whitelist was dropped -- per-action permission gates already
+// authorise tool calls, and the lookup-time category gate was a
+// recurring source of "tool registered but invisible" silent
+// failures. Block kept for future per-tool subsystem settings.)
 // ---------------------------------------------------------------------------
-
-configurationRegistry.registerConfiguration({
-	id: 'insrc.tools',
-	title: localize('insrc.tools.title', 'Insrc > Tools'),
-	type: 'object',
-	order: INSRC_ORDER + 5,
-	properties: {
-		'insrc.tools.enabledCategories': {
-			type: 'array',
-			items: { type: 'string' },
-			default: [
-				'file', 'shell', 'search', 'git', 'gh',
-				'ssh', 'http', 'k8s', 'cloud', 'diff',
-				'notify', 'test', 'pkg', 'web', 'graph', 'plan',
-				'artifact', 'db', 'data',
-				// `code` -- code-analyzer's driver tools
-				// (code_class_locate, code_orm_scan, code_migration_walk,
-				// ...). Without this, every code-analyzer skill that
-				// declares a `required-tools` precondition fails feasibility
-				// and the meta-skills pipeline aborts before classify-
-				// question even runs.
-				'code',
-				// `skill` -- the skill-meta tools (skill_describe,
-				// skill_invoke). classify-question's required-tools
-				// precondition references skill_describe; missing this
-				// drops the whole skills pipeline.
-				'skill',
-			],
-			description: localize('insrc.tools.enabledCategories', 'Whitelist of tool categories the agent can invoke. Tools outside this list are hidden at lookup time. Use to restrict the agent in compliance-sensitive projects.'),
-			scope: ConfigurationScope.MACHINE,
-		},
-	},
-});
 
 // ---------------------------------------------------------------------------
 // Insrc > Tools > Approval

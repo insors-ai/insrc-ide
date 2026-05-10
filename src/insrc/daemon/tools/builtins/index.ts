@@ -2,14 +2,12 @@
  * Builtin tools -- registration aggregator.
  *
  * One entry point for daemon/index.ts. Each domain plugs in via its
- * `registerXTools()` call. The set of domains that actually register
- * is gated by `insrc.tools.enabledCategories` (pushed from the IDE
- * via `tools.config.set`); categories not in the whitelist are
- * skipped at startup so the agent cannot invoke them.
+ * `registerXTools()` call; every domain registers unconditionally.
+ * Per-action permission gates (approval, fs-access, cross-agent
+ * depth) handle authorisation; we don't double-gate at registry
+ * lookup time.
  */
 
-import { getLogger } from '../../../shared/logger.js';
-import { getToolSettings } from '../config.js';
 import { registerGitTools } from './git/index.js';
 import { registerFileTools } from './file/index.js';
 import { registerShellTools } from './shell/index.js';
@@ -33,48 +31,31 @@ import { registerCodeTools } from './code/index.js';
 import { registerSkillTools } from './skills/invoke-skill.js';
 import { registerLlmAliases } from './llm-aliases.js';
 
-const log = getLogger('tools-builtins');
-
-const CATEGORIES: Readonly<Record<string, () => void>> = {
-  git:    registerGitTools,
-  file:   registerFileTools,
-  shell:  registerShellTools,
-  search: registerSearchTools,
-  gh:     registerGhTools,
-  ssh:    registerSshTools,
-  http:   registerHttpTools,
-  k8s:    registerK8sTools,
-  cloud:  registerCloudTools,
-  diff:   registerDiffTools,
-  notify: registerNotifyTools,
-  test:   registerTestTools,
-  pkg:    registerPkgTools,
-  web:    registerWebTools,
-  graph:    registerGraphTools,
-  plan:     registerPlanTools,
-  artifact: registerArtifactTools,
-  db:       registerDbTools,
-  data:     registerDataTools,
-  code:     registerCodeTools,
-  skill:    registerSkillTools,
-};
-
 export function registerBuiltinTools(): void {
-  const enabled = new Set(getToolSettings().enabledCategories);
-  const skipped: string[] = [];
-  for (const [category, register] of Object.entries(CATEGORIES)) {
-    if (enabled.has(category)) {
-      register();
-    } else {
-      skipped.push(category);
-    }
-  }
-  if (skipped.length > 0) {
-    log.info({ skipped }, 'tool categories disabled by insrc.tools.enabledCategories');
-  }
+  registerGitTools();
+  registerFileTools();
+  registerShellTools();
+  registerSearchTools();
+  registerGhTools();
+  registerSshTools();
+  registerHttpTools();
+  registerK8sTools();
+  registerCloudTools();
+  registerDiffTools();
+  registerNotifyTools();
+  registerTestTools();
+  registerPkgTools();
+  registerWebTools();
+  registerGraphTools();
+  registerPlanTools();
+  registerArtifactTools();
+  registerDbTools();
+  registerDataTools();
+  registerCodeTools();
+  registerSkillTools();
 
-  // Legacy LLM-name aliases always run; they no-op against categories
-  // whose canonical ids weren't registered because registerToolAlias
-  // refuses aliases for missing tools.
+  // Legacy LLM-name aliases (Read / Grep / Bash / WebSearch / ...)
+  // run last; they're alias-only and no-op against tools whose
+  // canonical id wasn't registered.
   registerLlmAliases();
 }

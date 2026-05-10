@@ -51,7 +51,6 @@ export class InsrcToolSettingsBridge extends Disposable implements IWorkbenchCon
 		if (!this.daemonService.isConnected) { return; }
 		const c = this.configurationService;
 		const payload: Record<string, unknown> = {
-			enabledCategories: c.getValue('insrc.tools.enabledCategories'),
 			'approval.defaultAction': c.getValue('insrc.tools.approval.defaultAction'),
 			'approval.maxEditRounds': c.getValue('insrc.tools.approval.maxEditRounds'),
 			'approval.showStructuredDiff': c.getValue('insrc.tools.approval.showStructuredDiff'),

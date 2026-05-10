@@ -8,11 +8,16 @@
  * src/vs/workbench/contrib/insrc/common/insrcConfiguration.ts so the
  * daemon behaves identically when started outside the IDE (scripts,
  * tests, headless CLI).
+ *
+ * The historical `enabledCategories` / `enabledSkillFamilies`
+ * whitelists were dropped: per-action permission gates (approval,
+ * fs-access, cross-agent depth) already gate authorisation, so
+ * double-gating at registry lookup time was unnecessary overhead
+ * and a recurring source of "tool registered but invisible" silent
+ * failures.
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { ALL_SKILL_FAMILIES } from '../skills/families.js';
-import type { SkillFamily } from '../skills/types.js';
 
 const log = getLogger('tools-config');
 
@@ -21,17 +26,6 @@ const log = getLogger('tools-config');
 // ---------------------------------------------------------------------------
 
 export interface ToolSettings {
-  enabledCategories: readonly string[];
-  /**
-   * Skill families enabled at lookup time (plans/analyzers/skills-core.md
-   * Phase 2.4). Mirrors `enabledCategories` for skills: `getSkill()`
-   * silently returns undefined for skills in disabled families. The
-   * default list ships with EVERY family in `ALL_SKILL_FAMILIES` --
-   * a registration-time CI gate enforces the two stay in sync to
-   * prevent the cross-agent-tool oversight from 2026-04-30 recurring
-   * at the skill layer.
-   */
-  enabledSkillFamilies: readonly SkillFamily[];
   approval: {
     defaultAction: 'approve' | 'skip';
     maxEditRounds: number;
@@ -75,28 +69,8 @@ export interface ToolSettings {
   };
 }
 
-const ALL_CATEGORIES: readonly string[] = [
-  'file', 'shell', 'search', 'git', 'gh',
-  'ssh', 'http', 'k8s', 'cloud', 'diff',
-  'notify', 'test', 'pkg', 'web', 'graph', 'plan',
-  'artifact', 'db',
-  // Cross-agent surfaces -- registered by registerCodeAnalyzerCrossAgentTools()
-  // and registerDataAnalyzerCrossAgentTools() at daemon bootstrap.
-  // Without these in the default enabled set, getTool() silently
-  // returns undefined and cross-agent calls surface as "Unknown tool"
-  // errors at the dispatcher.
-  'code', 'data',
-  // Skill registry meta-tool (skill_invoke). Registered by
-  // registerSkillTools() in daemon/tools/builtins/skills/invoke-skill.ts.
-  // Same lesson as the code/data oversight: default-enabled or it
-  // silently disappears from getTool() lookups.
-  'skill',
-];
-
 function defaults(): ToolSettings {
   return {
-    enabledCategories: ALL_CATEGORIES,
-    enabledSkillFamilies: ALL_SKILL_FAMILIES,
     approval:    { defaultAction: 'skip', maxEditRounds: 5, showStructuredDiff: true },
     loop:        { maxIterations: 25, maxNudges: 3 },
     output:      { inlineMaxChars: 12_000, retainSpills: false },
@@ -131,8 +105,6 @@ export function getToolSettings(): ToolSettings {
  */
 export function updateToolSettings(incoming: Record<string, unknown>): ToolSettings {
   const next: ToolSettings = {
-    enabledCategories: parseStringArray(incoming['enabledCategories'], current.enabledCategories),
-    enabledSkillFamilies: parseSkillFamilies(incoming['enabledSkillFamilies'], current.enabledSkillFamilies),
     approval: {
       defaultAction:     parseEnum(incoming['approval.defaultAction'],     ['approve', 'skip'], current.approval.defaultAction),
       maxEditRounds:     parseNumber(incoming['approval.maxEditRounds'],   current.approval.maxEditRounds, 1, 20),
@@ -171,8 +143,6 @@ export function updateToolSettings(incoming: Record<string, unknown>): ToolSetti
   };
   current = next;
   log.info({
-    enabledCategoryCount: next.enabledCategories.length,
-    enabledSkillFamilyCount: next.enabledSkillFamilies.length,
     maxIterations: next.loop.maxIterations,
     defaultApproval: next.approval.defaultAction,
   }, 'tool settings updated');
@@ -203,28 +173,4 @@ function parseEnum<T extends string>(v: unknown, allowed: readonly T[], fallback
 
 function parseString(v: unknown, fallback: string): string {
   return typeof v === 'string' ? v : fallback;
-}
-
-function parseStringArray(v: unknown, fallback: readonly string[]): readonly string[] {
-  if (!Array.isArray(v)) { return fallback; }
-  const out: string[] = [];
-  for (const item of v) {
-    if (typeof item === 'string' && item.length > 0) { out.push(item); }
-  }
-  return out.length > 0 ? out : fallback;
-}
-
-function parseSkillFamilies(
-  v: unknown,
-  fallback: readonly SkillFamily[],
-): readonly SkillFamily[] {
-  if (!Array.isArray(v)) { return fallback; }
-  const known = new Set<string>(ALL_SKILL_FAMILIES);
-  const out: SkillFamily[] = [];
-  for (const item of v) {
-    if (typeof item === 'string' && known.has(item)) {
-      out.push(item as SkillFamily);
-    }
-  }
-  return out.length > 0 ? out : fallback;
 }
