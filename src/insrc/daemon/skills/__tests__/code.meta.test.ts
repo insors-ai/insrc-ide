@@ -20,7 +20,7 @@ import {
 	_buildCatalogForTest as buildCatalog,
 	_matchesRepoCapabilityForTest as matchesRepoCapability,
 } from '../built-ins/code.meta.classify-question.js';
-import type { LLMResponse } from '../../../shared/types.js';
+import type { LLMMessage, LLMResponse } from '../../../shared/types.js';
 
 const CLASSIFY = 'code.meta.classify-question';
 const SELECT   = 'code.meta.select-scope';
@@ -315,4 +315,138 @@ test('select-scope: repoPath mismatch is rejected', async () => {
 	assert.equal(result.confidence, 'low');
 	const noteText = (result.notes ?? []).join(' | ');
 	assert.match(noteText, /repoPath/);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6 (conversation-flow-refinement.md): priorFacts -> LLM prompt
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture-mode provider: records the most recent `messages` argument
+ * so the test can assert what actually reached the LLM. This is the
+ * bottom-of-the-funnel check for Phase 6 -- if priorFacts don't show
+ * up here, the HDFS-Core regression is back even with all the
+ * upstream wiring intact.
+ */
+function captureProvider(text: string): {
+	provider: FakeProvider;
+	getCapturedMessages: () => LLMMessage[];
+} {
+	let captured: LLMMessage[] = [];
+	return {
+		provider: {
+			async complete(messages): Promise<LLMResponse> {
+				captured = messages;
+				return { text, stopReason: 'end_turn' };
+			},
+		},
+		getCapturedMessages: () => captured,
+	};
+}
+
+test('select-scope: priorFacts.modules render in the LLM prompt with path + label', async () => {
+	setup();
+	const valid = JSON.stringify({
+		scoped: [
+			{
+				skillId: 'code.source.module.describe',
+				args: { repoPath: REPO.path, modulePath: '/repo/alpha/hadoop-hdfs' },
+				resolvedScope: { repoPath: REPO.path },
+			},
+		],
+		notes: [],
+	});
+	const cap = captureProvider(valid);
+	await runSkillIsolated<unknown, SelectValue>(
+		SELECT,
+		{
+			question: 'describe HDFS Core',
+			candidates: [
+				{ skillId: 'code.source.module.describe', rationale: 'module summary', mustHaveScope: 'repo' },
+			],
+			repo: REPO,
+			priorFacts: {
+				modules: [
+					{ path: '/repo/alpha/hadoop-hdfs', label: 'HDFS Core', fileCount: 240 },
+				],
+			},
+		},
+		{ fakeProvider: cap.provider },
+	);
+
+	const userMsg = cap.getCapturedMessages().find(m => m.role === 'user');
+	assert.ok(userMsg, 'user message should reach the provider');
+	const body = userMsg!.content as string;
+	assert.match(body, /Prior facts \(from prior turns/, 'prompt should carry the Prior facts header');
+	assert.match(body, /Modules \(1\):/);
+	assert.match(body, /\/repo\/alpha\/hadoop-hdfs/);
+	assert.match(body, /HDFS Core/);
+});
+
+test('select-scope: priorFacts.entities + tables + ormModels all render in the prompt', async () => {
+	setup();
+	const valid = JSON.stringify({
+		scoped: [
+			{
+				skillId: 'code.entity.summary',
+				args: { repoPath: REPO.path, entityId: 'a'.repeat(32) },
+				resolvedScope: { repoPath: REPO.path, entityRef: 'compute' },
+			},
+		],
+		notes: [],
+	});
+	const cap = captureProvider(valid);
+	await runSkillIsolated<unknown, SelectValue>(
+		SELECT,
+		{
+			question: 'tell me about compute',
+			candidates: [
+				{ skillId: 'code.entity.summary', rationale: 'r', mustHaveScope: 'repo+entity' },
+			],
+			repo: REPO,
+			priorFacts: {
+				entities:  [{ entityRef: 'e1', name: 'compute',  kind: 'function', file: '/repo/alpha/src/c.ts' }],
+				tables:    [{ connectionId: 'pg-main', name: 'orders', columns: ['id', 'total'] }],
+				ormModels: [{ name: 'Order', dialect: 'prisma', table: 'orders' }],
+			},
+		},
+		{ fakeProvider: cap.provider },
+	);
+
+	const body = (cap.getCapturedMessages().find(m => m.role === 'user')!.content) as string;
+	assert.match(body, /Entities \(1\):/);
+	assert.match(body, /compute/);
+	assert.match(body, /Tables \(1\):/);
+	assert.match(body, /pg-main\.orders/);
+	assert.match(body, /ORM models \(1\):/);
+	assert.match(body, /prisma: Order -> orders/);
+});
+
+test('select-scope: no priorFacts -> Prior facts header is NOT in the prompt', async () => {
+	setup();
+	const valid = JSON.stringify({
+		scoped: [
+			{
+				skillId: 'code.source.repo.describe',
+				args: { repoPath: REPO.path },
+				resolvedScope: { repoPath: REPO.path },
+			},
+		],
+		notes: [],
+	});
+	const cap = captureProvider(valid);
+	await runSkillIsolated<unknown, SelectValue>(
+		SELECT,
+		{
+			question: 'describe the repo',
+			candidates: [
+				{ skillId: 'code.source.repo.describe', rationale: 'r', mustHaveScope: 'repo' },
+			],
+			repo: REPO,
+			// no priorFacts
+		},
+		{ fakeProvider: cap.provider },
+	);
+	const body = (cap.getCapturedMessages().find(m => m.role === 'user')!.content) as string;
+	assert.equal(body.includes('Prior facts'), false, 'cold runs should not advertise an empty Prior facts section');
 });
