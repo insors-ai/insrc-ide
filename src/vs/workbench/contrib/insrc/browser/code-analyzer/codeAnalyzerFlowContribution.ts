@@ -72,7 +72,7 @@ export class CodeAnalyzerFlowContribution extends Disposable implements IWorkben
 		this.logService.info(`[code-analyzer:flow] auto-opening report pane listId=${list.id} sessionId=${list.sessionId} bodyLen=${list.body.length}`);
 
 		try {
-			const input = new AnalysisReportInput(list.sessionId, list.id, list.body);
+			const input = new AnalysisReportInput(list.sessionId, list.id, list.body, list.title);
 			await input.ensureBackingFile(this.fileService);
 			await this.editorService.openEditor(input);
 		} catch (err) {

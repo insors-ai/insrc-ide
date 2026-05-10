@@ -548,6 +548,21 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // miss is silent.
     const priorFacts = readPriorFactsTag(session);
 
+    // Per-skill streaming progress. The skills pipeline runs
+    // classify-question -> select-scope -> N x per-skill -> calibrate.
+    // Without these emits the chat panel sits silent for many seconds
+    // while LLM calls churn. We piggyback on `onSkillEnd` (also wired
+    // for spill-writing) and translate skill ids into user-readable
+    // milestones; the spill side-effect runs unchanged.
+    this.emitChatProgress('Routing question through code analysis skills...');
+    const spillHandler = makeSpillHandler(session);
+    const onSkillEndWithProgress: NonNullable<SkillRunnerDeps['onSkillEnd']> = async (payload) => {
+      try {
+        this.emitChatProgress(progressMessageForSkillEnd(payload.skillId, payload.confidence));
+      } catch { /* progress is best-effort */ }
+      await spillHandler(payload);
+    };
+
     const pipelineResult = await runSkillsPipeline(
       {
         question: this._request,
@@ -562,12 +577,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           return session.resolver.resolve('code-analyzer', 'plan');
         },
         // conversation-flow-refinement.md Phase 2: every skill end fires
-        // the spill writer (disk JSON + artifact_vec Lance row).
-        // Without this, the meta-pipeline's outputs never make it into
-        // the per-session vector store, so a follow-up turn's
-        // `retrievePriorContext` finds nothing -- the exact failure
-        // mode in agent.2.log when this hook was missing.
-        onSkillEnd: makeSpillHandler(session),
+        // the spill writer (disk JSON + artifact_vec Lance row) AND the
+        // per-skill chat progress emit (Phase 4 follow-up).
+        onSkillEnd: onSkillEndWithProgress,
         ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       },
     );
@@ -583,12 +595,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     );
 
     if (pipelineResult.aborted) {
+      this.emitChatProgress('Pipeline aborted; producing empty report');
       if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: false });
       state.set(K_PLAN_TASKS, [] as AnalysisTask[]);
       state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
       state.set(K_HISTORY, [] as AnalyzerResult[]);
       return this.queueSynthesise(state);
     }
+
+    this.emitChatProgress(`Analysis pipeline complete (${pipelineResult.executions.length} skill${pipelineResult.executions.length === 1 ? '' : 's'} run, confidence ${pipelineResult.finalConfidence}); building report...`);
 
     const itemPrefix = `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
@@ -884,6 +899,28 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   /**
+   * Emit a one-line `progress` event (the same channel chat-handler
+   * uses for top-level milestones). The chat panel renders these as
+   * subtle "doing X..." lines above the response. Best-effort -- a
+   * missing `deps` (orchestrator initialised but not yet attached) or
+   * a closed channel is silently dropped, never thrown.
+   */
+  private emitChatProgress(message: string): void {
+    if (this.deps === undefined) {
+      return;
+    }
+    try {
+      this.deps.send({
+        id:     this.deps.requestId,
+        stream: 'progress',
+        data:   { message: `Code Analyzer: ${message}` },
+      });
+    } catch (err) {
+      log.debug({ err: (err as Error).message }, 'emitChatProgress: send failed (swallowed)');
+    }
+  }
+
+  /**
    * Emit a brainstorm-style `liveStep` event so the chat panel
    * renders progress / token chunks inside a boxed monospace
    * "live console" bubble.
@@ -955,6 +992,36 @@ function readPriorFactsTag(
 }
 
 export const _readPriorFactsTagForTest = readPriorFactsTag;
+
+/**
+ * Translate a skill-end event into a one-line user-facing message
+ * for the chat-panel progress strip. Meta-skills (classify-question,
+ * select-scope, calibrate-confidence) get their own milestone copy;
+ * everything else gets a generic "Completed: <id>" so newly-added
+ * skills surface automatically.
+ */
+function progressMessageForSkillEnd(
+  skillId: string,
+  confidence: import('../skills/types.js').SkillConfidence,
+): string {
+  switch (skillId) {
+    case 'code.meta.classify-question':
+      return confidence === 'low'
+        ? 'Could not route the question to any code analysis skill -- proceeding without scoped skills'
+        : 'Routed question to candidate skills';
+    case 'code.meta.select-scope':
+      return confidence === 'low'
+        ? 'Could not resolve scope for selected skills'
+        : 'Resolved skill arguments and scope';
+    case 'code.meta.calibrate-confidence':
+      return `Calibrated final confidence: ${confidence}`;
+    default: {
+      // Trim the family prefix for compactness: "code.entity.summary" -> "entity.summary"
+      const short = skillId.startsWith('code.') ? skillId.slice('code.'.length) : skillId;
+      return `Completed: ${short} (${confidence})`;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Skill-execution → AnalyzerResult adapters (re-run path)

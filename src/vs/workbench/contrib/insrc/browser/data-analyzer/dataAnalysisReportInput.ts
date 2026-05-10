@@ -35,6 +35,15 @@ export class DataAnalysisReportInput extends EphemeralEditorInput {
 		readonly sessionId: string,
 		listId: string,
 		private readonly _initialBody: string = '',
+		/**
+		 * Per-report display name shown in the editor tab. Defaults to
+		 * the generic "Data Analysis Report" when callers don't pass
+		 * one (resume / serializer paths). Production callers thread
+		 * `TodoList.title` here so each report gets a distinct tab
+		 * name -- otherwise multiple reports look identical in the tab
+		 * strip.
+		 */
+		private readonly _displayName?: string,
 	) {
 		super('data-analysis-report', listId, '.md');
 	}
@@ -49,7 +58,9 @@ export class DataAnalysisReportInput extends EphemeralEditorInput {
 	}
 
 	override getName(): string {
-		return 'Data Analysis Report';
+		return this._displayName !== undefined && this._displayName.length > 0
+			? this._displayName
+			: 'Data Analysis Report';
 	}
 
 	override getIcon(): ThemeIcon {

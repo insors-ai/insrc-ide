@@ -38,6 +38,16 @@ export class AnalysisReportInput extends EphemeralEditorInput {
 		readonly sessionId: string,
 		listId: string,
 		private readonly _initialBody: string = '',
+		/**
+		 * Per-report display name shown in the editor tab. Defaults to
+		 * the generic "Code Analysis Report" when callers don't pass a
+		 * title (resume / serializer paths). Production callers (the
+		 * flow contribution + the openReport command) thread the
+		 * `TodoList.title` here so each report gets a distinct tab
+		 * name -- otherwise multiple reports in a session look
+		 * identical in the tab strip.
+		 */
+		private readonly _displayName?: string,
 	) {
 		super('code-analysis-report', listId, '.md');
 	}
@@ -52,7 +62,9 @@ export class AnalysisReportInput extends EphemeralEditorInput {
 	}
 
 	override getName(): string {
-		return 'Code Analysis Report';
+		return this._displayName !== undefined && this._displayName.length > 0
+			? this._displayName
+			: 'Code Analysis Report';
 	}
 
 	override getIcon(): ThemeIcon {

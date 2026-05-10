@@ -79,7 +79,7 @@ registerAction2(class extends Action2 {
 			return;
 		}
 
-		const input = new DataAnalysisReportInput(list.sessionId, list.id, list.body ?? '');
+		const input = new DataAnalysisReportInput(list.sessionId, list.id, list.body ?? '', list.title);
 		await input.ensureBackingFile(fileService);
 		await editorService.openEditor(input);
 	}
