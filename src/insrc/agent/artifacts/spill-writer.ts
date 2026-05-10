@@ -162,23 +162,53 @@ async function spillOne(session: Session, payload: SpillPayload): Promise<SpillR
 }
 
 /**
- * Drop every artefact for a session. Called from `Session.close()`.
+ * Drop every artefact for a session.
+ *
+ * !! DO NOT WIRE THIS INTO Session.close() OR ANY OTHER AUTOMATIC
+ *    LIFECYCLE HOOK. !!
+ *
+ * Sessions stored under ~/.insrc are persistent by user contract.
+ * Closing a session just stops the in-memory Session object; the
+ * per-session disk spills + `artifact_vec` Lance rows must stay so
+ * future turns of the same session (and cross-session retrieval)
+ * keep working.
+ *
+ * The ONLY legal caller is the `repo.remove` cascade (in
+ * `daemon/conversations.ts:deleteSessionsForRepo`), which runs when
+ * the user removes a repo. At that point every session that belonged
+ * to the repo is being permanently deleted, so its spills go with
+ * it. No other caller. If you're tempted to wire this into a
+ * lifecycle hook, you're in the wrong place -- read the comment on
+ * `Session.close()` first.
+ *
  * Both the Lance rows and the disk directory are removed; failures
- * are logged but don't propagate (close should never throw).
+ * are logged but don't propagate.
  */
 export async function purgeSession(session: Session): Promise<void> {
-	const dir = PATHS.sessionTmp(session.id);
+	await purgeSessionById(session.id);
+}
+
+/**
+ * Same contract as `purgeSession` but takes a session id rather
+ * than a live Session object. Used by the `repo.remove` cascade,
+ * where we enumerate session ids for a repo before dropping their
+ * LMDB rows -- we never have a live Session object at that point.
+ *
+ * Same DO-NOT-WIRE warning applies. Repo-remove only.
+ */
+export async function purgeSessionById(sessionId: string): Promise<void> {
+	const dir = PATHS.sessionTmp(sessionId);
 	try {
-		const removed = await deleteArtifactsForSession(session.id);
-		log.info({ sessionId: session.id, lanceRowsRemoved: removed }, 'spill-writer: lance rows purged');
+		const removed = await deleteArtifactsForSession(sessionId);
+		log.info({ sessionId, lanceRowsRemoved: removed }, 'spill-writer: lance rows purged');
 	} catch (err) {
-		log.warn({ sessionId: session.id, err: errMessage(err) }, 'spill-writer: lance purge failed');
+		log.warn({ sessionId, err: errMessage(err) }, 'spill-writer: lance purge failed');
 	}
 	try {
 		await fs.rm(dir, { recursive: true, force: true });
-		log.info({ sessionId: session.id, dir }, 'spill-writer: tmp dir purged');
+		log.info({ sessionId, dir }, 'spill-writer: tmp dir purged');
 	} catch (err) {
-		log.warn({ sessionId: session.id, dir, err: errMessage(err) }, 'spill-writer: tmp dir purge failed');
+		log.warn({ sessionId, dir, err: errMessage(err) }, 'spill-writer: tmp dir purge failed');
 	}
 }
 

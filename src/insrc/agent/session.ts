@@ -226,22 +226,22 @@ export class Session {
   /**
    * Close the session: promote L2 summary to persistent store, delete raw turns.
    * Called on /exit or SIGINT.
+   *
+   * IMPORTANT: this method MUST NOT purge per-session artifact spills
+   * (~/.insrc/tmp/<session_id>/ or `artifact_vec` Lance rows). Sessions
+   * stored under ~/.insrc are persistent by user contract -- closing
+   * just stops the in-memory session; the LMDB conversations table +
+   * Lance vec tables (turn_vec, artifact_vec, future
+   * response_segment_vec) all stay so cross-session retrieval and
+   * resume keep working. Only an explicit `/forget` (or future user
+   * "delete session" command) may wipe a session's persisted data.
+   * The pre-existing `purgeSession` helper still exists in the
+   * spill-writer for that future explicit-delete path -- it is just
+   * NOT wired here.
    */
   async close(): Promise<void> {
     // Stop periodic health checks
     this.health.stop();
-
-    // conversation-flow-refinement.md Phase 2: drop the per-session
-    // artefact spills (Lance rows + ~/.insrc/tmp/<session_id>/).
-    // Failure-tolerant: purge errors are logged inside the writer
-    // and never propagate. Done before sessionClose so the session
-    // close RPC isn't held up if Lance is slow.
-    try {
-      const { purgeSession } = await import('./artifacts/spill-writer.js');
-      await purgeSession(this);
-    } catch {
-      // import failure -- never block close on it
-    }
 
     const summary = this.contextManager.getSummary();
     if (!summary) return; // Nothing to persist if no summary was generated

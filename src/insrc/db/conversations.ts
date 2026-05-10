@@ -543,6 +543,18 @@ export async function deleteSessionsForRepo(_db: DbClient, repo: string): Promis
 		if (row.repo === repo) ids.push(key as string);
 	}
 	if (ids.length === 0) return;
+
+	// Repo-remove cascade: drop per-session spilled artefacts (disk +
+	// `artifact_vec` Lance rows) for each session belonging to the
+	// repo BEFORE the LMDB rows go away. This is the ONLY automatic
+	// caller of the spill purge -- see the doc-comment on
+	// `purgeSession` for the rationale (sessions are persistent
+	// otherwise; only repo removal wipes their spills).
+	const { purgeSessionById } = await import('../agent/artifacts/spill-writer.js');
+	for (const id of ids) {
+		await purgeSessionById(id);
+	}
+
 	// Cascade: each session brings its turns + by_repo index entries
 	// with it.
 	await withWriteTxn(s => {
