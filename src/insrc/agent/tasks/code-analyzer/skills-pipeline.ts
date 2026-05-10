@@ -63,6 +63,15 @@ export interface SkillsPipelineDeps {
 	readonly session: Session;
 	readonly resolveProvider: (affinity: 'local' | 'cloud' | 'auto') => LLMProvider;
 	readonly signal?: AbortSignal | undefined;
+	/**
+	 * conversation-flow-refinement.md Phase 2: per-skill spill +
+	 * artifact_vec index hook. Forwarded into every `runSkill` call the
+	 * pipeline makes (classify-question, select-scope, per-skill body,
+	 * calibrate-confidence). Omit for back-compat / tests; supplying it
+	 * is what makes a follow-up turn's `retrievePriorContext` actually
+	 * find anything.
+	 */
+	readonly onSkillEnd?: import('../../../daemon/skills/invoke.js').SkillRunnerDeps['onSkillEnd'];
 }
 
 interface RepoMetaContext {
@@ -321,11 +330,13 @@ function buildSkillRunnerDeps(deps: SkillsPipelineDeps): {
 	session: Session;
 	resolveProvider: (affinity: 'local' | 'cloud' | 'auto') => LLMProvider;
 	signal?: AbortSignal;
+	onSkillEnd?: SkillsPipelineDeps['onSkillEnd'];
 } {
 	return {
 		session:         deps.session,
 		resolveProvider: deps.resolveProvider,
-		...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+		...(deps.signal     !== undefined ? { signal:     deps.signal     } : {}),
+		...(deps.onSkillEnd !== undefined ? { onSkillEnd: deps.onSkillEnd } : {}),
 	};
 }
 

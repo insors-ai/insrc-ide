@@ -183,6 +183,52 @@ test('skills-pipeline: classify returns no candidates -> aborted with note', asy
 	assert.match(result.notes.join(' '), /no candidates|low/);
 });
 
+test('skills-pipeline: onSkillEnd hook fires for every skill the pipeline runs', async () => {
+	// Conversation-flow-refinement Phase 2: the spill writer rides
+	// `SkillRunnerDeps.onSkillEnd`. Earlier the orchestrator only
+	// wired the hook on its inline `runSkill` calls -- the meta-skills
+	// pipeline's own `runSkill` invocations got a hand-rolled deps
+	// object without it, so spills never made it into Lance for real
+	// sessions. This test asserts the hook propagates through.
+	const baseDeps = setup();
+
+	const provider = buildFakeProvider([
+		{
+			skillFilter: msgs =>
+				msgs.some(m => m.role === 'system' && m.content.includes('code-analyzer skill router')),
+			text: CLASSIFY_REPO_DESCRIBE,
+		},
+		{
+			skillFilter: msgs =>
+				msgs.some(m => m.role === 'system' && m.content.includes('code-analyzer scope-selector')),
+			text: SELECT_REPO_DESCRIBE,
+		},
+	]);
+
+	const calls: string[] = [];
+	const deps: SkillsPipelineDeps = {
+		...baseDeps,
+		resolveProvider: () => provider,
+		onSkillEnd: async (payload) => { calls.push(payload.skillId); },
+	};
+
+	const result = await runSkillsPipeline(
+		{ question: 'Describe the repo.', repo: REPO },
+		deps,
+	);
+
+	assert.equal(result.aborted, false);
+	// classify-question + select-scope + the per-skill execution all
+	// ride runSkill internally -- each one MUST end up in `calls`.
+	// Order isn't strictly required, only that all three fired.
+	assert.ok(calls.includes('code.meta.classify-question'),
+		`expected classify-question to spill; got ${calls.join(', ')}`);
+	assert.ok(calls.includes('code.meta.select-scope'),
+		`expected select-scope to spill; got ${calls.join(', ')}`);
+	assert.ok(calls.includes('code.source.repo.describe'),
+		`expected repo.describe to spill; got ${calls.join(', ')}`);
+});
+
 test('skills-pipeline: select returns no scoped -> aborted with note', async () => {
 	const baseDeps = setup();
 	const emptySelect = JSON.stringify({ scoped: [], notes: ['could not resolve scope'] });

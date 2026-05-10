@@ -561,6 +561,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
           return session.resolver.resolve('code-analyzer', 'plan');
         },
+        // conversation-flow-refinement.md Phase 2: every skill end fires
+        // the spill writer (disk JSON + artifact_vec Lance row).
+        // Without this, the meta-pipeline's outputs never make it into
+        // the per-session vector store, so a follow-up turn's
+        // `retrievePriorContext` finds nothing -- the exact failure
+        // mode in agent.2.log when this hook was missing.
+        onSkillEnd: makeSpillHandler(session),
         ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       },
     );

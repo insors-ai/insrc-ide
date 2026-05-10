@@ -41,6 +41,7 @@ import type { PlannerInput } from '../agent/planner/agent-state.js';
 import type { BrainstormInput } from '../agent/tasks/brainstorm/types.js';
 // Research agent handled via ResearchController in controllers/research.ts
 import type { TesterInput } from '../agent/tasks/tester/types.js';
+import type { ResolvedIntent } from '../agent/intent/resolver.js';
 import type { RpcHandler, StreamHandler } from './server.js';
 
 const log = getLogger('chat');
@@ -1299,25 +1300,47 @@ async function runCodeAnalyzerSlash(
   // conversation-flow-refinement.md Phase 4: build a per-turn
   // PriorContext from the session's prior outputs and let the
   // question-enhancer rewrite the prompt in concrete identifiers
-  // before we hand it to the orchestrator. The slash path knows the
-  // intent is `code-analysis`, but we still call `resolveIntent` so
-  // the [intent:current] tag + timestamp get refreshed (drives the
-  // tag-reuse fast path on the *next* turn, regardless of how it
-  // arrives -- regular chat or another slash).
+  // before we hand it to the orchestrator. The slash path KNOWS the
+  // intent is `code-analysis` -- we don't run the LLM classifier
+  // here. Earlier we did, and a bare follow-up like "describe HDFS
+  // Core" got misclassified as `document` / `research`, which (a)
+  // clobbered the [intent:current] tag and (b) starved the retriever
+  // of intent-matched prior artifacts. Synthesize the ResolvedIntent
+  // directly: capture the prior tag value as `previousIntent` if it
+  // differs, then stamp the current tag.
   //
-  // All three steps are best-effort: any failure degrades to the raw
+  // All steps below are best-effort: any failure degrades to the raw
   // user prompt so the analyzer keeps working. The HDFS-Core
   // regression (turn 1 surfaces topModules, turn 2 "describe HDFS
   // Core" fails module lookup) is the motivating case.
   let effectiveQuestion = userPrompt;
   try {
-    const { resolveIntent } = await import('../agent/intent/resolver.js');
+    const {
+      INTENT_TAG_CURRENT,
+      INTENT_TAG_TIMESTAMP,
+    } = await import('../agent/intent/resolver.js');
     const { retrievePriorContext, PRIOR_CONTEXT_TAG_CURRENT } = await import(
       '../agent/intent/retriever.js'
     );
     const { enhanceQuestion } = await import('../agent/intent/enhancer.js');
 
-    const resolved = await resolveIntent(session, userPrompt);
+    const priorTagValue = session.contextManager.getTag(INTENT_TAG_CURRENT);
+    const previousIntent = priorTagValue.length > 0 && priorTagValue !== 'code-analysis'
+      ? priorTagValue
+      : undefined;
+    session.contextManager.setTag(INTENT_TAG_CURRENT,   'code-analysis');
+    session.contextManager.setTag(INTENT_TAG_TIMESTAMP, String(Date.now()));
+
+    const resolved: ResolvedIntent = {
+      id:         'code-analysis',
+      source:     previousIntent !== undefined ? 'classified-shifted' : 'tag',
+      confidence: 'high',
+      reasoning:  '/code-analyze slash command -- intent forced',
+      message:    userPrompt,
+      ...(previousIntent !== undefined
+        ? { previousIntent: previousIntent as ResolvedIntent['previousIntent'] }
+        : {}),
+    };
     const priorContext = await retrievePriorContext(session, userPrompt, resolved);
 
     const haveArtifacts = priorContext.artifacts.length > 0;
