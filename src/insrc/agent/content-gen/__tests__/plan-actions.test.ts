@@ -1,13 +1,10 @@
 /**
- * Tests for the planActions helper (Phase 1 of
- * plans/analyzers/cloud-plan-local-expand-cloud-review.md).
+ * Tests for the planActions helper.
  *
- * The helper sends a single LLM call to the cloud provider; we stub
- * the provider with a fakeProvider that returns canned text so the
- * tests stay deterministic without hitting Anthropic / Ollama. The
- * happy path and the validation-retry path both verify that the
- * resulting `PlannedAction[]` is well-formed and clamped to the
- * per-tier action budget.
+ * Lean input shape: intent + request + summaryContext + tier. The
+ * planner does NOT see skill executions or evidence -- per the
+ * design decision, the cloud LLM gets only what it needs to
+ * decompose the work; the local model picks tools at expand time.
  */
 
 import { test } from 'node:test';
@@ -42,9 +39,7 @@ function fakeProviderReturning(...texts: readonly string[]): LLMProvider {
 
 function fakeProviderThrowing(message: string): LLMProvider {
 	return {
-		async complete(): Promise<LLMResponse> {
-			throw new Error(message);
-		},
+		async complete(): Promise<LLMResponse> { throw new Error(message); },
 		async *stream() { yield ''; },
 		async embed() { return []; },
 		supportsTools: true,
@@ -74,45 +69,33 @@ const VALID_PLAN = JSON.stringify({
 	intentBrief: 'Describe HDFS Core, the distributed-storage subsystem of Hadoop.',
 	actions: [
 		{
-			id:        'modules-overview',
-			title:     'HDFS Core: Module Layout',
-			objective: 'Map the top-level HDFS Core packages and their responsibilities.',
-			evidence: [
-				{ skillId: 'code.source.repo.describe',   executionIdx: 0 },
-				{ skillId: 'code.source.module.describe', executionIdx: 1, highlight: 'hadoop-hdfs' },
-			],
+			id:        'overview',
+			title:     'Overview',
+			objective: 'Summarise the purpose and high-level structure of HDFS Core.',
 			maxBudgetTokens: 1500,
 			reviewCriteria: [
-				'Names each top-level HDFS Core module by absolute path',
-				'Cites the module.describe finding at least once',
-				'Notes the file count per module',
+				'States what HDFS Core is and what it does',
+				'Mentions the primary subsystems',
 			],
 		},
 		{
-			id:        'cyclic-deps',
-			title:     'Cyclic Dependencies',
-			objective: 'Surface the SCC cycles the cyclic-deps skill reported.',
-			evidence: [
-				{ skillId: 'code.quality.cyclic-deps', executionIdx: 2 },
-			],
+			id:        'modules',
+			title:     'Module layout',
+			objective: 'Map the top-level modules and their responsibilities.',
 			maxBudgetTokens: 1200,
 			reviewCriteria: [
-				'Lists every cycle the skill reported',
-				'Calls out the largest cycle by entity count',
+				'Names each top-level module by path',
+				'Notes the file count per module',
 			],
 		},
 	],
 });
 
 const FIXTURE_INPUT = {
-	request:     'do a detailed analysis of HDFS Core',
-	repoSummary: '/repo/hadoop -- Apache Hadoop, Java; primaryLanguages: java, scala',
-	executions:  [
-		{ skillId: 'code.source.repo.describe',   value: { topModules: [] }, confidence: 'high' as const,    notes: [] },
-		{ skillId: 'code.source.module.describe', value: { found: true },    confidence: 'high' as const,    notes: [] },
-		{ skillId: 'code.quality.cyclic-deps',    value: { cycleCount: 3 },  confidence: 'high' as const,    notes: [] },
-	],
-	tier: 'L' as const,
+	intent:         'code-analysis',
+	request:        'do a detailed analysis of HDFS Core',
+	summaryContext: '/repo/hadoop -- java/scala, ~12500 files, scope tier L. Prior turns covered: whole-repo overview surfacing top modules.',
+	tier:           'L' as const,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -125,7 +108,7 @@ test('validatePlan: valid input -> ok', () => {
 	if (typeof r === 'string') return;
 	assert.equal(r.intentBrief.length > 0, true);
 	assert.equal(r.actions.length, 2);
-	assert.equal(r.actions[0]!.id, 'modules-overview');
+	assert.equal(r.actions[0]!.id, 'overview');
 });
 
 test('validatePlan: missing intentBrief -> error', () => {
@@ -143,7 +126,7 @@ test('validatePlan: actions missing -> error', () => {
 test('validatePlan: action missing objective -> error', () => {
 	const broken = {
 		intentBrief: 'x',
-		actions: [{ id: 'a', title: 't', evidence: [], reviewCriteria: ['c'] }],
+		actions: [{ id: 'a', title: 't', reviewCriteria: ['c'] }],
 	};
 	const r = validatePlan(broken);
 	assert.equal(typeof r, 'string');
@@ -154,8 +137,8 @@ test('validatePlan: duplicate ids rejected', () => {
 	const broken = {
 		intentBrief: 'x',
 		actions: [
-			{ id: 'a', title: 't', objective: 'o', evidence: [], reviewCriteria: ['c1'] },
-			{ id: 'a', title: 't', objective: 'o', evidence: [], reviewCriteria: ['c2'] },
+			{ id: 'a', title: 't', objective: 'o', reviewCriteria: ['c1'] },
+			{ id: 'a', title: 't', objective: 'o', reviewCriteria: ['c2'] },
 		],
 	};
 	const r = validatePlan(broken);
@@ -163,28 +146,10 @@ test('validatePlan: duplicate ids rejected', () => {
 	assert.match(r as string, /duplicates/);
 });
 
-test('validatePlan: evidence with non-numeric executionIdx rejected', () => {
-	const broken = {
-		intentBrief: 'x',
-		actions: [{
-			id: 'a', title: 't', objective: 'o',
-			evidence: [{ skillId: 's', executionIdx: 'oops' }],
-			reviewCriteria: ['c'],
-		}],
-	};
-	const r = validatePlan(broken);
-	assert.equal(typeof r, 'string');
-	assert.match(r as string, /executionIdx/);
-});
-
 test('validatePlan: empty reviewCriteria array rejected', () => {
 	const broken = {
 		intentBrief: 'x',
-		actions: [{
-			id: 'a', title: 't', objective: 'o',
-			evidence: [{ skillId: 's', executionIdx: 0 }],
-			reviewCriteria: [],
-		}],
+		actions: [{ id: 'a', title: 't', objective: 'o', reviewCriteria: [] }],
 	};
 	const r = validatePlan(broken);
 	assert.equal(typeof r, 'string');
@@ -195,23 +160,9 @@ test('validatePlan: maxBudgetTokens clamps to [400, 3000]', () => {
 	const r = validatePlan({
 		intentBrief: 'x',
 		actions: [
-			{
-				id: 'low', title: 't', objective: 'o',
-				evidence: [{ skillId: 's', executionIdx: 0 }],
-				reviewCriteria: ['c'],
-				maxBudgetTokens: 100,
-			},
-			{
-				id: 'high', title: 't', objective: 'o',
-				evidence: [{ skillId: 's', executionIdx: 0 }],
-				reviewCriteria: ['c'],
-				maxBudgetTokens: 999999,
-			},
-			{
-				id: 'absent', title: 't', objective: 'o',
-				evidence: [{ skillId: 's', executionIdx: 0 }],
-				reviewCriteria: ['c'],
-			},
+			{ id: 'low',  title: 't', objective: 'o', reviewCriteria: ['c'], maxBudgetTokens: 100 },
+			{ id: 'high', title: 't', objective: 'o', reviewCriteria: ['c'], maxBudgetTokens: 999999 },
+			{ id: 'absent', title: 't', objective: 'o', reviewCriteria: ['c'] },
 		],
 	});
 	assert.notEqual(typeof r, 'string');
@@ -221,44 +172,58 @@ test('validatePlan: maxBudgetTokens clamps to [400, 3000]', () => {
 	assert.equal(r.actions[2]!.maxBudgetTokens, 1500);
 });
 
+test('validatePlan: extra `evidence` field is ignored (back-compat with pre-rewrite plans)', () => {
+	// The schema no longer has evidence; old planner outputs that
+	// included it should still parse cleanly (we just ignore it).
+	const r = validatePlan({
+		intentBrief: 'x',
+		actions: [{
+			id: 'a', title: 't', objective: 'o',
+			evidence: [{ skillId: 's', executionIdx: 0 }],
+			reviewCriteria: ['c'],
+		}],
+	});
+	assert.notEqual(typeof r, 'string');
+	if (typeof r === 'string') return;
+	assert.equal((r.actions[0] as unknown as { evidence?: unknown }).evidence, undefined);
+});
+
 // ---------------------------------------------------------------------------
 // buildPlanMessages (prompt assembly)
 // ---------------------------------------------------------------------------
 
-test('buildPlanMessages: includes request, repo summary, action budget, executions', () => {
+test('buildPlanMessages: includes intent, request, summary context, action budget', () => {
 	const { messages, userText } = buildPlanMessages({ ...FIXTURE_INPUT }, 4);
 	assert.equal(messages.length, 2);
 	assert.equal(messages[0]!.role, 'system');
 	assert.equal(messages[1]!.role, 'user');
+	const sys = messages[0]!.content as string;
+	assert.match(sys, /You plan a code-analysis report/);
+	assert.match(userText, /## Intent\ncode-analysis/);
 	assert.match(userText, /## Request/);
 	assert.match(userText, /detailed analysis of HDFS Core/);
-	assert.match(userText, /## Repository/);
+	assert.match(userText, /## Summary context/);
+	assert.match(userText, /Prior turns covered: whole-repo overview/);
 	assert.match(userText, /## Action budget/);
 	assert.match(userText, /Maximum actions for this report: 4/);
 	assert.match(userText, /scope tier: L/);
-	assert.match(userText, /## Executions \(3\)/);
-	assert.match(userText, /code\.source\.repo\.describe/);
-	assert.match(userText, /code\.quality\.cyclic-deps/);
 });
 
-test('buildPlanMessages: priorContextSummary section appears when supplied', () => {
-	const { userText } = buildPlanMessages(
-		{ ...FIXTURE_INPUT, priorContextSummary: 'Prior turn: described the whole repo (modules, file counts).' },
-		4,
-	);
-	assert.match(userText, /## Prior turns covered/);
-	assert.match(userText, /described the whole repo/);
+test('buildPlanMessages: empty summary context renders fallback line', () => {
+	const { userText } = buildPlanMessages({ ...FIXTURE_INPUT, summaryContext: '' }, 4);
+	assert.match(userText, /\(no summary supplied\)/);
 });
 
-test('buildPlanMessages: no priorContextSummary -> section omitted', () => {
+test('buildPlanMessages: data-analysis intent surfaces in system prompt', () => {
+	const { messages } = buildPlanMessages({ ...FIXTURE_INPUT, intent: 'data-analysis' }, 4);
+	const sys = messages[0]!.content as string;
+	assert.match(sys, /You plan a data-analysis report/);
+});
+
+test('buildPlanMessages: NO executions block in the prompt (lean shape)', () => {
 	const { userText } = buildPlanMessages({ ...FIXTURE_INPUT }, 4);
-	assert.equal(userText.includes('## Prior turns covered'), false);
-});
-
-test('buildPlanMessages: empty executions array -> placeholder line', () => {
-	const { userText } = buildPlanMessages({ ...FIXTURE_INPUT, executions: [] }, 4);
-	assert.match(userText, /## Executions \(0\)/);
-	assert.match(userText, /no executions ran/);
+	assert.equal(userText.includes('## Executions'), false);
+	assert.equal(userText.includes('confidence:'), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -277,17 +242,19 @@ test('planActions: happy path -> returns parsed plan + degraded:false', async ()
 	assert.equal(result.degraded, false);
 	assert.equal(result.actions.length, 2);
 	assert.match(result.intentBrief, /HDFS Core/);
+	// Lean shape: actions have NO evidence field.
+	for (const a of result.actions) {
+		assert.equal((a as unknown as { evidence?: unknown }).evidence, undefined);
+	}
 });
 
 test('planActions: planner over-shoots tier cap -> clamped', async () => {
-	// Build a 6-action plan; tier S only allows 2.
 	const overshoot = JSON.stringify({
 		intentBrief: 'foo',
 		actions: Array.from({ length: 6 }, (_, i) => ({
 			id: `act-${i}`,
 			title: 't',
 			objective: 'o',
-			evidence: [{ skillId: 's', executionIdx: 0 }],
 			reviewCriteria: ['c'],
 		})),
 	});
@@ -296,16 +263,14 @@ test('planActions: planner over-shoots tier cap -> clamped', async () => {
 		fakeProviderReturning(overshoot),
 	);
 	assert.equal(result.degraded, false);
-	assert.equal(result.actions.length, ACTION_BUDGET_BY_TIER.S);  // 2
+	assert.equal(result.actions.length, ACTION_BUDGET_BY_TIER.S);
 });
 
 test('planActions: explicit maxActions overrides tier cap (clamped to 32)', async () => {
 	const overshoot = JSON.stringify({
 		intentBrief: 'x',
 		actions: Array.from({ length: 50 }, (_, i) => ({
-			id: `a${i}`, title: 't', objective: 'o',
-			evidence: [{ skillId: 's', executionIdx: 0 }],
-			reviewCriteria: ['c'],
+			id: `a${i}`, title: 't', objective: 'o', reviewCriteria: ['c'],
 		})),
 	});
 	const result = await planActions(
@@ -334,7 +299,7 @@ test('planActions: both attempts invalid -> degraded:true with empty actions', a
 	assert.match(result.note ?? '', /plan stage failed/);
 });
 
-test('planActions: provider throws on first call -> retry, then degraded if second also throws', async () => {
+test('planActions: provider throws -> degraded result, no throw', async () => {
 	const result = await planActions(
 		{ ...FIXTURE_INPUT },
 		fakeProviderThrowing('connection lost'),
@@ -343,9 +308,8 @@ test('planActions: provider throws on first call -> retry, then degraded if seco
 	assert.match(result.note ?? '', /provider error/);
 });
 
-test('planActions: schema-violating first response includes corrective retry hint', async () => {
+test('planActions: corrective retry hint appears on second attempt', async () => {
 	const cap = captureMessagesProvider(VALID_PLAN);
-	// The first response is unparseable so a retry message is appended.
 	let callCount = 0;
 	const provider: LLMProvider = {
 		async complete(messages: LLMMessage[]): Promise<LLMResponse> {
@@ -363,12 +327,12 @@ test('planActions: schema-violating first response includes corrective retry hin
 	assert.equal(result.degraded, false);
 	const captured = cap.getCaptured();
 	const lastUser = captured.filter(m => m.role === 'user').pop();
-	assert.ok(lastUser, 'second attempt should have a user message');
+	assert.ok(lastUser);
 	assert.match(lastUser!.content as string, /Your previous response was rejected/);
 });
 
 // ---------------------------------------------------------------------------
-// stripFences (exported for symmetry with outline.ts)
+// stripFences
 // ---------------------------------------------------------------------------
 
 test('stripFences: unwraps ```json fences', () => {

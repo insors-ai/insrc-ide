@@ -16,7 +16,7 @@
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
-import type { PlanExecution, PlannedAction, PlannedEvidenceRef } from './plan-actions.js';
+import type { PlanExecution, PlannedAction } from './plan-actions.js';
 
 const log = getLogger('content-gen:expand-action');
 
@@ -26,9 +26,10 @@ const log = getLogger('content-gen:expand-action');
 
 export interface ExpandActionInput {
 	readonly action:    PlannedAction;
-	/** Subset of the pipeline's executions corresponding to
-	 *  `action.evidence`. Caller (orchestrator) does the slicing so
-	 *  the expander never sees unrelated executions. */
+	/** Skill executions the orchestrator gathered for THIS plan step.
+	 *  The expander never sees executions from other plan steps;
+	 *  caller (orchestrator) runs a per-step skills pipeline scoped
+	 *  to `action.objective` and hands the results in here. */
 	readonly evidence:  readonly PlanExecution[];
 	/** Original user prompt (for narrative orientation only). */
 	readonly request:   string;
@@ -192,9 +193,7 @@ function buildExpandMessages(input: ExpandActionInput): LLMMessage[] {
 	} else {
 		for (let i = 0; i < input.evidence.length; i++) {
 			const e = input.evidence[i]!;
-			const ref = input.action.evidence[i];
-			const highlight = ref?.highlight !== undefined ? `  highlight: ${ref.highlight}` : '';
-			userLines.push(`### [${i}] ${e.skillId} (confidence: ${e.confidence})${highlight}`);
+			userLines.push(`### [${i}] ${e.skillId} (confidence: ${e.confidence})`);
 			userLines.push(formatEvidenceValue(e.value));
 			if (e.notes.length > 0) {
 				userLines.push('Notes:');
@@ -269,4 +268,4 @@ export const _fallbackMarkdownForTest    = fallbackMarkdown;
 
 // Re-exports kept for callers that take Refs from this module's
 // surface without round-tripping through plan-actions.ts.
-export type { PlanExecution, PlannedAction, PlannedEvidenceRef };
+export type { PlanExecution, PlannedAction };

@@ -36,7 +36,7 @@ import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { INTENT_TAG_CURRENT, INTENT_TAG_TIMESTAMP } from '../../agent/intent/resolver.js';
-import { PRIOR_CONTEXT_TAG_CURRENT } from '../../agent/intent/retriever.js';
+import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import { makeSpillHandler } from '../../agent/artifacts/spill-writer.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import type { LLMProvider } from '../../shared/types.js';
@@ -806,7 +806,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     ca: CodeAnalysisState | undefined,
     _planned: readonly AnalysisTask[],
     accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-    executions: readonly PlanExecution[],
+    _executions: readonly PlanExecution[],
     tier: ScopeSize,
   ): Promise<string> {
     if (this.deps === undefined) {
@@ -817,23 +817,21 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const local = session.ollamaProvider;
     const reviewer = session.resolver.resolve('code-analyzer', 'review');
     const request = ca?.request ?? '';
-    const repoSummary = this.formatRepoSummaryLine();
 
-    // We funnel ALL synthesis progress into a single shared bubble
-    // (one persistent activity-console for the whole report) so the
-    // user sees a continuous narrative instead of bubbles flashing
-    // in and out per stage. Bubble is closed only after stitch.
+    // Lean summary context: repo descriptor + memory line.
+    const summaryContext = this.buildSummaryContext(tier);
+
     const synthBubble = 'synthesise';
     this.emitLiveStep(synthBubble, '');
 
-    // ----- Stage 1: plan ------------------------------------------------
+    // ----- Stage 1: plan (cloud, lean input) ----------------------------
     this.emitMilestone(synthBubble, 'planning report sections...');
 
     const plan = await planActions(
       {
+        intent:         'code-analysis',
         request,
-        repoSummary,
-        executions,
+        summaryContext,
         tier,
         analyzerLabel: 'code-analyzer',
       },
@@ -841,7 +839,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     );
 
     const actions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
-      ? [synthesiseFallbackAction(ca, accepted, executions)]
+      ? [synthesiseFallbackAction(ca, accepted)]
       : plan.actions;
 
     this.emitMilestone(
@@ -849,12 +847,24 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       `planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}`,
     );
 
-    // ----- Stage 2+3: per-action expand+review --------------------------
+    // ----- Stage 2+3: per-action [skills pipeline + expand + review] ----
     const sections: { id: string; title: string; markdown: string }[] = [];
+    const repo = repoContextFromSummary(this._repoSummary!);
+    const priorFacts = readPriorFactsTag(session);
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i]!;
-      const evidence = pickEvidence(action, executions);
-      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] expanding "${action.title}"...`);
+      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] gathering evidence for "${action.title}"...`);
+
+      // Per-step skills pipeline. The local model's classify-question
+      // + select-scope picks the tools / skills appropriate for this
+      // step's objective. The picked skills run; we adapt the
+      // pipeline result to PlanExecution[] for the expander.
+      const evidence = await this.runPerStepSkillsPipeline(action.objective, repo, priorFacts);
+
+      this.emitMilestone(
+        synthBubble,
+        `[${i + 1}/${actions.length}] expanding "${action.title}" (${evidence.length} skill execution${evidence.length === 1 ? '' : 's'})...`,
+      );
 
       const out = await expandThenReview(
         {
@@ -863,8 +873,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           request,
           analyzerLabel: 'code-analyzer',
           onProgress: (phase, payload) => {
-            // Sub-events only stream into the bubble; we don't
-            // hammer the top progress bar with per-phase noise.
             if (phase === 'review-1' || phase === 'review-2') {
               const verdict = payload.kind === 'review' ? payload.result.verdict : '?';
               this.emitLiveStep(synthBubble, this.formatProgress(`  ${action.id}: ${phase} (${verdict})`) + '\n');
@@ -889,14 +897,96 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // ----- Stage 4: stitch (no further LLM work) ------------------------
     const md = stitchPlanSections(plan.intentBrief, actions, sections, this._parentListId);
 
-    // Close the synthesis bubble. The chat-handler emits `done`
-    // shortly after this returns; that synthetic streamEnd would
-    // clear the bubble anyway, but closing here surfaces the
-    // "completed" state cleanly first.
     this.emitLiveStep(synthBubble, this.formatProgress(`report ready (${sections.length} section${sections.length === 1 ? '' : 's'})`) + '\n');
     this.emitLiveStep(synthBubble, '', true);
 
     return md;
+  }
+
+  /**
+   * Build the lean summary context the cloud planner sees:
+   *   line 1: active repo descriptor (path, languages, scope tier)
+   *   line 2 (optional): memory of what prior turns covered, mined
+   *           from the [priorContext:current] tag the chat-handler
+   *           stamps via the conversation-flow-refinement helpers.
+   */
+  private buildSummaryContext(tier: ScopeSize): string {
+    const lines: string[] = [];
+
+    const repoLine = this.formatRepoSummaryLine();
+    lines.push(`Active repo: ${repoLine.length > 0 ? repoLine : '(none)'} -- scope tier: ${tier}.`);
+
+    if (this.deps !== undefined) {
+      try {
+        const session = this.deps.session;
+        const raw = session.contextManager.getTag(PRIOR_CONTEXT_TAG_CURRENT);
+        if (raw.length > 0) {
+          const parsed = JSON.parse(raw) as {
+            currentIntent?: string;
+            intentChanged?: boolean;
+            previousIntent?: string;
+            facts?: import('../../agent/intent/retriever.js').PriorFacts;
+            artifactCount?: number;
+          };
+          const memory = summarizePriorContext({
+            currentIntent: parsed.currentIntent ?? 'code-analysis',
+            intentChanged: parsed.intentChanged ?? false,
+            ...(parsed.previousIntent !== undefined ? { previousIntent: parsed.previousIntent } : {}),
+            artifacts:     [],
+            facts:         parsed.facts ?? {},
+          });
+          if (memory.length > 0) lines.push(memory);
+        }
+      } catch (err) {
+        log.debug({ err: (err as Error).message }, 'buildSummaryContext: priorContext read failed (continuing)');
+      }
+    }
+
+    return lines.join(' ');
+  }
+
+  /**
+   * Run the meta-skills pipeline scoped to ONE plan step. The local
+   * model picks its own tools via classify-question + select-scope;
+   * the picked skills run; we adapt the pipeline result to
+   * PlanExecution[] for the expander. Errors degrade to empty
+   * evidence -- the expander handles the no-evidence case.
+   */
+  private async runPerStepSkillsPipeline(
+    objective: string,
+    repo: ReturnType<typeof repoContextFromSummary>,
+    priorFacts: PriorFactsForSkills | undefined,
+  ): Promise<readonly PlanExecution[]> {
+    if (this.deps === undefined) return [];
+    const session = this.deps.session;
+    try {
+      const result = await runSkillsPipeline(
+        {
+          question: objective,
+          repo,
+          ...(priorFacts !== undefined ? { priorFacts } : {}),
+        },
+        {
+          session,
+          resolveProvider: (affinity) => {
+            if (affinity === 'local') return session.ollamaProvider;
+            if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
+            return session.resolver.resolve('code-analyzer', 'plan');
+          },
+          onSkillEnd: makeSpillHandler(session),
+          ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+        },
+      );
+      return result.executions.map(e => ({
+        skillId:    e.skillId,
+        value:      e.value,
+        confidence: e.confidence,
+        notes:      e.notes,
+      }));
+    } catch (err) {
+      log.warn({ objective, err: (err as Error).message }, 'runPerStepSkillsPipeline: failed; expander will see no evidence');
+      return [];
+    }
   }
 
   private queueSinglePassSynthesise(
@@ -1241,54 +1331,25 @@ function progressMessageForSkillEnd(
 // ---------------------------------------------------------------------------
 
 /**
- * Slice the executions array down to just what one action's evidence
- * refs cite. The expander + reviewer only see this slice; unrelated
- * executions don't pollute the per-action prompt.
- */
-function pickEvidence(
-  action: PlannedAction,
-  executions: readonly PlanExecution[],
-): readonly PlanExecution[] {
-  const seen = new Set<number>();
-  const out: PlanExecution[] = [];
-  for (const ref of action.evidence) {
-    const idx = ref.executionIdx;
-    if (idx < 0 || idx >= executions.length || seen.has(idx)) continue;
-    const e = executions[idx];
-    if (e === undefined) continue;
-    // Filter out evidence whose skillId doesn't match the cited
-    // execution -- this defends against a planner mistake where it
-    // names the wrong skill for an index.
-    if (e.skillId !== ref.skillId) continue;
-    seen.add(idx);
-    out.push(e);
-  }
-  return out;
-}
-
-/**
  * Synthesise a single fallback action when the planner returns a
- * degraded / empty plan. The fallback covers ALL executions in one
- * "summary" section so the report still produces something useful.
+ * degraded / empty plan. The fallback drives the per-step skills
+ * pipeline against the user's request directly so the report still
+ * produces something useful.
  */
 function synthesiseFallbackAction(
   ca: CodeAnalysisState | undefined,
   accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-  executions: readonly PlanExecution[],
 ): PlannedAction {
   const requestSnippet = (ca?.request ?? 'analysis request').slice(0, 80);
-  const evidence = executions.map((e, i) => ({ skillId: e.skillId, executionIdx: i }));
-  const skillCount = executions.length;
   return {
     id:        'fallback-summary',
     title:     `Summary: ${requestSnippet}`,
-    objective: `Summarise the ${skillCount} skill execution${skillCount === 1 ? '' : 's'} the analyzer ran for this request.`,
-    evidence,
+    objective: `Address the user request "${ca?.request ?? '(unknown)'}" by running whatever code-analysis skills best fit it and summarising the findings.`,
     maxBudgetTokens: 2000,
     reviewCriteria: [
-      'Touches every skill execution at least once',
-      'States the user request verbatim',
-      `Notes that ${accepted.length} task${accepted.length === 1 ? '' : 's'} were accepted into the report`,
+      'Addresses the user request directly',
+      'Cites the skills the local model invoked',
+      `Notes that the planner did not propose a structured plan (${accepted.length} prior task${accepted.length === 1 ? '' : 's'} accepted)`,
     ],
   };
 }

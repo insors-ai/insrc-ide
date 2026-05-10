@@ -27,10 +27,6 @@ const ACTION: PlannedAction = {
 	id:        'modules-overview',
 	title:     'HDFS Core: Module Layout',
 	objective: 'Map the top-level HDFS Core packages and their responsibilities.',
-	evidence: [
-		{ skillId: 'code.source.repo.describe',   executionIdx: 0 },
-		{ skillId: 'code.source.module.describe', executionIdx: 1, highlight: 'hadoop-hdfs' },
-	],
 	maxBudgetTokens: 1500,
 	reviewCriteria: [
 		'Names each top-level HDFS Core module by absolute path',
@@ -132,7 +128,6 @@ test('buildExpandMessages: includes objective, criteria, evidence, request', () 
 	assert.match(user, /Names each top-level HDFS Core module/);
 	assert.match(user, /## Evidence \(2\)/);
 	assert.match(user, /code\.source\.repo\.describe/);
-	assert.match(user, /highlight: hadoop-hdfs/);
 });
 
 test('buildExpandMessages: refineHint is prepended to system prompt', () => {
@@ -151,7 +146,7 @@ test('buildExpandMessages: refineHint is prepended to system prompt', () => {
 
 test('buildExpandMessages: empty evidence array -> placeholder line', () => {
 	const msgs = buildExpandMessages({
-		action: { ...ACTION, evidence: [] },
+		action: ACTION,
 		evidence: [],
 		request: REQUEST,
 	});

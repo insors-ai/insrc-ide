@@ -356,3 +356,64 @@ function errMessage(e: unknown): string {
 // ---------------------------------------------------------------------------
 
 export const _mineFactsForTest = mineFacts;
+
+// ---------------------------------------------------------------------------
+// Memory summary (for the cloud planner's lean summary context)
+// ---------------------------------------------------------------------------
+
+/**
+ * Render a one-line memory summary the cloud planner sees as part of
+ * its summary context. Folds the prior turn's intent + the typed
+ * facts already covered into a short sentence so the planner avoids
+ * re-covering them.
+ *
+ * Returns an empty string when there's no useful prior context (no
+ * facts, no intent shift). Caller (orchestrator) concatenates this
+ * with the repo descriptor when composing the summary context for
+ * `planActions`.
+ */
+export function summarizePriorContext(priorContext: PriorContext): string {
+	const parts: string[] = [];
+
+	if (priorContext.intentChanged && priorContext.previousIntent !== undefined) {
+		parts.push(
+			`Intent shifted from \`${priorContext.previousIntent}\` to \`${priorContext.currentIntent}\` -- prior facts may need translation across analyzer families.`,
+		);
+	}
+
+	const factsParts: string[] = [];
+	const facts = priorContext.facts;
+
+	if (facts.modules !== undefined && facts.modules.length > 0) {
+		const sample = facts.modules.slice(0, 5).map(m => {
+			const label = m.label !== undefined ? `"${m.label}"` : '';
+			return `${m.path}${label ? ` (${label})` : ''}`;
+		}).join(', ');
+		const more = facts.modules.length > 5 ? `, +${facts.modules.length - 5} more` : '';
+		factsParts.push(`modules already covered: ${sample}${more}`);
+	}
+
+	if (facts.entities !== undefined && facts.entities.length > 0) {
+		const sample = facts.entities.slice(0, 5).map(e => `${e.kind} \`${e.name}\``).join(', ');
+		const more = facts.entities.length > 5 ? `, +${facts.entities.length - 5} more` : '';
+		factsParts.push(`entities cited: ${sample}${more}`);
+	}
+
+	if (facts.tables !== undefined && facts.tables.length > 0) {
+		const sample = facts.tables.slice(0, 5).map(t => `${t.connectionId}.${t.name}`).join(', ');
+		const more = facts.tables.length > 5 ? `, +${facts.tables.length - 5} more` : '';
+		factsParts.push(`tables cited: ${sample}${more}`);
+	}
+
+	if (facts.ormModels !== undefined && facts.ormModels.length > 0) {
+		const sample = facts.ormModels.slice(0, 5).map(o => `${o.dialect}: ${o.name}`).join(', ');
+		const more = facts.ormModels.length > 5 ? `, +${facts.ormModels.length - 5} more` : '';
+		factsParts.push(`ORM models cited: ${sample}${more}`);
+	}
+
+	if (factsParts.length > 0) {
+		parts.push(`Prior turns covered -- ${factsParts.join('; ')}.`);
+	}
+
+	return parts.join(' ');
+}

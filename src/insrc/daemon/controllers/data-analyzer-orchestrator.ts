@@ -43,6 +43,7 @@ import {
 import { generateMultiPass } from '../../agent/content-gen/index.js';
 import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
 import { expandThenReview } from '../../agent/content-gen/review-action.js';
+import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import {
   buildConnectionFingerprint,
   readCachedResult,
@@ -1111,7 +1112,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
    */
   private async runPlanExpandReviewSynthesise(
     accepted: readonly AcceptedTask[],
-    executions: readonly PlanExecution[],
+    _executions: readonly PlanExecution[],
   ): Promise<string> {
     if (this.deps === undefined) {
       throw new Error('runPlanExpandReviewSynthesise: deps not attached');
@@ -1122,24 +1123,19 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     const reviewer = session.resolver.resolve('data-analyzer', 'review');
     const request = this._request ?? '';
 
-    const repoSummary = (() => {
-      const path = session.repoPath ?? '';
-      const closure = session.closureRepos.length;
-      return path.length > 0
-        ? `${path} -- closure size: ${closure}`
-        : `(no active repo) -- closure size: ${closure}`;
-    })();
+    // Lean summary context: repo descriptor + memory line.
+    const summaryContext = this.buildSummaryContext();
 
-    // ----- Stage 1: plan ------------------------------------------------
+    // ----- Stage 1: plan (cloud, lean input) ----------------------------
     const planStep = 'synthesise (plan)';
     this.emitLiveStep(planStep, '');
     this.emitLiveStep(planStep, `[data-analyzer | tier=${this._tier}] planning report sections...\n`);
 
     const plan = await planActions(
       {
+        intent:         'data-analysis',
         request,
-        repoSummary,
-        executions,
+        summaryContext,
         tier: this._tier,
         analyzerLabel: 'data-analyzer',
       },
@@ -1147,7 +1143,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     );
 
     const actions = plan.degraded || plan.actions.length === 0
-      ? [synthesiseFallbackActionDA(request, accepted, executions)]
+      ? [synthesiseFallbackActionDA(request, accepted)]
       : plan.actions;
 
     this.emitLiveStep(
@@ -1156,13 +1152,15 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     );
     this.emitLiveStep(planStep, '', true);
 
-    // ----- Stage 2+3: per-action expand+review --------------------------
+    // ----- Stage 2+3: per-action [skills pipeline + expand + review] ----
     const sections: { id: string; title: string; markdown: string }[] = [];
     for (const action of actions) {
-      const evidence = pickEvidenceDA(action, executions);
+      // Per-step skills pipeline scoped to this section's objective.
+      const evidence = await this.runPerStepSkillsPipelineDA(action.objective);
+
       const stepId = `synthesise (${action.id})`;
       this.emitLiveStep(stepId, '');
-      this.emitLiveStep(stepId, `[data-analyzer] expanding "${action.title}"...\n`);
+      this.emitLiveStep(stepId, `[data-analyzer] expanding "${action.title}" (${evidence.length} skill execution${evidence.length === 1 ? '' : 's'})...\n`);
 
       const out = await expandThenReview(
         {
@@ -1206,6 +1204,85 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       });
     } catch (err) {
       log.debug({ err: (err as Error).message }, 'emitLiveStep: send failed (swallowed)');
+    }
+  }
+
+  /**
+   * Build the lean summary context the cloud planner sees:
+   *   line 1: active repo / closure descriptor + scope tier
+   *   line 2 (optional): memory of what prior turns covered
+   */
+  private buildSummaryContext(): string {
+    const session = this.deps?.session;
+    const lines: string[] = [];
+
+    const path = session?.repoPath ?? '';
+    const closure = session?.closureRepos.length ?? 0;
+    const repoLine = path.length > 0
+      ? `${path} -- closure size: ${closure}`
+      : `(no active repo) -- closure size: ${closure}`;
+    lines.push(`Active repo: ${repoLine} -- scope tier: ${this._tier}.`);
+
+    if (session !== undefined) {
+      try {
+        const raw = session.contextManager.getTag(PRIOR_CONTEXT_TAG_CURRENT);
+        if (raw.length > 0) {
+          const parsed = JSON.parse(raw) as {
+            currentIntent?: string;
+            intentChanged?: boolean;
+            previousIntent?: string;
+            facts?: import('../../agent/intent/retriever.js').PriorFacts;
+          };
+          const memory = summarizePriorContext({
+            currentIntent: parsed.currentIntent ?? 'data-analysis',
+            intentChanged: parsed.intentChanged ?? false,
+            ...(parsed.previousIntent !== undefined ? { previousIntent: parsed.previousIntent } : {}),
+            artifacts:     [],
+            facts:         parsed.facts ?? {},
+          });
+          if (memory.length > 0) lines.push(memory);
+        }
+      } catch (err) {
+        log.debug({ err: (err as Error).message }, 'buildSummaryContext: priorContext read failed');
+      }
+    }
+
+    return lines.join(' ');
+  }
+
+  /**
+   * Per-step skills pipeline. Picks tools / skills appropriate for
+   * one plan step's objective; returns the executions for the
+   * expander. Errors degrade to empty evidence.
+   */
+  private async runPerStepSkillsPipelineDA(objective: string): Promise<readonly PlanExecution[]> {
+    if (this.deps === undefined) return [];
+    const session = this.deps.session;
+    try {
+      const result = await runSkillsPipeline(
+        {
+          question:    objective,
+          connections: this._connections,
+        },
+        {
+          session,
+          resolveProvider: (affinity) => {
+            if (affinity === 'local') return session.ollamaProvider;
+            if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
+            return session.resolver.resolve('data-analyzer', 'meta');
+          },
+          ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+        },
+      );
+      return result.executions.map(e => ({
+        skillId:    e.skillId,
+        value:      e.value,
+        confidence: e.confidence,
+        notes:      e.notes,
+      }));
+    } catch (err) {
+      log.warn({ objective, err: (err as Error).message }, 'runPerStepSkillsPipelineDA: failed; expander will see no evidence');
+      return [];
     }
   }
 
@@ -1639,42 +1716,20 @@ function parseReviewerDecision(rawText: string): ReviewerDecision {
 // content-gen module isn't worth the coupling.
 // ---------------------------------------------------------------------------
 
-function pickEvidenceDA(
-  action: PlannedAction,
-  executions: readonly PlanExecution[],
-): readonly PlanExecution[] {
-  const seen = new Set<number>();
-  const out: PlanExecution[] = [];
-  for (const ref of action.evidence) {
-    const idx = ref.executionIdx;
-    if (idx < 0 || idx >= executions.length || seen.has(idx)) continue;
-    const e = executions[idx];
-    if (e === undefined) continue;
-    if (e.skillId !== ref.skillId) continue;
-    seen.add(idx);
-    out.push(e);
-  }
-  return out;
-}
-
 function synthesiseFallbackActionDA(
   request: string,
   accepted: readonly AcceptedTask[],
-  executions: readonly PlanExecution[],
 ): PlannedAction {
   const requestSnippet = request.length > 0 ? request.slice(0, 80) : 'data analysis request';
-  const evidence = executions.map((e, i) => ({ skillId: e.skillId, executionIdx: i }));
-  const skillCount = executions.length;
   return {
     id:        'fallback-summary',
     title:     `Summary: ${requestSnippet}`,
-    objective: `Summarise the ${skillCount} skill execution${skillCount === 1 ? '' : 's'} the data-analyzer ran for this request.`,
-    evidence,
+    objective: `Address the user request "${request || '(unknown)'}" by running whatever data-analysis skills best fit it and summarising the findings.`,
     maxBudgetTokens: 2000,
     reviewCriteria: [
-      'Touches every skill execution at least once',
-      'States the user request verbatim',
-      `Notes that ${accepted.length} task${accepted.length === 1 ? '' : 's'} were accepted into the report`,
+      'Addresses the user request directly',
+      'Cites the skills the local model invoked',
+      `Notes that the planner did not propose a structured plan (${accepted.length} prior task${accepted.length === 1 ? '' : 's'} accepted)`,
     ],
   };
 }

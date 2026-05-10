@@ -3,19 +3,24 @@
  * (plans/analyzers/cloud-plan-local-expand-cloud-review.md, Phase 1).
  *
  * One LLM call to the active cloud provider, constrained to
- * `PLAN_ACTIONS_SCHEMA`. Decomposes a single user prompt + the skills-
- * pipeline executions into N action-cards. Each action carries enough
- * information for an independent local-expand / cloud-review loop --
- * objective, evidence refs, review criteria.
+ * `PLAN_ACTIONS_SCHEMA`. Decomposes a single user request into N
+ * action-cards. Each card becomes one section of the final markdown
+ * report and is processed by an independent expand+review loop.
+ *
+ * **Lean input.** The cloud planner sees ONLY:
+ *   - intent          ('code-analysis' / 'data-analysis')
+ *   - request         (the user's prompt)
+ *   - summary context (one-line repo descriptor + memory of prior turns)
+ *
+ * It does NOT see the skills pipeline's executions or any pre-fetched
+ * evidence. The local model picks tools / runs skills per plan step.
+ * (Per the user's decision: "what tools to use, how to expand the
+ * plan steps should be left to the local LLM".)
  *
  * Mirrors `generateOutline` in `outline.ts`: structured-JSON output,
  * one validation retry, fallback to `degraded: true` on second
  * failure. Caller (orchestrator) handles degraded by falling back to
- * a single synthetic "summary" action so the report still produces.
- *
- * Analyzer-agnostic: takes a generic `PlanExecution[]` shape that
- * both code-analyzer and data-analyzer's `PerSkillExecution` satisfy
- * structurally.
+ * a single synthetic "summary" action.
  */
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
@@ -49,50 +54,36 @@ export const ACTION_BUDGET_BY_TIER: Readonly<Record<ScopeSize, number>> = {
 	XXXXL: 32,
 };
 
-/** Subset of `PerSkillExecution` the planner needs. Both
- *  analyzers' `PerSkillExecution` satisfies this structurally. */
-export interface PlanExecution {
-	readonly skillId:    string;
-	readonly value:      unknown;
-	readonly confidence: 'high' | 'medium' | 'low';
-	readonly notes:      readonly string[];
-}
-
-export interface PlannedEvidenceRef {
-	readonly skillId:      string;
-	readonly executionIdx: number;
-	readonly highlight?:   string | undefined;
-}
-
 export interface PlannedAction {
 	readonly id:              string;
 	readonly title:           string;
 	readonly objective:       string;
-	readonly evidence:        readonly PlannedEvidenceRef[];
 	readonly maxBudgetTokens: number;
 	readonly reviewCriteria:  readonly string[];
 }
 
 export interface PlanActionsInput {
-	/** User's enhanced prompt (post-question-enhancer where applicable). */
+	/** Analyzer family / intent. e.g. 'code-analysis' or 'data-analysis'. */
+	readonly intent: string;
+	/** User's prompt verbatim (post-question-enhancer where applicable). */
 	readonly request: string;
-	/** Free-form repo summary line. Caller composes; planner just
-	 *  echoes it as context. */
-	readonly repoSummary: string;
-	/** Skill executions in the order the pipeline ran them. */
-	readonly executions: readonly PlanExecution[];
+	/**
+	 * One- or two-line summary the planner uses as orientation. Caller
+	 * composes it from:
+	 *   - active repo descriptor (path, languages, tier)
+	 *   - memory: brief recap of prior turns + facts already covered
+	 * The planner does NOT see skill executions, evidence blobs, or
+	 * any other heavy context.
+	 */
+	readonly summaryContext: string;
 	/** Scope tier (caps action count via `ACTION_BUDGET_BY_TIER`). */
 	readonly tier: ScopeSize;
-	/** Optional one-line summary of what prior turns covered, so the
-	 *  planner doesn't repeat them. */
-	readonly priorContextSummary?: string | undefined;
 	/** Override the per-tier action budget (advisory). Clamped to the
 	 *  schema's hard cap of 32. */
 	readonly maxActions?: number | undefined;
 	/** Output token cap. Default 2500. */
 	readonly maxTokens?: number | undefined;
-	/** Optional analyzer label for logging ("code-analyzer" /
-	 *  "data-analyzer"). */
+	/** Optional analyzer label for logging. */
 	readonly analyzerLabel?: string | undefined;
 }
 
@@ -103,6 +94,19 @@ export interface PlanActionsResult {
 	 *  a synthetic single-action fallback. */
 	readonly degraded:    boolean;
 	readonly note?:       string | undefined;
+}
+
+/**
+ * `PlanExecution` shape kept for backwards compat with the
+ * expand-action / review-action helpers and the legacy orchestrator
+ * paths. The planner itself no longer consumes this -- it's used by
+ * the per-step skills pipeline that runs inside expand.
+ */
+export interface PlanExecution {
+	readonly skillId:    string;
+	readonly value:      unknown;
+	readonly confidence: 'high' | 'medium' | 'low';
+	readonly notes:      readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -173,41 +177,44 @@ export async function planActions(
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = [
-	'You plan an analysis report.',
-	'',
-	'Given the user request, the active repository summary, and the skill',
-	'executions the analyzer pipeline produced, decompose the work into',
-	'N action-cards. Each card becomes one section of the final markdown',
-	'report and is processed by an independent expand+review loop.',
-	'',
-	'Per action you MUST emit:',
-	'  - id              kebab-case stable key (deduped across actions)',
-	'  - title           short user-facing heading',
-	'  - objective       ONE sentence stating what the section answers',
-	'  - evidence        array of { skillId, executionIdx, highlight? } refs',
-	'                    pointing at the supplied executions; only cite',
-	'                    skills that actually ran',
-	'  - maxBudgetTokens cap for the local expander\'s draft',
-	'                    (default 1500; clamp 400-3000)',
-	'  - reviewCriteria  3-5 short bullets the reviewer scores against',
-	'',
-	'Plan-stage rules:',
-	'  1. EVERY action must cite at least one execution unless the section',
-	'     is purely structural (intro / summary / drill-down callout). When',
-	'     uncertain prefer to cite.',
-	'  2. Hard cap on action count is supplied per call -- never exceed it.',
-	'  3. The DEFAULT for in-repo report sections is depth, not breadth.',
-	'     A "describe X" prompt with detailed evidence should produce',
-	'     fewer / longer sections, not more / shallower ones.',
-	'  4. `intentBrief` is 1-2 sentences summarising what the report is',
-	'     about; the orchestrator uses it as the report intro.',
-	'  5. Review criteria are concrete checkable statements (e.g. "names',
-	'     each top-level module by path", "cites the cyclic-deps finding'
-		+ ' at least once"), NOT generic style notes.',
-	'',
-	'Output strict JSON ONLY (no markdown fences, no prose, no preamble).',
-].join('\n');
+function buildSystemPrompt(intent: string): string {
+	return [
+		`You plan a ${intent} report for a coding assistant.`,
+		'',
+		'Given the user request and a brief summary context (active',
+		'repository + memory of prior turns), decompose the work into N',
+		'high-level action-cards. Each card is one section of the final',
+		'markdown report. The local model will pick its own tools for',
+		'each step; the cloud model reviews each section.',
+		'',
+		'Per action you MUST emit:',
+		'  - id              kebab-case stable key (deduped across actions)',
+		'  - title           short user-facing heading',
+		'  - objective       ONE sentence stating WHAT the section answers',
+		'                    (this becomes the local model\'s working brief)',
+		'  - maxBudgetTokens cap for the local expander\'s draft',
+		'                    (default 1500; clamp 400-3000)',
+		'  - reviewCriteria  3-5 short bullets the reviewer scores against',
+		'',
+		'Plan-stage rules:',
+		'  1. Hard cap on action count is supplied per call -- never exceed it.',
+		'  2. The DEFAULT for in-repo report sections is depth, not breadth.',
+		'     A "describe X" prompt should produce fewer / longer sections,',
+		'     not more / shallower ones. Pick the shape that lets the report',
+		'     answer the request thoroughly.',
+		'  3. Do NOT name skills, tools, files, modules, or specific identifiers',
+		'     in the objective. The local model picks those at expand time. The',
+		'     objective is a goal statement -- not a tool call.',
+		'  4. Use the memory section to AVOID re-covering what prior turns did.',
+		'     Plan deeper / sideways from where prior reports left off.',
+		'  5. `intentBrief` is 1-2 sentences summarising what the report is about.',
+		'  6. Review criteria are concrete checkable statements (e.g. "names',
+		'     each top-level module by path", "covers cyclic dependencies if',
+		'     any are present"), NOT generic style notes.',
+		'',
+		'Output strict JSON ONLY (no markdown fences, no prose, no preamble).',
+	].join('\n');
+}
 
 interface BuiltMessages { readonly messages: LLMMessage[]; readonly userText: string; }
 
@@ -215,69 +222,32 @@ function buildPlanMessages(input: PlanActionsInput, maxActions: number): LLMMess
 	return buildPlanMessagesWithDebug(input, maxActions).messages;
 }
 
-/** Exported for tests so they can assert on the user-prompt body. */
 function buildPlanMessagesWithDebug(input: PlanActionsInput, maxActions: number): BuiltMessages {
 	const lines: string[] = [];
+
+	lines.push('## Intent');
+	lines.push(input.intent);
+	lines.push('');
 
 	lines.push('## Request');
 	lines.push(input.request.trim());
 	lines.push('');
 
-	lines.push('## Repository');
-	lines.push(input.repoSummary.trim().length > 0 ? input.repoSummary.trim() : '(none)');
+	lines.push('## Summary context');
+	lines.push(input.summaryContext.trim().length > 0 ? input.summaryContext.trim() : '(no summary supplied)');
 	lines.push('');
 
-	lines.push(`## Action budget`);
+	lines.push('## Action budget');
 	lines.push(`Maximum actions for this report: ${maxActions} (scope tier: ${input.tier}).`);
-	lines.push('');
-
-	if (input.priorContextSummary !== undefined && input.priorContextSummary.trim().length > 0) {
-		lines.push('## Prior turns covered');
-		lines.push(input.priorContextSummary.trim());
-		lines.push('Avoid duplicating sections the prior report already covered. Reference them only when the current request asks to drill deeper.');
-		lines.push('');
-	}
-
-	lines.push(`## Executions (${input.executions.length})`);
-	if (input.executions.length === 0) {
-		lines.push('(no executions ran -- the pipeline returned an empty result)');
-	} else {
-		for (let i = 0; i < input.executions.length; i++) {
-			const e = input.executions[i]!;
-			lines.push(`### [${i}] ${e.skillId} (confidence: ${e.confidence})`);
-			lines.push(formatExecutionValue(e.value));
-			if (e.notes.length > 0) {
-				lines.push('Notes:');
-				for (const n of e.notes.slice(0, 4)) {
-					lines.push(`  - ${n}`);
-				}
-			}
-			lines.push('');
-		}
-	}
 
 	const userText = lines.join('\n');
 	return {
 		messages: [
-			{ role: 'system', content: SYSTEM_PROMPT },
+			{ role: 'system', content: buildSystemPrompt(input.intent) },
 			{ role: 'user',   content: userText },
 		],
 		userText,
 	};
-}
-
-const EXECUTION_PREVIEW_MAX = 600;
-
-function formatExecutionValue(value: unknown): string {
-	if (value === null || value === undefined) return '(no value)';
-	let s: string;
-	try {
-		s = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-	} catch {
-		s = String(value);
-	}
-	if (s.length <= EXECUTION_PREVIEW_MAX) return s;
-	return s.slice(0, EXECUTION_PREVIEW_MAX) + ' ...<truncated>';
 }
 
 // ---------------------------------------------------------------------------
@@ -293,11 +263,8 @@ async function tryPlan(
 	provider: LLMProvider,
 	maxTokens: number,
 ): Promise<PlanAttempt> {
-	// Note: the request/response payloads are logged universally by
-	// the LLM provider logging-wrapper (agent/providers/logging-wrapper.ts),
-	// which sees every provider.complete() call. We only log the
-	// structural parsed-plan summary here so each log entry has
-	// semantic stage context.
+	// Note: request/response payloads are logged universally by the LLM
+	// provider logging-wrapper (agent/providers/logging-wrapper.ts).
 	let rawText: string;
 	try {
 		const response = await provider.complete(messages, {
@@ -374,33 +341,6 @@ function validatePlan(parsed: unknown): { intentBrief: string; actions: PlannedA
 		const objective = typeof a['objective'] === 'string' ? a['objective'].trim() : '';
 		if (objective.length === 0) return `action[${i}].objective missing or empty`;
 
-		if (!Array.isArray(a['evidence'])) {
-			return `action[${i}].evidence must be an array`;
-		}
-		const evidenceRaw = a['evidence'] as unknown[];
-		const evidence: PlannedEvidenceRef[] = [];
-		for (let j = 0; j < evidenceRaw.length; j++) {
-			const eRaw = evidenceRaw[j];
-			if (eRaw === null || typeof eRaw !== 'object' || Array.isArray(eRaw)) {
-				return `action[${i}].evidence[${j}] is not an object`;
-			}
-			const e = eRaw as Record<string, unknown>;
-			const skillId = typeof e['skillId'] === 'string' ? e['skillId'].trim() : '';
-			if (skillId.length === 0) return `action[${i}].evidence[${j}].skillId missing`;
-			const idxRaw = e['executionIdx'];
-			if (typeof idxRaw !== 'number' || !Number.isFinite(idxRaw) || idxRaw < 0) {
-				return `action[${i}].evidence[${j}].executionIdx must be a non-negative number`;
-			}
-			const ref: { -readonly [K in keyof PlannedEvidenceRef]: PlannedEvidenceRef[K] } = {
-				skillId,
-				executionIdx: Math.floor(idxRaw),
-			};
-			if (typeof e['highlight'] === 'string' && (e['highlight'] as string).trim().length > 0) {
-				ref.highlight = (e['highlight'] as string).trim();
-			}
-			evidence.push(ref);
-		}
-
 		if (!Array.isArray(a['reviewCriteria'])) {
 			return `action[${i}].reviewCriteria must be an array`;
 		}
@@ -417,7 +357,7 @@ function validatePlan(parsed: unknown): { intentBrief: string; actions: PlannedA
 			? Math.max(400, Math.min(3000, Math.floor(budgetRaw)))
 			: 1500;
 
-		actions.push({ id, title, objective, evidence, maxBudgetTokens, reviewCriteria });
+		actions.push({ id, title, objective, maxBudgetTokens, reviewCriteria });
 	}
 
 	return { intentBrief, actions };

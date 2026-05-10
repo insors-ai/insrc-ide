@@ -54,11 +54,15 @@ export const OUTLINE_SCHEMA = {
  * Each action carries:
  *   - `id`              stable section key (kebab-case, deduped)
  *   - `title`           user-facing heading
- *   - `objective`       one-sentence statement of what this section answers
- *   - `evidence`        skill-execution refs the expander is allowed to use
+ *   - `objective`       one-sentence GOAL the local model expands against
+ *                       (the local model picks tools / skills itself; the
+ *                       objective MUST NOT name skills, files, or modules)
  *   - `maxBudgetTokens` cap for the local expander's draft (clamped at
  *                       send time to the global per-action ceiling)
  *   - `reviewCriteria`  3-5 bullets the reviewer scores against
+ *
+ * NOTE: there is no `evidence` field. The cloud planner does not see
+ * skill executions; the local model picks evidence at expand time.
  */
 export const PLAN_ACTIONS_SCHEMA = {
 	type: 'object',
@@ -74,20 +78,6 @@ export const PLAN_ACTIONS_SCHEMA = {
 					id:        { type: 'string', minLength: 1 },
 					title:     { type: 'string', minLength: 1 },
 					objective: { type: 'string', minLength: 1 },
-					evidence: {
-						type: 'array',
-						minItems: 0,
-						maxItems: 16,
-						items: {
-							type: 'object',
-							properties: {
-								skillId:      { type: 'string', minLength: 1 },
-								executionIdx: { type: 'number' },
-								highlight:    { type: 'string' },
-							},
-							required: ['skillId', 'executionIdx'],
-						},
-					},
 					maxBudgetTokens: { type: 'number' },
 					reviewCriteria: {
 						type: 'array',
@@ -96,7 +86,7 @@ export const PLAN_ACTIONS_SCHEMA = {
 						items: { type: 'string', minLength: 1 },
 					},
 				},
-				required: ['id', 'title', 'objective', 'evidence', 'reviewCriteria'],
+				required: ['id', 'title', 'objective', 'reviewCriteria'],
 			},
 		},
 	},

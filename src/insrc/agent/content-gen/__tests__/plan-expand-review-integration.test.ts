@@ -1,17 +1,20 @@
 /**
- * Integration test for the cloud-plan / local-expand / cloud-review
- * synthesis flow (Phase 7 of plans/analyzers/cloud-plan-local-expand-
- * cloud-review.md). End-to-end exercise of the three helpers together:
+ * Integration test for the lean cloud-plan / local-expand /
+ * cloud-review synthesis flow.
  *
- *   planActions(cloud)
- *     -> expandThenReview(local, cloud) per action
+ *   planActions(cloud, lean input)
+ *     -> per-action: orchestrator runs skills pipeline scoped to step
+ *     -> expandThenReview(local, cloud)
  *     -> stitch
  *
- * Stubbed providers throughout; no Ollama / Anthropic dependency. The
- * orchestrator-side stitch is exercised separately in the orchestrator's
- * own tests (controllers/__tests__/...). This file locks in the
- * cross-helper contract: a planner output of N actions produces N
- * sections, each through its own expand+review loop, in plan order.
+ * The orchestrator's per-step skills-pipeline call is exercised in
+ * the orchestrator-side tests (controllers/__tests__/...). This file
+ * locks in the helper-level contract: the planner's lean output of
+ * N actions feeds N independent expand+review loops, in plan order.
+ *
+ * No `evidence` refs on PlannedAction. The orchestrator gathers
+ * per-step evidence at expand time; this test simulates that by
+ * passing canned evidence per action.
  */
 
 import { test } from 'node:test';
@@ -45,35 +48,45 @@ const PLAN_OUTPUT = JSON.stringify({
 		{
 			id:        'modules',
 			title:     'HDFS Core Modules',
-			objective: 'Map the top-level HDFS Core packages.',
-			evidence:  [{ skillId: 'code.source.repo.describe', executionIdx: 0 }],
+			objective: 'Map the top-level HDFS Core packages and their responsibilities.',
 			maxBudgetTokens: 1500,
 			reviewCriteria: [
 				'Names each top-level module by absolute path',
-				'Cites the repo.describe finding',
+				'Cites the repo summary finding at least once',
 			],
 		},
 		{
 			id:        'cycles',
 			title:     'Cyclic Dependencies',
-			objective: 'Surface the cycles the cyclic-deps skill reported.',
-			evidence:  [{ skillId: 'code.quality.cyclic-deps', executionIdx: 1 }],
+			objective: 'Surface the dependency cycles in the HDFS Core code base.',
 			maxBudgetTokens: 1200,
 			reviewCriteria: [
-				'Lists every cycle the skill reported',
+				'Lists every cycle reported',
 				'Calls out the largest cycle by entity count',
 			],
 		},
 	],
 });
 
-const EXECUTIONS: PlanExecution[] = [
+const FIXTURE_INPUT = {
+	intent:         'code-analysis',
+	request:        'do a detailed analysis of HDFS Core',
+	summaryContext: '/repo/hadoop -- java/scala, ~12500 files, scope tier L. Prior turns covered: whole-repo overview surfacing top modules.',
+	tier:           'L' as const,
+} as const;
+
+// Per-step evidence canned for each action -- the orchestrator
+// would gather this at expand time via runSkillsPipeline; the
+// integration test substitutes pre-canned evidence for determinism.
+const EVIDENCE_FOR_MODULES: PlanExecution[] = [
 	{
 		skillId:    'code.source.repo.describe',
 		value:      { topModules: [{ path: '/repo/hadoop/hadoop-hdfs', fileCount: 240 }] },
 		confidence: 'high',
 		notes:      [],
 	},
+];
+const EVIDENCE_FOR_CYCLES: PlanExecution[] = [
 	{
 		skillId:    'code.quality.cyclic-deps',
 		value:      { cycleCount: 3, cycles: [{ entities: ['A', 'B', 'C'] }] },
@@ -86,27 +99,20 @@ const EXECUTIONS: PlanExecution[] = [
 // End-to-end happy path
 // ---------------------------------------------------------------------------
 
-test('integration: plan -> per-action expandThenReview -> all sections produced in plan order', async () => {
-	// Cloud planner: returns the canned 2-action plan.
+test('integration: lean plan -> per-action expandThenReview -> all sections produced in plan order', async () => {
 	const cloudPlanProvider = fakeProvider(PLAN_OUTPUT);
 
-	const plan = await planActions(
-		{
-			request:     'do a detailed analysis of HDFS Core',
-			repoSummary: '/repo/hadoop -- languages: java, scala',
-			executions:  EXECUTIONS,
-			tier:        'L',
-		},
-		cloudPlanProvider,
-	);
+	const plan = await planActions({ ...FIXTURE_INPUT }, cloudPlanProvider);
 
 	assert.equal(plan.degraded, false);
 	assert.equal(plan.actions.length, 2);
 	assert.equal(plan.actions[0]!.id, 'modules');
 	assert.equal(plan.actions[1]!.id, 'cycles');
+	// Plan actions have NO `evidence` field anymore.
+	for (const a of plan.actions) {
+		assert.equal((a as unknown as { evidence?: unknown }).evidence, undefined);
+	}
 
-	// Local expander: yields a different body per action so we can
-	// verify ordering. Reviewer: accepts both on first pass.
 	const localProvider = fakeProvider(
 		'HDFS Core sits at `/repo/hadoop/hadoop-hdfs` (240 files).',
 		'cyclic-deps reported 3 cycles; the largest involves entities A, B, C.',
@@ -116,15 +122,16 @@ test('integration: plan -> per-action expandThenReview -> all sections produced 
 		JSON.stringify({ verdict: 'accept', notes: ['cycle count verified'] }),
 	);
 
+	const evidenceByActionId: Record<string, PlanExecution[]> = {
+		modules: EVIDENCE_FOR_MODULES,
+		cycles:  EVIDENCE_FOR_CYCLES,
+	};
+
 	const sections: { id: string; title: string; markdown: string }[] = [];
 	for (const action of plan.actions) {
-		const evidence = EXECUTIONS.filter(e => action.evidence.some(r => r.skillId === e.skillId));
+		const evidence = evidenceByActionId[action.id] ?? [];
 		const out = await expandThenReview(
-			{
-				action,
-				evidence,
-				request: 'do a detailed analysis of HDFS Core',
-			},
+			{ action, evidence, request: 'do a detailed analysis of HDFS Core' },
 			localProvider,
 			reviewProvider,
 		);
@@ -133,7 +140,6 @@ test('integration: plan -> per-action expandThenReview -> all sections produced 
 		assert.equal(out.verdict, 'accept');
 	}
 
-	// All sections present in plan order.
 	assert.equal(sections.length, 2);
 	assert.equal(sections[0]!.id, 'modules');
 	assert.equal(sections[1]!.id, 'cycles');
@@ -143,23 +149,11 @@ test('integration: plan -> per-action expandThenReview -> all sections produced 
 
 test('integration: refine on one action does not affect the other', async () => {
 	const cloudPlanProvider = fakeProvider(PLAN_OUTPUT);
-	const plan = await planActions(
-		{
-			request:     'do a detailed analysis of HDFS Core',
-			repoSummary: '/repo/hadoop',
-			executions:  EXECUTIONS,
-			tier:        'L',
-		},
-		cloudPlanProvider,
-	);
+	const plan = await planActions({ ...FIXTURE_INPUT }, cloudPlanProvider);
 
-	// Local expander: 3 calls -- modules-draft1, cycles-draft1, cycles-draft2.
-	const localProvider = fakeProvider(
-		'modules-draft1',
-		'cycles-draft1',
-		'cycles-draft2-after-refine',
-	);
-	// Reviewer: accepts modules; refines cycles on first pass; accepts cycles on second.
+	// 3 local calls: modules-draft1, cycles-draft1, cycles-draft2.
+	const localProvider = fakeProvider('modules-draft1', 'cycles-draft1', 'cycles-draft2-after-refine');
+	// Reviewer: accepts modules; refines cycles, then accepts.
 	const reviewProvider = fakeProvider(
 		JSON.stringify({ verdict: 'accept', notes: ['ok'] }),
 		JSON.stringify({ verdict: 'refine', refine: { hint: 'mention the largest cycle by name' }, notes: [] }),
@@ -167,8 +161,12 @@ test('integration: refine on one action does not affect the other', async () => 
 	);
 
 	const results: { id: string; rounds: 1 | 2; verdict: string }[] = [];
+	const evidenceByActionId: Record<string, PlanExecution[]> = {
+		modules: EVIDENCE_FOR_MODULES,
+		cycles:  EVIDENCE_FOR_CYCLES,
+	};
 	for (const action of plan.actions) {
-		const evidence = EXECUTIONS.filter(e => action.evidence.some(r => r.skillId === e.skillId));
+		const evidence = evidenceByActionId[action.id] ?? [];
 		const out = await expandThenReview(
 			{ action, evidence, request: 'q' },
 			localProvider,
@@ -177,7 +175,6 @@ test('integration: refine on one action does not affect the other', async () => 
 		results.push({ id: action.id, rounds: out.rounds, verdict: out.verdict });
 	}
 
-	// Modules accepted in 1 round; cycles needed 2.
 	assert.deepEqual(results, [
 		{ id: 'modules', rounds: 1, verdict: 'accept' },
 		{ id: 'cycles',  rounds: 2, verdict: 'refine-then-accept' },
@@ -186,58 +183,33 @@ test('integration: refine on one action does not affect the other', async () => 
 
 test('integration: planner degraded -> caller substitutes fallback action', async () => {
 	const cloudPlanProvider = fakeProvider('garbage', 'still garbage');
-	const plan = await planActions(
-		{
-			request:     'something',
-			repoSummary: '/repo/foo',
-			executions:  EXECUTIONS,
-			tier:        'M',
-		},
-		cloudPlanProvider,
-	);
+	const plan = await planActions({ ...FIXTURE_INPUT }, cloudPlanProvider);
 	assert.equal(plan.degraded, true);
 	assert.equal(plan.actions.length, 0);
-	// The orchestrator (not this test) is responsible for substituting
-	// a synthetic fallback action; here we just assert the contract:
-	// degraded=true + actions=[]. Orchestrator-side fallback is
-	// covered by the dedicated orchestrator integration tests.
+	// Orchestrator (not this test) substitutes a synthetic fallback
+	// action; here we just assert the contract: degraded=true with
+	// empty actions.
 });
 
-test('integration: action evidence with unknown executionIdx still drives a section (orchestrator filters)', async () => {
-	// Planner cites an out-of-range index; pickEvidence filtering is
-	// the orchestrator's job, but the helpers themselves don't crash.
-	const planWithBadEvidence = JSON.stringify({
+test('integration: empty evidence -> expander still drafts a section', async () => {
+	const cloudPlanProvider = fakeProvider(JSON.stringify({
 		intentBrief: 'x',
 		actions: [{
-			id: 'modules', title: 't', objective: 'o',
-			evidence: [{ skillId: 'code.source.repo.describe', executionIdx: 99 }],
+			id: 'modules', title: 't',
+			objective: 'Map the top-level packages.',
 			reviewCriteria: ['c'],
 		}],
-	});
-	const cloudPlanProvider = fakeProvider(planWithBadEvidence);
-	const plan = await planActions(
-		{
-			request:     'q',
-			repoSummary: '/repo',
-			executions:  EXECUTIONS,
-			tier:        'M',
-		},
-		cloudPlanProvider,
-	);
+	}));
+	const plan = await planActions({ ...FIXTURE_INPUT, tier: 'M' }, cloudPlanProvider);
 	assert.equal(plan.degraded, false);
 	assert.equal(plan.actions.length, 1);
 
-	// Run expandThenReview with EMPTY evidence (mimics orchestrator's
-	// pickEvidence filtering out the bad ref). The expander still
-	// produces a section.
+	// Orchestrator's per-step skills pipeline returned no evidence
+	// (cold repo / local model degraded). The expander still drafts.
 	const localProvider = fakeProvider('a section drafted with no evidence');
 	const reviewProvider = fakeProvider(JSON.stringify({ verdict: 'accept' }));
 	const out = await expandThenReview(
-		{
-			action:   plan.actions[0]!,
-			evidence: [],          // orchestrator would filter the bad idx
-			request:  'q',
-		},
+		{ action: plan.actions[0]!, evidence: [], request: 'q' },
 		localProvider,
 		reviewProvider,
 	);
@@ -249,19 +221,12 @@ test('integration: tier S clamps planner overshoot to 2 actions', async () => {
 	const overshoot = JSON.stringify({
 		intentBrief: 'x',
 		actions: Array.from({ length: 6 }, (_, i) => ({
-			id: `act-${i}`, title: 't', objective: 'o',
-			evidence: [{ skillId: 'code.source.repo.describe', executionIdx: 0 }],
-			reviewCriteria: ['c'],
+			id: `act-${i}`, title: 't', objective: 'o', reviewCriteria: ['c'],
 		})),
 	});
 	const plan = await planActions(
-		{
-			request:     'q',
-			repoSummary: '/repo',
-			executions:  EXECUTIONS,
-			tier:        'S',
-		},
+		{ ...FIXTURE_INPUT, tier: 'S' },
 		fakeProvider(overshoot),
 	);
-	assert.equal(plan.actions.length, 2);   // S budget
+	assert.equal(plan.actions.length, 2);
 });
