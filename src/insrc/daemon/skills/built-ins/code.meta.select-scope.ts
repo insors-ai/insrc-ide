@@ -71,6 +71,23 @@ interface SelectScopeInput {
 	readonly question:    string;
 	readonly candidates:  readonly CandidateIn[];
 	readonly repo:        RepoContext;
+	/**
+	 * Optional structured facts surfaced by prior turns in this
+	 * session (modules / entities / tables / ORM models). The LLM
+	 * uses these to resolve label-shaped references in the user's
+	 * question -- e.g. "describe HDFS Core" maps to a concrete
+	 * `modulePath` from `priorFacts.modules` instead of being
+	 * passed through verbatim and rejected at execute time.
+	 * conversation-flow-refinement.md Phase 4.
+	 */
+	readonly priorFacts?: PriorFacts;
+}
+
+interface PriorFacts {
+	readonly modules?:   readonly { path: string; label?: string; fileCount?: number }[];
+	readonly entities?:  readonly { entityRef: string; name: string; kind: string; file?: string }[];
+	readonly tables?:    readonly { connectionId: string; name: string; columns?: string[] }[];
+	readonly ormModels?: readonly { name: string; table?: string; dialect: string }[];
 }
 
 interface ResolvedScope {
@@ -128,12 +145,77 @@ const CANDIDATE_IN_SCHEMA = {
 	additionalProperties: false,
 } as const;
 
+const PRIOR_FACTS_SCHEMA = {
+	type: 'object',
+	properties: {
+		modules: {
+			type: 'array',
+			items: {
+				type: 'object',
+				properties: {
+					path:      { type: 'string' },
+					label:     { type: 'string' },
+					fileCount: { type: 'number' },
+				},
+				required: ['path'],
+				additionalProperties: false,
+			},
+			maxItems: 32,
+		},
+		entities: {
+			type: 'array',
+			items: {
+				type: 'object',
+				properties: {
+					entityRef: { type: 'string' },
+					name:      { type: 'string' },
+					kind:      { type: 'string' },
+					file:      { type: 'string' },
+				},
+				required: ['entityRef', 'name', 'kind'],
+				additionalProperties: false,
+			},
+			maxItems: 32,
+		},
+		tables: {
+			type: 'array',
+			items: {
+				type: 'object',
+				properties: {
+					connectionId: { type: 'string' },
+					name:         { type: 'string' },
+					columns:      { type: 'array', items: { type: 'string' } },
+				},
+				required: ['connectionId', 'name'],
+				additionalProperties: false,
+			},
+			maxItems: 32,
+		},
+		ormModels: {
+			type: 'array',
+			items: {
+				type: 'object',
+				properties: {
+					name:    { type: 'string' },
+					table:   { type: 'string' },
+					dialect: { type: 'string' },
+				},
+				required: ['name', 'dialect'],
+				additionalProperties: false,
+			},
+			maxItems: 32,
+		},
+	},
+	additionalProperties: false,
+} as const;
+
 const INPUT_SCHEMA = {
 	type: 'object',
 	properties: {
 		question:   { type: 'string', minLength: 1, maxLength: 4000 },
 		candidates: { type: 'array', items: CANDIDATE_IN_SCHEMA, minItems: 0, maxItems: 8 },
 		repo:       REPO_CONTEXT_SCHEMA,
+		priorFacts: PRIOR_FACTS_SCHEMA,
 	},
 	required: ['question', 'candidates', 'repo'],
 	additionalProperties: false,
@@ -244,6 +326,15 @@ function buildSystemPrompt(): string {
 		'6. Use `notes` to flag anything ambiguous in the question that you',
 		'   had to guess (default git refs, default thresholds, etc.).',
 		'   Empty array if every arg came directly from the question.',
+		'7. PRIOR FACTS: when the user message includes a `Prior facts`',
+		'   section, prefer those concrete identifiers over guessing. A',
+		'   reference like "HDFS Core" that maps uniquely to one of the',
+		'   listed `modules.label` MUST be replaced by that module\'s',
+		'   `path` in the skill `args`. Same rule for entities, tables,',
+		'   and ORM models. If a label matches multiple prior facts,',
+		'   surface via the existing ambiguity arm (rule 4). If no fact',
+		'   matches, treat the reference as cold per rule 5 -- DO NOT',
+		'   invent a fact-shaped identifier.',
 		'',
 		'Output ONLY the JSON object; no preamble, no fenced block.',
 	].join('\n');
@@ -276,18 +367,67 @@ function buildUserMessage(input: SelectScopeInput, manifests: readonly Candidate
 			'```',
 		].join('\n');
 	});
-	return [
+	const sections: string[] = [
 		'Question:',
 		input.question,
 		'',
 		'Active repo:',
 		repoLines.join('\n'),
 		'',
+	];
+
+	const factLines = renderPriorFacts(input.priorFacts);
+	if (factLines.length > 0) {
+		sections.push('Prior facts (from prior turns -- prefer these for label->identifier resolution):');
+		sections.push(...factLines);
+		sections.push('');
+	}
+
+	sections.push(
 		`Candidates (${input.candidates.length}):`,
 		candidateBlocks.length > 0 ? candidateBlocks.join('\n\n') : '(empty)',
 		'',
 		'Return ONLY the JSON object matching the schema; no preamble.',
-	].join('\n');
+	);
+	return sections.join('\n');
+}
+
+function renderPriorFacts(facts: PriorFacts | undefined): string[] {
+	if (facts === undefined) return [];
+	const out: string[] = [];
+
+	if (facts.modules !== undefined && facts.modules.length > 0) {
+		out.push(`Modules (${facts.modules.length}):`);
+		for (const m of facts.modules) {
+			const label = m.label !== undefined ? `  (label: "${m.label}")` : '';
+			const size  = m.fileCount !== undefined ? `  ${m.fileCount} files` : '';
+			out.push(`  - ${m.path}${label}${size}`);
+		}
+	}
+	if (facts.entities !== undefined && facts.entities.length > 0) {
+		out.push(`Entities (${facts.entities.length}):`);
+		for (const e of facts.entities) {
+			const file = e.file !== undefined ? `  in ${e.file}` : '';
+			out.push(`  - ${e.kind} \`${e.name}\` (id: ${e.entityRef})${file}`);
+		}
+	}
+	if (facts.tables !== undefined && facts.tables.length > 0) {
+		out.push(`Tables (${facts.tables.length}):`);
+		for (const t of facts.tables) {
+			const cols = t.columns !== undefined && t.columns.length > 0
+				? `  cols: ${t.columns.slice(0, 8).join(', ')}${t.columns.length > 8 ? ', ...' : ''}`
+				: '';
+			out.push(`  - ${t.connectionId}.${t.name}${cols}`);
+		}
+	}
+	if (facts.ormModels !== undefined && facts.ormModels.length > 0) {
+		out.push(`ORM models (${facts.ormModels.length}):`);
+		for (const o of facts.ormModels) {
+			const tbl = o.table !== undefined ? ` -> ${o.table}` : '';
+			out.push(`  - ${o.dialect}: ${o.name}${tbl}`);
+		}
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------

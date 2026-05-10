@@ -34,6 +34,7 @@ import {
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { INTENT_TAG_CURRENT, INTENT_TAG_TIMESTAMP } from '../../agent/intent/resolver.js';
+import { PRIOR_CONTEXT_TAG_CURRENT } from '../../agent/intent/retriever.js';
 import { makeSpillHandler } from '../../agent/artifacts/spill-writer.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import type { LLMProvider } from '../../shared/types.js';
@@ -52,6 +53,7 @@ import {
   repoContextFromSummary,
   runSkillsPipeline,
   type PerSkillExecution,
+  type PriorFactsForSkills,
   type SkillsPipelineResult,
 } from '../../agent/tasks/code-analyzer/skills-pipeline.js';
 import type {
@@ -536,10 +538,21 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     );
 
     const session = this.deps.session;
+
+    // conversation-flow-refinement.md Phase 4: pick up the typed
+    // PriorFacts the chat-handler stamped on the session, so the
+    // meta-skills (notably code.meta.select-scope) can resolve
+    // friendly labels (e.g. "HDFS Core") to the concrete identifiers
+    // emitted by a prior turn (e.g. modulePath). Drill-down /
+    // re-run / resume entry paths legitimately have no tag, so the
+    // miss is silent.
+    const priorFacts = readPriorFactsTag(session);
+
     const pipelineResult = await runSkillsPipeline(
       {
         question: this._request,
         repo:     repoContextFromSummary(this._repoSummary),
+        ...(priorFacts !== undefined ? { priorFacts } : {}),
       },
       {
         session,
@@ -884,6 +897,57 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Prior-context tag reader
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the `[priorContext:current]` tag the chat-handler stamps and
+ * extract just the typed `facts` half. Returns `undefined` for a
+ * missing / empty / unparseable tag, or when no fact bucket is
+ * populated (so the pipeline doesn't waste a `priorFacts: {}` payload
+ * on the wire).
+ */
+function readPriorFactsTag(
+  session: TaskOrchestratorDeps['session'],
+): PriorFactsForSkills | undefined {
+  const ctx = session.contextManager;
+  const raw = ctx.getTag(PRIOR_CONTEXT_TAG_CURRENT);
+  if (raw.length === 0) return undefined;
+
+  let parsed: { facts?: PriorFactsForSkills };
+  try {
+    parsed = JSON.parse(raw) as { facts?: PriorFactsForSkills };
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) },
+      'priorContext tag JSON parse failed -- ignoring');
+    return undefined;
+  }
+
+  const facts = parsed.facts;
+  if (facts === undefined) return undefined;
+
+  const total =
+    (facts.modules?.length   ?? 0) +
+    (facts.entities?.length  ?? 0) +
+    (facts.tables?.length    ?? 0) +
+    (facts.ormModels?.length ?? 0);
+  if (total === 0) return undefined;
+
+  log.info(
+    {
+      modules:   facts.modules?.length   ?? 0,
+      entities:  facts.entities?.length  ?? 0,
+      tables:    facts.tables?.length    ?? 0,
+      ormModels: facts.ormModels?.length ?? 0,
+    },
+    'orchestrator: priorFacts loaded from tag',
+  );
+  return facts;
+}
+
+export const _readPriorFactsTagForTest = readPriorFactsTag;
 
 // ---------------------------------------------------------------------------
 // Skill-execution → AnalyzerResult adapters (re-run path)

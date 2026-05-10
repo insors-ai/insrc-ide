@@ -1296,6 +1296,89 @@ async function runCodeAnalyzerSlash(
     data: { message: 'Intent: code-analyzer (slash command)' },
   });
 
+  // conversation-flow-refinement.md Phase 4: build a per-turn
+  // PriorContext from the session's prior outputs and let the
+  // question-enhancer rewrite the prompt in concrete identifiers
+  // before we hand it to the orchestrator. The slash path knows the
+  // intent is `code-analysis`, but we still call `resolveIntent` so
+  // the [intent:current] tag + timestamp get refreshed (drives the
+  // tag-reuse fast path on the *next* turn, regardless of how it
+  // arrives -- regular chat or another slash).
+  //
+  // All three steps are best-effort: any failure degrades to the raw
+  // user prompt so the analyzer keeps working. The HDFS-Core
+  // regression (turn 1 surfaces topModules, turn 2 "describe HDFS
+  // Core" fails module lookup) is the motivating case.
+  let effectiveQuestion = userPrompt;
+  try {
+    const { resolveIntent } = await import('../agent/intent/resolver.js');
+    const { retrievePriorContext, PRIOR_CONTEXT_TAG_CURRENT } = await import(
+      '../agent/intent/retriever.js'
+    );
+    const { enhanceQuestion } = await import('../agent/intent/enhancer.js');
+
+    const resolved = await resolveIntent(session, userPrompt);
+    const priorContext = await retrievePriorContext(session, userPrompt, resolved);
+
+    const haveArtifacts = priorContext.artifacts.length > 0;
+    const haveFacts =
+      (priorContext.facts.modules?.length   ?? 0) > 0 ||
+      (priorContext.facts.entities?.length  ?? 0) > 0 ||
+      (priorContext.facts.tables?.length    ?? 0) > 0 ||
+      (priorContext.facts.ormModels?.length ?? 0) > 0;
+
+    if (haveArtifacts || haveFacts) {
+      const enhanced = await enhanceQuestion(session, {
+        originalMessage: userPrompt,
+        priorContext,
+      });
+      effectiveQuestion = enhanced.enhancedQuestion.trim().length > 0
+        ? enhanced.enhancedQuestion
+        : userPrompt;
+      log.info(
+        {
+          changed:    effectiveQuestion !== userPrompt,
+          factCounts: {
+            modules:   priorContext.facts.modules?.length   ?? 0,
+            entities:  priorContext.facts.entities?.length  ?? 0,
+            tables:    priorContext.facts.tables?.length    ?? 0,
+            ormModels: priorContext.facts.ormModels?.length ?? 0,
+          },
+          artifacts:  priorContext.artifacts.length,
+          cited:      enhanced.citedArtifactIds.length,
+        },
+        '[code-analyze] enhancer produced effective question',
+      );
+
+      // Stamp the priorContext snapshot so the orchestrator can pull
+      // typed facts out without re-running retrieval. Only the facts
+      // half is needed downstream -- previews stayed with the
+      // enhancer for prompt assembly.
+      session.contextManager.setTag(
+        PRIOR_CONTEXT_TAG_CURRENT,
+        JSON.stringify({
+          currentIntent: priorContext.currentIntent,
+          intentChanged: priorContext.intentChanged,
+          facts:         priorContext.facts,
+          artifactCount: priorContext.artifacts.length,
+        }),
+      );
+
+      if (effectiveQuestion !== userPrompt) {
+        send({
+          id: requestId,
+          stream: 'progress',
+          data: { message: 'Code Analyzer: rewrote prompt with prior-context references' },
+        });
+      }
+    } else {
+      log.info('[code-analyze] no prior context found; using raw prompt');
+    }
+  } catch (err) {
+    log.warn({ err: err instanceof Error ? err.message : String(err) },
+      '[code-analyze] prior-context pipeline failed; falling back to raw prompt');
+  }
+
   const { CodeAnalyzerOrchestratorController } = await import(
     './controllers/code-analyzer-orchestrator.js'
   );
@@ -1347,7 +1430,10 @@ async function runCodeAnalyzerSlash(
     const result = await runControlledPipeline(
       controller,
       {
-        message: userPrompt,
+        // conversation-flow-refinement.md Phase 4: the enhancer's
+        // rewritten question is what reaches the orchestrator. Falls
+        // back to userPrompt above on any failure.
+        message: effectiveQuestion,
         codeContext: '',
         session,
         classification: {

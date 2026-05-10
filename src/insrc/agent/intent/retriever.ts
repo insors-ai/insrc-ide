@@ -25,6 +25,21 @@ import type { ResolvedIntent } from './resolver.js';
 const log = getLogger('prior-context-retriever');
 
 // ---------------------------------------------------------------------------
+// Tag identifier
+// ---------------------------------------------------------------------------
+
+/**
+ * ContextManager tag the chat-handler stamps with a JSON snapshot of
+ * the current turn's PriorContext (`{ facts, artifactCount, currentIntent }`).
+ * The orchestrator reads this back in `afterSkillsRoutingBootstrap`
+ * and threads `priorFacts` into the SkillsPipelineInput so meta-skills
+ * (notably `code.meta.select-scope`) can map friendly labels back to
+ * concrete identifiers. Cross-process: the tag travels with the
+ * Session; downstream paths that don't know about it just ignore it.
+ */
+export const PRIOR_CONTEXT_TAG_CURRENT = '[priorContext:current]';
+
+// ---------------------------------------------------------------------------
 // Public types (mirror the PriorContext shape declared in the plan)
 // ---------------------------------------------------------------------------
 

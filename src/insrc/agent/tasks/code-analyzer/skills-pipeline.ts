@@ -75,6 +75,31 @@ interface RepoMetaContext {
 export interface SkillsPipelineInput {
 	readonly question: string;
 	readonly repo:     RepoMetaContext;
+	/**
+	 * Optional prior-turn facts the meta-skills can use to resolve
+	 * label -> identifier references (e.g. "HDFS Core" -> the actual
+	 * `modulePath` that turn 1 surfaced). Threaded by the chat-handler
+	 * after `retrievePriorContext`; if absent, the skills run cold.
+	 * conversation-flow-refinement.md Phase 4.
+	 *
+	 * Only the typed `facts` half is forwarded to skills today --
+	 * the `artifacts` previews stay with the enhancer (Phase 3) and
+	 * the orchestrator's audit pane.
+	 */
+	readonly priorFacts?: PriorFactsForSkills;
+}
+
+/**
+ * Subset of agent/intent/retriever.ts `PriorFacts` that meta-skills
+ * actually consume. Mirror-shape on purpose so the orchestrator can
+ * pass through without coupling skills-pipeline to the retriever
+ * module's import surface.
+ */
+export interface PriorFactsForSkills {
+	readonly modules?:   readonly { path: string; label?: string; fileCount?: number }[];
+	readonly entities?:  readonly { entityRef: string; name: string; kind: string; file?: string }[];
+	readonly tables?:    readonly { connectionId: string; name: string; columns?: string[] }[];
+	readonly ormModels?: readonly { name: string; table?: string; dialect: string }[];
 }
 
 export interface ClassifyOutputView {
@@ -153,7 +178,12 @@ export async function runSkillsPipeline(
 
 	// 2. select-scope.
 	const select = await runSkill<
-		{ question: string; candidates: ClassifyOutputView['candidates']; repo: RepoMetaContext },
+		{
+			question:    string;
+			candidates:  ClassifyOutputView['candidates'];
+			repo:        RepoMetaContext;
+			priorFacts?: PriorFactsForSkills;
+		},
 		SelectScopeOutputView
 	>(
 		'code.meta.select-scope',
@@ -161,6 +191,10 @@ export async function runSkillsPipeline(
 			question:   input.question,
 			candidates: classify.value.candidates,
 			repo,
+			// Phase 4: thread prior-turn facts so select-scope can
+			// resolve label references (e.g. "HDFS Core") against
+			// modules / entities / tables the prior turn surfaced.
+			...(input.priorFacts !== undefined ? { priorFacts: input.priorFacts } : {}),
 		},
 		buildSkillRunnerDeps(deps),
 	);
