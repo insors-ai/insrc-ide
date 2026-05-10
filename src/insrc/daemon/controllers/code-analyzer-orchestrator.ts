@@ -2,36 +2,24 @@
  * CodeAnalyzerOrchestratorController -- the Code Analyzer family's
  * task-controller entry point.
  *
- * Phase 1.2 of plans/analyzers/code-analyzer.md. State machine:
+ * State machine:
  *
- *   planning            -> [plan LLM task]
- *   plan-approval       -> [plan-size gate]   (only when |tasks| > 16)
- *   analyzing           -> runAnalyzer() (inline in next()) +
- *                          [review LLM task]
- *   reviewing           -> apply decision; loop or jump to synthesise
  *   synthesising        -> [synthesise LLM task]
  *   done                  (writes list.body; the workbench-side
  *                          CodeAnalyzerFlowContribution opens the
  *                          Report Pane on the listUpdated event;
  *                          plan §2.1)
  *
- * Plan task runs on the cloud-default provider; review tasks on the
- * cloud-default provider; synthesise on the local model. The
- * per-task analyzer tool loop runs on the local model via
- * runAnalyzer (agent/tasks/code-analyzer/analyzer/runner.ts).
- *
- * Soft cap = 16 planned tasks; hard cap = 24; follow-ups capped at 8
- * across the whole run. Caps in `caps.ts` (imported below).
+ * Bootstrap markers (skills-routing / re-run / resume) drive entry;
+ * synthesis is the only remaining LLM step the orchestrator owns.
+ * Per-skill execution is handled by the meta-skills pipeline
+ * (`runSkillsPipeline`) for free-form questions and by the legacy
+ * `analysisTaskToSkillPlan` shim for re-runs of older lists.
  */
 
 import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
-import { runAnalyzer } from '../../agent/tasks/code-analyzer/analyzer/runner.js';
-import { sanitizeMarkdownReport } from '../../agent/tasks/code-analyzer/analyzer/sanitize.js';
-import { readCachedResult, writeCachedResult } from '../../agent/tasks/code-analyzer/cache.js';
-import { buildPlanPrompt, buildPlanSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/plan.js';
-import { buildReviewPrompt, REVIEW_SYSTEM } from '../../agent/tasks/code-analyzer/prompts/review.js';
 import { buildSynthesisPrompt, buildSynthesiseSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
 import {
   buildMultipassOutlineInput,
@@ -44,21 +32,25 @@ import {
   type SectionResult,
 } from '../../agent/content-gen/index.js';
 import { PATHS } from '../../shared/paths.js';
+import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
+import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
+import type { LLMProvider } from '../../shared/types.js';
+import type { ProviderAffinity, SkillResult } from '../skills/types.js';
 import type { ScopeSize } from '../../shared/classify.js';
 import type {
   AnalysisTask,
-  AnalysisTaskSeed,
   AnalyzerResult,
   CodeAnalysisState,
-  ReviewerDecision,
+  Confidence,
   RepoSummary,
 } from '../../agent/tasks/code-analyzer/types.js';
 import {
   SKILLS_ROUTING_BOOTSTRAP_MARKER,
   pipelineResultToAcceptedTasks,
-  readSkillsRoutingFromEnv,
   repoContextFromSummary,
   runSkillsPipeline,
+  type PerSkillExecution,
+  type SkillsPipelineResult,
 } from '../../agent/tasks/code-analyzer/skills-pipeline.js';
 import type {
   ControllerInput,
@@ -73,94 +65,35 @@ import type {
 
 const log = getLogger('code-analyzer:orchestrator');
 
-// ---------------------------------------------------------------------------
-// Caps -- per scope tier (Phase 5.A)
-// ---------------------------------------------------------------------------
-
-interface TierCaps {
-  /** Soft cap: above this, we fire the plan-size approval gate. */
-  readonly softTaskCap: number;
-  /** Hard cap: planner output is silently trimmed to this length. */
-  readonly hardTaskCap: number;
-}
-
 /**
- * Scope-tier-driven task caps. Phase 5.A introduced these so:
- *
- *   - "what does foo() do?" (S)        runs 1-3 focused tasks
- *   - "summarise the auth flow" (M)    runs 5-8 tasks
- *   - "describe the framework" (L)     runs 10-16 tasks
- *   - "compare brainstorm + designer" (XL) runs up to 24 tasks
- *   - "audit the entire repo" (XXL+)   runs 6-10 BROAD tasks
- *
- * Per-tier wall-clock caps were ALSO part of Phase 5.A but were
- * removed -- local Ollama runs routinely take 30-60 s per iteration;
- * a tight 30-90 s cap forces every task into the strict-JSON retry
- * path and roughly triples per-item cost. The runner's
- * `MAX_WALL_CLOCK_MS` (10 min) is the only safety bound now.
- */
-const TIER_CAPS: Readonly<Record<ScopeSize, TierCaps>> = {
-  S:     { softTaskCap: 3,  hardTaskCap: 5  },
-  M:     { softTaskCap: 16, hardTaskCap: 24 },
-  L:     { softTaskCap: 10, hardTaskCap: 16 },
-  XL:    { softTaskCap: 16, hardTaskCap: 24 },
-  XXL:   { softTaskCap: 6,  hardTaskCap: 10 },
-  XXXL:  { softTaskCap: 6,  hardTaskCap: 10 },
-  XXXXL: { softTaskCap: 6,  hardTaskCap: 10 },
-};
-
-function capsForTier(tier: ScopeSize | undefined): TierCaps {
-  return TIER_CAPS[tier ?? 'M'];
-}
-
-const MAX_FOLLOWUPS = 8;
-const MAX_RETRIES_PER_TASK = 2;
-const PLAN_GATE_TIMEOUT_MS = 5 * 60 * 1000; void PLAN_GATE_TIMEOUT_MS;
-const PRESENT_GATE_TIMEOUT_MS = 60 * 60 * 1000; void PRESENT_GATE_TIMEOUT_MS;
-
-/**
- * Sentinel emitted by buildInitialTasks's pass-through transform task
- * when the run is in re-run mode (Phase 4.1). afterPlan recognises
- * this exact string and routes to afterRerunBootstrap instead of the
- * LLM-plan-output parser.
+ * Sentinel emitted by `buildInitialTasks`'s pass-through transform
+ * when the run is in re-run mode. `next()` recognises this exact
+ * string and routes to `afterRerunBootstrap` instead of the regular
+ * synthesis path.
  */
 const RERUN_BOOTSTRAP_MARKER = '__rerun-bootstrap__';
 
 /**
- * Sentinel emitted by buildResumeTask's transform task on a
- * checkpoint resume (Phase 4-followup-C). The next() phase machine
- * recognises this and dispatches to the resume-bootstrap handler,
- * which inspects the persisted phase / queue / accepted state and
- * decides where to pick the run back up.
+ * Sentinel emitted by `buildResumeTask`'s transform on a checkpoint
+ * resume. `next()` recognises this and dispatches to the resume
+ * bootstrap handler.
  */
 const RESUME_BOOTSTRAP_MARKER = '__resume-bootstrap__';
 
 // ---------------------------------------------------------------------------
-// State keys (kept here so the rest of the file uses string constants)
+// State keys
 // ---------------------------------------------------------------------------
 
 const K_STATE          = 'caState';
-const K_PLAN_RESULT    = 'planResult';            // raw plan-task LLM output
+const K_PLAN_RESULT    = 'planResult';            // raw bootstrap pass-through output
 const K_PLAN_TASKS     = 'plannedTasks';          // AnalysisTask[]
-const K_TASK_QUEUE     = 'taskQueue';             // itemId[] still pending
-const K_CURRENT_TASK   = 'currentTask';           // AnalysisTask in flight
 const K_ACCEPTED       = 'acceptedResults';       // {task, result}[]
 const K_HISTORY        = 'reviewHistory';         // AnalyzerResult[] pre-history
-const K_RETRIES        = 'retryCounts';           // Record<itemId, number>
-const K_FOLLOWUP_COUNT = 'followUpsCount';
 const K_PHASE          = 'phase';
-const K_REVIEW_RESULT  = 'reviewResult';          // raw review-task output
-const K_LAST_RUNNER    = 'lastRunner';            // last RunAnalyzerOutcome
 const K_SYNTH_RESULT   = 'synthResult';           // final markdown
 const K_LIST_ID        = 'listId';
 
-type Phase =
-  | 'planning'
-  | 'plan-approval'
-  | 'analyzing'
-  | 'reviewing'
-  | 'synthesising'
-  | 'done';
+type Phase = 'synthesising' | 'done';
 
 // ---------------------------------------------------------------------------
 // Controller
@@ -170,40 +103,27 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   readonly id = 'code-analyzer';
 
   private deps?: TaskOrchestratorDeps;
-  /** Stashed in buildInitialTasks; consumed by ensureStateInitialized
-   *  on the first next() call when the state store is actually visible
-   *  to the controller. attachDeps fires before buildInitialTasks but
-   *  deps.stateStore is the ORIGINAL caller-passed value (often
-   *  undefined when the chat-handler builds deps inline) -- the
-   *  framework constructs the real stateStore locally and uses it for
-   *  next() calls without writing it back to deps. */
   private _request?: string;
   private _repoSummary?: RepoSummary;
   /**
    * Scope tier for this run -- captured from
    * `ControllerInput.classification.scope` in buildInitialTasks. Drives
-   * the per-tier cap lookup at every site that used to reference the
-   * old `SOFT_TASK_CAP` / `HARD_TASK_CAP` constants. Defaults to `'M'`
-   * (pre-Phase-5.A behaviour) when the caller didn't supply a tier.
+   * the per-tier synthesis playbook. Defaults to `'M'` when the caller
+   * didn't supply a tier.
    */
   private _tier: ScopeSize = 'M';
   /**
-   * Parent list id for drill-down runs (Phase 5.D). Captured from
+   * Parent list id for drill-down runs. Captured from
    * `ControllerInput.parentListId`; passed into `createList` so the
    * todos framework records the parent-child edge. Undefined for
-   * top-level / non-drill runs. Declared `string | undefined`
-   * (rather than `?: string`) so `exactOptionalPropertyTypes` lets us
-   * assign through from `input.parentListId` cleanly.
+   * top-level / non-drill runs.
    */
   private _parentListId: string | undefined = undefined;
   /**
-   * Re-run mode (Phase 4.1). Set from
-   * `ControllerInput.rerunFromListId`. When non-undefined the
-   * orchestrator skips the plan LLM step entirely -- buildInitialTasks
-   * queues a pass-through transform task whose afterPlan handler
-   * detects the rerun marker and reconstructs `AnalysisTask[]` from
-   * the prior list's items. The new run gets `parentListId = this`
-   * value so it threads under the prior in the todos pane.
+   * Re-run mode. Set from `ControllerInput.rerunFromListId`. When
+   * non-undefined the orchestrator queues a pass-through transform
+   * task whose handler reconstructs `AnalysisTask[]` from the prior
+   * list's items and replays them through the legacy-shim path.
    */
   private _rerunFromListId: string | undefined = undefined;
 
@@ -222,17 +142,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     log.info(
       {
         tier:             this._tier,
-        caps:             capsForTier(this._tier),
         parentListId:     this._parentListId ?? null,
         rerunFromListId:  this._rerunFromListId ?? null,
       },
       'code-analyzer scope tier captured',
     );
 
-    // Phase 4.1: re-run path skips the plan LLM call. We queue a
-    // pass-through transform task carrying a sentinel marker; the
-    // afterPlan handler detects the marker and reconstructs the
-    // AnalysisTask[] from the prior list's items asynchronously.
     if (this._rerunFromListId !== undefined) {
       return [{
         index: 0,
@@ -247,42 +162,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }];
     }
 
-    // code-analyzer-skills.md Phase 8: skills-routing path -- when
-    // the feature flag is on, emit a bootstrap pass-through task; the
-    // orchestrator's `next()` detects the marker and runs the skills
-    // pipeline (classify -> select-scope -> per-skill exec ->
-    // calibrate) inline, then queues the legacy synthesise step. The
-    // legacy plan LLM call + per-task analyzer + review steps are
-    // bypassed entirely. The flag is also captured in
-    // `state.skillsRouting` so a resume of an in-flight run dispatches
-    // consistently regardless of env-var changes.
-    if (readSkillsRoutingFromEnv()) {
-      log.info({ }, 'code-analyzer: skills-routing path enabled via env var');
-      return [{
-        index: 0,
-        description: 'Code Analyzer: routing question through skills pipeline...',
-        kind: 'transform',
-        intent: 'code-analysis',
-        passThrough: true,
-        userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
-        outputFormat: 'text',
-        stateKey: K_PLAN_RESULT,
-        persisted: true,
-      }];
-    }
-
     return [{
       index: 0,
-      description: `Code Analyzer: planning tasks (tier ${this._tier})...`,
-      kind: 'llm',
+      description: 'Code Analyzer: routing question through skills pipeline...',
+      kind: 'transform',
       intent: 'code-analysis',
-      systemPrompt: buildPlanSystemPrompt(this._tier),
-      userMessage: this.renderPlanUserMessage(this._request, this._repoSummary),
-      resolverAgent: 'code-analyzer',
-      resolverStep: 'plan',
-      providerHint: 'claude',
-      temperature: 0,
-      maxTokens: 2500,
+      passThrough: true,
+      userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+      outputFormat: 'text',
       stateKey: K_PLAN_RESULT,
       persisted: true,
     }];
@@ -311,15 +198,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       truncated:    false,
       cancelled:    false,
       approvedDirs: [],
-      // code-analyzer-skills.md Phase 8: capture routing flag at
-      // run start so a re-run / resume keeps the original behaviour
-      // even if the env var has flipped in the meantime.
-      skillsRouting: readSkillsRoutingFromEnv(),
     };
     state.set(K_STATE, initialState);
-    state.set(K_PHASE, 'planning' as Phase);
-    state.set(K_RETRIES, {} as Record<string, number>);
-    state.set(K_FOLLOWUP_COUNT, 0);
+    state.set(K_PHASE, 'synthesising' as Phase);
     state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
     state.set(K_HISTORY, [] as AnalyzerResult[]);
 
@@ -328,14 +209,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
   /**
    * Seed Session.access with the analyzer's pre-approved fs scopes
-   * (Phase 4 of plans/access-gate.md). Replaces the per-call
-   * checkPathAccess hook + fireFsAccessGate path: the analyzer runner
-   * now hands every fs tool call straight to executeTool, whose
-   * dispatcher (Phase 2) consults Session.access for a hit before
-   * firing a UI gate. The repo root cascades to every descendant via
-   * approvePrefix; out-of-repo dirs the user has previously approved
-   * during this run are re-seeded on resume so a long task crossing a
-   * daemon restart doesn't re-prompt for already-cleared paths.
+   * (Phase 4 of plans/access-gate.md).
    */
   private seedAccessFromState(ca: CodeAnalysisState): void {
     if (this.deps === undefined) return;
@@ -356,41 +230,22 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     state: TaskStateStore,
   ): Promise<Task[] | null> {
     this.ensureStateInitialized(state);
-    const phase = state.get<Phase>(K_PHASE) ?? 'planning';
+    const phase = state.get<Phase>(K_PHASE) ?? 'synthesising';
     log.info({ phase, completed: completed.description, gateAction: gateReply?.action }, 'next()');
 
-    // Resume bootstrap: the resume RPC's first task is a pass-through
-    // transform carrying the RESUME_BOOTSTRAP_MARKER. Detect it before
-    // the regular phase routing so we can pick where to re-enter the
-    // pipeline based on the persisted `phase`, not the marker's
-    // current phase value (which is whatever was checkpointed).
     if (completed.output.trim() === RESUME_BOOTSTRAP_MARKER) {
       return this.afterResumeBootstrap(state, phase);
     }
 
-    // code-analyzer-skills.md Phase 8: skills-routing path.
-    // buildInitialTasks emitted SKILLS_ROUTING_BOOTSTRAP_MARKER; run
-    // the meta-skills pipeline inline + queue synthesise.
     if (completed.output.trim() === SKILLS_ROUTING_BOOTSTRAP_MARKER) {
       return this.afterSkillsRoutingBootstrap(state);
     }
 
+    if (completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
+      return this.afterRerunBootstrap(state);
+    }
+
     switch (phase) {
-      case 'planning':
-        return this.afterPlan(completed, state);
-
-      case 'plan-approval':
-        return this.afterPlanApprovalGate(gateReply, state);
-
-      case 'analyzing':
-        // The "analyzing" phase queues a review LLM task; that task's
-        // completion brings us back to next() in the 'reviewing' phase.
-        log.warn({ phase }, 'unexpected next() call in analyzing phase');
-        return null;
-
-      case 'reviewing':
-        return this.afterReview(completed, state);
-
       case 'synthesising':
         return this.afterSynthesise(completed, state);
 
@@ -402,7 +257,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   finalize(state: TaskStateStore): FinalizeResult {
     const synthResult = state.get<string>(K_SYNTH_RESULT) ?? '';
     if (synthResult.length === 0) {
-      // Pipeline aborted before synthesise -- best-effort summary.
       const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
       const fallback = accepted.length === 0
         ? '_Code analysis aborted before any task completed._'
@@ -425,10 +279,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
   /**
    * Restore controller instance fields from a persisted state store
-   * before `next()` resumes the pipeline. Called from the resume RPC
-   * after the framework has hydrated the state store from the on-disk
-   * checkpoint file. Pure rebuild -- no side effects beyond setting
-   * private fields. Mirrors the brainstorm `restoreState` shape.
+   * before `next()` resumes the pipeline.
    */
   restoreState(state: TaskStateStore): void {
     const ca = state.get<CodeAnalysisState>(K_STATE);
@@ -439,21 +290,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     this._request     = ca.request;
     this._repoSummary = ca.repoSummary;
     this._tier        = ca.tier;
-
-    // Re-seed Session.access on resume (Phase 4 of plans/access-gate.md).
-    // Sessions are disposable; on IDE restart the AccessStore is fresh.
-    // Replay the pre-approved repo root + every dir the user cleared
-    // during the prior run so the analyzer doesn't re-prompt the user
-    // for paths that had already been approved.
     this.seedAccessFromState(ca);
-    // The checkpoint file doesn't currently persist the
-    // `_parentListId` / `_rerunFromListId` instance fields. They're
-    // reconstructable from the active list's `parentListId` (the
-    // todos framework stores it durably) but only if the caller
-    // re-supplies them via ControllerInput. For now leave them
-    // undefined on resume -- new analyzer items still belong to the
-    // existing list (see `_listId` -> `K_LIST_ID`), so the
-    // parent-child thread is preserved without re-stamping.
   }
 
   /**
@@ -462,23 +299,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    * `RESUME_BOOTSTRAP_MARKER`; `next()`'s phase handler recognises
    * the marker and dispatches based on the persisted `K_PHASE`:
    *
-   *   - planning              -> re-fire the plan LLM task.
-   *   - plan-approval         -> re-fire the plan-size approval gate.
-   *   - analyzing / reviewing -> pop next from K_TASK_QUEUE and re-run
-   *                              the analyzer + review loop.
-   *   - synthesising          -> re-fire synthesise (single-pass) or
-   *                              re-run multipass.
-   *   - done                  -> error out; nothing to resume.
-   *
-   * Caveat: the analyzer runner's inline tool-loop iterations are
-   * not individually checkpointed (each call to `runAnalyzer` is one
-   * persisted step at the framework level). On a crash mid-runAnalyzer
-   * the in-flight task restarts from scratch; previously-accepted
-   * tasks survive in K_ACCEPTED.
+   *   - synthesising  -> re-fire synthesise (single-pass) or re-run
+   *                      multipass.
+   *   - done          -> error out; nothing to resume.
    */
   buildResumeTask(state: TaskStateStore): Task {
-    const phase = state.get<Phase>(K_PHASE) ?? 'planning';
-    log.info({ phase, queueLen: state.get<string[]>(K_TASK_QUEUE)?.length ?? 0 }, 'resume: building bootstrap task');
+    const phase = state.get<Phase>(K_PHASE) ?? 'synthesising';
+    log.info({ phase }, 'resume: building bootstrap task');
     return {
       index: 0,
       description: `Code Analyzer: resuming from checkpoint (phase ${phase})...`,
@@ -496,172 +323,158 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   // Phase handlers
   // -------------------------------------------------------------------------
 
-  private async afterPlan(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    // Phase 4.1: re-run mode uses a pass-through transform whose output
-    // is the bootstrap marker. Detect it BEFORE attempting JSON parse.
-    if (this._rerunFromListId !== undefined && completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
-      return this.afterRerunBootstrap(state);
-    }
-
-    const planText = completed.output;
-    const planned = parsePlannedTasks(planText);
-    if (planned.length === 0) {
-      log.warn({ planText: planText.slice(0, 200) }, 'planner returned no tasks');
-      state.set(K_PHASE, 'done' as Phase);
-      state.set(K_SYNTH_RESULT, '_Planner returned no tasks. Try rephrasing the request._');
-      state.markSessionComplete();
-      return null;
-    }
-
-    // Phase 5.A: tier-aware caps. Tier was captured in
-    // buildInitialTasks; default 'M' matches the pre-Phase-5 caps.
-    const caps = capsForTier(this._tier);
-
-    // Apply hard cap silently (the planner prompt asks for <= softCap
-    // already; anything past hardCap is dropped before the user even
-    // sees it).
-    const trimmedHard = planned.slice(0, caps.hardTaskCap);
-    state.set(K_PLAN_TASKS, trimmedHard);
-
-    if (trimmedHard.length > caps.softTaskCap) {
-      // Plan-size approval gate. Surface the plan to the user so they
-      // can approve / trim-to-soft-cap / cancel before we pay the
-      // cloud cost of N reviews.
-      state.set(K_PHASE, 'plan-approval' as Phase);
-      const summary = renderPlanSummary(trimmedHard, caps);
-      return [{
-        index: 1,
-        description: `Plan has ${trimmedHard.length} tasks (tier ${this._tier}; soft cap ${caps.softTaskCap}). Approve, trim, or cancel?`,
-        kind: 'transform',
-        intent: 'code-analysis',
-        passThrough: true,
-        userMessage: summary,
-        outputFormat: 'markdown',
-        requiresGate: true,
-        gateTitle: `Code Analyzer plan size approval (tier ${this._tier})`,
-        gateActions: [
-          { name: 'approve', label: 'Approve all' },
-          { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
-          { name: 'cancel', label: 'Cancel run' },
-        ],
-        persisted: true,
-      }];
-    }
-
-    return await this.beginAnalysis(trimmedHard, state);
-  }
-
-  private async afterPlanApprovalGate(gateReply: GateReply | undefined, state: TaskStateStore): Promise<Task[] | null> {
-    const action = gateReply?.action ?? 'cancel';
-    let planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    const caps = capsForTier(this._tier);
-    log.info({ action, plannedCount: planned.length, tier: this._tier }, 'plan-size-approval gate fired');
-
-    if (action === 'cancel') {
-      const ca = state.get<CodeAnalysisState>(K_STATE);
-      if (ca) state.set(K_STATE, { ...ca, cancelled: true });
-      state.set(K_PHASE, 'done' as Phase);
-      state.set(K_SYNTH_RESULT, '_Code analysis cancelled at the plan-size gate._');
-      state.markSessionComplete();
-      return null;
-    }
-    // 'trim-to-soft' is the new action name; keep accepting the legacy
-    // 'trim-to-16' so any in-flight runs from before this commit don't
-    // mis-route on the gate reply.
-    if (action === 'trim-to-soft' || action === 'trim-to-16') {
-      planned = planned.slice(0, caps.softTaskCap);
-      state.set(K_PLAN_TASKS, planned);
-      const ca = state.get<CodeAnalysisState>(K_STATE);
-      if (ca) state.set(K_STATE, { ...ca, truncated: true });
-    }
-    return await this.beginAnalysis(planned, state);
-  }
-
   /**
-   * Phase 4.1 re-run bootstrap. Loads the prior list, reconstructs
-   * `AnalysisTask[]` from its items (using `TodoItem.description` for
-   * the question + `meta.kind` / `meta.scope` / `meta.hint` for the
-   * rest), then proceeds to `beginAnalysis` which creates a fresh
-   * TodoList (with parentListId stamped) and queues the first
-   * analyzer review.
-   *
-   * Defensive paths: if the prior list is gone, has no items, or
-   * none of its items have parseable meta, we fall back to a single
-   * "redo whatever the original prompt asked" task so the run still
-   * produces SOMETHING the user can compare against.
+   * Re-run bootstrap. Loads the prior list, reconstructs
+   * `AnalysisTask[]` from its items, maps each through
+   * `analysisTaskToSkillPlan` and runs the resulting skill steps
+   * inline. Tasks where the shim returns null (`free-form`) are
+   * skipped with a logged warning. Persists a fresh TodoList
+   * (parent-edged to the prior list) and queues synthesise.
    */
   private async afterRerunBootstrap(state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps?.todos === undefined || this._rerunFromListId === undefined) {
+    if (this.deps === undefined || this.deps.todos === undefined || this._rerunFromListId === undefined) {
       log.error('afterRerunBootstrap: deps.todos or rerunFromListId missing');
       state.set(K_PHASE, 'done' as Phase);
       state.set(K_SYNTH_RESULT, '_Re-run bootstrap failed: internal state missing._');
       state.markSessionComplete();
       return null;
     }
+    if (this._repoSummary === undefined) {
+      log.error('afterRerunBootstrap: repoSummary missing');
+      state.set(K_PHASE, 'done' as Phase);
+      state.set(K_SYNTH_RESULT, '_Re-run bootstrap failed: repo summary missing._');
+      state.markSessionComplete();
+      return null;
+    }
     const priorListId = this._rerunFromListId;
     const priorList = await this.deps.todos.getList(priorListId);
-    if (priorList === null) {
-      log.warn({ priorListId }, 'afterRerunBootstrap: prior list not found; falling back to single-task plan');
-      return this.beginAnalysis(buildFallbackTaskFromRequest(state.get<CodeAnalysisState>(K_STATE)?.request ?? ''), state);
-    }
-
-    const priorItems = priorList.items ?? [];
     const reconstructed: AnalysisTask[] = [];
-    for (const item of priorItems) {
-      const task = reconstructTaskFromItem(item);
-      if (task !== null) {
-        reconstructed.push(task);
+    if (priorList !== null) {
+      const priorItems = priorList.items ?? [];
+      for (const item of priorItems) {
+        const task = reconstructTaskFromItem(item);
+        if (task !== null) reconstructed.push(task);
       }
+      log.info(
+        { priorListId, priorItemCount: priorItems.length, reconstructed: reconstructed.length },
+        'afterRerunBootstrap: reconstructed task list',
+      );
+    } else {
+      log.warn({ priorListId }, 'afterRerunBootstrap: prior list not found; using fallback task');
     }
-    log.info(
-      { priorListId, priorItemCount: priorItems.length, reconstructed: reconstructed.length },
-      'afterRerunBootstrap: reconstructed task list',
-    );
     if (reconstructed.length === 0) {
-      log.warn({ priorListId }, 'afterRerunBootstrap: no parseable items; falling back to single-task plan');
-      return this.beginAnalysis(buildFallbackTaskFromRequest(state.get<CodeAnalysisState>(K_STATE)?.request ?? ''), state);
+      const fallback = buildFallbackTaskFromRequest(state.get<CodeAnalysisState>(K_STATE)?.request ?? '');
+      reconstructed.push(...fallback);
     }
-
-    // Phase 4.1: the new run threads under the prior list as a child
-    // (same id used both for parent edge AND skip-plan source). If
-    // the caller already supplied a different parentListId via the
-    // chat.send param, keep the caller-supplied one (drill-down +
-    // re-run could combine in theory).
     if (this._parentListId === undefined) {
       this._parentListId = priorListId;
     }
 
-    return this.beginAnalysis(reconstructed, state);
+    const repoPath = this._repoSummary.rootPath;
+    const accepted: Array<{ task: AnalysisTask; result: AnalyzerResult }> = [];
+    const itemPrefix = `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const runnerDeps = this.buildSkillRunnerDeps();
+
+    for (let i = 0; i < reconstructed.length; i++) {
+      const task = reconstructed[i]!;
+      const itemId = `${itemPrefix}-rerun-${i}`;
+      const plan = analysisTaskToSkillPlan(task, { repoPath });
+      if (plan === null) {
+        log.warn(
+          { kind: task.kind, question: task.question.slice(0, 80) },
+          'afterRerunBootstrap: legacy shim returned null; skipping task',
+        );
+        continue;
+      }
+
+      const executions: PerSkillExecution[] = [];
+      for (const step of plan.steps) {
+        try {
+          const result = await runSkill<Record<string, unknown>, unknown>(
+            step.skillId,
+            step.args,
+            runnerDeps,
+          );
+          executions.push(executionFromSkillResult(step.skillId, step.args, result, false));
+        } catch (err) {
+          executions.push({
+            skillId:       step.skillId,
+            args:          step.args,
+            resolvedScope: { repoPath },
+            value:         null,
+            confidence:    'low',
+            notes:         [`skill execution threw: ${(err as Error).message}`],
+            toolCalls:     [],
+            errored:       true,
+          });
+        }
+      }
+      const merged = mergeExecutionsToAnalyzerResult({ ...task, itemId }, executions);
+      accepted.push(merged);
+    }
+
+    const ca = state.get<CodeAnalysisState>(K_STATE);
+    state.set(K_PLAN_TASKS, accepted.map(a => a.task));
+    state.set(K_ACCEPTED, accepted);
+    state.set(K_HISTORY, accepted.map(a => a.result));
+
+    if (this.deps.todos !== undefined && ca !== undefined) {
+      const list = await this.deps.todos.createList({
+        sessionId: this.deps.session.id,
+        title: `Code Analysis: ${truncateTitle(ca.request)}`,
+        description: ca.request,
+        ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
+      });
+      const stamped: Array<{ task: AnalysisTask; result: AnalyzerResult }> = [];
+      for (const { task, result } of accepted) {
+        const item = await this.deps.todos.addItem(list.id, {
+          title: shortTitleFor(task),
+          description: task.question,
+          meta: {
+            kind: task.kind,
+            ...(task.scope !== undefined ? { scope: task.scope } : {}),
+            origin: task.origin,
+            retryCount: task.retryCount,
+          },
+        });
+        try {
+          await this.deps.todos.updateItemMeta(item.id, {
+            kind: task.kind,
+            ...(task.scope !== undefined ? { scope: task.scope } : {}),
+            origin: task.origin,
+            retryCount: 0,
+            answer:     result.answer,
+            findings:   result.findings,
+            citations:  result.citations,
+            confidence: result.confidence,
+            toolCalls:  result.toolCalls,
+          });
+          await this.deps.todos.markComplete(item.id);
+        } catch (err) {
+          log.warn(
+            { err: (err as Error).message, itemId: item.id },
+            'afterRerunBootstrap: failed to stamp item meta',
+          );
+        }
+        stamped.push({
+          task:   { ...task, itemId: item.id },
+          result: { ...result, itemId: item.id },
+        });
+      }
+      state.set(K_PLAN_TASKS, stamped.map(a => a.task));
+      state.set(K_ACCEPTED, stamped);
+      state.set(K_HISTORY, stamped.map(a => a.result));
+      state.set(K_STATE, { ...ca, listId: list.id });
+      state.set(K_LIST_ID, list.id);
+    }
+
+    return this.queueSynthesise(state);
   }
 
   /**
    * Dispatch the resume-bootstrap transform's completion based on
-   * the persisted `phase`. Called by next() when it recognises the
-   * RESUME_BOOTSTRAP_MARKER.
-   *
-   * The implementation strategy varies by phase:
-   *   - planning            -> re-fire the plan LLM task. Plan
-   *                            results aren't expensive (one cloud
-   *                            call) and idempotent enough that
-   *                            re-running is fine; if the prior
-   *                            checkpoint had a parsed plan we'd
-   *                            ideally skip, but the framework's
-   *                            checkpoint shape doesn't surface
-   *                            "this task already completed" to a
-   *                            controller that wasn't running when
-   *                            it did.
-   *   - plan-approval       -> re-fire the gate task. User makes
-   *                            the same approve/trim/cancel call.
-   *   - analyzing/reviewing -> hand off to runNextAnalyzerTask,
-   *                            which pops queue head, runs
-   *                            analyzer + review again. The
-   *                            already-accepted tasks in
-   *                            K_ACCEPTED survive; only the
-   *                            in-flight task restarts.
-   *   - synthesising        -> re-fire synthesise. queueSynthesise
-   *                            handles single-pass vs multipass
-   *                            internally based on tier.
-   *   - done                -> error -- nothing to resume.
+   * the persisted `phase`. With the legacy plan / analyse / review
+   * paths gone, only `synthesising` and `done` remain.
    */
   private async afterResumeBootstrap(state: TaskStateStore, phase: Phase): Promise<Task[] | null> {
     log.info({ phase }, 'resume: dispatching from bootstrap');
@@ -671,116 +484,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       state.markSessionComplete();
       return null;
     }
-    if (phase === 'planning') {
-      // Re-fire the plan LLM task verbatim from buildInitialTasks.
-      // The original instance fields were rebuilt by restoreState.
-      if (this._request === undefined || this._repoSummary === undefined) {
-        log.error('resume: planning phase but instance fields missing; aborting');
-        return null;
-      }
-      return [{
-        index: 0,
-        description: `Code Analyzer: re-planning (resume; tier ${this._tier})...`,
-        kind: 'llm',
-        intent: 'code-analysis',
-        systemPrompt: buildPlanSystemPrompt(this._tier),
-        userMessage: this.renderPlanUserMessage(this._request, this._repoSummary),
-        resolverAgent: 'code-analyzer',
-        resolverStep: 'plan',
-        providerHint: 'claude',
-        temperature: 0,
-        maxTokens: 2500,
-        stateKey: K_PLAN_RESULT,
-        persisted: true,
-      }];
-    }
-    if (phase === 'plan-approval') {
-      const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
-      const caps = capsForTier(this._tier);
-      const summary = renderPlanSummary(planned, caps);
-      return [{
-        index: 1,
-        description: `Plan has ${planned.length} tasks (resume; tier ${this._tier}). Approve, trim, or cancel?`,
-        kind: 'transform',
-        intent: 'code-analysis',
-        passThrough: true,
-        userMessage: summary,
-        outputFormat: 'markdown',
-        requiresGate: true,
-        gateTitle: `Code Analyzer plan size approval (tier ${this._tier})`,
-        gateActions: [
-          { name: 'approve', label: 'Approve all' },
-          { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
-          { name: 'cancel', label: 'Cancel run' },
-        ],
-        persisted: true,
-      }];
-    }
-    if (phase === 'analyzing' || phase === 'reviewing') {
-      // Both phases mean: a task is in flight (or about to be).
-      // runNextAnalyzerTask handles both cases -- pops queue head,
-      // re-runs analyzer + review. K_TASK_QUEUE state survives the
-      // crash; in-flight task restarts.
-      state.set(K_PHASE, 'analyzing' as Phase);
-      return this.runNextAnalyzerTask(state);
-    }
-    if (phase === 'synthesising') {
-      return this.queueSynthesise(state);
-    }
-    log.warn({ phase }, 'resume: unknown phase; falling through to runNextAnalyzerTask');
-    return this.runNextAnalyzerTask(state);
-  }
-
-  private async beginAnalysis(planned: AnalysisTask[], state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps === undefined || this.deps.todos === undefined) {
-      // Should never happen -- runControlledPipeline auto-builds
-      // deps.todos for registered families. Fail closed.
-      log.error('beginAnalysis: deps.todos is undefined; cannot create TodoList');
-      state.set(K_PHASE, 'done' as Phase);
-      state.set(K_SYNTH_RESULT, '_Internal error: TODO framework unavailable._');
-      state.markSessionComplete();
-      return null;
-    }
-
-    // Create the TodoList + items the user sees in the todos pane.
-    const ca = state.get<CodeAnalysisState>(K_STATE);
-    if (ca === undefined) {
-      log.error('beginAnalysis: state missing');
-      return null;
-    }
-    const list = await this.deps.todos.createList({
-      sessionId: this.deps.session.id,
-      title: `Code Analysis: ${truncateTitle(ca.request)}`,
-      description: ca.request,
-      // Phase 5.D: when this run was kicked off as a drill-down from
-      // an existing report's footer, stamp the parent edge so the
-      // todos framework + Report Pane can render the parent-child
-      // thread (kebab "Open report" can climb back up; the pane can
-      // show breadcrumbs).
-      ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
-    });
-    const taskWithIds: AnalysisTask[] = [];
-    const queue: string[] = [];
-    for (const t of planned) {
-      const item = await this.deps.todos.addItem(list.id, {
-        title: shortTitleFor(t),
-        description: t.question,
-        meta: {
-          kind: t.kind,
-          scope: t.scope,
-          origin: t.origin,
-          retryCount: t.retryCount,
-        },
-      });
-      taskWithIds.push({ ...t, itemId: item.id });
-      queue.push(item.id);
-    }
-    state.set(K_PLAN_TASKS, taskWithIds);
-    state.set(K_TASK_QUEUE, queue);
-    state.set(K_STATE, { ...ca, listId: list.id });
-    state.set(K_LIST_ID, list.id);
-
-    return await this.runNextAnalyzerTask(state);
+    return this.queueSynthesise(state);
   }
 
   // -- skills-routing bootstrap (code-analyzer-skills.md Phase 8) ----------
@@ -789,15 +493,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    * Skills-routing path. The bootstrap pass-through emitted by
    * `buildInitialTasks` lands here; we run `runSkillsPipeline`
    * inline (classify-question -> select-scope -> runSkill per scoped
-   * -> calibrate-confidence), adapt the result to the legacy
-   * `{ task, result }[]` shape via `pipelineResultToAcceptedTasks`,
-   * persist the TodoList, and queue the legacy synthesise step.
-   *
-   * The legacy plan + per-task analyzer + review steps are bypassed
-   * entirely. Skill-derived results carry their own confidence +
-   * notes that calibrate-confidence already rolled into a final
-   * verdict; the legacy reviewer's per-task contract doesn't fit
-   * one-shot skill results.
+   * -> calibrate-confidence), adapt the result via
+   * `pipelineResultToAcceptedTasks`, persist the TodoList, and queue
+   * the synthesise step.
    */
   private async afterSkillsRoutingBootstrap(state: TaskStateStore): Promise<Task[] | null> {
     if (this.deps === undefined) {
@@ -828,10 +526,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       {
         session,
         resolveProvider: (affinity) => {
-          // code-analyzer-skills §7.1: cloud affinity -> active cloud
-          // provider's small/fast tier. Match the data-orchestrator's
-          // shape: local -> ollama; cloud -> claude (fallback ollama);
-          // auto -> session resolver for the meta step.
           if (affinity === 'local') return session.ollamaProvider;
           if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
           return session.resolver.resolve('code-analyzer', 'plan');
@@ -851,9 +545,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     );
 
     if (pipelineResult.aborted) {
-      // Pipeline declined to proceed -- mark not-cancelled (the user
-      // didn't cancel) and queue synthesise so the report body
-      // explains the abort reason.
       if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: false });
       state.set(K_PLAN_TASKS, [] as AnalysisTask[]);
       state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
@@ -861,7 +552,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       return this.queueSynthesise(state);
     }
 
-    // Adapt pipeline -> legacy shapes the synthesise step consumes.
     const itemPrefix = `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
     const planned: AnalysisTask[] = accepted.map(a => a.task);
@@ -871,11 +561,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     state.set(K_ACCEPTED, accepted);
     state.set(K_HISTORY, history);
 
-    // Persist the TodoList + items so the user sees the per-skill
-    // runs in the chat panel. This duplicates the begin-of-
-    // beginAnalysis() block; small enough to inline here without
-    // factoring it out, since the skills branch doesn't need the
-    // analyzer queue / runner.
     if (this.deps.todos !== undefined && ca !== undefined) {
       const list = await this.deps.todos.createList({
         sessionId: this.deps.session.id,
@@ -896,8 +581,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             retryCount: t.retryCount,
           },
         });
-        // Stamp per-skill metadata + mark the item complete since
-        // the skill already ran.
         try {
           const r = accepted[i]!.result;
           await this.deps.todos.updateItemMeta(item.id, {
@@ -935,373 +618,33 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   /**
-   * Pop the next item from the queue, run the analyzer for it inline,
-   * stash the result on the item's meta, and queue the corresponding
-   * review LLM task. Returns null when the queue is empty (caller
-   * advances to synthesise).
+   * Build a `SkillRunnerDeps` for inline skill execution. Mirrors the
+   * cross-agent shim's helper so both call sites use the same
+   * provider-affinity contract and tool-exec context plumbing.
    */
-  private async runNextAnalyzerTask(state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps === undefined) return null;
-    const queue = state.get<string[]>(K_TASK_QUEUE) ?? [];
-    if (queue.length === 0) {
-      // No more pending items -- jump to synthesise.
-      return this.queueSynthesise(state);
+  private buildSkillRunnerDeps(): SkillRunnerDeps {
+    if (this.deps === undefined) {
+      throw new Error('buildSkillRunnerDeps: deps not attached');
     }
-    const itemId = queue[0]!;
-    const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    const taskBase = planned.find(t => t.itemId === itemId);
-    if (taskBase === undefined) {
-      log.error({ itemId }, 'runNextAnalyzerTask: task not found in plan');
-      // Drop and recurse.
-      state.set(K_TASK_QUEUE, queue.slice(1));
-      return this.runNextAnalyzerTask(state);
-    }
-    // Apply per-item retry count + hint from prior reviewer decision.
-    const retries = state.get<Record<string, number>>(K_RETRIES) ?? {};
-    const retryCount = retries[itemId] ?? 0;
-    const hint = state.get<string>(`${K_RETRIES}:hint:${itemId}`);
-    const task: AnalysisTask = {
-      ...taskBase,
-      retryCount,
-      ...(hint !== undefined ? { hint } : {}),
+    const session = this.deps.session;
+    const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
+      switch (affinity) {
+        case 'local': return session.ollamaProvider;
+        case 'cloud': return session.claudeProvider ?? session.ollamaProvider;
+        case 'auto':  return session.resolver.resolve('skill', 'default');
+      }
     };
-    state.set(K_CURRENT_TASK, task);
-
-    if (this.deps.todos !== undefined) {
-      try {
-        await this.deps.todos.markInProgress(itemId);
-      } catch (err) {
-        log.warn({ err, itemId }, 'markInProgress failed (continuing)');
-      }
-    }
-
-    // Phase 2.5: per-task cache. Look up before paying analyzer +
-    // reviewer cost. Tier is part of the key (different tiers produce
-    // different per-task playbook output for the same question --
-    // Phase 5.B). Hits short-circuit straight to accepted-with-original
-    // -confidence; the reviewer LLM task is skipped entirely.
-    const ca = state.get<CodeAnalysisState>(K_STATE);
-    const repoSnapshotId = ca?.repoSummary.repoSnapshotId ?? '';
-    const cached = await readCachedResult({
-      question: task.question,
-      scope: task.scope,
-      repoSnapshotId,
-      tier: this._tier,
-    });
-    if (cached !== null) {
-      log.info({ itemId, kind: task.kind, tier: this._tier }, 'analyzer cache hit; skipping analyzer + reviewer');
-      // Brainstorm-style bubble: open + emit one line + close
-      // immediately. Cache hits are fast; a longer-lived bubble
-      // would just blink. The chat panel still gets a transient
-      // visual cue that the task short-circuited.
-      const cacheStep = this.analyzeLiveStepName(state);
-      this.emitLiveStep(cacheStep, '');
-      this.emitLiveStep(cacheStep, this.formatProgress(state, `cache hit: ${task.kind} -- ${shortTitleFor(task)}`) + '\n');
-      this.emitLiveStep(cacheStep, '', true);
-      // Mirror runNextAnalyzerTask's accept-path side-effects: meta,
-      // markComplete, accepted/history, queue advance.
-      if (this.deps.todos !== undefined) {
-        try {
-          await this.deps.todos.updateItemMeta(itemId, {
-            kind: task.kind,
-            scope: task.scope,
-            origin: task.origin,
-            retryCount: task.retryCount,
-            ...(task.hint !== undefined ? { hint: task.hint } : {}),
-            answer: cached.answer,
-            findings: cached.findings,
-            citations: cached.citations,
-            confidence: cached.confidence,
-            toolCalls: cached.toolCalls,
-            ...(cached.truncated ? { truncated: true } : {}),
-            cacheHit: true,
-          });
-          await this.deps.todos.markComplete(itemId);
-        } catch (err) {
-          log.warn({ err, itemId }, 'cache-hit todos update failed (continuing)');
-        }
-      }
-      const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
-      const history = state.get<AnalyzerResult[]>(K_HISTORY) ?? [];
-      accepted.push({ task, result: cached });
-      history.push(cached);
-      state.set(K_ACCEPTED, accepted);
-      state.set(K_HISTORY, history);
-      state.set(K_TASK_QUEUE, queue.slice(1));
-      return this.runNextAnalyzerTask(state);
-    }
-
-    // Brainstorm-style bubble: open before the runner fires;
-    // accumulate tool-call notes + LLM tokens during the loop;
-    // close when the task completes (after the await).
-    const liveStepName = this.analyzeLiveStepName(state);
-    this.emitLiveStep(liveStepName, '');
-    this.emitLiveStep(liveStepName, this.formatProgress(state, `running task: ${task.kind} -- ${shortTitleFor(task)}`) + '\n');
-
-    const provider = this.resolveAnalyzerProvider();
-    const outcome = await runAnalyzer(task, {
-      provider,
-      session: this.deps.session,
-      // Tool-call traces from the runner (`[analyzer] graph_search(...)
-      // -> 5 rows in 234ms`) become bubble lines. The inner
-      // `[analyzer]` tag stays so the user can see the tool call
-      // layer; formatProgress prepends the `[code-analyzer | tier=X
-      // | K/N]` header.
-      onProgress: (msg) => this.emitLiveStep(liveStepName, this.formatProgress(state, msg) + '\n'),
-      // Token streaming during free-text LLM emissions between tool
-      // calls. Tokens append inline (no newline added) so the LLM's
-      // raw output flows in the bubble like brainstorm's spec writer.
-      onToken: (token) => this.emitLiveStep(liveStepName, token),
-      ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      // Phase 4 of plans/access-gate.md: drop the per-call
-      // checkPathAccess hook in favour of seeding Session.access at
-      // task start (see seedAccessFromState). The dispatcher inside
-      // executeTool fires the gate UI on miss using the send / channel
-      // / requestId we plumb here.
-      send:      this.deps.send,
-      channel:   this.deps.channel,
-      requestId: this.deps.requestId,
-      // Phase 5.A's per-tier wall-clock caps were dropped; the
-      // runner's MAX_WALL_CLOCK_MS (10 min safety bound) applies
-      // unconditionally. Local Ollama runs were getting cut off by
-      // the tight tier caps, forcing every task into the strict-
-      // JSON retry path and tripling per-item wall-clock cost.
-      // Phase 5.B: tier threaded into the analyzer system prompt so
-      // tierAnalyzerGuidance shifts the analytical altitude
-      // (per-line citations / signature-level / structural).
-      tier: this._tier,
-    });
-    state.set(K_LAST_RUNNER, outcome);
-    // Close the per-task live-console bubble; the framework will
-    // open its own ('code-analyzer', 'review') bubble for the next
-    // queued review LLM task.
-    this.emitLiveStep(liveStepName, '', true);
-
-    // Stash the runner result on item.meta so the todos pane / future
-    // resume can render it without rerunning.
-    if (this.deps.todos !== undefined) {
-      try {
-        await this.deps.todos.updateItemMeta(itemId, {
-          kind: task.kind,
-          scope: task.scope,
-          origin: task.origin,
-          retryCount: task.retryCount,
-          ...(task.hint !== undefined ? { hint: task.hint } : {}),
-          answer: outcome.result.answer,
-          findings: outcome.result.findings,
-          citations: outcome.result.citations,
-          confidence: outcome.result.confidence,
-          toolCalls: outcome.result.toolCalls,
-          ...(outcome.result.truncated ? { truncated: true } : {}),
-          ...(outcome.warning !== undefined ? { warning: outcome.warning } : {}),
-        });
-      } catch (err) {
-        log.warn({ err, itemId }, 'updateItemMeta failed (continuing)');
-      }
-    }
-
-    state.set(K_PHASE, 'reviewing' as Phase);
-
-    // Queue the review LLM task.
-    const history = state.get<AnalyzerResult[]>(K_HISTORY) ?? [];
-    const reviewMessages = buildReviewPrompt(task, outcome.result, history);
-    const userMessage = reviewMessages
-      .filter(m => m.role === 'user')
-      .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
-      .join('\n\n');
-
-    return [{
-      index: 100, // sentinel; framework only uses this for ordering within a sub-pipeline
-      description: `Code Analyzer: reviewing task "${shortTitleFor(task)}"...`,
-      kind: 'llm',
-      intent: 'code-analysis',
-      systemPrompt: REVIEW_SYSTEM,
-      userMessage,
-      resolverAgent: 'code-analyzer',
-      resolverStep: 'review',
-      providerHint: 'claude',
-      temperature: 0,
-      maxTokens: 1200,
-      stateKey: K_REVIEW_RESULT,
-      persisted: true,
-    }];
-  }
-
-  private async afterReview(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    const decision = parseReviewerDecision(completed.output);
-    const currentTask = state.get<AnalysisTask>(K_CURRENT_TASK);
-    const outcome = state.get<{ result: AnalyzerResult; warning?: string; truncated: boolean; proseOnlyFallback?: boolean }>(K_LAST_RUNNER);
-    if (currentTask === undefined || outcome === undefined) {
-      log.error('afterReview: missing currentTask or last runner outcome');
-      return this.queueSynthesise(state);
-    }
-
-    const queue = state.get<string[]>(K_TASK_QUEUE) ?? [];
-    const retries = { ...(state.get<Record<string, number>>(K_RETRIES) ?? {}) };
-    const followUpsSoFar = state.get<number>(K_FOLLOWUP_COUNT) ?? 0;
-    const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
-    const history = state.get<AnalyzerResult[]>(K_HISTORY) ?? [];
-
-    log.info(
-      { itemId: currentTask.itemId, decision: decision.decision, retryCount: currentTask.retryCount, queueRemaining: queue.length, proseOnlyFallback: outcome.proseOnlyFallback === true },
-      'reviewer decision',
-    );
-
-    // F4 guard: when the previous analyzer pass fell back to prose-only
-    // (the local model couldn't produce valid JSON across the strict-
-    // JSON retry), a reviewer-driven retry-with-hint is dead air. The
-    // model's blocked on JSON formatting, not on the question. Force
-    // accept-with-low-confidence so the run doesn't burn another ~60s
-    // per item to reach the same fallback.
-    if (decision.decision === 'retry-with-hint' && outcome.proseOnlyFallback === true) {
-      log.info(
-        { itemId: currentTask.itemId },
-        'F4: skipping retry-with-hint because previous outcome was prose-only fallback; accepting with low confidence',
-      );
-      if (this.deps?.todos !== undefined) {
-        try {
-          await this.deps.todos.markComplete(currentTask.itemId);
-        } catch (err) {
-          log.warn({ err, itemId: currentTask.itemId }, 'markComplete failed');
-        }
-      }
-      const downgraded: AnalyzerResult = { ...outcome.result, confidence: 'low' };
-      accepted.push({ task: currentTask, result: downgraded });
-      history.push(downgraded);
-      state.set(K_ACCEPTED, accepted);
-      state.set(K_HISTORY, history);
-      state.set(K_TASK_QUEUE, queue.slice(1));
-      return this.runNextAnalyzerTask(state);
-    }
-
-    switch (decision.decision) {
-      case 'accept': {
-        // Phase 2.5: write to per-task cache BEFORE markComplete --
-        // every reviewer-accepted result is reusable on the next run
-        // (same question + scope + tier within the same git revision).
-        // Cache write is fire-and-forget defensively inside the helper
-        // (write errors are logged but never thrown), so an unexpected
-        // failure here can't sink the analyze run.
-        const caForCache = state.get<CodeAnalysisState>(K_STATE);
-        const snapshotId = caForCache?.repoSummary.repoSnapshotId ?? '';
-        await writeCachedResult(
-          {
-            question: currentTask.question,
-            scope: currentTask.scope,
-            repoSnapshotId: snapshotId,
-            tier: this._tier,
-          },
-          outcome.result,
-        );
-        // Mark item complete + capture for synthesise.
-        if (this.deps?.todos !== undefined) {
-          try {
-            await this.deps.todos.markComplete(currentTask.itemId);
-          } catch (err) {
-            log.warn({ err, itemId: currentTask.itemId }, 'markComplete failed');
-          }
-        }
-        accepted.push({ task: currentTask, result: outcome.result });
-        history.push(outcome.result);
-        state.set(K_ACCEPTED, accepted);
-        state.set(K_HISTORY, history);
-        state.set(K_TASK_QUEUE, queue.slice(1));
-        return this.runNextAnalyzerTask(state);
-      }
-
-      case 'retry-with-hint': {
-        const newCount = (retries[currentTask.itemId] ?? 0) + 1;
-        if (newCount > MAX_RETRIES_PER_TASK) {
-          // Cap reached -- accept-with-low-confidence per design section 6.4.2.
-          log.info({ itemId: currentTask.itemId, newCount }, 'retry cap reached; accepting with low confidence');
-          if (this.deps?.todos !== undefined) {
-            try {
-              await this.deps.todos.markComplete(currentTask.itemId);
-            } catch (err) {
-              log.warn({ err, itemId: currentTask.itemId }, 'markComplete failed');
-            }
-          }
-          const downgraded: AnalyzerResult = { ...outcome.result, confidence: 'low' };
-          accepted.push({ task: currentTask, result: downgraded });
-          history.push(downgraded);
-          state.set(K_ACCEPTED, accepted);
-          state.set(K_HISTORY, history);
-          state.set(K_TASK_QUEUE, queue.slice(1));
-          return this.runNextAnalyzerTask(state);
-        }
-        retries[currentTask.itemId] = newCount;
-        state.set(K_RETRIES, retries);
-        state.set(`${K_RETRIES}:hint:${currentTask.itemId}`, decision.retryHint);
-        // Re-run the same item -- queue head stays.
-        return this.runNextAnalyzerTask(state);
-      }
-
-      case 'add-follow-up': {
-        // Accept the current item first.
-        if (this.deps?.todos !== undefined) {
-          try {
-            await this.deps.todos.markComplete(currentTask.itemId);
-          } catch (err) {
-            log.warn({ err, itemId: currentTask.itemId }, 'markComplete failed');
-          }
-        }
-        accepted.push({ task: currentTask, result: outcome.result });
-        history.push(outcome.result);
-        state.set(K_ACCEPTED, accepted);
-        state.set(K_HISTORY, history);
-
-        // Add up to 2 follow-ups -- but respect the global cap. Phase
-        // 5.A: hard cap is now tier-driven.
-        const slotsLeft = MAX_FOLLOWUPS - followUpsSoFar;
-        const totalPlanned = (state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? []).length;
-        const slotsBudget = Math.min(slotsLeft, capsForTier(this._tier).hardTaskCap - totalPlanned);
-        const newSeeds: AnalysisTaskSeed[] = decision.followUps.slice(0, Math.min(2, Math.max(0, slotsBudget)));
-        if (newSeeds.length > 0 && this.deps?.todos !== undefined) {
-          const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
-          const newQueue = [...queue.slice(1)];
-          for (const seed of newSeeds) {
-            const item = await this.deps.todos.addItem(state.get<string>(K_LIST_ID) ?? '', {
-              title: shortTitleFor(seed),
-              description: seed.question,
-              meta: { kind: seed.kind, scope: seed.scope, origin: 'follow-up', retryCount: 0 },
-            });
-            const fullTask: AnalysisTask = { ...seed, itemId: item.id, origin: 'follow-up', retryCount: 0 };
-            planned.push(fullTask);
-            newQueue.push(item.id);
-          }
-          state.set(K_PLAN_TASKS, planned);
-          state.set(K_TASK_QUEUE, newQueue);
-          state.set(K_FOLLOWUP_COUNT, followUpsSoFar + newSeeds.length);
-        } else {
-          state.set(K_TASK_QUEUE, queue.slice(1));
-        }
-        return this.runNextAnalyzerTask(state);
-      }
-
-      case 'done': {
-        // Accept the current item, then cancel everything pending and
-        // jump straight to synthesise.
-        if (this.deps?.todos !== undefined) {
-          try {
-            await this.deps.todos.markComplete(currentTask.itemId);
-          } catch (err) {
-            log.warn({ err, itemId: currentTask.itemId }, 'markComplete failed');
-          }
-        }
-        accepted.push({ task: currentTask, result: outcome.result });
-        state.set(K_ACCEPTED, accepted);
-        // Cancel remaining items.
-        const remaining = queue.slice(1);
-        if (this.deps?.todos !== undefined) {
-          for (const id of remaining) {
-            try { await this.deps.todos.markCancelled(id); }
-            catch (err) { log.warn({ err, id }, 'markCancelled failed'); }
-          }
-        }
-        state.set(K_TASK_QUEUE, []);
-        return this.queueSynthesise(state);
-      }
-    }
+    const toolExecCtx = {
+      ...(this.deps.send !== undefined ? { send: this.deps.send } : {}),
+      ...(this.deps.channel !== undefined ? { channel: this.deps.channel } : {}),
+      ...(this.deps.requestId !== undefined ? { requestId: this.deps.requestId } : {}),
+    };
+    return {
+      session,
+      resolveProvider,
+      toolExecCtx,
+      ...(this.deps.abortController?.signal !== undefined ? { signal: this.deps.abortController.signal } : {}),
+    };
   }
 
   private async queueSynthesise(state: TaskStateStore): Promise<Task[] | null> {
@@ -1311,17 +654,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
     const tier = this._tier;
 
-    // S/M tiers: existing single-pass synthesise. The doc fits in
-    // one local-model output window; multi-pass is overhead.
     if (tier === 'S' || tier === 'M') {
       return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
     }
 
-    // L / XL / XXL+ tiers: multi-pass via generateMultiPass to avoid
-    // the F10 truncation (devstral hits its num_predict ceiling
-    // around 13 KB of single-pass output). Runs INLINE -- no LLM
-    // Task is queued. On any failure we fall back to single-pass so
-    // the run still completes.
     try {
       const markdown = await this.runMultipassSynthesise(ca, planned, accepted, tier);
       state.set(K_SYNTH_RESULT, markdown);
@@ -1371,14 +707,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    * markdown. The drill-down footer is added synthetically when the
    * outline LLM omits it -- the Report Pane footer parser depends
    * on it.
-   *
-   * Cache: per-section disk LRU under `~/.insrc/cache/code-analyzer-
-   * sections/`. Sibling to the per-task cache (Phase 2.5); same
-   * eviction shape. Cache key salts on the run's `repoSnapshotId`,
-   * so a new commit invalidates every cached section.
-   *
-   * Throws on outline+section both failing terminally; the caller's
-   * fallback path queues the legacy single-pass synthesise.
    */
   private async runMultipassSynthesise(
     ca: CodeAnalysisState | undefined,
@@ -1393,13 +721,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const request = ca?.request ?? '';
     const repoSnapshotId = ca?.repoSummary.repoSnapshotId ?? '';
 
-    // Outline + section prompts (per-tier shape briefs).
     const outlineInput = buildMultipassOutlineInput(request, accepted, planned, tier);
     const sectionBuild = makeSectionBuilder(request, accepted, tier);
 
     const synthStep = 'synthesise (multi-pass)';
     this.emitLiveStep(synthStep, '');
-    this.emitLiveStep(synthStep, this.formatProgress(undefined, 'multi-pass synthesis: planning sections...', { phase: 'synthesis' }) + '\n');
+    this.emitLiveStep(synthStep, this.formatProgress('multi-pass synthesis: planning sections...') + '\n');
 
     const result = await generateMultiPass(
       {
@@ -1411,12 +738,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
         section: {
           build: sectionBuild,
-          // 4 K matches the single-pass synthesise budget + sits
-          // under devstral's post-tool-loop output ceiling. Combined
-          // with the section runner's continuation loop (up to
-          // MAX_SECTION_CONTINUATIONS extra passes when the model
-          // hits max_tokens), each section can grow to ~20 K tokens
-          // before we ship a partial.
           defaultBudgetTokens: 4000,
         },
         parallel: true,
@@ -1427,7 +748,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         onSectionComplete: (s: SectionResult) => {
           const note = s.note ? ` (${s.note})` : '';
           const status = s.fallback ? 'degraded' : 'ok';
-          this.emitLiveStep(synthStep, this.formatProgress(undefined, `section "${s.id}" ${status}${note}`, { phase: 'synthesis' }) + '\n');
+          this.emitLiveStep(synthStep, this.formatProgress(`section "${s.id}" ${status}${note}`) + '\n');
         },
         ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
       },
@@ -1440,16 +761,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         'multipass synthesis: degraded result accepted',
       );
     }
-    // Close the multipass bubble. The framework will open its own
-    // ('code-analyzer', 'synthesise') bubble if the run falls back
-    // to single-pass; otherwise the user just sees the report
-    // appear in the Report Pane.
     this.emitLiveStep(synthStep, '', true);
 
-    // Defensive: if the outline omitted the drill-down section, the
-    // markdown lacks a footer and the Report Pane has no buttons to
-    // render. Append a synthetic one. The model's section bodies
-    // already cover the rest -- we just stitch the missing tail.
     const hasDrillDown = result.outline.sections.some(s =>
       s.id === DRILL_DOWN_FALLBACK_SECTION.id || /drill[-\s]?down/i.test(s.title),
     );
@@ -1461,14 +774,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   /**
-   * Shared post-processing: sanitiser + list.body update + chat
-   * delta + done state. Used by both the multi-pass branch (calls
-   * directly after `runMultipassSynthesise`) and the single-pass
-   * branch (called from `afterSynthesise`).
+   * Shared post-processing: list.body update + chat delta + done
+   * state. Used by both the multi-pass branch (calls directly after
+   * `runMultipassSynthesise`) and the single-pass branch (called from
+   * `afterSynthesise`).
    */
   private async finalizeSynthesisedReport(state: TaskStateStore): Promise<void> {
-    const raw = state.get<string>(K_SYNTH_RESULT) ?? '';
-    const report = sanitizeMarkdownReport(raw);
+    const report = (state.get<string>(K_SYNTH_RESULT) ?? '').trim();
     state.set(K_SYNTH_RESULT, report);
     const listId = state.get<string>(K_LIST_ID);
     if (listId && this.deps?.todos !== undefined) {
@@ -1493,10 +805,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   private async afterSynthesise(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    // Single-pass branch: capture the LLM task's raw output, then
-    // run the shared post-processing (sanitise + updateListBody +
-    // chat delta + done state). Multi-pass takes the same path
-    // directly inside queueSynthesise.
     state.set(K_SYNTH_RESULT, completed.output);
     await this.finalizeSynthesisedReport(state);
     return null;
@@ -1516,67 +824,16 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       primaryLanguages: [],
       topLevelPackages: [],
       closureSize,
-      // Phase 2.5: stable repo snapshot id keyed on git HEAD. The
-      // per-task cache uses this as part of the entry key; a new commit
-      // on this repo flips the snapshot id and naturally invalidates
-      // every cached entry. Synchronous read is fine -- `.git/HEAD` is
-      // tiny and on the local fs. Falls back to a per-process timestamp
-      // when there's no git checkout (manual rootPath, fresh dir, ...).
       repoSnapshotId: readGitHeadSnapshotId(rootPath),
     };
   }
 
-  private renderPlanUserMessage(request: string, repo: RepoSummary): string {
-    const messages = buildPlanPrompt(request, repo, this._tier);
-    return messages
-      .filter(m => m.role === 'user')
-      .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
-      .join('\n\n');
-  }
-
-  private resolveAnalyzerProvider() {
-    if (this.deps === undefined) {
-      throw new Error('resolveAnalyzerProvider: deps not attached');
-    }
-    return this.deps.session.resolver.resolve('code-analyzer', 'analyzer');
-  }
-
   /**
-   * Format a progress message with the run's tier + task counter +
-   * drill-down breadcrumb (F12: plans/analyzers/code-analyzer.md
-   * §F12). Output shape:
-   *
-   *   `[code-analyzer | tier=L | 3/10] running task: describe -- ...`
-   *   `[code-analyzer | tier=XXL | synthesis | drill-down] section "summary" ok`
-   *
-   * - `tier`        always present.
-   * - `K/N`         present during the analyzer phase (K = task index
-   *                 the runner is about to start; N = total planned
-   *                 tasks at this moment, including any added
-   *                 follow-ups). Replaced by `synthesis` during the
-   *                 synthesise phase; absent otherwise.
-   * - `drill-down`  present when this run was kicked off via the
-   *                 `insrc.codeAnalyzer.drillDown` command (parent
-   *                 list id supplied) -- gives the user transcript-
-   *                 level context that they're inside a drill chain.
+   * Format a progress message with the run's tier + drill-down
+   * breadcrumb. Used by the multipass live-console bubble.
    */
-  private formatProgress(
-    state: TaskStateStore | undefined,
-    message: string,
-    opts?: { phase?: 'analyzer' | 'synthesis' },
-  ): string {
-    const phase = opts?.phase ?? 'analyzer';
-    const parts: string[] = ['code-analyzer', `tier=${this._tier}`];
-    if (phase === 'analyzer' && state !== undefined) {
-      const total  = state.get<AnalysisTask[]>(K_PLAN_TASKS)?.length ?? 0;
-      const queue  = state.get<string[]>(K_TASK_QUEUE)?.length ?? 0;
-      if (total > 0) {
-        const k = Math.max(1, Math.min(total, total - queue + 1));
-        parts.push(`${k}/${total}`);
-      }
-    } else if (phase === 'synthesis') {
-      parts.push('synthesis');
-    }
+  private formatProgress(message: string): string {
+    const parts: string[] = ['code-analyzer', `tier=${this._tier}`, 'synthesis'];
     if (this._parentListId !== undefined) {
       parts.push('drill-down');
     }
@@ -1586,22 +843,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   /**
    * Emit a brainstorm-style `liveStep` event so the chat panel
    * renders progress / token chunks inside a boxed monospace
-   * "live console" bubble (the same widget the framework uses for
-   * plan / review / synthesise LLM tasks). Replaced the F13
-   * progress-trail rendering after user feedback (2026-04-29):
-   * "for the streaming output check how the message display happens
-   * in brainstorming and apply the same to this".
-   *
-   * Per-task bubbles use a unique `step` (e.g. `analyze (3/10)`)
-   * keyed on the analyzing-phase task counter so each task gets its
-   * own bubble that opens before the runner fires + closes when the
-   * task completes. Multipass synthesis uses `synthesise (multi-pass)`.
-   * Cache-hit fast-paths get a brief one-line bubble that opens +
-   * closes immediately so the user sees the hit but no empty shell.
-   *
-   * `text=''` opens (or no-ops on existing). `done=true` removes the
-   * bubble. Token chunks append inline (no newline added). Progress
-   * lines should include their own trailing `\n`.
+   * "live console" bubble.
    */
   private emitLiveStep(step: string, text: string, done = false): void {
     if (this.deps === undefined) {
@@ -1618,68 +860,125 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       },
     });
   }
+}
 
-  /**
-   * Compute the per-task `liveStep` step name. Includes the K/N
-   * counter so each task creates a distinct bubble (chat panel
-   * keys bubbles on `${agent}:${step}`).
-   */
-  private analyzeLiveStepName(state: TaskStateStore): string {
-    const total = state.get<AnalysisTask[]>(K_PLAN_TASKS)?.length ?? 0;
-    const queue = state.get<string[]>(K_TASK_QUEUE)?.length ?? 0;
-    if (total > 0) {
-      const k = Math.max(1, Math.min(total, total - queue + 1));
-      return `analyze (${k}/${total})`;
+// ---------------------------------------------------------------------------
+// Skill-execution → AnalyzerResult adapters (re-run path)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a `PerSkillExecution` from a `SkillResult`. Mirrors the
+ * adapter shape used by `runSkillsPipeline` so both code paths feed
+ * `pipelineResultToAcceptedTasks` with identical entries.
+ */
+function executionFromSkillResult(
+  skillId: string,
+  args: Record<string, unknown>,
+  result: SkillResult<unknown>,
+  errored: boolean,
+): PerSkillExecution {
+  const repoPath = typeof args['repoPath'] === 'string' ? args['repoPath'] : '';
+  return {
+    skillId,
+    args,
+    resolvedScope: { repoPath },
+    value:         result.value,
+    confidence:    result.confidence,
+    notes:         result.notes ?? [],
+    toolCalls:     result.toolCalls.map(tc => ({
+      toolId:     tc.toolId,
+      durationMs: tc.durationMs,
+      ...(tc.error !== undefined ? { error: tc.error } : {}),
+    })),
+    errored,
+  };
+}
+
+/**
+ * Roll up multiple `PerSkillExecution`s for a single legacy
+ * `AnalysisTask` into one `AnalyzerResult`. Re-uses
+ * `pipelineResultToAcceptedTasks` per execution to get findings /
+ * answers / citations, then aggregates: answers concatenated,
+ * findings + citations unioned, confidence = min, toolCalls
+ * concatenated.
+ */
+function mergeExecutionsToAnalyzerResult(
+  task: AnalysisTask,
+  executions: readonly PerSkillExecution[],
+): { task: AnalysisTask; result: AnalyzerResult } {
+  if (executions.length === 0) {
+    return {
+      task,
+      result: {
+        itemId:     task.itemId,
+        answer:     `Skill plan for \`${task.kind}\` produced no executions.`,
+        findings:   [],
+        citations:  [],
+        confidence: 'low',
+        toolCalls:  [],
+      },
+    };
+  }
+  const synthetic: SkillsPipelineResult = {
+    classify:   { questionType: 'free-form', candidates: [], fallbacks: [], uncertaintyNotes: [] },
+    select:     { scoped: [], notes: [] },
+    executions,
+    finalConfidence: 'low',
+    notes: [],
+    aborted: false,
+  };
+  const pairs = pipelineResultToAcceptedTasks(synthetic, task.itemId);
+  const answers: string[] = [];
+  const findings: AnalyzerResult['findings'][number][] = [];
+  const citationsSeen = new Set<string>();
+  const citations: AnalyzerResult['citations'][number][] = [];
+  const toolCalls: AnalyzerResult['toolCalls'][number][] = [];
+  let lowest: Confidence = 'high';
+  const rank: Record<Confidence, number> = { high: 2, medium: 1, low: 0 };
+  for (const { result } of pairs) {
+    answers.push(result.answer);
+    for (const f of result.findings) findings.push(f);
+    for (const c of result.citations) {
+      const key = JSON.stringify(c);
+      if (citationsSeen.has(key)) continue;
+      citationsSeen.add(key);
+      citations.push(c);
     }
-    return 'analyze';
+    for (const tc of result.toolCalls) toolCalls.push(tc);
+    if (rank[result.confidence] < rank[lowest]) lowest = result.confidence;
   }
-
-  // fs-access gating moved to the universal access dispatcher (Phase
-  // 4 of plans/access-gate.md). The orchestrator's role here is just
-  // to seed Session.access at task start (see seedAccessFromState);
-  // the dispatcher in agent/tools/executor.ts handles the gate UI.
+  return {
+    task,
+    result: {
+      itemId:     task.itemId,
+      answer:     answers.join('\n\n'),
+      findings,
+      citations,
+      confidence: lowest,
+      toolCalls,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Plan / review parsing
+// Display helpers
 // ---------------------------------------------------------------------------
 
-interface PlannedTaskRaw {
-  kind?: unknown;
-  title?: unknown;
-  question?: unknown;
-  scope?: unknown;
+function shortTitleFor(t: AnalysisTask): string {
+  const seed = (t as { title?: unknown }).title;
+  if (typeof seed === 'string' && seed.trim().length > 0) {
+    return seed.trim().slice(0, 80);
+  }
+  return truncateTitle(t.question);
 }
 
-function parsePlannedTasks(raw: string): AnalysisTask[] {
-  const cleaned = stripFences(raw.trim());
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return [];
-  }
-  if (!isObject(parsed)) return [];
-  const tasksRaw = (parsed as { tasks?: unknown }).tasks;
-  if (!Array.isArray(tasksRaw)) return [];
-  const out: AnalysisTask[] = [];
-  for (const t of tasksRaw) {
-    if (!isObject(t)) continue;
-    const r = t as PlannedTaskRaw;
-    const kind = typeof r.kind === 'string' ? r.kind : '';
-    if (!isAnalysisKind(kind)) continue;
-    const question = typeof r.question === 'string' ? r.question.trim() : '';
-    if (question.length === 0) continue;
-    out.push({
-      itemId: '', // assigned at addItem time
-      kind,
-      question,
-      ...(isObject(r.scope) ? { scope: parseScope(r.scope as Record<string, unknown>) } : {}),
-      origin: 'plan',
-      retryCount: 0,
-    });
-  }
-  return out;
+function truncateTitle(s: string): string {
+  const trimmed = s.trim();
+  return trimmed.length > 80 ? trimmed.slice(0, 77) + '...' : trimmed;
+}
+
+function isAnalysisKind(s: string): s is AnalysisTask['kind'] {
+  return s === 'locate' || s === 'describe' || s === 'trace' || s === 'compare' || s === 'free-form';
 }
 
 function parseScope(raw: Record<string, unknown>): AnalysisTask['scope'] {
@@ -1711,126 +1010,14 @@ function parseScope(raw: Record<string, unknown>): AnalysisTask['scope'] {
   };
 }
 
-function parseReviewerDecision(raw: string): ReviewerDecision {
-  const cleaned = stripFences(raw.trim());
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return { decision: 'accept', rationale: 'reviewer JSON unparseable; defaulting to accept' };
-  }
-  if (!isObject(parsed)) {
-    return { decision: 'accept', rationale: 'reviewer payload not an object; defaulting to accept' };
-  }
-  const obj = parsed;
-  const decision = obj['decision'];
-  const rationale = typeof obj['rationale'] === 'string' ? obj['rationale'] : '';
-  if (decision === 'accept' || decision === 'done') {
-    return { decision, rationale };
-  }
-  if (decision === 'retry-with-hint') {
-    const hint = typeof obj['retryHint'] === 'string' ? obj['retryHint'] : '';
-    if (hint.length === 0) {
-      return { decision: 'accept', rationale: 'retry-with-hint with empty hint; treating as accept' };
-    }
-    return { decision: 'retry-with-hint', rationale, retryHint: hint };
-  }
-  if (decision === 'add-follow-up') {
-    const followUpsRaw = Array.isArray(obj['followUps']) ? obj['followUps'] : [];
-    const followUps: AnalysisTaskSeed[] = [];
-    for (const f of followUpsRaw) {
-      if (!isObject(f)) continue;
-      const r = f as PlannedTaskRaw;
-      const kind = typeof r.kind === 'string' ? r.kind : '';
-      if (!isAnalysisKind(kind)) continue;
-      const question = typeof r.question === 'string' ? r.question.trim() : '';
-      if (question.length === 0) continue;
-      followUps.push({
-        kind,
-        question,
-        ...(isObject(r.scope) ? { scope: parseScope(r.scope as Record<string, unknown>) } : {}),
-      });
-    }
-    return { decision: 'add-follow-up', rationale, followUps };
-  }
-  return { decision: 'accept', rationale: `unknown decision "${String(decision)}"; defaulting to accept` };
-}
-
 // ---------------------------------------------------------------------------
-// Display helpers
-// ---------------------------------------------------------------------------
-
-function shortTitleFor(t: AnalysisTaskSeed | AnalysisTask): string {
-  // Prefer the planner-provided title when present; otherwise derive from question.
-  const seed = (t as { title?: unknown }).title;
-  if (typeof seed === 'string' && seed.trim().length > 0) {
-    return seed.trim().slice(0, 80);
-  }
-  return truncateTitle(t.question);
-}
-
-function truncateTitle(s: string): string {
-  const trimmed = s.trim();
-  return trimmed.length > 80 ? trimmed.slice(0, 77) + '...' : trimmed;
-}
-
-function renderPlanSummary(tasks: readonly AnalysisTask[], caps: TierCaps): string {
-  const lines: string[] = [`# Code Analyzer plan (${tasks.length} tasks)`, ''];
-  for (let i = 0; i < tasks.length; i++) {
-    const t = tasks[i]!;
-    lines.push(`${i + 1}. [${t.kind}] ${shortTitleFor(t)}`);
-  }
-  lines.push('');
-  lines.push(`Soft cap is ${caps.softTaskCap}. Trim drops items past the first ${caps.softTaskCap}.`);
-  return lines.join('\n');
-}
-
-function isAnalysisKind(s: string): s is AnalysisTask['kind'] {
-  return s === 'locate' || s === 'describe' || s === 'trace' || s === 'compare' || s === 'free-form';
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
-}
-
-function stripFences(text: string): string {
-  let out = text;
-  if (out.startsWith('```')) {
-    out = out.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-  }
-  return out.trim();
-}
-
-/**
- * Compute a stable repo snapshot id from the active repo's git HEAD.
- *
- * Handles two HEAD shapes:
- *   1. `ref: refs/heads/<branch>` -- normal branch checkout. Read the
- *      branch ref for the actual SHA; fall back to the literal `ref:`
- *      string if the ref file is missing (just-created branch with no
- *      commit yet).
- *   2. Bare 40-hex SHA -- detached HEAD. Return it directly.
- *
- * On any failure (no `.git/`, unreadable file, unknown shape, empty
- * rootPath) falls back to a per-process timestamp so cache lookups
- * still work, but every controller instance ends up in its own private
- * key-space (no cross-run reuse). That's acceptable -- the cache stays
- * correct, just empty.
- *
- * Sync I/O is intentional: `buildRepoSummary` is called from the
- * synchronous `buildInitialTasks` path. `.git/HEAD` and the ref file
- * are tiny (<100 bytes) and on the local fs; the read is negligible.
- */
-// ---------------------------------------------------------------------------
-// Phase 4.1 re-run helpers
+// Re-run helpers
 // ---------------------------------------------------------------------------
 
 /**
  * Build an `AnalysisTask` from a prior run's `TodoItem`. Reads the
  * question from `description` and `kind` / `scope` / `hint` from
- * `meta` (AnalysisItemMeta wire shape). Returns null when the item
- * lacks the minimal fields (no description / unrecognised kind) so
- * the caller can fall back to its single-task default.
+ * `meta`. Returns null when the item lacks the minimal fields.
  */
 function reconstructTaskFromItem(item: {
   readonly id: string;
@@ -1849,7 +1036,7 @@ function reconstructTaskFromItem(item: {
   const scopeRaw = meta['scope'];
   const hintRaw = meta['hint'];
   const task: AnalysisTask = {
-    itemId: '', // assigned at addItem time in beginAnalysis
+    itemId: '',
     kind: kindRaw,
     question,
     origin: 'plan',
@@ -1865,8 +1052,7 @@ function reconstructTaskFromItem(item: {
 /**
  * Last-resort fallback when the prior list is gone or has no
  * parseable items. Produces a single free-form task carrying the
- * original request as the question, so the user still gets SOME
- * analysis they can compare against.
+ * original request as the question.
  */
 function buildFallbackTaskFromRequest(request: string): AnalysisTask[] {
   const trimmed = request.trim();
@@ -1884,14 +1070,7 @@ function buildFallbackTaskFromRequest(request: string): AnalysisTask[] {
 
 /**
  * Tail-append a synthetic `## Drill down` section to a stitched
- * multipass report when the outline LLM didn't plan one. The
- * Report Pane's footer parser expects the section to exist; without
- * it the user sees no clickable drill-down buttons.
- *
- * Three placeholder candidates derived from the run's content -- one
- * per task kind that has accepted findings -- so the user always
- * gets something actionable. If we can't derive any, we still emit
- * a header so the pane parser sees a section (with zero items).
+ * multipass report when the outline LLM didn't plan one.
  */
 function appendSyntheticDrillDown(
   markdown: string,
@@ -1951,7 +1130,6 @@ function readGitHeadSnapshotId(rootPath: string): string {
         return head;
       }
     }
-    // Detached HEAD: bare SHA.
     return head;
   } catch {
     return `t-${Date.now()}`;

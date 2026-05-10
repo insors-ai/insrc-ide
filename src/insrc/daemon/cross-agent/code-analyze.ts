@@ -1,36 +1,21 @@
 /**
- * `code_analyze` -- Flow-2 cross-agent dispatch entry
- * (plans/analyzers/code-analyzer.md Phase 3.6).
+ * `code_analyze` -- Flow-2 cross-agent dispatch entry.
  *
  * Sibling analyzer families (data-analyzer, deployment-analyzer)
- * call this tool with a pre-built `AnalysisTask[]`. The Code
- * Analyzer skips its plan step + user-facing gates, runs each
- * task through `runAnalyzer`, and returns a structured result
- * the caller can fold into its own report.
+ * call this tool with a pre-built `AnalysisTask[]`. Each task is
+ * mapped via `analysisTaskToSkillPlan` to a list of skill
+ * invocations; tasks where the shim returns null (`free-form`) are
+ * routed through the meta-skills pipeline instead. Returns a
+ * structured result the caller can fold into its own report.
  *
- * Caps + envelopes (per design §13.4):
- *   - Soft cap   16 tasks  (Flow 1 also caps here, but Flow 1 fires
- *                          a user gate; Flow 2 silently trims).
+ * Caps + envelopes:
+ *   - Soft cap   16 tasks (silently trimmed; `truncated: true`).
  *   - Hard cap   24 tasks.
- *   - Wall clock 60 s overall envelope. Tasks run concurrently;
- *                whatever lands inside the envelope is returned with
- *                `truncated: true`.
- *
- * Differences from Flow 1:
- *   - No planner LLM call (caller hands the task list).
- *   - No reviewer LLM call (the calling family runs its own review
- *     against the returned findings -- redundant cloud cost
- *     otherwise).
- *   - No present gate (no user in the loop).
- *   - No TodoList side-effects (Flow 2 results are caller-private).
- *
- * The result rolls per-task answers into one stitched markdown
- * `report` so the caller can splice it directly under a "Code
- * findings (code-analyzer)" subsection of its own write-up.
+ *   - Wall clock 60 s overall envelope.
  */
 
-import { runAnalyzer } from '../../agent/tasks/code-analyzer/analyzer/runner.js';
 import { registerTool } from '../tools/registry.js';
+import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import {
 	CROSS_AGENT_DEPTH_FIELD,
 	exceedsCrossAgentDepth,
@@ -38,6 +23,14 @@ import {
 	toolUnavailable,
 } from '../../shared/cross-agent.js';
 import { getLogger } from '../../shared/logger.js';
+import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
+import {
+	pipelineResultToAcceptedTasks,
+	repoContextFromSummary,
+	runSkillsPipeline,
+	type PerSkillExecution,
+	type SkillsPipelineResult,
+} from '../../agent/tasks/code-analyzer/skills-pipeline.js';
 import type {
 	AnalysisTask,
 	AnalysisKind,
@@ -46,7 +39,10 @@ import type {
 	CodeCitation,
 	Confidence,
 	Finding,
+	RepoSummary,
 } from '../../agent/tasks/code-analyzer/types.js';
+import type { LLMProvider } from '../../shared/types.js';
+import type { ProviderAffinity, SkillResult } from '../skills/types.js';
 import type { ScopeSize } from '../../shared/classify.js';
 import type { Tool, ToolDeps, ToolInput, ToolResult } from '../tools/types.js';
 
@@ -56,22 +52,11 @@ const log = getLogger('code-analyzer:flow2');
 // Caps + envelope
 // ---------------------------------------------------------------------------
 
-/**
- * Flow 2 silently trims a caller-supplied task list to this cap and
- * sets `truncated: true`. Mirrors Flow 1's soft cap (16) -- Flow 1
- * fires a user gate at the soft cap; Flow 2 has no user in the
- * loop, so the gate becomes a quiet trim per plan §3.6 ("silent
- * trim to 16, truncated: true set in the return value").
- */
 const FLOW2_TRIM_CAP = 16;
 const FLOW2_TOTAL_TIMEOUT_MS = 60_000;
-/** Per-task wall clock at the runner level. The overall 60 s envelope
- *  is the binding cap; each task is given a generous 45 s slot since
- *  the runner itself may already be near-done by then. */
-const FLOW2_PER_TASK_WALLCLOCK_MS = 45_000;
 
 // ---------------------------------------------------------------------------
-// Wire shape (matches plan §3.6 + slot for future tier hint)
+// Wire shape
 // ---------------------------------------------------------------------------
 
 interface RawTaskInput {
@@ -86,21 +71,12 @@ interface RawCallerContext {
 }
 
 interface CodeAnalyzeResult {
-	/** Stitched per-task markdown the caller can splice into its report. */
 	readonly report: string;
 	readonly findings: readonly Finding[];
 	readonly citations: readonly CodeCitation[];
 	readonly confidence: Confidence;
-	/**
-	 * True when:
-	 *   - the input task list was trimmed to fit the hard cap,
-	 *   - the 60 s envelope expired before all tasks finished,
-	 *   - any individual `runAnalyzer` returned truncated=true.
-	 */
 	readonly truncated: boolean;
-	/** Number of tasks dropped to fit the hard cap. */
 	readonly droppedTasks: number;
-	/** Number of tasks that didn't finish inside the 60 s envelope. */
 	readonly timedOutTasks: number;
 }
 
@@ -111,7 +87,7 @@ interface CodeAnalyzeResult {
 export const codeAnalyzeTool: Tool = {
 	id: 'code_analyze',
 	description:
-		'Cross-agent Flow-2 dispatch: run a sibling-supplied AnalysisTask[] through the Code Analyzer\'s per-task tool loop. Skips planning + reviews + gates -- caller does its own review against the returned findings. 60 s envelope. Returns a structured payload with stitched report + findings + citations.',
+		'Cross-agent Flow-2 dispatch: run a sibling-supplied AnalysisTask[] through the Code Analyzer skills pipeline. Each task is mapped to one or more skill invocations via the legacy shim; free-form tasks fall through to the meta-skills pipeline. 60 s envelope. Returns a structured payload with stitched report + findings + citations.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -140,7 +116,7 @@ export const codeAnalyzeTool: Tool = {
 			tier: {
 				type: 'string',
 				enum: ['S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'XXXXL'],
-				description: 'Optional sizing hint for the per-task analyzer playbook. Defaults to M when omitted; cross-agent calls usually arrive narrow so S/M is typical.',
+				description: 'Optional sizing hint reserved for the caller. Currently unused by the skills pipeline; defaults to M when omitted.',
 			},
 			[CROSS_AGENT_DEPTH_FIELD]: { type: 'number', description: 'Cross-agent recursion depth (set by caller).' },
 		},
@@ -180,8 +156,6 @@ export const codeAnalyzeTool: Tool = {
 			return fail('tasks array must contain at least one entry');
 		}
 
-		// Silent trim past the trim cap (plan §3.6: same as Flow 1's
-		// soft cap, but no user gate -- just drop and set truncated).
 		const droppedTasks = Math.max(0, allTasks.length - FLOW2_TRIM_CAP);
 		const tasks = allTasks.slice(0, FLOW2_TRIM_CAP);
 		if (droppedTasks > 0) {
@@ -191,13 +165,13 @@ export const codeAnalyzeTool: Tool = {
 		const callerCtx = input['callerContext'] as RawCallerContext | undefined;
 		const callerAgent = typeof callerCtx?.agent === 'string' ? callerCtx.agent : undefined;
 		const tier: ScopeSize = isScopeSize(input['tier']) ? input['tier'] as ScopeSize : 'M';
+		const repoPath = deps.session.repoPath;
 		log.info(
-			{ taskCount: tasks.length, dropped: droppedTasks, tier, callerAgent: callerAgent ?? null },
+			{ taskCount: tasks.length, dropped: droppedTasks, tier, callerAgent: callerAgent ?? null, repoPath },
 			'code:analyze: starting Flow-2 dispatch',
 		);
 
-		// ----- Run tasks under the 60 s envelope -----------------------------
-		const provider = deps.session.resolver.resolve('code-analyzer', 'analyzer');
+		// ----- Per-task skill execution under the 60 s envelope ---------------
 		const startedAt = Date.now();
 		const overallSignal = (() => {
 			const ctrl = new AbortController();
@@ -209,25 +183,20 @@ export const codeAnalyzeTool: Tool = {
 			return { ctrl, tid };
 		})();
 
+		const runnerDeps = buildSkillRunnerDeps(deps, overallSignal.ctrl.signal);
+
 		const runs = tasks.map(async (task): Promise<{
 			task: AnalysisTask;
 			outcome: AnalyzerResult | null;
-			truncated: boolean;
 			error?: string;
 		}> => {
 			try {
-				const result = await runAnalyzer(task, {
-					provider,
-					session: deps.session,
-					signal: overallSignal.ctrl.signal,
-					wallClockMs: FLOW2_PER_TASK_WALLCLOCK_MS,
-					tier,
-				});
-				return { task, outcome: result.result, truncated: result.truncated };
+				const outcome = await runTaskAsSkillExecutions(task, repoPath, runnerDeps);
+				return { task, outcome };
 			} catch (err) {
 				const message = (err as Error).message ?? String(err);
 				log.warn({ task: shortTitle(task), err: message }, 'code:analyze: task threw');
-				return { task, outcome: null, truncated: false, error: message };
+				return { task, outcome: null, error: message };
 			}
 		});
 
@@ -239,7 +208,6 @@ export const codeAnalyzeTool: Tool = {
 		// ----- Aggregate -----------------------------------------------------
 		const completed: { task: AnalysisTask; outcome: AnalyzerResult }[] = [];
 		const failed: { task: AnalysisTask; reason: string }[] = [];
-		let perTaskTruncated = false;
 		let timedOutTasks = 0;
 		for (const s of settled) {
 			if (s.status === 'rejected') {
@@ -254,13 +222,10 @@ export const codeAnalyzeTool: Tool = {
 				failed.push({ task: v.task, reason: v.error ?? 'unknown' });
 				continue;
 			}
-			if (v.truncated) {
-				perTaskTruncated = true;
-			}
 			completed.push({ task: v.task, outcome: v.outcome });
 		}
 
-		const truncated = droppedTasks > 0 || timedOutTasks > 0 || perTaskTruncated;
+		const truncated = droppedTasks > 0 || timedOutTasks > 0;
 		const report = stitchFlow2Report(completed, failed, callerAgent);
 		const findings = unionFindings(completed.map(c => c.outcome));
 		const citations = unionCitations(completed.map(c => c.outcome));
@@ -298,6 +263,168 @@ export const codeAnalyzeTool: Tool = {
 		};
 	},
 };
+
+// ---------------------------------------------------------------------------
+// Per-task skill execution
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a single legacy `AnalysisTask` through the skills pipeline.
+ * Tasks where `analysisTaskToSkillPlan` returns null (`free-form` or
+ * missing scope) are routed through `runSkillsPipeline` instead.
+ */
+async function runTaskAsSkillExecutions(
+	task: AnalysisTask,
+	repoPath: string,
+	runnerDeps: SkillRunnerDeps,
+): Promise<AnalyzerResult> {
+	const plan = analysisTaskToSkillPlan(task, { repoPath });
+	let executions: PerSkillExecution[] = [];
+
+	if (plan === null) {
+		const repoCtx = repoContextFromSummary(buildRepoSummaryFromPath(repoPath));
+		const pipeline = await runSkillsPipeline(
+			{ question: task.question, repo: repoCtx },
+			{
+				session:         runnerDeps.session,
+				resolveProvider: runnerDeps.resolveProvider,
+				...(runnerDeps.signal !== undefined ? { signal: runnerDeps.signal } : {}),
+			},
+		);
+		executions = [...pipeline.executions];
+	} else {
+		for (const step of plan.steps) {
+			try {
+				const result = await runSkill<Record<string, unknown>, unknown>(
+					step.skillId,
+					step.args,
+					runnerDeps,
+				);
+				executions.push(executionFromSkillResult(step.skillId, step.args, result, false));
+			} catch (err) {
+				executions.push({
+					skillId:       step.skillId,
+					args:          step.args,
+					resolvedScope: { repoPath },
+					value:         null,
+					confidence:    'low',
+					notes:         [`skill execution threw: ${(err as Error).message}`],
+					toolCalls:     [],
+					errored:       true,
+				});
+			}
+		}
+	}
+
+	return mergeExecutionsToAnalyzerResult(task, executions);
+}
+
+function buildRepoSummaryFromPath(repoPath: string): RepoSummary {
+	return {
+		name: repoPath.split('/').filter(Boolean).pop() ?? '(unknown)',
+		rootPath: repoPath,
+		primaryLanguages: [],
+		topLevelPackages: [],
+		closureSize: 1,
+		repoSnapshotId: '',
+	};
+}
+
+function executionFromSkillResult(
+	skillId: string,
+	args: Record<string, unknown>,
+	result: SkillResult<unknown>,
+	errored: boolean,
+): PerSkillExecution {
+	const repoPath = typeof args['repoPath'] === 'string' ? args['repoPath'] : '';
+	return {
+		skillId,
+		args,
+		resolvedScope: { repoPath },
+		value:         result.value,
+		confidence:    result.confidence,
+		notes:         result.notes ?? [],
+		toolCalls:     result.toolCalls.map(tc => ({
+			toolId:     tc.toolId,
+			durationMs: tc.durationMs,
+			...(tc.error !== undefined ? { error: tc.error } : {}),
+		})),
+		errored,
+	};
+}
+
+function mergeExecutionsToAnalyzerResult(
+	task: AnalysisTask,
+	executions: readonly PerSkillExecution[],
+): AnalyzerResult {
+	if (executions.length === 0) {
+		return {
+			itemId:     task.itemId,
+			answer:     `Skill plan for \`${task.kind}\` produced no executions.`,
+			findings:   [],
+			citations:  [],
+			confidence: 'low',
+			toolCalls:  [],
+		};
+	}
+	const synthetic: SkillsPipelineResult = {
+		classify:   { questionType: 'free-form', candidates: [], fallbacks: [], uncertaintyNotes: [] },
+		select:     { scoped: [], notes: [] },
+		executions,
+		finalConfidence: 'low',
+		notes: [],
+		aborted: false,
+	};
+	const pairs = pipelineResultToAcceptedTasks(synthetic, task.itemId.length > 0 ? task.itemId : 'flow2');
+	const answers: string[] = [];
+	const findings: Finding[] = [];
+	const citationsSeen = new Set<string>();
+	const citations: CodeCitation[] = [];
+	const toolCalls: AnalyzerResult['toolCalls'][number][] = [];
+	let lowest: Confidence = 'high';
+	const rank: Record<Confidence, number> = { high: 2, medium: 1, low: 0 };
+	for (const { result } of pairs) {
+		answers.push(result.answer);
+		for (const f of result.findings) findings.push(f);
+		for (const c of result.citations) {
+			const key = JSON.stringify(c);
+			if (citationsSeen.has(key)) continue;
+			citationsSeen.add(key);
+			citations.push(c);
+		}
+		for (const tc of result.toolCalls) toolCalls.push(tc);
+		if (rank[result.confidence] < rank[lowest]) lowest = result.confidence;
+	}
+	return {
+		itemId:     task.itemId,
+		answer:     answers.join('\n\n'),
+		findings,
+		citations,
+		confidence: lowest,
+		toolCalls,
+	};
+}
+
+function buildSkillRunnerDeps(deps: ToolDeps, signal: AbortSignal): SkillRunnerDeps {
+	const session = deps.session;
+	const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
+		switch (affinity) {
+			case 'local': return session.ollamaProvider;
+			case 'cloud': return session.claudeProvider ?? session.ollamaProvider;
+			case 'auto':  return session.resolver.resolve('skill', 'default');
+		}
+	};
+	return {
+		session,
+		resolveProvider,
+		toolExecCtx: {
+			...(deps.send !== undefined ? { send: deps.send } : {}),
+			...(deps.channel !== undefined ? { channel: deps.channel } : {}),
+			...(deps.requestId !== undefined ? { requestId: deps.requestId } : {}),
+		},
+		signal,
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -382,8 +509,7 @@ function aggregateConfidence(outcomes: readonly AnalyzerResult[]): Confidence {
 
 /**
  * Render the Flow-2 report. Caller folds this into its own write-up
- * under a "Code findings (code-analyzer)" subsection -- per §3.6 the
- * `callerContext.agent` ends up here as a labelling hint.
+ * under a "Code findings (code-analyzer)" subsection.
  */
 function stitchFlow2Report(
 	completed: readonly { task: AnalysisTask; outcome: AnalyzerResult }[],
@@ -428,10 +554,6 @@ function stitchFlow2Report(
 // Registration
 // ---------------------------------------------------------------------------
 
-/**
- * Register `code_analyze`. Called from the cross-agent index after
- * the lookup tools (code:locate / code:trace / code:describe).
- */
 export function registerCodeAnalyzeFlow2Tool(): void {
 	registerTool(codeAnalyzeTool);
 }

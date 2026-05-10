@@ -27,14 +27,12 @@ import { registerSkillTools } from '../../../../daemon/tools/builtins/skills/inv
 import {
 	runSkillsPipeline,
 	pipelineResultToAcceptedTasks,
-	isSkillsRoutingEnabled,
-	readSkillsRoutingFromEnv,
 	repoContextFromSummary,
 	type SkillsPipelineDeps,
 } from '../skills-pipeline.js';
 import type { Session } from '../../../session.js';
 import type { LLMProvider, LLMResponse } from '../../../../shared/types.js';
-import type { CodeAnalysisState, RepoSummary } from '../types.js';
+import type { RepoSummary } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -315,42 +313,3 @@ test('repoContextFromSummary: projects RepoSummary -> lean RepoMetaContext', () 
 	assert.equal(ctx.migrationTool, undefined);
 });
 
-// ---------------------------------------------------------------------------
-// Feature flag
-// ---------------------------------------------------------------------------
-
-test('isSkillsRoutingEnabled: state precedence over env', () => {
-	const env = process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'];
-	try {
-		process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'] = '1';
-		assert.equal(isSkillsRoutingEnabled({ skillsRouting: false } as unknown as CodeAnalysisState), false,
-			'state false should override env true');
-		assert.equal(isSkillsRoutingEnabled({ skillsRouting: true  } as unknown as CodeAnalysisState), true);
-		// Undefined state.skillsRouting -> falls through to env reader.
-		assert.equal(isSkillsRoutingEnabled(undefined), true);
-		process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'] = '0';
-		assert.equal(isSkillsRoutingEnabled(undefined), false);
-	} finally {
-		if (env === undefined) delete process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'];
-		else process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'] = env;
-	}
-});
-
-test('readSkillsRoutingFromEnv: accepts truthy values, rejects others', () => {
-	const env = process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'];
-	try {
-		for (const v of ['1', 'true', 'TRUE', 'on', 'On']) {
-			process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'] = v;
-			assert.equal(readSkillsRoutingFromEnv(), true, `should accept ${v}`);
-		}
-		for (const v of ['0', 'false', '', 'off', 'no']) {
-			process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'] = v;
-			assert.equal(readSkillsRoutingFromEnv(), false, `should reject ${v}`);
-		}
-		delete process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'];
-		assert.equal(readSkillsRoutingFromEnv(), false, 'unset -> false');
-	} finally {
-		if (env === undefined) delete process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'];
-		else process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'] = env;
-	}
-});

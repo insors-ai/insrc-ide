@@ -38,7 +38,6 @@ import type {
 	AnalysisTask,
 	AnalyzerResult,
 	CodeAnalysisConcern,
-	CodeAnalysisState,
 	CodeCitation,
 	Confidence,
 	Finding,
@@ -457,33 +456,6 @@ export function repoContextFromSummary(summary: RepoSummary): RepoMetaContext {
 		out.primaryLanguages = summary.primaryLanguages;
 	}
 	return out as RepoMetaContext;
-}
-
-// ---------------------------------------------------------------------------
-// Feature flag
-// ---------------------------------------------------------------------------
-
-/**
- * Read site for the skills-routing feature flag.
- *
- *   1. `state.skillsRouting` -- captured at orchestrator-run start
- *      so a re-run of an old report keeps the original routing.
- *   2. `INSRC_CODE_ANALYZER_SKILLS_ROUTING` env var -- read at
- *      orchestrator-run start when `state.skillsRouting` is unset.
- *      Truthy values: '1', 'true', 'on' (case-insensitive).
- */
-export function isSkillsRoutingEnabled(state: CodeAnalysisState | undefined): boolean {
-	const ss = state as CodeAnalysisState & { readonly skillsRouting?: boolean } | undefined;
-	if (ss?.skillsRouting === true)  return true;
-	if (ss?.skillsRouting === false) return false;
-	return readSkillsRoutingFromEnv();
-}
-
-export function readSkillsRoutingFromEnv(): boolean {
-	const raw = process.env['INSRC_CODE_ANALYZER_SKILLS_ROUTING'];
-	if (raw === undefined) return false;
-	const v = raw.trim().toLowerCase();
-	return v === '1' || v === 'true' || v === 'on';
 }
 
 // ---------------------------------------------------------------------------

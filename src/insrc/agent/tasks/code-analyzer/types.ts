@@ -348,14 +348,4 @@ export interface CodeAnalysisState {
   /** URI of the ephemeral AnalysisReportPane tab. Phase 2 sets this. */
   readonly reportUri?: string | undefined;
   readonly presentedAt?: number | undefined;
-  /**
-   * Skills-routing flag captured at orchestrator-run start
-   * (code-analyzer-skills.md Phase 8). When true the orchestrator
-   * routes the question through `runSkillsPipeline` (classify ->
-   * select-scope -> per-skill exec -> calibrate) instead of the
-   * legacy plan / per-task / review flow. Captured at run start so
-   * a re-run / resume keeps the original behaviour even if the env
-   * var has flipped in the meantime.
-   */
-  readonly skillsRouting?: boolean | undefined;
 }
