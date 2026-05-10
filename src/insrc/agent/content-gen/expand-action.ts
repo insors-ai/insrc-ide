@@ -68,6 +68,10 @@ export async function expandAction(
 	input: ExpandActionInput,
 	localProvider: LLMProvider,
 ): Promise<ExpandActionResult> {
+	// Request/response payloads are logged universally by the LLM
+	// provider logging-wrapper (agent/providers/logging-wrapper.ts).
+	// Helper-level log just adds the semantic stage tag so the trail
+	// is searchable by actionId.
 	const messages = buildExpandMessages(input);
 	const maxTokens = input.action.maxBudgetTokens;
 
@@ -96,6 +100,19 @@ export async function expandAction(
 
 	const cleaned = cleanExpanderResponse(rawText);
 	const truncated = stopReason === 'max_tokens' || stopReason === 'length';
+
+	log.info(
+		{
+			llmStage:   'expand-action',
+			actionId:   input.action.id,
+			rawLen:     rawText.length,
+			cleanedLen: cleaned.length,
+			truncated,
+			degraded:   cleaned.length === 0,
+		},
+		'expand-action: parsed result (full payload in llm-io log)',
+	);
+
 	return {
 		actionId:      input.action.id,
 		markdown:      cleaned,

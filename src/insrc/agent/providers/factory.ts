@@ -18,14 +18,20 @@ import { OllamaProvider } from './ollama.js';
 import { OpenAIProvider } from './openai.js';
 import { GeminiProvider } from './gemini.js';
 import { MistralProvider } from './mistral.js';
+import { wrapWithLogging } from './logging-wrapper.js';
 
 export function buildProvider(binding: StepBinding, cfg: AgentConfig): LLMProvider {
+  // EVERY provider built here is wrapped in the logging proxy
+  // (agent/providers/logging-wrapper.ts) so that every complete /
+  // stream / embed call -- regardless of caller -- writes the full
+  // request + response payload to the daemon log. Per the user's
+  // standing directive: ALL LLM interaction is logged, no truncation.
   switch (binding.provider) {
-    case 'local':     return buildLocal(binding, cfg);
-    case 'anthropic': return buildCloud('anthropic', binding, cfg);
-    case 'openai':    return buildCloud('openai', binding, cfg);
-    case 'gemini':    return buildCloud('gemini', binding, cfg);
-    case 'mistral':   return buildCloud('mistral', binding, cfg);
+    case 'local':     return wrapWithLogging(buildLocal(binding, cfg),     { providerName: 'local',     model: binding.model });
+    case 'anthropic': return wrapWithLogging(buildCloud('anthropic', binding, cfg), { providerName: 'anthropic', model: binding.model });
+    case 'openai':    return wrapWithLogging(buildCloud('openai',    binding, cfg), { providerName: 'openai',    model: binding.model });
+    case 'gemini':    return wrapWithLogging(buildCloud('gemini',    binding, cfg), { providerName: 'gemini',    model: binding.model });
+    case 'mistral':   return wrapWithLogging(buildCloud('mistral',   binding, cfg), { providerName: 'mistral',   model: binding.model });
     default: {
       const unknown: never = binding.provider;
       throw new Error(`Unknown provider: ${String(unknown)}`);

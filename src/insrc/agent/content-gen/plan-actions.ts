@@ -293,6 +293,11 @@ async function tryPlan(
 	provider: LLMProvider,
 	maxTokens: number,
 ): Promise<PlanAttempt> {
+	// Note: the request/response payloads are logged universally by
+	// the LLM provider logging-wrapper (agent/providers/logging-wrapper.ts),
+	// which sees every provider.complete() call. We only log the
+	// structural parsed-plan summary here so each log entry has
+	// semantic stage context.
 	let rawText: string;
 	try {
 		const response = await provider.complete(messages, {
@@ -320,6 +325,12 @@ async function tryPlan(
 	if (typeof validated === 'string') {
 		return { kind: 'error', reason: `schema violation: ${validated}` };
 	}
+
+	log.info(
+		{ llmStage: 'plan-actions', parsedPlan: validated },
+		'plan-actions: parsed plan structure (full payload in llm-io log)',
+	);
+
 	return { kind: 'ok', value: validated };
 }
 
