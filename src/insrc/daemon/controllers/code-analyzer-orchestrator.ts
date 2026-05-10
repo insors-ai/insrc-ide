@@ -469,6 +469,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             confidence: result.confidence,
             toolCalls:  result.toolCalls,
           });
+          // Item state machine requires pending -> in_progress -> completed.
+          // markComplete() called on a pending item throws "illegal
+          // item-status transition 'pending' -> 'completed'".
+          await this.deps.todos.markInProgress(item.id);
           await this.deps.todos.markComplete(item.id);
         } catch (err) {
           log.warn(
@@ -660,6 +664,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             confidence: r.confidence,
             toolCalls:  r.toolCalls,
           });
+          // Item state machine requires pending -> in_progress -> completed.
+          // markComplete() called on a pending item throws "illegal
+          // item-status transition 'pending' -> 'completed'" (the
+          // failure observed across all 4 items in agent.2.log).
+          await this.deps.todos.markInProgress(item.id);
           await this.deps.todos.markComplete(item.id);
         } catch (err) {
           log.warn(

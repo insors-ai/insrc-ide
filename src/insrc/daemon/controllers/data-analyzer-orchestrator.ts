@@ -740,6 +740,9 @@ export class DataAnalyzerOrchestratorController implements TaskController {
             ...(a.result.truncated      ? { truncated: true } : {}),
             ...(a.result.blockedReason !== undefined ? { blockedReason: a.result.blockedReason } : {}),
           });
+          // Item state machine requires pending -> in_progress -> completed.
+          // markComplete() on pending throws.
+          await this.deps.todos.markInProgress(a.task.itemId);
           await this.deps.todos.markComplete(a.task.itemId);
         } catch (err) {
           log.warn({ err, itemId: a.task.itemId }, 'skills-routing: updateItemMeta / markComplete failed');

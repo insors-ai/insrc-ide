@@ -287,30 +287,46 @@ async function runCalibrate(
 ): Promise<CalibrateRollup> {
 	if (executions.length === 0) return { confidence: 'low', notes: ['no executions to calibrate'] };
 
+	// Input shape MUST match the skill's INPUT_SCHEMA in
+	// daemon/skills/built-ins/data.meta.calibrate-confidence.ts:
+	//   findings:        [{ skillId, confidence, notes? }]   <- skillId REQUIRED
+	//   toolErrorTrace:  string[]                            <- name + type
+	// `additionalProperties: false`, so any extra field (e.g. an old
+	// `toolErrors` payload of objects) gets the input rejected. Earlier
+	// the pipeline sent `findings` without `skillId` and used the
+	// `toolErrors` field name -- agent.2.log:30894 captured the rejection.
 	type CalibrateInput = {
 		readonly question: string;
-		readonly findings: readonly { readonly confidence: Confidence; readonly notes: readonly string[] }[];
-		readonly toolErrors: readonly { readonly toolId: string; readonly error: string }[];
+		readonly findings: readonly { readonly skillId: string; readonly confidence: Confidence; readonly notes: readonly string[] }[];
+		readonly toolErrorTrace?: readonly string[];
 	};
 	type CalibrateOutput = {
-		readonly confidence: Confidence;
-		readonly rationale: readonly string[];
+		readonly calibrated: Confidence;
+		readonly rationale:  readonly string[];
 	};
 
-	const findings = executions.map(e => ({ confidence: e.confidence, notes: e.notes }));
-	const toolErrors = executions.flatMap(e =>
+	const findings = executions.map(e => ({
+		skillId:    e.skillId,
+		confidence: e.confidence,
+		notes:      e.notes,
+	}));
+	const toolErrorTrace = executions.flatMap(e =>
 		e.toolCalls
 			.filter(tc => tc.error !== undefined)
-			.map(tc => ({ toolId: tc.toolId, error: tc.error ?? '' })),
+			.map(tc => `${tc.toolId}: ${tc.error}`),
 	);
 
 	try {
 		const result = await runSkill<CalibrateInput, CalibrateOutput>(
 			'data.meta.calibrate-confidence',
-			{ question, findings, toolErrors },
+			{
+				question,
+				findings,
+				...(toolErrorTrace.length > 0 ? { toolErrorTrace } : {}),
+			},
 			buildSkillRunnerDeps(deps),
 		);
-		return { confidence: result.value.confidence, notes: result.value.rationale ?? [] };
+		return { confidence: result.value.calibrated, notes: result.value.rationale ?? [] };
 	} catch (err) {
 		const rolled = rollupMinConfidence(executions);
 		return { confidence: rolled, notes: [`calibrate-confidence skill failed: ${(err as Error).message}`] };
