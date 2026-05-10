@@ -63,6 +63,14 @@ export interface PriorFacts {
 export interface PriorContext {
 	readonly currentIntent:  string;
 	readonly intentChanged:  boolean;
+	/**
+	 * Intent the prior turn classified as. Populated only when
+	 * `intentChanged === true` (resolver source was 'classified-shifted').
+	 * The enhancer surfaces this as a "Note: intent shifted from X to Y"
+	 * line so the LLM understands prior facts may need translation
+	 * (Phase 5.2). Undefined for fresh / tag-reuse paths.
+	 */
+	readonly previousIntent?: string | undefined;
 	readonly artifacts:      readonly RetrievedArtifact[];
 	readonly facts:          PriorFacts;
 }
@@ -88,11 +96,12 @@ export async function retrievePriorContext(
 	const maxArtifacts = opts.maxArtifacts ?? DEFAULT_MAX_ARTIFACTS;
 	const scoreFloor   = opts.scoreFloor   ?? DEFAULT_SCORE_FLOOR;
 	const intentChanged = resolvedIntent.source === 'classified-shifted';
+	const previousIntent = intentChanged ? resolvedIntent.previousIntent : undefined;
 
 	// Empty query / empty session id -> no artefacts. Still return a
 	// useful PriorContext so callers can rely on the shape.
 	if (enhancedQuery.length === 0 || session.id.length === 0) {
-		return emptyContext(resolvedIntent.id, intentChanged);
+		return emptyContext(resolvedIntent.id, intentChanged, previousIntent);
 	}
 
 	let queryVec: number[] = [];
@@ -100,11 +109,11 @@ export async function retrievePriorContext(
 		queryVec = await embedQuery(enhancedQuery);
 	} catch (err) {
 		log.warn({ err: errMessage(err) }, 'retriever: embed failed -- returning empty context');
-		return emptyContext(resolvedIntent.id, intentChanged);
+		return emptyContext(resolvedIntent.id, intentChanged, previousIntent);
 	}
 	if (queryVec.length === 0) {
 		log.info({ session: session.id }, 'retriever: empty query vector (Ollama down?) -- empty context');
-		return emptyContext(resolvedIntent.id, intentChanged);
+		return emptyContext(resolvedIntent.id, intentChanged, previousIntent);
 	}
 
 	// Over-fetch by 2x so the score-floor filter has room to drop
@@ -117,10 +126,10 @@ export async function retrievePriorContext(
 		});
 	} catch (err) {
 		log.warn({ err: errMessage(err) }, 'retriever: lance query failed -- returning empty context');
-		return emptyContext(resolvedIntent.id, intentChanged);
+		return emptyContext(resolvedIntent.id, intentChanged, previousIntent);
 	}
 	if (raw.length === 0) {
-		return emptyContext(resolvedIntent.id, intentChanged);
+		return emptyContext(resolvedIntent.id, intentChanged, previousIntent);
 	}
 
 	const scored = scoreArtifacts(raw, resolvedIntent.id, Date.now())
@@ -140,6 +149,7 @@ export async function retrievePriorContext(
 	return {
 		currentIntent: resolvedIntent.id,
 		intentChanged,
+		...(previousIntent !== undefined ? { previousIntent } : {}),
 		artifacts,
 		facts,
 	};
@@ -323,10 +333,15 @@ function toRetrieved(s: ScoredArtifact): RetrievedArtifact {
 	};
 }
 
-function emptyContext(currentIntent: string, intentChanged: boolean): PriorContext {
+function emptyContext(
+	currentIntent: string,
+	intentChanged: boolean,
+	previousIntent?: string | undefined,
+): PriorContext {
 	return {
 		currentIntent,
 		intentChanged,
+		...(previousIntent !== undefined ? { previousIntent } : {}),
 		artifacts: [],
 		facts:     {},
 	};

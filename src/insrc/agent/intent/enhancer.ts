@@ -160,6 +160,13 @@ const SYSTEM_PROMPT = [
 	'     orchestrator will refetch and prompt you again with the full',
 	'     body inlined under `## Full artifact bodies`. Use sparingly:',
 	'     bound is 3 ids; second-pass requests are ignored.',
+	'  6. INTENT SHIFT: when the prompt includes a `Note: intent shifted`',
+	'     line, the prior facts came from a different analyzer family',
+	'     (e.g. code -> data). Translate identifiers across the boundary',
+	'     when that\'s the natural mapping -- a code-side `users` table',
+	'     reference becomes a data-side `(connectionId, target=users)`',
+	'     pair when the data analyzer needs it. If no clean translation',
+	'     exists, leave the noun as the user wrote it and add a note.',
 	'',
 	'Output strict JSON ONLY (no markdown fences, no prose):',
 	'  { "enhancedQuestion": "...",',
@@ -179,8 +186,20 @@ function buildMessages(
 	lines.push(input.originalMessage.trim());
 	lines.push('');
 
-	const intentLine = `## Current intent\n${input.priorContext.currentIntent}  (intentChanged: ${input.priorContext.intentChanged})`;
-	lines.push(intentLine);
+	// Phase 5.2: when the resolver flagged a shift, surface it as a
+	// dedicated note so the LLM applies rule 6 (cross-family identifier
+	// translation). Stable / fresh / tag-reuse paths just get the
+	// current-intent line.
+	lines.push('## Current intent');
+	lines.push(input.priorContext.currentIntent);
+	if (input.priorContext.intentChanged && input.priorContext.previousIntent !== undefined) {
+		lines.push('');
+		lines.push(
+			`Note: intent shifted from \`${input.priorContext.previousIntent}\` to ` +
+			`\`${input.priorContext.currentIntent}\`. Prior facts may need translation ` +
+			'across the analyzer boundary -- see system rule 6.',
+		);
+	}
 	lines.push('');
 
 	lines.push('## Prior facts (mined; primary -- prefer these for label→identifier)');

@@ -212,6 +212,56 @@ test('buildMessages: includes Full artifact bodies section on second pass', () =
 });
 
 // ---------------------------------------------------------------------------
+// Phase 5.2: intent-shift signaling
+// ---------------------------------------------------------------------------
+
+test('buildMessages: stable intent -> no shift note in user prompt', () => {
+	const ctx = priorContextWithModules();   // intentChanged = false
+	const msgs = buildMessages({ originalMessage: 'q', priorContext: ctx }, undefined);
+	const block = msgs[1]!.content as string;
+	assert.equal(block.includes('Note: intent shifted'), false);
+});
+
+test('buildMessages: shifted intent -> emits shift note + system rule 6 reference', () => {
+	const ctx: PriorContext = {
+		currentIntent:  'data-analysis',
+		intentChanged:  true,
+		previousIntent: 'code-analysis',
+		artifacts:      [],
+		facts:          { tables: [{ connectionId: 'main', name: 'users' }] },
+	};
+	const msgs = buildMessages({ originalMessage: 'schema of users', priorContext: ctx }, undefined);
+	const block = msgs[1]!.content as string;
+	assert.match(block, /Note: intent shifted from `code-analysis` to `data-analysis`/);
+	assert.match(block, /system rule 6/);
+	// The current-intent line still appears, but stays clean.
+	assert.match(block, /## Current intent\ndata-analysis/);
+});
+
+test('buildMessages: intentChanged=true without previousIntent -> no shift note (defensive)', () => {
+	// Should not happen in practice (retriever always populates the
+	// pair together), but the renderer must not blow up.
+	const ctx: PriorContext = {
+		currentIntent:  'data-analysis',
+		intentChanged:  true,
+		artifacts:      [],
+		facts:          {},
+	};
+	const msgs = buildMessages({ originalMessage: 'q', priorContext: ctx }, undefined);
+	const block = msgs[1]!.content as string;
+	assert.equal(block.includes('Note: intent shifted'), false);
+});
+
+test('SYSTEM_PROMPT carries rule 6 (cross-intent translation)', () => {
+	// Indirect: rule 6 has to be in the system message that buildMessages
+	// emits, otherwise rule 6 references in the user-prompt note are
+	// dangling. Pull the system message from a buildMessages call.
+	const msgs = buildMessages({ originalMessage: 'q', priorContext: EMPTY_PRIOR_CONTEXT }, undefined);
+	const sys = msgs[0]!.content as string;
+	assert.match(sys, /6\. INTENT SHIFT/);
+});
+
+// ---------------------------------------------------------------------------
 // enhanceQuestion end-to-end
 // ---------------------------------------------------------------------------
 

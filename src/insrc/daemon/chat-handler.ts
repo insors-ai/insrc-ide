@@ -1359,6 +1359,9 @@ async function runCodeAnalyzerSlash(
         JSON.stringify({
           currentIntent: priorContext.currentIntent,
           intentChanged: priorContext.intentChanged,
+          ...(priorContext.previousIntent !== undefined
+            ? { previousIntent: priorContext.previousIntent }
+            : {}),
           facts:         priorContext.facts,
           artifactCount: priorContext.artifacts.length,
         }),

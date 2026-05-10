@@ -267,3 +267,34 @@ test('retrievePriorContext: intentChanged flag mirrors resolver source', async (
 	assert.equal(ctx.intentChanged, true);
 	assert.equal(ctx.currentIntent, 'data-analysis');
 });
+
+// Phase 5.2: previousIntent must round-trip onto PriorContext when
+// the resolver flagged a shift, so the enhancer's "intent shifted
+// from X to Y" line has both halves to render.
+test('retrievePriorContext: previousIntent populated when intentChanged', async () => {
+	const session = makeFakeSession('session-B');
+	const shifted: ResolvedIntent = {
+		id:               'data-analysis',
+		source:           'classified-shifted',
+		previousIntent:   'code-analysis',
+		confidence:       'high',
+		reasoning:        'shifted',
+		message:          'schema of users',
+	};
+	const ctx = await retrievePriorContext(session, '', shifted);
+	assert.equal(ctx.previousIntent, 'code-analysis');
+});
+
+test('retrievePriorContext: previousIntent absent when intent stable', async () => {
+	const session = makeFakeSession('session-B');
+	const stable: ResolvedIntent = {
+		id:         'code-analysis',
+		source:     'tag',
+		confidence: 'high',
+		reasoning:  'stable',
+		message:    'q',
+	};
+	const ctx = await retrievePriorContext(session, '', stable);
+	assert.equal(ctx.intentChanged, false);
+	assert.equal(ctx.previousIntent, undefined);
+});
