@@ -819,10 +819,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const request = ca?.request ?? '';
     const repoSummary = this.formatRepoSummaryLine();
 
+    // We funnel ALL synthesis progress into a single shared bubble
+    // (one persistent activity-console for the whole report) so the
+    // user sees a continuous narrative instead of bubbles flashing
+    // in and out per stage. Bubble is closed only after stitch.
+    const synthBubble = 'synthesise';
+    this.emitLiveStep(synthBubble, '');
+
     // ----- Stage 1: plan ------------------------------------------------
-    const planStep = 'synthesise (plan)';
-    this.emitLiveStep(planStep, '');
-    this.emitLiveStep(planStep, this.formatProgress('planning report sections...') + '\n');
+    this.emitMilestone(synthBubble, 'planning report sections...');
 
     const plan = await planActions(
       {
@@ -839,19 +844,17 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       ? [synthesiseFallbackAction(ca, accepted, executions)]
       : plan.actions;
 
-    this.emitLiveStep(
-      planStep,
-      this.formatProgress(`planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}`) + '\n',
+    this.emitMilestone(
+      synthBubble,
+      `planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}`,
     );
-    this.emitLiveStep(planStep, '', true);
 
     // ----- Stage 2+3: per-action expand+review --------------------------
     const sections: { id: string; title: string; markdown: string }[] = [];
-    for (const action of actions) {
+    for (let i = 0; i < actions.length; i++) {
+      const action = actions[i]!;
       const evidence = pickEvidence(action, executions);
-      const stepId = `synthesise (${action.id})`;
-      this.emitLiveStep(stepId, '');
-      this.emitLiveStep(stepId, this.formatProgress(`expanding "${action.title}"...`) + '\n');
+      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] expanding "${action.title}"...`);
 
       const out = await expandThenReview(
         {
@@ -860,25 +863,40 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           request,
           analyzerLabel: 'code-analyzer',
           onProgress: (phase, payload) => {
-            // Per-phase chat-panel dribble for the activity-console
-            // bubble. Keep it terse; the body of the section is not
-            // streamed (it'd flood the bubble).
-            const tag = phase === 'final'
-              ? `done (verdict=${payload.kind === 'final' ? payload.verdict : '?'}, rounds=${payload.kind === 'final' ? payload.rounds : '?'})`
-              : phase;
-            this.emitLiveStep(stepId, this.formatProgress(`${action.id}: ${tag}`) + '\n');
+            // Sub-events only stream into the bubble; we don't
+            // hammer the top progress bar with per-phase noise.
+            if (phase === 'review-1' || phase === 'review-2') {
+              const verdict = payload.kind === 'review' ? payload.result.verdict : '?';
+              this.emitLiveStep(synthBubble, this.formatProgress(`  ${action.id}: ${phase} (${verdict})`) + '\n');
+            } else if (phase === 'expand-2') {
+              this.emitLiveStep(synthBubble, this.formatProgress(`  ${action.id}: refining draft after reviewer hint`) + '\n');
+            }
           },
         },
         local,
         reviewer,
       );
 
-      this.emitLiveStep(stepId, '', true);
+      this.emitMilestone(
+        synthBubble,
+        `[${i + 1}/${actions.length}] "${action.title}" -- ${out.verdict} (${out.rounds} round${out.rounds === 1 ? '' : 's'})`,
+      );
       sections.push({ id: action.id, title: action.title, markdown: out.markdown });
     }
 
+    this.emitMilestone(synthBubble, 'stitching final report...');
+
     // ----- Stage 4: stitch (no further LLM work) ------------------------
-    return stitchPlanSections(plan.intentBrief, actions, sections, this._parentListId);
+    const md = stitchPlanSections(plan.intentBrief, actions, sections, this._parentListId);
+
+    // Close the synthesis bubble. The chat-handler emits `done`
+    // shortly after this returns; that synthetic streamEnd would
+    // clear the bubble anyway, but closing here surfaces the
+    // "completed" state cleanly first.
+    this.emitLiveStep(synthBubble, this.formatProgress(`report ready (${sections.length} section${sections.length === 1 ? '' : 's'})`) + '\n');
+    this.emitLiveStep(synthBubble, '', true);
+
+    return md;
   }
 
   private queueSinglePassSynthesise(
@@ -1056,18 +1074,69 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    */
   private emitLiveStep(step: string, text: string, done = false): void {
     if (this.deps === undefined) {
+      log.warn({ step, text: text.slice(0, 60), done }, 'emitLiveStep: deps undefined -- chat panel will not see this');
       return;
     }
-    this.deps.send({
-      id: this.deps.requestId,
-      stream: 'liveStep',
-      data: {
-        agent: 'code-analyzer',
-        step,
-        text,
-        ...(done ? { done: true } : {}),
-      },
-    });
+    if (this.deps.send === undefined) {
+      log.warn({ step, text: text.slice(0, 60), done }, 'emitLiveStep: deps.send undefined -- chat panel will not see this');
+      return;
+    }
+    log.info({
+      step,
+      textLen: text.length,
+      done,
+      requestId: this.deps.requestId,
+    }, 'emitLiveStep: dispatching to chat panel');
+    try {
+      this.deps.send({
+        id: this.deps.requestId,
+        stream: 'liveStep',
+        data: {
+          agent: 'code-analyzer',
+          step,
+          text,
+          ...(done ? { done: true } : {}),
+        },
+      });
+    } catch (err) {
+      log.warn({ step, err: (err as Error).message }, 'emitLiveStep: send threw');
+    }
+  }
+
+  /**
+   * Emit a top-bar `progress` event in addition to the liveStep
+   * bubble. Belt-and-suspenders: liveStep bubbles are persistent
+   * but only visible if the chat-panel rendering picks them up;
+   * progress events update the always-on top progress bar so the
+   * user sees at least the latest milestone regardless of the
+   * bubble path. (The bar overwrites itself per event, by design.)
+   */
+  private emitChatProgress(message: string): void {
+    if (this.deps === undefined) {
+      log.warn({ message }, 'emitChatProgress: deps undefined');
+      return;
+    }
+    log.info({ message, requestId: this.deps.requestId }, 'emitChatProgress: dispatching');
+    try {
+      this.deps.send({
+        id: this.deps.requestId,
+        stream: 'progress',
+        data: { message: `Code Analyzer: ${message}` },
+      });
+    } catch (err) {
+      log.warn({ message, err: (err as Error).message }, 'emitChatProgress: send threw');
+    }
+  }
+
+  /**
+   * Emit BOTH a top-bar progress event and a liveStep bubble line
+   * for the same milestone. Use this for major milestones the user
+   * really should see; use emitLiveStep alone for sub-events that
+   * only need to show up in the bubble's running narrative.
+   */
+  private emitMilestone(step: string, message: string): void {
+    this.emitChatProgress(message);
+    this.emitLiveStep(step, this.formatProgress(message) + '\n');
   }
 
   /**
