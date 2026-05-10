@@ -96,6 +96,23 @@ export interface SkillRunnerDeps {
    * a fixture's `fakeTools` map.
    */
   readonly runTool?: ((call: ToolCall) => Promise<SkillToolResult>) | undefined;
+  /**
+   * Optional post-execute hook fired after a successful skill body
+   * returns -- conversation-flow-refinement.md Phase 2 spill-writer
+   * hook. Receives the same payload the caller sees plus the original
+   * input so the spill JSON is reproducible. Errors are swallowed
+   * (caller logs); the hook never blocks or alters the SkillResult.
+   * Not fired on the depth-overflow / feasibility-failed early-return
+   * paths -- those have no useful value blob.
+   */
+  readonly onSkillEnd?: ((payload: {
+    readonly skillId:    string;
+    readonly input:      unknown;
+    readonly value:      unknown;
+    readonly confidence: import('./types.js').SkillConfidence;
+    readonly notes:      readonly string[];
+    readonly durationMs: number;
+  }) => Promise<void> | void) | undefined;
 }
 
 export async function runSkill<I = unknown, O = unknown>(
@@ -289,12 +306,32 @@ export async function runSkill<I = unknown, O = unknown>(
   // declared softBudgetMs.
   checkSoftBudget(skill, startedAt, notes, emit);
 
+  const finalDurationMs = Date.now() - startedAt;
   emit({
     kind: 'skill-end',
     skillId: id,
     confidence: calibrated,
-    durationMs: Date.now() - startedAt,
+    durationMs: finalDurationMs,
   });
+
+  // conversation-flow-refinement.md Phase 2: post-execute hook for the
+  // spill-writer (and any future per-skill telemetry consumers).
+  // Errors are swallowed -- a hook failure must NEVER alter the
+  // SkillResult or block the caller.
+  if (runnerDeps.onSkillEnd !== undefined) {
+    try {
+      await runnerDeps.onSkillEnd({
+        skillId:    id,
+        input:      input as unknown,
+        value:      bodyResult.value,
+        confidence: calibrated,
+        notes,
+        durationMs: finalDurationMs,
+      });
+    } catch (err) {
+      log.warn({ skillId: id, err: (err as Error).message ?? String(err) }, 'onSkillEnd hook threw -- swallowed');
+    }
+  }
 
   return {
     value: bodyResult.value,

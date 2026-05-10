@@ -34,6 +34,7 @@ import {
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { INTENT_TAG_CURRENT, INTENT_TAG_TIMESTAMP } from '../../agent/intent/resolver.js';
+import { makeSpillHandler } from '../../agent/artifacts/spill-writer.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import type { LLMProvider } from '../../shared/types.js';
 import type { ProviderAffinity, SkillResult } from '../skills/types.js';
@@ -660,6 +661,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       session,
       resolveProvider,
       toolExecCtx,
+      // conversation-flow-refinement.md Phase 2: every successful
+      // skill body returns through this callback into the
+      // spill-writer (disk JSON + artifact_vec Lance row). Errors in
+      // the writer are swallowed; the runner never blocks on spill.
+      onSkillEnd: makeSpillHandler(session),
       ...(this.deps.abortController?.signal !== undefined ? { signal: this.deps.abortController.signal } : {}),
     };
   }

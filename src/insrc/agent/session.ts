@@ -231,6 +231,18 @@ export class Session {
     // Stop periodic health checks
     this.health.stop();
 
+    // conversation-flow-refinement.md Phase 2: drop the per-session
+    // artefact spills (Lance rows + ~/.insrc/tmp/<session_id>/).
+    // Failure-tolerant: purge errors are logged inside the writer
+    // and never propagate. Done before sessionClose so the session
+    // close RPC isn't held up if Lance is slow.
+    try {
+      const { purgeSession } = await import('./artifacts/spill-writer.js');
+      await purgeSession(this);
+    } catch {
+      // import failure -- never block close on it
+    }
+
     const summary = this.contextManager.getSummary();
     if (!summary) return; // Nothing to persist if no summary was generated
 

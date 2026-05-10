@@ -28,6 +28,17 @@ export const PATHS = {
   // an error pane). A startup reconciler in the workbench prunes any
   // file here that no open editor references.
   tmp:         join(INSRC_DIR, 'tmp'),
+  /**
+   * Returns the per-session output spill directory
+   * (conversation-flow-refinement.md Phase 2). The spill-writer
+   * subscribes to `session.skillAudit` and drops every skill output
+   * here as `<epoch_ms>-<skill_id>.json`, plus the synthesise
+   * step's rendered report as `<epoch_ms>-synthesise.md`. Indexed
+   * in parallel into the `artifact_vec` Lance table so the
+   * follow-up-turn retriever can pull them by relevance. Cleaned
+   * up on session close.
+   */
+  sessionTmp:  (sessionId: string): string => join(INSRC_DIR, 'tmp', sessionId),
   // Cache root for the Code Analyzer's multipass synthesis section
   // builder (Phase 5.C / content-gen). Per-section disk LRU; cache
   // key salts on the run's repoSnapshotId so a new commit
