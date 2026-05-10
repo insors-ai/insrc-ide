@@ -1267,19 +1267,10 @@ async function main(): Promise<void> {
 			return mod.removeOfflineBundleRpc();
 		},
 
-		// Code Analyzer per-task cache (plans/analyzers/code-analyzer.md
-		// Phase 2.5). The clearCache RPC backs the
-		// `insrc.codeAnalyzer.clearCache` palette command -- workbench
-		// doesn't have direct access to the daemon's `~/.insrc/cache/`
-		// dir, so the daemon owns the unlink and reports the count.
-		'codeAnalyzer.clearCache': async () => {
-			const mod = await import('../agent/tasks/code-analyzer/cache.js');
-			return mod.clearCache();
-		},
-
 		// Data Analyzer per-task cache (plans/analyzers/data-analyzer.md
-		// Phase 2.4). Mirror of `codeAnalyzer.clearCache`. Backs the
-		// `insrc.dataAnalyzer.clearCache` palette command.
+		// Phase 2.4). Backs the `insrc.dataAnalyzer.clearCache` palette
+		// command. The code-analyzer's per-task cache + clearCache RPC
+		// were dropped along with the legacy analyzer runner.
 		'dataAnalyzer.clearCache': async () => {
 			const mod = await import('../agent/tasks/data-analyzer/cache.js');
 			return mod.clearCache();

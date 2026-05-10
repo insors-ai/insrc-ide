@@ -28,15 +28,14 @@ export const PATHS = {
   // an error pane). A startup reconciler in the workbench prunes any
   // file here that no open editor references.
   tmp:         join(INSRC_DIR, 'tmp'),
-  // Cache root for the Code Analyzer's per-task LRU
-  // (plans/analyzers/code-analyzer.md Phase 2.5). Each cache entry
-  // stores a reviewer-accepted AnalyzerResult keyed on
-  // SHA256(question + scope + tier + repoSnapshotId). Caps at 200
-  // entries; evicts oldest by mtime. Cache invalidates per-commit
-  // automatically when the repoSnapshotId carries the git HEAD
-  // SHA. Cleared via the `insrc.codeAnalyzer.clearCache` palette
-  // command.
-  codeAnalyzerCache: join(INSRC_DIR, 'cache', 'code-analyzer'),
+  // Cache root for the Code Analyzer's multipass synthesis section
+  // builder (Phase 5.C / content-gen). Per-section disk LRU; cache
+  // key salts on the run's repoSnapshotId so a new commit
+  // invalidates every cached section. Used only by the synthesis
+  // step that runs inline in the orchestrator -- the legacy
+  // per-task cache that lived alongside it (`code-analyzer/`) was
+  // dropped along with the legacy analyzer runner.
+  codeAnalyzerSectionCache: join(INSRC_DIR, 'cache', 'code-analyzer-sections'),
   // Cache root for the Data Analyzer's per-task LRU
   // (plans/analyzers/data-analyzer.md Phase 2.4). Mirrors the
   // code-analyzer cache shape; key shape differs --

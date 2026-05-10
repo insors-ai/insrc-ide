@@ -511,10 +511,9 @@ async function resolveDataDiffPair(
 
 /**
  * Clear the Data Analyzer's per-task cache (plans/analyzers/data-analyzer.md
- * Phase 2.4). Mirrors `insrc.codeAnalyzer.clearCache`. Useful when the
- * connection-roster fingerprint hasn't changed but the user wants
- * fresh introspection (e.g. an out-of-band schema migration the
- * roster-level fingerprint can't detect).
+ * Phase 2.4). Useful when the connection-roster fingerprint hasn't
+ * changed but the user wants fresh introspection (e.g. an out-of-band
+ * schema migration the roster-level fingerprint can't detect).
  */
 registerAction2(class extends Action2 {
 	constructor() {

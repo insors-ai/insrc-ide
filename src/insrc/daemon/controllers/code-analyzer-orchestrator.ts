@@ -742,7 +742,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
         parallel: true,
         cache: makeDiskContentCache({
-          dir: pathJoin(PATHS.codeAnalyzerCache, '..', 'code-analyzer-sections'),
+          dir: PATHS.codeAnalyzerSectionCache,
         }),
         cacheContext: repoSnapshotId,
         onSectionComplete: (s: SectionResult) => {
