@@ -41,6 +41,8 @@ import {
   DRILL_DOWN_FALLBACK_SECTION,
 } from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
 import { generateMultiPass } from '../../agent/content-gen/index.js';
+import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import {
   buildConnectionFingerprint,
   readCachedResult,
@@ -58,6 +60,7 @@ import {
   K_SYNTH_RESULT,
   K_ACCEPTED,
   K_HISTORY,
+  K_RAW_EXECUTIONS,
   RESUME_BOOTSTRAP_MARKER,
   SKILLS_ROUTING_BOOTSTRAP_MARKER,
   type DataAnalysisState,
@@ -706,6 +709,13 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     state.set(K_ACCEPTED, accepted);
     state.set(K_HISTORY, history);
 
+    // Persist the raw PerSkillExecution[] for the plan-actions
+    // synthesis (Phase 5 of plans/analyzers/cloud-plan-local-expand-
+    // cloud-review.md). Same lossy-conversion concern as the code-
+    // analyzer side: pipelineResultToAcceptedTasks turns each
+    // structured value into an `answer` string.
+    state.set(K_RAW_EXECUTIONS, pipelineResult.executions);
+
     // Create the TodoList + items so the user sees the per-skill
     // runs in the chat panel. `_persistTaskList` walks `planned`,
     // calls addItem per task, and stamps the resulting framework-
@@ -1025,33 +1035,43 @@ export class DataAnalyzerOrchestratorController implements TaskController {
 
     const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
     const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-
-    const provider = this.deps.session.resolver.resolve('data-analyzer', 'synthesise');
-    const outline = buildMultipassOutlineInput(this._request ?? '', accepted, planned, this._tier);
-    const sectionBuild = makeSectionBuilder(this._request ?? '', accepted, this._tier);
+    const rawExecutions = state.get<readonly PlanExecution[]>(K_RAW_EXECUTIONS);
 
     let markdown = '';
     try {
-      const result = await generateMultiPass(
-        {
-          outline: { system: outline.system, user: outline.user, maxSections: outline.maxSections, maxTokens: outline.maxTokens },
-          section: { build: sectionBuild },
-          ...(this.deps.abortController?.signal !== undefined ? { signal: this.deps.abortController.signal } : {}),
-        },
-        provider,
+      markdown = await this.runPlanExpandReviewSynthesise(
+        accepted,
+        rawExecutions ?? deriveExecutionsFromAcceptedDA(accepted),
       );
-      markdown = result.markdown;
-      // Inject drill-down fallback if the outline omitted it.
-      const hasDrillDown = result.outline.sections.some(
-        s => s.id === DRILL_DOWN_FALLBACK_SECTION.id ||
-             /drill[-\s]?down/i.test(s.title),
-      );
-      if (!hasDrillDown) {
-        markdown += `\n\n## ${DRILL_DOWN_FALLBACK_SECTION.title}\n\n_(no drill-down candidates emitted by the synthesise pass)_\n`;
-      }
     } catch (err) {
-      log.error({ err: (err as Error).message }, 'queueSynthesise: generateMultiPass failed');
-      markdown = `# Data Analysis Report\n\n_Synthesis failed: ${(err as Error).message}_\n\nSee accepted findings in the todos pane.`;
+      log.warn(
+        { err: (err as Error).message },
+        'queueSynthesise: plan/expand/review failed; falling back to legacy multipass',
+      );
+      try {
+        const provider = this.deps.session.resolver.resolve('data-analyzer', 'synthesise');
+        const outline = buildMultipassOutlineInput(this._request ?? '', accepted, planned, this._tier);
+        const sectionBuild = makeSectionBuilder(this._request ?? '', accepted, this._tier);
+        const result = await generateMultiPass(
+          {
+            outline: { system: outline.system, user: outline.user, maxSections: outline.maxSections, maxTokens: outline.maxTokens },
+            section: { build: sectionBuild },
+            ...(this.deps.abortController?.signal !== undefined ? { signal: this.deps.abortController.signal } : {}),
+          },
+          provider,
+        );
+        markdown = result.markdown;
+        const hasDrillDown = result.outline.sections.some(
+          s => s.id === DRILL_DOWN_FALLBACK_SECTION.id ||
+               /drill[-\s]?down/i.test(s.title),
+        );
+        if (!hasDrillDown) {
+          markdown += `\n\n## ${DRILL_DOWN_FALLBACK_SECTION.title}\n\n_(no drill-down candidates emitted by the synthesise pass)_\n`;
+        }
+      } catch (err2) {
+        log.error({ err: (err2 as Error).message }, 'queueSynthesise: legacy multipass also failed');
+        markdown = `# Data Analysis Report\n\n_Synthesis failed: ${(err2 as Error).message}_\n\nSee accepted findings in the todos pane.`;
+      }
     }
 
     // Phase 3.3: ER artifact integration. For every `kind: 'er'`
@@ -1080,6 +1100,113 @@ export class DataAnalyzerOrchestratorController implements TaskController {
 
     state.set(K_PHASE, 'done' as DataAnalyzerPhase);
     return null;
+  }
+
+  /**
+   * Plan / expand / review synthesis driver (Phase 5 of
+   * plans/analyzers/cloud-plan-local-expand-cloud-review.md). Mirrors
+   * the code-analyzer's runPlanExpandReviewSynthesise; the helpers
+   * are analyzer-agnostic so the only differences are the resolver
+   * step ids and the analyzerLabel.
+   */
+  private async runPlanExpandReviewSynthesise(
+    accepted: readonly AcceptedTask[],
+    executions: readonly PlanExecution[],
+  ): Promise<string> {
+    if (this.deps === undefined) {
+      throw new Error('runPlanExpandReviewSynthesise: deps not attached');
+    }
+    const session = this.deps.session;
+    const cloud = session.resolver.resolve('data-analyzer', 'plan');
+    const local = session.ollamaProvider;
+    const reviewer = session.resolver.resolve('data-analyzer', 'review');
+    const request = this._request ?? '';
+
+    const repoSummary = (() => {
+      const path = session.repoPath ?? '';
+      const closure = session.closureRepos.length;
+      return path.length > 0
+        ? `${path} -- closure size: ${closure}`
+        : `(no active repo) -- closure size: ${closure}`;
+    })();
+
+    // ----- Stage 1: plan ------------------------------------------------
+    const planStep = 'synthesise (plan)';
+    this.emitLiveStep(planStep, '');
+    this.emitLiveStep(planStep, `[data-analyzer | tier=${this._tier}] planning report sections...\n`);
+
+    const plan = await planActions(
+      {
+        request,
+        repoSummary,
+        executions,
+        tier: this._tier,
+        analyzerLabel: 'data-analyzer',
+      },
+      cloud,
+    );
+
+    const actions = plan.degraded || plan.actions.length === 0
+      ? [synthesiseFallbackActionDA(request, accepted, executions)]
+      : plan.actions;
+
+    this.emitLiveStep(
+      planStep,
+      `[data-analyzer | tier=${this._tier}] planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}\n`,
+    );
+    this.emitLiveStep(planStep, '', true);
+
+    // ----- Stage 2+3: per-action expand+review --------------------------
+    const sections: { id: string; title: string; markdown: string }[] = [];
+    for (const action of actions) {
+      const evidence = pickEvidenceDA(action, executions);
+      const stepId = `synthesise (${action.id})`;
+      this.emitLiveStep(stepId, '');
+      this.emitLiveStep(stepId, `[data-analyzer] expanding "${action.title}"...\n`);
+
+      const out = await expandThenReview(
+        {
+          action,
+          evidence,
+          request,
+          analyzerLabel: 'data-analyzer',
+          onProgress: (phase, payload) => {
+            const tag = phase === 'final'
+              ? `done (verdict=${payload.kind === 'final' ? payload.verdict : '?'}, rounds=${payload.kind === 'final' ? payload.rounds : '?'})`
+              : phase;
+            this.emitLiveStep(stepId, `[data-analyzer] ${action.id}: ${tag}\n`);
+          },
+        },
+        local,
+        reviewer,
+      );
+
+      this.emitLiveStep(stepId, '', true);
+      sections.push({ id: action.id, title: action.title, markdown: out.markdown });
+    }
+
+    // ----- Stage 4: stitch -----------------------------------------------
+    return stitchPlanSectionsDA(plan.intentBrief, actions, sections);
+  }
+
+  /** Emit a brainstorm-style `liveStep` event (mirrors the code-
+   *  analyzer's emitter; data-analyzer didn't have one before). */
+  private emitLiveStep(step: string, text: string, done = false): void {
+    if (this.deps === undefined) return;
+    try {
+      this.deps.send({
+        id: this.deps.requestId,
+        stream: 'liveStep',
+        data: {
+          agent: 'data-analyzer',
+          step,
+          text,
+          ...(done ? { done: true } : {}),
+        },
+      });
+    } catch (err) {
+      log.debug({ err: (err as Error).message }, 'emitLiveStep: send failed (swallowed)');
+    }
   }
 
   private async afterSynthesise(_completed: TaskResult, _state: TaskStateStore): Promise<Task[] | null> {
@@ -1501,4 +1628,96 @@ function parseReviewerDecision(rawText: string): ReviewerDecision {
     return { kind: 'done', followUps: [] };
   }
   return { kind: 'accept', followUps: [] };
+}
+
+
+// ---------------------------------------------------------------------------
+// Plan / expand / review synthesis helpers (Phase 5 of
+// plans/analyzers/cloud-plan-local-expand-cloud-review.md). Mirrors
+// the code-analyzer helpers; kept analyzer-local instead of shared
+// because the AcceptedTask shapes differ enough that lifting to the
+// content-gen module isn't worth the coupling.
+// ---------------------------------------------------------------------------
+
+function pickEvidenceDA(
+  action: PlannedAction,
+  executions: readonly PlanExecution[],
+): readonly PlanExecution[] {
+  const seen = new Set<number>();
+  const out: PlanExecution[] = [];
+  for (const ref of action.evidence) {
+    const idx = ref.executionIdx;
+    if (idx < 0 || idx >= executions.length || seen.has(idx)) continue;
+    const e = executions[idx];
+    if (e === undefined) continue;
+    if (e.skillId !== ref.skillId) continue;
+    seen.add(idx);
+    out.push(e);
+  }
+  return out;
+}
+
+function synthesiseFallbackActionDA(
+  request: string,
+  accepted: readonly AcceptedTask[],
+  executions: readonly PlanExecution[],
+): PlannedAction {
+  const requestSnippet = request.length > 0 ? request.slice(0, 80) : 'data analysis request';
+  const evidence = executions.map((e, i) => ({ skillId: e.skillId, executionIdx: i }));
+  const skillCount = executions.length;
+  return {
+    id:        'fallback-summary',
+    title:     `Summary: ${requestSnippet}`,
+    objective: `Summarise the ${skillCount} skill execution${skillCount === 1 ? '' : 's'} the data-analyzer ran for this request.`,
+    evidence,
+    maxBudgetTokens: 2000,
+    reviewCriteria: [
+      'Touches every skill execution at least once',
+      'States the user request verbatim',
+      `Notes that ${accepted.length} task${accepted.length === 1 ? '' : 's'} were accepted into the report`,
+    ],
+  };
+}
+
+function deriveExecutionsFromAcceptedDA(
+  accepted: readonly AcceptedTask[],
+): readonly PlanExecution[] {
+  return accepted.map(a => ({
+    skillId:    a.task.kind,
+    value:      a.result.answer,
+    confidence: a.result.confidence,
+    notes:      [],
+  }));
+}
+
+function stitchPlanSectionsDA(
+  intentBrief: string,
+  actions: readonly PlannedAction[],
+  sections: readonly { id: string; title: string; markdown: string }[],
+): string {
+  const lines: string[] = [];
+  if (intentBrief.trim().length > 0) {
+    lines.push(intentBrief.trim());
+    lines.push('');
+  }
+  const byId = new Map(sections.map(s => [s.id, s]));
+  for (const action of actions) {
+    const s = byId.get(action.id);
+    if (s === undefined || s.markdown.trim().length === 0) continue;
+    lines.push(`## ${action.title}`);
+    lines.push('');
+    lines.push(s.markdown.trim());
+    lines.push('');
+  }
+
+  // Drill-down footer (Report Pane parser anchor).
+  const haveDrillDown = sections.some(s => /^##\s+Drill\s+down/im.test(s.markdown));
+  if (!haveDrillDown) {
+    lines.push('## Drill down');
+    lines.push('');
+    lines.push('_The planner did not propose drill-down bullets for this run. Open the todos pane to launch a follow-up._');
+    lines.push('');
+  }
+
+  return lines.join('\n').trimEnd() + '\n';
 }

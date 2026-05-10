@@ -70,6 +70,7 @@ export const K_REVIEW_RESULT  = 'review-result';    // raw review output
 export const K_SYNTH_RESULT   = 'synth-result';     // raw synthesise output
 export const K_ACCEPTED       = 'accepted';         // Array<{task, result}>
 export const K_HISTORY        = 'history';          // DataAnalyzerResult[]
+export const K_RAW_EXECUTIONS = 'rawExecutions';    // PerSkillExecution[] from skills pipeline (for plan-actions synthesis)
 
 /**
  * Sentinel emitted by `buildResumeTask` and detected in the
