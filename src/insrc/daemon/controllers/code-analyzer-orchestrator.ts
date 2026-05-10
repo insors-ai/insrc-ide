@@ -551,14 +551,22 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // Per-skill streaming progress. The skills pipeline runs
     // classify-question -> select-scope -> N x per-skill -> calibrate.
     // Without these emits the chat panel sits silent for many seconds
-    // while LLM calls churn. We piggyback on `onSkillEnd` (also wired
-    // for spill-writing) and translate skill ids into user-readable
-    // milestones; the spill side-effect runs unchanged.
-    this.emitChatProgress('Routing question through code analysis skills...');
+    // while LLM calls churn. We use the same `liveStep` bubble pattern
+    // as brainstorm + the multi-pass synthesise step here -- a single
+    // `(agent, step)` pair (`code-analyzer` / `skills`) accumulates
+    // every milestone in ONE persistent activity-console bubble. The
+    // top progress bar (`stream: 'progress'`) overwrites itself per
+    // event and is unsuitable for per-skill narrative.
+    const PIPELINE_STEP = 'skills';
+    this.emitLiveStep(PIPELINE_STEP, '');
+    this.emitLiveStep(PIPELINE_STEP, this.formatProgress('routing question through code analysis skills...') + '\n');
     const spillHandler = makeSpillHandler(session);
     const onSkillEndWithProgress: NonNullable<SkillRunnerDeps['onSkillEnd']> = async (payload) => {
       try {
-        this.emitChatProgress(progressMessageForSkillEnd(payload.skillId, payload.confidence));
+        this.emitLiveStep(
+          PIPELINE_STEP,
+          this.formatProgress(progressMessageForSkillEnd(payload.skillId, payload.confidence)) + '\n',
+        );
       } catch { /* progress is best-effort */ }
       await spillHandler(payload);
     };
@@ -595,7 +603,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     );
 
     if (pipelineResult.aborted) {
-      this.emitChatProgress('Pipeline aborted; producing empty report');
+      this.emitLiveStep(PIPELINE_STEP, this.formatProgress('pipeline aborted; producing empty report') + '\n');
+      this.emitLiveStep(PIPELINE_STEP, '', true);
       if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: false });
       state.set(K_PLAN_TASKS, [] as AnalysisTask[]);
       state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
@@ -603,7 +612,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       return this.queueSynthesise(state);
     }
 
-    this.emitChatProgress(`Analysis pipeline complete (${pipelineResult.executions.length} skill${pipelineResult.executions.length === 1 ? '' : 's'} run, confidence ${pipelineResult.finalConfidence}); building report...`);
+    this.emitLiveStep(
+      PIPELINE_STEP,
+      this.formatProgress(`pipeline complete (${pipelineResult.executions.length} skill${pipelineResult.executions.length === 1 ? '' : 's'} run, confidence ${pipelineResult.finalConfidence}); building report...`) + '\n',
+    );
+    this.emitLiveStep(PIPELINE_STEP, '', true);
 
     const itemPrefix = `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
@@ -896,28 +909,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       parts.push('drill-down');
     }
     return `[${parts.join(' | ')}] ${message}`;
-  }
-
-  /**
-   * Emit a one-line `progress` event (the same channel chat-handler
-   * uses for top-level milestones). The chat panel renders these as
-   * subtle "doing X..." lines above the response. Best-effort -- a
-   * missing `deps` (orchestrator initialised but not yet attached) or
-   * a closed channel is silently dropped, never thrown.
-   */
-  private emitChatProgress(message: string): void {
-    if (this.deps === undefined) {
-      return;
-    }
-    try {
-      this.deps.send({
-        id:     this.deps.requestId,
-        stream: 'progress',
-        data:   { message: `Code Analyzer: ${message}` },
-      });
-    } catch (err) {
-      log.debug({ err: (err as Error).message }, 'emitChatProgress: send failed (swallowed)');
-    }
   }
 
   /**
