@@ -1,0 +1,11 @@
+{
+  "input": {
+    "title": "Smoke fixture findings",
+    "findings": [
+      { "severity": "high",   "message": "fixture finding 1" },
+      { "severity": "medium", "message": "fixture finding 2" }
+    ]
+  },
+  "expectedConfidenceFloor": "high",
+  "_comment": "Pure template renderer; emits markdown table with confidence 'high'."
+}

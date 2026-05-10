@@ -1,0 +1,10 @@
+{
+  "input": {
+    "orm":      "auto",
+    "model":    "FixtureModel",
+    "repoPath": "/repo/nonexistent-fixture-repo"
+  },
+  "expectedConfidenceFloor": "low",
+  "expectedConfidence": "low",
+  "_comment": "Smoke gate: skill declares preconditions: required-tools [code_orm_scan]. Without fakeTools the harness doesn't register them, so feasibility short-circuits at confidence 'low'. Happy-path coverage lives in code.orm.resolve-model.test.ts."
+}

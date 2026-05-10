@@ -104,35 +104,7 @@ assert.ok(
  * unblocking a refactor; clear them before merging the fixture
  * commit. Bare skill ids (no version pinning).
  */
-const KNOWN_INCOMPLETE = new Set<string>([
-  'data.code.dead-code',
-  'code.class.extract-fields',
-  'code.class.locate-references',
-  'code.orm.resolve-model',
-  'code.migration.extract-history',
-  'code.source.file.describe',
-  'code.source.module.describe',
-  'code.source.repo.describe',
-  'code.entity.locate-by-name',
-  'code.entity.summary',
-  'code.entity.callers',
-  'code.entity.callees',
-  'code.entity.search-by-vector',
-  'code.quality.complexity',
-  'code.quality.duplication',
-  'code.quality.unused-exports',
-  'code.quality.cyclic-deps',
-  'code.synth.entity-card',
-  'code.synth.findings-table',
-  'code.synth.callgraph-mermaid',
-  'code.synth.module-tree',
-  'code.synth.architecture-overview',
-  'code.compare.signature',
-  'code.compare.impl-vs-doc',
-  'code.compare.entity-versions',
-  'code.meta.classify-question',
-  'code.meta.select-scope',
-]);
+const KNOWN_INCOMPLETE = new Set<string>([]);
 
 for (const skill of skills) {
   if (KNOWN_INCOMPLETE.has(skill.id)) {

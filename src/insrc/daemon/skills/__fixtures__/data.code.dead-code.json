@@ -1,0 +1,7 @@
+{
+  "input": {
+    "repo": "/repo/nonexistent-fixture-repo"
+  },
+  "expectedConfidenceFloor": "low",
+  "_comment": "Smoke gate: empty graph slice -> no roots -> early-return with confidence 'low'. Happy-path coverage lives in data.code.dead-code.test.ts."
+}

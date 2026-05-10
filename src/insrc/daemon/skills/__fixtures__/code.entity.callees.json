@@ -1,0 +1,7 @@
+{
+  "input": {
+    "entityId": "00000000000000000000000000000000"
+  },
+  "expectedConfidenceFloor": "medium",
+  "_comment": "Smoke gate: synthetic entityId -> empty neighbors -> confidence 'medium'. Same skill source as code.entity.callers (one source file, two skills). Happy-path coverage lives in code.entity.test.ts."
+}

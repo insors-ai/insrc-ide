@@ -1,0 +1,11 @@
+{
+  "input": {
+    "repoPath": "/repo/alpha",
+    "modules": [
+      { "path": "/repo/alpha/src",  "fileCount": 5,  "entityCount": 20 },
+      { "path": "/repo/alpha/test", "fileCount": 3,  "entityCount": 12 }
+    ]
+  },
+  "expectedConfidenceFloor": "high",
+  "_comment": "Pure template renderer; emits a tree-shaped markdown block at confidence 'high'."
+}

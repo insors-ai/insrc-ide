@@ -1,0 +1,8 @@
+{
+  "input": {
+    "className": "FixtureClass"
+  },
+  "expectedConfidenceFloor": "low",
+  "expectedConfidence": "low",
+  "_comment": "Smoke gate: skill declares preconditions: required-tools [code_class_locate, code_class_references]. Feasibility short-circuits at confidence 'low' without fakeTools. Happy-path coverage lives in code.class.locate-references.test.ts."
+}
