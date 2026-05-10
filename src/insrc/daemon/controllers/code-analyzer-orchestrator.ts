@@ -33,6 +33,7 @@ import {
 } from '../../agent/content-gen/index.js';
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
+import { INTENT_TAG_CURRENT, INTENT_TAG_TIMESTAMP } from '../../agent/intent/resolver.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import type { LLMProvider } from '../../shared/types.js';
 import type { ProviderAffinity, SkillResult } from '../skills/types.js';
@@ -147,6 +148,22 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       },
       'code-analyzer scope tier captured',
     );
+
+    // conversation-flow-refinement.md Phase 1.1: stamp the
+    // [intent:current] tag on the session's ContextManager so a
+    // follow-up turn's resolveIntent() sees this run's intent (the
+    // tag-reuse fast path is what skips the cold LLM classify call
+    // when the user types a continuation-shaped follow-up like
+    // "now describe HDFS Core" after this run completes). Belt-and-
+    // suspenders with the chat-handler's own resolver call: this
+    // write fires whether or not the entry path went through the
+    // resolver (e.g. drill-down from the report footer, parent-
+    // list re-run, or a direct programmatic dispatch).
+    const ctx = input.session?.contextManager ?? this.deps?.session.contextManager;
+    if (ctx !== undefined) {
+      ctx.setTag(INTENT_TAG_CURRENT,   'code-analysis');
+      ctx.setTag(INTENT_TAG_TIMESTAMP, String(Date.now()));
+    }
 
     if (this._rerunFromListId !== undefined) {
       return [{
