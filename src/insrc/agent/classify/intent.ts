@@ -75,16 +75,7 @@ export async function classifyPrimaryIntent(
       role: 'intent classifier for a coding assistant',
       classes: INTENT_CLASSES,
       text: prefix.message,
-      // Slice B (slash discovery): tell the classifier which slash
-      // commands the chat path recognises. Without this, a user
-      // typo like `/code-analyzer` (extra `-r`) bypasses the
-      // family-direct dispatcher (exact-match miss + Levenshtein
-      // miss when the typo is far) and gets topic-classified by
-      // the LLM, which routed `/code-analyzer ...` to `research`
-      // because of the keyword overlap. The classifier now sees
-      // the slash list and can return its closest registered
-      // intent (or set fallback when there's no fit).
-      context: buildSlashContext(),
+      context: buildClassifierContext(session),
     },
     resolveClassifierProvider(session, 'classify'),
   );
@@ -101,13 +92,42 @@ export async function classifyPrimaryIntent(
 }
 
 /**
- * Build the slash-command awareness block the classifier sees as
- * `ClassifyInput.context`. Tells the LLM which `/<name>` literals
- * are real slash commands so a typo or unknown slash doesn't get
- * topic-classified into a tangentially-related intent.
+ * Build the classifier context block the LLM sees alongside the
+ * intent-class list. Three sections:
+ *
+ *   1. Active repo signal -- if the session has a repo loaded, this
+ *      is a strong prior that the user is asking about THIS code,
+ *      which makes `code-analysis` the default for ambiguous prompts
+ *      and `research` only correct when the user is explicitly
+ *      asking about something OUTSIDE the repo.
+ *
+ *   2. Research vs. code-analysis tiebreaker -- the failure mode
+ *      that drove this hint: bare follow-ups like "describe HDFS
+ *      Core" landed in `research` because the LLM saw the
+ *      research-shaped verb "describe" without context. The rule
+ *      below biases the classifier toward `code-analysis` when the
+ *      noun is plausibly an in-repo entity / module / file / class.
+ *
+ *   3. Slash-command awareness -- existing block. Helps with `/foo`
+ *      typos so the classifier doesn't topic-classify a near-miss
+ *      slash literal into a tangentially-related intent.
  */
-function buildSlashContext(): string {
-	const lines = ['Registered chat slash commands (these are exact-match-only on the dispatcher):'];
+function buildClassifierContext(session: Session): string {
+	const lines: string[] = [];
+
+	const repoPath = session.repoPath ?? '';
+	if (repoPath.length > 0) {
+		lines.push(`Active repository: \`${repoPath}\` (the user has a repo loaded; questions about this code default to code-analysis).`);
+		lines.push('');
+	}
+
+	lines.push('Research vs. code-analysis tiebreaker:');
+	lines.push('- `research` is for EXTERNAL information lookup ONLY: web search, third-party package docs, external API references, library / framework behaviour, vendor specs, blog posts. Pick `research` ONLY when the user is explicitly asking about something the project itself cannot answer.');
+	lines.push('- `code-analysis` is the DEFAULT for any read-only question about THIS project -- "describe X", "what does X do", "summarise X", "where is X", "how does X work", "explain the auth flow", "list the modules", "find callers of X". A follow-up that names a module / file / class / function from a prior in-repo answer is also `code-analysis`, even when it is one short verb plus a noun.');
+	lines.push('- A research-shaped verb (describe, summarise, explain) does NOT make a prompt research. The deciding question is "is the answer inside this repo?" -- if yes, code-analysis. If the answer requires consulting external sources, research.');
+	lines.push('');
+
+	lines.push('Registered chat slash commands (these are exact-match-only on the dispatcher):');
 	for (const cmd of SLASH_COMMANDS) {
 		lines.push(`- /${cmd.id}: ${cmd.description}`);
 	}
