@@ -72,8 +72,10 @@ export class DataAnalyzerFlowContribution extends Disposable implements IWorkben
 
 		try {
 			const input = new DataAnalysisReportInput(list.sessionId, list.id, list.body, list.title);
+			// Pin so each report opens in its own tab instead of replacing
+			// VSCode's shared preview slot. Mirrors the code-analyzer fix.
 			await input.ensureBackingFile(this.fileService);
-			await this.editorService.openEditor(input);
+			await this.editorService.openEditor(input, { pinned: true });
 		} catch (err) {
 			this.logService.warn(`[data-analyzer:flow] openEditor failed for listId=${list.id}: ${(err as Error).message}`);
 			// Failed to open -- allow a retry on the next list update.

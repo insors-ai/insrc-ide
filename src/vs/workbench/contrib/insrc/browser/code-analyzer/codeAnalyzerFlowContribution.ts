@@ -74,7 +74,12 @@ export class CodeAnalyzerFlowContribution extends Disposable implements IWorkben
 		try {
 			const input = new AnalysisReportInput(list.sessionId, list.id, list.body, list.title);
 			await input.ensureBackingFile(this.fileService);
-			await this.editorService.openEditor(input);
+			// Pin the editor so each report gets its own dedicated tab.
+			// Without `pinned: true`, openEditor uses VSCode's preview-tab
+			// slot which is REUSED by the next openEditor call -- so a
+			// second `/code-analyze` run would steamroll the first
+			// report's tab even though both inputs have distinct URIs.
+			await this.editorService.openEditor(input, { pinned: true });
 		} catch (err) {
 			this.logService.warn(`[code-analyzer:flow] openEditor failed for listId=${list.id}: ${(err as Error).message}`);
 			// Failed to open -- allow a retry on the next list update.

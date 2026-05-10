@@ -87,7 +87,9 @@ registerAction2(class extends Action2 {
 
 		const input = new AnalysisReportInput(list.sessionId, list.id, list.body ?? '', list.title);
 		await input.ensureBackingFile(fileService);
-		await editorService.openEditor(input);
+		// Pin so each report opens in its own tab instead of replacing
+		// VSCode's shared preview slot.
+		await editorService.openEditor(input, { pinned: true });
 	}
 });
 
