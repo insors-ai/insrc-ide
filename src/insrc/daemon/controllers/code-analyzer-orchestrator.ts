@@ -31,6 +31,8 @@ import {
   makeDiskContentCache,
   type SectionResult,
 } from '../../agent/content-gen/index.js';
+import { planActions, ACTION_BUDGET_BY_TIER, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { INTENT_TAG_CURRENT, INTENT_TAG_TIMESTAMP } from '../../agent/intent/resolver.js';
@@ -93,6 +95,7 @@ const K_PLAN_RESULT    = 'planResult';            // raw bootstrap pass-through 
 const K_PLAN_TASKS     = 'plannedTasks';          // AnalysisTask[]
 const K_ACCEPTED       = 'acceptedResults';       // {task, result}[]
 const K_HISTORY        = 'reviewHistory';         // AnalyzerResult[] pre-history
+const K_RAW_EXECUTIONS = 'rawExecutions';         // PerSkillExecution[] from skills pipeline (for plan-actions synthesis)
 const K_PHASE          = 'phase';
 const K_SYNTH_RESULT   = 'synthResult';           // final markdown
 const K_LIST_ID        = 'listId';
@@ -627,6 +630,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const planned: AnalysisTask[] = accepted.map(a => a.task);
     const history: AnalyzerResult[] = accepted.map(a => a.result);
 
+    // Persist the raw PerSkillExecution[] so the plan-actions
+    // synthesis (Phase 4 of plans/analyzers/cloud-plan-local-expand-
+    // cloud-review.md) sees the structured outputs the planner needs.
+    // pipelineResultToAcceptedTasks() lossily converts each execution
+    // to a string `answer`, which is fine for the legacy tier-based
+    // synthesis but starves the planner of evidence.
+    state.set(K_RAW_EXECUTIONS, pipelineResult.executions);
+
     state.set(K_PLAN_TASKS, planned);
     state.set(K_ACCEPTED, accepted);
     state.set(K_HISTORY, history);
@@ -727,29 +738,147 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     };
   }
 
+  /**
+   * Plan -> per-action [expand+review] -> stitch synthesis flow per
+   * plans/analyzers/cloud-plan-local-expand-cloud-review.md (Phase 4).
+   *
+   * Replaces the legacy tier-based fork (S/M -> local single-pass /
+   * L+ -> cloud multipass). Every prompt now goes through:
+   *   1. plan(cloud)   -> N action-cards
+   *   2. per action: expand(local) -> review(cloud) [-> expand(local) -> review(cloud)]
+   *   3. stitch        -> no overall review
+   *
+   * Tier still drives the action-budget cap (S=2 ... XXXXL=32).
+   * Re-run / resume paths reuse this entry too -- they pass the
+   * raw executions they reconstructed from the prior list.
+   */
   private async queueSynthesise(state: TaskStateStore): Promise<Task[] | null> {
     state.set(K_PHASE, 'synthesising' as Phase);
     const ca = state.get<CodeAnalysisState>(K_STATE);
     const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
     const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
+    const rawExecutions = state.get<readonly PlanExecution[]>(K_RAW_EXECUTIONS);
     const tier = this._tier;
 
-    if (tier === 'S' || tier === 'M') {
+    if (this.deps === undefined) {
+      log.error('queueSynthesise: deps missing -- cannot run plan stage');
       return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
     }
 
     try {
-      const markdown = await this.runMultipassSynthesise(ca, planned, accepted, tier);
+      const markdown = await this.runPlanExpandReviewSynthesise(
+        ca,
+        planned,
+        accepted,
+        rawExecutions ?? deriveExecutionsFromAccepted(accepted),
+        tier,
+      );
       state.set(K_SYNTH_RESULT, markdown);
       await this.finalizeSynthesisedReport(state);
       return null;
     } catch (err) {
       log.warn(
         { tier, err: (err as Error).message },
-        'multipass synthesis failed; falling back to single-pass',
+        'plan/expand/review synthesis failed; falling back to legacy multipass',
       );
-      return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
+      try {
+        const markdown = await this.runMultipassSynthesise(ca, planned, accepted, tier);
+        state.set(K_SYNTH_RESULT, markdown);
+        await this.finalizeSynthesisedReport(state);
+        return null;
+      } catch (err2) {
+        log.warn(
+          { tier, err: (err2 as Error).message },
+          'legacy multipass also failed; falling back to single-pass LLM task',
+        );
+        return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
+      }
     }
+  }
+
+  /**
+   * Plan / expand / review synthesis driver. Cloud plans the
+   * sections (planActions); local drafts each one and cloud reviews
+   * with one bounded refinement round (expandThenReview); we stitch
+   * with no overall review.
+   */
+  private async runPlanExpandReviewSynthesise(
+    ca: CodeAnalysisState | undefined,
+    _planned: readonly AnalysisTask[],
+    accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+    executions: readonly PlanExecution[],
+    tier: ScopeSize,
+  ): Promise<string> {
+    if (this.deps === undefined) {
+      throw new Error('runPlanExpandReviewSynthesise: deps not attached');
+    }
+    const session = this.deps.session;
+    const cloud = session.resolver.resolve('code-analyzer', 'plan');
+    const local = session.ollamaProvider;
+    const reviewer = session.resolver.resolve('code-analyzer', 'review');
+    const request = ca?.request ?? '';
+    const repoSummary = this.formatRepoSummaryLine();
+
+    // ----- Stage 1: plan ------------------------------------------------
+    const planStep = 'synthesise (plan)';
+    this.emitLiveStep(planStep, '');
+    this.emitLiveStep(planStep, this.formatProgress('planning report sections...') + '\n');
+
+    const plan = await planActions(
+      {
+        request,
+        repoSummary,
+        executions,
+        tier,
+        analyzerLabel: 'code-analyzer',
+      },
+      cloud,
+    );
+
+    const actions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
+      ? [synthesiseFallbackAction(ca, accepted, executions)]
+      : plan.actions;
+
+    this.emitLiveStep(
+      planStep,
+      this.formatProgress(`planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}`) + '\n',
+    );
+    this.emitLiveStep(planStep, '', true);
+
+    // ----- Stage 2+3: per-action expand+review --------------------------
+    const sections: { id: string; title: string; markdown: string }[] = [];
+    for (const action of actions) {
+      const evidence = pickEvidence(action, executions);
+      const stepId = `synthesise (${action.id})`;
+      this.emitLiveStep(stepId, '');
+      this.emitLiveStep(stepId, this.formatProgress(`expanding "${action.title}"...`) + '\n');
+
+      const out = await expandThenReview(
+        {
+          action,
+          evidence,
+          request,
+          analyzerLabel: 'code-analyzer',
+          onProgress: (phase, payload) => {
+            // Per-phase chat-panel dribble for the activity-console
+            // bubble. Keep it terse; the body of the section is not
+            // streamed (it'd flood the bubble).
+            const tag = phase === 'final'
+              ? `done (verdict=${payload.kind === 'final' ? payload.verdict : '?'}, rounds=${payload.kind === 'final' ? payload.rounds : '?'})`
+              : phase;
+            this.emitLiveStep(stepId, this.formatProgress(`${action.id}: ${tag}`) + '\n');
+          },
+        },
+        local,
+        reviewer,
+      );
+
+      this.emitLiveStep(stepId, '', true);
+      sections.push({ id: action.id, title: action.title, markdown: out.markdown });
+    }
+
+    // ----- Stage 4: stitch (no further LLM work) ------------------------
+    return stitchPlanSections(plan.intentBrief, actions, sections, this._parentListId);
   }
 
   private queueSinglePassSynthesise(
@@ -940,6 +1069,20 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       },
     });
   }
+
+  /**
+   * Build a one-line repo descriptor for the planActions helper.
+   * The planner echoes this verbatim as `## Repository` context.
+   */
+  private formatRepoSummaryLine(): string {
+    if (this._repoSummary === undefined) return '';
+    const r = this._repoSummary;
+    const parts = [r.rootPath];
+    if (r.primaryLanguages.length > 0) parts.push(`languages: ${r.primaryLanguages.join(', ')}`);
+    if (r.topLevelPackages.length > 0) parts.push(`top-level packages: ${r.topLevelPackages.slice(0, 6).join(', ')}`);
+    parts.push(`closure size: ${r.closureSize}`);
+    return parts.join(' -- ');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,6 +1164,135 @@ function progressMessageForSkillEnd(
       return `Completed: ${short} (${confidence})`;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Plan / expand / review synthesis helpers (Phase 4 of
+// plans/analyzers/cloud-plan-local-expand-cloud-review.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Slice the executions array down to just what one action's evidence
+ * refs cite. The expander + reviewer only see this slice; unrelated
+ * executions don't pollute the per-action prompt.
+ */
+function pickEvidence(
+  action: PlannedAction,
+  executions: readonly PlanExecution[],
+): readonly PlanExecution[] {
+  const seen = new Set<number>();
+  const out: PlanExecution[] = [];
+  for (const ref of action.evidence) {
+    const idx = ref.executionIdx;
+    if (idx < 0 || idx >= executions.length || seen.has(idx)) continue;
+    const e = executions[idx];
+    if (e === undefined) continue;
+    // Filter out evidence whose skillId doesn't match the cited
+    // execution -- this defends against a planner mistake where it
+    // names the wrong skill for an index.
+    if (e.skillId !== ref.skillId) continue;
+    seen.add(idx);
+    out.push(e);
+  }
+  return out;
+}
+
+/**
+ * Synthesise a single fallback action when the planner returns a
+ * degraded / empty plan. The fallback covers ALL executions in one
+ * "summary" section so the report still produces something useful.
+ */
+function synthesiseFallbackAction(
+  ca: CodeAnalysisState | undefined,
+  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+  executions: readonly PlanExecution[],
+): PlannedAction {
+  const requestSnippet = (ca?.request ?? 'analysis request').slice(0, 80);
+  const evidence = executions.map((e, i) => ({ skillId: e.skillId, executionIdx: i }));
+  const skillCount = executions.length;
+  return {
+    id:        'fallback-summary',
+    title:     `Summary: ${requestSnippet}`,
+    objective: `Summarise the ${skillCount} skill execution${skillCount === 1 ? '' : 's'} the analyzer ran for this request.`,
+    evidence,
+    maxBudgetTokens: 2000,
+    reviewCriteria: [
+      'Touches every skill execution at least once',
+      'States the user request verbatim',
+      `Notes that ${accepted.length} task${accepted.length === 1 ? '' : 's'} were accepted into the report`,
+    ],
+  };
+}
+
+/**
+ * Adapter for re-run / resume paths that don't carry the original
+ * `PerSkillExecution[]` (e.g. when reconstructing from a prior
+ * TodoList). Synthesises a degraded `PlanExecution[]` from the
+ * post-processed `AnalyzerResult.answer` text so the planner still
+ * has something to chew on. Loses precision compared to the raw
+ * structured value the live path supplies, but keeps re-runs working.
+ */
+function deriveExecutionsFromAccepted(
+  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
+): readonly PlanExecution[] {
+  return accepted.map(a => ({
+    skillId:    a.task.kind === 'free-form' ? a.task.question.replace(/^\[skill\]\s*/, '') : a.task.kind,
+    value:      a.result.answer,
+    confidence: a.result.confidence,
+    notes:      [],
+  }));
+}
+
+/**
+ * Stitch the planner's intent brief + per-action sections into the
+ * final markdown. No further LLM work happens here -- per the spec
+ * the cloud reviewer's per-action verdict is the final quality
+ * gate, NOT a global review pass.
+ *
+ * The drill-down footer (Report Pane parser depends on it) is
+ * appended verbatim. It is not a planned action.
+ */
+function stitchPlanSections(
+  intentBrief: string,
+  actions: readonly PlannedAction[],
+  sections: readonly { id: string; title: string; markdown: string }[],
+  parentListId: string | undefined,
+): string {
+  const lines: string[] = [];
+  if (intentBrief.trim().length > 0) {
+    lines.push(intentBrief.trim());
+    lines.push('');
+  }
+
+  // Maintain the planner's order even if expandThenReview returned
+  // sections in a different sequence (it doesn't today, but defend).
+  const byId = new Map(sections.map(s => [s.id, s]));
+  for (const action of actions) {
+    const s = byId.get(action.id);
+    if (s === undefined || s.markdown.trim().length === 0) continue;
+    lines.push(`## ${action.title}`);
+    lines.push('');
+    lines.push(s.markdown.trim());
+    lines.push('');
+  }
+
+  // Drill-down footer -- the Report Pane parser looks for a `## Drill
+  // down` heading to surface "run sub-analysis" actions. Skip on
+  // drill-down child runs (parentListId set) since they're already
+  // children. The planner is encouraged but not required to produce
+  // its own bullets; if it didn't include them, this footer is the
+  // minimal anchor the pane needs to render the empty-state.
+  if (parentListId === undefined) {
+    const haveDrillDown = sections.some(s => /^##\s+Drill\s+down/im.test(s.markdown));
+    if (!haveDrillDown) {
+      lines.push('## Drill down');
+      lines.push('');
+      lines.push('_The planner did not propose drill-down bullets for this run. Click an action in the Report Pane footer or open the todos pane to launch a follow-up._');
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n').trimEnd() + '\n';
 }
 
 // ---------------------------------------------------------------------------
