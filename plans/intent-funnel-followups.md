@@ -289,6 +289,56 @@ The VSCode renderer (per CLAUDE.md's clickable-link conventions) opens the file 
 
 ---
 
+## D. Report Pane interactions -- annotations + forward-to-chat
+
+Live-test feedback (2026-05-11) after Phase C.4 shipped: the
+Code Analysis Report Pane should support two interactive
+affordances on top of the rendered markdown.
+
+### D.1 Annotations
+
+**Surface:** [src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportPane.ts](src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportPane.ts) -- the same pane that already renders the synthesised report via `MarkdownRenderer`.
+
+**Feature:** the user selects a span of text in the report (a sentence, a bullet, a table row, a citation) and attaches a note / highlight / tag to it. Re-rendering the report (e.g. on resume, on idle-reaper restoring the list) preserves the annotation.
+
+**Open design questions before implementation:**
+1. **Annotation kinds** -- just free-text notes? Or also color-coded highlights, todo-style markers ("✓ verified", "❓ check"), star-bookmarks?
+2. **Anchoring** -- selections are fragile across LLM re-runs. Options:
+   - Range-by-text (store the selected substring + a fuzzy match on re-render). Survives minor edits.
+   - Range-by-position (char offset into list.body). Breaks if the body shifts by even one character.
+   - Anchor to a stable identifier (heading id, citation key). Most robust but limits granularity.
+3. **Persistence** -- annotations should travel with the TodoList (the analyzer's durable per-run state). Add a `list.annotations?: Annotation[]` field on the TodoList row in LMDB and a workbench-side store keyed on listId.
+4. **Visual treatment** -- gutter pins? Underline + tooltip on hover? Sidebar panel listing all annotations for the current list?
+5. **Scope** -- per-report only, or also exposable via the Todos pane / RPC so the workbench can surface annotation counts on the run list?
+
+**Effort estimate:** unknown until 1-4 are answered. Lower bound is ~4 hrs (text-only notes, range-by-text anchoring, in-memory only, gutter pin). Upper bound is ~2 days (multi-kind, durable, surfaceable across the workbench).
+
+### D.2 Forward to chat
+
+**Feature:** the user selects a span of report text → clicks "Forward to chat" → the chat panel input prefills with the selection quoted as a Markdown blockquote, ready for the user to type a follow-up question against it.
+
+**Surface:**
+- Selection listener on the Report Pane body container (existing `analysisReportPane._body`).
+- A floating action button or context-menu entry (the workbench's standard right-click menu pattern) gated on `window.getSelection().toString().length > 0`.
+- An action that calls the chat service's "prefill input" command -- requires the chat service to expose `setInputValue(text)` if it doesn't already; if not, route through a new command id (e.g. `insrc.chat.prefillInput`).
+
+**Open design questions:**
+1. **Quote format** -- blockquote (`> selected text`) or a fenced code block? Blockquote reads more like normal prose; the user usually adds a question after it ("> selected paragraph\n\nWhy does this contradict the architecture section?").
+2. **Citations preservation** -- if the selection includes `path:` Markdown links, do we keep them in the quoted blockquote? Probably yes -- they'd remain clickable in the chat panel after our `path:` allow-list fix (`bb1d531e843`).
+3. **Cursor placement** -- after prefilling, focus the input + place the cursor at the end (most natural for adding the question).
+
+**Effort estimate:** ~2 hrs. The plumbing (selection listener + chat-service command) is straightforward; the questions are about polish.
+
+### Sequencing D within the broader followups
+
+D.2 (forward-to-chat) is independent of every prior item -- can ship in isolation any time. D.1 (annotations) is bigger and has open design questions; bundle once those are answered.
+
+Recommended order:
+1. D.2 first (~2 hrs; small surface, immediate value).
+2. D.1 second (effort dependent on design choices).
+
+---
+
 ## Sequencing
 
 Phase A is fully parallelisable -- four small independent diffs. Phase B is gated on the orchestrator investigation. Phase C.1-C.3 are independent of A and B. **C.4 depends on B.2** -- can't persist the report file without a truthful `finalOutput`.
