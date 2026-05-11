@@ -1,19 +1,33 @@
 /**
  * Prompt decomposition — splits a user message into structured actions.
  *
- * Replaces the single-intent classifier with a multi-action decomposer.
- * Returns an ordered array of actions with file references, purposes,
- * dependencies, and output directives.
+ * **Phase 5 of plans/intent-classification-consolidation.md** is
+ * narrowing this module's job to STRUCTURE only. The historical
+ * "decomposer picks intent" behaviour mis-classified in-repo
+ * follow-ups like "elaborate on the core filesystem" as `research`
+ * because the prompt carried an "Informational questions are
+ * research" rule that the canonical classifier never agreed with.
+ *
+ * Phase 5 (this commit) removes the bad rule from the prompt + the
+ * biased "research" examples + the `## Available intents` list.
+ * The prompt now restricts itself to the classifier's tiebreaker so
+ * any intent it does still emit aligns with `classifyPrimaryIntent`.
+ *
+ * Phase 6 will drop the `intent` field from the output schema +
+ * interface entirely and route every action through
+ * `resolveIntent(session, action.action)` from the chat-handler.
+ * Until then the field is **advisory only** -- new code MUST call
+ * `resolveIntent` rather than read `DecomposedAction.intent`.
  *
  * Examples:
- * - "design a caching layer" → [{ intent: 'design', subject: '...' }]
+ * - "design a caching layer" → [{ subject: '...', action: 'design a caching layer' }]
  * - "design X based on Y and use Z for styling" → [
- *     { intent: 'design', subject: 'X', refs: [{ path: 'Y', purpose: 'requirements-source' }] },
- *     { intent: 'style', refs: [{ path: 'Z', purpose: 'style-reference' }], dependsOn: 0 },
+ *     { subject: 'X', refs: [{ path: 'Y', purpose: 'requirements-source' }] },
+ *     { refs: [{ path: 'Z', purpose: 'style-reference' }], relation: 'depends' },
  *   ]
  * - "check pods and show indexer status" → [
- *     { intent: 'infra', action: 'check pods' },
- *     { intent: 'infra', action: 'show indexer status' },
+ *     { action: 'check pods', commandHint: 'kubectl get pods' },
+ *     { action: 'show indexer status' },
  *   ]
  */
 
@@ -86,6 +100,11 @@ export interface DecomposeResult {
 // Prompt
 // ---------------------------------------------------------------------------
 
+// Internal allow-list used by the parser to filter unknown LLM
+// outputs. Not surfaced in the prompt -- the LLM should not have to
+// reason about the intent taxonomy here, since per Phase 5 the
+// decomposer is structural-only. Kept for parser validation until
+// Phase 6 drops the `intent` field from the schema entirely.
 const ALL_INTENTS = [
   'implement', 'refactor', 'test', 'debug', 'review',
   'document', 'research', 'code-analysis', 'plan', 'requirements', 'design',
@@ -93,9 +112,11 @@ const ALL_INTENTS = [
 ];
 
 const DECOMPOSE_SYSTEM = `You are a prompt decomposer for a coding assistant.
-Given a user message, identify the PRIMARY intent and any ATTACHED sub-requests.
-
-Available intents: ${ALL_INTENTS.join(', ')}
+Given a user message, split it into its PRIMARY request and any
+ATTACHED sub-requests -- this is a STRUCTURAL job, not a topical
+classification. A separate component (resolveIntent) is responsible
+for picking the intent of each action; the \`intent\` field below is
+advisory only and the canonical classifier will overrule it.
 
 Attached relation types:
 - augment: enhances primary with additional context/angle (merged into one agent run)
@@ -113,38 +134,35 @@ File reference purposes:
 - config: configuration file reference
 - data: data file reference
 
-Rules:
-- Every prompt has exactly ONE primary intent
-- Additional sub-requests are "attached" with a relation type
-- "augment" (DEFAULT for same-intent sub-requests): information that enhances the primary goal.
+Structural rules:
+- Every prompt has exactly ONE primary item; everything else is "attached" with a relation.
+- "augment" (DEFAULT for same-topic sub-requests): information that enhances the primary goal.
   "find X and also check Y for comparison" -- Y augments X, single agent run with richer context.
   "implement X based on Y" -- Y augments X as reference material.
-- "format": output formatting requests ("as markdown", "as table", "give me a comparison", "summarize")
-- "depends": step 2 needs step 1's output. DIFFERENT intents only ("design X then implement it")
+- "format": output formatting requests ("as markdown", "as table", "give me a comparison", "summarize").
+- "depends": step 2 needs step 1's output ("design X then implement it").
 - "append": truly independent questions in the same message. Rare -- prefer augment.
-- "parallel": independent work, different intents ("check security AND check performance")
-- When in doubt between "augment" and "append", ALWAYS choose "augment"
-- Informational questions ("what is X", "how does X work") are "research" intent
-- For infra/deploy intents, provide commandHint (best-guess shell command, no output flags)
-- Confidence: 0.9+ clear, 0.7-0.9 inferred, below 0.7 guesses
-- Greetings/conversational: primary "research" with action "chat", confidence 0.3
+- "parallel": independent work that doesn't share data ("check security AND check performance").
+- When in doubt between "augment" and "append", ALWAYS choose "augment".
+- For infra/deploy intents, provide commandHint (best-guess shell command, no output flags).
+- Confidence: 0.9+ clear, 0.7-0.9 inferred, below 0.7 guesses.
 
-Examples:
-- "find NodeJS libs for OCR and also check the Python module for reference"
-  primary: research "find NodeJS OCR libs"
-  attached: [{ relation: "augment", action: "check Python module as reference" }]
+Intent tiebreaker (advisory; resolveIntent has the final say):
+- \`research\` is for EXTERNAL information lookup ONLY: web search, third-party docs, vendor specs, library/framework behaviour. Pick it ONLY when the answer cannot come from the project itself.
+- \`code-analysis\` is the DEFAULT for any read-only question about THIS project -- "describe X", "what does X do", "summarise X", "explain how X works", "list the modules", "find callers of X". A research-shaped verb ("describe", "summarise", "explain") does NOT make a prompt research; the question is "is the answer inside this repo?" -- if yes, code-analysis.
 
+Examples (structural shape; intent in each is advisory only):
 - "check pods and output as markdown"
-  primary: infra "check pods"
+  primary: { action: "check pods", commandHint: "kubectl get pods" }
   attached: [{ relation: "format", action: "format as markdown" }]
 
 - "design the API then implement it"
-  primary: design "design the API"
-  attached: [{ relation: "depends", intent: "implement", action: "implement the API" }]
+  primary: { action: "design the API" }
+  attached: [{ relation: "depends", action: "implement the API" }]
 
-- "analyze security issues and also review performance"
-  primary: research "analyze security issues"
-  attached: [{ relation: "parallel", intent: "research", action: "review performance" }]
+- "analyse security issues and also review performance"
+  primary: { action: "analyse security issues" }
+  attached: [{ relation: "parallel", action: "review performance" }]
 
 Output ONLY valid JSON -- no markdown fences, no explanation:
 {
