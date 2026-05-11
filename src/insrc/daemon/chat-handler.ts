@@ -1250,6 +1250,22 @@ async function runDataAnalyzerSlash(
       },
       deps,
     );
+    // Phase C.4 of plans/intent-funnel-followups.md: write the
+    // report markdown to ~/.insrc/tmp/<sessionId>/reports/turn-N.md
+    // and emit a chat-panel link to it. Runs BEFORE the `done`
+    // event so the link lands in the user's transcript as part of
+    // the message body. Capture turnIdx pre-increment -- it's the
+    // same value persistTurn will write to LMDB.
+    const turnIdx = session.turnIndex;
+    if (result.finalFormat === 'markdown' && result.finalOutput.length > 0) {
+      await persistReportFile({
+        sessionId: session.id ?? 'unknown',
+        turnIdx,
+        markdown: result.finalOutput,
+        send,
+        requestId,
+      });
+    }
     send({ id: requestId, stream: 'done', data: { summary: 'data-analyzer' } });
     await persistTurn(session, originalMessage, result.finalOutput, result.finalFormat);
   } catch (err) {
@@ -1470,6 +1486,21 @@ async function runCodeAnalyzerSlash(
       },
       deps,
     );
+    // Phase C.4 of plans/intent-funnel-followups.md: persist the
+    // report markdown + emit a chat-panel link to it BEFORE the
+    // `done` event so the link is part of the user's transcript.
+    // turnIdx is captured pre-increment -- matches the index
+    // persistTurn will write into LMDB on the next line.
+    const turnIdx = session.turnIndex;
+    if (result.finalFormat === 'markdown' && result.finalOutput.length > 0) {
+      await persistReportFile({
+        sessionId: session.id ?? 'unknown',
+        turnIdx,
+        markdown: result.finalOutput,
+        send,
+        requestId,
+      });
+    }
     send({ id: requestId, stream: 'done', data: { summary: 'code-analyzer' } });
     await persistTurn(session, originalMessage, result.finalOutput, result.finalFormat);
   } catch (err) {
@@ -3144,6 +3175,88 @@ async function persistTurn(
     // Fire-and-forget — don't fail the chat on persistence errors
     log.debug({ err }, 'failed to persist turn');
   }
+}
+
+/**
+ * Phase C.4 of plans/intent-funnel-followups.md -- after a code- or
+ * data-analyzer report finishes, persist the full markdown to a
+ * per-session file under `~/.insrc/tmp/<sessionId>/reports/` so the
+ * chat panel can render a clickable link back to it. Closing the
+ * Report Pane tab no longer loses the report -- the link reopens it.
+ *
+ * Lifecycle: lives under PATHS.sessionTmp() alongside the spill
+ * artefacts. Survives daemon restart and idle-session reaping;
+ * cleared on `repo.remove` cascade alongside `purgeSessionById` /
+ * `deleteResponseSegmentsForSession`.
+ *
+ * The chat-panel link uses a `file://` URI -- VSCode's default
+ * opener handles it without a custom URI scheme. The visible link
+ * label is the analysis topic (first H1 / H2 from the markdown,
+ * falling back to "View report") so the chat reads naturally.
+ *
+ * Best-effort: a write failure logs at warn and skips the link.
+ * The LMDB turn row + segment indexing already succeeded by this
+ * point; the report file is an additive convenience.
+ */
+async function persistReportFile(args: {
+  sessionId: string;
+  turnIdx:   number;
+  markdown:  string;
+  send:      (msg: IpcStreamMessage) => void;
+  requestId: number;
+}): Promise<void> {
+  if (args.markdown.trim().length === 0) return;
+  try {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const { PATHS } = await import('../shared/paths.js');
+
+    const dir = join(PATHS.sessionTmp(args.sessionId), 'reports');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, `turn-${args.turnIdx}.md`);
+    await writeFile(file, args.markdown, 'utf8');
+    log.info({ sessionId: args.sessionId, turnIdx: args.turnIdx, file, bytes: args.markdown.length }, 'report file persisted');
+
+    // Derive a friendly link label from the report's first heading.
+    // Falls back to "View report" when no heading is present.
+    const heading = extractFirstHeading(args.markdown) ?? 'View report';
+
+    // Use a file:// URI so the IDE's default opener handles it --
+    // PATHS.sessionTmp() lives outside the workspace so the custom
+    // `path:` opener (which resolves workspace-relative paths) can't
+    // route here. The chat-panel markdown renderer treats file://
+    // links the way VSCode normally does: a click opens the
+    // referenced file in a new editor tab.
+    const fileUri = `file://${file}`;
+    const linkLine = `\n\n📄 [${heading}](${fileUri})\n`;
+    args.send({
+      id: args.requestId,
+      stream: 'delta',
+      data: { text: linkLine, format: 'markdown' },
+    });
+  } catch (err) {
+    log.warn({ err, sessionId: args.sessionId, turnIdx: args.turnIdx }, 'report file persist failed (continuing)');
+  }
+}
+
+/**
+ * Pluck the first `# ` / `## ` heading out of a markdown body for
+ * use as the report-link label in the chat panel. Trims the leading
+ * `#`s + whitespace; clamps to 80 chars. Returns null when the body
+ * has no heading in the first ~10 lines (we don't scan the whole
+ * doc -- if the heading isn't near the top it's probably not the
+ * title).
+ */
+function extractFirstHeading(markdown: string): string | null {
+  const lines = markdown.split('\n', 10);
+  for (const line of lines) {
+    const m = /^#{1,3}\s+(.+?)\s*$/.exec(line);
+    if (m) {
+      const title = m[1]!.trim();
+      return title.length > 80 ? title.slice(0, 77) + '...' : title;
+    }
+  }
+  return null;
 }
 
 /**
