@@ -224,27 +224,22 @@ export class Session {
   }
 
   /**
-   * Close the session: promote L2 summary to persistent store, delete raw turns.
-   * Called on /exit or SIGINT.
+   * Persist the session's L2 summary + seen-entities snapshot to the
+   * conversations LMDB row + the session_vec Lance row. Idempotent;
+   * safe to call repeatedly. Does NOT close the session -- the
+   * in-memory Session, health checks, channels etc. all keep going.
    *
-   * IMPORTANT: this method MUST NOT purge per-session artifact spills
-   * (~/.insrc/tmp/<session_id>/ or `artifact_vec` Lance rows). Sessions
-   * stored under ~/.insrc are persistent by user contract -- closing
-   * just stops the in-memory session; the LMDB conversations table +
-   * Lance vec tables (turn_vec, artifact_vec, future
-   * response_segment_vec) all stay so cross-session retrieval and
-   * resume keep working. Only an explicit `/forget` (or future user
-   * "delete session" command) may wipe a session's persisted data.
-   * The pre-existing `purgeSession` helper still exists in the
-   * spill-writer for that future explicit-delete path -- it is just
-   * NOT wired here.
+   * Called by:
+   *   - `close()` as part of teardown.
+   *   - The chat-pool's idle reaper, periodically, for the protected
+   *     "active" session (so a crash doesn't lose the running summary).
+   *
+   * No-op when no summary exists yet (a fresh session with no
+   * compaction-worthy turns produces no summary -- nothing to write).
    */
-  async close(): Promise<void> {
-    // Stop periodic health checks
-    this.health.stop();
-
+  async persistSummary(): Promise<void> {
     const summary = this.contextManager.getSummary();
-    if (!summary) return; // Nothing to persist if no summary was generated
+    if (!summary) return;
 
     const summaryVector = await embedText(this.ollamaProvider, summary);
 
@@ -255,6 +250,31 @@ export class Session {
       seenEntities: [...this.seenEntities],
       summaryVector,
     });
+  }
+
+  /**
+   * Close the session: persist L2 summary, stop periodic health checks.
+   * Called on /exit, SIGINT, or by the workbench's chat.close RPC
+   * (see daemon/chat-sessions.ts:close).
+   *
+   * IMPORTANT: this method MUST NOT purge per-session artifact spills
+   * (~/.insrc/tmp/<session_id>/ or `artifact_vec` Lance rows). Sessions
+   * stored under ~/.insrc are persistent by user contract -- closing
+   * just stops the in-memory session; the LMDB conversations table +
+   * Lance vec tables (turn_vec, artifact_vec, future
+   * response_segment_vec) all stay so cross-session retrieval and
+   * resume keep working. Only an explicit `/forget` (or the
+   * `repo.remove` cascade) may wipe a session's persisted data.
+   * The pre-existing `purgeSession` helper still exists in the
+   * spill-writer for that explicit-delete path -- it is just NOT
+   * wired here.
+   */
+  async close(): Promise<void> {
+    // Stop periodic health checks
+    this.health.stop();
+
+    // Persist the L2 summary + seen-entities snapshot.
+    await this.persistSummary();
   }
 
   /** Delete all session summaries for the current repo (/forget). */

@@ -355,15 +355,57 @@ export class ChatSessionPool {
   }
 
   /**
-   * Clean up idle sessions (called periodically).
+   * Periodic maintenance pass.
+   *
+   * Two policies:
+   *
+   *   1. **Active session (most recently touched in the pool):
+   *      NEVER closed.** Regardless of idle duration. This is the
+   *      session the user is actively using in the IDE; closing it
+   *      would destroy in-memory context, the channel, and the
+   *      L4 task scratch. Instead, periodically `persistSummary()`
+   *      so the L2 summary lands in LMDB + Lance for crash recovery
+   *      without stopping the session. `persistSummary()` is
+   *      idempotent and a no-op when there is no summary yet.
+   *
+   *   2. **Other sessions past `IDLE_TIMEOUT_MS`: closed normally.**
+   *      `close()` itself persists the summary as part of teardown,
+   *      so closing a stale session is the right "clean it up"
+   *      semantic. Sessions with an agent currently running are
+   *      always skipped.
    */
   private cleanupIdle(): void {
     const now = Date.now();
+
+    // Identify the protected session (most recently touched).
+    let mostRecentlyTouchedId: string | null = null;
+    let mostRecentTs = -Infinity;
     for (const [id, s] of this.sessions) {
-      if (!s.agentRunning && (now - s.lastActivityAt) > IDLE_TIMEOUT_MS) {
-        log.info({ sessionId: id, idleMinutes: Math.floor((now - s.lastActivityAt) / 60000) }, 'closing idle session');
-        void this.close(id);
+      if (s.lastActivityAt > mostRecentTs) {
+        mostRecentTs = s.lastActivityAt;
+        mostRecentlyTouchedId = id;
       }
+    }
+
+    for (const [id, s] of this.sessions) {
+      const isActive = id === mostRecentlyTouchedId;
+
+      if (isActive) {
+        // Active session: keep it alive, but periodically persist its
+        // L2 summary so a daemon crash doesn't lose it. Wrapped in
+        // try/catch so a transient persist failure doesn't take out
+        // the timer; we'll try again on the next tick.
+        s.session.persistSummary().catch(err => {
+          log.warn({ sessionId: id, err: String(err) }, 'periodic persistSummary failed (continuing)');
+        });
+        continue;
+      }
+
+      if (s.agentRunning) continue;
+      if ((now - s.lastActivityAt) <= IDLE_TIMEOUT_MS) continue;
+
+      log.info({ sessionId: id, idleMinutes: Math.floor((now - s.lastActivityAt) / 60000) }, 'closing idle session');
+      void this.close(id);
     }
   }
 
