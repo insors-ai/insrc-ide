@@ -277,16 +277,28 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       const fallback = accepted.length === 0
         ? '_Code analysis aborted before any task completed._'
         : `_Code analysis aborted partway through (${accepted.length} task(s) completed). See the todos pane for details._`;
+      // Aborted run -- short fallback string IS the chat-panel
+      // render too (nothing was streamed to the Report Pane).
       return { output: fallback, format: 'markdown' };
     }
-    // Plan §2.1 hard requirement 1: the chat panel MUST NOT render
-    // the synthesised markdown -- it lives in the Code Analysis
-    // Report Pane (workbench) and in `list.body` (durable). The
-    // afterSynthesise step already emits a one-line "report ready"
-    // delta to the transcript. Returning a duplicate one-liner here
-    // would just double-print; an empty FinalizeResult lets the
-    // framework render nothing extra.
-    return { output: '', format: 'markdown' };
+    // Phase B.2 of plans/intent-funnel-followups.md: persist the
+    // FULL synthesised markdown as `output` so the chat-handler's
+    // persistTurn writes it to LMDB and the Phase-2 segment
+    // indexer can chunk it. Use `chatRender: ''` to suppress the
+    // chat-panel re-render -- the report lives in the Code
+    // Analysis Report Pane (workbench) and in `list.body`
+    // (durable); the afterSynthesise step already emitted the
+    // "report ready" one-liner to the transcript, so re-emitting
+    // here would double-print.
+    //
+    // Plan §2.1 hard requirement 1 (chat panel MUST NOT render the
+    // synthesised markdown) stays intact: `chatRender: ''` blocks
+    // the delta. `output` is for downstream persistence ONLY.
+    return {
+      output:     synthResult,
+      chatRender: '',
+      format:     'markdown',
+    };
   }
 
   // -------------------------------------------------------------------------

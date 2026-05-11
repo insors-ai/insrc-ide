@@ -358,8 +358,34 @@ export interface GateReply {
 }
 
 export interface FinalizeResult {
+  /**
+   * The CANONICAL output of the controller -- this is what gets
+   * persisted to LMDB as the turn's assistant body, fed into
+   * response-segment indexing for the intent classifier's memory,
+   * and (Phase C.4 of plans/intent-funnel-followups.md) used to
+   * materialise the report file the chat panel links back to.
+   *
+   * For most controllers this is also what the chat panel renders.
+   * The exceptions (code-analyzer / data-analyzer) stream their
+   * output to a separate Report Pane during execution and want to
+   * SUPPRESS chat-panel rendering at finalize time -- they set
+   * `chatRender: ''` while keeping `output` populated.
+   */
   output: string;
   format: TaskFormat;
+  /**
+   * Override what the framework renders in the chat panel at
+   * finalize. When unset, the framework defaults to `output` (the
+   * legacy behaviour every controller pre-Phase-B.2 relied on).
+   * When set to `''`, no delta is sent -- useful when `output`
+   * already streamed via per-task deltas or lives in a separate
+   * pane and re-rendering it in chat would double-print.
+   *
+   * Setting `chatRender` to ANY non-empty string OVERRIDES `output`
+   * for the chat-panel render only -- persistence still uses
+   * `output`.
+   */
+  chatRender?: string | undefined;
   artifacts?: Array<{ name: string; content: string }> | undefined;
 }
 
@@ -858,11 +884,21 @@ export async function runControlledPipeline(
   // 3. Finalize
   const finalized = controller.finalize(stateStore);
 
-  // Send final output
-  send({ id: requestId, stream: 'delta', data: {
-    text: finalized.output,
-    format: finalized.format,
-  } });
+  // Send final output to the chat panel. Per Phase B.2 of
+  // plans/intent-funnel-followups.md, `chatRender` lets a
+  // controller divorce "what gets persisted" from "what gets
+  // rendered in chat" -- code-analyzer streams its report to a
+  // separate Report Pane during execution and uses `chatRender:
+  // ''` to suppress double-printing here. `output` stays
+  // populated so the caller can persist the full report to LMDB
+  // and feed it into response-segment indexing.
+  const renderForChat = finalized.chatRender ?? finalized.output;
+  if (renderForChat.length > 0) {
+    send({ id: requestId, stream: 'delta', data: {
+      text: renderForChat,
+      format: finalized.format,
+    } });
+  }
 
   // Write artifacts
   if (finalized.artifacts) {
