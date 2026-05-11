@@ -32,6 +32,7 @@ import {
   type SectionResult,
 } from '../../agent/content-gen/index.js';
 import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { formatRepoSizeSummary } from '../repo-summary.js';
 import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
@@ -112,6 +113,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   private _request?: string;
   private _repoSummary?: RepoSummary;
   /**
+   * Phase E.1b: full repo size + shape summary (file count, top
+   * modules, language breakdown). Pre-computed by the chat-handler
+   * before this controller boots so the scope classifier and the
+   * planner share the same ground truth. Replaces the previous
+   * one-line "closure size: N" repo descriptor that left the
+   * planner emitting generic section titles.
+   */
+  private _repoSizeSummary?: import('../repo-summary.js').RepoSizeSummary | undefined;
+  /**
    * Scope tier for this run -- captured from
    * `ControllerInput.classification.scope` in buildInitialTasks. Drives
    * the per-tier synthesis playbook. Defaults to `'M'` when the caller
@@ -142,6 +152,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   buildInitialTasks(input: ControllerInput): Task[] {
     this._request = input.message;
     this._repoSummary = this.buildRepoSummary(input);
+    this._repoSizeSummary = input.repoSizeSummary;
     this._tier = input.classification?.scope ?? 'M';
     this._parentListId = input.parentListId;
     this._rerunFromListId = input.rerunFromListId;
@@ -916,10 +927,27 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
    *           stamps via the conversation-flow-refinement helpers.
    */
   private buildSummaryContext(tier: ScopeSize): string {
-    const lines: string[] = [];
+    const parts: string[] = [];
 
-    const repoLine = this.formatRepoSummaryLine();
-    lines.push(`Active repo: ${repoLine.length > 0 ? repoLine : '(none)'} -- scope tier: ${tier}.`);
+    // Phase E.1b: lead with the detailed repo size + shape summary
+    // when available. Pre-E.1b the planner saw a single line ("Active
+    // repo: <path> -- closure size: 1 -- scope tier: M") which gave
+    // it zero signal about subsystems / languages / module sizes,
+    // and it emitted generic section titles like "Architecture &
+    // Entry Points". With the detailed block the planner can write
+    // subsystem-specific titles ("OCR Subsystem", "Legal Extraction
+    // Pipeline", "Stirling PDF Integration").
+    if (this._repoSizeSummary !== undefined && !this._repoSizeSummary.empty) {
+      parts.push('## Repo summary');
+      parts.push(formatRepoSizeSummary(this._repoSizeSummary, 'detailed'));
+      parts.push('');
+      parts.push(`Scope tier: ${tier}.`);
+    } else {
+      // Fallback to the legacy one-line shape when no E.1b summary
+      // was threaded through (cold-path callers, future re-runs).
+      const repoLine = this.formatRepoSummaryLine();
+      parts.push(`Active repo: ${repoLine.length > 0 ? repoLine : '(none)'} -- scope tier: ${tier}.`);
+    }
 
     if (this.deps !== undefined) {
       try {
@@ -940,14 +968,18 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             artifacts:     [],
             facts:         parsed.facts ?? {},
           });
-          if (memory.length > 0) lines.push(memory);
+          if (memory.length > 0) {
+            parts.push('');
+            parts.push('## Prior conversation context');
+            parts.push(memory);
+          }
         }
       } catch (err) {
         log.debug({ err: (err as Error).message }, 'buildSummaryContext: priorContext read failed (continuing)');
       }
     }
 
-    return lines.join(' ');
+    return parts.join('\n');
   }
 
   /**

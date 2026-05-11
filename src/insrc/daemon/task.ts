@@ -350,6 +350,21 @@ export interface ControllerInput {
    * Other controllers ignore the field.
    */
   rerunFromListId?: string | undefined;
+  /**
+   * Pre-computed repo size summary (Phase E.1b of
+   * plans/intent-funnel-followups.md). The chat-handler runs
+   * `getRepoSizeSummary(repoPath)` ONCE per code-analyzer turn so
+   * the scope classifier and the planner share the same ground
+   * truth without paying the graph-walk twice. The code-analyzer
+   * orchestrator reads this in `buildSummaryContext` to give the
+   * planner real signal (file counts, top modules, language
+   * breakdown) instead of "closure size: 1" -- pre-E.1b the
+   * planner had no idea it was looking at a multi-thousand-file
+   * monorepo and emitted generic section titles.
+   *
+   * Other controllers ignore the field.
+   */
+  repoSizeSummary?: import('./repo-summary.js').RepoSizeSummary | undefined;
 }
 
 export interface GateReply {

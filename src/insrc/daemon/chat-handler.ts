@@ -1440,9 +1440,38 @@ async function runCodeAnalyzerSlash(
     // go in `context` to help the model judge "single function" vs
     // "entire repo" prompts.
     let scope: import('../shared/classify.js').ScopeSize = 'M';
+    // Phase E.1a / E.1b of plans/intent-funnel-followups.md: the
+    // scope classifier and the planner BOTH need real ground truth
+    // about the repo (size, top modules, languages) -- pre-E.1 they
+    // saw only `closure size: N` and picked M for any one-sentence
+    // prompt regardless of repo complexity. Compute the summary
+    // ONCE here and stash it on the active session so the
+    // orchestrator's planner can reuse it without a second graph
+    // walk (E.1b).
+    let repoSummary: import('./repo-summary.js').RepoSizeSummary | undefined;
+    if (session.repoPath) {
+      try {
+        const { getRepoSizeSummary } = await import('./repo-summary.js');
+        repoSummary = await getRepoSizeSummary(session.repoPath);
+        // Cache on the active session entry for the orchestrator
+        // to pick up. The chat-session pool entry is keyed by
+        // session id; storing under `_repoSizeSummary` keeps the
+        // type minimal.
+        (active as { _repoSizeSummary?: import('./repo-summary.js').RepoSizeSummary })
+          ._repoSizeSummary = repoSummary;
+      } catch (err) {
+        log.warn({ err: err instanceof Error ? err.message : String(err) },
+          '[code-analyze] getRepoSizeSummary failed; scope classifier + planner will see degraded context');
+      }
+    }
     try {
+      const { formatRepoSizeSummary } = await import('./repo-summary.js');
       const repoCtxLines: string[] = [];
-      if (session.repoPath) { repoCtxLines.push(`active repo: ${session.repoPath}`); }
+      if (repoSummary !== undefined) {
+        repoCtxLines.push(formatRepoSizeSummary(repoSummary, 'compact'));
+      } else if (session.repoPath) {
+        repoCtxLines.push(`active repo: ${session.repoPath}`);
+      }
       repoCtxLines.push(`dependency closure size: ${session.closureRepos.length}`);
       const sized = await classifyScope(
         {
@@ -1484,6 +1513,11 @@ async function runCodeAnalyzerSlash(
         // the orchestrator skips planning and reconstructs from the
         // prior list's items.
         ...(rerunFromListId !== undefined ? { rerunFromListId } : {}),
+        // Phase E.1b: thread the pre-computed repo size summary so
+        // the orchestrator's planner sees real ground truth (file
+        // count, top modules, languages) instead of just the
+        // repo path + closure size.
+        ...(repoSummary !== undefined ? { repoSizeSummary: repoSummary } : {}),
       },
       deps,
     );
