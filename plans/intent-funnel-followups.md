@@ -618,6 +618,220 @@ less acute (or auto-resolve) once E.1 lands. Recommended order:
 Total: ~13 hours (revised up from 10 once the planner-context
 work was scoped honestly).
 
+**Note**: if Phase F (below) lands, most of E.5 / E.6 / E.4 fold
+naturally into the new tool-loop architecture -- they describe
+behaviours the LLM can manage itself given the right tool catalog
+and prompt. E.1a (scope tier) and E.1b (planner repo context)
+still apply to the cloud-side outline planner.
+
+---
+
+## F. Architectural shift -- replace per-section orchestration with a tool-calling loop
+
+### Diagnosis
+
+Inspection of the live LLM trace for plan item 4 of the
+insors-extraction run (llmCallId=30, the local LLM expand call)
+surfaced a deeper issue than "the evidence was thin." The
+evidence was thin because the current architecture **pre-cooks**
+it: a cloud LLM picks skills, another cloud LLM fills args, the
+skills run with truncated outputs, and the local LLM receives a
+static evidence block it can neither extend nor refine.
+
+The user's observation: this is the wrong split. The LOCAL LLM
+should know what skills exist and decide what to call, when, and
+with what args -- and iterate based on results. Ollama supports
+native tool-calling; the codebase already has the full
+infrastructure to drive this loop.
+
+### Existing infrastructure (zero gaps)
+
+| Piece | Location | State |
+|---|---|---|
+| Ollama tool-calling | [agent/providers/ollama.ts:78](src/insrc/agent/providers/ollama.ts#L78) | `supportsTools = true` with per-family quirks (qwen / mistral / devstral) |
+| Tool loop driver | [agent/tools/loop.ts:73 `runToolLoop`](src/insrc/agent/tools/loop.ts#L73) | "system + user + tool defs, loop on tool_use until text" |
+| Tool definitions | [agent/tools/registry.ts:66 `getToolDefinitions`](src/insrc/agent/tools/registry.ts#L66) | Returns the active tool catalog |
+| Skills exposed as tools | [daemon/tools/builtins/skills/invoke-skill.ts `registerSkillTools`](src/insrc/daemon/tools/builtins/skills/invoke-skill.ts) | Already wraps every registered skill as a ToolDefinition (used by 9+ skill tests) |
+| Reference implementation | [agent/tasks/shared/investigate.ts:202-214](src/insrc/agent/tasks/shared/investigate.ts#L202-L214) | Production pattern used by Pair (analyze step) + Delegate (execute-step) |
+
+### Validation against the brainstorm flow
+
+The user assumed brainstorm already followed this pattern.
+Audit result: **it does NOT**. `agent/tasks/brainstorm/*` and
+`daemon/controllers/brainstorm/*` use plain `provider.complete()`
+calls (`spec-builder.ts:29`, `ideas.ts:42`, `ideas.ts:131`) --
+same multi-step orchestrator + LLM-with-pre-cooked-context
+pattern as the analyzer. No `runToolLoop`, no tool definitions.
+
+The actual reference is [`agent/tasks/shared/investigate.ts`](src/insrc/agent/tasks/shared/investigate.ts) -- a 20-line wrapper over `runToolLoop` that gives Pair / Delegate read-only autonomous exploration. Phase F maps directly onto this pattern with the skill catalog substituted for the file-system tools.
+
+### Architecture diff
+
+| Step | Current pipeline (per section) | Phase F (per section) |
+|---|---|---|
+| Plan outline | Cloud planner: 4-8 sections w/ titles + objectives + reviewCriteria | **Same** -- no change |
+| classify-question | Cloud LLM picks 2-4 candidate skills | **REMOVED** -- LLM picks at the moment of need |
+| select-scope | Cloud LLM fills skill args | **REMOVED** -- LLM emits args in the tool-call payload |
+| Skill execution | Skills run with pre-picked args; outputs piped to expander | **Skills run as tool returns inside the loop** |
+| expand-action | Local LLM sees pre-cooked evidence; writes the section | **Local LLM in `runToolLoop`**: sees objective + tool catalog; calls skills as needed; iterates; final text response = the section |
+| review-action | Cloud LLM judges + may polish | **Same** -- quality gate stays (1 cloud call/section) |
+
+Net effect:
+- **Cloud LLM cost per section**: drops from ~3 to ~1 (just review). Planner still runs once for the whole report.
+- **Evidence quality**: LLM picks skills based on the actual section topic, drills deeper iteratively, never hits pre-cooked-evidence truncation.
+- **Local LLM workload**: increases -- multiple tool-call turns per section vs. one expand call. qwen3-coder handles this well per the existing `investigate.ts` production usage.
+
+### F.1 Wire the skill catalog as the analyzer's tool set
+
+**Where:** [daemon/tools/builtins/skills/invoke-skill.ts `registerSkillTools`](src/insrc/daemon/tools/builtins/skills/invoke-skill.ts) is already invoked at daemon boot to expose every registered skill as a ToolDefinition. The analyzer needs to fetch the *right subset* -- not every skill, just the ones relevant to code-analysis sections.
+
+**Fix:**
+1. Add a filter to `getToolDefinitions` (or a sibling `getAnalyzerToolDefinitions`) that returns the `code.source.*`, `code.entity.*`, `code.quality.*`, `code.class.*`, and `code.compare.*` skills as tools.
+2. EXCLUDE the meta skills (`code.meta.classify-question`, `code.meta.select-scope`, `data.meta.calibrate-confidence`) -- these are scaffolding for the OLD pipeline and become dead code once F.2 lands.
+3. EXCLUDE write-skills (none exist for code-analyzer today; future-proof the filter so a write-skill can't accidentally end up in the read-only tool set).
+
+**Tests:**
+- Snapshot test on the analyzer tool catalog: contains the expected ~12-15 read-only skills; excludes meta skills.
+- A `supportsTools` test against the local Ollama provider verifying it accepts the full catalog without truncation.
+
+**Effort:** 1 hr.
+
+### F.2 Replace `runMetaSkillsPipeline` with a section-writing tool loop
+
+**Where:** [daemon/controllers/code-analyzer-orchestrator.ts](src/insrc/daemon/controllers/code-analyzer-orchestrator.ts) -- find the per-action loop that today calls `runSkill` for each picked candidate then `expandAction`. Replace with a single call to a new `writeSectionWithTools` helper modelled on `investigate.ts`.
+
+**New file:** `agent/tasks/code-analyzer/write-section.ts`:
+
+```ts
+export interface SectionDraft {
+  markdown: string;
+  toolCallCount: number;
+  hitLimit: boolean;
+  toolCalls: { skillId: string; args: object; resultDigest: string }[];
+}
+
+export async function writeSectionWithTools(args: {
+  provider: LLMProvider;
+  action: PlannedAction;
+  request: string;
+  repoSummary: string;        // the same context the planner saw
+  maxToolCalls?: number;       // default 10 per section
+  onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
+}): Promise<SectionDraft> {
+  // Mirrors investigate.ts:investigate() but:
+  //   1. Tools come from getAnalyzerToolDefinitions() (skill catalog)
+  //   2. System prompt is the section-writer prompt (clickable
+  //      citations, etc.) adapted for tool-driven evidence
+  //   3. User prompt = `<request> | <action title + objective + criteria>`
+  //   4. Final text response IS the section markdown (no extra
+  //      expand-action call needed)
+  ...
+}
+```
+
+**Orchestrator changes:**
+- Delete the per-step `runMetaSkillsPipeline` loop in [code-analyzer-orchestrator.ts](src/insrc/daemon/controllers/code-analyzer-orchestrator.ts).
+- Replace with: for each `action` in the plan, call `writeSectionWithTools({ action, request, repoSummary, ... })`.
+- Reviewer (`review-action.ts`) still runs after each section -- unchanged.
+
+**Tests:**
+- Mock provider that returns canned `tool_calls` then a final text; assert: the tool calls land in the result's `toolCalls` trace, the markdown is the final text, the loop terminates on text response.
+- Integration: a 4-section plan against a fixture skill-catalog; assert: tool-loop runs once per section, no cloud LLM calls for classify-question / select-scope, the review-action still runs.
+
+**Effort:** 3 hrs.
+
+### F.3 Adapt the section-writer system prompt for tool-driven evidence
+
+**Where:** [agent/content-gen/expand-action.ts SYSTEM_PROMPT_BASE](src/insrc/agent/content-gen/expand-action.ts) -- the prompt currently assumes a pre-cooked `## Evidence` block. Strip that assumption.
+
+**Edits:**
+1. Drop the rule "Use ONLY the supplied evidence."
+2. Replace with: "Use the available tools to gather evidence as needed. Call multiple tools when the question warrants it. Stop calling tools and emit the section markdown once you have enough to satisfy the review criteria."
+3. Keep rule 5 (CLICKABLE CITATIONS) -- still applies; the path/lineStart fields come back inside tool returns instead of in a pre-cooked block.
+4. Add: "Each tool call costs latency. Prefer 2-4 well-aimed calls over 8 scattershot ones."
+
+**Tests:** prompt-string assertions in `expand-action.test.ts` (or a new `write-section.test.ts`) -- the new wording lands, the "ONLY the supplied evidence" rule is gone.
+
+**Effort:** 30 min.
+
+### F.4 Delete dead code paths
+
+Once F.2 wires the new flow:
+
+- [daemon/skills/built-ins/code.meta.classify-question.ts](src/insrc/daemon/skills/built-ins/code.meta.classify-question.ts) -- DELETE. The new flow doesn't need a "candidate skill picker" because the LLM picks at the moment of need.
+- [daemon/skills/built-ins/code.meta.select-scope.ts](src/insrc/daemon/skills/built-ins/code.meta.select-scope.ts) + [data.meta.select-scope.ts](src/insrc/daemon/skills/built-ins/data.meta.select-scope.ts) -- DELETE both. The LLM emits skill args directly in the tool-call payload.
+- `data.meta.calibrate-confidence` -- evaluate; may stay if the reviewer wants a final confidence stamp. Likely DELETE.
+- The orchestrator's `runMetaSkillsPipeline` private method -- DELETE.
+- expand-action.ts's elaborate `formatEvidenceValue` / evidence-formatting helpers -- DELETE.
+
+**Tests:** the `funnel-enforcement.test.ts` pattern (grep-based) -- assert no production module imports the deleted meta skills outside of the deletion commit.
+
+**Effort:** 2 hrs.
+
+### F.5 Live test + budget tuning + citation chain verification
+
+Run `/code-analyze describe what this repo does` against the same insors-extraction repo. Verify:
+
+1. The local LLM iterates: tool calls visible in the daemon log via the `onToolCall` callback.
+2. Tool calls are RELEVANT to the section -- e.g. for "Technology Stack", the LLM calls `code.entity.search-by-vector` for "framework imports" not just `repo.describe`.
+3. `path:` citations survive the round-trip (the LLM extracts file + lineStart from tool returns and emits clickable links).
+4. Per-section tool-call count stays under budget (cap at 8-10 per section).
+5. Cloud LLM call count drops to ~1 per section (just review-action) -- check via `llmCallId` provider field in the log.
+
+If any tool gets called >3 times in one section with similar args, the LLM is in a loop -- tune via the system prompt or the budget cap.
+
+**Effort:** 2 hrs.
+
+### F.6 (deferred) Brainstorm flow as the next tool-loop candidate
+
+Once the analyzer's Phase F lands, the brainstorm agent is the
+obvious next candidate -- it currently uses the same multi-step
+orchestrator + pre-cooked-context pattern (`spec-builder.ts:29`,
+`ideas.ts:42`, `ideas.ts:131`). Moving it to a tool-loop would
+let the spec-builder LLM call skills to ground its design ideas
+in the actual codebase rather than working from a single
+question + a static context block.
+
+**Out of scope for Phase F**; record here so it's not forgotten.
+
+### Phase F total effort
+
+| Sub-phase | Effort |
+|---|---|
+| F.1 Wire skill catalog as analyzer tool set | 1 hr |
+| F.2 Replace metaskills pipeline with `runToolLoop` | 3 hrs |
+| F.3 Adapt expand-action system prompt | 30 min |
+| F.4 Delete dead code paths | 2 hrs |
+| F.5 Live test + budget tuning | 2 hrs |
+| **Total** | **~8.5 hours** |
+
+### Sequencing Phase F vs Phase E
+
+Phase F obsoletes most of Phase E:
+
+- **E.1a (scope-sizer)**: STILL APPLIES -- the cloud planner still emits the outline, still needs scope-tier reasoning. Land it independently before or after F; small surface.
+- **E.1b (planner repo context)**: STILL APPLIES -- the planner needs repo summary to write good section objectives. Land before F.
+- **E.1c (planner prompt: name subsystems in titles)**: STILL APPLIES -- same reason.
+- **E.2 (non-empty drill-down)**: STILL APPLIES -- drill-down is the planner's job.
+- **E.3 (entry-point validator in `repo.describe`)**: STILL APPLIES -- but the LLM in F can ALSO discover entry points by calling `code.entity.search-by-vector` for "main entry CLI app". E.3 becomes lower priority.
+- **E.4 (test-source citation rule)**: SUPERSEDED by F -- the prompt now says "tool-driven evidence; cite what you fetch." The test-vs-prod nuance can be a one-line addition.
+- **E.5 (skill diversification + cache)**: PARTIALLY SUPERSEDED -- the LLM diversifies naturally. `repo.describe` caching still useful because the LLM may call it multiple times.
+- **E.6 (repo-specific identity)**: STILL APPLIES -- prompt rule about avoiding generic framings; bundles with F.3.
+
+Recommended overall sequencing:
+
+1. **E.1a + E.1b + E.1c** (cloud planner gets repo context) -- 4.5 hrs.
+2. **F.1 -> F.2 -> F.3 -> F.4 -> F.5** (tool-loop rearchitecture) -- 8.5 hrs.
+3. **E.2** (non-empty drill-down) -- 2 hrs.
+4. **E.3** (entry-point validator) -- 3 hrs, lower priority after F.
+5. **E.5 partial** (`repo.describe` caching only) -- 1 hr.
+6. **E.4 + E.6** (citation + identity polish) -- 1 hr, bundles with F.3.
+7. **D.2** (forward-to-chat) -- 2 hrs, independent.
+8. **D.1** (annotations) -- TBD, design questions still open.
+
+Total combined Phase E + F + D.2: ~22 hours of focused work,
+with the biggest unlock (F) sitting at ~8.5 hours.
+
 ---
 
 ## Sequencing
