@@ -206,3 +206,121 @@ test('resolveIntent: classifier fallback (LLM error) -> low confidence', async (
 	// SOME intent back without crashing.
 	assert.ok(typeof r.id === 'string' && r.id.length > 0);
 });
+
+// ---------------------------------------------------------------------------
+// Phase 1: slash-forced + explicit override + prefix absorption
+// ---------------------------------------------------------------------------
+
+test('resolveIntent: slashForced bypasses classifier, stamps tag, source=slash-forced', async () => {
+	let llmCalls = 0;
+	const provider: LLMProvider = {
+		async complete(): Promise<LLMResponse> {
+			llmCalls++;
+			return { text: classifierJson('research'), stopReason: 'end_turn' };
+		},
+		async *stream() { yield ''; },
+		async embed() { return []; },
+		supportsTools: false,
+	};
+	const session = makeFakeSession(provider);
+	const r = await resolveIntent(session, 'describe HDFS Core', { slashForced: 'code-analysis' });
+	assert.equal(r.id, 'code-analysis');
+	assert.equal(r.source, 'slash-forced');
+	assert.equal(r.confidence, 'high');
+	assert.equal(r.reasoning, 'forced by slash command');
+	assert.equal(llmCalls, 0, 'slash-forced must NOT call the LLM');
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), 'code-analysis');
+	assert.ok(session.contextManager.getTag(INTENT_TAG_TIMESTAMP).length > 0);
+	assert.match(session.contextManager.getTag(INTENT_TAG_LAST_RESOLVED), /slash-forced/);
+});
+
+test('resolveIntent: slashForced overrides any prior tag and records previousIntent', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('debug') }]);
+	const session  = makeFakeSession(provider);
+	session.contextManager.setTag(INTENT_TAG_CURRENT, 'research');
+
+	const r = await resolveIntent(session, 'analyse the package', { slashForced: 'code-analysis' });
+	assert.equal(r.id, 'code-analysis');
+	assert.equal(r.source, 'slash-forced');
+	assert.equal(r.previousIntent, 'research');
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), 'code-analysis',
+		'tag must be overwritten with the slash-forced intent');
+});
+
+test('resolveIntent: explicitOverride opt bypasses classifier, source=override', async () => {
+	let llmCalls = 0;
+	const provider: LLMProvider = {
+		async complete(): Promise<LLMResponse> {
+			llmCalls++;
+			return { text: classifierJson('research'), stopReason: 'end_turn' };
+		},
+		async *stream() { yield ''; },
+		async embed() { return []; },
+		supportsTools: false,
+	};
+	const session = makeFakeSession(provider);
+	const r = await resolveIntent(session, 'rewrite the auth flow', { explicitOverride: 'refactor' });
+	assert.equal(r.id, 'refactor');
+	assert.equal(r.source, 'override');
+	assert.equal(r.confidence, 'high');
+	assert.equal(r.reasoning, 'explicit override by caller');
+	assert.equal(llmCalls, 0);
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), 'refactor');
+});
+
+test('resolveIntent: /intent <name> in raw message -> source=override (parsePrefix absorbed)', async () => {
+	let llmCalls = 0;
+	const provider: LLMProvider = {
+		async complete(): Promise<LLMResponse> {
+			llmCalls++;
+			return { text: classifierJson('research'), stopReason: 'end_turn' };
+		},
+		async *stream() { yield ''; },
+		async embed() { return []; },
+		supportsTools: false,
+	};
+	const session = makeFakeSession(provider);
+	const r = await resolveIntent(session, '/intent design build a streaming pipeline');
+	assert.equal(r.id, 'design');
+	assert.equal(r.source, 'override');
+	assert.equal(r.message, 'build a streaming pipeline', 'message must be prefix-stripped');
+	assert.equal(llmCalls, 0, '/intent override must NOT call the LLM');
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), 'design');
+});
+
+test('resolveIntent: slashForced wins over /intent in raw message', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('research') }]);
+	const session  = makeFakeSession(provider);
+	const r = await resolveIntent(
+		session,
+		'/intent debug fix the loop',
+		{ slashForced: 'code-analysis' },
+	);
+	assert.equal(r.id, 'code-analysis');
+	assert.equal(r.source, 'slash-forced');
+});
+
+test('resolveIntent: /intent strips prefix BEFORE continuation heuristic so tag-reuse path still fires', async () => {
+	// Even with the @provider prefix, "now describe HDFS Core" is
+	// continuation-shaped on the stripped body. Without prefix
+	// absorption the tag-reuse path would miss it and force a cold
+	// classify.
+	let llmCalls = 0;
+	const provider: LLMProvider = {
+		async complete(): Promise<LLMResponse> {
+			llmCalls++;
+			return { text: classifierJson('research'), stopReason: 'end_turn' };
+		},
+		async *stream() { yield ''; },
+		async embed() { return []; },
+		supportsTools: false,
+	};
+	const session = makeFakeSession(provider);
+	session.contextManager.setTag(INTENT_TAG_CURRENT, 'code-analysis');
+
+	const r = await resolveIntent(session, '@local now describe HDFS Core');
+	assert.equal(r.id, 'code-analysis');
+	assert.equal(r.source, 'tag');
+	assert.equal(r.message, 'now describe HDFS Core', 'message must be prefix-stripped');
+	assert.equal(llmCalls, 0);
+});
