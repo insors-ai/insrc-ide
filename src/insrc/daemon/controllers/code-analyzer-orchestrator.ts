@@ -4,37 +4,22 @@
  *
  * State machine:
  *
- *   synthesising        -> [synthesise LLM task]
+ *   synthesising        -> [plan-expand-review-synthesise]
  *   done                  (writes list.body; the workbench-side
  *                          CodeAnalyzerFlowContribution opens the
- *                          Report Pane on the listUpdated event;
- *                          plan §2.1)
+ *                          Report Pane on the listUpdated event)
  *
- * Bootstrap markers (skills-routing / re-run / resume) drive entry;
- * synthesis is the only remaining LLM step the orchestrator owns.
- * Per-skill execution is handled by the meta-skills pipeline
- * (`runSkillsPipeline`) for free-form questions and by the legacy
- * `analysisTaskToSkillPlan` shim for re-runs of older lists.
+ * Bootstrap markers (synthesis / re-run / resume) drive entry.
+ * Free-form questions go through the planner -> per-section tool-loop
+ * pipeline (`runPlanExpandReviewSynthesise`); re-runs of older lists
+ * route through the legacy `analysisTaskToSkillPlan` shim.
  */
 
 import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
-import { buildSynthesisPrompt, buildSynthesiseSystemPrompt } from '../../agent/tasks/code-analyzer/prompts/synthesise.js';
-import {
-  buildMultipassOutlineInput,
-  makeSectionBuilder,
-  DRILL_DOWN_FALLBACK_SECTION,
-} from '../../agent/tasks/code-analyzer/prompts/synthesise-multipass.js';
-import {
-  generateMultiPass,
-  makeDiskContentCache,
-  type SectionResult,
-} from '../../agent/content-gen/index.js';
 import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
-import { expandThenReview } from '../../agent/content-gen/review-action.js';
-import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import { makeSpillHandler } from '../../agent/artifacts/spill-writer.js';
@@ -50,10 +35,7 @@ import type {
   RepoSummary,
 } from '../../agent/tasks/code-analyzer/types.js';
 import {
-  SKILLS_ROUTING_BOOTSTRAP_MARKER,
   pipelineResultToAcceptedTasks,
-  repoContextFromSummary,
-  runSkillsPipeline,
   type PerSkillExecution,
   type PriorFactsForSkills,
   type SkillsPipelineResult,
@@ -95,7 +77,16 @@ const K_PLAN_RESULT    = 'planResult';            // raw bootstrap pass-through 
 const K_PLAN_TASKS     = 'plannedTasks';          // AnalysisTask[]
 const K_ACCEPTED       = 'acceptedResults';       // {task, result}[]
 const K_HISTORY        = 'reviewHistory';         // AnalyzerResult[] pre-history
-const K_RAW_EXECUTIONS = 'rawExecutions';         // PerSkillExecution[] from skills pipeline (for plan-actions synthesis)
+
+/**
+ * Pass-through marker emitted by `buildInitialTasks` for the
+ * standard (non-rerun) entry path. The framework runs the
+ * pass-through, calls `next()` with the marker, and we transition
+ * straight into `queueSynthesise`. Phase F (2026-05-11) replaces
+ * the old `SKILLS_ROUTING_BOOTSTRAP_MARKER` which kicked off a
+ * legacy classify-question / select-scope / execute pipeline.
+ */
+const SYNTHESIS_BOOTSTRAP_MARKER = '__synthesis-bootstrap__';
 const K_PHASE          = 'phase';
 const K_SYNTH_RESULT   = 'synthResult';           // final markdown
 const K_LIST_ID        = 'listId';
@@ -189,13 +180,22 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }];
     }
 
+    // Phase F of plans/intent-funnel-followups.md: the bootstrap
+    // skills-routing pipeline (classify-question -> select-scope ->
+    // execute) is gone. The orchestrator emits a one-shot
+    // pass-through to land in `next()`, which calls queueSynthesise
+    // directly. The planner reads the repo summary (E.1b) and
+    // emits N section actions; the tool-loop section writer
+    // (write-section.ts) gathers evidence per section via
+    // `skill_invoke`; the TodoList is created from the planner's
+    // sections (no longer from bootstrap skill executions).
     return [{
       index: 0,
-      description: 'Code Analyzer: routing question through skills pipeline...',
+      description: 'Code Analyzer: planning sections...',
       kind: 'transform',
       intent: 'code-analysis',
       passThrough: true,
-      userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+      userMessage: SYNTHESIS_BOOTSTRAP_MARKER,
       outputFormat: 'text',
       stateKey: K_PLAN_RESULT,
       persisted: true,
@@ -264,8 +264,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       return this.afterResumeBootstrap(state, phase);
     }
 
-    if (completed.output.trim() === SKILLS_ROUTING_BOOTSTRAP_MARKER) {
-      return this.afterSkillsRoutingBootstrap(state);
+    if (completed.output.trim() === SYNTHESIS_BOOTSTRAP_MARKER) {
+      // Phase F: go straight to synthesise. No skills-routing
+      // pipeline upstream. The planner reads the repo summary
+      // (E.1b) and emits sections; the tool-loop writer (Phase F.2)
+      // gathers per-section evidence via skill_invoke.
+      return this.queueSynthesise(state);
     }
 
     if (completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
@@ -530,194 +534,18 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     return this.queueSynthesise(state);
   }
 
-  // -- skills-routing bootstrap (code-analyzer-skills.md Phase 8) ----------
+  // -- (removed) skills-routing bootstrap ---------------------------------
+  //
+  // The legacy `afterSkillsRoutingBootstrap` ran a
+  // classify-question / select-scope / execute / calibrate
+  // pipeline ONCE before the planner, ostensibly to populate the
+  // workbench TodoList with one item per skill execution. Phase F
+  // (2026-05-11) removed it -- the planner now reads the repo
+  // summary directly (E.1b) and the tool-loop section writer
+  // (Phase F.2) gathers per-section evidence via `skill_invoke`.
+  // TodoList items are created from the planner's section actions
+  // inside `runPlanExpandReviewSynthesise`.
 
-  /**
-   * Skills-routing path. The bootstrap pass-through emitted by
-   * `buildInitialTasks` lands here; we run `runSkillsPipeline`
-   * inline (classify-question -> select-scope -> runSkill per scoped
-   * -> calibrate-confidence), adapt the result via
-   * `pipelineResultToAcceptedTasks`, persist the TodoList, and queue
-   * the synthesise step.
-   */
-  private async afterSkillsRoutingBootstrap(state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps === undefined) {
-      log.error('afterSkillsRoutingBootstrap: deps missing');
-      return null;
-    }
-    if (this._request === undefined || this._request.length === 0) {
-      log.error('afterSkillsRoutingBootstrap: request missing');
-      return null;
-    }
-    if (this._repoSummary === undefined) {
-      log.error('afterSkillsRoutingBootstrap: repoSummary missing');
-      return null;
-    }
-
-    const ca = state.get<CodeAnalysisState>(K_STATE);
-    log.info(
-      { repo: this._repoSummary.rootPath, tier: this._tier },
-      'afterSkillsRoutingBootstrap: running meta-skills pipeline',
-    );
-
-    const session = this.deps.session;
-
-    // conversation-flow-refinement.md Phase 4: pick up the typed
-    // PriorFacts the chat-handler stamped on the session, so the
-    // meta-skills (notably code.meta.select-scope) can resolve
-    // friendly labels (e.g. "HDFS Core") to the concrete identifiers
-    // emitted by a prior turn (e.g. modulePath). Drill-down /
-    // re-run / resume entry paths legitimately have no tag, so the
-    // miss is silent.
-    const priorFacts = readPriorFactsTag(session);
-
-    // Per-skill streaming progress. The skills pipeline runs
-    // classify-question -> select-scope -> N x per-skill -> calibrate.
-    // Without these emits the chat panel sits silent for many seconds
-    // while LLM calls churn. We use the same `liveStep` bubble pattern
-    // as brainstorm + the multi-pass synthesise step here -- a single
-    // `(agent, step)` pair (`code-analyzer` / `skills`) accumulates
-    // every milestone in ONE persistent activity-console bubble. The
-    // top progress bar (`stream: 'progress'`) overwrites itself per
-    // event and is unsuitable for per-skill narrative.
-    const PIPELINE_STEP = 'skills';
-    this.emitLiveStep(PIPELINE_STEP, '');
-    this.emitLiveStep(PIPELINE_STEP, this.formatProgress('routing question through code analysis skills...') + '\n');
-    const spillHandler = makeSpillHandler(session);
-    const onSkillEndWithProgress: NonNullable<SkillRunnerDeps['onSkillEnd']> = async (payload) => {
-      try {
-        this.emitLiveStep(
-          PIPELINE_STEP,
-          this.formatProgress(progressMessageForSkillEnd(payload.skillId, payload.confidence)) + '\n',
-        );
-      } catch { /* progress is best-effort */ }
-      await spillHandler(payload);
-    };
-
-    const pipelineResult = await runSkillsPipeline(
-      {
-        question: this._request,
-        repo:     repoContextFromSummary(this._repoSummary),
-        ...(priorFacts !== undefined ? { priorFacts } : {}),
-      },
-      {
-        session,
-        resolveProvider: (affinity) => {
-          if (affinity === 'local') return session.ollamaProvider;
-          if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
-          return session.resolver.resolve('code-analyzer', 'plan');
-        },
-        // conversation-flow-refinement.md Phase 2: every skill end fires
-        // the spill writer (disk JSON + artifact_vec Lance row) AND the
-        // per-skill chat progress emit (Phase 4 follow-up).
-        onSkillEnd: onSkillEndWithProgress,
-        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      },
-    );
-
-    log.info(
-      {
-        aborted:         pipelineResult.aborted,
-        executions:      pipelineResult.executions.length,
-        finalConfidence: pipelineResult.finalConfidence,
-        notes:           pipelineResult.notes.slice(0, 3),
-      },
-      'afterSkillsRoutingBootstrap: pipeline complete',
-    );
-
-    if (pipelineResult.aborted) {
-      this.emitLiveStep(PIPELINE_STEP, this.formatProgress('pipeline aborted; producing empty report') + '\n');
-      this.emitLiveStep(PIPELINE_STEP, '', true);
-      if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: false });
-      state.set(K_PLAN_TASKS, [] as AnalysisTask[]);
-      state.set(K_ACCEPTED, [] as Array<{ task: AnalysisTask; result: AnalyzerResult }>);
-      state.set(K_HISTORY, [] as AnalyzerResult[]);
-      return this.queueSynthesise(state);
-    }
-
-    this.emitLiveStep(
-      PIPELINE_STEP,
-      this.formatProgress(`pipeline complete (${pipelineResult.executions.length} skill${pipelineResult.executions.length === 1 ? '' : 's'} run, confidence ${pipelineResult.finalConfidence}); building report...`) + '\n',
-    );
-    this.emitLiveStep(PIPELINE_STEP, '', true);
-
-    const itemPrefix = `cr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
-    const planned: AnalysisTask[] = accepted.map(a => a.task);
-    const history: AnalyzerResult[] = accepted.map(a => a.result);
-
-    // Persist the raw PerSkillExecution[] so the plan-actions
-    // synthesis (Phase 4 of plans/analyzers/cloud-plan-local-expand-
-    // cloud-review.md) sees the structured outputs the planner needs.
-    // pipelineResultToAcceptedTasks() lossily converts each execution
-    // to a string `answer`, which is fine for the legacy tier-based
-    // synthesis but starves the planner of evidence.
-    state.set(K_RAW_EXECUTIONS, pipelineResult.executions);
-
-    state.set(K_PLAN_TASKS, planned);
-    state.set(K_ACCEPTED, accepted);
-    state.set(K_HISTORY, history);
-
-    if (this.deps.todos !== undefined && ca !== undefined) {
-      const list = await this.deps.todos.createList({
-        sessionId: this.deps.session.id,
-        title: `Code Analysis: ${truncateTitle(ca.request)}`,
-        description: ca.request,
-        ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
-      });
-      const stamped: AnalysisTask[] = [];
-      for (let i = 0; i < planned.length; i++) {
-        const t = planned[i]!;
-        const item = await this.deps.todos.addItem(list.id, {
-          title: shortTitleFor(t),
-          description: t.question,
-          meta: {
-            kind: t.kind,
-            ...(t.scope !== undefined ? { scope: t.scope } : {}),
-            origin: t.origin,
-            retryCount: t.retryCount,
-          },
-        });
-        try {
-          const r = accepted[i]!.result;
-          await this.deps.todos.updateItemMeta(item.id, {
-            kind: t.kind,
-            ...(t.scope !== undefined ? { scope: t.scope } : {}),
-            origin: t.origin,
-            retryCount: 0,
-            answer:     r.answer,
-            findings:   r.findings,
-            citations:  r.citations,
-            confidence: r.confidence,
-            toolCalls:  r.toolCalls,
-          });
-          // Item state machine requires pending -> in_progress -> completed.
-          // markComplete() called on a pending item throws "illegal
-          // item-status transition 'pending' -> 'completed'" (the
-          // failure observed across all 4 items in agent.2.log).
-          await this.deps.todos.markInProgress(item.id);
-          await this.deps.todos.markComplete(item.id);
-        } catch (err) {
-          log.warn(
-            { err: (err as Error).message, itemId: item.id },
-            'afterSkillsRoutingBootstrap: failed to stamp item meta',
-          );
-        }
-        stamped.push({ ...t, itemId: item.id });
-      }
-      state.set(K_PLAN_TASKS, stamped);
-      const stampedAccepted = stamped.map((task, i) => ({
-        task,
-        result: { ...accepted[i]!.result, itemId: task.itemId },
-      }));
-      state.set(K_ACCEPTED, stampedAccepted);
-      state.set(K_HISTORY, stampedAccepted.map(a => a.result));
-      state.set(K_STATE, { ...ca, listId: list.id });
-      state.set(K_LIST_ID, list.id);
-    }
-
-    return this.queueSynthesise(state);
-  }
 
   /**
    * Build a `SkillRunnerDeps` for inline skill execution. Mirrors the
@@ -771,63 +599,61 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   private async queueSynthesise(state: TaskStateStore): Promise<Task[] | null> {
     state.set(K_PHASE, 'synthesising' as Phase);
     const ca = state.get<CodeAnalysisState>(K_STATE);
-    const planned = state.get<AnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    const accepted = state.get<Array<{ task: AnalysisTask; result: AnalyzerResult }>>(K_ACCEPTED) ?? [];
-    const rawExecutions = state.get<readonly PlanExecution[]>(K_RAW_EXECUTIONS);
     const tier = this._tier;
 
     if (this.deps === undefined) {
       log.error('queueSynthesise: deps missing -- cannot run plan stage');
-      return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
+      // No legacy fallbacks remain (Phase F). Emit a placeholder and
+      // mark the run complete so the framework doesn't hang.
+      state.set(K_SYNTH_RESULT, '_Code analysis aborted: orchestrator deps missing._');
+      await this.finalizeSynthesisedReport(state);
+      return null;
     }
 
     try {
-      const markdown = await this.runPlanExpandReviewSynthesise(
-        ca,
-        planned,
-        accepted,
-        rawExecutions ?? deriveExecutionsFromAccepted(accepted),
-        tier,
-      );
+      const markdown = await this.runPlanExpandReviewSynthesise(ca, tier, state);
       state.set(K_SYNTH_RESULT, markdown);
       await this.finalizeSynthesisedReport(state);
       return null;
     } catch (err) {
       log.warn(
         { tier, err: (err as Error).message },
-        'plan/expand/review synthesis failed; falling back to legacy multipass',
+        'plan/expand/review synthesis failed; emitting fallback report',
       );
-      try {
-        const markdown = await this.runMultipassSynthesise(ca, planned, accepted, tier);
-        state.set(K_SYNTH_RESULT, markdown);
-        await this.finalizeSynthesisedReport(state);
-        return null;
-      } catch (err2) {
-        log.warn(
-          { tier, err: (err2 as Error).message },
-          'legacy multipass also failed; falling back to single-pass LLM task',
-        );
-        return this.queueSinglePassSynthesise(ca, planned, accepted, tier);
-      }
+      state.set(
+        K_SYNTH_RESULT,
+        `_Code analysis aborted: ${(err as Error).message}._`,
+      );
+      await this.finalizeSynthesisedReport(state);
+      return null;
     }
   }
 
   /**
-   * Plan / expand / review synthesis driver. Cloud plans the
-   * sections (planActions); local drafts each one and cloud reviews
-   * with one bounded refinement round (expandThenReview); we stitch
-   * with no overall review.
+   * Phase F synthesis driver. Cloud plans the sections (planActions);
+   * local drafts each one inside a `skill_invoke` tool loop
+   * (writeSectionWithTools); cloud reviews the draft (reviewAction);
+   * we stitch with no overall review. TodoList items track sections
+   * 1:1 -- pending while waiting, in-progress while drafting,
+   * complete on review accept.
+   *
+   * No legacy fallbacks: if planActions returns empty actions we
+   * fall through to `synthesiseFallbackAction` (one generic
+   * section); any other error bubbles up to `queueSynthesise` which
+   * emits an aborted-run placeholder.
    */
   private async runPlanExpandReviewSynthesise(
     ca: CodeAnalysisState | undefined,
-    _planned: readonly AnalysisTask[],
-    accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-    _executions: readonly PlanExecution[],
     tier: ScopeSize,
+    state: TaskStateStore,
   ): Promise<string> {
     if (this.deps === undefined) {
       throw new Error('runPlanExpandReviewSynthesise: deps not attached');
     }
+    // accepted is empty under Phase F (no bootstrap pipeline) but the
+    // fallback helper accepts it for type-compat with the legacy
+    // shape.
+    const accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[] = [];
     const session = this.deps.session;
     const cloud = session.resolver.resolve('code-analyzer', 'plan');
     const local = session.ollamaProvider;
@@ -863,121 +689,153 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       `planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}`,
     );
 
-    // ----- Stage 2+3: per-action [skills pipeline + expand + review] ----
+    // Phase F: create the workbench TodoList from the PLANNER's
+    // sections (one item per planned action). Previously the
+    // bootstrap routing pipeline created items per skill execution
+    // -- that pipeline is gone, so TodoList sourcing moved here.
+    // Items start pending, transition to in-progress as each
+    // section's tool loop fires, and complete when its draft
+    // returns from the reviewer.
+    const todoItemIds: (string | undefined)[] = new Array(actions.length).fill(undefined);
+    if (this.deps.todos !== undefined && ca !== undefined) {
+      try {
+        const list = await this.deps.todos.createList({
+          sessionId: this.deps.session.id,
+          title:     `Code Analysis: ${truncateTitle(ca.request)}`,
+          description: ca.request,
+          ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
+        });
+        for (let i = 0; i < actions.length; i++) {
+          const a = actions[i]!;
+          const item = await this.deps.todos.addItem(list.id, {
+            title:       a.title,
+            description: a.objective,
+            meta:        { kind: 'plan-action', origin: 'planner', retryCount: 0 },
+          });
+          todoItemIds[i] = item.id;
+        }
+        // Surface listId via state so finalizeSynthesisedReport can
+        // stamp the rendered report onto the TodoList body when
+        // synthesis completes.
+        state.set(K_LIST_ID, list.id);
+        if (ca !== undefined) state.set(K_STATE, { ...ca, listId: list.id });
+      } catch (err) {
+        log.warn({ err: (err as Error).message }, 'TodoList creation failed (sections will still ship)');
+      }
+    }
+
+    // ----- Stage 2+3: per-action tool-loop draft + cloud review ---------
     //
-    // Phase F of plans/intent-funnel-followups.md introduces a new
-    // tool-loop section writer that replaces the pre-cooked
-    // "classify-question -> select-scope -> execute skills ->
-    // expand-action" pipeline with a single tool-calling loop where
-    // the LOCAL LLM picks skills via `skill_invoke`. Gated behind
-    // `INSRC_ANALYZER_TOOL_LOOP=1` for live verification before it
-    // becomes the default. Both paths share the planner + the
-    // reviewer; only the per-section evidence-gathering + drafting
-    // changes.
-    const useToolLoop = process.env['INSRC_ANALYZER_TOOL_LOOP'] === '1';
-    log.info({ useToolLoop, sections: actions.length }, 'per-action section writer chosen');
+    // Phase F of plans/intent-funnel-followups.md. The LOCAL LLM
+    // drives a tool-calling loop with `skill_invoke` per section --
+    // it picks skills + args itself, iterating until it has enough
+    // evidence to satisfy the review criteria. The cloud reviewer
+    // then judges + may polish the draft.
+    //
+    // The previous "classify-question -> select-scope -> pre-fetch
+    // evidence -> expand-action" cloud-orchestrated pipeline was
+    // removed (2026-05-11) along with the env-var gate that fenced
+    // it off. The failure mode the live test surfaced: select-scope
+    // ignored the section title's module path and defaulted to
+    // `<repo>/src` against repos that don't follow that layout,
+    // producing "no-files-in-module" evidence for indexed modules
+    // and forcing the writer to hedge ("appears to lack indexed
+    // files"). The tool loop avoids that by giving the writer the
+    // section title + tool catalog directly.
+    const { writeSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
+    const { reviewAction } = await import('../../agent/content-gen/review-action.js');
+    log.info({ sections: actions.length }, 'per-action tool-loop writer starting');
 
     const sections: { id: string; title: string; markdown: string }[] = [];
-    const repo = repoContextFromSummary(this._repoSummary!);
-    const priorFacts = readPriorFactsTag(session);
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i]!;
+      const itemId = todoItemIds[i];
 
-      if (useToolLoop) {
-        // Phase F path: tool-loop section writer.
-        this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via tool loop...`);
-        const { writeSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
-        // repoContext drives the skill-catalog filter (ORM / migration
-        // family gates). RepoSummary doesn't currently surface ORM
-        // detection -- pass an empty repoContext so those families
-        // get filtered out by default. Future: thread ORM detection
-        // through the indexer + RepoSummary so the section writer can
-        // see code.orm.* and code.migration.* when applicable.
-        const draft = await writeSectionWithTools({
-          provider:    local,
-          session,
-          action,
-          request,
-          repoContext: {},
-          ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-          onProgress: (msg) => {
-            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-          },
-        });
-
-        // Run the reviewer over the tool-loop draft. The reviewer
-        // sees the captured skill calls as `evidence` so it can
-        // fact-check the draft against what the LLM actually fetched.
-        const { reviewAction } = await import('../../agent/content-gen/review-action.js');
-        const reviewerEvidence: PlanExecution[] = draft.skillCalls.map(c => ({
-          skillId:    c.skillId,
-          value:      { args: c.args, output: c.resultText, errored: c.errored } as unknown,
-          confidence: c.errored ? 'low' : 'high',
-          notes:      [],
-        }));
-        const review = await reviewAction(
-          {
-            action,
-            draft: {
-              actionId:      action.id,
-              markdown:      draft.markdown,
-              tokenEstimate: Math.ceil(draft.markdown.length / 4),
-              truncated:     false,
-              degraded:      false,
-            },
-            evidence:      reviewerEvidence,
-            analyzerLabel: 'code-analyzer',
-          },
-          reviewer,
-        );
-
-        const final = review.accepted?.markdown ?? draft.markdown;
-        this.emitMilestone(
-          synthBubble,
-          `[${i + 1}/${actions.length}] "${action.title}" -- ${review.verdict} (tool-loop: ${draft.toolCallCount} skill call${draft.toolCallCount === 1 ? '' : 's'}${draft.hitLimit ? ', hit cap' : ''})`,
-        );
-        sections.push({ id: action.id, title: action.title, markdown: final });
-        continue;
+      // Transition the TodoList item to in-progress so the
+      // workbench shows a spinner / live indicator for the section
+      // we're currently working on.
+      if (itemId !== undefined && this.deps.todos !== undefined) {
+        try { await this.deps.todos.markInProgress(itemId); }
+        catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markInProgress failed (best-effort)'); }
       }
 
-      // Legacy path (default until INSRC_ANALYZER_TOOL_LOOP=1 is set).
-      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] gathering evidence for "${action.title}"...`);
+      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via tool loop...`);
 
-      // Per-step skills pipeline. The local model's classify-question
-      // + select-scope picks the tools / skills appropriate for this
-      // step's objective. The picked skills run; we adapt the
-      // pipeline result to PlanExecution[] for the expander.
-      const evidence = await this.runPerStepSkillsPipeline(action.objective, repo, priorFacts);
+      // repoContext drives the skill-catalog filter (ORM / migration
+      // family gates). RepoSummary doesn't currently surface ORM
+      // detection -- pass an empty repoContext so those families
+      // get filtered out by default. Future: thread ORM detection
+      // through the indexer + RepoSummary so the section writer can
+      // see code.orm.* and code.migration.* when applicable.
+      const draft = await writeSectionWithTools({
+        provider:    local,
+        session,
+        action,
+        request,
+        repoContext: {},
+        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+        onProgress: (msg) => {
+          this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+        },
+      });
 
-      this.emitMilestone(
-        synthBubble,
-        `[${i + 1}/${actions.length}] expanding "${action.title}" (${evidence.length} skill execution${evidence.length === 1 ? '' : 's'})...`,
-      );
-
-      const out = await expandThenReview(
+      // Run the reviewer over the tool-loop draft. The reviewer
+      // sees the captured skill calls as `evidence` so it can
+      // fact-check the draft against what the LLM actually fetched.
+      const reviewerEvidence: PlanExecution[] = draft.skillCalls.map(c => ({
+        skillId:    c.skillId,
+        value:      { args: c.args, output: c.resultText, errored: c.errored } as unknown,
+        confidence: c.errored ? 'low' : 'high',
+        notes:      [],
+      }));
+      const review = await reviewAction(
         {
           action,
-          evidence,
-          request,
-          analyzerLabel: 'code-analyzer',
-          onProgress: (phase, payload) => {
-            if (phase === 'review-1' || phase === 'review-2') {
-              const verdict = payload.kind === 'review' ? payload.result.verdict : '?';
-              this.emitLiveStep(synthBubble, this.formatProgress(`  ${action.id}: ${phase} (${verdict})`) + '\n');
-            } else if (phase === 'expand-2') {
-              this.emitLiveStep(synthBubble, this.formatProgress(`  ${action.id}: refining draft after reviewer hint`) + '\n');
-            }
+          draft: {
+            actionId:      action.id,
+            markdown:      draft.markdown,
+            tokenEstimate: Math.ceil(draft.markdown.length / 4),
+            truncated:     false,
+            degraded:      false,
           },
+          evidence:      reviewerEvidence,
+          analyzerLabel: 'code-analyzer',
         },
-        local,
         reviewer,
       );
 
+      const final = review.accepted?.markdown ?? draft.markdown;
+
+      // Stamp the section result on the TodoList item + mark complete.
+      if (itemId !== undefined && this.deps.todos !== undefined) {
+        try {
+          await this.deps.todos.updateItemMeta(itemId, {
+            kind:       'plan-action',
+            origin:     'planner',
+            retryCount: 0,
+            answer:     final,
+            findings:   [],
+            citations:  [],
+            confidence: draft.hitLimit ? 'medium' : 'high',
+            toolCalls:  draft.skillCalls.map(c => ({
+              kind:     'skill',
+              skillId:  c.skillId,
+              args:     c.args,
+              durationMs: 0,
+              status:   c.errored ? 'failed' : 'ok',
+            })),
+          });
+          await this.deps.todos.markComplete(itemId);
+        } catch (err) {
+          log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)');
+        }
+      }
+
       this.emitMilestone(
         synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- ${out.verdict} (${out.rounds} round${out.rounds === 1 ? '' : 's'})`,
+        `[${i + 1}/${actions.length}] "${action.title}" -- ${review.verdict} (${draft.toolCallCount} skill call${draft.toolCallCount === 1 ? '' : 's'}${draft.hitLimit ? ', hit cap' : ''})`,
       );
-      sections.push({ id: action.id, title: action.title, markdown: out.markdown });
+      sections.push({ id: action.id, title: action.title, markdown: final });
     }
 
     this.emitMilestone(synthBubble, 'stitching final report...');
@@ -1052,151 +910,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     }
 
     return parts.join('\n');
-  }
-
-  /**
-   * Run the meta-skills pipeline scoped to ONE plan step. The local
-   * model picks its own tools via classify-question + select-scope;
-   * the picked skills run; we adapt the pipeline result to
-   * PlanExecution[] for the expander. Errors degrade to empty
-   * evidence -- the expander handles the no-evidence case.
-   */
-  private async runPerStepSkillsPipeline(
-    objective: string,
-    repo: ReturnType<typeof repoContextFromSummary>,
-    priorFacts: PriorFactsForSkills | undefined,
-  ): Promise<readonly PlanExecution[]> {
-    if (this.deps === undefined) return [];
-    const session = this.deps.session;
-    try {
-      const result = await runSkillsPipeline(
-        {
-          question: objective,
-          repo,
-          ...(priorFacts !== undefined ? { priorFacts } : {}),
-        },
-        {
-          session,
-          resolveProvider: (affinity) => {
-            if (affinity === 'local') return session.ollamaProvider;
-            if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
-            return session.resolver.resolve('code-analyzer', 'plan');
-          },
-          onSkillEnd: makeSpillHandler(session),
-          ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-        },
-      );
-      return result.executions.map(e => ({
-        skillId:    e.skillId,
-        value:      e.value,
-        confidence: e.confidence,
-        notes:      e.notes,
-      }));
-    } catch (err) {
-      log.warn({ objective, err: (err as Error).message }, 'runPerStepSkillsPipeline: failed; expander will see no evidence');
-      return [];
-    }
-  }
-
-  private queueSinglePassSynthesise(
-    ca: CodeAnalysisState | undefined,
-    planned: readonly AnalysisTask[],
-    accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-    tier: ScopeSize,
-  ): Task[] {
-    const messages = buildSynthesisPrompt(ca?.request ?? '', accepted, planned, tier);
-    const userMessage = messages
-      .filter(m => m.role === 'user')
-      .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
-      .join('\n\n');
-    return [{
-      index: 200,
-      description: `Code Analyzer: composing report (tier ${tier})...`,
-      kind: 'llm',
-      intent: 'code-analysis',
-      systemPrompt: buildSynthesiseSystemPrompt(tier),
-      userMessage,
-      resolverAgent: 'code-analyzer',
-      resolverStep: 'synthesise',
-      providerHint: 'local',
-      temperature: 0.2,
-      maxTokens: 4000,
-      stateKey: K_SYNTH_RESULT,
-      persisted: true,
-    }];
-  }
-
-  /**
-   * Multi-pass synthesis (Phase 5.C / content-gen consumer). Outline
-   * pass plans the section list; pass-2 drafts each section body
-   * within a bounded token budget; the stitcher assembles the final
-   * markdown. The drill-down footer is added synthetically when the
-   * outline LLM omits it -- the Report Pane footer parser depends
-   * on it.
-   */
-  private async runMultipassSynthesise(
-    ca: CodeAnalysisState | undefined,
-    planned: readonly AnalysisTask[],
-    accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-    tier: ScopeSize,
-  ): Promise<string> {
-    if (this.deps === undefined) {
-      throw new Error('runMultipassSynthesise: deps not attached');
-    }
-    const provider = this.deps.session.resolver.resolve('code-analyzer', 'synthesise');
-    const request = ca?.request ?? '';
-    const repoSnapshotId = ca?.repoSummary.repoSnapshotId ?? '';
-
-    const outlineInput = buildMultipassOutlineInput(request, accepted, planned, tier);
-    const sectionBuild = makeSectionBuilder(request, accepted, tier);
-
-    const synthStep = 'synthesise (multi-pass)';
-    this.emitLiveStep(synthStep, '');
-    this.emitLiveStep(synthStep, this.formatProgress('multi-pass synthesis: planning sections...') + '\n');
-
-    const result = await generateMultiPass(
-      {
-        outline: {
-          system: outlineInput.system,
-          user:   outlineInput.user,
-          maxSections: outlineInput.maxSections,
-          maxTokens:   outlineInput.maxTokens,
-        },
-        section: {
-          build: sectionBuild,
-          defaultBudgetTokens: 4000,
-        },
-        parallel: true,
-        cache: makeDiskContentCache({
-          dir: PATHS.codeAnalyzerSectionCache,
-        }),
-        cacheContext: repoSnapshotId,
-        onSectionComplete: (s: SectionResult) => {
-          const note = s.note ? ` (${s.note})` : '';
-          const status = s.fallback ? 'degraded' : 'ok';
-          this.emitLiveStep(synthStep, this.formatProgress(`section "${s.id}" ${status}${note}`) + '\n');
-        },
-        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      },
-      provider,
-    );
-
-    if (result.degraded) {
-      log.info(
-        { tier, sections: result.sections.length, anyFallback: result.sections.some(s => s.fallback) },
-        'multipass synthesis: degraded result accepted',
-      );
-    }
-    this.emitLiveStep(synthStep, '', true);
-
-    const hasDrillDown = result.outline.sections.some(s =>
-      s.id === DRILL_DOWN_FALLBACK_SECTION.id || /drill[-\s]?down/i.test(s.title),
-    );
-    if (!hasDrillDown) {
-      log.info({ tier }, 'multipass: outline missing drill-down section; appending synthetic footer');
-      return appendSyntheticDrillDown(result.markdown, request, accepted);
-    }
-    return result.markdown;
   }
 
   /**
@@ -1404,35 +1117,6 @@ function readPriorFactsTag(
 
 export const _readPriorFactsTagForTest = readPriorFactsTag;
 
-/**
- * Translate a skill-end event into a one-line user-facing message
- * for the chat-panel progress strip. Meta-skills (classify-question,
- * select-scope, calibrate-confidence) get their own milestone copy;
- * everything else gets a generic "Completed: <id>" so newly-added
- * skills surface automatically.
- */
-function progressMessageForSkillEnd(
-  skillId: string,
-  confidence: import('../skills/types.js').SkillConfidence,
-): string {
-  switch (skillId) {
-    case 'code.meta.classify-question':
-      return confidence === 'low'
-        ? 'Could not route the question to any code analysis skill -- proceeding without scoped skills'
-        : 'Routed question to candidate skills';
-    case 'code.meta.select-scope':
-      return confidence === 'low'
-        ? 'Could not resolve scope for selected skills'
-        : 'Resolved skill arguments and scope';
-    case 'code.meta.calibrate-confidence':
-      return `Calibrated final confidence: ${confidence}`;
-    default: {
-      // Trim the family prefix for compactness: "code.entity.summary" -> "entity.summary"
-      const short = skillId.startsWith('code.') ? skillId.slice('code.'.length) : skillId;
-      return `Completed: ${short} (${confidence})`;
-    }
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Plan / expand / review synthesis helpers (Phase 4 of
@@ -1463,24 +1147,6 @@ function synthesiseFallbackAction(
   };
 }
 
-/**
- * Adapter for re-run / resume paths that don't carry the original
- * `PerSkillExecution[]` (e.g. when reconstructing from a prior
- * TodoList). Synthesises a degraded `PlanExecution[]` from the
- * post-processed `AnalyzerResult.answer` text so the planner still
- * has something to chew on. Loses precision compared to the raw
- * structured value the live path supplies, but keeps re-runs working.
- */
-function deriveExecutionsFromAccepted(
-  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-): readonly PlanExecution[] {
-  return accepted.map(a => ({
-    skillId:    a.task.kind === 'free-form' ? a.task.question.replace(/^\[skill\]\s*/, '') : a.task.kind,
-    value:      a.result.answer,
-    confidence: a.result.confidence,
-    notes:      [],
-  }));
-}
 
 /**
  * Stitch the planner's intent brief + per-action sections into the
@@ -1539,9 +1205,9 @@ function stitchPlanSections(
 // ---------------------------------------------------------------------------
 
 /**
- * Build a `PerSkillExecution` from a `SkillResult`. Mirrors the
- * adapter shape used by `runSkillsPipeline` so both code paths feed
- * `pipelineResultToAcceptedTasks` with identical entries.
+ * Build a `PerSkillExecution` from a `SkillResult`. Used by the
+ * re-run path (`afterRerunBootstrap`) to feed
+ * `pipelineResultToAcceptedTasks` for legacy task replays.
  */
 function executionFromSkillResult(
   skillId: string,
@@ -1738,52 +1404,6 @@ function buildFallbackTaskFromRequest(request: string): AnalysisTask[] {
     origin: 'plan',
     retryCount: 0,
   }];
-}
-
-/**
- * Tail-append a synthetic `## Drill down` section to a stitched
- * multipass report when the outline LLM didn't plan one.
- */
-function appendSyntheticDrillDown(
-  markdown: string,
-  request: string,
-  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-): string {
-  const lines: string[] = [markdown.replace(/\s+$/, ''), '', '## Drill down', ''];
-  const candidates = pickDrillDownCandidates(request, accepted);
-  if (candidates.length === 0) {
-    lines.push('_No drill-down candidates available; rephrase the original prompt to dig deeper._');
-  } else {
-    for (const c of candidates) {
-      const scope = c.scope.length > 0 ? ` -- scope: \`${c.scope}\`` : '';
-      lines.push(`- **${c.question}**${scope}`);
-    }
-  }
-  return lines.join('\n') + '\n';
-}
-
-function pickDrillDownCandidates(
-  _request: string,
-  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-): Array<{ question: string; scope: string }> {
-  const out: Array<{ question: string; scope: string }> = [];
-  const seen = new Set<string>();
-  for (const { task, result } of accepted) {
-    if (out.length >= 3) {
-      break;
-    }
-    const firstCitation = result.citations[0];
-    const scope = firstCitation && typeof firstCitation === 'object' && 'path' in firstCitation
-      ? String((firstCitation as { path: string }).path)
-      : '';
-    const question = `Dig deeper on ${task.kind}: ${task.question}`;
-    if (seen.has(question)) {
-      continue;
-    }
-    seen.add(question);
-    out.push({ question, scope });
-  }
-  return out;
 }
 
 function readGitHeadSnapshotId(rootPath: string): string {
