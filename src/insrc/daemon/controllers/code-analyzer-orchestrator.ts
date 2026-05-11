@@ -864,11 +864,83 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     );
 
     // ----- Stage 2+3: per-action [skills pipeline + expand + review] ----
+    //
+    // Phase F of plans/intent-funnel-followups.md introduces a new
+    // tool-loop section writer that replaces the pre-cooked
+    // "classify-question -> select-scope -> execute skills ->
+    // expand-action" pipeline with a single tool-calling loop where
+    // the LOCAL LLM picks skills via `skill_invoke`. Gated behind
+    // `INSRC_ANALYZER_TOOL_LOOP=1` for live verification before it
+    // becomes the default. Both paths share the planner + the
+    // reviewer; only the per-section evidence-gathering + drafting
+    // changes.
+    const useToolLoop = process.env['INSRC_ANALYZER_TOOL_LOOP'] === '1';
+    log.info({ useToolLoop, sections: actions.length }, 'per-action section writer chosen');
+
     const sections: { id: string; title: string; markdown: string }[] = [];
     const repo = repoContextFromSummary(this._repoSummary!);
     const priorFacts = readPriorFactsTag(session);
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i]!;
+
+      if (useToolLoop) {
+        // Phase F path: tool-loop section writer.
+        this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via tool loop...`);
+        const { writeSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
+        // repoContext drives the skill-catalog filter (ORM / migration
+        // family gates). RepoSummary doesn't currently surface ORM
+        // detection -- pass an empty repoContext so those families
+        // get filtered out by default. Future: thread ORM detection
+        // through the indexer + RepoSummary so the section writer can
+        // see code.orm.* and code.migration.* when applicable.
+        const draft = await writeSectionWithTools({
+          provider:    local,
+          session,
+          action,
+          request,
+          repoContext: {},
+          ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+          onProgress: (msg) => {
+            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+          },
+        });
+
+        // Run the reviewer over the tool-loop draft. The reviewer
+        // sees the captured skill calls as `evidence` so it can
+        // fact-check the draft against what the LLM actually fetched.
+        const { reviewAction } = await import('../../agent/content-gen/review-action.js');
+        const reviewerEvidence: PlanExecution[] = draft.skillCalls.map(c => ({
+          skillId:    c.skillId,
+          value:      { args: c.args, output: c.resultText, errored: c.errored } as unknown,
+          confidence: c.errored ? 'low' : 'high',
+          notes:      [],
+        }));
+        const review = await reviewAction(
+          {
+            action,
+            draft: {
+              actionId:      action.id,
+              markdown:      draft.markdown,
+              tokenEstimate: Math.ceil(draft.markdown.length / 4),
+              truncated:     false,
+              degraded:      false,
+            },
+            evidence:      reviewerEvidence,
+            analyzerLabel: 'code-analyzer',
+          },
+          reviewer,
+        );
+
+        const final = review.accepted?.markdown ?? draft.markdown;
+        this.emitMilestone(
+          synthBubble,
+          `[${i + 1}/${actions.length}] "${action.title}" -- ${review.verdict} (tool-loop: ${draft.toolCallCount} skill call${draft.toolCallCount === 1 ? '' : 's'}${draft.hitLimit ? ', hit cap' : ''})`,
+        );
+        sections.push({ id: action.id, title: action.title, markdown: final });
+        continue;
+      }
+
+      // Legacy path (default until INSRC_ANALYZER_TOOL_LOOP=1 is set).
       this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] gathering evidence for "${action.title}"...`);
 
       // Per-step skills pipeline. The local model's classify-question
