@@ -3031,11 +3031,17 @@ async function persistTurn(
     const embedding = await session.contextManager.embedQuery(userMessage);
     await session.contextManager.recordTurn(turnRecord, embedding);
 
+    // Snapshot turn metadata BEFORE the index bump -- needed for
+    // both the RPC payload and the response-segment indexing hook.
+    const sessionId = session.id ?? 'unknown';
+    const turnIdx   = session.turnIndex;
+    const turnId    = `${sessionId}:${turnIdx}`;
+
     // 2. Persist to DB via RPC (fire-and-forget)
     const { rpc: cliRpc } = await import('../cli/client.js');
     await cliRpc('conversation.saveTurn', {
-      sessionId: session.id ?? 'unknown',
-      idx: session.turnIndex,
+      sessionId,
+      idx: turnIdx,
       user: userMessage,
       assistant: assistantResponse,
       entities: entityIds,
@@ -3048,11 +3054,11 @@ async function persistTurn(
     });
 
     // 3. On first turn, save session with a human-readable title
-    if (session.turnIndex === 0) {
+    if (turnIdx === 0) {
       const title = generateSessionTitle(userMessage);
       try {
         await cliRpc('conversation.saveSession', {
-          id: session.id ?? 'unknown',
+          id: sessionId,
           repo: session.repoPath,
           summary: title,
           seenEntities: entityIds,
@@ -3066,8 +3072,73 @@ async function persistTurn(
 
     session.turnIndex++;
     log.debug({ sessionId: session.id, idx: session.turnIndex, entities: entityIds.length }, 'turn persisted + context updated');
+
+    // 4. Index the assistant response into response_segment_vec for
+    //    the intent classifier's memory retrieval (Phase 2 of
+    //    plans/intent-classification-consolidation.md). Best-effort:
+    //    embed failures (Ollama down) drop the row; we never block
+    //    the chat path on this. Runs AFTER the LMDB save so a crash
+    //    in the chunker can't roll back the turn write.
+    void indexResponseSegments({
+      sessionId,
+      turnId,
+      assistantResponse,
+    });
   } catch (err) {
     // Fire-and-forget — don't fail the chat on persistence errors
     log.debug({ err }, 'failed to persist turn');
+  }
+}
+
+/**
+ * Best-effort fan-out: chunk the assistant response, embed each
+ * chunk, upsert into `response_segment_vec`. Returns silently on
+ * any failure (Ollama unavailable, Lance error, etc.) since the
+ * conversation has already been persisted to LMDB.
+ *
+ * Empty responses produce zero rows. Embeddings that come back
+ * empty (Ollama unreachable) are skipped, not stored as empty
+ * vectors -- otherwise ANN over zero vectors would degenerate.
+ */
+async function indexResponseSegments(args: {
+  sessionId: string;
+  turnId:    string;
+  assistantResponse: string;
+}): Promise<void> {
+  try {
+    if (args.assistantResponse.trim().length === 0) return;
+    const { chunkResponseForRetrieval } = await import('../agent/intent/response-chunker.js');
+    const chunks = chunkResponseForRetrieval(args.assistantResponse);
+    if (chunks.length === 0) return;
+
+    const { embedText } = await import('../indexer/embedder.js');
+    const ts = BigInt(Date.now());
+    const rows = await Promise.all(chunks.map(async c => {
+      const vec = await embedText(c.text);
+      return vec.length === 0 ? null : {
+        id:         `${args.turnId}:${c.idx}`,
+        embedding:  new Float32Array(vec),
+        sessionId:  args.sessionId,
+        turnId:     args.turnId,
+        segmentIdx: c.idx,
+        text:       c.text,
+        timestamp:  ts,
+      };
+    }));
+    const valid = rows.filter((r): r is NonNullable<typeof r> => r !== null);
+    if (valid.length === 0) {
+      log.debug({ turnId: args.turnId }, 'response-segment indexing produced zero rows (all embeds empty)');
+      return;
+    }
+
+    const { upsertResponseSegmentVecBatch } = await import('../db/lance/response-segment-vec.js');
+    await upsertResponseSegmentVecBatch(valid);
+    log.debug({
+      turnId: args.turnId,
+      chunks: chunks.length,
+      stored: valid.length,
+    }, 'response segments indexed');
+  } catch (err) {
+    log.debug({ err, turnId: args.turnId }, 'response-segment indexing failed (continuing)');
   }
 }
