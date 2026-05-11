@@ -127,6 +127,52 @@ export async function searchTurnVecs(
 	}));
 }
 
+export interface SearchTurnsBySessionOpts {
+	sessionId: string;
+	limit:     number;
+	/** Default: ['turn','directive','merged'] -- mirrors searchTurnVecs */
+	types?:    readonly string[];
+}
+
+/**
+ * ANN search restricted to a single session. Used by the intent
+ * resolver's classifier-memory retrieval (Phase 3 of
+ * plans/intent-classification-consolidation.md): "find prior turns
+ * in THIS conversation similar to the user's current message".
+ *
+ * Repo is intentionally NOT a filter here -- the question we're
+ * answering is "what's in this session's history", which is a
+ * narrower scope than the per-repo cross-session search above.
+ */
+export async function searchTurnVecsBySession(
+	queryVec: number[],
+	opts: SearchTurnsBySessionOpts,
+): Promise<TurnVecHit[]> {
+	if (queryVec.length === 0 || opts.sessionId === '') return [];
+	const table = await getTurnVecTable();
+	const types = opts.types ?? ['turn', 'directive', 'merged'];
+	const typeList = types.map(t => `'${escapeLanceString(t)}'`).join(', ');
+
+	const conditions: string[] = [
+		`sessionId = '${escapeLanceString(opts.sessionId)}'`,
+		`type IN (${typeList})`,
+		"id != '_seed_turn_vec'",
+	];
+
+	const rows = await table.search(queryVec)
+		.limit(opts.limit)
+		.where(conditions.join(' AND '))
+		.toArray();
+	return rows.map(r => ({
+		id:        r['id']        as string,
+		repo:      r['repo']      as string,
+		sessionId: r['sessionId'] as string,
+		type:      r['type']      as string,
+		tier:      r['tier']      as string,
+		distance:  Number(r['_distance']),
+	}));
+}
+
 /**
  * Bulk-fetch turn embeddings by id. Returns a map id -> Float32Array;
  * ids without a Lance row are absent from the result.
