@@ -3,7 +3,8 @@ import type { Intent } from '../shared/types.js';
 import { loadConfigWithKeys } from './config.js';
 import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
-import { classifyPrimaryIntent } from './classify/intent.js';
+import { resolveIntent } from './intent/resolver.js';
+import { parsePrefix } from './prefix.js';
 import { selectProvider } from './router.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
@@ -167,9 +168,19 @@ export async function runOneShot(
     classifyMessage = `@anthropic ${classifyInput}`;
   }
 
-  // Classify (honours /intent + @provider prefixes, uses the
-  // session's classifier provider cascade).
-  const classified = await classifyPrimaryIntent(classifyMessage, session);
+  // Phase 7 of plans/intent-classification-consolidation.md: route
+  // through the single resolveIntent funnel. parsePrefix runs again
+  // here just to extract the @provider override (resolveIntent
+  // absorbs /intent <name> internally but doesn't surface the
+  // @provider piece because that's a provider-routing concern, not
+  // an intent concern). Both passes are idempotent on the prefix.
+  const resolved = await resolveIntent(session, classifyMessage);
+  const explicitFromPrefix = parsePrefix(classifyMessage).explicit;
+  const classified = {
+    intent:    resolved.id,
+    message:   resolved.message,
+    explicit:  explicitFromPrefix,
+  };
 
   // Force --claude if flag set but no @anthropic prefix was used
   let explicit = classified.explicit;

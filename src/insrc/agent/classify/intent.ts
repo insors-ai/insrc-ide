@@ -1,15 +1,26 @@
 /**
- * Primary-intent classification wrapper.
+ * Primary-intent classification -- INTERNAL implementation only.
  *
- * Thin glue between the generic `classify()` module and the top-level
- * chat pipeline: handles the `/intent` + `@provider` prefix overrides
- * (which bypass LLM classification entirely) and returns the unified
- * shape all callers (chat-handler, agent/index, agent/cli) expect.
+ * **STANDING RULE** (plans/intent-classification-consolidation.md,
+ * Phase 7): the SOLE legal caller of `classifyPrimaryIntent` is
+ * `agent/intent/resolver.ts:resolveIntent`. New code that wants to
+ * pick an intent for a user message imports `resolveIntent` from
+ * `agent/intent/resolver.ts`. No other module classifies intent.
  *
- * The wrapper exists because prefix parsing is a pipeline concern that
- * shouldn't leak into the generic classifier. Without it every caller
- * would have to duplicate the same "parse prefixes, skip LLM if
- * override set" dance.
+ * The function stays exported (not module-private) because the
+ * regression suite in `__tests__/intent.test.ts` exercises its
+ * prompt rendering directly. CI enforces the rule via a grep-based
+ * assert in `__tests__/funnel-enforcement.test.ts`: any production
+ * module outside the resolver that imports this function fails
+ * the build.
+ *
+ * Historical note: before Phase 6 this function was called from
+ * three additional places (daemon/chat-handler.ts:1803,
+ * agent/cli.ts:172, agent/index.ts:284). Each had its own subset
+ * of context (active repo / prior intent tag / memory) and drifted
+ * independently -- the trigger bug ("elaborate on X" misclassified
+ * as research) lived in exactly that drift. The resolver is now
+ * the single funnel; this module is its implementation detail.
  */
 
 import type { ExplicitProvider, Intent } from '../../shared/types.js';

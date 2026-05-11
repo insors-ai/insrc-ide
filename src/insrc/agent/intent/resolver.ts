@@ -381,7 +381,7 @@ function stampIntentTags(
 // Continuation heuristic
 // ---------------------------------------------------------------------------
 
-const CONTINUATION_LEAD = /^(?:now|then|next|also|and|so|what about|how about|tell me about|show me|describe|drill into|what does|why does|why is|why|how|where|which)\b/i;
+const CONTINUATION_LEAD = /^(?:now|then|next|also|and|so|what about|how about|tell me about|show me|describe|drill into|elaborate(?:\s+on)?|expand(?:\s+on)?|summari[sz]e|explain|walk me through|continue|go on|more|what does|why does|why is|why|how|where|which)\b/i;
 
 const ANAPHORIC_TOKEN = /\b(?:it|its|that|this|those|these|the same|same|previous|last(?:\s+one)?|above|before|earlier|prior|here)\b/i;
 

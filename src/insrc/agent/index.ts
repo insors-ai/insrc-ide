@@ -5,7 +5,8 @@ import { PATHS } from '../shared/paths.js';
 import { loadConfigWithKeys } from './config.js';
 import { Session } from './session.js';
 import { ensureAgentModel } from './lifecycle.js';
-import { classifyPrimaryIntent } from './classify/intent.js';
+import { resolveIntent } from './intent/resolver.js';
+import { parsePrefix } from './prefix.js';
 import { selectProvider } from './router.js';
 import { getToolDefinitions } from './tools/registry.js';
 import { runToolLoop } from './tools/loop.js';
@@ -278,10 +279,18 @@ export async function startRepl(cwd?: string): Promise<void> {
     // Use cleaned message (without file paths) for classification if attachments found
     const classifyInput = attachments.length > 0 ? messageWithoutPaths || raw : raw;
 
-    // Classify intent and select provider. `classifyPrimaryIntent`
-    // honours the /intent + @provider prefixes and uses the session's
-    // classifier provider (per-step -> active cloud -> local cascade).
-    const classified = await classifyPrimaryIntent(classifyInput, session);
+    // Phase 7 of plans/intent-classification-consolidation.md: every
+    // intent classification goes through resolveIntent. parsePrefix
+    // is called separately to extract the @provider override that
+    // ResolvedIntent doesn't surface (provider routing is a separate
+    // concern from intent classification).
+    const resolved = await resolveIntent(session, classifyInput);
+    const explicitFromPrefix = parsePrefix(classifyInput).explicit;
+    const classified = {
+      intent:   resolved.id,
+      message:  resolved.message,
+      explicit: explicitFromPrefix,
+    };
     const route = selectProvider(classified.intent, classified.explicit, {
       ollamaProvider: session.ollamaProvider,
       cloudProvider: session.claudeProvider,

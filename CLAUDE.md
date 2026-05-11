@@ -159,6 +159,14 @@ source ~/.insors && npx tsx scripts/test-ollama-bash.ts     # ollama tool-callin
 - Daemon communicates via JSON-RPC over Unix socket at `~/.insrc/daemon.sock`
 - CLI/agent never opens LMDB or LanceDB directly — always goes through daemon IPC
 
+### Intent classification (single funnel)
+- **Every intent classification goes through `resolveIntent(session, message)`** in `agent/intent/resolver.ts`. No other module classifies user-message intent.
+- Slash dispatchers (`/code-analyze`, `/data-analyze`, `/<intent-slash>`) call `resolveIntent(session, prompt, { slashForced: <intent> })` so the `[intent:current]` tag stamps consistently with the regular path
+- The decomposer splits messages STRUCTURALLY only -- its `intent` field is advisory and gets overwritten by the resolver via `resolveActionIntents` before downstream code reads it
+- Cold-classify path (inside `resolveIntent`) pulls a memory bundle (top-3 most-relevant prior turns + top-3 prior response segments via ANN over `turn_vec` + `response_segment_vec`) and emits a typed `relationship` (`NEW` / `FOLLOWUP` / `DRILL_DOWN` / `RESPONSE_TO` / `CONTINUATION` / `CORRECTION` / `COMPARE_WITH` / `TANGENT`) with citation refs
+- `[intent:current]` tag is written EXCLUSIVELY by the resolver. Two grep-based CI asserts in `agent/intent/__tests__/funnel-enforcement.test.ts` pin both rules
+- New code that wants to know the intent of a user message imports `resolveIntent`. New code that wants to know how the prompt relates to prior turns reads `resolved.relationship`. See `plans/intent-classification-consolidation.md`
+
 ### Context management
 - 5-layer budget system (L1 system, L2 summary, L3a recent, L3b semantic, L4 task, L5 response)
 - Context is assembled per-turn from graph queries, not raw file dumps
