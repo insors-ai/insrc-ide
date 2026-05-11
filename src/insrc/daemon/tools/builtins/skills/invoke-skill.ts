@@ -145,9 +145,12 @@ function resolveProviderForAffinity(
  */
 function renderSkillResultAsToolResult(skillId: string, result: SkillResult): ToolResult {
   const skill = getSkill(skillId);
+  const rejectionSuffix = result.rejectionReason !== undefined
+    ? ` -- rejection: \`${result.rejectionReason}\``
+    : '';
   const headline = skill !== undefined
-    ? `**skill:${skillId}** (${skill.family} / ${skill.owner}) -- confidence: \`${result.confidence}\``
-    : `**skill:${skillId}** -- confidence: \`${result.confidence}\``;
+    ? `**skill:${skillId}** (${skill.family} / ${skill.owner}) -- confidence: \`${result.confidence}\`${rejectionSuffix}`
+    : `**skill:${skillId}** -- confidence: \`${result.confidence}\`${rejectionSuffix}`;
 
   const lines: string[] = [headline, ''];
 
@@ -202,6 +205,7 @@ function renderSkillResultAsToolResult(skillId: string, result: SkillResult): To
       toolCalls: result.toolCalls,
       subSkillCalls: result.subSkillCalls ?? [],
       truncated: result.truncated === true,
+      ...(result.rejectionReason !== undefined ? { rejectionReason: result.rejectionReason } : {}),
     },
   };
 }

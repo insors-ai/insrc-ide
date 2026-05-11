@@ -307,7 +307,7 @@ function splitMessages(messages: LLMMessage[]): {
 
 /**
  * Convert our ContentBlock[] to Anthropic SDK content blocks.
- * Supports text, image (base64), and document (base64 PDF) blocks.
+ * Supports text, image, document, tool_use, and tool_result blocks.
  */
 function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam[] {
   return blocks.map((block): Anthropic.ContentBlockParam => {
@@ -331,6 +331,20 @@ function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam
             media_type: block.mediaType as 'application/pdf',
             data: block.data,
           },
+        };
+      case 'tool_use':
+        return {
+          type: 'tool_use',
+          id: block.id,
+          name: block.name,
+          input: block.input as Record<string, unknown>,
+        };
+      case 'tool_result':
+        return {
+          type: 'tool_result',
+          tool_use_id: block.tool_use_id,
+          content: block.content,
+          ...(block.isError === true ? { is_error: true } : {}),
         };
     }
   });

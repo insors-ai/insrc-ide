@@ -89,22 +89,50 @@ export class MistralProvider implements LLMProvider {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function toMistralMessages(messages: LLMMessage[]): any[] {
-  return messages.map(m => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out: any[] = [];
+  for (const m of messages) {
     if (typeof m.content === 'string') {
-      return { role: m.role, content: m.content };
+      out.push({ role: m.role, content: m.content });
+      continue;
     }
-    // Mistral supports text-only primarily; images/PDFs fall back to a warning.
+    // Mistral chat API: text content + optional tool_calls / tool role.
     const textParts: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolCalls: any[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const toolResults: any[] = [];
     let hadBinary = false;
     for (const block of m.content) {
       if (block.type === 'text') textParts.push(block.text);
-      else hadBinary = true;
+      else if (block.type === 'tool_use') {
+        toolCalls.push({
+          id: block.id,
+          type: 'function',
+          function: { name: block.name, arguments: JSON.stringify(block.input) },
+        });
+      } else if (block.type === 'tool_result') {
+        toolResults.push({
+          role: 'tool',
+          content: block.isError === true ? `[error] ${block.content}` : block.content,
+          tool_call_id: block.tool_use_id,
+        });
+      } else hadBinary = true;
+    }
+    if (toolResults.length > 0) {
+      for (const tr of toolResults) out.push(tr);
+      continue;
     }
     const content = textParts.join('\n') + (hadBinary
       ? '\n\n[Binary attachment -- not forwarded to Mistral; use a vision-capable provider or switch active provider]'
       : '');
-    return { role: m.role, content };
-  });
+    if (m.role === 'assistant' && toolCalls.length > 0) {
+      out.push({ role: 'assistant', content, toolCalls });
+    } else {
+      out.push({ role: m.role, content });
+    }
+  }
+  return out;
 }
 
 function toMistralTools(tools: ToolDefinition[]): Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }> {

@@ -784,12 +784,29 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       });
 
       const reviewDraft = async (d: typeof draft) => {
-        const reviewerEvidence: PlanExecution[] = d.skillCalls.map(c => ({
-          skillId:    c.skillId,
-          value:      { args: c.args, output: c.resultText, errored: c.errored } as unknown,
-          confidence: c.errored ? 'low' : 'high',
-          notes:      [],
-        }));
+        // Fix 11.8: partition the captured calls into successful
+        // evidence (used for scoring) and failed calls (CONTEXT
+        // only -- so the reviewer doesn't refine just because the
+        // writer's first invocation got rejected on schema).
+        const reviewerEvidence: PlanExecution[] = [];
+        const failedCalls: import('../../agent/content-gen/review-action.js').FailedToolCall[] = [];
+        for (const c of d.skillCalls) {
+          if (c.errored) {
+            failedCalls.push({
+              skillId:           c.skillId,
+              args:              c.args,
+              output:            c.resultText,
+              ...(c.rejectionReason !== undefined ? { rejectionReason: c.rejectionReason } : {}),
+            });
+          } else {
+            reviewerEvidence.push({
+              skillId:    c.skillId,
+              value:      { args: c.args, output: c.resultText } as unknown,
+              confidence: 'high',
+              notes:      [],
+            });
+          }
+        }
         return reviewAction(
           {
             action,
@@ -801,6 +818,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               degraded:      false,
             },
             evidence:      reviewerEvidence,
+            ...(failedCalls.length > 0 ? { failedCalls } : {}),
             analyzerLabel: 'code-analyzer',
           },
           reviewer,
@@ -812,6 +830,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
       // Round 2: if the reviewer asked for a refine and supplied a
       // hint, redraft with the hint threaded into the user prompt.
+      // Fix 11.4: pass round-1's describedSkills into round 2 so the
+      // retry doesn't waste rounds re-discovering schemas the writer
+      // already learned.
       const refineHint = review.verdict === 'refine' ? review.refine?.hint?.trim() : undefined;
       if (refineHint !== undefined && refineHint.length > 0) {
         log.info({ actionId: action.id, hint: refineHint }, 'reviewer requested refine; running second pass');
@@ -823,6 +844,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           request,
           repoContext: {},
           refineHint,
+          priorDescribedSkills: draft.describedSkills,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
           onProgress: (msg) => {
             this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
@@ -832,7 +854,23 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         rounds = 2;
       }
 
-      const final = review.accepted?.markdown ?? draft.markdown;
+      // Fix 11.5: when round 2 still verdicts refine, the orchestrator
+      // used to silently ship `draft.markdown` (which the reviewer
+      // explicitly rejected) as the section. Replace with a degraded
+      // marker so the report doesn't carry plausible-looking-but-wrong
+      // content. The TodoList item carries the failure reason.
+      const sectionFailed = rounds === 2 && review.verdict === 'refine';
+      const final = sectionFailed
+        ? '_This section could not be drafted -- the writer failed both attempts. See the TodoList item for the writer\'s trace and the reviewer\'s hint._'
+        : (review.accepted?.markdown ?? draft.markdown);
+
+      // Fix 11.6: confidence reflects the reviewer's verdict, not the
+      // tool-loop iteration count. accept@round1 = high; accept@round2
+      // = medium; refine (binding) = low.
+      const itemConfidence: 'high' | 'medium' | 'low' =
+        review.verdict === 'accept' && rounds === 1 ? 'high'   :
+        review.verdict === 'accept' && rounds === 2 ? 'medium' :
+                                                      'low';
 
       // Stamp the section result on the TodoList item + mark complete.
       if (itemId !== undefined && this.deps.todos !== undefined) {
@@ -844,7 +882,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             answer:     final,
             findings:   [],
             citations:  [],
-            confidence: draft.hitLimit ? 'medium' : 'high',
+            confidence: itemConfidence,
             toolCalls:  draft.skillCalls.map(c => ({
               kind:     'skill',
               skillId:  c.skillId,
@@ -852,6 +890,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               durationMs: 0,
               status:   c.errored ? 'failed' : 'ok',
             })),
+            ...(sectionFailed && review.refine?.hint !== undefined
+              ? { failureReason: review.refine.hint }
+              : {}),
           });
           await this.deps.todos.markComplete(itemId);
         } catch (err) {
@@ -1202,12 +1243,19 @@ function stitchPlanSections(
 
   // Maintain the planner's order even if expandThenReview returned
   // sections in a different sequence (it doesn't today, but defend).
+  // Empty sections (writer produced no usable content) get a degraded
+  // placeholder so the stitched report's section count matches what
+  // the milestones promised the user.
   const byId = new Map(sections.map(s => [s.id, s]));
   for (const action of actions) {
     const s = byId.get(action.id);
-    if (s === undefined || s.markdown.trim().length === 0) continue;
     lines.push(`## ${action.title}`);
     lines.push('');
+    if (s === undefined || s.markdown.trim().length === 0) {
+      lines.push('_Section unavailable -- the writer produced no usable content. See the TodoList item for the writer\'s trace and the reviewer\'s hint._');
+      lines.push('');
+      continue;
+    }
     lines.push(s.markdown.trim());
     lines.push('');
   }

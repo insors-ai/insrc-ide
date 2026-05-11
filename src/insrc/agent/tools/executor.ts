@@ -438,5 +438,6 @@ function unifiedToLegacy(toolCallId: string, result: UnifiedToolResult): ToolRes
     toolCallId,
     content: result.output,
     isError: !result.success,
+    ...(result.data !== undefined ? { data: result.data } : {}),
   };
 }

@@ -103,14 +103,26 @@ function toGeminiContents(messages: LLMMessage[]): { system?: string; contents: 
       contents.push({ role, parts: [{ text: m.content }] });
       continue;
     }
-    const parts = m.content.map(block => {
-      if (block.type === 'text') return { text: block.text };
-      if (block.type === 'image') {
-        return { inlineData: { mimeType: block.mediaType, data: block.data } };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parts: any[] = [];
+    for (const block of m.content) {
+      if (block.type === 'text') parts.push({ text: block.text });
+      else if (block.type === 'image') parts.push({ inlineData: { mimeType: block.mediaType, data: block.data } });
+      else if (block.type === 'document') parts.push({ inlineData: { mimeType: block.mediaType, data: block.data } });
+      else if (block.type === 'tool_use') {
+        parts.push({ functionCall: { name: block.name, args: block.input } });
+      } else if (block.type === 'tool_result') {
+        // Gemini doesn't separate by `tool_use_id`; emit as functionResponse
+        // tied to the call's name. The loop currently emits one tool_result
+        // per tool_use, so positional correspondence works.
+        parts.push({
+          functionResponse: {
+            name: block.tool_use_id, // best-effort -- gemini correlates by name in practice
+            response: { content: block.isError === true ? `[error] ${block.content}` : block.content },
+          },
+        });
       }
-      // document (PDF)
-      return { inlineData: { mimeType: block.mediaType, data: block.data } };
-    });
+    }
     contents.push({ role, parts });
   }
   return { ...(system !== undefined ? { system } : {}), contents };

@@ -1,4 +1,5 @@
 import type {
+  ContentBlock,
   LLMMessage,
   LLMProvider,
   LLMResponse,
@@ -10,20 +11,6 @@ import type { Session } from '../session.js';
 import { executeTool, type ToolExecContext } from './executor.js';
 import { validateToolCall, type ValidationResult } from './validator.js';
 import { getToolSettings } from '../../daemon/tools/config.js';
-
-/**
- * Sentinel placed on assistant turns that issued tool calls.
- * Lives in working-message history so providers don't see an empty
- * assistant turn. Chosen as an HTML comment so:
- *   (a) the LLM is extremely unlikely to emit it as natural narrative,
- *   (b) if a stray copy *does* leak into final text it renders to
- *       nothing in the report.
- *
- * `sanitizeFinalResponse` strips any leaked instance from the loop's
- * returned `response` as defence-in-depth.
- */
-const TOOL_USE_TURN_MARKER = '<!--insrc:tool-use-->';
-const TOOL_USE_TURN_MARKER_RE = /<!--\s*insrc:tool-use\s*-->/g;
 
 // ---------------------------------------------------------------------------
 // Tool Loop Runner
@@ -54,8 +41,27 @@ export interface ToolLoopOpts {
   onToolCall?: (call: ToolCall, validation: ValidationResult) => void;
   /** Callback when a tool call returns */
   onToolResult?: (call: ToolCall, result: ToolResult) => void;
+  /**
+   * Caller-provided protocol hook. Runs AFTER validation but BEFORE
+   * `executeTool`. Returning a `ToolResult` short-circuits the call --
+   * the actual tool body is NOT invoked and the returned result is
+   * fed back to the LLM. Returning `null`/`undefined` lets the call
+   * proceed normally.
+   *
+   * The code-analyzer section writer uses this to enforce the
+   * "always describe before invoke" protocol: a `skill_invoke` whose
+   * `skillId` hasn't been described yet in this loop is rejected
+   * with a protocol-error tool_result so the LLM learns to call
+   * `skill_describe` first.
+   */
+  interceptToolCall?: (call: ToolCall) => ToolResult | null | undefined;
   /** Max tokens for LLM completions */
   maxTokens?: number | undefined;
+  /** Override `getToolSettings().loop.maxIterations` for this loop.
+   *  Callers like the code-analyzer's section writer pass their own
+   *  per-section cap (default 10) so a global config change doesn't
+   *  silently widen a per-call budget the orchestrator was relying on. */
+  maxIterations?: number | undefined;
   /** Callback when an LLM response includes usage info (for cost tracking) */
   onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
   /** User's original prompt (passed to SmartRead for intelligent extraction) */
@@ -97,7 +103,8 @@ export async function runToolLoop(
   let iterations = 0;
   let nudgeCount = 0;
 
-  const { maxIterations, maxNudges } = getToolSettings().loop;
+  const { maxIterations: globalMaxIterations, maxNudges } = getToolSettings().loop;
+  const maxIterations = opts.maxIterations ?? globalMaxIterations;
   while (iterations < maxIterations) {
     // Call LLM with tool definitions — stream text via onToken if callback provided
     const completionOpts: { tools: ToolDefinition[]; maxTokens?: number; onToken?: (t: string) => void } = { tools };
@@ -122,8 +129,20 @@ export async function runToolLoop(
 
     // If no tool calls, check if LLM described using a tool without calling it
     if (llmResponse.stopReason !== 'tool_use' || !llmResponse.toolCalls?.length) {
-      // Detect: response references an available tool action but didn't invoke it
-      // Only nudge if the response ends with unexpecuted intent (last sentence is future-tense)
+      // Heuristic nudge: detect responses where the model talks about
+      // doing X but doesn't actually call a tool to do it. Two regex
+      // gates (tool name reference + future-tense intent phrase)
+      // gate the nudge so plain conversational replies aren't re-
+      // prompted.
+      //
+      // NOTE: this backstops loops where the loop has no stronger
+      // protocol enforcement (Pair's `fs_read`, Delegate's
+      // `graph_query`, Brainstorm). The code-analyzer's section
+      // writer has its own `interceptToolCall` enforcement
+      // (writeSectionWithTools's describe-before-invoke protocol)
+      // which fires earlier and more precisely, so nudges rarely
+      // trigger there. If a future analyzer adopts a similar
+      // protocol the nudge can be skipped for that loop entirely.
       const toolNames = tools.map(t => t.name.toLowerCase());
       const lastSentence = finalResponse.trim().split(/[.!?\n]/).filter(s => s.trim()).pop()?.trim().toLowerCase() ?? '';
       const referencesTool = toolNames.some(name =>
@@ -167,6 +186,16 @@ export async function runToolLoop(
         continue;
       }
 
+      // Caller-supplied protocol hook. Used by the code-analyzer
+      // section writer to enforce describe-before-invoke. If the
+      // hook returns a ToolResult, skip the actual dispatch.
+      const intercepted = opts.interceptToolCall?.(call);
+      if (intercepted) {
+        onToolResult?.(call, intercepted);
+        toolResults.push(intercepted);
+        continue;
+      }
+
       // Execute (auto-execute or approved)
       const execCtx: ToolExecContext = {
         userPrompt: opts.userPrompt,
@@ -179,66 +208,71 @@ export async function runToolLoop(
       toolResults.push(result);
     }
 
-    // Build the assistant message with tool calls. We need *some* token in
-    // the assistant turn so providers don't drop an empty turn, but the
-    // token must be one the model cannot naturally re-emit -- otherwise
-    // the model copies it into its own final-turn text (we saw the local
-    // LLM mimicking `[tool calls executed]` and stopping). HTML comments
-    // are an extremely rare token in narrative output and invisible if a
-    // straggler leaks through.
-    const assistantContent = llmResponse.text
-      ? `${llmResponse.text}\n${TOOL_USE_TURN_MARKER}`
-      : TOOL_USE_TURN_MARKER;
+    // Build the assistant turn as STRUCTURED content blocks: an
+    // optional text block (the model's pre-tool-call narration)
+    // followed by one `tool_use` block per call. Providers translate
+    // these into their native tool_use API shapes so history carries
+    // the structured signal the model expects, not a mimicable text
+    // marker. (We previously used `<!--insrc:tool-use-->` as a
+    // stand-in; the local LLM kept mimicking it as final-turn text.)
+    const assistantBlocks: ContentBlock[] = [];
+    if (llmResponse.text.length > 0) {
+      assistantBlocks.push({ type: 'text', text: llmResponse.text });
+    }
+    for (const c of llmResponse.toolCalls) {
+      assistantBlocks.push({ type: 'tool_use', id: c.id, name: c.name, input: c.input });
+    }
+    const assistantMsg: LLMMessage = { role: 'assistant', content: assistantBlocks };
+    workingMessages.push(assistantMsg);
+    producedMessages.push(assistantMsg);
 
-    workingMessages.push({ role: 'assistant', content: assistantContent });
-    producedMessages.push({ role: 'assistant', content: assistantContent });
-
-    // Append tool results — large outputs spill to temp file and get SmartRead-chunked
+    // Build the user turn carrying tool_result blocks. Large outputs
+    // spill to temp file + SmartRead-chunked first.
     const inlineMaxChars = getToolSettings().output.inlineMaxChars;
-    const resultContent = (await Promise.all(toolResults
-      .map(async r => {
-        const prefix = r.isError ? '[error] ' : '';
-        let content = r.content;
-        if (content.length > inlineMaxChars) {
-          // Spill to temp file, then SmartRead it
-          const { writeFileSync, mkdirSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const { tmpdir } = await import('node:os');
-          const tempDir = join(tmpdir(), '.insrc', 'tool-output');
-          mkdirSync(tempDir, { recursive: true });
-          const tempPath = join(tempDir, `${r.toolCallId}-${Date.now()}.txt`);
-          writeFileSync(tempPath, content, 'utf-8');
+    const resultBlocks: ContentBlock[] = await Promise.all(toolResults.map(async r => {
+      let content = r.content;
+      if (content.length > inlineMaxChars) {
+        const { writeFileSync, mkdirSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const { tmpdir } = await import('node:os');
+        const tempDir = join(tmpdir(), '.insrc', 'tool-output');
+        mkdirSync(tempDir, { recursive: true });
+        const tempPath = join(tempDir, `${r.toolCallId}-${Date.now()}.txt`);
+        writeFileSync(tempPath, content, 'utf-8');
 
-          const lineCount = content.split('\n').length;
-          const sizeKB = (content.length / 1024).toFixed(1);
-          opts.onProgress?.(`Tool output large (${lineCount} lines, ${sizeKB}KB) — chunking via SmartRead`);
+        const lineCount = content.split('\n').length;
+        const sizeKB = (content.length / 1024).toFixed(1);
+        opts.onProgress?.(`Tool output large (${lineCount} lines, ${sizeKB}KB) — chunking via SmartRead`);
 
-          // Use SmartRead to extract relevant parts
-          try {
-            const { smartRead } = await import('./smart-read.js');
-            const result = await smartRead(tempPath, opts.userPrompt ?? '', 4000, undefined, opts.onProgress);
-            content = result.content;
-          } catch {
-            // Fallback: head + tail
-            const lines = content.split('\n');
-            content = [
-              `[Large output: ${lineCount} lines, ${sizeKB}KB — saved to ${tempPath}]`,
-              '',
-              ...lines.slice(0, 50),
-              '',
-              `... [${lineCount - 70} lines in temp file] ...`,
-              '',
-              ...lines.slice(-20),
-            ].join('\n');
-          }
+        try {
+          const { smartRead } = await import('./smart-read.js');
+          const sr = await smartRead(tempPath, opts.userPrompt ?? '', 4000, undefined, opts.onProgress);
+          content = sr.content;
+        } catch {
+          const lines = content.split('\n');
+          content = [
+            `[Large output: ${lineCount} lines, ${sizeKB}KB — saved to ${tempPath}]`,
+            '',
+            ...lines.slice(0, 50),
+            '',
+            `... [${lineCount - 70} lines in temp file] ...`,
+            '',
+            ...lines.slice(-20),
+          ].join('\n');
         }
-        return `<tool_result tool_call_id="${r.toolCallId}">\n${prefix}${content}\n</tool_result>`;
-      })
-    ))
-      .join('\n\n');
+      }
+      const block: ContentBlock = {
+        type: 'tool_result',
+        tool_use_id: r.toolCallId,
+        content,
+        ...(r.isError === true ? { isError: true } : {}),
+      };
+      return block;
+    }));
 
-    workingMessages.push({ role: 'user', content: resultContent });
-    producedMessages.push({ role: 'user', content: resultContent });
+    const userMsg: LLMMessage = { role: 'user', content: resultBlocks };
+    workingMessages.push(userMsg);
+    producedMessages.push(userMsg);
 
     // Reset accumulated text for next iteration
     finalResponse = '';
@@ -251,18 +285,9 @@ export async function runToolLoop(
   }
 
   return {
-    response: sanitizeFinalResponse(finalResponse),
+    response: finalResponse.trim(),
     messages: producedMessages,
     iterations,
     hitLimit,
   };
-}
-
-/**
- * Strip any leaked `<!--insrc:tool-use-->` marker from the LLM's final
- * text. Belt-and-braces -- the marker itself is unlikely to be emitted,
- * but if it ever is, we don't want it surfacing in user-facing output.
- */
-function sanitizeFinalResponse(text: string): string {
-  return text.replace(TOOL_USE_TURN_MARKER_RE, '').trim();
 }

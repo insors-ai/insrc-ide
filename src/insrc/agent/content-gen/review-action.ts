@@ -29,10 +29,28 @@ const DEFAULT_MAX_TOKENS = 800;
 // Public types
 // ---------------------------------------------------------------------------
 
+/**
+ * One failed tool call surfaced to the reviewer for CONTEXT only --
+ * never scored as evidence. Lets the reviewer see "the writer tried
+ * but the call was rejected (e.g. invalid input)" without conflating
+ * the failure with the writer's reasoning.
+ */
+export interface FailedToolCall {
+	readonly skillId:           string;
+	readonly args:              unknown;
+	readonly rejectionReason?:  string | undefined;
+	readonly output:            string;
+}
+
 export interface ReviewActionInput {
-	readonly action:    PlannedAction;
-	readonly draft:     ExpandActionResult;
-	readonly evidence:  readonly PlanExecution[];
+	readonly action:        PlannedAction;
+	readonly draft:         ExpandActionResult;
+	/** Successful tool calls; the reviewer scores the draft against this. */
+	readonly evidence:      readonly PlanExecution[];
+	/** Failed tool calls (invalid input, feasibility-failed, execute-threw,
+	 *  protocol-error). Surfaced to the reviewer as context only -- never
+	 *  used as evidence. Optional. */
+	readonly failedCalls?:  readonly FailedToolCall[] | undefined;
 	readonly analyzerLabel?: string | undefined;
 }
 
@@ -127,6 +145,18 @@ export async function reviewAction(
 // ---------------------------------------------------------------------------
 
 /**
+ * @deprecated No production callers since the code-analyzer's
+ * Phase F refactor (2026-05-11) moved to a tool-loop expander
+ * (`writeSectionWithTools`) and inlined the 2-round driver in
+ * `runPlanExpandReviewSynthesise`. The text-only `expandAction`
+ * expander this function wraps is no longer used by any analyzer.
+ *
+ * Kept for now as regression coverage of the 2-round contract
+ * (accept@1, refine→accept@2, refine→refine binding accept). If a
+ * future caller needs a generic 2-round driver, refactor this
+ * function to accept an expander callback instead of bundling
+ * `expandAction` directly.
+ *
  * One per-action expand+review loop. Two-round contract:
  *   1. Expand (local) -> review (cloud).
  *      - If verdict='accept', return.
@@ -315,6 +345,24 @@ function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
 			const e = input.evidence[i]!;
 			userLines.push(`### [${i}] ${e.skillId} (confidence: ${e.confidence})`);
 			userLines.push(formatEvidenceValue(e.value));
+			userLines.push('');
+		}
+	}
+
+	// Fix 11.8: failed tool calls go in a separate block so the
+	// reviewer treats them as CONTEXT (the writer tried but the call
+	// errored) rather than EVIDENCE (which would taint scoring).
+	const failedCalls = input.failedCalls ?? [];
+	if (failedCalls.length > 0) {
+		userLines.push('');
+		userLines.push(`## Failed tool calls (CONTEXT ONLY -- do not score against these)`);
+		userLines.push('These calls did not produce useful output. Do not refine just because they failed -- score the draft against the successful Evidence above.');
+		userLines.push('');
+		for (let i = 0; i < failedCalls.length; i++) {
+			const f = failedCalls[i]!;
+			const reason = f.rejectionReason ?? 'errored';
+			userLines.push(`### [${i}] ${f.skillId} (${reason})`);
+			userLines.push('args: ' + formatEvidenceValue(f.args));
 			userLines.push('');
 		}
 	}

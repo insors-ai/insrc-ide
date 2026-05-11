@@ -98,13 +98,20 @@ type ChatMessage = {
 };
 
 function toOpenAIMessages(messages: LLMMessage[]): ChatMessage[] {
-  return messages.map(m => {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
     if (typeof m.content === 'string') {
-      return { role: m.role, content: m.content };
+      out.push({ role: m.role, content: m.content });
+      continue;
     }
-    // Multimodal -- map text blocks and images to OpenAI's content parts.
-    // PDFs are not natively supported in chat.completions; fall back to text warning.
+    // Multimodal / structured -- map blocks to OpenAI's content shape.
+    // - text + image_url => content parts on user/assistant
+    // - tool_use         => `tool_calls` array on assistant
+    // - tool_result      => separate `role: 'tool'` messages
+    // - document         => fallback warning (PDFs not supported by chat.completions)
     const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [];
+    const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
+    const toolResults: Array<{ id: string; content: string }> = [];
     for (const block of m.content) {
       if (block.type === 'text') {
         parts.push({ type: 'text', text: block.text });
@@ -114,11 +121,38 @@ function toOpenAIMessages(messages: LLMMessage[]): ChatMessage[] {
           image_url: { url: `data:${block.mediaType};base64,${block.data}` },
         });
       } else if (block.type === 'document') {
-        parts.push({ type: 'text', text: '[PDF attachment -- not supported by OpenAI chat.completions; use a vision-capable model or switch providers]' });
+        parts.push({ type: 'text', text: '[PDF attachment -- not supported by OpenAI chat.completions]' });
+      } else if (block.type === 'tool_use') {
+        toolCalls.push({
+          id: block.id,
+          type: 'function',
+          function: { name: block.name, arguments: JSON.stringify(block.input) },
+        });
+      } else if (block.type === 'tool_result') {
+        toolResults.push({ id: block.tool_use_id, content: block.isError === true ? `[error] ${block.content}` : block.content });
       }
     }
-    return { role: m.role, content: parts };
-  });
+
+    if (toolResults.length > 0) {
+      // tool results travel as separate `role: 'tool'` messages.
+      for (const tr of toolResults) {
+        out.push({ role: 'tool', content: tr.content, tool_call_id: tr.id });
+      }
+      continue;
+    }
+
+    if (m.role === 'assistant' && toolCalls.length > 0) {
+      out.push({
+        role: 'assistant',
+        content: parts.length > 0 ? parts : '',
+        tool_calls: toolCalls,
+      });
+      continue;
+    }
+
+    out.push({ role: m.role, content: parts.length > 0 ? parts : '' });
+  }
+  return out;
 }
 
 function toOpenAITools(tools: ToolDefinition[]): Array<{ type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }> {

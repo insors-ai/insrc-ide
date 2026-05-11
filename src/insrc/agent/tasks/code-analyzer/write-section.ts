@@ -57,6 +57,13 @@ export interface WriteSectionInput {
 	 * README.md lines 1-199").
 	 */
 	readonly refineHint?:     string | undefined;
+	/**
+	 * Skill IDs the LLM has already described in a PRIOR section-
+	 * writing pass (round 1, when this is round 2). Seeds the
+	 * describe-before-invoke protocol so the round-2 retry doesn't
+	 * waste rounds re-discovering schemas already learned.
+	 */
+	readonly priorDescribedSkills?: ReadonlySet<string> | undefined;
 }
 
 /**
@@ -71,6 +78,12 @@ export interface CapturedSkillCall {
 	readonly resultText: string;
 	/** True when the tool call returned `success: false` (skill error). */
 	readonly errored:    boolean;
+	/** Typed rejection reason when the skill runner short-circuited.
+	 *  Distinguishes invalid-input vs feasibility-failed vs execute-
+	 *  threw vs protocol-error vs depth-exceeded. Absent on successful
+	 *  calls and on errored calls whose runner-side data did not carry
+	 *  a reason. */
+	readonly rejectionReason?: string | undefined;
 }
 
 export interface WriteSectionOutput {
@@ -84,6 +97,11 @@ export interface WriteSectionOutput {
 	readonly skillsCalled:   readonly string[];
 	/** Full skill-call trace (args + results) for the reviewer. */
 	readonly skillCalls:     readonly CapturedSkillCall[];
+	/** Skill IDs the LLM described in this pass (cumulative -- seeded
+	 *  from `priorDescribedSkills` plus any new describes in this run).
+	 *  Caller threads this into a round-2 retry so it doesn't waste
+	 *  rounds re-describing skills already learned. */
+	readonly describedSkills: ReadonlySet<string>;
 }
 
 const DEFAULT_MAX_TOOL_CALLS = 10;
@@ -103,10 +121,14 @@ const SYSTEM_PROMPT_INTRO = [
 	'',
 	'## How to work',
 	'  1. READ the section objective + review criteria. Decide what evidence you need.',
-	'  2. PICK skills from the catalog that produce that evidence. Call `skill_invoke({ skillId, args })`.',
-	'     Use `skill_describe({ skillId })` first when the schema is unclear.',
-	'  3. INSPECT the skill result; iterate -- call more skills if the evidence is thin or contradicts your draft.',
-	'  4. When you have enough to satisfy every review criterion, STOP calling tools and emit the section markdown',
+	'  2. For each skill you intend to use, FIRST call `skill_describe({ id: <skillId> })` to fetch its',
+	'     input/output schema. The tool loop ENFORCES this -- `skill_invoke` for a skill you have not',
+	'     described returns a protocol-error and DOES NOT execute the skill. Describe once per skill per',
+	'     section; subsequent invocations of the same skill do not need to re-describe.',
+	'  3. PICK skills from the catalog that produce the evidence you need. Call',
+	'     `skill_invoke({ skillId, args })` with `args` matching the schema you just learned.',
+	'  4. INSPECT the skill result; iterate -- call more skills if the evidence is thin or contradicts your draft.',
+	'  5. When you have enough to satisfy every review criterion, STOP calling tools and emit the section markdown',
 	'     as your final text response.',
 	'',
 	'## Final-turn shape (CRITICAL)',
@@ -207,8 +229,17 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 			hitLimit:      false,
 			skillsCalled:  [],
 			skillCalls:    [],
+			describedSkills: new Set<string>(),
 		};
 	}
+
+	// Phase F.6 / fix 11.1: enforce the describe-before-invoke
+	// protocol. `describedSkills` is seeded from priorDescribedSkills
+	// (so round-2 retries don't re-discover schemas round-1 learned)
+	// and grows as the LLM calls `skill_describe`. `skill_invoke` for
+	// a skill not in the set is short-circuited with a protocol-error
+	// tool result; the skill body is NOT executed.
+	const describedSkills = new Set<string>(input.priorDescribedSkills ?? []);
 
 	const skillsCalled: string[] = [];
 	const skillCalls:   CapturedSkillCall[] = [];
@@ -220,6 +251,9 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 	let nextIteration = 0;
 	const trackToolCall = (call: { name: string; input: Record<string, unknown> }): void => {
 		nextIteration++;
+		if (call.name === 'skill_describe' && typeof call.input['id'] === 'string') {
+			describedSkills.add(call.input['id'] as string);
+		}
 		if (call.name === 'skill_invoke' && typeof call.input['skillId'] === 'string') {
 			const skillId = call.input['skillId'] as string;
 			const args    = (call.input['args'] as Record<string, unknown> | undefined) ?? {};
@@ -229,7 +263,7 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 	};
 	const trackToolResult = (
 		call: { name: string },
-		result: { output: string; success: boolean },
+		result: { output: string; success: boolean; rejectionReason?: string | undefined },
 	): void => {
 		const pending = pendingByIteration.get(nextIteration);
 		if (pending !== undefined && call.name === 'skill_invoke') {
@@ -238,6 +272,7 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 				args:       pending.args,
 				resultText: result.output,
 				errored:    result.success === false,
+				...(result.rejectionReason !== undefined ? { rejectionReason: result.rejectionReason } : {}),
 			});
 			pendingByIteration.delete(nextIteration);
 		}
@@ -264,6 +299,7 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		permissionMode: 'auto-accept',
 		session:        input.session,
 		maxTokens,
+		maxIterations:  maxToolCalls,
 	};
 	loopOpts.onToolCall = (call) => {
 		trackToolCall(call);
@@ -273,7 +309,41 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		input.onProgress?.(`  [${input.action.id}] ${call.name}(${inputSummary})`);
 	};
 	loopOpts.onToolResult = (call, result) => {
-		trackToolResult(call, { output: result.content, success: !result.isError });
+		// Pull `rejectionReason` off result.data when present so the
+		// captured trace + reviewer evidence builder can branch on
+		// typed reason rather than substring-matching `output`.
+		const data = (result as { data?: { rejectionReason?: string } }).data;
+		const rejectionReason = data?.rejectionReason;
+		trackToolResult(call, {
+			output:  result.content,
+			success: !result.isError,
+			...(rejectionReason !== undefined ? { rejectionReason } : {}),
+		});
+	};
+	// Mandatory describe-before-invoke protocol enforcement.
+	loopOpts.interceptToolCall = (call) => {
+		if (call.name !== 'skill_invoke') return null;
+		const sid = typeof call.input['skillId'] === 'string' ? call.input['skillId'] : '';
+		if (sid.length === 0) return null;
+		if (describedSkills.has(sid)) return null;
+		log.info(
+			{ actionId: input.action.id, skillId: sid },
+			'writeSectionWithTools: protocol violation -- skill_invoke without prior skill_describe; rejecting',
+		);
+		return {
+			toolCallId: call.id,
+			content:
+				`[protocol-error] You must call \`skill_describe({ id: "${sid}" })\` ` +
+				`BEFORE \`skill_invoke\` for that skill. The describe step is mandatory and ` +
+				`enforced by the tool loop -- this invocation was NOT executed. Call ` +
+				`skill_describe first to fetch the skill's input schema, then retry the ` +
+				`invocation with args matching the schema.`,
+			isError: true,
+			// Synthetic rejection reason -- distinguishes the protocol
+			// short-circuit from runner-side failures so the reviewer
+			// evidence splitter can categorise correctly.
+			data: { rejectionReason: 'protocol-error' },
+		};
 	};
 
 	// Cap the loop's iterations independently of the global tool-config
@@ -293,12 +363,8 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		'writeSectionWithTools: tool loop complete',
 	);
 
-	if (result.iterations > maxToolCalls) {
-		log.warn(
-			{ actionId: input.action.id, iterations: result.iterations, cap: maxToolCalls },
-			'writeSectionWithTools: tool loop exceeded section-level cap (continuing -- result accepted)',
-		);
-	}
+	// Section-level cap is now enforced by runToolLoop directly
+	// (via opts.maxIterations); no post-check needed.
 
 	return {
 		markdown:      result.response,
@@ -306,6 +372,7 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		hitLimit:      result.hitLimit,
 		skillsCalled,
 		skillCalls,
+		describedSkills,
 	};
 }
 

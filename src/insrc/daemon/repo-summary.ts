@@ -26,9 +26,33 @@
 import type { Entity, EntityKind, Language } from '../shared/types.js';
 import { listEntitiesForRepo } from '../db/entities.js';
 import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join as pathJoin } from 'node:path';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('repo-summary');
+
+/**
+ * Cache keyed on `${repoPath}::${gitHeadRef}`. The graph walk is
+ * idempotent for a given commit -- as long as HEAD hasn't moved we
+ * can return the prior result. Invalidates implicitly when HEAD
+ * changes (different cache key). For non-git repos / repos where the
+ * HEAD read fails we still cache, but under the synthetic `'no-git'`
+ * sentinel so we don't recompute every turn either.
+ */
+const summaryCache = new Map<string, RepoSizeSummary>();
+
+/** Invalidate any cached summary for a repo. Indexer write callbacks
+ *  call this when entities change without a git commit. */
+export function invalidateRepoSizeSummaryCache(repoPath?: string): void {
+	if (repoPath === undefined) {
+		summaryCache.clear();
+		return;
+	}
+	for (const key of [...summaryCache.keys()]) {
+		if (key.startsWith(`${repoPath}::`)) summaryCache.delete(key);
+	}
+}
 
 /** One language bucket. */
 export interface LanguageRow {
@@ -70,6 +94,10 @@ export async function getRepoSizeSummary(repoPath: string): Promise<RepoSizeSumm
 	};
 
 	if (repoPath.length === 0) return empty;
+
+	const cacheKey = `${repoPath}::${readGitHeadRef(repoPath)}`;
+	const cached = summaryCache.get(cacheKey);
+	if (cached !== undefined) return cached;
 
 	let entities: Entity[];
 	try {
@@ -118,7 +146,7 @@ export async function getRepoSizeSummary(repoPath: string): Promise<RepoSizeSumm
 		.sort((a, b) => b.fileCount - a.fileCount)
 		.slice(0, TOP_MODULES_K);
 
-	return {
+	const summary: RepoSizeSummary = {
 		repoPath,
 		fileCount,
 		entityCount: entities.length,
@@ -127,6 +155,30 @@ export async function getRepoSizeSummary(repoPath: string): Promise<RepoSizeSumm
 		topModules,
 		empty:       false,
 	};
+	summaryCache.set(cacheKey, summary);
+	return summary;
+}
+
+/**
+ * Read `.git/HEAD` + follow one indirection to get the current commit
+ * sha. Returns `'no-git'` for non-git repos or when the read fails so
+ * the cache still de-duplicates within a session.
+ */
+function readGitHeadRef(repoPath: string): string {
+	try {
+		const head = readFileSync(pathJoin(repoPath, '.git', 'HEAD'), 'utf8').trim();
+		if (head.startsWith('ref:')) {
+			const ref = head.slice(4).trim();
+			try {
+				return readFileSync(pathJoin(repoPath, '.git', ref), 'utf8').trim();
+			} catch {
+				return head;
+			}
+		}
+		return head;
+	} catch {
+		return 'no-git';
+	}
 }
 
 /**

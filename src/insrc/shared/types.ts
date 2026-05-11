@@ -8,7 +8,23 @@
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; mediaType: string; data: string }   // base64-encoded
-  | { type: 'document'; mediaType: string; data: string }; // base64-encoded PDF
+  | { type: 'document'; mediaType: string; data: string } // base64-encoded PDF
+  /**
+   * Tool invocation on an `assistant` turn. The loop emits this when
+   * the LLM's prior response was `stopReason: 'tool_use'` -- it
+   * preserves the structured tool call in conversation history so
+   * the next round sees what the assistant did, rather than a
+   * mimicable text marker. Providers translate this into their
+   * native tool_use API shape.
+   */
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  /**
+   * Tool result on a `user` turn. The loop emits this after each
+   * tool executes. Providers translate to their native tool_result
+   * shape. `content` is the rendered text the LLM sees; `isError`
+   * mirrors the `ToolResult.isError` flag.
+   */
+  | { type: 'tool_result'; tool_use_id: string; content: string; isError?: boolean };
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant';
@@ -31,6 +47,15 @@ export interface ToolResult {
   toolCallId: string;
   content: string;
   isError?: boolean | undefined;
+  /**
+   * Optional structured data alongside the textual content. Used by
+   * skill_invoke / skill_describe to surface the typed SkillResult
+   * back to orchestrator-side trace callers without re-parsing the
+   * markdown `content`. Loop transport (provider → executor → loop)
+   * preserves this field verbatim; the LLM does NOT see it (only
+   * `content` is rendered into the next prompt's tool_result block).
+   */
+  data?: unknown;
 }
 
 export interface LLMResponse {

@@ -31,7 +31,15 @@
 import type { Skill } from '../../../daemon/skills/types.js';
 import { listSkillsByOwner } from '../../../daemon/skills/registry.js';
 
-const CATALOG_SUMMARY_MAX = 120;
+/**
+ * Catalog summaries serve SELECTION only (which skill is relevant for
+ * this section). The CALLING contract -- arg names, types, required
+ * flags -- comes from the mandatory `skill_describe` step. Keep
+ * summaries short: a one-clause verb-phrase is enough to pick a
+ * skill, and trimming saves ~15 tokens per skill from the system
+ * prompt which is re-sent on every iteration of the tool loop.
+ */
+const CATALOG_SUMMARY_MAX = 60;
 
 export interface CatalogEntry {
 	readonly id:      string;
@@ -96,8 +104,9 @@ export function formatAnalyzerSkillCatalog(catalog: readonly CatalogEntry[]): st
 		return '## Available skills\n(no skills available for this repo)';
 	}
 	const lines: string[] = [
-		'## Available skills (call via `skill_invoke({ skillId: "...", args: {...} })`)',
-		'Use `skill_describe({ skillId })` first if a skill\'s argument schema is unclear.',
+		'## Available skills',
+		'You MUST call `skill_describe({ id: <skillId> })` BEFORE `skill_invoke({ skillId, args })` for that skill.',
+		'The tool loop rejects undescribed invocations. Describe-once-per-skill-per-section is enough.',
 		'',
 	];
 

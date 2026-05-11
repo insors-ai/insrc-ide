@@ -153,6 +153,7 @@ export async function runSkill<I = unknown, O = unknown>(
         `skill-depth ${newDepth} exceeds cap ${MAX_SKILL_DEPTH}; halting recursion before execute()`,
       ],
       toolCalls: [],
+      rejectionReason: 'cross-skill-depth-exceeded',
     };
   }
 
@@ -196,6 +197,7 @@ export async function runSkill<I = unknown, O = unknown>(
       confidence: 'low',
       notes: ['precondition-failed: ' + reasons.join('; ')],
       toolCalls: [],
+      rejectionReason: 'precondition-failed',
     };
   }
   emit({ kind: 'skill-feasibility', skillId: id, ok: true });
@@ -260,6 +262,7 @@ export async function runSkill<I = unknown, O = unknown>(
       notes: errNotes,
       toolCalls: toolCallTrace,
       ...(subSkillTrace.length > 0 ? { subSkillCalls: subSkillTrace } : {}),
+      rejectionReason: 'execute-threw',
     };
   }
 
@@ -268,11 +271,13 @@ export async function runSkill<I = unknown, O = unknown>(
   //    during skill-development iteration.
   const notes: string[] = [...(bodyResult.notes ?? [])];
   let outputClampToLow = false;
+  let outputInvalid = false;
   const outputCheck = validate(bodyResult.value, skill.outputs);
   if (!outputCheck.ok) {
     log.warn({ id, errors: outputCheck.errors }, 'runSkill: invalid-output');
     notes.push(`invalid-output: ${outputCheck.errors.join('; ')}`);
     outputClampToLow = true;
+    outputInvalid = true;
   }
 
   // 9. Confidence calibration.
@@ -340,6 +345,7 @@ export async function runSkill<I = unknown, O = unknown>(
     toolCalls: fullToolCalls,
     ...(fullSubSkills.length > 0 ? { subSkillCalls: fullSubSkills } : {}),
     ...(bodyResult.truncated ? { truncated: true } : {}),
+    ...(outputInvalid ? { rejectionReason: 'invalid-output' as const } : {}),
   };
 }
 
@@ -512,6 +518,7 @@ function rejectAsLow<O>(
     confidence: 'low',
     notes: [`${reason}: ${message}`],
     toolCalls: [],
+    rejectionReason: reason,
   };
 }
 

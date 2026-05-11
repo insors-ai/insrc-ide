@@ -219,6 +219,14 @@ export interface SkillResult<O = unknown> {
   readonly toolCalls: readonly SkillToolCallSummary[];
   readonly subSkillCalls?: readonly SkillSubSkillSummary[];
   readonly truncated?: boolean;
+  /**
+   * Set ONLY on rejection paths -- categorises *why* the runner short-
+   * circuited (input failed validation, feasibility failed, the skill
+   * body threw, output failed validation, ...). Downstream consumers
+   * branch on this without substring-matching notes. Always absent
+   * when the skill executed cleanly.
+   */
+  readonly rejectionReason?: SkillRejectReason;
 }
 
 // ---------------------------------------------------------------------------

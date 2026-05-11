@@ -1453,12 +1453,6 @@ async function runCodeAnalyzerSlash(
       try {
         const { getRepoSizeSummary } = await import('./repo-summary.js');
         repoSummary = await getRepoSizeSummary(session.repoPath);
-        // Cache on the active session entry for the orchestrator
-        // to pick up. The chat-session pool entry is keyed by
-        // session id; storing under `_repoSizeSummary` keeps the
-        // type minimal.
-        (active as { _repoSizeSummary?: import('./repo-summary.js').RepoSizeSummary })
-          ._repoSizeSummary = repoSummary;
       } catch (err) {
         log.warn({ err: err instanceof Error ? err.message : String(err) },
           '[code-analyze] getRepoSizeSummary failed; scope classifier + planner will see degraded context');
@@ -1526,8 +1520,18 @@ async function runCodeAnalyzerSlash(
     // `done` event so the link is part of the user's transcript.
     // turnIdx is captured pre-increment -- matches the index
     // persistTurn will write into LMDB on the next line.
+    //
+    // Skip persistence when the run aborted -- the orchestrator's
+    // `finalize` returns a `_Code analysis aborted...` placeholder in
+    // those cases. Writing it to disk would leave a misleading
+    // turn-N.md file (the link in the chat panel would open a doc
+    // saying "aborted"). Instead surface the abort inline so the
+    // user sees the failure but no false "view report" link.
     const turnIdx = session.turnIndex;
-    if (result.finalFormat === 'markdown' && result.finalOutput.length > 0) {
+    const isAbortedFallback =
+      result.finalFormat === 'markdown' &&
+      result.finalOutput.trim().startsWith('_Code analysis aborted');
+    if (result.finalFormat === 'markdown' && result.finalOutput.length > 0 && !isAbortedFallback) {
       await persistReportFile({
         sessionId: session.id ?? 'unknown',
         turnIdx,
@@ -1535,6 +1539,12 @@ async function runCodeAnalyzerSlash(
         userPrompt: originalMessage,
         send,
         requestId,
+      });
+    } else if (isAbortedFallback) {
+      send({
+        id: requestId,
+        stream: 'delta',
+        data: { text: result.finalOutput, format: 'markdown' },
       });
     }
     send({ id: requestId, stream: 'done', data: { summary: 'code-analyzer' } });
