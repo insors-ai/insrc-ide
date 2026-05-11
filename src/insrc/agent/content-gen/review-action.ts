@@ -269,6 +269,14 @@ const SYSTEM_PROMPT = [
 	'     include a `hint` and SHOULD NOT include `accepted`.',
 	'  4. Keep `notes` short -- 1-3 entries describing what was good',
 	'     or which criterion drove the verdict.',
+	'  5. PRESERVE CLICKABLE CITATIONS. The expander emits',
+	'     `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)` Markdown',
+	'     links so the IDE can navigate to the source. When polishing',
+	'     under `accepted.markdown` you MUST preserve these links',
+	'     verbatim -- do NOT strip them, convert them to bare backticks,',
+	'     or invent new ones the evidence does not support. If the',
+	'     draft is missing links for entities the evidence carries a',
+	'     file for, emit `refine` with a hint to add them.',
 ].join('\n');
 
 function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {

@@ -144,6 +144,22 @@ test('buildExpandMessages: refineHint is prepended to system prompt', () => {
 	assert.match(sys, /You write ONE section/);
 });
 
+test('buildExpandMessages: system prompt mandates clickable-citation Markdown links (Phase C.2)', () => {
+	// Phase C.2 of plans/intent-funnel-followups.md -- the live test
+	// surfaced that the analyzer's reports referenced classes / files
+	// as plain text. Pre-fix, the rule said "code, paths, and
+	// identifiers go in `inline code`" -- a plain-text instruction.
+	// Post-fix, the prompt instructs `path:` Markdown links (the
+	// scheme the IDE's PathUriOpener wires through).
+	const msgs = buildExpandMessages({ action: ACTION, evidence: EVIDENCE, request: REQUEST });
+	const sys = msgs[0]!.content as string;
+	assert.match(sys, /CLICKABLE CITATIONS/);
+	assert.match(sys, /Markdown link the IDE recognises/);
+	assert.match(sys, /path:.*#L\d+/, 'system prompt must show a path: URI with a line-fragment example');
+	assert.match(sys, /NEVER mention an entity as plain text/,
+		'system prompt must forbid plain-text entity mentions when a file is available');
+});
+
 test('buildExpandMessages: empty evidence array -> placeholder line', () => {
 	const msgs = buildExpandMessages({
 		action: ACTION,
