@@ -25,6 +25,7 @@ import {
 } from '../resolver.js';
 import type { Session } from '../../session.js';
 import type { LLMProvider, LLMResponse, LLMMessage } from '../../../shared/types.js';
+import type { ClassifierMemory } from '../classifier-memory.js';
 
 // ---------------------------------------------------------------------------
 // Pure helper: looksLikeContinuation
@@ -298,6 +299,167 @@ test('resolveIntent: slashForced wins over /intent in raw message', async () => 
 	);
 	assert.equal(r.id, 'code-analysis');
 	assert.equal(r.source, 'slash-forced');
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: memory + relationship + citation hydration
+// ---------------------------------------------------------------------------
+
+const SAMPLE_MEMORY: ClassifierMemory = {
+	turns: [
+		{ turnId: 'sess-1:2', role: 'user',      excerpt: 'now describe HDFS Core',          timestamp: 1_700_000_002_000, recencyRank: 1, relevance: 0.9 },
+		{ turnId: 'sess-1:1', role: 'assistant', excerpt: 'NameNode owns the namespace.',   timestamp: 1_700_000_001_000, recencyRank: 2, relevance: 0.7 },
+		{ turnId: 'sess-1:0', role: 'user',      excerpt: 'describe what this repo does',    timestamp: 1_700_000_000_000, recencyRank: 3, relevance: 0.4 },
+	],
+	segments: [
+		{ segmentId: 'sess-1:0:4', turnId: 'sess-1:0', segmentIdx: 4, text: 'HDFS Core is the distributed filesystem layer.', timestamp: 1_700_000_000_500, recencyRank: 1, relevance: 0.94 },
+		{ segmentId: 'sess-1:1:2', turnId: 'sess-1:1', segmentIdx: 2, text: 'YARN handles cluster resource scheduling.',      timestamp: 1_700_000_001_500, recencyRank: 2, relevance: 0.66 },
+	],
+};
+
+function classifierJsonWithRelationship(opts: {
+	intent?: string;
+	relationship?: { kind?: string; confidence?: number; citations?: string[] };
+}): string {
+	return JSON.stringify({
+		id:         opts.intent ?? 'code-analysis',
+		confidence: 0.9,
+		reasoning:  'fake',
+		scope:      'M',
+		relationship: opts.relationship === undefined
+			? { kind: 'NEW', confidence: 0.5, reasoning: 'no memory', citations: [] }
+			: {
+				kind:       opts.relationship.kind       ?? 'FOLLOWUP',
+				confidence: opts.relationship.confidence ?? 0.8,
+				reasoning:  'derived from recent context',
+				citations:  opts.relationship.citations  ?? [],
+			},
+	});
+}
+
+test('resolveIntent: cold path with memory -> relationship hydrated with cited turn + segment', async () => {
+	const provider = buildFakeProvider([{
+		text: classifierJsonWithRelationship({
+			intent: 'code-analysis',
+			relationship: { kind: 'DRILL_DOWN', confidence: 0.92, citations: ['t1', 's1'] },
+		}),
+	}]);
+	const session = makeFakeSession(provider);
+
+	const r = await resolveIntent(
+		session,
+		'elaborate on the core filesystem',
+		{ memoryOverride: SAMPLE_MEMORY },
+	);
+
+	assert.equal(r.id, 'code-analysis');
+	assert.equal(r.source, 'classified-fresh');
+	assert.ok(r.relationship !== undefined);
+	assert.equal(r.relationship!.kind,       'DRILL_DOWN');
+	assert.equal(r.relationship!.confidence, 'high');
+	assert.equal(r.relationship!.citations.length, 2);
+
+	const turnCitation = r.relationship!.citations.find(c => c.kind === 'turn');
+	assert.ok(turnCitation !== undefined);
+	assert.equal(turnCitation!.id, 'sess-1:2');
+	assert.equal(turnCitation!.recencyRank, 1);
+	assert.match(turnCitation!.excerpt, /HDFS Core/);
+
+	const segCitation = r.relationship!.citations.find(c => c.kind === 'segment');
+	assert.ok(segCitation !== undefined);
+	assert.equal(segCitation!.id, 'sess-1:0:4');
+	assert.match(segCitation!.excerpt, /HDFS Core/);
+});
+
+test('resolveIntent: hydrator drops citation keys not present in the memory bundle', async () => {
+	const provider = buildFakeProvider([{
+		text: classifierJsonWithRelationship({
+			intent: 'code-analysis',
+			relationship: { kind: 'DRILL_DOWN', citations: ['t1', 't99', 's1', 's42', 'not-a-key', 'x1'] },
+		}),
+	}]);
+	const session = makeFakeSession(provider);
+
+	const r = await resolveIntent(
+		session,
+		'anything',
+		{ memoryOverride: SAMPLE_MEMORY },
+	);
+
+	const ids = r.relationship!.citations.map(c => c.id);
+	// t1 -> sess-1:2 ; s1 -> sess-1:0:4. Everything else dropped.
+	assert.deepEqual(ids.sort(), ['sess-1:0:4', 'sess-1:2'].sort());
+});
+
+test('resolveIntent: cold path with EMPTY memory -> classifier sees no memory + no relationship on result', async () => {
+	let capturedSystem: string | null = null;
+	const provider: LLMProvider = {
+		async complete(messages: LLMMessage[]): Promise<LLMResponse> {
+			capturedSystem = messages[0]!.content;
+			return { text: classifierJson('code-analysis'), stopReason: 'end_turn' };
+		},
+		async *stream() { yield ''; },
+		async embed() { return []; },
+		supportsTools: false,
+	};
+	const session = makeFakeSession(provider);
+
+	const r = await resolveIntent(
+		session,
+		'audit the entire codebase',
+		{ memoryOverride: { turns: [], segments: [] } },
+	);
+
+	assert.equal(r.relationship, undefined,
+		'empty memory means no relationshipEnum was passed -> no relationship on result');
+	assert.ok(capturedSystem !== null);
+	assert.ok(!/Relationship to prior conversation/.test(capturedSystem!),
+		'classifier prompt must NOT include the relationship section when memory was empty');
+});
+
+test('resolveIntent: slash-forced path -> NO memory retrieval, NO relationship', async () => {
+	let memoryFn = 0;
+	const provider: LLMProvider = {
+		async complete(): Promise<LLMResponse> {
+			throw new Error('classifier should not be called');
+		},
+		async *stream() { yield ''; },
+		async embed() { return []; },
+		supportsTools: false,
+	};
+	const session = makeFakeSession(provider);
+	const r = await resolveIntent(
+		session,
+		'describe HDFS',
+		{
+			slashForced: 'code-analysis',
+			memoryOverride: SAMPLE_MEMORY,   // even with memory present
+		},
+	);
+	void memoryFn;
+	assert.equal(r.source, 'slash-forced');
+	assert.equal(r.relationship, undefined,
+		'slash-forced bypasses the cold path; relationship must be undefined');
+});
+
+test('resolveIntent: tag-reuse path -> NO relationship', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('research') }]);
+	const session  = makeFakeSession(provider);
+	session.contextManager.setTag(INTENT_TAG_CURRENT, 'code-analysis');
+
+	const r = await resolveIntent(session, 'now describe HDFS Core');
+	assert.equal(r.source, 'tag');
+	assert.equal(r.relationship, undefined);
+});
+
+test('resolveIntent: relationship confidence mapped to high/medium/low', async () => {
+	const session = makeFakeSession(buildFakeProvider([{
+		text: classifierJsonWithRelationship({
+			relationship: { kind: 'FOLLOWUP', confidence: 0.55, citations: ['t1'] },
+		}),
+	}]));
+	const r = await resolveIntent(session, 'a', { memoryOverride: SAMPLE_MEMORY });
+	assert.equal(r.relationship!.confidence, 'low');
 });
 
 test('resolveIntent: /intent strips prefix BEFORE continuation heuristic so tag-reuse path still fires', async () => {

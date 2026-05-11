@@ -64,6 +64,7 @@ export interface TurnMemoryHit {
 export interface SegmentMemoryHit {
 	readonly segmentId:   string;     // ${turnId}:${segmentIdx}
 	readonly turnId:      string;
+	readonly segmentIdx:  number;     // segment ordinal inside its source turn
 	readonly text:        string;
 	readonly timestamp:   number;
 	readonly recencyRank: number;
@@ -247,6 +248,7 @@ function projectSegmentHits(
 	return top.map(h => ({
 		segmentId:   h.id,
 		turnId:      h.turnId,
+		segmentIdx:  h.segmentIdx,
 		text:        trimAtSentence(h.text, SEGMENT_EXCERPT_MAX_CHARS),
 		timestamp:   Number(h.timestamp),
 		recencyRank: recencyRankOf.get(h.id) ?? 1,

@@ -44,6 +44,8 @@
 import { getLogger } from '../../shared/logger.js';
 import { classifyPrimaryIntent } from '../classify/intent.js';
 import { parsePrefix } from '../prefix.js';
+import { retrieveClassifierMemory, type ClassifierMemory } from './classifier-memory.js';
+import type { RelationshipKind } from './relationship.js';
 import type { Session } from '../session.js';
 import type { Intent } from '../../shared/types.js';
 
@@ -77,6 +79,36 @@ export interface ResolvedIntent {
 	readonly reasoning:        string;
 	/** Message text after prefix-stripping (mirrors classifyPrimaryIntent). */
 	readonly message:          string;
+	/**
+	 * Typed relationship to prior session activity. Always present
+	 * on the cold path (defaults to `{ kind: 'NEW' }` when memory
+	 * was empty); always `undefined` on slash-forced / override /
+	 * tag-reuse paths (they short-circuit before memory retrieval
+	 * runs).
+	 */
+	readonly relationship?:    IntentRelationship | undefined;
+}
+
+/**
+ * Memory-citation backed relationship classification. Distinct from
+ * `ResolvedIntent.source`: `source` describes HOW the resolver picked
+ * this intent; `relationship` describes how this prompt relates to
+ * prior conversation activity. Citations point back to the specific
+ * turns / response segments the classifier leaned on.
+ */
+export interface IntentRelationship {
+	readonly kind:        RelationshipKind;
+	readonly confidence:  'high' | 'medium' | 'low';
+	readonly reasoning:   string;
+	readonly citations:   readonly MemoryCitation[];   // 0..N items
+}
+
+export interface MemoryCitation {
+	readonly kind:        'turn' | 'segment';
+	readonly id:          string;     // turnId or segmentId
+	readonly excerpt:     string;     // ≤240 chars (turn) / ≤800 chars (segment)
+	readonly recencyRank: number;     // 1 = most recent
+	readonly relevance:   number;     // 0..1 ANN relevance
 }
 
 /**
@@ -95,6 +127,13 @@ export interface ResolveIntentOpts {
 	readonly slashForced?:      Intent | undefined;
 	/** Explicit override: skip classifier; stamp tag with this id. */
 	readonly explicitOverride?: Intent | undefined;
+	/**
+	 * Test-only override of the classifier-memory retrieval. Returns
+	 * the bundle the cold path would normally retrieve. Production
+	 * callers leave unset and pick up `retrieveClassifierMemory` with
+	 * the default Ollama-backed embedder.
+	 */
+	readonly memoryOverride?:   ClassifierMemory | undefined;
 }
 
 /**
@@ -171,11 +210,15 @@ export async function resolveIntent(
 		return resolved;
 	}
 
-	// 4. Cold path: call the LLM classifier. classifyPrimaryIntent
-	//    re-parses prefixes internally; that's idempotent (running
-	//    parsePrefix on already-stripped text is a no-op) so we keep
-	//    passing the raw message until Phase 7 privatises it.
-	const classified = await classifyPrimaryIntent(rawMessage, session);
+	// 4. Cold path: pull memory + call the LLM classifier with it.
+	//    classifyPrimaryIntent re-parses prefixes internally; that's
+	//    idempotent (running parsePrefix on already-stripped text is a
+	//    no-op) so we keep passing the raw message until Phase 7
+	//    privatises it.
+	const memory: ClassifierMemory = opts?.memoryOverride
+		?? await retrieveClassifierMemory(session, prefix.message);
+
+	const classified = await classifyPrimaryIntent(rawMessage, session, memory);
 	const newId      = classified.intent;
 	const previous   = priorId;
 
@@ -190,6 +233,8 @@ export async function resolveIntent(
 			: classified.confidence >= 0.6 ? 'medium'
 				: 'low';
 
+	const relationship = hydrateRelationshipCitations(classified.relationship, memory);
+
 	const resolved: ResolvedIntent = {
 		id:         newId,
 		source,
@@ -197,6 +242,7 @@ export async function resolveIntent(
 		reasoning:  classified.reasoning || 'LLM classifier',
 		message:    classified.message,
 		...(previous !== undefined ? { previousIntent: previous } : {}),
+		...(relationship !== undefined ? { relationship } : {}),
 	};
 	stampIntentTags(session, resolved, previous);
 
@@ -206,10 +252,87 @@ export async function resolveIntent(
 			source:     resolved.source,
 			previous:   resolved.previousIntent,
 			confidence: resolved.confidence,
+			relationship: relationship?.kind,
+			citations:    relationship?.citations.length ?? 0,
 		},
 		'intent resolved (LLM)',
 	);
 	return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// Relationship hydration
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate the classifier's raw `relationship.citations` keys
+ * (e.g. `["t1", "s2"]`) into hydrated MemoryCitation objects using
+ * the memory bundle the resolver retrieved earlier in the turn.
+ *
+ * Citation keys index into `memory.turns` (`t1`, `t2`, ...) and
+ * `memory.segments` (`s1`, `s2`, ...) by the same position the
+ * classifier prompt rendered them. Keys that don't resolve (LLM
+ * hallucinated a key beyond the memory bundle, or off-by-one) are
+ * dropped silently per the plan's defensive policy.
+ *
+ * Confidence is mapped from the LLM's 0..1 to the resolver's
+ * 'high' | 'medium' | 'low' tiers (same thresholds as the primary
+ * intent confidence above).
+ *
+ * Returns `undefined` when the classifier emitted no relationship
+ * (slash-forced / override / tag-reuse paths bypass this; cold path
+ * with empty memory also bypasses, since classifyPrimaryIntent
+ * skips the relationship enum when memory is empty).
+ */
+function hydrateRelationshipCitations(
+	raw: { kind: RelationshipKind; confidence: number; reasoning: string; citations: readonly string[] } | undefined,
+	memory: ClassifierMemory,
+): IntentRelationship | undefined {
+	if (raw === undefined) return undefined;
+
+	const citations: MemoryCitation[] = [];
+	for (const key of raw.citations) {
+		const hydrated = hydrateCitationKey(key, memory);
+		if (hydrated !== undefined) citations.push(hydrated);
+	}
+
+	const confidence = raw.confidence >= 0.85 ? 'high'
+		: raw.confidence >= 0.6 ? 'medium'
+			: 'low';
+
+	return {
+		kind:        raw.kind,
+		confidence,
+		reasoning:   raw.reasoning,
+		citations,
+	};
+}
+
+function hydrateCitationKey(key: string, memory: ClassifierMemory): MemoryCitation | undefined {
+	const m = key.trim().match(/^([ts])(\d+)$/i);
+	if (m === null) return undefined;
+	const kind = m[1]!.toLowerCase() === 't' ? 'turn' : 'segment';
+	const idx  = parseInt(m[2]!, 10) - 1;
+	if (kind === 'turn') {
+		const t = memory.turns[idx];
+		if (t === undefined) return undefined;
+		return {
+			kind:        'turn',
+			id:          t.turnId,
+			excerpt:     t.excerpt,
+			recencyRank: t.recencyRank,
+			relevance:   t.relevance,
+		};
+	}
+	const s = memory.segments[idx];
+	if (s === undefined) return undefined;
+	return {
+		kind:        'segment',
+		id:          s.segmentId,
+		excerpt:     s.text,
+		recencyRank: s.recencyRank,
+		relevance:   s.relevance,
+	};
 }
 
 // ---------------------------------------------------------------------------

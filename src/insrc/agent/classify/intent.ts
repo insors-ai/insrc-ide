@@ -14,12 +14,14 @@
 
 import type { ExplicitProvider, Intent } from '../../shared/types.js';
 import type { Session } from '../session.js';
-import type { ScopeSize } from '../../shared/classify.js';
+import type { ClassifyRelationship, ScopeSize } from '../../shared/classify.js';
 import { parsePrefix } from '../prefix.js';
 import { classify } from './index.js';
 import { resolveClassifierProvider } from './provider.js';
 import { INTENT_CLASSES } from '../../shared/intent-classes.js';
 import { SLASH_COMMANDS } from '../../shared/slash-commands.js';
+import type { ClassifierMemory } from '../intent/classifier-memory.js';
+import { RELATIONSHIP_KINDS, type RelationshipKind } from '../intent/relationship.js';
 
 export interface IntentClassifyResult {
   /** Resolved primary intent. */
@@ -40,6 +42,15 @@ export interface IntentClassifyResult {
   readonly scope: ScopeSize;
   /** True when the classifier errored and fell back to classes[0]. */
   readonly fallback: boolean;
+  /**
+   * Relationship to recent conversation activity. Present iff `memory`
+   * was supplied with at least one turn or segment hit (the cold path
+   * in the resolver). The `kind` is one of `RELATIONSHIP_KINDS`;
+   * `citations` are RAW string keys (e.g. ["t1", "s2"]) -- the resolver
+   * is responsible for hydrating them into MemoryCitation objects via
+   * `hydrateRelationshipCitations`.
+   */
+  readonly relationship?: ClassifyRelationship & { kind: RelationshipKind } | undefined;
 }
 
 /**
@@ -50,11 +61,15 @@ export interface IntentClassifyResult {
  *    `confidence = 1.0` and skip the LLM call.
  * 3. Otherwise run the generic classifier against INTENT_CLASSES using
  *    the session's classifier provider (resolver cascade: per-step
- *    override -> active cloud -> local).
+ *    override -> active cloud -> local). When `memory` is supplied
+ *    AND non-empty, the prompt grows a `## Recent context` block AND
+ *    the response schema grows a `relationship` block (Phase 4 of
+ *    plans/intent-classification-consolidation.md).
  */
 export async function classifyPrimaryIntent(
   raw: string,
   session: Session,
+  memory?: ClassifierMemory,
 ): Promise<IntentClassifyResult> {
   const prefix = parsePrefix(raw);
 
@@ -70,15 +85,37 @@ export async function classifyPrimaryIntent(
     };
   }
 
+  const memoryHasHits = memory !== undefined
+    && (memory.turns.length > 0 || memory.segments.length > 0);
+
+  const baseContext = buildClassifierContext(session);
+  const memoryContext = memoryHasHits ? renderMemoryContextBlock(memory!) : '';
+  const fullContext = memoryContext.length > 0
+    ? `${baseContext}\n\n${memoryContext}`
+    : baseContext;
+
   const result = await classify(
     {
       role: 'intent classifier for a coding assistant',
       classes: INTENT_CLASSES,
       text: prefix.message,
-      context: buildClassifierContext(session),
+      context: fullContext,
+      ...(memoryHasHits ? { relationshipEnum: RELATIONSHIP_KINDS } : {}),
     },
     resolveClassifierProvider(session, 'classify'),
   );
+
+  // Project the generic ClassifyRelationship into the typed
+  // RelationshipKind shape. Defensive: if memory was empty we never
+  // asked for a relationship, so leave the field undefined.
+  const relationship = (memoryHasHits && result.relationship !== undefined)
+    ? {
+        ...result.relationship,
+        kind: (RELATIONSHIP_KINDS as readonly string[]).includes(result.relationship.kind)
+          ? result.relationship.kind as typeof RELATIONSHIP_KINDS[number]
+          : RELATIONSHIP_KINDS[0],
+      }
+    : undefined;
 
   return {
     intent: result.id as Intent,
@@ -88,7 +125,63 @@ export async function classifyPrimaryIntent(
     reasoning: result.reasoning,
     scope: result.scope,
     fallback: result.fallback,
+    ...(relationship !== undefined ? { relationship } : {}),
   };
+}
+
+/**
+ * Render the classifier-memory bundle as a `## Recent context`
+ * block. Format mirrors the spec in
+ * plans/intent-classification-consolidation.md Phase 4.1: each
+ * turn / segment item is prefixed with a stable [tN] / [sN]
+ * citation key so the LLM's `relationship.citations` array can
+ * point back to specific memory items.
+ *
+ * Returns an empty string when both lists are empty (caller should
+ * have already filtered, but defensive).
+ */
+function renderMemoryContextBlock(memory: ClassifierMemory): string {
+  if (memory.turns.length === 0 && memory.segments.length === 0) return '';
+
+  const lines: string[] = [];
+  lines.push('## Recent context');
+  if (memory.turns.length > 0) {
+    lines.push(`### Recent turns (${memory.turns.length}, sorted by recency)`);
+    memory.turns.forEach((t, i) => {
+      const ageStr = formatRelativeAge(t.timestamp);
+      const role   = t.role.toUpperCase();
+      const rel    = t.relevance.toFixed(2);
+      lines.push(
+        `[t${i + 1}] (${ageStr}, ${role}, relevance ${rel}, id=${t.turnId})`,
+        `      > ${t.excerpt.replace(/\n/g, '\n      > ')}`,
+      );
+    });
+  }
+  if (memory.segments.length > 0) {
+    lines.push(`### Relevant segments from prior responses (${memory.segments.length}, by relevance)`);
+    memory.segments.forEach((s, i) => {
+      const rel = s.relevance.toFixed(2);
+      lines.push(
+        `[s${i + 1}] (turn ${s.turnId} segment ${s.segmentIdx}, relevance ${rel}, id=${s.segmentId})`,
+        `      > ${s.text.replace(/\n/g, '\n      > ')}`,
+      );
+    });
+  }
+  return lines.join('\n');
+}
+
+function formatRelativeAge(epochMs: number): string {
+  if (!Number.isFinite(epochMs) || epochMs <= 0) return 'unknown age';
+  const deltaMs = Date.now() - epochMs;
+  if (deltaMs < 0) return 'just now';
+  const sec = Math.floor(deltaMs / 1000);
+  if (sec < 60)         return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60)         return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24)          return `${hr} hr ago`;
+  const day = Math.floor(hr / 24);
+  return `${day} day${day === 1 ? '' : 's'} ago`;
 }
 
 /**

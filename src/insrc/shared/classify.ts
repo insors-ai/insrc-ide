@@ -111,6 +111,39 @@ export interface ClassifyInput {
    * Defaults to "classifier".
    */
   readonly role?: string;
+  /**
+   * Optional relationship enum. When supplied, the classifier ALSO
+   * picks how the input text relates to prior conversation activity
+   * referenced in `context`. The system prompt grows a relationship
+   * section; the response schema grows a `relationship` block. The
+   * caller is expected to embed citation keys (`[t1]`, `[s2]`, etc.)
+   * inside `context` so the LLM can refer back to them. The classifier
+   * does NOT validate citation keys -- it just returns whatever the
+   * LLM emitted; the caller filters against its own memory bundle.
+   */
+  readonly relationshipEnum?: readonly string[];
+}
+
+/**
+ * Relationship classification emitted alongside the primary class
+ * when the caller supplied `relationshipEnum`. Always populated on
+ * a successful classify() call when `relationshipEnum` was set;
+ * defaults safely (`kind = relationshipEnum[0]`, empty citations) on
+ * any parse failure.
+ */
+export interface ClassifyRelationship {
+  /** One of `ClassifyInput.relationshipEnum`. */
+  readonly kind: string;
+  /** 0..1 confidence the LLM reported. Clamped. */
+  readonly confidence: number;
+  /** One-sentence reasoning the LLM gave. May be empty. */
+  readonly reasoning: string;
+  /**
+   * Raw citation keys the LLM emitted (e.g. `['t1', 's2']`). The
+   * caller is responsible for filtering against its own memory
+   * bundle and translating keys into hydrated citation objects.
+   */
+  readonly citations: readonly string[];
 }
 
 export interface ClassifyResult {
@@ -134,4 +167,11 @@ export interface ClassifyResult {
    * an id not in `classes`. The caller decides whether to retry.
    */
   readonly fallback: boolean;
+  /**
+   * Present iff `ClassifyInput.relationshipEnum` was supplied. Always
+   * populated on success (defaults to `{ kind: relationshipEnum[0],
+   * confidence: 0.5, reasoning: '...', citations: [] }` if the LLM
+   * omitted or malformed the relationship block).
+   */
+  readonly relationship?: ClassifyRelationship | undefined;
 }

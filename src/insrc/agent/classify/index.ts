@@ -14,7 +14,12 @@
  */
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
-import type { ClassifyInput, ClassifyResult, ScopeSize } from '../../shared/classify.js';
+import type {
+  ClassifyInput,
+  ClassifyResult,
+  ClassifyRelationship,
+  ScopeSize,
+} from '../../shared/classify.js';
 import { getLogger } from '../../shared/logger.js';
 
 const VALID_SCOPES: readonly ScopeSize[] = ['S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'XXXXL'];
@@ -68,7 +73,9 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
     .map(c => `- ${c.id}: ${c.description ?? c.label ?? c.id}`)
     .join('\n');
 
-  const systemLines = [
+  const wantsRelationship = (input.relationshipEnum?.length ?? 0) > 0;
+
+  const systemLines: string[] = [
     `You are a ${role}. Given the text below, pick EXACTLY ONE class that best describes it AND estimate the scope of the work being asked for.`,
     '',
     '## Classes',
@@ -82,6 +89,23 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
     '- `XXL`   -- multi-subsystem change (e.g. auth + storage + UI)',
     '- `XXXL`  -- cross-cutting architectural change',
     '- `XXXXL` -- major rewrite or new product direction',
+  ];
+
+  if (wantsRelationship) {
+    systemLines.push(
+      '',
+      '## Relationship to prior conversation',
+      'In addition to picking the intent class, classify how the input prompt relates to the recent context the user has shared (the `## Recent context` block, if any). Use one of:',
+      ...input.relationshipEnum!.map(k => `- ${k}`),
+      '',
+      'Citation rules:',
+      '- The `relationship.citations` array MUST list the [tN] / [sN] keys you actually leaned on to decide.',
+      '- Empty array when the relationship is the "fresh / new topic" kind, or when no recent-context items applied.',
+      '- Cite only keys that appear in the `## Recent context` block; do NOT invent new keys.',
+    );
+  }
+
+  systemLines.push(
     '',
     'Rules:',
     '- Pick the single best-fit class.',
@@ -91,8 +115,28 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
     '- Return ONLY valid JSON (no markdown fences, no prose).',
     '',
     'Schema:',
-    '{ "id": "<class id>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "scope": "<S|M|L|XL|XXL|XXXL|XXXXL>" }',
-  ];
+  );
+
+  if (wantsRelationship) {
+    systemLines.push(
+      '{',
+      '  "id":         "<class id>",',
+      '  "confidence": <0.0-1.0>,',
+      '  "reasoning":  "<one sentence>",',
+      '  "scope":      "<S|M|L|XL|XXL|XXXL|XXXXL>",',
+      '  "relationship": {',
+      `    "kind":       "<${input.relationshipEnum!.join('|')}>",`,
+      '    "confidence": <0.0-1.0>,',
+      '    "reasoning":  "<one sentence>",',
+      '    "citations":  ["<key>", ...]',
+      '  }',
+      '}',
+    );
+  } else {
+    systemLines.push(
+      '{ "id": "<class id>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "scope": "<S|M|L|XL|XXL|XXXL|XXXXL>" }',
+    );
+  }
 
   const userLines: string[] = [];
   if (input.context && input.context.trim().length > 0) {
@@ -136,7 +180,52 @@ function parseResponse(rawText: string, input: ClassifyInput): ClassifyResult | 
   const scopeRaw = typeof obj['scope'] === 'string' ? (obj['scope'] as string).trim().toUpperCase() : '';
   const scope: ScopeSize = VALID_SCOPES_SET.has(scopeRaw) ? (scopeRaw as ScopeSize) : 'M';
 
+  const wantsRelationship = (input.relationshipEnum?.length ?? 0) > 0;
+  if (wantsRelationship) {
+    const relationship = parseRelationship(obj['relationship'], input.relationshipEnum!);
+    return { id, confidence, reasoning, scope, fallback: false, relationship };
+  }
+
   return { id, confidence, reasoning, scope, fallback: false };
+}
+
+/**
+ * Coerce the LLM-emitted `relationship` block into a typed
+ * ClassifyRelationship. Defensive on every field: any malformed /
+ * missing piece falls back to the safe defaults so callers never
+ * have to handle "missing relationship when relationshipEnum was
+ * supplied". The `kind` always lands on a valid enum value (default:
+ * the first enum entry, expected to be the "neutral / new topic"
+ * kind).
+ */
+function parseRelationship(
+  raw: unknown,
+  enumKinds: readonly string[],
+): ClassifyRelationship {
+  const fallbackKind = enumKinds[0] ?? '';
+  const fallback: ClassifyRelationship = {
+    kind:       fallbackKind,
+    confidence: 0.5,
+    reasoning:  'no relationship data emitted',
+    citations:  [],
+  };
+  if (!raw || typeof raw !== 'object') return fallback;
+
+  const r = raw as Record<string, unknown>;
+  const kindRaw = typeof r['kind'] === 'string' ? r['kind'] as string : '';
+  const validKinds = new Set(enumKinds);
+  const kind = validKinds.has(kindRaw) ? kindRaw : fallbackKind;
+
+  const confRaw = typeof r['confidence'] === 'number' ? r['confidence'] as number : 0.5;
+  const confidence = Math.max(0, Math.min(1, confRaw));
+
+  const reasoning = typeof r['reasoning'] === 'string' ? r['reasoning'] as string : '';
+
+  const citationsRaw = Array.isArray(r['citations']) ? r['citations'] as unknown[] : [];
+  const citations = citationsRaw
+    .filter((c): c is string => typeof c === 'string' && c.length > 0);
+
+  return { kind, confidence, reasoning, citations };
 }
 
 function stripFences(text: string): string {
