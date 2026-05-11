@@ -31,7 +31,7 @@ import {
   makeDiskContentCache,
   type SectionResult,
 } from '../../agent/content-gen/index.js';
-import { planActions, ACTION_BUDGET_BY_TIER, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
 import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
