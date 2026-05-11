@@ -256,16 +256,50 @@ Run `/code-analyze describe what this repo does` on Hadoop, verify the report's 
 
 ---
 
+### C.4 Final report needs a chat-panel link back to the persisted document
+
+**Symptom:** when `/code-analyze` completes, the report opens in a tab. The chat panel shows the streamed deltas + a `done` summary, but **nothing in the chat history points back at the rendered report file**. If the user closes the tab they cannot reopen the report -- their only option is to re-run the analysis from scratch (slow, expensive, may produce a different report).
+
+**Expected:** after the report is materialised, the chat panel turn ends with a Markdown line like:
+
+```
+📄 [View report: HDFS Core analysis](file:///Users/subhagho/.insrc/tmp/<sessionId>/reports/<turnId>.md)
+```
+
+The VSCode renderer (per CLAUDE.md's clickable-link conventions) opens the file when clicked -- the user gets the same view as the original tab without re-running anything. Persists across daemon restarts because the file lives in `~/.insrc/tmp/<sessionId>/` which survives session close (Phase 2 of the consolidation plan keeps the spill dir alive; only `repo.remove` purges it).
+
+**Where to fix (two-part):**
+
+1. **Persist the report on the daemon side.** Current pipeline streams deltas to the IDE but doesn't write the final markdown anywhere on disk (this is the SAME hole as B.1/B.2 -- if `result.finalOutput` becomes truthful, the spill writer already has a per-session tmp dir, just needs a `reports/` subdir + `writeFile(${turnId}.md, finalOutput)`).
+2. **Emit the link in the chat panel.** After persist, emit a final `delta` containing the Markdown link OR add a `reportPath` field to the `done` IPC payload that the chat-panel renderer turns into a link. Decide based on the existing IPC contract -- if `done.summary` already supports markdown, use it; otherwise extend the contract with `reportFile`.
+
+**Cross-link to B.2:** completing B.2 (orchestrator populates `finalOutput` truthfully) is a prerequisite for this -- you can't persist what you don't have. Implement B before C.4.
+
+**Tests:**
+- daemon-side: integration test that after `runCodeAnalyzerSlash` finishes, `~/.insrc/tmp/<sessionId>/reports/<turnId>.md` exists and matches `result.finalOutput`.
+- IDE-side: manual verification that the chat panel renders the link and clicking it opens the file.
+
+**Success criteria:**
+- Every `/code-analyze` turn produces a file at `~/.insrc/tmp/<sessionId>/reports/<turnId>.md` containing the full rendered markdown.
+- The chat panel's final message includes a clickable link to that file.
+- Closing the tab, then clicking the chat-panel link, re-opens the same content.
+- Files survive across daemon restarts; cleanup happens only on `repo.remove` (same lifecycle as the spill artefacts).
+
+**Effort:** ~1 hr after B.2 lands.
+
+---
+
 ## Sequencing
 
-Phase A is fully parallelisable -- four small independent diffs. Phase B is gated on the orchestrator investigation. Phase C is independent of A and B.
+Phase A is fully parallelisable -- four small independent diffs. Phase B is gated on the orchestrator investigation. Phase C.1-C.3 are independent of A and B. **C.4 depends on B.2** -- can't persist the report file without a truthful `finalOutput`.
 
 Recommended order:
 1. **Phase A** in a single PR (all four; ~1 hr) -- biggest impact-per-effort, no architectural risk.
-2. **Phase B** next (~2 hrs) -- restores the full Phase 4 memory design.
-3. **Phase C** last (~2 hrs) -- highest user-facing impact but doesn't gate any classifier behaviour.
+2. **Phase B** next (~2 hrs) -- restores the full Phase 4 memory design AND unblocks C.4.
+3. **Phase C.1-C.3** (clickable refs in report content; ~2 hrs) -- parallelisable with A and B.
+4. **Phase C.4** (chat-panel link to persisted report; ~1 hr) -- AFTER B.2.
 
-Total: ~5 hours of focused work.
+Total: ~6 hours of focused work.
 
 ---
 
