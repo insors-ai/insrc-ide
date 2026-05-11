@@ -1261,7 +1261,8 @@ async function runDataAnalyzerSlash(
       await persistReportFile({
         sessionId: session.id ?? 'unknown',
         turnIdx,
-        markdown: result.finalOutput,
+        markdown:   result.finalOutput,
+        userPrompt: originalMessage,
         send,
         requestId,
       });
@@ -1496,7 +1497,8 @@ async function runCodeAnalyzerSlash(
       await persistReportFile({
         sessionId: session.id ?? 'unknown',
         turnIdx,
-        markdown: result.finalOutput,
+        markdown:   result.finalOutput,
+        userPrompt: originalMessage,
         send,
         requestId,
       });
@@ -3189,21 +3191,29 @@ async function persistTurn(
  * cleared on `repo.remove` cascade alongside `purgeSessionById` /
  * `deleteResponseSegmentsForSession`.
  *
- * The chat-panel link uses a `file://` URI -- VSCode's default
- * opener handles it without a custom URI scheme. The visible link
- * label is the analysis topic (first H1 / H2 from the markdown,
- * falling back to "View report") so the chat reads naturally.
+ * Link rendering: the emitted delta carries pre-rendered HTML
+ * (assistant deltas land in chatView via _setTrustedHtml -- raw
+ * markdown shows up verbatim there). The `file://` URI routes
+ * through chatView._wireMarkdownLinks -> openerService.open(...) so
+ * the IDE's default file opener pops the saved report in a new tab.
+ *
+ * Label: the caller passes the user's original prompt (truncated to
+ * 80 chars) -- "describe what this repo does" reads naturally as a
+ * link label in the transcript. Falls back to the first heading in
+ * the markdown, then "View report".
  *
  * Best-effort: a write failure logs at warn and skips the link.
  * The LMDB turn row + segment indexing already succeeded by this
  * point; the report file is an additive convenience.
  */
 async function persistReportFile(args: {
-  sessionId: string;
-  turnIdx:   number;
-  markdown:  string;
-  send:      (msg: IpcStreamMessage) => void;
-  requestId: number;
+  sessionId:    string;
+  turnIdx:      number;
+  markdown:     string;
+  /** The user's original prompt for this turn; used as the link label. */
+  userPrompt?:  string;
+  send:         (msg: IpcStreamMessage) => void;
+  requestId:    number;
 }): Promise<void> {
   if (args.markdown.trim().length === 0) return;
   try {
@@ -3217,26 +3227,63 @@ async function persistReportFile(args: {
     await writeFile(file, args.markdown, 'utf8');
     log.info({ sessionId: args.sessionId, turnIdx: args.turnIdx, file, bytes: args.markdown.length }, 'report file persisted');
 
-    // Derive a friendly link label from the report's first heading.
-    // Falls back to "View report" when no heading is present.
-    const heading = extractFirstHeading(args.markdown) ?? 'View report';
+    // Label priority: user prompt > first heading > generic fallback.
+    // The user prompt reads most naturally in the chat transcript
+    // ("View report: describe what this repo does") -- the LLM's
+    // first-section heading is a structural artefact, not the doc
+    // title.
+    const label = pickReportLinkLabel(args.userPrompt, args.markdown);
 
-    // Use a file:// URI so the IDE's default opener handles it --
-    // PATHS.sessionTmp() lives outside the workspace so the custom
-    // `path:` opener (which resolves workspace-relative paths) can't
-    // route here. The chat-panel markdown renderer treats file://
-    // links the way VSCode normally does: a click opens the
-    // referenced file in a new editor tab.
+    // file:// URI for the saved report. PATHS.sessionTmp() lives
+    // outside the workspace so the workspace-relative `path:` opener
+    // doesn't apply -- the IDE's default file opener handles it.
     const fileUri = `file://${file}`;
-    const linkLine = `\n\n📄 [${heading}](${fileUri})\n`;
+
+    // Pre-render through marked + the daemon's renderMarkdown helper
+    // so the chat panel (which assigns assistant content via
+    // _setTrustedHtml in chatView) receives HTML instead of raw
+    // markdown syntax. Without this step the `[label](file://...)`
+    // markdown text shows up verbatim in the transcript.
+    const linkMd = `\n\n📄 [${label}](${fileUri})\n`;
+    const rendered = renderMarkdown(linkMd);
     args.send({
       id: args.requestId,
       stream: 'delta',
-      data: { text: linkLine, format: 'markdown' },
+      data: { text: rendered.text, format: rendered.format },
     });
   } catch (err) {
     log.warn({ err, sessionId: args.sessionId, turnIdx: args.turnIdx }, 'report file persist failed (continuing)');
   }
+}
+
+/**
+ * Choose the human-readable label for the chat-panel report link.
+ *
+ *   1. User prompt (truncated to 80 chars). Reads naturally as a
+ *      title even when the report doesn't start with an H1.
+ *   2. First `#` / `##` / `###` heading found in the first ~10 lines
+ *      of the markdown (legacy fallback for paths that don't carry
+ *      a user prompt).
+ *   3. Generic "View report".
+ *
+ * Empty / whitespace-only inputs at any tier fall through to the
+ * next.
+ */
+function pickReportLinkLabel(userPrompt: string | undefined, markdown: string): string {
+  const promptLabel = sanitiseLinkLabel(userPrompt ?? '');
+  if (promptLabel !== '') return promptLabel;
+  const headingLabel = extractFirstHeading(markdown);
+  if (headingLabel !== null) return headingLabel;
+  return 'View report';
+}
+
+function sanitiseLinkLabel(raw: string): string {
+  // Collapse newlines + leading "/slash" prefix (when the user
+  // arrived via /code-analyze or /data-analyze) so the label
+  // reads like prose, not a command invocation.
+  const cleaned = raw.replace(/\s+/g, ' ').replace(/^\/[\w-]+\s*/, '').trim();
+  if (cleaned.length === 0) return '';
+  return cleaned.length > 80 ? cleaned.slice(0, 77) + '...' : cleaned;
 }
 
 /**

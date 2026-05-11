@@ -527,6 +527,15 @@ function getSanitizerOptions(options: IInternalSanitizerOptions): { config: domp
 		Schemas.vscodeFileResource,
 		Schemas.vscodeRemote,
 		Schemas.vscodeRemoteResource,
+		// Custom scheme used by the code-analyzer's citation links
+		// (e.g. `[label](path:src/foo.ts#L42-L58)`). Handled by the
+		// PathUriOpener contribution (src/vs/workbench/contrib/insrc/
+		// browser/code-analyzer/pathUriOpener.ts) which resolves the
+		// relative path against the active workspace -- safe surface,
+		// no risk of arbitrary command execution. Without this entry
+		// dompurify strips the href and the analyzer's references
+		// degrade to plain text.
+		'path',
 	];
 
 	if (options.isTrusted) {
