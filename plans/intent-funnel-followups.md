@@ -1,139 +1,124 @@
-# Intent funnel follow-ups -- gaps surfaced during real-world testing
+# Intent funnel follow-ups -- post-consolidation fix plan
 
-**Status:** open
-**Surfaced:** 2026-05-11 during live test of `plans/intent-classification-consolidation.md` after Phase 7 + 9 landed (`b15c506f700`).
-**Test scenario:** `/code-analyze describe what this repo does` followed by `drill down into HDFS`. Both prompts classified correctly (`code-analysis`, relationship `DRILL_DOWN`), but the classifier context was thinner than the Phase 4 design intended.
-
-These are bugs and gaps that DON'T block the consolidation -- the funnel is working. They block the classifier from being as informed as it should be on follow-ups.
-
----
-
-## 1. Continuation heuristic misses `drill down`
-
-**Where:** [agent/intent/resolver.ts:161 CONTINUATION_LEAD regex](src/insrc/agent/intent/resolver.ts#L161)
-
-**Bug:** The regex includes `drill into` but not `drill down`. A user typing "drill down into HDFS" falls through to the cold-classify path instead of the cheap tag-reuse fast path. Same answer either way (the cold path still picked `code-analysis`), but burns an LLM call and a memory retrieval per turn for a textually obvious continuation.
-
-**Fix:** Extend the regex alternation:
-```ts
-drill\s+(?:into|down(?:\s+into)?)
-```
-
-**Why:** Saves ~3-5s and one Ollama embed + one Anthropic LLM call per drill-down turn. Multiply by every "drill down" the user types in a session.
-
-**Effort:** 5 min + new test cases in `resolver.test.ts:looksLikeContinuation`.
+**Status:** ready
+**Owner:** subhagho@gmail.com
+**Surfaced:** 2026-05-11 during live test of `plans/intent-classification-consolidation.md` (`b15c506f700`).
+**Trigger bug:** confirmed FIXED end-to-end. `/code-analyze X` → `drill down into HDFS` correctly classifies as `code-analysis` with relationship `DRILL_DOWN`. These follow-ups improve quality and close gaps the live test surfaced -- none of them block the consolidation.
 
 ---
 
-## 2. Assistant-side turn excerpts MISSING from classifier memory
+## Phase A -- quick wins (concrete diffs, ~1 hour total)
 
-**Where:** `## Recent context` rendered by [agent/classify/intent.ts:renderMemoryContextBlock](src/insrc/agent/classify/intent.ts) gets fed turn hits from [agent/intent/classifier-memory.ts:hydrateTurnHits](src/insrc/agent/intent/classifier-memory.ts).
+### A.1 Citation hydrator drops bracketed `[tN]` / `[sN]` keys
 
-**Symptom:** Both turn excerpts in the rendered context were USER-side. The prior `/code-analyze` had just produced a 12-section report 3 min before -- none of it surfaced. The LLM had no idea which section had HDFS content; the relationship classification was correct only because the user message itself ("drill down into HDFS") + the prior user message ("describe what this repo does") were enough to infer DRILL_DOWN without seeing the assistant output.
+**Location:** [src/insrc/agent/intent/resolver.ts:326](src/insrc/agent/intent/resolver.ts#L326) `hydrateCitationKey`.
 
-```
-[t1] (3 min ago, USER, relevance 0.43, id=...:1)
-      > /code-analyze describe what this repo does
-[t2] (14 hr ago, USER, relevance 0.43, id=...:0)
-      > /code-analyze describe what this repo does
-```
+**Symptom:** Live LLM (llmCallId=128 in agent.5.log) returned `"citations": ["[t1]", "[t2]"]` -- with brackets. The hydrator's `^([ts])(\d+)$` regex rejected both, so the resolver logged `citations: 0` even though the LLM tried to cite both turns. **100% citation-loss rate observed in the first live cold-classify follow-up.**
 
-**Root cause (suspected):** The hydrator emits one TurnMemoryHit per non-empty side of each turn (user + assistant). Two turns × two sides = 4 candidates. Top-3 by recency would normally include at least one assistant excerpt. Only seeing 2 user-side excerpts means **both turns' `assistant` field in LMDB is empty**.
+**Why the LLM brackets them:** the system prompt references citation keys as `[t1]` / `[s2]` in the rules section, and the rendered `## Recent context` block prefixes each item with the bracketed form. The LLM copied the format faithfully.
 
-**Why empty?** Two paths to investigate:
-1. `runCodeAnalyzerSlash` in [daemon/chat-handler.ts](src/insrc/daemon/chat-handler.ts) calls `await persistTurn(session, originalMessage, result.finalOutput, result.finalFormat)`. Is `result.finalOutput` the full report or a stub? The orchestrator owns `result` -- audit `CodeAnalyzerOrchestratorController` for what it populates `finalOutput` with.
-2. The orchestrator may be flushing markdown to the IDE via a side channel (`send({ stream: 'delta', ... })`) and `result.finalOutput` ends up as an empty string / one-liner because the streaming bypassed accumulation.
+**Fix (both edits):**
 
-**Fix sketch:** Verify `persistTurn` receives the full assistant body. If not, the orchestrator's result-builder needs to populate `result.finalOutput` with the rendered report.
-
-**Effort:** ~30 min investigation + small fix.
-
----
-
-## 3. `response_segment_vec` empty for an active session
-
-**Where:** Phase 2 indexing hook in [daemon/chat-handler.ts:indexResponseSegments](src/insrc/daemon/chat-handler.ts) (the `void indexResponseSegments({...})` fan-out after `persistTurn`).
-
-**Symptom:** `classifier-memory retrieved` log line showed `segments: 0` for a session with a recent 12-section assistant report. The Phase 2 chunker should have produced ~12 segments (one per `##` heading) and the indexer should have embedded + upserted each into `response_segment_vec`.
-
-**Possible causes (in order of likelihood):**
-1. **`persistTurn` not called with the full report.** Same root cause as #2 -- if the assistant field is empty, the chunker returns 0 chunks and nothing gets indexed. Fixing #2 likely fixes this.
-2. **`embedText` returning empty** -- Ollama embeddings unavailable / slow. The indexing fan-out drops rows whose embedding came back empty. Check daemon log for `embedText` Ollama errors.
-3. **Chunker filtering everything** -- unlikely; the chunker has lenient defaults (200-char min, 1500-char max). A 12-section markdown report should easily clear minimum.
-4. **`response segments indexed` debug line never emitted** -- means the indexer didn't even run. Grep daemon log for that string after a `/code-analyze` turn to confirm.
-
-**Investigation steps:**
-```bash
-grep "response segments indexed" /tmp/.insrc/agent.*.log
-grep "response-segment indexing" /tmp/.insrc/agent.*.log
-```
-
-**Effort:** ~30 min depending on root cause.
-
----
-
-## 4. `code.meta.select-scope` skill chokes on markdown-fenced JSON
-
-**Where:** `skill.code.meta.select-scope` (file location unknown -- skill package). The warning came at [agent.5.log:1778489725246](#).
-
-**Symptom:**
-```
-JSON parse failed: Unexpected token '`', "```json\n{\n\"... is not valid JSON
-"select-scope retry rejected; surfacing low confidence"
-```
-
-The LLM (likely Anthropic given the planner config) returned the scope JSON wrapped in ` ```json ... ``` ` fences. The skill's parser does a strict `JSON.parse` and rejects. The skill's retry policy gives up and marks the result low-confidence.
-
-**Pre-existing issue.** Not related to the consolidation work. But it's a recurring pattern across skills.
-
-**Fix:** Add a `stripFences` pre-step before `JSON.parse` in select-scope (and audit other meta-skills that may have the same gap). The classifier module already has the helper at [agent/classify/index.ts:stripFences](src/insrc/agent/classify/index.ts) -- consider moving it to `shared/` and reusing across skills.
-
-**Effort:** ~30 min for select-scope + audit of other skills.
-
----
-
-## 5. Citation hydration silently drops `[tN]` / `[sN]` keys
-
-**Where:** [agent/intent/resolver.ts:hydrateCitationKey](src/insrc/agent/intent/resolver.ts) -- the regex `^([ts])(\d+)$` matches bare keys (`t1`, `s2`) but NOT bracketed keys (`[t1]`, `[s2]`).
-
-**Symptom:** Live LLM call (llmCallId=128 in agent.5.log) returned
-`"citations": ["[t1]", "[t2]"]` -- with brackets. The hydrator regex
-rejected both, so the resolver logged `citations: 0` even though the
-LLM tried to cite both turns. 100% citation-loss rate observed in
-the first live cold-classify follow-up.
-
-**Why the LLM brackets them:** The classifier system prompt
-references citation keys as `[t1]` / `[s2]` notation in the rules
-section, AND the rendered `## Recent context` block prefixes each
-item with the bracketed form (`[t1] (3 min ago, USER, ...)`). The
-LLM copied the format faithfully.
-
-**Two fixes (do both):**
-
-1. **Loosen the hydrator** -- strip brackets before matching. Defensive
-   against either format the LLM might emit:
+1. **Loosen the hydrator** -- strip brackets before matching:
    ```ts
-   const m = key.trim().replace(/^\[|\]$/g, '').match(/^([ts])(\d+)$/i);
+   function hydrateCitationKey(key: string, memory: ClassifierMemory): MemoryCitation | undefined {
+       const bare = key.trim().replace(/^\[|\]$/g, '');
+       const m = bare.match(/^([ts])(\d+)$/i);
+       if (m === null) return undefined;
+       ...
+   }
    ```
 
-2. **Tighten the prompt** -- in [agent/classify/index.ts](src/insrc/agent/classify/index.ts) where the citation rules are rendered, add an explicit example: "Citations are BARE keys -- emit `t1`, not `[t1]`."
+2. **Tighten the prompt** in [src/insrc/agent/classify/index.ts:81](src/insrc/agent/classify/index.ts) (the citation rules block rendered when `relationshipEnum` is supplied) -- add an explicit format note:
+   ```
+   - Citations are BARE keys: emit `"t1"`, NOT `"[t1]"`. The brackets
+     in the recent-context block are visual markers only.
+   ```
 
-**Test:** Add a citation-format case to `relationship.test.ts` covering bracketed inputs.
+**Tests:** add to [src/insrc/agent/classify/__tests__/relationship.test.ts](src/insrc/agent/classify/__tests__/relationship.test.ts) -- a parser case verifying both bracketed AND bare citations survive end-to-end via `resolveIntent.hydrateRelationshipCitations`. Add to [src/insrc/agent/intent/__tests__/resolver.test.ts](src/insrc/agent/intent/__tests__/resolver.test.ts) -- bracketed citations resolve correctly.
 
-**Effort:** 15 min for the regex fix + prompt tweak + test.
+**Success criteria:** after fix, the previously-observed `citations: ["[t1]", "[t2]"]` payload yields `citations: 2` on the resolver, with both hydrated `MemoryCitation` objects pointing at the right turns.
+
+**Effort:** 15 min.
 
 ---
 
-## 6. Scope tier descriptions are coding-centric; read-only intents always default to `M`
+### A.2 Continuation heuristic misses `drill down`
 
-**Where:** [agent/classify/index.ts buildMessages](src/insrc/agent/classify/index.ts) rendered scope-tier block + [shared/classify.ts SCOPE_META](src/insrc/shared/classify.ts) descriptions.
+**Location:** [src/insrc/agent/intent/resolver.ts:384](src/insrc/agent/intent/resolver.ts#L384) `CONTINUATION_LEAD` regex.
 
-**Symptom:** Live test classified "drill down into HDFS" (one of the
-biggest subsystems in Apache Hadoop, ~50 modules) as `scope: 'M'`,
-the same tier the classifier picks for a 1-paragraph touch-up. The
-LLM has no scope vocabulary that fits read-only / analysis work.
+**Symptom:** the regex currently includes `drill into` but not `drill down`. Live test: `drill down into HDFS` fell through to cold-classify, burning an Ollama embed + an Anthropic LLM call when the tag-reuse fast path would have produced the same answer for free.
 
-**Root cause:** Every tier description is framed as "a change":
+**Fix:** extend the alternation:
+
+```ts
+// BEFORE
+... |describe|drill into|elaborate(?:\s+on)? ...
+
+// AFTER
+... |describe|drill\s+(?:into|down(?:\s+into)?)|elaborate(?:\s+on)? ...
+```
+
+**Tests:** add to [src/insrc/agent/intent/__tests__/resolver.test.ts](src/insrc/agent/intent/__tests__/resolver.test.ts) -- `looksLikeContinuation` returns `true` for `drill down into X`, `drill down on Y`, `drill down`.
+
+**Success criteria:** a 2-turn session where turn 1 is `/code-analyze ...` and turn 2 is `drill down into HDFS` resolves via `source: 'tag'`, NOT `source: 'classified-fresh'`. Verified by inspecting `intent resolved (...)` log line.
+
+**Effort:** 5 min.
+
+---
+
+### A.3 `select-scope` skills choke on unmatched markdown fences
+
+**Locations:**
+- [src/insrc/daemon/skills/built-ins/code.meta.select-scope.ts:527](src/insrc/daemon/skills/built-ins/code.meta.select-scope.ts#L527) `stripFences`
+- [src/insrc/daemon/skills/built-ins/data.meta.select-scope.ts:401](src/insrc/daemon/skills/built-ins/data.meta.select-scope.ts#L401) `stripFences`
+
+**Symptom:** live warning at agent.5.log:1778489725246 --
+```
+JSON parse failed: Unexpected token '`', "```json\n{\n\"... is not valid JSON
+select-scope retry rejected; surfacing low confidence
+```
+
+The skill DOES call `stripFences` before `JSON.parse`, but the current implementation uses a regex that requires MATCHED open/close fences:
+
+```ts
+function stripFences(text: string): string {
+    const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(text);
+    return fenceMatch !== null ? fenceMatch[1]! : text;
+}
+```
+
+When the LLM emits an opening ` ```json ` but no closing fence (truncation, model quirk, etc.), the regex doesn't match and returns the raw text -- which still leads with ` ``` ` and fails parsing.
+
+**Fix:** replace with the lenient version that already works in [src/insrc/agent/classify/index.ts:231](src/insrc/agent/classify/index.ts#L231) -- strip leading and trailing fences independently:
+
+```ts
+function stripFences(text: string): string {
+    let out = text.trim();
+    if (out.startsWith('```')) {
+        out = out.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+    }
+    return out.trim();
+}
+```
+
+Audit the other built-in skills under [src/insrc/daemon/skills/built-ins/](src/insrc/daemon/skills/built-ins/) for any other strict-fence parsers; replace them too. Consider extracting `stripFences` to `src/insrc/shared/json-fences.ts` (or similar) so the four current copies stay in sync.
+
+**Tests:** add to [src/insrc/daemon/skills/__tests__/](src/insrc/daemon/skills/__tests__/) -- one case each for: matched fences, open-only fence, no fences, fenced + trailing whitespace.
+
+**Success criteria:** the same LLM payload that triggered the live warning (`"```json\n{...\n```"` AND `"```json\n{...\n"`) both parse successfully.
+
+**Effort:** 30 min including the shared-helper extraction + audit of sibling skills.
+
+---
+
+### A.4 Scope tier descriptions are coding-centric
+
+**Locations:**
+- [src/insrc/agent/classify/index.ts:84-91](src/insrc/agent/classify/index.ts#L84-L91) -- the scope-tier block rendered into the classifier system prompt
+- [src/insrc/shared/classify.ts:42-69](src/insrc/shared/classify.ts#L42-L69) `SCOPE_META` -- the label + description pair surfaced in the UI / logs
+
+**Symptom:** live test classified "drill down into HDFS" (one of the biggest subsystems in Apache Hadoop, ~50 modules) as `scope: 'M'` -- identical to a one-paragraph touch-up. Every tier description is framed as "a change":
 
 ```
 - S     -- one small, localized change (minutes of work)
@@ -145,97 +130,147 @@ LLM has no scope vocabulary that fits read-only / analysis work.
 - XXXXL -- major rewrite or new product direction
 ```
 
-For read-only intents (`code-analysis`, `data-analysis`, `research`,
-`review`, `document`, `brainstorm`) there's no concept of "a change"
-to size. The LLM falls back to M.
+For read-only intents (`code-analysis`, `data-analysis`, `research`, `review`, `document`, `brainstorm`) there's no concept of "a change" to size. The LLM defaults to M.
 
-**Downstream impact:** Scope drives planning budget, expand-step
-depth, and report length in the analyzer pipeline. Treating
-"describe whole repo" and "drill into one subsystem" identically
-under M skews all of those.
+**Downstream impact:** scope drives planning budget, expand-step depth, and report length in the analyzer pipeline. Treating "describe whole repo" and "drill into one subsystem" identically under M skews all of those.
 
-**Proposed reframe -- work-volume neutral, reads for any intent:**
+**Fix:** replace the tier descriptions in BOTH locations with work-volume-neutral wording that reads sensibly for any intent:
 
+**`agent/classify/index.ts` (the LLM prompt):**
 ```
-- S     -- one focused unit (a function, a column, a paragraph; minutes)
-- M     -- one module / one report section / one focused query (single session)
-- L     -- a full module or 5-10 sections / a feature build (multi-session)
-- XL    -- a subsystem (HDFS / auth / storage layer; many modules)
-- XXL   -- multiple subsystems (auth + storage + UI; or repo-wide analysis)
-- XXXL  -- cross-cutting concern that touches every subsystem
-- XXXXL -- whole-product / multi-product / major rewrite
+- `S`     -- one focused unit (a function, a column, a paragraph; minutes)
+- `M`     -- one module / one report section / one focused query (single session)
+- `L`     -- a full module or 5-10 sections / a feature build (multi-session)
+- `XL`    -- a subsystem (HDFS / auth / storage layer; many modules)
+- `XXL`   -- multiple subsystems (auth + storage + UI; or repo-wide analysis)
+- `XXXL`  -- cross-cutting concern that touches every subsystem
+- `XXXXL` -- whole-product / multi-product / major rewrite
 ```
 
-These read sensibly for `code-analysis` ("a subsystem-scale report"
-is XL just like "implement spanning several modules" is XL),
-`data-analysis` ("an analysis across multiple tables" is L), and
-`research` (still inherently bounded). The downstream consumers in
-`SCOPE_META` (label + tooltip-style description) are already
-intent-neutral so the reframe doesn't ripple beyond the prompt.
+**`shared/classify.ts SCOPE_META`** (each `description` field):
+```ts
+S:     'one focused unit (a function, a column, a paragraph); minutes',
+M:     'one module / one report section / one focused query; single session',
+L:     'a full module or 5-10 sections / a feature build; multi-session',
+XL:    'a subsystem (HDFS / auth / storage layer); many modules',
+XXL:   'multiple subsystems or repo-wide analysis',
+XXXL:  'cross-cutting concern that touches every subsystem',
+XXXXL: 'whole-product / multi-product / major rewrite',
+```
 
-**Test:** Update the snapshot-style scope-tier assertions if any
-exist; otherwise just verify the LLM picks XL for "describe HDFS
-Core" on a large repo. Live testing is the real validation.
+(`label` stays unchanged -- "Small", "Medium", etc. The UI pill / chip text doesn't depend on intent.)
 
-**Effort:** ~30 min including snapshot tests.
+**Tests:** the existing scope-classifier tests pin specific intent classifications, not the tier wording -- they should keep passing. Spot-check live: run "describe HDFS Core" on Hadoop after the change and verify the LLM picks XL (not M).
+
+**Success criteria:** the LLM's scope output differentiates subsystem-scale read-only work from single-module work. A "describe HDFS" prompt should land XL+; "summarise NameNode RPC" should land M-L.
+
+**Effort:** 30 min including a live spot-check.
 
 ---
 
-## 7. Code references in the analysis report should be clickable
+## Phase B -- memory pipeline gap (#2 + #3 bundled, ~2 hours)
 
-**Where:** Code-analyzer Markdown output -- the per-section reports
-emitted by the synthesize/expand/review pipeline and rendered in
-the IDE's Report Pane.
+The two are tightly coupled: if the assistant body never reaches `persistTurn`, both the turn embedding AND the segment indexing miss the assistant content.
 
-**Symptom:** When the report mentions a class, file, function, or
-module (`HdfsServerConstants`, `hadoop-hdfs-project/hadoop-hdfs/...`,
-`NameNode#startCommonServices`, etc.) it appears as plain text. User
-has to copy-paste into the file picker to navigate. The graph
-already knows the file path for every entity surfaced by the
-analysis -- the daemon's response just isn't formatting them as
-links.
+### B.1 Audit `result.finalOutput` for the code-analyzer slash path
 
-**Expected:** Each reference renders as a Markdown link the user
-can click to jump straight to the file (or to the line if the
-entity has line metadata). The VSCode extension's renderer (per
-CLAUDE.md's notes about `[filename.ts](src/filename.ts)` /
-`[filename.ts:42](src/filename.ts#L42)` syntax) already supports
-clickable file links inside Markdown.
+**Location:** [src/insrc/daemon/chat-handler.ts:1474](src/insrc/daemon/chat-handler.ts#L1474) calls `persistTurn(session, originalMessage, result.finalOutput, result.finalFormat)` inside `runCodeAnalyzerSlash`. `result` comes from `runControlledPipeline(controller, ..., deps)` where `controller = CodeAnalyzerOrchestratorController`.
 
-**Where to fix:** Two candidate layers --
+**Investigation steps:**
 
-1. **At the skill output layer** -- the skills that surface entity
-   refs (`code.source.repo.describe`, `code.source.module.describe`,
-   `code.entity.search-by-vector`, `code.entity.locate-by-name`,
-   etc.) format their results into a structured shape the
-   review-action LLM consumes. If those shapes carry `path` and
-   `lineStart` alongside `name`, the LLM has everything it needs to
-   emit Markdown links.
-2. **At the review/render layer** -- alternatively, post-process the
-   LLM's markdown to upgrade bare entity names into links by looking
-   them up in the entity index. Riskier (false positives on common
-   words that happen to match an entity name) but doesn't require
-   teaching the LLM about Markdown link syntax.
+1. Read [src/insrc/daemon/controllers/code-analyzer-orchestrator.ts](src/insrc/daemon/controllers/code-analyzer-orchestrator.ts) and trace how `finalOutput` is populated. The synthesis/expand/review pipeline streams sections to the IDE via `send({ stream: 'delta', ... })` -- verify whether the final aggregated markdown also lands in `finalOutput` on the controller result.
+2. Reproduce: run `/code-analyze ...` against a live daemon and then immediately run:
+   ```bash
+   grep '"msg":"response segments indexed"' /tmp/.insrc/agent.*.log | tail -5
+   grep '"msg":"response-segment indexing failed' /tmp/.insrc/agent.*.log | tail -5
+   ```
+   - **If "indexed" appears with `stored: 0`**: assistant body was empty (root cause confirmed at B.2).
+   - **If "indexed" appears with `stored: N > 0`**: bug is elsewhere -- maybe the turn vector itself wasn't written (check `turn_vec` for the session id), or `searchTurnVecsBySession` is missing it.
+   - **If "indexing failed" appears**: Ollama embed failure is the root cause -- separate fix.
+   - **If NOTHING appears**: `persistTurn` not being called, or `indexResponseSegments` was passed an empty body and short-circuited at the `trim().length === 0` guard.
 
-**Recommendation:** Layer 1 is cleaner. Update the system prompt
-for the synthesize/expand step to instruct: "When mentioning an
-entity, file, or module, render it as a Markdown link using the
-`path` / `lineStart` fields surfaced by the skills." Pre-condition:
-make sure the skills' output JSON consistently carries those
-fields (audit them; some may only emit `name`).
+**Expected root cause:** the orchestrator streams sections to the IDE but doesn't accumulate them into the pipeline result -- `finalOutput` ends up empty or a one-line summary.
 
-**Effort:** ~1 hr for the prompt change + skill-output audit + live
-verification. Larger if more skills need their output shape
-extended to include paths.
+### B.2 Fix the orchestrator to populate `finalOutput` with the full report
+
+**Sketch:** the controller's `Result` payload needs to carry the rendered, accumulated markdown. Three implementation paths:
+
+1. **Tap the stream**: install a capture-send wrapper around the orchestrator's `send` (similar to the `captureSend` pattern at chat-handler.ts:2696) that records every `delta` chunk into a string; set `result.finalOutput` to that buffer at the end of the pipeline.
+2. **Have the orchestrator emit `finalOutput` directly**: the synthesis step already builds section bodies in memory before streaming. Surface that buffer back as part of the controller's return shape.
+3. **Re-render on persist**: after the pipeline completes, read the `code_analysis_list` row by id and reconstruct the markdown server-side.
+
+Path (1) is the least invasive -- adds a wrapper at the chat-handler call site without touching the controller. Path (2) is cleaner but requires touching the controller's Result shape. Pick after the investigation pins the exact gap.
+
+**Tests:** add a chat-handler integration test that runs `runCodeAnalyzerSlash` against a fake controller emitting deltas, asserts the LMDB turn row's `assistant` field after persistTurn is the concatenation of all deltas.
+
+**Success criteria after B.1 + B.2:**
+- `/code-analyze X` produces a turn row whose `assistant` field is the full markdown report.
+- The next turn's `classifier-memory retrieved` log line shows `segments: ≥3` and `turns: ≥3` with at least one ASSISTANT-side excerpt in the rendered `## Recent context`.
+
+**Effort:** 30 min investigation + 1 hr fix + 30 min test.
 
 ---
 
-## Prioritisation
+## Phase C -- clickable code references in analysis reports (~2 hours)
 
-1. **#5 (citation regex)** -- highest impact relative to effort; 100% of LLM-emitted citations are currently dropped. 15 min.
-2. **#1 (drill down regex)** -- trivial follow-on while in the resolver. 5 min.
-3. **#2 (assistant-side missing)** -- biggest functional impact; the Phase 4 memory design is degraded until this is fixed.
-4. **#3 (segments empty)** -- likely solves itself when #2 is fixed. Verify after the #2 fix lands.
-5. **#7 (clickable code refs)** -- highest user-facing impact; reports are useless if the user can't navigate from a mention to the source. Bundle with the next code-analyzer prompt pass.
-6. **#6 (scope tiers)** -- bigger semantic change; ship after observing more live runs to confirm the new descriptions land sensibly across all intents.
-7. **#4 (select-scope fences)** -- robustness; sporadic. Bundle with the next skills-pipeline pass.
+### C.1 Audit skill output schemas for `path` + `lineStart`
+
+**Locations:** [src/insrc/daemon/skills/built-ins/](src/insrc/daemon/skills/built-ins/) -- the code.source.* and code.entity.* skills. Specifically:
+- `code.source.repo.describe`
+- `code.source.module.describe`
+- `code.source.file.describe`
+- `code.entity.search-by-vector`
+- `code.entity.locate-by-name`
+
+Each surfaces entity refs (class names, file paths, function names) consumed by the synthesize/expand prompt downstream. Audit each one's output schema -- some may carry only `name`, not `path` / `lineStart`. The entity graph already stores both per entity, so the missing fields are a serialisation gap, not a data gap.
+
+**Standardise on:** every entity-emitting skill output includes `{ name, path, lineStart? }` for every reference.
+
+### C.2 Update synthesize/expand prompt to render Markdown links
+
+**Location:** the system prompt in [src/insrc/daemon/controllers/code-analyzer-orchestrator.ts](src/insrc/daemon/controllers/code-analyzer-orchestrator.ts) (synthesis step) and [src/insrc/agent/content-gen/review-action.ts](src/insrc/agent/content-gen/review-action.ts) (expand/review step).
+
+**Prompt addition:** after the entity-reference instructions, insert:
+
+```
+When mentioning a class, file, module, or function the user can
+navigate to, render it as a Markdown link using the `path` (and
+optional `lineStart`) carried by the skill's output:
+
+  Bare entity:   [HdfsServerConstants](hadoop-hdfs/src/main/java/.../HdfsServerConstants.java)
+  Specific line: [startCommonServices](hadoop-hdfs/.../NameNode.java#L432)
+
+NEVER mention an entity as plain text when its path is available.
+```
+
+**Note on the renderer:** per `CLAUDE.md`, the VSCode extension's
+markdown renderer accepts `[label](relative/path)` and `[label](relative/path#L42)` links. No renderer-side changes needed.
+
+### C.3 Test live
+
+Run `/code-analyze describe what this repo does` on Hadoop, verify the report's section bodies contain Markdown links (Ctrl-click in the Report Pane navigates to the file).
+
+**Success criteria:** every entity / file / function mention in a report renders as a clickable link. Bare plain-text references are the exception (and only when no path is available).
+
+**Effort:** 30 min audit + 30 min prompt edit + 1 hr live verification across all section types.
+
+---
+
+## Sequencing
+
+Phase A is fully parallelisable -- four small independent diffs. Phase B is gated on the orchestrator investigation. Phase C is independent of A and B.
+
+Recommended order:
+1. **Phase A** in a single PR (all four; ~1 hr) -- biggest impact-per-effort, no architectural risk.
+2. **Phase B** next (~2 hrs) -- restores the full Phase 4 memory design.
+3. **Phase C** last (~2 hrs) -- highest user-facing impact but doesn't gate any classifier behaviour.
+
+Total: ~5 hours of focused work.
+
+---
+
+## Out of scope
+
+- Re-running the consolidation plan's Phase 9 enforcement tests -- they already pass (`b15c506f700` keeps the funnel + tag-stamping asserts green).
+- Privatising `classifyPrimaryIntent` to a non-exported function -- the Phase 7 banner + CI grep assert is enough; the export stays for the test surface.
+- Backfilling response-segment vectors for historical sessions -- not needed once forward-going indexing lands; old sessions just get empty memory until they accrue new turns.
