@@ -381,28 +381,63 @@ Two root causes:
 
 The system-prompt rule "Pick the SMALLEST tier the work could plausibly fit into" (in [agent/classify/scope.ts:95](src/insrc/agent/classify/scope.ts#L95)) amplifies the downward bias.
 
-### E.1 Scope classifier: inject repo size + reframe smallest-tier rule + add examples
+### E.1 BIG LEVER -- inject repo summary into the planner's prompt (not just the scope classifier)
 
-**Where:** [src/insrc/agent/classify/scope.ts](src/insrc/agent/classify/scope.ts) `buildMessages`. Optionally the chat-handler's `runCodeAnalyzerSlash` call site if we need to pre-fetch repo stats.
+**Direct evidence** from llmCallId=4 (the planner) in agent.5.log for the live run:
 
-**Three changes:**
+**Planner's ENTIRE user message:**
+```
+## Intent
+code-analysis
 
-1. **Inject repo-size signal into the user prompt.** Before calling `classifyScope`, pull a cached repo summary (the indexer already maintains file / entity / language counts). Prepend the summary to the scope-sizer's user message:
+## Request
+describe what this repo does
 
+## Summary context
+Active repo: /Users/subhagho/work/projects/insors-ai/insors-extraction -- closure size: 1 -- scope tier: M.
+
+## Action budget
+Maximum actions for this report: 4 (scope tier: M).
+```
+
+**Planner's response:** 4 actions with entirely generic titles
+(`Repository Purpose & Scope`, `Architecture & Entry Points`,
+`Core Capabilities & Features`, `Technology Stack & Notable
+Constraints`). Not one section title references `ocr`,
+`extraction`, `stirling`, `legal-extraction`, `PDF`, or any
+subsystem hint that exists in this codebase.
+
+**Diagnosis:** the planner is **flying blind**. It sees the user
+request + the scope tier + the action budget -- and **almost
+nothing else about the repo**. With no signal about the actual
+codebase, the LLM emits the same generic 4-section outline it
+would emit for *any* code-analysis request. Even if the scope
+tier were L (so the action budget jumped to 8), the planner
+would just produce 8 generic sections instead of 4.
+
+The summary-context line should already carry `languages` and
+`top-level packages` per [code-analyzer-orchestrator.ts:1241 formatRepoSummaryLine](src/insrc/daemon/controllers/code-analyzer-orchestrator.ts#L1241) -- but the observed prompt only shows `closure size: 1`. Either `_repoSummary.primaryLanguages` / `.topLevelPackages` are empty at orchestrator init, or the formatting drops them. **Bug to confirm during fix.**
+
+**Three layers of fix.** The scope-classifier fix from the prior
+draft of E.1 stays -- it's the cheap win -- but the planner-side
+fix is where the report quality lift actually comes from.
+
+#### E.1a Scope classifier: inject repo size + reframe rule + add examples
+
+**Where:** [src/insrc/agent/classify/scope.ts](src/insrc/agent/classify/scope.ts) `buildMessages`. Pass a richer context block from the orchestrator's call site.
+
+1. **Inject repo-size signal into the user prompt.** Prepend file / entity / language counts from the index:
    ```
    ## Repo size
-   files=3153, classes=3863, methods=11400, languages=[python, json, markdown, yaml]
+   files=3153, classes=3863, methods=11400
+   languages=[python, json, markdown, yaml, shell]
    top modules=[insors/core, insors/ocr, insors/extraction, ...]
    ```
 
-   This is a 4-5 line addition; the indexer's repo-describe output already carries everything we need.
-
-2. **Reframe the "smallest tier" rule.** Current line ([scope.ts:95](src/insrc/agent/classify/scope.ts#L95)): "Pick the SMALLEST tier the work could plausibly fit into." Replace with:
-
+2. **Reframe the "smallest tier" rule.** Current ([scope.ts:95](src/insrc/agent/classify/scope.ts#L95)): "Pick the SMALLEST tier the work could plausibly fit into." Replace with:
    > Pick the tier that gives the answer the right BREADTH -- the smallest tier that DOES THE PROMPT JUSTICE. For broad-overview prompts against a multi-module repo, the answer is multi-section by nature -- L or XL -- even when the prompt is one sentence.
 
-3. **Add explicit overview-style examples.** Few-shot anchors push the LLM away from "single session" misreads:
-
+3. **Add explicit overview-style examples** as few-shot anchors:
    ```
    EXAMPLES:
    - "describe what this repo does"            (3000-file repo) -> L
@@ -411,11 +446,77 @@ The system-prompt rule "Pick the SMALLEST tier the work could plausibly fit into
    - "deep dive on architecture + design + ops" (3000-file repo) -> XL
    ```
 
-**Tests:**
-- Snapshot test on the rendered prompt: repo-size section is present + the new rule wording lands + the four examples appear.
-- A fake-LLM integration test against an "L" prompt + size signal: result is `'L'` not `'M'`.
-
 **Effort:** ~1 hr including snapshot + integration test.
+
+#### E.1b Planner: inject the full repo summary into the planner's user prompt (THE BIG LEVER)
+
+**Where:** [src/insrc/daemon/controllers/code-analyzer-orchestrator.ts:918 buildSummaryContext](src/insrc/daemon/controllers/code-analyzer-orchestrator.ts#L918). The orchestrator builds the planner's `summaryContext` string here; that string lands verbatim in the planner's user prompt at [plan-actions.ts:236-237](src/insrc/agent/content-gen/plan-actions.ts#L236).
+
+**Current shape:** `Active repo: <path> -- closure size: N -- scope tier: <tier>.`
+
+**Proposed shape:** call `code.source.repo.describe` (cached per-run -- see E.5) and concatenate its output into the summary:
+
+```
+## Active repo
+/Users/subhagho/work/projects/insors-ai/insors-extraction
+closure size: 1, scope tier: L
+
+## Repo summary
+- File counts by language:
+    python=1629, json=454, markdown=318, yaml=316, shell=177,
+    sql=69, dockerfile=34, html=139, config=16, toml=1
+- Entity counts: 3863 classes, 11400 methods, 3153 files
+- Top modules by file count:
+    insors/core/PDF/stirling/    (PDF processing client, ~120 files)
+    insors/ocr/                  (OCR + transformers, ~350 files)
+    insors/extraction/legal/     (legal case extraction, ~200 files)
+    insors/extraction/db/        (persistence, ~150 files)
+    test/                        (test fixtures + integration, ~600 files)
+- Detected entry points: insors/cli.py, insors/api/app.py
+- Detected ORMs: sqlalchemy (12 models)
+- Cyclic dependencies: 1 (table_matrix.py <-> row_boundary_detector.py)
+```
+
+With THAT context, the planner can write:
+- `OCR Subsystem & Document Preprocessing` instead of `Architecture & Entry Points`
+- `Legal Case Extraction Pipeline` instead of `Core Capabilities`
+- `Stirling PDF Integration` instead of `Technology Stack`
+- `Persistence Layer & Migration Strategy` instead of `Notable Constraints`
+
+The report carries repo-specific identity from the section
+titles down.
+
+**Implementation steps:**
+1. Surface `code.source.repo.describe`'s JSON output as a typed `RepoSummaryDetailed` shape on the orchestrator (cache per-run -- see E.5).
+2. Add a `formatRepoSummaryDetailed()` helper that renders the JSON as the markdown block above.
+3. `buildSummaryContext` calls `formatRepoSummaryDetailed()` and prepends to the current short-form line.
+4. Diagnose + fix the existing bug where `primaryLanguages` + `topLevelPackages` weren't on the wire (formatRepoSummaryLine returns `<path> -- closure size: 1` instead of the full 4-part line). Likely a load-order issue in `buildRepoSummary`.
+
+**Tests:**
+- Snapshot test on the planner's user prompt after `buildSummaryContext` renders -- repo summary block present + populated.
+- Integration test: a fake `code.source.repo.describe` returning ocr / extraction / legal modules -> planner output's section titles reference at least 2 of them.
+
+**Effort:** ~3 hrs (bug-fix the short-form line + new helper + tests).
+
+#### E.1c Planner prompt: lean on the repo summary explicitly
+
+**Where:** [src/insrc/agent/content-gen/plan-actions.ts buildSystemPrompt](src/insrc/agent/content-gen/plan-actions.ts) (system prompt of the planner LLM).
+
+Add a rule to the system prompt:
+
+> When a `## Repo summary` block is present, you MUST reference at least one specific top-module, detected entry point, or named subsystem in EACH `action.title`. Generic titles like "Architecture & Entry Points" are a code smell -- they signal you ignored the summary. If the summary lists `ocr/`, `extraction/legal/`, `stirling/`, the action titles should name those subsystems.
+
+**Effort:** 15 min for prompt edit + assert in `plan-actions.test.ts`.
+
+---
+
+### E.1 net effort
+
+E.1a + E.1b + E.1c bundled = ~4.5 hrs. Bigger than the original
+1 hr estimate, but this is the work that actually moves report
+quality. The scope-tier fix alone (E.1a) lifts the action count
+from 4 -> 8; the planner-context fix (E.1b) lifts the action
+*specificity* from generic-to-any-repo to specific-to-this-repo.
 
 ---
 
@@ -500,16 +601,22 @@ Surface as a structured field on the skill output (`entryPoints: { file, kind, e
 
 ### Sequencing Phase E
 
-E.1 is the biggest leverage -- a tier upgrade for overview-style prompts unblocks 8+ sections instead of 4, fanning out evidence collection, and most of E.2-E.6 become less acute. Recommended order:
+E.1 is the biggest leverage by far. The scope-tier fix unblocks
+more sections (4 -> 8); the planner-context fix lifts EACH
+section from generic to repo-specific. Most of E.2-E.6 become
+less acute (or auto-resolve) once E.1 lands. Recommended order:
 
-1. **E.1** (scope-sizer fixes -- repo size + rule reframe + examples) -- 1 hr. Highest leverage.
-2. **E.5** (skill diversification + repo.describe caching) -- 3 hrs. Maximises evidence depth once we have more plan steps.
-3. **E.2** (non-empty drill-down) -- 2 hrs. UX continuity.
-4. **E.4** (test-source citation rule) -- 30 min.
-5. **E.6** (repo-specific identity) -- 15 min + live verify. Bundle with E.4.
-6. **E.3** (entry-point validator) -- 3 hrs. Bigger surface; can wait until E.1 + E.5 prove the upstream picture is sound.
+1. **E.1a** (scope-sizer fixes) -- 1 hr.
+2. **E.1b** (planner: inject repo summary) -- 3 hrs. THE BIG LEVER.
+3. **E.1c** (planner system-prompt rule) -- 15 min. Bundle with E.1b.
+4. **E.5** (skill diversification + repo.describe caching) -- 3 hrs. E.1b depends on the cache landing alongside.
+5. **E.2** (non-empty drill-down) -- 2 hrs.
+6. **E.4** (test-source citation rule) -- 30 min.
+7. **E.6** (repo-specific identity) -- 15 min. Bundle with E.4.
+8. **E.3** (entry-point validator) -- 3 hrs. Wait until E.1b + E.5 prove the upstream picture is sound.
 
-Total: ~10 hours.
+Total: ~13 hours (revised up from 10 once the planner-context
+work was scoped honestly).
 
 ---
 
