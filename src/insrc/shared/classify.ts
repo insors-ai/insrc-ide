@@ -11,13 +11,20 @@
  * (how many ideas to seed, Pair vs Delegate routing, single-turn vs
  * multi-round planning, etc.).
  *
- *   S      -- one small, localized change (minutes)
- *   M      -- a few related changes in one module (single session)
- *   L      -- a feature or module-sized piece of work (multi-session)
- *   XL     -- subsystem-scale change spanning several modules
- *   XXL    -- multi-subsystem change (auth + storage + UI, etc.)
- *   XXXL   -- cross-cutting architectural change
- *   XXXXL  -- major rewrite / new product direction
+ * The tiers are INTENT-NEUTRAL -- they describe work-volume in any
+ * vocabulary (changes, analysis depth, query breadth, refactor span).
+ * Pre-Phase-A.4 the descriptions were framed as "a change" and every
+ * read-only intent (code-analysis, data-analysis, research, review,
+ * document, brainstorm) defaulted to M because no tier fit. The
+ * current wording reads sensibly for ALL intents.
+ *
+ *   S      -- one focused unit (a function, a column, a paragraph); minutes
+ *   M      -- one module / one report section / one focused query; single session
+ *   L      -- a full module or 5-10 sections / a feature build; multi-session
+ *   XL     -- a subsystem (HDFS / auth / storage layer); many modules
+ *   XXL    -- multiple subsystems or repo-wide analysis
+ *   XXXL   -- cross-cutting concern that touches every subsystem
+ *   XXXXL  -- whole-product / multi-product / major rewrite
  *
  * When the LLM doesn't return a recognizable scope, callers get 'M'
  * (the safe "normal" default). `fallback: true` lets callers
@@ -41,31 +48,31 @@ export interface ScopeMeta {
 export const SCOPE_META: Readonly<Record<ScopeSize, ScopeMeta>> = {
   S: {
     label: 'Small',
-    description: 'one small, localized change (minutes of work)',
+    description: 'one focused unit (a function, a column, a paragraph); minutes',
   },
   M: {
     label: 'Medium',
-    description: 'a few related changes in one module (single session)',
+    description: 'one module / one report section / one focused query; single session',
   },
   L: {
     label: 'Large',
-    description: 'a feature or module-sized piece of work (multi-session)',
+    description: 'a full module or 5-10 sections / a feature build; multi-session',
   },
   XL: {
     label: 'Very Large',
-    description: 'subsystem-scale change spanning several modules',
+    description: 'a subsystem (HDFS / auth / storage layer); many modules',
   },
   XXL: {
     label: 'Very Very Large',
-    description: 'multi-subsystem change (e.g. auth + storage + UI)',
+    description: 'multiple subsystems or repo-wide analysis',
   },
   XXXL: {
     label: 'Extremely Large',
-    description: 'cross-cutting architectural change',
+    description: 'cross-cutting concern that touches every subsystem',
   },
   XXXXL: {
     label: 'Gigantic',
-    description: 'major rewrite or new product direction',
+    description: 'whole-product / multi-product / major rewrite',
   },
 };
 

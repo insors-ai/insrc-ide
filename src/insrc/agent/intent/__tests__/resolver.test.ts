@@ -39,6 +39,16 @@ test('looksLikeContinuation: anaphoric short message -> true', () => {
 	assert.equal(looksLikeContinuation('now look at YARN'), true);
 });
 
+test('looksLikeContinuation: "drill down" variants -> true (Phase A.2 regression)', () => {
+	// Pre-A.2 the regex matched "drill into" but not "drill down",
+	// so "drill down into HDFS" fell through to cold-classify in the
+	// live test. Same answer (code-analysis) but burns an Ollama
+	// embed + an Anthropic LLM call per follow-up.
+	assert.equal(looksLikeContinuation('drill down into HDFS'), true);
+	assert.equal(looksLikeContinuation('drill down on the auth module'), true);
+	assert.equal(looksLikeContinuation('drill down'), true);
+});
+
 test('looksLikeContinuation: continuation lead-in short message -> true', () => {
 	assert.equal(looksLikeContinuation('next show me callers'), true);
 	assert.equal(looksLikeContinuation('also describe the module'), true);
@@ -389,6 +399,43 @@ test('resolveIntent: hydrator drops citation keys not present in the memory bund
 	const ids = r.relationship!.citations.map(c => c.id);
 	// t1 -> sess-1:2 ; s1 -> sess-1:0:4. Everything else dropped.
 	assert.deepEqual(ids.sort(), ['sess-1:0:4', 'sess-1:2'].sort());
+});
+
+test('resolveIntent: hydrator accepts bracketed citation keys [t1] / [s2]', async () => {
+	// Phase A.1 regression: the live LLM emits keys with brackets
+	// (copied from the visual marker in the rendered memory block).
+	// The hydrator must strip them before matching.
+	const provider = buildFakeProvider([{
+		text: classifierJsonWithRelationship({
+			intent: 'code-analysis',
+			relationship: { kind: 'DRILL_DOWN', citations: ['[t1]', '[s1]'] },
+		}),
+	}]);
+	const session = makeFakeSession(provider);
+
+	const r = await resolveIntent(
+		session,
+		'anything',
+		{ memoryOverride: SAMPLE_MEMORY },
+	);
+
+	assert.equal(r.relationship!.citations.length, 2,
+		'bracketed [t1] and [s1] must hydrate -- not be dropped as malformed');
+	const ids = r.relationship!.citations.map(c => c.id).sort();
+	assert.deepEqual(ids, ['sess-1:0:4', 'sess-1:2'].sort());
+});
+
+test('resolveIntent: hydrator handles mixed bracketed + bare citation keys', async () => {
+	const provider = buildFakeProvider([{
+		text: classifierJsonWithRelationship({
+			intent: 'code-analysis',
+			relationship: { kind: 'DRILL_DOWN', citations: ['t1', '[s1]', '[t2]', 's2'] },
+		}),
+	}]);
+	const session = makeFakeSession(provider);
+	const r = await resolveIntent(session, 'anything', { memoryOverride: SAMPLE_MEMORY });
+	assert.equal(r.relationship!.citations.length, 4,
+		'all four citations (mixed brackets) must hydrate');
 });
 
 test('resolveIntent: cold path with EMPTY memory -> classifier sees no memory + no relationship on result', async () => {

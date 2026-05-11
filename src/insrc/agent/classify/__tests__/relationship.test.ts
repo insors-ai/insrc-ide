@@ -74,7 +74,11 @@ test('classify: relationshipEnum supplied -> system prompt grows relationship se
 		assert.match(sys, new RegExp(`- ${k}`), `enum value ${k} must appear in the prompt`);
 	}
 	assert.match(sys, /"relationship":\s*{/, 'schema must include the relationship block');
-	assert.match(sys, /\[tN\]\s*\/\s*\[sN\]/, 'system prompt must mention the citation key shape');
+	// Phase A.1 -- the prompt must instruct BARE citation keys, not
+	// the bracketed visual-marker form. Live LLM had been copying the
+	// brackets faithfully and the hydrator was silently dropping them.
+	assert.match(sys, /BARE keys/, 'system prompt must instruct bare keys without brackets');
+	assert.match(sys, /"t1".*NOT.*"\[t1\]"/, 'system prompt must show the bare-vs-bracketed example');
 });
 
 // ---------------------------------------------------------------------------

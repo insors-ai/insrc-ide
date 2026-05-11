@@ -21,6 +21,7 @@ import type {
   ScopeSize,
 } from '../../shared/classify.js';
 import { getLogger } from '../../shared/logger.js';
+import { stripJsonFences } from '../../shared/json-fences.js';
 
 const VALID_SCOPES: readonly ScopeSize[] = ['S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'XXXXL'];
 const VALID_SCOPES_SET = new Set<string>(VALID_SCOPES);
@@ -82,13 +83,14 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
     classList,
     '',
     '## Scope (size of the work)',
-    '- `S`     -- one small, localized change (minutes of work)',
-    '- `M`     -- a few related changes in one module (single session)',
-    '- `L`     -- a feature or module-sized piece of work (multi-session)',
-    '- `XL`    -- subsystem-scale change spanning several modules',
-    '- `XXL`   -- multi-subsystem change (e.g. auth + storage + UI)',
-    '- `XXXL`  -- cross-cutting architectural change',
-    '- `XXXXL` -- major rewrite or new product direction',
+    'These tiers apply to ANY intent -- analysis depth, query breadth, refactor span, etc. Pick the smallest tier the work could plausibly fit into.',
+    '- `S`     -- one focused unit (a function, a column, a paragraph; minutes)',
+    '- `M`     -- one module / one report section / one focused query (single session)',
+    '- `L`     -- a full module or 5-10 sections / a feature build (multi-session)',
+    '- `XL`    -- a subsystem (HDFS / auth / storage layer; many modules)',
+    '- `XXL`   -- multiple subsystems (auth + storage + UI; or repo-wide analysis)',
+    '- `XXXL`  -- cross-cutting concern that touches every subsystem',
+    '- `XXXXL` -- whole-product / multi-product / major rewrite',
   ];
 
   if (wantsRelationship) {
@@ -99,7 +101,8 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
       ...input.relationshipEnum!.map(k => `- ${k}`),
       '',
       'Citation rules:',
-      '- The `relationship.citations` array MUST list the [tN] / [sN] keys you actually leaned on to decide.',
+      '- The `relationship.citations` array MUST list the keys you actually leaned on to decide.',
+      '- Citations are BARE keys: emit `"t1"`, NOT `"[t1]"`. The brackets in the recent-context block are visual markers only.',
       '- Empty array when the relationship is the "fresh / new topic" kind, or when no recent-context items applied.',
       '- Cite only keys that appear in the `## Recent context` block; do NOT invent new keys.',
     );
@@ -155,7 +158,7 @@ function buildMessages(input: ClassifyInput): LLMMessage[] {
 // ---------------------------------------------------------------------------
 
 function parseResponse(rawText: string, input: ClassifyInput): ClassifyResult | null {
-  const cleaned = stripFences(rawText.trim());
+  const cleaned = stripJsonFences(rawText);
   let parsed: unknown;
   try {
     parsed = JSON.parse(cleaned);
@@ -226,14 +229,6 @@ function parseRelationship(
     .filter((c): c is string => typeof c === 'string' && c.length > 0);
 
   return { kind, confidence, reasoning, citations };
-}
-
-function stripFences(text: string): string {
-  let out = text;
-  if (out.startsWith('```')) {
-    out = out.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-  }
-  return out.trim();
 }
 
 function fallbackResult(input: ClassifyInput, reason: string): ClassifyResult {

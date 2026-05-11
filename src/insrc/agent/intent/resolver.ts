@@ -324,7 +324,14 @@ function hydrateRelationshipCitations(
 }
 
 function hydrateCitationKey(key: string, memory: ClassifierMemory): MemoryCitation | undefined {
-	const m = key.trim().match(/^([ts])(\d+)$/i);
+	// Phase A.1 of plans/intent-funnel-followups.md: accept both
+	// bare keys (`t1`, `s2`) and bracketed keys (`[t1]`, `[s2]`).
+	// The classifier prompt renders memory items with `[tN]` /
+	// `[sN]` visual markers so the LLM often echoes the brackets
+	// verbatim in its citations array; pre-fix this dropped 100%
+	// of bracketed emissions silently.
+	const bare = key.trim().replace(/^\[|\]$/g, '');
+	const m = bare.match(/^([ts])(\d+)$/i);
 	if (m === null) return undefined;
 	const kind = m[1]!.toLowerCase() === 't' ? 'turn' : 'segment';
 	const idx  = parseInt(m[2]!, 10) - 1;
@@ -381,7 +388,7 @@ function stampIntentTags(
 // Continuation heuristic
 // ---------------------------------------------------------------------------
 
-const CONTINUATION_LEAD = /^(?:now|then|next|also|and|so|what about|how about|tell me about|show me|describe|drill into|elaborate(?:\s+on)?|expand(?:\s+on)?|summari[sz]e|explain|walk me through|continue|go on|more|what does|why does|why is|why|how|where|which)\b/i;
+const CONTINUATION_LEAD = /^(?:now|then|next|also|and|so|what about|how about|tell me about|show me|describe|drill\s+(?:into|down(?:\s+into)?)|elaborate(?:\s+on)?|expand(?:\s+on)?|summari[sz]e|explain|walk me through|continue|go on|more|what does|why does|why is|why|how|where|which)\b/i;
 
 const ANAPHORIC_TOKEN = /\b(?:it|its|that|this|those|these|the same|same|previous|last(?:\s+one)?|above|before|earlier|prior|here)\b/i;
 

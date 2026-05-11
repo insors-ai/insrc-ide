@@ -37,6 +37,7 @@ import { registerSkill, getSkill } from '../registry.js';
 import { validate as validateJsonSchema } from '../json-schema.js';
 import type { Skill, SkillResult } from '../types.js';
 import type { LLMMessage, LLMProvider } from '../../../shared/types.js';
+import { stripJsonFences } from '../../../shared/json-fences.js';
 
 const log = getLogger('skill.code.meta.select-scope');
 
@@ -447,7 +448,7 @@ function parseAndValidate(
 	candidates: readonly CandidateIn[],
 	repo: RepoContext,
 ): ParseResult {
-	const text = stripFences(raw).trim();
+	const text = stripJsonFences(raw);
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
@@ -524,10 +525,6 @@ function parseAndValidate(
 	return { ok: true, value: { scoped, notes } };
 }
 
-function stripFences(text: string): string {
-	const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(text);
-	return fenceMatch !== null ? fenceMatch[1]! : text;
-}
 
 // ---------------------------------------------------------------------------
 // LLM call

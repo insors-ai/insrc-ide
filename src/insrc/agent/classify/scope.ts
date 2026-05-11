@@ -17,6 +17,7 @@
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
 import type { ScopeSize } from '../../shared/classify.js';
 import { getLogger } from '../../shared/logger.js';
+import { stripJsonFences } from '../../shared/json-fences.js';
 
 const log = getLogger('classify:scope');
 
@@ -82,13 +83,14 @@ function buildMessages(input: ScopeClassifyInput): LLMMessage[] {
 		`You are a ${role}. Given the text below, estimate the SCOPE of the work the user is asking about.`,
 		'',
 		'## Scope (size of the work)',
-		'- `S`     -- one small, localized question (single function, handful of lines).',
-		'- `M`     -- a small group of related entities (single file, tight cluster).',
-		'- `L`     -- a feature / module / sub-tree (~10-50 entities; multi-file).',
-		'- `XL`    -- multiple modules; cross-cutting comparison or trace.',
-		'- `XXL`   -- sub-system audit (multiple modules + their interactions).',
-		'- `XXXL`  -- repo-wide architectural concern.',
-		'- `XXXXL` -- multi-repo / new product direction.',
+		'These tiers apply to ANY intent -- analysis depth, query breadth, refactor span, etc. Pick the SMALLEST tier the work could plausibly fit into.',
+		'- `S`     -- one focused unit (a function, a column, a paragraph; minutes)',
+		'- `M`     -- one module / one report section / one focused query (single session)',
+		'- `L`     -- a full module or 5-10 sections / a feature build (multi-session)',
+		'- `XL`    -- a subsystem (HDFS / auth / storage layer; many modules)',
+		'- `XXL`   -- multiple subsystems (auth + storage + UI; or repo-wide analysis)',
+		'- `XXXL`  -- cross-cutting concern that touches every subsystem',
+		'- `XXXXL` -- whole-product / multi-product / major rewrite',
 		'',
 		'Rules:',
 		'- Pick the SMALLEST tier the work could plausibly fit into.',
@@ -116,7 +118,7 @@ function buildMessages(input: ScopeClassifyInput): LLMMessage[] {
 // ---------------------------------------------------------------------------
 
 function parseResponse(rawText: string): ScopeClassifyResult | null {
-	const cleaned = stripFences(rawText.trim());
+	const cleaned = stripJsonFences(rawText);
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(cleaned);
@@ -139,12 +141,4 @@ function parseResponse(rawText: string): ScopeClassifyResult | null {
 		reasoning,
 		fallback: false,
 	};
-}
-
-function stripFences(text: string): string {
-	let out = text;
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-	}
-	return out.trim();
 }
