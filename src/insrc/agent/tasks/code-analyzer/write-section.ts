@@ -50,6 +50,13 @@ export interface WriteSectionInput {
 	readonly maxTokens?:      number | undefined;
 	/** Streaming progress callback for tool calls + text deltas. */
 	readonly onProgress?:     ((message: string) => void) | undefined;
+	/**
+	 * Reviewer's refine hint from a prior pass. When set, this is
+	 * surfaced in the user prompt so the LLM knows what to fix on its
+	 * second draft (e.g. "the previous draft was empty -- summarise
+	 * README.md lines 1-199").
+	 */
+	readonly refineHint?:     string | undefined;
 }
 
 /**
@@ -101,6 +108,17 @@ const SYSTEM_PROMPT_INTRO = [
 	'  3. INSPECT the skill result; iterate -- call more skills if the evidence is thin or contradicts your draft.',
 	'  4. When you have enough to satisfy every review criterion, STOP calling tools and emit the section markdown',
 	'     as your final text response.',
+	'',
+	'## Final-turn shape (CRITICAL)',
+	'Your final turn -- the turn where you stop calling tools -- MUST be the COMPLETE section body. Specifically:',
+	'  - NO meta-narration. Do not write "Let me examine...", "I need to check...", "Now I will summarise..." or any',
+	'    other turn-by-turn commentary. The reader sees only the final body.',
+	'  - NO internal markers. Never emit strings like `[tool calls executed]`, `<!-- ... -->`, or `[tool_result ...]`.',
+	'    Those are conversation scaffolding, not section content.',
+	'  - SUBSTANTIVE PROSE. Target multiple paragraphs (or paragraphs + lists/tables) grounded in the skill evidence',
+	'    you actually fetched. A one-sentence section is a failed section -- if you have nothing to say, call more skills.',
+	'  - SELF-CONTAINED. The body must stand on its own when stitched into the report; no references to "above" or',
+	'    "the previous step".',
 	'',
 	'## Output rules',
 	'  1. Final text response is the SECTION BODY ONLY -- no leading `## <title>` heading (the orchestrator stitches headings).',
@@ -156,6 +174,15 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		userParts.push('');
 		userParts.push('## Repo summary');
 		userParts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
+	}
+	if (input.refineHint !== undefined && input.refineHint.trim().length > 0) {
+		userParts.push('');
+		userParts.push('## Reviewer hint (you have ONE more attempt)');
+		userParts.push('Your previous draft was rejected by the reviewer. Address this directly:');
+		userParts.push('');
+		userParts.push(input.refineHint.trim());
+		userParts.push('');
+		userParts.push('Gather any additional evidence you need, then emit the COMPLETE section body. Do not echo this hint or refer to "the previous draft" in the section text.');
 	}
 	userParts.push('');
 	userParts.push('Begin by analysing the section\'s objective + criteria, then call `skill_invoke` to gather evidence. When the criteria are satisfied, emit the section markdown.');
@@ -225,6 +252,7 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 			catalogSize:  catalog.length,
 			maxToolCalls,
 			maxTokens,
+			refinePass:   input.refineHint !== undefined && input.refineHint.trim().length > 0,
 		},
 		'writeSectionWithTools: starting tool loop',
 	);

@@ -11,6 +11,20 @@ import { executeTool, type ToolExecContext } from './executor.js';
 import { validateToolCall, type ValidationResult } from './validator.js';
 import { getToolSettings } from '../../daemon/tools/config.js';
 
+/**
+ * Sentinel placed on assistant turns that issued tool calls.
+ * Lives in working-message history so providers don't see an empty
+ * assistant turn. Chosen as an HTML comment so:
+ *   (a) the LLM is extremely unlikely to emit it as natural narrative,
+ *   (b) if a stray copy *does* leak into final text it renders to
+ *       nothing in the report.
+ *
+ * `sanitizeFinalResponse` strips any leaked instance from the loop's
+ * returned `response` as defence-in-depth.
+ */
+const TOOL_USE_TURN_MARKER = '<!--insrc:tool-use-->';
+const TOOL_USE_TURN_MARKER_RE = /<!--\s*insrc:tool-use\s*-->/g;
+
 // ---------------------------------------------------------------------------
 // Tool Loop Runner
 //
@@ -165,10 +179,16 @@ export async function runToolLoop(
       toolResults.push(result);
     }
 
-    // Build the assistant message with tool calls (text so far + indication of tool use)
+    // Build the assistant message with tool calls. We need *some* token in
+    // the assistant turn so providers don't drop an empty turn, but the
+    // token must be one the model cannot naturally re-emit -- otherwise
+    // the model copies it into its own final-turn text (we saw the local
+    // LLM mimicking `[tool calls executed]` and stopping). HTML comments
+    // are an extremely rare token in narrative output and invisible if a
+    // straggler leaks through.
     const assistantContent = llmResponse.text
-      ? `${llmResponse.text}\n[tool calls executed]`
-      : '[tool calls executed]';
+      ? `${llmResponse.text}\n${TOOL_USE_TURN_MARKER}`
+      : TOOL_USE_TURN_MARKER;
 
     workingMessages.push({ role: 'assistant', content: assistantContent });
     producedMessages.push({ role: 'assistant', content: assistantContent });
@@ -231,9 +251,18 @@ export async function runToolLoop(
   }
 
   return {
-    response: finalResponse,
+    response: sanitizeFinalResponse(finalResponse),
     messages: producedMessages,
     iterations,
     hitLimit,
   };
+}
+
+/**
+ * Strip any leaked `<!--insrc:tool-use-->` marker from the LLM's final
+ * text. Belt-and-braces -- the marker itself is unlikely to be emitted,
+ * but if it ever is, we don't want it surfacing in user-facing output.
+ */
+function sanitizeFinalResponse(text: string): string {
+  return text.replace(TOOL_USE_TURN_MARKER_RE, '').trim();
 }

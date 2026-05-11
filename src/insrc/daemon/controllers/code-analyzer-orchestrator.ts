@@ -767,7 +767,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // get filtered out by default. Future: thread ORM detection
       // through the indexer + RepoSummary so the section writer can
       // see code.orm.* and code.migration.* when applicable.
-      const draft = await writeSectionWithTools({
+      // Two-round contract: draft -> review -> [if refine, redraft with hint -> review].
+      // Mirrors the legacy `expandThenReview` shape from
+      // agent/content-gen/review-action.ts so reviewer hints actually
+      // drive a retry instead of being silently dropped.
+      let draft = await writeSectionWithTools({
         provider:    local,
         session,
         action,
@@ -779,30 +783,54 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
       });
 
-      // Run the reviewer over the tool-loop draft. The reviewer
-      // sees the captured skill calls as `evidence` so it can
-      // fact-check the draft against what the LLM actually fetched.
-      const reviewerEvidence: PlanExecution[] = draft.skillCalls.map(c => ({
-        skillId:    c.skillId,
-        value:      { args: c.args, output: c.resultText, errored: c.errored } as unknown,
-        confidence: c.errored ? 'low' : 'high',
-        notes:      [],
-      }));
-      const review = await reviewAction(
-        {
-          action,
-          draft: {
-            actionId:      action.id,
-            markdown:      draft.markdown,
-            tokenEstimate: Math.ceil(draft.markdown.length / 4),
-            truncated:     false,
-            degraded:      false,
+      const reviewDraft = async (d: typeof draft) => {
+        const reviewerEvidence: PlanExecution[] = d.skillCalls.map(c => ({
+          skillId:    c.skillId,
+          value:      { args: c.args, output: c.resultText, errored: c.errored } as unknown,
+          confidence: c.errored ? 'low' : 'high',
+          notes:      [],
+        }));
+        return reviewAction(
+          {
+            action,
+            draft: {
+              actionId:      action.id,
+              markdown:      d.markdown,
+              tokenEstimate: Math.ceil(d.markdown.length / 4),
+              truncated:     false,
+              degraded:      false,
+            },
+            evidence:      reviewerEvidence,
+            analyzerLabel: 'code-analyzer',
           },
-          evidence:      reviewerEvidence,
-          analyzerLabel: 'code-analyzer',
-        },
-        reviewer,
-      );
+          reviewer,
+        );
+      };
+
+      let review = await reviewDraft(draft);
+      let rounds: 1 | 2 = 1;
+
+      // Round 2: if the reviewer asked for a refine and supplied a
+      // hint, redraft with the hint threaded into the user prompt.
+      const refineHint = review.verdict === 'refine' ? review.refine?.hint?.trim() : undefined;
+      if (refineHint !== undefined && refineHint.length > 0) {
+        log.info({ actionId: action.id, hint: refineHint }, 'reviewer requested refine; running second pass');
+        this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] "${action.title}" -- refine (redrafting with reviewer hint)`);
+        draft = await writeSectionWithTools({
+          provider:    local,
+          session,
+          action,
+          request,
+          repoContext: {},
+          refineHint,
+          ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+          onProgress: (msg) => {
+            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+          },
+        });
+        review = await reviewDraft(draft);
+        rounds = 2;
+      }
 
       const final = review.accepted?.markdown ?? draft.markdown;
 
@@ -812,7 +840,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           await this.deps.todos.updateItemMeta(itemId, {
             kind:       'plan-action',
             origin:     'planner',
-            retryCount: 0,
+            retryCount: rounds - 1,
             answer:     final,
             findings:   [],
             citations:  [],
@@ -831,9 +859,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         }
       }
 
+      const verdictLabel = rounds === 2
+        ? (review.verdict === 'accept' ? 'refine-then-accept' : 'refine-then-refine')
+        : review.verdict;
       this.emitMilestone(
         synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- ${review.verdict} (${draft.toolCallCount} skill call${draft.toolCallCount === 1 ? '' : 's'}${draft.hitLimit ? ', hit cap' : ''})`,
+        `[${i + 1}/${actions.length}] "${action.title}" -- ${verdictLabel} (${draft.toolCallCount} skill call${draft.toolCallCount === 1 ? '' : 's'}${draft.hitLimit ? ', hit cap' : ''})`,
       );
       sections.push({ id: action.id, title: action.title, markdown: final });
     }
