@@ -339,6 +339,180 @@ Recommended order:
 
 ---
 
+## E. Report-quality gaps -- planner under-plans on overview prompts
+
+After Phase A-C shipped + the rendering fix (`bb1d531e843`), the
+first live run produced a 6.2 KB report for `insors-extraction`
+with `/code-analyze describe what this repo does`. Quality
+inspection surfaced gaps that trace to the PLANNER (not the
+synthesizer -- the synthesizer was faithful to the plan).
+
+### Diagnosis recap
+
+Skill timeline for the run: **5 plan steps** (1 repo-grounding pre-pass + 4 sections). Plan budget per [plan-actions.ts:47 ACTION_BUDGET_BY_TIER](src/insrc/agent/content-gen/plan-actions.ts#L47):
+
+```
+S=2, M=4, L=8, XL=12, XXL=16, XXXL=24, XXXXL=32
+```
+
+This run classified at **M** -- so 4 actions is the planner's
+budget cap. The planner hit it exactly. The synthesizer faithfully
+turned 4 plan steps into 4 report sections. **The mismatch is
+upstream of the planner**: the scope classifier picked M for a
+prompt that should have classified at L+.
+
+### Why M -- evidence from the log
+
+Direct evidence from llmCallId=1 in agent.5.log:
+
+```
+Input: "describe what this repo does"
+Context: active repo: <path>, dependency closure size: 1
+Output: { "scope": "M", "reasoning": "Understanding a repository's
+         purpose requires reading documentation and examining key
+         files in one focused session." }
+```
+
+Two root causes:
+
+1. **LLM anchored on "single session" (time) instead of "single module / single section" (breadth).** Phase A.4's M description is "one module / one report section / one focused query" -- breadth-based. The LLM's reasoning is time-based ("fits in one focused session"). The model invented its own heuristic and the ladder lost.
+
+2. **The scope-sizer's context carries NO repo-size signal.** The user prompt to the scope classifier carries only the repo path + dependency closure size (`1`). The LLM doesn't know it's looking at a 3,153-file / 3,863-class / 11,400-method monorepo. Without size signal, "describe what this repo does" reads as a small ask. With size signal, the same prompt naturally clears L if not XL.
+
+The system-prompt rule "Pick the SMALLEST tier the work could plausibly fit into" (in [agent/classify/scope.ts:95](src/insrc/agent/classify/scope.ts#L95)) amplifies the downward bias.
+
+### E.1 Scope classifier: inject repo size + reframe smallest-tier rule + add examples
+
+**Where:** [src/insrc/agent/classify/scope.ts](src/insrc/agent/classify/scope.ts) `buildMessages`. Optionally the chat-handler's `runCodeAnalyzerSlash` call site if we need to pre-fetch repo stats.
+
+**Three changes:**
+
+1. **Inject repo-size signal into the user prompt.** Before calling `classifyScope`, pull a cached repo summary (the indexer already maintains file / entity / language counts). Prepend the summary to the scope-sizer's user message:
+
+   ```
+   ## Repo size
+   files=3153, classes=3863, methods=11400, languages=[python, json, markdown, yaml]
+   top modules=[insors/core, insors/ocr, insors/extraction, ...]
+   ```
+
+   This is a 4-5 line addition; the indexer's repo-describe output already carries everything we need.
+
+2. **Reframe the "smallest tier" rule.** Current line ([scope.ts:95](src/insrc/agent/classify/scope.ts#L95)): "Pick the SMALLEST tier the work could plausibly fit into." Replace with:
+
+   > Pick the tier that gives the answer the right BREADTH -- the smallest tier that DOES THE PROMPT JUSTICE. For broad-overview prompts against a multi-module repo, the answer is multi-section by nature -- L or XL -- even when the prompt is one sentence.
+
+3. **Add explicit overview-style examples.** Few-shot anchors push the LLM away from "single session" misreads:
+
+   ```
+   EXAMPLES:
+   - "describe what this repo does"            (3000-file repo) -> L
+   - "summarise the auth module"               (any size)       -> M
+   - "what does parseConfig do?"               (any size)       -> S
+   - "deep dive on architecture + design + ops" (3000-file repo) -> XL
+   ```
+
+**Tests:**
+- Snapshot test on the rendered prompt: repo-size section is present + the new rule wording lands + the four examples appear.
+- A fake-LLM integration test against an "L" prompt + size signal: result is `'L'` not `'M'`.
+
+**Effort:** ~1 hr including snapshot + integration test.
+
+---
+
+### E.2 Drill-down section ships empty when planner doesn't propose candidates
+
+**Where:** [src/insrc/agent/tasks/code-analyzer/prompts/synthesise-multipass.ts](src/insrc/agent/tasks/code-analyzer/prompts/synthesise-multipass.ts) -- the synthesise prompt requires a "drill-down" section "ALWAYS LAST". The renderer's footer in [analysisReportPane.ts:_renderDrillDownFooter](src/vs/workbench/contrib/insrc/browser/code-analyzer/analysisReportPane.ts) falls back to a placeholder when no candidates parse:
+
+> _The planner did not propose drill-down bullets for this run. Click an action in the Report Pane footer or open the todos pane to launch a follow-up._
+
+**Symptom:** the live run's report ends with that placeholder. The drill-down section is supposed to be the user's primary affordance for the next turn (3-5 candidate next-step analyses). Shipping empty defeats the iterate-by-drilling-down UX.
+
+**Fix (two layers):**
+
+1. **Synthesizer prompt:** strengthen "ALWAYS LAST" to "ALWAYS LAST AND ALWAYS NON-EMPTY -- propose 3-5 candidate next analyses even when the evidence is thin. Generic candidates ('drill into the auth subsystem', 'analyse the data layer') are fine; do not emit an empty drill-down."
+2. **Code-side guard:** in the orchestrator (between synthesize and stitch), if the drill-down section is empty, inject a generic fallback set keyed off the top modules from `code.source.repo.describe`. The drill-down is what the user clicks to launch the next turn; empty makes the run feel incomplete.
+
+**Effort:** ~1 hr (prompt) + ~1 hr (code-side fallback) = 2 hrs.
+
+---
+
+### E.3 Validate "main entry point" claims against the repo
+
+**Where:** [code.source.repo.describe](src/insrc/daemon/skills/built-ins/code.source.repo.describe.ts) + the synthesizer prompt.
+
+**Symptom:** the live report named [`run_pipeline`](path:insors/core/PDF/stirling/client.py#L701-L710) as "the main entry point for data processing." The path `insors/core/PDF/stirling/` strongly suggests this is a wrapper for the external StirlingPDF tool, NOT the codebase's actual entry point. The LLM picked a method it found via search-by-vector and over-promoted it.
+
+**Fix:** add an entry-point heuristic to `code.source.repo.describe`:
+- Scan for `if __name__ == '__main__':` blocks
+- Top-level Flask / FastAPI / Starlette app declarations
+- AWS Lambda handler patterns
+- CLI entry points declared in `pyproject.toml` / `setup.py`
+- Top-level `main.py` / `cli.py` / `app.py`
+
+Surface as a structured field on the skill output (`entryPoints: { file, kind, evidence }[]`). The synthesizer's prompt then says "if the user asks about entry points, cite from this list; never promote a vendored client wrapper as 'the main entry point.'"
+
+**Effort:** ~3 hrs.
+
+---
+
+### E.4 Test files cited as evidence for production dependencies
+
+**Where:** the synthesise + section-expand prompts in `agent/content-gen/expand-action.ts` + `agent/tasks/code-analyzer/prompts/synthesise-multipass.ts`.
+
+**Symptom:** the live report cited `[extraction_output](path:test/ocr/google/test_google_integration.py#L71-L74)` as evidence the repo depends on Google's APIs. Tests verify the test exists, not that production code depends on Google.
+
+**Fix:** in the section-writer prompt (`expand-action.ts SYSTEM_PROMPT_BASE`), add a citation-quality rule:
+
+> Prefer production-source citations over test-source citations. When evidence comes from a path under `test/`, `__tests__/`, `*.test.*`, or `*.spec.*`, mark the claim as "tested" rather than "implemented" -- and prefer citing the production source the test exercises. If only test evidence exists, say so explicitly.
+
+**Effort:** 30 min.
+
+---
+
+### E.5 Narrow evidence base / repeated shallow skills
+
+**Where:** [src/insrc/daemon/skills/built-ins/code.source.repo.describe.ts](src/insrc/daemon/skills/built-ins/code.source.repo.describe.ts) + the planner's skill-selection logic in [plan-actions.ts](src/insrc/agent/content-gen/plan-actions.ts).
+
+**Symptom:** in the live run, `code.source.repo.describe` ran in 5/5 steps and `code.entity.search-by-vector` in 4/5. Heavier skills (`code.quality.complexity`, `code.quality.unused-exports`, `code.entity.callers`, `code.entity.summary`) ran zero or once. Repeated shallow skills produce repeated shallow evidence.
+
+**Fix (two-stage):**
+
+1. **Cache `repo.describe`** within a run -- it returns the same repo-overview JSON for every step. Add a per-run memo at the orchestrator level (or in the skill itself if it's pure).
+2. **Planner skill diversification:** when the planner picks candidate skills for an action, penalise selecting the same skill across more than 2 actions in a run. Force coverage of `code.entity.summary`, `code.entity.callers`, `code.quality.*` for L+ runs.
+
+**Effort:** ~3 hrs (cache + planner diversification).
+
+---
+
+### E.6 Reports lack repo-specific identity
+
+**Where:** section-writer prompt (`expand-action.ts`).
+
+**Symptom:** the live report treats `insors-extraction` as a generic Python data-extraction toolkit. Doesn't engage with what makes this repo specific -- the domain hinted at by the name (insurance? legal? -- the report mentions "legal case extraction" once but doesn't develop it), the product surface, the intended consumer.
+
+**Fix:** in `expand-action.ts SYSTEM_PROMPT_BASE`, add:
+
+> When describing the repository's purpose / domain, USE THE REPO NAME and any domain-specific identifiers (table names, class names, README excerpts, top-level package names) as evidence of specificity. A generic "Python data extraction toolkit" framing is a code smell -- there are thousands. What makes THIS repo specific is what the report should lead with.
+
+**Effort:** 15 min for prompt edit; verify live.
+
+---
+
+### Sequencing Phase E
+
+E.1 is the biggest leverage -- a tier upgrade for overview-style prompts unblocks 8+ sections instead of 4, fanning out evidence collection, and most of E.2-E.6 become less acute. Recommended order:
+
+1. **E.1** (scope-sizer fixes -- repo size + rule reframe + examples) -- 1 hr. Highest leverage.
+2. **E.5** (skill diversification + repo.describe caching) -- 3 hrs. Maximises evidence depth once we have more plan steps.
+3. **E.2** (non-empty drill-down) -- 2 hrs. UX continuity.
+4. **E.4** (test-source citation rule) -- 30 min.
+5. **E.6** (repo-specific identity) -- 15 min + live verify. Bundle with E.4.
+6. **E.3** (entry-point validator) -- 3 hrs. Bigger surface; can wait until E.1 + E.5 prove the upstream picture is sound.
+
+Total: ~10 hours.
+
+---
+
 ## Sequencing
 
 Phase A is fully parallelisable -- four small independent diffs. Phase B is gated on the orchestrator investigation. Phase C.1-C.3 are independent of A and B. **C.4 depends on B.2** -- can't persist the report file without a truthful `finalOutput`.
