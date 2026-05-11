@@ -74,10 +74,12 @@ export function selectAgent(intent: Intent): AgentRouteResult {
     case 'infra':
       return { persona: 'deployer', intent };
 
-    // Family controller (no persona) -- code-analysis is routed
-    // through CodeAnalyzerOrchestratorController via the standard
+    // Family controllers (no persona) -- code-analysis routes
+    // through CodeAnalyzerOrchestratorController and data-analysis
+    // through DataAnalyzerOrchestratorController via the standard
     // family-controller dispatch (daemon/task.ts:resolveController).
     case 'code-analysis':
+    case 'data-analysis':
       return { persona: null, intent };
   }
 }

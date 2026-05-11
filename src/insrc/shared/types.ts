@@ -93,6 +93,7 @@ export type Intent =
   | 'document'
   | 'research'
   | 'code-analysis'
+  | 'data-analysis'
   | 'plan'
   | 'requirements'
   | 'design'

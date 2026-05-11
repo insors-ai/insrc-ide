@@ -8,7 +8,6 @@
 
 import { Session } from '../agent/session.js';
 import { decompose, type DecomposedAction } from '../agent/decompose.js';
-import { classifyPrimaryIntent } from '../agent/classify/intent.js';
 import { classifyScope } from '../agent/classify/scope.js';
 import type { AttachedAction } from '../agent/decompose.js';
 import { selectProvider } from '../agent/router.js';
@@ -41,7 +40,6 @@ import type { PlannerInput } from '../agent/planner/agent-state.js';
 import type { BrainstormInput } from '../agent/tasks/brainstorm/types.js';
 // Research agent handled via ResearchController in controllers/research.ts
 import type { TesterInput } from '../agent/tasks/tester/types.js';
-import type { ResolvedIntent } from '../agent/intent/resolver.js';
 import type { RpcHandler, StreamHandler } from './server.js';
 
 const log = getLogger('chat');
@@ -1181,6 +1179,18 @@ async function runDataAnalyzerSlash(
     data: { message: 'Intent: data-analyzer (slash command)' },
   });
 
+  // Phase 6: route the slash through resolveIntent so the
+  // `[intent:current]` tag stays consistent with the regular path
+  // and the next turn's tag-reuse heuristic has the right prior.
+  // We don't read the result here -- the slash already knows the
+  // intent -- but the side effect (tag stamp) is the point.
+  try {
+    const { resolveIntent } = await import('../agent/intent/resolver.js');
+    await resolveIntent(session, userPrompt, { slashForced: 'data-analysis' });
+  } catch (err) {
+    log.warn({ err }, '[data-analyze] resolveIntent stamp failed (continuing)');
+  }
+
   const { DataAnalyzerOrchestratorController } = await import(
     './controllers/data-analyzer-orchestrator.js'
   );
@@ -1297,50 +1307,33 @@ async function runCodeAnalyzerSlash(
     data: { message: 'Intent: code-analyzer (slash command)' },
   });
 
-  // conversation-flow-refinement.md Phase 4: build a per-turn
-  // PriorContext from the session's prior outputs and let the
-  // question-enhancer rewrite the prompt in concrete identifiers
-  // before we hand it to the orchestrator. The slash path KNOWS the
-  // intent is `code-analysis` -- we don't run the LLM classifier
-  // here. Earlier we did, and a bare follow-up like "describe HDFS
-  // Core" got misclassified as `document` / `research`, which (a)
-  // clobbered the [intent:current] tag and (b) starved the retriever
-  // of intent-matched prior artifacts. Synthesize the ResolvedIntent
-  // directly: capture the prior tag value as `previousIntent` if it
-  // differs, then stamp the current tag.
+  // Phase 6 of plans/intent-classification-consolidation.md:
+  // route through `resolveIntent({ slashForced: 'code-analysis' })`
+  // so the SAME funnel that owns the regular path also owns the
+  // slash path. The resolver stamps `[intent:current]` and
+  // `[intent:current.timestamp]`; no need to write them by hand.
   //
-  // All steps below are best-effort: any failure degrades to the raw
-  // user prompt so the analyzer keeps working. The HDFS-Core
-  // regression (turn 1 surfaces topModules, turn 2 "describe HDFS
-  // Core" fails module lookup) is the motivating case.
+  // Earlier this code hand-rolled a ResolvedIntent + stamped the
+  // tag directly; that diverged from the resolver's contract and
+  // is now a Phase-7 dead branch. The HDFS-Core regression that
+  // motivated the original code (turn 2 fails module lookup when
+  // intent is classified wrong) is fixed at the funnel level now
+  // -- the resolver's slash-forced path returns the right intent
+  // unconditionally.
+  //
+  // All steps below remain best-effort: any failure degrades to
+  // the raw user prompt so the analyzer keeps working.
   let effectiveQuestion = userPrompt;
   try {
-    const {
-      INTENT_TAG_CURRENT,
-      INTENT_TAG_TIMESTAMP,
-    } = await import('../agent/intent/resolver.js');
+    const { resolveIntent } = await import('../agent/intent/resolver.js');
     const { retrievePriorContext, PRIOR_CONTEXT_TAG_CURRENT } = await import(
       '../agent/intent/retriever.js'
     );
     const { enhanceQuestion } = await import('../agent/intent/enhancer.js');
 
-    const priorTagValue = session.contextManager.getTag(INTENT_TAG_CURRENT);
-    const previousIntent = priorTagValue.length > 0 && priorTagValue !== 'code-analysis'
-      ? priorTagValue
-      : undefined;
-    session.contextManager.setTag(INTENT_TAG_CURRENT,   'code-analysis');
-    session.contextManager.setTag(INTENT_TAG_TIMESTAMP, String(Date.now()));
-
-    const resolved: ResolvedIntent = {
-      id:         'code-analysis',
-      source:     previousIntent !== undefined ? 'classified-shifted' : 'tag',
-      confidence: 'high',
-      reasoning:  '/code-analyze slash command -- intent forced',
-      message:    userPrompt,
-      ...(previousIntent !== undefined
-        ? { previousIntent: previousIntent as ResolvedIntent['previousIntent'] }
-        : {}),
-    };
+    const resolved = await resolveIntent(session, userPrompt, {
+      slashForced: 'code-analysis',
+    });
     const priorContext = await retrievePriorContext(session, userPrompt, resolved);
 
     const haveArtifacts = priorContext.artifacts.length > 0;
@@ -1563,6 +1556,20 @@ async function runChatMessage(
     message = rest;
     log.info({ intent: forcedIntentFromSlash, slashId }, 'intent slash override');
     send({ id: requestId, stream: 'progress', data: { message: `Intent forced: ${forcedIntentFromSlash}` } });
+    // Phase 6 of plans/intent-classification-consolidation.md:
+    // stamp the [intent:current] tag via resolveIntent so the
+    // intent slash path obeys the same funnel as regular and
+    // family-direct slash paths. Best-effort -- a failed stamp
+    // doesn't block dispatch (the override below still routes
+    // correctly).
+    try {
+      const { resolveIntent } = await import('../agent/intent/resolver.js');
+      await resolveIntent(session, message, {
+        slashForced: forcedIntentFromSlash as import('../shared/types.js').Intent,
+      });
+    } catch (err) {
+      log.warn({ err, slashId }, 'intent slash resolveIntent stamp failed (continuing)');
+    }
   }
 
   // 0. Resolve file references with per-session cache
@@ -1655,6 +1662,42 @@ async function runChatMessage(
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content as string }));
   const decomposeProvider = session.resolver.resolve('classifier', 'decompose');
   const decomposed = await decompose(message, decomposeProvider, historyMessages);
+
+  // Phase 6 of plans/intent-classification-consolidation.md: route
+  // intent classification through the resolveIntent funnel for
+  // every action the decomposer surfaced. The decomposer's prompt
+  // is now structural-only (Phase 5); the .intent field it still
+  // emits is advisory until Phase 7 drops it from the schema.
+  // resolveActionIntents mutates each action's .intent to the
+  // resolver's answer and stamps [intent:current] exactly once
+  // (via the primary action; attached actions resolve with
+  // noStamp: true). Skipped when forcedIntentFromSlash is set --
+  // the slash path already stamped the tag up front above.
+  if (forcedIntentFromSlash === undefined && decomposed.usedLLM) {
+    try {
+      const { resolveActionIntents, resolveSingleActionIntent } = await import('../agent/intent/action-intents.js');
+      if (decomposed.prompt) {
+        await resolveActionIntents({
+          session,
+          primary:  decomposed.prompt.primary,
+          attached: decomposed.prompt.attached,
+        });
+      } else if (decomposed.actions.length > 0) {
+        // Legacy actions[] shape -- treat the first as primary and
+        // resolve the rest with noStamp so the tag still lands on
+        // the lead action.
+        const [first, ...rest] = decomposed.actions;
+        await resolveSingleActionIntent(session, first!);
+        const { resolveIntent } = await import('../agent/intent/resolver.js');
+        await Promise.all(rest.map(async a => {
+          const r = await resolveIntent(session, a.action, { noStamp: true });
+          a.intent = r.id;
+        }));
+      }
+    } catch (err) {
+      log.warn({ err }, 'resolveActionIntents failed; falling back to decomposer-emitted intent');
+    }
+  }
 
   // Primary/attached processing state. Seeded from the intent-slash
   // shortcut detected above so `/<intent> <prompt>` short-circuits the
@@ -1799,17 +1842,30 @@ async function runChatMessage(
       classifiedReasoning = 'decomposer single-action';
     }
   } else {
-    log.info({ message: message.slice(0, 80) }, 'classifying (fallback)');
-    const classified = await classifyPrimaryIntent(enrichedMessage, session);
-    classifiedIntent = classified.intent;
-    classifiedMessage = classified.message;
-    classifiedExplicit = classified.explicit;
-    classifiedConfidence = classified.confidence;
-    classifiedReasoning = classified.reasoning || (classified.fallback ? 'classifier fallback' : 'llm classifier');
-    classifiedScope = classified.scope;
+    log.info({ message: message.slice(0, 80) }, 'resolving intent (fallback)');
+    // Phase 6: route through resolveIntent, the canonical funnel.
+    // This used to call classifyPrimaryIntent directly which (a)
+    // skipped the tag-reuse fast path and (b) saw no memory
+    // context. resolveIntent handles both for free.
+    const { resolveIntent } = await import('../agent/intent/resolver.js');
+    const resolved = await resolveIntent(session, enrichedMessage);
+    classifiedIntent = resolved.id;
+    classifiedMessage = resolved.message;
+    classifiedExplicit = undefined;
+    classifiedConfidence = resolved.confidence === 'high' ? 0.95
+      : resolved.confidence === 'medium' ? 0.75
+        : 0.45;
+    classifiedReasoning = resolved.reasoning || 'resolveIntent';
+    // Scope no longer carried by ResolvedIntent in Phase 6; keep
+    // the default 'M' until Phase 7 either restores it on the
+    // resolver output or drops it from ControllerInput entirely.
     log.info(
-      { intent: classifiedIntent, confidence: classified.confidence, scope: classified.scope, fallback: classified.fallback },
-      'classified',
+      {
+        intent:       classifiedIntent,
+        source:       resolved.source,
+        relationship: resolved.relationship?.kind,
+      },
+      'resolved intent (fallback path)',
     );
   }
 

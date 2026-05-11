@@ -35,7 +35,6 @@ import { planActions, ACTION_BUDGET_BY_TIER, type PlannedAction, type PlanExecut
 import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import { PATHS } from '../../shared/paths.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
-import { INTENT_TAG_CURRENT, INTENT_TAG_TIMESTAMP } from '../../agent/intent/resolver.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import { makeSpillHandler } from '../../agent/artifacts/spill-writer.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
@@ -155,21 +154,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       'code-analyzer scope tier captured',
     );
 
-    // conversation-flow-refinement.md Phase 1.1: stamp the
-    // [intent:current] tag on the session's ContextManager so a
-    // follow-up turn's resolveIntent() sees this run's intent (the
-    // tag-reuse fast path is what skips the cold LLM classify call
-    // when the user types a continuation-shaped follow-up like
-    // "now describe HDFS Core" after this run completes). Belt-and-
-    // suspenders with the chat-handler's own resolver call: this
-    // write fires whether or not the entry path went through the
-    // resolver (e.g. drill-down from the report footer, parent-
-    // list re-run, or a direct programmatic dispatch).
-    const ctx = input.session?.contextManager ?? this.deps?.session.contextManager;
-    if (ctx !== undefined) {
-      ctx.setTag(INTENT_TAG_CURRENT,   'code-analysis');
-      ctx.setTag(INTENT_TAG_TIMESTAMP, String(Date.now()));
-    }
+    // Phase 6 of plans/intent-classification-consolidation.md:
+    // the [intent:current] tag write moved to resolveIntent. Every
+    // entry path into this orchestrator (regular slash, drill-down
+    // from the report footer, parent-list re-run, programmatic
+    // dispatch from a workbench RPC) now goes through resolveIntent
+    // with `{ slashForced: 'code-analysis' }`, which stamps the
+    // tag exactly once. The belt-and-suspenders write that used to
+    // live here would re-stamp the tag and silently overwrite any
+    // attached-action resolution that landed in the same turn.
 
     if (this._rerunFromListId !== undefined) {
       return [{

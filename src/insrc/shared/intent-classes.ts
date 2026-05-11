@@ -27,6 +27,7 @@ export const INTENT_CLASSES: readonly IntentClass[] = [
   { id: 'document',     description: 'user wants documentation, docstrings, READMEs, changelogs, or ADRs' },
   { id: 'research',     description: 'EXTERNAL-ONLY information lookup. Pick this ONLY when the answer cannot be obtained from this repository alone and requires consulting external sources -- web search, third-party package documentation, external API references, framework behaviour, blog posts, RFCs, vendor specs. Signals: explicit "search the web", "look up", "what does library X do", "find an article about Y". If the user is asking about anything inside this codebase, this is NOT research -- pick `code-analysis` instead.' },
   { id: 'code-analysis', description: 'ANY read-only question about THIS project\'s code, files, modules, classes, functions, types, behaviour, structure, design, dependencies, call graph, or repo organisation. This is the DEFAULT for in-repo questions. Pick this for "describe X", "what does X do", "where is X", "how does X work", "summarise X", "explain the auth flow", "list the modules", "find callers of foo()", and any drill-down that follows up on a previous code-analysis report. Output is a cited Markdown report. Do NOT pick `research` for in-repo questions even if the prompt is phrased as a research-like request -- "describe HDFS Core" with this repo loaded is code-analysis, not research.' },
+  { id: 'data-analysis', description: 'questions about TABULAR DATA the user has attached (CSV / Parquet / JSONL files, configured database connections, dataframes). Pick this for "what columns are in X", "show me the schema", "aggregate by Y", "find outliers in Z", "compare these two tables". For data-analysis the user is asking about row-level facts in data, not source-code structure.' },
   { id: 'brainstorm',   description: 'user wants to explore ideas, generate alternatives, or iterate on a creative / architectural problem' },
   { id: 'deploy',       description: 'user wants to deploy, rollout, or push to an environment' },
   { id: 'release',      description: 'user wants to cut a release, bump a version, publish a package, or generate a changelog' },
@@ -39,7 +40,7 @@ export const INTENT_CLASSES: readonly IntentClass[] = [
 const _exhaustivenessCheck: Record<Intent, true> = {
   requirements: true, design: true, plan: true, implement: true,
   refactor: true, test: true, debug: true, review: true, document: true,
-  research: true, 'code-analysis': true, brainstorm: true,
+  research: true, 'code-analysis': true, 'data-analysis': true, brainstorm: true,
   deploy: true, release: true, infra: true,
 };
 void _exhaustivenessCheck;

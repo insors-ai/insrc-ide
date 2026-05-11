@@ -462,6 +462,61 @@ test('resolveIntent: relationship confidence mapped to high/medium/low', async (
 	assert.equal(r.relationship!.confidence, 'low');
 });
 
+// ---------------------------------------------------------------------------
+// Phase 6: noStamp opt
+// ---------------------------------------------------------------------------
+
+test('resolveIntent: noStamp suppresses [intent:current] write on slash-forced path', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('research') }]);
+	const session  = makeFakeSession(provider);
+	const r = await resolveIntent(session, 'describe HDFS', {
+		slashForced: 'code-analysis',
+		noStamp:     true,
+	});
+	assert.equal(r.id, 'code-analysis');
+	assert.equal(r.source, 'slash-forced');
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), '',
+		'noStamp must NOT write [intent:current]');
+});
+
+test('resolveIntent: noStamp suppresses write on override path', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('research') }]);
+	const session  = makeFakeSession(provider);
+	await resolveIntent(session, '/intent design something', { noStamp: true });
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), '');
+});
+
+test('resolveIntent: noStamp suppresses write on tag-reuse path', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('research') }]);
+	const session  = makeFakeSession(provider);
+	session.contextManager.setTag(INTENT_TAG_CURRENT, 'code-analysis');
+	// Re-stamp the original tag's timestamp so we can detect that
+	// noStamp leaves it untouched.
+	session.contextManager.setTag(INTENT_TAG_TIMESTAMP, '12345');
+	await resolveIntent(session, 'now describe HDFS Core', { noStamp: true });
+	assert.equal(session.contextManager.getTag(INTENT_TAG_TIMESTAMP), '12345',
+		'tag-reuse noStamp must leave the prior timestamp intact');
+});
+
+test('resolveIntent: noStamp suppresses write on cold-classify path', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('debug') }]);
+	const session  = makeFakeSession(provider);
+	await resolveIntent(
+		session,
+		'audit the entire codebase for security issues across the board',
+		{ noStamp: true },
+	);
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), '',
+		'cold-classify noStamp must NOT stamp the tag');
+});
+
+test('resolveIntent: default (no noStamp) still stamps as before', async () => {
+	const provider = buildFakeProvider([{ text: classifierJson('code-analysis') }]);
+	const session  = makeFakeSession(provider);
+	await resolveIntent(session, 'audit the entire codebase');
+	assert.equal(session.contextManager.getTag(INTENT_TAG_CURRENT), 'code-analysis');
+});
+
 test('resolveIntent: /intent strips prefix BEFORE continuation heuristic so tag-reuse path still fires', async () => {
 	// Even with the @provider prefix, "now describe HDFS Core" is
 	// continuation-shaped on the stripped body. Without prefix

@@ -128,6 +128,18 @@ export interface ResolveIntentOpts {
 	/** Explicit override: skip classifier; stamp tag with this id. */
 	readonly explicitOverride?: Intent | undefined;
 	/**
+	 * Suppress the `[intent:current]` tag write. Used by the
+	 * `resolveActionIntents` helper for ATTACHED actions in a
+	 * multi-action decomposition: only the primary's resolved
+	 * intent should land on the session tag (otherwise the last
+	 * resolved action overwrites the primary and the next turn's
+	 * tag-reuse path reads the wrong prior). The plan's rule
+	 * "tag stamping happens exactly once per turn" stays intact:
+	 * exactly one resolveIntent call per turn writes; the others
+	 * still return their `ResolvedIntent` for caller use.
+	 */
+	readonly noStamp?:          boolean | undefined;
+	/**
 	 * Test-only override of the classifier-memory retrieval. Returns
 	 * the bundle the cold path would normally retrieve. Production
 	 * callers leave unset and pick up `retrieveClassifierMemory` with
@@ -152,6 +164,8 @@ export async function resolveIntent(
 ): Promise<ResolvedIntent> {
 	const priorId = readIntentTag(session);
 
+	const noStamp = opts?.noStamp === true;
+
 	// 1. Slash-forced (chat-handler dispatch). Highest precedence:
 	//    we already know the intent, no parsing or LLM needed.
 	if (opts?.slashForced !== undefined) {
@@ -163,9 +177,9 @@ export async function resolveIntent(
 			message:    rawMessage.trim(),
 			...(priorId !== undefined ? { previousIntent: priorId } : {}),
 		};
-		stampIntentTags(session, resolved, priorId);
+		if (!noStamp) stampIntentTags(session, resolved, priorId);
 		log.info(
-			{ id: resolved.id, source: resolved.source, previous: priorId },
+			{ id: resolved.id, source: resolved.source, previous: priorId, noStamp },
 			'intent resolved (slash-forced)',
 		);
 		return resolved;
@@ -186,9 +200,9 @@ export async function resolveIntent(
 			message:    prefix.message,
 			...(priorId !== undefined ? { previousIntent: priorId } : {}),
 		};
-		stampIntentTags(session, resolved, priorId);
+		if (!noStamp) stampIntentTags(session, resolved, priorId);
 		log.info(
-			{ id: resolved.id, source: resolved.source, previous: priorId },
+			{ id: resolved.id, source: resolved.source, previous: priorId, noStamp },
 			'intent resolved (override)',
 		);
 		return resolved;
@@ -205,8 +219,8 @@ export async function resolveIntent(
 			reasoning:  'continuation-shaped follow-up; reusing prior intent tag',
 			message:    prefix.message,
 		};
-		stampIntentTags(session, resolved, priorId);
-		log.info({ id: resolved.id, source: resolved.source }, 'intent resolved (tag reuse)');
+		if (!noStamp) stampIntentTags(session, resolved, priorId);
+		log.info({ id: resolved.id, source: resolved.source, noStamp }, 'intent resolved (tag reuse)');
 		return resolved;
 	}
 
@@ -244,7 +258,7 @@ export async function resolveIntent(
 		...(previous !== undefined ? { previousIntent: previous } : {}),
 		...(relationship !== undefined ? { relationship } : {}),
 	};
-	stampIntentTags(session, resolved, previous);
+	if (!noStamp) stampIntentTags(session, resolved, previous);
 
 	log.info(
 		{
@@ -254,6 +268,7 @@ export async function resolveIntent(
 			confidence: resolved.confidence,
 			relationship: relationship?.kind,
 			citations:    relationship?.citations.length ?? 0,
+			noStamp,
 		},
 		'intent resolved (LLM)',
 	);
