@@ -99,7 +99,19 @@ export async function runToolLoop(
   // Working copy of messages — we append tool results as we go
   const workingMessages = [...messages];
   const producedMessages: LLMMessage[] = [];
-  let finalResponse = '';
+
+  // Interleaved-investigation memory model: every assistant turn's text is
+  // a paragraph of the section. `sectionParagraphs` collects them in order;
+  // `currentTurnText` is the per-iteration scratchpad that flushes into the
+  // section list at the end of each iteration.
+  //
+  // The returned `response` is `sectionParagraphs.join('\n\n')`, not just
+  // the final turn's text -- so callers that drive interleaved-investigation
+  // (the code-analyzer section writer) get the full paragraph stream.
+  // Callers whose model emits text only on the final turn (Pair / Delegate
+  // / Brainstorm in the common case) see the same string they did before.
+  const sectionParagraphs: string[] = [];
+  let currentTurnText = '';
   let iterations = 0;
   let nudgeCount = 0;
 
@@ -111,7 +123,7 @@ export async function runToolLoop(
     if (opts.maxTokens !== undefined) completionOpts.maxTokens = opts.maxTokens;
     if (onTextDelta) {
       completionOpts.onToken = (token: string) => {
-        finalResponse += token;
+        currentTurnText += token;
         onTextDelta(token);
       };
     }
@@ -124,7 +136,7 @@ export async function runToolLoop(
 
     // If no streaming callback, pick up text from the full response
     if (!onTextDelta && llmResponse.text) {
-      finalResponse += llmResponse.text;
+      currentTurnText += llmResponse.text;
     }
 
     // If no tool calls, check if LLM described using a tool without calling it
@@ -144,22 +156,31 @@ export async function runToolLoop(
       // trigger there. If a future analyzer adopts a similar
       // protocol the nudge can be skipped for that loop entirely.
       const toolNames = tools.map(t => t.name.toLowerCase());
-      const lastSentence = finalResponse.trim().split(/[.!?\n]/).filter(s => s.trim()).pop()?.trim().toLowerCase() ?? '';
+      const lastSentence = currentTurnText.trim().split(/[.!?\n]/).filter(s => s.trim()).pop()?.trim().toLowerCase() ?? '';
       const referencesTool = toolNames.some(name =>
         lastSentence.includes(name.toLowerCase())
       ) || /\b(check|read|look at|examine|list|search|find|grep|scan)\b.*\b(file|directory|folder|log|path|content)\b/i.test(lastSentence);
       const isFutureTense = /\b(let me|i'll|i will|i need to|i should|i can|going to)\b/i.test(lastSentence);
 
       if (referencesTool && isFutureTense && nudgeCount < maxNudges) {
-        // LLM's final sentence describes a tool action it didn't take
-        workingMessages.push({ role: 'assistant', content: finalResponse });
+        // LLM's final sentence describes a tool action it didn't take.
+        // Push the partial text into the paragraph stream (still useful as
+        // analysis prose) and re-prompt with a corrective user turn.
+        if (currentTurnText.trim().length > 0) {
+          sectionParagraphs.push(currentTurnText.trim());
+        }
+        workingMessages.push({ role: 'assistant', content: currentTurnText });
         workingMessages.push({ role: 'user', content: 'You described an action but did not call a tool. Use the available tools to perform it now.' });
-        finalResponse = '';
+        currentTurnText = '';
         nudgeCount++;
         continue;
       }
-      // Record assistant message
-      producedMessages.push({ role: 'assistant', content: finalResponse });
+      // No-tool-call turn = the closing turn. Flush its text into the
+      // section stream and exit the loop.
+      if (currentTurnText.trim().length > 0) {
+        sectionParagraphs.push(currentTurnText.trim());
+      }
+      producedMessages.push({ role: 'assistant', content: currentTurnText });
       break;
     }
 
@@ -274,18 +295,31 @@ export async function runToolLoop(
     workingMessages.push(userMsg);
     producedMessages.push(userMsg);
 
-    // Reset accumulated text for next iteration
-    finalResponse = '';
+    // Flush this iteration's text into the paragraph stream + reset for
+    // the next iteration. Each tool-use turn that included accompanying
+    // text contributes a paragraph to the final section.
+    if (currentTurnText.trim().length > 0) {
+      sectionParagraphs.push(currentTurnText.trim());
+    }
+    currentTurnText = '';
   }
 
   const hitLimit = iterations >= maxIterations;
-  if (hitLimit && !finalResponse) {
-    finalResponse = '[max tool iterations reached]';
-    producedMessages.push({ role: 'assistant', content: finalResponse });
+  if (hitLimit) {
+    // If we ran out of iterations, the current turn's partial text (if
+    // any) was never flushed by the per-iteration tail. Capture it now
+    // so it doesn't disappear.
+    if (currentTurnText.trim().length > 0) {
+      sectionParagraphs.push(currentTurnText.trim());
+    }
+    if (sectionParagraphs.length === 0) {
+      sectionParagraphs.push('[max tool iterations reached]');
+      producedMessages.push({ role: 'assistant', content: '[max tool iterations reached]' });
+    }
   }
 
   return {
-    response: finalResponse.trim(),
+    response: sectionParagraphs.join('\n\n').trim(),
     messages: producedMessages,
     iterations,
     hitLimit,

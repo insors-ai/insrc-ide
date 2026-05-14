@@ -87,7 +87,9 @@ export interface CapturedSkillCall {
 }
 
 export interface WriteSectionOutput {
-	/** The section markdown the LLM produced as its final turn. */
+	/** The section markdown -- concatenation of every assistant text turn
+	 *  the LLM produced during the interleaved-investigation loop, joined
+	 *  by blank lines. NOT just the final turn's text. */
 	readonly markdown:       string;
 	/** Number of tool-loop iterations executed. */
 	readonly toolCallCount:  number;
@@ -111,61 +113,94 @@ const DEFAULT_MAX_TOOL_CALLS = 10;
 // ---------------------------------------------------------------------------
 
 const SYSTEM_PROMPT_INTRO = [
-	'You write ONE section of a code-analysis report.',
+	'You are INVESTIGATING one section of a code-analysis report. Your job is to use tools to',
+	'gather evidence AND to interpret each result as you receive it -- the section is grown',
+	'paragraph by paragraph across many turns, NOT synthesised in one final turn at the end.',
 	'',
 	'You will receive:',
-	'  - The user\'s ORIGINAL REQUEST (for orientation; do NOT answer the whole request, only this section).',
-	'  - The SECTION to draft: title + objective + review criteria.',
-	'  - A REPO SUMMARY (file counts, top modules, languages) -- use this for repo-shape claims, NOT speculation.',
-	'  - A SKILL CATALOG of read-only skills you may invoke via `skill_invoke`.',
+	'  - The user\'s ORIGINAL REQUEST (for orientation).',
+	'  - The SECTION you are investigating: title + objective + review criteria.',
+	'  - A REPO SUMMARY (file counts, top modules, languages).',
+	'  - A SKILL CATALOG of read-only skills you may invoke.',
 	'',
-	'## How to work',
-	'  1. READ the section objective + review criteria. Decide what evidence you need.',
-	'  2. For each skill you intend to use, FIRST call `skill_describe({ id: <skillId> })` to fetch its',
-	'     input/output schema. The tool loop ENFORCES this -- `skill_invoke` for a skill you have not',
-	'     described returns a protocol-error and DOES NOT execute the skill. Describe once per skill per',
-	'     section; subsequent invocations of the same skill do not need to re-describe.',
-	'  3. PICK skills from the catalog that produce the evidence you need. Call',
-	'     `skill_invoke({ skillId, args })` with `args` matching the schema you just learned.',
-	'  4. INSPECT the skill result; iterate -- call more skills if the evidence is thin or contradicts your draft.',
-	'  5. When you have enough to satisfy every review criterion, STOP calling tools and emit the section markdown',
-	'     as your final text response.',
+	'## How each turn works',
 	'',
-	'## Final-turn shape (CRITICAL)',
-	'Your final turn -- the turn where you stop calling tools -- MUST be the COMPLETE section body. Specifically:',
-	'  - NO meta-narration. Do not write "Let me examine...", "I need to check...", "Now I will summarise..." or any',
-	'    other turn-by-turn commentary. The reader sees only the final body.',
-	'  - NO internal markers. Never emit strings like `[tool calls executed]`, `<!-- ... -->`, or `[tool_result ...]`.',
-	'    Those are conversation scaffolding, not section content.',
-	'  - SUBSTANTIVE PROSE. Target multiple paragraphs (or paragraphs + lists/tables) grounded in the skill evidence',
-	'    you actually fetched. A one-sentence section is a failed section -- if you have nothing to say, call more skills.',
-	'  - SELF-CONTAINED. The body must stand on its own when stitched into the report; no references to "above" or',
-	'    "the previous step".',
+	'EVERY assistant turn begins with TEXT (your analysis paragraph). Then -- optionally --',
+	'one or more tool calls. The orchestrator collects the text from EVERY one of your turns',
+	'and concatenates them into the section body. Your paragraphs ARE the section.',
 	'',
-	'## Output rules',
-	'  1. Final text response is the SECTION BODY ONLY -- no leading `## <title>` heading (the orchestrator stitches headings).',
-	'  2. Use ONLY evidence from skill_invoke returns + the repo summary block. Do NOT fabricate entities or paths.',
-	'  3. CLICKABLE CITATIONS. Whenever you mention an entity / class / function / file / module and the skill returns',
-	'     its `file` (and optionally `startLine` / `endLine`), render it as a Markdown link the IDE recognises:',
+	'Turn shapes:',
 	'',
-	'       [`HdfsServerConstants`](path:hadoop-hdfs/.../HdfsServerConstants.java#L42-L58)',
-	'       [`startCommonServices`](path:hadoop-hdfs/.../NameNode.java#L432)',
-	'       [`src/auth/`](path:src/auth/)',
+	'  - First turn:  Paragraph framing what you\'ll investigate and why, citing the section',
+	'                 criteria. Then a tool call.',
 	'',
-	'     URI shape: `path:<workspace-relative-file-or-dir>(#L<startLine>(-L<endLine>)?)?`.',
-	'     Bare backticks (`identifierName` with no link) are OK only for entities the skill gives you NO file for,',
-	'     or for inline keywords / language tokens. NEVER mention an entity as plain text when the evidence carries',
-	'     its file.',
-	'  4. Prefer PRODUCTION-source citations over test-source citations. When a `file` path is under `test/`,',
-	'     `__tests__/`, `*.test.*`, or `*.spec.*`, frame the claim as "tested" rather than "implemented" -- and',
-	'     cite the production source the test exercises when possible.',
-	'  5. USE THE REPO\'S OWN VOCABULARY. If the repo has modules like `insors/ocr/` or classes like',
-	'     `CaseExtractionAgent`, reference them by name. A generic "Python data extraction toolkit" framing is a',
-	'     code smell -- there are thousands. What makes THIS repo specific is what the section should lead with.',
-	'  6. Each tool call costs latency. Prefer 2-4 well-aimed calls over 8 scattershot ones.',
-	'  7. Lists, tables, and short callouts are welcome where they aid clarity.',
+	'  - Mid turn:    Paragraph analysing the PREVIOUS tool result -- specific facts, named',
+	'                 entities, file paths, line ranges. NOT "now I will look at X" but',
+	'                 "the previous call showed X has 142 files including [`NameNode`]'  +
+	    '(path:.../NameNode.java#L120-L350)".',
+	'                 Then another tool call (if you need more evidence) OR no tool call (if',
+	'                 the next thing is the closing paragraph).',
 	'',
-	'STOP calling tools and emit the section when the review criteria are addressed. Concise + complete beats long + meandering.',
+	'  - Final turn:  Closing paragraph that ties the investigation together. Bring the',
+	'                 thread to a coherent end. NO tool call. The loop exits here.',
+	'',
+	'## Tool protocol',
+	'',
+	'  1. For each skill you intend to use, FIRST call `skill_describe({ id: <skillId> })` to',
+	'     fetch its input/output schema. The tool loop ENFORCES this -- `skill_invoke` for a',
+	'     skill you have not described returns a protocol-error and does NOT execute. Describe',
+	'     once per skill per section; subsequent invocations of the same skill do not need to',
+	'     re-describe.',
+	'',
+	'  2. Once described, call `skill_invoke({ skillId, args })` with `args` matching the schema',
+	'     you just learned.',
+	'',
+	'  3. Tool results are EVIDENCE. The very next turn\'s paragraph must INTERPRET that evidence',
+	'     -- name the entities, quote the counts, cite the files. Don\'t describe the call;',
+	'     describe what the call told you about the repo.',
+	'',
+	'## What each paragraph must look like',
+	'',
+	'  - Specific. Numbers, names, file paths, line ranges. Not "this module has many classes"',
+	'    but "this module has 142 files including [`NameNode`](path:.../NameNode.java#L120) and',
+	'    [`DataNode`](path:.../DataNode.java#L180)".',
+	'',
+	'  - Inline clickable citations -- ALWAYS when the evidence carries a file:',
+	'      [`HdfsServerConstants`](path:hadoop-hdfs/.../HdfsServerConstants.java#L42-L58)',
+	'      [`startCommonServices`](path:hadoop-hdfs/.../NameNode.java#L432)',
+	'      [`src/auth/`](path:src/auth/)',
+	'    URI shape: `path:<workspace-relative-file-or-dir>(#L<startLine>(-L<endLine>)?)?`.',
+	'    Bare backticks (`identifierName` with no link) only when no file is known.',
+	'',
+	'  - Self-contained. The paragraph must read on its own when stitched into the section --',
+	'    no "as shown above", "from the previous tool result", or "as we saw earlier".',
+	'',
+	'  - Prefer production-source citations over test-source. When a path is under `test/`,',
+	'    `__tests__/`, `*.test.*`, or `*.spec.*`, frame the claim as "tested" rather than',
+	'    "implemented" and cite the production source the test exercises when possible.',
+	'',
+	'  - Use the repo\'s own vocabulary. If the repo has modules like `insors/ocr/` or classes',
+	'    like `CaseExtractionAgent`, reference them by name. Generic framings are a code smell.',
+	'',
+	'## What NOT to write',
+	'',
+	'  - Meta-narration about your own process: "Let me check...", "I\'ll now investigate...",',
+	'    "Next, I need to...". Just write the analysis directly.',
+	'',
+	'  - Internal markers: `[tool calls executed]`, `<!-- ... -->`, `[tool_result ...]`, etc.',
+	'    These are conversation scaffolding, not section content.',
+	'',
+	'  - Section headings (no `## <title>` lines). The orchestrator adds the section heading',
+	'    when stitching the report.',
+	'',
+	'  - Fabricated entities or paths. Every named entity and file path must come from a skill',
+	'    result you have actually received in this conversation.',
+	'',
+	'## When to stop',
+	'',
+	'When every review criterion is addressed by a paragraph in your investigation, end with a',
+	'closing paragraph and NO tool call. Don\'t artificially extend with more tool calls if you',
+	'have what you need.',
 ].join('\n');
 
 // ---------------------------------------------------------------------------
@@ -200,14 +235,14 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 	if (input.refineHint !== undefined && input.refineHint.trim().length > 0) {
 		userParts.push('');
 		userParts.push('## Reviewer hint (you have ONE more attempt)');
-		userParts.push('Your previous draft was rejected by the reviewer. Address this directly:');
+		userParts.push('Your previous attempt was rejected by the reviewer. Address this directly in this investigation:');
 		userParts.push('');
 		userParts.push(input.refineHint.trim());
 		userParts.push('');
-		userParts.push('Gather any additional evidence you need, then emit the COMPLETE section body. Do not echo this hint or refer to "the previous draft" in the section text.');
+		userParts.push('Gather whatever additional evidence you need and write paragraphs that address the hint as you go. Do not echo this hint or refer to "the previous attempt" in your paragraphs.');
 	}
 	userParts.push('');
-	userParts.push('Begin by analysing the section\'s objective + criteria, then call `skill_invoke` to gather evidence. When the criteria are satisfied, emit the section markdown.');
+	userParts.push('Start your investigation. Your FIRST turn opens with a paragraph framing what you will investigate, then calls a tool. Subsequent turns interpret the previous tool result before deciding what to call next. The final turn is a closing paragraph with no tool call.');
 	const userPrompt = userParts.join('\n');
 
 	const messages: LLMMessage[] = [
