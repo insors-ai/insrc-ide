@@ -59,7 +59,9 @@ const DEFAULT_RELATION_KINDS: readonly RelationKind[] = [
 	'CALLS', 'IMPORTS', 'INHERITS', 'IMPLEMENTS', 'REFERENCES',
 ];
 
-const DEFAULT_LIMIT = 200;
+// `limit` removed in Phase B.1 of plans/code-analyzer-interleaved-investigation.md.
+// Skills return the COMPLETE unreachable set; the renderer projects a first page
+// for the LLM and the rest is reachable via skill_load_page over the on-disk spill.
 
 interface DeadCodeInput {
 	readonly repo:           string;
@@ -67,7 +69,6 @@ interface DeadCodeInput {
 	readonly candidateKinds?: readonly EntityKind[];
 	readonly relationKinds?:  readonly RelationKind[];
 	readonly maxDepth?:       number;
-	readonly limit?:          number;
 }
 
 interface DeadEntity {
@@ -105,7 +106,6 @@ const dataCodeDeadCodeSkill: Skill<DeadCodeInput, DeadCodeOutput> = {
 			candidateKinds: { type: 'array',  items: { type: 'string' }, description: 'Entity kinds to consider as candidates. Default: function / method / class / interface / type / variable.' },
 			relationKinds:  { type: 'array',  items: { type: 'string' }, description: 'Edge kinds traversed from roots. Default: CALLS / IMPORTS / INHERITS / IMPLEMENTS / REFERENCES.' },
 			maxDepth:       { type: 'number', minimum: 0, description: 'BFS depth cap. Default: unbounded.' },
-			limit:          { type: 'number', minimum: 1, maximum: 1000, description: 'Max dead entities returned. Default: 200. The full count is in `deadCount` regardless of this cap.' },
 		},
 		required: ['repo'],
 		additionalProperties: false,
@@ -142,7 +142,6 @@ const dataCodeDeadCodeSkill: Skill<DeadCodeInput, DeadCodeOutput> = {
 	async execute(input: DeadCodeInput, _deps: SkillDeps): Promise<SkillResult<DeadCodeOutput>> {
 		const candidateKinds = input.candidateKinds ?? DEFAULT_CANDIDATE_KINDS;
 		const relationKinds  = input.relationKinds  ?? DEFAULT_RELATION_KINDS;
-		const limit          = input.limit          ?? DEFAULT_LIMIT;
 
 		// 1. Resolve roots.
 		let roots: readonly string[];
@@ -189,11 +188,11 @@ const dataCodeDeadCodeSkill: Skill<DeadCodeInput, DeadCodeOutput> = {
 		);
 		const scoped = allUnreachable.filter(e => e.repo === input.repo);
 
-		// 3. Cap to limit and project to the output shape.
-		const truncated = scoped.length > limit;
-		const dead = scoped.slice(0, limit).map(toDeadEntity);
+		// 3. Return the FULL unreachable set (Phase B.1 -- no truncation).
+		//    The renderer pages it for the LLM; the spill carries it whole.
+		const dead = scoped.map(toDeadEntity);
 
-		const result: SkillResult<DeadCodeOutput> = {
+		return {
 			value: {
 				repo:      input.repo,
 				rootCount: roots.length,
@@ -204,7 +203,6 @@ const dataCodeDeadCodeSkill: Skill<DeadCodeInput, DeadCodeOutput> = {
 			notes,
 			toolCalls: [],
 		};
-		return truncated ? { ...result, truncated: true } : result;
 	},
 };
 

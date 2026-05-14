@@ -19,8 +19,8 @@ import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { findEntitiesByName } from '../../../db/entities.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
 
-const DEFAULT_LIMIT = 25;
-const MAX_LIMIT     = 100;
+// Phase B.1: removed DEFAULT_LIMIT / MAX_LIMIT / `limit` parameter.
+// Skill returns ALL matches; the renderer pages for the LLM.
 
 const ALL_KINDS: readonly EntityKind[] = [
 	'function', 'method', 'class', 'interface', 'type', 'variable',
@@ -32,7 +32,6 @@ interface LocateInput {
 	readonly kinds?:   readonly EntityKind[];
 	readonly repoPath?: string;
 	readonly language?: Language;
-	readonly limit?:    number;
 }
 
 interface MatchEntity {
@@ -50,7 +49,6 @@ interface MatchEntity {
 interface LocateOutput {
 	readonly name:    string;
 	readonly matches: readonly MatchEntity[];
-	readonly truncated: boolean;
 }
 
 const codeEntityLocateByNameSkill: Skill<LocateInput, LocateOutput> = {
@@ -58,8 +56,7 @@ const codeEntityLocateByNameSkill: Skill<LocateInput, LocateOutput> = {
 	name: 'Code: locate entities by exact name',
 	description:
 		'Find every entity matching an exact name across the requested kinds. Optional repo / ' +
-		'language filters narrow the scope. Returns `{ matches: [...] }` -- empty when nothing ' +
-		'matches; truncated:true when the cap is hit.',
+		'language filters narrow the scope. Returns the COMPLETE set of matches.',
 	family: 'source-introspection',
 	owner: 'code-analyzer',
 	version: 1,
@@ -80,7 +77,6 @@ const codeEntityLocateByNameSkill: Skill<LocateInput, LocateOutput> = {
 				enum: ['typescript', 'javascript', 'python', 'go', 'java', 'scala'],
 				description: 'Optional language filter.',
 			},
-			limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: `Max matches to return. Default: ${DEFAULT_LIMIT}.` },
 		},
 		required: ['name'],
 		additionalProperties: false,
@@ -88,25 +84,22 @@ const codeEntityLocateByNameSkill: Skill<LocateInput, LocateOutput> = {
 	outputs: {
 		type: 'object',
 		properties: {
-			name:      { type: 'string' },
-			matches:   { type: 'array' },
-			truncated: { type: 'boolean' },
+			name:    { type: 'string' },
+			matches: { type: 'array' },
 		},
-		required: ['name', 'matches', 'truncated'],
+		required: ['name', 'matches'],
 	},
 	toolDeps: [],
 	providerAffinity: 'auto',
 
 	async execute(input: LocateInput, _deps: SkillDeps): Promise<SkillResult<LocateOutput>> {
-		const limit = Math.max(1, Math.min(MAX_LIMIT, input.limit ?? DEFAULT_LIMIT));
 		const kinds = input.kinds !== undefined && input.kinds.length > 0
 			? input.kinds
 			: ALL_KINDS;
 
-		const baseOpts = {
-			kinds,
-			limit: limit + 1, // probe one extra to detect truncation
-		} as const;
+		// Pass an effectively-unlimited cap so the graph primitive doesn't
+		// truncate. The renderer pages for the LLM (Phase B.5).
+		const baseOpts = { kinds, limit: Number.MAX_SAFE_INTEGER } as const;
 		const opts = input.repoPath !== undefined
 			? { ...baseOpts, repo: input.repoPath }
 			: baseOpts;
@@ -116,18 +109,16 @@ const codeEntityLocateByNameSkill: Skill<LocateInput, LocateOutput> = {
 			? raw.filter(e => e.language === input.language)
 			: raw;
 
-		const truncated = filtered.length > limit;
-		const matches = filtered.slice(0, limit).map(toMatch);
+		const matches = filtered.map(toMatch);
 
-		const result: SkillResult<LocateOutput> = {
-			value: { name: input.name, matches, truncated },
+		return {
+			value: { name: input.name, matches },
 			confidence: matches.length > 0 ? 'high' : 'medium',
 			notes: matches.length === 0
 				? [`No entity named '${input.name}' found in the index.`]
 				: [],
 			toolCalls: [],
 		};
-		return truncated ? { ...result, truncated: true } : result;
 	},
 };
 

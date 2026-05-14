@@ -27,13 +27,11 @@ const CANDIDATE_KINDS: ReadonlySet<EntityKind> = new Set([
 
 const REFERENCE_EDGES = ['IMPORTS', 'CALLS', 'REFERENCES'] as const;
 
-const DEFAULT_LIMIT = 200;
-const MAX_LIMIT     = 1000;
+// Phase B.1: removed limit. Returns the complete set.
 
 interface UnusedExportsInput {
 	readonly repoPath: string;
 	readonly kinds?:   readonly EntityKind[];
-	readonly limit?:   number;
 }
 
 interface UnusedEntry {
@@ -74,7 +72,6 @@ const codeQualityUnusedExportsSkill: Skill<UnusedExportsInput, UnusedExportsOutp
 				uniqueItems: true,
 				minItems: 1,
 			},
-			limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: `Max unused entries returned. Default: ${DEFAULT_LIMIT}.` },
 		},
 		required: ['repoPath'],
 		additionalProperties: false,
@@ -93,7 +90,6 @@ const codeQualityUnusedExportsSkill: Skill<UnusedExportsInput, UnusedExportsOutp
 	providerAffinity: 'auto',
 
 	async execute(input: UnusedExportsInput, _deps: SkillDeps): Promise<SkillResult<UnusedExportsOutput>> {
-		const limit = Math.max(1, Math.min(MAX_LIMIT, input.limit ?? DEFAULT_LIMIT));
 		const kinds = input.kinds !== undefined && input.kinds.length > 0
 			? new Set<EntityKind>(input.kinds)
 			: CANDIDATE_KINDS;
@@ -111,14 +107,13 @@ const codeQualityUnusedExportsSkill: Skill<UnusedExportsInput, UnusedExportsOutp
 			}
 		}
 
-		const truncated = unused.length > limit;
 		const out: UnusedExportsOutput = {
 			repoPath:       input.repoPath,
 			candidateCount: candidates.length,
 			unusedCount:    unused.length,
-			unused:         unused.slice(0, limit),
+			unused,
 		};
-		const result: SkillResult<UnusedExportsOutput> = {
+		return {
 			value: out,
 			confidence: candidates.length > 0 ? 'high' : 'low',
 			notes: candidates.length === 0
@@ -126,7 +121,6 @@ const codeQualityUnusedExportsSkill: Skill<UnusedExportsInput, UnusedExportsOutp
 				: [],
 			toolCalls: [],
 		};
-		return truncated ? { ...result, truncated: true } : result;
 	},
 };
 

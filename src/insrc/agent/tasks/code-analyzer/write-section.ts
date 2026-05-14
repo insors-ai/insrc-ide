@@ -159,6 +159,13 @@ const SYSTEM_PROMPT_INTRO = [
 	'     -- name the entities, quote the counts, cite the files. Don\'t describe the call;',
 	'     describe what the call told you about the repo.',
 	'',
+	'  4. Large skill outputs are pageable. When a `skill_invoke` result shows a `**Paging:**`',
+	'     section, the result has been projected -- you saw the first page; the rest is on disk.',
+	'     If a topic needs the long tail (sampling pages for patterns, finding rare cases, etc.),',
+	'     call `skill_load_page({ spillId, fieldPath, pageIndex })` with the spillId from the',
+	'     original result. Each page you load should be followed by a paragraph that interprets',
+	'     what that page added before you page further or move on.',
+	'',
 	'## What each paragraph must look like',
 	'',
 	'  - Specific. Numbers, names, file paths, line ranges. Not "this module has many classes"',
@@ -252,9 +259,11 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 
 	const skillInvokeTool   = getTool('skill_invoke');
 	const skillDescribeTool = getTool('skill_describe');
+	const skillLoadPageTool = getTool('skill_load_page');
 	const tools: ToolDefinition[] = [];
 	if (skillInvokeTool)   tools.push({ name: skillInvokeTool.id,   description: skillInvokeTool.description,   inputSchema: skillInvokeTool.inputSchema });
 	if (skillDescribeTool) tools.push({ name: skillDescribeTool.id, description: skillDescribeTool.description, inputSchema: skillDescribeTool.inputSchema });
+	if (skillLoadPageTool) tools.push({ name: skillLoadPageTool.id, description: skillLoadPageTool.description, inputSchema: skillLoadPageTool.inputSchema });
 
 	if (tools.length === 0) {
 		log.warn({ actionId: input.action.id }, 'writeSectionWithTools: skill meta-tools not registered -- emitting stub');

@@ -221,10 +221,11 @@ test('explicit candidateKinds narrows the dead set', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// limit + truncated
+// full-fidelity output (Phase B.1: skill returns the complete unreachable set;
+// no `limit` parameter; renderer / skill_load_page handle paging for the LLM)
 // ---------------------------------------------------------------------------
 
-test('limit caps `dead` array; deadCount reports the uncapped total', async () => {
+test('returns the COMPLETE dead set; no truncation in the skill body', async () => {
 	const main = makeEntity('main', { isExported: true });
 	const orphans: Entity[] = [];
 	for (let i = 0; i < 10; i++) {
@@ -234,11 +235,11 @@ test('limit caps `dead` array; deadCount reports the uncapped total', async () =
 
 	const result = await runSkillIsolated<unknown, DeadCodeOutput>(
 		'data.code.dead-code',
-		{ repo: REPO, limit: 3 },
+		{ repo: REPO },
 	);
-	assert.equal(result.result.value.deadCount, 10, 'uncapped total stays accurate');
-	assert.equal(result.result.value.dead.length, 3, 'dead array is capped at limit');
-	assert.equal(result.result.truncated, true);
+	assert.equal(result.result.value.deadCount, 10, 'deadCount = full unreachable total');
+	assert.equal(result.result.value.dead.length, 10, 'dead array contains every entry, not a slice');
+	assert.equal(result.result.truncated, undefined, 'no truncated flag emitted any more');
 });
 
 // ---------------------------------------------------------------------------

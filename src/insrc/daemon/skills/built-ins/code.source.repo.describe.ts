@@ -25,7 +25,8 @@ import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { listEntitiesForRepo } from '../../../db/entities.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
 
-const TOP_K_MODULES = 20;
+// Phase B.1: removed TOP_K_MODULES cap. `modules` returns the COMPLETE
+// list of modules sorted by file count; renderer pages for the LLM.
 
 interface RepoDescribeInput {
 	readonly repoPath: string;
@@ -51,7 +52,7 @@ type RepoDescribeOutput =
 		readonly entityCount:  number;
 		readonly kindCounts:   Readonly<Partial<Record<EntityKind, number>>>;
 		readonly languages:    readonly LanguageSummary[];
-		readonly topModules:   readonly ModuleSummary[];
+		readonly modules:      readonly ModuleSummary[];
 	}
 	| {
 		readonly found:  false;
@@ -63,7 +64,7 @@ const codeSourceRepoDescribeSkill: Skill<RepoDescribeInput, RepoDescribeOutput> 
 	name: 'Code: describe a repo',
 	description:
 		'High-level repo summary: file / entity counts, kind breakdown, language breakdown, ' +
-		'and the top-K modules (directories) by file count. Returns ' +
+		'and the COMPLETE list of modules (directories) sorted by file count. Returns ' +
 		'`{ found: false, reason: "repo-not-indexed" }` when nothing has been indexed yet.',
 	family: 'source-introspection',
 	owner: 'code-analyzer',
@@ -90,9 +91,9 @@ const codeSourceRepoDescribeSkill: Skill<RepoDescribeInput, RepoDescribeOutput> 
 					entityCount: { type: 'number' },
 					kindCounts:  { type: 'object' },
 					languages:   { type: 'array' },
-					topModules:  { type: 'array' },
+					modules:     { type: 'array' },
 				},
-				required: ['found', 'repoPath', 'fileCount', 'entityCount', 'kindCounts', 'languages', 'topModules'],
+				required: ['found', 'repoPath', 'fileCount', 'entityCount', 'kindCounts', 'languages', 'modules'],
 			},
 			{
 				type: 'object',
@@ -146,14 +147,13 @@ const codeSourceRepoDescribeSkill: Skill<RepoDescribeInput, RepoDescribeOutput> 
 			.map(([language, s]) => ({ language, fileCount: s.files, entityCount: s.entities }))
 			.sort((a, b) => b.fileCount - a.fileCount);
 
-		const topModules: ModuleSummary[] = [...moduleFileCount.entries()]
+		const modules: ModuleSummary[] = [...moduleFileCount.entries()]
 			.map(([path, c]) => ({
 				path,
 				fileCount:   c,
 				entityCount: moduleEntityCount.get(path) ?? 0,
 			}))
-			.sort((a, b) => b.fileCount - a.fileCount || b.entityCount - a.entityCount)
-			.slice(0, TOP_K_MODULES);
+			.sort((a, b) => b.fileCount - a.fileCount || b.entityCount - a.entityCount);
 
 		const out: RepoDescribeOutput = {
 			found:        true,
@@ -162,7 +162,7 @@ const codeSourceRepoDescribeSkill: Skill<RepoDescribeInput, RepoDescribeOutput> 
 			entityCount:  all.length - fileCount,
 			kindCounts,
 			languages,
-			topModules,
+			modules,
 		};
 		return {
 			value: out,

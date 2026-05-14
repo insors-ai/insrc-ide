@@ -33,7 +33,6 @@ import {
 	_previewOfForTest as previewOf,
 	_safeSkillIdForPathForTest as safeSkillIdForPath,
 	PREVIEW_MAX_BYTES_FOR_TEST,
-	FULL_BLOB_MAX_BYTES_FOR_TEST,
 } from '../spill-writer.js';
 import { INTENT_TAG_CURRENT } from '../../intent/resolver.js';
 import { PATHS } from '../../../shared/paths.js';
@@ -63,9 +62,9 @@ test('safeSkillIdForPath: replaces / : \\ with _', () => {
 	assert.equal(safeSkillIdForPath('a/b\\c:d'), 'a_b_c_d');
 });
 
-test('preview / blob caps are sane (smoke check on the constants)', () => {
-	assert.ok(PREVIEW_MAX_BYTES_FOR_TEST > 0 && PREVIEW_MAX_BYTES_FOR_TEST < FULL_BLOB_MAX_BYTES_FOR_TEST);
-	assert.ok(FULL_BLOB_MAX_BYTES_FOR_TEST <= 1024 * 1024); // <= 1 MiB
+test('preview cap is sane (smoke check on the constant)', () => {
+	assert.ok(PREVIEW_MAX_BYTES_FOR_TEST > 0);
+	assert.ok(PREVIEW_MAX_BYTES_FOR_TEST <= 8 * 1024);
 });
 
 // ---------------------------------------------------------------------------
@@ -155,12 +154,15 @@ test('makeSpillHandler: swallows writer errors -- caller never throws', async ()
 	});
 });
 
-test('makeSpillHandler: large value blob truncates on disk', async () => {
+test('makeSpillHandler: large value blob is written in full, no truncation', async () => {
+	// Phase B.3 of plans/code-analyzer-interleaved-investigation.md:
+	// the on-disk cap was removed so the spill is the source of truth
+	// for skill_load_page paging.
 	const session = makeFakeSession(sessionId);
 	const handler = makeSpillHandler(session);
 
-	// Build a value blob larger than FULL_BLOB_MAX_BYTES.
-	const huge = { huge: 'x'.repeat(FULL_BLOB_MAX_BYTES_FOR_TEST + 4096) };
+	const hugeStr = 'x'.repeat(512 * 1024); // 512 KB -- well past the old 256 KB cap
+	const huge = { huge: hugeStr };
 	await handler({
 		skillId:    'huge',
 		input:      {},
@@ -174,8 +176,9 @@ test('makeSpillHandler: large value blob truncates on disk', async () => {
 	const entries = fs.readdirSync(sessionTmpDir);
 	const file = join(sessionTmpDir, entries[0]!);
 	const onDisk = readFileSync(file, 'utf8');
-	assert.ok(onDisk.length <= FULL_BLOB_MAX_BYTES_FOR_TEST + 32, 'disk file should be truncated');
-	assert.match(onDisk, /<truncated>$/);
+	const parsed = JSON.parse(onDisk) as { value: { huge: string } };
+	assert.equal(parsed.value.huge.length, hugeStr.length, 'spill must carry the full payload byte-for-byte');
+	assert.doesNotMatch(onDisk, /<truncated>$/);
 });
 
 test('purgeSession: removes the tmp dir + tolerates empty / missing dirs', async () => {

@@ -22,13 +22,12 @@ import {
 const TARGET_KINDS: ReadonlySet<EntityKind> = new Set(['function', 'method']);
 
 const DEFAULT_THRESHOLD   = 0.8;
-const DEFAULT_MAX_PAIRS   = 100;
-const HARD_PAIR_BUDGET    = 500;
+// Phase B.1: removed maxPairs. Returns the full sorted pair list;
+// renderer pages for the LLM.
 
 interface DuplicationInput {
 	readonly repoPath:    string;
 	readonly threshold?:  number;
-	readonly maxPairs?:   number;
 }
 
 interface DupePartner {
@@ -68,7 +67,6 @@ const codeQualityDuplicationSkill: Skill<DuplicationInput, DuplicationOutput> = 
 		properties: {
 			repoPath:  { type: 'string', description: 'Repo root absolute path.' },
 			threshold: { type: 'number', minimum: 0, maximum: 1, description: `Jaccard threshold. Default: ${DEFAULT_THRESHOLD}.` },
-			maxPairs:  { type: 'number', minimum: 1, maximum: HARD_PAIR_BUDGET, description: `Top-N pairs returned. Default: ${DEFAULT_MAX_PAIRS}.` },
 		},
 		required: ['repoPath'],
 		additionalProperties: false,
@@ -90,7 +88,6 @@ const codeQualityDuplicationSkill: Skill<DuplicationInput, DuplicationOutput> = 
 
 	async execute(input: DuplicationInput, _deps: SkillDeps): Promise<SkillResult<DuplicationOutput>> {
 		const threshold = clamp(input.threshold ?? DEFAULT_THRESHOLD, 0, 1);
-		const maxPairs  = Math.max(1, Math.min(HARD_PAIR_BUDGET, input.maxPairs ?? DEFAULT_MAX_PAIRS));
 
 		const all = await listEntitiesForRepo(null, input.repoPath);
 		const targets = all.filter(e => TARGET_KINDS.has(e.kind) && e.body.length > 0);
@@ -120,8 +117,6 @@ const codeQualityDuplicationSkill: Skill<DuplicationInput, DuplicationOutput> = 
 		}
 
 		pairs.sort((a, b) => b.similarity - a.similarity);
-		const truncated = pairs.length > maxPairs;
-		const top = pairs.slice(0, maxPairs);
 
 		const out: DuplicationOutput = {
 			repoPath:           input.repoPath,
@@ -129,10 +124,10 @@ const codeQualityDuplicationSkill: Skill<DuplicationInput, DuplicationOutput> = 
 			fingerprintedCount: sigs.length,
 			pairCount:          pairs.length,
 			threshold,
-			pairs:              top,
+			pairs,
 		};
 
-		const result: SkillResult<DuplicationOutput> = {
+		return {
 			value: out,
 			confidence: sigs.length > 0 ? 'high' : 'low',
 			notes: sigs.length === 0
@@ -140,7 +135,6 @@ const codeQualityDuplicationSkill: Skill<DuplicationInput, DuplicationOutput> = 
 				: [],
 			toolCalls: [],
 		};
-		return truncated ? { ...result, truncated: true } : result;
 	},
 };
 

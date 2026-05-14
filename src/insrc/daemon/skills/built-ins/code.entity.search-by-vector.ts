@@ -28,8 +28,14 @@ import { searchEntities, type SearchFilter } from '../../../db/search.js';
 import { embedQuery } from '../../../indexer/embedder.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
 
-const DEFAULT_LIMIT = 10;
-const MAX_LIMIT     = 50;
+// ANN top-K is a SEMANTIC parameter, not an output-truncation cap:
+// the search returns the K most-similar hits by similarity score and
+// no "full" result exists -- there are millions of entities below
+// the threshold of relevance. Default raised to 100 (Phase B.1 of
+// plans/code-analyzer-interleaved-investigation.md); MAX_LIMIT raised
+// proportionally. The renderer can still page the result.
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT     = 500;
 
 interface SearchByVectorInput {
 	readonly query:        string;
@@ -60,10 +66,11 @@ const skill: Skill<SearchByVectorInput, SearchByVectorOutput> = {
 	id: 'code.entity.search-by-vector',
 	name: 'Code: semantic vector search across the closure',
 	description:
-		'Embed a free-form query and run ANN over the entity_vec table to find semantically ' +
-		'related entities. Returns hits in Lance-side rank order. `closureRepos` defaults to ' +
-		'the session\'s active closure when omitted; `filter` narrows to "code" / "artifact" / ' +
-		'"all" (default). Caps at 50; hits beyond `limit` are dropped.',
+		'Embed a free-form query and run ANN over the entity_vec table to find the K most ' +
+		'semantically similar entities. Returns hits in Lance-side rank order. `limit` is the ' +
+		'top-K (semantic, not a truncation cap -- ANN inherently returns top-K). Default 100, ' +
+		'max 500. `closureRepos` defaults to the session\'s active closure when omitted; `filter` ' +
+		'narrows to "code" / "artifact" / "all" (default).',
 	family: 'source-introspection',
 	owner: 'code-analyzer',
 	version: 1,

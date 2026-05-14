@@ -21,13 +21,12 @@ import {
 
 const TARGET_KINDS: ReadonlySet<EntityKind> = new Set(['function', 'method']);
 
-const DEFAULT_LIMIT = 200;
-const MAX_LIMIT     = 1000;
+// Phase B.1: removed limit. Skill returns the FULL sorted entries list;
+// renderer pages for the LLM.
 
 interface ComplexityInput {
 	readonly repoPath: string;
 	readonly file?:    string;
-	readonly limit?:   number;
 }
 
 interface ComplexityEntry {
@@ -45,7 +44,7 @@ interface ComplexityOutput {
 	readonly file?:       string;
 	readonly entryCount:  number;
 	readonly histogram:   Readonly<Record<ComplexityLevel, number>>;
-	readonly top:         readonly ComplexityEntry[];
+	readonly entries:     readonly ComplexityEntry[];
 }
 
 const codeQualityComplexitySkill: Skill<ComplexityInput, ComplexityOutput> = {
@@ -53,8 +52,8 @@ const codeQualityComplexitySkill: Skill<ComplexityInput, ComplexityOutput> = {
 	name: 'Code: cyclomatic complexity per function / method',
 	description:
 		'Compute cyclomatic complexity for every function / method in the requested scope ' +
-		'(repo-wide or single file). Returns the top-N entries by score plus a histogram of ' +
-		'severity buckets (low / medium / high / critical).',
+		'(repo-wide or single file). Returns the COMPLETE sorted entries list (highest first) ' +
+		'plus a histogram of severity buckets (low / medium / high / critical).',
 	family: 'quality-profile',
 	owner: 'code-analyzer',
 	version: 1,
@@ -63,7 +62,6 @@ const codeQualityComplexitySkill: Skill<ComplexityInput, ComplexityOutput> = {
 		properties: {
 			repoPath: { type: 'string', description: 'Repo root absolute path.' },
 			file:     { type: 'string', description: 'Optional: scope to one file.' },
-			limit:    { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: `Top-N entries returned. Default: ${DEFAULT_LIMIT}.` },
 		},
 		required: ['repoPath'],
 		additionalProperties: false,
@@ -75,16 +73,14 @@ const codeQualityComplexitySkill: Skill<ComplexityInput, ComplexityOutput> = {
 			file:       { type: 'string' },
 			entryCount: { type: 'number' },
 			histogram:  { type: 'object' },
-			top:        { type: 'array' },
+			entries:    { type: 'array' },
 		},
-		required: ['repoPath', 'entryCount', 'histogram', 'top'],
+		required: ['repoPath', 'entryCount', 'histogram', 'entries'],
 	},
 	toolDeps: [],
 	providerAffinity: 'auto',
 
 	async execute(input: ComplexityInput, _deps: SkillDeps): Promise<SkillResult<ComplexityOutput>> {
-		const limit = Math.max(1, Math.min(MAX_LIMIT, input.limit ?? DEFAULT_LIMIT));
-
 		const all = input.file !== undefined
 			? await findEntitiesByFile(null, input.file)
 			: await listEntitiesForRepo(null, input.repoPath);
@@ -96,17 +92,15 @@ const codeQualityComplexitySkill: Skill<ComplexityInput, ComplexityOutput> = {
 		for (const e of entries) histogram[e.level]++;
 
 		entries.sort((a, b) => b.cyclomatic - a.cyclomatic);
-		const truncated = entries.length > limit;
-		const top = entries.slice(0, limit);
 
 		const out: ComplexityOutput = {
 			repoPath:   input.repoPath,
 			...(input.file !== undefined ? { file: input.file } : {}),
 			entryCount: entries.length,
 			histogram,
-			top,
+			entries,
 		};
-		const result: SkillResult<ComplexityOutput> = {
+		return {
 			value: out,
 			confidence: targets.length > 0 ? 'high' : 'low',
 			notes: targets.length === 0
@@ -114,7 +108,6 @@ const codeQualityComplexitySkill: Skill<ComplexityInput, ComplexityOutput> = {
 				: [],
 			toolCalls: [],
 		};
-		return truncated ? { ...result, truncated: true } : result;
 	},
 };
 

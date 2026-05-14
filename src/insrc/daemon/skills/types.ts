@@ -227,6 +227,28 @@ export interface SkillResult<O = unknown> {
    * when the skill executed cleanly.
    */
   readonly rejectionReason?: SkillRejectReason;
+  /**
+   * Reference to the on-disk spill of the full structured payload --
+   * populated by the runner's `onSkillEnd` hook (the spill-writer).
+   * Surfaces in the rendered tool_result so the LLM can page through
+   * large results via the `skill_load_page` meta-tool. Phase B of
+   * plans/code-analyzer-interleaved-investigation.md.
+   */
+  readonly spillRecord?: SkillSpillRecord;
+}
+
+/**
+ * On-disk spill location for a SkillResult. Produced by
+ * `makeSpillHandler` (agent/artifacts/spill-writer.ts) and threaded
+ * through `runSkill` into `SkillResult.spillRecord`.
+ */
+export interface SkillSpillRecord {
+  /** Globally-unique id: `<sessionId>:<timestamp>:<skillId>`. */
+  readonly spillId: string;
+  /** Absolute path to the JSON file holding the full payload. */
+  readonly path:    string;
+  /** Size of the on-disk file in bytes. */
+  readonly bytes:   number;
 }
 
 // ---------------------------------------------------------------------------

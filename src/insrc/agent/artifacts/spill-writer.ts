@@ -40,16 +40,17 @@ const log = getLogger('spill-writer');
 /**
  * Soft cap on the value preview embedded into the Lance row + the
  * inline preview shown in the enhancer prompt. The full body is on
- * disk; the LLM can `requestArtifactIds` to load more.
+ * disk; the LLM can `requestArtifactIds` to load more, or page
+ * through it via `skill_load_page`.
  */
 const PREVIEW_MAX_BYTES = 2048;
 
-/**
- * Hard cap on the value blob serialised to disk. Skill outputs are
- * usually well under this; the cap exists so a misbehaving skill
- * can't fill the user's tmp dir. Truncation is trailing.
- */
-const FULL_BLOB_MAX_BYTES = 256 * 1024;
+// FULL_BLOB_MAX_BYTES was a 256 KB on-disk truncation cap. Removed in
+// Phase B.3 of plans/code-analyzer-interleaved-investigation.md --
+// accuracy-over-speed requires the spill carry the full structured
+// payload byte-for-byte. The LLM can page through arbitrarily large
+// results via the new `skill_load_page` meta-tool; the spill is the
+// source of truth.
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -59,6 +60,7 @@ export interface SpillRecord {
 	readonly id:         string;        // session_id:timestamp:skill_id
 	readonly path:       string;        // absolute disk path
 	readonly previewLen: number;        // bytes of preview indexed
+	readonly bytes:      number;        // bytes of on-disk file
 }
 
 /**
@@ -77,12 +79,18 @@ export function makeSpillHandler(session: Session): NonNullable<
 > {
 	return async (payload) => {
 		try {
-			await spillOne(session, payload);
+			const rec = await spillOne(session, payload);
+			return {
+				spillId: rec.id,
+				path:    rec.path,
+				bytes:   rec.bytes,
+			};
 		} catch (err) {
 			log.warn(
 				{ skillId: payload.skillId, err: errMessage(err) },
 				'spill-writer: spill failed (swallowed; skill runner unaffected)',
 			);
+			return undefined;
 		}
 	};
 }
@@ -115,13 +123,12 @@ async function spillOne(session: Session, payload: SpillPayload): Promise<SpillR
 		durationMs: payload.durationMs,
 	}, null, 2);
 
-	const truncated = fullBlob.length > FULL_BLOB_MAX_BYTES;
-	const onDisk    = truncated
-		? fullBlob.slice(0, FULL_BLOB_MAX_BYTES) + '\n... <truncated>'
-		: fullBlob;
-
+	// Spill the FULL payload byte-for-byte. No on-disk cap (B.3) -- the
+	// pageable skill_load_page tool gives the LLM access to arbitrarily
+	// large spilled values one chunk at a time.
 	await fs.mkdir(dir, { recursive: true });
-	await fs.writeFile(file, onDisk, 'utf8');
+	await fs.writeFile(file, fullBlob, 'utf8');
+	log.info({ skillId: payload.skillId, bytes: fullBlob.length, file }, 'spill: full payload written');
 
 	// Embed a preview of the value blob (not the full envelope -- the
 	// envelope adds noise like timestamp + duration that biases the
@@ -158,7 +165,7 @@ async function spillOne(session: Session, payload: SpillPayload): Promise<SpillR
 		log.info({ id }, 'spill-writer: skipped Lance upsert -- empty vector');
 	}
 
-	return { id, path: file, previewLen: row.preview.length };
+	return { id, path: file, previewLen: row.preview.length, bytes: fullBlob.length };
 }
 
 /**
@@ -255,4 +262,3 @@ function errMessage(e: unknown): string {
 export const _previewOfForTest         = previewOf;
 export const _safeSkillIdForPathForTest = safeSkillIdForPath;
 export const PREVIEW_MAX_BYTES_FOR_TEST = PREVIEW_MAX_BYTES;
-export const FULL_BLOB_MAX_BYTES_FOR_TEST = FULL_BLOB_MAX_BYTES;

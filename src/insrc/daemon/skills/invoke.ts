@@ -112,7 +112,9 @@ export interface SkillRunnerDeps {
     readonly confidence: import('./types.js').SkillConfidence;
     readonly notes:      readonly string[];
     readonly durationMs: number;
-  }) => Promise<void> | void) | undefined;
+  }) => Promise<import('./types.js').SkillSpillRecord | void>
+      | import('./types.js').SkillSpillRecord
+      | void) | undefined;
 }
 
 export async function runSkill<I = unknown, O = unknown>(
@@ -323,9 +325,15 @@ export async function runSkill<I = unknown, O = unknown>(
   // spill-writer (and any future per-skill telemetry consumers).
   // Errors are swallowed -- a hook failure must NEVER alter the
   // SkillResult or block the caller.
+  //
+  // Phase B (interleaved-investigation): the hook may now return a
+  // SkillSpillRecord describing the on-disk location of the full
+  // payload. We thread it onto SkillResult so the renderer can
+  // surface the spillId for paging via skill_load_page.
+  let spillRecord: import('./types.js').SkillSpillRecord | undefined;
   if (runnerDeps.onSkillEnd !== undefined) {
     try {
-      await runnerDeps.onSkillEnd({
+      const ret = await runnerDeps.onSkillEnd({
         skillId:    id,
         input:      input as unknown,
         value:      bodyResult.value,
@@ -333,6 +341,9 @@ export async function runSkill<I = unknown, O = unknown>(
         notes,
         durationMs: finalDurationMs,
       });
+      if (ret !== undefined && ret !== null && typeof ret === 'object' && 'spillId' in ret) {
+        spillRecord = ret as import('./types.js').SkillSpillRecord;
+      }
     } catch (err) {
       log.warn({ skillId: id, err: (err as Error).message ?? String(err) }, 'onSkillEnd hook threw -- swallowed');
     }
@@ -346,6 +357,7 @@ export async function runSkill<I = unknown, O = unknown>(
     ...(fullSubSkills.length > 0 ? { subSkillCalls: fullSubSkills } : {}),
     ...(bodyResult.truncated ? { truncated: true } : {}),
     ...(outputInvalid ? { rejectionReason: 'invalid-output' as const } : {}),
+    ...(spillRecord !== undefined ? { spillRecord } : {}),
   };
 }
 

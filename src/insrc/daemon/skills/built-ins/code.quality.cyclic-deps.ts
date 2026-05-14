@@ -17,11 +17,11 @@ import { listEntitiesForRepo } from '../../../db/entities.js';
 import { sccEntities } from '../../../db/search.js';
 import type { Entity } from '../../../shared/types.js';
 
-const DEFAULT_MAX_CYCLES = 50;
+// Phase B.1: removed maxCycles. Returns the complete set of cycles
+// (sorted by size, largest first); renderer pages for the LLM.
 
 interface CyclicDepsInput {
 	readonly repoPath:   string;
-	readonly maxCycles?: number;
 }
 
 interface CycleNode {
@@ -46,15 +46,15 @@ const codeQualityCyclicDepsSkill: Skill<CyclicDepsInput, CyclicDepsOutput> = {
 	name: 'Code: detect file-level import cycles',
 	description:
 		'Find strongly-connected components of size >= 2 over the file-level IMPORTS graph. ' +
-		'Each SCC is a cycle the team should resolve. Returns the capped list plus the full count.',
+		'Each SCC is a cycle the team should resolve. Returns the COMPLETE list of cycles ' +
+		'(sorted by size, largest first); renderer pages for the LLM.',
 	family: 'quality-profile',
 	owner: 'code-analyzer',
 	version: 1,
 	inputs: {
 		type: 'object',
 		properties: {
-			repoPath:  { type: 'string', description: 'Repo root absolute path.' },
-			maxCycles: { type: 'number', minimum: 1, maximum: 500, description: `Max cycles returned. Default: ${DEFAULT_MAX_CYCLES}.` },
+			repoPath: { type: 'string', description: 'Repo root absolute path.' },
 		},
 		required: ['repoPath'],
 		additionalProperties: false,
@@ -73,8 +73,6 @@ const codeQualityCyclicDepsSkill: Skill<CyclicDepsInput, CyclicDepsOutput> = {
 	providerAffinity: 'auto',
 
 	async execute(input: CyclicDepsInput, _deps: SkillDeps): Promise<SkillResult<CyclicDepsOutput>> {
-		const maxCycles = Math.max(1, Math.min(500, input.maxCycles ?? DEFAULT_MAX_CYCLES));
-
 		const all = await listEntitiesForRepo(null, input.repoPath);
 		const files = all.filter(e => e.kind === 'file');
 		if (files.length === 0) {
@@ -96,12 +94,9 @@ const codeQualityCyclicDepsSkill: Skill<CyclicDepsInput, CyclicDepsOutput> = {
 		// just "this file is reachable from itself" via Tarjan's
 		// definition, not an actual cycle.
 		const cycles = components.filter(c => c.length >= 2);
-
-		const truncated = cycles.length > maxCycles;
 		const ranked = cycles
 			.slice()
 			.sort((a, b) => b.length - a.length)
-			.slice(0, maxCycles)
 			.map(toCycle);
 
 		const out: CyclicDepsOutput = {
@@ -111,7 +106,7 @@ const codeQualityCyclicDepsSkill: Skill<CyclicDepsInput, CyclicDepsOutput> = {
 			cycles:     ranked,
 		};
 
-		const result: SkillResult<CyclicDepsOutput> = {
+		return {
 			value: out,
 			confidence: 'high',
 			notes: cycles.length === 0
@@ -119,7 +114,6 @@ const codeQualityCyclicDepsSkill: Skill<CyclicDepsInput, CyclicDepsOutput> = {
 				: [`Found ${cycles.length} import cycle(s) across ${files.length} files.`],
 			toolCalls: [],
 		};
-		return truncated ? { ...result, truncated: true } : result;
 	},
 };
 
