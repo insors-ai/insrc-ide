@@ -208,6 +208,24 @@ const SYSTEM_PROMPT_INTRO = [
 	'When every review criterion is addressed by a paragraph in your investigation, end with a',
 	'closing paragraph and NO tool call. Don\'t artificially extend with more tool calls if you',
 	'have what you need.',
+	'',
+	'## Memory model',
+	'',
+	'Your conversation history is bounded. As the loop runs, older `tool_result` blocks may be',
+	'EVICTED from your context once their analysis paragraph has been written -- a stub like',
+	'`[evicted -- ... use skill_load_page ... if you need to re-examine ...]` replaces the raw',
+	'content. Two implications:',
+	'',
+	'  1. The paragraph you write IS the persistent record of what you learned from a tool',
+	'     result. State numbers, names, file paths, line ranges INLINE in the paragraph. Don\'t',
+	'     write "as the previous tool_result showed" -- that result may no longer be in your',
+	'     context by the time the paragraph is read.',
+	'',
+	'  2. The on-disk spill is the source of truth and is NEVER lost. If you need to re-examine',
+	'     evidence you already analysed -- e.g. to compare findings across pages, or to surface',
+	'     a specific entity you noticed earlier -- issue a `skill_load_page` call with the',
+	'     spillId from the original `skill_invoke` result. The spill carries the COMPLETE',
+	'     payload; eviction only reclaims the in-context copy.',
 ].join('\n');
 
 // ---------------------------------------------------------------------------
@@ -396,13 +414,28 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 	// whether to accept the partial section.
 	const result: ToolLoopResult = await runToolLoop(messages, loopOpts);
 
+	// Phase D: per-section instrumentation. Paragraph count + citation
+	// density tell us whether the model is actually following the
+	// interleaved-investigation pattern; evictionsApplied + tokensFinal
+	// tell us whether the memory model is working.
+	const paragraphCount = countParagraphs(result.response);
+	const citationCount  = countCitations(result.response);
+	const avgTextLengthPerTurn = paragraphCount > 0
+		? Math.round(result.response.length / paragraphCount)
+		: 0;
+
 	log.info(
 		{
-			actionId:      input.action.id,
-			toolCallCount: result.iterations,
-			hitLimit:      result.hitLimit,
+			actionId:             input.action.id,
+			toolCallCount:        result.iterations,
+			hitLimit:             result.hitLimit,
 			skillsCalled,
-			textLength:    result.response.length,
+			textLength:           result.response.length,
+			paragraphCount,
+			avgTextLengthPerTurn,
+			citationCount,
+			evictionsApplied:     result.evictionsApplied,
+			inputTokensFinal:     result.inputTokensFinal,
 		},
 		'writeSectionWithTools: tool loop complete',
 	);
@@ -418,6 +451,28 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		skillCalls,
 		describedSkills,
 	};
+}
+
+/**
+ * Count paragraphs in the concatenated section text. Phase A.2 joins
+ * per-turn paragraphs with `\n\n`, so paragraph count = number of
+ * non-empty blocks separated by blank lines.
+ */
+function countParagraphs(text: string): number {
+	const trimmed = text.trim();
+	if (trimmed.length === 0) return 0;
+	return trimmed.split(/\n\s*\n/).filter(p => p.trim().length > 0).length;
+}
+
+/**
+ * Count clickable `[label](path:...)` citations in the section text.
+ * Used as a quality signal -- substantive sections should have
+ * inline citations pointing at specific entities / files / line
+ * ranges, not just prose.
+ */
+function countCitations(text: string): number {
+	const matches = text.match(/\[[^\]]+\]\(path:[^)]+\)/g);
+	return matches === null ? 0 : matches.length;
 }
 
 // ---------------------------------------------------------------------------

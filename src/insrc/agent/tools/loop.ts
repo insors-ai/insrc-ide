@@ -62,6 +62,16 @@ export interface ToolLoopOpts {
    *  per-section cap (default 10) so a global config change doesn't
    *  silently widen a per-call budget the orchestrator was relying on. */
   maxIterations?: number | undefined;
+  /**
+   * Token budget for the LLM's INPUT context (Phase C of the
+   * interleaved-investigation plan). When the estimated input tokens
+   * exceed `maxInputTokens * 0.7`, the loop runs an eviction pass
+   * that stubs `tool_result` blocks whose analysis paragraph is
+   * already in history. Set to a generous fraction of the active
+   * model's max-input window; default 16000 (suits both qwen3-coder
+   * and devstral-small-2).
+   */
+  maxInputTokens?: number | undefined;
   /** Callback when an LLM response includes usage info (for cost tracking) */
   onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
   /** User's original prompt (passed to SmartRead for intelligent extraction) */
@@ -81,6 +91,10 @@ export interface ToolLoopResult {
   iterations: number;
   /** Whether the loop hit the max iteration limit */
   hitLimit: boolean;
+  /** Number of tool_result blocks the eviction policy stubbed (Phase C). */
+  evictionsApplied: number;
+  /** Estimated tokens in the final working-message set (Phase D telemetry). */
+  inputTokensFinal: number;
 }
 
 /**
@@ -114,10 +128,21 @@ export async function runToolLoop(
   let currentTurnText = '';
   let iterations = 0;
   let nudgeCount = 0;
+  let evictionsApplied = 0;
 
   const { maxIterations: globalMaxIterations, maxNudges } = getToolSettings().loop;
-  const maxIterations = opts.maxIterations ?? globalMaxIterations;
+  const maxIterations    = opts.maxIterations  ?? globalMaxIterations;
+  const maxInputTokens   = opts.maxInputTokens ?? 16000;
+  const evictionThreshold = Math.floor(maxInputTokens * 0.7);
+
   while (iterations < maxIterations) {
+    // Phase C.2: before each provider call, run an eviction pass if
+    // working memory is approaching the input-token budget. Eviction
+    // stubs tool_result blocks whose analysis paragraph is already in
+    // history; the disk spill remains the source of truth for any
+    // future skill_load_page reads.
+    evictionsApplied += maybeEvict(workingMessages, evictionThreshold);
+
     // Call LLM with tool definitions — stream text via onToken if callback provided
     const completionOpts: { tools: ToolDefinition[]; maxTokens?: number; onToken?: (t: string) => void } = { tools };
     if (opts.maxTokens !== undefined) completionOpts.maxTokens = opts.maxTokens;
@@ -323,5 +348,99 @@ export async function runToolLoop(
     messages: producedMessages,
     iterations,
     hitLimit,
+    evictionsApplied,
+    inputTokensFinal: estimateTokens(workingMessages),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase C helpers: estimateTokens + maybeEvict
+// ---------------------------------------------------------------------------
+
+/**
+ * Cheap heuristic token estimator over an `LLMMessage[]`. Uses a
+ * chars-per-token ratio of 3 (the same ratio the rest of the project
+ * uses, from `agent/context/budget.ts`). Not precise, but precise
+ * enough to drive an eviction trigger.
+ */
+function estimateTokens(messages: readonly LLMMessage[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    if (typeof m.content === 'string') {
+      chars += m.content.length;
+    } else {
+      for (const block of m.content) {
+        if (block.type === 'text') chars += block.text.length;
+        else if (block.type === 'tool_use') chars += block.name.length + JSON.stringify(block.input).length + 16;
+        else if (block.type === 'tool_result') chars += block.content.length;
+        else if (block.type === 'image') chars += 256;     // rough placeholder for image attachments
+        else if (block.type === 'document') chars += 512;  // rough placeholder for PDFs
+      }
+    }
+  }
+  return Math.ceil(chars / 3);
+}
+
+/**
+ * Walk the working-message array oldest-to-newest; for each `tool_result`
+ * block whose subsequent assistant turn contains a substantive text block,
+ * replace the result content with a stub. Stops as soon as the estimate
+ * drops below the budget. Returns the number of tool_result blocks
+ * stubbed.
+ *
+ * Eviction never affects:
+ *   - the system message (workingMessages[0])
+ *   - the initial user message (workingMessages[1])
+ *   - the most-recent user message (so the model can still read its
+ *     latest evidence)
+ *   - any assistant text or tool_use blocks (they're the load-bearing
+ *     narrative + action history)
+ *
+ * "Substantive" = text block length >= 50 chars.
+ */
+function maybeEvict(workingMessages: LLMMessage[], budget: number): number {
+  if (estimateTokens(workingMessages) <= budget) return 0;
+
+  const lastIdx = workingMessages.length - 1;
+  let evicted = 0;
+
+  for (let i = 2; i < lastIdx; i++) {
+    const msg = workingMessages[i]!;
+    if (msg.role !== 'user') continue;
+    if (typeof msg.content === 'string') continue;
+    const blocks = msg.content as ContentBlock[];
+
+    // Has a subsequent assistant text block of >= 50 chars been written?
+    if (!hasSubsequentTextAnalysis(workingMessages, i)) continue;
+
+    for (let b = 0; b < blocks.length; b++) {
+      const block = blocks[b]!;
+      if (block.type !== 'tool_result') continue;
+      if (block.content.startsWith('[evicted')) continue;   // already stubbed
+      blocks[b] = {
+        type: 'tool_result',
+        tool_use_id: block.tool_use_id,
+        content: `[evicted -- analysis paragraph for tool_use_id "${block.tool_use_id}" was captured in a subsequent assistant turn. Use skill_load_page with the corresponding spillId if you need to re-examine this evidence.]`,
+        ...(block.isError === true ? { isError: true as const } : {}),
+      };
+      evicted++;
+      if (estimateTokens(workingMessages) <= budget) return evicted;
+    }
+  }
+  return evicted;
+}
+
+function hasSubsequentTextAnalysis(workingMessages: readonly LLMMessage[], afterIdx: number): boolean {
+  for (let i = afterIdx + 1; i < workingMessages.length; i++) {
+    const m = workingMessages[i]!;
+    if (m.role !== 'assistant') continue;
+    if (typeof m.content === 'string') {
+      if (m.content.trim().length >= 50) return true;
+      continue;
+    }
+    for (const b of m.content as ContentBlock[]) {
+      if (b.type === 'text' && b.text.trim().length >= 50) return true;
+    }
+  }
+  return false;
 }
