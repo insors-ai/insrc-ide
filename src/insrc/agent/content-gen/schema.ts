@@ -124,11 +124,14 @@ export const REVIEW_ACTION_SCHEMA = {
 			items: {
 				type: 'object',
 				properties: {
-					id:     { type: 'string', minLength: 1 },
+					id:     { type: 'string', minLength: 1, maxLength: 16 },
 					kind:   { type: 'string', enum: ['fix', 'enhance', 'add', 'trim'] },
-					where:  { type: 'string', minLength: 1 },
-					issue:  { type: 'string', minLength: 1 },
-					action: { type: 'string', minLength: 1 },
+					where:  { type: 'string', minLength: 1, maxLength: 64 },
+					// Phase K.3: cap issue/action to keep the reviewer's
+					// output within the K.2 budget (~450 chars/item raw).
+					// 200 is a soft cap; the prompt asks for ≤150.
+					issue:  { type: 'string', minLength: 1, maxLength: 200 },
+					action: { type: 'string', minLength: 1, maxLength: 200 },
 					evidenceRefs: {
 						type: 'array',
 						items: { type: 'string' },

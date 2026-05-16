@@ -962,30 +962,69 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       let final: string;
       let shippedRound: 1 | 2 | 3;
       let shipDecisionReason: string;
-      let confidenceBasis: 'accept-r1' | 'accept-r2' | 'accept-r3' | 'needs-work-no-fix' | 'needs-work-fix-pending';
+      let confidenceBasis:
+        | 'accept-r1'
+        | 'accept-r2-or-r3'
+        | 'degraded-accept'
+        | 'needs-work-no-fix'
+        | 'needs-work-fix-pending';
 
-      const acceptIdx = candidates.findIndex(c => c.review.verdict === 'accept');
+      // Phase K.1: ONLY a non-degraded accept short-circuits the
+      // picker. A degraded soft-accept (reviewer JSON malformed twice
+      // -> review-action.ts soft-accepts with workItems=[]) carries
+      // `review.degraded === true`; treating it as a real accept
+      // ships the round's draft without ever scoring it against the
+      // other rounds. Run #2 (2026-05-16) had sections 5 and 7 ship a
+      // weaker round-2 redraft over a stronger round-1 draft because
+      // of this. The picker now runs on the candidates set whenever
+      // there is NO non-degraded accept; degraded candidates can
+      // still win on length / citations.
+      const acceptIdx = candidates.findIndex(
+        c => c.review.verdict === 'accept' && c.review.degraded === false,
+      );
+      const hasDegradedAccept = candidates.some(
+        c => c.review.verdict === 'accept' && c.review.degraded === true,
+      );
+
       if (acceptIdx >= 0) {
         const accepted = candidates[acceptIdx]!;
         final = accepted.review.accepted?.markdown ?? accepted.markdown;
         shippedRound = accepted.round;
         shipDecisionReason = `accept@round${accepted.round}`;
-        confidenceBasis = accepted.round === 1 ? 'accept-r1'
-          : accepted.round === 2 ? 'accept-r2'
-          : 'accept-r3';
+        confidenceBasis = accepted.round === 1 ? 'accept-r1' : 'accept-r2-or-r3';
       } else {
         const pick = pickBestRound(candidates);
         const winner = pick.winner;
         // Footer lists the WINNING round's reviewer work-items so the
         // user sees what's still pending against the shipped draft.
         const footer = buildSectionFooter(winner.review.workItems);
-        final = winner.markdown + footer;
+        // Phase K.5: when ANY review on the shipping path was degraded,
+        // append a one-line honesty note above the footer so the user
+        // knows the reviewer didn't actually approve the draft.
+        const degradedNote = hasDegradedAccept || winner.review.degraded
+          ? '\n\n_Note: the reviewer\'s structured response was malformed on this section. The draft shipped without a verified accept._'
+          : '';
+        final = winner.markdown + degradedNote + footer;
         shippedRound = winner.round;
-        shipDecisionReason = pick.reason;
+        shipDecisionReason = winner.review.degraded || hasDegradedAccept
+          ? `${pick.reason} (degraded review)`
+          : pick.reason;
         const fixUnaddressed = winner.review.workItems.filter(w => w.kind === 'fix').length;
-        confidenceBasis = fixUnaddressed > 0 ? 'needs-work-fix-pending' : 'needs-work-no-fix';
+        if (winner.review.degraded || hasDegradedAccept) {
+          confidenceBasis = 'degraded-accept';
+        } else if (fixUnaddressed > 0) {
+          confidenceBasis = 'needs-work-fix-pending';
+        } else {
+          confidenceBasis = 'needs-work-no-fix';
+        }
       }
 
+      // Phase K.4 confidence semantics:
+      //  - real accept @ round 1                -> high
+      //  - real accept @ round 2/3              -> medium
+      //  - degraded accept anywhere on the path -> medium (NOT high; reviewer crashed)
+      //  - all needs-work, no `fix` pending     -> medium
+      //  - all needs-work, `fix` items pending  -> low
       const itemConfidence: 'high' | 'medium' | 'low' =
         confidenceBasis === 'accept-r1' ? 'high' :
         confidenceBasis === 'needs-work-fix-pending' ? 'low' :
@@ -1009,6 +1048,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       const reviewRoundsTrace = candidates.map(c => ({
         round:        c.round,
         verdict:      c.review.verdict,
+        // Phase K.4: surface degraded soft-accept so the workbench can
+        // render a "review crashed" icon next to that round.
+        degraded:     c.review.degraded,
         workItems:    c.review.workItems.map(w => ({
           id:     w.id,
           kind:   w.kind,
@@ -1055,6 +1097,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       const r3signal = patchSignals.find(s => s.round === 3);
       const fixItemsUnaddressedFinal = winnerCandidate.review.workItems.filter(w => w.kind === 'fix').length;
       const redraftFallbackFired = patchSignals.some(s => s.redraftFallback);
+      // Phase K.4: degradedReviews counts the rounds whose review
+      // came back via the soft-accept fallback. A high rate means
+      // the cloud reviewer is hitting its output budget; combined
+      // with patchProtocolFollowed=false it's the leading indicator
+      // for the "broke before it tried" failure mode.
+      const degradedReviews = candidates.filter(c => c.review.degraded).length;
       log.info(
         {
           actionId:                action.id,
@@ -1072,9 +1120,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           redraftFallbackFired,
           redraftFallbackReason:   redraftFallbackFired ? 'protocol' : undefined,
           fixItemsUnaddressedFinal,
+          degradedReviews,
           traces: candidates.map(c => ({
             round:        c.round,
             verdict:      c.review.verdict,
+            degraded:     c.review.degraded,
             markdownLen:  c.markdown.length,
             workItems:    c.review.workItems.length,
             itemStatuses: c.patch?.itemStatuses.length ?? 0,

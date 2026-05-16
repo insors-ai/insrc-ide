@@ -27,7 +27,14 @@ import type { PlanExecution, PlannedAction } from './plan-actions.js';
 
 const log = getLogger('content-gen:review-action');
 
-const DEFAULT_MAX_TOKENS = 800;
+// Phase K.2: the new structured-review schema (Phase E) emits up to
+// 6 work items, each carrying id/kind/where/issue/action fields.
+// Six items * ~450 chars formatted as JSON easily exceeds the old
+// 800-token cap, which made the reviewer hit max_tokens mid-string
+// on every section of the 2026-05-16 retest. Raised to 2500 to
+// comfortably hold 6 items plus an optional accepted.markdown
+// polish.
+const DEFAULT_MAX_TOKENS = 2500;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -347,10 +354,11 @@ const SYSTEM_PROMPT = [
 	'                 by blank lines). Use "paragraph N" or "section',
 	'                 opening" or "section closing" or "after paragraph N".',
 	'                 NEVER vague regions like "throughout the draft".',
-	'  - `issue`  -- one-sentence problem statement.',
-	'  - `action` -- one-sentence concrete fix. ONE step. Never list',
-	'                 alternatives ("cite X or Y or Z" -> emit three',
-	'                 separate items, one per cite).',
+	'  - `issue`  -- one short sentence (≤150 chars). State the problem,',
+	'                 not the fix.',
+	'  - `action` -- one short sentence (≤150 chars). ONE concrete step.',
+	'                 Never list alternatives ("cite X or Y or Z" ->',
+	'                 emit three separate items, one per cite).',
 	'  - `evidenceRefs` -- optional; reference back into the evidence',
 	'                 block as `evidence[N]`.',
 	'',
@@ -552,6 +560,12 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 			if (where.length === 0)  return `\`workItems[${i}].where\` is required`;
 			if (issue.length === 0)  return `\`workItems[${i}].issue\` is required`;
 			if (action.length === 0) return `\`workItems[${i}].action\` is required`;
+			// Phase K.3 length caps -- soft target is 150 chars but we
+			// accept up to 200 so the validator doesn't reject a tiny
+			// overflow. The schema's maxLength applies on Ollama's
+			// structured-output path; this is the cloud-provider check.
+			if (issue.length  > 200) return `\`workItems[${i}].issue\` exceeds 200 chars`;
+			if (action.length > 200) return `\`workItems[${i}].action\` exceeds 200 chars`;
 
 			const item: { -readonly [K in keyof ReviewWorkItem]: ReviewWorkItem[K] } = {
 				id, kind, where, issue, action,
