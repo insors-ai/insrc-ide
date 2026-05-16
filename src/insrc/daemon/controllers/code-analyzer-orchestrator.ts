@@ -821,6 +821,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         d:               DraftLike,
         cumulativeCalls: readonly TaggedSkillCall[],
         currentRound:    1 | 2 | 3,
+        priorReviews:    readonly { round: 1 | 2; verdict: 'accept' | 'needs-work'; workItems: readonly import('../../agent/content-gen/review-action.js').ReviewWorkItem[] }[] = [],
       ) => {
         // Fix 11.8: partition the captured calls into successful
         // evidence (used for scoring) and failed calls (CONTEXT
@@ -884,6 +885,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             },
             evidence:      reviewerEvidence,
             ...(failedCalls.length > 0 ? { failedCalls } : {}),
+            ...(priorReviews.length > 0 ? { priorReviews } : {}),
             analyzerLabel: 'code-analyzer',
           },
           reviewer,
@@ -996,7 +998,16 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           ...nextDraft.skillCalls.map(c => ({ ...c, round: r })),
         ];
         draft  = nextDraft;
-        review = await reviewDraft(draft, cumulativeCalls, r);
+        // Phase N.2: surface prior rounds' work-item lists to the
+        // reviewer so it can judge whether the new draft addressed
+        // earlier flags. We only carry round-1 and (for r=3) round-2.
+        const priorReviewsForR: { round: 1 | 2; verdict: 'accept' | 'needs-work'; workItems: readonly import('../../agent/content-gen/review-action.js').ReviewWorkItem[] }[] = [
+          { round: 1, verdict: candidates[0]!.review.verdict, workItems: candidates[0]!.review.workItems },
+        ];
+        if (r === 3 && candidates[1] !== undefined) {
+          priorReviewsForR.push({ round: 2, verdict: candidates[1]!.review.verdict, workItems: candidates[1]!.review.workItems });
+        }
+        review = await reviewDraft(draft, cumulativeCalls, r, priorReviewsForR);
 
         candidates.push(
           patchInfo !== undefined

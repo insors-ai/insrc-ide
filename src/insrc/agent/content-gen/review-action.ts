@@ -63,6 +63,18 @@ export interface ReviewActionInput {
 	 *  used as evidence. Optional. */
 	readonly failedCalls?:  readonly FailedToolCall[] | undefined;
 	readonly analyzerLabel?: string | undefined;
+	/**
+	 * Phase N.2: prior rounds' verdicts surfaced to the reviewer so it
+	 * can judge whether the new draft addressed what was previously
+	 * flagged. Run #2 showed reviewers drifting between rounds because
+	 * each pass was completely fresh. Each entry is one round's work-
+	 * item list + verdict, in order.
+	 */
+	readonly priorReviews?: readonly {
+		readonly round:     1 | 2;
+		readonly verdict:   'accept' | 'needs-work';
+		readonly workItems: readonly ReviewWorkItem[];
+	}[] | undefined;
 }
 
 /**
@@ -394,6 +406,28 @@ function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
 		userLines.push(`- ${c}`);
 	}
 	userLines.push('');
+
+	// Phase N.2: prior reviews surfaced so the cloud reviewer can
+	// judge whether the new draft addressed earlier flags, rather
+	// than starting fresh and drifting between rounds.
+	const priorReviews = input.priorReviews ?? [];
+	if (priorReviews.length > 0) {
+		userLines.push(`## Prior review${priorReviews.length === 1 ? '' : 's'} (this draft is round ${priorReviews.length + 1})`);
+		for (const pr of priorReviews) {
+			userLines.push('');
+			userLines.push(`### Round ${pr.round}: verdict=${pr.verdict}`);
+			if (pr.workItems.length === 0) {
+				userLines.push('_(no work items)_');
+				continue;
+			}
+			for (const wi of pr.workItems) {
+				userLines.push(`- **${wi.id}** (${wi.kind}, ${wi.where}): ${wi.action}`);
+			}
+		}
+		userLines.push('');
+		userLines.push('Judge this draft against those earlier flags. If the writer addressed them, say so. If not, raise them again -- but do NOT raise items the prior reviewer did not flag unless they are genuinely new issues with the current draft.');
+		userLines.push('');
+	}
 
 	userLines.push('## Draft markdown');
 	userLines.push('```markdown');
