@@ -25,11 +25,18 @@ import type { LLMProvider, LLMMessage, ToolDefinition } from '../../../shared/ty
 import type { Session } from '../../session.js';
 import type { PlannedAction } from '../../content-gen/plan-actions.js';
 import type { RepoSizeSummary } from '../../../daemon/repo-summary.js';
+import type { ReviewWorkItem } from '../../content-gen/review-action.js';
 import { runToolLoop, type ToolLoopResult } from '../../tools/loop.js';
 import { getTool } from '../../../daemon/tools/registry.js';
 import { buildAnalyzerSkillCatalog, formatAnalyzerSkillCatalog, type AnalyzerRepoContext } from './skill-catalog.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
+import {
+	parsePatches,
+	applyPatches,
+	type PatchBlock,
+	type WorkItemStatus,
+} from './apply-patches.js';
 
 const log = getLogger('code-analyzer:write-section');
 
@@ -107,6 +114,43 @@ export interface WriteSectionOutput {
 }
 
 const DEFAULT_MAX_TOOL_CALLS = 10;
+
+// ---------------------------------------------------------------------------
+// Phase F: patch-loop entry point shape
+// ---------------------------------------------------------------------------
+
+export interface PatchSectionInput {
+	readonly provider:             LLMProvider;
+	readonly session:              Session;
+	readonly action:               PlannedAction;
+	readonly request:              string;
+	readonly repoContext:          AnalyzerRepoContext;
+	readonly repoSizeSummary?:     RepoSizeSummary | undefined;
+	readonly maxToolCalls?:        number | undefined;
+	readonly maxTokens?:           number | undefined;
+	readonly onProgress?:          ((message: string) => void) | undefined;
+	/** The draft markdown the writer should patch (output of the
+	 *  previous round). */
+	readonly draftMarkdown:        string;
+	/** The reviewer's typed work-item list (Phase E). */
+	readonly workItems:            readonly ReviewWorkItem[];
+	/** Skill IDs the LLM already described in a prior round; seeds the
+	 *  describe-before-invoke protocol so the patch round doesn't waste
+	 *  iterations re-discovering schemas already learned. */
+	readonly priorDescribedSkills: ReadonlySet<string>;
+	/** Successful skill calls from prior rounds; surfaced to the reviewer
+	 *  as evidence for round-N review so cumulative evidence is scored. */
+	readonly priorSkillCalls:      readonly CapturedSkillCall[];
+}
+
+export interface PatchSectionOutput extends WriteSectionOutput {
+	/** Per-item status the patch loop reports. */
+	readonly itemStatuses: readonly WorkItemStatus[];
+	/** True when the writer emitted zero `patch:<id>` / `skip:<id>`
+	 *  blocks. Signals the orchestrator's F.4 escape hatch to fall back
+	 *  to a writeSectionWithTools redraft. */
+	readonly patchProtocolFollowed: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -520,12 +564,350 @@ function isProcessNarrationFraming(firstParagraph: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Phase F: patch-loop system prompt
+// ---------------------------------------------------------------------------
+
+const PATCH_SYSTEM_PROMPT_INTRO = [
+	'You are REVISING a section draft. The cloud reviewer has flagged',
+	'a list of concrete work items; your job is to address each item by',
+	'patching the existing draft. You do NOT rewrite the whole section.',
+	'',
+	'You will receive:',
+	'  - The current draft markdown, with paragraphs numbered (1-indexed).',
+	'  - A list of work items, each with: id, kind, where, issue, action.',
+	'  - The same SKILL CATALOG and meta-tools as the original investigation.',
+	'',
+	'## Work-item kinds',
+	'',
+	'  - `fix`     -- factual error in the draft. Verify with a skill call',
+	'                 if needed, then replace the paragraph with a corrected',
+	'                 version. Unaddressed `fix` items drop section confidence.',
+	'  - `enhance` -- correct but thin. Gather more evidence (skill call),',
+	'                 then replace the paragraph with a thicker version.',
+	'  - `add`     -- coverage missing. Run a sub-investigation (skill calls),',
+	'                 then INSERT a new paragraph at the anchor.',
+	'  - `trim`    -- redundant / off-topic. Delete the paragraph; no skill',
+	'                 call needed; the patch body should be empty.',
+	'',
+	'## Output protocol (REQUIRED -- read carefully)',
+	'',
+	'For each work item in the order given:',
+	'',
+	'  1. Write ONE prose sentence stating which paragraph(s) you will touch',
+	'     and what kind of change it is.',
+	'  2. Make any tool calls you need for evidence (follow the same',
+	'     describe-before-invoke protocol -- `skill_describe` before',
+	'     `skill_invoke` for any skill you have not described).',
+	'  3. Emit a fenced block tagged with the item id. THIS IS HOW THE',
+	'     ORCHESTRATOR APPLIES THE EDIT -- it parses these blocks; prose',
+	'     outside the blocks is discarded by the patch applier.',
+	'',
+	'         ```patch:wi-1',
+	'         <new paragraph content>',
+	'         ```',
+	'',
+	'     For `add` items, optionally specify the anchor in the fence:',
+	'',
+	'         ```patch:wi-3 after=paragraph-5',
+	'         <new paragraph content>',
+	'         ```',
+	'',
+	'     For `trim`, emit an empty body (the paragraph at the `where` is',
+	'     deleted):',
+	'',
+	'         ```patch:wi-4',
+	'         ```',
+	'',
+	'  4. If you genuinely cannot address an item (evidence is missing or',
+	'     contradictory), emit a `skip` block with a one-sentence reason:',
+	'',
+	'         ```skip:wi-2',
+	'         The repo has no Kerberos integration; the claim was wrong but',
+	'         I could not determine the correct subsystem.',
+	'         ```',
+	'',
+	'After the last item, end your turn (no closing prose needed -- the',
+	'orchestrator reassembles the draft from your patch blocks).',
+	'',
+	'## What NOT to do',
+	'',
+	'  - Do NOT rewrite the whole section. The orchestrator preserves',
+	'    every paragraph you do not touch.',
+	'  - Do NOT emit a `patch:` block for an item id that was not in your',
+	'    work-item list.',
+	'  - Do NOT skip an item without emitting a `skip:<id>` block -- the',
+	'    orchestrator interprets a missing block as silent failure.',
+	'  - Do NOT include section headings (`## <title>`) inside any patch',
+	'    body. The orchestrator stitches headings during report assembly.',
+	'  - Do NOT include `[evicted ...]` stubs or other internal markers in',
+	'    your patch bodies.',
+	'',
+	'## Patch body content',
+	'',
+	'  - Patch bodies must be plain markdown paragraphs (no fenced code',
+	'    blocks inside a patch).',
+	'  - Citations use the same shape as the original draft:',
+	'    `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)`. Preserve',
+	'    existing citations the unaffected paragraphs already carry; add',
+	'    new ones where the work item asks for them.',
+	'  - Be specific. The reviewer rejected the previous draft for being',
+	'    thin; the patched paragraph must concretely address the item.',
+].join('\n');
+
+// ---------------------------------------------------------------------------
+// Phase F: patchSectionWithTools
+// ---------------------------------------------------------------------------
+
+/**
+ * Phase F entry point. Runs the writer in PATCH mode: the model sees
+ * the round-1 draft plus the reviewer's typed work-item list and emits
+ * fenced `patch:<id>` / `skip:<id>` blocks the orchestrator applies
+ * back into the draft via `applyPatches`.
+ *
+ * Key differences from `writeSectionWithTools`:
+ *
+ *   - Different SYSTEM prompt (patch protocol; no "first turn: framing").
+ *   - The patch-loop response is parsed into PatchBlocks; the section
+ *     markdown is the result of `applyPatches(draftMarkdown, workItems, blocks)`,
+ *     NOT the concatenation of assistant turns.
+ *   - Transition-phrase nudge is disabled (no "closing paragraph" in
+ *     the patch protocol -- it would misfire).
+ *   - `priorSkillCalls` are surfaced to the orchestrator so it can pass
+ *     cumulative evidence to the reviewer.
+ *
+ * Returns the patched markdown + per-item statuses. If the writer
+ * emitted zero patch/skip blocks, `patchProtocolFollowed` is `false`
+ * and the orchestrator should fall back to a `writeSectionWithTools`
+ * redraft (F.4 escape hatch).
+ */
+export async function patchSectionWithTools(input: PatchSectionInput): Promise<PatchSectionOutput> {
+	const catalog = buildAnalyzerSkillCatalog(input.repoContext);
+
+	// SYSTEM = patch-loop intro + skill catalog block.
+	const systemPrompt = [PATCH_SYSTEM_PROMPT_INTRO, '', formatAnalyzerSkillCatalog(catalog)].join('\n');
+
+	// USER = original request + section card + numbered draft + work-item list.
+	const userParts: string[] = [];
+	userParts.push('## Original request');
+	userParts.push(input.request.trim());
+	userParts.push('');
+	userParts.push('## Section being revised');
+	userParts.push(`title:     ${input.action.title}`);
+	userParts.push(`objective: ${input.action.objective}`);
+	userParts.push('');
+	userParts.push('## Review criteria');
+	for (const c of input.action.reviewCriteria) {
+		userParts.push(`- ${c}`);
+	}
+	if (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty) {
+		userParts.push('');
+		userParts.push('## Repo summary');
+		userParts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
+	}
+
+	// Current draft with paragraphs numbered for the model.
+	userParts.push('');
+	userParts.push('## Current draft (paragraphs numbered)');
+	const paragraphs = splitDraftParagraphs(input.draftMarkdown);
+	if (paragraphs.length === 0) {
+		userParts.push('_(draft is empty)_');
+	} else {
+		for (let i = 0; i < paragraphs.length; i++) {
+			userParts.push(`[paragraph ${i + 1}]`);
+			userParts.push(paragraphs[i]!);
+			userParts.push('');
+		}
+	}
+
+	// Work items the writer must address.
+	userParts.push('## Work items to address (in order)');
+	for (const wi of input.workItems) {
+		userParts.push(`- **${wi.id}** (${wi.kind}, where: ${wi.where})`);
+		userParts.push(`  issue: ${wi.issue}`);
+		userParts.push(`  action: ${wi.action}`);
+		if (wi.evidenceRefs !== undefined && wi.evidenceRefs.length > 0) {
+			userParts.push(`  evidence: ${wi.evidenceRefs.join(', ')}`);
+		}
+	}
+	userParts.push('');
+	userParts.push('Begin. For each work item, emit ONE prose line stating what you will do, then any tool calls you need, then the matching `patch:<id>` or `skip:<id>` fenced block. The orchestrator parses the blocks; prose outside the blocks is discarded.');
+
+	const messages: LLMMessage[] = [
+		{ role: 'system', content: systemPrompt },
+		{ role: 'user',   content: userParts.join('\n') },
+	];
+
+	const skillInvokeTool   = getTool('skill_invoke');
+	const skillDescribeTool = getTool('skill_describe');
+	const skillLoadPageTool = getTool('skill_load_page');
+	const tools: ToolDefinition[] = [];
+	if (skillInvokeTool)   tools.push({ name: skillInvokeTool.id,   description: skillInvokeTool.description,   inputSchema: skillInvokeTool.inputSchema });
+	if (skillDescribeTool) tools.push({ name: skillDescribeTool.id, description: skillDescribeTool.description, inputSchema: skillDescribeTool.inputSchema });
+	if (skillLoadPageTool) tools.push({ name: skillLoadPageTool.id, description: skillLoadPageTool.description, inputSchema: skillLoadPageTool.inputSchema });
+
+	if (tools.length === 0) {
+		log.warn({ actionId: input.action.id }, 'patchSectionWithTools: skill meta-tools not registered -- emitting stub');
+		return {
+			markdown:               input.draftMarkdown,
+			toolCallCount:          0,
+			hitLimit:               false,
+			skillsCalled:           [],
+			skillCalls:             [],
+			describedSkills:        new Set<string>(input.priorDescribedSkills),
+			itemStatuses:           input.workItems.map(wi => ({ id: wi.id, status: 'skipped' as const, reason: 'tools-not-registered' })),
+			patchProtocolFollowed:  false,
+		};
+	}
+
+	const describedSkills = new Set<string>(input.priorDescribedSkills);
+	const skillsCalled: string[] = [];
+	const skillCalls: CapturedSkillCall[] = [];
+	const pendingByIteration = new Map<number, { skillId: string; args: Record<string, unknown> }>();
+	let nextIteration = 0;
+
+	const trackToolCall = (call: { name: string; input: Record<string, unknown> }): void => {
+		nextIteration++;
+		if (call.name === 'skill_describe' && typeof call.input['id'] === 'string') {
+			describedSkills.add(call.input['id'] as string);
+		}
+		if (call.name === 'skill_invoke' && typeof call.input['skillId'] === 'string') {
+			const skillId = call.input['skillId'] as string;
+			const args    = (call.input['args'] as Record<string, unknown> | undefined) ?? {};
+			skillsCalled.push(skillId);
+			pendingByIteration.set(nextIteration, { skillId, args });
+		}
+	};
+	const trackToolResult = (
+		call: { name: string },
+		result: { output: string; success: boolean; rejectionReason?: string | undefined },
+	): void => {
+		const pending = pendingByIteration.get(nextIteration);
+		if (pending !== undefined && call.name === 'skill_invoke') {
+			skillCalls.push({
+				skillId:    pending.skillId,
+				args:       pending.args,
+				resultText: result.output,
+				errored:    result.success === false,
+				...(result.rejectionReason !== undefined ? { rejectionReason: result.rejectionReason } : {}),
+			});
+			pendingByIteration.delete(nextIteration);
+		}
+	};
+
+	const maxToolCalls = input.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
+	const maxTokens    = input.maxTokens    ?? input.action.maxBudgetTokens;
+
+	log.info(
+		{
+			actionId:    input.action.id,
+			catalogSize: catalog.length,
+			maxToolCalls,
+			maxTokens,
+			workItems:   input.workItems.length,
+			draftBytes:  input.draftMarkdown.length,
+		},
+		'patchSectionWithTools: starting patch loop',
+	);
+
+	const loopOpts: Parameters<typeof runToolLoop>[1] = {
+		provider:               input.provider,
+		tools,
+		intent:                 'code-analyzer-section-patch',
+		permissionMode:         'auto-accept',
+		session:                input.session,
+		maxTokens,
+		maxIterations:          maxToolCalls,
+		// Phase J.2: the patch protocol's output shape is `patch:<id>` /
+		// `skip:<id>` blocks, NOT framing-then-close. The transition-
+		// phrase nudge would misfire here.
+		disableTransitionNudge: true,
+	};
+	loopOpts.onToolCall = (call) => {
+		trackToolCall(call);
+		const inputSummary = call.name === 'skill_invoke'
+			? String(call.input['skillId'] ?? '?')
+			: summariseInput(call.input);
+		input.onProgress?.(`  [${input.action.id}/patch] ${call.name}(${inputSummary})`);
+	};
+	loopOpts.onToolResult = (call, result) => {
+		const data = (result as { data?: { rejectionReason?: string } }).data;
+		const rejectionReason = data?.rejectionReason;
+		trackToolResult(call, {
+			output:  result.content,
+			success: !result.isError,
+			...(rejectionReason !== undefined ? { rejectionReason } : {}),
+		});
+	};
+	loopOpts.interceptToolCall = (call) => {
+		if (call.name !== 'skill_invoke') return null;
+		const sid = typeof call.input['skillId'] === 'string' ? call.input['skillId'] : '';
+		if (sid.length === 0) return null;
+		if (describedSkills.has(sid)) return null;
+		log.info(
+			{ actionId: input.action.id, skillId: sid },
+			'patchSectionWithTools: protocol violation -- skill_invoke without prior skill_describe; rejecting',
+		);
+		return {
+			toolCallId: call.id,
+			content:
+				`[protocol-error] You must call \`skill_describe({ id: "${sid}" })\` ` +
+				`BEFORE \`skill_invoke\` for that skill.`,
+			isError: true,
+			data: { rejectionReason: 'protocol-error' },
+		};
+	};
+
+	const result: ToolLoopResult = await runToolLoop(messages, loopOpts);
+
+	// Parse the writer's combined text into patch blocks, then apply.
+	const blocks: readonly PatchBlock[] = parsePatches(result.response);
+	const applied = applyPatches(input.draftMarkdown, input.workItems, blocks);
+	const patchProtocolFollowed = blocks.length > 0;
+
+	log.info(
+		{
+			actionId:              input.action.id,
+			toolCallCount:         result.iterations,
+			hitLimit:              result.hitLimit,
+			skillsCalled,
+			patchBlocks:           blocks.length,
+			workItems:             input.workItems.length,
+			itemsAddressed:        applied.itemStatuses.filter(s => s.status === 'addressed').length,
+			itemsPartial:          applied.itemStatuses.filter(s => s.status === 'partial').length,
+			itemsSkipped:          applied.itemStatuses.filter(s => s.status === 'skipped').length,
+			patchProtocolFollowed,
+			evictionsApplied:      result.evictionsApplied,
+			inputTokensFinal:      result.inputTokensFinal,
+		},
+		'patchSectionWithTools: patch loop complete',
+	);
+
+	return {
+		markdown:               applied.patchedMarkdown,
+		toolCallCount:          result.iterations,
+		hitLimit:               result.hitLimit,
+		skillsCalled,
+		skillCalls,
+		describedSkills,
+		itemStatuses:           applied.itemStatuses,
+		patchProtocolFollowed,
+	};
+}
+
+function splitDraftParagraphs(markdown: string): string[] {
+	const trimmed = markdown.trim();
+	if (trimmed.length === 0) return [];
+	return trimmed.split(/\n\s*\n/).map(p => p.trim()).filter(p => p.length > 0);
+}
+
+// ---------------------------------------------------------------------------
 // Test exports
 // ---------------------------------------------------------------------------
 
 export const _isProcessNarrationFramingForTest = isProcessNarrationFraming;
 export const _countParagraphsForTest           = countParagraphs;
 export const _countCitationsForTest            = countCitations;
+export const _splitDraftParagraphsForTest      = splitDraftParagraphs;
 
 // ---------------------------------------------------------------------------
 // Helpers

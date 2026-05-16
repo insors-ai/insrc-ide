@@ -93,6 +93,18 @@ const K_LIST_ID        = 'listId';
 
 type Phase = 'synthesising' | 'done';
 
+// Subset of CapturedSkillCall the reviewer + TodoList stamping read.
+// Both writeSectionWithTools and patchSectionWithTools emit values
+// shaped this way, so the per-round loop can accumulate them across
+// rounds without importing both interfaces.
+interface CapturedSkillCallLike {
+  readonly skillId:          string;
+  readonly args:             Record<string, unknown>;
+  readonly resultText:       string;
+  readonly errored:          boolean;
+  readonly rejectionReason?: string | undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Controller
 // ---------------------------------------------------------------------------
@@ -742,7 +754,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // and forcing the writer to hedge ("appears to lack indexed
     // files"). The tool loop avoids that by giving the writer the
     // section title + tool catalog directly.
-    const { writeSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
+    const { writeSectionWithTools, patchSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
     const { reviewAction } = await import('../../agent/content-gen/review-action.js');
     log.info({ sections: actions.length }, 'per-action tool-loop writer starting');
 
@@ -771,7 +783,19 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // Mirrors the legacy `expandThenReview` shape from
       // agent/content-gen/review-action.ts so reviewer hints actually
       // drive a retry instead of being silently dropped.
-      let draft = await writeSectionWithTools({
+      // Phase F.5 of plans/code-analyzer-structured-review.md: replace
+      // the 2-round write+redraft loop with a 3-round write+patch loop.
+      // Round 1: writeSectionWithTools (initial investigation).
+      // Round 2/3: patchSectionWithTools (iterate over reviewer's
+      //            workItems and patch the prior draft).
+      // F.4 escape hatch: if the patch loop emits zero patch/skip
+      //            blocks (protocol non-compliance), fall back to a
+      //            redraft via writeSectionWithTools with the work-item
+      //            list collapsed into a hint string.
+      // The ship policy below (Phase G next) currently ships the last
+      // round's draft; Phase G adds the best-of-rounds picker + footer.
+      type DraftLike = Awaited<ReturnType<typeof writeSectionWithTools>>;
+      let draft: DraftLike = await writeSectionWithTools({
         provider:    local,
         session,
         action,
@@ -783,14 +807,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
       });
 
-      const reviewDraft = async (d: typeof draft) => {
+      const reviewDraft = async (d: DraftLike, cumulativeCalls: readonly CapturedSkillCallLike[]) => {
         // Fix 11.8: partition the captured calls into successful
         // evidence (used for scoring) and failed calls (CONTEXT
         // only -- so the reviewer doesn't refine just because the
         // writer's first invocation got rejected on schema).
         const reviewerEvidence: PlanExecution[] = [];
         const failedCalls: import('../../agent/content-gen/review-action.js').FailedToolCall[] = [];
-        for (const c of d.skillCalls) {
+        for (const c of cumulativeCalls) {
           if (c.errored) {
             failedCalls.push({
               skillId:           c.skillId,
@@ -825,70 +849,104 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         );
       };
 
-      let review = await reviewDraft(draft);
-      let rounds: 1 | 2 = 1;
+      let cumulativeCalls: CapturedSkillCallLike[] = [...draft.skillCalls];
+      let review = await reviewDraft(draft, cumulativeCalls);
+      let rounds: 1 | 2 | 3 = 1;
+      // Per-round outcome trace (Phase I will extend; for now just logs).
+      type RoundTrace = { round: 1 | 2 | 3; verdict: string; markdownLen: number; patchProtocolFollowed?: boolean; itemsAddressed?: number };
+      const roundTraces: RoundTrace[] = [{ round: 1, verdict: review.verdict, markdownLen: draft.markdown.length }];
 
-      // Round 2: if the reviewer asked for a refine and supplied a
-      // hint, redraft with the hint threaded into the user prompt.
-      // Fix 11.4: pass round-1's describedSkills into round 2 so the
-      // retry doesn't waste rounds re-discovering schemas the writer
-      // already learned.
-      // Phase E bridge: the reviewer now emits a typed work-item list
-      // (workItems[]) instead of a single hint string. The patch loop
-      // in Phase F will consume the list directly; for the existing
-      // round-2 redraft path we collapse it into a hint string.
-      // Phase G replaces this entire round-2 block with the 3-round
-      // patch loop + best-of-rounds picker.
-      const refineHint = review.verdict === 'needs-work' && review.workItems.length > 0
-        ? review.workItems.map(w => w.action).join('; ')
-        : undefined;
-      if (refineHint !== undefined && refineHint.length > 0) {
-        log.info({ actionId: action.id, hint: refineHint }, 'reviewer requested refine; running second pass');
-        this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] "${action.title}" -- refine (redrafting with reviewer hint)`);
-        draft = await writeSectionWithTools({
-          provider:    local,
+      for (let r: 2 | 3 = 2; r <= 3 && review.verdict === 'needs-work'; r = (r + 1) as 2 | 3) {
+        const workItems = review.workItems;
+        const hintFromItems = workItems.map(w => w.action).join('; ');
+
+        log.info(
+          { actionId: action.id, round: r, workItems: workItems.length },
+          `reviewer requested needs-work; running round ${r}`,
+        );
+        this.emitMilestone(
+          synthBubble,
+          `[${i + 1}/${actions.length}] "${action.title}" -- patch (round ${r}, ${workItems.length} work item${workItems.length === 1 ? '' : 's'})`,
+        );
+
+        const patched = await patchSectionWithTools({
+          provider:             local,
           session,
           action,
           request,
-          repoContext: {},
-          refineHint,
+          repoContext:          {},
+          draftMarkdown:        draft.markdown,
+          workItems,
           priorDescribedSkills: draft.describedSkills,
+          priorSkillCalls:      cumulativeCalls,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
           onProgress: (msg) => {
             this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
           },
         });
-        review = await reviewDraft(draft);
-        rounds = 2;
+
+        let nextDraft: DraftLike;
+        if (!patched.patchProtocolFollowed) {
+          // F.4 escape hatch: model didn't follow the patch protocol.
+          // Fall back to a fresh writeSectionWithTools with the
+          // work-item list collapsed into a hint string.
+          log.warn(
+            { actionId: action.id, round: r },
+            'patch loop emitted no patch/skip blocks; falling back to redraft',
+          );
+          nextDraft = await writeSectionWithTools({
+            provider:    local,
+            session,
+            action,
+            request,
+            repoContext: {},
+            refineHint:           hintFromItems,
+            priorDescribedSkills: patched.describedSkills,
+            ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+            onProgress: (msg) => {
+              this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+            },
+          });
+        } else {
+          // Strip the patch-specific fields; the orchestrator works
+          // against the WriteSectionOutput-shaped subset.
+          nextDraft = {
+            markdown:        patched.markdown,
+            toolCallCount:   patched.toolCallCount,
+            hitLimit:        patched.hitLimit,
+            skillsCalled:    patched.skillsCalled,
+            skillCalls:      patched.skillCalls,
+            describedSkills: patched.describedSkills,
+          };
+        }
+
+        cumulativeCalls = [...cumulativeCalls, ...nextDraft.skillCalls];
+        draft  = nextDraft;
+        review = await reviewDraft(draft, cumulativeCalls);
+        rounds = r;
+        roundTraces.push({
+          round:                 r,
+          verdict:               review.verdict,
+          markdownLen:           draft.markdown.length,
+          patchProtocolFollowed: patched.patchProtocolFollowed,
+          itemsAddressed:        patched.itemStatuses.filter(s => s.status === 'addressed').length,
+        });
       }
 
-      // Fix 11.5: when round 2 still verdicts needs-work, the
-      // orchestrator used to silently ship `draft.markdown` (which the
-      // reviewer explicitly rejected) as the section. Replace with a
-      // degraded marker so the report doesn't carry plausible-looking-
-      // but-wrong content. The TodoList item carries the failure reason.
-      //
-      // Phase G of plans/code-analyzer-structured-review.md replaces
-      // this entire ship-or-kill branch with a 3-round best-of-rounds
-      // picker + footer for unaddressed items.
-      const sectionFailed = rounds === 2 && review.verdict === 'needs-work';
-      const final = sectionFailed
-        ? '_This section could not be drafted -- the writer failed both attempts. See the TodoList item for the writer\'s trace and the reviewer\'s hint._'
-        : (review.accepted?.markdown ?? draft.markdown);
+      // Phase G placeholder: ship the last round's draft. No more
+      // placeholder kill -- if all 3 rounds verdicted needs-work, ship
+      // anyway. Phase G replaces this with a best-of-rounds picker + footer.
+      const final = (review.accepted?.markdown ?? draft.markdown);
 
-      // Fix 11.6: confidence reflects the reviewer's verdict, not the
-      // tool-loop iteration count. accept@round1 = high; accept@round2
-      // = medium; needs-work (binding) = low.
+      // Confidence: accept@1 high; accept@2/3 medium; all-rounds-needs-work low.
       const itemConfidence: 'high' | 'medium' | 'low' =
         review.verdict === 'accept' && rounds === 1 ? 'high'   :
-        review.verdict === 'accept' && rounds === 2 ? 'medium' :
+        review.verdict === 'accept'                 ? 'medium' :
                                                       'low';
 
       // Stamp the section result on the TodoList item + mark complete.
-      // Phase E bridge: failureReason now derived from the reviewer's
-      // work-item actions (Phase G will swap this for the structured
-      // workItems + itemStatuses persistence the plan describes).
-      const failureReason = sectionFailed && review.workItems.length > 0
+      // Phase G will extend this with the per-round workItems + statuses.
+      const failureReason = review.verdict === 'needs-work' && review.workItems.length > 0
         ? review.workItems.map(w => `${w.kind}: ${w.action}`).join('\n')
         : undefined;
       if (itemId !== undefined && this.deps.todos !== undefined) {
@@ -901,7 +959,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             findings:   [],
             citations:  [],
             confidence: itemConfidence,
-            toolCalls:  draft.skillCalls.map(c => ({
+            toolCalls:  cumulativeCalls.map(c => ({
               kind:     'skill',
               skillId:  c.skillId,
               args:     c.args,
@@ -916,12 +974,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         }
       }
 
-      const verdictLabel = rounds === 2
-        ? (review.verdict === 'accept' ? 'refine-then-accept' : 'refine-then-needs-work')
-        : review.verdict;
+      log.info({ actionId: action.id, rounds, traces: roundTraces }, 'section drafting complete');
+      const verdictLabel = `${review.verdict}@round${rounds}`;
       this.emitMilestone(
         synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- ${verdictLabel} (${draft.toolCallCount} skill call${draft.toolCallCount === 1 ? '' : 's'}${draft.hitLimit ? ', hit cap' : ''})`,
+        `[${i + 1}/${actions.length}] "${action.title}" -- ${verdictLabel} (${cumulativeCalls.length} cumulative skill call${cumulativeCalls.length === 1 ? '' : 's'})`,
       );
       sections.push({ id: action.id, title: action.title, markdown: final });
     }
