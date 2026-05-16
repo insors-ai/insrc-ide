@@ -71,6 +71,20 @@ export interface WriteSectionInput {
 	 * waste rounds re-discovering schemas already learned.
 	 */
 	readonly priorDescribedSkills?: ReadonlySet<string> | undefined;
+	/**
+	 * Phase M.1: when set, the writer runs in RECOVERY mode -- this
+	 * is the F.4 escape-hatch fallback after a failed patch loop. The
+	 * recovery context carries the prior draft's length and paragraph
+	 * count as soft targets so the redraft produces a comparably-full
+	 * section instead of a narrow answer to the hint. The system prompt
+	 * also swaps to a recovery-mode variant that explicitly says
+	 * "produce a fresh comparably-full draft, NOT a focused answer".
+	 */
+	readonly recoveryContext?: {
+		readonly priorDraftLength:    number;
+		readonly priorParagraphCount: number;
+		readonly priorCitationCount:  number;
+	} | undefined;
 }
 
 /**
@@ -295,6 +309,46 @@ const SYSTEM_PROMPT_INTRO = [
 ].join('\n');
 
 // ---------------------------------------------------------------------------
+// Phase M.1: recovery-mode preamble for the F.4 escape hatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Prepended to SYSTEM_PROMPT_INTRO when writeSectionWithTools runs in
+ * RECOVERY mode (the F.4 escape hatch after a failed patch loop).
+ *
+ * The 2026-05-16 run #2 showed F.4 redrafts consistently producing
+ * much shorter / weaker output than round 1 (231-1186 chars vs
+ * round 1's 2-5k). The hintFromItems collapse primed the model to
+ * write a "focused answer" instead of a full draft. This preamble
+ * + the recovery-context block in the user message tells the model
+ * the redraft must MATCH the prior draft's scope.
+ */
+const RECOVERY_MODE_PREAMBLE = [
+	'## Recovery-mode instructions (READ FIRST)',
+	'',
+	'You are running as the RECOVERY pass after a failed patch loop.',
+	'Read the `## Recovery context` block in the user message for the',
+	'prior draft\'s length / paragraph / citation targets. Produce a',
+	'FRESH, COMPARABLY FULL section -- NOT a narrow answer to the',
+	'reviewer hint.',
+	'',
+	'Three rules specific to recovery mode:',
+	'',
+	'  1. The reviewer hint (when provided) is a CONSTRAINT, not the topic.',
+	'     Address it as ONE thread within the full section. Do not let it',
+	'     dominate the structure. Cover the original section objective and',
+	'     review criteria with the same coverage the prior draft did.',
+	'',
+	'  2. MATCH the prior draft\'s density signals. If the prior draft',
+	'     had 5 paragraphs with 9 citations, your redraft should be in',
+	'     the same neighborhood. A 2-paragraph stub is a regression.',
+	'',
+	'  3. Iterate fully. Use the full tool-call budget. Do NOT stop',
+	'     after one or two skill calls; gather evidence at the same',
+	'     depth the original investigation did.',
+].join('\n');
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -302,7 +356,17 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 	const catalog = buildAnalyzerSkillCatalog(input.repoContext);
 
 	// Build the system prompt: intro rules + skill catalog block.
-	const sysParts: string[] = [SYSTEM_PROMPT_INTRO, '', formatAnalyzerSkillCatalog(catalog)];
+	// Phase M.1: recoveryContext prepends a recovery-mode preamble so
+	// the F.4 escape-hatch redraft produces a comparably-full section
+	// instead of a narrow focused answer to the hint.
+	const sysParts: string[] = [];
+	if (input.recoveryContext !== undefined) {
+		sysParts.push(RECOVERY_MODE_PREAMBLE);
+		sysParts.push('');
+	}
+	sysParts.push(SYSTEM_PROMPT_INTRO);
+	sysParts.push('');
+	sysParts.push(formatAnalyzerSkillCatalog(catalog));
 	const systemPrompt = sysParts.join('\n');
 
 	// Build the user prompt: original request + section card + repo summary.
@@ -323,9 +387,25 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		userParts.push('## Repo summary');
 		userParts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
 	}
+	// Phase M.1: recovery context = soft targets from the prior draft
+	// so the redraft matches its scope instead of writing a stub.
+	if (input.recoveryContext !== undefined) {
+		userParts.push('');
+		userParts.push('## Recovery context (READ FIRST)');
+		userParts.push('This is a RECOVERY pass. A prior round of patches against the existing draft failed (the model emitted no patch blocks). Your job is to produce a FRESH, COMPARABLY FULL draft of the section -- not a narrow answer to any reviewer hint.');
+		userParts.push('');
+		userParts.push('Soft targets from the prior draft (match these density signals; do not produce a stub):');
+		userParts.push(`  - length:     ~${input.recoveryContext.priorDraftLength} chars`);
+		userParts.push(`  - paragraphs: ~${input.recoveryContext.priorParagraphCount}`);
+		userParts.push(`  - citations:  ≥${input.recoveryContext.priorCitationCount}`);
+		userParts.push('');
+		userParts.push('Treat the reviewer hint (if any) below as a CONSTRAINT on the new draft, not the topic. The section objective and review criteria remain the primary target.');
+	}
 	if (input.refineHint !== undefined && input.refineHint.trim().length > 0) {
 		userParts.push('');
-		userParts.push('## Reviewer hint (you have ONE more attempt)');
+		userParts.push(input.recoveryContext !== undefined
+			? '## Reviewer hint (constraint, not topic)'
+			: '## Reviewer hint (you have ONE more attempt)');
 		userParts.push('Your previous attempt was rejected by the reviewer. Address this directly in this investigation:');
 		userParts.push('');
 		userParts.push(input.refineHint.trim());

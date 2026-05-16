@@ -97,12 +97,20 @@ type Phase = 'synthesising' | 'done';
 // Both writeSectionWithTools and patchSectionWithTools emit values
 // shaped this way, so the per-round loop can accumulate them across
 // rounds without importing both interfaces.
+//
+// Phase M.2: the orchestrator tags each entry with the round it came
+// from so the reviewer-evidence builder can compress older rounds for
+// round-2/3 reviews (cumulative evidence routinely blew the reviewer's
+// input budget in run #2).
 interface CapturedSkillCallLike {
   readonly skillId:          string;
   readonly args:             Record<string, unknown>;
   readonly resultText:       string;
   readonly errored:          boolean;
   readonly rejectionReason?: string | undefined;
+}
+interface TaggedSkillCall extends CapturedSkillCallLike {
+  readonly round: 1 | 2 | 3;
 }
 
 // ---------------------------------------------------------------------------
@@ -809,11 +817,21 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
       });
 
-      const reviewDraft = async (d: DraftLike, cumulativeCalls: readonly CapturedSkillCallLike[]) => {
+      const reviewDraft = async (
+        d:               DraftLike,
+        cumulativeCalls: readonly TaggedSkillCall[],
+        currentRound:    1 | 2 | 3,
+      ) => {
         // Fix 11.8: partition the captured calls into successful
         // evidence (used for scoring) and failed calls (CONTEXT
         // only -- so the reviewer doesn't refine just because the
         // writer's first invocation got rejected on schema).
+        //
+        // Phase M.2: prune older rounds' evidence for round-2/3
+        // reviews. Round-1 calls remain verbatim only for the round-1
+        // review; rounds 2 and 3 see round-1 calls compressed to
+        // one-line summaries (skillId + arg keys), with the most
+        // recent round's calls verbatim.
         const reviewerEvidence: PlanExecution[] = [];
         const failedCalls: import('../../agent/content-gen/review-action.js').FailedToolCall[] = [];
         for (const c of cumulativeCalls) {
@@ -823,6 +841,27 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               args:              c.args,
               output:            c.resultText,
               ...(c.rejectionReason !== undefined ? { rejectionReason: c.rejectionReason } : {}),
+            });
+            continue;
+          }
+          const compressForReview = currentRound > 1 && c.round < currentRound;
+          if (compressForReview) {
+            // Older round in a 2nd/3rd review -- replace the full
+            // resultText with a brief summary so the reviewer still
+            // sees what was investigated without paying the full
+            // token cost.
+            const argKeys = Object.keys(c.args).slice(0, 4).join(', ');
+            const resultLen = c.resultText.length;
+            reviewerEvidence.push({
+              skillId:    c.skillId,
+              value:      {
+                args:           c.args,
+                output:         `_(round ${c.round} evidence summarised: ${resultLen} chars, args: { ${argKeys} })_`,
+                evidenceRound:  c.round,
+                summarised:     true,
+              } as unknown,
+              confidence: 'high',
+              notes:      [],
             });
           } else {
             reviewerEvidence.push({
@@ -851,8 +890,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         );
       };
 
-      let cumulativeCalls: CapturedSkillCallLike[] = [...draft.skillCalls];
-      let review = await reviewDraft(draft, cumulativeCalls);
+      let cumulativeCalls: TaggedSkillCall[] = draft.skillCalls.map(c => ({ ...c, round: 1 as const }));
+      let review = await reviewDraft(draft, cumulativeCalls, 1);
 
       // Track each round's candidate -- the picker (Phase G) reads
       // these and chooses best-of-rounds when no round verdicts accept.
@@ -903,10 +942,22 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           // doesn't emit per-item statuses, so we omit `patch` from
           // the candidate -- the picker treats it like a round-1-style
           // fresh draft (no fix-items-addressed credit).
+          //
+          // Phase M.1: pass recoveryContext so the redraft uses the
+          // recovery-mode preamble + soft-targets from the prior draft.
+          // The 2026-05-16 run #2 showed F.4 redrafts consistently
+          // producing much shorter / weaker output than round 1; the
+          // recovery mode tells the model to match the prior scope.
           log.warn(
             { actionId: action.id, round: r },
             'patch loop emitted no patch/skip blocks; falling back to redraft',
           );
+          // Use draft's signals (round 1 if r=2, round 2 if r=3) as
+          // the recovery target. Round-1 signals are the most reliable
+          // baseline so we use them for any round's recovery.
+          const baseline = candidates[0]!;
+          const baselineCitationCount = (baseline.markdown.match(/\[[^\]]+\]\(path:[^)]+\)/g) ?? []).length;
+          const baselineParagraphCount = baseline.markdown.trim().split(/\n\s*\n/).filter(p => p.trim().length > 0).length;
           nextDraft = await writeSectionWithTools({
             provider:    local,
             session,
@@ -915,6 +966,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             repoContext: {},
             refineHint:           hintFromItems,
             priorDescribedSkills: patched.describedSkills,
+            recoveryContext: {
+              priorDraftLength:    baseline.markdown.length,
+              priorParagraphCount: baselineParagraphCount,
+              priorCitationCount:  baselineCitationCount,
+            },
             ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
             onProgress: (msg) => {
               this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
@@ -935,9 +991,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           patchInfo = { priorWorkItems, itemStatuses: patched.itemStatuses };
         }
 
-        cumulativeCalls = [...cumulativeCalls, ...nextDraft.skillCalls];
+        cumulativeCalls = [
+          ...cumulativeCalls,
+          ...nextDraft.skillCalls.map(c => ({ ...c, round: r })),
+        ];
         draft  = nextDraft;
-        review = await reviewDraft(draft, cumulativeCalls);
+        review = await reviewDraft(draft, cumulativeCalls, r);
 
         candidates.push(
           patchInfo !== undefined
