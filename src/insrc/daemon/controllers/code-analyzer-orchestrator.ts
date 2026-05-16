@@ -860,6 +860,10 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         { round: 1, markdown: draft.markdown, review },
       ];
 
+      // Phase I instrumentation: per-round patch-protocol + escape-hatch
+      // signals. Indexed by round number (2 or 3); absent for round 1.
+      const patchSignals: { round: 2 | 3; protocolFollowed: boolean; redraftFallback: boolean; itemsAddressed: number }[] = [];
+
       for (let r: 2 | 3 = 2; r <= 3 && review.verdict === 'needs-work'; r = (r + 1) as 2 | 3) {
         const priorWorkItems = review.workItems;   // captured BEFORE the patch
         const hintFromItems  = priorWorkItems.map(w => w.action).join('; ');
@@ -939,6 +943,12 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             ? { round: r, markdown: draft.markdown, review, patch: patchInfo }
             : { round: r, markdown: draft.markdown, review },
         );
+        patchSignals.push({
+          round:            r,
+          protocolFollowed: patched.patchProtocolFollowed,
+          redraftFallback:  !patched.patchProtocolFollowed,
+          itemsAddressed:   patched.itemStatuses.filter(s => s.status === 'addressed').length,
+        });
       }
 
       // -----------------------------------------------------------------
@@ -1039,13 +1049,29 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         }
       }
 
+      // Phase I.1: flat per-section instrumentation. Fields here are
+      // mined by scripts/analyzer-metrics.ts -- keep names stable.
+      const r2signal = patchSignals.find(s => s.round === 2);
+      const r3signal = patchSignals.find(s => s.round === 3);
+      const fixItemsUnaddressedFinal = winnerCandidate.review.workItems.filter(w => w.kind === 'fix').length;
+      const redraftFallbackFired = patchSignals.some(s => s.redraftFallback);
       log.info(
         {
-          actionId:        action.id,
-          rounds:          candidates.length,
+          actionId:                action.id,
+          roundsRun:               candidates.length,
           shippedRound,
+          shippedDraft:            `round${shippedRound}`,
           shipDecisionReason,
-          confidence:      itemConfidence,
+          confidence:              itemConfidence,
+          workItemsR1:             candidates[0]!.review.workItems.length,
+          workItemsR2:             candidates[1]?.review.workItems.length ?? 0,
+          itemsAddressedR2:        r2signal?.itemsAddressed ?? 0,
+          itemsAddressedR3:        r3signal?.itemsAddressed ?? 0,
+          patchProtocolFollowedR2: r2signal?.protocolFollowed,
+          patchProtocolFollowedR3: r3signal?.protocolFollowed,
+          redraftFallbackFired,
+          redraftFallbackReason:   redraftFallbackFired ? 'protocol' : undefined,
+          fixItemsUnaddressedFinal,
           traces: candidates.map(c => ({
             round:        c.round,
             verdict:      c.review.verdict,

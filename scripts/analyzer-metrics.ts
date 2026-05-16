@@ -48,6 +48,27 @@ interface SectionMetrics {
 	readonly firstTurnFramingDetected: boolean;
 }
 
+// Phase I.1: section-level summary emitted ONCE per section by the
+// orchestrator after the 3-round patch loop ends. Has everything the
+// SectionMetrics (per-round writer log) does NOT.
+interface SectionRunSummary {
+	readonly time: number;
+	readonly pid: number;
+	readonly actionId: string;
+	readonly roundsRun: 1 | 2 | 3;
+	readonly shippedRound: 1 | 2 | 3;
+	readonly shipDecisionReason: string;
+	readonly confidence: 'high' | 'medium' | 'low';
+	readonly workItemsR1: number;
+	readonly workItemsR2: number;
+	readonly itemsAddressedR2: number;
+	readonly itemsAddressedR3: number;
+	readonly patchProtocolFollowedR2: boolean | undefined;
+	readonly patchProtocolFollowedR3: boolean | undefined;
+	readonly redraftFallbackFired: boolean;
+	readonly fixItemsUnaddressedFinal: number;
+}
+
 const LOG_DIR = '/tmp/.insrc';
 
 function pickLatestLog(): string {
@@ -75,8 +96,9 @@ function parseArgs(argv: readonly string[]): { logPath: string; pidFilter: numbe
 	return { logPath, pidFilter };
 }
 
-function loadSections(logPath: string, pidFilter: number | undefined): SectionMetrics[] {
-	const out: SectionMetrics[] = [];
+function loadSections(logPath: string, pidFilter: number | undefined): { rounds: SectionMetrics[]; sections: SectionRunSummary[] } {
+	const rounds: SectionMetrics[] = [];
+	const sections: SectionRunSummary[] = [];
 	for (const line of readFileSync(logPath, 'utf8').split('\n')) {
 		if (line.length === 0) {
 			continue;
@@ -87,30 +109,52 @@ function loadSections(logPath: string, pidFilter: number | undefined): SectionMe
 		} catch {
 			continue;
 		}
-		if (j['msg'] !== 'writeSectionWithTools: tool loop complete') {
-			continue;
-		}
 		if (pidFilter !== undefined && j['pid'] !== pidFilter) {
 			continue;
 		}
-		out.push({
-			time: j['time'] as number,
-			pid: j['pid'] as number,
-			actionId: j['actionId'] as string,
-			toolCallCount: j['toolCallCount'] as number,
-			hitLimit: j['hitLimit'] as boolean,
-			skillsCalled: (j['skillsCalled'] as readonly string[]) ?? [],
-			textLength: j['textLength'] as number,
-			paragraphCount: (j['paragraphCount'] as number) ?? 0,
-			avgTextLengthPerTurn: (j['avgTextLengthPerTurn'] as number) ?? 0,
-			citationCount: (j['citationCount'] as number) ?? 0,
-			evictionsApplied: (j['evictionsApplied'] as number) ?? 0,
-			inputTokensFinal: (j['inputTokensFinal'] as number) ?? 0,
-			transitionPhraseNudgeFired: (j['transitionPhraseNudgeFired'] as boolean) ?? false,
-			firstTurnFramingDetected:   (j['firstTurnFramingDetected'] as boolean) ?? false,
-		});
+
+		if (j['msg'] === 'writeSectionWithTools: tool loop complete' || j['msg'] === 'patchSectionWithTools: patch loop complete') {
+			rounds.push({
+				time: j['time'] as number,
+				pid: j['pid'] as number,
+				actionId: j['actionId'] as string,
+				toolCallCount: j['toolCallCount'] as number,
+				hitLimit: j['hitLimit'] as boolean,
+				skillsCalled: (j['skillsCalled'] as readonly string[]) ?? [],
+				textLength: (j['textLength'] as number) ?? 0,
+				paragraphCount: (j['paragraphCount'] as number) ?? 0,
+				avgTextLengthPerTurn: (j['avgTextLengthPerTurn'] as number) ?? 0,
+				citationCount: (j['citationCount'] as number) ?? 0,
+				evictionsApplied: (j['evictionsApplied'] as number) ?? 0,
+				inputTokensFinal: (j['inputTokensFinal'] as number) ?? 0,
+				transitionPhraseNudgeFired: (j['transitionPhraseNudgeFired'] as boolean) ?? false,
+				firstTurnFramingDetected:   (j['firstTurnFramingDetected'] as boolean) ?? false,
+			});
+			continue;
+		}
+
+		if (j['msg'] === 'section drafting complete') {
+			sections.push({
+				time: j['time'] as number,
+				pid: j['pid'] as number,
+				actionId: j['actionId'] as string,
+				roundsRun:                (j['roundsRun'] as 1 | 2 | 3) ?? 1,
+				shippedRound:             (j['shippedRound'] as 1 | 2 | 3) ?? 1,
+				shipDecisionReason:       String(j['shipDecisionReason'] ?? ''),
+				confidence:               (j['confidence'] as 'high' | 'medium' | 'low') ?? 'medium',
+				workItemsR1:              (j['workItemsR1'] as number) ?? 0,
+				workItemsR2:              (j['workItemsR2'] as number) ?? 0,
+				itemsAddressedR2:         (j['itemsAddressedR2'] as number) ?? 0,
+				itemsAddressedR3:         (j['itemsAddressedR3'] as number) ?? 0,
+				patchProtocolFollowedR2:  j['patchProtocolFollowedR2'] as boolean | undefined,
+				patchProtocolFollowedR3:  j['patchProtocolFollowedR3'] as boolean | undefined,
+				redraftFallbackFired:     (j['redraftFallbackFired'] as boolean) ?? false,
+				fixItemsUnaddressedFinal: (j['fixItemsUnaddressedFinal'] as number) ?? 0,
+			});
+			continue;
+		}
 	}
-	return out;
+	return { rounds, sections };
 }
 
 function median(arr: readonly number[]): number {
@@ -201,17 +245,119 @@ function formatAggregates(rows: SectionMetrics[]): string {
 	].join('\n');
 }
 
+function formatSectionsTable(rows: SectionRunSummary[]): string {
+	const lines: string[] = [];
+	lines.push(
+		pad('actionId', 36) + ' ' +
+		pad('rnds', 4) + ' ' +
+		pad('ship', 4) + ' ' +
+		pad('wi1', 4) + ' ' +
+		pad('wi2', 4) + ' ' +
+		pad('addR2', 5) + ' ' +
+		pad('addR3', 5) + ' ' +
+		pad('fixUn', 5) + ' ' +
+		pad('p2', 3) + ' ' +
+		pad('p3', 3) + ' ' +
+		pad('rdft', 4) + ' ' +
+		pad('conf', 6) + ' ' +
+		'reason',
+	);
+	lines.push('-'.repeat(110));
+	for (const r of rows) {
+		const p2 = r.patchProtocolFollowedR2 === undefined ? '-' : (r.patchProtocolFollowedR2 ? 'Y' : 'N');
+		const p3 = r.patchProtocolFollowedR3 === undefined ? '-' : (r.patchProtocolFollowedR3 ? 'Y' : 'N');
+		lines.push(
+			pad(r.actionId.slice(0, 36), 36) + ' ' +
+			pad(r.roundsRun, 4) + ' ' +
+			pad(`r${r.shippedRound}`, 4) + ' ' +
+			pad(r.workItemsR1, 4) + ' ' +
+			pad(r.workItemsR2, 4) + ' ' +
+			pad(r.itemsAddressedR2, 5) + ' ' +
+			pad(r.itemsAddressedR3, 5) + ' ' +
+			pad(r.fixItemsUnaddressedFinal, 5) + ' ' +
+			pad(p2, 3) + ' ' +
+			pad(p3, 3) + ' ' +
+			pad(r.redraftFallbackFired ? 'Y' : '-', 4) + ' ' +
+			pad(r.confidence, 6) + ' ' +
+			r.shipDecisionReason.slice(0, 32),
+		);
+	}
+	return lines.join('\n');
+}
+
+function formatSectionsAggregates(rows: SectionRunSummary[]): string {
+	if (rows.length === 0) {
+		return '(no section summaries)';
+	}
+	const n = rows.length;
+	const pct = (k: number): string => `${k} / ${n} (${Math.round((k / n) * 100)}%)`;
+	const r1 = rows.filter(r => r.roundsRun === 1).length;
+	const r2 = rows.filter(r => r.roundsRun === 2).length;
+	const r3 = rows.filter(r => r.roundsRun === 3).length;
+	const fromR1 = rows.filter(r => r.shippedRound === 1).length;
+	const fromR2 = rows.filter(r => r.shippedRound === 2).length;
+	const fromR3 = rows.filter(r => r.shippedRound === 3).length;
+	const fixOK = rows.filter(r => r.fixItemsUnaddressedFinal === 0).length;
+	const fallback = rows.filter(r => r.redraftFallbackFired).length;
+	// Patch-protocol compliance over the patch rounds that ran (R2 + R3).
+	let patchRoundsRun = 0;
+	let patchRoundsFollowed = 0;
+	for (const r of rows) {
+		if (r.patchProtocolFollowedR2 !== undefined) {
+			patchRoundsRun++;
+			if (r.patchProtocolFollowedR2) {
+				patchRoundsFollowed++;
+			}
+		}
+		if (r.patchProtocolFollowedR3 !== undefined) {
+			patchRoundsRun++;
+			if (r.patchProtocolFollowedR3) {
+				patchRoundsFollowed++;
+			}
+		}
+	}
+	const protocolPct = patchRoundsRun === 0 ? '(no patch rounds)'
+		: `${patchRoundsFollowed} / ${patchRoundsRun} (${Math.round((patchRoundsFollowed / patchRoundsRun) * 100)}%)`;
+
+	const high = rows.filter(r => r.confidence === 'high').length;
+	const med  = rows.filter(r => r.confidence === 'medium').length;
+	const low  = rows.filter(r => r.confidence === 'low').length;
+
+	return [
+		`sections:                  ${n}`,
+		`rounds  R1 / R2 / R3:      ${r1} / ${r2} / ${r3}`,
+		`shipped R1 / R2 / R3:      ${fromR1} / ${fromR2} / ${fromR3}`,
+		`patch-protocol compliance: ${protocolPct}`,
+		`redraft fallback fired:    ${pct(fallback)}`,
+		`all fix items addressed:   ${pct(fixOK)}`,
+		`confidence H / M / L:      ${high} / ${med} / ${low}`,
+	].join('\n');
+}
+
 const { logPath, pidFilter } = parseArgs(process.argv.slice(2));
-const sections = loadSections(logPath, pidFilter);
+const { rounds, sections } = loadSections(logPath, pidFilter);
 
 console.log(`Log: ${logPath}${pidFilter !== undefined ? `  (pid ${pidFilter})` : ''}`);
-console.log(`Sections: ${sections.length}`);
+console.log(`Per-round events: ${rounds.length}  |  Section summaries: ${sections.length}`);
 console.log('');
-if (sections.length === 0) {
-	console.log('No "writeSectionWithTools: tool loop complete" events found. Run /code-analyze first.');
+if (rounds.length === 0 && sections.length === 0) {
+	console.log('No analyzer events found. Run /code-analyze first.');
 	process.exit(0);
 }
-console.log(formatTable(sections));
-console.log('');
-console.log('Aggregates:');
-console.log(formatAggregates(sections));
+
+if (sections.length > 0) {
+	console.log('== Per-section summaries (Phase G/I) ==');
+	console.log(formatSectionsTable(sections));
+	console.log('');
+	console.log('Section aggregates:');
+	console.log(formatSectionsAggregates(sections));
+	console.log('');
+}
+
+if (rounds.length > 0) {
+	console.log('== Per-round writer events (Phase D/J) ==');
+	console.log(formatTable(rounds));
+	console.log('');
+	console.log('Round aggregates:');
+	console.log(formatAggregates(rounds));
+}
