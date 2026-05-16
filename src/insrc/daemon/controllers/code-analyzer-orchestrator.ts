@@ -756,6 +756,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // section title + tool catalog directly.
     const { writeSectionWithTools, patchSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
     const { reviewAction } = await import('../../agent/content-gen/review-action.js');
+    const { pickBestRound, buildSectionFooter } = await import('../../agent/tasks/code-analyzer/pick-best-draft.js');
+    type RoundCandidate = import('../../agent/tasks/code-analyzer/pick-best-draft.js').RoundCandidate;
     log.info({ sections: actions.length }, 'per-action tool-loop writer starting');
 
     const sections: { id: string; title: string; markdown: string }[] = [];
@@ -851,22 +853,24 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
       let cumulativeCalls: CapturedSkillCallLike[] = [...draft.skillCalls];
       let review = await reviewDraft(draft, cumulativeCalls);
-      let rounds: 1 | 2 | 3 = 1;
-      // Per-round outcome trace (Phase I will extend; for now just logs).
-      type RoundTrace = { round: 1 | 2 | 3; verdict: string; markdownLen: number; patchProtocolFollowed?: boolean; itemsAddressed?: number };
-      const roundTraces: RoundTrace[] = [{ round: 1, verdict: review.verdict, markdownLen: draft.markdown.length }];
+
+      // Track each round's candidate -- the picker (Phase G) reads
+      // these and chooses best-of-rounds when no round verdicts accept.
+      const candidates: RoundCandidate[] = [
+        { round: 1, markdown: draft.markdown, review },
+      ];
 
       for (let r: 2 | 3 = 2; r <= 3 && review.verdict === 'needs-work'; r = (r + 1) as 2 | 3) {
-        const workItems = review.workItems;
-        const hintFromItems = workItems.map(w => w.action).join('; ');
+        const priorWorkItems = review.workItems;   // captured BEFORE the patch
+        const hintFromItems  = priorWorkItems.map(w => w.action).join('; ');
 
         log.info(
-          { actionId: action.id, round: r, workItems: workItems.length },
+          { actionId: action.id, round: r, workItems: priorWorkItems.length },
           `reviewer requested needs-work; running round ${r}`,
         );
         this.emitMilestone(
           synthBubble,
-          `[${i + 1}/${actions.length}] "${action.title}" -- patch (round ${r}, ${workItems.length} work item${workItems.length === 1 ? '' : 's'})`,
+          `[${i + 1}/${actions.length}] "${action.title}" -- patch (round ${r}, ${priorWorkItems.length} work item${priorWorkItems.length === 1 ? '' : 's'})`,
         );
 
         const patched = await patchSectionWithTools({
@@ -876,7 +880,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           request,
           repoContext:          {},
           draftMarkdown:        draft.markdown,
-          workItems,
+          workItems:            priorWorkItems,
           priorDescribedSkills: draft.describedSkills,
           priorSkillCalls:      cumulativeCalls,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
@@ -886,10 +890,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         });
 
         let nextDraft: DraftLike;
+        let patchInfo: { priorWorkItems: typeof priorWorkItems; itemStatuses: typeof patched.itemStatuses } | undefined;
         if (!patched.patchProtocolFollowed) {
           // F.4 escape hatch: model didn't follow the patch protocol.
           // Fall back to a fresh writeSectionWithTools with the
-          // work-item list collapsed into a hint string.
+          // work-item list collapsed into a hint string. The redraft
+          // doesn't emit per-item statuses, so we omit `patch` from
+          // the candidate -- the picker treats it like a round-1-style
+          // fresh draft (no fix-items-addressed credit).
           log.warn(
             { actionId: action.id, round: r },
             'patch loop emitted no patch/skip blocks; falling back to redraft',
@@ -907,6 +915,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
             },
           });
+          patchInfo = undefined;
         } else {
           // Strip the patch-specific fields; the orchestrator works
           // against the WriteSectionOutput-shaped subset.
@@ -918,43 +927,94 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             skillCalls:      patched.skillCalls,
             describedSkills: patched.describedSkills,
           };
+          patchInfo = { priorWorkItems, itemStatuses: patched.itemStatuses };
         }
 
         cumulativeCalls = [...cumulativeCalls, ...nextDraft.skillCalls];
         draft  = nextDraft;
         review = await reviewDraft(draft, cumulativeCalls);
-        rounds = r;
-        roundTraces.push({
-          round:                 r,
-          verdict:               review.verdict,
-          markdownLen:           draft.markdown.length,
-          patchProtocolFollowed: patched.patchProtocolFollowed,
-          itemsAddressed:        patched.itemStatuses.filter(s => s.status === 'addressed').length,
-        });
+
+        candidates.push(
+          patchInfo !== undefined
+            ? { round: r, markdown: draft.markdown, review, patch: patchInfo }
+            : { round: r, markdown: draft.markdown, review },
+        );
       }
 
-      // Phase G placeholder: ship the last round's draft. No more
-      // placeholder kill -- if all 3 rounds verdicted needs-work, ship
-      // anyway. Phase G replaces this with a best-of-rounds picker + footer.
-      const final = (review.accepted?.markdown ?? draft.markdown);
+      // -----------------------------------------------------------------
+      // Phase G: ship policy.
+      //   1. Short-circuit on the FIRST round that verdicted accept.
+      //   2. Otherwise pick the best draft by the lexicographic signal
+      //      order (fix-items-addressed, citations, paragraphs, length)
+      //      and append a footer listing the winning round's still-
+      //      unaddressed reviewer work-items.
+      // -----------------------------------------------------------------
+      let final: string;
+      let shippedRound: 1 | 2 | 3;
+      let shipDecisionReason: string;
+      let confidenceBasis: 'accept-r1' | 'accept-r2' | 'accept-r3' | 'needs-work-no-fix' | 'needs-work-fix-pending';
 
-      // Confidence: accept@1 high; accept@2/3 medium; all-rounds-needs-work low.
+      const acceptIdx = candidates.findIndex(c => c.review.verdict === 'accept');
+      if (acceptIdx >= 0) {
+        const accepted = candidates[acceptIdx]!;
+        final = accepted.review.accepted?.markdown ?? accepted.markdown;
+        shippedRound = accepted.round;
+        shipDecisionReason = `accept@round${accepted.round}`;
+        confidenceBasis = accepted.round === 1 ? 'accept-r1'
+          : accepted.round === 2 ? 'accept-r2'
+          : 'accept-r3';
+      } else {
+        const pick = pickBestRound(candidates);
+        const winner = pick.winner;
+        // Footer lists the WINNING round's reviewer work-items so the
+        // user sees what's still pending against the shipped draft.
+        const footer = buildSectionFooter(winner.review.workItems);
+        final = winner.markdown + footer;
+        shippedRound = winner.round;
+        shipDecisionReason = pick.reason;
+        const fixUnaddressed = winner.review.workItems.filter(w => w.kind === 'fix').length;
+        confidenceBasis = fixUnaddressed > 0 ? 'needs-work-fix-pending' : 'needs-work-no-fix';
+      }
+
       const itemConfidence: 'high' | 'medium' | 'low' =
-        review.verdict === 'accept' && rounds === 1 ? 'high'   :
-        review.verdict === 'accept'                 ? 'medium' :
-                                                      'low';
+        confidenceBasis === 'accept-r1' ? 'high' :
+        confidenceBasis === 'needs-work-fix-pending' ? 'low' :
+        'medium';
 
-      // Stamp the section result on the TodoList item + mark complete.
-      // Phase G will extend this with the per-round workItems + statuses.
-      const failureReason = review.verdict === 'needs-work' && review.workItems.length > 0
-        ? review.workItems.map(w => `${w.kind}: ${w.action}`).join('\n')
+      // ---- Phase G.4: TodoList persistence with per-round trace ------
+      // failureReason now reflects what the WINNING round did NOT
+      // address; the per-round trace is stamped on the item meta for
+      // the workbench to render as a checklist.
+      const winnerCandidate = acceptIdx >= 0 ? candidates[acceptIdx]! : candidates.find(c => c.round === shippedRound)!;
+      const failureReason = acceptIdx < 0 && winnerCandidate.review.workItems.length > 0
+        ? winnerCandidate.review.workItems.map(w => `${w.kind}: ${w.action}`).join('\n')
         : undefined;
+
+      // Phase G.4: per-round trace persisted on the TodoList item so
+      // the workbench can render the reviewer's punch list + the
+      // writer's per-item statuses as a checklist alongside the
+      // section body. Fields are typed as Record<string, unknown> by
+      // the updateItemMeta API; the workbench will type-narrow these
+      // when it consumes them.
+      const reviewRoundsTrace = candidates.map(c => ({
+        round:        c.round,
+        verdict:      c.review.verdict,
+        workItems:    c.review.workItems.map(w => ({
+          id:     w.id,
+          kind:   w.kind,
+          where:  w.where,
+          issue:  w.issue,
+          action: w.action,
+        })),
+        itemStatuses: c.patch?.itemStatuses ?? [],
+      }));
+
       if (itemId !== undefined && this.deps.todos !== undefined) {
         try {
           await this.deps.todos.updateItemMeta(itemId, {
             kind:       'plan-action',
             origin:     'planner',
-            retryCount: rounds - 1,
+            retryCount: shippedRound - 1,
             answer:     final,
             findings:   [],
             citations:  [],
@@ -966,6 +1026,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               durationMs: 0,
               status:   c.errored ? 'failed' : 'ok',
             })),
+            // Phase G.4 per-round trace.
+            rounds:             shippedRound,
+            shippedDraft:       `round${shippedRound}`,
+            shipDecisionReason,
+            reviewRounds:       reviewRoundsTrace,
             ...(failureReason !== undefined ? { failureReason } : {}),
           });
           await this.deps.todos.markComplete(itemId);
@@ -974,8 +1039,24 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         }
       }
 
-      log.info({ actionId: action.id, rounds, traces: roundTraces }, 'section drafting complete');
-      const verdictLabel = `${review.verdict}@round${rounds}`;
+      log.info(
+        {
+          actionId:        action.id,
+          rounds:          candidates.length,
+          shippedRound,
+          shipDecisionReason,
+          confidence:      itemConfidence,
+          traces: candidates.map(c => ({
+            round:        c.round,
+            verdict:      c.review.verdict,
+            markdownLen:  c.markdown.length,
+            workItems:    c.review.workItems.length,
+            itemStatuses: c.patch?.itemStatuses.length ?? 0,
+          })),
+        },
+        'section drafting complete',
+      );
+      const verdictLabel = `${shipDecisionReason}@round${shippedRound}`;
       this.emitMilestone(
         synthBubble,
         `[${i + 1}/${actions.length}] "${action.title}" -- ${verdictLabel} (${cumulativeCalls.length} cumulative skill call${cumulativeCalls.length === 1 ? '' : 's'})`,
