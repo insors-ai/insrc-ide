@@ -221,10 +221,12 @@ test('repo.describe: aggregates kindCounts, languages, top modules', async () =>
 	assert.equal(tsRow['fileCount'], 2);
 	assert.equal(tsRow['entityCount'], 2);
 
-	const topModules = v['topModules'] as Array<Record<string, unknown>>;
+	// Phase B.1 renamed `topModules` -> `modules` (returns the COMPLETE list,
+	// no longer top-K).
+	const modules = v['modules'] as Array<Record<string, unknown>>;
 	// `${REPO}/src/orm` has 2 files (top), `${REPO}/src/util` has 1.
-	assert.equal(topModules[0]!['path'], `${REPO}/src/orm`);
-	assert.equal(topModules[0]!['fileCount'], 2);
+	assert.equal(modules[0]!['path'], `${REPO}/src/orm`);
+	assert.equal(modules[0]!['fileCount'], 2);
 });
 
 test('repo.describe: unindexed repo -> { found: false, reason: repo-not-indexed }', async () => {

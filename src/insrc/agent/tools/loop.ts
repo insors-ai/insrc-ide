@@ -417,10 +417,24 @@ function maybeEvict(workingMessages: LLMMessage[], budget: number): number {
       const block = blocks[b]!;
       if (block.type !== 'tool_result') continue;
       if (block.content.startsWith('[evicted')) continue;   // already stubbed
+
+      // Preserve the spillId (if any) so the model can still page into
+      // the on-disk spill after eviction. The renderer formats it as
+      // "_Full payload spilled to `<spillId>` ..._"; we extract the
+      // backtick-quoted id.
+      const spillIdMatch = block.content.match(/spilled to `([^`]+)`/);
+      const spillIdHint  = spillIdMatch ? ` spillId: ${spillIdMatch[1]}` : '';
+      const stub = `[evicted${spillIdHint}]`;
+
+      // Only evict if the stub is materially smaller than the original.
+      // For tiny tool_results (e.g. errors), the stub can be LARGER --
+      // skip those to avoid net-negative evictions.
+      if (stub.length >= block.content.length) continue;
+
       blocks[b] = {
         type: 'tool_result',
         tool_use_id: block.tool_use_id,
-        content: `[evicted -- analysis paragraph for tool_use_id "${block.tool_use_id}" was captured in a subsequent assistant turn. Use skill_load_page with the corresponding spillId if you need to re-examine this evidence.]`,
+        content: stub,
         ...(block.isError === true ? { isError: true as const } : {}),
       };
       evicted++;

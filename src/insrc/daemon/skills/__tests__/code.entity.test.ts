@@ -236,5 +236,6 @@ test('callees: empty result -> medium confidence', async () => {
 	assert.equal(result.confidence, 'medium');
 	const v = result.value as Record<string, unknown>;
 	assert.equal((v['neighbors'] as unknown[]).length, 0);
-	assert.equal(v['truncated'], false);
+	// Phase B.1 dropped the `truncated` output field (no skill-side cap).
+	assert.equal(v['truncated'], undefined);
 });

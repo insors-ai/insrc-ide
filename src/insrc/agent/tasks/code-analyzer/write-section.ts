@@ -454,9 +454,12 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 }
 
 /**
- * Count paragraphs in the concatenated section text. Phase A.2 joins
- * per-turn paragraphs with `\n\n`, so paragraph count = number of
- * non-empty blocks separated by blank lines.
+ * Count paragraphs in the concatenated section text. Counts non-empty
+ * blocks separated by blank lines (`\n\s*\n`). NOTE: this is paragraph
+ * count, not turn count -- a single turn may emit multiple paragraphs,
+ * and Phase A.2 also joins between turns with `\n\n`. Both contribute.
+ * The metric reflects "how many paragraphs of prose did the section
+ * end up with", which is the quality signal we actually care about.
  */
 function countParagraphs(text: string): number {
 	const trimmed = text.trim();
