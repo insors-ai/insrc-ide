@@ -833,7 +833,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // Fix 11.4: pass round-1's describedSkills into round 2 so the
       // retry doesn't waste rounds re-discovering schemas the writer
       // already learned.
-      const refineHint = review.verdict === 'refine' ? review.refine?.hint?.trim() : undefined;
+      // Phase E bridge: the reviewer now emits a typed work-item list
+      // (workItems[]) instead of a single hint string. The patch loop
+      // in Phase F will consume the list directly; for the existing
+      // round-2 redraft path we collapse it into a hint string.
+      // Phase G replaces this entire round-2 block with the 3-round
+      // patch loop + best-of-rounds picker.
+      const refineHint = review.verdict === 'needs-work' && review.workItems.length > 0
+        ? review.workItems.map(w => w.action).join('; ')
+        : undefined;
       if (refineHint !== undefined && refineHint.length > 0) {
         log.info({ actionId: action.id, hint: refineHint }, 'reviewer requested refine; running second pass');
         this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] "${action.title}" -- refine (redrafting with reviewer hint)`);
@@ -854,25 +862,35 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         rounds = 2;
       }
 
-      // Fix 11.5: when round 2 still verdicts refine, the orchestrator
-      // used to silently ship `draft.markdown` (which the reviewer
-      // explicitly rejected) as the section. Replace with a degraded
-      // marker so the report doesn't carry plausible-looking-but-wrong
-      // content. The TodoList item carries the failure reason.
-      const sectionFailed = rounds === 2 && review.verdict === 'refine';
+      // Fix 11.5: when round 2 still verdicts needs-work, the
+      // orchestrator used to silently ship `draft.markdown` (which the
+      // reviewer explicitly rejected) as the section. Replace with a
+      // degraded marker so the report doesn't carry plausible-looking-
+      // but-wrong content. The TodoList item carries the failure reason.
+      //
+      // Phase G of plans/code-analyzer-structured-review.md replaces
+      // this entire ship-or-kill branch with a 3-round best-of-rounds
+      // picker + footer for unaddressed items.
+      const sectionFailed = rounds === 2 && review.verdict === 'needs-work';
       const final = sectionFailed
         ? '_This section could not be drafted -- the writer failed both attempts. See the TodoList item for the writer\'s trace and the reviewer\'s hint._'
         : (review.accepted?.markdown ?? draft.markdown);
 
       // Fix 11.6: confidence reflects the reviewer's verdict, not the
       // tool-loop iteration count. accept@round1 = high; accept@round2
-      // = medium; refine (binding) = low.
+      // = medium; needs-work (binding) = low.
       const itemConfidence: 'high' | 'medium' | 'low' =
         review.verdict === 'accept' && rounds === 1 ? 'high'   :
         review.verdict === 'accept' && rounds === 2 ? 'medium' :
                                                       'low';
 
       // Stamp the section result on the TodoList item + mark complete.
+      // Phase E bridge: failureReason now derived from the reviewer's
+      // work-item actions (Phase G will swap this for the structured
+      // workItems + itemStatuses persistence the plan describes).
+      const failureReason = sectionFailed && review.workItems.length > 0
+        ? review.workItems.map(w => `${w.kind}: ${w.action}`).join('\n')
+        : undefined;
       if (itemId !== undefined && this.deps.todos !== undefined) {
         try {
           await this.deps.todos.updateItemMeta(itemId, {
@@ -890,9 +908,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               durationMs: 0,
               status:   c.errored ? 'failed' : 'ok',
             })),
-            ...(sectionFailed && review.refine?.hint !== undefined
-              ? { failureReason: review.refine.hint }
-              : {}),
+            ...(failureReason !== undefined ? { failureReason } : {}),
           });
           await this.deps.todos.markComplete(itemId);
         } catch (err) {
@@ -901,7 +917,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }
 
       const verdictLabel = rounds === 2
-        ? (review.verdict === 'accept' ? 'refine-then-accept' : 'refine-then-refine')
+        ? (review.verdict === 'accept' ? 'refine-then-accept' : 'refine-then-needs-work')
         : review.verdict;
       this.emitMilestone(
         synthBubble,

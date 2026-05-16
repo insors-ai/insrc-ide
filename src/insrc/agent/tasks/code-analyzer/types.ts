@@ -232,9 +232,10 @@ export interface AnalysisItemMeta {
    *  one strict-JSON retry already exhausted. */
   readonly warning?: string | undefined;
   /** Set when both rounds of the writeSectionWithTools → reviewAction
-   *  loop returned `verdict: 'refine'`. Carries the reviewer's last
-   *  hint so the user can inspect why the section couldn't be drafted
-   *  (the section body itself is a degraded marker in this case). */
+   *  loop returned `verdict: 'needs-work'`. Carries a concatenation of
+   *  the reviewer's last work-item actions so the user can inspect why
+   *  the section couldn't be drafted (the section body itself is a
+   *  degraded marker in this case). */
   readonly failureReason?: string | undefined;
 }
 

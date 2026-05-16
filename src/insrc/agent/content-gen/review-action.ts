@@ -7,7 +7,8 @@
  *   - sees the action card (objective + reviewCriteria),
  *   - sees the local draft,
  *   - sees the same evidence the expander saw,
- *   - emits `{ verdict: 'accept' | 'refine', accepted?, refine?, notes }`.
+ *   - emits `{ verdict: 'accept' | 'needs-work', workItems[], accepted?, notes }`
+ *     (Phase E of plans/code-analyzer-structured-review.md).
  *
  * Plus the per-action loop driver `expandThenReview` that ties Phase
  * 2 + 3 together: expand -> review -> if refine then expand-with-hint
@@ -54,14 +55,44 @@ export interface ReviewActionInput {
 	readonly analyzerLabel?: string | undefined;
 }
 
+/**
+ * Phase E of plans/code-analyzer-structured-review.md.
+ *
+ * Kind semantics:
+ *   - `fix`     -- factually wrong claim. The patch loop must address
+ *                  these; unaddressed `fix` items drop section
+ *                  confidence to `low`.
+ *   - `enhance` -- correct but thin (missing citations, vague).
+ *   - `add`     -- required coverage missing.
+ *   - `trim`    -- redundant / off-topic; cut in place.
+ */
+export type WorkItemKind = 'fix' | 'enhance' | 'add' | 'trim';
+
+/**
+ * One concrete editorial change the reviewer wants applied to the
+ * draft. Each item is atomic (one location, one issue, one action) --
+ * the patch loop (Phase F) iterates over the list and emits a
+ * `patch:<id>` or `skip:<id>` block per item.
+ */
+export interface ReviewWorkItem {
+	readonly id:     string;     // unique within the workItems list
+	readonly kind:   WorkItemKind;
+	readonly where:  string;     // "paragraph 3" | "section opening" | "after paragraph 5"
+	readonly issue:  string;     // one-sentence problem statement
+	readonly action: string;     // one-sentence concrete fix
+	/** Optional references back into the evidence block ("evidence[2]"). */
+	readonly evidenceRefs?: readonly string[];
+}
+
 export interface ReviewActionResult {
-	readonly verdict:   'accept' | 'refine';
+	readonly verdict:   'accept' | 'needs-work';
+	/** Work items the patch loop should iterate. Empty when verdict=accept. */
+	readonly workItems: readonly ReviewWorkItem[];
 	readonly accepted?: { readonly markdown: string };
-	readonly refine?:   { readonly hint: string };
 	readonly notes:     readonly string[];
 	/** True when the reviewer's response was unparseable / schema-
 	 *  violating after a single retry. The orchestrator treats this
-	 *  as a soft accept (verdict='accept', accepted.markdown =
+	 *  as a soft accept (verdict='accept', workItems=[], accepted.markdown =
 	 *  draft.markdown) so a flaky reviewer can't block the report. */
 	readonly degraded:  boolean;
 }
@@ -133,10 +164,11 @@ export async function reviewAction(
 		'review-action: both attempts invalid; soft-accepting draft',
 	);
 	return {
-		verdict:  'accept',
-		accepted: { markdown: input.draft.markdown },
-		notes:    [`reviewer-degraded: ${second.reason}`],
-		degraded: true,
+		verdict:   'accept',
+		workItems: [],
+		accepted:  { markdown: input.draft.markdown },
+		notes:     [`reviewer-degraded: ${second.reason}`],
+		degraded:  true,
 	};
 }
 
@@ -208,20 +240,26 @@ export async function expandThenReview(
 	}
 
 	// --- Round 2 ---------------------------------------------------------
-	const hint = review1.refine?.hint?.trim();
-	if (hint === undefined || hint.length === 0) {
-		// Reviewer said `refine` but didn't supply a hint -- treat as
+	// Phase E bridge: collapse the work-item list into a single hint
+	// string for the legacy expandAction expander. This entire function
+	// is being replaced by patchSectionWithTools in Phase F + the
+	// 3-round loop in Phase G; deletion happens in Phase H.
+	const hint = review1.workItems.length > 0
+		? review1.workItems.map(w => w.action).join('; ')
+		: '';
+	if (hint.length === 0) {
+		// Reviewer said `needs-work` but produced no items -- treat as
 		// accept of round-1 draft.
 		log.warn(
 			{ analyzer: input.analyzerLabel, actionId: input.action.id },
-			'expand-then-review: reviewer returned refine without a hint; soft-accepting round 1',
+			'expand-then-review: reviewer returned needs-work without items; soft-accepting round 1',
 		);
 		const markdown = (review1.accepted?.markdown ?? draft1.markdown).trim();
 		const result: ExpandThenReviewResult = {
 			markdown,
 			rounds:   1,
 			verdict:  'accept',
-			notes:    [...review1.notes, 'refine-without-hint; treated as accept'],
+			notes:    [...review1.notes, 'needs-work-without-items; treated as accept'],
 		};
 		onProgress?.('final', { kind: 'final', verdict: result.verdict, rounds: result.rounds, markdown: result.markdown });
 		return result;
@@ -252,8 +290,8 @@ export async function expandThenReview(
 
 	const markdown2 = (review2.accepted?.markdown ?? draft2.markdown).trim();
 	const round2Notes = [...review1.notes, ...review2.notes];
-	if (review2.verdict === 'refine') {
-		round2Notes.push('second-review-still-refine; binding accept');
+	if (review2.verdict === 'needs-work') {
+		round2Notes.push('second-review-still-needs-work; binding accept');
 	}
 	const final: ExpandThenReviewResult = {
 		markdown: markdown2,
@@ -278,35 +316,64 @@ const SYSTEM_PROMPT = [
 	'  - The draft markdown the local expander produced.',
 	'  - The same evidence the expander saw.',
 	'',
-	'Your job is a single binary verdict + (optionally) a focused fix.',
+	'Your job is a verdict + (for needs-work) a typed work-item list',
+	'that a patch loop will iterate.',
 	'',
 	'Verdict rules:',
 	'  - `accept` -- the draft adequately satisfies the review criteria.',
-	'    You MAY include a polished rewrite under `accepted.markdown`',
-	'    if surgical edits are clearly worth it; otherwise omit it and',
-	'    the orchestrator uses the local draft as-is. Do NOT rewrite',
-	'    just for style.',
-	'  - `refine` -- the draft has a SPECIFIC concrete gap that a',
-	'    second pass should fix. Provide ONE actionable sentence in',
-	'    `refine.hint`. Do NOT list multiple issues -- pick the most',
-	'    important one. The local expander gets one more attempt with',
-	'    your hint as a focused-fix instruction.',
+	'    `workItems` MUST be empty. You MAY include a polished rewrite',
+	'    under `accepted.markdown` if surgical edits are clearly worth',
+	'    it; otherwise omit it and the orchestrator uses the local',
+	'    draft as-is. Do NOT rewrite just for style.',
+	'  - `needs-work` -- the draft has concrete issues. Emit 1-6',
+	'     atomic work items in `workItems`. Each item describes ONE',
+	'     change to ONE location.',
+	'',
+	'Work-item kinds:',
+	'  - `fix`     -- factually wrong / unsupported claim in the draft.',
+	'                 Use ONLY for factual problems (e.g. the draft',
+	'                 says class X does Y, but the evidence shows it',
+	'                 does Z). Stylistic issues use `enhance`. `fix`',
+	'                 items GATE the section -- they must be addressed',
+	'                 or the section ships with reduced confidence.',
+	'  - `enhance` -- claim is correct but thin (missing citations,',
+	'                 vague phrasing, lacks specifics).',
+	'  - `add`     -- a topic the review criteria require is missing.',
+	'                 The patch loop will run a sub-investigation and',
+	'                 add a new paragraph.',
+	'  - `trim`    -- redundant / off-topic content; cut in place.',
+	'',
+	'Work-item field rules:',
+	'  - `id`     -- unique within the workItems list; use `wi-1`, `wi-2`, ...',
+	'  - `where`  -- point at something CONCRETE in the draft. Count',
+	'                 paragraphs starting at 1 (paragraphs are separated',
+	'                 by blank lines). Use "paragraph N" or "section',
+	'                 opening" or "section closing" or "after paragraph N".',
+	'                 NEVER vague regions like "throughout the draft".',
+	'  - `issue`  -- one-sentence problem statement.',
+	'  - `action` -- one-sentence concrete fix. ONE step. Never list',
+	'                 alternatives ("cite X or Y or Z" -> emit three',
+	'                 separate items, one per cite).',
+	'  - `evidenceRefs` -- optional; reference back into the evidence',
+	'                 block as `evidence[N]`.',
 	'',
 	'Hard rules:',
 	'  1. Output strict JSON ONLY -- no markdown fences, no prose, no preamble.',
-	'  2. The schema is fixed: `{ verdict, accepted?, refine?, notes? }`.',
-	'  3. `accept` MUST NOT include a `refine` field. `refine` MUST',
-	'     include a `hint` and SHOULD NOT include `accepted`.',
-	'  4. Keep `notes` short -- 1-3 entries describing what was good',
+	'  2. The schema is fixed: `{ verdict, workItems, accepted?, notes? }`.',
+	'  3. `accept` -> `workItems` MUST be empty. `needs-work` -> `workItems`',
+	'     MUST be non-empty. Validator rejects mismatches.',
+	'  4. Cap at 6 work items. If there are more than 6 issues, pick the',
+	'     6 most important. Round 2/3 of the loop will catch the rest.',
+	'  5. Keep `notes` short -- 1-3 entries describing what was good',
 	'     or which criterion drove the verdict.',
-	'  5. PRESERVE CLICKABLE CITATIONS. The expander emits',
+	'  6. PRESERVE CLICKABLE CITATIONS. The expander emits',
 	'     `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)` Markdown',
 	'     links so the IDE can navigate to the source. When polishing',
 	'     under `accepted.markdown` you MUST preserve these links',
 	'     verbatim -- do NOT strip them, convert them to bare backticks,',
 	'     or invent new ones the evidence does not support. If the',
 	'     draft is missing links for entities the evidence carries a',
-	'     file for, emit `refine` with a hint to add them.',
+	'     file for, emit an `enhance` work item.',
 ].join('\n');
 
 function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
@@ -368,7 +435,7 @@ function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
 	}
 
 	userLines.push('## Output');
-	userLines.push('Strict JSON: `{ verdict, accepted?, refine?, notes }`. No fences, no prose.');
+	userLines.push('Strict JSON: `{ verdict, workItems, accepted?, notes }`. No fences, no prose. `workItems` MUST be empty for `accept` and non-empty (1-6 items) for `needs-work`.');
 
 	return [
 		{ role: 'system', content: SYSTEM_PROMPT },
@@ -443,8 +510,8 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 	const obj = parsed as Record<string, unknown>;
 
 	const verdictRaw = obj['verdict'];
-	if (verdictRaw !== 'accept' && verdictRaw !== 'refine') {
-		return '`verdict` must be "accept" or "refine"';
+	if (verdictRaw !== 'accept' && verdictRaw !== 'needs-work') {
+		return '`verdict` must be "accept" or "needs-work"';
 	}
 
 	const notes: string[] = [];
@@ -456,11 +523,63 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 		}
 	}
 
+	// Parse workItems (always required as an array, but may be empty
+	// for accept). Phase E of plans/code-analyzer-structured-review.md.
+	const workItemsRaw = obj['workItems'];
+	if (workItemsRaw !== undefined && !Array.isArray(workItemsRaw)) {
+		return '`workItems` must be an array';
+	}
+	const workItems: ReviewWorkItem[] = [];
+	const seenIds = new Set<string>();
+	if (Array.isArray(workItemsRaw)) {
+		if (workItemsRaw.length > 6) {
+			return '`workItems` capped at 6 items';
+		}
+		for (let i = 0; i < workItemsRaw.length; i++) {
+			const wiRaw = workItemsRaw[i];
+			if (wiRaw === null || typeof wiRaw !== 'object' || Array.isArray(wiRaw)) {
+				return `\`workItems[${i}]\` is not an object`;
+			}
+			const wi = wiRaw as Record<string, unknown>;
+			const id     = typeof wi['id']     === 'string' ? (wi['id'] as string).trim() : '';
+			const kind   = wi['kind'];
+			const where  = typeof wi['where']  === 'string' ? (wi['where'] as string).trim() : '';
+			const issue  = typeof wi['issue']  === 'string' ? (wi['issue'] as string).trim() : '';
+			const action = typeof wi['action'] === 'string' ? (wi['action'] as string).trim() : '';
+			if (id.length === 0)     return `\`workItems[${i}].id\` is required`;
+			if (seenIds.has(id))     return `\`workItems[${i}].id\` "${id}" is duplicated`;
+			seenIds.add(id);
+			if (kind !== 'fix' && kind !== 'enhance' && kind !== 'add' && kind !== 'trim') {
+				return `\`workItems[${i}].kind\` must be one of fix|enhance|add|trim`;
+			}
+			if (where.length === 0)  return `\`workItems[${i}].where\` is required`;
+			if (issue.length === 0)  return `\`workItems[${i}].issue\` is required`;
+			if (action.length === 0) return `\`workItems[${i}].action\` is required`;
+
+			const item: { -readonly [K in keyof ReviewWorkItem]: ReviewWorkItem[K] } = {
+				id, kind, where, issue, action,
+			};
+			const refsRaw = wi['evidenceRefs'];
+			if (Array.isArray(refsRaw)) {
+				const refs: string[] = [];
+				for (const r of refsRaw) {
+					if (typeof r === 'string' && r.trim().length > 0) refs.push(r.trim());
+				}
+				if (refs.length > 0) item.evidenceRefs = refs;
+			}
+			workItems.push(item);
+		}
+	}
+
 	if (verdictRaw === 'accept') {
+		if (workItems.length > 0) {
+			return '`workItems` must be empty when verdict="accept"';
+		}
 		const result: { -readonly [K in keyof ReviewActionResult]: ReviewActionResult[K] } = {
-			verdict:  'accept',
+			verdict:   'accept',
+			workItems: [],
 			notes,
-			degraded: false,
+			degraded:  false,
 		};
 		const acceptedRaw = obj['accepted'];
 		if (acceptedRaw !== undefined && typeof acceptedRaw === 'object' && acceptedRaw !== null) {
@@ -472,21 +591,15 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 		return result;
 	}
 
-	// verdict === 'refine'
-	const refineRaw = obj['refine'];
-	if (refineRaw === undefined || typeof refineRaw !== 'object' || refineRaw === null) {
-		return '`refine` block missing for verdict="refine"';
-	}
-	const r = refineRaw as Record<string, unknown>;
-	const hint = typeof r['hint'] === 'string' ? r['hint'].trim() : '';
-	if (hint.length === 0) {
-		return '`refine.hint` must be a non-empty string';
+	// verdict === 'needs-work'
+	if (workItems.length === 0) {
+		return '`workItems` must be non-empty when verdict="needs-work"';
 	}
 	return {
-		verdict:  'refine',
-		refine:   { hint },
+		verdict:   'needs-work',
+		workItems,
 		notes,
-		degraded: false,
+		degraded:  false,
 	};
 }
 

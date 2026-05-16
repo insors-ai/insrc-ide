@@ -155,9 +155,19 @@ test('integration: refine on one action does not affect the other', async () => 
 	const localProvider = fakeProvider('modules-draft1', 'cycles-draft1', 'cycles-draft2-after-refine');
 	// Reviewer: accepts modules; refines cycles, then accepts.
 	const reviewProvider = fakeProvider(
-		JSON.stringify({ verdict: 'accept', notes: ['ok'] }),
-		JSON.stringify({ verdict: 'refine', refine: { hint: 'mention the largest cycle by name' }, notes: [] }),
-		JSON.stringify({ verdict: 'accept', notes: ['fixed'] }),
+		JSON.stringify({ verdict: 'accept', workItems: [], notes: ['ok'] }),
+		JSON.stringify({
+			verdict:   'needs-work',
+			workItems: [{
+				id:     'wi-1',
+				kind:   'enhance',
+				where:  'paragraph 1',
+				issue:  'largest cycle not named',
+				action: 'mention the largest cycle by name',
+			}],
+			notes:     [],
+		}),
+		JSON.stringify({ verdict: 'accept', workItems: [], notes: ['fixed'] }),
 	);
 
 	const results: { id: string; rounds: 1 | 2; verdict: string }[] = [];

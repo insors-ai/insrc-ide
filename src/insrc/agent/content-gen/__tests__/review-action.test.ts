@@ -1,11 +1,17 @@
 /**
  * Tests for the reviewAction helper + expandThenReview loop driver
- * (Phase 3 of plans/analyzers/cloud-plan-local-expand-cloud-review.md).
+ * (Phase 3 of plans/analyzers/cloud-plan-local-expand-cloud-review.md,
+ * with Phase E of plans/code-analyzer-structured-review.md replacing
+ * the single-hint refine shape with a typed work-item list).
  *
  * The review helper sends one cloud LLM call and parses the JSON
  * verdict; the loop driver chains expand+review with a bounded
  * second-round refinement. We use stubbed providers throughout so
  * the tests are deterministic.
+ *
+ * Note: `expandThenReview` is deprecated (Phase H deletes it). The
+ * tests here keep it covered until that deletion lands so the
+ * Phase E bridge doesn't regress silently.
  */
 
 import { test } from 'node:test';
@@ -31,7 +37,6 @@ const ACTION: PlannedAction = {
 	id:        'modules-overview',
 	title:     'HDFS Core: Module Layout',
 	objective: 'Map the top-level HDFS Core packages and their responsibilities.',
-	evidence:  [{ skillId: 'code.source.repo.describe', executionIdx: 0 }],
 	maxBudgetTokens: 1500,
 	reviewCriteria: [
 		'Names each top-level HDFS Core module by absolute path',
@@ -79,76 +84,148 @@ function fakeProviderThrowing(message: string): LLMProvider {
 }
 
 const ACCEPT_VERDICT = JSON.stringify({
-	verdict: 'accept',
-	notes:   ['evidence is concrete; criteria satisfied'],
+	verdict:   'accept',
+	workItems: [],
+	notes:     ['evidence is concrete; criteria satisfied'],
 });
 
 const ACCEPT_WITH_POLISH = JSON.stringify({
-	verdict: 'accept',
-	accepted: { markdown: 'HDFS Core lives at `/repo/hadoop/hadoop-hdfs` -- 240 files (polished).' },
-	notes:    ['lightly tightened wording'],
+	verdict:   'accept',
+	workItems: [],
+	accepted:  { markdown: 'HDFS Core lives at `/repo/hadoop/hadoop-hdfs` -- 240 files (polished).' },
+	notes:     ['lightly tightened wording'],
 });
 
-const REFINE_VERDICT = JSON.stringify({
-	verdict: 'refine',
-	refine:  { hint: 'Mention the file count per top-level module, not just the root.' },
-	notes:   ['draft missed the per-module count'],
+const NEEDS_WORK_VERDICT = JSON.stringify({
+	verdict:   'needs-work',
+	workItems: [
+		{
+			id:     'wi-1',
+			kind:   'enhance',
+			where:  'paragraph 1',
+			issue:  'No per-module file counts cited',
+			action: 'Mention the file count per top-level module, not just the root',
+		},
+	],
+	notes:     ['draft missed the per-module count'],
 });
 
 // ---------------------------------------------------------------------------
 // validateReview (pure)
 // ---------------------------------------------------------------------------
 
-test('validateReview: bare accept -> ok, no accepted block', () => {
-	const r = validateReview({ verdict: 'accept' });
+test('validateReview: bare accept with empty workItems -> ok, no accepted block', () => {
+	const r = validateReview({ verdict: 'accept', workItems: [] });
 	assert.notEqual(typeof r, 'string');
 	if (typeof r === 'string') return;
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.accepted, undefined);
+	assert.deepEqual(r.workItems, []);
 });
 
 test('validateReview: accept with polished rewrite -> ok, accepted.markdown set', () => {
-	const r = validateReview({ verdict: 'accept', accepted: { markdown: 'polished' } });
+	const r = validateReview({ verdict: 'accept', workItems: [], accepted: { markdown: 'polished' } });
 	assert.notEqual(typeof r, 'string');
 	if (typeof r === 'string') return;
 	assert.equal(r.accepted?.markdown, 'polished');
 });
 
-test('validateReview: accept with empty markdown -> ok, accepted dropped', () => {
-	const r = validateReview({ verdict: 'accept', accepted: { markdown: '   ' } });
+test('validateReview: accept with NON-empty workItems -> error', () => {
+	const r = validateReview({
+		verdict: 'accept',
+		workItems: [{ id: 'wi-1', kind: 'fix', where: 'p1', issue: 'x', action: 'y' }],
+	});
+	assert.equal(typeof r, 'string');
+	assert.match(r as string, /workItems.*empty/);
+});
+
+test('validateReview: needs-work without workItems -> error', () => {
+	const r = validateReview({ verdict: 'needs-work', workItems: [] });
+	assert.equal(typeof r, 'string');
+	assert.match(r as string, /workItems.*non-empty/);
+});
+
+test('validateReview: needs-work with single fix item -> ok', () => {
+	const r = validateReview({
+		verdict: 'needs-work',
+		workItems: [
+			{ id: 'wi-1', kind: 'fix', where: 'paragraph 2', issue: 'wrong claim', action: 'verify and correct' },
+		],
+	});
 	assert.notEqual(typeof r, 'string');
 	if (typeof r === 'string') return;
-	assert.equal(r.accepted, undefined);
+	assert.equal(r.verdict, 'needs-work');
+	assert.equal(r.workItems.length, 1);
+	assert.equal(r.workItems[0]!.id, 'wi-1');
+	assert.equal(r.workItems[0]!.kind, 'fix');
 });
 
-test('validateReview: refine without hint -> error', () => {
-	const r = validateReview({ verdict: 'refine', refine: {} });
+test('validateReview: work item missing required field -> error', () => {
+	const r = validateReview({
+		verdict: 'needs-work',
+		workItems: [{ id: 'wi-1', kind: 'fix', where: 'p1', issue: 'x' }],   // missing `action`
+	});
 	assert.equal(typeof r, 'string');
-	assert.match(r as string, /hint/);
+	assert.match(r as string, /action.*required/);
 });
 
-test('validateReview: refine without refine block -> error', () => {
-	const r = validateReview({ verdict: 'refine' });
+test('validateReview: work item with bogus kind -> error', () => {
+	const r = validateReview({
+		verdict: 'needs-work',
+		workItems: [{ id: 'wi-1', kind: 'overhaul', where: 'p1', issue: 'x', action: 'y' }],
+	});
 	assert.equal(typeof r, 'string');
-	assert.match(r as string, /refine/);
+	assert.match(r as string, /kind.*fix\|enhance\|add\|trim/);
 });
 
-test('validateReview: refine with hint -> ok', () => {
-	const r = validateReview({ verdict: 'refine', refine: { hint: 'Add the cyclic-deps citation' } });
+test('validateReview: duplicate work item ids -> error', () => {
+	const r = validateReview({
+		verdict: 'needs-work',
+		workItems: [
+			{ id: 'wi-1', kind: 'fix',     where: 'p1', issue: 'a', action: 'fix it' },
+			{ id: 'wi-1', kind: 'enhance', where: 'p2', issue: 'b', action: 'enhance it' },
+		],
+	});
+	assert.equal(typeof r, 'string');
+	assert.match(r as string, /duplicated/);
+});
+
+test('validateReview: more than 6 work items -> error', () => {
+	const items = Array.from({ length: 7 }, (_, i) => ({
+		id: `wi-${i + 1}`, kind: 'enhance' as const, where: `p${i + 1}`, issue: 'x', action: 'y',
+	}));
+	const r = validateReview({ verdict: 'needs-work', workItems: items });
+	assert.equal(typeof r, 'string');
+	assert.match(r as string, /capped at 6/);
+});
+
+test('validateReview: work item with evidenceRefs -> ok, refs preserved', () => {
+	const r = validateReview({
+		verdict: 'needs-work',
+		workItems: [{
+			id: 'wi-1', kind: 'enhance', where: 'p1', issue: 'x', action: 'y',
+			evidenceRefs: ['evidence[0]', 'evidence[2]'],
+		}],
+	});
 	assert.notEqual(typeof r, 'string');
 	if (typeof r === 'string') return;
-	assert.equal(r.verdict, 'refine');
-	assert.equal(r.refine?.hint, 'Add the cyclic-deps citation');
+	assert.deepEqual(r.workItems[0]!.evidenceRefs, ['evidence[0]', 'evidence[2]']);
 });
 
 test('validateReview: bogus verdict -> error', () => {
-	const r = validateReview({ verdict: 'maybe' });
+	const r = validateReview({ verdict: 'maybe', workItems: [] });
 	assert.equal(typeof r, 'string');
 	assert.match(r as string, /verdict/);
 });
 
+test('validateReview: legacy "refine" verdict -> error (no longer accepted)', () => {
+	const r = validateReview({ verdict: 'refine', refine: { hint: 'old shape' } });
+	assert.equal(typeof r, 'string');
+	assert.match(r as string, /accept.*needs-work/);
+});
+
 test('validateReview: notes filter to non-empty strings only', () => {
-	const r = validateReview({ verdict: 'accept', notes: ['', 'good', '   ', 'fine'] });
+	const r = validateReview({ verdict: 'accept', workItems: [], notes: ['', 'good', '   ', 'fine'] });
 	assert.notEqual(typeof r, 'string');
 	if (typeof r === 'string') return;
 	assert.deepEqual(r.notes, ['good', 'fine']);
@@ -164,6 +241,9 @@ test('buildReviewMessages: includes objective, criteria, draft, evidence', () =>
 	const sys = msgs[0]!.content as string;
 	const user = msgs[1]!.content as string;
 	assert.match(sys, /You review ONE section/);
+	assert.match(sys, /Work-item kinds:/);
+	assert.match(sys, /fix.*factually wrong/);
+	assert.match(sys, /needs-work/);
 	assert.match(user, /## Section under review/);
 	assert.match(user, /HDFS Core: Module Layout/);
 	assert.match(user, /## Review criteria/);
@@ -171,6 +251,7 @@ test('buildReviewMessages: includes objective, criteria, draft, evidence', () =>
 	assert.match(user, /## Draft markdown/);
 	assert.match(user, /\/repo\/hadoop\/hadoop-hdfs/);
 	assert.match(user, /## Evidence the expander saw/);
+	assert.match(user, /workItems/);
 });
 
 test('buildReviewMessages: truncated draft -> truncation note rendered', () => {
@@ -204,6 +285,7 @@ test('reviewAction: accept verdict on first try -> verdict accept, no degraded',
 	);
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.degraded, false);
+	assert.deepEqual(r.workItems, []);
 });
 
 test('reviewAction: accept-with-polish -> accepted.markdown surfaced', async () => {
@@ -215,13 +297,15 @@ test('reviewAction: accept-with-polish -> accepted.markdown surfaced', async () 
 	assert.match(r.accepted?.markdown ?? '', /polished/);
 });
 
-test('reviewAction: refine verdict -> hint surfaced', async () => {
+test('reviewAction: needs-work verdict -> workItems surfaced', async () => {
 	const r = await reviewAction(
 		{ action: ACTION, draft: DRAFT, evidence: EVIDENCE },
-		fakeProvider(REFINE_VERDICT),
+		fakeProvider(NEEDS_WORK_VERDICT),
 	);
-	assert.equal(r.verdict, 'refine');
-	assert.match(r.refine?.hint ?? '', /file count/);
+	assert.equal(r.verdict, 'needs-work');
+	assert.equal(r.workItems.length, 1);
+	assert.equal(r.workItems[0]!.kind, 'enhance');
+	assert.match(r.workItems[0]!.action, /file count/);
 });
 
 test('reviewAction: first-pass invalid + second-pass valid -> ok', async () => {
@@ -240,6 +324,7 @@ test('reviewAction: both attempts invalid -> soft accept with degraded:true', as
 	);
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.degraded, true);
+	assert.deepEqual(r.workItems, []);
 	assert.equal(r.accepted?.markdown, DRAFT.markdown);
 	assert.match(r.notes[0] ?? '', /reviewer-degraded/);
 });
@@ -251,10 +336,11 @@ test('reviewAction: provider throws on both attempts -> soft accept', async () =
 	);
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.degraded, true);
+	assert.deepEqual(r.workItems, []);
 });
 
 // ---------------------------------------------------------------------------
-// expandThenReview loop
+// expandThenReview loop (deprecated; bridges old hint loop through workItems)
 // ---------------------------------------------------------------------------
 
 const LOCAL_BODY = 'HDFS Core lives at `/repo/hadoop/hadoop-hdfs` (240 files).';
@@ -304,7 +390,7 @@ test('expandThenReview: 1-round accept -> rounds=1, no second expand', async () 
 	assert.deepEqual(phases, ['expand-1', 'review-1', 'final']);
 });
 
-test('expandThenReview: refine then accept -> rounds=2, second draft used', async () => {
+test('expandThenReview: needs-work then accept -> rounds=2, second draft used', async () => {
 	let localIdx = 0;
 	const local: LLMProvider = {
 		async complete(): Promise<LLMResponse> {
@@ -316,7 +402,7 @@ test('expandThenReview: refine then accept -> rounds=2, second draft used', asyn
 		supportsTools: true,
 	};
 
-	const cloud = fakeProvider(REFINE_VERDICT, ACCEPT_VERDICT);
+	const cloud = fakeProvider(NEEDS_WORK_VERDICT, ACCEPT_VERDICT);
 
 	const phases: ExpandThenReviewPhase[] = [];
 	const result = await expandThenReview(
@@ -336,7 +422,7 @@ test('expandThenReview: refine then accept -> rounds=2, second draft used', asyn
 	assert.deepEqual(phases, ['expand-1', 'review-1', 'expand-2', 'review-2', 'final']);
 });
 
-test('expandThenReview: refine then refine -> rounds=2, binding accept on second draft, note flag', async () => {
+test('expandThenReview: needs-work twice -> rounds=2, binding accept on second draft, note flag', async () => {
 	let localIdx = 0;
 	const local: LLMProvider = {
 		async complete(): Promise<LLMResponse> {
@@ -348,7 +434,7 @@ test('expandThenReview: refine then refine -> rounds=2, binding accept on second
 		supportsTools: true,
 	};
 
-	const cloud = fakeProvider(REFINE_VERDICT, REFINE_VERDICT);
+	const cloud = fakeProvider(NEEDS_WORK_VERDICT, NEEDS_WORK_VERDICT);
 
 	const result = await expandThenReview(
 		{ action: ACTION, evidence: EVIDENCE, request: 'q' },
@@ -359,34 +445,23 @@ test('expandThenReview: refine then refine -> rounds=2, binding accept on second
 	assert.equal(result.rounds, 2);
 	assert.equal(result.verdict, 'refine-then-accept');
 	assert.match(result.markdown, /second-refined/);
-	assert.ok(result.notes.some(n => /second-review-still-refine/.test(n)));
+	assert.ok(result.notes.some(n => /second-review-still-needs-work/.test(n)));
 });
 
-test('expandThenReview: refine without hint -> treated as accept of round 1', async () => {
+test('expandThenReview: needs-work without items -> treated as accept of round 1', async () => {
 	const local = fakeProvider(LOCAL_BODY);
-	const cloud = fakeProvider(JSON.stringify({ verdict: 'refine', refine: { hint: 'Add the cyclic-deps citation.' } }));
-	// Modify reviewer above to return refine WITH hint, then we'll
-	// cover the without-hint path via a different path: pass a
-	// fakeProvider that yields refine-with-empty-hint -> validation
-	// rejects it, retry returns same -> degraded soft-accept.
-	void cloud;
-
-	// Different test: simulate the reviewer returning refine without
-	// a hint at the schema-violation level. validateReview will
-	// reject; tryReview retries; the retry also returns the same
-	// shape -> reviewAction returns degraded soft-accept.
-	const cloudDegraded = fakeProvider(
-		JSON.stringify({ verdict: 'refine' }),                  // no refine block -> error
-		JSON.stringify({ verdict: 'refine', refine: {} }),       // still bad -> error
+	// reviewer says needs-work but with empty workItems (validator
+	// rejects -> retry fails too -> degraded soft-accept).
+	const cloud = fakeProvider(
+		JSON.stringify({ verdict: 'needs-work', workItems: [] }),
+		JSON.stringify({ verdict: 'needs-work', workItems: [] }),
 	);
 
 	const result = await expandThenReview(
 		{ action: ACTION, evidence: EVIDENCE, request: 'q' },
 		local,
-		cloudDegraded,
+		cloud,
 	);
-	// Both review attempts fail -> reviewAction returns degraded
-	// accept -> the loop accepts in round 1.
 	assert.equal(result.rounds, 1);
 	assert.equal(result.verdict, 'accept');
 });

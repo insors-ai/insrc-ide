@@ -94,30 +94,55 @@ export const PLAN_ACTIONS_SCHEMA = {
 } as const;
 
 /**
- * Review verdict schema (per-action cloud reviewer). The reviewer
- * picks `accept` (optionally with a polished rewrite under
- * `accepted.markdown`) or `refine` (one focused hint the local
- * expander uses on its second pass). Second-pass `refine` verdicts
- * are binding -- the orchestrator accepts the second draft regardless
- * and stamps a note.
+ * Review verdict schema (per-action cloud reviewer). Phase E of
+ * plans/code-analyzer-structured-review.md: replaced the single
+ * `refine.hint` string with a typed work-item list.
+ *
+ * Verdict shape:
+ *   - `accept`: the draft adequately satisfies the review criteria.
+ *     `workItems` MUST be empty. `accepted.markdown` MAY contain a
+ *     polished rewrite preserving all clickable citations.
+ *   - `needs-work`: the draft has concrete heterogeneous issues.
+ *     `workItems` MUST be non-empty (1-6 items). The orchestrator
+ *     hands the work-item list to a patch loop that addresses each
+ *     item against the draft.
+ *
+ * Work-item kinds:
+ *   - `fix`     -- factually wrong claim in the draft (gates shipping).
+ *   - `enhance` -- correct but thin (missing citations / vague).
+ *   - `add`     -- required coverage missing.
+ *   - `trim`    -- redundant / off-topic; cut in place.
  */
 export const REVIEW_ACTION_SCHEMA = {
 	type: 'object',
 	properties: {
-		verdict:  { type: 'string', enum: ['accept', 'refine'] },
+		verdict:  { type: 'string', enum: ['accept', 'needs-work'] },
+		workItems: {
+			type: 'array',
+			minItems: 0,
+			maxItems: 6,
+			items: {
+				type: 'object',
+				properties: {
+					id:     { type: 'string', minLength: 1 },
+					kind:   { type: 'string', enum: ['fix', 'enhance', 'add', 'trim'] },
+					where:  { type: 'string', minLength: 1 },
+					issue:  { type: 'string', minLength: 1 },
+					action: { type: 'string', minLength: 1 },
+					evidenceRefs: {
+						type: 'array',
+						items: { type: 'string' },
+					},
+				},
+				required: ['id', 'kind', 'where', 'issue', 'action'],
+			},
+		},
 		accepted: {
 			type: 'object',
 			properties: {
 				markdown: { type: 'string' },
 			},
 			required: ['markdown'],
-		},
-		refine: {
-			type: 'object',
-			properties: {
-				hint: { type: 'string', minLength: 1 },
-			},
-			required: ['hint'],
 		},
 		notes: {
 			type: 'array',
