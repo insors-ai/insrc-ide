@@ -44,6 +44,8 @@ interface SectionMetrics {
 	readonly citationCount: number;
 	readonly evictionsApplied: number;
 	readonly inputTokensFinal: number;
+	readonly transitionPhraseNudgeFired: boolean;
+	readonly firstTurnFramingDetected: boolean;
 }
 
 const LOG_DIR = '/tmp/.insrc';
@@ -104,6 +106,8 @@ function loadSections(logPath: string, pidFilter: number | undefined): SectionMe
 			citationCount: (j['citationCount'] as number) ?? 0,
 			evictionsApplied: (j['evictionsApplied'] as number) ?? 0,
 			inputTokensFinal: (j['inputTokensFinal'] as number) ?? 0,
+			transitionPhraseNudgeFired: (j['transitionPhraseNudgeFired'] as boolean) ?? false,
+			firstTurnFramingDetected:   (j['firstTurnFramingDetected'] as boolean) ?? false,
 		});
 	}
 	return out;
@@ -142,10 +146,15 @@ function formatTable(rows: SectionMetrics[]): string {
 		pad('cites', 5) + ' ' +
 		pad('evict', 5) + ' ' +
 		pad('tok', 6) + ' ' +
+		pad('flags', 7) + ' ' +
 		'hit',
 	);
-	lines.push('-'.repeat(96));
+	lines.push('-'.repeat(104));
 	for (const r of rows) {
+		// flags column: N = transition-phrase nudge fired, F = first-turn
+		// process-narration framing detected (J.4).
+		const flags = (r.transitionPhraseNudgeFired ? 'N' : '-')
+			+ (r.firstTurnFramingDetected ? 'F' : '-');
 		lines.push(
 			pad(r.actionId.slice(0, 36), 36) + ' ' +
 			pad(r.toolCallCount, 5) + ' ' +
@@ -156,6 +165,7 @@ function formatTable(rows: SectionMetrics[]): string {
 			pad(r.citationCount, 5) + ' ' +
 			pad(r.evictionsApplied, 5) + ' ' +
 			pad(r.inputTokensFinal, 6) + ' ' +
+			pad(flags, 7) + ' ' +
 			(r.hitLimit ? 'cap' : '-'),
 		);
 	}
@@ -173,6 +183,8 @@ function formatAggregates(rows: SectionMetrics[]): string {
 	const evicts = rows.map(r => r.evictionsApplied);
 	const tokens = rows.map(r => r.inputTokensFinal);
 	const iters = rows.map(r => r.toolCallCount);
+	const nudged  = rows.filter(r => r.transitionPhraseNudgeFired).length;
+	const framing = rows.filter(r => r.firstTurnFramingDetected).length;
 	return [
 		`sections:                  ${rows.length}`,
 		`iterations  median / p90:  ${median(iters)} / ${p90(iters)}`,
@@ -184,6 +196,8 @@ function formatAggregates(rows: SectionMetrics[]): string {
 		`tokensFinal median / p90:  ${median(tokens)} / ${p90(tokens)}`,
 		`hit-cap sections:          ${rows.filter(r => r.hitLimit).length}`,
 		`empty sections (text=0):   ${rows.filter(r => r.textLength === 0).length}`,
+		`transition-nudge fired:    ${nudged} / ${rows.length} (${rows.length > 0 ? Math.round((nudged / rows.length) * 100) : 0}%)`,
+		`process-narration framing: ${framing} / ${rows.length} (${rows.length > 0 ? Math.round((framing / rows.length) * 100) : 0}%)`,
 	].join('\n');
 }
 

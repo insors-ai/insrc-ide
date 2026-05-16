@@ -72,6 +72,16 @@ export interface ToolLoopOpts {
    * and devstral-small-2).
    */
   maxInputTokens?: number | undefined;
+  /**
+   * Phase J.2: disable the transition-phrase nudge. Default `false`
+   * (nudge on). The code-analyzer section writer benefits from the
+   * nudge -- it catches the "announce-then-stop" failure mode where
+   * a final paragraph reads "Let me now investigate X" without
+   * actually calling the tool. The patch loop in Phase F has a
+   * different output protocol (`patch:<id>` / `skip:<id>` blocks,
+   * not framing-then-close) so it sets this `true`.
+   */
+  disableTransitionNudge?: boolean | undefined;
   /** Callback when an LLM response includes usage info (for cost tracking) */
   onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
   /** User's original prompt (passed to SmartRead for intelligent extraction) */
@@ -95,6 +105,8 @@ export interface ToolLoopResult {
   evictionsApplied: number;
   /** Estimated tokens in the final working-message set (Phase D telemetry). */
   inputTokensFinal: number;
+  /** Phase J.2: true if the transition-phrase nudge fired during this loop. */
+  transitionPhraseNudgeFired: boolean;
 }
 
 /**
@@ -129,6 +141,13 @@ export async function runToolLoop(
   let iterations = 0;
   let nudgeCount = 0;
   let evictionsApplied = 0;
+  // Phase J.2: separate one-shot counter for the transition-phrase
+  // nudge. Independent of `nudgeCount` because the underlying failure
+  // mode (announce-then-stop) is rarer than the tool-reference nudge's
+  // "described an action but didn't call it" pattern and we don't
+  // want to share budget.
+  let transitionNudgeCount = 0;
+  const transitionNudgeBudget = opts.disableTransitionNudge === true ? 0 : 1;
 
   const { maxIterations: globalMaxIterations, maxNudges } = getToolSettings().loop;
   const maxIterations    = opts.maxIterations  ?? globalMaxIterations;
@@ -166,6 +185,34 @@ export async function runToolLoop(
 
     // If no tool calls, check if LLM described using a tool without calling it
     if (llmResponse.stopReason !== 'tool_use' || !llmResponse.toolCalls?.length) {
+      // Phase J.2: transition-phrase nudge. Detects the failure mode
+      // where the model's final paragraph IS an announcement ("Let me
+      // now investigate X", "I'll examine Y next") rather than analysis.
+      // The 2026-05-16 Hadoop run showed this firing on round-2 refine
+      // passes where the model produced one solid paragraph then
+      // signed off with "Let me now investigate the distinction
+      // between unit and integration tests" -- and never called the
+      // tool. One-shot per loop; if the model emits a second
+      // transition-phrase ending we accept the output as-is rather
+      // than fight it into an infinite loop.
+      const finalParagraph = currentTurnText.trim().split(/\n{2,}/).pop()?.trim() ?? '';
+      const transitionRegex = /^(let me|i'll now|i'll start|i'll begin|i'll examine|i'll look|i'll check|i will now|i will start|i will begin|i will examine|next, i|next i'll|going to|now i'll|now let me)\b/i;
+      const isPureTransition = transitionRegex.test(finalParagraph);
+
+      if (isPureTransition && transitionNudgeCount < transitionNudgeBudget) {
+        if (currentTurnText.trim().length > 0) {
+          sectionParagraphs.push(currentTurnText.trim());
+        }
+        workingMessages.push({ role: 'assistant', content: currentTurnText });
+        workingMessages.push({
+          role: 'user',
+          content: 'Your last paragraph announced an action ("' + finalParagraph.slice(0, 80) + (finalParagraph.length > 80 ? '...' : '') + '") but you did not execute it. Either make the tool call you announced, or rewrite the closing paragraph without the announcement.',
+        });
+        currentTurnText = '';
+        transitionNudgeCount++;
+        continue;
+      }
+
       // Heuristic nudge: detect responses where the model talks about
       // doing X but doesn't actually call a tool to do it. Two regex
       // gates (tool name reference + future-tense intent phrase)
@@ -350,6 +397,7 @@ export async function runToolLoop(
     hitLimit,
     evictionsApplied,
     inputTokensFinal: estimateTokens(workingMessages),
+    transitionPhraseNudgeFired: transitionNudgeCount > 0,
   };
 }
 

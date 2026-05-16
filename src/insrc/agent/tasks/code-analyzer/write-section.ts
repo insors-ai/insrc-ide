@@ -131,18 +131,32 @@ const SYSTEM_PROMPT_INTRO = [
 	'',
 	'Turn shapes:',
 	'',
-	'  - First turn:  Paragraph framing what you\'ll investigate and why, citing the section',
-	'                 criteria. Then a tool call.',
+	'  - First turn:  Open with a TOPIC SENTENCE about the SUBJECT you are about to describe',
+	'                 -- the code, the subsystem, the pattern. Do NOT narrate your process',
+	'                 ("I will investigate...", "Let me start by..."). Then a tool call.',
 	'',
-	'  - Mid turn:    Paragraph analysing the PREVIOUS tool result -- specific facts, named',
-	'                 entities, file paths, line ranges. NOT "now I will look at X" but',
-	'                 "the previous call showed X has 142 files including [`NameNode`]'  +
-	    '(path:.../NameNode.java#L120-L350)".',
-	'                 Then another tool call (if you need more evidence) OR no tool call (if',
-	'                 the next thing is the closing paragraph).',
+	'                 WRONG: "I will investigate the test architecture by examining unit and',
+	'                 integration test modules across HDFS, MapReduce, and YARN to identify',
+	'                 their organization."',
+	'                 RIGHT: "The test architecture spans three repository module trees',
+	'                 (HDFS, MapReduce, YARN), with each tree carrying its own',
+	'                 `src/test/java/` hierarchy and a distinct cluster-simulation fixture."',
 	'',
-	'  - Final turn:  Closing paragraph that ties the investigation together. Bring the',
-	'                 thread to a coherent end. NO tool call. The loop exits here.',
+	'  - Mid turn:    Each paragraph states a SPECIFIC fact from the previous tool result --',
+	'                 entity name, file path with line range, a count or a quoted constant.',
+	'                 NOT "now I will look at X" but "the previous call showed X has 142',
+	'                 files including [`NameNode`](path:.../NameNode.java#L120-L350)". The',
+	'                 paragraph is the persistent record of what you learned. Then another',
+	'                 tool call (if you need more evidence) OR no tool call (if the next',
+	'                 thing is the closing paragraph).',
+	'',
+	'  - Final turn:  Closing paragraph naming the most important takeaway from the',
+	'                 investigation as a whole. NO tool call. The loop exits here.',
+	'',
+	'                 If you have more to investigate, DO NOT close -- make the next tool',
+	'                 call instead. NEVER write "Let me now investigate X" as a closing',
+	'                 paragraph. If X is worth investigating, call the tool. If it is not,',
+	'                 omit X entirely.',
 	'',
 	'## Tool protocol',
 	'',
@@ -192,7 +206,11 @@ const SYSTEM_PROMPT_INTRO = [
 	'## What NOT to write',
 	'',
 	'  - Meta-narration about your own process: "Let me check...", "I\'ll now investigate...",',
-	'    "Next, I need to...". Just write the analysis directly.',
+	'    "Next, I need to...". Just write the analysis directly. These phrases also MUST NOT',
+	'    appear as the LAST sentence of any turn -- if you write one, the next thing you',
+	'    emit must be the announced tool call, not a turn ending. Announcing an action and',
+	'    then stopping is the most common failure mode of this loop; the orchestrator will',
+	'    nudge you to either execute the action or rewrite the closing without it.',
 	'',
 	'  - Internal markers: `[tool calls executed]`, `<!-- ... -->`, `[tool_result ...]`, etc.',
 	'    These are conversation scaffolding, not section content.',
@@ -267,7 +285,7 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		userParts.push('Gather whatever additional evidence you need and write paragraphs that address the hint as you go. Do not echo this hint or refer to "the previous attempt" in your paragraphs.');
 	}
 	userParts.push('');
-	userParts.push('Start your investigation. Your FIRST turn opens with a paragraph framing what you will investigate, then calls a tool. Subsequent turns interpret the previous tool result before deciding what to call next. The final turn is a closing paragraph with no tool call.');
+	userParts.push('Begin. Your FIRST turn opens with a topic sentence about the SUBJECT (the code, the subsystem, the pattern), then calls a tool. Do not narrate your process. Subsequent turns interpret the previous tool result -- specific facts inline -- before deciding what to call next. The final turn is a closing paragraph naming the most important takeaway; no tool call. If you have more to investigate, do not close -- call the next tool instead.');
 	const userPrompt = userParts.join('\n');
 
 	const messages: LLMMessage[] = [
@@ -423,19 +441,28 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 	const avgTextLengthPerTurn = paragraphCount > 0
 		? Math.round(result.response.length / paragraphCount)
 		: 0;
+	// Phase J.4: detect first-turn process-narration framing ("I will
+	// investigate...", "Let me start by..."). The prompt rewrite in
+	// J.1 tells the writer to open with a SUBJECT topic sentence;
+	// this metric tells us whether the rewrite landed across runs.
+	const firstTurnFramingDetected = isProcessNarrationFraming(
+		result.response.split(/\n\s*\n/, 1)[0] ?? '',
+	);
 
 	log.info(
 		{
-			actionId:             input.action.id,
-			toolCallCount:        result.iterations,
-			hitLimit:             result.hitLimit,
+			actionId:                   input.action.id,
+			toolCallCount:              result.iterations,
+			hitLimit:                   result.hitLimit,
 			skillsCalled,
-			textLength:           result.response.length,
+			textLength:                 result.response.length,
 			paragraphCount,
 			avgTextLengthPerTurn,
 			citationCount,
-			evictionsApplied:     result.evictionsApplied,
-			inputTokensFinal:     result.inputTokensFinal,
+			evictionsApplied:           result.evictionsApplied,
+			inputTokensFinal:           result.inputTokensFinal,
+			transitionPhraseNudgeFired: result.transitionPhraseNudgeFired,
+			firstTurnFramingDetected,
 		},
 		'writeSectionWithTools: tool loop complete',
 	);
@@ -477,6 +504,28 @@ function countCitations(text: string): number {
 	const matches = text.match(/\[[^\]]+\]\(path:[^)]+\)/g);
 	return matches === null ? 0 : matches.length;
 }
+
+/**
+ * Phase J.4: detect whether the FIRST paragraph of a section reads as
+ * process-narration framing ("I will investigate the test architecture
+ * by examining...") rather than a subject topic sentence ("The test
+ * architecture spans three repository module trees..."). The J.1
+ * prompt rewrite teaches the writer to open with the latter; this
+ * metric measures whether the rewrite is landing across runs.
+ */
+function isProcessNarrationFraming(firstParagraph: string): boolean {
+	const trimmed = firstParagraph.trim();
+	if (trimmed.length === 0) return false;
+	return /^(i will (investigate|examine|analyze|analyse|explore|look at|describe|cover)|let me (investigate|examine|start|begin|first)|i'll (investigate|examine|start|begin|first|look)|i need to (investigate|examine|look))\b/i.test(trimmed);
+}
+
+// ---------------------------------------------------------------------------
+// Test exports
+// ---------------------------------------------------------------------------
+
+export const _isProcessNarrationFramingForTest = isProcessNarrationFraming;
+export const _countParagraphsForTest           = countParagraphs;
+export const _countCitationsForTest            = countCitations;
 
 // ---------------------------------------------------------------------------
 // Helpers
