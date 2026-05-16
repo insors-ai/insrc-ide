@@ -1,17 +1,17 @@
 /**
- * Tests for the reviewAction helper + expandThenReview loop driver
- * (Phase 3 of plans/analyzers/cloud-plan-local-expand-cloud-review.md,
- * with Phase E of plans/code-analyzer-structured-review.md replacing
- * the single-hint refine shape with a typed work-item list).
+ * Tests for the reviewAction helper (Phase 3 of
+ * plans/analyzers/cloud-plan-local-expand-cloud-review.md, with
+ * Phase E of plans/code-analyzer-structured-review.md replacing the
+ * single-hint refine shape with a typed work-item list).
  *
  * The review helper sends one cloud LLM call and parses the JSON
- * verdict; the loop driver chains expand+review with a bounded
- * second-round refinement. We use stubbed providers throughout so
- * the tests are deterministic.
+ * verdict. We use stubbed providers throughout so the tests are
+ * deterministic.
  *
- * Note: `expandThenReview` is deprecated (Phase H deletes it). The
- * tests here keep it covered until that deletion lands so the
- * Phase E bridge doesn't regress silently.
+ * The legacy `expandThenReview` 2-round driver was deleted in
+ * Phase H; the code-analyzer orchestrator runs the 3-round patch
+ * loop directly. End-to-end coverage of that loop is in the
+ * orchestrator's integration tests.
  */
 
 import { test } from 'node:test';
@@ -19,9 +19,6 @@ import assert from 'node:assert/strict';
 
 import {
 	reviewAction,
-	expandThenReview,
-	type ExpandThenReviewPhase,
-	type ExpandThenReviewPayload,
 	_validateReviewForTest as validateReview,
 	_buildReviewMessagesForTest as buildReviewMessages,
 } from '../review-action.js';
@@ -339,165 +336,3 @@ test('reviewAction: provider throws on both attempts -> soft accept', async () =
 	assert.deepEqual(r.workItems, []);
 });
 
-// ---------------------------------------------------------------------------
-// expandThenReview loop (deprecated; bridges old hint loop through workItems)
-// ---------------------------------------------------------------------------
-
-const LOCAL_BODY = 'HDFS Core lives at `/repo/hadoop/hadoop-hdfs` (240 files).';
-
-test('expandThenReview: 1-round accept -> rounds=1, no second expand', async () => {
-	const expandCalls: number[] = [];
-	const reviewCalls: number[] = [];
-	let expandIdx = 0;
-	let reviewIdx = 0;
-
-	const local: LLMProvider = {
-		async complete(): Promise<LLMResponse> {
-			expandCalls.push(++expandIdx);
-			return { text: LOCAL_BODY, stopReason: 'end_turn' };
-		},
-		async *stream() { yield ''; },
-		async embed() { return []; },
-		supportsTools: true,
-	};
-
-	const cloud: LLMProvider = {
-		async complete(): Promise<LLMResponse> {
-			reviewCalls.push(++reviewIdx);
-			return { text: ACCEPT_VERDICT, stopReason: 'end_turn' };
-		},
-		async *stream() { yield ''; },
-		async embed() { return []; },
-		supportsTools: true,
-	};
-
-	const phases: ExpandThenReviewPhase[] = [];
-	const result = await expandThenReview(
-		{
-			action:   ACTION,
-			evidence: EVIDENCE,
-			request:  'do a detailed analysis of HDFS Core',
-			onProgress: (phase: ExpandThenReviewPhase, _payload: ExpandThenReviewPayload) => { phases.push(phase); },
-		},
-		local,
-		cloud,
-	);
-
-	assert.equal(result.rounds, 1);
-	assert.equal(result.verdict, 'accept');
-	assert.equal(expandCalls.length, 1);
-	assert.equal(reviewCalls.length, 1);
-	assert.deepEqual(phases, ['expand-1', 'review-1', 'final']);
-});
-
-test('expandThenReview: needs-work then accept -> rounds=2, second draft used', async () => {
-	let localIdx = 0;
-	const local: LLMProvider = {
-		async complete(): Promise<LLMResponse> {
-			const text = (localIdx++ === 0) ? LOCAL_BODY : 'Refined: HDFS Core (240 files), HDFS Client, HDFS NN.';
-			return { text, stopReason: 'end_turn' };
-		},
-		async *stream() { yield ''; },
-		async embed() { return []; },
-		supportsTools: true,
-	};
-
-	const cloud = fakeProvider(NEEDS_WORK_VERDICT, ACCEPT_VERDICT);
-
-	const phases: ExpandThenReviewPhase[] = [];
-	const result = await expandThenReview(
-		{
-			action:   ACTION,
-			evidence: EVIDENCE,
-			request:  'do a detailed analysis of HDFS Core',
-			onProgress: (phase) => { phases.push(phase); },
-		},
-		local,
-		cloud,
-	);
-
-	assert.equal(result.rounds, 2);
-	assert.equal(result.verdict, 'refine-then-accept');
-	assert.match(result.markdown, /Refined/);
-	assert.deepEqual(phases, ['expand-1', 'review-1', 'expand-2', 'review-2', 'final']);
-});
-
-test('expandThenReview: needs-work twice -> rounds=2, binding accept on second draft, note flag', async () => {
-	let localIdx = 0;
-	const local: LLMProvider = {
-		async complete(): Promise<LLMResponse> {
-			const text = (localIdx++ === 0) ? 'first' : 'second-refined';
-			return { text, stopReason: 'end_turn' };
-		},
-		async *stream() { yield ''; },
-		async embed() { return []; },
-		supportsTools: true,
-	};
-
-	const cloud = fakeProvider(NEEDS_WORK_VERDICT, NEEDS_WORK_VERDICT);
-
-	const result = await expandThenReview(
-		{ action: ACTION, evidence: EVIDENCE, request: 'q' },
-		local,
-		cloud,
-	);
-
-	assert.equal(result.rounds, 2);
-	assert.equal(result.verdict, 'refine-then-accept');
-	assert.match(result.markdown, /second-refined/);
-	assert.ok(result.notes.some(n => /second-review-still-needs-work/.test(n)));
-});
-
-test('expandThenReview: needs-work without items -> treated as accept of round 1', async () => {
-	const local = fakeProvider(LOCAL_BODY);
-	// reviewer says needs-work but with empty workItems (validator
-	// rejects -> retry fails too -> degraded soft-accept).
-	const cloud = fakeProvider(
-		JSON.stringify({ verdict: 'needs-work', workItems: [] }),
-		JSON.stringify({ verdict: 'needs-work', workItems: [] }),
-	);
-
-	const result = await expandThenReview(
-		{ action: ACTION, evidence: EVIDENCE, request: 'q' },
-		local,
-		cloud,
-	);
-	assert.equal(result.rounds, 1);
-	assert.equal(result.verdict, 'accept');
-});
-
-test('expandThenReview: review degraded both attempts -> soft-accept round 1', async () => {
-	const local = fakeProvider(LOCAL_BODY);
-	const cloud = fakeProvider('garbage', 'garbage');
-	const result = await expandThenReview(
-		{ action: ACTION, evidence: EVIDENCE, request: 'q' },
-		local,
-		cloud,
-	);
-	assert.equal(result.rounds, 1);
-	assert.equal(result.verdict, 'accept');
-});
-
-test('expandThenReview: progress callback receives expand/review/final payloads', async () => {
-	const local = fakeProvider(LOCAL_BODY);
-	const cloud = fakeProvider(ACCEPT_VERDICT);
-
-	const seen: { phase: ExpandThenReviewPhase; kind: string }[] = [];
-	await expandThenReview(
-		{
-			action:   ACTION,
-			evidence: EVIDENCE,
-			request:  'q',
-			onProgress: (phase, payload) => {
-				seen.push({ phase, kind: payload.kind });
-			},
-		},
-		local,
-		cloud,
-	);
-	assert.deepEqual(seen, [
-		{ phase: 'expand-1', kind: 'expand' },
-		{ phase: 'review-1', kind: 'review' },
-		{ phase: 'final',    kind: 'final' },
-	]);
-});

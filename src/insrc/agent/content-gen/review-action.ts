@@ -10,10 +10,13 @@
  *   - emits `{ verdict: 'accept' | 'needs-work', workItems[], accepted?, notes }`
  *     (Phase E of plans/code-analyzer-structured-review.md).
  *
- * Plus the per-action loop driver `expandThenReview` that ties Phase
- * 2 + 3 together: expand -> review -> if refine then expand-with-hint
- * -> review -> binding accept on the second review regardless of
- * verdict.
+ * Plus the per-action loop driver `expandThenReview` -- a text-only
+ * 2-round contract used by the DATA-analyzer (orchestrator path
+ * `runFollowupExpandReviewSynthesise`). The code-analyzer no longer
+ * uses this driver -- it runs the 3-round patch loop directly via
+ * patchSectionWithTools (Phase F.5 / G of the structured-review plan).
+ * Migrating the data-analyzer to the same patch loop is out of scope
+ * for that plan.
  */
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
@@ -97,37 +100,6 @@ export interface ReviewActionResult {
 	readonly degraded:  boolean;
 }
 
-export interface ExpandThenReviewInput {
-	readonly action:   PlannedAction;
-	readonly evidence: readonly PlanExecution[];
-	readonly request:  string;
-	readonly analyzerLabel?: string | undefined;
-	/** Optional progress hook fired between phases. The orchestrator
-	 *  uses this to emit liveStep events to the chat panel. */
-	readonly onProgress?: ExpandThenReviewProgress | undefined;
-}
-
-export type ExpandThenReviewPhase =
-	| 'expand-1'
-	| 'review-1'
-	| 'expand-2'
-	| 'review-2'
-	| 'final';
-
-export type ExpandThenReviewProgress = (phase: ExpandThenReviewPhase, payload: ExpandThenReviewPayload) => void;
-
-export type ExpandThenReviewPayload =
-	| { readonly kind: 'expand'; readonly result: ExpandActionResult }
-	| { readonly kind: 'review'; readonly result: ReviewActionResult }
-	| { readonly kind: 'final';  readonly verdict: 'accept' | 'refine-then-accept'; readonly rounds: 1 | 2; readonly markdown: string };
-
-export interface ExpandThenReviewResult {
-	readonly markdown: string;
-	readonly rounds:   1 | 2;
-	readonly verdict:  'accept' | 'refine-then-accept';
-	readonly notes:    readonly string[];
-}
-
 // ---------------------------------------------------------------------------
 // Public API: review only
 // ---------------------------------------------------------------------------
@@ -173,29 +145,57 @@ export async function reviewAction(
 }
 
 // ---------------------------------------------------------------------------
-// Public API: expand-then-review loop
+// Public API: expand-then-review loop (data-analyzer)
 // ---------------------------------------------------------------------------
 
+export interface ExpandThenReviewInput {
+	readonly action:   PlannedAction;
+	readonly evidence: readonly PlanExecution[];
+	readonly request:  string;
+	readonly analyzerLabel?: string | undefined;
+	/** Optional progress hook fired between phases. The orchestrator
+	 *  uses this to emit liveStep events to the chat panel. */
+	readonly onProgress?: ExpandThenReviewProgress | undefined;
+}
+
+export type ExpandThenReviewPhase =
+	| 'expand-1'
+	| 'review-1'
+	| 'expand-2'
+	| 'review-2'
+	| 'final';
+
+export type ExpandThenReviewProgress = (phase: ExpandThenReviewPhase, payload: ExpandThenReviewPayload) => void;
+
+export type ExpandThenReviewPayload =
+	| { readonly kind: 'expand'; readonly result: ExpandActionResult }
+	| { readonly kind: 'review'; readonly result: ReviewActionResult }
+	| { readonly kind: 'final';  readonly verdict: 'accept' | 'refine-then-accept'; readonly rounds: 1 | 2; readonly markdown: string };
+
+export interface ExpandThenReviewResult {
+	readonly markdown: string;
+	readonly rounds:   1 | 2;
+	readonly verdict:  'accept' | 'refine-then-accept';
+	readonly notes:    readonly string[];
+}
+
 /**
- * @deprecated No production callers since the code-analyzer's
- * Phase F refactor (2026-05-11) moved to a tool-loop expander
- * (`writeSectionWithTools`) and inlined the 2-round driver in
- * `runPlanExpandReviewSynthesise`. The text-only `expandAction`
- * expander this function wraps is no longer used by any analyzer.
+ * Text-only 2-round expand+review loop used by the DATA-analyzer.
  *
- * Kept for now as regression coverage of the 2-round contract
- * (accept@1, refine→accept@2, refine→refine binding accept). If a
- * future caller needs a generic 2-round driver, refactor this
- * function to accept an expander callback instead of bundling
- * `expandAction` directly.
- *
- * One per-action expand+review loop. Two-round contract:
+ * Contract:
  *   1. Expand (local) -> review (cloud).
  *      - If verdict='accept', return.
- *   2. Else expand again with the reviewer's hint -> review again.
+ *   2. Else expand again with the reviewer's work-items collapsed
+ *      into a hint string -> review again.
  *      - Either verdict is binding: accept the second draft.
  *
  * Never throws; all sub-stage failures degrade to a soft accept.
+ *
+ * The code-analyzer no longer uses this driver -- it runs a
+ * 3-round patch loop via patchSectionWithTools directly. Migrating
+ * the data-analyzer to the same loop is out of scope for the
+ * structured-review plan; for now this driver bridges the new
+ * work-item review shape to the legacy hint-string expander.
  */
 export async function expandThenReview(
 	input: ExpandThenReviewInput,
@@ -240,16 +240,13 @@ export async function expandThenReview(
 	}
 
 	// --- Round 2 ---------------------------------------------------------
-	// Phase E bridge: collapse the work-item list into a single hint
-	// string for the legacy expandAction expander. This entire function
-	// is being replaced by patchSectionWithTools in Phase F + the
-	// 3-round loop in Phase G; deletion happens in Phase H.
+	// Phase E bridge: the reviewer now emits a typed work-item list
+	// (workItems[]) instead of a single hint string. Collapse the
+	// list into a hint for the legacy expandAction text expander.
 	const hint = review1.workItems.length > 0
 		? review1.workItems.map(w => w.action).join('; ')
 		: '';
 	if (hint.length === 0) {
-		// Reviewer said `needs-work` but produced no items -- treat as
-		// accept of round-1 draft.
 		log.warn(
 			{ analyzer: input.analyzerLabel, actionId: input.action.id },
 			'expand-then-review: reviewer returned needs-work without items; soft-accepting round 1',

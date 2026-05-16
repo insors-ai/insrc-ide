@@ -308,9 +308,15 @@ The TodoList view can render this as a checklist with strike-through on addresse
 
 ### Phase H -- migration + cleanup
 
-#### H.1 Delete the deprecated text-only path
+#### H.1 Trim the deprecated text-only path
 
-[`expandThenReview`](src/insrc/agent/content-gen/review-action.ts#L168-L266) is already marked deprecated (no production callers). Delete it; the test that asserts the 2-round contract moves to cover `patchSectionWithTools` instead.
+[`expandThenReview`](src/insrc/agent/content-gen/review-action.ts) was originally marked deprecated as "no production callers." That was wrong: the **data-analyzer** orchestrator (`runFollowupExpandReviewSynthesise`) still uses it. Migrating the data-analyzer to the new patch loop is out of scope for this plan, so H.1 is *partial*:
+
+  - The code-analyzer orchestrator no longer calls `expandThenReview` (Phase F.5 replaced it with the 3-round patch loop).
+  - `expandThenReview` is kept alive in `review-action.ts` for the data-analyzer caller. The Phase E bridge (collapse `workItems[]` to a hint string) lives inside it.
+  - The legacy reviewer test suite that tested the 2-round contract via `expandThenReview` is dropped; the 3-round patch loop is exercised through `apply-patches`, `pick-best-draft`, and (eventually) the orchestrator integration test. The `plan-expand-review-integration.test.ts` was rewritten to test `planActions` + `reviewAction` directly without the wrapper.
+
+Full deletion lands when the data-analyzer migration ships in a follow-up plan.
 
 #### H.2 Update the existing reviewer tests
 
