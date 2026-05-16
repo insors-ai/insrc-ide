@@ -1203,10 +1203,20 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         },
         'section drafting complete',
       );
-      const verdictLabel = `${shipDecisionReason}@round${shippedRound}`;
+      // Phase O.1: shipDecisionReason for accept paths already
+      // contains "accept@roundN"; strip a trailing "@round\d+" if
+      // present so we don't end up with "accept@round2@round2".
+      // Phase O.2: surface confidence + unaddressed-item count in the
+      // milestone so the chat panel shows the operator-relevant info
+      // without them having to read the footer.
+      const baseLabel = shipDecisionReason.replace(/@round\d+(\s*\(degraded review\))?$/, '$1');
+      const unaddressedCount = winnerCandidate.review.workItems.length;
+      const unaddressedNote = unaddressedCount > 0
+        ? `; ${unaddressedCount} reviewer item${unaddressedCount === 1 ? '' : 's'} unaddressed`
+        : '';
       this.emitMilestone(
         synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- ${verdictLabel} (${cumulativeCalls.length} cumulative skill call${cumulativeCalls.length === 1 ? '' : 's'})`,
+        `[${i + 1}/${actions.length}] "${action.title}" -- ${baseLabel} @ round ${shippedRound} (${cumulativeCalls.length} cumulative skill call${cumulativeCalls.length === 1 ? '' : 's'}; confidence: ${itemConfidence}${unaddressedNote})`,
       );
       sections.push({ id: action.id, title: action.title, markdown: final });
     }
