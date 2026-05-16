@@ -887,6 +887,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           workItems:            priorWorkItems,
           priorDescribedSkills: draft.describedSkills,
           priorSkillCalls:      cumulativeCalls,
+          round:                r,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
           onProgress: (msg) => {
             this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');

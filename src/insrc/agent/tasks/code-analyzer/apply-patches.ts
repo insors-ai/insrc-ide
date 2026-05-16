@@ -158,9 +158,29 @@ export function applyPatches(
 			continue;
 		}
 
-		// patch: apply per kind
-		const status = applyOne(item, block, paragraphs, edits);
-		statuses.push(status);
+		// Phase L.4: defense-in-depth sanitization. If the patch body
+		// ends with a transition phrase ("Next, I will...", "Let me
+		// now examine...") the writer slipped its between-block
+		// narration into the body. The terminal-artifact rule in the
+		// L.2 prompt rewrite should prevent this, but we strip it
+		// here as a backstop. The item status becomes `partial` with
+		// the reason so the operator sees the prompt-level fix didn't
+		// fully land.
+		const sanitized = stripTrailingTransition(block.body);
+		const sanitizedBlock: PatchBlock = sanitized.changed
+			? { ...block, body: sanitized.body }
+			: block;
+
+		const status = applyOne(item, sanitizedBlock, paragraphs, edits);
+		if (sanitized.changed && status.status === 'addressed') {
+			statuses.push({
+				id:     item.id,
+				status: 'partial',
+				reason: 'writer announced an action in the patch body; trailing sentence stripped',
+			});
+		} else {
+			statuses.push(status);
+		}
 	}
 
 	const patched = applyEdits(paragraphs, edits);
@@ -291,8 +311,32 @@ function applyEdits(
 }
 
 // ---------------------------------------------------------------------------
+// Phase L.4: trailing-transition sanitizer
+// ---------------------------------------------------------------------------
+
+const TRANSITION_REGEX = /(?:^|(?<=[.!?]\s))(let me|i'll now|i'll start|i'll begin|i'll examine|i'll look|i'll check|i'll add|i will now|i will start|i will begin|i will examine|i will add|next, i|next i'll|going to|now i'll|now let me|to further (?:understand|explore|examine|investigate))\b[^.!?]*[.!?]?\s*$/i;
+
+/**
+ * Strip a trailing transition sentence from a patch body. Used as
+ * defense in depth against the L.2 prompt-level fix. Returns the
+ * sanitized body + a flag indicating whether any change was made.
+ *
+ * Matches phrases starting at the LAST sentence boundary (or the
+ * start of the body) so we don't accidentally strip mid-paragraph
+ * occurrences like "...the reader I will describe is...".
+ */
+function stripTrailingTransition(body: string): { body: string; changed: boolean } {
+	const trimmed = body.trim();
+	if (trimmed.length === 0) return { body: trimmed, changed: false };
+	const stripped = trimmed.replace(TRANSITION_REGEX, '').trimEnd();
+	if (stripped === trimmed) return { body: trimmed, changed: false };
+	return { body: stripped, changed: true };
+}
+
+// ---------------------------------------------------------------------------
 // Test exports
 // ---------------------------------------------------------------------------
 
 export const _resolveParagraphIdxForTest = resolveParagraphIdx;
 export const _splitParagraphsForTest     = splitParagraphs;
+export const _stripTrailingTransitionForTest = stripTrailingTransition;

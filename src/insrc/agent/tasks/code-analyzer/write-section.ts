@@ -141,6 +141,10 @@ export interface PatchSectionInput {
 	/** Successful skill calls from prior rounds; surfaced to the reviewer
 	 *  as evidence for round-N review so cumulative evidence is scored. */
 	readonly priorSkillCalls:      readonly CapturedSkillCall[];
+	/** Phase L.3: round number (2 or 3). Round 3 gets an escalation
+	 *  prompt that explicitly tells the model the previous attempts
+	 *  produced zero blocks. */
+	readonly round:                2 | 3;
 }
 
 export interface PatchSectionOutput extends WriteSectionOutput {
@@ -564,95 +568,188 @@ function isProcessNarrationFraming(firstParagraph: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Phase F: patch-loop system prompt
+// Phase F + L: patch-loop system prompt
 // ---------------------------------------------------------------------------
 
-const PATCH_SYSTEM_PROMPT_INTRO = [
-	'You are REVISING a section draft. The cloud reviewer has flagged',
-	'a list of concrete work items; your job is to address each item by',
-	'patching the existing draft. You do NOT rewrite the whole section.',
-	'',
-	'You will receive:',
-	'  - The current draft markdown, with paragraphs numbered (1-indexed).',
-	'  - A list of work items, each with: id, kind, where, issue, action.',
-	'  - The same SKILL CATALOG and meta-tools as the original investigation.',
-	'',
-	'## Work-item kinds',
-	'',
-	'  - `fix`     -- factual error in the draft. Verify with a skill call',
-	'                 if needed, then replace the paragraph with a corrected',
-	'                 version. Unaddressed `fix` items drop section confidence.',
-	'  - `enhance` -- correct but thin. Gather more evidence (skill call),',
-	'                 then replace the paragraph with a thicker version.',
-	'  - `add`     -- coverage missing. Run a sub-investigation (skill calls),',
-	'                 then INSERT a new paragraph at the anchor.',
-	'  - `trim`    -- redundant / off-topic. Delete the paragraph; no skill',
-	'                 call needed; the patch body should be empty.',
-	'',
-	'## Output protocol (REQUIRED -- read carefully)',
-	'',
-	'For each work item in the order given:',
-	'',
-	'  1. Write ONE prose sentence stating which paragraph(s) you will touch',
-	'     and what kind of change it is.',
-	'  2. Make any tool calls you need for evidence (follow the same',
-	'     describe-before-invoke protocol -- `skill_describe` before',
-	'     `skill_invoke` for any skill you have not described).',
-	'  3. Emit a fenced block tagged with the item id. THIS IS HOW THE',
-	'     ORCHESTRATOR APPLIES THE EDIT -- it parses these blocks; prose',
-	'     outside the blocks is discarded by the patch applier.',
-	'',
-	'         ```patch:wi-1',
-	'         <new paragraph content>',
-	'         ```',
-	'',
-	'     For `add` items, optionally specify the anchor in the fence:',
-	'',
-	'         ```patch:wi-3 after=paragraph-5',
-	'         <new paragraph content>',
-	'         ```',
-	'',
-	'     For `trim`, emit an empty body (the paragraph at the `where` is',
-	'     deleted):',
-	'',
-	'         ```patch:wi-4',
-	'         ```',
-	'',
-	'  4. If you genuinely cannot address an item (evidence is missing or',
-	'     contradictory), emit a `skip` block with a one-sentence reason:',
-	'',
-	'         ```skip:wi-2',
-	'         The repo has no Kerberos integration; the claim was wrong but',
-	'         I could not determine the correct subsystem.',
-	'         ```',
-	'',
-	'After the last item, end your turn (no closing prose needed -- the',
-	'orchestrator reassembles the draft from your patch blocks).',
-	'',
-	'## What NOT to do',
-	'',
-	'  - Do NOT rewrite the whole section. The orchestrator preserves',
-	'    every paragraph you do not touch.',
-	'  - Do NOT emit a `patch:` block for an item id that was not in your',
-	'    work-item list.',
-	'  - Do NOT skip an item without emitting a `skip:<id>` block -- the',
-	'    orchestrator interprets a missing block as silent failure.',
-	'  - Do NOT include section headings (`## <title>`) inside any patch',
-	'    body. The orchestrator stitches headings during report assembly.',
-	'  - Do NOT include `[evicted ...]` stubs or other internal markers in',
-	'    your patch bodies.',
-	'',
-	'## Patch body content',
-	'',
-	'  - Patch bodies must be plain markdown paragraphs (no fenced code',
-	'    blocks inside a patch).',
-	'  - Citations use the same shape as the original draft:',
-	'    `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)`. Preserve',
-	'    existing citations the unaffected paragraphs already carry; add',
-	'    new ones where the work item asks for them.',
-	'  - Be specific. The reviewer rejected the previous draft for being',
-	'    thin; the patched paragraph must concretely address the item.',
-].join('\n');
+/**
+ * Phase L.2 + L.3: the patch prompt is built per-round so round 3 can
+ * escalate. The 2026-05-16 run #2 surfaced that the model treats the
+ * old prompt's "for each work item: 1, 2, 3" as a serial OUTER loop
+ * (announce ALL items, then gather ALL evidence, then... never emit
+ * the patch blocks). The L.2 rewrite restructures the protocol to
+ * make per-item interleaving explicit, and to anchor the patch block
+ * IMMEDIATELY after each item's prose+evidence.
+ */
+function buildPatchSystemPrompt(round: 2 | 3): string {
+	const base: string[] = [
+		'You are REVISING a section draft. The cloud reviewer has flagged',
+		'a list of concrete work items; your job is to address each item by',
+		'patching the existing draft. You do NOT rewrite the whole section.',
+		'',
+		'You will receive:',
+		'  - The current draft markdown, with paragraphs numbered (1-indexed).',
+		'  - A list of work items, each with: id, kind, where, issue, action.',
+		'  - The same SKILL CATALOG and meta-tools as the original investigation.',
+		'',
+		'## Work-item kinds',
+		'',
+		'  - `fix`     -- factual error in the draft. Verify with a skill call',
+		'                 if needed, then replace the paragraph with a corrected',
+		'                 version. Unaddressed `fix` items drop section confidence.',
+		'  - `enhance` -- correct but thin. Gather more evidence (skill call),',
+		'                 then replace the paragraph with a thicker version.',
+		'  - `add`     -- coverage missing. Run a sub-investigation (skill calls),',
+		'                 then INSERT a new paragraph at the anchor.',
+		'  - `trim`    -- redundant / off-topic. Delete the paragraph; no skill',
+		'                 call needed; the patch body should be empty.',
+		'',
+		'## Output protocol (REQUIRED -- read carefully)',
+		'',
+		'Process ONE work item at a time. For each item, complete ALL THREE',
+		'steps before moving to the next item. Do NOT batch the prose for',
+		'every item upfront and then try to gather evidence at the end.',
+		'',
+		'Per-item loop (repeat for every work item, in order):',
+		'',
+		'  1. ANNOUNCE: write ONE prose sentence naming the item id and what',
+		'     change you are about to make. Example:',
+		'     "For wi-2 (enhance, paragraph 3), I will add file:line refs',
+		'     for DatanodeManager."',
+		'  2. GATHER (only if needed): make a single skill call (or skill_describe',
+		'     first if the skill is new). Use the tool result to inform the',
+		'     patch body below.',
+		'  3. EMIT THE PATCH BLOCK: this is the only output the orchestrator',
+		'     reads. Prose outside the fenced block is DISCARDED.',
+		'',
+		'        ```patch:wi-2',
+		'        The DatanodeManager [`DatanodeManager`](path:.../DatanodeManager.java#L80-L420)',
+		'        tracks heartbeats from every DataNode in the cluster...',
+		'        ```',
+		'',
+		'     For `add` items, name the anchor in the fence:',
+		'',
+		'        ```patch:wi-5 after=paragraph-2',
+		'        <new paragraph content>',
+		'        ```',
+		'',
+		'     For `trim`, emit an EMPTY body (the paragraph at the `where`',
+		'     is deleted):',
+		'',
+		'        ```patch:wi-7',
+		'        ```',
+		'',
+		'  4. If you genuinely cannot address an item (evidence is missing',
+		'     or contradictory), emit a `skip:<id>` block with a one-sentence',
+		'     reason INSTEAD of a `patch:<id>` block:',
+		'',
+		'        ```skip:wi-3',
+		'        The repo has no Kerberos integration; the claim was wrong',
+		'        but I could not determine the correct subsystem.',
+		'        ```',
+		'',
+		'## Why per-item interleaving matters',
+		'',
+		'A previous run of this loop failed because the model wrote:',
+		'',
+		'  WRONG: "I will enhance paragraph 2 by adding citations. I will',
+		'         enhance paragraph 1 by clarifying scopes. I will trim',
+		'         paragraph 3. Let me now gather evidence."',
+		'  (then gathered evidence forever; never emitted a patch block;',
+		'  the orchestrator parsed zero blocks and the section did not',
+		'  improve)',
+		'',
+		'  RIGHT: "For wi-1 (enhance, paragraph 2): adding DatanodeManager',
+		'         citation."',
+		'         <skill_invoke for code.entity.summary>',
+		'         ```patch:wi-1',
+		'         The DatanodeManager [`DatanodeManager`](path:...) tracks',
+		'         heartbeats from every DataNode...',
+		'         ```',
+		'         "For wi-2 (enhance, paragraph 1): clarifying the fs and',
+		'         util subsystem scopes."',
+		'         ```patch:wi-2',
+		'         The fs and util subsystems both live under',
+		'         org.apache.hadoop but address different layers...',
+		'         ```',
+		'',
+		'Each work item MUST produce either a `patch:<id>` or `skip:<id>`',
+		'block before you move on. A turn without ANY patch/skip blocks is',
+		'treated as silent failure and the orchestrator will run a redraft',
+		'fallback that is unlikely to satisfy the reviewer.',
+		'',
+		'## What NOT to do',
+		'',
+		'  - Do NOT batch all announcements first, then gather evidence,',
+		'    then emit blocks. Process per item, end to end.',
+		'  - Do NOT rewrite the whole section. The orchestrator preserves',
+		'    every paragraph you do not touch.',
+		'  - Do NOT emit a `patch:` block for an item id that was not in',
+		'    your work-item list.',
+		'  - Do NOT skip an item without emitting a `skip:<id>` block --',
+		'    the orchestrator interprets a missing block as silent failure.',
+		'  - Do NOT include section headings (`## <title>`) inside any patch',
+		'    body. The orchestrator stitches headings during report assembly.',
+		'  - Do NOT include `[evicted ...]` stubs or other internal markers',
+		'    in your patch bodies.',
+		'',
+		'## Patch body content (terminal-artifact rule)',
+		'',
+		'  Each patch body becomes a STANDALONE paragraph in the final',
+		'  report. It is a TERMINAL artifact -- there is no "next" inside',
+		'  the patch body. Do NOT include transition phrases. Do NOT promise',
+		'  further investigation.',
+		'',
+		'    WRONG: "The HDFS module contains 707 files including',
+		'           DFSConfigKeys. Next, I will examine the MapReduce',
+		'           module."',
+		'    RIGHT: "The HDFS module contains 707 files including',
+		'           [`DFSConfigKeys`](path:.../DFSConfigKeys.java#L1-L2034),',
+		'           which defines the configuration keys that govern block',
+		'           placement, replication factor, and the heartbeat interval."',
+		'',
+		'  Other rules:',
+		'',
+		'  - Patch bodies must be plain markdown paragraphs (no fenced code',
+		'    blocks inside a patch).',
+		'  - Citations use the same shape as the original draft:',
+		'    `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)`. Preserve',
+		'    existing citations the unaffected paragraphs already carry; add',
+		'    new ones where the work item asks for them.',
+		'  - Be specific. The reviewer rejected the previous draft for being',
+		'    thin; the patched paragraph must concretely address the item.',
+	];
+
+	if (round === 3) {
+		// Phase L.3: third-round escalation. The second-round patch loop
+		// already ran on this draft and (if we reached round 3) failed
+		// or produced an unreviewed result. Tell the model directly.
+		const escalation: string[] = [
+			'',
+			'## ESCALATION -- THIRD ATTEMPT',
+			'',
+			'This is your THIRD attempt at this section. The first two passes',
+			'either emitted zero fenced blocks or produced output the reviewer',
+			'rejected. The orchestrator will ship the BEST draft from across',
+			'all three attempts (lexicographic on fix-items-addressed,',
+			'citations, paragraphs, length) -- but it CANNOT credit you for',
+			'items you announce but do not emit blocks for.',
+			'',
+			'For this attempt:',
+			'  - You MUST emit a `patch:<id>` or `skip:<id>` block for EVERY',
+			'    work item in your input. A turn with zero blocks ships',
+			'    nothing from this round.',
+			'  - If an item cannot be addressed, use `skip:<id>` with a',
+			'    one-sentence reason. A skip block IS productive output --',
+			'    it tells the orchestrator you tried and explains why.',
+			'  - Skill calls are optional this round. If the previous',
+			'    rounds gathered the evidence already, just write the',
+			'    patch body from what is in your context.',
+			'  - Silence is the worst possible response.',
+		];
+		return [...base, ...escalation].join('\n');
+	}
+	return base.join('\n');
+}
 
 // ---------------------------------------------------------------------------
 // Phase F: patchSectionWithTools
@@ -684,7 +781,7 @@ export async function patchSectionWithTools(input: PatchSectionInput): Promise<P
 	const catalog = buildAnalyzerSkillCatalog(input.repoContext);
 
 	// SYSTEM = patch-loop intro + skill catalog block.
-	const systemPrompt = [PATCH_SYSTEM_PROMPT_INTRO, '', formatAnalyzerSkillCatalog(catalog)].join('\n');
+	const systemPrompt = [buildPatchSystemPrompt(input.round), '', formatAnalyzerSkillCatalog(catalog)].join('\n');
 
 	// USER = original request + section card + numbered draft + work-item list.
 	const userParts: string[] = [];
@@ -730,7 +827,7 @@ export async function patchSectionWithTools(input: PatchSectionInput): Promise<P
 		}
 	}
 	userParts.push('');
-	userParts.push('Begin. For each work item, emit ONE prose line stating what you will do, then any tool calls you need, then the matching `patch:<id>` or `skip:<id>` fenced block. The orchestrator parses the blocks; prose outside the blocks is discarded.');
+	userParts.push('Begin. Process ONE work item end-to-end before starting the next: write your prose announcement, make any tool call you need, then emit the `patch:<id>` or `skip:<id>` block. Repeat for the next item. Do NOT batch all announcements first. The orchestrator parses the fenced blocks; prose outside them is discarded.');
 
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: systemPrompt },

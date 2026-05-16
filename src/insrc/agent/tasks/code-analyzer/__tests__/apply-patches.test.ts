@@ -16,6 +16,7 @@ import {
 	applyPatches,
 	_resolveParagraphIdxForTest as resolveIdx,
 	_splitParagraphsForTest     as splitParas,
+	_stripTrailingTransitionForTest as stripTransition,
 } from '../apply-patches.js';
 import type { ReviewWorkItem } from '../../../content-gen/review-action.js';
 
@@ -271,4 +272,54 @@ test('applyPatches: empty workItems -> draft unchanged', () => {
 	const r = applyPatches(DRAFT, [], []);
 	assert.equal(r.patchedMarkdown, DRAFT);
 	assert.deepEqual(r.itemStatuses, []);
+});
+
+// ---------------------------------------------------------------------------
+// Phase L.4: trailing-transition sanitizer
+// ---------------------------------------------------------------------------
+
+test('stripTransition: clean body -> unchanged', () => {
+	const out = stripTransition('The HDFS DataNode handles block storage.');
+	assert.equal(out.changed, false);
+	assert.equal(out.body, 'The HDFS DataNode handles block storage.');
+});
+
+test('stripTransition: trailing "Next, I will..." -> stripped', () => {
+	const out = stripTransition('The HDFS module contains 707 files. Next, I will examine MapReduce.');
+	assert.equal(out.changed, true);
+	assert.match(out.body, /707 files\.$/);
+});
+
+test('stripTransition: trailing "Let me now investigate..." -> stripped', () => {
+	const out = stripTransition('Three cycles were reported. Let me now investigate the largest one.');
+	assert.equal(out.changed, true);
+	assert.match(out.body, /reported\.$/);
+});
+
+test('stripTransition: trailing "I will examine..." -> stripped', () => {
+	const out = stripTransition('YARN handles resource allocation. I will examine the NodeManager next.');
+	assert.equal(out.changed, true);
+	assert.match(out.body, /allocation\.$/);
+});
+
+test('stripTransition: "I will" mid-paragraph -> NOT stripped', () => {
+	const out = stripTransition('The reader I will describe is BlockReader; it serves all reads.');
+	assert.equal(out.changed, false);
+});
+
+test('stripTransition: empty body -> unchanged', () => {
+	const out = stripTransition('');
+	assert.equal(out.changed, false);
+	assert.equal(out.body, '');
+});
+
+test('applyPatches: patch body with trailing transition -> sanitized + status=partial', () => {
+	const items = [wi({ id: 'wi-1', kind: 'enhance', where: 'paragraph 1' })];
+	const blocks = parsePatches('```patch:wi-1\nHadoop is an open-source framework. Next, I will examine HDFS.\n```');
+	const r = applyPatches(DRAFT, items, blocks);
+	const lines = r.patchedMarkdown.split('\n\n');
+	assert.match(lines[0]!, /open-source framework\.$/);
+	assert.doesNotMatch(lines[0]!, /Next, I will/);
+	assert.equal(r.itemStatuses[0]!.status, 'partial');
+	assert.match(r.itemStatuses[0]!.reason ?? '', /trailing sentence stripped/);
 });
