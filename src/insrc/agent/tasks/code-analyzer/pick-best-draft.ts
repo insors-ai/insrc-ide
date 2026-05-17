@@ -173,30 +173,11 @@ function compareSignals(a: RoundScore, b: RoundScore): { cmp: number; reason: Sh
 	return { cmp: b.textLength - a.textLength, reason: 'text-length' };
 }
 
-// ---------------------------------------------------------------------------
-// Footer builder (G.3)
-// ---------------------------------------------------------------------------
-
-/**
- * Build the footer that lists reviewer follow-ups left unaddressed by
- * the shipped draft. Returned string includes a leading `\n\n---\n`
- * separator so the caller can blind-concat to the section body.
- * Returns empty string when there are no items to footer.
- */
-export function buildSectionFooter(items: readonly ReviewWorkItem[]): string {
-	if (items.length === 0) return '';
-	const bullets = items.map(w => `- ${w.kind} ${w.where}: ${w.action}`);
-	const noun = items.length === 1 ? 'follow-up' : 'follow-ups';
-	return [
-		'',
-		'---',
-		`_Reviewer flagged ${items.length} ${noun} this draft did not fully address:_`,
-		'',
-		...bullets,
-		'',
-		'_See the TodoList item for the full trace._',
-	].join('\n');
-}
+// G.3 buildSectionFooter was removed after run #3: reviewer misses
+// (unaddressed work items, degraded reviews) are now only logged --
+// not appended to the section markdown. The per-section log line +
+// TodoList reviewRounds[] trace + chat-panel milestone carry the
+// same info without polluting the report body.
 
 // ---------------------------------------------------------------------------
 // Test exports

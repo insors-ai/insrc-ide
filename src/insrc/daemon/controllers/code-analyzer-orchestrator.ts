@@ -764,7 +764,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // section title + tool catalog directly.
     const { writeSectionWithTools, patchSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
     const { reviewAction } = await import('../../agent/content-gen/review-action.js');
-    const { pickBestRound, buildSectionFooter } = await import('../../agent/tasks/code-analyzer/pick-best-draft.js');
+    const { pickBestRound } = await import('../../agent/tasks/code-analyzer/pick-best-draft.js');
     type RoundCandidate = import('../../agent/tasks/code-analyzer/pick-best-draft.js').RoundCandidate;
     log.info({ sections: actions.length }, 'per-action tool-loop writer starting');
 
@@ -1066,16 +1066,16 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       } else {
         const pick = pickBestRound(candidates);
         const winner = pick.winner;
-        // Footer lists the WINNING round's reviewer work-items so the
-        // user sees what's still pending against the shipped draft.
-        const footer = buildSectionFooter(winner.review.workItems);
-        // Phase K.5: when ANY review on the shipping path was degraded,
-        // append a one-line honesty note above the footer so the user
-        // knows the reviewer didn't actually approve the draft.
-        const degradedNote = hasDegradedAccept || winner.review.degraded
-          ? '\n\n_Note: the reviewer\'s structured response was malformed on this section. The draft shipped without a verified accept._'
-          : '';
-        final = winner.markdown + degradedNote + footer;
+        // Reviewer misses (unaddressed work items, degraded-review
+        // notes) are intentionally NOT appended to the section body.
+        // They live in:
+        //   - the per-section log line (degradedReviews, fixItemsUnaddressedFinal)
+        //   - the TodoList item's reviewRounds[] trace (per-round
+        //     workItems + itemStatuses, with degraded flag per round)
+        //   - the chat-panel milestone (confidence + unaddressed count)
+        // so the operator has full visibility without polluting the
+        // report markdown.
+        final = winner.markdown;
         shippedRound = winner.round;
         shipDecisionReason = winner.review.degraded || hasDegradedAccept
           ? `${pick.reason} (degraded review)`

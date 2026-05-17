@@ -1,5 +1,5 @@
 /**
- * Tests for the Phase G best-of-rounds picker + footer builder.
+ * Tests for the Phase G best-of-rounds picker.
  *
  * Picker uses lexicographic preference:
  *   1. fixItemsAddressed (correctness wins)
@@ -7,8 +7,10 @@
  *   3. paragraphCount
  *   4. textLength (tie-breaker)
  *
- * Footer lists reviewer follow-ups left unaddressed by the shipped
- * draft.
+ * The G.3 buildSectionFooter helper was removed after run #3 --
+ * reviewer misses are now only logged, not appended to the section
+ * markdown. See the orchestrator's per-section log line +
+ * TodoList reviewRounds[] trace.
  */
 
 import { test } from 'node:test';
@@ -16,7 +18,6 @@ import assert from 'node:assert/strict';
 
 import {
 	pickBestRound,
-	buildSectionFooter,
 	type RoundCandidate,
 	_scoreOneForTest as scoreOne,
 	_compareSignalsForTest as compareSignals,
@@ -210,30 +211,3 @@ test('pickBestRound: empty -> throws', () => {
 	assert.throws(() => pickBestRound([]), /non-empty/);
 });
 
-// ---------------------------------------------------------------------------
-// buildSectionFooter
-// ---------------------------------------------------------------------------
-
-test('buildSectionFooter: empty -> empty string', () => {
-	assert.equal(buildSectionFooter([]), '');
-});
-
-test('buildSectionFooter: items listed with kind + where + action', () => {
-	const items: ReviewWorkItem[] = [
-		wi({ id: 'wi-1', kind: 'enhance', where: 'paragraph 2', action: 'add file:line refs for DatanodeManager' }),
-		wi({ id: 'wi-2', kind: 'add',     where: 'after paragraph 4', action: 'cover rack-awareness' }),
-	];
-	const out = buildSectionFooter(items);
-	assert.match(out, /---/);
-	assert.match(out, /Reviewer flagged 2 follow-ups/);
-	assert.match(out, /enhance paragraph 2: add file:line refs for DatanodeManager/);
-	assert.match(out, /add after paragraph 4: cover rack-awareness/);
-	assert.match(out, /See the TodoList item/);
-});
-
-test('buildSectionFooter: single item -> singular noun', () => {
-	const items: ReviewWorkItem[] = [wi({ id: 'wi-1', kind: 'fix', action: 'fix the claim' })];
-	const out = buildSectionFooter(items);
-	assert.match(out, /1 follow-up\b/);   // singular
-	assert.doesNotMatch(out, /follow-ups/);
-});
