@@ -476,11 +476,439 @@ If those metrics improve, ship J standalone. The structured-review work in E-G t
 
 ---
 
-## Out of scope
+## Live retest 2026-05-16 (run #2)
+
+After Phases E-J shipped (commits `e6a1f6f5afc` → `590cc5dc40e`), a second `/code-analyze` run was driven against the same Hadoop repo. The planner produced 8 sections (vs 12 in the first run -- different scope tier). All 8 sections shipped with content; **0 placeholder kills** (vs 11/12 in the first run). Report at `~/.insrc/tmp/<sessionId>/reports/turn-1.md`, 21,778 bytes (~4.5x the first run's 4,801).
+
+### Macro outcomes
+
+| Metric | Run #1 (2026-05-16 #1) | Run #2 (2026-05-16 #2) |
+|---|---|---|
+| Sections shipped | 1 / 12 (rest were placeholders) | **8 / 8** |
+| Report size | 4,801 bytes | **21,778 bytes** |
+| `firstTurnFramingDetected` rate | ~100% | **0%** |
+| Transition-phrase nudge fires | n/a | 0 (never needed -- J.1 prompt rewrite is sufficient) |
+| Patch-protocol compliance | n/a | **1 / 7 patch calls** (14%; target was ≥70%) |
+| F.4 redraft fallback fires | n/a | **6 / 7 patch calls** (target was <30%) |
+| Real (non-degraded) accept verdicts | n/a | **0 / 8 sections** |
+| Sections where shipping went through the picker | n/a | 2 / 8 (sections 3, 4) |
+| Sections shipped via degraded soft-accept | n/a | 5 / 8 (sections 1, 2, 6, 7, 8) |
+| Sections that shipped a worse round-2 over a better round-1 because of the degraded short-circuit | n/a | **2 / 8** (sections 5, 7) |
+
+### Per-section table
+
+| # | Section | Round | Reason | Conf | Notes |
+|---|---|---|---|---|---|
+| 1 | Hadoop Project Scope & Mission | 2 | accept@round2 (degraded) | medium | Patch produced 2 of 6 items; reviewer JSON parse failed twice |
+| 2 | HDFS NameNode | 1 | accept@round1 (degraded) | high | No patch round ran; degraded soft-accept |
+| 3 | Hadoop Common Utilities | 1 | **picker: paragraph-count** | medium | Patch failed R2 + R3; round 1 won correctly |
+| 4 | MapReduce Batch Processing | 1 | **picker: citation-count** | **low** | 1 fix item still pending; confidence reflects it |
+| 5 | YARN Resource Management | 2 | accept@round2 (degraded) | medium | **Lost content**: 1186-char redraft shipped over 3659-char round 1 |
+| 6 | Language Composition | 1 | accept@round1 (degraded) | high | 960 chars / 0 citations; misleading "high" confidence |
+| 7 | Module Hierarchy | 2 | accept@round2 (degraded) | medium | **Lost content**: 1080-char redraft shipped over 5130-char round 1 |
+| 8 | Codebase Scale | 1 | accept@round1 (degraded) | high | 6810 chars; degraded soft-accept harmless here (no patch round) |
+
+### Wins (don't regress these)
+
+- **Subject-framing prompt landed everywhere.** `firstTurnFramingDetected: false` on all 8 sections. No "I will investigate..." openers.
+- **Transition-phrase nudge never fired** -- the prompt rewrite alone was enough for the writer (round 1) loop.
+- **Picker correctly defends against regressions** when it gets to run. Sections 3 and 4 both shipped round-1 over weaker patch rounds.
+- **No placeholder kills.** The whole point of Phase G's redesign held up under the patch protocol's near-total failure.
+- **Confidence H/M/L semantics are right** (`confidence: low` on section 4 because there's a `fix` item pending; medium on picker wins with no fix pending).
+- **TodoList per-round trace persists.** `reviewRounds` array with workItems + itemStatuses serialises cleanly through `updateItemMeta`.
+
+### Failure clusters surfaced
+
+Three issues, ranked by severity:
+
+1. **P0 -- Degraded soft-accept short-circuits the picker** (sections 5, 7). The reviewer's structured output exceeds the 800-token output cap, both attempts return malformed JSON, the soft-accept path returns `verdict='accept'` with `workItems=[]`, and the orchestrator's `acceptIdx >= 0` short-circuit ships that round's draft -- bypassing the picker that would have chosen the better round. Net effect: a thinner, citation-poor F.4 redraft beats a richer round 1.
+2. **P0 -- Patch protocol systemically fails** (6 of 7 patch calls produced 0 patch blocks). The model emits prose narration where the prompt asks for fenced `patch:<id>` blocks. The orchestrator parses 0 blocks, marks all items `skipped`, falls back to F.4 redraft. The redraft is consistently shorter than round 1 (231 / 363 / 988 / 1080 / 1186 chars vs round 1 averaging 2-5k). The picker rescues shipping by choosing round 1, but the work-item list never gets addressed.
+3. **P1 -- Reviewer max_tokens crisis** (every section). `DEFAULT_MAX_TOKENS=800` was sized for the old `{verdict, refine.hint}` shape. The new schema's six work items each carrying `id+kind+where+issue+action` fields easily exceed 800 output tokens; truncation lands mid-string; the validator rejects; one retry fails the same way; soft-accept fires. We hit this on every reviewer call. Cause of #1 above.
+
+### Compounded findings
+
+The transition-phrase pattern J.2 was meant to catch did sneak back in -- but through a different surface than the writer-turn nudge can see. The `patch:wi-N` block bodies contain phrases like "Next, I will examine the MapReduce module" -- they get pasted into the section verbatim by `applyPatches`. The nudge scans the outer turn text, not patch-body content, so it doesn't catch this. Fixable at the patch-prompt layer (see L.2 below).
+
+---
+
+## Follow-up plan (run #2 fix batch)
+
+Five new phases organized by severity. The dependency order is K → L → M → N → O. K is P0 reliability; L addresses the patch protocol viability that drove most of the run's degraded outcomes; M-O are quality improvements that ride on top.
+
+### Phase K -- reliability P0 (must land before the next retest)
+
+#### K.1 Picker excludes degraded-accept candidates
+
+**Why:** [pick-best-draft.ts](src/insrc/agent/tasks/code-analyzer/pick-best-draft.ts) is only invoked when no round verdicted `accept`. The orchestrator's `acceptIdx = candidates.findIndex(c => c.review.verdict === 'accept')` short-circuit doesn't distinguish a real accept from a degraded soft-accept. The soft-accept path in [reviewAction](src/insrc/agent/content-gen/review-action.ts) returns `verdict='accept', workItems=[], degraded=true` -- and the orchestrator treats it identically to a real accept.
+
+**Fix:** the short-circuit must require `review.verdict === 'accept' && review.degraded === false`. Degraded accepts fall through to the picker. The picker then scores every round (including the degraded one) and chooses by the existing lexicographic order. A round with content but a degraded review usually wins on text-length / paragraphs.
+
+**Test:** add a test in `pick-best-draft.test.ts` exercising the "two rounds, first verdicted needs-work cleanly, second verdicted degraded-accept" case -- the picker should fire and pick the better round, not the degraded one.
+
+**Impact:** sections 5 and 7 of run #2 would have shipped round 1's 3659- and 5130-char drafts instead of the 1186- and 1080-char redrafts.
+
+#### K.2 Raise the reviewer output budget
+
+**Why:** the live run had **every** reviewer call hit `stopReason: max_tokens` at some point. Output cap of 800 is wrong for the new schema -- one workItem already runs ~400-500 chars formatted as JSON; six items × ~450 chars ≈ 900 tokens before `accepted.markdown` polish.
+
+**Fix:** [review-action.ts](src/insrc/agent/content-gen/review-action.ts) `DEFAULT_MAX_TOKENS` from 800 → **2500**. Test that the existing reviewer tests still pass with the higher cap (provider stubs ignore maxTokens, so this is paperwork).
+
+**Side effect:** higher cost per review call. Worth it -- a broken reviewer is far worse than a slightly more expensive one. Phase K.3 below compresses the schema to claw back some of the budget.
+
+#### K.3 Compact the workItem field shape
+
+**Why:** the `issue` and `action` fields are free-form sentences with no length cap. The reviewer routinely writes 200-char `action` strings. Six items × 200 char actions ≈ 1200 chars on action alone.
+
+**Fix:** add `maxLength` to the schema (`issue`: 150, `action`: 150). Update the system prompt to make the cap explicit -- "Keep `issue` and `action` to one short sentence (≤150 chars each)." Validator already enforces non-empty; extend it to enforce ≤200 chars (a touch above the soft target to allow some slack).
+
+**Side effect:** the reviewer occasionally needs more nuance than 150 chars allows. Acceptable trade -- the writer doesn't read prose nuance well anyway; a shorter directive is more likely to be obeyed.
+
+#### K.4 Distinguish degraded soft-accept from real accept in metrics + UI
+
+**Why:** the per-section log line emits `shipDecisionReason: 'accept@round2'` whether the accept was a real or degraded one. The TodoList persisted `reviewRounds[i].verdict === 'accept'` regardless. The user can't tell from the report or TodoList whether the reviewer actually approved the draft or crashed and we shipped by default.
+
+**Fix:** propagate `review.degraded` into the orchestrator's per-round trace and the section-complete log line. Add `degradedReviews: number` to the section summary (count of rounds where the review was degraded). Confidence semantics adjust:
+- Real `accept @ round 1` → high
+- Real `accept @ round 2/3` → medium
+- Degraded `accept` at ANY round → medium (not high; reviewer didn't actually approve)
+- All `needs-work` + no `fix` pending → medium
+- All `needs-work` + `fix` pending → low
+
+**TodoList:** add `degraded: true` flag to the per-round entry in `reviewRounds`. The workbench can render a small "review crashed" icon next to that round.
+
+#### K.5 Confidence label honesty in the section footer
+
+When a section's shipping decision involved a degraded review, append a one-line note above the existing footer:
+
+```
+_Note: the reviewer's structured response was malformed on this section.
+The draft shipped without a verified accept._
+```
+
+This is informational, not alarming. It tells the user "treat this section's reviewer-approval as soft."
+
+---
+
+### Phase L -- patch protocol viability
+
+The whole structured-review design hinges on the patch loop working. Run #2 showed the patch loop emitting **zero patch blocks 6 out of 7 times**. Until that's fixed, the picker is doing all the work and Phases E-G are wasted.
+
+#### L.1 Inspect what the model actually emits in place of patch blocks
+
+**Before changing prompts**, dump a failed patch loop's raw LLM output. The orchestrator already logs the request/response shape via `llm-io`. Pull a failed section's response text and answer:
+
+- Does the model emit prose with NO fenced blocks? (most likely)
+- Does it emit prose with markdown headers / bullets but no fences? (possible)
+- Does it emit fenced blocks with the wrong tag pattern? (e.g. `\`\`\`wi-1` without the `patch:` prefix)
+- Does it emit fenced blocks with content but wrong delimiters?
+
+The fix depends on the answer. If it's "no fences at all," the prompt isn't landing. If it's "wrong delimiter shape," the parser regex is too tight. If it's "the model wrote the patches in the prose itself," then we need a different parsing strategy.
+
+This is the **single most important investigation** in the fix batch. Without this data, every L.2-L.4 fix is a guess.
+
+#### L.2 Patch-body terminal-artifact rule
+
+Independent of L.1: the patch protocol prompt doesn't tell the model that the **patch body is a standalone paragraph that will be inserted verbatim**. The model carries over its writer-prompt habit of ending each paragraph with a transition ("Next, I will examine X"). Those transitions get pasted into the section.
+
+**Fix:** add a `## Patch body content` block to `PATCH_SYSTEM_PROMPT_INTRO` with concrete WRONG/RIGHT examples (mirroring J.1's structure but applied to patch bodies):
+
+```
+The patch body becomes a STANDALONE paragraph in the final report.
+It is a terminal artifact -- there is no "next" inside the patch body.
+Do NOT include transition phrases. Do NOT promise further investigation.
+
+  WRONG: "The HDFS module contains 707 files including DFSConfigKeys.
+  Next, I will examine the MapReduce module."
+  RIGHT: "The HDFS module contains 707 files including
+  [`DFSConfigKeys`](path:.../DFSConfigKeys.java#L1-L2034), which
+  defines the configuration keys that govern block placement,
+  replication factor, and the heartbeat interval."
+```
+
+This is the root-cause fix surfacing in run #2 (where the transition phrases leaked from section 1's patches into the shipped draft). Regex-strip in `applyPatches` would be a weak band-aid; the prompt is the right layer.
+
+#### L.3 Round-curated patch prompts (R3 escalation)
+
+Run #2 confirmed: when round 2's patch loop bailed, round 3 saw the **exact same patch prompt** and bailed identically. No "this is your last attempt, the previous patch produced zero blocks" signal.
+
+**Fix:** parameterise `PATCH_SYSTEM_PROMPT_INTRO` with a `round` argument. Round 3's variant prepends an escalation note:
+
+```
+This is your THIRD attempt. The previous patch round produced zero
+fenced blocks -- the orchestrator interpreted that as silent failure
+and ran a redraft fallback. The redraft did not satisfy the reviewer
+either. You MUST emit `patch:<id>` or `skip:<id>` fenced blocks for
+each work item. If you cannot address an item, emit a `skip:` block
+with a one-sentence reason. Silence is the worst possible response.
+```
+
+This makes the round-3 prompt actively escalate, not just retry.
+
+#### L.4 Patch-body sanitization as defense in depth
+
+After L.1 + L.2 land, if the live retest still shows transition phrases in patch bodies, add a sanitizer in [apply-patches.ts](src/insrc/agent/tasks/code-analyzer/apply-patches.ts):
+
+- Reject patch bodies whose final sentence matches the J.2 transition regex.
+- Mark the item `partial` with reason `"writer announced an action; body sanitized"`.
+
+This is defense in depth, not the primary fix. The prompt change (L.2) should suffice on most runs.
+
+---
+
+### Phase M -- F.4 redraft prompt curation
+
+The F.4 redraft fallback uses the **same writer prompt** as round 1 with a `## Reviewer hint` block prepended. Run #2 showed every F.4 redraft producing a meaningfully shorter draft than round 1 (231-1186 chars vs round 1's 2-5k). The hint focuses the model narrowly; the writer prompt's "open with a topic sentence about the SUBJECT" doesn't override the "answer the hint" pull.
+
+#### M.1 New "recovery" writer prompt variant
+
+`writeSectionWithTools` gains a third entry-point mode (`mode: 'fresh' | 'recovery'`). Recovery mode swaps `SYSTEM_PROMPT_INTRO` for `RECOVERY_SYSTEM_PROMPT_INTRO`, which differs from the writer prompt in three places:
+
+- "This is a recovery pass. The patch loop attempted to revise an existing draft and could not. Produce a **fresh, comparably-full draft** of the section, NOT a narrow answer to the reviewer's hints."
+- "Treat the reviewer hints as constraints, not as the topic. The section objective and review criteria remain the primary target."
+- "Match the original draft's length and density (similar paragraph count, similar citation density). Do not produce a stub."
+
+Plus the F.4 redraft path passes the round-1 draft length / paragraph count as soft targets in the user message:
+
+```
+## Recovery context
+- The original draft was ~3,500 chars across 5 paragraphs with 9 citations.
+- The patch loop tried to address: <hint>
+- Produce a fresh draft of comparable scope (NOT a narrow answer).
+```
+
+#### M.2 Cumulative-evidence pruning for the reviewer
+
+Run #2's section 7 round-2 review user message was over 16 KB just on evidence (15 cumulative skill calls). Most of round 2's skill calls duplicate round 1's findings. Trim:
+
+- Round 2 review: send round-1 evidence + only round-2's NEW (non-duplicate) calls.
+- Round 3 review: send a compressed summary of round-1+round-2 evidence ("21 skill calls covered: module.describe ×8, entity.summary ×7, file.describe ×6") + round-3's new calls verbatim.
+
+This cuts the reviewer's input by 30-60% on rounds 2/3 without dropping signal.
+
+---
+
+### Phase N -- writer-quality nudges
+
+#### N.1 Enforce entity-level drill-down when section needs concrete citations
+
+Section 3 of run #2 had 5 paragraphs and 3207 chars but **0 citations** because the writer only called `code.source.module.describe` -- which returns aggregate stats but no entity-level file:line anchors.
+
+**Fix in the writer system prompt:** add a "citation density requirement":
+
+```
+A section's review criteria include "names concrete entities with
+file paths." `module.describe` returns module-level stats only --
+file:line citations come from `entity.summary`, `file.describe`,
+or `class.locate-references`. If your investigation has not made
+at least one entity-level skill call by your third turn, you MUST
+do so before closing.
+```
+
+This is a soft mandate, not a hard one -- the loop doesn't enforce it -- but it makes the requirement explicit so the model's stop heuristic factors it in.
+
+#### N.2 Reviewer round-awareness
+
+Currently every review pass is fresh -- the cloud reviewer doesn't know it asked for X in round 1. Run #2 showed reviewer work-item lists drifting between rounds for the same section.
+
+**Fix:** when round 2's review fires, prepend round 1's reviewer work-item list to the user message under a `## Previous review (round 1)` block. The reviewer sees what it asked for last time, and can judge whether round 2 addressed it. Same pattern for round 3.
+
+This adds ~1 KB to the round-2/3 user message but gives the reviewer continuity that the writer already has (via priorDescribedSkills + cumulative skill calls).
+
+---
+
+### Phase O -- cosmetic cleanups
+
+#### O.1 verdictLabel doubling
+
+Milestone label `accept@round2@round2` appears when the accept-short-circuit branch fires because `shipDecisionReason` already contains `'accept@roundN'` and the label-builder appends `'@roundN'` again. Trivial fix: drop the `@round` suffix from the accept branch's `shipDecisionReason` string, OR strip a trailing `@round\d+` from the label-builder. Picker-path labels (`paragraph-count@round1`) render correctly.
+
+#### O.2 Better "section drafting complete" milestone string
+
+Run #2's milestone strings are dense but cryptic for non-developers. Compose a clearer line per section:
+
+```
+[5/8] "YARN Resource Management" -- shipped round 1 (picker: citation-count;
+       5 reviewer follow-ups remain unaddressed; confidence: medium)
+```
+
+Lift the unaddressed-count and confidence into the milestone so the chat panel surfaces them without the user having to read the report footer.
+
+---
+
+## Run #2 success criteria (re-run after K-L land)
+
+- 8/8 sections shipped with content (regression check; achieved in run #2).
+- ≥1 section achieves a **non-degraded** accept (real reviewer approval, not soft-accept).
+- Patch-protocol compliance ≥50% (target stretched from 70% pending L.1 findings; if L.1 shows the model is fundamentally fighting the protocol, this target may go up or the design changes).
+- F.4 redraft fallback fires on <50% of patch calls (target was 30%; relaxed pending L.1).
+- 0 sections ship a worse later round over a better earlier round (K.1 guarantees this).
+- Median F.4 redraft length ≥80% of round-1 median length (M.1 closes the gap).
+- 0 transition phrases in any shipped patch body (L.2 + L.4).
+
+---
+
+## Live retest 2026-05-17 (run #3)
+
+After Phases K-O shipped (commits `72170527cb0` -> `34abb836389`), a third `/code-analyze` run drove against the same Hadoop repo. Planner produced 12 sections. All 12 shipped with content. Report at `~/.insrc/tmp/<sessionId>/reports/turn-2.md`, **40,419 bytes** (1.9x run #2 / 8.4x run #1).
+
+### Macro outcomes vs prior runs
+
+| Metric | Run #1 | Run #2 | Run #3 |
+|---|---|---|---|
+| Sections shipped | 1 / 12 placeholders | 8 / 8 | **12 / 12** |
+| Report size | 4,801 B | 21,778 B | **40,419 B** |
+| Real (non-degraded) accepts | 0 | 0 | **3** (sections 9, 10, 11) |
+| Patch protocol producing blocks | n/a | 1 section | **2 sections** (5, 12) |
+| Sections losing content to degraded short-circuit | n/a | 2 (5, 7) | **0** (K.1 working) |
+| Sections with degraded review | n/a | 5 / 8 | 3 / 12 (3, 4, 7) |
+| `firstTurnFramingDetected` rate | ~100% | 0% | **0%** |
+| Transition-phrase nudge fires | n/a | 0 | 0 |
+| verdictLabel doubling occurrences | n/a | 5 / 8 milestones | **0 / 12** (O.1) |
+
+### Run #3 per-section table
+
+| # | Section | R | Reason | Conf | Patch R2 | Patch R3 | Notes |
+|---|---|---|---|---|---|---|---|
+| 1 | HDFS NameNode | 3 | citation-count | low | 0/6 | 0/4 | recovery redraft 2280/7 won |
+| 2 | Common Filesystem | 1 | citation-count | medium | 0/5 | 0/5 | round 1 (2682/6) beat redrafts (778/0, 1060/3) |
+| 3 | MapReduce Client | 1 | sole-candidate (degraded) | medium | – | – | reviewer crashed; shipped round 1 |
+| 4 | YARN ResourceMgr | 2 | citation-count (degraded) | medium | 0/5 | 0/5 | recovery redraft 6213 chars |
+| 5 | YARN Protocol Records | 2 | text-length | low | **1/5** | **3/5** | **both patches emitted** |
+| 6 | HDFS Client I/O | 3 | citation-count | medium | 0/5 | 0/5 | thin throughout (919->1026) |
+| 7 | Common Utilities | 1 | paragraph-count (degraded) | medium | 0/5 | – | F.4 produced 0-char redraft |
+| 8 | MapReduce Task | 3 | citation-count | medium | 0/5 | 0/5 | strong recovery (2108/6) |
+| 9 | YARN Web UI | 2 | **accept@round2** | medium | **4/5** | – | first real accept; patch worked |
+| 10 | HDFS Testing | 2 | **accept@round2** | medium | 0/4 | – | real accept via F.4 redraft |
+| 11 | MapReduce Testing | 2 | **accept@round2** | medium | 0/4 | – | real accept via F.4 redraft |
+| 12 | Repo Build | 1 | paragraph-count | medium | **1/5** | **3/5** | both patches emitted; round 1 won |
+
+### What landed
+
+- **K.1 (degraded-accept exclusion)**: **0 sections** lost content to a degraded short-circuit (vs 2 in run #2). Picker fires correctly whenever the only accept is degraded.
+- **K.2 (raised reviewer maxTokens 800 -> 2500)**: most reviewer calls landed valid JSON; the few that didn't were schema violations, not truncation (see Phase P below).
+- **K.4 (degraded flag through trace + confidence)**: `degraded` propagates through `reviewRounds[i]`, `degradedReviews` counter on the section log line, and the confidence downgrade. Sections 3 / 4 / 7 correctly show `confidence: medium` despite being on the degraded path.
+- **L.3 (round-3 escalation)** when accepted: sections 5 R3 and 12 R3 both emitted 3-4 patch blocks with **zero skill calls** -- the "skill calls are optional" clause is the key driver of patch protocol success on substantive sections.
+- **M.1 (recovery prompt)** when accepted: sections 4 / 8 / 10 produced recovery redrafts 2.3-2.8x larger than round 1, with comparable or better citation density. Sections 9, 10, 11 reached real accepts via the F.4 path.
+- **N.2 (reviewer round-awareness)**: no reviewer drift observed across rounds in any section. priorReviews block landed cleanly.
+- **O.1 + O.2**: milestone format clean (`accept @ round 2`, `paragraph-count @ round 1`) with confidence + unaddressed count surfaced inline.
+
+### What did not land
+
+The structural failure clusters from run #2 narrowed but did not close:
+
+- **L.2 prompt rewrite did not fix substantive-round-1 patches**. The model still treats the per-item interleaving prompt as a TODO list ("For wi-1, I will... For wi-2, I will... Let me gather evidence") and runs out of iterations before emitting blocks. The R3 escalation works because the "skill calls are optional" clause overrides the gather instinct -- but only on R3 today.
+- **N.1 entity-drill-down rule (soft mandate)** -- ~50% of sections closed round 1 with only `code.source.module.describe` calls and 0 citations. The soft "MUST call entity-level skill before closing" rule was ignored.
+- **Writer voluntary-early-close** -- sections 6, 7, 8, 9, 10 closed round 1 after 1-3 tool calls. The "When to stop" rule fires too eagerly. Round 1 thinness is what later triggered F.4 reliance.
+- **K.3 length cap blocking the reviewer** -- sections 4 R3 and 7 R2 both had reviewer JSON rejected because `workItems[i].action` exceeded 200 chars. The validator's max-length check is now BLOCKING valid review output; the cap should soft-truncate, not reject.
+- **Reviewer hallucinating `kind`** outside the fix|enhance|add|trim enum -- sections 3 / 4 R3 retry / 7 all hit `workItems[0].kind must be one of fix|enhance|add|trim`. The reviewer is inventing kinds like `clarify` / `restructure`. Either widen the enum or strengthen prompt + auto-retry with a corrective re-prompt that names the violating value.
+- **F.4 empty redraft** -- section 7's recovery redraft produced `textLength: 0`. New failure mode. The recovery preamble's "produce a fresh comparably-full draft" instruction didn't reach the model under whatever context primed an empty response.
+- **Writer-side duplicate paragraphs** -- section 2 round 1 had paragraphs 2 and 3 as near-duplicates of each other (same "module contains 297 files..." opener). The interleaved-investigation loop re-narrated already-seen evidence after eviction.
+
+The plan's K-O batch closed the most-acute reliability issues (degraded-accept short-circuit, picker correctness, milestone clarity). The remaining failures cluster around the **writer's tool-call discipline** and the **reviewer's schema discipline** -- both addressable through Phase P.
+
+### Out-of-band fix landed after the run
+
+Run #3's reviewer-misses were appended into the section markdown via `buildSectionFooter` (G.3) and the K.5 degraded-review note. That mixed two audiences (report reader vs operator). Both surfaces were removed after the run (commit `e7baa080483`):
+
+- `buildSectionFooter` deleted from `pick-best-draft.ts` and its tests.
+- The orchestrator's picker branch ships `winner.markdown` verbatim with no overlay.
+- Reviewer misses now live only in: the per-section log line, the TodoList `reviewRounds[]` trace, and the chat-panel milestone.
+
+`shipDecisionReason` still appends `(degraded review)` suffix when relevant, but that's a log/milestone artifact -- never in section content.
+
+---
+
+## Follow-up plan (run #3 fix batch -- Phase P)
+
+Six fixes targeting the failure clusters above, ordered by impact. P.1 + P.2 are the biggest leverage; P.3-P.6 are quality nudges.
+
+### P.1 Raise tool-call cap to 32
+
+**Why:** `DEFAULT_MAX_TOOL_CALLS = 10` in [write-section.ts](src/insrc/agent/tasks/code-analyzer/write-section.ts) was sized when writers commonly stopped at 5-7 calls. Run #3 showed:
+
+  - Substantive round 1s (sections 1, 4, 11, 12) hit the cap at 10 with the model still actively calling tools.
+  - Patch loops on substantive sections (4 R3 spammed 10 entity.summary calls before being cut off; 11 R2 made 6 calls but never emitted a block) needed more space to gather AND emit.
+  - Recovery redrafts (4 R2 produced 6213 chars hitting the cap, 8 R3 produced 2108 chars hitting the cap) wanted more room to match round-1 density.
+
+**Fix:** raise `DEFAULT_MAX_TOOL_CALLS` from 10 to **32**. Same value applied to both `writeSectionWithTools` and `patchSectionWithTools`. The global `getToolSettings().loop.maxIterations = 25` is still honored as a hard ceiling; the per-call override pushes it to 32 only for code-analyzer sections.
+
+**Side effect:** longer per-section runs (~3x worst case). Acceptable for the accuracy-over-speed principle. Phase I instrumentation already tracks per-section `toolCallCount` so we can measure the new average.
+
+### P.2 Patch prompt: bring "skill calls are optional" forward to R2
+
+**Why:** the [PATCH_SYSTEM_PROMPT round 3 escalation](src/insrc/agent/tasks/code-analyzer/write-section.ts) clause "Skill calls are optional this round. If the previous rounds gathered the evidence already, just write the patch body from what is in your context" is the single highest-leverage line in the patch prompt -- it's what enabled sections 5 R3, 9 R2, 12 R3 to emit blocks. Today it only fires on round 3. Run #3 showed substantive round-1 drafts produce 0 patch blocks on R2 because the model gathers indefinitely; bringing the clause forward gives R2 the same out.
+
+**Fix:** add a "Skill calls are usually unnecessary" section to the base patch prompt (the round-agnostic body). Frame it as:
+
+```
+You already have round-1's skill-call evidence in your conversation
+history. The patch body should USUALLY emit from that existing
+context. Only call a skill when the work item explicitly requires
+new evidence (e.g. an `add` item asking for a topic round 1 did not
+investigate). Gathering more evidence is the most common failure
+mode of this loop -- the cap will kill the loop before you emit
+the patch.
+```
+
+Keep the L.3 R3 escalation block on top of this -- R3 still gets a stronger nudge ("you MUST emit blocks, silence is the worst response").
+
+### P.3 K.3 length cap: soft-truncate instead of validator-reject
+
+**Why:** sections 4 R3 and 7 R2 had reviewer JSON rejected because `action` exceeded 200 chars. The validator currently returns a hard error -> retry -> if retry also too long, soft-accept with `workItems=[]`. That throws away a perfectly usable review.
+
+**Fix:** in [review-action.ts validator](src/insrc/agent/content-gen/review-action.ts) -- when `issue.length > 200` or `action.length > 200`, **truncate to 200 chars with an ellipsis** and add a note to `notes[]` flagging that the field was truncated. Validator no longer rejects on length. The schema's `maxLength` becomes advisory (the cloud LLM still tries to respect it via the schema hint, but exceeding it doesn't break the flow).
+
+### P.4 Reviewer kind-enum hallucination: corrective retry
+
+**Why:** sections 3, 4 R3, 7 all hit `workItems[0].kind must be one of fix|enhance|add|trim`. The reviewer invents kinds like `clarify` or `restructure`. The current retry just re-sends the same prompt with a generic "previous response was rejected" message -- doesn't say what was wrong.
+
+**Fix:** when the validator detects an out-of-enum `kind`, the retry prompt names the violating value AND the closest valid mapping. For example: `Your response used kind="clarify" which is not in the allowed enum. Map it to "enhance" (closest match) or pick the right one from fix|enhance|add|trim.` This converts a 50/50 retry into a near-certain success because the model now knows exactly what to fix.
+
+**Side effect:** adds ~50 chars to the retry prompt for kind violations only. No cost to normal-path reviews.
+
+### P.5 N.1 entity-drill-down: harden from soft mandate to loop-level rule
+
+**Why:** the [N.1 "Citation density requirement" prompt section](src/insrc/agent/tasks/code-analyzer/write-section.ts) tells the writer to call an entity-level skill before closing if it's only used module.describe by turn 3. Run #3 showed ~50% of sections ignore the rule. Soft mandates in long prompts have weak compliance.
+
+**Fix:** enforce at the loop level via `interceptToolCall`. Track per-loop `moduleDescribeCallCount`. If the writer attempts to emit `end_turn` after only module.describe calls AND citationCount in the produced text is 0 AND the action's review criteria mention "entities" / "classes" / "implementations" / "specific" / "file:line", the loop injects a synthetic user turn: `Your draft has no clickable citations and you have only called code.source.module.describe. The section criteria require concrete entity references. Call code.entity.summary or code.source.file.describe for at least one entity before closing.` One-shot per loop (similar to J.2 transition-phrase nudge).
+
+### P.6 Writer voluntary-early-close hard floor
+
+**Why:** sections 6, 7, 8, 9, 10 of run #3 closed round 1 after 1-3 tool calls. The "When to stop" rule reads "When every review criterion is addressed by a paragraph in your investigation" but the writer self-assesses with no verification.
+
+**Fix:** loop-level minimum-iterations guard in `writeSectionWithTools`. If the writer attempts `end_turn` before `min(3, criteria.length)` `skill_invoke` calls have been made, inject a synthetic user turn: `You have closed after N skill calls; the section has M review criteria. Make at least one skill call per criterion before closing.` Triggers only once per loop. Recovery mode (M.1) doubles the floor since recovery drafts should match round-1's depth.
+
+### P.7 F.4 redraft empty-output guard
+
+**Why:** section 7's F.4 redraft returned `textLength: 0`. The picker still ran but had only round 1 as a usable candidate, and that round 1 was already thin.
+
+**Fix:** when `writeSectionWithTools` returns `markdown.length === 0` in recovery mode, log it loudly (`error` level, not `warn`) AND retry once with a re-prompted variant: `Your previous response was empty. The recovery context requires a fresh comparably-full draft. Begin with the section's topic sentence about the SUBJECT, not a preamble.` If the retry is also empty, accept the empty draft (picker handles it).
+
+### P.8 Writer-side duplicate-paragraph detection
+
+**Why:** section 2 round 1 had paragraphs 2 and 3 as near-duplicates. The interleaved-investigation loop re-narrates already-seen evidence after eviction.
+
+**Fix:** in the loop's paragraph-flush step ([loop.ts](src/insrc/agent/tools/loop.ts), after `sectionParagraphs.push(currentTurnText.trim())`), compare the new paragraph against the previous one. If the trigram-shingle Jaccard similarity is > 0.7, drop the new paragraph and emit a synthetic user turn: `The paragraph you just wrote is nearly identical to your previous one. State a NEW fact from the latest tool result, not a restatement of prior analysis.` One-shot per loop.
+
+---
+
+## Run #3 success criteria (re-run after P lands)
+
+- 12/12 sections shipped (regression check).
+- ≥6 sections achieve a non-degraded accept (vs 3 in run #3).
+- Patch-protocol compliance ≥40% (vs ~17% in run #3 with current cap).
+- Median round-1 textLength ≥2000 chars (vs ~1500 in run #3 -- P.6 closes the gap).
+- 0 reviewer rejections due to K.3 length cap (P.3 fixes this).
+- 0 reviewer rejections due to kind-enum hallucination unrecovered (P.4 retry fixes most).
+- 0 sections with duplicate-paragraph regressions (P.8).
+
+---
+
+## Out of scope (for the K-O follow-up batch)
 
 - Replacing the reviewer with a local model (Decision 3 above). Worth measuring on a future run, not this plan.
-- Changing the 6-item cap. The cap is a heuristic; revisit if retest shows we're frequently hitting it.
-- Reviewer round 3. The cap stays at 2.
+- Changing the 6-item cap. The cap is a heuristic; the K.2/K.3 output-budget fixes assume the cap stays.
+- ~~Reviewer round 3. The cap stays at 2.~~ (Updated in the locked decisions: 3 rounds shipped in Phase F.)
 - Migrating the `data-analyzer` reviewer. This plan touches the code-analyzer path only. The data-analyzer (`runFollowupExpandReviewSynthesise` in the same orchestrator) uses `expandThenReview` and would need its own pass.
 
 ## Rollback plan
