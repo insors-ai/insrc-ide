@@ -1210,6 +1210,168 @@ The plan stays accuracy-first. Phase Q is a follow-up once Phases P metrics are 
 
 ---
 
+## Phase R -- per-item patch loop (eliminates the ghost-ID failure mode)
+
+### R.1 Iterate per work item; orchestrator controls IDs end-to-end
+
+**Why:** runs #4-#6 surfaced a recurring failure: the writer emits fenced `patch:<id>` blocks but with IDs that don't match the reviewer's `workItems[].id` values (`patch:wi_1` with underscore, `patch:1` renumbered, `patch:enhance-paragraph-1` semantically named, `patch:wi-A` relettered, etc.). The applier walks the workItems list, looks up each item's id in the parsed block map, finds nothing, marks all items `skipped: 'no patch emitted'`. Symptoms:
+
+  - `patchBlocks: N` (N > 0) -- the writer DID emit blocks
+  - `itemsAddressed: 0`, `itemsSkipped: workItems.length` -- but none matched
+  - `patchProtocolFollowed: true` -- because blocks were emitted (misleading)
+  - F.4 redraft fallback does NOT fire (the protocol-followed flag bypasses it)
+  - The picker sees identical R2/R3 content (since no patches applied) and reports `'tied'` (or under the old picker, would arbitrarily lex-pick R1)
+
+Observed prevalence:
+  - Run #4: section 4 R2/R3, section 5 R2, section 6 R2/R3 -- 5 patch attempts
+  - Run #5: section 1 R3, section 3 R3 -- 2 patch attempts (qwen3-coder also affected; not model-specific)
+  - Run #6: section 1 R2, section 2 R2/R3 -- 3 patch attempts
+
+The root cause is the **fenced-block ID protocol itself**. The writer has to (a) read the work-items list, (b) remember each id verbatim, (c) emit a fenced block with the id as the info-string tag. Any of those steps can drift -- and they do drift consistently across both devstral and qwen.
+
+**Fix:** invert the loop. Instead of one giant patch call where the writer must emit fenced blocks for every item, iterate **per work item** inside the orchestrator. The orchestrator already has the IDs (from the reviewer's structured response); the writer never needs to handle them.
+
+#### New flow
+
+```ts
+async function patchSectionItemwise(input: PatchSectionItemwiseInput): Promise<PatchSectionOutput> {
+  let workingDraft = input.draftMarkdown;
+  const statuses: WorkItemStatus[] = [];
+  // Address `fix` items first (correctness gate), then add/enhance/trim
+  const ordered = orderByPriority(input.workItems);
+  for (const item of ordered) {
+    const status = await applyOneItem(workingDraft, item, input);
+    workingDraft  = status.patchedDraft;
+    statuses.push(status.itemStatus);
+  }
+  return { markdown: workingDraft, itemStatuses: statuses, ... };
+}
+
+async function applyOneItem(draft, item, ctx): Promise<{ patchedDraft, itemStatus }> {
+  switch (item.kind) {
+    case 'trim': {
+      // No LLM call needed -- just delete the targeted paragraph.
+      const newDraft = deleteParagraph(draft, item.where);
+      return { patchedDraft: newDraft, itemStatus: { id: item.id, status: 'addressed' } };
+    }
+    case 'fix':
+    case 'enhance': {
+      const newPara = await localLLM.complete(buildEnhancePrompt(draft, item, ctx));
+      if (newPara.trim().length === 0) {
+        return { patchedDraft: draft, itemStatus: { id: item.id, status: 'skipped', reason: 'empty response' } };
+      }
+      const newDraft = replaceParagraph(draft, item.where, newPara);
+      return { patchedDraft: newDraft, itemStatus: { id: item.id, status: 'addressed' } };
+    }
+    case 'add': {
+      // Allow 1-2 skill calls in this item's sub-loop (it may need new evidence)
+      const newPara = await localLLM.completeWithSkills(buildAddPrompt(draft, item, ctx), {
+        maxToolCalls: 3,
+        skills: ['code.entity.summary', 'code.source.file.describe', ...],
+      });
+      // ... same shape: empty -> skipped, otherwise insert at anchor
+    }
+  }
+}
+```
+
+#### Per-item prompt template (fix / enhance)
+
+```
+You are revising paragraph 3 of this section. The reviewer flagged:
+
+  Issue:  {item.issue}
+  Action: {item.action}
+
+Current paragraph 3:
+{paragraphs[3]}
+
+Other paragraphs (read-only context):
+{paragraphs[1..N except 3]}
+
+Output ONLY the replacement paragraph text. No fences, no preamble,
+no "here is the patch" line -- just the new paragraph as plain
+markdown. Preserve any clickable citations the original paragraph
+carried; add new ones where the action asks for them. Stay focused
+on the action: do not edit other content.
+```
+
+#### Per-item prompt template (add)
+
+```
+You are adding a new paragraph to this section. The reviewer flagged
+a missing topic:
+
+  Issue:  {item.issue}
+  Action: {item.action}
+  Anchor: insert after paragraph {anchor-index}
+
+Existing section paragraphs (read-only context):
+{all paragraphs}
+
+You may make up to 2 skill_invoke calls if you need NEW evidence
+the existing paragraphs do not cover. After gathering, output ONLY
+the new paragraph -- no fences, no preamble.
+```
+
+#### Per-item handling by kind
+
+| Kind | LLM call needed | Orchestrator action |
+|---|---|---|
+| `fix`     | yes (no skills) | replace paragraph at `where` |
+| `enhance` | yes (no skills) | replace paragraph at `where` |
+| `add`     | yes (1-2 skills allowed) | insert after anchor |
+| `trim`    | **no** | delete paragraph at `where` |
+
+#### Properties
+
+- **Ghost-IDs impossible by construction** -- the writer never handles IDs. The orchestrator looks up each item.id, drives the call, slots the response in.
+- **No fenced-block protocol** -- replaced by plain prose output. No `patch:<id>` parser, no info-string tag matching.
+- **Status tracking trivial** -- orchestrator owns the loop, sees each response, knows immediately whether to mark addressed / partial / skipped.
+- **`trim` is free** -- no LLM call, just a paragraph delete. Sections of all-`trim` items cost nothing.
+- **Per-item failure is bounded** -- if item 3 returns empty / garbage, items 4-6 still get a fair try. Today's batch-emit pattern fails all items together when the batch protocol breaks.
+- **`fix` items can be sequenced first** so a downstream `enhance` failure doesn't block the correctness gate.
+- **Smaller per-call latency** -- each call has a much smaller prompt (one item + draft + tight prose context) and a much smaller expected output (one paragraph, ~200-500 chars). qwen at ~12s/call x 6 items = ~72s per patch round. devstral at ~30-60s/short-call x 6 = 3-6 min per patch round. Both compare favourably to today's "one big call that gathers + emits" pattern (current devstral ranges: 60s - 6min, with frequent cap-hits).
+
+#### Cost trade-offs
+
+- **N LLM calls per round** instead of 1: more requests, but each smaller (less prompt + less output). Total tokens roughly comparable; cloud cost neutral; wall-clock often LOWER because no single giant call.
+- **`add` items may make 1-2 skill calls** within their sub-loop, so the budget per round needs to accommodate `add_count * 2` extra skill calls. With the P.1 cap of 32 per loop the budget is plenty.
+- **No batched announce/emit** so the model can't make the gather-then-stall mistake. Each call is laser-focused on one prose change.
+
+#### What gets retired
+
+- `patchSectionWithTools` becomes the legacy entry point (or gets refactored into `patchSectionItemwise`).
+- `PATCH_SYSTEM_PROMPT_INTRO` (the big "for each work item: announce, gather, emit fenced block" prompt) becomes obsolete.
+- `parsePatches` / fenced-block parser is no longer needed for the patch loop (could keep for legacy).
+- `applyPatches`'s block-matching logic simplifies to direct `where`-based replace/insert/delete.
+- L.2 (per-item interleaving prompt rewrite), L.3 (R3 escalation), L.4 (transition-phrase sanitizer in patch bodies) all become unnecessary -- the per-item prompt has no room for those failure modes.
+
+#### What stays
+
+- The reviewer's structured workItems output (Phase E) -- unchanged.
+- The 3-round loop (Phase F.5) -- still bounded retries.
+- The picker (Phase G + P.9) -- still chooses best-of-rounds, and the picker's weighted-items-addressed signal now ALWAYS gets accurate counts (no more "patches emitted but skipped" inflation).
+- The F.4 recovery redraft -- still fires when a patch round produces ZERO addressed items (which under R.1 means the per-item loop genuinely failed, not a protocol drift).
+
+#### Migration
+
+R.1 replaces the patch protocol wholesale. Rollout:
+  1. Implement `patchSectionItemwise` alongside `patchSectionWithTools`.
+  2. Gate the orchestrator on `analyzerConfig.useItemwisePatch` (default `false`).
+  3. Run a side-by-side live test (one section per side) to compare.
+  4. If itemwise wins on ghost-ID elimination + similar accept rate, flip the default.
+  5. Delete `patchSectionWithTools` and the related prompts.
+
+Estimated work: ~400-600 lines (new entry point + per-item prompts + orchestrator wiring + tests). Picker, reviewer, recovery all unchanged.
+
+#### Out-of-scope here
+
+- Migrating the data-analyzer to itemwise (separate plan -- data-analyzer doesn't use the workItem schema yet).
+- Per-section parallelism (deferred under Phase Q).
+
+---
+
 ## Run #3 success criteria (re-run after P lands)
 
 - 12/12 sections shipped (regression check).
