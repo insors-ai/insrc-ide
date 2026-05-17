@@ -127,7 +127,19 @@ export interface WriteSectionOutput {
 	readonly describedSkills: ReadonlySet<string>;
 }
 
-const DEFAULT_MAX_TOOL_CALLS = 10;
+// Phase P.1: raised 10 -> 32 after run #3 showed substantive
+// sections (HDFS NameNode, YARN ResourceManager, repo-build) hitting
+// the cap at 10 with the model still actively calling tools. The 32
+// budget gives both initial-write AND patch loops room to:
+//   - drill into entity-level skills (entity.summary / file.describe)
+//     for ~3-5 entities per section
+//   - emit per-item patch blocks after gathering evidence (the patch
+//     loop's gather-then-emit pattern needs 12-15 calls minimum on
+//     substantive sections per the L.1 log analysis)
+//   - recovery redrafts can match round-1 density without truncation
+// Trade-off: longer worst-case section time. Acceptable per the
+// accuracy-over-speed principle in the structured-review plan.
+const DEFAULT_MAX_TOOL_CALLS = 32;
 
 // ---------------------------------------------------------------------------
 // Phase F: patch-loop entry point shape
@@ -812,6 +824,24 @@ function buildPatchSystemPrompt(round: 2 | 3): string {
 		'    new ones where the work item asks for them.',
 		'  - Be specific. The reviewer rejected the previous draft for being',
 		'    thin; the patched paragraph must concretely address the item.',
+		'',
+		'## Skill calls are usually unnecessary in patch rounds',
+		'',
+		'  Round 1 already gathered the evidence -- your conversation',
+		'  history includes round 1\'s skill_invoke results. The patch body',
+		'  should USUALLY emit from that existing context. Only call a',
+		'  skill when the work item explicitly requires NEW evidence (e.g.',
+		'  an `add` item asking for a topic round 1 did not investigate).',
+		'',
+		'  Gathering MORE evidence on a patch round is the single most',
+		'  common failure mode of this loop: the model spins on tool calls',
+		'  until the iteration cap kills the loop before any `patch:<id>`',
+		'  block is emitted. The orchestrator then runs a redraft fallback',
+		'  which is unlikely to satisfy the reviewer.',
+		'',
+		'  Default to ZERO skill calls per work item unless the item\'s',
+		'  `kind` is `add` AND its `issue` names a topic not yet covered',
+		'  by round 1\'s evidence.',
 	];
 
 	if (round === 3) {
@@ -836,9 +866,10 @@ function buildPatchSystemPrompt(round: 2 | 3): string {
 			'  - If an item cannot be addressed, use `skip:<id>` with a',
 			'    one-sentence reason. A skip block IS productive output --',
 			'    it tells the orchestrator you tried and explains why.',
-			'  - Skill calls are optional this round. If the previous',
-			'    rounds gathered the evidence already, just write the',
-			'    patch body from what is in your context.',
+			'  - Skip skill calls entirely on this round. The base prompt',
+			'    already says they are usually unnecessary; for round 3',
+			'    they are forbidden unless the item kind is `add`. Write',
+			'    the patch body from the context you already have.',
 			'  - Silence is the worst possible response.',
 		];
 		return [...base, ...escalation].join('\n');
