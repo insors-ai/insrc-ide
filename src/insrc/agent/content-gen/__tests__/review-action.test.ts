@@ -196,6 +196,27 @@ test('validateReview: more than 6 work items -> error', () => {
 	assert.match(r as string, /capped at 6/);
 });
 
+test('validateReview: P.3 issue >200 chars -> soft-truncated, NOT rejected', () => {
+	const longIssue  = 'x'.repeat(250);
+	const longAction = 'y'.repeat(220);
+	const r = validateReview({
+		verdict: 'needs-work',
+		workItems: [{
+			id: 'wi-1', kind: 'enhance', where: 'p1', issue: longIssue, action: longAction,
+		}],
+	});
+	assert.notEqual(typeof r, 'string', 'validator must NOT reject; should soft-truncate');
+	if (typeof r === 'string') return;
+	assert.equal(r.verdict, 'needs-work');
+	assert.equal(r.workItems[0]!.issue.length, 200, 'issue clipped to 200 chars');
+	assert.equal(r.workItems[0]!.action.length, 200, 'action clipped to 200 chars');
+	assert.ok(r.workItems[0]!.issue.endsWith('...'),  'truncated issue should end with ellipsis');
+	assert.ok(r.workItems[0]!.action.endsWith('...'), 'truncated action should end with ellipsis');
+	// Truncation notes surfaced
+	assert.ok(r.notes.some(n => /workItems\[0\]\.issue truncated from 250/.test(n)));
+	assert.ok(r.notes.some(n => /workItems\[0\]\.action truncated from 220/.test(n)));
+});
+
 test('validateReview: work item with evidenceRefs -> ok, refs preserved', () => {
 	const r = validateReview({
 		verdict: 'needs-work',
@@ -238,7 +259,7 @@ test('buildReviewMessages: includes objective, criteria, draft, evidence', () =>
 	const sys = msgs[0]!.content as string;
 	const user = msgs[1]!.content as string;
 	assert.match(sys, /You review ONE section/);
-	assert.match(sys, /Work-item kinds:/);
+	assert.match(sys, /When to pick each work-item kind/);
 	assert.match(sys, /fix.*factually wrong/);
 	assert.match(sys, /needs-work/);
 	assert.match(user, /## Section under review/);
@@ -248,7 +269,9 @@ test('buildReviewMessages: includes objective, criteria, draft, evidence', () =>
 	assert.match(user, /## Draft markdown/);
 	assert.match(user, /\/repo\/hadoop\/hadoop-hdfs/);
 	assert.match(user, /## Evidence the expander saw/);
-	assert.match(user, /workItems/);
+	// Phase P.4: JSON Schema block now lives in the user message.
+	assert.match(user, /## Response schema \(JSON Schema\)/);
+	assert.match(user, /"enum":\s*\[\s*"fix",\s*"enhance",\s*"add",\s*"trim"\s*\]/);
 });
 
 test('buildReviewMessages: truncated draft -> truncation note rendered', () => {
@@ -314,19 +337,20 @@ test('reviewAction: first-pass invalid + second-pass valid -> ok', async () => {
 	assert.equal(r.degraded, false);
 });
 
-test('reviewAction: both attempts invalid -> soft accept with degraded:true', async () => {
+test('reviewAction: all 3 attempts invalid -> soft accept with degraded:true', async () => {
+	// P.4 raised max attempts to 3 -- need 3 garbage responses to exhaust the loop.
 	const r = await reviewAction(
 		{ action: ACTION, draft: DRAFT, evidence: EVIDENCE },
-		fakeProvider('garbage one', 'garbage two'),
+		fakeProvider('garbage one', 'garbage two', 'garbage three'),
 	);
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.degraded, true);
 	assert.deepEqual(r.workItems, []);
 	assert.equal(r.accepted?.markdown, DRAFT.markdown);
-	assert.match(r.notes[0] ?? '', /reviewer-degraded/);
+	assert.match(r.notes[0] ?? '', /reviewer-degraded after 3 attempts/);
 });
 
-test('reviewAction: provider throws on both attempts -> soft accept', async () => {
+test('reviewAction: provider throws on all attempts -> soft accept', async () => {
 	const r = await reviewAction(
 		{ action: ACTION, draft: DRAFT, evidence: EVIDENCE },
 		fakeProviderThrowing('connection lost'),
@@ -334,5 +358,38 @@ test('reviewAction: provider throws on both attempts -> soft accept', async () =
 	assert.equal(r.verdict, 'accept');
 	assert.equal(r.degraded, true);
 	assert.deepEqual(r.workItems, []);
+});
+
+test('reviewAction: P.4 kind-enum violation recovers on corrective retry', async () => {
+	// First attempt: out-of-enum kind 'clarify'.
+	// Second attempt: corrected to 'enhance' after seeing the corrective message.
+	const bad = JSON.stringify({
+		verdict:   'needs-work',
+		workItems: [{ id: 'wi-1', kind: 'clarify', where: 'p1', issue: 'thin', action: 'add detail' }],
+	});
+	const good = JSON.stringify({
+		verdict:   'needs-work',
+		workItems: [{ id: 'wi-1', kind: 'enhance', where: 'p1', issue: 'thin', action: 'add detail' }],
+	});
+	const r = await reviewAction(
+		{ action: ACTION, draft: DRAFT, evidence: EVIDENCE },
+		fakeProvider(bad, good),
+	);
+	assert.equal(r.verdict, 'needs-work');
+	assert.equal(r.degraded, false);
+	assert.equal(r.workItems[0]!.kind, 'enhance');
+});
+
+test('reviewAction: P.4 third attempt succeeds after two failures (3-attempt loop)', async () => {
+	const r = await reviewAction(
+		{ action: ACTION, draft: DRAFT, evidence: EVIDENCE },
+		fakeProvider(
+			'garbage one',
+			'garbage two',
+			JSON.stringify({ verdict: 'accept', workItems: [], notes: ['recovered'] }),
+		),
+	);
+	assert.equal(r.verdict, 'accept');
+	assert.equal(r.degraded, false);
 });
 

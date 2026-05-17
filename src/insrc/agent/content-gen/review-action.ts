@@ -25,6 +25,11 @@ import { REVIEW_ACTION_SCHEMA } from './schema.js';
 import { expandAction, type ExpandActionResult } from './expand-action.js';
 import type { PlanExecution, PlannedAction } from './plan-actions.js';
 
+// Phase P.4: cap total reviewer attempts (initial + 2 retries).
+// insors-extraction's instructor.from_anthropic ANTHROPIC_JSON mode
+// defaults to 3 attempts on validation failures; we mirror that.
+const MAX_REVIEW_ATTEMPTS = 3;
+
 const log = getLogger('content-gen:review-action');
 
 // Phase K.2: the new structured-review schema (Phase E) emits up to
@@ -126,41 +131,135 @@ export interface ReviewActionResult {
 /**
  * Run the review stage for one action. Never throws; failures degrade
  * to verdict='accept' so the report can still ship.
+ *
+ * Phase P.4: 3-attempt loop with corrective retries. Each retry quotes
+ * back the rejected JSON and names the specific violating value (when
+ * the validator surfaces one), then suggests a corrective mapping for
+ * known constraints (kind enum especially). Matches the
+ * insors-extraction `instructor` pattern.
  */
 export async function reviewAction(
 	input: ReviewActionInput,
 	cloudProvider: LLMProvider,
 ): Promise<ReviewActionResult> {
-	const messages = buildReviewMessages(input);
+	const messages = [...buildReviewMessages(input)];
 
-	const first = await tryReview(messages, cloudProvider);
-	if (first.kind === 'ok') return first.value;
+	let lastReason: string | undefined;
+	let lastRaw:    string | undefined;
+	for (let attempt = 1; attempt <= MAX_REVIEW_ATTEMPTS; attempt++) {
+		const result = await tryReview(messages, cloudProvider);
+		if (result.kind === 'ok') {
+			if (attempt > 1) {
+				log.info(
+					{ analyzer: input.analyzerLabel, actionId: input.action.id, recoveredOnAttempt: attempt },
+					'review-action: recovered on retry',
+				);
+			}
+			return result.value;
+		}
+		lastReason = result.reason;
+		lastRaw    = result.raw;
+		if (attempt === MAX_REVIEW_ATTEMPTS) break;
 
-	log.info(
-		{ analyzer: input.analyzerLabel, actionId: input.action.id, reason: first.reason },
-		'review-action: first attempt invalid; retrying with correction',
-	);
-	const retryMessages: LLMMessage[] = [
-		...messages,
-		{
+		log.info(
+			{ analyzer: input.analyzerLabel, actionId: input.action.id, attempt, reason: lastReason },
+			'review-action: attempt invalid; retrying with corrective prompt',
+		);
+		messages.push({
 			role: 'user',
-			content: `Your previous response was rejected: ${first.reason}.\n\nReturn ONLY the JSON object that matches the ReviewActionResult schema. No fences, no prose, no preamble.`,
-		},
-	];
-	const second = await tryReview(retryMessages, cloudProvider);
-	if (second.kind === 'ok') return second.value;
+			content: buildCorrectiveRetryMessage(lastReason, lastRaw),
+		});
+	}
 
 	log.warn(
-		{ analyzer: input.analyzerLabel, actionId: input.action.id, first: first.reason, second: second.reason },
-		'review-action: both attempts invalid; soft-accepting draft',
+		{ analyzer: input.analyzerLabel, actionId: input.action.id, attempts: MAX_REVIEW_ATTEMPTS, lastReason },
+		'review-action: all attempts invalid; soft-accepting draft',
 	);
 	return {
 		verdict:   'accept',
 		workItems: [],
 		accepted:  { markdown: input.draft.markdown },
-		notes:     [`reviewer-degraded: ${second.reason}`],
+		notes:     [`reviewer-degraded after ${MAX_REVIEW_ATTEMPTS} attempts: ${lastReason ?? 'unknown'}`],
 		degraded:  true,
 	};
+}
+
+/**
+ * Phase P.4: build the corrective retry user message. Pattern lifted
+ * from insors-extraction's instructor.Mode.ANTHROPIC_JSON behavior --
+ * include the actual rejected output AND the specific violating value
+ * so the model has a concrete correction target, not a generic
+ * "your response was rejected" hand-wave.
+ */
+function buildCorrectiveRetryMessage(reason: string, raw: string | undefined): string {
+	const suggestion = correctiveSuggestion(reason);
+	const lines: string[] = [];
+	lines.push(`Your previous response was rejected by the JSON Schema validator with this error:`);
+	lines.push('');
+	lines.push(`    ${reason}`);
+	lines.push('');
+	if (raw !== undefined && raw.trim().length > 0) {
+		const preview = raw.length > 600 ? raw.slice(0, 600) + ' ...<truncated>' : raw;
+		lines.push('Your rejected response:');
+		lines.push('```');
+		lines.push(preview);
+		lines.push('```');
+		lines.push('');
+	}
+	if (suggestion !== undefined) {
+		lines.push(suggestion);
+		lines.push('');
+	}
+	lines.push('Re-emit the JSON object that validates against the schema in the system prompt. Return ONLY the JSON -- no fences, no prose, no preamble.');
+	return lines.join('\n');
+}
+
+/**
+ * Map a validator reason to a corrective suggestion. Covers the
+ * highest-frequency violation patterns seen in run #3 (kind enum
+ * hallucinations + length-cap edges). Returns `undefined` when the
+ * reason has no specific suggestion -- in that case the rejected-
+ * payload echo above is enough.
+ */
+function correctiveSuggestion(reason: string): string | undefined {
+	// kind enum violation: extract the bad value and map to the
+	// closest valid kind.
+	const kindMatch = reason.match(/`workItems\[(\d+)\]\.kind` must be one of fix\|enhance\|add\|trim/);
+	if (kindMatch !== null) {
+		return [
+			`The \`kind\` field is a CLOSED enum -- only fix | enhance | add | trim are valid.`,
+			`Closest-valid mappings for common stand-ins:`,
+			`  - "clarify" / "expand" / "elaborate" / "specify"  -> use **enhance**`,
+			`  - "restructure" / "reorganize" / "consolidate" / "split" -> use **enhance** (or split into a trim+add pair)`,
+			`  - "correct" / "rectify" / "amend" -> use **fix**`,
+			`  - "remove" / "delete" / "cut" -> use **trim**`,
+			`  - "cover" / "include" / "introduce" -> use **add**`,
+			`Choose the kind that best matches your intent for workItems[${kindMatch[1]}] from the four valid values.`,
+		].join('\n');
+	}
+	if (/workItems` must be empty when verdict="accept"/.test(reason)) {
+		return `When verdict is "accept", the workItems array MUST be empty []. If you have work items, change verdict to "needs-work" instead.`;
+	}
+	if (/workItems` must be non-empty when verdict="needs-work"/.test(reason)) {
+		return `When verdict is "needs-work", you MUST provide 1-6 work items. If the draft has no issues, change verdict to "accept" with workItems = [].`;
+	}
+	if (/workItems` capped at 6 items/.test(reason)) {
+		return `Cap the workItems array at 6 entries. Pick the 6 most important items; the patch loop will catch the rest on subsequent rounds.`;
+	}
+	if (/workItems\[\d+\]\.kind` is required/.test(reason)) {
+		return `Every work item MUST include all of: id, kind, where, issue, action. The kind field is missing from at least one item.`;
+	}
+	const requiredMatch = reason.match(/`workItems\[(\d+)\]\.(\w+)` is required/);
+	if (requiredMatch !== null) {
+		return `The required field \`${requiredMatch[2]}\` is missing from workItems[${requiredMatch[1]}]. Every item must include all of: id, kind, where, issue, action.`;
+	}
+	if (/duplicated/.test(reason)) {
+		return `Each work item id must be UNIQUE within the workItems list. Use sequential ids: wi-1, wi-2, wi-3, ...`;
+	}
+	if (/unparseable JSON/.test(reason)) {
+		return `Your response was not valid JSON. Return ONLY a single JSON object with no markdown fences, no prose preamble, and no trailing text after the closing brace.`;
+	}
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +422,13 @@ export async function expandThenReview(
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
+// Phase P.4: SYSTEM_PROMPT carries ONLY the semantic guidance the
+// JSON Schema cannot express -- kind-selection intent, when-to-use,
+// workflow rules, citation preservation. All structural rules
+// (workItems-empty-vs-non-empty, field requireds, field length caps)
+// were duplicated between prose and schema and dropped from the
+// prose to avoid drift. The shape lives in the JSON Schema block
+// appended to the user message by buildReviewMessages.
 const SYSTEM_PROMPT = [
 	'You review ONE section of an analysis report.',
 	'',
@@ -331,21 +437,23 @@ const SYSTEM_PROMPT = [
 	'  - The review criteria you must score against.',
 	'  - The draft markdown the local expander produced.',
 	'  - The same evidence the expander saw.',
+	'  - The JSON Schema your response must validate against.',
 	'',
-	'Your job is a verdict + (for needs-work) a typed work-item list',
-	'that a patch loop will iterate.',
+	'Your job is a verdict (`accept` or `needs-work`). For `needs-work`,',
+	'emit a typed work-item list that a patch loop will iterate.',
 	'',
-	'Verdict rules:',
+	'## When to pick each verdict',
+	'',
 	'  - `accept` -- the draft adequately satisfies the review criteria.',
-	'    `workItems` MUST be empty. You MAY include a polished rewrite',
-	'    under `accepted.markdown` if surgical edits are clearly worth',
-	'    it; otherwise omit it and the orchestrator uses the local',
-	'    draft as-is. Do NOT rewrite just for style.',
-	'  - `needs-work` -- the draft has concrete issues. Emit 1-6',
-	'     atomic work items in `workItems`. Each item describes ONE',
-	'     change to ONE location.',
+	'    You MAY include a polished rewrite under `accepted.markdown`',
+	'    if surgical edits are clearly worth it; otherwise omit it and',
+	'    the orchestrator uses the local draft as-is. Do NOT rewrite',
+	'    just for style.',
+	'  - `needs-work` -- the draft has concrete issues that a patch',
+	'    loop should address. Emit atomic work items, one per change.',
 	'',
-	'Work-item kinds:',
+	'## When to pick each work-item kind',
+	'',
 	'  - `fix`     -- factually wrong / unsupported claim in the draft.',
 	'                 Use ONLY for factual problems (e.g. the draft',
 	'                 says class X does Y, but the evidence shows it',
@@ -353,44 +461,46 @@ const SYSTEM_PROMPT = [
 	'                 items GATE the section -- they must be addressed',
 	'                 or the section ships with reduced confidence.',
 	'  - `enhance` -- claim is correct but thin (missing citations,',
-	'                 vague phrasing, lacks specifics).',
+	'                 vague phrasing, lacks specifics). Also covers',
+	'                 "clarify", "expand", "elaborate" -- anything where',
+	'                 the existing content is right but needs more depth.',
 	'  - `add`     -- a topic the review criteria require is missing.',
 	'                 The patch loop will run a sub-investigation and',
-	'                 add a new paragraph.',
+	'                 add a new paragraph at the anchor.',
 	'  - `trim`    -- redundant / off-topic content; cut in place.',
 	'',
-	'Work-item field rules:',
-	'  - `id`     -- unique within the workItems list; use `wi-1`, `wi-2`, ...',
-	'  - `where`  -- point at something CONCRETE in the draft. Count',
-	'                 paragraphs starting at 1 (paragraphs are separated',
-	'                 by blank lines). Use "paragraph N" or "section',
-	'                 opening" or "section closing" or "after paragraph N".',
-	'                 NEVER vague regions like "throughout the draft".',
-	'  - `issue`  -- one short sentence (≤150 chars). State the problem,',
-	'                 not the fix.',
-	'  - `action` -- one short sentence (≤150 chars). ONE concrete step.',
-	'                 Never list alternatives ("cite X or Y or Z" ->',
-	'                 emit three separate items, one per cite).',
-	'  - `evidenceRefs` -- optional; reference back into the evidence',
-	'                 block as `evidence[N]`.',
+	'## Workflow rules',
 	'',
-	'Hard rules:',
-	'  1. Output strict JSON ONLY -- no markdown fences, no prose, no preamble.',
-	'  2. The schema is fixed: `{ verdict, workItems, accepted?, notes? }`.',
-	'  3. `accept` -> `workItems` MUST be empty. `needs-work` -> `workItems`',
-	'     MUST be non-empty. Validator rejects mismatches.',
-	'  4. Cap at 6 work items. If there are more than 6 issues, pick the',
-	'     6 most important. Round 2/3 of the loop will catch the rest.',
-	'  5. Keep `notes` short -- 1-3 entries describing what was good',
-	'     or which criterion drove the verdict.',
-	'  6. PRESERVE CLICKABLE CITATIONS. The expander emits',
-	'     `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)` Markdown',
-	'     links so the IDE can navigate to the source. When polishing',
-	'     under `accepted.markdown` you MUST preserve these links',
-	'     verbatim -- do NOT strip them, convert them to bare backticks,',
-	'     or invent new ones the evidence does not support. If the',
-	'     draft is missing links for entities the evidence carries a',
-	'     file for, emit an `enhance` work item.',
+	'  - Each work item is ATOMIC -- one location, one issue, one action.',
+	'    If you have three asks for the same paragraph, emit three items.',
+	'  - The `where` field MUST point at something concrete in the draft:',
+	'    "paragraph N" / "section opening" / "section closing" /',
+	'    "after paragraph N". NEVER vague regions like',
+	'    "throughout the draft".',
+	'  - Keep `issue` and `action` to one short sentence each (the',
+	'    schema enforces max 200 chars). State the problem in `issue`,',
+	'    the single concrete fix in `action`. Never list alternatives',
+	'    ("cite X or Y or Z" -> emit three separate items).',
+	'  - Pick the 6 most important items if there are more. Subsequent',
+	'    rounds catch the rest.',
+	'  - `notes` should be 1-3 short entries describing what was good',
+	'    or which criterion drove the verdict.',
+	'',
+	'## Citation preservation (mandatory)',
+	'',
+	'The expander emits `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)` ',
+	'Markdown links so the IDE can navigate to the source. When polishing',
+	'under `accepted.markdown` you MUST preserve these links verbatim --',
+	'do NOT strip them, convert them to bare backticks, or invent new',
+	'ones the evidence does not support. If the draft is missing links',
+	'for entities the evidence carries a file for, emit an `enhance`',
+	'work item.',
+	'',
+	'## Output',
+	'',
+	'Strict JSON ONLY -- no markdown fences, no prose, no preamble.',
+	'The JSON Schema appears at the end of the user message; your',
+	'response must validate against it.',
 ].join('\n');
 
 function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
@@ -473,8 +583,20 @@ function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
 		}
 	}
 
+	// Phase P.4: inject the JSON Schema as JSON text in a fenced block.
+	// The model treats JSON Schema as a strict constraint (recognized
+	// format in training data), where bulleted prose reads as
+	// "examples". Closes ~90% of first-attempt failures on cloud
+	// reviewers per the run #3 analysis.
+	userLines.push('## Response schema (JSON Schema)');
+	userLines.push('Your response MUST validate against this schema. Enums are CLOSED -- only the listed values are valid.');
+	userLines.push('');
+	userLines.push('```json');
+	userLines.push(JSON.stringify(REVIEW_ACTION_SCHEMA, null, 2));
+	userLines.push('```');
+	userLines.push('');
 	userLines.push('## Output');
-	userLines.push('Strict JSON: `{ verdict, workItems, accepted?, notes }`. No fences, no prose. `workItems` MUST be empty for `accept` and non-empty (1-6 items) for `needs-work`.');
+	userLines.push('Return ONLY the JSON object that validates against the schema above. No fences, no prose, no preamble.');
 
 	return [
 		{ role: 'system', content: SYSTEM_PROMPT },
@@ -502,7 +624,7 @@ function formatEvidenceValue(value: unknown): string {
 
 type ReviewAttempt =
 	| { kind: 'ok';    value: ReviewActionResult }
-	| { kind: 'error'; reason: string };
+	| { kind: 'error'; reason: string; raw?: string };
 
 async function tryReview(
 	messages: LLMMessage[],
@@ -526,14 +648,15 @@ async function tryReview(
 		parsed = JSON.parse(cleaned);
 	} catch (err) {
 		return {
-			kind: 'error',
-			reason: `unparseable JSON (${(err as Error).message}); raw=${rawText.slice(0, 120)}`,
+			kind:   'error',
+			reason: `unparseable JSON (${(err as Error).message})`,
+			raw:    rawText,
 		};
 	}
 
 	const validated = validateReview(parsed);
 	if (typeof validated === 'string') {
-		return { kind: 'error', reason: `schema violation: ${validated}` };
+		return { kind: 'error', reason: `schema violation: ${validated}`, raw: cleaned };
 	}
 	return { kind: 'ok', value: validated };
 }
@@ -570,6 +693,11 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 	}
 	const workItems: ReviewWorkItem[] = [];
 	const seenIds = new Set<string>();
+	// Phase P.3: collect soft-truncation notes here so the caller sees
+	// what got clipped. Notes are appended to `result.notes` on
+	// success. No rejection-on-length anymore -- the validator clips
+	// `issue` / `action` at 200 chars instead of failing the review.
+	const truncationNotes: string[] = [];
 	if (Array.isArray(workItemsRaw)) {
 		if (workItemsRaw.length > 6) {
 			return '`workItems` capped at 6 items';
@@ -580,11 +708,11 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 				return `\`workItems[${i}]\` is not an object`;
 			}
 			const wi = wiRaw as Record<string, unknown>;
-			const id     = typeof wi['id']     === 'string' ? (wi['id'] as string).trim() : '';
-			const kind   = wi['kind'];
-			const where  = typeof wi['where']  === 'string' ? (wi['where'] as string).trim() : '';
-			const issue  = typeof wi['issue']  === 'string' ? (wi['issue'] as string).trim() : '';
-			const action = typeof wi['action'] === 'string' ? (wi['action'] as string).trim() : '';
+			const id        = typeof wi['id']     === 'string' ? (wi['id'] as string).trim() : '';
+			const kind      = wi['kind'];
+			const where     = typeof wi['where']  === 'string' ? (wi['where'] as string).trim() : '';
+			let   issue     = typeof wi['issue']  === 'string' ? (wi['issue'] as string).trim() : '';
+			let   action    = typeof wi['action'] === 'string' ? (wi['action'] as string).trim() : '';
 			if (id.length === 0)     return `\`workItems[${i}].id\` is required`;
 			if (seenIds.has(id))     return `\`workItems[${i}].id\` "${id}" is duplicated`;
 			seenIds.add(id);
@@ -594,12 +722,19 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 			if (where.length === 0)  return `\`workItems[${i}].where\` is required`;
 			if (issue.length === 0)  return `\`workItems[${i}].issue\` is required`;
 			if (action.length === 0) return `\`workItems[${i}].action\` is required`;
-			// Phase K.3 length caps -- soft target is 150 chars but we
-			// accept up to 200 so the validator doesn't reject a tiny
-			// overflow. The schema's maxLength applies on Ollama's
-			// structured-output path; this is the cloud-provider check.
-			if (issue.length  > 200) return `\`workItems[${i}].issue\` exceeds 200 chars`;
-			if (action.length > 200) return `\`workItems[${i}].action\` exceeds 200 chars`;
+			// Phase P.3: soft-truncate instead of reject. Length caps
+			// were costing us valid reviews in run #3 (sections 4 R3,
+			// 7 R2 -- reviewer's 230-char `action` field tripped the
+			// 200 cap, validator rejected, soft-accept fired). Now we
+			// clip with an ellipsis and surface the clip as a note.
+			if (issue.length > 200) {
+				truncationNotes.push(`workItems[${i}].issue truncated from ${issue.length} to 200 chars`);
+				issue = issue.slice(0, 197) + '...';
+			}
+			if (action.length > 200) {
+				truncationNotes.push(`workItems[${i}].action truncated from ${action.length} to 200 chars`);
+				action = action.slice(0, 197) + '...';
+			}
 
 			const item: { -readonly [K in keyof ReviewWorkItem]: ReviewWorkItem[K] } = {
 				id, kind, where, issue, action,
@@ -614,6 +749,11 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 			}
 			workItems.push(item);
 		}
+	}
+	// Phase P.3: append truncation notes to the review notes so they
+	// surface in logs + TodoList. No effect on verdict / workItems.
+	if (truncationNotes.length > 0) {
+		notes.push(...truncationNotes);
 	}
 
 	if (verdictRaw === 'accept') {
