@@ -892,6 +892,124 @@ Keep the L.3 R3 escalation block on top of this -- R3 still gets a stronger nudg
 
 ---
 
+## Run #3 performance profile (deferred -- Phase Q)
+
+Mined from `/tmp/.insrc/agent.2.log` after run #3 completed. **Accuracy fixes (Phases P) ship first; performance optimization (Phase Q) is deferred.**
+
+### Hotspot ladder
+
+| Phase | Time | % of run |
+|---|---|---|
+| **Local LLM (devstral writer + patcher + redraft)** | **147.4 min** | **92.6%** |
+| Cloud reviewer (anthropic Haiku) | 6.9 min | 4.3% |
+| Planner (anthropic) | 0.3 min | 0.2% |
+| Stitching + persist | <1 s | 0% |
+
+Total runtime: **159 min** for 12 sections. 97% of wall time is LLM I/O; the local model is the floor.
+
+### Per-call latency
+
+- **Local**: 377 calls, median 12.9s, mean 23.5s, **p95 84.7s**. Top-10 slowest local calls together = **22.8 min** (14% of run); slowest single call = 190s. Tail-dominated.
+- **Cloud reviewer**: 58 calls, median 7.2s, mean 7.4s, p95 9.9s. Tight distribution.
+
+### Per-section spread (8x variance)
+
+| Section | Time | Notes |
+|---|---|---|
+| 9 YARN Web UI | 3:48 | best case: 2 rounds, patch hit on R2 |
+| 4 YARN ResourceMgr | 29:50 | worst case: hit cap twice + recovery + R3 escalation (18% of run) |
+
+Worst-case sections all hit the tool-call cap on multiple rounds AND ran F.4 recovery on top. Best-case sections accepted on round 2.
+
+### Skill-call distribution
+
+```
+code.source.module.describe   47   <-- most-used by 25%+
+code.entity.summary           37
+code.source.file.describe     24
+code.entity.callees            4
+code.entity.callers            2
+```
+
+Module-level skills account for ~40% of all calls -- confirms N.1's diagnosis (writer over-relies on aggregate stats). Phase P.5 (loop-level entity-drill-down enforcement) reduces this skew.
+
+### Why this is deferred behind accuracy
+
+The accuracy work in Phases K-O has narrowed failure modes meaningfully but Phase P still has 8 outstanding fixes. Running a perf pass *before* P lands would:
+  - Optimize for the wrong failure shape (the writer's call patterns change once P.5/P.6 land).
+  - Conflate accuracy regressions with perf gains in any A/B comparison.
+  - Risk shipping a faster-but-worse run.
+
+The accuracy floor is what determines whether the report ships content at all. Speed is a second-order concern once content quality is at a usable bar.
+
+---
+
+## Phase Q -- performance optimization (deferred until Phase P lands)
+
+Constraint baseline: **single Ollama instance, single loaded local model serializes inference**. Parallel section execution against the same local model is a false economy. The realistic levers:
+
+### Q.1 Skill-call memoization at the loop level
+
+**Why:** the writer sometimes issues the same `skill_invoke({skillId, args})` twice in a section. Section 12 of run #3 made 9 consecutive `code.source.module.describe` calls, several likely with overlapping/duplicate args. Each duplicate is a wasted ~15-25s round trip through Ollama.
+
+**Fix:** in [runToolLoop](src/insrc/agent/tools/loop.ts), cache `(toolName, JSON.stringify(input))` -> result for the lifetime of the loop. On a cache hit, skip the dispatch entirely and synthesise the cached `tool_result` back to the model. The cache lives in loop state only -- not across sections.
+
+**Expected impact:** 4-6 fewer skill calls per chatty section. At 20s/call avg, that's ~1.5 min/section saved on the chatty cluster (sections 4, 11, 12). Total: 5-10 min off the run.
+
+### Q.2 Eviction-threshold tightening on patch + redraft rounds
+
+**Why:** the eviction trigger today is 70% of `maxInputTokens` (16000 -> ~11200 tokens). On substantive sections in round 2/3, the working set carries round-1's full evidence plus new patch-loop tool_results -- close to the threshold but rarely tipping it during the loop. Higher input = slower per-token generation, especially on devstral.
+
+**Fix:** lower the eviction threshold to **50% (~8000)** for round 2/3 patch + recovery contexts. Round 1 keeps the current 70% (it's gathering fresh and doesn't have a backlog).
+
+**Expected impact:** trims ~30-40% off input tokens on later rounds -> ~10-15% per-call latency reduction on round 2/3.
+
+### Q.3 Evict the `tool_use.input` block too, not just `tool_result.content`
+
+**Why:** today eviction stubs only the `tool_result.content` field of evicted skill calls. The accompanying `tool_use.input` (the args block: full module paths, entity ids, etc) stays verbatim. Full module paths can run 200-500 chars; many such inputs add up.
+
+**Fix:** in [maybeEvict](src/insrc/agent/tools/loop.ts), when stubbing a tool_result, also rewrite the matching `tool_use.input` to a one-key summary like `{ "_summary": "code.source.module.describe(hadoop-hdfs)" }` retaining the skill id but dropping the full args.
+
+**Expected impact:** ~5-10% extra input shrink stacked on top of Q.2.
+
+### Q.4 Cumulative-skill-call compression for the WRITER context (not just reviewer)
+
+**Why:** M.2 already lands evidence compression for the cloud reviewer's input -- older rounds collapsed to one-line summaries on round-2/3 reviews. The same compression could apply to the local WRITER's context window in the patch loop. Today the patcher's `messages` include all prior round's tool_use + tool_result blocks verbatim.
+
+**Fix:** when entering `patchSectionWithTools` for round 2 or 3, pre-compress prior-round tool_use/tool_result blocks in `priorSkillCalls` to summaries before they enter the working message set. The local model sees "(round 1 evidence summarised: 8 skill calls covering modules X, Y, Z)" instead of the raw payloads.
+
+**Expected impact:** ~20-30% input shrink on round 2/3 patches.
+
+### Q.5 Multi-model routing for mechanical turns (if RAM permits)
+
+**Why:** the truncation reality (writer needs ~1500-token output budget) blocks shrinking the big prose turns. But the **mechanical** turns -- the patch-loop announcement ("For wi-1, I will...") and the skill-arg construction -- output only ~50-150 tokens. Routing those to a smaller / faster local model (qwen3-coder, codellama-7b) loaded alongside devstral would clip several seconds per call.
+
+**Fix:** plumb a second `LLMProvider` through writeSectionWithTools / patchSectionWithTools, route specific call types to it. Detection: turns where the previous tool result was a small (<200 byte) primitive skill response (e.g., a single entity.summary) tend to be mechanical announcements.
+
+**Caveats:**
+  - Requires loading two models in Ollama simultaneously (~30GB RAM for devstral 22B + qwen3 7B).
+  - Per-section gain depends heavily on how many mechanical vs substantive turns happen; estimate: 10-20% on chatty sections.
+
+**Expected impact:** conditional on RAM + the routing heuristic landing cleanly. Could be the biggest single lever, could be moderate. Worth measuring.
+
+### Q.6 (deprioritised) parallel sections against the local model
+
+**Cut.** Ollama serializes per loaded model; running section N+1 in parallel with section N just queues both on the same backend. Real parallelism would require multiple models or a different inference backend (vLLM, TGI). Not viable in the current single-model Ollama setup.
+
+### Realistic Phase Q ceiling
+
+With Q.1-Q.5 landing (assuming Q.5's multi-model routing is feasible):
+
+- **Q.1 alone**: 5-10 min off (~5%)
+- **Q.2 + Q.3 + Q.4 stacked**: 15-25% per-call latency reduction on round 2/3 -> ~20 min off total
+- **Q.5 conditional**: another 10-20% if multi-model lands cleanly
+
+Combined: **159 min run could become ~95-115 min** for the same 12 sections. Below that requires a faster local model.
+
+The plan stays accuracy-first. Phase Q is a follow-up once Phases P metrics are landed and validated.
+
+---
+
 ## Run #3 success criteria (re-run after P lands)
 
 - 12/12 sections shipped (regression check).
