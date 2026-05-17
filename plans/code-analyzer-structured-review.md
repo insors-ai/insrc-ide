@@ -995,6 +995,101 @@ Expect the prompt to shrink by ~30%. The same de-duplication should apply to any
 
 **Fix:** in the loop's paragraph-flush step ([loop.ts](src/insrc/agent/tools/loop.ts), after `sectionParagraphs.push(currentTurnText.trim())`), compare the new paragraph against the previous one. If the trigram-shingle Jaccard similarity is > 0.7, drop the new paragraph and emit a synthetic user turn: `The paragraph you just wrote is nearly identical to your previous one. State a NEW fact from the latest tool result, not a restatement of prior analysis.` One-shot per loop.
 
+### P.9 Picker: replace lexicographic comparator with weighted-score + absolute-target normalization
+
+**Why:** run #4 section 1 surfaced a real picker miscall. The reviewer flagged 6 items in round 1; round 2 addressed 5; round 3 addressed all 5 of its incoming items. But **none** of the items were kind=`fix` -- they were all `enhance` / `add` / `trim`. The current picker's `fixItemsAddressed` counter (in [pick-best-draft.ts](src/insrc/agent/tasks/code-analyzer/pick-best-draft.ts) `countFixItemsAddressed`) only counts `fix` kinds, so all three rounds tied at 0 there and the comparator fell through to `citationCount`. Round 1's heavy entity drill-down had produced ~13 citations; rounds 2/3's patches replaced paragraphs and ended up with fewer citations. **Round 1 shipped over two rounds that successfully addressed the reviewer's actual feedback.**
+
+The root cause is two design choices in the current picker:
+  1. `fixItemsAddressed` ignores `enhance` / `add` / `trim` -- they get zero credit even when the patch loop addresses them cleanly. The reviewer asks for them as "concrete heterogeneous changes" (Phase E semantics) so they're substantive, not optional.
+  2. **Lexicographic ordering** means the first non-tied signal decides everything. The signal can be a 5-item-addressed gap and the picker still falls through to citation-count if both rounds have `fixItemsAddressed = 0`. The signals don't *compose*.
+  3. **Citation count is a raw tally**, not a quality measure. 12 citations to trivial classes < 4 citations to load-bearing entities, but the picker can't see that. At the citation densities Phase P is producing (8-15/section), the count is noise.
+
+**Fix:** replace the lexicographic comparator with a **weighted sum** over four signals, all normalized to 0-1 via **absolute targets** (not max-across-candidates -- absolute is more stable, doesn't amplify small differences, and reflects "what's good enough" rather than "what's best in the pile").
+
+#### Signal weights
+
+| Weight | Signal | Target (full credit at) |
+|---|---|---|
+| **4** | `weightedItemsAddressed` -- all kinds, inner weights below | 10 |
+| **3** | `citationDiversity` -- unique cited files | 8 |
+| **2** | `paragraphCount` | 6 |
+| **1** | `textLength` -- final tie-breaker | 3000 |
+
+#### Inner weights for `weightedItemsAddressed`
+
+```
+fix     = 3   (factual error; gates correctness)
+add     = 2   (missing required topic)
+enhance = 2   (correct but thin; the most common reviewer ask)
+trim    = 1   (mechanical deletion)
+```
+
+For round N's patch: sum `kind_weight(prior_item.kind)` over every item with `status === 'addressed'`. Round 1 always scores 0 here (no prior round to address).
+
+#### Absolute normalization
+
+For each signal: `normalized = min(raw_value / target, 1.0)`. Cap at 1.0 -- exceeding the target doesn't earn extra credit. This means once a round hits "good enough" on a signal, the comparator stops favoring further investment on that axis and the next-priority signal takes over.
+
+#### Score + reason
+
+```
+score = 4 * normalized(weightedItemsAddressed)
+      + 3 * normalized(citationDiversity)
+      + 2 * normalized(paragraphCount)
+      + 1 * normalized(textLength)
+// max possible: 10.0
+```
+
+Winner = round with highest score. `shipDecisionReason` becomes the signal that contributed the most points to the winner (its `weight * normalized` term), surfaced for log + milestone visibility.
+
+#### Worked example (section 1 of run #4)
+
+| Round | weighted-items | citation-diversity | paragraphs | length |
+|---|---|---|---|---|
+| 1 | 0 | 13 -> capped at 1.0 | 5 -> 0.83 | 2500 -> 0.83 |
+| 2 | 5 enhances * 2 = 10 -> 1.0 | 8 -> 1.0 | 4 -> 0.67 | 2200 -> 0.73 |
+| 3 | 5 enhances * 2 = 10 -> 1.0 | 6 -> 0.75 | 3 -> 0.50 | 1900 -> 0.63 |
+
+Scores:
+  - R1 = 4*0 + 3*1.0 + 2*0.83 + 1*0.83 = **5.49**
+  - R2 = 4*1.0 + 3*1.0 + 2*0.67 + 1*0.73 = **9.06**
+  - R3 = 4*1.0 + 3*0.75 + 2*0.50 + 1*0.63 = **7.88**
+
+**Round 2 wins.** The picker correctly recognises that addressing reviewer feedback (5 items * weight-2) outweighs round 1's citation density advantage.
+
+#### Why absolute over max-across-candidates
+
+Max-across normalization (every signal divided by the per-batch max) can amplify trivial differences. If R1=13 citations and R2=11, max-across gives R1=1.0, R2=0.85 -- looks like a 15% gap, but it's two citations. Absolute targets cap at 1.0 once "good enough" is reached, letting the next-priority signal break the tie. This is more stable when all three rounds are in a similar quality band.
+
+#### Migration
+
+`pickBestRound` becomes a pure refactor of the picker function; the result shape changes only slightly:
+
+```ts
+export interface PickResult {
+  readonly winnerIdx:           number;
+  readonly winner:              RoundCandidate;
+  readonly reason:              ShipDecisionReason;   // signal with highest contribution
+  readonly scores:              readonly RoundScore[]; // per-candidate breakdown
+}
+
+interface RoundScore {
+  readonly round:                       1 | 2 | 3;
+  readonly weightedItemsAddressed:      number;   // raw
+  readonly citationDiversity:           number;   // raw (unique files)
+  readonly paragraphCount:              number;   // raw
+  readonly textLength:                  number;   // raw
+  readonly normalized: { weightedItems: number; citations: number; paragraphs: number; length: number };
+  readonly totalScore:                  number;   // 0-10
+}
+```
+
+Existing tests need updating (~14 picker tests will need new expected values; the reason names change to `weighted-items-addressed` / `citation-diversity` / `paragraph-count` / `text-length`). The orchestrator's call site is unchanged.
+
+#### Tunable
+
+The four signal weights (4/3/2/1), the four inner work-item weights (fix/add/enhance/trim), and the four targets (10/8/6/3000) all become module-level constants in `pick-best-draft.ts` so they can be tuned without rewriting logic.
+
 ---
 
 ## Run #3 performance profile (deferred -- Phase Q)
