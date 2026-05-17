@@ -858,13 +858,118 @@ Keep the L.3 R3 escalation block on top of this -- R3 still gets a stronger nudg
 
 **Fix:** in [review-action.ts validator](src/insrc/agent/content-gen/review-action.ts) -- when `issue.length > 200` or `action.length > 200`, **truncate to 200 chars with an ellipsis** and add a note to `notes[]` flagging that the field was truncated. Validator no longer rejects on length. The schema's `maxLength` becomes advisory (the cloud LLM still tries to respect it via the schema hint, but exceeding it doesn't break the flow).
 
-### P.4 Reviewer kind-enum hallucination: corrective retry
+### P.4 Reviewer structured-output reliability: JSON Schema in prompt + corrective retries
 
-**Why:** sections 3, 4 R3, 7 all hit `workItems[0].kind must be one of fix|enhance|add|trim`. The reviewer invents kinds like `clarify` or `restructure`. The current retry just re-sends the same prompt with a generic "previous response was rejected" message -- doesn't say what was wrong.
+**Why:** the 2026-05-17 reviewer-failure analysis showed that **100% of first-attempt failures (27/27) in run #3 were `kind` enum violations** -- Haiku invented kinds like `clarify` / `restructure` outside our `fix|enhance|add|trim` enum. 90% of all reviewer calls failed on first try; 10% ended in soft-accept after the retry also failed. The reviewer's `opts.responseFormat` is currently dropped on the floor in every cloud provider (Anthropic / OpenAI / Gemini / Mistral) -- the schema travels into `complete()` but never reaches the API.
 
-**Fix:** when the validator detects an out-of-enum `kind`, the retry prompt names the violating value AND the closest valid mapping. For example: `Your response used kind="clarify" which is not in the allowed enum. Map it to "enhance" (closest match) or pick the right one from fix|enhance|add|trim.` This converts a 50/50 retry into a near-certain success because the model now knows exactly what to fix.
+The sister codebase `insors-extraction` (which never sees malformed responses despite complex nested JSON) uses a single battle-tested pattern across all providers via the `instructor` library:
 
-**Side effect:** adds ~50 chars to the retry prompt for kind violations only. No cost to normal-path reviews.
+  - Anthropic: `instructor.from_anthropic(client, mode=ANTHROPIC_JSON)`
+  - OpenAI:    `instructor.from_openai(client)` (default JSON mode)
+  - Ollama:    `instructor.from_openai(client, mode=Mode.JSON)` against Ollama's OpenAI shim
+  - Gemini:    hand-rolled but identical -- `_format_schema_for_prompt` serializes Pydantic schema as JSON Schema text in a fenced block in the system prompt, parses + validates with Pydantic, retries on `ValidationError`.
+
+All four converge on the same recipe: **JSON Schema as JSON text in the system prompt + retry with the specific Pydantic ValidationError as a corrective user message**, with `max_retries=3`. NOT `tool_use`, NOT server-side schema enforcement.
+
+**Fix (provider-agnostic -- lives entirely in [review-action.ts](src/insrc/agent/content-gen/review-action.ts), works across every LLMProvider):**
+
+1. **Inject the schema as JSON Schema text into the system prompt.** Replace the current prose description of the schema (`"The schema is fixed: { verdict, workItems, accepted?, notes? }"` plus a bulleted enum list) with a fenced ```json block containing `JSON.stringify(REVIEW_ACTION_SCHEMA, null, 2)`. The kind enum and required fields are encoded in a format every cloud LLM is trained to obey strictly (JSON Schema is a recognized constraint format in their training data, where prose lists read as "examples").
+
+   Concretely the system prompt gains a section like:
+
+   ```
+   ## Response schema (JSON Schema)
+
+   Your response MUST validate against this JSON Schema. The `kind` enum
+   is CLOSED -- only the listed values are valid.
+
+   ```json
+   {
+     "type": "object",
+     "properties": {
+       "verdict": { "type": "string", "enum": ["accept", "needs-work"] },
+       "workItems": {
+         "type": "array", "minItems": 0, "maxItems": 6,
+         "items": {
+           "type": "object",
+           "properties": {
+             "id":     { "type": "string", "minLength": 1, "maxLength": 16 },
+             "kind":   { "type": "string", "enum": ["fix", "enhance", "add", "trim"] },
+             "where":  { "type": "string", "minLength": 1, "maxLength": 64 },
+             "issue":  { "type": "string", "minLength": 1, "maxLength": 200 },
+             "action": { "type": "string", "minLength": 1, "maxLength": 200 }
+           },
+           "required": ["id", "kind", "where", "issue", "action"]
+         }
+       },
+       ...
+     },
+     "required": ["verdict"]
+   }
+   ```
+   ```
+
+2. **Corrective retry with the specific violation surfaced.** When `validateReview` rejects, the retry user message names the EXACT violating value (not just the validation rule). Today's retry message is:
+
+   > "Your previous response was rejected: \`workItems[0].kind\` must be one of fix|enhance|add|trim. Return ONLY the JSON object..."
+
+   The new retry message reads back the bad value AND points to a corrective mapping:
+
+   > "Your previous response had `workItems[0].kind = \"clarify\"` which is not in the allowed enum. The closed enum is `fix | enhance | add | trim`. The closest valid kind for an item describing 'clarify the X claim' is **enhance** (kind=enhance is for correct-but-thin content; clarification is enhancement). Re-emit the JSON with `workItems[0].kind = \"enhance\"` (or another valid value if more appropriate). Return ONLY the corrected JSON."
+
+   The validator needs to grow a small "extractViolation" helper that pulls the offending value out of the parsed JSON for any constraint type (enum / minLength / maxLength / type / required) and a tiny lookup table for closest-valid suggestions (only for the `kind` enum -- the others don't need suggestions).
+
+3. **Raise max retries from 2 → 3** to match the `insors-extraction` pattern. The added cost is one possible extra cloud call per section; in run #3 even with 90% first-try failures the total cloud time was 7 minutes -- one more retry on rare cases is trivial.
+
+**Provider coverage matrix:**
+
+This fix lives in the caller-side prompt construction, so all cloud providers are covered uniformly through the existing `LLMProvider` interface. No per-provider plumbing required for Anthropic / OpenAI / Gemini / Mistral. Side benefit: when the planner or other strict-JSON callers (`plan-actions.ts`, `relationship.ts`, etc.) adopt the same `responseFormat.schema` shape, they get the same reliability without further work.
+
+  - **Anthropic (Haiku)** -- Phase P.4 main target. Schema in prompt + corrective retry brings 90% first-try failure → near 0%.
+  - **OpenAI / Azure OpenAI** -- the schema-in-prompt pattern works identically. (Future option: add native `response_format: { type: 'json_schema', json_schema: ... }` for GPT-4.1+ if available, but the prompt-based fix is already sufficient.)
+  - **Gemini** -- prompt-based works as in `insors-extraction`'s manual implementation. (Future option: native `response_schema` parameter for Gemini 1.5+.)
+  - **Mistral** -- prompt-based works the same way; Mistral has `response_format: { type: 'json_object' }` but not schema-aware enforcement, so prompt remains primary.
+  - **Ollama (local)** -- already wired via [providers/ollama.ts](src/insrc/agent/providers/ollama.ts) (relays `responseFormat.schema` to Ollama's native `format` parameter). This means local-LLM reviewers get the strongest enforcement automatically. No change needed; the prompt-side schema injection complements it.
+
+**Expected impact:**
+
+  - First-try reviewer failure rate: **90% → <10%** (matches `insors-extraction`'s observed reliability on complex nested JSON).
+  - Soft-accept degraded reviews: **10% → near 0%** (combined with P.3 soft-truncate on length caps).
+  - Total cloud time per run: slightly LOWER despite raised retries (fewer retries actually fire; the ones that do are more likely to succeed without a third).
+  - Operator visibility: degraded reviews still surface via `degradedReviews` count + `confidence: medium` downgrade -- but they'll be rare instead of routine.
+
+This is the upstream root-cause fix. The prior P.4 sketch (name the violation in retry) is subsumed; the JSON-Schema-in-prompt is the load-bearing change.
+
+**Critical: also REMOVE the prose structure descriptions from the system prompt.**
+
+The current SYSTEM_PROMPT in [review-action.ts](src/insrc/agent/content-gen/review-action.ts) carries the schema in three overlapping forms:
+
+  1. A prose "Verdict rules:" section listing accept / needs-work semantics
+  2. A prose "Work-item kinds:" section describing each kind verbally
+  3. A prose "Work-item field rules:" section listing field constraints (id / where / issue / action / evidenceRefs)
+  4. A prose "Hard rules:" section that includes `"The schema is fixed: { verdict, workItems, accepted?, notes? }"`
+
+Once the JSON Schema block lands, **keep ONLY the semantic guidance the schema cannot express** -- which is the *intent* of each kind (when to pick `fix` vs `enhance` vs `add` vs `trim`) and the workflow rules (`each item atomic`, `cap at 6`, `pick the 6 most important`). DELETE:
+
+  - All field-shape prose (id / where / issue / action / evidenceRefs structural rules) -- the JSON Schema's `properties` / `required` / `maxLength` / `minLength` cover it.
+  - The "verdict rules" prose enumeration of `accept` vs `needs-work` requirements (`workItems MUST be empty` / `MUST be non-empty`) -- the schema enforces it.
+  - The "Hard rule 2" line about the schema shape -- redundant with the schema block.
+  - The "Hard rule 3" line about `accept` vs `needs-work` workItems -- redundant.
+
+Duplicated structure information between prose and schema is a known source of LLM confusion: the model has to reconcile two descriptions of the same constraint, and when they drift even slightly the model picks whichever it thinks fits better. Single source of truth (the JSON Schema block) avoids the drift.
+
+The resulting reviewer system prompt is roughly:
+  - Role + responsibilities (you review one section)
+  - Inputs (what you'll receive)
+  - Verdict semantics (when to accept vs needs-work) -- SEMANTIC ONLY, no shape
+  - Kind selection guidance (when each kind applies) -- SEMANTIC ONLY, no shape
+  - Workflow rules (atomic items, max 6, pick most important)
+  - Output expectations (JSON only, no fences, no preamble)
+  - The JSON Schema block (the SHAPE)
+
+Expect the prompt to shrink by ~30%. The same de-duplication should apply to any other strict-JSON caller (`plan-actions.ts`, etc.) when they adopt the JSON-Schema-in-prompt pattern.
+
+**Out-of-scope here:** wiring `opts.responseFormat.schema` through each cloud provider as native API parameters (Anthropic's tool-use trick, OpenAI's `response_format`, Gemini's `response_schema`). Worth doing eventually for defense in depth, but the prompt-based approach is what `insors-extraction` validated at production scale on the same providers, and it's a one-place fix in `review-action.ts`.
 
 ### P.5 N.1 entity-drill-down: harden from soft mandate to loop-level rule
 
