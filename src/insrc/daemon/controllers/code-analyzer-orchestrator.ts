@@ -762,7 +762,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // and forcing the writer to hedge ("appears to lack indexed
     // files"). The tool loop avoids that by giving the writer the
     // section title + tool catalog directly.
-    const { writeSectionWithTools, patchSectionWithTools } = await import('../../agent/tasks/code-analyzer/write-section.js');
+    const { writeSectionWithTools, patchSectionWithTools, patchSectionItemwise } = await import('../../agent/tasks/code-analyzer/write-section.js');
+    // Phase R.1: per-item patch loop. Default ON -- eliminates the ghost-ID
+    // failure mode where the writer emits `patch:<id>` blocks with IDs that
+    // don't match workItems[].id (observed across both qwen + devstral; runs
+    // #4-#6 had 10+ such silent miscalls). Set INSRC_ANALYZER_PATCH_MODE=legacy
+    // to fall back to the fenced-block patchSectionWithTools path.
+    const patchMode = process.env['INSRC_ANALYZER_PATCH_MODE'] === 'legacy' ? 'legacy' : 'itemwise';
+    log.info({ patchMode }, 'patch-loop mode selected');
     const { reviewAction } = await import('../../agent/content-gen/review-action.js');
     const { pickBestRound } = await import('../../agent/tasks/code-analyzer/pick-best-draft.js');
     type RoundCandidate = import('../../agent/tasks/code-analyzer/pick-best-draft.js').RoundCandidate;
@@ -918,7 +925,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           `[${i + 1}/${actions.length}] "${action.title}" -- patch (round ${r}, ${priorWorkItems.length} work item${priorWorkItems.length === 1 ? '' : 's'})`,
         );
 
-        const patched = await patchSectionWithTools({
+        const patchInput = {
           provider:             local,
           session,
           action,
@@ -930,10 +937,13 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           priorSkillCalls:      cumulativeCalls,
           round:                r,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-          onProgress: (msg) => {
+          onProgress: (msg: string) => {
             this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
           },
-        });
+        };
+        const patched = patchMode === 'itemwise'
+          ? await patchSectionItemwise(patchInput)
+          : await patchSectionWithTools(patchInput);
 
         let nextDraft: DraftLike;
         let patchInfo: { priorWorkItems: typeof priorWorkItems; itemStatuses: typeof patched.itemStatuses } | undefined;

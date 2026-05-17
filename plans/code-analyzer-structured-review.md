@@ -1212,7 +1212,10 @@ The plan stays accuracy-first. Phase Q is a follow-up once Phases P metrics are 
 
 ## Phase R -- per-item patch loop (eliminates the ghost-ID failure mode)
 
-### R.1 Iterate per work item; orchestrator controls IDs end-to-end
+### R.1 Iterate per work item; orchestrator controls IDs end-to-end -- **SHIPPED** (default ON)
+
+Implemented as `patchSectionItemwise` in `src/insrc/agent/tasks/code-analyzer/write-section.ts`, wired into the orchestrator behind `INSRC_ANALYZER_PATCH_MODE` (default `itemwise`; set to `legacy` for the old fenced-block path during rollback). Test coverage: `src/insrc/agent/tasks/code-analyzer/__tests__/patch-section-itemwise.test.ts` (17 tests). Run #6 still in progress against the legacy code; R.1 applies on next daemon restart.
+
 
 **Why:** runs #4-#6 surfaced a recurring failure: the writer emits fenced `patch:<id>` blocks but with IDs that don't match the reviewer's `workItems[].id` values (`patch:wi_1` with underscore, `patch:1` renumbered, `patch:enhance-paragraph-1` semantically named, `patch:wi-A` relettered, etc.). The applier walks the workItems list, looks up each item's id in the parsed block map, finds nothing, marks all items `skipped: 'no patch emitted'`. Symptoms:
 

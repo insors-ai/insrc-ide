@@ -1171,6 +1171,406 @@ function splitDraftParagraphs(markdown: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Phase R.1: patchSectionItemwise -- per-item patch loop
+// ---------------------------------------------------------------------------
+//
+// Eliminates the ghost-ID failure mode of patchSectionWithTools. Instead of
+// asking the writer to emit fenced `patch:<id>` blocks (which both devstral
+// and qwen drift on -- `patch:wi_1`, `patch:1`, `patch:enhance-paragraph-1`
+// all observed), the orchestrator iterates per work item. The writer never
+// sees an ID; it gets one item, one focused prompt, returns one paragraph
+// of plain text. The orchestrator slots the response in by `item.where`.
+//
+// Per-kind handling:
+//   fix     -- single LLM call (no skills); replace target paragraph
+//   enhance -- single LLM call (no skills); replace target paragraph
+//   add     -- single LLM call (up to ~3 skill calls); insert after anchor
+//   trim    -- no LLM call; orchestrator-side delete
+
+export interface PatchSectionItemwiseInput {
+	readonly provider:             LLMProvider;
+	readonly session:              Session;
+	readonly action:               PlannedAction;
+	readonly request:              string;
+	readonly repoContext:          AnalyzerRepoContext;
+	readonly repoSizeSummary?:     RepoSizeSummary | undefined;
+	readonly maxToolCalls?:        number | undefined;
+	readonly maxTokens?:           number | undefined;
+	readonly onProgress?:          ((message: string) => void) | undefined;
+	readonly draftMarkdown:        string;
+	readonly workItems:            readonly ReviewWorkItem[];
+	readonly priorDescribedSkills: ReadonlySet<string>;
+	readonly priorSkillCalls:      readonly CapturedSkillCall[];
+	readonly round:                2 | 3;
+}
+
+/** Max skill calls a single `add` item may use inside its sub-loop.
+ *  Counts describe + invoke + final assistant turn against this budget. */
+const ADD_ITEM_TOOL_CALL_BUDGET = 4;
+
+/** Order in which the per-item loop addresses kinds. `fix` first (the
+ *  correctness gate); then `enhance` / `add` (content); then `trim`
+ *  (deletes happen last so earlier `where` indices stay valid). */
+const KIND_ORDER: Record<ReviewWorkItem['kind'], number> = {
+	fix:     0,
+	enhance: 1,
+	add:     2,
+	trim:    3,
+};
+
+export async function patchSectionItemwise(input: PatchSectionItemwiseInput): Promise<PatchSectionOutput> {
+	const ordered = [...input.workItems].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]);
+
+	let workingDraft     = input.draftMarkdown;
+	const statuses       = new Map<string, WorkItemStatus>();
+	const describedSkills = new Set<string>(input.priorDescribedSkills);
+	const skillsCalled: string[]            = [];
+	const skillCalls:   CapturedSkillCall[] = [];
+	let totalToolCalls   = 0;
+	const maxToolCalls   = input.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
+
+	log.info(
+		{
+			actionId:   input.action.id,
+			round:      input.round,
+			workItems:  input.workItems.length,
+			draftBytes: input.draftMarkdown.length,
+			maxToolCalls,
+		},
+		'patchSectionItemwise: starting per-item patch loop',
+	);
+
+	for (const item of ordered) {
+		if (item.kind === 'trim') {
+			// No LLM call. Synthesize a patch:<id> block; the applier's
+			// trim handler ignores body, deletes the targeted paragraph.
+			const status = applyOneItem(workingDraft, item, '');
+			workingDraft = status.patchedMarkdown;
+			statuses.set(item.id, status.itemStatus);
+			input.onProgress?.(`  [${input.action.id}/patch] trim ${item.id} (${item.where})`);
+			continue;
+		}
+
+		const remaining = maxToolCalls - totalToolCalls;
+		if (remaining <= 0) {
+			statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'tool-call budget exhausted' });
+			continue;
+		}
+
+		if (item.kind === 'add') {
+			const itemBudget = Math.min(ADD_ITEM_TOOL_CALL_BUDGET, remaining);
+			const itemResult = await runAddItem(item, workingDraft, input, describedSkills, itemBudget);
+			totalToolCalls += itemResult.toolCalls;
+			skillsCalled.push(...itemResult.skillsCalled);
+			skillCalls.push(...itemResult.skillCalls);
+			const text = itemResult.text.trim();
+			if (text.length === 0) {
+				statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'empty add response' });
+				continue;
+			}
+			const status = applyOneItem(workingDraft, item, text);
+			workingDraft = status.patchedMarkdown;
+			statuses.set(item.id, status.itemStatus);
+			continue;
+		}
+
+		// fix or enhance: one LLM call, no skills
+		const text = await runFixEnhanceItem(item, workingDraft, input);
+		totalToolCalls += 1;
+		const trimmed = text.trim();
+		if (trimmed.length === 0) {
+			statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'empty fix/enhance response' });
+			continue;
+		}
+		const status = applyOneItem(workingDraft, item, trimmed);
+		workingDraft = status.patchedMarkdown;
+		statuses.set(item.id, status.itemStatus);
+	}
+
+	// Emit statuses in the reviewer's original workItems order so the
+	// orchestrator and downstream consumers (picker, todo trace) see a
+	// stable shape regardless of how we sequenced execution.
+	const itemStatuses: WorkItemStatus[] = input.workItems.map(
+		wi => statuses.get(wi.id) ?? { id: wi.id, status: 'skipped', reason: 'not processed' },
+	);
+
+	const itemsAddressed = itemStatuses.filter(s => s.status === 'addressed').length;
+	// Treat the per-item loop as "protocol followed" whenever any item
+	// was addressed. The orchestrator's F.4 escape hatch triggers when
+	// this is false -- under R.1 that means the loop genuinely produced
+	// zero useful changes (every item returned empty or unresolvable),
+	// which is exactly the recovery scenario F.4 is designed for.
+	const patchProtocolFollowed = itemsAddressed > 0;
+
+	log.info(
+		{
+			actionId:        input.action.id,
+			round:           input.round,
+			toolCallCount:   totalToolCalls,
+			hitLimit:        totalToolCalls >= maxToolCalls,
+			skillsCalled,
+			workItems:       input.workItems.length,
+			itemsAddressed,
+			itemsPartial:    itemStatuses.filter(s => s.status === 'partial').length,
+			itemsSkipped:    itemStatuses.filter(s => s.status === 'skipped').length,
+			patchProtocolFollowed,
+		},
+		'patchSectionItemwise: per-item patch loop complete',
+	);
+
+	return {
+		markdown:               workingDraft,
+		toolCallCount:          totalToolCalls,
+		hitLimit:               totalToolCalls >= maxToolCalls,
+		skillsCalled,
+		skillCalls,
+		describedSkills,
+		itemStatuses,
+		patchProtocolFollowed,
+	};
+}
+
+/**
+ * Slot the LLM's new paragraph into the working draft. Reuses
+ * `applyPatches` by synthesizing a single PatchBlock with the
+ * orchestrator-owned id -- the same id that lives in `workItems[]`, so
+ * the block always matches by construction. Ghost-IDs are impossible:
+ * the writer never produced the id.
+ */
+function applyOneItem(
+	workingDraft: string,
+	item:         ReviewWorkItem,
+	body:         string,
+): { patchedMarkdown: string; itemStatus: WorkItemStatus } {
+	const block: PatchBlock = { kind: 'patch', itemId: item.id, attrs: {}, body };
+	const result = applyPatches(workingDraft, [item], [block]);
+	const status = result.itemStatuses[0] ?? { id: item.id, status: 'skipped', reason: 'applier returned no status' };
+	return { patchedMarkdown: result.patchedMarkdown, itemStatus: status };
+}
+
+async function runFixEnhanceItem(
+	item:         ReviewWorkItem,
+	workingDraft: string,
+	input:        PatchSectionItemwiseInput,
+): Promise<string> {
+	const paragraphs = splitDraftParagraphs(workingDraft);
+	const targetIdx  = resolveParagraphIdxByWhere(item.where, paragraphs);
+	const targetText = targetIdx !== null && targetIdx < paragraphs.length
+		? paragraphs[targetIdx]!
+		: '(target paragraph could not be located; produce a fresh paragraph that addresses the reviewer\'s action)';
+
+	const system = [
+		'You are revising ONE paragraph of a code-analysis section. The reviewer flagged a specific issue and described a concrete fix.',
+		'',
+		'OUTPUT FORMAT: a single replacement paragraph. Plain markdown. NO fenced code blocks around your response. NO preamble ("Here is the revised paragraph"). NO transition sentence at the end ("Next, I will..."). Just the paragraph text.',
+		'',
+		'Preserve any clickable `[text](path:foo.ts#L1)` citations the original carried; add new ones where the action asks. Stay focused on this one action -- do not edit unrelated content.',
+	].join('\n');
+
+	const userParts: string[] = [];
+	userParts.push('## Section context');
+	userParts.push(`title:     ${input.action.title}`);
+	userParts.push(`objective: ${input.action.objective}`);
+	userParts.push('');
+	userParts.push(`## Paragraph to revise (reviewer pointed to "${item.where}")`);
+	userParts.push(targetText);
+	userParts.push('');
+	userParts.push('## Reviewer flag');
+	userParts.push(`Issue:  ${item.issue}`);
+	userParts.push(`Action: ${item.action}`);
+	if (item.evidenceRefs !== undefined && item.evidenceRefs.length > 0) {
+		userParts.push(`Evidence refs: ${item.evidenceRefs.join(', ')}`);
+	}
+	userParts.push('');
+	if (paragraphs.length > 1) {
+		userParts.push('## Surrounding paragraphs (read-only context, do NOT include in your output)');
+		for (let i = 0; i < paragraphs.length; i++) {
+			if (i === targetIdx) continue;
+			userParts.push(`[paragraph ${i + 1}]`);
+			userParts.push(paragraphs[i]!);
+			userParts.push('');
+		}
+	}
+	userParts.push('Output ONLY the replacement paragraph text.');
+
+	const messages: LLMMessage[] = [
+		{ role: 'system', content: system },
+		{ role: 'user',   content: userParts.join('\n') },
+	];
+
+	input.onProgress?.(`  [${input.action.id}/patch] ${item.kind} ${item.id} (${item.where})`);
+
+	const resp = await input.provider.complete(messages, {
+		maxTokens: input.maxTokens ?? input.action.maxBudgetTokens,
+	});
+	return stripParagraphArtifacts(resp.text);
+}
+
+async function runAddItem(
+	item:           ReviewWorkItem,
+	workingDraft:   string,
+	input:          PatchSectionItemwiseInput,
+	describedSkills: Set<string>,
+	itemBudget:     number,
+): Promise<{ text: string; toolCalls: number; skillsCalled: string[]; skillCalls: CapturedSkillCall[] }> {
+	const catalog    = buildAnalyzerSkillCatalog(input.repoContext);
+	const paragraphs = splitDraftParagraphs(workingDraft);
+
+	const system = [
+		'You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; produce a single paragraph that fills the gap.',
+		'',
+		'You MAY make up to 2 skill calls if you need new evidence the existing section does not cover. Always call `skill_describe({ id })` before invoking a skill the first time.',
+		'',
+		'AFTER gathering evidence (or immediately, if no evidence is needed), end with a final assistant turn that contains ONLY the new paragraph as plain markdown. NO fenced code blocks around your response. NO preamble. NO transition sentence. Just the paragraph text.',
+		'',
+		formatAnalyzerSkillCatalog(catalog),
+	].join('\n');
+
+	const userParts: string[] = [];
+	userParts.push('## Section context');
+	userParts.push(`title:     ${input.action.title}`);
+	userParts.push(`objective: ${input.action.objective}`);
+	userParts.push('');
+	userParts.push('## Reviewer flag (missing coverage)');
+	userParts.push(`Issue:  ${item.issue}`);
+	userParts.push(`Action: ${item.action}`);
+	userParts.push(`Anchor: insert after "${item.where}"`);
+	if (item.evidenceRefs !== undefined && item.evidenceRefs.length > 0) {
+		userParts.push(`Evidence refs: ${item.evidenceRefs.join(', ')}`);
+	}
+	userParts.push('');
+	if (paragraphs.length > 0) {
+		userParts.push('## Existing section paragraphs (read-only context)');
+		for (let i = 0; i < paragraphs.length; i++) {
+			userParts.push(`[paragraph ${i + 1}]`);
+			userParts.push(paragraphs[i]!);
+			userParts.push('');
+		}
+	}
+	userParts.push('Output your final turn as ONLY the new paragraph text.');
+
+	const messages: LLMMessage[] = [
+		{ role: 'system', content: system },
+		{ role: 'user',   content: userParts.join('\n') },
+	];
+
+	const skillInvokeTool   = getTool('skill_invoke');
+	const skillDescribeTool = getTool('skill_describe');
+	const skillLoadPageTool = getTool('skill_load_page');
+	const tools: ToolDefinition[] = [];
+	if (skillInvokeTool)   tools.push({ name: skillInvokeTool.id,   description: skillInvokeTool.description,   inputSchema: skillInvokeTool.inputSchema });
+	if (skillDescribeTool) tools.push({ name: skillDescribeTool.id, description: skillDescribeTool.description, inputSchema: skillDescribeTool.inputSchema });
+	if (skillLoadPageTool) tools.push({ name: skillLoadPageTool.id, description: skillLoadPageTool.description, inputSchema: skillLoadPageTool.inputSchema });
+
+	const localSkillsCalled: string[]            = [];
+	const localSkillCalls:   CapturedSkillCall[] = [];
+	const pendingByIteration = new Map<number, { skillId: string; args: Record<string, unknown> }>();
+	let nextIteration = 0;
+
+	input.onProgress?.(`  [${input.action.id}/patch] add ${item.id} (${item.where})`);
+
+	const loopOpts: Parameters<typeof runToolLoop>[1] = {
+		provider:               input.provider,
+		tools,
+		intent:                 'code-analyzer-section-patch',
+		permissionMode:         'auto-accept',
+		session:                input.session,
+		maxTokens:              input.maxTokens ?? input.action.maxBudgetTokens,
+		maxIterations:          itemBudget,
+		disableTransitionNudge: true,
+	};
+	loopOpts.onToolCall = (call) => {
+		nextIteration++;
+		if (call.name === 'skill_describe' && typeof call.input['id'] === 'string') {
+			describedSkills.add(call.input['id'] as string);
+		}
+		if (call.name === 'skill_invoke' && typeof call.input['skillId'] === 'string') {
+			const skillId = call.input['skillId'] as string;
+			const args    = (call.input['args'] as Record<string, unknown> | undefined) ?? {};
+			localSkillsCalled.push(skillId);
+			pendingByIteration.set(nextIteration, { skillId, args });
+		}
+	};
+	loopOpts.onToolResult = (call, result) => {
+		const pending = pendingByIteration.get(nextIteration);
+		if (pending !== undefined && call.name === 'skill_invoke') {
+			const data = (result as { data?: { rejectionReason?: string } }).data;
+			const rejectionReason = data?.rejectionReason;
+			localSkillCalls.push({
+				skillId:    pending.skillId,
+				args:       pending.args,
+				resultText: result.content,
+				errored:    result.isError === true,
+				...(rejectionReason !== undefined ? { rejectionReason } : {}),
+			});
+			pendingByIteration.delete(nextIteration);
+		}
+	};
+	loopOpts.interceptToolCall = (call) => {
+		if (call.name !== 'skill_invoke') return null;
+		const sid = typeof call.input['skillId'] === 'string' ? call.input['skillId'] : '';
+		if (sid.length === 0) return null;
+		if (describedSkills.has(sid)) return null;
+		return {
+			toolCallId: call.id,
+			content:
+				`[protocol-error] You must call \`skill_describe({ id: "${sid}" })\` ` +
+				`BEFORE \`skill_invoke\` for that skill.`,
+			isError: true,
+			data: { rejectionReason: 'protocol-error' },
+		};
+	};
+
+	const result: ToolLoopResult = await runToolLoop(messages, loopOpts);
+	return {
+		text:          stripParagraphArtifacts(result.response),
+		toolCalls:     result.iterations,
+		skillsCalled:  localSkillsCalled,
+		skillCalls:    localSkillCalls,
+	};
+}
+
+/**
+ * Local mirror of apply-patches.ts `resolveParagraphIdx`. Kept here to
+ * avoid bleeding internal exports into the public surface of the
+ * applier. Accepts the same `where` shapes the reviewer produces.
+ */
+function resolveParagraphIdxByWhere(where: string, paragraphs: readonly string[]): number | null {
+	if (paragraphs.length === 0) return null;
+	const w = where.trim().toLowerCase();
+	if (/^(section\s+)?(opening|start)$/.test(w)) return 0;
+	if (/^(section\s+)?(closing|ending|end)$/.test(w)) return paragraphs.length - 1;
+	const single = w.match(/^(?:after\s+)?paragraphs?\s+(\d+)/);
+	if (single !== null) {
+		const n = Number.parseInt(single[1]!, 10);
+		if (Number.isFinite(n) && n >= 1 && n <= paragraphs.length) return n - 1;
+	}
+	return null;
+}
+
+/**
+ * Strip the model's most common output preambles / wrappers when it
+ * fails to follow the "ONLY the paragraph text" instruction. Cheap
+ * defense-in-depth; the prompt does the heavy lifting.
+ */
+function stripParagraphArtifacts(text: string): string {
+	let t = text.trim();
+	if (t.length === 0) return t;
+
+	// Strip surrounding triple-backtick fence (with or without info string).
+	const fence = t.match(/^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```$/);
+	if (fence) t = fence[1]!.trim();
+
+	// Strip "Here is..." / "Here's..." opener up to the FIRST period or colon
+	// (lazy match so we don't eat the actual paragraph that follows).
+	t = t.replace(/^(here'?s?\b[^.\n]*?[.:]\s*)/i, '').trim();
+	// Strip a leading "Revised paragraph:" / "New paragraph:" label.
+	t = t.replace(/^(revised paragraph|new paragraph|paragraph|replacement)\s*[:\-]\s*/i, '').trim();
+
+	return t;
+}
+
+// ---------------------------------------------------------------------------
 // Test exports
 // ---------------------------------------------------------------------------
 
@@ -1178,6 +1578,9 @@ export const _isProcessNarrationFramingForTest = isProcessNarrationFraming;
 export const _countParagraphsForTest           = countParagraphs;
 export const _countCitationsForTest            = countCitations;
 export const _splitDraftParagraphsForTest      = splitDraftParagraphs;
+export const _stripParagraphArtifactsForTest   = stripParagraphArtifacts;
+export const _resolveParagraphIdxByWhereForTest = resolveParagraphIdxByWhere;
+export const _KIND_ORDER_FOR_TEST              = KIND_ORDER;
 
 // ---------------------------------------------------------------------------
 // Helpers
