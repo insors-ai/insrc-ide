@@ -82,6 +82,25 @@ export interface ToolLoopOpts {
    * not framing-then-close) so it sets this `true`.
    */
   disableTransitionNudge?: boolean | undefined;
+  /**
+   * Phase P.5 + P.6: caller-supplied close-time check. Fires when the
+   * model attempts `end_turn` (no tool call); gets a snapshot of the
+   * loop state and returns either:
+   *   - `null` -- allow the loop to exit normally
+   *   - a `string` -- the synthetic user-turn nudge that re-prompts
+   *     the model. The loop continues for one more iteration.
+   *
+   * One-shot per loop (the loop only consults closeNudge once; if it
+   * fires the result is recorded and subsequent end_turn attempts
+   * proceed normally). Use this for "you closed too early" or "you
+   * skipped a required tool call" patterns specific to a given
+   * loop's caller. The transition-phrase nudge (J.2) and this hook
+   * use separate budgets.
+   */
+  closeNudge?: ((ctx: {
+    readonly sectionText:    string;
+    readonly iterations:     number;
+  }) => string | null) | undefined;
   /** Callback when an LLM response includes usage info (for cost tracking) */
   onUsage?: ((usage: { inputTokens: number; outputTokens: number }) => void) | undefined;
   /** User's original prompt (passed to SmartRead for intelligent extraction) */
@@ -107,6 +126,10 @@ export interface ToolLoopResult {
   inputTokensFinal: number;
   /** Phase J.2: true if the transition-phrase nudge fired during this loop. */
   transitionPhraseNudgeFired: boolean;
+  /** Phase P.5/P.6: true if the closeNudge fired during this loop. */
+  closeNudgeFired: boolean;
+  /** Phase P.8: number of paragraph-flushes dropped as near-duplicates. */
+  duplicateParagraphsDropped: number;
 }
 
 /**
@@ -148,6 +171,10 @@ export async function runToolLoop(
   // want to share budget.
   let transitionNudgeCount = 0;
   const transitionNudgeBudget = opts.disableTransitionNudge === true ? 0 : 1;
+  // Phase P.5/P.6: one-shot caller-driven closing nudge.
+  let closeNudgeFired = false;
+  // Phase P.8: count paragraphs dropped as near-duplicates during flush.
+  let duplicateParagraphsDropped = 0;
 
   const { maxIterations: globalMaxIterations, maxNudges } = getToolSettings().loop;
   const maxIterations    = opts.maxIterations  ?? globalMaxIterations;
@@ -201,7 +228,7 @@ export async function runToolLoop(
 
       if (isPureTransition && transitionNudgeCount < transitionNudgeBudget) {
         if (currentTurnText.trim().length > 0) {
-          sectionParagraphs.push(currentTurnText.trim());
+          pushParagraph(sectionParagraphs, currentTurnText);
         }
         workingMessages.push({ role: 'assistant', content: currentTurnText });
         workingMessages.push({
@@ -239,7 +266,7 @@ export async function runToolLoop(
         // Push the partial text into the paragraph stream (still useful as
         // analysis prose) and re-prompt with a corrective user turn.
         if (currentTurnText.trim().length > 0) {
-          sectionParagraphs.push(currentTurnText.trim());
+          pushParagraph(sectionParagraphs, currentTurnText);
         }
         workingMessages.push({ role: 'assistant', content: currentTurnText });
         workingMessages.push({ role: 'user', content: 'You described an action but did not call a tool. Use the available tools to perform it now.' });
@@ -247,10 +274,34 @@ export async function runToolLoop(
         nudgeCount++;
         continue;
       }
+      // Phase P.5 / P.6: caller-supplied close-time check. Fires once
+      // per loop; lets the writer side enforce per-section rules like
+      // "you closed with 0 citations after only module.describe calls"
+      // (P.5) or "you closed before making min(3, criteria.length)
+      // skill_invoke calls" (P.6).
+      if (!closeNudgeFired && opts.closeNudge !== undefined) {
+        const accumulatedText = currentTurnText.trim().length > 0
+          ? [...sectionParagraphs, currentTurnText.trim()].join('\n\n')
+          : sectionParagraphs.join('\n\n');
+        const nudgeMsg = opts.closeNudge({
+          sectionText: accumulatedText,
+          iterations,
+        });
+        if (nudgeMsg !== null && nudgeMsg.length > 0) {
+          if (currentTurnText.trim().length > 0) {
+            pushParagraph(sectionParagraphs, currentTurnText);
+          }
+          workingMessages.push({ role: 'assistant', content: currentTurnText });
+          workingMessages.push({ role: 'user', content: nudgeMsg });
+          currentTurnText = '';
+          closeNudgeFired = true;
+          continue;
+        }
+      }
       // No-tool-call turn = the closing turn. Flush its text into the
       // section stream and exit the loop.
       if (currentTurnText.trim().length > 0) {
-        sectionParagraphs.push(currentTurnText.trim());
+        pushParagraph(sectionParagraphs, currentTurnText);
       }
       producedMessages.push({ role: 'assistant', content: currentTurnText });
       break;
@@ -371,7 +422,7 @@ export async function runToolLoop(
     // the next iteration. Each tool-use turn that included accompanying
     // text contributes a paragraph to the final section.
     if (currentTurnText.trim().length > 0) {
-      sectionParagraphs.push(currentTurnText.trim());
+      pushParagraph(sectionParagraphs, currentTurnText);
     }
     currentTurnText = '';
   }
@@ -382,11 +433,33 @@ export async function runToolLoop(
     // any) was never flushed by the per-iteration tail. Capture it now
     // so it doesn't disappear.
     if (currentTurnText.trim().length > 0) {
-      sectionParagraphs.push(currentTurnText.trim());
+      pushParagraph(sectionParagraphs, currentTurnText);
     }
     if (sectionParagraphs.length === 0) {
       sectionParagraphs.push('[max tool iterations reached]');
       producedMessages.push({ role: 'assistant', content: '[max tool iterations reached]' });
+    }
+  }
+
+  // Phase P.8: paragraph-push helper with near-duplicate detection.
+  // Each push splits the new text on `\n{2,}` (the model sometimes
+  // emits multi-paragraph turns); each resulting block is compared
+  // against the immediate previous block via trigram-shingle Jaccard
+  // similarity. Drops blocks whose similarity to the prior block is
+  // >= 0.7 -- the threshold catches "modules contains 297 files..."
+  // duplicate-paragraph patterns observed in section 2 R1 of run #3
+  // without false-positiving on legitimate "module Y contains M files"
+  // followups (which share scaffold but differ on entities).
+  function pushParagraph(into: string[], text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    for (const block of trimmed.split(/\n{2,}/).map(b => b.trim()).filter(b => b.length > 0)) {
+      const prev = into[into.length - 1];
+      if (prev !== undefined && jaccardTrigramSimilarity(block, prev) >= 0.7) {
+        duplicateParagraphsDropped++;
+        continue;
+      }
+      into.push(block);
     }
   }
 
@@ -398,8 +471,43 @@ export async function runToolLoop(
     evictionsApplied,
     inputTokensFinal: estimateTokens(workingMessages),
     transitionPhraseNudgeFired: transitionNudgeCount > 0,
+    closeNudgeFired,
+    duplicateParagraphsDropped,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Phase P.8: paragraph-similarity check (trigram-shingle Jaccard)
+// ---------------------------------------------------------------------------
+
+function shingles(text: string, n: number = 3): Set<string> {
+  // Normalize: lowercase, collapse whitespace, drop punctuation runs.
+  const normalised = text.toLowerCase().replace(/[^\w\s]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const tokens = normalised.split(' ').filter(t => t.length > 0);
+  const out = new Set<string>();
+  if (tokens.length < n) {
+    out.add(tokens.join(' '));
+    return out;
+  }
+  for (let i = 0; i <= tokens.length - n; i++) {
+    out.add(tokens.slice(i, i + n).join(' '));
+  }
+  return out;
+}
+
+function jaccardTrigramSimilarity(a: string, b: string): number {
+  const sa = shingles(a);
+  const sb = shingles(b);
+  if (sa.size === 0 && sb.size === 0) return 1;
+  let intersect = 0;
+  for (const s of sa) {
+    if (sb.has(s)) intersect++;
+  }
+  const union = sa.size + sb.size - intersect;
+  return union === 0 ? 0 : intersect / union;
+}
+
+export const _jaccardTrigramSimilarityForTest = jaccardTrigramSimilarity;
 
 // ---------------------------------------------------------------------------
 // Phase C helpers: estimateTokens + maybeEvict

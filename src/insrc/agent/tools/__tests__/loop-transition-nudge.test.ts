@@ -184,3 +184,42 @@ test('transition-nudge: pattern is anchored at start of FINAL paragraph, not any
 	assert.equal(callCount(), 1);
 	assert.equal(r.transitionPhraseNudgeFired, false);
 });
+
+// ---------------------------------------------------------------------------
+// Phase P.8: trigram-shingle Jaccard similarity
+// ---------------------------------------------------------------------------
+
+import { _jaccardTrigramSimilarityForTest as jaccard } from '../loop.js';
+
+test('jaccard: identical strings -> 1.0', () => {
+	const a = 'The HDFS module contains 707 files and 19327 entities';
+	assert.equal(jaccard(a, a), 1);
+});
+
+test('jaccard: near-duplicate paragraphs (run #3 section 2 case) -> >= 0.7', () => {
+	// Actual paragraphs 2 and 3 from section 2 round 1 of run #3 -- the
+	// model emitted two paragraphs that differ only in entity names +
+	// citation markup, sharing two full trailing sentences verbatim.
+	const a = 'The org.apache.hadoop.fs module contains 297 files and 5796 entities, with 3591 public entities. Key files include FileSystem.java, Path.java, and FSDataInputStream.java, which form the core of the filesystem abstraction layer. This layer enables Hadoop to interact with various storage backends through a unified interface.';
+	const b = 'The org.apache.hadoop.fs module contains 297 files and 5796 entities, with 3591 public entities. Key files include Abortable, AbstractFileSystem, and BufferedFSInputStream, which form the core of the filesystem abstraction layer. This layer enables Hadoop to interact with various storage backends through a unified interface.';
+	const sim = jaccard(a, b);
+	assert.ok(sim >= 0.7, `expected near-duplicate to score >=0.7, got ${sim}`);
+});
+
+test('jaccard: legitimate "module Y contains M files" pattern with different entities -> < 0.7', () => {
+	const a = 'The HDFS module contains 707 files including DFSConfigKeys, DFSUtil, and DFSNetworkTopology.';
+	const b = 'The YARN module contains 111 files including AllocateRequest, AllocateResponse, and ApplicationsRequestScope.';
+	const sim = jaccard(a, b);
+	assert.ok(sim < 0.7, `legitimate followup should not score >=0.7, got ${sim}`);
+});
+
+test('jaccard: completely different topics -> near 0', () => {
+	const a = 'The HDFS DataNode handles block storage and serves read/write requests.';
+	const b = 'YARN ResourceManager schedules containers across NodeManagers in the cluster.';
+	const sim = jaccard(a, b);
+	assert.ok(sim < 0.1, `unrelated topics should score near 0, got ${sim}`);
+});
+
+test('jaccard: empty strings -> 1.0 (both empty)', () => {
+	assert.equal(jaccard('', ''), 1);
+});

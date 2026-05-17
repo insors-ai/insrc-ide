@@ -581,6 +581,53 @@ export async function writeSectionWithTools(input: WriteSectionInput): Promise<W
 		};
 	};
 
+	// Phase P.5 + P.6: close-time check. Fires (at most once) when the
+	// model attempts end_turn; checks two writer-specific rules:
+	//   P.6: minimum skill_invoke count before close. Sections of run
+	//        #3 closed after 1-3 calls with 0-3 citations -- "When to
+	//        stop" was triggering too eagerly. Min = min(3,
+	//        criteria.length).
+	//   P.5: entity-drill-down requirement when criteria mention
+	//        entity-level concerns. Forces at least one entity-level
+	//        skill before closing when 0 citations + only module.describe
+	//        calls so far.
+	const criteriaMentionEntities = input.action.reviewCriteria.some(c =>
+		/\b(class|entit|implement|file:line|specific|concrete|method|function)\w*/i.test(c),
+	);
+	const minSkillInvokeFloor = Math.min(3, input.action.reviewCriteria.length);
+	loopOpts.closeNudge = (ctx) => {
+		const skillInvokeCount = skillsCalled.length;
+		const onlyModuleDescribe = skillsCalled.every(s => s === 'code.source.module.describe');
+		const citationCount = countCitations(ctx.sectionText);
+		// P.6: hard floor on skill calls
+		if (skillInvokeCount < minSkillInvokeFloor) {
+			log.info(
+				{ actionId: input.action.id, skillInvokeCount, floor: minSkillInvokeFloor },
+				'writeSectionWithTools: P.6 close-floor nudge -- too few skill_invoke calls',
+			);
+			return (
+				`You closed after only ${skillInvokeCount} skill_invoke call${skillInvokeCount === 1 ? '' : 's'}. The section has ${input.action.reviewCriteria.length} review criterion/criteria; ` +
+				`the analyzer requires at least ${minSkillInvokeFloor} skill_invoke call${minSkillInvokeFloor === 1 ? '' : 's'} before closing. ` +
+				`Make at least ${minSkillInvokeFloor - skillInvokeCount} more skill_invoke call${(minSkillInvokeFloor - skillInvokeCount) === 1 ? '' : 's'} (drilling into a criterion you have not yet covered) before closing.`
+			);
+		}
+		// P.5: entity-drill-down requirement
+		if (criteriaMentionEntities && citationCount === 0 && onlyModuleDescribe && skillsCalled.length > 0) {
+			log.info(
+				{ actionId: input.action.id, skillsCalled, citationCount },
+				'writeSectionWithTools: P.5 entity-drill-down nudge -- module-only investigation',
+			);
+			return (
+				`Your draft has 0 clickable citations and you have only called \`code.source.module.describe\`. ` +
+				`The section criteria require concrete entity-level references (class names, file:line). ` +
+				`Module-describe returns aggregate stats only -- file:line anchors come from \`code.entity.summary\` ` +
+				`or \`code.source.file.describe\` or \`code.class.locate-references\`. ` +
+				`Call one of these entity-level skills for at least one key entity before closing.`
+			);
+		}
+		return null;
+	};
+
 	// Cap the loop's iterations independently of the global tool-config
 	// default by post-checking. runToolLoop reads the global default;
 	// we'll surface hitLimit via the result so the caller can decide
