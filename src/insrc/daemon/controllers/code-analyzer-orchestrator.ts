@@ -960,6 +960,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           const baseline = candidates[0]!;
           const baselineCitationCount = (baseline.markdown.match(/\[[^\]]+\]\(path:[^)]+\)/g) ?? []).length;
           const baselineParagraphCount = baseline.markdown.trim().split(/\n\s*\n/).filter(p => p.trim().length > 0).length;
+          const recoveryContext = {
+            priorDraftLength:    baseline.markdown.length,
+            priorParagraphCount: baselineParagraphCount,
+            priorCitationCount:  baselineCitationCount,
+          };
           nextDraft = await writeSectionWithTools({
             provider:    local,
             session,
@@ -968,16 +973,46 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             repoContext: {},
             refineHint:           hintFromItems,
             priorDescribedSkills: patched.describedSkills,
-            recoveryContext: {
-              priorDraftLength:    baseline.markdown.length,
-              priorParagraphCount: baselineParagraphCount,
-              priorCitationCount:  baselineCitationCount,
-            },
+            recoveryContext,
             ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
             onProgress: (msg) => {
               this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
             },
           });
+          // Phase P.7: F.4 empty-redraft guard. Run #3 section 7
+          // produced textLength: 0 in recovery mode -- the redraft
+          // returned with no text, leaving the picker with nothing
+          // useful to work with. Retry ONCE with a more direct
+          // re-prompt before accepting the empty output.
+          if (nextDraft.markdown.trim().length === 0) {
+            log.error(
+              { actionId: action.id, round: r },
+              'F.4 recovery redraft produced empty output; retrying once with direct re-prompt',
+            );
+            nextDraft = await writeSectionWithTools({
+              provider:    local,
+              session,
+              action,
+              request,
+              repoContext: {},
+              // Direct re-prompt: bypass the hint (which may have
+              // primed the model to bail) and ask for a topic-sentence
+              // opener directly.
+              refineHint:           `Your previous recovery attempt returned empty output. Begin THIS attempt with a topic sentence about the SUBJECT (the code, the subsystem, the pattern named in the section objective), then drill into evidence with skill calls. Produce a comparably-full draft. The reviewer items you were addressing are: ${hintFromItems}`,
+              priorDescribedSkills: nextDraft.describedSkills,
+              recoveryContext,
+              ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+              onProgress: (msg) => {
+                this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+              },
+            });
+            if (nextDraft.markdown.trim().length === 0) {
+              log.error(
+                { actionId: action.id, round: r },
+                'F.4 recovery redraft EMPTY on second attempt too; picker will rescue',
+              );
+            }
+          }
           patchInfo = undefined;
         } else {
           // Strip the patch-specific fields; the orchestrator works
