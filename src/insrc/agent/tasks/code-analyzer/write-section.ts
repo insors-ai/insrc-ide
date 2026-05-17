@@ -127,19 +127,19 @@ export interface WriteSectionOutput {
 	readonly describedSkills: ReadonlySet<string>;
 }
 
-// Phase P.1: raised 10 -> 32 after run #3 showed substantive
-// sections (HDFS NameNode, YARN ResourceManager, repo-build) hitting
-// the cap at 10 with the model still actively calling tools. The 32
-// budget gives both initial-write AND patch loops room to:
-//   - drill into entity-level skills (entity.summary / file.describe)
-//     for ~3-5 entities per section
-//   - emit per-item patch blocks after gathering evidence (the patch
-//     loop's gather-then-emit pattern needs 12-15 calls minimum on
-//     substantive sections per the L.1 log analysis)
-//   - recovery redrafts can match round-1 density without truncation
+// Phase P.1: raised 10 -> 32 after run #3 showed substantive sections
+// hitting the cap at 10 with the model still actively calling tools.
+// Phase S.1: raised 32 -> 64 after run #6 showed the model burning
+// large portions of the 32-budget on repeated invalid-input retries
+// (qwen3-coder:30b hammered `code.entity.summary` with the same wrong
+// `entity` arg 10+ times on a single section). The schema-on-invalid-
+// input feedback (in invoke-skill.ts) reduces that class of failure,
+// but on the worst sections the model still needs more budget to
+// recover. 64 leaves room for both substantive investigation AND
+// schema-correction retries without truncating early.
 // Trade-off: longer worst-case section time. Acceptable per the
 // accuracy-over-speed principle in the structured-review plan.
-const DEFAULT_MAX_TOOL_CALLS = 32;
+const DEFAULT_MAX_TOOL_CALLS = 64;
 
 // ---------------------------------------------------------------------------
 // Phase F: patch-loop entry point shape

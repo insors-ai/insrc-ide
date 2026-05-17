@@ -160,6 +160,21 @@ function renderSkillResultAsToolResult(skillId: string, result: SkillResult): To
     lines.push('');
   }
 
+  // When the runner rejected the call as `invalid-input`, the model
+  // commonly hammers the same wrong arg shape over and over (qwen3-coder
+  // run #6 showed `code.entity.summary` retried 10+ times with the same
+  // `entity` key instead of `entityId`). Inline the skill's input JSON
+  // schema right here in the rejection result so the corrective signal
+  // is co-located with the error -- the model doesn't have to remember
+  // the schema from an earlier `skill_describe` call many turns back.
+  if (result.rejectionReason === 'invalid-input' && skill !== undefined) {
+    lines.push('**Required input shape (resend `skill_invoke` with `args` matching this exactly):**');
+    lines.push('```json');
+    lines.push(JSON.stringify(skill.inputs, null, 2));
+    lines.push('```');
+    lines.push('');
+  }
+
   if (result.toolCalls.length > 0) {
     lines.push('**Tool calls:**');
     for (const c of result.toolCalls) {
