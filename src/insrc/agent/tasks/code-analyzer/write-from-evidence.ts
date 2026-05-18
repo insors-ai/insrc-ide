@@ -112,23 +112,46 @@ function buildSystemPrompt(): string {
 		'  - The section title + objective + review criteria.',
 		'  - A REPO SUMMARY for orientation.',
 		'  - The full EVIDENCE LEDGER another agent gathered for this section --',
-		'    a list of skill invocations with extracted facts and citations.',
+		'    a list of skill invocations with extracted facts and INLINE citation links.',
 		'',
 		'Your job: write the section markdown in one coherent pass. Cover the objective.',
 		'Address every review criterion. Use the evidence to ground every claim.',
 		'',
-		'Hard rules:',
-		'  1. CITE every fact via the `[label](path:foo.ts#L1-L20)` citation strings',
-		'     provided in the evidence. Carry them VERBATIM into the prose. Do NOT',
-		'     fabricate citations.',
-		'  2. Write COMPLETE PARAGRAPHS with specific entity names, file paths, counts.',
-		'     No filler ("this module is well-organised"); no speculation beyond evidence.',
-		'  3. NO process narration. NEVER write "I will...", "Let me...", "Now I will...",',
-		'     "Based on the evidence above, ...". Just state the facts.',
-		'  4. NO preamble or postscript. No "Here is the section:". No "In summary, ...".',
-		'  5. Output ONLY the section markdown body. Do NOT include the section heading',
-		'     (`## title`) -- the orchestrator prepends it.',
-		'  6. 4-8 paragraphs is the target. Don\'t pad; don\'t truncate.',
+		'## How citations work (READ THIS CAREFULLY)',
+		'',
+		'Each evidence fact in the ledger is presented like this:',
+		'  - Module contains 30 files [`db/__init__.py:1-20`](path:insors/extraction/db/__init__.py#L1-L20)',
+		'',
+		'The `[label](path:...)` part is a MARKDOWN LINK. When you write your prose,',
+		'you MUST embed these links INLINE in your sentences -- not as a separate',
+		'reference list. Carry the link VERBATIM (same label, same URL).',
+		'',
+		'EXAMPLE prose:',
+		'  > The `db` submodule contains 30 Python files implementing the persistence',
+		'  > layer ([`db/__init__.py:1-20`](path:insors/extraction/db/__init__.py#L1-L20)).',
+		'  > Two classes anchor the design: `ManagedCursor` and `ExtractionDbManager`',
+		'  > ([`db/__init__.py:20-80`](path:insors/extraction/db/__init__.py#L20-L80)).',
+		'',
+		'Notice how the `[label](path:...)` markdown links are EMBEDDED INSIDE',
+		'sentences, after the claim they support. THAT is what you must produce.',
+		'',
+		'## Hard rules',
+		'',
+		'  1. **Every paragraph must contain AT LEAST ONE inline `[label](path:...)`',
+		'     link.** A paragraph with no links does not count -- you must cite.',
+		'  2. **Carry the citation links VERBATIM** -- same label text, same URL. Do',
+		'     NOT shorten them, do NOT paraphrase the label, do NOT invent new URLs.',
+		'  3. **Use specific names, counts, file paths** from the evidence facts. No',
+		'     filler ("this module is well-organised"); no speculation beyond evidence.',
+		'  4. **NO process narration.** Never "I will...", "Let me...", "Based on the',
+		'     evidence above...", "In conclusion...". Just state the facts.',
+		'  5. **NO preamble or postscript.** No "Here is the section:". No "In summary".',
+		'  6. **No section heading.** Do NOT emit `## title` -- the orchestrator',
+		'     prepends it. Start with the body paragraph directly.',
+		'  7. **4-8 paragraphs is the target.** Don\'t pad; don\'t truncate.',
+		'',
+		'Before you finish: scan your output. If any paragraph has zero `[...](path:...)`',
+		'links, REWRITE that paragraph to include the relevant citation from the evidence.',
 	].join('\n');
 }
 
@@ -152,21 +175,45 @@ function buildUserPrompt(input: WriteFromEvidenceInput): string {
 	}
 	parts.push('');
 	parts.push('## Evidence ledger');
+	parts.push('Each item below is a fact + a markdown-link citation. **Embed these links',
+		'INLINE in your prose** when you write about each fact.');
+	parts.push('');
 	if (input.evidence.length === 0) {
 		parts.push('_(no evidence captured -- write a brief best-effort overview, flag uncertainty explicitly)_');
 	} else {
 		for (let i = 0; i < input.evidence.length; i++) {
 			const e = input.evidence[i]!;
-			parts.push(`### ${i + 1}. ${e.skillId} (confidence: ${e.confidence})`);
-			parts.push(`args: \`${JSON.stringify(e.args)}\``);
-			parts.push('facts:');
-			for (const f of e.facts) {
-				parts.push(`  - ${f}`);
-			}
-			if (e.citations.length > 0) {
-				parts.push('citations:');
-				for (const c of e.citations) {
-					parts.push(`  - \`${c}\``);
+			parts.push(`### Evidence ${i + 1}: \`${e.skillId}\` (${e.confidence})`);
+			// Pair each fact with the corresponding citation as an inline
+			// markdown link. The model is much more likely to carry an
+			// inline link verbatim than to compose one from separate
+			// fact+citation lists. When there are more facts than
+			// citations, distribute the citations round-robin so every
+			// fact carries at least one. When there are more citations
+			// than facts, attach the extras to the last fact.
+			const links = e.citations.map((c, idx) => `[ref ${i + 1}.${idx + 1}](${c.startsWith('path:') ? c : `path:${c}`})`);
+			if (e.facts.length === 0) {
+				if (links.length > 0) {
+					parts.push(`  - (no facts; raw citations: ${links.join(', ')})`);
+				}
+			} else if (links.length === 0) {
+				for (const f of e.facts) {
+					parts.push(`  - ${f} _(no citation -- mark this claim as uncertain in your prose)_`);
+				}
+			} else {
+				for (let fi = 0; fi < e.facts.length; fi++) {
+					const f = e.facts[fi]!;
+					// Round-robin assignment so every fact gets at least one
+					// link when there's at least one citation overall.
+					const link = links[fi % links.length]!;
+					parts.push(`  - ${f} ${link}`);
+				}
+				// Surface any "extra" citations (more cites than facts) so
+				// the model can still attach them to whichever paragraph
+				// fits best.
+				if (links.length > e.facts.length) {
+					const extras = links.slice(e.facts.length).join(', ');
+					parts.push(`  - _additional citations available for this evidence: ${extras}_`);
 				}
 			}
 			parts.push('');

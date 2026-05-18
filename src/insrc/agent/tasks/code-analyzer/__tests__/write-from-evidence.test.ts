@@ -201,5 +201,5 @@ test('writeSectionFromEvidence: system prompt forbids process narration + headin
 	const sys = captured.messages.find(m => m.role === 'system');
 	const text = typeof sys?.content === 'string' ? sys.content : '';
 	assert.match(text, /process narration/i);
-	assert.match(text, /Do NOT include the section heading/);
+	assert.match(text, /No section heading/i);
 });
