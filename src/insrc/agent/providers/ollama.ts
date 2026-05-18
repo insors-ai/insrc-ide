@@ -176,11 +176,19 @@ export class OllamaProvider implements LLMProvider {
     // the model produce shape-constrained answers across the whole
     // tool-calling loop.
     const ollamaFormat = this._resolveOllamaFormat(opts.responseFormat, tools);
+    // qwen3.6 (and other thinking-capable qwen models) treats `think: false`
+    // as a structured request to skip the <think>...</think> reasoning block.
+    // qwen3-coder already gets the legacy `/no_think` prompt-prefix path
+    // above; sending the field is harmless for non-thinking models. Tool-loop
+    // calls (the model is just picking the next tool) don't benefit from
+    // thinking and the latency hit per turn is material.
+    const disableThinking = this.quirks.noThinkOnTools && tools !== undefined && tools.length > 0;
     const response = await this.client.chat({
       model: this.model,
       messages: ollamaMessages,
       ...(tools ? { tools } : {}),
       ...(ollamaFormat !== undefined ? { format: ollamaFormat } : {}),
+      ...(disableThinking ? { think: false } : {}),
       stream: true,
       options: {
         num_ctx: this.numCtx,
