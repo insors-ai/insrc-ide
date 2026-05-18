@@ -260,6 +260,125 @@ async function main(): Promise<void> {
 	const { registerAllSkills } = await import('./skills/index.js');
 	registerAllSkills();
 
+	// Shared session-purge pipeline. Used by `agent.discard`,
+	// `session.delete`, and `session.deleteBulk` so they don't drift.
+	// plans/session-delete.md Phase B.
+	//
+	// Strictly sessionId-scoped: only rows / files keyed to the given
+	// `sessionId` are removed. Cross-session drill-down children stay
+	// (their `parentListId` will dangle; renderers tolerate orphans --
+	// see plan locked decision 6).
+	const purgeSession = async (sessionId: string, opts: { compact: boolean }) => {
+		const t0 = Date.now();
+		const { readdirSync, unlinkSync, existsSync: existsFs, rmSync } = await import('node:fs');
+		const { join } = await import('node:path');
+		const { deleteSession } = await import('../db/conversations.js');
+		const { dropSessionFromPool } = await import('./chat-handler.js');
+		const { deleteSessionFromLance, compactSessionVecTables } = await import('../db/lance/cleanup.js');
+
+		// 1. Pool entry (aborts in-flight agent if any). Drop FIRST so
+		//    subsequent deletes don't race with a live run touching the
+		//    same rows.
+		try {
+			dropSessionFromPool(sessionId);
+		} catch (err) {
+			log.warn({ err: (err as Error).message, sessionId }, 'purgeSession: pool.drop failed');
+		}
+
+		// 2. Checkpoint files (match by session-id suffix -- works for
+		//    every controller that owns checkpoints under this session).
+		let checkpointsDeleted = 0;
+		const checkpointDir = join(PATHS.insrc, 'checkpoints');
+		if (existsFs(checkpointDir)) {
+			const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${sessionId}.json`));
+			for (const f of files) {
+				try {
+					unlinkSync(join(checkpointDir, f));
+					checkpointsDeleted++;
+				} catch {
+					// Best-effort.
+				}
+			}
+		}
+
+		// 3. Todos framework cascade (`caller: 'system'` authorises the
+		//    broad cleanup; `sessionIds: [...]` scopes it strictly).
+		let todosListsDeleted = 0;
+		let todosItemsDeleted = 0;
+		try {
+			const cleanupResult = await todosRpc.cleanup(db, {
+				caller: 'system',
+				sessionIds: [sessionId],
+			});
+			if (!('error' in cleanupResult)) {
+				todosListsDeleted = cleanupResult.deletedListCount;
+				todosItemsDeleted = cleanupResult.deletedItemCount;
+			} else {
+				log.warn({ err: cleanupResult, sessionId }, 'purgeSession: todos cleanup rejected');
+			}
+		} catch (err) {
+			log.warn({ err: (err as Error).message, sessionId }, 'purgeSession: todos cleanup failed');
+		}
+
+		// 4. LMDB session row + turn rows.
+		let sessionRows = 0;
+		let turnRows = 0;
+		try {
+			const result = await deleteSession(db, sessionId);
+			sessionRows = result.sessionRows;
+			turnRows = result.turnRows;
+		} catch (err) {
+			log.warn({ err: (err as Error).message, sessionId }, 'purgeSession: DB delete failed');
+		}
+
+		// 5. Lance vector tables.
+		let lance = { sessionRows: 0, turnRows: 0, responseSegments: 0, artifacts: 0 };
+		try {
+			lance = await deleteSessionFromLance(sessionId);
+		} catch (err) {
+			log.warn({ err: (err as Error).message, sessionId }, 'purgeSession: lance delete failed');
+		}
+
+		// 6. Tmp directory at ~/.insrc/tmp/<sessionId>/.
+		let tmpFilesDeleted = 0;
+		try {
+			const tmpDir = join(PATHS.tmp, sessionId);
+			if (existsFs(tmpDir)) {
+				// Count files (one level deep) for telemetry, then nuke
+				// the directory. We don't recurse into subdirs for the
+				// count -- the synth-spill / reports layout is flat.
+				const files = readdirSync(tmpDir);
+				tmpFilesDeleted = files.length;
+				rmSync(tmpDir, { recursive: true, force: true });
+			}
+		} catch (err) {
+			log.warn({ err: (err as Error).message, sessionId }, 'purgeSession: tmp dir cleanup failed');
+		}
+
+		// 7. Lance compaction (per-session path runs this; bulk defers
+		//    to one pass at the end of the loop).
+		if (opts.compact) {
+			try {
+				await compactSessionVecTables();
+			} catch (err) {
+				log.warn({ err: (err as Error).message, sessionId }, 'purgeSession: compaction failed');
+			}
+		}
+
+		const counts = {
+			checkpointsDeleted,
+			todosListsDeleted,
+			todosItemsDeleted,
+			sessionRows,
+			turnRows,
+			lance,
+			tmpFilesDeleted,
+			durationMs: Date.now() - t0,
+		};
+		log.info({ sessionId, ...counts, compacted: opts.compact }, 'purgeSession complete');
+		return counts;
+	};
+
 	// 7. Start IPC server
 	const server = new IpcServer({
 		'repo.add': async (params) => {
@@ -517,79 +636,74 @@ async function main(): Promise<void> {
 
 		'agent.discard': async (params) => {
 			const { id } = params as { id: string };
-			// Phase 4 discard (plans/session-lifecycle.md). Purges every
-			// trace of the session so the Runs sidebar stops listing it:
-			//   1. Checkpoint file(s) under ~/.insrc/checkpoints/
-			//   2. Todos framework lists/items/comments for this session
-			//      (plans/todo-framework.md Phase 2b).
-			//   3. DB sessions row + all associated turns.
-			//   4. In-memory pool entry (aborts any in-flight agent).
-			// Best-effort per step -- a missing checkpoint / DB row is fine;
-			// continue purging the other artifacts.
-			const { readdirSync, unlinkSync, existsSync: existsFs } = await import('node:fs');
-			const { join } = await import('node:path');
-			const { deleteSession } = await import('../db/conversations.js');
-			const { dropSessionFromPool } = await import('./chat-handler.js');
+			// Now a thin caller of the session-purge path (plans/session-delete.md
+			// Phase B.3). The semantic shift -- agent.discard now also deletes
+			// Lance vectors and the session's tmp directory -- matches user
+			// expectation: discarding an agent run shouldn't leave its
+			// embedding traces behind. Compaction is deferred here since
+			// individual agent discards aren't a heavy enough event to
+			// justify the optimize pass on its own.
+			const counts = await purgeSession(id, { compact: false });
+			return {
+				ok: true,
+				checkpointsDeleted: counts.checkpointsDeleted,
+				todosListsDeleted:  counts.todosListsDeleted,
+				todosItemsDeleted:  counts.todosItemsDeleted,
+				sessionRows:        counts.sessionRows,
+				turnRows:           counts.turnRows,
+				// New fields (additive; old clients ignore):
+				lance:              counts.lance,
+				tmpFilesDeleted:    counts.tmpFilesDeleted,
+			};
+		},
 
-			// 1. Checkpoint files (match by session-id suffix -- works
-			//    regardless of which controller owned the session).
-			let checkpointsDeleted = 0;
-			const checkpointDir = join(PATHS.insrc, 'checkpoints');
-			if (existsFs(checkpointDir)) {
-				const files = readdirSync(checkpointDir).filter(f => f.endsWith(`-${id}.json`));
-				for (const f of files) {
-					try {
-						unlinkSync(join(checkpointDir, f));
-						checkpointsDeleted++;
-					} catch {
-						// Best-effort.
-					}
+		'session.delete': async (params) => {
+			// plans/session-delete.md Phase B.1. Single-session purge of
+			// every byte of session-keyed data. Runs the per-session
+			// pipeline and then compacts Lance.
+			const { sessionId } = params as { sessionId: string };
+			if (typeof sessionId !== 'string' || sessionId.length === 0) {
+				return { deleted: false, reason: 'invalid-input', message: 'sessionId required' };
+			}
+			const counts = await purgeSession(sessionId, { compact: true });
+			return { deleted: true, counts };
+		},
+
+		'session.deleteBulk': async (params) => {
+			// plans/session-delete.md Phase B.2. Loops over the per-
+			// session path but defers compaction; runs ONE optimize pass
+			// at the end of the loop (compaction is the expensive part
+			// and bulk delete is the time it most matters to amortize).
+			// Each session iteration is independent -- a failure in one
+			// doesn't abort the rest; per-session errors aggregate into
+			// the response.
+			const { sessionIds } = params as { sessionIds: readonly string[] };
+			if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
+				return { deleted: 0, failed: 0, errors: [] };
+			}
+			const errors: { sessionId: string; reason: string }[] = [];
+			let deleted = 0;
+			for (const id of sessionIds) {
+				if (typeof id !== 'string' || id.length === 0) {
+					errors.push({ sessionId: String(id), reason: 'invalid-id' });
+					continue;
+				}
+				try {
+					await purgeSession(id, { compact: false });
+					deleted++;
+				} catch (err) {
+					errors.push({ sessionId: id, reason: (err as Error).message });
 				}
 			}
-
-			// 2. Todos framework purge. `caller: 'system'` authorises the
-			//    broad cleanup; `sessionIds: [id]` scopes it so the
-			//    retention safety rail doesn't reject.
-			let todosListsDeleted = 0;
-			let todosItemsDeleted = 0;
+			// One compact pass at the end -- amortizes the optimize cost.
 			try {
-				const cleanupResult = await todosRpc.cleanup(db, {
-					caller: 'system',
-					sessionIds: [id],
-				});
-				if (!('error' in cleanupResult)) {
-					todosListsDeleted = cleanupResult.deletedListCount;
-					todosItemsDeleted = cleanupResult.deletedItemCount;
-				} else {
-					log.warn({ err: cleanupResult, sessionId: id }, 'agent.discard: todos cleanup rejected');
-				}
+				const { compactSessionVecTables } = await import('../db/lance/cleanup.js');
+				await compactSessionVecTables();
 			} catch (err) {
-				log.warn({ err, sessionId: id }, 'agent.discard: todos cleanup failed');
+				log.warn({ err: (err as Error).message }, 'session.deleteBulk: compaction failed (best-effort, continuing)');
 			}
-
-			// 3. DB session row + turns.
-			let sessionRows = 0;
-			let turnRows = 0;
-			try {
-				const result = await deleteSession(db, id);
-				sessionRows = result.sessionRows;
-				turnRows = result.turnRows;
-			} catch (err) {
-				log.warn({ err, sessionId: id }, 'agent.discard: DB delete failed');
-			}
-
-			// 4. In-memory pool entry (aborts in-flight agent if any).
-			try {
-				dropSessionFromPool(id);
-			} catch (err) {
-				log.warn({ err, sessionId: id }, 'agent.discard: pool.drop failed');
-			}
-
-			log.info(
-				{ sessionId: id, checkpointsDeleted, todosListsDeleted, todosItemsDeleted, sessionRows, turnRows },
-				'agent.discard',
-			);
-			return { ok: true, checkpointsDeleted, todosListsDeleted, todosItemsDeleted, sessionRows, turnRows };
+			log.info({ deleted, failed: errors.length }, 'session.deleteBulk complete');
+			return { deleted, failed: errors.length, errors };
 		},
 
 		'daemon.status': async () => {
