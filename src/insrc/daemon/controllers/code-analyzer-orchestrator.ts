@@ -763,13 +763,64 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // files"). The tool loop avoids that by giving the writer the
     // section title + tool catalog directly.
     const { writeSectionWithTools, patchSectionWithTools, patchSectionItemwise } = await import('../../agent/tasks/code-analyzer/write-section.js');
+    const { gatherEvidence } = await import('../../agent/tasks/code-analyzer/gather-evidence.js');
+    const { writeSectionFromEvidence } = await import('../../agent/tasks/code-analyzer/write-from-evidence.js');
+    type DraftLike = Awaited<ReturnType<typeof writeSectionWithTools>>;
     // Phase R.1: per-item patch loop. Default ON -- eliminates the ghost-ID
     // failure mode where the writer emits `patch:<id>` blocks with IDs that
     // don't match workItems[].id (observed across both qwen + devstral; runs
     // #4-#6 had 10+ such silent miscalls). Set INSRC_ANALYZER_PATCH_MODE=legacy
     // to fall back to the fenced-block patchSectionWithTools path.
     const patchMode = process.env['INSRC_ANALYZER_PATCH_MODE'] === 'legacy' ? 'legacy' : 'itemwise';
-    log.info({ patchMode }, 'patch-loop mode selected');
+    // plans/code-analyzer-gather-then-write.md D3. Default = gather+write
+    // (Phase G + Phase W). Setting INSRC_ANALYZER_WRITE_MODE=interleaved-legacy
+    // restores the run-#9 interleaved writer (writeSectionWithTools). Same
+    // structural reason as patchMode: the new path is the fix for a real
+    // failure (run-#9 had section 2 emit the same anchor paragraph 20+
+    // times due to eviction thrashing inside the interleaved loop) and we
+    // keep the legacy path one env-var away during the transition.
+    const writeMode = process.env['INSRC_ANALYZER_WRITE_MODE'] === 'interleaved-legacy' ? 'interleaved-legacy' : 'gather-write';
+    log.info({ patchMode, writeMode }, 'analyzer modes selected');
+
+    // Adapter that runs the new gather+write pipeline and reshapes the
+    // result into the legacy DraftLike contract so the downstream
+    // patch / review / picker code can stay as-is. Wraps both R1 calls
+    // (the initial draft AND the F.4 recovery redraft) consistently.
+    const runGatherWrite = async (opts: {
+      action:          PlannedAction,
+      request:         string,
+      onProgress:      ((msg: string) => void) | undefined,
+      priorDescribedSkills?: ReadonlySet<string> | undefined,
+    }): Promise<DraftLike> => {
+      const gatherInput: Parameters<typeof gatherEvidence>[0] = {
+        provider:    local,
+        session,
+        action:      opts.action,
+        request:     opts.request,
+        repoContext: {},
+        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+        ...(opts.onProgress !== undefined ? { onProgress: opts.onProgress } : {}),
+        ...(opts.priorDescribedSkills !== undefined ? { priorDescribedSkills: opts.priorDescribedSkills } : {}),
+      };
+      const ledger = await gatherEvidence(gatherInput);
+      const writeInput: Parameters<typeof writeSectionFromEvidence>[0] = {
+        provider:    local,
+        action:      opts.action,
+        request:     opts.request,
+        evidence:    ledger.evidence,
+        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+      };
+      const written = await writeSectionFromEvidence(writeInput);
+      return {
+        markdown:        written.markdown,
+        toolCallCount:   ledger.iterations,
+        hitLimit:        ledger.hitLimit,
+        skillsCalled:    ledger.skillsCalled,
+        skillCalls:      ledger.skillCalls,
+        describedSkills: ledger.describedSkills,
+      };
+    };
+
     const { reviewAction } = await import('../../agent/content-gen/review-action.js');
     const { pickBestRound } = await import('../../agent/tasks/code-analyzer/pick-best-draft.js');
     type RoundCandidate = import('../../agent/tasks/code-analyzer/pick-best-draft.js').RoundCandidate;
@@ -811,18 +862,20 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       //            list collapsed into a hint string.
       // The ship policy below (Phase G next) currently ships the last
       // round's draft; Phase G adds the best-of-rounds picker + footer.
-      type DraftLike = Awaited<ReturnType<typeof writeSectionWithTools>>;
-      let draft: DraftLike = await writeSectionWithTools({
-        provider:    local,
-        session,
-        action,
-        request,
-        repoContext: {},
-        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-        onProgress: (msg) => {
-          this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-        },
-      });
+      const r1OnProgress = (msg: string) => {
+        this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+      };
+      let draft: DraftLike = writeMode === 'gather-write'
+        ? await runGatherWrite({ action, request, onProgress: r1OnProgress })
+        : await writeSectionWithTools({
+            provider:    local,
+            session,
+            action,
+            request,
+            repoContext: {},
+            ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+            onProgress: r1OnProgress,
+          });
 
       const reviewDraft = async (
         d:               DraftLike,
@@ -975,20 +1028,27 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
             priorParagraphCount: baselineParagraphCount,
             priorCitationCount:  baselineCitationCount,
           };
-          nextDraft = await writeSectionWithTools({
-            provider:    local,
-            session,
-            action,
-            request,
-            repoContext: {},
-            refineHint:           hintFromItems,
-            priorDescribedSkills: patched.describedSkills,
-            recoveryContext,
-            ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-            onProgress: (msg) => {
-              this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-            },
-          });
+          const recoveryOnProgress = (msg: string) => {
+            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+          };
+          // Phase G (gather-then-write) F.4 fallback = fresh re-gather +
+          // re-write. The legacy interleaved-writer recovery path (with
+          // refineHint + recoveryContext) is preserved when WRITE_MODE
+          // is interleaved-legacy so the env-flag is the only switch.
+          nextDraft = writeMode === 'gather-write'
+            ? await runGatherWrite({ action, request, onProgress: recoveryOnProgress, priorDescribedSkills: patched.describedSkills })
+            : await writeSectionWithTools({
+                provider:    local,
+                session,
+                action,
+                request,
+                repoContext: {},
+                refineHint:           hintFromItems,
+                priorDescribedSkills: patched.describedSkills,
+                recoveryContext,
+                ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+                onProgress: recoveryOnProgress,
+              });
           // Phase P.7: F.4 empty-redraft guard. Run #3 section 7
           // produced textLength: 0 in recovery mode -- the redraft
           // returned with no text, leaving the picker with nothing
@@ -999,23 +1059,23 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
               { actionId: action.id, round: r },
               'F.4 recovery redraft produced empty output; retrying once with direct re-prompt',
             );
-            nextDraft = await writeSectionWithTools({
-              provider:    local,
-              session,
-              action,
-              request,
-              repoContext: {},
-              // Direct re-prompt: bypass the hint (which may have
-              // primed the model to bail) and ask for a topic-sentence
-              // opener directly.
-              refineHint:           `Your previous recovery attempt returned empty output. Begin THIS attempt with a topic sentence about the SUBJECT (the code, the subsystem, the pattern named in the section objective), then drill into evidence with skill calls. Produce a comparably-full draft. The reviewer items you were addressing are: ${hintFromItems}`,
-              priorDescribedSkills: nextDraft.describedSkills,
-              recoveryContext,
-              ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-              onProgress: (msg) => {
-                this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-              },
-            });
+            nextDraft = writeMode === 'gather-write'
+              ? await runGatherWrite({ action, request, onProgress: recoveryOnProgress, priorDescribedSkills: nextDraft.describedSkills })
+              : await writeSectionWithTools({
+                  provider:    local,
+                  session,
+                  action,
+                  request,
+                  repoContext: {},
+                  // Direct re-prompt: bypass the hint (which may have
+                  // primed the model to bail) and ask for a topic-sentence
+                  // opener directly.
+                  refineHint:           `Your previous recovery attempt returned empty output. Begin THIS attempt with a topic sentence about the SUBJECT (the code, the subsystem, the pattern named in the section objective), then drill into evidence with skill calls. Produce a comparably-full draft. The reviewer items you were addressing are: ${hintFromItems}`,
+                  priorDescribedSkills: nextDraft.describedSkills,
+                  recoveryContext,
+                  ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+                  onProgress: recoveryOnProgress,
+                });
             if (nextDraft.markdown.trim().length === 0) {
               log.error(
                 { actionId: action.id, round: r },
