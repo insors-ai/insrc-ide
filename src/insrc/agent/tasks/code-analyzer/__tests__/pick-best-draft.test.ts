@@ -167,8 +167,10 @@ test('scoreOne: produces normalised + contribution + totalScore breakdown', () =
 	assert.ok(Math.abs(s.normalised.citationDiversity      - 0.375) < 1e-6);
 	assert.ok(Math.abs(s.normalised.paragraphCount         - 0.5)   < 1e-6);
 
-	// Total = 4*0.3 + 3*0.375 + 2*0.5 + 1*(RICH_MD.length/3000)
-	const expected = 4*0.3 + 3*0.375 + 2*0.5 + 1*(RICH_MD.length/3000);
+	// 2026-05-18: textLength weight dropped from 1 to 0 (run #11 §1
+	// surfaced the picker preferring a longer-but-less-grounded draft).
+	// Total = 4*0.3 + 3*0.375 + 2*0.5 + 0*(RICH_MD.length/3000)
+	const expected = 4*0.3 + 3*0.375 + 2*0.5;
 	assert.ok(Math.abs(s.totalScore - expected) < 1e-6);
 });
 
@@ -329,7 +331,7 @@ test('pickBestRound: constants exposed for tuning', () => {
 	assert.equal(_WEIGHTS.weightedItemsAddressed, 4);
 	assert.equal(_WEIGHTS.citationDiversity,      3);
 	assert.equal(_WEIGHTS.paragraphCount,         2);
-	assert.equal(_WEIGHTS.textLength,             1);
+	assert.equal(_WEIGHTS.textLength,             0);
 	assert.equal(_TARGETS.weightedItemsAddressed, 10);
 	assert.equal(_TARGETS.citationDiversity,      8);
 	assert.equal(_TARGETS.paragraphCount,         6);

@@ -49,12 +49,23 @@ import type { WorkItemStatus } from './apply-patches.js';
 // Tunable constants -- all in one place for easy adjustment
 // ---------------------------------------------------------------------------
 
-/** Signal weights. Higher = bigger contribution to the total score. */
+/** Signal weights. Higher = bigger contribution to the total score.
+ *
+ * 2026-05-18: dropped textLength from 1 to 0 after run #11 §1 showed
+ * the picker preferring a longer-but-less-grounded R2 (1840 chars,
+ * 80% items addressed, 3 fix items pending) over a shorter R3 that
+ * actually addressed every reviewer flag (1276 chars, 100% items
+ * addressed). Under the anti-hallucination contract, a draft that
+ * SHRANK because the writer cut unsupported claims is better, not
+ * worse. Char count rewarded padding; removed it from the score.
+ * The other three signals (items-addressed, citation diversity,
+ * paragraph count) already capture every signal of substantive prose.
+ */
 const WEIGHTS = {
 	weightedItemsAddressed: 4,
 	citationDiversity:      3,
 	paragraphCount:         2,
-	textLength:             1,
+	textLength:             0,
 } as const;
 
 /**
