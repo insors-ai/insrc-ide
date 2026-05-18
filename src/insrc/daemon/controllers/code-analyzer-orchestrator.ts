@@ -1358,11 +1358,41 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }
     }
     if (this.deps !== undefined) {
+      // Emit a SUMMARY card -- not the full report. The full report
+      // lives on the TodoList body (and renders in the dedicated
+      // Report Pane); inlining it into chat bloats session-reload
+      // (the assistant message text persists verbatim) and crowds the
+      // chat panel. Summary surfaces: section count, char count, and
+      // a clickable `Open Report Pane` link wired to the existing
+      // `insrc.codeAnalyzer.openReport` command.
+      const sectionCount = (report.match(/^## /gm) ?? []).length;
+      const charCount    = report.length;
+      const summary: string[] = [];
+      summary.push('');
+      summary.push('_Code Analysis report ready._');
+      summary.push('');
+      if (sectionCount > 0) {
+        summary.push(`- **Sections drafted:** ${sectionCount}`);
+      }
+      if (charCount > 0) {
+        summary.push(`- **Report length:** ${charCount.toLocaleString()} chars`);
+      }
+      if (listId !== undefined) {
+        // command: URIs require trust at the renderer side -- the
+        // chat-view's link-wirer recognises this scheme and routes
+        // straight through commandService (see _wireMarkdownLinks).
+        const args = encodeURIComponent(JSON.stringify({ listId }));
+        summary.push('');
+        summary.push(`[Open Report Pane](command:insrc.codeAnalyzer.openReport?${args})`);
+      } else {
+        summary.push('');
+        summary.push('See the **Code Analysis Report** pane.');
+      }
       this.deps.send({
         id: this.deps.requestId,
         stream: 'delta',
         data: {
-          text: '\n_Code Analysis report ready -- see the **Code Analysis Report** pane._\n',
+          text: summary.join('\n') + '\n',
           format: 'markdown',
         },
       });

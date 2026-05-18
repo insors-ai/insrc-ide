@@ -419,6 +419,15 @@ export interface TaskResult {
   subResults?: TaskResult[] | undefined;
   /** Gate reply if this task was gated. */
   gateReply?: GateReply | undefined;
+  /**
+   * Chat-panel render override. Mirrors `FinalizeResult.chatRender` --
+   * empty string suppresses the chat delta entirely (e.g., code-
+   * analyzer streams its full report into the dedicated Report Pane
+   * and emits its own summary line separately); undefined falls back
+   * to `output`. Use to divorce "what gets persisted in `output`"
+   * from "what shows up inline in the chat panel".
+   */
+  chatRender?: string | undefined;
 }
 
 export interface TaskPipelineResult {
@@ -429,6 +438,15 @@ export interface TaskPipelineResult {
   finalFormat: TaskFormat;
   /** Whether all tasks succeeded. */
   success: boolean;
+  /**
+   * Mirrors `FinalizeResult.chatRender`. Threaded up so the agent-task
+   * wrapper can propagate it onto the outer TaskResult, where the
+   * executeTasks delta-emission honors it (empty string = suppress
+   * delta entirely). Without this, controllers that set chatRender:''
+   * still get their full report inlined into chat via the per-task
+   * delta path.
+   */
+  chatRender?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -587,17 +605,30 @@ export async function runTaskPipeline(
 
         // Only send delta for the final task at depth 0
         if (isLast && !suppressDelta && depth === 0) {
-          // Transform tasks replace the accumulated raw output with formatted text
-          const replace = task.kind === 'transform';
-          // Convert markdown to pre-rendered HTML for the webview
-          const rendered = result.format === 'markdown'
-            ? renderMarkdown(result.output)
-            : { text: result.output, format: result.format };
-          send({ id: requestId, stream: 'delta', data: {
-            text: rendered.text,
-            format: rendered.format,
-            replace,
-          } });
+          // Honor `result.chatRender` -- the controller's escape hatch
+          // for divorcing "what gets persisted" (`output`) from "what
+          // gets rendered into chat" (`chatRender`). Empty string
+          // explicitly suppresses the delta entirely (e.g., code-
+          // analyzer streams its report into a dedicated Report Pane
+          // and emits its own summary line separately; inlining the
+          // full report here also bloated session-reload because the
+          // delta is persisted into the assistant message). `undefined`
+          // falls back to `output` for the normal path. Same precedence
+          // `runControlledPipeline` already uses.
+          const chatBody = result.chatRender ?? result.output;
+          if (chatBody.length > 0) {
+            // Transform tasks replace the accumulated raw output with formatted text
+            const replace = task.kind === 'transform';
+            // Convert markdown to pre-rendered HTML for the webview
+            const rendered = result.format === 'markdown'
+              ? renderMarkdown(chatBody)
+              : { text: chatBody, format: result.format };
+            send({ id: requestId, stream: 'delta', data: {
+              text: rendered.text,
+              format: rendered.format,
+              replace,
+            } });
+          }
         }
 
         log.info({ idx, kind: task.kind, intent: task.intent, format: result.format, success: result.success, depth }, 'task completed');
@@ -960,6 +991,7 @@ export async function runControlledPipeline(
     finalOutput: finalized.output,
     finalFormat: finalized.format,
     success: allResults.every(r => r.success),
+    ...(finalized.chatRender !== undefined ? { chatRender: finalized.chatRender } : {}),
   };
 }
 
@@ -1723,6 +1755,7 @@ async function executeAgentTask(
     format: result.finalFormat,
     success: result.success,
     subResults: result.tasks,
+    ...(result.chatRender !== undefined ? { chatRender: result.chatRender } : {}),
   };
 }
 

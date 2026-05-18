@@ -815,6 +815,25 @@ export class InsrcChatViewPane extends ViewPane {
 			}
 			e.preventDefault();
 			e.stopPropagation();
+			// `command:` URIs from chat HTML come from our daemon
+			// (controlled source) -- e.g., the code-analyzer's "Open
+			// Report Pane" summary card. openerService blocks these by
+			// default unless the markdown is marked trusted, so route
+			// straight through commandService for our chat content.
+			if (href.startsWith('command:')) {
+				const qIdx = href.indexOf('?');
+				const cmdId = decodeURIComponent(qIdx < 0 ? href.slice('command:'.length) : href.slice('command:'.length, qIdx));
+				let args: unknown;
+				if (qIdx >= 0) {
+					try {
+						args = JSON.parse(decodeURIComponent(href.slice(qIdx + 1)));
+					} catch {
+						args = undefined;
+					}
+				}
+				void this.commandService.executeCommand(cmdId, args);
+				return;
+			}
 			void this.openerService.open(href, { fromUserGesture: true, allowContributedOpeners: true });
 		}));
 	}
@@ -995,6 +1014,32 @@ export class InsrcChatViewPane extends ViewPane {
 		// clipped; mirror what _onInputEvent normally does.
 		this._input.style.height = 'auto';
 		this._input.style.height = Math.min(this._input.scrollHeight, 120) + 'px';
+		setTimeout(() => {
+			this._input.focus();
+			this._input.setSelectionRange(this._input.value.length, this._input.value.length);
+		}, 0);
+	}
+
+	/**
+	 * Prefill the chat input with externally-supplied text (e.g. a
+	 * "Send to chat" action from the analysis report pane). When
+	 * `append` is true, the new text is added below any existing draft
+	 * separated by a blank line so the user's in-progress question is
+	 * preserved; otherwise the input is replaced.
+	 *
+	 * Auto-resizes the textarea (same as the handoff-prompt path) and
+	 * focuses with the caret AT THE END so the user can keep typing
+	 * their question after the quoted block.
+	 */
+	public prefillInput(text: string, opts?: { readonly append?: boolean }): void {
+		if (text.length === 0) { return; }
+		const existing = this._input.value;
+		const next = opts?.append && existing.length > 0
+			? `${existing}\n\n${text}`
+			: text;
+		this._input.value = next;
+		this._input.style.height = 'auto';
+		this._input.style.height = Math.min(this._input.scrollHeight, 200) + 'px';
 		setTimeout(() => {
 			this._input.focus();
 			this._input.setSelectionRange(this._input.value.length, this._input.value.length);

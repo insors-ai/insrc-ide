@@ -74,3 +74,32 @@ registerAction2(class extends Action2 {
 		await viewsService.openView(INSRC_CHAT_VIEW_ID, true);
 	}
 });
+
+// ---------------------------------------------------------------------------
+// Prefill chat input command -- used by the analysis report pane's
+// "Send to chat" action to seed the composer with a selected snippet.
+// Opens the chat view (focusing it) then calls the view's public
+// prefillInput method.
+// ---------------------------------------------------------------------------
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'insrc.chat.prefillInput',
+			title: localize2('insrc.chat.prefillInput', 'Insrc: Prefill Chat Input'),
+			category: Categories.View,
+			f1: false,
+		});
+	}
+
+	async run(accessor: ServicesAccessor, args?: { text?: string; append?: boolean }): Promise<void> {
+		if (!args || typeof args.text !== 'string' || args.text.length === 0) {
+			return;
+		}
+		const viewsService = accessor.get(IViewsService);
+		const view = await viewsService.openView<InsrcChatViewPane>(INSRC_CHAT_VIEW_ID, true);
+		if (view && typeof view.prefillInput === 'function') {
+			view.prefillInput(args.text, args.append === true ? { append: true } : undefined);
+		}
+	}
+});

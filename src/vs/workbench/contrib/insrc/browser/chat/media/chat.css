@@ -371,6 +371,13 @@
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
+	/* Parent .insrc-chat-messages is a flex column with auto-scroll.
+	 * Without flex-shrink:0 the live console gets squished into the
+	 * remaining viewport when appended near the bottom -- producing a
+	 * tiny ~50px widget instead of the intended 200px+. Pinning the
+	 * shrink factor keeps the widget at its natural height and forces
+	 * the parent to scroll instead. */
+	flex-shrink: 0;
 }
 
 .insrc-chat-live-console-header {
@@ -407,6 +414,11 @@
 	white-space: pre-wrap;
 	color: var(--vscode-editor-foreground);
 	padding: 8px 10px;
+	/* Fixed body size: matching min and max so the widget is the
+	 * same height whether it's the first or last bubble in the
+	 * message list. Long output scrolls inside the body via
+	 * overflow-y; the parent message list scrolls separately. */
+	min-height: 200px;
 	max-height: 200px;
 	overflow-y: auto;
 	scroll-behavior: smooth;

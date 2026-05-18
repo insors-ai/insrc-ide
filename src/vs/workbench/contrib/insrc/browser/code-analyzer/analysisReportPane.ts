@@ -49,6 +49,17 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 	private _markdownRenderer: MarkdownRenderer | undefined;
 	private _renderedBody: string | undefined;
 
+	// Selection-driven UI: a floating pill that surfaces "Annotate"
+	// and "Send to chat" actions when the user selects text inside
+	// `_body`. Annotations are in-memory only (cleared on pane close
+	// or input change) -- highlight + inline note marker.
+	private _selectionBar: HTMLElement | undefined;
+	private _annotationOverlay: HTMLElement | undefined;
+	private _annotationOverlayInput: HTMLTextAreaElement | undefined;
+	private _pendingAnnotationRange: Range | undefined;
+	private _annotationSeq = 0;
+	private _selectionListenerAttached = false;
+
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -85,6 +96,10 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 		this._body = dom.append(this._container, dom.$('.insrc-analysis-report-body.rendered-markdown-host'));
 		this._emptyEl = dom.append(this._container, dom.$('.insrc-analysis-report-empty'));
 		this._emptyEl.textContent = 'Report not yet ready. The pane will populate when the analysis finishes.';
+
+		this._buildSelectionBar();
+		this._buildAnnotationOverlay();
+		this._attachSelectionListener();
 	}
 
 	protected override onSetInput(input: AnalysisReportInput): void {
@@ -106,6 +121,9 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 	protected override onClearInput(): void {
 		this._listId = undefined;
 		this._renderedBody = undefined;
+		this._annotationSeq = 0;
+		this._hideSelectionBar();
+		this._hideAnnotationOverlay();
 		dom.clearNode(this._body);
 	}
 
@@ -152,6 +170,13 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 		this._emptyEl.style.display = 'none';
 		this._body.style.display = '';
 		dom.clearNode(this._body);
+		// Body content was just replaced -- any prior in-memory
+		// highlights/annotations are now stale (their wrapping <mark>
+		// nodes no longer exist). Reset counters and hide the floating
+		// UI so leftover overlays don't point at gone-text.
+		this._annotationSeq = 0;
+		this._hideSelectionBar();
+		this._hideAnnotationOverlay();
 
 		// Phase 5.D: split out the trailing `## Drill down` section so
 		// each candidate becomes a clickable button rather than plain
@@ -212,5 +237,199 @@ export class AnalysisReportPane extends InsrcEditorPaneBase<AnalysisReportInput>
 		this._body.style.display = 'none';
 		this._emptyEl.textContent = message;
 		this._emptyEl.style.display = '';
+	}
+
+	// -----------------------------------------------------------------
+	// Selection-driven actions: annotate (in-memory highlight + note)
+	// and send-to-chat (prefill the chat composer with a quoted block).
+	//
+	// We use a global `selectionchange` listener filtered to selections
+	// contained inside `_body` so the floating bar only appears for
+	// report-body text. The bar lives at document.body to escape any
+	// transform/overflow on the pane container.
+	// -----------------------------------------------------------------
+
+	private _buildSelectionBar(): void {
+		this._selectionBar = dom.$('.insrc-analysis-report-selection-bar');
+		const annotateBtn = dom.append(this._selectionBar, dom.$('button.insrc-analysis-report-selection-bar-button'));
+		annotateBtn.textContent = 'Annotate';
+		annotateBtn.title = 'Highlight the selection and attach an inline note';
+		this._register(dom.addDisposableListener(annotateBtn, dom.EventType.MOUSE_DOWN, e => {
+			// MOUSEDOWN (not CLICK) so we capture the selection before
+			// it collapses when the button takes focus.
+			e.preventDefault();
+			this._openAnnotationOverlay();
+		}));
+		const sendBtn = dom.append(this._selectionBar, dom.$('button.insrc-analysis-report-selection-bar-button'));
+		sendBtn.textContent = 'Send to chat';
+		sendBtn.title = 'Insert the selection as a quoted block in the chat composer';
+		this._register(dom.addDisposableListener(sendBtn, dom.EventType.MOUSE_DOWN, e => {
+			e.preventDefault();
+			this._sendSelectionToChat();
+		}));
+		dom.getWindow(this._body).document.body.appendChild(this._selectionBar);
+		this._register({ dispose: () => this._selectionBar?.remove() });
+	}
+
+	private _buildAnnotationOverlay(): void {
+		this._annotationOverlay = dom.$('.insrc-analysis-report-annotation-overlay');
+		this._annotationOverlayInput = dom.append(this._annotationOverlay, dom.$('textarea')) as HTMLTextAreaElement;
+		this._annotationOverlayInput.placeholder = 'Note about the highlighted text...';
+		this._annotationOverlayInput.rows = 3;
+		const actions = dom.append(this._annotationOverlay, dom.$('.insrc-analysis-report-annotation-overlay-actions'));
+		const cancelBtn = dom.append(actions, dom.$('button'));
+		cancelBtn.textContent = 'Cancel';
+		this._register(dom.addDisposableListener(cancelBtn, dom.EventType.CLICK, () => this._hideAnnotationOverlay()));
+		const saveBtn = dom.append(actions, dom.$('button.primary'));
+		saveBtn.textContent = 'Save';
+		this._register(dom.addDisposableListener(saveBtn, dom.EventType.CLICK, () => this._commitAnnotation()));
+		// Cmd/Ctrl+Enter shortcut for save while focused in textarea
+		this._register(dom.addDisposableListener(this._annotationOverlayInput, dom.EventType.KEY_DOWN, (e: KeyboardEvent) => {
+			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+				e.preventDefault();
+				this._commitAnnotation();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				this._hideAnnotationOverlay();
+			}
+		}));
+		dom.getWindow(this._body).document.body.appendChild(this._annotationOverlay);
+		this._register({ dispose: () => this._annotationOverlay?.remove() });
+	}
+
+	private _attachSelectionListener(): void {
+		if (this._selectionListenerAttached) { return; }
+		this._selectionListenerAttached = true;
+		const win = dom.getWindow(this._body);
+		this._register(dom.addDisposableListener(win.document, 'selectionchange', () => {
+			this._refreshSelectionBar();
+		}));
+		// Hide selection bar when user scrolls or resizes (its absolute
+		// position would otherwise float away from the text).
+		this._register(dom.addDisposableListener(this._body, 'scroll', () => this._hideSelectionBar()));
+		this._register(dom.addDisposableListener(win, 'resize', () => this._hideSelectionBar()));
+	}
+
+	private _refreshSelectionBar(): void {
+		const win = dom.getWindow(this._body);
+		const sel = win.document.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+			this._hideSelectionBar();
+			return;
+		}
+		const range = sel.getRangeAt(0);
+		// Only show the bar if the selection is INSIDE the report body.
+		if (!this._body.contains(range.commonAncestorContainer)) {
+			this._hideSelectionBar();
+			return;
+		}
+		const text = sel.toString().trim();
+		if (text.length === 0) {
+			this._hideSelectionBar();
+			return;
+		}
+		// Position the bar just above the selection rectangle.
+		const rect = range.getBoundingClientRect();
+		if (rect.width === 0 && rect.height === 0) {
+			this._hideSelectionBar();
+			return;
+		}
+		const bar = this._selectionBar!;
+		bar.classList.add('visible');
+		// Defer position until the bar has measurable width.
+		const barRect = bar.getBoundingClientRect();
+		const top = Math.max(4, rect.top - barRect.height - 6);
+		const left = Math.max(4, Math.min(win.innerWidth - barRect.width - 4, rect.left + rect.width / 2 - barRect.width / 2));
+		bar.style.top = `${top}px`;
+		bar.style.left = `${left}px`;
+	}
+
+	private _hideSelectionBar(): void {
+		this._selectionBar?.classList.remove('visible');
+	}
+
+	private _hideAnnotationOverlay(): void {
+		this._annotationOverlay?.classList.remove('visible');
+		this._pendingAnnotationRange = undefined;
+		if (this._annotationOverlayInput) {
+			this._annotationOverlayInput.value = '';
+		}
+	}
+
+	private _openAnnotationOverlay(): void {
+		const win = dom.getWindow(this._body);
+		const sel = win.document.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) { return; }
+		const range = sel.getRangeAt(0);
+		if (!this._body.contains(range.commonAncestorContainer)) { return; }
+		// Snapshot the range BEFORE the textarea steals focus and
+		// collapses the selection.
+		this._pendingAnnotationRange = range.cloneRange();
+
+		const rect = range.getBoundingClientRect();
+		const overlay = this._annotationOverlay!;
+		overlay.classList.add('visible');
+		const overlayRect = overlay.getBoundingClientRect();
+		const top = Math.min(win.innerHeight - overlayRect.height - 8, rect.bottom + 8);
+		const left = Math.max(8, Math.min(win.innerWidth - overlayRect.width - 8, rect.left));
+		overlay.style.top = `${top}px`;
+		overlay.style.left = `${left}px`;
+		this._hideSelectionBar();
+		setTimeout(() => this._annotationOverlayInput?.focus(), 0);
+	}
+
+	private _commitAnnotation(): void {
+		const range = this._pendingAnnotationRange;
+		const note = (this._annotationOverlayInput?.value ?? '').trim();
+		if (range === undefined || note.length === 0) {
+			this._hideAnnotationOverlay();
+			return;
+		}
+		const win = dom.getWindow(this._body);
+		this._annotationSeq++;
+		const id = `ann-${this._annotationSeq}`;
+		const mark = win.document.createElement('mark');
+		mark.className = 'insrc-analysis-report-annotation';
+		mark.dataset['annotationId'] = id;
+		mark.title = note;
+		try {
+			// surroundContents throws when the range partially selects
+			// non-text nodes (e.g. spans a paragraph boundary). Fall
+			// back to a clone+wrap that handles cross-element ranges.
+			range.surroundContents(mark);
+		} catch {
+			const fragment = range.extractContents();
+			mark.appendChild(fragment);
+			range.insertNode(mark);
+		}
+		// Inline marker: a small superscript badge after the wrapped
+		// range, hovering shows the note via the native title attr.
+		const marker = win.document.createElement('span');
+		marker.className = 'insrc-analysis-report-annotation-marker';
+		marker.textContent = String(this._annotationSeq);
+		marker.title = note;
+		mark.after(marker);
+		this._hideAnnotationOverlay();
+		// Collapse the selection so the bar doesn't immediately
+		// reappear over the just-highlighted text.
+		win.document.getSelection()?.removeAllRanges();
+	}
+
+	private _sendSelectionToChat(): void {
+		const win = dom.getWindow(this._body);
+		const sel = win.document.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) { return; }
+		const range = sel.getRangeAt(0);
+		if (!this._body.contains(range.commonAncestorContainer)) { return; }
+		const text = sel.toString().trim();
+		if (text.length === 0) { return; }
+		// Prefix every line with `> ` to render as a markdown blockquote
+		// in the chat composer. Add a trailing blank line so the user's
+		// next keystrokes land OUTSIDE the quote.
+		const quoted = text.split('\n').map(line => `> ${line}`).join('\n');
+		const payload = `${quoted}\n\n`;
+		void this.commandService.executeCommand('insrc.chat.prefillInput', { text: payload, append: true });
+		this._hideSelectionBar();
+		win.document.getSelection()?.removeAllRanges();
 	}
 }
