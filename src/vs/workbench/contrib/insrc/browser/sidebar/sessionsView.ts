@@ -15,6 +15,7 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
+import { INotificationService, Severity } from '../../../../../platform/notification/common/notification.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
@@ -42,10 +43,17 @@ class SessionsDelegate implements IListVirtualDelegate<SessionsTreeNode> {
 
 // -- Date group renderer --
 
-interface IDateGroupTemplateData { label: HTMLElement }
+interface IDateGroupTemplateData {
+	row: HTMLElement;
+	label: HTMLElement;
+	deleteBtn: HTMLElement;
+	onDelete: { current: (() => void) | undefined };
+}
 
 class DateGroupRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IDateGroupTemplateData> {
 	readonly templateId = 'dateGroup';
+
+	constructor(private readonly _onDeleteGroup: (node: SessionsTreeNode & { kind: 'dateGroup' }) => void) { }
 
 	renderTemplate(container: HTMLElement): IDateGroupTemplateData {
 		const row = dom.append(container, dom.$('.insrc-session-date-group'));
@@ -63,13 +71,37 @@ class DateGroupRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, I
 		label.style.fontSize = '11px';
 		label.style.textTransform = 'uppercase';
 		label.style.letterSpacing = '0.5px';
+		label.style.flex = '1';
 
-		return { label };
+		// Delete-all-in-group affordance. Hidden by default; visible on
+		// row hover via JS listeners (the sidebar pane has no dedicated
+		// stylesheet, so we toggle inline visibility rather than add
+		// a CSS file for one rule).
+		const deleteBtn = dom.append(row, dom.$('a.insrc-session-delete-btn.codicon.codicon-trash'));
+		deleteBtn.title = 'Delete all sessions in this group';
+		deleteBtn.style.cursor = 'pointer';
+		deleteBtn.style.fontSize = '12px';
+		deleteBtn.style.opacity = '0.7';
+		deleteBtn.style.visibility = 'hidden';
+		deleteBtn.style.padding = '0 4px';
+		row.onmouseenter = () => { deleteBtn.style.visibility = 'visible'; };
+		row.onmouseleave = () => { deleteBtn.style.visibility = 'hidden'; };
+
+		const onDelete: { current: (() => void) | undefined } = { current: undefined };
+		deleteBtn.onclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			onDelete.current?.();
+		};
+
+		return { row, label, deleteBtn, onDelete };
 	}
 
 	renderElement(node: ITreeNode<SessionsTreeNode, FuzzyScore>, _index: number, data: IDateGroupTemplateData): void {
 		if (node.element.kind === 'dateGroup') {
 			data.label.textContent = node.element.label;
+			const group = node.element;
+			data.onDelete.current = () => this._onDeleteGroup(group);
 		}
 	}
 
@@ -137,10 +169,19 @@ class RepoRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, IRepoT
 
 // -- Session renderer --
 
-interface ISessionTemplateData { row: HTMLElement; icon: HTMLElement; time: HTMLElement; summary: HTMLElement }
+interface ISessionTemplateData {
+	row: HTMLElement;
+	icon: HTMLElement;
+	time: HTMLElement;
+	summary: HTMLElement;
+	deleteBtn: HTMLElement;
+	onDelete: { current: (() => void) | undefined };
+}
 
 class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISessionTemplateData> {
 	readonly templateId = 'session';
+
+	constructor(private readonly _onDeleteSession: (session: SessionInfo) => void) { }
 
 	renderTemplate(container: HTMLElement): ISessionTemplateData {
 		const row = dom.append(container, dom.$('.insrc-session-row'));
@@ -168,7 +209,27 @@ class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISe
 		summary.style.fontSize = '12px';
 		summary.style.flex = '1';
 
-		return { row, icon, time, summary };
+		// Per-session delete affordance. Hidden by default; visible on
+		// row hover via JS listeners (no dedicated stylesheet).
+		const deleteBtn = dom.append(row, dom.$('a.insrc-session-delete-btn.codicon.codicon-trash'));
+		deleteBtn.title = 'Delete this session and all its data';
+		deleteBtn.style.cursor = 'pointer';
+		deleteBtn.style.fontSize = '12px';
+		deleteBtn.style.opacity = '0.7';
+		deleteBtn.style.visibility = 'hidden';
+		deleteBtn.style.padding = '0 4px';
+		deleteBtn.style.flexShrink = '0';
+		row.onmouseenter = () => { deleteBtn.style.visibility = 'visible'; };
+		row.onmouseleave = () => { deleteBtn.style.visibility = 'hidden'; };
+
+		const onDelete: { current: (() => void) | undefined } = { current: undefined };
+		deleteBtn.onclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			onDelete.current?.();
+		};
+
+		return { row, icon, time, summary, deleteBtn, onDelete };
 	}
 
 	renderElement(node: ITreeNode<SessionsTreeNode, FuzzyScore>, _index: number, data: ISessionTemplateData): void {
@@ -177,6 +238,7 @@ class SessionRenderer implements ITreeRenderer<SessionsTreeNode, FuzzyScore, ISe
 			data.time.textContent = new Date(s.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 			data.summary.textContent = (s.summary || s.id).substring(0, 80);
 			data.row.title = s.summary || s.id;
+			data.onDelete.current = () => this._onDeleteSession(s);
 		}
 	}
 
@@ -267,6 +329,7 @@ export class InsrcSessionsViewPane extends ViewPane {
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@IInsrcChatService private readonly chatService: IInsrcChatService,
 		@IViewsService private readonly viewsService: IViewsService,
+		@INotificationService private readonly notificationService: INotificationService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 
@@ -287,7 +350,11 @@ export class InsrcSessionsViewPane extends ViewPane {
 			'InsrcSessions',
 			treeContainer,
 			new SessionsDelegate(),
-			[new RepoRenderer((repoPath) => this._openChatForRepo(repoPath)), new DateGroupRenderer(), new SessionRenderer()],
+			[
+				new RepoRenderer((repoPath) => this._openChatForRepo(repoPath)),
+				new DateGroupRenderer((group) => this._onDeleteGroup(group)),
+				new SessionRenderer((session) => this._onDeleteSession(session)),
+			],
 			new SessionsDataSource(this.daemonService),
 			{
 				identityProvider: { getId: (e: SessionsTreeNode) => getNodeId(e) },
@@ -335,6 +402,72 @@ export class InsrcSessionsViewPane extends ViewPane {
 			await this.viewsService.openView(INSRC_CHAT_VIEW_ID, true);
 		} catch {
 			// ignore
+		}
+	}
+
+	// -----------------------------------------------------------------
+	// Session deletion (plans/session-delete.md Phase C + D)
+	// -----------------------------------------------------------------
+
+	private _onDeleteSession(session: SessionInfo): void {
+		const summary = session.summary?.trim().length ? session.summary.trim() : 'Untitled';
+		this.notificationService.prompt(
+			Severity.Warning,
+			`Delete session "${summary}"? This removes all turns, todos, reports, and embeddings. Cannot be undone.`,
+			[
+				{
+					label: 'Delete',
+					run: async () => {
+						const result = await this.chatService.deleteSession(session.id);
+						if (result.deleted) {
+							this.notificationService.info(`Session "${summary}" deleted.`);
+						} else {
+							this.notificationService.error(`Failed to delete session: ${result.reason ?? 'unknown'}`);
+						}
+						void this._refreshTree();
+					},
+				},
+				{ label: 'Cancel', run: () => { /* no-op */ } },
+			],
+		);
+	}
+
+	private _onDeleteGroup(group: SessionsTreeNode & { kind: 'dateGroup' }): void {
+		const count = group.sessions.length;
+		if (count === 0) {
+			return;
+		}
+		// The group label is shaped as e.g. "Today (3)" -- strip the
+		// count for the confirm message so it doesn't read weird.
+		const labelText = group.label.replace(/\s*\(\d+\)\s*$/, '');
+		this.notificationService.prompt(
+			Severity.Warning,
+			`Delete all ${count} session${count === 1 ? '' : 's'} in "${labelText}"? This removes all turns, todos, reports, and embeddings. Cannot be undone.`,
+			[
+				{
+					label: 'Delete all',
+					run: async () => {
+						const ids = group.sessions.map(s => s.id);
+						const result = await this.chatService.deleteSessionsBulk(ids);
+						if (result.failed === 0) {
+							this.notificationService.info(`Deleted ${result.deleted} session${result.deleted === 1 ? '' : 's'} in "${labelText}".`);
+						} else {
+							this.notificationService.warn(`Deleted ${result.deleted} session${result.deleted === 1 ? '' : 's'}; ${result.failed} failed.`);
+						}
+						void this._refreshTree();
+					},
+				},
+				{ label: 'Cancel', run: () => { /* no-op */ } },
+			],
+		);
+	}
+
+	private async _refreshTree(): Promise<void> {
+		try {
+			await this.tree.setInput(ROOT);
+		} catch {
+			// Best-effort -- if the tree isn't initialised yet there's
+			// nothing to refresh.
 		}
 	}
 }

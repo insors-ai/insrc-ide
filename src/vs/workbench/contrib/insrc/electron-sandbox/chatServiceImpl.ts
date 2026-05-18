@@ -8,7 +8,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInsrcDaemonService, type IInsrcStreamHandle, type DaemonStreamMessage } from '../common/daemonService.js';
-import { IInsrcChatService, type ChatMessage, type ChatEvent, type CodeAnnotation, type GateInfo, type ProgressInfo } from '../common/chatService.js';
+import { IInsrcChatService, type ChatMessage, type ChatEvent, type CodeAnnotation, type GateInfo, type ProgressInfo, type DeleteSessionResult, type DeleteSessionsBulkResult } from '../common/chatService.js';
 
 const STORAGE_KEY_REPO = 'insrc.chat.activeRepo';
 const STORAGE_KEY_SESSION = 'insrc.chat.activeSessionId';
@@ -680,6 +680,59 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		if (this._streamHandle) {
 			this._streamHandle.dispose();
 			this._streamHandle = undefined;
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Session deletion (plans/session-delete.md Phase C.3)
+	// ---------------------------------------------------------------------------
+
+	async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
+		if (!this.daemonService.isConnected) {
+			return { deleted: false, reason: 'not-connected' };
+		}
+		if (typeof sessionId !== 'string' || sessionId.length === 0) {
+			return { deleted: false, reason: 'invalid-input' };
+		}
+		// If the user is deleting the currently-active session, clear
+		// local state first so the chat panel doesn't try to render
+		// against rows the daemon is about to drop.
+		const wasActive = sessionId === this._activeSessionId;
+		try {
+			const result = await this.daemonService.rpc<DeleteSessionResult>('session.delete', { sessionId });
+			if (wasActive) {
+				this._activeSessionId = undefined;
+				this._activeRepo = undefined;
+				this._messages = [];
+				this._onDidChangeSession.fire(undefined);
+			}
+			return result;
+		} catch (err) {
+			this.logService.warn('[insrc-chat] session.delete failed:', (err as Error).message);
+			return { deleted: false, reason: (err as Error).message };
+		}
+	}
+
+	async deleteSessionsBulk(sessionIds: readonly string[]): Promise<DeleteSessionsBulkResult> {
+		if (!this.daemonService.isConnected) {
+			return { deleted: 0, failed: sessionIds.length, errors: sessionIds.map(id => ({ sessionId: id, reason: 'not-connected' })) };
+		}
+		if (sessionIds.length === 0) {
+			return { deleted: 0, failed: 0, errors: [] };
+		}
+		const activeInSet = this._activeSessionId !== undefined && sessionIds.includes(this._activeSessionId);
+		try {
+			const result = await this.daemonService.rpc<DeleteSessionsBulkResult>('session.deleteBulk', { sessionIds });
+			if (activeInSet) {
+				this._activeSessionId = undefined;
+				this._activeRepo = undefined;
+				this._messages = [];
+				this._onDidChangeSession.fire(undefined);
+			}
+			return result;
+		} catch (err) {
+			this.logService.warn('[insrc-chat] session.deleteBulk failed:', (err as Error).message);
+			return { deleted: 0, failed: sessionIds.length, errors: [{ sessionId: '*', reason: (err as Error).message }] };
 		}
 	}
 

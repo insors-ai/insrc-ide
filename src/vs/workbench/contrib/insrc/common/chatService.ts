@@ -219,4 +219,47 @@ export interface IInsrcChatService {
 
 	// Annotations
 	sendAnnotations(annotations: readonly CodeAnnotation[]): Promise<void>;
+
+	/**
+	 * Delete a chat session and every byte of session-keyed data
+	 * (LMDB rows, Lance vectors, checkpoint files, tmp directory,
+	 * todos). Strict sessionId scoping -- cross-session drill-down
+	 * children are NOT touched (their `parentListId` will dangle;
+	 * existing renderers tolerate orphans).
+	 *
+	 * plans/session-delete.md Phase C.3.
+	 */
+	deleteSession(sessionId: string): Promise<DeleteSessionResult>;
+
+	/**
+	 * Delete multiple sessions. Server-side loop with one Lance
+	 * compaction pass at the end. Per-session errors aggregate;
+	 * a failing session doesn't block the rest.
+	 */
+	deleteSessionsBulk(sessionIds: readonly string[]): Promise<DeleteSessionsBulkResult>;
+}
+
+export interface DeleteSessionResult {
+	readonly deleted: boolean;
+	readonly counts?: {
+		readonly checkpointsDeleted: number;
+		readonly todosListsDeleted: number;
+		readonly todosItemsDeleted: number;
+		readonly sessionRows: number;
+		readonly turnRows: number;
+		readonly tmpFilesDeleted: number;
+		readonly lance: {
+			readonly sessionRows: number;
+			readonly turnRows: number;
+			readonly responseSegments: number;
+			readonly artifacts: number;
+		};
+	};
+	readonly reason?: string;
+}
+
+export interface DeleteSessionsBulkResult {
+	readonly deleted: number;
+	readonly failed: number;
+	readonly errors: readonly { readonly sessionId: string; readonly reason: string }[];
 }
