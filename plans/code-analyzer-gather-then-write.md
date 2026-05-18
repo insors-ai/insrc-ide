@@ -175,6 +175,40 @@ Cleanup pass (Deliverable 4, optional follow-up): delete the legacy interleaved 
 
 ---
 
+## Follow-up optimizations (TODO -- ship after current architecture is validated end-to-end)
+
+### Collapse the 2-call gather pattern into 1 call via `record_evidence` synthetic tool
+
+**Motivation:** Phase G today runs TWO LLM calls per iteration -- (a) tool-decision (model picks `skill_invoke` / `skill_describe` / `skill_load_page` via Ollama's native tool calling) and (b) summarize-result (separate constrained-JSON call via `responseFormat: { schema }` that extracts facts + citations from the raw skill output). Per the run #11 numbers, this is the dominant gather-phase cost -- section 1 spent 40 minutes on 18 iterations × ~2 calls each. Cutting to 1 call per iteration would roughly halve gather latency.
+
+**Proposed change:** expose summarization as a synthetic `record_evidence` tool the model picks alongside the skill meta-tools. The orchestrator implements it as a ledger append -- no LLM call required. Ollama's native tool-calling enforces the input schema (facts, citations, confidence), so we keep the structured-output guarantee.
+
+```ts
+{
+  name: 'record_evidence',
+  description: 'Capture structured facts + citations from the previous skill_invoke result.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      facts:      { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 4 },
+      citations:  { type: 'array', items: { type: 'string' } },
+      confidence: { enum: ['high', 'medium', 'low'] },
+    },
+    required: ['facts', 'citations', 'confidence'],
+  },
+}
+```
+
+Each iteration becomes: model emits `record_evidence(...)` for the result it just saw (orchestrator appends, no LLM); same turn or next, model emits `skill_invoke(...)` for the next investigation; eventually model emits `EVIDENCE_COMPLETE` text without tool calls -> stop.
+
+**Expected outcome:** ~50% reduction in gather latency. Run #11 section 1's 36 LLM calls (18 iterations × 2) -> 18 calls. The full run's total cut from ~5h projected to ~2.5h.
+
+**Risk:** the model now picks from 4 tools (3 skill meta-tools + record_evidence) and must remember to record before invoking again. Could be worse if devstral fumbles the new pattern; could be a big win if it doesn't. Mitigation: keep the 2-call path one env-var away (`INSRC_ANALYZER_GATHER_SUMMARIZE_MODE=separate-call|tool-call`, default `tool-call` once validated).
+
+**Trigger:** implement once current gather-write architecture has 2-3 clean runs confirming the structural fix holds. Don't compound architecture changes mid-test.
+
+---
+
 ## Rollback
 
 - Feature flag `INSRC_ANALYZER_WRITE_MODE=interleaved-legacy` flips back to the old path with no rebuild.
