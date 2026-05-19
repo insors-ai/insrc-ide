@@ -14,18 +14,6 @@
 {{section:citation-rules}}
 <!-- END SECTION: citation-rules -->
 
-<!-- BEGIN SECTION: error-catalog -->
-{{section:error-catalog}}
-<!-- END SECTION: error-catalog -->
-
-<!-- BEGIN SECTION: gap-paragraph-template -->
-{{section:gap-paragraph-template}}
-<!-- END SECTION: gap-paragraph-template -->
-
 <!-- BEGIN SECTION: output-format -->
 {{section:output-format/write}}
-<!-- END SECTION: output-format -->
-
-<!-- BEGIN SECTION: repo-context -->
-{{section:repo-context}}
-<!-- END SECTION: repo-context -->
+<!-- END SECTION: output-format -->{{REPO_CONTEXT}}

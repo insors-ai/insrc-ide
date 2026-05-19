@@ -177,7 +177,7 @@ function relPathFromSections(abs: string): string {
 function flowVarsForSmoke(flow: PromptFlow): Record<string, string> {
 	switch (flow) {
 		case 'gather': return { SKILL_CATALOG: '', REPO_CONTEXT: '' };
-		case 'write':
+		case 'write':  return { REPO_CONTEXT: '' };
 		case 'review': return {};
 	}
 }
