@@ -27,7 +27,12 @@ const PROMPTS_ROOT = dirname(fileURLToPath(import.meta.url));
 const fileCache    = new Map<string, string>();
 
 const INCLUDE_DEPTH_LIMIT = 8;
-const SECTION_RE          = /\{\{section:([\w/\-]+)\}\}/g;
+// Section directive: `{{section:path/to/file}}`. The path body may contain
+// literal `{{VAR_NAME}}` placeholders so callers can dispatch sections by
+// variable (e.g. `{{section:coverage-angles/{{TIER}}}}` -> resolves TIER
+// first, then reads `sections/coverage-angles/<tier>.md`). The path is
+// either a word/slash/dash character, or a complete `{{VAR}}` placeholder.
+const SECTION_RE          = /\{\{section:((?:[\w/\-]|\{\{[A-Z_][A-Z0-9_]*\}\})+)\}\}/g;
 const VAR_RE              = /\{\{([A-Z_][A-Z0-9_]*)\}\}/g;
 
 // ---------------------------------------------------------------------------
@@ -75,7 +80,7 @@ export function loadPatchPrompt(kind: PatchKind, vars: PromptVars): string {
  */
 export function loadPromptFile(relPath: string, vars: PromptVars): string {
 	const raw      = readPromptFile(relPath);
-	const composed = expandSections(raw, 0);
+	const composed = expandSections(raw, vars, 0);
 	return expandVars(composed, vars).trim();
 }
 
@@ -110,16 +115,22 @@ function readPromptFile(relPath: string): string {
 	return cached;
 }
 
-function expandSections(text: string, depth: number): string {
+function expandSections(text: string, vars: PromptVars, depth: number): string {
 	if (depth > INCLUDE_DEPTH_LIMIT) {
 		throw new Error(
 			`prompt section include cycle or depth > ${INCLUDE_DEPTH_LIMIT}`,
 		);
 	}
-	return text.replace(SECTION_RE, (_match, name: string) => {
+	return text.replace(SECTION_RE, (_match, rawName: string) => {
+		// Resolve any `{{VAR}}` placeholders inside the section path BEFORE
+		// the file lookup. Lets the flow file dispatch sections by variable
+		// (e.g. {{section:coverage-angles/{{TIER}}}} with TIER='xl' reads
+		// sections/coverage-angles/xl.md). Missing vars throw the same loud
+		// "prompt variable missing" error as a regular {{VAR}} use.
+		const name = expandVars(rawName, vars);
 		const sectionRaw = readPromptFile(`sections/${name}.md`);
 		// Recurse so a section can itself include another section.
-		return expandSections(sectionRaw, depth + 1);
+		return expandSections(sectionRaw, vars, depth + 1);
 	});
 }
 

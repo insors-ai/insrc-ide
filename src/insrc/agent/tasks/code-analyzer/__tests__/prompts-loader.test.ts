@@ -140,6 +140,54 @@ test('expandVars: throws on missing variable', () => {
 // File-cache hygiene
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Variable substitution INSIDE {{section:path}} (Phase A)
+// ---------------------------------------------------------------------------
+
+test('{{section:path/{{VAR}}}} dispatches to the right file when VAR is set', () => {
+	_clearCacheForTest();
+	// Fixture: sections/_test-fixtures/dispatch-root.md contains
+	//   {{section:_test-fixtures/leaf-{{LEAF}}}}
+	// LEAF='a' -> reads _test-fixtures/leaf-a.md ("LEAF_A_CONTENT")
+	const outA = loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'a' });
+	assert.match(outA, /LEAF_A_CONTENT/);
+	assert.doesNotMatch(outA, /LEAF_B_CONTENT/);
+
+	_clearCacheForTest();
+	const outB = loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'b' });
+	assert.match(outB, /LEAF_B_CONTENT/);
+	assert.doesNotMatch(outB, /LEAF_A_CONTENT/);
+});
+
+test('{{section:path/{{VAR}}}} preserves outer text around the dispatch', () => {
+	_clearCacheForTest();
+	const out = loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'a' });
+	// dispatch-root.md wraps the section include with START / END markers
+	// (after an HTML-comment header), and the resolved leaf content sits
+	// between them.
+	assert.match(out, /START\nLEAF_A_CONTENT\n.*END$/s);
+});
+
+test('{{section:path/{{VAR}}}} throws when VAR missing from path', () => {
+	_clearCacheForTest();
+	assert.throws(
+		() => loadPromptFile('sections/_test-fixtures/dispatch-root.md', {}),
+		/prompt variable missing: LEAF/,
+	);
+});
+
+test('{{section:path/{{VAR}}}} throws ENOENT when the resolved path does not exist', () => {
+	_clearCacheForTest();
+	assert.throws(
+		() => loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'nope' }),
+		/ENOENT|no such file/i,
+	);
+});
+
+// ---------------------------------------------------------------------------
+// Cache hygiene
+// ---------------------------------------------------------------------------
+
 test('_clearCacheForTest allows re-read after cache invalidation', () => {
 	_clearCacheForTest();
 	const first  = readSection('compliance');
