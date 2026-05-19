@@ -1491,6 +1491,15 @@ async function runItemWithSkills(
 			localSkillsCalled.push(skillId);
 			pendingByIteration.set(nextIteration, { skillId, args });
 		}
+		// Surface the skill id to the chat panel for each call so the
+		// live stream during a patch item shows what the model is
+		// actually doing, not just the bare "skill_invoke" tag.
+		const skillRef = call.name === 'skill_invoke'
+			? String(call.input['skillId'] ?? '?')
+			: call.name === 'skill_describe'
+			? String(call.input['id'] ?? '?')
+			: '';
+		input.onProgress?.(`  [${input.action.id}/patch] ${call.name}${skillRef ? `(${skillRef})` : ''}`);
 	};
 	loopOpts.onToolResult = (call, result) => {
 		const pending = pendingByIteration.get(nextIteration);
