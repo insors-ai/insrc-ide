@@ -79,6 +79,21 @@ build_daemon() {
 		# -a preserves timestamps so incremental builds stay cheap.
 		cp -a src/insrc/assets/. out/insrc/assets/
 	fi
+	# Mirror all *.md prompt files from src/insrc to out/insrc preserving
+	# the directory layout. Daemon prompts (e.g. agent/tasks/code-analyzer/
+	# prompts/**/*.md) are loaded at runtime via paths relative to
+	# import.meta.url, so they must live next to the compiled .js. Generic
+	# glob -- no per-directory edit when new prompts are added. Excludes
+	# node_modules/ (third-party READMEs) and __tests__/ (test fixtures).
+	echo "[insrc-build] copying daemon prompts (.md)"
+	(
+		cd src/insrc \
+		&& find . -type f -name '*.md' \
+			-not -path './node_modules/*' \
+			-not -path '*/__tests__/*' \
+			-print0 \
+		| cpio -pdm0 ../../out/insrc/ 2>/dev/null
+	)
 }
 
 cmd="${1:-all}"
