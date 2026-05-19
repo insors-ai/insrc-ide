@@ -14,6 +14,10 @@
 {{section:review-rules}}
 <!-- END SECTION: review-rules -->
 
+<!-- BEGIN SECTION: error-catalog -->
+{{section:error-catalog}}
+<!-- END SECTION: error-catalog -->
+
 <!-- BEGIN SECTION: output-format -->
 {{section:output-format/review}}
 <!-- END SECTION: output-format -->

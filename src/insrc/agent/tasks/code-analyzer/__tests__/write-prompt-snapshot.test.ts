@@ -53,11 +53,24 @@ test('flow/write/system.md preserves BEGIN/END section markers', () => {
 	const composed = loadFlowPrompt('write', { REPO_CONTEXT: '' });
 	for (const section of [
 		'compliance', 'role', 'anti-hallucination',
-		'citation-rules', 'output-format',
+		'citation-rules', 'error-catalog', 'gap-paragraph-template',
+		'output-format',
 	]) {
 		assert.match(composed, new RegExp(`<!-- BEGIN SECTION: ${section} -->`));
 		assert.match(composed, new RegExp(`<!-- END SECTION: ${section} -->`));
 	}
+});
+
+test('flow/write/system.md includes the error catalog + gap template (Phase 6)', () => {
+	_clearCacheForTest();
+	const composed = loadFlowPrompt('write', { REPO_CONTEXT: '' });
+	// Spot-check Phase 6 content is wired in.
+	assert.match(composed, /Common failure patterns/);
+	assert.match(composed, /FABRICATED PARAGRAPH/);
+	assert.match(composed, /GROUNDED PARAGRAPH/);
+	assert.match(composed, /HAND-ROLLED CITATION/);
+	assert.match(composed, /When the evidence does not cover a topic/);
+	assert.match(composed, /A short honest gap is preferred/);
 });
 
 test('flow/write/system.md carries the anti-hallucination contract + ledger references', () => {

@@ -61,11 +61,20 @@ for (const kind of KINDS) {
 		const composed = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
 		for (const section of [
 			'compliance', 'role', 'anti-hallucination',
-			'coverage-angles', 'output-format',
+			'coverage-angles', 'error-catalog', 'gap-paragraph-template',
+			'output-format',
 		]) {
 			assert.match(composed, new RegExp(`<!-- BEGIN SECTION: ${section} -->`));
 			assert.match(composed, new RegExp(`<!-- END SECTION: ${section} -->`));
 		}
+	});
+
+	test(`flow/patch/${kind}/system.md includes the error catalog + gap template (Phase 6)`, () => {
+		_clearCacheForTest();
+		const composed = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
+		assert.match(composed, /Common failure patterns/);
+		assert.match(composed, /FABRICATED PARAGRAPH/);
+		assert.match(composed, /When the evidence does not cover a topic/);
 	});
 }
 

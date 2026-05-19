@@ -14,6 +14,14 @@
 {{section:coverage-angles-patch}}
 <!-- END SECTION: coverage-angles -->
 
+<!-- BEGIN SECTION: error-catalog -->
+{{section:error-catalog}}
+<!-- END SECTION: error-catalog -->
+
+<!-- BEGIN SECTION: gap-paragraph-template -->
+{{section:gap-paragraph-template}}
+<!-- END SECTION: gap-paragraph-template -->
+
 <!-- BEGIN SECTION: output-format -->
 {{section:output-format/patch-fix}}
 <!-- END SECTION: output-format -->

@@ -133,6 +133,77 @@ hallucinated citations.
 
 <!-- END SECTION: review-rules -->
 
+<!-- BEGIN SECTION: error-catalog -->
+## Common failure patterns (read before drafting)
+
+These are the patterns that cause sections to fail review. Writers MUST
+avoid them; reviewers MUST flag them. Each pair shows the bad shape on
+the left and the corrected grounded shape on the right.
+
+### Paragraph-level failures
+
+❌ FABRICATED PARAGRAPH (do NOT write this)
+   "The `DistributedFileSystem` class extends `FileSystem` and provides
+    block-level read/write with strong consistency guarantees, with the
+    namenode coordinating block allocation across datanodes."
+   Why this is wrong: the evidence ledger contains NO entry for
+   `DistributedFileSystem`, `FileSystem`, `namenode`, or `datanode`. The
+   writer pulled the class names + architectural behaviour from prior
+   Hadoop knowledge.
+
+✅ GROUNDED PARAGRAPH (write this shape instead)
+   "The `fs` submodule contains 12 Python classes ([`fs/__init__.py:1-40`](path:insors/extraction/fs/__init__.py#L1-L40))
+    anchored by `LocalFileSystem`, which the ledger surfaces at
+    [`fs/local.py:18-220`](path:insors/extraction/fs/local.py#L18-L220).
+    No evidence entry covers distributed-mode classes, so this section
+    does not discuss them."
+   Why this is right: every named class + count + behaviour traces to
+   an evidence citation; the absent topic is acknowledged explicitly
+   rather than filled in.
+
+### Citation-level failures
+
+❌ HAND-ROLLED CITATION (do NOT write this)
+   "`HDFSNamenode` orchestrates the journal ([hadoop-hdfs/.../namenode](path:hadoop-hdfs/src/main/java))"
+   Why this is wrong: the path points at a DIRECTORY, with no `#L`
+   line-range suffix. The writer composed the URL from prior knowledge
+   -- the ledger never surfaced this class.
+
+✅ EVIDENCE-BACKED CITATION (write this shape instead)
+   "Lookup happens in `resolve_module` ([`paths.py:88-104`](path:insors/extraction/paths.py#L88-L104))."
+   Why this is right: the link points to a file + a specific line range
+   that appears verbatim in an evidence entry.
+
+❌ FAKE LINE RANGE (do NOT write this)
+   "The entire `db` module ([`db/__init__.py:1-500`](path:insors/extraction/db/__init__.py#L1-L500)) ..."
+   Why this is wrong: the writer chose `#L1-L500` to suggest "whole
+   file" coverage, but no evidence entry contains that line range.
+
+✅ NARROW LINE RANGE FROM EVIDENCE (write this shape instead)
+   "The `ManagedCursor` class ([`db/__init__.py:20-80`](path:insors/extraction/db/__init__.py#L20-L80)) ..."
+   Why this is right: the line range comes from an actual evidence fact.
+
+### Confession failures (writer)
+
+❌ LANGUAGE THAT CONFESSES THE GAP (do NOT do this)
+   "While the evidence ledger did not provide specific code references
+    for this subsystem, these processes are well-documented in Hadoop's
+    architecture as follows: ..."
+   Why this is wrong: this is the writer telling the reader, in plain
+   language, that the paragraph that follows is from prior knowledge,
+   not from the evidence. Reviewers MUST flag this immediately with a
+   `fix` work item -- it is a self-incriminating fabrication.
+
+✅ EXPLICIT GAP ACKNOWLEDGEMENT (write this shape instead)
+   "The available evidence does not surface the request-routing
+    subsystem. The gather phase opened the top-level module entries
+    but did not reach the routing layer. This is a gap in the section,
+    not a claim about the codebase."
+   Why this is right: the gap is named honestly. No general-knowledge
+   paragraph follows.
+
+<!-- END SECTION: error-catalog -->
+
 <!-- BEGIN SECTION: output-format -->
 ## Output
 

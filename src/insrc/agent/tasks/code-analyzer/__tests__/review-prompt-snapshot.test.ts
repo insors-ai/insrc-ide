@@ -39,11 +39,21 @@ test('flow/review/system.md preserves BEGIN/END section markers', () => {
 	const composed = loadFlowPrompt('review', {});
 	for (const section of [
 		'compliance', 'role', 'anti-hallucination',
-		'review-rules', 'output-format',
+		'review-rules', 'error-catalog', 'output-format',
 	]) {
 		assert.match(composed, new RegExp(`<!-- BEGIN SECTION: ${section} -->`));
 		assert.match(composed, new RegExp(`<!-- END SECTION: ${section} -->`));
 	}
+});
+
+test('flow/review/system.md includes the error catalog (Phase 6)', () => {
+	_clearCacheForTest();
+	const composed = loadFlowPrompt('review', {});
+	// Reviewer side: same catalog, but framed as patterns to FLAG.
+	assert.match(composed, /Common failure patterns/);
+	assert.match(composed, /FABRICATED PARAGRAPH/);
+	assert.match(composed, /HAND-ROLLED CITATION/);
+	assert.match(composed, /LANGUAGE THAT CONFESSES THE GAP/);
 });
 
 test('flow/review/system.md carries the anti-hallucination gate + verdict guidance', () => {
