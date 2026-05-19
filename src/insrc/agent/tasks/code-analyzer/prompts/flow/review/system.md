@@ -10,13 +10,9 @@
 {{section:anti-hallucination/reviewer}}
 <!-- END SECTION: anti-hallucination -->
 
-<!-- BEGIN SECTION: citation-rules -->
-{{section:citation-rules}}
-<!-- END SECTION: citation-rules -->
-
-<!-- BEGIN SECTION: error-catalog -->
-{{section:error-catalog}}
-<!-- END SECTION: error-catalog -->
+<!-- BEGIN SECTION: review-rules -->
+{{section:review-rules}}
+<!-- END SECTION: review-rules -->
 
 <!-- BEGIN SECTION: output-format -->
 {{section:output-format/review}}

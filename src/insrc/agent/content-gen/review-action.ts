@@ -24,6 +24,7 @@ import { getLogger } from '../../shared/logger.js';
 import { REVIEW_ACTION_SCHEMA } from './schema.js';
 import { expandAction, type ExpandActionResult } from './expand-action.js';
 import type { PlanExecution, PlannedAction } from './plan-actions.js';
+import { loadFlowPrompt } from '../tasks/code-analyzer/prompts/loader.js';
 
 // Phase P.4: cap total reviewer attempts (initial + 2 retries).
 // insors-extraction's instructor.from_anthropic ANTHROPIC_JSON mode
@@ -422,143 +423,18 @@ export async function expandThenReview(
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
-// Phase P.4: SYSTEM_PROMPT carries ONLY the semantic guidance the
-// JSON Schema cannot express -- kind-selection intent, when-to-use,
-// workflow rules, citation preservation. All structural rules
+// Phase 5 of plans/code-analyzer-externalize-prompts.md.
+// Prose lives in src/insrc/agent/tasks/code-analyzer/prompts/flow/review/
+// system.md + the sections it composes. The loader reads MD at module
+// init (readFileSync; same pattern as the other phases).
+//
+// SYSTEM_PROMPT carries ONLY the semantic guidance the JSON Schema
+// cannot express -- kind-selection intent, when-to-use, workflow rules,
+// citation preservation, anti-hallucination gate. All structural rules
 // (workItems-empty-vs-non-empty, field requireds, field length caps)
-// were duplicated between prose and schema and dropped from the
-// prose to avoid drift. The shape lives in the JSON Schema block
-// appended to the user message by buildReviewMessages.
-const SYSTEM_PROMPT = [
-	'## Compliance directive (READ FIRST)',
-	'',
-	'You MUST follow EVERY instruction in this prompt carefully and without',
-	'deviation. These rules are not suggestions -- they are the contract under',
-	'which your output is judged. Partial compliance, "good enough" shortcuts,',
-	'or skipping rules you think don\'t apply will cause the output to be',
-	'rejected and the round to fail. If a rule conflicts with what feels',
-	'natural, the rule wins.',
-	'',
-	'You review ONE section of an analysis report.',
-	'',
-	'You will receive:',
-	'  - The section\'s objective.',
-	'  - The review criteria you must score against.',
-	'  - The draft markdown the local expander produced.',
-	'  - The same evidence the expander saw.',
-	'  - The JSON Schema your response must validate against.',
-	'',
-	'Your job is a verdict (`accept` or `needs-work`). For `needs-work`,',
-	'emit a typed work-item list that a patch loop will iterate.',
-	'',
-	'## Anti-hallucination gate (CRITICAL -- read first)',
-	'',
-	'Your single most important job is to catch CLAIMS WITHOUT EVIDENCE.',
-	'',
-	'The expander has been observed to short-circuit investigation when it has',
-	'prior knowledge of a domain (Hadoop, Linux, React, Django, etc.) and write',
-	'plausible-sounding general documentation from memory. The reader cannot',
-	'tell the difference -- claims sound authoritative either way. Your review',
-	'is the gate that catches this.',
-	'',
-	'For EVERY factual statement in the draft (class names, file paths, counts,',
-	'method signatures, architectural claims, specific behaviour descriptions),',
-	'check the EVIDENCE block:',
-	'',
-	'  1. Does the SAME fact appear in an evidence entry? If yes -> fine.',
-	'  2. If NO, emit a `fix` work item flagging the unsupported claim. Examples',
-	'     of unsupported claims to flag with `fix`:',
-	'       - "The module contains 135 files" but no evidence entry confirms 135.',
-	'       - "`DistributedFileSystem` extends `FileSystem`" but no evidence',
-	'         surfaces either class.',
-	'       - Citations linking to DIRECTORIES (e.g. `path:hadoop-hdfs/.../fs`)',
-	'         when the prose claims a specific class lives there but no evidence',
-	'         entry opened that class -- the citation is hand-rolled, not real.',
-	'  3. If the draft contains LANGUAGE ACKNOWLEDGING the gap ("the evidence',
-	'     ledger did not provide specific code references", "these processes are',
-	'     well-documented in <X>\'s architecture") -- emit a `fix` immediately.',
-	'     This is the writer confessing in plain language that it filled in from',
-	'     memory.',
-	'  4. If the draft is short + honest about evidence gaps, that is GOOD --',
-	'     do NOT down-vote it for being short. An honest 200-char section that',
-	'     says "the gather phase did not surface enough to cover this objective"',
-	'     is preferable to a 3000-char plausible fabrication. Accept short honest',
-	'     drafts when the evidence really is empty.',
-	'',
-	'`fix` is the correct kind for unsupported-claim issues -- they GATE the',
-	'section\'s confidence. Use `enhance` only when the claim is supported but',
-	'thin / could be deeper. Do NOT use `enhance` to demand new claims; that is',
-	'`add`. Do NOT use `trim` to delete fabricated content (the writer needs to',
-	'know it was fabricated; emit `fix` so the patch loop replaces it).',
-	'',
-	'## When to pick each verdict',
-	'',
-	'  - `accept` -- the draft adequately satisfies the review criteria AND',
-	'    every factual claim traces to an evidence entry. You MAY include a',
-	'    polished rewrite under `accepted.markdown` if surgical edits are',
-	'    clearly worth it; otherwise omit it and the orchestrator uses the',
-	'    local draft as-is. Do NOT rewrite just for style.',
-	'  - `needs-work` -- the draft has concrete issues that a patch loop',
-	'    should address. Emit atomic work items, one per change. ANY',
-	'    unsupported claim is automatically `needs-work` regardless of how',
-	'    well the rest of the section reads.',
-	'',
-	'## When to pick each work-item kind',
-	'',
-	'  - `fix`     -- factually wrong, unsupported, or fabricated claim in',
-	'                 the draft. Use for any claim not traceable to the',
-	'                 evidence (see anti-hallucination gate above). Use for',
-	'                 actual factual errors too (the draft says class X does',
-	'                 Y, but evidence shows Z). `fix` items GATE the',
-	'                 section -- they must be addressed or it ships with',
-	'                 reduced confidence.',
-	'  - `enhance` -- claim is correct + supported but thin (missing',
-	'                 citations the evidence provides, vague phrasing,',
-	'                 lacks specifics). Also covers "clarify", "expand",',
-	'                 "elaborate" -- the existing content is grounded but',
-	'                 needs more depth.',
-	'  - `add`     -- a topic the review criteria require is missing. The',
-	'                 patch loop will run a sub-investigation and add a new',
-	'                 paragraph at the anchor.',
-	'  - `trim`    -- redundant / off-topic content. Do NOT use this for',
-	'                 fabricated content -- that needs `fix` so the patch',
-	'                 loop replaces it with grounded content.',
-	'',
-	'## Workflow rules',
-	'',
-	'  - Each work item is ATOMIC -- one location, one issue, one action.',
-	'    If you have three asks for the same paragraph, emit three items.',
-	'  - The `where` field MUST point at something concrete in the draft:',
-	'    "paragraph N" / "section opening" / "section closing" /',
-	'    "after paragraph N". NEVER vague regions like',
-	'    "throughout the draft".',
-	'  - Keep `issue` and `action` to one short sentence each (the',
-	'    schema enforces max 200 chars). State the problem in `issue`,',
-	'    the single concrete fix in `action`. Never list alternatives',
-	'    ("cite X or Y or Z" -> emit three separate items).',
-	'  - Pick the 6 most important items if there are more. Subsequent',
-	'    rounds catch the rest.',
-	'  - `notes` should be 1-3 short entries describing what was good',
-	'    or which criterion drove the verdict.',
-	'',
-	'## Citation preservation (mandatory)',
-	'',
-	'The expander emits `[label](path:<file>(#L<startLine>(-L<endLine>)?)?)` ',
-	'Markdown links so the IDE can navigate to the source. When polishing',
-	'under `accepted.markdown` you MUST preserve these links verbatim --',
-	'do NOT strip them, convert them to bare backticks, or invent new',
-	'ones the evidence does not support. If the draft is missing links',
-	'for entities the evidence carries a file for, emit an `enhance`',
-	'work item. If the draft contains links to paths NOT in any evidence',
-	'entry (model invented the URL), emit a `fix` work item -- those are',
-	'hallucinated citations.',
-	'',
-	'## Output',
-	'',
-	'Strict JSON ONLY -- no markdown fences, no prose, no preamble.',
-	'The JSON Schema appears at the end of the user message; your',
-	'response must validate against it.',
-].join('\n');
+// live in the JSON Schema block appended to the user message by
+// buildReviewMessages.
+const SYSTEM_PROMPT = loadFlowPrompt('review', {});
 
 function buildReviewMessages(input: ReviewActionInput): LLMMessage[] {
 	const userLines: string[] = [];
