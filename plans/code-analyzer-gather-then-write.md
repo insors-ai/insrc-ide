@@ -177,6 +177,62 @@ Cleanup pass (Deliverable 4, optional follow-up): delete the legacy interleaved 
 
 ## Follow-up optimizations (TODO -- ship after current architecture is validated end-to-end)
 
+### Cloud-generated per-section exploration plan (Phase P++, blocking)
+
+**Why:** Hadoop run (2026-05-19, PID 75771) revealed that the writer's anti-hallucination contract is structurally sound (zero fabrication, honest gap acknowledgements when evidence is empty) but the **gather phase keeps producing empty evidence** because the local model gives up after one ad-hoc `skill_describe` call. Concrete trace from `hdfs-client-layer`:
+
+```
+iter 1: assistant text + skill_describe({id: 'code.entity.locate-by-name'})    ← just describing
+iter 2: assistant empty text, stop=end_turn                                    ← soft-stop fires
+result: evidenceCount=0, citationCount=0, write phase produces honest "no evidence" stub
+```
+
+The cloud planner emitted clear targets ("outlines DFSClient class structure", "traces read path") and even named specific classes (`DFSClient`, `DFSOutputStream`, `MiniDFSCluster`). The local model couldn't translate those targets into a sequence of skill invocations. The gather phase has no per-section plan to execute.
+
+**Fix:** extend the cloud planner output so each section carries an `explorationPlan` — a pre-resolved list of skill invocations the orchestrator executes deterministically.
+
+```ts
+interface PlannedAction {
+  id, title, objective, maxBudgetTokens, reviewCriteria,
+  explorationPlan: readonly ExplorationStep[],   // NEW
+}
+
+type ExplorationStep =
+  | { kind: 'describe',       skillId: string }
+  | { kind: 'invoke-static',  skillId: string, args: Record<string, unknown> }
+  | { kind: 'invoke-dynamic', skillId: string, hint: string }
+```
+
+`invoke-static` = orchestrator dispatches directly, no LLM.
+`invoke-dynamic` = small focused LLM call to resolve args from prior step's result (e.g., `entityId` from a `locate-by-name` result).
+
+Phase G becomes a strict executor:
+1. Iterate `explorationPlan` in order
+2. Each step → dispatch → summarize → ledger entry
+3. No soft-stop. No iteration cap (plan IS the cap).
+4. If a step errors, log it and continue to the next step (not abort).
+5. After the plan completes, `EvidenceLedger` is fully populated.
+
+**The model never decides "what to call next"** — the planner already decided. The model only fills in dynamic args from prior results (a narrow, focused task it's good at).
+
+**Implementation outline:**
+1. Extend `plan-actions.ts` SYSTEM_PROMPT + output schema so each action carries `explorationPlan`. The cloud planner is already seeing the skill catalog via the system prompt; this just makes the plan structured.
+2. Update `gatherEvidence` to consume `explorationPlan` strictly. The existing tool-decision-by-LLM path becomes the FALLBACK for sections where the planner couldn't emit a plan (e.g., schema-violating planner output).
+3. Migration flag `INSRC_ANALYZER_GATHER_MODE=planned|adaptive` defaulting to `planned`. Today's behaviour stays one env-var away.
+
+**Expected outcomes:**
+- Zero "0 evidence" sections. Every section's gather walks a structured plan.
+- Substantive sections become substantive (Hadoop §3-§6 should produce real prose, not gap-acknowledgements).
+- Gather latency per section becomes predictable (N plan steps × per-call latency).
+
+**Risks:**
+- The cloud planner's per-section plan must reference REAL skill IDs and reasonable arg shapes. JSON Schema constraint on the planner output mitigates.
+- A pathological plan that lists 30 skills wastes the local model. Cap plan size at e.g. 8 steps; surface "want more" via an `invoke-dynamic` step that returns "follow-up: call X next".
+
+**Trigger:** ship as the next concrete change after this run's analysis. The current run already produced 12 sections worth of "honest gap" output that's safe to ship; the next run with explorationPlan should produce 12 sections worth of substantive content.
+
+---
+
 ### Collapse the 2-call gather pattern into 1 call via `record_evidence` synthetic tool
 
 **Motivation:** Phase G today runs TWO LLM calls per iteration -- (a) tool-decision (model picks `skill_invoke` / `skill_describe` / `skill_load_page` via Ollama's native tool calling) and (b) summarize-result (separate constrained-JSON call via `responseFormat: { schema }` that extracts facts + citations from the raw skill output). Per the run #11 numbers, this is the dominant gather-phase cost -- section 1 spent 40 minutes on 18 iterations × ~2 calls each. Cutting to 1 call per iteration would roughly halve gather latency.
