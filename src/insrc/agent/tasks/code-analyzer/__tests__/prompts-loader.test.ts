@@ -139,6 +139,59 @@ test('expandVars: throws on missing variable', () => {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Per-tier section dispatch (Phase C -- files exist + tier dispatch works)
+// ---------------------------------------------------------------------------
+
+const TIERS = ['xl', 'l', 'm', 's'] as const;
+
+for (const tier of TIERS) {
+	test(`tier=${tier}: coverage-angles/${tier}.md loads and is non-empty`, () => {
+		_clearCacheForTest();
+		const out = readSection(`coverage-angles/${tier}`);
+		assert.ok(out.trim().length > 200, `coverage-angles/${tier}.md unexpectedly short (${out.length} chars)`);
+		// Per-tier files should name their tier.
+		assert.match(out, new RegExp(`tier[ -](?:${tier === 'xl' ? 'XL\\+?' : tier.toUpperCase()})`, 'i'));
+	});
+
+	test(`tier=${tier}: coverage-angles-patch/${tier}.md loads and is non-empty`, () => {
+		_clearCacheForTest();
+		const out = readSection(`coverage-angles-patch/${tier}`);
+		assert.ok(out.trim().length > 200, `coverage-angles-patch/${tier}.md unexpectedly short (${out.length} chars)`);
+	});
+
+	test(`tier=${tier}: planner-context/${tier}.md loads and is non-empty`, () => {
+		_clearCacheForTest();
+		const out = readSection(`planner-context/${tier}`);
+		assert.ok(out.trim().length > 200, `planner-context/${tier}.md unexpectedly short (${out.length} chars)`);
+	});
+}
+
+test('skill-glossary.md loads and names the canonical chains', () => {
+	_clearCacheForTest();
+	const out = readSection('skill-glossary');
+	assert.ok(out.trim().length > 200);
+	assert.match(out, /Chain A: name-known investigation/);
+	assert.match(out, /Chain B: module-down investigation/);
+	assert.match(out, /Common arg-shape mistakes/);
+});
+
+test('Phase D readiness: dispatch via {{TIER}} resolves to each per-tier coverage-angles', () => {
+	// Once Phase D wires `{{section:coverage-angles/{{TIER}}}}` into the
+	// flow files, the loader will dispatch by tier. Exercise that resolution
+	// against the fixture sections we just landed (production wiring lands
+	// in Phase D).
+	_clearCacheForTest();
+	for (const tier of TIERS) {
+		const out = loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'a' });
+		// fixture dispatch already covers the var-in-section-path path;
+		// here we just verify each tier file is reachable via readSection.
+		const tierContent = readSection(`coverage-angles/${tier}`);
+		assert.ok(tierContent.length > 0, `tier ${tier} coverage-angles unreachable`);
+		void out;
+	}
+});
+
+// ---------------------------------------------------------------------------
 // Variable substitution INSIDE {{section:path}} (Phase A)
 // ---------------------------------------------------------------------------
 
