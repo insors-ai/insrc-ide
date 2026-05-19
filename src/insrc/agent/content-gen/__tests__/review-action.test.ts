@@ -98,7 +98,7 @@ const NEEDS_WORK_VERDICT = JSON.stringify({
 	workItems: [
 		{
 			id:     'wi-1',
-			kind:   'enhance',
+			kind: 'fix',
 			where:  'paragraph 1',
 			issue:  'No per-module file counts cited',
 			action: 'Mention the file count per top-level module, not just the root',
@@ -172,7 +172,7 @@ test('validateReview: work item with bogus kind -> error', () => {
 		workItems: [{ id: 'wi-1', kind: 'overhaul', where: 'p1', issue: 'x', action: 'y' }],
 	});
 	assert.equal(typeof r, 'string');
-	assert.match(r as string, /kind.*fix\|enhance\|add\|trim/);
+	assert.match(r as string, /kind.*fix\|add\|trim/);
 });
 
 test('validateReview: duplicate work item ids -> error', () => {
@@ -180,7 +180,7 @@ test('validateReview: duplicate work item ids -> error', () => {
 		verdict: 'needs-work',
 		workItems: [
 			{ id: 'wi-1', kind: 'fix',     where: 'p1', issue: 'a', action: 'fix it' },
-			{ id: 'wi-1', kind: 'enhance', where: 'p2', issue: 'b', action: 'enhance it' },
+			{ id: 'wi-1', kind: 'fix', where: 'p2', issue: 'b', action: 'enhance it' },
 		],
 	});
 	assert.equal(typeof r, 'string');
@@ -189,7 +189,7 @@ test('validateReview: duplicate work item ids -> error', () => {
 
 test('validateReview: more than 6 work items -> error', () => {
 	const items = Array.from({ length: 7 }, (_, i) => ({
-		id: `wi-${i + 1}`, kind: 'enhance' as const, where: `p${i + 1}`, issue: 'x', action: 'y',
+		id: `wi-${i + 1}`, kind: 'fix' as const, where: `p${i + 1}`, issue: 'x', action: 'y',
 	}));
 	const r = validateReview({ verdict: 'needs-work', workItems: items });
 	assert.equal(typeof r, 'string');
@@ -202,7 +202,7 @@ test('validateReview: P.3 issue >200 chars -> soft-truncated, NOT rejected', () 
 	const r = validateReview({
 		verdict: 'needs-work',
 		workItems: [{
-			id: 'wi-1', kind: 'enhance', where: 'p1', issue: longIssue, action: longAction,
+			id: 'wi-1', kind: 'fix', where: 'p1', issue: longIssue, action: longAction,
 		}],
 	});
 	assert.notEqual(typeof r, 'string', 'validator must NOT reject; should soft-truncate');
@@ -221,7 +221,7 @@ test('validateReview: work item with evidenceRefs -> ok, refs preserved', () => 
 	const r = validateReview({
 		verdict: 'needs-work',
 		workItems: [{
-			id: 'wi-1', kind: 'enhance', where: 'p1', issue: 'x', action: 'y',
+			id: 'wi-1', kind: 'fix', where: 'p1', issue: 'x', action: 'y',
 			evidenceRefs: ['evidence[0]', 'evidence[2]'],
 		}],
 	});
@@ -260,7 +260,7 @@ test('buildReviewMessages: includes objective, criteria, draft, evidence', () =>
 	const user = msgs[1]!.content as string;
 	assert.match(sys, /You review ONE section/);
 	assert.match(sys, /When to pick each work-item kind/);
-	assert.match(sys, /fix.*factually wrong/);
+	assert.match(sys, /fix[\s\S]*factually wrong/);
 	assert.match(sys, /needs-work/);
 	assert.match(user, /## Section under review/);
 	assert.match(user, /HDFS Core: Module Layout/);
@@ -271,7 +271,7 @@ test('buildReviewMessages: includes objective, criteria, draft, evidence', () =>
 	assert.match(user, /## Evidence the expander saw/);
 	// Phase P.4: JSON Schema block now lives in the user message.
 	assert.match(user, /## Response schema \(JSON Schema\)/);
-	assert.match(user, /"enum":\s*\[\s*"fix",\s*"enhance",\s*"add",\s*"trim"\s*\]/);
+	assert.match(user, /"enum":\s*\[\s*"fix",\s*"add",\s*"trim"\s*\]/);
 });
 
 test('buildReviewMessages: truncated draft -> truncation note rendered', () => {
@@ -324,7 +324,7 @@ test('reviewAction: needs-work verdict -> workItems surfaced', async () => {
 	);
 	assert.equal(r.verdict, 'needs-work');
 	assert.equal(r.workItems.length, 1);
-	assert.equal(r.workItems[0]!.kind, 'enhance');
+	assert.equal(r.workItems[0]!.kind, 'fix');
 	assert.match(r.workItems[0]!.action, /file count/);
 });
 
@@ -362,14 +362,14 @@ test('reviewAction: provider throws on all attempts -> soft accept', async () =>
 
 test('reviewAction: P.4 kind-enum violation recovers on corrective retry', async () => {
 	// First attempt: out-of-enum kind 'clarify'.
-	// Second attempt: corrected to 'enhance' after seeing the corrective message.
+	// Second attempt: corrected to 'fix' after seeing the corrective message.
 	const bad = JSON.stringify({
 		verdict:   'needs-work',
 		workItems: [{ id: 'wi-1', kind: 'clarify', where: 'p1', issue: 'thin', action: 'add detail' }],
 	});
 	const good = JSON.stringify({
 		verdict:   'needs-work',
-		workItems: [{ id: 'wi-1', kind: 'enhance', where: 'p1', issue: 'thin', action: 'add detail' }],
+		workItems: [{ id: 'wi-1', kind: 'fix', where: 'p1', issue: 'thin', action: 'add detail' }],
 	});
 	const r = await reviewAction(
 		{ action: ACTION, draft: DRAFT, evidence: EVIDENCE },
@@ -377,7 +377,7 @@ test('reviewAction: P.4 kind-enum violation recovers on corrective retry', async
 	);
 	assert.equal(r.verdict, 'needs-work');
 	assert.equal(r.degraded, false);
-	assert.equal(r.workItems[0]!.kind, 'enhance');
+	assert.equal(r.workItems[0]!.kind, 'fix');
 });
 
 test('reviewAction: P.4 third attempt succeeds after two failures (3-attempt loop)', async () => {

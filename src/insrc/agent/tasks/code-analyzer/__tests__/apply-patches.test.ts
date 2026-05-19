@@ -161,8 +161,8 @@ function wi(opts: Partial<ReviewWorkItem> & Pick<ReviewWorkItem, 'id' | 'kind'>)
 	} as ReviewWorkItem;
 }
 
-test('applyPatches: enhance replaces target paragraph', () => {
-	const items = [wi({ id: 'wi-1', kind: 'enhance', where: 'paragraph 2' })];
+test('applyPatches: fix replaces target paragraph', () => {
+	const items = [wi({ id: 'wi-1', kind: 'fix', where: 'paragraph 2' })];
 	const blocks = parsePatches('```patch:wi-1\nHDFS stores data across a cluster, default replication 3.\n```');
 	const r = applyPatches(DRAFT, items, blocks);
 	const lines = r.patchedMarkdown.split('\n\n');
@@ -223,7 +223,7 @@ test('applyPatches: skip block -> status=skipped with reason', () => {
 });
 
 test('applyPatches: no block emitted for item -> status=skipped no-patch', () => {
-	const items = [wi({ id: 'wi-1', kind: 'enhance', where: 'paragraph 1' })];
+	const items = [wi({ id: 'wi-1', kind: 'fix', where: 'paragraph 1' })];
 	const blocks = parsePatches('');
 	const r = applyPatches(DRAFT, items, blocks);
 	const lines = r.patchedMarkdown.split('\n\n');
@@ -234,7 +234,7 @@ test('applyPatches: no block emitted for item -> status=skipped no-patch', () =>
 
 test('applyPatches: multiple ops -- replace, insert, delete -- non-overlapping', () => {
 	const items = [
-		wi({ id: 'wi-1', kind: 'enhance', where: 'paragraph 1' }),
+		wi({ id: 'wi-1', kind: 'fix', where: 'paragraph 1' }),
 		wi({ id: 'wi-2', kind: 'add',     where: 'after paragraph 1' }),
 		wi({ id: 'wi-3', kind: 'trim',    where: 'paragraph 3' }),
 	];
@@ -255,8 +255,8 @@ test('applyPatches: multiple ops -- replace, insert, delete -- non-overlapping',
 
 test('applyPatches: status order matches workItems order, not block order', () => {
 	const items = [
-		wi({ id: 'wi-A', kind: 'enhance', where: 'paragraph 1' }),
-		wi({ id: 'wi-B', kind: 'enhance', where: 'paragraph 2' }),
+		wi({ id: 'wi-A', kind: 'fix', where: 'paragraph 1' }),
+		wi({ id: 'wi-B', kind: 'fix', where: 'paragraph 2' }),
 	];
 	// Emit block B before block A in the writer text:
 	const blocks = parsePatches([
@@ -314,7 +314,7 @@ test('stripTransition: empty body -> unchanged', () => {
 });
 
 test('applyPatches: patch body with trailing transition -> sanitized + status=partial', () => {
-	const items = [wi({ id: 'wi-1', kind: 'enhance', where: 'paragraph 1' })];
+	const items = [wi({ id: 'wi-1', kind: 'fix', where: 'paragraph 1' })];
 	const blocks = parsePatches('```patch:wi-1\nHadoop is an open-source framework. Next, I will examine HDFS.\n```');
 	const r = applyPatches(DRAFT, items, blocks);
 	const lines = r.patchedMarkdown.split('\n\n');

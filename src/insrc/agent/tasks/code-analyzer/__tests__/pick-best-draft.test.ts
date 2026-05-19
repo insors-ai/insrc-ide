@@ -4,7 +4,7 @@
  * Picker uses a weighted-sum scoring with absolute-target normalisation:
  *
  *   weighted-items-addressed (weight 4, target 10) -- inner weights:
- *     fix=3, add=2, enhance=2, trim=1
+ *     fix=3, add=2, trim=1
  *   citation-diversity        (weight 3, target 8 unique cited files)
  *   paragraph-count           (weight 2, target 6)
  *   text-length               (weight 1, target 3000 chars)
@@ -101,7 +101,7 @@ test('countWeightedItemsAddressed: round 1 (no patch field) -> 0', () => {
 	assert.equal(countItems(c), 0);
 });
 
-test('countWeightedItemsAddressed: kind weights -- fix=3, add=2, enhance=2, trim=1', () => {
+test('countWeightedItemsAddressed: kind weights -- fix=3, add=2, trim=1', () => {
 	const c: RoundCandidate = {
 		round:    2,
 		markdown: SHORT_MD,
@@ -110,21 +110,19 @@ test('countWeightedItemsAddressed: kind weights -- fix=3, add=2, enhance=2, trim
 			priorWorkItems: [
 				wi({ id: 'wi-1', kind: 'fix' }),       // 3
 				wi({ id: 'wi-2', kind: 'add' }),       // 2
-				wi({ id: 'wi-3', kind: 'enhance' }),   // 2
-				wi({ id: 'wi-4', kind: 'trim' }),      // 1
-				wi({ id: 'wi-5', kind: 'enhance' }),   // not addressed -> 0
+				wi({ id: 'wi-3', kind: 'trim' }),      // 1
+				wi({ id: 'wi-4', kind: 'fix' }),       // not addressed -> 0
 			],
 			itemStatuses: [
 				{ id: 'wi-1', status: 'addressed' },
 				{ id: 'wi-2', status: 'addressed' },
 				{ id: 'wi-3', status: 'addressed' },
-				{ id: 'wi-4', status: 'addressed' },
-				{ id: 'wi-5', status: 'partial' },     // not counted
+				{ id: 'wi-4', status: 'partial' },     // not counted
 			],
 		},
 	};
-	// 3 + 2 + 2 + 1 = 8
-	assert.equal(countItems(c), 8);
+	// 3 + 2 + 1 = 6
+	assert.equal(countItems(c), 6);
 });
 
 test('countWeightedItemsAddressed: skipped + partial NOT counted', () => {
@@ -135,7 +133,7 @@ test('countWeightedItemsAddressed: skipped + partial NOT counted', () => {
 		patch: {
 			priorWorkItems: [
 				wi({ id: 'wi-1', kind: 'fix' }),
-				wi({ id: 'wi-2', kind: 'enhance' }),
+				wi({ id: 'wi-2', kind: 'fix' }),
 			],
 			itemStatuses: [
 				{ id: 'wi-1', status: 'skipped' },
@@ -255,8 +253,8 @@ test('pickBestRound: single fix item NOT enough to win over a much richer r1', (
 	assert.equal(r.winnerIdx, 0);
 });
 
-test('pickBestRound: P.9 fix -- enhance/add items now count (run #4 section 1 case)', () => {
-	// Run #4 section 1: reviewer flagged 6 items, all kind=enhance/add/trim
+test('pickBestRound: P.9 fix -- add items count (run #4 section 1 case)', () => {
+	// Run #4 section 1: reviewer flagged 6 items, all kind=fix/add/trim
 	// (NO fix items). Round 2 addressed 5 of them, round 1 had 13 citations.
 	// Under the OLD lex picker: r1 won (because fixItemsAddressed tied at
 	// 0 and citationCount fell through to r1's lead). Under the NEW
@@ -279,7 +277,7 @@ test('pickBestRound: P.9 fix -- enhance/add items now count (run #4 section 1 ca
 		].join('\n\n').padEnd(2200, ' '),
 		review:   mkReview('needs-work'),
 		patch: {
-			priorWorkItems: Array.from({ length: 5 }, (_, i) => wi({ id: `wi-${i + 1}`, kind: 'enhance' })),
+			priorWorkItems: Array.from({ length: 5 }, (_, i) => wi({ id: `wi-${i + 1}`, kind: 'fix' })),
 			itemStatuses:   Array.from({ length: 5 }, (_, i) => ({ id: `wi-${i + 1}`, status: 'addressed' as const })),
 		},
 	};

@@ -84,7 +84,6 @@ const TARGETS = {
 const KIND_WEIGHTS: Record<WorkItemKind, number> = {
 	fix:     3,
 	add:     2,
-	enhance: 2,
 	trim:    1,
 };
 

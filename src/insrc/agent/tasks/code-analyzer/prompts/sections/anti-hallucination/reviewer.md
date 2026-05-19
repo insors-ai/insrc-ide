@@ -32,8 +32,9 @@ check the EVIDENCE block:
      is preferable to a 3000-char plausible fabrication. Accept short honest
      drafts when the evidence really is empty.
 
-`fix` is the correct kind for unsupported-claim issues -- they GATE the
-section's confidence. Use `enhance` only when the claim is supported but
-thin / could be deeper. Do NOT use `enhance` to demand new claims; that is
-`add`. Do NOT use `trim` to delete fabricated content (the writer needs to
-know it was fabricated; emit `fix` so the patch loop replaces it).
+`fix` is the correct kind for both kinds of problem the patch loop
+addresses: unsupported claims (which GATE section confidence) AND
+correct-but-thin claims (under-cited / vague / needs depth). Do NOT
+use `fix` to demand entirely new claims; that is `add`. Do NOT use
+`trim` to delete fabricated content (the writer needs to know it was
+fabricated; emit `fix` so the patch loop replaces it).

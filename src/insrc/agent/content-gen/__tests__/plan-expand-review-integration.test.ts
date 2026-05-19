@@ -112,7 +112,7 @@ test('integration: planner output feeds reviewer correctly (per-action contract)
 			verdict:   'needs-work',
 			workItems: [{
 				id:     'wi-1',
-				kind:   'enhance',
+				kind: 'fix',
 				where:  'paragraph 1',
 				issue:  'largest cycle not named',
 				action: 'mention the largest cycle by name',

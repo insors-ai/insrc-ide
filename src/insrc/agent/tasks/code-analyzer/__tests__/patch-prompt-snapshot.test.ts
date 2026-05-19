@@ -36,7 +36,7 @@ const FIXTURE_REPO_CONTEXT =
 	'Files: 42\n' +
 	'Top modules: alpha, beta';
 
-const KINDS: readonly PatchKind[] = ['fix', 'enhance', 'add'];
+const KINDS: readonly PatchKind[] = ['fix', 'add'];
 
 for (const kind of KINDS) {
 	test(`flow/patch/${kind}/system.md composes byte-equivalently to golden`, () => {
@@ -89,12 +89,6 @@ test('add-kind intro talks about ADDING a new paragraph', () => {
 	_clearCacheForTest();
 	const composed = loadPatchPrompt('add', { SKILL_CATALOG: '', REPO_CONTEXT: '' });
 	assert.match(composed, /ADDING ONE new paragraph/);
-});
-
-test('enhance-kind intro talks about ENHANCING a thin paragraph', () => {
-	_clearCacheForTest();
-	const composed = loadPatchPrompt('enhance', { SKILL_CATALOG: '', REPO_CONTEXT: '' });
-	assert.match(composed, /ENHANCING ONE paragraph/);
 });
 
 function snapshotMismatchHint(kind: PatchKind): string {

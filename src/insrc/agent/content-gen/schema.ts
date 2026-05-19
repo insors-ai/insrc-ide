@@ -125,7 +125,7 @@ export const REVIEW_ACTION_SCHEMA = {
 				type: 'object',
 				properties: {
 					id:     { type: 'string', minLength: 1, maxLength: 16 },
-					kind:   { type: 'string', enum: ['fix', 'enhance', 'add', 'trim'] },
+					kind:   { type: 'string', enum: ['fix', 'add', 'trim'] },
 					where:  { type: 'string', minLength: 1, maxLength: 64 },
 					// Phase K.3: cap issue/action to keep the reviewer's
 					// output within the K.2 budget (~450 chars/item raw).

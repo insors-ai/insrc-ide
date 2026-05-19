@@ -82,21 +82,19 @@ for (const flow of SINGLE_FOLDER_FLOWS) {
 	});
 }
 
-const PATCH_KINDS: readonly PatchKind[] = ['fix', 'enhance', 'add'];
+const PATCH_KINDS: readonly PatchKind[] = ['fix', 'add'];
 
 for (const kind of PATCH_KINDS) {
 	test(`loadPatchPrompt: ${kind} composes without throwing`, () => {
 		_clearCacheForTest();
-		// Phase 4 filled in patch role + output-format + anti-hallucination
-		// + coverage-angles for all three kinds. Patch flow requires
-		// SKILL_CATALOG + REPO_CONTEXT (same shape as gather).
+		// Patch flow requires SKILL_CATALOG + REPO_CONTEXT (same shape
+		// as gather). `enhance` was folded into `fix` -- see plans/
+		// code-analyzer-scope-tier-prompts.md.
 		const out = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
 		assert.ok(out.length > 0, `patch/${kind} composed prompt is empty`);
 		assert.match(out, /<!-- BEGIN SECTION: role -->/);
 		// Role intro varies per-kind; spot-check the verb is right.
-		const verb = kind === 'fix' ? /CORRECTING ONE/
-			: kind === 'enhance' ? /ENHANCING ONE/
-			: /ADDING ONE new/;
+		const verb = kind === 'fix' ? /CORRECTING ONE/ : /ADDING ONE new/;
 		assert.match(out, verb);
 		assert.doesNotMatch(out, /\{\{section:/);
 		assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/);

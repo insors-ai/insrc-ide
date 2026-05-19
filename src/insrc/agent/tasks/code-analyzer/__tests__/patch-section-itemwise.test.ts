@@ -145,10 +145,9 @@ test('resolveIdxByWhere: section opening / closing', () => {
 // KIND_ORDER (fix first; trim last)
 // ---------------------------------------------------------------------------
 
-test('KIND_ORDER: fix < enhance < add < trim', () => {
-	assert.ok(KIND_ORDER.fix     < KIND_ORDER.enhance);
-	assert.ok(KIND_ORDER.enhance < KIND_ORDER.add);
-	assert.ok(KIND_ORDER.add     < KIND_ORDER.trim);
+test('KIND_ORDER: fix < add < trim', () => {
+	assert.ok(KIND_ORDER.fix < KIND_ORDER.add);
+	assert.ok(KIND_ORDER.add < KIND_ORDER.trim);
 });
 
 // ---------------------------------------------------------------------------
@@ -184,10 +183,10 @@ test('patchSectionItemwise: fix replaces the targeted paragraph', async () => {
 	assert.equal(result.patchProtocolFollowed, true);
 });
 
-test('patchSectionItemwise: enhance replaces with LLM output', async () => {
+test('patchSectionItemwise: fix replaces target paragraph with LLM output', async () => {
 	const draft = 'p1.\n\nthin paragraph.\n\np3.';
 	const workItems: ReviewWorkItem[] = [
-		{ id: 'wi-2', kind: 'enhance', where: 'paragraph 2', issue: 'thin', action: 'add specifics' },
+		{ id: 'wi-2', kind: 'fix', where: 'paragraph 2', issue: 'thin', action: 'add specifics' },
 	];
 	const { provider } = buildFakeProvider(['Richer paragraph with [foo](path:foo.ts) citation.']);
 	const result = await patchSectionItemwise(buildInput({ draft, workItems, provider }));
@@ -225,24 +224,24 @@ test('patchSectionItemwise: prompts include item.issue + action + targeted parag
 	assert.match(userPrompt, /second paragraph that is broken/);
 });
 
-test('patchSectionItemwise: addresses fix BEFORE enhance even when reviewer lists enhance first', async () => {
+test('patchSectionItemwise: addresses fix BEFORE add even when reviewer lists add first', async () => {
 	const draft = 'p1.\n\np2.\n\np3.';
 	const workItems: ReviewWorkItem[] = [
-		{ id: 'wi-enhance', kind: 'enhance', where: 'paragraph 3', issue: 'thin', action: 'expand' },
-		{ id: 'wi-fix',     kind: 'fix',     where: 'paragraph 2', issue: 'wrong', action: 'fix' },
+		{ id: 'wi-add', kind: 'add', where: 'after paragraph 3', issue: 'missing', action: 'add coverage' },
+		{ id: 'wi-fix', kind: 'fix', where: 'paragraph 2',       issue: 'wrong',   action: 'correct'      },
 	];
 	const { provider, calls } = buildFakeProvider([
-		'corrected p2.',        // fix runs first
-		'enhanced p3.',         // enhance runs second
+		'corrected p2.',     // fix runs first (KIND_ORDER.fix=0)
+		'new paragraph.',    // add runs second (KIND_ORDER.add=1)
 	]);
 	const result = await patchSectionItemwise(buildInput({ draft, workItems, provider }));
 
 	assert.equal(calls.length, 2);
-	// Fix prompt must mention the fix item's issue, NOT the enhance item's.
+	// Fix prompt must mention the fix item's issue, NOT the add item's.
 	assert.match(calls[0]!.user, /wrong/);
-	assert.doesNotMatch(calls[0]!.user, /\bthin\b/);
-	// Statuses emitted in the reviewer's original order (enhance first, fix second).
-	assert.equal(result.itemStatuses[0]?.id, 'wi-enhance');
+	assert.doesNotMatch(calls[0]!.user, /missing/);
+	// Statuses emitted in the reviewer's original order (add first, fix second).
+	assert.equal(result.itemStatuses[0]?.id, 'wi-add');
 	assert.equal(result.itemStatuses[1]?.id, 'wi-fix');
 	assert.equal(result.itemStatuses[0]?.status, 'addressed');
 	assert.equal(result.itemStatuses[1]?.status, 'addressed');
@@ -271,7 +270,7 @@ test('patchSectionItemwise: patchProtocolFollowed false when zero items addresse
 	const draft = 'p1.\n\np2.';
 	const workItems: ReviewWorkItem[] = [
 		{ id: 'wi-1', kind: 'fix',     where: 'paragraph 1', issue: 'x', action: 'y' },
-		{ id: 'wi-2', kind: 'enhance', where: 'paragraph 2', issue: 'x', action: 'y' },
+		{ id: 'wi-2', kind: 'fix', where: 'paragraph 2', issue: 'x', action: 'y' },
 	];
 	const { provider } = buildFakeProvider(['', '   ']); // both empty
 	const result = await patchSectionItemwise(buildInput({ draft, workItems, provider }));

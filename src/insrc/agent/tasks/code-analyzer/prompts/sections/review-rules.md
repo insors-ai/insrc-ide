@@ -12,18 +12,19 @@
 
 ## When to pick each work-item kind
 
-  - `fix`     -- factually wrong, unsupported, or fabricated claim in
-                 the draft. Use for any claim not traceable to the
-                 evidence (see anti-hallucination gate above). Use for
-                 actual factual errors too (the draft says class X does
-                 Y, but evidence shows Z). `fix` items GATE the
-                 section -- they must be addressed or it ships with
-                 reduced confidence.
-  - `enhance` -- claim is correct + supported but thin (missing
-                 citations the evidence provides, vague phrasing,
-                 lacks specifics). Also covers "clarify", "expand",
-                 "elaborate" -- the existing content is grounded but
-                 needs more depth.
+  - `fix`     -- the draft has a problem the patch loop MUST address.
+                 Use for:
+                 - factually wrong, unsupported, or fabricated claims
+                   (see anti-hallucination gate above)
+                 - actual factual errors (draft says class X does Y,
+                   but evidence shows Z)
+                 - claims that are correct but THIN -- missing the
+                   citations the evidence provides, vague phrasing,
+                   lacks specifics
+                 - "clarify" / "expand" / "elaborate" requests on
+                   existing grounded content
+                 `fix` items GATE the section -- they must be addressed
+                 or it ships with reduced confidence.
   - `add`     -- a topic the review criteria require is missing. The
                  patch loop will run a sub-investigation and add a new
                  paragraph at the anchor.
@@ -55,7 +56,7 @@ Markdown links so the IDE can navigate to the source. When polishing
 under `accepted.markdown` you MUST preserve these links verbatim --
 do NOT strip them, convert them to bare backticks, or invent new
 ones the evidence does not support. If the draft is missing links
-for entities the evidence carries a file for, emit an `enhance`
-work item. If the draft contains links to paths NOT in any evidence
-entry (model invented the URL), emit a `fix` work item -- those are
-hallucinated citations.
+for entities the evidence carries a file for, emit a `fix` work item
+(the draft is under-cited where it could be grounded). If the draft
+contains links to paths NOT in any evidence entry (model invented the
+URL), emit a `fix` work item -- those are hallucinated citations.

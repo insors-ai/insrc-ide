@@ -70,7 +70,7 @@ Read order:
 - `loadFlowPrompt('gather', vars)` -> `flow/gather/system.md`
 - `loadFlowPrompt('write', vars)`  -> `flow/write/system.md`
 - `loadFlowPrompt('review', vars)` -> `flow/review/system.md`
-- `loadPatchPrompt('fix' | 'enhance' | 'add', vars)` -> `flow/patch/<kind>/system.md`
+- `loadPatchPrompt('fix' | 'add', vars)` -> `flow/patch/<kind>/system.md`
 
 Each file is read once per daemon lifetime (file cache by relative path).
 

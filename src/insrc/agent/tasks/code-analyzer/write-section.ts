@@ -748,11 +748,11 @@ function buildPatchSystemPrompt(round: 2 | 3): string {
 		'',
 		'## Work-item kinds',
 		'',
-		'  - `fix`     -- factual error in the draft. Verify with a skill call',
-		'                 if needed, then replace the paragraph with a corrected',
+		'  - `fix`     -- the draft has a problem the patch must address:',
+		'                 factual error, unsupported claim, or correct-but-thin',
+		'                 content. Verify with a skill call if needed, then',
+		'                 replace the paragraph with a corrected / expanded',
 		'                 version. Unaddressed `fix` items drop section confidence.',
-		'  - `enhance` -- correct but thin. Gather more evidence (skill call),',
-		'                 then replace the paragraph with a thicker version.',
 		'  - `add`     -- coverage missing. Run a sub-investigation (skill calls),',
 		'                 then INSERT a new paragraph at the anchor.',
 		'  - `trim`    -- redundant / off-topic. Delete the paragraph; no skill',
@@ -768,7 +768,7 @@ function buildPatchSystemPrompt(round: 2 | 3): string {
 		'',
 		'  1. ANNOUNCE: write ONE prose sentence naming the item id and what',
 		'     change you are about to make. Example:',
-		'     "For wi-2 (enhance, paragraph 3), I will add file:line refs',
+		'     "For wi-2 (fix, paragraph 3), I will add file:line refs',
 		'     for DatanodeManager."',
 		'  2. GATHER (only if needed): make a single skill call (or skill_describe',
 		'     first if the skill is new). Use the tool result to inform the',
@@ -806,21 +806,21 @@ function buildPatchSystemPrompt(round: 2 | 3): string {
 		'',
 		'A previous run of this loop failed because the model wrote:',
 		'',
-		'  WRONG: "I will enhance paragraph 2 by adding citations. I will',
-		'         enhance paragraph 1 by clarifying scopes. I will trim',
+		'  WRONG: "I will fix paragraph 2 by adding citations. I will',
+		'         fix paragraph 1 by clarifying scopes. I will trim',
 		'         paragraph 3. Let me now gather evidence."',
 		'  (then gathered evidence forever; never emitted a patch block;',
 		'  the orchestrator parsed zero blocks and the section did not',
 		'  improve)',
 		'',
-		'  RIGHT: "For wi-1 (enhance, paragraph 2): adding DatanodeManager',
+		'  RIGHT: "For wi-1 (fix, paragraph 2): adding DatanodeManager',
 		'         citation."',
 		'         <skill_invoke for code.entity.summary>',
 		'         ```patch:wi-1',
 		'         The DatanodeManager [`DatanodeManager`](path:...) tracks',
 		'         heartbeats from every DataNode...',
 		'         ```',
-		'         "For wi-2 (enhance, paragraph 1): clarifying the fs and',
+		'         "For wi-2 (fix, paragraph 1): clarifying the fs and',
 		'         util subsystem scopes."',
 		'         ```patch:wi-2',
 		'         The fs and util subsystems both live under',
@@ -1183,10 +1183,11 @@ function splitDraftParagraphs(markdown: string): string[] {
 // of plain text. The orchestrator slots the response in by `item.where`.
 //
 // Per-kind handling:
-//   fix     -- single LLM call (no skills); replace target paragraph
-//   enhance -- single LLM call (no skills); replace target paragraph
-//   add     -- single LLM call (up to ~3 skill calls); insert after anchor
+//   fix     -- single LLM call with skills; replace target paragraph
+//   add     -- single LLM call with skills; insert after anchor
 //   trim    -- no LLM call; orchestrator-side delete
+// (`enhance` was folded into `fix` -- see plans/code-analyzer-scope-
+// tier-prompts.md.)
 
 export interface PatchSectionItemwiseInput {
 	readonly provider:             LLMProvider;
@@ -1214,13 +1215,12 @@ export interface PatchSectionItemwiseInput {
 // without an artificial sub-cap fighting the gather/research framing.
 
 /** Order in which the per-item loop addresses kinds. `fix` first (the
- *  correctness gate); then `enhance` / `add` (content); then `trim`
- *  (deletes happen last so earlier `where` indices stay valid). */
+ *  correctness gate); then `add` (new content); then `trim` (deletes
+ *  happen last so earlier `where` indices stay valid). */
 const KIND_ORDER: Record<ReviewWorkItem['kind'], number> = {
 	fix:     0,
-	enhance: 1,
-	add:     2,
-	trim:    3,
+	add:     1,
+	trim:    2,
 };
 
 export async function patchSectionItemwise(input: PatchSectionItemwiseInput): Promise<PatchSectionOutput> {
@@ -1373,13 +1373,14 @@ async function runItemWithSkills(
 	// values (skill catalog + optional repo summary) and the operational
 	// flags (replaces / insert) that the user-prompt builder below uses.
 	// trim items are filtered out by the patchSectionItemwise loop before
-	// reaching this function; narrow ReviewWorkItem's kind to the three
-	// skill-enabled kinds for the loader.
+	// reaching this function; narrow ReviewWorkItem's kind to the two
+	// skill-enabled kinds for the loader. `enhance` was folded into
+	// `fix` during the scope-tier work.
 	if (item.kind === 'trim') {
 		throw new Error('runItemWithSkills called with kind=trim (caller should have filtered)');
 	}
-	const kind: 'fix' | 'enhance' | 'add' = item.kind;
-	const replaces = kind === 'fix' || kind === 'enhance';   // both REPLACE target paragraph; add INSERTS
+	const kind: 'fix' | 'add' = item.kind;
+	const replaces = kind === 'fix';   // fix REPLACES target paragraph; add INSERTS
 
 	const skillCatalog = formatAnalyzerSkillCatalog(catalog);
 	const repoContext  = (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty)
@@ -1390,15 +1391,14 @@ async function runItemWithSkills(
 		REPO_CONTEXT:  repoContext,
 	});
 
-	// Resolve the target paragraph for fix/enhance so the model sees what
-	// it's replacing alongside the reviewer's note. add INSERTS so there's
+	// Resolve the target paragraph for fix so the model sees what it's
+	// replacing alongside the reviewer's note. `add` INSERTS so there's
 	// no target -- surrounding paragraphs serve as informational context.
 	const targetIdx = replaces ? resolveParagraphIdxByWhere(item.where, paragraphs) : null;
 
 	const flagHeader =
-		kind === 'fix'     ? '## Reviewer flag (claim is unsupported / wrong)'
-		: kind === 'enhance' ? '## Reviewer flag (paragraph is thin / under-cited / vague)'
-		:                       '## Reviewer flag (missing coverage)';
+		kind === 'fix' ? '## Reviewer flag (claim is unsupported / wrong / thin)'
+		:                '## Reviewer flag (missing coverage)';
 
 	const userParts: string[] = [];
 	userParts.push('## Section context');

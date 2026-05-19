@@ -84,17 +84,24 @@ export interface ReviewActionInput {
 }
 
 /**
- * Phase E of plans/code-analyzer-structured-review.md.
+ * Phase E of plans/code-analyzer-structured-review.md +
+ * Phase B of plans/code-analyzer-scope-tier-prompts.md (enhance fold-in).
  *
  * Kind semantics:
- *   - `fix`     -- factually wrong claim. The patch loop must address
- *                  these; unaddressed `fix` items drop section
- *                  confidence to `low`.
- *   - `enhance` -- correct but thin (missing citations, vague).
- *   - `add`     -- required coverage missing.
+ *   - `fix`     -- the draft has a problem the patch loop MUST address:
+ *                  factually wrong / unsupported claim, OR a correct
+ *                  claim that's thin (missing citations, vague, under-
+ *                  cited). Both gate section confidence; unaddressed
+ *                  fix items drop confidence to `low`. (The legacy
+ *                  `enhance` kind was folded into `fix` -- in practice
+ *                  ~50% of enhance items demanded the same skill-
+ *                  enabled investigation that fix items did, and
+ *                  splitting them was a distinction without a
+ *                  difference for the patch loop.)
+ *   - `add`     -- required coverage missing; insert a new paragraph.
  *   - `trim`    -- redundant / off-topic; cut in place.
  */
-export type WorkItemKind = 'fix' | 'enhance' | 'add' | 'trim';
+export type WorkItemKind = 'fix' | 'add' | 'trim';
 
 /**
  * One concrete editorial change the reviewer wants applied to the
@@ -224,18 +231,20 @@ function buildCorrectiveRetryMessage(reason: string, raw: string | undefined): s
  */
 function correctiveSuggestion(reason: string): string | undefined {
 	// kind enum violation: extract the bad value and map to the
-	// closest valid kind.
-	const kindMatch = reason.match(/`workItems\[(\d+)\]\.kind` must be one of fix\|enhance\|add\|trim/);
+	// closest valid kind. Phase B (scope-tier plan) collapsed
+	// `enhance` into `fix`, so the legacy enhance synonyms ("clarify"
+	// / "expand" / etc.) now map to fix as well.
+	const kindMatch = reason.match(/`workItems\[(\d+)\]\.kind` must be one of fix\|add\|trim/);
 	if (kindMatch !== null) {
 		return [
-			`The \`kind\` field is a CLOSED enum -- only fix | enhance | add | trim are valid.`,
+			`The \`kind\` field is a CLOSED enum -- only fix | add | trim are valid.`,
 			`Closest-valid mappings for common stand-ins:`,
-			`  - "clarify" / "expand" / "elaborate" / "specify"  -> use **enhance**`,
-			`  - "restructure" / "reorganize" / "consolidate" / "split" -> use **enhance** (or split into a trim+add pair)`,
+			`  - "clarify" / "expand" / "elaborate" / "specify" / "enhance"  -> use **fix**`,
+			`  - "restructure" / "reorganize" / "consolidate" / "split" -> use **fix** (or split into a trim+add pair)`,
 			`  - "correct" / "rectify" / "amend" -> use **fix**`,
 			`  - "remove" / "delete" / "cut" -> use **trim**`,
 			`  - "cover" / "include" / "introduce" -> use **add**`,
-			`Choose the kind that best matches your intent for workItems[${kindMatch[1]}] from the four valid values.`,
+			`Choose the kind that best matches your intent for workItems[${kindMatch[1]}] from the three valid values.`,
 		].join('\n');
 	}
 	if (/workItems` must be empty when verdict="accept"/.test(reason)) {
@@ -666,8 +675,8 @@ function validateReview(parsed: unknown): ReviewActionResult | string {
 			if (id.length === 0)     return `\`workItems[${i}].id\` is required`;
 			if (seenIds.has(id))     return `\`workItems[${i}].id\` "${id}" is duplicated`;
 			seenIds.add(id);
-			if (kind !== 'fix' && kind !== 'enhance' && kind !== 'add' && kind !== 'trim') {
-				return `\`workItems[${i}].kind\` must be one of fix|enhance|add|trim`;
+			if (kind !== 'fix' && kind !== 'add' && kind !== 'trim') {
+				return `\`workItems[${i}].kind\` must be one of fix|add|trim`;
 			}
 			if (where.length === 0)  return `\`workItems[${i}].where\` is required`;
 			if (issue.length === 0)  return `\`workItems[${i}].issue\` is required`;

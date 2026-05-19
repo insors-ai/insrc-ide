@@ -45,7 +45,7 @@ const VAR_RE              = /\{\{([A-Z_][A-Z0-9_]*)\}\}/g;
  */
 export type PromptFlow = 'gather' | 'write' | 'review';
 
-export type PatchKind = 'fix' | 'enhance' | 'add';
+export type PatchKind = 'fix' | 'add';
 
 export type PromptVars = Record<string, string>;
 
@@ -66,9 +66,11 @@ export function loadFlowPrompt(flow: PromptFlow, vars: PromptVars): string {
 
 /**
  * Patch-flow specialization. The patch loop dispatches by kind
- * (fix / enhance / add) -- each kind has its own composition file
- * under `flow/patch/<kind>/system.md` that swaps the role + output
- * sections while sharing everything else.
+ * (fix / add) -- each kind has its own composition file under
+ * `flow/patch/<kind>/system.md` that swaps the role + output sections
+ * while sharing everything else. (`enhance` was folded into `fix`
+ * during the scope-tier work -- see plans/code-analyzer-scope-tier-
+ * prompts.md.)
  */
 export function loadPatchPrompt(kind: PatchKind, vars: PromptVars): string {
 	return loadPromptFile(`flow/patch/${kind}/system.md`, vars);
