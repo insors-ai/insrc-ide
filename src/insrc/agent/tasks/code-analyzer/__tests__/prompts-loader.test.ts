@@ -87,15 +87,19 @@ const PATCH_KINDS: readonly PatchKind[] = ['fix', 'enhance', 'add'];
 for (const kind of PATCH_KINDS) {
 	test(`loadPatchPrompt: ${kind} composes without throwing`, () => {
 		_clearCacheForTest();
-		// Patch flow currently still uses stub sections (filled in
-		// during Phase 4 lift-and-shift). No vars required by stubs;
-		// safe to pass empty.
-		const out = loadPatchPrompt(kind, {});
+		// Phase 4 filled in patch role + output-format + anti-hallucination
+		// + coverage-angles for all three kinds. Patch flow requires
+		// SKILL_CATALOG + REPO_CONTEXT (same shape as gather).
+		const out = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
 		assert.ok(out.length > 0, `patch/${kind} composed prompt is empty`);
 		assert.match(out, /<!-- BEGIN SECTION: role -->/);
-		assert.match(out, new RegExp(`stub: role-patch-${kind}`));
-		assert.match(out, new RegExp(`stub: output-format/patch-${kind}`));
+		// Role intro varies per-kind; spot-check the verb is right.
+		const verb = kind === 'fix' ? /CORRECTING ONE/
+			: kind === 'enhance' ? /ENHANCING ONE/
+			: /ADDING ONE new/;
+		assert.match(out, verb);
 		assert.doesNotMatch(out, /\{\{section:/);
+		assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/);
 	});
 }
 

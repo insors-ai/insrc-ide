@@ -31,6 +31,7 @@ import { getTool } from '../../../daemon/tools/registry.js';
 import { buildAnalyzerSkillCatalog, formatAnalyzerSkillCatalog, type AnalyzerRepoContext } from './skill-catalog.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
+import { loadPatchPrompt } from './prompts/loader.js';
 import {
 	parsePatches,
 	applyPatches,
@@ -1366,96 +1367,28 @@ async function runItemWithSkills(
 	const catalog    = buildAnalyzerSkillCatalog(input.repoContext);
 	const paragraphs = splitDraftParagraphs(workingDraft);
 
-	// Per-kind framing. All three skill-enabled kinds share the same
-	// anti-hallucination contract + multi-angle research guidance; only
-	// the verb (correct / enhance / add), the operational framing (the
-	// paragraph being addressed, insert-vs-replace), and the output
-	// rule differ.
-	const kind     = item.kind; // 'fix' | 'enhance' | 'add'
-	const replaces = kind === 'fix' || kind === 'enhance';   // both REPLACE target paragraph; add INSERTS
-	const intro    =
-		kind === 'fix'
-			? 'You are CORRECTING ONE paragraph the reviewer flagged as factually wrong or unsupported. **Fixing this issue is NOT optional.** The reviewer identified a specific factual error or unsupported claim that gates the section\'s confidence; you MUST investigate the repository to verify or refute it, then produce a corrected replacement paragraph grounded in what you actually found. Do NOT paraphrase the same claim, do NOT silently drop the issue, do NOT skip the investigation. Either ground the claim with skill results or honestly state the gap -- but the paragraph MUST change.'
-		: kind === 'enhance'
-			? 'You are ENHANCING ONE paragraph the reviewer flagged as thin, vague, or under-cited. The current paragraph is shown below; investigate the repository to surface the specifics the reviewer asked for (additional citations, named classes, line ranges, concrete behaviour), then produce an enhanced replacement paragraph grounded in what you actually found.'
-		: /* add */
-			'You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; investigate the repository to find the relevant code/tests/docs and produce a single paragraph grounded in what you actually found.';
-
-	const outputRule =
-		kind === 'fix'
-			? 'AFTER investigating, end with a final assistant turn that contains ONLY the corrected replacement paragraph. If the evidence does not support the original claim AND does not surface a correction, say so honestly in the replacement paragraph -- do NOT fabricate.'
-		: kind === 'enhance'
-			? 'AFTER investigating, end with a final assistant turn that contains ONLY the enhanced replacement paragraph. If the evidence does not surface the specifics the reviewer asked for, say so honestly -- do NOT pad with general knowledge.'
-		: /* add */
-			'AFTER investigating, end with a final assistant turn that contains ONLY the new paragraph. If the evidence does not surface enough for the topic, write a short honest paragraph stating the gap -- do NOT fabricate.';
-
-	const systemParts: string[] = [
-		'## Compliance directive (READ FIRST)',
-		'',
-		'You MUST follow EVERY instruction in this prompt carefully and without',
-		'deviation. These rules are not suggestions -- they are the contract under',
-		'which your output is judged. Partial compliance, "good enough" shortcuts,',
-		'or skipping rules you think don\'t apply will cause the output to be',
-		'rejected and the round to fail. If a rule conflicts with what feels',
-		'natural, the rule wins.',
-		'',
-		intro,
-		'',
-		'## Anti-hallucination contract (NON-NEGOTIABLE)',
-		'',
-		'You may have prior knowledge of well-known codebases (Hadoop, Linux, React,',
-		'Django, etc.). That knowledge does NOT count as evidence. The reader needs',
-		'to verify every fact against THIS specific repository -- which may be a fork,',
-		'a custom version, an outdated snapshot, or a different project with a similar name.',
-		'',
-		'Rules:',
-		'  1. EVERY claim in your replacement paragraph must trace to a `skill_invoke`',
-		'     result you obtained in this call. If you have not invoked a skill that',
-		'     surfaces a fact, that fact does not exist for this paragraph.',
-		'  2. Carry citations `[label](path:foo.ts#L1)` VERBATIM from the skill results.',
-		'     Do NOT compose paths. Do NOT cite a directory and pretend it points at a class.',
-		'  3. If your investigation does not surface what the reviewer asked for, write a',
-		'     short honest paragraph acknowledging the gap. Honest gaps beat plausible',
-		'     fabrications.',
-		'',
-		'## How to investigate',
-		'',
-		'Think like a researcher: cross-reference across MULTIPLE angles before producing',
-		'the replacement. A claim from one source is weak; from code + test + doc is strong.',
-		'',
-		'Coverage angles to pursue (pick what the reviewer flag actually requires):',
-		'',
-		'  1. **Targeted file** -- `code.source.file.describe` on the file holding the',
-		'     paragraph\'s subject. Confirms the file exists and gives you line ranges.',
-		'  2. **Key entities** -- `code.entity.locate-by-name` + `code.entity.summary`',
-		'     for classes/functions/interfaces the reviewer named.',
-		'  3. **Tests** -- `*Test*` / `*Spec*` files under the same module reveal contract',
-		'     + edge-case handling.',
-		'  4. **Examples / docs** -- `examples/`, `samples/`, README, design docs explain',
-		'     intent + canonical usage.',
-		'  5. **Cross-references** -- callers/callees, interface implementations, config',
-		'     keys when the topic is behavioural.',
-		'  6. **Module structure** -- `code.source.module.describe` when scoping or counts',
-		'     matter.',
-		'',
-		'Invoke as many skills as you need. The section-level call budget is the only cap.',
-		'Use `skill_describe({ id })` once per skill before invoking, then `skill_invoke({ skillId, args })`.',
-		'',
-		'## Output',
-		'',
-		outputRule,
-		'',
-		'NO fenced code blocks around your final paragraph. NO preamble ("Here is the',
-		'paragraph"). NO transition sentence ("Next, I will..."). Just the paragraph text.',
-		'',
-		formatAnalyzerSkillCatalog(catalog),
-	];
-	if (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty) {
-		systemParts.push('');
-		systemParts.push('## Repository under analysis');
-		systemParts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
+	// Phase 4 of plans/code-analyzer-externalize-prompts.md.
+	// Per-kind prose lives in prompts/flow/patch/<kind>/system.md and
+	// the sections it composes. This block only assembles the variable
+	// values (skill catalog + optional repo summary) and the operational
+	// flags (replaces / insert) that the user-prompt builder below uses.
+	// trim items are filtered out by the patchSectionItemwise loop before
+	// reaching this function; narrow ReviewWorkItem's kind to the three
+	// skill-enabled kinds for the loader.
+	if (item.kind === 'trim') {
+		throw new Error('runItemWithSkills called with kind=trim (caller should have filtered)');
 	}
-	const system = systemParts.join('\n');
+	const kind: 'fix' | 'enhance' | 'add' = item.kind;
+	const replaces = kind === 'fix' || kind === 'enhance';   // both REPLACE target paragraph; add INSERTS
+
+	const skillCatalog = formatAnalyzerSkillCatalog(catalog);
+	const repoContext  = (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty)
+		? '\n\n## Repository under analysis\n' + formatRepoSizeSummary(input.repoSizeSummary, 'detailed')
+		: '';
+	const system = loadPatchPrompt(kind, {
+		SKILL_CATALOG: skillCatalog,
+		REPO_CONTEXT:  repoContext,
+	});
 
 	// Resolve the target paragraph for fix/enhance so the model sees what
 	// it's replacing alongside the reviewer's note. add INSERTS so there's

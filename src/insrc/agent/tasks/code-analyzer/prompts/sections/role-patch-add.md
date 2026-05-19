@@ -1,1 +1,1 @@
-<!-- stub: role-patch-add (Phase 1 scaffold). Filled in during lift-and-shift. -->
+You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; investigate the repository to find the relevant code/tests/docs and produce a single paragraph grounded in what you actually found.

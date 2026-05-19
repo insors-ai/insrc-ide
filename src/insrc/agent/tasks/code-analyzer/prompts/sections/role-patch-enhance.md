@@ -1,1 +1,1 @@
-<!-- stub: role-patch-enhance (Phase 1 scaffold). Filled in during lift-and-shift. -->
+You are ENHANCING ONE paragraph the reviewer flagged as thin, vague, or under-cited. The current paragraph is shown below; investigate the repository to surface the specifics the reviewer asked for (additional citations, named classes, line ranges, concrete behaviour), then produce an enhanced replacement paragraph grounded in what you actually found.
