@@ -1,7 +1,10 @@
 /**
  * Multi-pass synthesis prompts for the Data Analyzer.
  *
- * Mirrors agent/tasks/code-analyzer/prompts/synthesise-multipass.ts.
+ * (Historically mirrored an analogous TS file in the code-analyzer
+ * prompts/ tree; the code-analyzer side has externalized its prompts
+ * to MD files -- see plans/code-analyzer-externalize-prompts.md. The
+ * data-analyzer can adopt the same loader-based layout later.)
  * The orchestrator's synthesise step calls `generateMultiPass()` (from
  * agent/content-gen/) which:
  *   1. Runs the OUTLINE pass to produce a section list (4-6 sections).

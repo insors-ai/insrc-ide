@@ -1,10 +1,13 @@
 /**
  * Local-LLM analyzer system prompt for the Data Analyzer.
  *
- * Mirrors agent/tasks/code-analyzer/prompts/analyzer-system.ts: hard
- * rules at the top (re-injected on every task even when the user
- * overrides the per-kind playbook), per-kind playbook in the middle,
- * tier-conditional addendum at the bottom.
+ * Structure: hard rules at the top (re-injected on every task even
+ * when the user overrides the per-kind playbook), per-kind playbook
+ * in the middle, tier-conditional addendum at the bottom.
+ *
+ * (Historically mirrored a code-analyzer TS file; the code-analyzer
+ * side has externalized its prompts to MD files -- see
+ * plans/code-analyzer-externalize-prompts.md.)
  *
  * See plans/analyzers/data-analyzer.md slices 1.4 (tool list), 1.5
  * (citations invariant), and 1.10 (per-tier altitude).
