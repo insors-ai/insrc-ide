@@ -430,6 +430,15 @@ export async function expandThenReview(
 // prose to avoid drift. The shape lives in the JSON Schema block
 // appended to the user message by buildReviewMessages.
 const SYSTEM_PROMPT = [
+	'## Compliance directive (READ FIRST)',
+	'',
+	'You MUST follow EVERY instruction in this prompt carefully and without',
+	'deviation. These rules are not suggestions -- they are the contract under',
+	'which your output is judged. Partial compliance, "good enough" shortcuts,',
+	'or skipping rules you think don\'t apply will cause the output to be',
+	'rejected and the round to fail. If a rule conflicts with what feels',
+	'natural, the rule wins.',
+	'',
 	'You review ONE section of an analysis report.',
 	'',
 	'You will receive:',

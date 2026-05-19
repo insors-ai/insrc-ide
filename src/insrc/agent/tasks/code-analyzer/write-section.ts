@@ -1375,7 +1375,7 @@ async function runItemWithSkills(
 	const replaces = kind === 'fix' || kind === 'enhance';   // both REPLACE target paragraph; add INSERTS
 	const intro    =
 		kind === 'fix'
-			? 'You are CORRECTING ONE paragraph the reviewer flagged as factually wrong or unsupported. The disputed claim is in the paragraph below; investigate the repository to verify or refute it, then produce a corrected replacement paragraph grounded in what you actually found.'
+			? 'You are CORRECTING ONE paragraph the reviewer flagged as factually wrong or unsupported. **Fixing this issue is NOT optional.** The reviewer identified a specific factual error or unsupported claim that gates the section\'s confidence; you MUST investigate the repository to verify or refute it, then produce a corrected replacement paragraph grounded in what you actually found. Do NOT paraphrase the same claim, do NOT silently drop the issue, do NOT skip the investigation. Either ground the claim with skill results or honestly state the gap -- but the paragraph MUST change.'
 		: kind === 'enhance'
 			? 'You are ENHANCING ONE paragraph the reviewer flagged as thin, vague, or under-cited. The current paragraph is shown below; investigate the repository to surface the specifics the reviewer asked for (additional citations, named classes, line ranges, concrete behaviour), then produce an enhanced replacement paragraph grounded in what you actually found.'
 		: /* add */
@@ -1390,6 +1390,15 @@ async function runItemWithSkills(
 			'AFTER investigating, end with a final assistant turn that contains ONLY the new paragraph. If the evidence does not surface enough for the topic, write a short honest paragraph stating the gap -- do NOT fabricate.';
 
 	const systemParts: string[] = [
+		'## Compliance directive (READ FIRST)',
+		'',
+		'You MUST follow EVERY instruction in this prompt carefully and without',
+		'deviation. These rules are not suggestions -- they are the contract under',
+		'which your output is judged. Partial compliance, "good enough" shortcuts,',
+		'or skipping rules you think don\'t apply will cause the output to be',
+		'rejected and the round to fail. If a rule conflicts with what feels',
+		'natural, the rule wins.',
+		'',
 		intro,
 		'',
 		'## Anti-hallucination contract (NON-NEGOTIABLE)',
