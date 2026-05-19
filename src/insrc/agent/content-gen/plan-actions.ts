@@ -85,6 +85,18 @@ export interface PlanActionsInput {
 	readonly maxTokens?: number | undefined;
 	/** Optional analyzer label for logging. */
 	readonly analyzerLabel?: string | undefined;
+	/**
+	 * Optional per-tier decomposition guidance the caller supplies. The
+	 * planner framework is shared across analyzers; this field is the
+	 * caller-injected context that tells the planner WHAT TO COVER for
+	 * the active tier. Phase E of plans/code-analyzer-scope-tier-prompts.md.
+	 *
+	 * Code-analyzer fills this with the rendered `sections/planner-
+	 * context/{tier}.md` MD. Data-analyzer (which has its own tier-
+	 * aware prompts elsewhere) leaves it undefined. When undefined,
+	 * the planner emits its prior generic prompt.
+	 */
+	readonly tierContext?: string | undefined;
 }
 
 export interface PlanActionsResult {
@@ -177,8 +189,8 @@ export async function planActions(
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(intent: string): string {
-	return [
+function buildSystemPrompt(intent: string, tierContext: string | undefined): string {
+	const parts: string[] = [
 		`You plan a ${intent} report for a coding assistant.`,
 		'',
 		'Given the user request and a brief summary context (active',
@@ -187,6 +199,17 @@ function buildSystemPrompt(intent: string): string {
 		'markdown report. The local model will pick its own tools for',
 		'each step; the cloud model reviews each section.',
 		'',
+	];
+	// Phase E of plans/code-analyzer-scope-tier-prompts.md:
+	// the caller (orchestrator) injects a per-tier decomposition menu
+	// here when one is available, so the planner emits sections aligned
+	// with the tier-appropriate exploration. Shared planner framework =
+	// generic; caller-injected context = analyzer-specific.
+	if (tierContext !== undefined && tierContext.trim().length > 0) {
+		parts.push(tierContext.trim());
+		parts.push('');
+	}
+	parts.push(
 		'Per action you MUST emit:',
 		'  - id              kebab-case stable key (deduped across actions)',
 		'  - title           short user-facing heading',
@@ -223,7 +246,8 @@ function buildSystemPrompt(intent: string): string {
 		'     any are present"), NOT generic style notes.',
 		'',
 		'Output strict JSON ONLY (no markdown fences, no prose, no preamble).',
-	].join('\n');
+	);
+	return parts.join('\n');
 }
 
 interface BuiltMessages { readonly messages: LLMMessage[]; readonly userText: string; }
@@ -253,7 +277,7 @@ function buildPlanMessagesWithDebug(input: PlanActionsInput, maxActions: number)
 	const userText = lines.join('\n');
 	return {
 		messages: [
-			{ role: 'system', content: buildSystemPrompt(input.intent) },
+			{ role: 'system', content: buildSystemPrompt(input.intent, input.tierContext) },
 			{ role: 'user',   content: userText },
 		],
 		userText,

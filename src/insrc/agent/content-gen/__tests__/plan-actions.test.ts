@@ -227,6 +227,34 @@ test('buildPlanMessages: NO executions block in the prompt (lean shape)', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Phase E: caller-injected tierContext (plans/code-analyzer-scope-tier-prompts.md)
+// ---------------------------------------------------------------------------
+
+test('buildPlanMessages: tierContext (when supplied) appears in the system prompt', () => {
+	const tierContext = '## Decomposition guidance (tier XL+)\n\nSENTINEL_TIER_BODY';
+	const { messages } = buildPlanMessages(
+		{ ...FIXTURE_INPUT, tierContext },
+		4,
+	);
+	const sys = messages[0]!.content as string;
+	assert.match(sys, /SENTINEL_TIER_BODY/);
+	// The tier block is injected ABOVE the per-action rules (the
+	// planner reads the menu first, then learns how to emit actions).
+	const tierIdx = sys.indexOf('SENTINEL_TIER_BODY');
+	const rulesIdx = sys.indexOf('Per action you MUST emit');
+	assert.ok(tierIdx >= 0 && rulesIdx >= 0 && tierIdx < rulesIdx,
+		'tierContext should precede the per-action rules');
+});
+
+test('buildPlanMessages: tierContext omitted/empty -> system prompt unchanged shape', () => {
+	const { messages: msgsNone } = buildPlanMessages({ ...FIXTURE_INPUT }, 4);
+	const { messages: msgsEmpty } = buildPlanMessages({ ...FIXTURE_INPUT, tierContext: '' }, 4);
+	const { messages: msgsWhite } = buildPlanMessages({ ...FIXTURE_INPUT, tierContext: '   \n  \n' }, 4);
+	assert.equal(msgsNone[0]!.content, msgsEmpty[0]!.content);
+	assert.equal(msgsEmpty[0]!.content, msgsWhite[0]!.content);
+});
+
+// ---------------------------------------------------------------------------
 // planActions end-to-end
 // ---------------------------------------------------------------------------
 

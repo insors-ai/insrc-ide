@@ -689,12 +689,29 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // ----- Stage 1: plan (cloud, lean input) ----------------------------
     this.emitMilestone(synthBubble, 'planning report sections...');
 
+    // Phase E of plans/code-analyzer-scope-tier-prompts.md: load the
+    // per-tier decomposition guidance MD and inject it into the planner
+    // call as tierContext. The shared planner framework treats this
+    // as opaque text; the orchestrator owns analyzer-specific content.
+    const { loadPromptFile, normalizeTier } = await import('../../agent/tasks/code-analyzer/prompts/loader.js');
+    let tierContext: string;
+    try {
+      tierContext = loadPromptFile(
+        `sections/planner-context/${normalizeTier(tier)}.md`,
+        {},
+      );
+    } catch (err) {
+      log.warn({ tier, err: (err as Error).message }, 'failed to load planner-context; planner will run without per-tier guidance');
+      tierContext = '';
+    }
+
     const plan = await planActions(
       {
         intent:         'code-analysis',
         request,
         summaryContext,
         tier,
+        tierContext,
         analyzerLabel: 'code-analyzer',
       },
       cloud,
