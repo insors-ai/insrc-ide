@@ -798,6 +798,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         action:      opts.action,
         request:     opts.request,
         repoContext: {},
+        tier:        this._tier,
         ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
         ...(opts.onProgress !== undefined ? { onProgress: opts.onProgress } : {}),
         ...(opts.priorDescribedSkills !== undefined ? { priorDescribedSkills: opts.priorDescribedSkills } : {}),
@@ -989,6 +990,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           priorDescribedSkills: draft.describedSkills,
           priorSkillCalls:      cumulativeCalls,
           round:                r,
+          tier:                 this._tier,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
           onProgress: (msg: string) => {
             this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');

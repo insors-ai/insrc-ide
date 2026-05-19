@@ -87,10 +87,13 @@ const PATCH_KINDS: readonly PatchKind[] = ['fix', 'add'];
 for (const kind of PATCH_KINDS) {
 	test(`loadPatchPrompt: ${kind} composes without throwing`, () => {
 		_clearCacheForTest();
-		// Patch flow requires SKILL_CATALOG + REPO_CONTEXT (same shape
-		// as gather). `enhance` was folded into `fix` -- see plans/
-		// code-analyzer-scope-tier-prompts.md.
-		const out = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
+		// Patch flow requires SKILL_CATALOG + REPO_CONTEXT + TIER. Phase D
+		// added per-tier dispatch on coverage-angles-patch/. `enhance` was
+		// folded into `fix` in Phase B -- see plans/code-analyzer-scope-
+		// tier-prompts.md.
+		const out = loadPatchPrompt(kind, {
+			SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
+		});
 		assert.ok(out.length > 0, `patch/${kind} composed prompt is empty`);
 		assert.match(out, /<!-- BEGIN SECTION: role -->/);
 		// Role intro varies per-kind; spot-check the verb is right.
@@ -107,12 +110,13 @@ for (const kind of PATCH_KINDS) {
 
 test('expandVars: substitutes {{VAR}} placeholders from flow vars', () => {
 	_clearCacheForTest();
-	// Gather flow has been lifted into MD (Phase 2). Its system.md
-	// requires SKILL_CATALOG + REPO_CONTEXT. Pass sentinel values so we
-	// can verify both placeholders were resolved.
+	// Gather flow requires SKILL_CATALOG + REPO_CONTEXT + TIER
+	// (Phase D added the tier dispatch). Pass sentinel values so we
+	// can verify all placeholders were resolved.
 	const out = loadPromptFile('flow/gather/system.md', {
 		SKILL_CATALOG: '## SENTINEL_CATALOG_BLOCK',
 		REPO_CONTEXT:  '',
+		TIER:          'm',
 	});
 	assert.ok(out.includes('## SENTINEL_CATALOG_BLOCK'),
 		'SKILL_CATALOG should be substituted verbatim');
@@ -279,7 +283,7 @@ function relPathFromSections(abs: string): string {
  */
 function flowVarsForSmoke(flow: PromptFlow): Record<string, string> {
 	switch (flow) {
-		case 'gather': return { SKILL_CATALOG: '', REPO_CONTEXT: '' };
+		case 'gather': return { SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm' };
 		case 'write':  return { REPO_CONTEXT: '' };
 		case 'review': return {};
 	}

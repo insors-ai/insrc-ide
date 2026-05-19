@@ -35,29 +35,114 @@ Rules:
 
 <!-- END SECTION: anti-hallucination -->
 
+<!-- BEGIN SECTION: skill-glossary -->
+## Skill primitives (term mapping for this catalog)
+
+The menus below use plain-language terms ("module", "file", "entity",
+"caller"). They map to SPECIFIC catalog skills with SPECIFIC argument
+names. The catalog is strict (`additionalProperties: false`) -- using
+the wrong arg name will be rejected with an invalid-input error and
+that call wastes your tool-call budget.
+
+ALWAYS call `skill_describe({ id })` for a skill the first time you
+use it. Read the input schema. Then use the EXACT arg names from the
+schema in your `skill_invoke` call.
+
+### Vocabulary -> skill mapping
+
+| What the menu says | Catalog skill | Required args | Returns |
+|---|---|---|---|
+| "the repo's module list" / "what directories are top-level" | `code.source.repo.describe` | (none; uses session repo) | module list sorted by file count |
+| "summarise this **module**" (a directory of source files) | `code.source.module.describe` | `modulePath` (absolute dir), `repoPath` (absolute repo root) | files, entity ids, sub-modules |
+| "summarise this **file**" / "enumerate its entities + imports" | `code.source.file.describe` | `file` (absolute path -- NOT `path`), `repoPath` | language, entity ids, imports |
+| "**locate** an entity by name" (class / function / method / etc.) | `code.entity.locate-by-name` | `name` (string); optional `kinds` (array of strings), `repoPath`, `language` | entity ids of matches |
+| "**read** an entity's body" / "what does this entity do" | `code.entity.summary` | `entityId` (32-char hex; from a prior lookup) | typed metadata + body excerpt |
+| "**who calls** this entity" | `code.entity.callers` | `entityId` (32-char hex) | calling entities (1-hop CALLS in-edges) |
+| "**semantic search** for entities" (when you don't know the name) | `code.entity.search-by-vector` | `query` (string); optional `limit`, `filter` | top-K semantically similar entities |
+
+### Standard skill chains
+
+`summary` / `callers` cannot be called standalone -- they need an
+`entityId`, which is a 32-char hex string that ONLY `locate-by-name`,
+`search-by-vector`, `file.describe`, or `module.describe` emit. Use
+one of these two canonical chains:
+
+**Chain A: name-known investigation** -- you have a class / function
+name and want to read its actual body or find its callers:
+
+  1. `locate-by-name({ name: "FooHandler" })` -- get entity ids
+  2. `summary({ entityId: <id from step 1> })` -- read the body
+  3. (optional) `callers({ entityId: <id> })` -- find who uses it
+
+**Chain B: module-down investigation** -- you want to map a directory's
+shape and pick interesting entities to read:
+
+  1. `repo.describe()` -- get the module list (skip if you already
+     know the modulePath you want)
+  2. `module.describe({ modulePath, repoPath })` -- get the files +
+     entity ids in the module
+  3. For each interesting file: `file.describe({ file, repoPath })`
+     -- get entity ids defined in that file
+  4. For the most important entities: `summary({ entityId })` -- read
+     body
+
+### Common arg-shape mistakes (observed in prior runs)
+
+- `code.source.file.describe` takes `file`, **not** `path`. Passing
+  `path` fails with `unexpected property 'path'`.
+- `code.source.module.describe` takes `modulePath` + `repoPath`,
+  **both** required, **both** absolute paths.
+- `code.entity.summary` takes `entityId` (32-char hex), **not**
+  `name`. You cannot summarise an entity by its name -- locate it
+  first.
+- `kinds` on `code.entity.locate-by-name` is an ARRAY of strings
+  (e.g. `["class", "function"]`), not a single string.
+
+When in doubt, call `skill_describe({ id })` first. Once per skill
+per section is enough; the orchestrator caches.
+
+<!-- END SECTION: skill-glossary -->
+
 <!-- BEGIN SECTION: coverage-angles -->
-## How to investigate
+## Investigation menu (tier S, patch context)
 
-Think like a researcher: cross-reference across MULTIPLE angles before producing
-the replacement. A claim from one source is weak; from code + test + doc is strong.
+You are revising ONE paragraph of an existing tier-S section. Tier-S
+is FILE-LEVEL review -- 2-3 specific files. The patch must touch the
+actual file(s) the paragraph references.
 
-Coverage angles to pursue (pick what the reviewer flag actually requires):
+### Menu items (tier S)
 
-  1. **Targeted file** -- `code.source.file.describe` on the file holding the
-     paragraph's subject. Confirms the file exists and gives you line ranges.
-  2. **Key entities** -- `code.entity.locate-by-name` + `code.entity.summary`
-     for classes/functions/interfaces the reviewer named.
-  3. **Tests** -- `*Test*` / `*Spec*` files under the same module reveal contract
-     + edge-case handling.
-  4. **Examples / docs** -- `examples/`, `samples/`, README, design docs explain
-     intent + canonical usage.
-  5. **Cross-references** -- callers/callees, interface implementations, config
-     keys when the topic is behavioural.
-  6. **Module structure** -- `code.source.module.describe` when scoping or counts
-     matter.
+1. **In-depth file review** -- `code.source.file.describe` on the
+   target file(s) the paragraph references; `code.entity.summary` on
+   the named entity within. Surface line ranges so the writer can
+   cite precisely.
+2. **Nested dependencies** -- for non-stdlib imports referenced by the
+   paragraph: `code.entity.locate-by-name` then `code.entity.summary`
+   to read the imported target (depth-1 or depth-2 max).
+3. **Data persistence touches** -- DB queries / cursor opens / file
+   opens surfaced by `code.entity.summary`; for DB queries, name the
+   table + whether parameterized.
+4. **Semantic + syntactic checks** -- error handling, ignored returns,
+   shell-script discipline (`set -e` / quoted vars), config /
+   migration safety, secret-leak risk in build scripts.
+5. **Usage review (callers with risks)** -- `code.entity.locate-by-name`
+   + `code.entity.callers` for callers of the file's exports; judge
+   whether each passes the required guards.
 
-Invoke as many skills as you need. The section-level call budget is the only cap.
-Use `skill_describe({ id })` once per skill before invoking, then `skill_invoke({ skillId, args })`.
+---
+
+## Depth + stop signal (tier S, patch)
+
+- **Minimum**: 2 substantive `skill_invoke` calls. The patch MUST
+  touch the file the paragraph names (1 `code.source.file.describe`
+  AND 1 `code.entity.summary` on the relevant entity).
+- **Target**: 3-5 calls -- file + named entity + one caller / nested
+  dep / config touch.
+- **Hard cap**: 32 calls.
+
+A tier-S paragraph patch that never reads the actual file is a
+structural fail. The section objective named specific files; ground
+the patch in their actual content.
 
 <!-- END SECTION: coverage-angles -->
 

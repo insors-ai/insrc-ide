@@ -10,8 +10,12 @@
 {{section:anti-hallucination/patch}}
 <!-- END SECTION: anti-hallucination -->
 
+<!-- BEGIN SECTION: skill-glossary -->
+{{section:skill-glossary}}
+<!-- END SECTION: skill-glossary -->
+
 <!-- BEGIN SECTION: coverage-angles -->
-{{section:coverage-angles-patch}}
+{{section:coverage-angles-patch/{{TIER}}}}
 <!-- END SECTION: coverage-angles -->
 
 <!-- BEGIN SECTION: error-catalog -->

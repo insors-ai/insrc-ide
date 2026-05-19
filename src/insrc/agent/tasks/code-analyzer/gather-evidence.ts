@@ -35,7 +35,8 @@ import { executeTool } from '../../tools/executor.js';
 import { buildAnalyzerSkillCatalog, formatAnalyzerSkillCatalog, type AnalyzerRepoContext, type CatalogEntry } from './skill-catalog.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
-import { loadFlowPrompt } from './prompts/loader.js';
+import { loadFlowPrompt, normalizeTier } from './prompts/loader.js';
+import type { ScopeSize } from '../../../shared/classify.js';
 
 const log = getLogger('code-analyzer:gather');
 
@@ -84,6 +85,11 @@ export interface GatherEvidenceInput {
 	 *  describe-before-invoke protocol so a round-2 gather doesn't
 	 *  re-describe. */
 	readonly priorDescribedSkills?: ReadonlySet<string> | undefined;
+	/** Scope tier classified at run-start. Drives which per-tier
+	 *  exploration checklist the gather prompt dispatches to
+	 *  (`sections/coverage-angles/{tier}.md`). Optional with a
+	 *  fallback to 'M' to keep older callers working. */
+	readonly tier?:                ScopeSize | undefined;
 }
 
 export interface EvidenceLedger {
@@ -140,7 +146,7 @@ export async function gatherEvidence(input: GatherEvidenceInput): Promise<Eviden
 	const maxTokens     = input.maxTokens     ?? DEFAULT_MAX_TOKENS;
 
 	const messages: LLMMessage[] = [
-		{ role: 'system', content: buildSystemPrompt(catalog, input.repoSizeSummary) },
+		{ role: 'system', content: buildSystemPrompt(catalog, input.repoSizeSummary, input.tier ?? 'M') },
 		{ role: 'user',   content: buildUserPrompt(input) },
 	];
 
@@ -350,12 +356,18 @@ export async function gatherEvidence(input: GatherEvidenceInput): Promise<Eviden
 // Prompts
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(catalog: readonly CatalogEntry[], repoSizeSummary: RepoSizeSummary | undefined): string {
-	// Phase 2 of plans/code-analyzer-externalize-prompts.md.
+function buildSystemPrompt(
+	catalog:         readonly CatalogEntry[],
+	repoSizeSummary: RepoSizeSummary | undefined,
+	tier:            ScopeSize,
+): string {
+	// Phase 2 of plans/code-analyzer-externalize-prompts.md +
+	// Phase D of plans/code-analyzer-scope-tier-prompts.md.
 	// Prose lives in prompts/flow/gather/system.md and the sections it
-	// composes. This function only assembles the variable values --
-	// the skill catalog block and the (optional) repo-summary block --
-	// and hands them to the loader.
+	// composes. This function only assembles the variable values
+	// (skill catalog + optional repo summary + tier slug) and hands
+	// them to the loader. The tier slug dispatches the per-tier
+	// coverage-angles section.
 	const skillCatalog = formatAnalyzerSkillCatalog(catalog);
 	const repoContext  = (repoSizeSummary !== undefined && !repoSizeSummary.empty)
 		? '\n\n## Repository under analysis\n' + formatRepoSizeSummary(repoSizeSummary, 'detailed')
@@ -363,6 +375,7 @@ function buildSystemPrompt(catalog: readonly CatalogEntry[], repoSizeSummary: Re
 	return loadFlowPrompt('gather', {
 		SKILL_CATALOG: skillCatalog,
 		REPO_CONTEXT:  repoContext,
+		TIER:          normalizeTier(tier),
 	});
 }
 

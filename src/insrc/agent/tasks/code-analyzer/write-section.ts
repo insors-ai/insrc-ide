@@ -31,7 +31,8 @@ import { getTool } from '../../../daemon/tools/registry.js';
 import { buildAnalyzerSkillCatalog, formatAnalyzerSkillCatalog, type AnalyzerRepoContext } from './skill-catalog.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
-import { loadPatchPrompt } from './prompts/loader.js';
+import { loadPatchPrompt, normalizeTier } from './prompts/loader.js';
+import type { ScopeSize } from '../../../shared/classify.js';
 import {
 	parsePatches,
 	applyPatches,
@@ -1204,6 +1205,11 @@ export interface PatchSectionItemwiseInput {
 	readonly priorDescribedSkills: ReadonlySet<string>;
 	readonly priorSkillCalls:      readonly CapturedSkillCall[];
 	readonly round:                2 | 3;
+	/** Scope tier classified at run-start. Drives the per-tier
+	 *  patch-investigation menu the per-item prompt dispatches to
+	 *  (`sections/coverage-angles-patch/{tier}.md`). Optional with a
+	 *  fallback to 'M' for older callers. */
+	readonly tier?:                ScopeSize | undefined;
 }
 
 /** Max skill calls a single `add` item may use inside its sub-loop.
@@ -1389,6 +1395,7 @@ async function runItemWithSkills(
 	const system = loadPatchPrompt(kind, {
 		SKILL_CATALOG: skillCatalog,
 		REPO_CONTEXT:  repoContext,
+		TIER:          normalizeTier(input.tier ?? 'M'),
 	});
 
 	// Resolve the target paragraph for fix so the model sees what it's

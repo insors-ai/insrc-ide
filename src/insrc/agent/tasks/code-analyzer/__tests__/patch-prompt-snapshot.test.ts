@@ -1,10 +1,10 @@
 /**
- * Phase 4 of plans/code-analyzer-externalize-prompts.md.
+ * Phase 4 of plans/code-analyzer-externalize-prompts.md +
+ * Phase D of plans/code-analyzer-scope-tier-prompts.md (per-tier dispatch).
  *
  * Golden-file snapshot tests for the externalized Patch (Phase P)
- * system prompts -- three flows, one per kind (fix / enhance / add).
- * Each composition is verified against a committed golden under
- * prompts-golden/patch-<kind>.txt.
+ * system prompts -- 2 kinds (fix / add) x 4 tiers (xl / l / m / s)
+ * = 8 goldens.
  *
  * Update goldens: INSRC_PROMPT_SNAPSHOT_UPDATE=1 npx tsx --test <this-file>
  */
@@ -17,8 +17,8 @@ import { fileURLToPath } from 'node:url';
 
 import { loadPatchPrompt, _clearCacheForTest, type PatchKind } from '../prompts/loader.js';
 
-const HERE         = dirname(fileURLToPath(import.meta.url));
-const GOLDEN_DIR   = join(HERE, 'prompts-golden');
+const HERE       = dirname(fileURLToPath(import.meta.url));
+const GOLDEN_DIR = join(HERE, 'prompts-golden');
 
 const FIXTURE_SKILL_CATALOG = [
 	'## Available skills',
@@ -37,31 +37,44 @@ const FIXTURE_REPO_CONTEXT =
 	'Top modules: alpha, beta';
 
 const KINDS: readonly PatchKind[] = ['fix', 'add'];
+const TIERS = ['xl', 'l', 'm', 's'] as const;
 
 for (const kind of KINDS) {
-	test(`flow/patch/${kind}/system.md composes byte-equivalently to golden`, () => {
+	for (const tier of TIERS) {
+		test(`flow/patch/${kind}/system.md (tier=${tier}) composes byte-equivalently`, () => {
+			_clearCacheForTest();
+			const composed = loadPatchPrompt(kind, {
+				SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
+				REPO_CONTEXT:  FIXTURE_REPO_CONTEXT,
+				TIER:          tier,
+			});
+
+			const goldenPath = join(GOLDEN_DIR, `patch-${kind}-${tier}.txt`);
+			if (process.env['INSRC_PROMPT_SNAPSHOT_UPDATE'] === '1') {
+				writeFileSync(goldenPath, composed + '\n', 'utf8');
+				console.log(`updated golden: ${goldenPath}`);
+				return;
+			}
+			const golden = readFileSync(goldenPath, 'utf8').replace(/\n$/, '');
+			assert.equal(composed, golden, snapshotMismatchHint(kind, tier));
+		});
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cross-kind / cross-tier invariants
+// ---------------------------------------------------------------------------
+
+for (const kind of KINDS) {
+	test(`flow/patch/${kind}/system.md preserves BEGIN/END section markers (tier=m)`, () => {
 		_clearCacheForTest();
 		const composed = loadPatchPrompt(kind, {
-			SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
-			REPO_CONTEXT:  FIXTURE_REPO_CONTEXT,
+			SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
 		});
-
-		const goldenPath = join(GOLDEN_DIR, `patch-${kind}.txt`);
-		if (process.env['INSRC_PROMPT_SNAPSHOT_UPDATE'] === '1') {
-			writeFileSync(goldenPath, composed + '\n', 'utf8');
-			console.log(`updated golden: ${goldenPath}`);
-			return;
-		}
-		const golden = readFileSync(goldenPath, 'utf8').replace(/\n$/, '');
-		assert.equal(composed, golden, snapshotMismatchHint(kind));
-	});
-
-	test(`flow/patch/${kind}/system.md preserves BEGIN/END section markers`, () => {
-		_clearCacheForTest();
-		const composed = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
 		for (const section of [
 			'compliance', 'role', 'anti-hallucination',
-			'coverage-angles', 'error-catalog', 'gap-paragraph-template',
+			'skill-glossary', 'coverage-angles',
+			'error-catalog', 'gap-paragraph-template',
 			'output-format',
 		]) {
 			assert.match(composed, new RegExp(`<!-- BEGIN SECTION: ${section} -->`));
@@ -69,9 +82,11 @@ for (const kind of KINDS) {
 		}
 	});
 
-	test(`flow/patch/${kind}/system.md includes the error catalog + gap template (Phase 6)`, () => {
+	test(`flow/patch/${kind}/system.md includes the error catalog + gap template`, () => {
 		_clearCacheForTest();
-		const composed = loadPatchPrompt(kind, { SKILL_CATALOG: '', REPO_CONTEXT: '' });
+		const composed = loadPatchPrompt(kind, {
+			SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
+		});
 		assert.match(composed, /Common failure patterns/);
 		assert.match(composed, /FABRICATED PARAGRAPH/);
 		assert.match(composed, /When the evidence does not cover a topic/);
@@ -80,20 +95,24 @@ for (const kind of KINDS) {
 
 test('fix-kind intro emphasizes "NOT optional"', () => {
 	_clearCacheForTest();
-	const composed = loadPatchPrompt('fix', { SKILL_CATALOG: '', REPO_CONTEXT: '' });
+	const composed = loadPatchPrompt('fix', {
+		SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
+	});
 	assert.match(composed, /NOT optional/);
 	assert.match(composed, /MUST change/);
 });
 
 test('add-kind intro talks about ADDING a new paragraph', () => {
 	_clearCacheForTest();
-	const composed = loadPatchPrompt('add', { SKILL_CATALOG: '', REPO_CONTEXT: '' });
+	const composed = loadPatchPrompt('add', {
+		SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
+	});
 	assert.match(composed, /ADDING ONE new paragraph/);
 });
 
-function snapshotMismatchHint(kind: PatchKind): string {
+function snapshotMismatchHint(kind: PatchKind, tier: string): string {
 	return (
-		`Patch ${kind} flow prompt diverged from the committed golden.\n` +
+		`Patch ${kind} flow prompt (tier=${tier}) diverged from the committed golden.\n` +
 		'If the divergence is intentional, regenerate:\n' +
 		'  INSRC_PROMPT_SNAPSHOT_UPDATE=1 npx tsx --test \\\n' +
 		'    src/insrc/agent/tasks/code-analyzer/__tests__/patch-prompt-snapshot.test.ts'

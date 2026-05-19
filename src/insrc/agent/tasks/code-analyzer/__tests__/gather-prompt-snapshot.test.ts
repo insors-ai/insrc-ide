@@ -1,21 +1,12 @@
 /**
- * Phase 2 of plans/code-analyzer-externalize-prompts.md.
+ * Phase 2 of plans/code-analyzer-externalize-prompts.md +
+ * Phase D of plans/code-analyzer-scope-tier-prompts.md (per-tier dispatch).
  *
- * Golden-file snapshot test for the externalized Gather (Phase G)
- * system prompt. The test:
+ * Golden-file snapshot tests for the externalized Gather (Phase G)
+ * system prompt -- ONE golden per tier (xl / l / m / s) since the
+ * gather flow now dispatches the coverage-angles section by TIER.
  *
- *   1. Composes the gather flow prompt with a fixed skill catalog +
- *      fixed repo summary fixture (no real I/O against the daemon).
- *   2. Reads the committed golden file `prompts-golden/gather.txt`.
- *   3. Asserts byte-equivalence.
- *
- * When you edit any of the gather-flow sections (compliance,
- * anti-hallucination/investigator, skill-usage, coverage-angles,
- * output-format/gather, role-gather, or flow/gather/system.md) the
- * test will fail. Eyeball the diff and update the golden file with:
- *
- *   INSRC_PROMPT_SNAPSHOT_UPDATE=1 npx tsx --test \
- *     src/insrc/agent/tasks/code-analyzer/__tests__/gather-prompt-snapshot.test.ts
+ * Update goldens: INSRC_PROMPT_SNAPSHOT_UPDATE=1 npx tsx --test <this-file>
  */
 
 import { test } from 'node:test';
@@ -26,11 +17,11 @@ import { fileURLToPath } from 'node:url';
 
 import { loadFlowPrompt, _clearCacheForTest } from '../prompts/loader.js';
 
-const HERE        = dirname(fileURLToPath(import.meta.url));
-const GOLDEN_PATH = join(HERE, 'prompts-golden', 'gather.txt');
+const HERE       = dirname(fileURLToPath(import.meta.url));
+const GOLDEN_DIR = join(HERE, 'prompts-golden');
 
 // ---------------------------------------------------------------------------
-// Fixed fixtures -- intentionally tiny so the golden stays readable
+// Fixed fixtures -- intentionally tiny so each golden stays readable
 // ---------------------------------------------------------------------------
 
 const FIXTURE_SKILL_CATALOG = [
@@ -49,53 +40,64 @@ const FIXTURE_REPO_CONTEXT_PRESENT =
 	'Files: 42\n' +
 	'Top modules: alpha, beta';
 
+const TIERS = ['xl', 'l', 'm', 's'] as const;
+
 // ---------------------------------------------------------------------------
-// Tests
+// Per-tier byte-equivalence
 // ---------------------------------------------------------------------------
 
-test('flow/gather/system.md composes byte-equivalently to golden (with repo summary)', () => {
-	_clearCacheForTest();
-	const composed = loadFlowPrompt('gather', {
-		SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
-		REPO_CONTEXT:  FIXTURE_REPO_CONTEXT_PRESENT,
+for (const tier of TIERS) {
+	test(`flow/gather/system.md (tier=${tier}) composes byte-equivalently to golden`, () => {
+		_clearCacheForTest();
+		const composed = loadFlowPrompt('gather', {
+			SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
+			REPO_CONTEXT:  FIXTURE_REPO_CONTEXT_PRESENT,
+			TIER:          tier,
+		});
+
+		const goldenPath = join(GOLDEN_DIR, `gather-${tier}.txt`);
+		if (process.env['INSRC_PROMPT_SNAPSHOT_UPDATE'] === '1') {
+			writeFileSync(goldenPath, composed + '\n', 'utf8');
+			console.log(`updated golden: ${goldenPath}`);
+			return;
+		}
+		const golden = readFileSync(goldenPath, 'utf8').replace(/\n$/, '');
+		assert.equal(composed, golden, snapshotMismatchHint(tier));
 	});
+}
 
-	if (process.env['INSRC_PROMPT_SNAPSHOT_UPDATE'] === '1') {
-		writeFileSync(GOLDEN_PATH, composed + '\n', 'utf8');
-		console.log(`updated golden: ${GOLDEN_PATH}`);
-		return;
-	}
-
-	const golden = readGolden();
-	assert.equal(composed, golden, snapshotMismatchHint());
-});
+// ---------------------------------------------------------------------------
+// Cross-tier invariants
+// ---------------------------------------------------------------------------
 
 test('flow/gather/system.md drops repo-context block when no repo summary', () => {
 	_clearCacheForTest();
 	const composed = loadFlowPrompt('gather', {
 		SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
 		REPO_CONTEXT:  '',
+		TIER:          'm',
 	});
-	// The composed prompt must NOT contain "Repository under analysis"
-	// when the caller passes empty repo context (gather-evidence.ts
-	// gates this by checking `repoSizeSummary.empty`).
 	assert.doesNotMatch(composed, /## Repository under analysis/);
-	// And it MUST end with the skill catalog (no trailing repo block).
 	assert.match(composed, /## Available skills[\s\S]+code\.source\.file\.describe[^\n]*\n?$/);
 });
 
-test('flow/gather/system.md preserves BEGIN/END section markers', () => {
-	_clearCacheForTest();
-	const composed = loadFlowPrompt('gather', {
-		SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
-		REPO_CONTEXT:  '',
-	});
-	for (const section of [
-		'role', 'compliance', 'anti-hallucination',
-		'skill-usage', 'coverage-angles', 'output-format',
-	]) {
-		assert.match(composed, new RegExp(`<!-- BEGIN SECTION: ${section} -->`));
-		assert.match(composed, new RegExp(`<!-- END SECTION: ${section} -->`));
+test('flow/gather/system.md preserves BEGIN/END section markers (all tiers)', () => {
+	for (const tier of TIERS) {
+		_clearCacheForTest();
+		const composed = loadFlowPrompt('gather', {
+			SKILL_CATALOG: FIXTURE_SKILL_CATALOG,
+			REPO_CONTEXT:  '',
+			TIER:          tier,
+		});
+		for (const section of [
+			'role', 'compliance', 'anti-hallucination',
+			'skill-usage', 'skill-glossary', 'coverage-angles', 'output-format',
+		]) {
+			assert.match(composed, new RegExp(`<!-- BEGIN SECTION: ${section} -->`),
+				`tier ${tier} missing BEGIN ${section}`);
+			assert.match(composed, new RegExp(`<!-- END SECTION: ${section} -->`),
+				`tier ${tier} missing END ${section}`);
+		}
 	}
 });
 
@@ -105,30 +107,37 @@ test('flow/gather/system.md substitutes {{SKILL_CATALOG}} verbatim', () => {
 	const composed = loadFlowPrompt('gather', {
 		SKILL_CATALOG: sentinel,
 		REPO_CONTEXT:  '',
+		TIER:          'm',
 	});
 	assert.ok(composed.includes(sentinel), 'sentinel catalog should appear verbatim');
 });
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+test('flow/gather/system.md (tier=xl) carries the XL+ menu items', () => {
+	_clearCacheForTest();
+	const composed = loadFlowPrompt('gather', {
+		SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'xl',
+	});
+	// XL+ menu is the broadest: must reference functional overview,
+	// data persistence design, and external dependencies.
+	assert.match(composed, /Functional Overview/);
+	assert.match(composed, /Data Persistence/);
+	assert.match(composed, /External Dependencies/);
+});
 
-function readGolden(): string {
-	try {
-		// strip trailing newline that writeFileSync added during update
-		return readFileSync(GOLDEN_PATH, 'utf8').replace(/\n$/, '');
-	} catch {
-		throw new Error(
-			`golden file not found at ${GOLDEN_PATH}.\n` +
-			'Generate it with: INSRC_PROMPT_SNAPSHOT_UPDATE=1 npx tsx --test <this-file>',
-		);
-	}
-}
+test('flow/gather/system.md (tier=s) carries the S menu items', () => {
+	_clearCacheForTest();
+	const composed = loadFlowPrompt('gather', {
+		SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 's',
+	});
+	// S menu emphasises file-level review + usage review.
+	assert.match(composed, /In-depth file review/);
+	assert.match(composed, /Usage review/);
+});
 
-function snapshotMismatchHint(): string {
+function snapshotMismatchHint(tier: string): string {
 	return (
-		'Gather flow prompt diverged from the committed golden.\n' +
-		'If the divergence is intentional (e.g. you edited a section), regenerate the golden:\n' +
+		`Gather flow prompt (tier=${tier}) diverged from the committed golden.\n` +
+		'If the divergence is intentional (e.g. you edited a section), regenerate:\n' +
 		'  INSRC_PROMPT_SNAPSHOT_UPDATE=1 npx tsx --test \\\n' +
 		'    src/insrc/agent/tasks/code-analyzer/__tests__/gather-prompt-snapshot.test.ts'
 	);
