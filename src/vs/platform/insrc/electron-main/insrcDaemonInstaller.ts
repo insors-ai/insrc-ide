@@ -215,7 +215,12 @@ async function install(logService: ILogService, config: DaemonRepoConfig): Promi
 	// history they can `git fetch --unshallow` inside DAEMON_DIR.
 	await run(logService, 'git', ['clone', '--branch', config.repoBranch, '--depth', '1', '--single-branch', config.repoUrl, DAEMON_DIR]);
 	await run(logService, 'npm', ['install', '--legacy-peer-deps'], DAEMON_SRC);
-	await run(logService, 'npx', ['tsc'], DAEMON_SRC);
+	// `npm run build` chains `tsc` + the prompt-MD mirror (scripts/
+	// copy-prompts.mjs). Switched from `npx tsc` so the non-TS prompt
+	// assets ship alongside the compiled JS -- the code-analyzer's
+	// externalized prompts under `prompts/` would otherwise be missing
+	// from `~/.insrc/daemon/out/` and Phase-G/W/P/R would all ENOENT.
+	await run(logService, 'npm', ['run', 'build'], DAEMON_SRC);
 	await linkNodeModules(logService);
 
 	if (!fs.existsSync(DAEMON_ENTRY_CLONED)) {
@@ -253,7 +258,8 @@ async function rebuild(logService: ILogService, headSha: string): Promise<void> 
 	logService.info(`${UPDATE_LOG_HEAD} clean-rebuilding daemon at ${headSha.slice(0, 12)}`);
 	await fs.promises.rm(DAEMON_OUT, { recursive: true, force: true });
 	await run(logService, 'npm', ['install', '--legacy-peer-deps'], DAEMON_SRC);
-	await run(logService, 'npx', ['tsc'], DAEMON_SRC);
+	// `npm run build` -- tsc + prompt-MD mirror (see install() above).
+	await run(logService, 'npm', ['run', 'build'], DAEMON_SRC);
 	await linkNodeModules(logService);
 	if (!fs.existsSync(DAEMON_ENTRY_CLONED)) {
 		throw new Error(`build completed but entry missing: ${DAEMON_ENTRY_CLONED}`);
