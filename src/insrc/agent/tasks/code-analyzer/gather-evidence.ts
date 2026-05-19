@@ -35,6 +35,7 @@ import { executeTool } from '../../tools/executor.js';
 import { buildAnalyzerSkillCatalog, formatAnalyzerSkillCatalog, type AnalyzerRepoContext, type CatalogEntry } from './skill-catalog.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
+import { loadFlowPrompt } from './prompts/loader.js';
 
 const log = getLogger('code-analyzer:gather');
 
@@ -350,126 +351,19 @@ export async function gatherEvidence(input: GatherEvidenceInput): Promise<Eviden
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(catalog: readonly CatalogEntry[], repoSizeSummary: RepoSizeSummary | undefined): string {
-	const parts: string[] = [
-		'You are GATHERING evidence for one section of a code-analysis report.',
-		'Your job is to investigate the SPECIFIC repository in front of you by calling',
-		'read-only skills. Not to write prose. Not to summarize from memory.',
-		'',
-		'## Compliance directive (READ FIRST)',
-		'',
-		'You MUST follow EVERY instruction in this prompt carefully and without',
-		'deviation. These rules are not suggestions -- they are the contract under',
-		'which your output is judged. Partial compliance, "good enough" shortcuts,',
-		'or skipping rules you think don\'t apply will cause the output to be',
-		'rejected and the round to fail. If a rule conflicts with what feels',
-		'natural, the rule wins.',
-		'',
-		// Anti-hallucination + investigation rules + stop condition + skill catalog below.
-		// Repository summary is appended at the END so the LLM sees concrete repo
-		// shape (top modules, languages, file counts) as authoritative ambient
-		// context, not as a piece of the user's request.
-		'## Anti-hallucination contract (NON-NEGOTIABLE)',
-		'',
-		'You may have prior knowledge of well-known codebases (Hadoop, Linux, React,',
-		'Django, etc.). That knowledge does NOT count as evidence. The reader needs',
-		'to verify every fact against THIS specific repository -- which may be a fork,',
-		'a custom version, an outdated snapshot, or a completely different project with',
-		'a similar name.',
-		'',
-		'Rules:',
-		'  1. EVERY claim that ends up in the report must trace to a skill_invoke result',
-		'     in YOUR gathered evidence. If you have not invoked a skill that surfaces a',
-		'     fact, that fact does not exist for this analysis.',
-		'  2. If you find yourself ABOUT to emit a stop signal without having invoked',
-		'     at least 3-4 substantive `skill_invoke` calls, that is a RED FLAG. You are',
-		'     probably about to hallucinate. Keep investigating instead.',
-		'  3. Confidence without evidence is the failure mode this design exists to prevent.',
-		'     "I know how X works in general" is not the same as "I observed X in this repo".',
-		'',
-		'## How to investigate',
-		'',
-		'Each turn:',
-		'  - Decide which skill to invoke next, then call it via skill_invoke.',
-		'  - Describe a skill (`skill_describe({ id })`) before invoking it the first time.',
-		'  - The orchestrator AUTOMATICALLY captures a structured summary of each invoke',
-		'    result after the call -- you do not need to interpret results in your text.',
-		'',
-		'Think like a researcher writing a paper. Cross-reference your claims across',
-		'MULTIPLE angles before stopping. A claim backed by one source is weak; a claim',
-		'backed by code + test + example/doc is strong. The review criteria for this',
-		'section define the questions you must answer with cited evidence -- treat each',
-		'criterion as a sub-investigation that may need several skill calls to close.',
-		'',
-		'Coverage angles to pursue (in roughly this order):',
-		'',
-		'  1. **Structure** -- describe the top-level modules the section asks about with',
-		'     `code.source.module.describe`. Confirm what files / submodules / entities',
-		'     they hold. If the section names specific subsystems, drill into each.',
-		'',
-		'  2. **Key code surfaces** -- for the classes / interfaces / functions named in',
-		'     the section criteria, use `code.entity.locate-by-name` to find them, then',
-		'     `code.entity.summary` to read their actual definitions. Then',
-		'     `code.source.file.describe` on the files those entities live in. Do NOT',
-		'     cite files or classes you have not opened with a skill.',
-		'',
-		'  3. **Tests** -- test files reveal expected behaviour + real usage. Look for',
-		'     `*Test*` / `*Spec*` / `__tests__` patterns under the section\'s scope.',
-		'     `code.source.file.describe` on the test files; this is where contracts and',
-		'     edge-case handling become explicit.',
-		'',
-		'  4. **Examples + samples** -- directories like `examples/`, `samples/`,',
-		'     `cookbook/`, or top-level demo files show how the public API is meant to',
-		'     be used. They\'re often the most accurate source on intent.',
-		'',
-		'  5. **Documentation** -- README.md, design docs under `docs/` or `design/`,',
-		'     ADRs, plan markdown files, package-level javadoc. These explain WHY a',
-		'     subsystem is shaped the way it is. Use file.describe on them.',
-		'',
-		'  6. **Cross-references** -- when an entity matters, look at its callers and',
-		'     callees, its interface implementations, its config keys. Use additional',
-		'     `code.entity.*` skills to walk the graph until the picture is complete.',
-		'',
-		'  7. **Configuration + schemas** -- if the section mentions behaviour that\'s',
-		'     tunable, look at config files (`.yaml`, `.toml`, `.properties`), schema',
-		'     definitions, and default-value declarations.',
-		'',
-		'You do NOT have to hit every angle for every section -- pick the ones the',
-		'section objective + criteria actually require. But a section that asks about a',
-		'subsystem and gets investigated only via `module.describe` is under-researched.',
-		'Push past the surface; let what you find guide what you call next.',
-		'',
-		'## Stop condition',
-		'',
-		'Before stopping, ask yourself for EACH review criterion: "do I have a',
-		'specific, cited evidence fact that lets the writer answer this?" If any',
-		'criterion has no grounded evidence -- keep investigating.',
-		'',
-		`  - When every review criterion is covered with grounded evidence, emit exactly`,
-		`    the text \`${EVIDENCE_COMPLETE_SENTINEL}\` (with NO tool calls in that turn).`,
-		`  - Do NOT emit any other text without a tool call. "I think I have enough"`,
-		`    or "this should be sufficient" without the sentinel signals to the orchestrator`,
-		`    that you are giving up early. Either keep investigating or emit the sentinel.`,
-		'  - If the skill catalog truly cannot answer the section objective, emit',
-		`    \`${EVIDENCE_COMPLETE_SENTINEL}\` only AFTER you have exhausted relevant`,
-		'    angles (structure + key code + tests + examples + docs + config) and',
-		'    confirmed nothing useful surfaces. The write phase will then honestly say',
-		'    "evidence unavailable" instead of fabricating.',
-		'',
-		'## Hard rules',
-		'',
-		'  - Do NOT write prose for the report. That happens in a SEPARATE write phase.',
-		'  - Keep your text turns SHORT -- one sentence stating what you intend to',
-		'    investigate next.',
-		`  - When done (and only when done), emit ONLY: \`${EVIDENCE_COMPLETE_SENTINEL}\``,
-		'',
-		formatAnalyzerSkillCatalog(catalog),
-	];
-	if (repoSizeSummary !== undefined && !repoSizeSummary.empty) {
-		parts.push('');
-		parts.push('## Repository under analysis');
-		parts.push(formatRepoSizeSummary(repoSizeSummary, 'detailed'));
-	}
-	return parts.join('\n');
+	// Phase 2 of plans/code-analyzer-externalize-prompts.md.
+	// Prose lives in prompts/flow/gather/system.md and the sections it
+	// composes. This function only assembles the variable values --
+	// the skill catalog block and the (optional) repo-summary block --
+	// and hands them to the loader.
+	const skillCatalog = formatAnalyzerSkillCatalog(catalog);
+	const repoContext  = (repoSizeSummary !== undefined && !repoSizeSummary.empty)
+		? '\n\n## Repository under analysis\n' + formatRepoSizeSummary(repoSizeSummary, 'detailed')
+		: '';
+	return loadFlowPrompt('gather', {
+		SKILL_CATALOG: skillCatalog,
+		REPO_CONTEXT:  repoContext,
+	});
 }
 
 function buildUserPrompt(input: GatherEvidenceInput): string {

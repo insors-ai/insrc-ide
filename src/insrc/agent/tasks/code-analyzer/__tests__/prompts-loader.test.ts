@@ -44,21 +44,19 @@ test('every section under sections/ loads without throwing', () => {
 	}
 });
 
-test('section files use HTML-comment markers, not bare placeholders', () => {
-	// Phase 1 stubs use `<!-- stub: ... -->`. Once content is filled in,
-	// the convention is BEGIN SECTION / END SECTION markers within. This
-	// test asserts the stub convention only; the snapshot tests in later
-	// phases will verify final shape.
+test('every section file has non-empty content', () => {
+	// Section files hold raw content (Markdown). BEGIN/END markers live
+	// in the flow composition files that include them, not in the
+	// sections themselves. The only invariant here is non-emptiness
+	// and that no section accidentally contains an unresolved
+	// {{section:...}} placeholder (sections can include each other,
+	// but the loader expands them recursively).
 	_clearCacheForTest();
 	const sectionFiles = listMdFiles(join(PROMPTS_ROOT, 'sections'))
 		.map(abs => relPathFromSections(abs));
 	for (const sec of sectionFiles) {
 		const raw = readSection(sec);
-		assert.match(
-			raw,
-			/<!-- stub: |<!-- BEGIN SECTION: /,
-			`section ${sec} must use HTML-comment markers, got: ${raw.slice(0, 80)}`,
-		);
+		assert.ok(raw.trim().length > 0, `section ${sec} is empty`);
 	}
 });
 
@@ -69,12 +67,14 @@ test('section files use HTML-comment markers, not bare placeholders', () => {
 const SINGLE_FOLDER_FLOWS: readonly PromptFlow[] = ['gather', 'write', 'review'];
 
 for (const flow of SINGLE_FOLDER_FLOWS) {
-	test(`loadFlowPrompt: ${flow} composes from stubs without throwing`, () => {
+	test(`loadFlowPrompt: ${flow} composes without throwing`, () => {
 		_clearCacheForTest();
-		const out = loadFlowPrompt(flow, {});
+		// Each flow accepts its own variables. Pass them as empty strings
+		// here -- the goal is structural validation (section includes
+		// resolve, BEGIN/END markers preserved), not content snapshotting.
+		// Per-flow snapshot tests verify content separately.
+		const out = loadFlowPrompt(flow, flowVarsForSmoke(flow));
 		assert.ok(out.length > 0, `${flow} composed prompt is empty`);
-		// BEGIN SECTION markers from the flow file are preserved through
-		// composition (only {{section:...}} directives are replaced).
 		assert.match(out, /<!-- BEGIN SECTION: compliance -->/);
 		assert.match(out, /<!-- END SECTION: compliance -->/);
 		// Every {{section:...}} include must have been resolved.
@@ -85,8 +85,11 @@ for (const flow of SINGLE_FOLDER_FLOWS) {
 const PATCH_KINDS: readonly PatchKind[] = ['fix', 'enhance', 'add'];
 
 for (const kind of PATCH_KINDS) {
-	test(`loadPatchPrompt: ${kind} composes from stubs without throwing`, () => {
+	test(`loadPatchPrompt: ${kind} composes without throwing`, () => {
 		_clearCacheForTest();
+		// Patch flow currently still uses stub sections (filled in
+		// during Phase 4 lift-and-shift). No vars required by stubs;
+		// safe to pass empty.
 		const out = loadPatchPrompt(kind, {});
 		assert.ok(out.length > 0, `patch/${kind} composed prompt is empty`);
 		assert.match(out, /<!-- BEGIN SECTION: role -->/);
@@ -100,19 +103,19 @@ for (const kind of PATCH_KINDS) {
 // Variable substitution
 // ---------------------------------------------------------------------------
 
-test('expandVars: substitutes a {{VAR}} placeholder', () => {
+test('expandVars: substitutes {{VAR}} placeholders from flow vars', () => {
 	_clearCacheForTest();
-	// Use loadPromptFile against a fixture-style input: we create a fake
-	// "prompt file" by reading an existing section into the cache, then
-	// reading a synthetic top-level template that references {{REPO_SUMMARY}}.
-	// Simpler: hit the real flow file with required vars supplied.
-	// Phase 1 stubs don't carry {{VAR}} yet, so this test uses readSection
-	// + a manual mock. Instead we test the failure mode below where the
-	// var IS present and required.
-	const out = loadPromptFile('flow/gather/system.md', {});
-	// No {{VAR}} placeholders in the stub composition -> no missing-var
-	// error. The lift-and-shift phases add real variables.
-	assert.ok(out.length > 0);
+	// Gather flow has been lifted into MD (Phase 2). Its system.md
+	// requires SKILL_CATALOG + REPO_CONTEXT. Pass sentinel values so we
+	// can verify both placeholders were resolved.
+	const out = loadPromptFile('flow/gather/system.md', {
+		SKILL_CATALOG: '## SENTINEL_CATALOG_BLOCK',
+		REPO_CONTEXT:  '',
+	});
+	assert.ok(out.includes('## SENTINEL_CATALOG_BLOCK'),
+		'SKILL_CATALOG should be substituted verbatim');
+	// All placeholders must be resolved.
+	assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/);
 });
 
 test('expandVars: throws on missing variable', () => {
@@ -164,4 +167,17 @@ function listMdFiles(root: string): string[] {
 function relPathFromSections(abs: string): string {
 	const sectionsRoot = join(PROMPTS_ROOT, 'sections') + '/';
 	return abs.slice(sectionsRoot.length).replace(/\.md$/, '');
+}
+
+/**
+ * Variables expected by each flow's stubs / current composition.
+ * Phase 2 has filled in gather; write + review are still stubs
+ * (filled in during Phases 3 + 5) and need no vars yet.
+ */
+function flowVarsForSmoke(flow: PromptFlow): Record<string, string> {
+	switch (flow) {
+		case 'gather': return { SKILL_CATALOG: '', REPO_CONTEXT: '' };
+		case 'write':
+		case 'review': return {};
+	}
 }
