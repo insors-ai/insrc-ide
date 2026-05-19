@@ -1257,15 +1257,29 @@ export async function patchSectionItemwise(input: PatchSectionItemwiseInput): Pr
 			continue;
 		}
 
-		if (item.kind === 'add') {
+		if (item.kind === 'add' || item.kind === 'fix') {
+			// `fix` items mean the reviewer flagged a claim as factually
+			// wrong or unsupported -- the writer needs SKILL ACCESS to
+			// actually look up the truth, same as `add`. Without skills,
+			// the writer can only paraphrase the bad claim or drop it,
+			// neither of which grounds anything. Hadoop run #75771 +
+			// fs-core-abstractions §1 confirmed: `fix` items consistently
+			// remain unaddressed (3-5 per low-conf section) because the
+			// old runFixEnhanceItem couldn't investigate.
 			const itemBudget = Math.min(ADD_ITEM_TOOL_CALL_BUDGET, remaining);
-			const itemResult = await runAddItem(item, workingDraft, input, describedSkills, itemBudget);
-			totalToolCalls += itemResult.toolCalls;
+			const itemResult = await runItemWithSkills(item, workingDraft, input, describedSkills, itemBudget);
+			// runToolLoop reports iterations as the count of TOOL-USE
+			// iterations -- 0 when the model returned text only. Every
+			// processed item still cost at least one LLM call (the
+			// final no-tool turn that emits the replacement paragraph).
+			// Bill at least 1 against the budget so a stream of zero-
+			// skill items doesn't run forever.
+			totalToolCalls += Math.max(itemResult.toolCalls, 1);
 			skillsCalled.push(...itemResult.skillsCalled);
 			skillCalls.push(...itemResult.skillCalls);
 			const text = itemResult.text.trim();
 			if (text.length === 0) {
-				statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'empty add response' });
+				statuses.set(item.id, { id: item.id, status: 'skipped', reason: `empty ${item.kind} response` });
 				continue;
 			}
 			const status = applyOneItem(workingDraft, item, text);
@@ -1274,12 +1288,13 @@ export async function patchSectionItemwise(input: PatchSectionItemwiseInput): Pr
 			continue;
 		}
 
-		// fix or enhance: one LLM call, no skills
-		const text = await runFixEnhanceItem(item, workingDraft, input);
+		// enhance: one LLM call, no skills (stylistic rewrites don't
+		// require investigation -- the claim is already supported).
+		const text = await runEnhanceItem(item, workingDraft, input);
 		totalToolCalls += 1;
 		const trimmed = text.trim();
 		if (trimmed.length === 0) {
-			statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'empty fix/enhance response' });
+			statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'empty enhance response' });
 			continue;
 		}
 		const status = applyOneItem(workingDraft, item, trimmed);
@@ -1348,7 +1363,7 @@ function applyOneItem(
 	return { patchedMarkdown: result.patchedMarkdown, itemStatus: status };
 }
 
-async function runFixEnhanceItem(
+async function runEnhanceItem(
 	item:         ReviewWorkItem,
 	workingDraft: string,
 	input:        PatchSectionItemwiseInput,
@@ -1406,7 +1421,7 @@ async function runFixEnhanceItem(
 	return stripParagraphArtifacts(resp.text);
 }
 
-async function runAddItem(
+async function runItemWithSkills(
 	item:           ReviewWorkItem,
 	workingDraft:   string,
 	input:          PatchSectionItemwiseInput,
@@ -1416,38 +1431,73 @@ async function runAddItem(
 	const catalog    = buildAnalyzerSkillCatalog(input.repoContext);
 	const paragraphs = splitDraftParagraphs(workingDraft);
 
+	// Per-kind framing. `add` = produce a new paragraph for a missing
+	// topic. `fix` = correct a factually wrong / unsupported claim in
+	// an existing paragraph. Both need skill access; the framing changes
+	// only the system prompt and the user-prompt section about the
+	// reviewer flag.
+	const isFix    = item.kind === 'fix';
+	const intro    = isFix
+		? 'You are CORRECTING ONE paragraph the reviewer flagged as factually wrong or unsupported. The disputed claim is in the paragraph below; investigate the repository to verify or refute it, then produce a corrected replacement paragraph grounded in what you actually found.'
+		: 'You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; produce a single paragraph that fills the gap.';
+	const exitRule = isFix
+		? 'AFTER gathering evidence, end with a final assistant turn that contains ONLY the replacement paragraph as plain markdown. Carry verbatim citations `[label](path:foo.ts#L1)` for every fact you used from the skill results. If the evidence does not support the original claim AND does not surface a correction, say so honestly in the replacement paragraph -- do NOT fabricate.'
+		: 'AFTER gathering evidence (or immediately, if no evidence is needed), end with a final assistant turn that contains ONLY the new paragraph as plain markdown. NO fenced code blocks around your response. NO preamble. NO transition sentence. Just the paragraph text.';
+
 	const system = [
-		'You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; produce a single paragraph that fills the gap.',
+		intro,
 		'',
-		'You MAY make up to 2 skill calls if you need new evidence the existing section does not cover. Always call `skill_describe({ id })` before invoking a skill the first time.',
+		'You MAY make up to 2 skill calls to look up evidence. Always call `skill_describe({ id })` before invoking a skill the first time.',
 		'',
-		'AFTER gathering evidence (or immediately, if no evidence is needed), end with a final assistant turn that contains ONLY the new paragraph as plain markdown. NO fenced code blocks around your response. NO preamble. NO transition sentence. Just the paragraph text.',
+		exitRule,
 		'',
 		formatAnalyzerSkillCatalog(catalog),
 	].join('\n');
+
+	// Resolve the target paragraph for `fix` so the model sees the
+	// disputed claim alongside the reviewer's note. `add` has no target
+	// (it's an insert) so this is just informational context.
+	const targetIdx = isFix ? resolveParagraphIdxByWhere(item.where, paragraphs) : null;
 
 	const userParts: string[] = [];
 	userParts.push('## Section context');
 	userParts.push(`title:     ${input.action.title}`);
 	userParts.push(`objective: ${input.action.objective}`);
 	userParts.push('');
-	userParts.push('## Reviewer flag (missing coverage)');
+	if (isFix && targetIdx !== null && targetIdx < paragraphs.length) {
+		userParts.push(`## Paragraph to correct (reviewer pointed to "${item.where}")`);
+		userParts.push(paragraphs[targetIdx]!);
+		userParts.push('');
+		userParts.push('## Reviewer flag (claim is unsupported / wrong)');
+	} else if (isFix) {
+		userParts.push('## Reviewer flag (claim is unsupported / wrong; target paragraph not located)');
+	} else {
+		userParts.push('## Reviewer flag (missing coverage)');
+	}
 	userParts.push(`Issue:  ${item.issue}`);
 	userParts.push(`Action: ${item.action}`);
-	userParts.push(`Anchor: insert after "${item.where}"`);
+	if (!isFix) {
+		userParts.push(`Anchor: insert after "${item.where}"`);
+	}
 	if (item.evidenceRefs !== undefined && item.evidenceRefs.length > 0) {
 		userParts.push(`Evidence refs: ${item.evidenceRefs.join(', ')}`);
 	}
 	userParts.push('');
 	if (paragraphs.length > 0) {
-		userParts.push('## Existing section paragraphs (read-only context)');
+		const ctxHeader = isFix
+			? '## Other section paragraphs (read-only context; the paragraph to correct is shown above)'
+			: '## Existing section paragraphs (read-only context)';
+		userParts.push(ctxHeader);
 		for (let i = 0; i < paragraphs.length; i++) {
+			if (isFix && i === targetIdx) { continue; }
 			userParts.push(`[paragraph ${i + 1}]`);
 			userParts.push(paragraphs[i]!);
 			userParts.push('');
 		}
 	}
-	userParts.push('Output your final turn as ONLY the new paragraph text.');
+	userParts.push(isFix
+		? 'Output your final turn as ONLY the corrected replacement paragraph text.'
+		: 'Output your final turn as ONLY the new paragraph text.');
 
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: system },
