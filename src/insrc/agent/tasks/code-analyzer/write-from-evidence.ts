@@ -67,7 +67,7 @@ export async function writeSectionFromEvidence(input: WriteFromEvidenceInput): P
 	const maxTokens = input.maxTokens ?? Math.max(input.action.maxBudgetTokens * 2, 2400);
 
 	const messages: LLMMessage[] = [
-		{ role: 'system', content: buildSystemPrompt() },
+		{ role: 'system', content: buildSystemPrompt(input.repoSizeSummary) },
 		{ role: 'user',   content: buildUserPrompt(input) },
 	];
 
@@ -104,15 +104,18 @@ export async function writeSectionFromEvidence(input: WriteFromEvidenceInput): P
 // Prompts
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(): string {
-	return [
+function buildSystemPrompt(repoSizeSummary: RepoSizeSummary | undefined): string {
+	const parts: string[] = [
 		'You are writing ONE section of a code-analysis report.',
 		'',
-		'You will receive:',
+		'You will receive (in the user message):',
 		'  - The section title + objective + review criteria.',
-		'  - A REPO SUMMARY for orientation.',
 		'  - The full EVIDENCE LEDGER another agent gathered for this section --',
 		'    a list of skill invocations with extracted facts and INLINE citation links.',
+		'',
+		'Repository-level context (file counts, top modules, languages) is supplied',
+		'at the END of this system prompt -- treat it as authoritative ambient context,',
+		'not as user-supplied data.',
 		'',
 		'## Anti-hallucination contract (NON-NEGOTIABLE)',
 		'',
@@ -183,7 +186,13 @@ function buildSystemPrompt(): string {
 		'Before you finish: scan your output. For EACH claim, ask "is this fact in the',
 		'evidence ledger?" If no, REMOVE or REWRITE it. For each paragraph: does it have',
 		'an inline `[...](path:...)` link from the ledger? If no, REWRITE it.',
-	].join('\n');
+	];
+	if (repoSizeSummary !== undefined && !repoSizeSummary.empty) {
+		parts.push('');
+		parts.push('## Repository under analysis');
+		parts.push(formatRepoSizeSummary(repoSizeSummary, 'detailed'));
+	}
+	return parts.join('\n');
 }
 
 function buildUserPrompt(input: WriteFromEvidenceInput): string {
@@ -199,11 +208,8 @@ function buildUserPrompt(input: WriteFromEvidenceInput): string {
 	for (const c of input.action.reviewCriteria) {
 		parts.push(`- ${c}`);
 	}
-	if (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty) {
-		parts.push('');
-		parts.push('## Repo summary');
-		parts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
-	}
+	// Repo summary moved to the system prompt (authoritative ambient
+	// context); not repeated in the user prompt.
 	parts.push('');
 	parts.push('## Evidence ledger');
 	parts.push('Each item below is a fact + a markdown-link citation. **Embed these links',

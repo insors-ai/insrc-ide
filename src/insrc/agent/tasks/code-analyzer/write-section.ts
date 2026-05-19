@@ -1206,7 +1206,11 @@ export interface PatchSectionItemwiseInput {
 
 /** Max skill calls a single `add` item may use inside its sub-loop.
  *  Counts describe + invoke + final assistant turn against this budget. */
-const ADD_ITEM_TOOL_CALL_BUDGET = 4;
+// No per-item tool-call cap. The orchestrator's section-level
+// `maxToolCalls` (default DEFAULT_MAX_TOOL_CALLS = 64) is the only
+// budget; each item gets whatever the section has left. Lets a
+// substantive `fix` or `add` investigation run as deep as it needs
+// without an artificial sub-cap fighting the gather/research framing.
 
 /** Order in which the per-item loop addresses kinds. `fix` first (the
  *  correctness gate); then `enhance` / `add` (content); then `trim`
@@ -1257,47 +1261,30 @@ export async function patchSectionItemwise(input: PatchSectionItemwiseInput): Pr
 			continue;
 		}
 
-		if (item.kind === 'add' || item.kind === 'fix') {
-			// `fix` items mean the reviewer flagged a claim as factually
-			// wrong or unsupported -- the writer needs SKILL ACCESS to
-			// actually look up the truth, same as `add`. Without skills,
-			// the writer can only paraphrase the bad claim or drop it,
-			// neither of which grounds anything. Hadoop run #75771 +
-			// fs-core-abstractions §1 confirmed: `fix` items consistently
-			// remain unaddressed (3-5 per low-conf section) because the
-			// old runFixEnhanceItem couldn't investigate.
-			const itemBudget = Math.min(ADD_ITEM_TOOL_CALL_BUDGET, remaining);
-			const itemResult = await runItemWithSkills(item, workingDraft, input, describedSkills, itemBudget);
-			// runToolLoop reports iterations as the count of TOOL-USE
-			// iterations -- 0 when the model returned text only. Every
-			// processed item still cost at least one LLM call (the
-			// final no-tool turn that emits the replacement paragraph).
-			// Bill at least 1 against the budget so a stream of zero-
-			// skill items doesn't run forever.
-			totalToolCalls += Math.max(itemResult.toolCalls, 1);
-			skillsCalled.push(...itemResult.skillsCalled);
-			skillCalls.push(...itemResult.skillCalls);
-			const text = itemResult.text.trim();
-			if (text.length === 0) {
-				statuses.set(item.id, { id: item.id, status: 'skipped', reason: `empty ${item.kind} response` });
-				continue;
-			}
-			const status = applyOneItem(workingDraft, item, text);
-			workingDraft = status.patchedMarkdown;
-			statuses.set(item.id, status.itemStatus);
+		// All three non-trim kinds (fix / enhance / add) route through
+		// the skill-enabled patch handler. Evidence from runs through
+		// 2026-05-19 showed that ~50% of `enhance` items demand new
+		// lookups (specific class refs, line ranges, expanded
+		// explanations grounded in code), not just stylistic rewrites
+		// -- which is what the old skill-less path assumed. With skill
+		// access, every patch attempt can ground itself in real
+		// evidence instead of paraphrasing or fabricating.
+		const itemResult = await runItemWithSkills(item, workingDraft, input, describedSkills, remaining);
+		// runToolLoop reports iterations as the count of TOOL-USE
+		// iterations -- 0 when the model returned text only. Every
+		// processed item still cost at least one LLM call (the
+		// final no-tool turn that emits the replacement paragraph).
+		// Bill at least 1 against the budget so a stream of zero-
+		// skill items doesn't run forever.
+		totalToolCalls += Math.max(itemResult.toolCalls, 1);
+		skillsCalled.push(...itemResult.skillsCalled);
+		skillCalls.push(...itemResult.skillCalls);
+		const text = itemResult.text.trim();
+		if (text.length === 0) {
+			statuses.set(item.id, { id: item.id, status: 'skipped', reason: `empty ${item.kind} response` });
 			continue;
 		}
-
-		// enhance: one LLM call, no skills (stylistic rewrites don't
-		// require investigation -- the claim is already supported).
-		const text = await runEnhanceItem(item, workingDraft, input);
-		totalToolCalls += 1;
-		const trimmed = text.trim();
-		if (trimmed.length === 0) {
-			statuses.set(item.id, { id: item.id, status: 'skipped', reason: 'empty enhance response' });
-			continue;
-		}
-		const status = applyOneItem(workingDraft, item, trimmed);
+		const status = applyOneItem(workingDraft, item, text);
 		workingDraft = status.patchedMarkdown;
 		statuses.set(item.id, status.itemStatus);
 	}
@@ -1363,63 +1350,11 @@ function applyOneItem(
 	return { patchedMarkdown: result.patchedMarkdown, itemStatus: status };
 }
 
-async function runEnhanceItem(
-	item:         ReviewWorkItem,
-	workingDraft: string,
-	input:        PatchSectionItemwiseInput,
-): Promise<string> {
-	const paragraphs = splitDraftParagraphs(workingDraft);
-	const targetIdx  = resolveParagraphIdxByWhere(item.where, paragraphs);
-	const targetText = targetIdx !== null && targetIdx < paragraphs.length
-		? paragraphs[targetIdx]!
-		: '(target paragraph could not be located; produce a fresh paragraph that addresses the reviewer\'s action)';
-
-	const system = [
-		'You are revising ONE paragraph of a code-analysis section. The reviewer flagged a specific issue and described a concrete fix.',
-		'',
-		'OUTPUT FORMAT: a single replacement paragraph. Plain markdown. NO fenced code blocks around your response. NO preamble ("Here is the revised paragraph"). NO transition sentence at the end ("Next, I will..."). Just the paragraph text.',
-		'',
-		'Preserve any clickable `[text](path:foo.ts#L1)` citations the original carried; add new ones where the action asks. Stay focused on this one action -- do not edit unrelated content.',
-	].join('\n');
-
-	const userParts: string[] = [];
-	userParts.push('## Section context');
-	userParts.push(`title:     ${input.action.title}`);
-	userParts.push(`objective: ${input.action.objective}`);
-	userParts.push('');
-	userParts.push(`## Paragraph to revise (reviewer pointed to "${item.where}")`);
-	userParts.push(targetText);
-	userParts.push('');
-	userParts.push('## Reviewer flag');
-	userParts.push(`Issue:  ${item.issue}`);
-	userParts.push(`Action: ${item.action}`);
-	if (item.evidenceRefs !== undefined && item.evidenceRefs.length > 0) {
-		userParts.push(`Evidence refs: ${item.evidenceRefs.join(', ')}`);
-	}
-	userParts.push('');
-	if (paragraphs.length > 1) {
-		userParts.push('## Surrounding paragraphs (read-only context, do NOT include in your output)');
-		for (let i = 0; i < paragraphs.length; i++) {
-			if (i === targetIdx) continue;
-			userParts.push(`[paragraph ${i + 1}]`);
-			userParts.push(paragraphs[i]!);
-			userParts.push('');
-		}
-	}
-	userParts.push('Output ONLY the replacement paragraph text.');
-
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: system },
-		{ role: 'user',   content: userParts.join('\n') },
-	];
-
-	input.onProgress?.(`  [${input.action.id}/patch] ${item.kind} ${item.id} (${item.where})`);
-
-	const resp = await input.provider.complete(messages, {
-		maxTokens: input.maxTokens ?? input.action.maxBudgetTokens,
-	});
-	return stripParagraphArtifacts(resp.text);
-}
+// Note: runEnhanceItem removed 2026-05-19. enhance items now route
+// through runItemWithSkills like fix and add. The single-call
+// skill-less path couldn't honour ~half of real enhance asks
+// ("add citation to X", "expand explanation of Y", "name the class
+// that does Z") because they needed lookups it didn't have access to.
 
 async function runItemWithSkills(
 	item:           ReviewWorkItem,
@@ -1431,52 +1366,119 @@ async function runItemWithSkills(
 	const catalog    = buildAnalyzerSkillCatalog(input.repoContext);
 	const paragraphs = splitDraftParagraphs(workingDraft);
 
-	// Per-kind framing. `add` = produce a new paragraph for a missing
-	// topic. `fix` = correct a factually wrong / unsupported claim in
-	// an existing paragraph. Both need skill access; the framing changes
-	// only the system prompt and the user-prompt section about the
-	// reviewer flag.
-	const isFix    = item.kind === 'fix';
-	const intro    = isFix
-		? 'You are CORRECTING ONE paragraph the reviewer flagged as factually wrong or unsupported. The disputed claim is in the paragraph below; investigate the repository to verify or refute it, then produce a corrected replacement paragraph grounded in what you actually found.'
-		: 'You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; produce a single paragraph that fills the gap.';
-	const exitRule = isFix
-		? 'AFTER gathering evidence, end with a final assistant turn that contains ONLY the replacement paragraph as plain markdown. Carry verbatim citations `[label](path:foo.ts#L1)` for every fact you used from the skill results. If the evidence does not support the original claim AND does not surface a correction, say so honestly in the replacement paragraph -- do NOT fabricate.'
-		: 'AFTER gathering evidence (or immediately, if no evidence is needed), end with a final assistant turn that contains ONLY the new paragraph as plain markdown. NO fenced code blocks around your response. NO preamble. NO transition sentence. Just the paragraph text.';
+	// Per-kind framing. All three skill-enabled kinds share the same
+	// anti-hallucination contract + multi-angle research guidance; only
+	// the verb (correct / enhance / add), the operational framing (the
+	// paragraph being addressed, insert-vs-replace), and the output
+	// rule differ.
+	const kind     = item.kind; // 'fix' | 'enhance' | 'add'
+	const replaces = kind === 'fix' || kind === 'enhance';   // both REPLACE target paragraph; add INSERTS
+	const intro    =
+		kind === 'fix'
+			? 'You are CORRECTING ONE paragraph the reviewer flagged as factually wrong or unsupported. The disputed claim is in the paragraph below; investigate the repository to verify or refute it, then produce a corrected replacement paragraph grounded in what you actually found.'
+		: kind === 'enhance'
+			? 'You are ENHANCING ONE paragraph the reviewer flagged as thin, vague, or under-cited. The current paragraph is shown below; investigate the repository to surface the specifics the reviewer asked for (additional citations, named classes, line ranges, concrete behaviour), then produce an enhanced replacement paragraph grounded in what you actually found.'
+		: /* add */
+			'You are ADDING ONE new paragraph to a code-analysis section. The reviewer flagged a missing topic; investigate the repository to find the relevant code/tests/docs and produce a single paragraph grounded in what you actually found.';
 
-	const system = [
+	const outputRule =
+		kind === 'fix'
+			? 'AFTER investigating, end with a final assistant turn that contains ONLY the corrected replacement paragraph. If the evidence does not support the original claim AND does not surface a correction, say so honestly in the replacement paragraph -- do NOT fabricate.'
+		: kind === 'enhance'
+			? 'AFTER investigating, end with a final assistant turn that contains ONLY the enhanced replacement paragraph. If the evidence does not surface the specifics the reviewer asked for, say so honestly -- do NOT pad with general knowledge.'
+		: /* add */
+			'AFTER investigating, end with a final assistant turn that contains ONLY the new paragraph. If the evidence does not surface enough for the topic, write a short honest paragraph stating the gap -- do NOT fabricate.';
+
+	const systemParts: string[] = [
 		intro,
 		'',
-		'You MAY make up to 2 skill calls to look up evidence. Always call `skill_describe({ id })` before invoking a skill the first time.',
+		'## Anti-hallucination contract (NON-NEGOTIABLE)',
 		'',
-		exitRule,
+		'You may have prior knowledge of well-known codebases (Hadoop, Linux, React,',
+		'Django, etc.). That knowledge does NOT count as evidence. The reader needs',
+		'to verify every fact against THIS specific repository -- which may be a fork,',
+		'a custom version, an outdated snapshot, or a different project with a similar name.',
+		'',
+		'Rules:',
+		'  1. EVERY claim in your replacement paragraph must trace to a `skill_invoke`',
+		'     result you obtained in this call. If you have not invoked a skill that',
+		'     surfaces a fact, that fact does not exist for this paragraph.',
+		'  2. Carry citations `[label](path:foo.ts#L1)` VERBATIM from the skill results.',
+		'     Do NOT compose paths. Do NOT cite a directory and pretend it points at a class.',
+		'  3. If your investigation does not surface what the reviewer asked for, write a',
+		'     short honest paragraph acknowledging the gap. Honest gaps beat plausible',
+		'     fabrications.',
+		'',
+		'## How to investigate',
+		'',
+		'Think like a researcher: cross-reference across MULTIPLE angles before producing',
+		'the replacement. A claim from one source is weak; from code + test + doc is strong.',
+		'',
+		'Coverage angles to pursue (pick what the reviewer flag actually requires):',
+		'',
+		'  1. **Targeted file** -- `code.source.file.describe` on the file holding the',
+		'     paragraph\'s subject. Confirms the file exists and gives you line ranges.',
+		'  2. **Key entities** -- `code.entity.locate-by-name` + `code.entity.summary`',
+		'     for classes/functions/interfaces the reviewer named.',
+		'  3. **Tests** -- `*Test*` / `*Spec*` files under the same module reveal contract',
+		'     + edge-case handling.',
+		'  4. **Examples / docs** -- `examples/`, `samples/`, README, design docs explain',
+		'     intent + canonical usage.',
+		'  5. **Cross-references** -- callers/callees, interface implementations, config',
+		'     keys when the topic is behavioural.',
+		'  6. **Module structure** -- `code.source.module.describe` when scoping or counts',
+		'     matter.',
+		'',
+		'Invoke as many skills as you need. The section-level call budget is the only cap.',
+		'Use `skill_describe({ id })` once per skill before invoking, then `skill_invoke({ skillId, args })`.',
+		'',
+		'## Output',
+		'',
+		outputRule,
+		'',
+		'NO fenced code blocks around your final paragraph. NO preamble ("Here is the',
+		'paragraph"). NO transition sentence ("Next, I will..."). Just the paragraph text.',
 		'',
 		formatAnalyzerSkillCatalog(catalog),
-	].join('\n');
+	];
+	if (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty) {
+		systemParts.push('');
+		systemParts.push('## Repository under analysis');
+		systemParts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
+	}
+	const system = systemParts.join('\n');
 
-	// Resolve the target paragraph for `fix` so the model sees the
-	// disputed claim alongside the reviewer's note. `add` has no target
-	// (it's an insert) so this is just informational context.
-	const targetIdx = isFix ? resolveParagraphIdxByWhere(item.where, paragraphs) : null;
+	// Resolve the target paragraph for fix/enhance so the model sees what
+	// it's replacing alongside the reviewer's note. add INSERTS so there's
+	// no target -- surrounding paragraphs serve as informational context.
+	const targetIdx = replaces ? resolveParagraphIdxByWhere(item.where, paragraphs) : null;
+
+	const flagHeader =
+		kind === 'fix'     ? '## Reviewer flag (claim is unsupported / wrong)'
+		: kind === 'enhance' ? '## Reviewer flag (paragraph is thin / under-cited / vague)'
+		:                       '## Reviewer flag (missing coverage)';
 
 	const userParts: string[] = [];
 	userParts.push('## Section context');
 	userParts.push(`title:     ${input.action.title}`);
 	userParts.push(`objective: ${input.action.objective}`);
 	userParts.push('');
-	if (isFix && targetIdx !== null && targetIdx < paragraphs.length) {
-		userParts.push(`## Paragraph to correct (reviewer pointed to "${item.where}")`);
+	if (replaces && targetIdx !== null && targetIdx < paragraphs.length) {
+		const targetHeader = kind === 'fix'
+			? `## Paragraph to correct (reviewer pointed to "${item.where}")`
+			: `## Paragraph to enhance (reviewer pointed to "${item.where}")`;
+		userParts.push(targetHeader);
 		userParts.push(paragraphs[targetIdx]!);
 		userParts.push('');
-		userParts.push('## Reviewer flag (claim is unsupported / wrong)');
-	} else if (isFix) {
-		userParts.push('## Reviewer flag (claim is unsupported / wrong; target paragraph not located)');
+		userParts.push(flagHeader);
+	} else if (replaces) {
+		userParts.push(`${flagHeader} (target paragraph not located -- produce a fresh paragraph)`);
 	} else {
-		userParts.push('## Reviewer flag (missing coverage)');
+		userParts.push(flagHeader);
 	}
 	userParts.push(`Issue:  ${item.issue}`);
 	userParts.push(`Action: ${item.action}`);
-	if (!isFix) {
+	if (!replaces) {
 		userParts.push(`Anchor: insert after "${item.where}"`);
 	}
 	if (item.evidenceRefs !== undefined && item.evidenceRefs.length > 0) {
@@ -1484,19 +1486,19 @@ async function runItemWithSkills(
 	}
 	userParts.push('');
 	if (paragraphs.length > 0) {
-		const ctxHeader = isFix
-			? '## Other section paragraphs (read-only context; the paragraph to correct is shown above)'
+		const ctxHeader = replaces
+			? '## Other section paragraphs (read-only context; the paragraph to revise is shown above)'
 			: '## Existing section paragraphs (read-only context)';
 		userParts.push(ctxHeader);
 		for (let i = 0; i < paragraphs.length; i++) {
-			if (isFix && i === targetIdx) { continue; }
+			if (replaces && i === targetIdx) { continue; }
 			userParts.push(`[paragraph ${i + 1}]`);
 			userParts.push(paragraphs[i]!);
 			userParts.push('');
 		}
 	}
-	userParts.push(isFix
-		? 'Output your final turn as ONLY the corrected replacement paragraph text.'
+	userParts.push(replaces
+		? `Output your final turn as ONLY the ${kind === 'fix' ? 'corrected' : 'enhanced'} replacement paragraph text.`
 		: 'Output your final turn as ONLY the new paragraph text.');
 
 	const messages: LLMMessage[] = [
@@ -1517,7 +1519,7 @@ async function runItemWithSkills(
 	const pendingByIteration = new Map<number, { skillId: string; args: Record<string, unknown> }>();
 	let nextIteration = 0;
 
-	input.onProgress?.(`  [${input.action.id}/patch] add ${item.id} (${item.where})`);
+	input.onProgress?.(`  [${input.action.id}/patch] ${kind} ${item.id} (${item.where})`);
 
 	const loopOpts: Parameters<typeof runToolLoop>[1] = {
 		provider:               input.provider,

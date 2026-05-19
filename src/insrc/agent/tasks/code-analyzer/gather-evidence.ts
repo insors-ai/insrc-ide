@@ -139,7 +139,7 @@ export async function gatherEvidence(input: GatherEvidenceInput): Promise<Eviden
 	const maxTokens     = input.maxTokens     ?? DEFAULT_MAX_TOKENS;
 
 	const messages: LLMMessage[] = [
-		{ role: 'system', content: buildSystemPrompt(catalog) },
+		{ role: 'system', content: buildSystemPrompt(catalog, input.repoSizeSummary) },
 		{ role: 'user',   content: buildUserPrompt(input) },
 	];
 
@@ -349,12 +349,16 @@ export async function gatherEvidence(input: GatherEvidenceInput): Promise<Eviden
 // Prompts
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(catalog: readonly CatalogEntry[]): string {
-	return [
+function buildSystemPrompt(catalog: readonly CatalogEntry[], repoSizeSummary: RepoSizeSummary | undefined): string {
+	const parts: string[] = [
 		'You are GATHERING evidence for one section of a code-analysis report.',
 		'Your job is to investigate the SPECIFIC repository in front of you by calling',
 		'read-only skills. Not to write prose. Not to summarize from memory.',
 		'',
+		// Anti-hallucination + investigation rules + stop condition + skill catalog below.
+		// Repository summary is appended at the END so the LLM sees concrete repo
+		// shape (top modules, languages, file counts) as authoritative ambient
+		// context, not as a piece of the user's request.
 		'## Anti-hallucination contract (NON-NEGOTIABLE)',
 		'',
 		'You may have prior knowledge of well-known codebases (Hadoop, Linux, React,',
@@ -381,28 +385,66 @@ function buildSystemPrompt(catalog: readonly CatalogEntry[]): string {
 		'  - The orchestrator AUTOMATICALLY captures a structured summary of each invoke',
 		'    result after the call -- you do not need to interpret results in your text.',
 		'',
-		'Investigate at MULTIPLE levels of detail before stopping:',
-		'  - At LEAST one `code.source.module.describe` for each top-level module the',
-		'    section asks about, to confirm it exists and to count files/entities.',
-		'  - At LEAST one `code.source.file.describe` per significant file you intend',
-		'    to cite, to confirm it exists and grab line ranges. Do NOT cite files you',
-		'    have not opened with a skill.',
-		'  - When the section is about a specific class or function, use',
-		'    `code.entity.locate-by-name` or `code.entity.summary` to ground the claim',
-		'    in the actual entity definition.',
+		'Think like a researcher writing a paper. Cross-reference your claims across',
+		'MULTIPLE angles before stopping. A claim backed by one source is weak; a claim',
+		'backed by code + test + example/doc is strong. The review criteria for this',
+		'section define the questions you must answer with cited evidence -- treat each',
+		'criterion as a sub-investigation that may need several skill calls to close.',
+		'',
+		'Coverage angles to pursue (in roughly this order):',
+		'',
+		'  1. **Structure** -- describe the top-level modules the section asks about with',
+		'     `code.source.module.describe`. Confirm what files / submodules / entities',
+		'     they hold. If the section names specific subsystems, drill into each.',
+		'',
+		'  2. **Key code surfaces** -- for the classes / interfaces / functions named in',
+		'     the section criteria, use `code.entity.locate-by-name` to find them, then',
+		'     `code.entity.summary` to read their actual definitions. Then',
+		'     `code.source.file.describe` on the files those entities live in. Do NOT',
+		'     cite files or classes you have not opened with a skill.',
+		'',
+		'  3. **Tests** -- test files reveal expected behaviour + real usage. Look for',
+		'     `*Test*` / `*Spec*` / `__tests__` patterns under the section\'s scope.',
+		'     `code.source.file.describe` on the test files; this is where contracts and',
+		'     edge-case handling become explicit.',
+		'',
+		'  4. **Examples + samples** -- directories like `examples/`, `samples/`,',
+		'     `cookbook/`, or top-level demo files show how the public API is meant to',
+		'     be used. They\'re often the most accurate source on intent.',
+		'',
+		'  5. **Documentation** -- README.md, design docs under `docs/` or `design/`,',
+		'     ADRs, plan markdown files, package-level javadoc. These explain WHY a',
+		'     subsystem is shaped the way it is. Use file.describe on them.',
+		'',
+		'  6. **Cross-references** -- when an entity matters, look at its callers and',
+		'     callees, its interface implementations, its config keys. Use additional',
+		'     `code.entity.*` skills to walk the graph until the picture is complete.',
+		'',
+		'  7. **Configuration + schemas** -- if the section mentions behaviour that\'s',
+		'     tunable, look at config files (`.yaml`, `.toml`, `.properties`), schema',
+		'     definitions, and default-value declarations.',
+		'',
+		'You do NOT have to hit every angle for every section -- pick the ones the',
+		'section objective + criteria actually require. But a section that asks about a',
+		'subsystem and gets investigated only via `module.describe` is under-researched.',
+		'Push past the surface; let what you find guide what you call next.',
 		'',
 		'## Stop condition',
 		'',
-		`  - When you judge you have enough evidence to cover the section objective + review`,
-		`    criteria, emit exactly the text \`${EVIDENCE_COMPLETE_SENTINEL}\` (with NO tool`,
-		`    calls in that turn).`,
+		'Before stopping, ask yourself for EACH review criterion: "do I have a',
+		'specific, cited evidence fact that lets the writer answer this?" If any',
+		'criterion has no grounded evidence -- keep investigating.',
+		'',
+		`  - When every review criterion is covered with grounded evidence, emit exactly`,
+		`    the text \`${EVIDENCE_COMPLETE_SENTINEL}\` (with NO tool calls in that turn).`,
 		`  - Do NOT emit any other text without a tool call. "I think I have enough"`,
 		`    or "this should be sufficient" without the sentinel signals to the orchestrator`,
 		`    that you are giving up early. Either keep investigating or emit the sentinel.`,
-		'  - If the skill catalog cannot answer the section objective at all, emit',
-		`    \`${EVIDENCE_COMPLETE_SENTINEL}\` only AFTER you have tried at least 3 distinct`,
-		'    skills to confirm nothing useful is available. The write phase will then',
-		'    honestly say "evidence unavailable" instead of fabricating.',
+		'  - If the skill catalog truly cannot answer the section objective, emit',
+		`    \`${EVIDENCE_COMPLETE_SENTINEL}\` only AFTER you have exhausted relevant`,
+		'    angles (structure + key code + tests + examples + docs + config) and',
+		'    confirmed nothing useful surfaces. The write phase will then honestly say',
+		'    "evidence unavailable" instead of fabricating.',
 		'',
 		'## Hard rules',
 		'',
@@ -412,7 +454,13 @@ function buildSystemPrompt(catalog: readonly CatalogEntry[]): string {
 		`  - When done (and only when done), emit ONLY: \`${EVIDENCE_COMPLETE_SENTINEL}\``,
 		'',
 		formatAnalyzerSkillCatalog(catalog),
-	].join('\n');
+	];
+	if (repoSizeSummary !== undefined && !repoSizeSummary.empty) {
+		parts.push('');
+		parts.push('## Repository under analysis');
+		parts.push(formatRepoSizeSummary(repoSizeSummary, 'detailed'));
+	}
+	return parts.join('\n');
 }
 
 function buildUserPrompt(input: GatherEvidenceInput): string {
@@ -427,11 +475,6 @@ function buildUserPrompt(input: GatherEvidenceInput): string {
 	parts.push('## Review criteria (what the reviewer will score on)');
 	for (const c of input.action.reviewCriteria) {
 		parts.push(`- ${c}`);
-	}
-	if (input.repoSizeSummary !== undefined && !input.repoSizeSummary.empty) {
-		parts.push('');
-		parts.push('## Repo summary');
-		parts.push(formatRepoSizeSummary(input.repoSizeSummary, 'detailed'));
 	}
 	parts.push('');
 	parts.push(`Begin gathering. When you have enough, emit \`${EVIDENCE_COMPLETE_SENTINEL}\`.`);
