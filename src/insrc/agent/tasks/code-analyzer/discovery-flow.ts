@@ -31,9 +31,10 @@
  * structured `Citation[]` directly, at which point the adapter
  * goes away.
  *
- * Feature-gated: orchestrator only enters this path when
- * `process.env.INSRC_ANALYZER_FLOW === 'discovery'`. Default
- * (`gather-write`) keeps using the existing patch-loop flow.
+ * Default behavior: this is the active code path. Set
+ * `INSRC_ANALYZER_FLOW=gather-write` in the daemon env to opt
+ * out (legacy patch-loop flow stays available until Phase eta
+ * deletes it).
  */
 
 import type { LLMProvider } from '../../../shared/types.js';
@@ -310,9 +311,15 @@ export function renderCitationAsString(c: Citation): string {
  * True when the discovery flow is the active path. Read at function-
  * call time (not module-init) so tests can override `process.env`
  * without re-importing.
+ *
+ * **Default is `true`** (the discovery flow is the default path).
+ * The legacy gather-write + patch flow remains opt-in until Phase
+ * eta deletes it -- set `INSRC_ANALYZER_FLOW=gather-write` to fall
+ * back to the prior pipeline. Any other value (or unset) selects
+ * the new discovery flow.
  */
 export function isDiscoveryFlowEnabled(): boolean {
-	return process.env['INSRC_ANALYZER_FLOW'] === 'discovery';
+	return process.env['INSRC_ANALYZER_FLOW'] !== 'gather-write';
 }
 
 // ---------------------------------------------------------------------------

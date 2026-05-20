@@ -860,11 +860,11 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via tool loop...`);
 
       // Phase delta of plans/code-analyzer-discovery-plan-loop.md:
-      // when INSRC_ANALYZER_FLOW=discovery, replace the entire per-
-      // section gather + write + patch + picker pipeline with the
-      // cloud-driven discovery-plan loop. Feature-gated so the
-      // existing flow stays the default until empirical validation
-      // (Phase zeta) ships.
+      // the discovery-plan loop replaces the entire per-section
+      // gather + write + patch + picker pipeline with a cloud-driven
+      // multi-cycle discovery + structured-citation + prose-review
+      // flow. Default-on; opt out with INSRC_ANALYZER_FLOW=gather-write
+      // until Phase eta deletes the legacy fallback below.
       const { isDiscoveryFlowEnabled, runDiscoveryFlow } = await import('../../agent/tasks/code-analyzer/discovery-flow.js');
       if (isDiscoveryFlowEnabled()) {
         const discResult = await runDiscoveryFlow({
