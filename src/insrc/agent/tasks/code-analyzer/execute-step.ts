@@ -79,7 +79,7 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 	}
 
 	const system     = buildStepSystemPrompt(input.repoSizeSummary);
-	const userPrompt = buildStepUserPrompt(input.step);
+	const userPrompt = buildStepUserPrompt(input.step, input.repoSizeSummary?.repoPath);
 
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: system },
@@ -167,16 +167,29 @@ function buildStepSystemPrompt(repoSizeSummary: RepoSizeSummary | undefined): st
 	return loadFlowPrompt('execute-step', { REPO_CONTEXT: repoContext });
 }
 
-function buildStepUserPrompt(step: DiscoveryStep): string {
+function buildStepUserPrompt(step: DiscoveryStep, repoPath: string | undefined): string {
 	// Dynamic, per-step. Imperative task list -- one numbered item per
 	// PlannedSkillCall, with the bolded target and (optionally) a Chain
 	// line that names the source task + the field to pull. The model
 	// reads the skill's argument schema from the catalog in the system
 	// prompt; the user message says what to invoke and what to invoke
 	// it for.
+	//
+	// The workspace root is repeated at the top of the user prompt
+	// (even though it's also in REPO_CONTEXT) so the model sees the
+	// absolute path right next to the imperatives. Empirical: when the
+	// path was only in the system prompt's repo summary, Devstral
+	// missed it and invented `/repo` for the `repoPath` argument.
 	const parts: string[] = [];
 	parts.push(`## Step: ${step.id}`);
 	parts.push(`Intent: ${step.intent.trim()}`);
+	if (repoPath !== undefined && repoPath.length > 0) {
+		parts.push('');
+		parts.push(`**Workspace root:** \`${repoPath}\``);
+		parts.push(`Use this exact path as the \`repoPath\` argument on every skill call below.`);
+		parts.push(`For \`modulePath\` / \`file\` arguments, prefix this root onto the repo-relative paths`);
+		parts.push(`shown in the repository summary.`);
+	}
 	parts.push('');
 	parts.push('## Tasks (run in order)');
 	parts.push('');

@@ -238,7 +238,7 @@ test('buildStepSystemPrompt: omits repo-context block when repoSizeSummary is un
 });
 
 test('buildStepUserPrompt: names the step id + intent + imperative task list', () => {
-	const prompt = buildStepUserPrompt(fixtureStep());
+	const prompt = buildStepUserPrompt(fixtureStep(), undefined);
 	assert.match(prompt, /## Step: step-1/);
 	assert.match(prompt, /Intent: investigate the FSDirectory class/);
 	assert.match(prompt, /## Tasks \(run in order\)/);
@@ -248,14 +248,27 @@ test('buildStepUserPrompt: names the step id + intent + imperative task list', (
 });
 
 test('buildStepUserPrompt: emits a Chain hint line for dependsOn calls', () => {
-	const prompt = buildStepUserPrompt(fixtureStep());
+	const prompt = buildStepUserPrompt(fixtureStep(), undefined);
 	// s1.b depends on s1.a, which is the first task (index 1).
 	assert.match(prompt, /Chain: use the `entityId` from task 1's result/);
 });
 
 test('buildStepUserPrompt: closes by telling the model to emit the JSON envelope as its final turn', () => {
-	const prompt = buildStepUserPrompt(fixtureStep());
+	const prompt = buildStepUserPrompt(fixtureStep(), undefined);
 	assert.match(prompt, /emit the JSON envelope as your FINAL assistant turn/);
+});
+
+test('buildStepUserPrompt: surfaces the workspace root + repoPath directive when provided', () => {
+	const prompt = buildStepUserPrompt(fixtureStep(), '/Users/u/work/hadoop');
+	assert.match(prompt, /\*\*Workspace root:\*\* `\/Users\/u\/work\/hadoop`/);
+	assert.match(prompt, /Use this exact path as the `repoPath` argument/);
+});
+
+test('buildStepUserPrompt: omits workspace-root block when repoPath is undefined or empty', () => {
+	const promptUndef = buildStepUserPrompt(fixtureStep(), undefined);
+	assert.doesNotMatch(promptUndef, /Workspace root/);
+	const promptEmpty = buildStepUserPrompt(fixtureStep(), '');
+	assert.doesNotMatch(promptEmpty, /Workspace root/);
 });
 
 // ---------------------------------------------------------------------------
