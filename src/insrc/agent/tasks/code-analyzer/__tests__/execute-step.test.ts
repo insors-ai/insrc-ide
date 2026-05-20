@@ -63,16 +63,6 @@ function fixtureStep(): DiscoveryStep {
 	};
 }
 
-const FIX_SCHEMA: Record<string, unknown> = {
-	type:       'object',
-	required:   ['name'],
-	properties: { name: { type: 'string', description: 'Exact name to match.' } },
-};
-
-function fakeSchemaLookup(known: Record<string, Record<string, unknown>>) {
-	return (id: string) => known[id];
-}
-
 function fakeProvider(responses: readonly LLMResponse[]): { provider: LLMProvider; calls: LLMMessage[][] } {
 	const calls: LLMMessage[][] = [];
 	let i = 0;
@@ -217,47 +207,55 @@ test('determineStatus: all planned called + facts + citations -> ok', () => {
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
-test('buildStepSystemPrompt: includes step intent + planned skill ids + schemas when known', () => {
-	const step = fixtureStep();
-	const lookup = fakeSchemaLookup({
-		'code.entity.locate-by-name': FIX_SCHEMA,
-		'code.entity.summary':        FIX_SCHEMA,
-	});
-	const prompt = buildStepSystemPrompt(step, lookup);
-	assert.match(prompt, /investigate the FSDirectory class/);
+test('buildStepSystemPrompt: loads static MD with the skill catalog', () => {
+	const prompt = buildStepSystemPrompt(undefined);
+	// The static skill glossary section is embedded.
+	assert.match(prompt, /Skill primitives/);
 	assert.match(prompt, /code\.entity\.locate-by-name/);
 	assert.match(prompt, /code\.entity\.summary/);
-	assert.match(prompt, /Input schema:/);
-	// Both schemas inlined.
-	const occurrences = (prompt.match(/Input schema:/g) ?? []).length;
-	assert.equal(occurrences, 2);
+	assert.match(prompt, /Chain A/);
+	assert.match(prompt, /Chain B/);
 });
 
-test('buildStepSystemPrompt: missing schema falls back to "call skill_describe first" hint', () => {
-	const step = fixtureStep();
-	const lookup = fakeSchemaLookup({});   // both schemas unknown
-	const prompt = buildStepSystemPrompt(step, lookup);
-	assert.match(prompt, /Input schema: unavailable/);
-	assert.match(prompt, /skill_describe\(\{ id: "code\.entity\.locate-by-name" \}\)/);
-});
-
-test('buildStepSystemPrompt: surfaces dependsOn relationship', () => {
-	const step = fixtureStep();
-	const prompt = buildStepSystemPrompt(step, () => undefined);
-	assert.match(prompt, /Depends on: s1\.a/);
-});
-
-test('buildStepSystemPrompt: instructs model to emit the final JSON object only', () => {
-	const prompt = buildStepSystemPrompt(fixtureStep(), () => undefined);
-	assert.match(prompt, /## Final output/);
+test('buildStepSystemPrompt: includes envelope schema + the no-prose-around-JSON rule', () => {
+	const prompt = buildStepSystemPrompt(undefined);
 	assert.match(prompt, /"facts":/);
 	assert.match(prompt, /"citations":/);
-	assert.match(prompt, /Output ONLY the JSON object in your final turn/);
+	assert.match(prompt, /markdown fences/i);
+	assert.match(prompt, /preamble/i);
 });
 
-test('buildStepUserPrompt: names the step id', () => {
+test('buildStepSystemPrompt: documents how to read the user message + DOs/DONTs', () => {
+	const prompt = buildStepSystemPrompt(undefined);
+	assert.match(prompt, /How the user message is structured/);
+	assert.match(prompt, /## DOs/);
+	assert.match(prompt, /## DON'Ts/);
+});
+
+test('buildStepSystemPrompt: omits repo-context block when repoSizeSummary is undefined', () => {
+	const prompt = buildStepSystemPrompt(undefined);
+	assert.doesNotMatch(prompt, /## Repository under analysis/);
+});
+
+test('buildStepUserPrompt: names the step id + intent + imperative task list', () => {
 	const prompt = buildStepUserPrompt(fixtureStep());
 	assert.match(prompt, /## Step: step-1/);
+	assert.match(prompt, /Intent: investigate the FSDirectory class/);
+	assert.match(prompt, /## Tasks \(run in order\)/);
+	// Imperative "Invoke ... for **target**." framing.
+	assert.match(prompt, /1\. Invoke `code\.entity\.locate-by-name` for \*\*the FSDirectory class\*\*\./);
+	assert.match(prompt, /2\. Invoke `code\.entity\.summary` for \*\*use entityId from s1\.a\*\*\./);
+});
+
+test('buildStepUserPrompt: emits a Chain hint line for dependsOn calls', () => {
+	const prompt = buildStepUserPrompt(fixtureStep());
+	// s1.b depends on s1.a, which is the first task (index 1).
+	assert.match(prompt, /Chain: use the `entityId` from task 1's result/);
+});
+
+test('buildStepUserPrompt: closes by telling the model to emit the JSON envelope as its final turn', () => {
+	const prompt = buildStepUserPrompt(fixtureStep());
+	assert.match(prompt, /emit the JSON envelope as your FINAL assistant turn/);
 });
 
 // ---------------------------------------------------------------------------
@@ -286,7 +284,6 @@ test('executeStep: happy-path -- ok step output, structured citations', async ()
 		provider,
 		session:         FAKE_SESSION,
 		step,
-		getSkillSchema:  () => FIX_SCHEMA,
 	});
 	// Status: failed because no skills were called in this fake path.
 	// The test verifies the parse + structure round-trip, not the
@@ -305,7 +302,6 @@ test('executeStep: empty model output -> failed status, empty arrays', async () 
 		provider,
 		session:         FAKE_SESSION,
 		step:            fixtureStep(),
-		getSkillSchema:  () => undefined,
 	});
 	assert.equal(out.status, 'failed');
 	assert.equal(out.facts.length, 0);
@@ -318,7 +314,6 @@ test('executeStep: malformed JSON output -> failed status', async () => {
 		provider,
 		session:         FAKE_SESSION,
 		step:            fixtureStep(),
-		getSkillSchema:  () => undefined,
 	});
 	assert.equal(out.status, 'failed');
 });
@@ -329,7 +324,6 @@ test('executeStep: stepId preserved from input', async () => {
 		provider,
 		session:         FAKE_SESSION,
 		step:            { ...fixtureStep(), id: 'step-42' },
-		getSkillSchema:  () => undefined,
 	});
 	assert.equal(out.stepId, 'step-42');
 });

@@ -58,7 +58,6 @@ import { computeCoverage } from './cycle-memory.js';
 import { executeStep } from './execute-step.js';
 import { writeSectionFromEvidence } from './write-from-evidence.js';
 import type { EvidenceEntry } from './gather-evidence.js';
-import { getSkill } from '../../../daemon/skills/registry.js';
 import { getLogger } from '../../../shared/logger.js';
 
 const log = getLogger('code-analyzer:discovery-flow');
@@ -140,11 +139,8 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 				provider:       input.localProvider,
 				session:        input.session,
 				step,
-				getSkillSchema: (skillId) => {
-					const sk = getSkill(skillId);
-					return sk?.inputs;
-				},
-				...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+				...(input.repoSizeSummary !== undefined ? { repoSizeSummary: input.repoSizeSummary } : {}),
+				...(input.onProgress !== undefined      ? { onProgress: input.onProgress }           : {}),
 			});
 			cycleOutputs.push(out);
 		}

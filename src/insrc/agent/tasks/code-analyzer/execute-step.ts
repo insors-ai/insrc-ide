@@ -3,31 +3,30 @@
  *
  * Runs ONE cloud-planned `DiscoveryStep` on the local LLM:
  *
- *   - The cloud has named the skills to call + provided semantic
- *     context for each call. The orchestrator looks up authoritative
- *     skill schemas from the registry and injects them into the
- *     prompt so the local LLM has the right arg shapes (eliminating
- *     the `path` vs `file` class of error).
+ *   - The system prompt is loaded from `prompts/flow/execute-step/`,
+ *     which embeds the static skill catalog ({{section:skill-glossary}})
+ *     so the local LLM knows what every skill *does* and what
+ *     arguments each one takes -- the prompt is otherwise stable
+ *     across all step calls in a section, which keeps the KV cache
+ *     warm.
+ *   - The user prompt is dynamic per step: an imperative ordered task
+ *     list ("Invoke `X` for **Y**. Chain: use the entityId from task
+ *     N's result.") that names the specific skill + concrete target
+ *     for each `PlannedSkillCall` the cloud chose.
  *   - Local runs a focused tool loop (skill_invoke + skill_describe
- *     available); it may invoke ADDITIONAL skills beyond the cloud's
- *     plan when its judgment says they're needed.
- *   - When the tool loop closes, local emits ONE final assistant
- *     turn containing a JSON object with `facts` + `citations`. The
- *     orchestrator parses this into a `StepOutput`, fills the
- *     bookkeeping fields (stepId, durationMs, status,
- *     extraSkillsCalled), and returns.
- *
- * No prompt MD files yet -- Phase γ lifts the four new flow prompts
- * (discovery-expand / discovery-review / execute-step / prose-review)
- * into the prompts/ tree together. Phase β keeps the system prompt
- * inline so the type + plumbing land + are testable on their own.
+ *     available) and emits ONE final assistant turn containing a JSON
+ *     object with `facts` + `citations`. The orchestrator parses this
+ *     into a `StepOutput`.
  */
 
 import type { LLMProvider, LLMMessage, ToolDefinition } from '../../../shared/types.js';
 import type { Session } from '../../session.js';
+import type { RepoSizeSummary } from '../../../daemon/repo-summary.js';
+import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getTool } from '../../../daemon/tools/registry.js';
 import { runToolLoop } from '../../tools/loop.js';
 import { getLogger } from '../../../shared/logger.js';
+import { loadFlowPrompt } from './prompts/loader.js';
 
 import type {
 	Citation,
@@ -46,10 +45,9 @@ export interface ExecuteStepInput {
 	readonly provider:        LLMProvider;
 	readonly session:         Session;
 	readonly step:            DiscoveryStep;
-	/** Schema lookup for the skills the cloud named. Returns the skill's
-	 *  `inputs` JSON Schema (from the daemon registry) or `undefined`
-	 *  when the skill id is unknown. Tests inject a stub. */
-	readonly getSkillSchema:  (skillId: string) => Record<string, unknown> | undefined;
+	/** Optional repo-size summary; if present, formatted and embedded
+	 *  into the {{REPO_CONTEXT}} slot of the system prompt. */
+	readonly repoSizeSummary?: RepoSizeSummary | undefined;
 	/** Default 16 iterations -- enough for ~5 cloud-named skills (each:
 	 *  describe + invoke = 2 turns) plus a couple of extras. */
 	readonly maxIterations?:  number | undefined;
@@ -80,7 +78,7 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 		};
 	}
 
-	const system = buildStepSystemPrompt(input.step, input.getSkillSchema);
+	const system     = buildStepSystemPrompt(input.repoSizeSummary);
 	const userPrompt = buildStepUserPrompt(input.step);
 
 	const messages: LLMMessage[] = [
@@ -159,88 +157,66 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 // Internals -- prompt assembly
 // ---------------------------------------------------------------------------
 
-function buildStepSystemPrompt(
-	step:           DiscoveryStep,
-	getSkillSchema: (id: string) => Record<string, unknown> | undefined,
-): string {
-	const parts: string[] = [
-		`You are executing ONE discovery step for a code-analysis report.`,
-		``,
-		`## Step intent`,
-		``,
-		step.intent,
-		``,
-		`## Cloud-planned skill calls (run these IN ORDER)`,
-		``,
-	];
-
-	for (const call of step.skills) {
-		const schema = getSkillSchema(call.skillId);
-		parts.push(`### ${call.id}: \`${call.skillId}\``);
-		parts.push(`Context (resolve into args): ${call.context}`);
-		if (call.dependsOn !== undefined) {
-			parts.push(`Depends on: ${call.dependsOn} (use its output to derive args for this call)`);
-		}
-		if (schema !== undefined) {
-			parts.push(`Input schema:`);
-			parts.push('```json');
-			parts.push(JSON.stringify(schema, null, 2));
-			parts.push('```');
-		} else {
-			parts.push(`Input schema: unavailable -- call \`skill_describe({ id: "${call.skillId}" })\` first.`);
-		}
-		parts.push(``);
-	}
-
-	parts.push(
-		`## Extra skills`,
-		``,
-		`If the cloud's planned calls aren't sufficient to address the`,
-		`step intent, you MAY invoke additional skills via \`skill_invoke\`.`,
-		`Use \`skill_describe({ id })\` first for any skill you haven't`,
-		`already invoked. Keep extras to the minimum needed.`,
-		``,
-		`## Final output`,
-		``,
-		`When you have run all the planned skills (and any extras you`,
-		`needed), STOP making tool calls and emit ONE final assistant`,
-		`turn containing a JSON object with this shape:`,
-		``,
-		'```json',
-		`{`,
-		`  "facts":     ["<one or more facts about the step's topic, plain text>"],`,
-		`  "citations": [`,
-		`    {`,
-		`      "path":      "<file path>",`,
-		`      "startLine": <number, optional>,`,
-		`      "endLine":   <number, optional>,`,
-		`      "entityId":  "<32-char hex, optional>",`,
-		`      "label":     "<class or function name, optional>"`,
-		`    }`,
-		`  ]`,
-		`}`,
-		'```',
-		``,
-		`Rules:`,
-		`  - Every fact must trace to a skill_invoke result from THIS step.`,
-		`    If you have no grounded facts, return \`"facts": []\` and`,
-		`    \`"citations": []\`. Don't fabricate.`,
-		`  - Citations must come from skill outputs. Carry path / line`,
-		`    ranges / entityIds verbatim from what the skills returned.`,
-		`  - Output ONLY the JSON object in your final turn. No prose`,
-		`    around it, no markdown fences in the response, no preamble.`,
-	);
-
-	return parts.join('\n');
+function buildStepSystemPrompt(repoSizeSummary: RepoSizeSummary | undefined): string {
+	// Static across all step calls -- skill catalog, DOs/DONTs, envelope
+	// schema all live in `prompts/flow/execute-step/system.md`. Only the
+	// repo-size summary varies (per session).
+	const repoContext = (repoSizeSummary !== undefined && !repoSizeSummary.empty)
+		? '\n\n## Repository under analysis\n' + formatRepoSizeSummary(repoSizeSummary, 'detailed')
+		: '';
+	return loadFlowPrompt('execute-step', { REPO_CONTEXT: repoContext });
 }
 
 function buildStepUserPrompt(step: DiscoveryStep): string {
-	return [
-		`## Step: ${step.id}`,
-		``,
-		`Begin by running the planned skill calls in order. When you have`,
-		`enough grounded facts, emit the final JSON object.`,
-	].join('\n');
+	// Dynamic, per-step. Imperative task list -- one numbered item per
+	// PlannedSkillCall, with the bolded target and (optionally) a Chain
+	// line that names the source task + the field to pull. The model
+	// reads the skill's argument schema from the catalog in the system
+	// prompt; the user message says what to invoke and what to invoke
+	// it for.
+	const parts: string[] = [];
+	parts.push(`## Step: ${step.id}`);
+	parts.push(`Intent: ${step.intent.trim()}`);
+	parts.push('');
+	parts.push('## Tasks (run in order)');
+	parts.push('');
+
+	const byCallId = new Map<string, number>();
+	step.skills.forEach((c, i) => byCallId.set(c.id, i + 1));
+
+	for (let i = 0; i < step.skills.length; i++) {
+		const call = step.skills[i]!;
+		parts.push(`${i + 1}. Invoke \`${call.skillId}\` for **${call.context.trim()}**.`);
+		const chainLine = renderChainHint(call, byCallId);
+		if (chainLine !== null) {
+			parts.push(`   ${chainLine}`);
+		}
+	}
+
+	parts.push('');
+	parts.push('After all tasks complete (and any minimal extras you needed),');
+	parts.push('emit the JSON envelope as your FINAL assistant turn -- top-level');
+	parts.push('JSON only, no markdown fences, no preamble.');
+	return parts.join('\n');
+}
+
+/**
+ * Render the "Chain: ..." hint line for a planned call that has a
+ * `dependsOn` reference. Returns `null` for non-chained calls.
+ *
+ * The hint names the source task by its 1-based index (matching the
+ * numbered task list the model just read) and names the field to pull
+ * -- defaulting to `entityId`, which is the dominant chain shape
+ * (locate-by-name or search-by-vector feeding summary/callers).
+ */
+function renderChainHint(
+	call:        PlannedSkillCall,
+	byCallId:    ReadonlyMap<string, number>,
+): string | null {
+	if (call.dependsOn === undefined) return null;
+	const sourceIdx = byCallId.get(call.dependsOn);
+	const sourceRef = sourceIdx !== undefined ? `task ${sourceIdx}` : `task \`${call.dependsOn}\``;
+	return `Chain: use the \`entityId\` from ${sourceRef}'s result.`;
 }
 
 // ---------------------------------------------------------------------------
