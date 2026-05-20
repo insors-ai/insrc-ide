@@ -163,3 +163,116 @@ export function emptyCycleMemory(reviewCriteria: readonly string[]): CycleMemory
 		scratchpad: '',
 	};
 }
+
+// ---------------------------------------------------------------------------
+// JSON Schemas (used as `responseFormat.schema` on cloud LLM calls)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared sub-schema for a DiscoveryStep. Used inside both
+ * DISCOVERY_PLAN_SCHEMA and CYCLE_REVIEW_RESPONSE_SCHEMA (which carries
+ * `new_steps: DiscoveryStep[]`).
+ *
+ * Caps:
+ *   - 1-6 skills per step (matches the gather budget; >6 would suggest
+ *     the step should be split)
+ *   - 5-200 char intent (one-sentence purpose)
+ *   - 32-char id (kebab-case typical: "step-1", "step-2", ...)
+ *   - targetsCriteria is unique-int-array of indices into the section's
+ *     reviewCriteria list (validated downstream against the section)
+ */
+const DISCOVERY_STEP_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['id', 'intent', 'skills', 'targetsCriteria'],
+	additionalProperties: false,
+	properties: {
+		id:     { type: 'string', minLength: 1, maxLength: 32 },
+		intent: { type: 'string', minLength: 5, maxLength: 200 },
+		skills: {
+			type: 'array',
+			minItems: 1,
+			maxItems: 6,
+			items: {
+				type: 'object',
+				required: ['id', 'skillId', 'context'],
+				additionalProperties: false,
+				properties: {
+					id:        { type: 'string', minLength: 1, maxLength: 16 },
+					skillId:   { type: 'string', minLength: 5, maxLength: 80 },
+					context:   { type: 'string', minLength: 1, maxLength: 200 },
+					dependsOn: { type: 'string', maxLength: 16 },
+				},
+			},
+		},
+		targetsCriteria: {
+			type: 'array',
+			items: { type: 'integer', minimum: 0 },
+			uniqueItems: true,
+			maxItems: 12,
+		},
+	},
+};
+
+/**
+ * Schema for the cloud's Stage 2 emission (expandDiscoveryPlan).
+ * Cycle 1 -> 2-10 steps; cycle 2+ steps come back via the cycle
+ * review's new_steps and aren't bounded here. The cycle field is
+ * carried for symmetry with the type even though the orchestrator
+ * supplies it; cloud just echoes back.
+ */
+export const DISCOVERY_PLAN_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['steps', 'cycle'],
+	additionalProperties: false,
+	properties: {
+		steps: {
+			type: 'array',
+			minItems: 1,
+			maxItems: 12,
+			items: DISCOVERY_STEP_SCHEMA,
+		},
+		cycle: { type: 'integer', minimum: 1, maximum: 3 },
+	},
+};
+
+/**
+ * Schema for the cloud's Stage 5 emission (reviewCycle).
+ *   - keep: ids of step outputs from THIS cycle to promote to ledger
+ *   - new_steps: more discovery for next cycle (empty array = done)
+ *   - scratchpad: optional free-form note carried forward
+ */
+export const CYCLE_REVIEW_RESPONSE_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['keep', 'new_steps'],
+	additionalProperties: false,
+	properties: {
+		keep: {
+			type: 'array',
+			items: { type: 'string', minLength: 1, maxLength: 32 },
+			uniqueItems: true,
+		},
+		new_steps: {
+			type: 'array',
+			maxItems: 12,
+			items: DISCOVERY_STEP_SCHEMA,
+		},
+		scratchpad: { type: 'string', maxLength: 500 },
+	},
+};
+
+/** Schema for the cloud's Stage 7 emission (reviewProse). Lighter shape:
+ *  verdict + optional notes. No ledger sent; cloud is judging the
+ *  rendered markdown directly. */
+export const PROSE_REVIEW_RESPONSE_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['verdict'],
+	additionalProperties: false,
+	properties: {
+		verdict: { type: 'string', enum: ['accept', 'redraft'] },
+		notes: {
+			type: 'array',
+			maxItems: 6,
+			items: { type: 'string', minLength: 1, maxLength: 200 },
+		},
+	},
+};

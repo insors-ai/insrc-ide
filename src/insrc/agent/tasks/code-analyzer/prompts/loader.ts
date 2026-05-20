@@ -43,7 +43,16 @@ const VAR_RE              = /\{\{([A-Z_][A-Z0-9_]*)\}\}/g;
  * Single-folder flows (one `flow/<name>/system.md`). The patch flow
  * is per-kind -- see `loadPatchPrompt` -- and is not listed here.
  */
-export type PromptFlow = 'gather' | 'write' | 'review';
+export type PromptFlow =
+	| 'gather'
+	| 'write'
+	| 'review'
+	// Phase gamma of plans/code-analyzer-discovery-plan-loop.md:
+	// new flow MDs for the cloud-driven discovery loop.
+	| 'discovery-expand'
+	| 'discovery-review'
+	| 'execute-step'
+	| 'prose-review';
 
 export type PatchKind = 'fix' | 'add';
 
