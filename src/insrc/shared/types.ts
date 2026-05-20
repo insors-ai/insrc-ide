@@ -62,8 +62,28 @@ export interface LLMResponse {
   text: string;
   toolCalls?: ToolCall[] | undefined;
   stopReason: 'end_turn' | 'tool_use' | 'max_tokens';
-  /** Token usage from the API response (if available). */
-  usage?: { inputTokens: number; outputTokens: number } | undefined;
+  /**
+   * Token usage from the API response (if available).
+   *
+   * `cacheReadTokens` / `cacheCreationTokens` are populated when the
+   * provider supports prompt caching and the call hit / created a
+   * cache entry. Both default to 0 for providers without caching or
+   * for cache-cold calls.
+   *
+   * The semantics are anthropic-shaped (which is the most common):
+   *   - inputTokens          = uncached input tokens billed at full rate
+   *   - cacheReadTokens      = input tokens served from cache (billed at ~10%)
+   *   - cacheCreationTokens  = input tokens written to cache this call (~125%)
+   * Other providers map their reporting onto this shape; absent fields
+   * (e.g. OpenAI's `prompt_tokens_details.cached_tokens`) populate
+   * `cacheReadTokens` only.
+   */
+  usage?: {
+    inputTokens:           number;
+    outputTokens:          number;
+    cacheReadTokens?:      number | undefined;
+    cacheCreationTokens?:  number | undefined;
+  } | undefined;
 }
 
 export interface CompletionOpts {
@@ -95,6 +115,14 @@ export interface CompletionOpts {
    * truth in that case.
    */
   responseFormat?: 'json' | { readonly schema: Record<string, unknown> } | undefined;
+  /**
+   * Whether the provider should mark the system message as cacheable
+   * (anthropic `cache_control: ephemeral`, ollama `keep_alive`, etc.).
+   * Defaults to `true` -- the system prompt is the canonical stable-
+   * prefix target. Set `false` for one-off calls where the system
+   * message changes every call and caching would waste cache writes.
+   */
+  cacheSystem?: boolean | undefined;
 }
 
 export interface LLMProvider {

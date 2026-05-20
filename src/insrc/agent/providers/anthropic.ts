@@ -57,6 +57,15 @@ export class AnthropicProvider implements LLMProvider {
   async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
     const { system, apiMessages } = splitMessages(messages);
     const tools = opts.tools ? toAnthropicTools(opts.tools) : undefined;
+    // Prompt caching: when the caller hasn't opted out (default = on),
+    // mark the system prompt as a cacheable prefix with
+    // `cache_control: { type: 'ephemeral' }`. Anthropic billing for
+    // cache reads is ~10% of input rate, cache writes ~125%; for a
+    // tool-loop with N iterations sharing the same system prompt the
+    // net saving approaches `(N-1) * 0.9 * input_cost`. The marker is
+    // a no-op when `system` is undefined.
+    const cacheSystem = opts.cacheSystem !== false;
+    const systemParam = buildSystemParam(system, cacheSystem);
 
     log.debug({
       model: this.model,
@@ -84,7 +93,7 @@ export class AnthropicProvider implements LLMProvider {
         const stream = this.client.messages.stream({
           model:      this.model,
           max_tokens: opts.maxTokens ?? 8_192,
-          ...(system ? { system } : {}),
+          ...(systemParam !== undefined ? { system: systemParam } : {}),
           ...(tools && tools.length > 0 ? { tools } : {}),
           messages:   apiMessages,
         });
@@ -121,10 +130,7 @@ export class AnthropicProvider implements LLMProvider {
             : response.stop_reason === 'max_tokens'
               ? 'max_tokens'
               : 'end_turn',
-          usage: {
-            inputTokens: response.usage.input_tokens,
-            outputTokens: response.usage.output_tokens,
-          },
+          usage: extractUsage(response.usage),
         };
       }
 
@@ -154,6 +160,8 @@ export class AnthropicProvider implements LLMProvider {
         stopReason: response.stop_reason,
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
+        cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
         textLen: text.length,
         text,
         toolCallCount: toolCalls.length,
@@ -168,10 +176,7 @@ export class AnthropicProvider implements LLMProvider {
           : response.stop_reason === 'max_tokens'
             ? 'max_tokens'
             : 'end_turn',
-        usage: {
-          inputTokens: response.usage.input_tokens,
-          outputTokens: response.usage.output_tokens,
-        },
+        usage: extractUsage(response.usage),
       };
     } catch (err) {
       throw wrapError(err);
@@ -357,6 +362,46 @@ function toAnthropicTools(tools: ToolDefinition[]): Anthropic.Tool[] {
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
   }));
 }
+
+/**
+ * Build the Anthropic `system` parameter. When `cacheSystem` is true
+ * and a system prompt is present, wraps it in a single content block
+ * with `cache_control: { type: 'ephemeral' }` so the prefix is
+ * cacheable. Anthropic charges ~125% of input rate for the first call
+ * that writes the cache and ~10% for subsequent reads, so this is a
+ * net win as soon as the same system prompt is sent twice within the
+ * cache TTL (5 min for ephemeral). When `cacheSystem` is false or
+ * `system` is undefined, falls back to the previous string / undef
+ * shape.
+ */
+function buildSystemParam(
+  system: string | undefined,
+  cacheSystem: boolean,
+): string | Anthropic.TextBlockParam[] | undefined {
+  if (system === undefined || system.length === 0) return undefined;
+  if (!cacheSystem) return system;
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+}
+
+/**
+ * Project the Anthropic SDK's `Message.usage` onto our LLMResponse
+ * shape, preserving cache hit / write tokens when present.
+ */
+function extractUsage(u: Anthropic.Usage): LLMResponse['usage'] {
+  return {
+    inputTokens:           u.input_tokens,
+    outputTokens:          u.output_tokens,
+    cacheReadTokens:       u.cache_read_input_tokens ?? 0,
+    cacheCreationTokens:   u.cache_creation_input_tokens ?? 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Test exports (caching helpers)
+// ---------------------------------------------------------------------------
+
+export const _buildSystemParamForTest = buildSystemParam;
+export const _extractUsageForTest     = extractUsage;
 
 function wrapError(err: unknown): never {
   if (err instanceof Anthropic.AuthenticationError) {

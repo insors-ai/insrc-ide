@@ -186,14 +186,29 @@ function fromOpenAIResponse(response: any): LLMResponse {
     : finishReason === 'length'   ? 'max_tokens'
     :                               'end_turn';
   const usage = response?.usage;
+  // OpenAI automatically caches prompt prefixes >= 1024 tokens. There's
+  // NO client-side marker required (unlike Anthropic) -- caching fires
+  // server-side. The response carries the hit count under
+  // `usage.prompt_tokens_details.cached_tokens` (or
+  // `cache_read_input_tokens` on newer SDK shapes). Surface it so
+  // operators can see whether caching is firing as expected. Subtract
+  // cached from prompt_tokens to get the uncached input count, matching
+  // anthropic's shape where inputTokens = full-rate billed input.
+  const cachedTokens =
+    (usage as { prompt_tokens_details?: { cached_tokens?: number } } | undefined)
+      ?.prompt_tokens_details?.cached_tokens
+    ?? (usage as { cache_read_input_tokens?: number } | undefined)?.cache_read_input_tokens
+    ?? 0;
+  const promptTokens = usage?.prompt_tokens ?? 0;
   return {
     text,
     ...(toolCalls ? { toolCalls } : {}),
     stopReason,
     ...(usage ? {
       usage: {
-        inputTokens: usage.prompt_tokens ?? 0,
-        outputTokens: usage.completion_tokens ?? 0,
+        inputTokens:      Math.max(0, promptTokens - cachedTokens),
+        outputTokens:     usage.completion_tokens ?? 0,
+        cacheReadTokens:  cachedTokens,
       },
     } : {}),
   };

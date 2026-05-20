@@ -183,12 +183,22 @@ export class OllamaProvider implements LLMProvider {
     // calls (the model is just picking the next tool) don't benefit from
     // thinking and the latency hit per turn is material.
     const disableThinking = this.quirks.noThinkOnTools && tools !== undefined && tools.length > 0;
+    // Prompt caching: Ollama caches KV state when consecutive calls
+    // share a prompt prefix AND the model is still loaded. `keep_alive`
+    // controls how long the daemon keeps the model in memory after a
+    // call returns; default 5min. For the analyzer's tool-loop (often
+    // hours of work on the same model + same system prompt) we set this
+    // to 24h so the model + KV cache survive between calls and prefix
+    // reuse kicks in. `cacheSystem === false` reverts to the default
+    // (5m) for one-off calls.
+    const keepAlive = opts.cacheSystem === false ? undefined : '24h';
     const response = await this.client.chat({
       model: this.model,
       messages: ollamaMessages,
       ...(tools ? { tools } : {}),
       ...(ollamaFormat !== undefined ? { format: ollamaFormat } : {}),
       ...(disableThinking ? { think: false } : {}),
+      ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
       stream: true,
       options: {
         num_ctx: this.numCtx,
@@ -199,7 +209,16 @@ export class OllamaProvider implements LLMProvider {
 
     let text = '';
     let allToolCalls: OllamaToolCall[] = [];
-
+    // Ollama's final stream chunk carries token counts:
+    //   prompt_eval_count        -- input tokens
+    //   prompt_eval_duration     -- ns spent on prompt processing
+    //   eval_count               -- output tokens generated
+    // When the model's KV cache is warm and the prompt prefix matched
+    // a prior call, `prompt_eval_count` reflects only the NEW (non-
+    // cached) prefix portion. The `done_reason === 'load'` chunk
+    // (model warm-up) doesn't carry these fields.
+    let promptEvalCount: number | undefined;
+    let evalCount: number | undefined;
     for await (const chunk of response) {
       if (chunk.message.content) {
         text += chunk.message.content;
@@ -207,6 +226,11 @@ export class OllamaProvider implements LLMProvider {
       }
       if (chunk.message.tool_calls) {
         allToolCalls = allToolCalls.concat(chunk.message.tool_calls as OllamaToolCall[]);
+      }
+      // `done: true` chunks carry the usage counts.
+      if (chunk.done === true) {
+        if (typeof chunk.prompt_eval_count === 'number') promptEvalCount = chunk.prompt_eval_count;
+        if (typeof chunk.eval_count === 'number')        evalCount = chunk.eval_count;
       }
     }
 
@@ -218,12 +242,17 @@ export class OllamaProvider implements LLMProvider {
       text,
       toolCallCount: toolCalls.length,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      promptEvalCount,
+      evalCount,
     }, 'ollama response');
 
     return {
       text,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       stopReason: toolCalls.length > 0 ? 'tool_use' : 'end_turn',
+      ...(promptEvalCount !== undefined && evalCount !== undefined ? {
+        usage: { inputTokens: promptEvalCount, outputTokens: evalCount },
+      } : {}),
     };
   }
 
