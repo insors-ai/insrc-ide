@@ -257,33 +257,44 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 // ---------------------------------------------------------------------------
 
 /**
- * Convert retained step outputs into the legacy `EvidenceEntry[]`
- * shape the writer currently consumes. Removed in Phase ε when the
- * writer migrates to read `Citation[]` directly.
+ * Convert retained step outputs into the `EvidenceEntry[]` shape the
+ * writer consumes. Phase epsilon of
+ * plans/code-analyzer-discovery-plan-loop.md: the structured
+ * `Citation` objects pass through directly via `citationObjs`; the
+ * legacy string `citations` field stays empty. The writer detects
+ * `citationObjs` and renders inline markdown links from the
+ * structured fields, so the adapter no longer pre-renders strings.
  *
  * Mapping:
- *   - skillId    -- the stepId (semantically: which step produced this)
- *   - args       -- empty object (the writer doesn't read it)
- *   - facts      -- carried through
- *   - citations  -- each Citation rendered as a `[label](path:foo#L1-L20)`
- *                   markdown link string. Label falls back to the
- *                   file basename when not present.
- *   - confidence -- mapped from step status: ok -> high, partial ->
- *                   medium, failed -> low
+ *   - skillId       -- the stepId (semantically: which step produced this)
+ *   - args          -- empty object (the writer doesn't read it)
+ *   - facts         -- carried through
+ *   - citations     -- empty (legacy field; structured ones live in
+ *                      citationObjs)
+ *   - citationObjs  -- the structured Citation[] from the step output
+ *   - confidence    -- mapped from step status: ok -> high, partial
+ *                      -> medium, failed -> low
  */
 export function adaptStepOutputsForWriter(outputs: readonly StepOutput[]): EvidenceEntry[] {
 	return outputs.map(out => ({
-		skillId:    out.stepId,
-		args:       {},
-		facts:      out.facts,
-		citations:  out.citations.map(renderCitationAsString),
-		confidence: out.status === 'ok' ? 'high' as const
-			:        out.status === 'partial' ? 'medium' as const
-			:        'low' as const,
+		skillId:       out.stepId,
+		args:          {},
+		facts:         out.facts,
+		citations:     [],
+		citationObjs:  out.citations,
+		confidence:    out.status === 'ok' ? 'high' as const
+			:           out.status === 'partial' ? 'medium' as const
+			:           'low' as const,
 	}));
 }
 
-function renderCitationAsString(c: Citation): string {
+/** Render a single structured Citation as `[label](path:foo#L1-L20)`.
+ *  Phase ε kept this exported for the unit tests that locked in the
+ *  string-rendering format before the writer-side migration. After
+ *  the migration, this helper is no longer the primary code path
+ *  (the writer renders directly from Citation fields); kept for
+ *  callers that still want a string form (e.g. for logs / telemetry). */
+export function renderCitationAsString(c: Citation): string {
 	const range = c.startLine !== undefined && c.endLine !== undefined
 		? `#L${c.startLine}-L${c.endLine}`
 		: (c.startLine !== undefined ? `#L${c.startLine}` : '');

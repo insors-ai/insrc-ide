@@ -51,9 +51,22 @@ export interface EvidenceEntry {
 	readonly args:       Record<string, unknown>;
 	/** 1-3 short key facts extracted from the skill result. */
 	readonly facts:      readonly string[];
-	/** `path:foo.ts#L1-L20`-style citation strings. The write phase
-	 *  carries these verbatim into the prose. */
+	/** `path:foo.ts#L1-L20`-style citation strings. Legacy shape kept
+	 *  for the gather-evidence emitter (this module). The writer
+	 *  consumes this when `citationObjs` is undefined.
+	 *
+	 *  Phase epsilon of plans/code-analyzer-discovery-plan-loop.md:
+	 *  new callers (discovery-flow) populate `citationObjs` with the
+	 *  structured Citation shape and leave `citations` empty. The
+	 *  writer prefers `citationObjs` when present, falls back to
+	 *  this string form when not. */
 	readonly citations:  readonly string[];
+	/** Phase epsilon: structured citations from the discovery-flow
+	 *  ledger. When set + non-empty, the writer renders inline
+	 *  markdown links from these (path / startLine / endLine / label)
+	 *  rather than from `citations`. Optional + undefined-tolerant
+	 *  so the existing gather-evidence path stays unchanged. */
+	readonly citationObjs?: readonly import('../../content-gen/discovery-plan.js').Citation[] | undefined;
 	readonly confidence: 'high' | 'medium' | 'low';
 }
 

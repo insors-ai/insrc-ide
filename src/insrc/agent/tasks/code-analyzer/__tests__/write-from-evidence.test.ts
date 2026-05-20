@@ -10,6 +10,8 @@ import {
 	writeSectionFromEvidence,
 	stripWriterArtifacts,
 	extractCitations,
+	_buildUserPromptForTest as buildUserPrompt,
+	_renderStructuredCitationLinkForTest as renderStructuredCitationLink,
 	type WriteFromEvidenceInput,
 } from '../write-from-evidence.js';
 import type { LLMProvider, LLMResponse, LLMMessage } from '../../../../shared/types.js';
@@ -202,4 +204,65 @@ test('writeSectionFromEvidence: system prompt forbids process narration + headin
 	const text = typeof sys?.content === 'string' ? sys.content : '';
 	assert.match(text, /process narration/i);
 	assert.match(text, /No section heading/i);
+});
+
+// ---------------------------------------------------------------------------
+// Phase ε -- structured citation rendering
+// ---------------------------------------------------------------------------
+
+test('renderStructuredCitationLink: label + line range', () => {
+	const out = renderStructuredCitationLink(
+		{ path: '/repo/Foo.java', startLine: 1, endLine: 100, label: 'Foo' },
+		0,
+		0,
+	);
+	assert.equal(out, '[Foo](path:/repo/Foo.java#L1-L100)');
+});
+
+test('renderStructuredCitationLink: label falls back to file basename', () => {
+	const out = renderStructuredCitationLink(
+		{ path: '/repo/Bar.java', startLine: 5 },
+		2,
+		1,
+	);
+	assert.equal(out, '[Bar.java](path:/repo/Bar.java#L5)');
+});
+
+test('renderStructuredCitationLink: empty path tail -> falls back to ref label', () => {
+	const out = renderStructuredCitationLink({ path: '/' }, 0, 2);
+	assert.equal(out, '[ref 1.3](path:/)');
+});
+
+test('buildUserPrompt: citationObjs (Phase ε) -- renders structured links inline', () => {
+	const evidence: readonly EvidenceEntry[] = [
+		{
+			skillId:      'step-1',
+			args:         {},
+			facts:        ['FSDirectory anchors the namespace'],
+			citations:    [],          // legacy field intentionally empty
+			citationObjs: [{ path: '/repo/FSDirectory.java', startLine: 1, endLine: 400, label: 'FSDirectory' }],
+			confidence:   'high',
+		},
+	];
+	const userText = buildUserPrompt(buildInput({
+		provider: buildFakeProvider('').provider,
+		evidence,
+	}));
+	// The structured citation is rendered as `[FSDirectory](path:...)`
+	// embedded INLINE alongside the fact, NOT as a separate ref line.
+	assert.match(userText, /FSDirectory anchors the namespace \[FSDirectory\]\(path:\/repo\/FSDirectory\.java#L1-L400\)/);
+	// Legacy string format should NOT appear.
+	assert.doesNotMatch(userText, /\[ref 1\.1\]/);
+});
+
+test('buildUserPrompt: legacy citations still work when citationObjs absent', () => {
+	// Sanity: when the entry uses the legacy `citations: string[]`
+	// (the existing gather-evidence path), the writer still renders
+	// the ref-style markdown link the legacy code expects.
+	const userText = buildUserPrompt(buildInput({
+		provider: buildFakeProvider('').provider,
+		evidence: SAMPLE_EVIDENCE,
+	}));
+	assert.match(userText, /\[ref 1\.1\]/);
+	assert.match(userText, /path:insors\/extraction\/db\/__init__\.py#L1-L20/);
 });

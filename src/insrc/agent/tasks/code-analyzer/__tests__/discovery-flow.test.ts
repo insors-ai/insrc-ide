@@ -156,11 +156,18 @@ test('adaptStepOutputsForWriter: maps StepOutput[] to EvidenceEntry[] correctly'
 	assert.equal(out[0]!.skillId, 'step-1');
 	assert.equal(out[0]!.confidence, 'high');
 	assert.equal(out[0]!.facts.length, 2);
-	assert.equal(out[0]!.citations.length, 1);
-	assert.equal(out[0]!.citations[0], '[Foo](path:/a.ts#L1-L20)');
+	// Phase epsilon: structured citations now live in citationObjs;
+	// the legacy `citations` field is empty (writer renders from
+	// citationObjs natively).
+	assert.equal(out[0]!.citations.length, 0);
+	assert.ok(out[0]!.citationObjs !== undefined);
+	assert.equal(out[0]!.citationObjs!.length, 1);
+	assert.equal(out[0]!.citationObjs![0]!.path, '/a.ts');
+	assert.equal(out[0]!.citationObjs![0]!.label, 'Foo');
 	assert.equal(out[1]!.confidence, 'medium');
-	// Label falls back to file basename when not provided.
-	assert.equal(out[1]!.citations[0], '[b.ts](path:/b.ts)');
+	assert.equal(out[1]!.citations.length, 0);
+	assert.ok(out[1]!.citationObjs !== undefined);
+	assert.equal(out[1]!.citationObjs![0]!.path, '/b.ts');
 });
 
 test('renderCitationAsString: handles each optional combo', () => {

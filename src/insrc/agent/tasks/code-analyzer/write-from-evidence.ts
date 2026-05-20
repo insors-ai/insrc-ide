@@ -148,7 +148,18 @@ function buildUserPrompt(input: WriteFromEvidenceInput): string {
 			// citations, distribute the citations round-robin so every
 			// fact carries at least one. When there are more citations
 			// than facts, attach the extras to the last fact.
-			const links = e.citations.map((c, idx) => `[ref ${i + 1}.${idx + 1}](${c.startsWith('path:') ? c : `path:${c}`})`);
+			//
+			// Phase epsilon of plans/code-analyzer-discovery-plan-loop.md:
+			// when the entry carries structured `citationObjs` (from the
+			// discovery flow's adapter), render markdown links directly
+			// from the Citation fields -- the writer sees the entityId,
+			// label, and line range natively rather than parsing a string
+			// like `path:foo.ts#L1-L20`. Falls back to the legacy
+			// string-citation path when `citationObjs` is undefined or
+			// empty (gather-evidence flow + back-compat).
+			const links = (e.citationObjs !== undefined && e.citationObjs.length > 0)
+				? e.citationObjs.map((c, idx) => renderStructuredCitationLink(c, i, idx))
+				: e.citations.map((c, idx) => `[ref ${i + 1}.${idx + 1}](${c.startsWith('path:') ? c : `path:${c}`})`);
 			if (e.facts.length === 0) {
 				if (links.length > 0) {
 					parts.push(`  - (no facts; raw citations: ${links.join(', ')})`);
@@ -225,6 +236,29 @@ export function stripWriterArtifacts(text: string): string {
  * diversity without rescanning the body. Distinct URIs only -- a
  * single citation used in two places counts once.
  */
+/**
+ * Render one structured Citation as an inline `[label](path:foo#L1-L20)`
+ * markdown link. Phase epsilon of plans/code-analyzer-discovery-plan-loop.md:
+ * the discovery flow's adapter populates `EvidenceEntry.citationObjs`
+ * with these; the writer renders them natively rather than carrying
+ * pre-rendered strings.
+ *
+ * Label preference:
+ *   1. Citation.label (class/function/file label from the cloud or
+ *      the executing skill)
+ *   2. The file's basename (path's tail segment)
+ *   3. The bare fact-pair "ref <evIdx+1>.<citIdx+1>" if both are
+ *      missing (matches the legacy string path's label format).
+ */
+function renderStructuredCitationLink(c: import('../../content-gen/discovery-plan.js').Citation, evIdx: number, citIdx: number): string {
+	const range = (c.startLine !== undefined && c.endLine !== undefined)
+		? `#L${c.startLine}-L${c.endLine}`
+		: (c.startLine !== undefined ? `#L${c.startLine}` : '');
+	const fallbackLabel = c.path.split('/').pop() ?? '';
+	const label = c.label ?? (fallbackLabel.length > 0 ? fallbackLabel : `ref ${evIdx + 1}.${citIdx + 1}`);
+	return `[${label}](path:${c.path}${range})`;
+}
+
 export function extractCitations(markdown: string): readonly string[] {
 	const re = /\[[^\]]+\]\(path:([^)]+)\)/g;
 	const seen = new Set<string>();
@@ -239,5 +273,6 @@ export function extractCitations(markdown: string): readonly string[] {
 // Test exports
 // ---------------------------------------------------------------------------
 
-export const _buildSystemPromptForTest = buildSystemPrompt;
-export const _buildUserPromptForTest   = buildUserPrompt;
+export const _buildSystemPromptForTest             = buildSystemPrompt;
+export const _buildUserPromptForTest               = buildUserPrompt;
+export const _renderStructuredCitationLinkForTest  = renderStructuredCitationLink;
