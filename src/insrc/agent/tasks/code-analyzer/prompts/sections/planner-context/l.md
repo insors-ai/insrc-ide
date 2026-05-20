@@ -1,37 +1,50 @@
 ## Decomposition guidance (tier L)
 
 This is a tier-L code analysis -- the scope is a medium-to-large
-module. Decompose into sections that together cover the following
-menu. The L scope is narrower than XL+; sections should focus on the
-module itself, not the wider repo.
+module. Your job: decompose the work into 3-6 sections that together
+answer the USER REQUEST in depth. The user's actual question is the
+primary driver. The menu below is a **coverage checklist** to make
+sure no important axis is missed -- it is NOT a list of section
+titles to copy.
 
-### Coverage menu (L)
+### How to use the coverage menu
 
-1. **Module functionality** -- what the module does + its public
-   entry points.
-2. **Exposed endpoints** -- how the module is called (HTTP / message
-   receivers / internal callers).
-3. **Data Persistence details** -- DB / cache / file-store touches
-   specific to this module.
-4. **Dependencies (internal + external)** -- what the module imports,
-   both other-modules-in-repo and third-party packages.
-5. **Test coverage** -- how well-tested is this module's surface.
-6. **Deployment artifacts (configs)** -- module-specific config files
-   + env vars.
+1. **Read the user request first.** What specific module / behaviour
+   did they ask about? Which classes / endpoints / data flows are
+   named?
+2. **Decompose into request-driven sections.** Each section is one
+   meaningful slice of the module the user is asking about. Name
+   SPECIFIC public entries / submodules / classes from the
+   repo-summary block.
+3. **Cross-check against the coverage menu BELOW.** For each axis,
+   ask "is it touched by any of my planned sections?" If yes,
+   fine. If no AND the axis is relevant, add a section.
+
+### Coverage menu (do NOT name sections after these)
+
+  - module functionality + public entry points
+  - exposed endpoints (HTTP / message receivers / internal callers)
+  - data persistence touches (DB / cache / file stores)
+  - dependencies (internal modules + external packages)
+  - test coverage of the module's surface
+  - deployment artifacts + configuration that affect this module
 
 ### Section-count guidance
 
-- Aim for 3-6 sections. L scope rarely needs more than 6; below 3
-  risks "one big kitchen-sink section".
-- Combine endpoints + dependencies into one section if both are thin.
-- Reserve dedicated sections for the dominant concern (e.g. if the
-  module is heavily persistence-oriented, give persistence its own
-  section).
+- Aim for 3-6 sections. Below 3 risks "one big kitchen-sink section";
+  above 6 fragments the module.
+- Combine thin axes into one section if neither alone justifies its
+  own.
+- Reserve dedicated sections for the module's dominant concern (if
+  it's persistence-heavy, give persistence its own section).
 
 ### Naming + scope per section
 
 Each section needs:
-  - A title that names THE MODULE (e.g. "Auth Module: Endpoints &
-    Session Lifecycle"), not generic phrases.
-  - An objective sentence.
-  - 3-5 specific, scorable review criteria.
+  - A title that names the MODULE + a specific aspect of it
+    (e.g. "Auth Module: Endpoints & Session Lifecycle",
+    "Storage Module: Repository Classes & Schema"). NOT generic
+    axis labels like "Module Functionality" or "Dependencies".
+  - An objective sentence anchored on the named module + aspect.
+  - 3-5 specific, scorable review criteria referencing actual
+    class / file names visible in the repo summary.
