@@ -19,6 +19,8 @@ import {
 	_buildSystemParamForTest,
 	_extractUsageForTest,
 } from '../anthropic.js';
+import { _fromMistralResponseForTest } from '../mistral.js';
+import { _fromGeminiResponseForTest }  from '../gemini.js';
 
 // ---------------------------------------------------------------------------
 // buildSystemParam (anthropic) -- cache_control marker wiring
@@ -93,4 +95,65 @@ test('anthropic.extractUsage: cache read -> read populated, creation 0', () => {
 	} as unknown as Parameters<typeof _extractUsageForTest>[0]);
 	assert.equal(u?.cacheReadTokens, 1500);
 	assert.equal(u?.cacheCreationTokens, 0);
+});
+
+// ---------------------------------------------------------------------------
+// mistral -- observability for auto-cached prefixes
+// ---------------------------------------------------------------------------
+
+test('mistral: cold cache -> cacheReadTokens 0, inputTokens = promptTokens', () => {
+	const r = _fromMistralResponseForTest({
+		choices: [{ message: { content: 'hello', toolCalls: undefined }, finishReason: 'stop' }],
+		usage: { promptTokens: 800, completionTokens: 50 },
+	});
+	assert.equal(r.usage?.inputTokens, 800);
+	assert.equal(r.usage?.outputTokens, 50);
+	assert.equal(r.usage?.cacheReadTokens, 0);
+});
+
+test('mistral: cache hit via SDK >=1.3 `cachedTokens` field', () => {
+	const r = _fromMistralResponseForTest({
+		choices: [{ message: { content: 'hi', toolCalls: undefined }, finishReason: 'stop' }],
+		usage: { promptTokens: 1000, completionTokens: 50, cachedTokens: 800 },
+	});
+	// 1000 prompt - 800 cached = 200 billed-at-full-rate
+	assert.equal(r.usage?.inputTokens, 200);
+	assert.equal(r.usage?.cacheReadTokens, 800);
+});
+
+test('mistral: cache hit via legacy `prompt_tokens_details.cached_tokens` shape', () => {
+	const r = _fromMistralResponseForTest({
+		choices: [{ message: { content: 'hi', toolCalls: undefined }, finishReason: 'stop' }],
+		usage: { promptTokens: 1200, completionTokens: 30, prompt_tokens_details: { cached_tokens: 900 } },
+	});
+	assert.equal(r.usage?.inputTokens, 300);
+	assert.equal(r.usage?.cacheReadTokens, 900);
+});
+
+// ---------------------------------------------------------------------------
+// gemini -- observability for implicit-cache hits (32K+ contexts)
+// ---------------------------------------------------------------------------
+
+test('gemini: cold cache -> cacheReadTokens 0, inputTokens = promptTokenCount', () => {
+	const r = _fromGeminiResponseForTest({
+		candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }],
+		usageMetadata: { promptTokenCount: 5000, candidatesTokenCount: 100 },
+	});
+	assert.equal(r.usage?.inputTokens, 5000);
+	assert.equal(r.usage?.outputTokens, 100);
+	assert.equal(r.usage?.cacheReadTokens, 0);
+});
+
+test('gemini: cache hit via cachedContentTokenCount', () => {
+	const r = _fromGeminiResponseForTest({
+		candidates: [{ content: { parts: [{ text: 'hi' }] }, finishReason: 'STOP' }],
+		usageMetadata: {
+			promptTokenCount:         40000,
+			candidatesTokenCount:     200,
+			cachedContentTokenCount:  35000,
+		},
+	});
+	// 40000 prompt - 35000 cached = 5000 billed
+	assert.equal(r.usage?.inputTokens, 5000);
+	assert.equal(r.usage?.cacheReadTokens, 35000);
 });

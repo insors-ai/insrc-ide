@@ -153,18 +153,46 @@ function fromGeminiResponse(response: any): LLMResponse {
     toolCalls && toolCalls.length > 0 ? 'tool_use'
     : finishReason === 'MAX_TOKENS'   ? 'max_tokens'
     :                                   'end_turn';
+  // Gemini supports two caching modes:
+  //
+  //   - Implicit caching (Gemini 2.0 Flash / 2.5 / etc.): automatic
+  //     server-side prefix cache that fires for contexts >= ~32K
+  //     tokens. No client marker required. Hit count surfaces under
+  //     `usageMetadata.cachedContentTokenCount`.
+  //
+  //   - Explicit cached content: create a `cachedContents` resource
+  //     via `client.caches.create({...})`, then reference by name in
+  //     subsequent calls (`cachedContent: <name>` config field). This
+  //     is session-level state, not handled by a single complete()
+  //     call -- a future enhancement when the analyzer's per-section
+  //     workflow can manage cache resources explicitly.
+  //
+  // For now: surface implicit-cache hit counts from the response. The
+  // request side stays unchanged. Most analyzer prompts (2-3K tokens)
+  // sit below the implicit threshold and will return 0; longer
+  // synthesis prompts above 32K will benefit automatically.
+  const cachedTokens = (usage as { cachedContentTokenCount?: number } | undefined)
+    ?.cachedContentTokenCount ?? 0;
+  const promptTokens = usage?.promptTokenCount ?? 0;
   return {
     text,
     ...(toolCalls ? { toolCalls } : {}),
     stopReason,
     ...(usage ? {
       usage: {
-        inputTokens: usage.promptTokenCount ?? 0,
-        outputTokens: usage.candidatesTokenCount ?? 0,
+        inputTokens:      Math.max(0, promptTokens - cachedTokens),
+        outputTokens:     usage.candidatesTokenCount ?? 0,
+        cacheReadTokens:  cachedTokens,
       },
     } : {}),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Test exports (caching observability)
+// ---------------------------------------------------------------------------
+
+export const _fromGeminiResponseForTest = fromGeminiResponse;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractText(response: any): string | undefined {

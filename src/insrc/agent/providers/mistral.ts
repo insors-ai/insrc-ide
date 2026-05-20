@@ -171,18 +171,38 @@ function fromMistralResponse(response: any): LLMResponse {
     : finishReason === 'length'   ? 'max_tokens'
     :                               'end_turn';
   const usage = response?.usage;
+  // Mistral's modern models (mistral-large-2411, codestral-25.01, etc.)
+  // auto-cache stable prefixes server-side; no client marker is required.
+  // The response carries the hit count under either
+  // `usage.cachedTokens` (SDK >=1.3) or
+  // `usage.prompt_tokens_details.cached_tokens` (snake_case payload).
+  // Surface whichever is present, default to 0. Older models without
+  // caching support simply return 0 -- still safe.
+  const cachedTokens =
+    (usage as { cachedTokens?: number } | undefined)?.cachedTokens
+    ?? (usage as { prompt_tokens_details?: { cached_tokens?: number } } | undefined)
+       ?.prompt_tokens_details?.cached_tokens
+    ?? 0;
+  const promptTokens = usage?.promptTokens ?? 0;
   return {
     text,
     ...(toolCalls ? { toolCalls } : {}),
     stopReason,
     ...(usage ? {
       usage: {
-        inputTokens: usage.promptTokens ?? 0,
-        outputTokens: usage.completionTokens ?? 0,
+        inputTokens:      Math.max(0, promptTokens - cachedTokens),
+        outputTokens:     usage.completionTokens ?? 0,
+        cacheReadTokens:  cachedTokens,
       },
     } : {}),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Test exports (caching observability)
+// ---------------------------------------------------------------------------
+
+export const _fromMistralResponseForTest = fromMistralResponse;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function safeParseJson(s: any): Record<string, unknown> {
