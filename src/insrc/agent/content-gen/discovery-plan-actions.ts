@@ -43,6 +43,7 @@ import type {
 import {
 	CYCLE_REVIEW_RESPONSE_SCHEMA,
 	DISCOVERY_PLAN_SCHEMA,
+	PROSE_REVIEW_RESPONSE_SCHEMA,
 } from './discovery-plan.js';
 
 const log = getLogger('content-gen:discovery-plan-actions');
@@ -280,6 +281,108 @@ function buildReviewMessages(input: ReviewCycleInput): LLMMessage[] {
 }
 
 // ---------------------------------------------------------------------------
+// reviewProse (Stage 7)
+// ---------------------------------------------------------------------------
+
+export interface ReviewProseResponse {
+	readonly verdict:  'accept' | 'redraft';
+	readonly notes:    readonly string[];
+}
+
+export interface ReviewProseInput {
+	readonly section:        PlannedAction;
+	readonly prose:          string;
+	readonly analyzerLabel?: string | undefined;
+	readonly maxTokens?:     number | undefined;
+}
+
+/**
+ * Final prose-only review. Sees the section markdown + section
+ * objective + review criteria; does NOT see the retained ledger.
+ *
+ * Defaults to `accept` on all-attempts-fail -- the loop shouldn't
+ * fail the report just because the final reviewer is flaky.
+ */
+export async function reviewProse(
+	input:         ReviewProseInput,
+	cloudProvider: LLMProvider,
+): Promise<ReviewProseResponse> {
+	const messages = buildProseReviewMessages(input);
+
+	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		try {
+			const response = await cloudProvider.complete(messages, {
+				maxTokens:      input.maxTokens ?? 800,
+				temperature:    0,
+				responseFormat: { schema: PROSE_REVIEW_RESPONSE_SCHEMA as Record<string, unknown> },
+			});
+			const parsed = parseJsonStrict(response.text);
+			if (parsed === null) {
+				if (attempt === MAX_ATTEMPTS) break;
+				continue;
+			}
+			const validated = validateProseReview(parsed);
+			if (typeof validated === 'string') {
+				log.info({ analyzer: input.analyzerLabel, attempt, reason: validated }, 'reviewProse: schema violation; retrying');
+				if (attempt === MAX_ATTEMPTS) break;
+				continue;
+			}
+			return validated;
+		} catch (err) {
+			log.warn({ analyzer: input.analyzerLabel, attempt, err: (err as Error).message }, 'reviewProse: provider error');
+			if (attempt === MAX_ATTEMPTS) break;
+		}
+	}
+
+	log.warn({ analyzer: input.analyzerLabel, sectionId: input.section.id }, 'reviewProse: all attempts failed -- soft-accepting');
+	return { verdict: 'accept', notes: ['reviewer-degraded; soft-accepted'] };
+}
+
+function buildProseReviewMessages(input: ReviewProseInput): LLMMessage[] {
+	const system = loadFlowPrompt('prose-review', {});
+
+	const userLines: string[] = [];
+	userLines.push('## Section under review');
+	userLines.push(`title:     ${input.section.title}`);
+	userLines.push(`objective: ${input.section.objective}`);
+	userLines.push('');
+	userLines.push('## Review criteria');
+	input.section.reviewCriteria.forEach((c, i) => userLines.push(`  ${i}. ${c}`));
+	userLines.push('');
+	userLines.push('## Section prose (markdown)');
+	userLines.push('```markdown');
+	userLines.push(input.prose);
+	userLines.push('```');
+	userLines.push('');
+	userLines.push('## Response schema');
+	userLines.push('Your response MUST be strict JSON matching:');
+	userLines.push('```json');
+	userLines.push(JSON.stringify(PROSE_REVIEW_RESPONSE_SCHEMA, null, 2));
+	userLines.push('```');
+
+	return [
+		{ role: 'system', content: system },
+		{ role: 'user',   content: userLines.join('\n') },
+	];
+}
+
+function validateProseReview(parsed: unknown): ReviewProseResponse | string {
+	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		return 'response is not a JSON object';
+	}
+	const obj = parsed as Record<string, unknown>;
+	const verdict = obj['verdict'];
+	if (verdict !== 'accept' && verdict !== 'redraft') {
+		return '`verdict` must be "accept" or "redraft"';
+	}
+	const notesRaw = obj['notes'];
+	const notes: string[] = Array.isArray(notesRaw)
+		? (notesRaw as unknown[]).filter((n): n is string => typeof n === 'string' && n.trim().length > 0).map(n => n.trim())
+		: [];
+	return { verdict, notes };
+}
+
+// ---------------------------------------------------------------------------
 // Parsing + validation
 // ---------------------------------------------------------------------------
 
@@ -392,6 +495,8 @@ function validateCycleReview(parsed: unknown, stepOutputs: readonly StepOutput[]
 
 export const _validateDiscoveryPlanForTest = validateDiscoveryPlan;
 export const _validateCycleReviewForTest   = validateCycleReview;
+export const _validateProseReviewForTest   = validateProseReview;
 export const _buildExpandMessagesForTest   = buildExpandMessages;
 export const _buildReviewMessagesForTest   = buildReviewMessages;
+export const _buildProseReviewMessagesForTest = buildProseReviewMessages;
 export const _fallbackPlanForTest          = fallbackPlan;

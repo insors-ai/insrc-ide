@@ -859,6 +859,52 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
       this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via tool loop...`);
 
+      // Phase delta of plans/code-analyzer-discovery-plan-loop.md:
+      // when INSRC_ANALYZER_FLOW=discovery, replace the entire per-
+      // section gather + write + patch + picker pipeline with the
+      // cloud-driven discovery-plan loop. Feature-gated so the
+      // existing flow stays the default until empirical validation
+      // (Phase zeta) ships.
+      const { isDiscoveryFlowEnabled, runDiscoveryFlow } = await import('../../agent/tasks/code-analyzer/discovery-flow.js');
+      if (isDiscoveryFlowEnabled()) {
+        const discResult = await runDiscoveryFlow({
+          localProvider: local,
+          cloudProvider: cloud,
+          session,
+          action,
+          request,
+          tier,
+          ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+          ...(summaryContext !== undefined && summaryContext.length > 0 ? { repoSummary: summaryContext } : {}),
+          analyzerLabel: 'code-analyzer',
+          onProgress: (msg: string) => {
+            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+          },
+        });
+        log.info(
+          {
+            actionId:           action.id,
+            flow:               'discovery',
+            cyclesRun:          discResult.cyclesRun,
+            retainedStepCount:  discResult.retainedStepCount,
+            proseVerdict:       discResult.proseVerdict,
+            proseRedraftFired:  discResult.proseRedraftFired,
+            perCycle:           discResult.perCycleSummary,
+          },
+          'section drafting complete (discovery flow)',
+        );
+        this.emitMilestone(
+          synthBubble,
+          `[${i + 1}/${actions.length}] "${action.title}" -- discovery (${discResult.cyclesRun} cycle${discResult.cyclesRun === 1 ? '' : 's'}; ${discResult.retainedStepCount} retained step${discResult.retainedStepCount === 1 ? '' : 's'}; prose: ${discResult.proseVerdict}${discResult.proseRedraftFired ? ' [redrafted]' : ''})`,
+        );
+        sections.push({ id: action.id, title: action.title, markdown: discResult.markdown });
+        if (itemId !== undefined && this.deps.todos !== undefined) {
+          try { await this.deps.todos.markComplete(itemId); }
+          catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)'); }
+        }
+        continue;   // skip the legacy gather-write + patch pipeline below
+      }
+
       // repoContext drives the skill-catalog filter (ORM / migration
       // family gates). RepoSummary doesn't currently surface ORM
       // detection -- pass an empty repoContext so those families
