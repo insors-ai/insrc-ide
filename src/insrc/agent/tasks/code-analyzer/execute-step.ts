@@ -58,11 +58,20 @@ export interface ExecuteStepInput {
 export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> {
 	const t0 = Date.now();
 
+	// Mirror gather-evidence's tool wiring: skill_invoke + skill_describe
+	// + skill_load_page. The load-page tool is what makes the per-skill
+	// paging mechanism (projectValueForLLM + SkillSpillRecord) actually
+	// usable -- without it, the "Next page: skill_load_page(...)" hint
+	// the model sees in tool_result content points at a tool it cannot
+	// call, and large skill outputs (e.g. module.describe returning
+	// hundreds of files) are stranded after the first page.
 	const skillInvokeTool   = getTool('skill_invoke');
 	const skillDescribeTool = getTool('skill_describe');
+	const skillLoadPageTool = getTool('skill_load_page');
 	const tools: ToolDefinition[] = [];
 	if (skillInvokeTool)   tools.push({ name: skillInvokeTool.id,   description: skillInvokeTool.description,   inputSchema: skillInvokeTool.inputSchema });
 	if (skillDescribeTool) tools.push({ name: skillDescribeTool.id, description: skillDescribeTool.description, inputSchema: skillDescribeTool.inputSchema });
+	if (skillLoadPageTool) tools.push({ name: skillLoadPageTool.id, description: skillLoadPageTool.description, inputSchema: skillLoadPageTool.inputSchema });
 
 	if (tools.length === 0) {
 		// Skill meta-tools not registered (test env without daemon, or
@@ -111,6 +120,8 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 			? String(call.input['skillId'] ?? '?')
 			: call.name === 'skill_describe'
 			? String(call.input['id'] ?? '?')
+			: call.name === 'skill_load_page'
+			? String(call.input['spillId'] ?? '?')
 			: '';
 		input.onProgress?.(`  [${input.step.id}] ${call.name}${skillRef ? `(${skillRef})` : ''}`);
 	};
