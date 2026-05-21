@@ -57,7 +57,7 @@ import {
 import { computeCoverage } from './cycle-memory.js';
 import { executeStep } from './execute-step.js';
 import { writeSectionFromEvidence } from './write-from-evidence.js';
-import type { EvidenceEntry } from './gather-evidence.js';
+import type { EvidenceEntry } from './summarize-result.js';
 import { getLogger } from '../../../shared/logger.js';
 
 const log = getLogger('code-analyzer:discovery-flow');

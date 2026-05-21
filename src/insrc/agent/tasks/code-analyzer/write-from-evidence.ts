@@ -23,7 +23,7 @@ import type { RepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
 import { loadFlowPrompt } from './prompts/loader.js';
-import type { EvidenceEntry } from './gather-evidence.js';
+import type { EvidenceEntry } from './summarize-result.js';
 
 const log = getLogger('code-analyzer:write');
 

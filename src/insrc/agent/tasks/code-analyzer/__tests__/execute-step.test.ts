@@ -1,20 +1,18 @@
 /**
- * Phase β tests for plans/code-analyzer-discovery-plan-loop.md.
+ * Tests for executeStep after the per-result-summarization rewrite
+ * ([plans/code-analyzer-execute-step-per-result-summarization.md]).
  *
- * `executeStep` is the local-side executor for one cloud-planned
- * DiscoveryStep. These tests cover:
- *
- *   - The parse layer (parseStepEmission) -- JSON extraction from
- *     model output across fence / preamble / trailing-prose variants.
- *   - Status determination (determineStatus) -- ok / partial / failed
- *     across the relevant cases.
- *   - Prompt assembly -- the system prompt includes step intent,
- *     planned skills, schemas when known, and the JSON output rule.
- *   - End-to-end via a FakeProvider that returns a single canned
- *     text response (no tool calls; happy path through runToolLoop).
- *
- * No real skill registry or daemon needed; the fake provider returns
- * a text response and runToolLoop exits on stopReason='end_turn'.
+ * Coverage:
+ *   - Pure helpers: inferCriteriaForStep, uniqueFlattenFacts,
+ *     mergeCitations, parseLegacyCitation, renderEntryStub.
+ *   - determineStatus: ok / partial / failed across the relevant cases
+ *     (now keyed on evidence.length, not just facts).
+ *   - Prompt assembly: system prompt mentions per-result evidence
+ *     capture and the "STOP calling tools" exit; the closing-envelope
+ *     contract is gone.
+ *   - End-to-end behavior via FakeProvider where the model emits no
+ *     tool calls -- verifies the soft-stop path returns whatever
+ *     evidence was captured (in these tests: zero).
  */
 
 import { test } from 'node:test';
@@ -22,17 +20,21 @@ import assert from 'node:assert/strict';
 
 import {
 	executeStep,
-	parseStepEmission,
-	_buildStepSystemPromptForTest as buildStepSystemPrompt,
-	_buildStepUserPromptForTest   as buildStepUserPrompt,
-	_determineStatusForTest       as determineStatus,
+	renderEntryStub,
+	_buildStepSystemPromptForTest    as buildStepSystemPrompt,
+	_buildStepUserPromptForTest      as buildStepUserPrompt,
+	_determineStatusForTest          as determineStatus,
+	_inferCriteriaForStepForTest     as inferCriteriaForStep,
+	_uniqueFlattenFactsForTest       as uniqueFlattenFacts,
+	_mergeCitationsForTest           as mergeCitations,
+	_parseLegacyCitationForTest      as parseLegacyCitation,
 } from '../execute-step.js';
 
 import type {
 	DiscoveryStep,
 	PlannedSkillCall,
-	Citation,
 } from '../../../content-gen/discovery-plan.js';
+import type { EvidenceEntry } from '../summarize-result.js';
 import type { LLMProvider, LLMMessage, LLMResponse, CompletionOpts } from '../../../../shared/types.js';
 import type { Session } from '../../../session.js';
 import { registerSkillTools } from '../../../../daemon/tools/builtins/skills/invoke-skill.js';
@@ -69,7 +71,7 @@ function fakeProvider(responses: readonly LLMResponse[]): { provider: LLMProvide
 	const provider: LLMProvider = {
 		supportsTools: true,
 		async complete(messages: LLMMessage[], _opts?: CompletionOpts): Promise<LLMResponse> {
-			calls.push(messages);
+			calls.push([...messages]);
 			const r = responses[i++];
 			if (r === undefined) {
 				throw new Error(`fake provider out of canned responses (idx=${i - 1})`);
@@ -84,101 +86,160 @@ function fakeProvider(responses: readonly LLMResponse[]): { provider: LLMProvide
 
 const FAKE_SESSION: Session = {} as unknown as Session;
 
+function fixtureEntry(overrides: Partial<EvidenceEntry> = {}): EvidenceEntry {
+	return {
+		skillId:    'code.entity.locate-by-name',
+		args:       { name: 'FSDirectory' },
+		facts:      ['Found 3 entities named FSDirectory'],
+		citations:  ['path:/repo/FSDirectory.java#L1-L400'],
+		confidence: 'high',
+		...overrides,
+	};
+}
+
 // ---------------------------------------------------------------------------
-// parseStepEmission
+// inferCriteriaForStep
 // ---------------------------------------------------------------------------
 
-test('parseStepEmission: clean JSON object -> parsed', () => {
-	const out = parseStepEmission(`{
-		"facts": ["FSDirectory holds the namespace"],
-		"citations": [{ "path": "/repo/FSDirectory.java", "startLine": 1, "endLine": 100, "label": "FSDirectory" }]
-	}`);
-	assert.ok(out !== null);
-	assert.deepEqual([...out!.facts], ['FSDirectory holds the namespace']);
-	assert.equal(out!.citations.length, 1);
-	assert.equal(out!.citations[0]!.path, '/repo/FSDirectory.java');
-	assert.equal(out!.citations[0]!.startLine, 1);
-	assert.equal(out!.citations[0]!.label, 'FSDirectory');
-});
-
-test('parseStepEmission: triple-backtick fenced JSON -> parsed', () => {
-	const out = parseStepEmission('```json\n{ "facts": ["a"], "citations": [] }\n```');
-	assert.ok(out !== null);
-	assert.deepEqual([...out!.facts], ['a']);
-});
-
-test('parseStepEmission: leading preamble + JSON -> parsed (first balanced object)', () => {
-	const out = parseStepEmission('Here is the JSON:\n{ "facts": ["hello"], "citations": [] }');
-	assert.ok(out !== null);
-	assert.deepEqual([...out!.facts], ['hello']);
-});
-
-test('parseStepEmission: empty string -> null', () => {
-	assert.equal(parseStepEmission(''), null);
-});
-
-test('parseStepEmission: malformed JSON -> null', () => {
-	assert.equal(parseStepEmission('{ "facts": [ "broken" '), null);
-});
-
-test('parseStepEmission: missing facts/citations -> empty arrays (not null)', () => {
-	const out = parseStepEmission('{}');
-	assert.ok(out !== null);
-	assert.equal(out!.facts.length, 0);
-	assert.equal(out!.citations.length, 0);
-});
-
-test('parseStepEmission: citation missing path -> dropped', () => {
-	const out = parseStepEmission(`{
-		"facts": [],
-		"citations": [
-			{ "startLine": 1, "endLine": 2 },
-			{ "path": "/ok.ts", "startLine": 5 }
-		]
-	}`);
-	assert.ok(out !== null);
-	assert.equal(out!.citations.length, 1);
-	assert.equal(out!.citations[0]!.path, '/ok.ts');
-});
-
-test('parseStepEmission: non-string facts dropped, blanks dropped', () => {
-	const out = parseStepEmission(`{ "facts": ["good", "", null, 42, "  another  "], "citations": [] }`);
-	assert.ok(out !== null);
-	assert.deepEqual([...out!.facts], ['good', 'another']);
-});
-
-test('parseStepEmission: full citation with all optional fields -> kept verbatim', () => {
-	const out = parseStepEmission(`{
-		"facts": ["x"],
-		"citations": [{
-			"path":      "/repo/a.ts",
-			"startLine": 10,
-			"endLine":   20,
-			"entityId":  "abcdef0123456789abcdef0123456789",
-			"label":     "Foo",
-			"repoPath":  "/repo"
-		}]
-	}`);
-	const c: Citation = out!.citations[0]!;
-	assert.equal(c.path,      '/repo/a.ts');
-	assert.equal(c.startLine, 10);
-	assert.equal(c.endLine,   20);
-	assert.equal(c.entityId,  'abcdef0123456789abcdef0123456789');
-	assert.equal(c.label,     'Foo');
-	assert.equal(c.repoPath,  '/repo');
+test('inferCriteriaForStep: returns 3 criteria including the step intent', () => {
+	const crit = inferCriteriaForStep(fixtureStep());
+	assert.equal(crit.length, 3);
+	assert.ok(crit[0]!.includes('investigate the FSDirectory class'));
+	assert.ok(crit.some(c => /specific entities/.test(c)));
+	assert.ok(crit.some(c => /citations verbatim/.test(c)));
 });
 
 // ---------------------------------------------------------------------------
-// determineStatus
+// uniqueFlattenFacts
 // ---------------------------------------------------------------------------
 
-test('determineStatus: no facts and no citations -> failed', () => {
-	assert.equal(determineStatus({ facts: [], citations: [], calledSkillIds: [], plannedSkillCount: 2 }), 'failed');
+test('uniqueFlattenFacts: dedups across entries case-insensitively', () => {
+	const out = uniqueFlattenFacts([
+		fixtureEntry({ facts: ['Found 3 entities', 'INode tree class'] }),
+		fixtureEntry({ facts: ['found 3 entities', 'Another fact'] }),
+	]);
+	assert.deepEqual([...out], ['Found 3 entities', 'INode tree class', 'Another fact']);
 });
 
-test('determineStatus: facts but no citations -> partial', () => {
+test('uniqueFlattenFacts: empty / blank facts are dropped', () => {
+	const out = uniqueFlattenFacts([
+		fixtureEntry({ facts: ['real', '', '   '] }),
+	]);
+	assert.deepEqual([...out], ['real']);
+});
+
+// ---------------------------------------------------------------------------
+// parseLegacyCitation
+// ---------------------------------------------------------------------------
+
+test('parseLegacyCitation: path with line range -> structured', () => {
+	const c = parseLegacyCitation('path:/repo/a.ts#L1-L20');
+	assert.deepEqual(c, { path: '/repo/a.ts', startLine: 1, endLine: 20 });
+});
+
+test('parseLegacyCitation: path with single line -> structured', () => {
+	const c = parseLegacyCitation('path:/repo/a.ts#L42');
+	assert.deepEqual(c, { path: '/repo/a.ts', startLine: 42 });
+});
+
+test('parseLegacyCitation: path without #L -> path only', () => {
+	const c = parseLegacyCitation('path:/repo/a.ts');
+	assert.deepEqual(c, { path: '/repo/a.ts' });
+});
+
+test('parseLegacyCitation: empty -> null', () => {
+	assert.equal(parseLegacyCitation(''), null);
+});
+
+test('parseLegacyCitation: tolerates missing path: prefix', () => {
+	const c = parseLegacyCitation('/repo/a.ts#L1-L5');
+	assert.deepEqual(c, { path: '/repo/a.ts', startLine: 1, endLine: 5 });
+});
+
+// ---------------------------------------------------------------------------
+// mergeCitations
+// ---------------------------------------------------------------------------
+
+test('mergeCitations: dedups on (path, startLine, endLine) across entries', () => {
+	const out = mergeCitations([
+		fixtureEntry({ citations: ['path:/repo/a.ts#L1-L20'] }),
+		fixtureEntry({ citations: ['path:/repo/a.ts#L1-L20', 'path:/repo/b.ts#L5-L9'] }),
+	]);
+	assert.equal(out.length, 2);
+	assert.equal(out[0]!.path, '/repo/a.ts');
+	assert.equal(out[1]!.path, '/repo/b.ts');
+});
+
+test('mergeCitations: prefers citationObjs when present', () => {
+	const out = mergeCitations([
+		{
+			skillId:      'x',
+			args:         {},
+			facts:        ['fact'],
+			citations:    ['path:/repo/a.ts#L1'],
+			citationObjs: [{ path: '/repo/a.ts', startLine: 1, endLine: 50, label: 'Foo' }],
+			confidence:   'high',
+		},
+	]);
+	assert.equal(out.length, 1);
+	assert.equal(out[0]!.endLine, 50);
+	assert.equal(out[0]!.label, 'Foo');
+});
+
+// ---------------------------------------------------------------------------
+// renderEntryStub (Phase 2.5 compaction)
+// ---------------------------------------------------------------------------
+
+test('renderEntryStub: golden format with simple args', () => {
+	const stub = renderEntryStub('e_3', fixtureEntry(), 'code.entity.locate-by-name', { name: 'FSDirectory' });
+	assert.match(stub, /^\[evidence e_3: code\.entity\.locate-by-name\(name="FSDirectory"\)/);
+	assert.match(stub, /facts=1 cites=1 conf=high/);
+	assert.match(stub, /skill_load_page if needed/);
+});
+
+test('renderEntryStub: truncates very long string args', () => {
+	const longName = 'a'.repeat(100);
+	const stub = renderEntryStub('e_1', fixtureEntry(), 'sk', { name: longName });
+	assert.match(stub, /name="a{30}\.\.\."/);
+});
+
+test('renderEntryStub: arrays + nested objects render as size markers', () => {
+	const stub = renderEntryStub(
+		'e_1',
+		fixtureEntry(),
+		'sk',
+		{ items: [1, 2, 3, 4], nested: { a: 1, b: 2 } },
+	);
+	assert.match(stub, /items=\[4\]/);
+	assert.match(stub, /nested=\{2 keys\}/);
+});
+
+test('renderEntryStub: stays under ~400 chars even for chunky entries', () => {
+	const stub = renderEntryStub('e_42', fixtureEntry({
+		facts:     ['f1', 'f2', 'f3', 'f4'],
+		citations: ['path:/repo/a.ts#L1-L10', 'path:/repo/b.ts#L100-L200'],
+	}), 'code.entity.locate-by-name', { name: 'FSDirectory', kinds: ['class', 'function'], language: 'java' });
+	assert.ok(stub.length < 400, `stub is ${stub.length} chars`);
+});
+
+// ---------------------------------------------------------------------------
+// determineStatus (new signature: keys on evidence.length)
+// ---------------------------------------------------------------------------
+
+test('determineStatus: zero evidence -> failed', () => {
 	assert.equal(determineStatus({
-		facts:             ['a'],
+		evidenceCount:     0,
+		facts:             [],
+		citations:         [],
+		calledSkillIds:    [],
+		plannedSkillCount: 2,
+	}), 'failed');
+});
+
+test('determineStatus: evidence captured but no citations -> partial', () => {
+	assert.equal(determineStatus({
+		evidenceCount:     2,
+		facts:             ['a', 'b'],
 		citations:         [],
 		calledSkillIds:    ['code.entity.summary'],
 		plannedSkillCount: 1,
@@ -187,15 +248,17 @@ test('determineStatus: facts but no citations -> partial', () => {
 
 test('determineStatus: fewer skills called than planned -> partial', () => {
 	assert.equal(determineStatus({
+		evidenceCount:     1,
 		facts:             ['a'],
 		citations:         [{ path: '/x.ts' }],
-		calledSkillIds:    ['code.entity.locate-by-name'],   // 1 called
-		plannedSkillCount: 2,                                  // 2 planned
+		calledSkillIds:    ['code.entity.locate-by-name'],
+		plannedSkillCount: 2,
 	}), 'partial');
 });
 
-test('determineStatus: all planned called + facts + citations -> ok', () => {
+test('determineStatus: all planned called + evidence + citations -> ok', () => {
 	assert.equal(determineStatus({
+		evidenceCount:     2,
 		facts:             ['a', 'b'],
 		citations:         [{ path: '/x.ts' }],
 		calledSkillIds:    ['code.entity.locate-by-name', 'code.entity.summary'],
@@ -209,7 +272,6 @@ test('determineStatus: all planned called + facts + citations -> ok', () => {
 
 test('buildStepSystemPrompt: loads static MD with the skill catalog', () => {
 	const prompt = buildStepSystemPrompt(undefined);
-	// The static skill glossary section is embedded.
 	assert.match(prompt, /Skill primitives/);
 	assert.match(prompt, /code\.entity\.locate-by-name/);
 	assert.match(prompt, /code\.entity\.summary/);
@@ -217,17 +279,26 @@ test('buildStepSystemPrompt: loads static MD with the skill catalog', () => {
 	assert.match(prompt, /Chain B/);
 });
 
-test('buildStepSystemPrompt: includes envelope schema + the no-prose-around-JSON rule', () => {
+test('buildStepSystemPrompt: describes per-result evidence capture + STOP-calling-tools exit', () => {
 	const prompt = buildStepSystemPrompt(undefined);
-	assert.match(prompt, /"facts":/);
-	assert.match(prompt, /"citations":/);
-	assert.match(prompt, /markdown fences/i);
-	assert.match(prompt, /preamble/i);
+	assert.match(prompt, /captures structured evidence/i);
+	assert.match(prompt, /STOP calling tools/);
 });
 
-test('buildStepSystemPrompt: documents how to read the user message + DOs/DONTs', () => {
+test('buildStepSystemPrompt: documents the compaction marker the model will see in tool_results', () => {
 	const prompt = buildStepSystemPrompt(undefined);
-	assert.match(prompt, /How the user message is structured/);
+	assert.match(prompt, /\[evidence e_/);
+	assert.match(prompt, /facts=.*cites=.*conf=/);
+});
+
+test('buildStepSystemPrompt: does NOT mention the legacy closing JSON envelope', () => {
+	const prompt = buildStepSystemPrompt(undefined);
+	assert.doesNotMatch(prompt, /Final output \(your LAST assistant turn\)/);
+	assert.doesNotMatch(prompt, /Hard rules on the envelope/);
+});
+
+test('buildStepSystemPrompt: documents DOs/DONTs', () => {
+	const prompt = buildStepSystemPrompt(undefined);
 	assert.match(prompt, /## DOs/);
 	assert.match(prompt, /## DON'Ts/);
 });
@@ -242,20 +313,19 @@ test('buildStepUserPrompt: names the step id + intent + imperative task list', (
 	assert.match(prompt, /## Step: step-1/);
 	assert.match(prompt, /Intent: investigate the FSDirectory class/);
 	assert.match(prompt, /## Tasks \(run in order\)/);
-	// Imperative "Invoke ... for **target**." framing.
 	assert.match(prompt, /1\. Invoke `code\.entity\.locate-by-name` for \*\*the FSDirectory class\*\*\./);
 	assert.match(prompt, /2\. Invoke `code\.entity\.summary` for \*\*use entityId from s1\.a\*\*\./);
 });
 
 test('buildStepUserPrompt: emits a Chain hint line for dependsOn calls', () => {
 	const prompt = buildStepUserPrompt(fixtureStep(), undefined);
-	// s1.b depends on s1.a, which is the first task (index 1).
 	assert.match(prompt, /Chain: use the `entityId` from task 1's result/);
 });
 
-test('buildStepUserPrompt: closes by telling the model to emit the JSON envelope as its final turn', () => {
+test('buildStepUserPrompt: closes by telling the model to STOP calling tools (no envelope contract)', () => {
 	const prompt = buildStepUserPrompt(fixtureStep(), undefined);
-	assert.match(prompt, /emit the JSON envelope as your FINAL assistant turn/);
+	assert.match(prompt, /STOP calling tools/);
+	assert.doesNotMatch(prompt, /JSON envelope/i);
 });
 
 test('buildStepUserPrompt: surfaces the workspace root + repoPath directive when provided', () => {
@@ -272,71 +342,62 @@ test('buildStepUserPrompt: omits workspace-root block when repoPath is undefined
 });
 
 // ---------------------------------------------------------------------------
-// executeStep end-to-end via FakeProvider (no real tool loop iterations)
+// executeStep end-to-end (no tool calls -- soft-stop path only)
 // ---------------------------------------------------------------------------
-// The fake provider returns a single end_turn response containing the
-// final JSON emission, so runToolLoop exits immediately on iteration 0.
-// (Real tool-loop integration is exercised in Phase δ integration tests
-// once orchestrator wiring lands.)
 
-test('executeStep: happy-path -- ok step output, structured citations', async () => {
-	const { provider } = fakeProvider([{
-		text: `{
-			"facts": ["FSDirectory anchors the HDFS namespace"],
-			"citations": [{
-				"path":      "/repo/FSDirectory.java",
-				"startLine": 1,
-				"endLine":   400,
-				"label":     "FSDirectory"
-			}]
-		}`,
-		stopReason: 'end_turn',
-	}]);
-	const step = fixtureStep();
+test('executeStep: model emits text without tool calls -> exits cleanly, status=failed (zero evidence)', async () => {
+	const { provider, calls } = fakeProvider([
+		{ text: 'I have nothing to do here.', stopReason: 'end_turn' },
+	]);
 	const out = await executeStep({
 		provider,
-		session:         FAKE_SESSION,
-		step,
+		session: FAKE_SESSION,
+		step:    fixtureStep(),
 	});
-	// Status: failed because no skills were called in this fake path.
-	// The test verifies the parse + structure round-trip, not the
-	// tool-loop integration (deferred to Phase δ).
-	assert.equal(out.stepId, 'step-1');
-	assert.equal(out.facts.length, 1);
-	assert.equal(out.citations.length, 1);
-	assert.equal(out.citations[0]!.path, '/repo/FSDirectory.java');
-	assert.equal(out.citations[0]!.label, 'FSDirectory');
-	assert.ok(out.durationMs >= 0);
+	assert.equal(out.status, 'failed');
+	assert.equal(out.facts.length, 0);
+	assert.equal(out.citations.length, 0);
+	assert.equal(calls.length, 1, 'only one inference call -- loop should exit on no-tools');
 });
 
-test('executeStep: empty model output -> failed status, empty arrays', async () => {
-	const { provider } = fakeProvider([{ text: '', stopReason: 'end_turn' }]);
+test('executeStep: regression -- empty text + no tool calls still exits without crashing', async () => {
+	// This is the Devstral empty-text bug pattern. Pre-rewrite, executeStep
+	// would emit the "failed to parse step emission JSON" warning and
+	// return failed. Post-rewrite it should also return failed -- but it
+	// should NOT have tried to parse a closing envelope.
+	const { provider } = fakeProvider([
+		{ text: '', stopReason: 'end_turn' },
+	]);
 	const out = await executeStep({
 		provider,
-		session:         FAKE_SESSION,
-		step:            fixtureStep(),
+		session: FAKE_SESSION,
+		step:    fixtureStep(),
 	});
 	assert.equal(out.status, 'failed');
 	assert.equal(out.facts.length, 0);
 	assert.equal(out.citations.length, 0);
 });
 
-test('executeStep: malformed JSON output -> failed status', async () => {
-	const { provider } = fakeProvider([{ text: 'not json at all', stopReason: 'end_turn' }]);
-	const out = await executeStep({
-		provider,
-		session:         FAKE_SESSION,
-		step:            fixtureStep(),
-	});
-	assert.equal(out.status, 'failed');
-});
-
 test('executeStep: stepId preserved from input', async () => {
-	const { provider } = fakeProvider([{ text: '{"facts":["x"],"citations":[]}', stopReason: 'end_turn' }]);
+	const { provider } = fakeProvider([
+		{ text: '', stopReason: 'end_turn' },
+	]);
 	const out = await executeStep({
 		provider,
-		session:         FAKE_SESSION,
-		step:            { ...fixtureStep(), id: 'step-42' },
+		session: FAKE_SESSION,
+		step:    { ...fixtureStep(), id: 'step-42' },
 	});
 	assert.equal(out.stepId, 'step-42');
+});
+
+test('executeStep: respects max-iter cap (zero canned responses would throw; cap=0 short-circuits the loop)', async () => {
+	const { provider, calls } = fakeProvider([]);
+	const out = await executeStep({
+		provider,
+		session:       FAKE_SESSION,
+		step:          fixtureStep(),
+		maxIterations: 0,
+	});
+	assert.equal(out.status, 'failed');
+	assert.equal(calls.length, 0, 'no inference calls when maxIterations=0');
 });

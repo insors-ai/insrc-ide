@@ -16,7 +16,7 @@ import {
 } from '../write-from-evidence.js';
 import type { LLMProvider, LLMResponse, LLMMessage } from '../../../../shared/types.js';
 import type { PlannedAction } from '../../../content-gen/plan-actions.js';
-import type { EvidenceEntry } from '../gather-evidence.js';
+import type { EvidenceEntry } from '../summarize-result.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
