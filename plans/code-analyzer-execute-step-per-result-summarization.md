@@ -718,6 +718,310 @@ fake hex strings -- becomes unreachable.
 | Eviction stub bloats with long facts/citations lists | low | Each `EvidenceEntry` is capped at 4 facts (`maxItems: 4` in `EVIDENCE_SUMMARY_SCHEMA`) and citations are small path strings. Total stub stays under ~500 chars even for chunky entries (existing `< 400 chars` golden test relaxes to `< 800`). |
 | Window setting drifts across callers | low | Single optional field with a documented default; only set explicitly when a chain requires it. Default-1 is the right value for the discovery flow's planned skill chains. |
 
+### Phase 8 -- per-task driver (supersedes the agentic tool loop)
+
+**Why.** Phase 7's eviction window fixed Haiku's hallucination cascade
+but only partially helped local (devstral-small-2 on Ollama). Live
+HDFS run (2026-05-22, post-Phase-7) revealed that the *agentic tool
+loop* itself is too cognitively heavy for the local model:
+
+- Devstral returns short text-only acknowledgements at iter 1 in
+  ~50% of fresh-step starts (e.g. *"I'll execute the tasks in order
+  to map the inode hierarchy..."*) and no `tool_use` block. Loop
+  exits `no-tools` -> status=failed, evidence=0.
+- Devstral returns empty `text` + zero `tool_calls` at iter 1 in
+  ~40% (Ollama's chat-template parser drops the generated tokens).
+- Past iter 1, Devstral often empty-bails at iter 2-4 when input
+  tokens cross ~5-6k. Phase 7 mitigates this by preserving
+  per-result evidence, but the deeper turn never produces output.
+
+Root cause is *not* a model-quality issue and *not* a prompt-wording
+issue. It's a structural mismatch: the tool-loop pattern asks the
+model to silently bookkeep across ~4-8 message positions per turn
+(scroll back to the task list, match its prior `tool_use` to "which
+task that was", find the chainable value in a raw JSON `tool_result`,
+emit the next `tool_use`). Strong models do this implicitly; weak
+local models punt by emitting prose or empty output.
+
+The ReAct-shaped loop is also unnecessarily flexible for executeStep's
+use case: the cloud planner has already chosen WHICH skills to call,
+IN WHAT ORDER, and IDENTIFIED the chain dependencies (via
+`PlannedSkillCall.dependsOn`). There's nothing for the local model
+to "decide" beyond the literal arg shape for each call.
+
+**Reshape.** Move the loop driver from the model to the orchestrator.
+The model becomes a single-shot function called once per task whose
+only job is: "given this context + this task, emit ONE `skill_invoke`
+tool_use block with correct args."
+
+Pseudocode:
+
+```ts
+for (let i = 0; i < step.skills.length; i++) {
+  const task = step.skills[i];
+  const priorResult = i === 0 ? null : evidence[evidence.length - 1];
+
+  const messages = buildPerTaskMessages({
+    stepIntent:  step.intent,
+    repoContext: repoSummary,
+    priorTask:   i === 0 ? null : { task: step.skills[i - 1], result: priorResult },
+    currentTask: task,
+  });
+
+  const resp = await provider.complete(messages, {
+    tools,
+    tool_choice: 'required',         // model must emit a tool_use
+    maxTokens:   1024,                // small budget; emitting one tool_use is cheap
+  });
+
+  if (resp.toolCalls.length === 0) {
+    // Hard fail: model violated tool_choice=required.
+    // Retry once with a sterner prompt, then skip this task and continue.
+    ...
+  }
+
+  const result = await executeTool(resp.toolCalls[0], { session });
+  const entry  = await summarizeResult(provider, {
+    skillId:    String(resp.toolCalls[0].input.skillId),
+    args:       resp.toolCalls[0].input.args,
+    resultText: result.content,
+    objective:  step.intent,
+    criteria:   inferCriteriaForStep(step),
+  });
+  evidence.push(entry);
+}
+// step done; no model "decides termination" path.
+```
+
+**Per-task prompt shape.**
+
+System message (compact, ~1-2k tokens, FOCUSED on the per-call job):
+
+```markdown
+You output ONE `skill_invoke` tool_use block per turn. The orchestrator
+runs the skill and decides what to do next; you do not loop, plan
+ahead, or decide when to stop.
+
+## Repository
+<repoSummary -- file/entity counts, top modules, languages>
+
+## How this turn works
+- You will see ONE specific task to execute (skill + target description).
+- If a prior task ran, you will see its result in the conversation.
+- Read the task description, read the prior result if any, then emit
+  one `skill_invoke({ skillId, args })` tool_use block.
+- Do NOT emit prose, narration, or planning. Emit the tool_use block
+  and nothing else.
+
+## Skill catalog
+<exactly the catalog row for THIS task's skillId, with arg schema>
+
+## Common arg-shape rules
+<the 4-5 known foot-guns: `file` not `path`, `entityId` is 32-char hex, etc>
+```
+
+User message (per call):
+
+```markdown
+## Step context
+<step.intent in one sentence>
+
+## Task to execute now
+Skill:  <task.skillId>
+Target: <task.context>          (e.g. "the INode class representing
+                                  filesystem tree nodes")
+{{ if task.dependsOn }}
+Chain:  use the `entityId` (or relevant handle) from the prior task's
+        result shown below. If no chainable handle is present, emit
+        the call with a sensible alternative arg (e.g. fall back to
+        a name-based lookup).
+{{ /if }}
+
+{{ if priorResult }}
+## Prior task that just completed
+Skill: <prior.skillId>
+Args:  <prior.args formatted>
+
+### Raw result
+<prior.tool_result content, full text>
+{{ /if }}
+
+## Output
+Emit exactly one `skill_invoke` tool_use block now. No narration.
+```
+
+Input-token budget per call: system ~1.5k, user ~0.5-3k (depends on
+prior-result size). Well under the devstral empty-text threshold.
+
+**What's removed.**
+
+- The `while (iteration < maxIterations)` agentic loop. Replaced by
+  the `for (task of step.skills)` driver. The agentic branch is
+  **ripped out entirely** -- not kept as a back-compat fallback. No
+  `mode` switch, no dead-code paths.
+- `evictionWindow` config and the in-place stub-mutation logic
+  (Phases 2.5 + 7). Each per-task call is fresh; there's no
+  multi-turn conversation to evict from. The `EvictableEntry` type,
+  `applyEvictionWindow` helper, and Phase 2.5 stub-renderer code are
+  deleted from `execute-step.ts` along with the agentic loop.
+- `skill_describe` and `skill_load_page` as model-visible meta-tools.
+  The orchestrator looks up the current task's skill schema from the
+  registry (`getTool(task.skillId).inputSchema`) and **inlines it
+  verbatim** in the per-task user prompt -- so the model sees the
+  exact arg shape for THIS task's skill without having to ask for it.
+  Pagination, if needed, becomes the orchestrator's responsibility,
+  not the model's.
+- The "stop calling tools when done" / "no closing JSON envelope"
+  prompt contracts -- termination is deterministic.
+- The "model may invoke extras beyond planned" allowance. The cloud
+  reviewer is the correct place to ask for additional investigation;
+  the local model freelancing inside a step was never load-bearing
+  and the run logs show it almost never produced retainable extras.
+
+**What stays unchanged.**
+
+- `DiscoveryStep` / `PlannedSkillCall` schema (the planner's output
+  shape). `skills[]` already carries `skillId + context + dependsOn`,
+  exactly what the per-task driver needs.
+- `summarizeResult` -- runs once per task to produce the
+  `EvidenceEntry`. Unchanged interface and prompt.
+- `EvidenceEntry` aggregation into `StepOutput { facts, citations,
+  status }`. The reviewer sees the same shape it does today.
+- `discovery-flow.ts` orchestrator (the outer
+  plan -> N executeStep calls -> reviewCycle loop). It sees the same
+  `StepOutput` interface back; the new mode is purely an executeStep
+  internals change.
+
+**What's gained (the failure modes that go away).**
+
+| Failure mode (from today's catalog) | Phase 8 status |
+|---|---|
+| Iter-1 text-only acknowledgement | Eliminated. `tool_choice: required` + per-task prompt mean the model can ONLY emit a tool_use. No agentic framing for it to narrate inside. |
+| Iter-1 empty output | Mitigated. Per-call inputs stay under ~3k tokens, below devstral's empty-text trigger regime. If a stray empty response happens, retry once with the same prompt -- contained to ONE task, not whole step. |
+| Deep-multi-turn empty-text bail | Eliminated. There is no deep multi-turn conversation. Each task is a fresh call with small context. |
+| Hallucinated skill name | Eliminated. The orchestrator names the exact skillId in the prompt; model's job is args, not skill picking. |
+| Wrong arg schema | Reduced. The per-task system prompt includes the exact arg schema for THIS task's skill (not the full catalog). Existing corrective-schema injection still catches the residual cases. |
+| Hallucinated entityIds | Already eliminated by Phase 7's raw-tool_result preservation; Phase 8 keeps that property by surfacing the prior raw result verbatim in the next prompt. |
+| Model decides termination wrong | Eliminated. The orchestrator decides termination after the last planned task. |
+
+**Tradeoffs (honest accounting).**
+
+| Lost capability | Worth it? |
+|---|---|
+| Model can no longer choose to skip a planned task that returned no useful target | Yes. Per the run logs, the model never made good use of this; instead it tended to bail when a task failed. Orchestrator runs every task; reviewer judges the evidence collectively. |
+| Model can no longer invoke unplanned "extras" mid-step | Yes. Extras were rare and rarely added value. The cycle reviewer requests more steps in the next cycle if coverage is incomplete -- the correct place for that decision. |
+| Model can no longer dynamically adapt mid-step (e.g. "pivot from inode investigation to journal investigation because inode turned up empty") | Yes. The planner is the right component for that decision (it sees the cycle's review feedback). Mid-step adaptation by the local model was never reliable enough to count on. |
+
+**Phase 8 sub-phases.**
+
+#### 8a -- refactor executeStep internals
+
+- Replace `while (iteration < maxIterations)` with `for (task of step.skills)`.
+- **Rip out the agentic loop entirely** -- no `mode` switch, no
+  back-compat branch. Single implementation: per-task driver.
+- Delete `EvictableEntry`, `applyEvictionWindow`, `evictionWindow`
+  option, `renderEntryStub`, and `formatProgressLine` (the agentic-
+  loop progress helper). `formatArgsInline` stays (still useful for
+  progress logging in the new loop).
+- Add `buildPerTaskMessages(stepInput, priorResult, currentTask)` builder.
+- Plumb `tool_choice: 'required'` (or per-provider equivalent) through
+  `CompletionOpts` for the per-task call.
+- Termination: loop ends after the last task. `stopReason` = `'completed'`.
+
+#### 8b -- rewrite the existing execute-step system prompt
+
+- **Rewrite** `prompts/flow/execute-step/system.md` in place. The old
+  agentic-mode contents are gone; the new content is the per-task
+  system prompt (~1.5k tokens). The static slot `{{REPO_CONTEXT}}` is
+  preserved.
+- The full skill catalog is dropped. Instead, the orchestrator inlines
+  the exact arg schema for THIS task's skillId into the per-task user
+  message (looked up via `getTool(skillId).inputSchema`).
+- Drop the "STOP calling tools" / "orchestrator captures evidence as
+  you go" verbiage -- both are moot in per-task mode.
+- Keep the anti-hallucination block and the common arg-shape rules
+  (foot-guns like `file` vs `path`, 32-char hex entityIds).
+
+#### 8c -- `tool_choice` plumbing
+
+- Extend `CompletionOpts` with `toolChoice?: 'auto' | 'required' | 'none'`.
+- Map per-provider:
+  - Ollama: forward as `tool_choice` on the request payload (model-
+    dependent; if devstral ignores it, the stall-retry below catches
+    the violation).
+  - Anthropic: `tool_choice: { type: 'any' }` when `required`, otherwise
+    default.
+  - OpenAI / Mistral / Gemini: per-vendor equivalent.
+- Default `'auto'` everywhere so existing call sites are unchanged.
+
+#### 8d -- per-task fallback / retry
+
+- If a per-task call returns zero `toolCalls` (model violated
+  `tool_choice: required`, or Ollama doesn't enforce it), retry ONCE
+  with a sterner prompt suffix:
+  `"You must emit a skill_invoke tool_use block. Your previous
+  response had none. Try again."`
+- If the retry also returns zero, log a warn and skip the task
+  (status will reflect partial coverage). Do NOT abort the whole
+  step -- partial evidence is better than zero.
+
+#### 8e -- tests
+
+- **Retire** all tests that asserted the agentic-loop contract.
+  Specifically delete or rewrite:
+  - `renderEntryStub` golden + format tests (function gone)
+  - `applyEvictionWindow` tests (function gone)
+  - `formatProgressLine` test (function gone; `formatArgsInline`
+    tests stay)
+  - `_DEFAULT_EVICTION_WINDOW` test export gone
+  - `executeStep: model emits text without tool calls -> exits cleanly`
+    (no-tools is no longer a termination signal in per-task mode)
+  - `executeStep: respects max-iter cap` (no max-iter in per-task mode)
+- Add per-task tests:
+  - Happy path: 3 planned tasks -> 3 provider calls, 3 evidence
+    entries captured, status=ok.
+  - Chain dependency: task 2's `dependsOn` task 1; assert task 1's
+    raw result text appears in task 2's prompt.
+  - Empty toolCalls on a per-task call -> one retry; if retry empty
+    too, task is skipped, step continues.
+  - Step with 0 planned tasks -> immediate empty StepOutput, no
+    provider calls.
+  - Per-task user-message golden: assert the rendered prompt for a
+    fixed `(stepIntent, priorResult, currentTask)` input contains
+    the inlined skill schema + the chain hint when `dependsOn` is set.
+
+#### 8f -- live validation against Hadoop
+
+- Re-run the same HDFS XL analyzer prompt that's been our corpus.
+- Acceptance metrics:
+  - Per-step `evidence.length` matches `step.skills.length` in
+    >= 80% of steps (vs today's intermittent 1-3 out of N).
+  - Per-step wall-clock improves vs Phase 7 (no wasted iterations
+    on stalled / empty-output turns).
+  - Cycle reviewer's `keep:` list size goes up (more retainable
+    evidence per cycle).
+
+**Files touched.**
+
+- `src/insrc/agent/tasks/code-analyzer/execute-step.ts`
+  (refactored end-to-end; agentic loop + Phase 2.5/7 code deleted)
+- `src/insrc/agent/tasks/code-analyzer/prompts/flow/execute-step/system.md`
+  (rewritten in place for per-task mode)
+- `src/insrc/shared/types.ts` (extend `CompletionOpts.toolChoice`)
+- `src/insrc/agent/providers/ollama.ts`, `anthropic.ts`,
+  `openai.ts`, `mistral.ts`, `gemini.ts` (plumb `toolChoice`)
+- `src/insrc/agent/tasks/code-analyzer/__tests__/execute-step.test.ts`
+  (agentic-loop tests deleted; per-task tests added)
+- This plan doc (Phase 8 section)
+
+**Risks.**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Local model still returns empty toolCalls on the per-task call (devstral parser bug at lower context too) | medium | 8d retry; if both attempts return empty, task is skipped but step continues with partial evidence. No more all-or-nothing failure. |
+| Ollama doesn't honor `tool_choice: required` for devstral | medium | Same -- retry covers this. The stronger fix would be to switch the local executor model to one that honors `tool_choice` (e.g. qwen3-coder); that's an orthogonal swap and out of scope here. |
+| Per-task prompts duplicate content across N calls per step | low | Trade-off accepted. Ollama caches at the token level (KV cache) when the same prefix repeats across calls within a session. Net cost similar or lower vs the legacy loop's deep-context calls. |
+
 ## Risks
 
 | Risk | Likelihood | Mitigation |

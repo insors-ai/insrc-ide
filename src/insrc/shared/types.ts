@@ -123,6 +123,30 @@ export interface CompletionOpts {
    * message changes every call and caching would waste cache writes.
    */
   cacheSystem?: boolean | undefined;
+  /**
+   * Constrain the model's choice of tool use.
+   *
+   *   - `'auto'`     (default) -- model may emit text, tool_use, or both.
+   *   - `'required'`           -- model MUST emit at least one tool_use
+   *                               block. Used by the executeStep per-task
+   *                               driver (Phase 8) so the local model
+   *                               can't punt to acknowledgement prose
+   *                               instead of calling a tool.
+   *   - `'none'`               -- model MUST NOT emit a tool_use block.
+   *
+   * Provider plumbing maps this to the vendor-specific knob:
+   *
+   *   - Ollama:    `tool_choice` on the request (model-dependent).
+   *   - Anthropic: `tool_choice: { type: 'any' }` for `'required'`,
+   *                `{ type: 'auto' }` for `'auto'`,
+   *                `{ type: 'none' }` for `'none'`.
+   *   - OpenAI:    `tool_choice: 'required' | 'auto' | 'none'` (same).
+   *
+   * Providers that don't support the constraint silently ignore it;
+   * callers should treat enforcement as best-effort and have a
+   * client-side retry path for the residual non-compliance.
+   */
+  toolChoice?: 'auto' | 'required' | 'none' | undefined;
 }
 
 export interface LLMProvider {

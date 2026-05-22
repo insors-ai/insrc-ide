@@ -192,10 +192,20 @@ export class OllamaProvider implements LLMProvider {
     // reuse kicks in. `cacheSystem === false` reverts to the default
     // (5m) for one-off calls.
     const keepAlive = opts.cacheSystem === false ? undefined : '24h';
+    // tool_choice: best-effort across Ollama model families. Some
+    // models (qwen3-coder, devstral) honor it; others ignore. The
+    // executeStep per-task driver (Phase 8) treats this as a HINT
+    // and has a client-side retry path for the residual non-compliance.
+    // Ollama SDK doesn't type the field yet; pass it through the
+    // request object via a cast.
+    const wantsToolChoice = opts.toolChoice !== undefined && tools !== undefined && tools.length > 0;
     const response = await this.client.chat({
       model: this.model,
       messages: ollamaMessages,
       ...(tools ? { tools } : {}),
+      // Ollama SDK doesn't expose `tool_choice` in its TS types yet, but
+      // the underlying HTTP API accepts it. Forward only when set.
+      ...(wantsToolChoice ? ({ tool_choice: opts.toolChoice } as Record<string, unknown>) : {}),
       ...(ollamaFormat !== undefined ? { format: ollamaFormat } : {}),
       ...(disableThinking ? { think: false } : {}),
       ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),

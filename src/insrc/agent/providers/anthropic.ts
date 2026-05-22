@@ -57,6 +57,7 @@ export class AnthropicProvider implements LLMProvider {
   async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
     const { system, apiMessages } = splitMessages(messages);
     const tools = opts.tools ? toAnthropicTools(opts.tools) : undefined;
+    const toolChoice = toAnthropicToolChoice(opts.toolChoice, tools);
     // Prompt caching: when the caller hasn't opted out (default = on),
     // mark the system prompt as a cacheable prefix with
     // `cache_control: { type: 'ephemeral' }`. Anthropic billing for
@@ -95,6 +96,7 @@ export class AnthropicProvider implements LLMProvider {
           max_tokens: opts.maxTokens ?? 8_192,
           ...(systemParam !== undefined ? { system: systemParam } : {}),
           ...(tools && tools.length > 0 ? { tools } : {}),
+          ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
           messages:   apiMessages,
         });
 
@@ -139,6 +141,7 @@ export class AnthropicProvider implements LLMProvider {
         max_tokens: opts.maxTokens ?? 8_192,
         ...(system ? { system } : {}),
         ...(tools && tools.length > 0 ? { tools } : {}),
+        ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
         messages:   apiMessages,
       });
 
@@ -361,6 +364,29 @@ function toAnthropicTools(tools: ToolDefinition[]): Anthropic.Tool[] {
     description:  t.description,
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
   }));
+}
+
+/**
+ * Map our generic `CompletionOpts.toolChoice` to Anthropic's
+ * `tool_choice` parameter shape. Returns `undefined` when no constraint
+ * is set or when tools aren't being provided (Anthropic rejects
+ * `tool_choice` without `tools`).
+ *
+ *   - 'auto'     -> { type: 'auto' }
+ *   - 'required' -> { type: 'any' }     (Anthropic's name for "must use a tool")
+ *   - 'none'     -> { type: 'none' }
+ */
+function toAnthropicToolChoice(
+  toolChoice: 'auto' | 'required' | 'none' | undefined,
+  tools: Anthropic.Tool[] | undefined,
+): Anthropic.MessageCreateParams['tool_choice'] | undefined {
+  if (toolChoice === undefined) return undefined;
+  if (!tools || tools.length === 0) return undefined;
+  switch (toolChoice) {
+    case 'auto':     return { type: 'auto' };
+    case 'required': return { type: 'any' };
+    case 'none':     return { type: 'none' };
+  }
 }
 
 /**
