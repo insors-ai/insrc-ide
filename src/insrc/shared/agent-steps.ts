@@ -36,7 +36,11 @@ export interface AgentDefinition {
 
 /**
  * Policy notes per agent:
- * - Generative and classifier steps stay on local (cheap, fast, iterable).
+ * - Generative steps stay on local (cheap, fast, iterable).
+ * - Primary intent `classify` runs on cloud (per-turn routing
+ *   decision is quality-critical -- a wrong intent sends the user to
+ *   the wrong agent for the whole turn). The other classifier steps
+ *   (decompose, command-extract) stay on local.
  * - Review / validation / enhance / detail / refine / promote / discuss
  *   default to cloud (quality matters; these are the steps the user
  *   notices when the output feels off).
@@ -45,7 +49,14 @@ export const AGENT_STEP_CATALOG: readonly AgentDefinition[] = [
 	{
 		agent: 'classifier',
 		steps: [
-			{ step: 'classify', defaultTier: 'local', description: 'Primary intent classifier' },
+			// `classify` runs on cloud because the per-turn relationship
+			// + intent decision is quality-critical (a wrong intent routes
+			// the user to the wrong agent for the entire turn) and the
+			// local model was producing too many misclassifications --
+			// especially around FOLLOWUP / DRILL_DOWN / NEW boundaries
+			// where a few extra tokens of cloud reasoning materially
+			// changes the routing.
+			{ step: 'classify', defaultTier: 'cloud', description: 'Primary intent classifier' },
 			{ step: 'decompose', defaultTier: 'local', description: 'Break multi-intent prompts into actions' },
 			{ step: 'command-extract', defaultTier: 'local', description: 'Extract shell commands from natural language' },
 		],
