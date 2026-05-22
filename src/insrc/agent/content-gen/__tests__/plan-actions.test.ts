@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 
 import {
 	planActions,
-	ACTION_BUDGET_BY_TIER,
+	DEFAULT_MAX_ACTIONS,
 	_validatePlanForTest as validatePlan,
 	_buildPlanMessagesForTest as buildPlanMessages,
 	_stripFencesForTest as stripFences,
@@ -205,8 +205,8 @@ test('buildPlanMessages: includes intent, request, summary context, action budge
 	assert.match(userText, /## Summary context/);
 	assert.match(userText, /Prior turns covered: whole-repo overview/);
 	assert.match(userText, /## Action budget/);
-	assert.match(userText, /Maximum actions for this report: 4/);
-	assert.match(userText, /scope tier: L/);
+	assert.match(userText, /Safety ceiling: at most 4 actions/);
+	assert.match(userText, /structural shape/);
 });
 
 test('buildPlanMessages: empty summary context renders fallback line', () => {
@@ -276,10 +276,10 @@ test('planActions: happy path -> returns parsed plan + degraded:false', async ()
 	}
 });
 
-test('planActions: planner over-shoots tier cap -> clamped', async () => {
+test('planActions: planner over-shoots safety ceiling -> clamped to DEFAULT_MAX_ACTIONS', async () => {
 	const overshoot = JSON.stringify({
 		intentBrief: 'foo',
-		actions: Array.from({ length: 6 }, (_, i) => ({
+		actions: Array.from({ length: DEFAULT_MAX_ACTIONS + 6 }, (_, i) => ({
 			id: `act-${i}`,
 			title: 't',
 			objective: 'o',
@@ -291,10 +291,10 @@ test('planActions: planner over-shoots tier cap -> clamped', async () => {
 		fakeProviderReturning(overshoot),
 	);
 	assert.equal(result.degraded, false);
-	assert.equal(result.actions.length, ACTION_BUDGET_BY_TIER.S);
+	assert.equal(result.actions.length, DEFAULT_MAX_ACTIONS);
 });
 
-test('planActions: explicit maxActions overrides tier cap (clamped to 32)', async () => {
+test('planActions: explicit maxActions overrides default ceiling (clamped to 32)', async () => {
 	const overshoot = JSON.stringify({
 		intentBrief: 'x',
 		actions: Array.from({ length: 50 }, (_, i) => ({

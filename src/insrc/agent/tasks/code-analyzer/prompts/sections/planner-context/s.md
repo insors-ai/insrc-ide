@@ -1,17 +1,17 @@
 ## Decomposition guidance (tier S)
 
-This is a tier-S code analysis -- the scope is 2-3 specific files
-(code / config / deploy / DB scripts). Tier-S reports are narrow and
-near-exhaustive on the named files. Decompose into 2-3 sections.
+This is a tier-S code analysis -- the scope is a small set of
+specific files (code / config / deploy / DB scripts). Tier-S reports
+are narrow and near-exhaustive on the named files.
 
 ### How to use the coverage menu
 
 1. **Read the user request first.** Which files did they name? What
    specific question about those files do they want answered?
-2. **Decompose by FILE (typically).** For 2 files: one section per
-   file plus optionally a "Cross-File Usage & Risks" section. For 1
-   script: a single comprehensive section is often cleaner than
-   splitting.
+2. **Decompose by FILE (typically).** One section per named file is
+   the usual shape; optionally add a "Cross-File Usage & Risks"
+   section when the files interact meaningfully. A single script
+   file usually wants ONE comprehensive section, not splits.
 3. **Cross-check against the coverage menu BELOW.** Each file's
    section should touch the axes that apply (review, deps, persistence,
    safety checks, usage).
@@ -25,13 +25,16 @@ near-exhaustive on the named files. Decompose into 2-3 sections.
     config / migration safety, secret-leak risk)
   - usage review (callers + whether they pass required guards)
 
-### Section-count guidance
+### Decomposition strategy
 
-- Aim for 2-3 sections.
+Section count is REQUEST-DRIVEN, not tier-driven:
+
+- Number of sections = (files named) + optional cross-file section.
+  Two files -> 2-3 sections; one script -> 1 section.
 - Over-decomposition fragments files that should be reviewed together.
-- For 1 script file: a single comprehensive section with "What it
-  does" / "What it touches" / "What's risky" sub-areas is usually
-  cleaner.
+  Don't split one file across multiple sections just to inflate count.
+- The safety ceiling in the user message is an upper bound, not a
+  target. A narrow tier-S request is allowed to return 1 section.
 
 ### Naming + scope per section
 

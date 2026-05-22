@@ -1,11 +1,10 @@
 ## Decomposition guidance (tier L)
 
 This is a tier-L code analysis -- the scope is a medium-to-large
-module. Your job: decompose the work into 3-6 sections that together
-answer the USER REQUEST in depth. The user's actual question is the
-primary driver. The menu below is a **coverage checklist** to make
-sure no important axis is missed -- it is NOT a list of section
-titles to copy.
+module. Decompose the work into sections that together answer the
+USER REQUEST in depth. The user's actual question is the primary
+driver -- the menu below is a **coverage checklist** to make sure no
+important axis is missed, NOT a list of section titles to copy.
 
 ### How to use the coverage menu
 
@@ -29,14 +28,20 @@ titles to copy.
   - test coverage of the module's surface
   - deployment artifacts + configuration that affect this module
 
-### Section-count guidance
+### Decomposition strategy
 
-- Aim for 3-6 sections. Below 3 risks "one big kitchen-sink section";
-  above 6 fragments the module.
+Section count is REQUEST-DRIVEN, not tier-driven:
+
+- One section per major submodule / public-entry cluster / dominant
+  concern that the request actually touches. The repo-summary names
+  the candidate submodules; the request narrows which are in scope.
 - Combine thin axes into one section if neither alone justifies its
-  own.
+  own (e.g. "Tests & Configuration" if both are light).
 - Reserve dedicated sections for the module's dominant concern (if
   it's persistence-heavy, give persistence its own section).
+- A single-question L-tier ask may be fine with 2-3 sections; a
+  broad module review may want 5-6. Let the request drive the count,
+  not the tier.
 
 ### Naming + scope per section
 

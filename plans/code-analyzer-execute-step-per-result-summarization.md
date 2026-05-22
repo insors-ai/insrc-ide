@@ -1022,6 +1022,87 @@ prior-result size). Well under the devstral empty-text threshold.
 | Ollama doesn't honor `tool_choice: required` for devstral | medium | Same -- retry covers this. The stronger fix would be to switch the local executor model to one that honors `tool_choice` (e.g. qwen3-coder); that's an orthogonal swap and out of scope here. |
 | Per-task prompts duplicate content across N calls per step | low | Trade-off accepted. Ollama caches at the token level (KV cache) when the same prefix repeats across calls within a session. Net cost similar or lower vs the legacy loop's deep-context calls. |
 
+### Phase 9 -- decouple section count from scope tier
+
+**Why.** Phase 6 fixed the analogous coupling for per-cycle step
+count, but the **section count** at the report planner was still
+hard-wired to the scope tier via `ACTION_BUDGET_BY_TIER` (S=2, M=4,
+L=8, XL=12, XXL=16, ...) AND via "Aim for N-M sections" stanzas in
+the four `planner-context/{s,m,l,xl}.md` files. Observed live: a
+drill-down request classified as tier-M was clamped to **exactly 4
+sections** regardless of how many concerns the request actually
+covered. Same root cause as Phase 6: tier should drive the SHAPE /
+DEPTH of each section, not the count. The count is properly driven
+by the structural shape of the request (files / features /
+subsystems named).
+
+**What changes.**
+
+- `agent/content-gen/plan-actions.ts`:
+  - Replace per-tier `ACTION_BUDGET_BY_TIER` map with a single
+    `DEFAULT_MAX_ACTIONS = 12` safety ceiling.
+  - `tierCap` lookup removed; default = `DEFAULT_MAX_ACTIONS`.
+    Callers can still pass `maxActions` to tighten further; the
+    schema's 32 absolute cap stays.
+  - User-message "Maximum actions for this report: N (scope tier:
+    M)" → "Safety ceiling: at most N actions. Return FEWER when
+    narrow. Section count is driven by the request's structural
+    shape, NOT scope tier."
+  - System-prompt rule #1 reworded: ceiling is NOT a target;
+    two concerns -> two sections; six subsystems -> six sections;
+    don't pad up to the ceiling.
+- `prompts/sections/planner-context/{s,m,l,xl}.md`:
+  - "Section-count guidance" stanzas (`Aim for N-M sections`) removed
+    from all four files.
+  - Replaced with "Decomposition strategy" subsections that frame
+    count as REQUEST-DRIVEN. Each MD still describes the DEPTH and
+    SHAPE that distinguishes its tier (file-level vs feature-deep-
+    dive vs subsystem vs full-repo), which is what tier should still
+    influence.
+- Tests:
+  - `plan-actions.test.ts`: `ACTION_BUDGET_BY_TIER.S` import → swap
+    to `DEFAULT_MAX_ACTIONS`. The "over-shoots tier cap -> clamped"
+    test repurposed to "over-shoots safety ceiling -> clamped to
+    DEFAULT_MAX_ACTIONS". The user-message regex updated from
+    `Maximum actions for this report: 4` to `Safety ceiling: at
+    most 4 actions`.
+
+**Tier still matters for.**
+
+- The `tierContext` MD that injects per-tier DEPTH guidance still
+  loads. Each MD describes what ONE section at that tier looks like
+  (file-level review vs feature deep-dive vs subsystem vs full-repo
+  survey). That coupling stays.
+- The `ScopeSize` field stays in `PlanActionsInput` for prompt
+  routing. Only the tier-derived `actions.length` cap is removed.
+
+**Tier does NOT matter for.**
+
+- The MAX section count. Both a tier-S file review of 3 files and a
+  tier-XL "full repo overview" question can return up to
+  `DEFAULT_MAX_ACTIONS`; they just naturally land at different
+  counts because the request shape differs.
+- Whether the planner should "pad" to hit a tier-target. There's no
+  tier-target anymore -- only a safety ceiling.
+
+**Files changed.**
+
+- `src/insrc/agent/content-gen/plan-actions.ts`
+- `src/insrc/agent/content-gen/__tests__/plan-actions.test.ts`
+- `src/insrc/agent/tasks/code-analyzer/prompts/sections/planner-context/s.md`
+- `src/insrc/agent/tasks/code-analyzer/prompts/sections/planner-context/m.md`
+- `src/insrc/agent/tasks/code-analyzer/prompts/sections/planner-context/l.md`
+- `src/insrc/agent/tasks/code-analyzer/prompts/sections/planner-context/xl.md`
+- This plan doc (Phase 9 section)
+
+**Risks.**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Without a low per-tier cap, a tier-S file-review request might over-decompose | low | The S-tier MD already says "one section per file, optionally one cross-file section" and "over-decomposition fragments files that should be reviewed together. Don't split one file across multiple sections just to inflate count." The 12-action ceiling stays as a hard upper bound. |
+| Removing the XXL/XXXL/XXXXL caps (which were 16/24/32) loses headroom for genuinely huge reports | low | Reports with >12 top-level sections become unreadable. The right pattern for a huge repo is fewer top-level sections + drill-down follow-ups (the same flow we tested), not 32 sections in one shot. Callers that genuinely need more can pass `maxActions` explicitly. |
+| Live behavior regresses (model now picks weird counts) | medium | Validate via re-running the failing drill-down (which previously returned exactly 4 sections) and a fresh HDFS survey. Expectation: drill-down picks count from the actual concerns in the request, not from tier M's old 4 cap. |
+
 ## Risks
 
 | Risk | Likelihood | Mitigation |

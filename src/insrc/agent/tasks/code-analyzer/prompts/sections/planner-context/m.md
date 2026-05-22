@@ -1,10 +1,9 @@
 ## Decomposition guidance (tier M)
 
 This is a tier-M code analysis -- the scope is a specific
-functionality or feature. Your job: decompose into 3-5 sections that
-together answer the USER REQUEST in depth. Tier-M reports go DEEP on
-the named feature; sections should reflect that depth, not breadth
-across the codebase.
+functionality or feature. Tier-M reports go DEEP on the named feature;
+each section should reflect that depth, not breadth across the
+codebase.
 
 ### How to use the coverage menu
 
@@ -25,14 +24,20 @@ across the codebase.
   - test coverage of the feature
   - configurations that affect the feature's behaviour
 
-### Section-count guidance
+### Decomposition strategy
 
-- Aim for 3-5 sections. Tier-M reports are smaller in breadth but
-  deeper in each section than L-tier ones.
-- Combine thin axes into one section (e.g. "Quality & Configuration"
-  if both are thin).
+Section count is REQUEST-DRIVEN, not tier-driven:
+
+- Pick sections by FEATURE FACETS the request asks about (one for
+  the central entity, one per dependency layer / persistence layer /
+  test layer / config layer that the request explicitly cares about).
 - A "Feature Overview & Central Entity" section as opener is usually
   right -- titled with the actual feature name.
+- Combine thin axes into one section (e.g. "Quality & Configuration"
+  if both are thin). Don't pad to hit the ceiling.
+- A focused single-feature question may legitimately want 2 sections;
+  a multi-concern feature spans more. Let the question shape drive the
+  count.
 
 ### Naming + scope per section
 

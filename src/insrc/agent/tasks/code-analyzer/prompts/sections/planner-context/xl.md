@@ -1,11 +1,10 @@
 ## Decomposition guidance (tier XL+)
 
 This is a tier-XL+ code analysis -- the scope is a full repository or
-a large module. Your job: decompose the work into 6-12 sections that
-together answer the USER REQUEST in depth. The user's actual question
-is the primary driver. The menu below is a **coverage checklist** to
-make sure no important axis is missed -- it is NOT a list of section
-titles to copy.
+a large module. Decompose the work into sections that together answer
+the USER REQUEST in depth. The user's actual question is the primary
+driver -- the menu below is a **coverage checklist** to make sure no
+important axis is missed, NOT a list of section titles to copy.
 
 ### How to use the coverage menu
 
@@ -41,14 +40,21 @@ not these axis labels.
   - deployment + build artifacts
   - external dependencies + third-party libraries
 
-### Section-count guidance
+### Decomposition strategy
 
-- Aim for 6-12 sections for a typical XL+ repo. Below 6 each section
-  becomes a kitchen sink; above 12 the report fragments.
+Section count is REQUEST-DRIVEN, not tier-driven:
+
+- One section per top-level subsystem / package / layer that the
+  request actually touches. The repo-summary names the candidate
+  subsystems; the request narrows which are in scope.
 - The decomposition should reflect the codebase's NATURAL structure
   (subsystems, modules, layers), not a 1:1 mapping of the menu.
 - Reserve dedicated sections for the high-risk / high-complexity
   areas the user is most likely interested in.
+- A targeted "analyze just X subsystem in this big repo" question
+  is allowed to return 2-3 sections; a "give me a full architectural
+  survey" question naturally fans out to many more. Let the question
+  shape the count -- do not pad to the safety ceiling.
 
 ### Naming + scope per section
 

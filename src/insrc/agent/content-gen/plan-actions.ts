@@ -37,22 +37,21 @@ const DEFAULT_MAX_TOKENS = 2500;
 // ---------------------------------------------------------------------------
 
 /**
- * Per-tier action budget cap. Lower tiers get fewer sections;
- * higher tiers get more breathing room. The cap is advisory to the
- * planner -- it can return fewer -- and a hard clamp on the helper
- * side so a runaway model can't blow the report up.
+ * Default safety ceiling on the action count for a single report.
  *
- * The schema's absolute ceiling is 32 (matches XXXXL).
+ * Phase 9 (plans/code-analyzer-execute-step-per-result-summarization.md):
+ * section count is now tier-INDEPENDENT, driven by the structural shape
+ * of the user request (number of files / features / subsystems they
+ * named, not the scope tier). Phase 6 made the same change for the
+ * per-cycle step count; this is the section-level analogue.
+ *
+ * The constant below is a safety ceiling, not a target -- the planner
+ * is encouraged to return FEWER actions when the request is narrow.
+ * Callers that genuinely need higher breadth (e.g. a wide
+ * repo-survey) pass an explicit `maxActions`; that override is clamped
+ * to the schema's absolute ceiling of 32.
  */
-export const ACTION_BUDGET_BY_TIER: Readonly<Record<ScopeSize, number>> = {
-	S:     2,
-	M:     4,
-	L:     8,
-	XL:    12,
-	XXL:   16,
-	XXXL:  24,
-	XXXXL: 32,
-};
+export const DEFAULT_MAX_ACTIONS = 12;
 
 export interface PlannedAction {
 	readonly id:              string;
@@ -76,10 +75,12 @@ export interface PlanActionsInput {
 	 * any other heavy context.
 	 */
 	readonly summaryContext: string;
-	/** Scope tier (caps action count via `ACTION_BUDGET_BY_TIER`). */
+	/** Scope tier (still threaded to the planner for DEPTH guidance via
+	 *  `tierContext`; Phase 9 no longer derives a per-tier action cap
+	 *  from it). */
 	readonly tier: ScopeSize;
-	/** Override the per-tier action budget (advisory). Clamped to the
-	 *  schema's hard cap of 32. */
+	/** Override the default action ceiling (advisory). Defaults to
+	 *  `DEFAULT_MAX_ACTIONS`. Clamped to the schema's hard cap of 32. */
 	readonly maxActions?: number | undefined;
 	/** Output token cap. Default 2500. */
 	readonly maxTokens?: number | undefined;
@@ -138,8 +139,7 @@ export async function planActions(
 		throw new Error('planActions: `request` must be non-empty');
 	}
 
-	const tierCap   = ACTION_BUDGET_BY_TIER[input.tier];
-	const requested = input.maxActions ?? tierCap;
+	const requested = input.maxActions ?? DEFAULT_MAX_ACTIONS;
 	const maxActions = Math.max(1, Math.min(32, requested));
 	const maxTokens  = input.maxTokens ?? DEFAULT_MAX_TOKENS;
 	const messages   = buildPlanMessages(input, maxActions);
@@ -220,7 +220,12 @@ function buildSystemPrompt(intent: string, tierContext: string | undefined): str
 		'  - reviewCriteria  3-5 short bullets the reviewer scores against',
 		'',
 		'Plan-stage rules:',
-		'  1. Hard cap on action count is supplied per call -- never exceed it.',
+		'  1. A safety ceiling is supplied per call -- never exceed it. The',
+		'     ceiling is NOT a target; section count is driven by the',
+		'     structural shape of the request (files / features /',
+		'     subsystems the user named), not by the scope tier. Two',
+		'     concerns -> two sections; six subsystems -> six sections.',
+		'     Don\'t pad up to the ceiling.',
 		'  2. The DEFAULT for in-repo report sections is depth, not breadth.',
 		'     A "describe X" prompt should produce fewer / longer sections,',
 		'     not more / shallower ones. Pick the shape that lets the report',
@@ -272,7 +277,10 @@ function buildPlanMessagesWithDebug(input: PlanActionsInput, maxActions: number)
 	lines.push('');
 
 	lines.push('## Action budget');
-	lines.push(`Maximum actions for this report: ${maxActions} (scope tier: ${input.tier}).`);
+	lines.push(`Safety ceiling: at most ${maxActions} actions for this report.`);
+	lines.push('Return FEWER when the request is narrow. Section count is');
+	lines.push('driven by the request\'s structural shape (files / features /');
+	lines.push('subsystems named), NOT by the scope tier.');
 
 	const userText = lines.join('\n');
 	return {
