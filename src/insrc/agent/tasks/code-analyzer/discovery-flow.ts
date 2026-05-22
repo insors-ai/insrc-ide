@@ -131,12 +131,15 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 		}
 		for (const s of stepsToRun) stepsById.set(s.id, s);
 
-		// Execute each step on the local LLM.
+		// Execute each step on the cloud LLM (temporary -- local model
+		// reliably refuses to call tools from the executeStep prompt
+		// shape; revisit once the system prompt elicits skill_invoke
+		// from qwen3-coder consistently).
 		const cycleOutputs: StepOutput[] = [];
 		for (const step of stepsToRun) {
 			input.onProgress?.(`  [${input.action.id}/${step.id}] ${step.intent}`);
 			const out = await executeStep({
-				provider:       input.localProvider,
+				provider:       input.cloudProvider,
 				session:        input.session,
 				step,
 				...(input.repoSizeSummary !== undefined ? { repoSizeSummary: input.repoSizeSummary } : {}),
