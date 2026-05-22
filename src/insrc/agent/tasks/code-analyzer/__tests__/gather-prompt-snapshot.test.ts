@@ -118,10 +118,11 @@ test('flow/gather/system.md (tier=xl) carries the XL+ menu items', () => {
 		SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'xl',
 	});
 	// XL+ menu is the broadest: must reference functional overview,
-	// data persistence design, and external dependencies.
-	assert.match(composed, /Functional Overview/);
-	assert.match(composed, /Data Persistence/);
-	assert.match(composed, /External Dependencies/);
+	// data persistence design, and external dependencies. (Capitalisation
+	// changed after the Phase 6 menu rewrite into per-step depth menus.)
+	assert.match(composed, /[Ff]unctional overview/);
+	assert.match(composed, /[Dd]ata persistence/);
+	assert.match(composed, /[Ee]xternal dependencies/);
 });
 
 test('flow/gather/system.md (tier=s) carries the S menu items', () => {

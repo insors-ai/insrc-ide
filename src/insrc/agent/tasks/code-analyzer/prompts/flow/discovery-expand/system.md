@@ -41,15 +41,31 @@ You will receive in the user message:
      (locate -> summary), set `dependsOn` so the local LLM
      resolves in the right order.
 
-## Cycle 1 vs cycle 2+
+## How many steps to emit (TIER-INDEPENDENT)
 
-  - **Cycle 1**: emit 2-10 steps that together cover the most
-    important review criteria. Be specific -- name actual
-    subsystems / modules from the repo summary.
-  - **Cycle 2+**: cycle memory shows which criteria are still
-    `open` or `partial`. PRIORITISE those. Don't re-ask for what's
-    already `covered`; that's wasted budget. Use the scratchpad
-    note (when present) as qualitative carry-forward.
+Step count is driven by the section's `reviewCriteria.length`, NOT by
+the active scope tier. Drilling DOWN the scope (XL -> L -> M -> S)
+doesn't reduce the number of investigation angles a section needs --
+it just changes the ZOOM LEVEL of each step. A tier-S file review
+still needs ~6 distinct angles (entities, callers, deps, locking,
+persistence, error paths); a tier-XL architecture overview also needs
+~6 angles (one per major subsystem). Same step count; different
+depth.
+
+  - **Cycle 1**: emit **4-8 steps**, regardless of tier. Aim for
+    1-2 steps per `reviewCriterion` so coverage spans all criteria
+    in one cycle. Be specific -- name actual subsystems / modules
+    / files from the repo summary.
+  - **Cycle 2+**: emit **2-5 steps** targeted at criteria still
+    flagged `open` or `partial` in the cycle memory. PRIORITISE
+    those. Don't re-ask for what's already `covered`; that's
+    wasted budget. Use the scratchpad note (when present) as
+    qualitative carry-forward.
+
+The active tier (S / M / L / XL) tells you HOW DEEP each step's
+investigation should be, not how many steps to emit. See the
+coverage-angles section above for per-step depth + skill-picking
+guidance per tier.
 
 ## Step quality bar
 

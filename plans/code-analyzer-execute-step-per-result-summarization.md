@@ -460,6 +460,110 @@ into one where it's reliable (~6k tokens), through the whole step.
 - Update [plans/code-analyzer-discovery-plan-loop.md](code-analyzer-discovery-plan-loop.md)
   to mark Phase β + ε as superseded.
 
+### Phase 6 -- decouple plan-step count from scope size
+
+The current planner prompts ("Cycle 1: emit 2-10 steps") and the
+per-tier coverage menus (S = "near-exhaustive, 8-15 calls", XL =
+"6-10 calls for a typical section") couple TWO orthogonal axes:
+
+- **Investigation depth per step** (how zoomed-in each plan step is)
+- **Number of plan steps** (how many slices of the section to
+  investigate in this cycle)
+
+The bug: as you drill DOWN the scope (XL -> L -> M -> S), the actual
+volume of "stuff worth investigating in a section" doesn't shrink --
+it just surfaces at a finer granularity. A tier-S section reviewing
+ONE file still needs ~6 investigation angles (exported entities,
+callers, nested deps, lock model, persistence touches, error paths);
+a tier-XL section surveying an architecture also needs ~6
+investigation angles (one per major subsystem). What differs is the
+ZOOM LEVEL of each step's intent, not the count.
+
+Today's prompts conflate the two and push the cloud toward fewer
+steps at higher tiers. That misshapes the plan: XL sections get 2-4
+broad steps that each try to cover too much, while S sections get
+8+ tightly-scoped steps that re-investigate the same file from
+slightly different angles. Both regimes burn budget at the wrong
+boundary.
+
+**Reshape:**
+
+1. **Detier the step count.** `prompts/flow/discovery-expand/system.md`
+   currently says *"Cycle 1: emit 2-10 steps"*. Replace with:
+
+   > Cycle 1: emit 4-8 steps per cycle, regardless of tier. The cloud
+   > picks the count based on `reviewCriteria.length` -- aim for 1-2
+   > steps per criterion. Cycle 2+ emits 2-5 steps targeted at
+   > criteria still flagged `open` or `partial` in the cycle memory.
+
+   This puts the count under the control of `reviewCriteria` (which
+   the section-plan stage already calibrates to the section's
+   complexity), not the section's tier.
+
+2. **Reframe coverage-angles MDs as per-step depth menus.** The four
+   files at `prompts/sections/coverage-angles/{s,m,l,xl}.md` currently
+   read as "section-level investigation budgets". Rewrite each as a
+   menu of "per-step investigation depth" -- describing what ONE plan
+   step at this tier looks like:
+
+   - **S (file-level)**: each step zooms in on ONE facet of ONE file
+     (entities, callers, deps, locking, persistence, error paths).
+     Each step calls 2-4 skills at fine granularity (every entity
+     summary, every caller).
+   - **M (module-level)**: each step zooms in on ONE submodule or
+     ONE responsibility. 2-5 skills per step.
+   - **L (multi-module)**: each step covers ONE cross-cutting
+     concern across the modules in scope. 3-5 skills per step.
+   - **XL (large slice)**: each step surveys ONE major subsystem
+     or architectural layer. 3-5 skills at coarse granularity
+     (module.describe + a few targeted summaries).
+
+3. **Drop the "minimum / target / hard cap call count" language**
+   from coverage-angles. Those numbers double-encoded the step count
+   via "calls per section". With per-step skill count already capped
+   at 1-5 in the discovery-expand prompt, the section-total call
+   budget emerges from `step_count × per_step_skills`, which is
+   already bounded by `maxIterations`. The MD shouldn't try to set
+   another budget.
+
+4. **Keep the "what to look for" lists in each tier's MD.** Those are
+   still useful as advisory checklists -- they describe what an
+   investigation at this depth would typically surface. Reword them
+   from "do X then Y then Z for the section" to "for each plan step
+   targeting this section, here are the depths and angles to pick
+   from".
+
+5. **planner-context/{s,m,l,xl}.md**: these are the cousin docs that
+   describe how the section-PLAN stage uses each tier. Their
+   coverage-menu cross-references stay valid (the menus still exist,
+   just reframed). Verify the cross-refs land in the right paragraphs
+   after the rewrite; tighten if they read awkwardly.
+
+**Files touched:**
+
+- `prompts/flow/discovery-expand/system.md` (planner prompt)
+- `prompts/sections/coverage-angles/{s,m,l,xl}.md` (4 menus)
+- `prompts/sections/planner-context/{s,m,l,xl}.md` (4 context blocks --
+  verify cross-refs only, no semantic change)
+
+**Risks:**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Cloud planner emits the wrong number of steps for a section (too few -> shallow; too many -> over-budget) | medium | The "4-8 per cycle" range is wide; the per-criterion guidance ("1-2 steps per criterion") anchors it to the section's criteria, which the section-plan stage already calibrates. Watch the first live run for distribution of step counts vs criteria counts. |
+| Tier-XL sections lose depth because each step now picks coarser tools | low | The coverage-angles XL MD explicitly tells the cloud to use `module.describe` + targeted summaries per step. Same skills as before, just framed at the step level. |
+| Tier-S sections lose breadth (only one facet per step) | low | The 4-8 step count per cycle preserves the breadth -- 6 steps × 1 facet each = 6 facets covered, matching today's typical 6-facet S section. |
+
+**Tests:**
+
+- Update existing tests that assert specific step-count language in
+  the planner prompt (grep for `2-10` / step-count expectations in
+  `__tests__/*discovery*.test.ts`).
+- Add a golden test: the discovery-expand system prompt renders the
+  same way across all four tiers EXCEPT the coverage-angles section
+  (the only tier-conditional part). Catches regressions where someone
+  re-introduces tier-conditional step-count language elsewhere.
+
 ## Risks
 
 | Risk | Likelihood | Mitigation |
