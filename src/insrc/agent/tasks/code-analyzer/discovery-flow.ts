@@ -131,15 +131,18 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 		}
 		for (const s of stepsToRun) stepsById.set(s.id, s);
 
-		// Execute each step on the cloud LLM (temporary -- local model
-		// reliably refuses to call tools from the executeStep prompt
-		// shape; revisit once the system prompt elicits skill_invoke
-		// from qwen3-coder consistently).
+		// Execute each step on the local LLM. The earlier cloud-provider
+		// swap (commit 9a7a181) was a workaround for what we thought was
+		// a local-model failure to call tools; Phase 7 (eviction window)
+		// proved the root cause was the Phase 2.5 in-place compaction
+		// stripping handles from context before the next turn, which
+		// affected every provider. With Phase 7 the local path should
+		// work again on its own terms.
 		const cycleOutputs: StepOutput[] = [];
 		for (const step of stepsToRun) {
 			input.onProgress?.(`  [${input.action.id}/${step.id}] ${step.intent}`);
 			const out = await executeStep({
-				provider:       input.cloudProvider,
+				provider:       input.localProvider,
 				session:        input.session,
 				step,
 				...(input.repoSizeSummary !== undefined ? { repoSizeSummary: input.repoSizeSummary } : {}),
