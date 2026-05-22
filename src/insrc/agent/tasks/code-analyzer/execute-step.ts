@@ -232,14 +232,41 @@ function wireSkillMetaTools(): ToolDefinition[] {
 }
 
 function formatProgressLine(stepId: string, call: ToolCall): string {
-	const skillRef = call.name === 'skill_invoke'
-		? String(call.input['skillId'] ?? '?')
-		: call.name === 'skill_describe'
-		? String(call.input['id'] ?? '?')
-		: call.name === 'skill_load_page'
-		? String(call.input['spillId'] ?? '?')
-		: '';
-	return `  [${stepId}] ${call.name}${skillRef ? `(${skillRef})` : ''}`;
+	// Surface the full skill command in the chat stream -- the skill id
+	// AND a compact representation of the args -- so the live console
+	// shows what's actually being executed, not just the meta-tool name.
+	//
+	// skill_invoke: render the inner skillId(args).
+	// skill_describe / skill_load_page: render the meta-tool itself with
+	//   its inline args (small enough to inline).
+	if (call.name === 'skill_invoke') {
+		const skillId = String(call.input['skillId'] ?? '?');
+		const args    = (call.input['args'] as Record<string, unknown> | undefined) ?? {};
+		const argSig  = formatArgsInline(args);
+		return `  [${stepId}] ${skillId}(${argSig})`;
+	}
+	return `  [${stepId}] ${call.name}(${formatArgsInline(call.input)})`;
+}
+
+/**
+ * Compact one-line rendering of an arguments object for surfacing in
+ * the chat stream + the Phase 2.5 compaction stub. Strings are quoted
+ * + truncated at 30 chars; numbers / booleans render bare; arrays as
+ * `[N]`; nested objects as `{K keys}`. Total length capped at ~80
+ * chars (then suffixed with `...`).
+ */
+export function formatArgsInline(args: Record<string, unknown>): string {
+	const parts: string[] = [];
+	for (const [k, v] of Object.entries(args)) {
+		if (typeof v === 'string')      parts.push(`${k}="${v.length > 30 ? v.slice(0, 30) + '...' : v}"`);
+		else if (typeof v === 'number') parts.push(`${k}=${v}`);
+		else if (typeof v === 'boolean')parts.push(`${k}=${v}`);
+		else if (Array.isArray(v))      parts.push(`${k}=[${v.length}]`);
+		else if (v && typeof v === 'object') parts.push(`${k}={${Object.keys(v as Record<string, unknown>).length} keys}`);
+		else                            parts.push(`${k}=?`);
+		if (parts.join(', ').length > 80) { parts.push('...'); break; }
+	}
+	return parts.join(', ');
 }
 
 function assembleAssistantBlocks(text: string, toolCalls: readonly ToolCall[]): ContentBlock[] {
@@ -343,28 +370,11 @@ export function renderEntryStub(
 	skillId:  string,
 	args:     Record<string, unknown>,
 ): string {
-	const argSig = renderArgsForStub(args);
 	return [
-		`[evidence ${entryId}: ${skillId}(${argSig})`,
+		`[evidence ${entryId}: ${skillId}(${formatArgsInline(args)})`,
 		`  facts=${entry.facts.length} cites=${entry.citations.length} conf=${entry.confidence}`,
 		`  raw result available via skill_load_page if needed.]`,
 	].join('\n');
-}
-
-function renderArgsForStub(args: Record<string, unknown>): string {
-	// Compact one-line representation. Skip nested objects (just show
-	// the keys). Quote strings; show numbers as-is. ~50 chars max.
-	const parts: string[] = [];
-	for (const [k, v] of Object.entries(args)) {
-		if (typeof v === 'string')      parts.push(`${k}="${v.length > 30 ? v.slice(0, 30) + '...' : v}"`);
-		else if (typeof v === 'number') parts.push(`${k}=${v}`);
-		else if (typeof v === 'boolean')parts.push(`${k}=${v}`);
-		else if (Array.isArray(v))      parts.push(`${k}=[${v.length}]`);
-		else if (v && typeof v === 'object') parts.push(`${k}={${Object.keys(v as Record<string, unknown>).length} keys}`);
-		else                            parts.push(`${k}=?`);
-		if (parts.join(', ').length > 80) { parts.push('...'); break; }
-	}
-	return parts.join(', ');
 }
 
 // ---------------------------------------------------------------------------

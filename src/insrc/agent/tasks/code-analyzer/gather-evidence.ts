@@ -44,6 +44,7 @@ import type { ScopeSize } from '../../../shared/classify.js';
 // locally so this file's signatures still compile.
 import { summarizeResult } from './summarize-result.js';
 import type { EvidenceEntry } from './summarize-result.js';
+import { formatArgsInline } from './execute-step.js';
 
 const log = getLogger('code-analyzer:gather');
 
@@ -204,16 +205,16 @@ export async function gatherEvidence(input: GatherEvidenceInput): Promise<Eviden
 		const toolResultBlocks: ContentBlock[] = [];
 
 		for (const call of toolCalls) {
-			// Surface the SKILL ID so the chat panel shows
-			// "skill_invoke(code.entity.summary)" rather than the bare
-			// "skill_invoke" -- otherwise the live stream is opaque about
-			// what the LLM is actually doing each turn.
-			const skillRef = call.name === 'skill_invoke'
-				? String(call.input['skillId'] ?? '?')
-				: call.name === 'skill_describe'
-				? String(call.input['id'] ?? '?')
-				: '';
-			input.onProgress?.(`  [${input.action.id}/gather] ${call.name}${skillRef ? `(${skillRef})` : ''}`);
+			// Surface the full skill command in the chat panel -- skill id
+			// AND a compact arg signature -- so the live stream shows what's
+			// actually being executed, not just the meta-tool name.
+			if (call.name === 'skill_invoke') {
+				const skillId = String(call.input['skillId'] ?? '?');
+				const args    = (call.input['args'] as Record<string, unknown> | undefined) ?? {};
+				input.onProgress?.(`  [${input.action.id}/gather] ${skillId}(${formatArgsInline(args)})`);
+			} else {
+				input.onProgress?.(`  [${input.action.id}/gather] ${call.name}(${formatArgsInline(call.input)})`);
+			}
 
 			// Track describes so a future invoke without prior describe gets
 			// rejected by the same protocol the interleaved writer used.

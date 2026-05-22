@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import {
 	executeStep,
 	renderEntryStub,
+	formatArgsInline,
 	_buildStepSystemPromptForTest    as buildStepSystemPrompt,
 	_buildStepUserPromptForTest      as buildStepUserPrompt,
 	_determineStatusForTest          as determineStatus,
@@ -220,6 +221,58 @@ test('renderEntryStub: stays under ~400 chars even for chunky entries', () => {
 		citations: ['path:/repo/a.ts#L1-L10', 'path:/repo/b.ts#L100-L200'],
 	}), 'code.entity.locate-by-name', { name: 'FSDirectory', kinds: ['class', 'function'], language: 'java' });
 	assert.ok(stub.length < 400, `stub is ${stub.length} chars`);
+});
+
+// ---------------------------------------------------------------------------
+// formatArgsInline (shared by formatProgressLine + renderEntryStub)
+// ---------------------------------------------------------------------------
+
+test('formatArgsInline: quotes string values', () => {
+	assert.equal(formatArgsInline({ name: 'FSDirectory' }), 'name="FSDirectory"');
+});
+
+test('formatArgsInline: renders numbers + booleans bare', () => {
+	assert.equal(formatArgsInline({ pageIndex: 2, includeBody: true, verbose: false }), 'pageIndex=2, includeBody=true, verbose=false');
+});
+
+test('formatArgsInline: arrays render as [N] size marker', () => {
+	assert.equal(formatArgsInline({ kinds: ['class', 'function', 'method'] }), 'kinds=[3]');
+});
+
+test('formatArgsInline: nested objects render as {N keys}', () => {
+	assert.equal(formatArgsInline({ filter: { a: 1, b: 2, c: 3 } }), 'filter={3 keys}');
+});
+
+test('formatArgsInline: truncates string values at 30 chars with "..." suffix', () => {
+	const long = 'a'.repeat(100);
+	assert.equal(formatArgsInline({ name: long }), `name="${'a'.repeat(30)}..."`);
+});
+
+test('formatArgsInline: keeps strings up to 30 chars intact', () => {
+	const exactly30 = 'a'.repeat(30);
+	assert.equal(formatArgsInline({ name: exactly30 }), `name="${exactly30}"`);
+});
+
+test('formatArgsInline: caps total length around 80 chars + appends "..."', () => {
+	const result = formatArgsInline({
+		a: 'short value here',
+		b: 'another value',
+		c: 'and a third',
+		d: 'and a fourth one',
+		e: 'and a fifth',
+	});
+	assert.ok(result.endsWith('...'), `expected trailing "..."; got: ${result}`);
+	// Allow some headroom -- the cap is enforced AFTER pushing the
+	// trigger part, so the final string includes that part + ", ...".
+	assert.ok(result.length < 120, `expected ~80-char cap, got ${result.length}: ${result}`);
+});
+
+test('formatArgsInline: empty args -> empty string', () => {
+	assert.equal(formatArgsInline({}), '');
+});
+
+test('formatArgsInline: unknown value types render as "?"', () => {
+	assert.equal(formatArgsInline({ x: null, y: undefined }), 'x=?, y=?');
 });
 
 // ---------------------------------------------------------------------------

@@ -1551,15 +1551,15 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   /**
-   * Format a progress message with the run's tier + drill-down
-   * breadcrumb. Used by the multipass live-console bubble.
+   * Pass-through formatter for live-console messages. Previously this
+   * prepended a `[code-analyzer | tier=X | synthesis]` breadcrumb to
+   * every message; the chat panel already groups by agent (so the
+   * `code-analyzer` part is redundant) and the tier / drill-down
+   * info is on the bubble header. Kept as a single seam in case we
+   * want to bring per-message decoration back later.
    */
   private formatProgress(message: string): string {
-    const parts: string[] = ['code-analyzer', `tier=${this._tier}`, 'synthesis'];
-    if (this._parentListId !== undefined) {
-      parts.push('drill-down');
-    }
-    return `[${parts.join(' | ')}] ${message}`;
+    return message;
   }
 
   /**
