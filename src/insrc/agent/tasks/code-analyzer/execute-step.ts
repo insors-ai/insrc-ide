@@ -31,6 +31,7 @@ import type { Session } from '../../session.js';
 import type { RepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getTool } from '../../../daemon/tools/registry.js';
+import { getSkill } from '../../../daemon/skills/index.js';
 import { executeTool } from '../../tools/executor.js';
 import { getLogger } from '../../../shared/logger.js';
 import { loadFlowPrompt } from './prompts/loader.js';
@@ -201,18 +202,32 @@ interface PerTaskCallInput {
 }
 
 /**
- * Make one (or two on retry) calls to the provider for `task`. Returns
- * the dispatched tool's raw result text + the tool_call shape, or null
- * if the model violated `tool_choice: required` even on retry.
+ * Make one (or two on retry) calls to the provider for `task`. Two
+ * retry triggers share the same budget:
+ *
+ *   1. Empty toolCalls (provider violated `tool_choice: required`).
+ *   2. Tool dispatched but the skill runner rejected the args
+ *      (`result.isError === true`). The runner's error response
+ *      typically includes the corrective schema; we surface that
+ *      back to the model in the next attempt's prompt suffix so it
+ *      can emit valid args.
+ *
+ * Returns the (last) dispatched tool's raw result text + tool_call
+ * shape -- even if it's an error -- or null if the model violated
+ * `tool_choice: required` on every attempt.
  */
 async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null> {
+	let lastErrorFeedback: string | null = null;
+	let lastErroredOutcome: CallOutcome | null = null;
+
 	for (let attempt = 0; attempt <= PER_TASK_EMPTY_RETRIES; attempt++) {
 		const messages = buildPerTaskMessages({
-			stepIntent:        input.step.intent,
-			task:              input.task,
+			stepIntent:         input.step.intent,
+			task:               input.task,
 			priorTaskAndResult: input.priorTaskAndResult,
-			repoSizeSummary:   input.repoSizeSummary,
-			retryAttempt:      attempt,
+			repoSizeSummary:    input.repoSizeSummary,
+			retryAttempt:       attempt,
+			...(lastErrorFeedback !== null ? { lastErrorFeedback } : {}),
 		});
 
 		const resp = await input.provider.complete(messages, {
@@ -227,6 +242,7 @@ async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null>
 				{ stepId: input.step.id, taskId: input.task.id, attempt, textLen: (resp.text ?? '').length },
 				'callPerTask: provider returned no toolCalls; will retry if attempts remain',
 			);
+			lastErrorFeedback = 'Your previous response had no tool_use block. You MUST emit exactly one `skill_invoke` tool_use block on this turn.';
 			continue;
 		}
 
@@ -237,10 +253,26 @@ async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null>
 		const resultText = typeof result.content === 'string'
 			? result.content
 			: JSON.stringify(result.content);
+
+		if (result.isError === true) {
+			log.warn(
+				{ stepId: input.step.id, taskId: input.task.id, attempt, errLen: resultText.length },
+				'callPerTask: tool dispatch returned isError; will retry with corrective schema if attempts remain',
+			);
+			lastErroredOutcome = { toolCall, resultText };
+			lastErrorFeedback  = `Your previous skill_invoke call was rejected by the skill runner. Read the error below and re-emit the call with CORRECT args.\n\n--- Error from prior attempt ---\n${resultText}\n--- End error ---`;
+			continue;
+		}
+
 		return { toolCall, resultText };
 	}
 
-	return null;
+	// All attempts exhausted. If the last attempt errored but did
+	// produce a tool_use, return THAT outcome so the summarizer at
+	// least sees the error text (status will reflect partial). If the
+	// last attempt produced no tool_use at all, return null and let
+	// the caller skip the task.
+	return lastErroredOutcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +323,11 @@ interface BuildPerTaskMessagesInput {
 	readonly priorTaskAndResult: { priorTask: PlannedSkillCall; priorResultText: string } | null;
 	readonly repoSizeSummary?: RepoSizeSummary | undefined;
 	readonly retryAttempt:     number;
+	/** On retry attempts, the verbatim text we want the model to read
+	 *  in order to correct its prior emission. Set by `callPerTask` to
+	 *  either "no tool_use block emitted" or "skill runner rejected
+	 *  these args + here's the corrective schema". */
+	readonly lastErrorFeedback?: string;
 }
 
 export function buildPerTaskMessages(input: BuildPerTaskMessagesInput): LLMMessage[] {
@@ -310,7 +347,7 @@ function buildStepSystemPrompt(repoSizeSummary: RepoSizeSummary | undefined): st
 }
 
 function buildPerTaskUserPrompt(input: BuildPerTaskMessagesInput): string {
-	const { stepIntent, task, priorTaskAndResult, retryAttempt } = input;
+	const { stepIntent, task, priorTaskAndResult, retryAttempt, lastErrorFeedback } = input;
 	const skillSchemaText = renderSkillSchema(task.skillId);
 
 	const parts: string[] = [];
@@ -326,10 +363,17 @@ function buildPerTaskUserPrompt(input: BuildPerTaskMessagesInput): string {
 		parts.push('relevant handle (entityId, path, etc.) from its result below.');
 	}
 	parts.push('');
-	parts.push('## Skill schema (`skill_invoke.input.args` must match this)');
+	parts.push(`## Skill schema for \`${task.skillId}\` (your \`args\` field must match this)`);
 	parts.push('```json');
 	parts.push(skillSchemaText);
 	parts.push('```');
+	parts.push('');
+	parts.push('**Derive the `args` from the Target above** -- the natural-language target');
+	parts.push('describes what to look up; translate it into the args field using the schema.');
+	parts.push('Example: a target like "the FSDirectory class" with a skill whose schema');
+	parts.push('requires `name: string` becomes `args: { "name": "FSDirectory" }`.');
+	parts.push('Empty `args: {}` is almost always wrong -- the schema\'s `required` field tells you');
+	parts.push('which keys MUST be populated.');
 
 	if (priorTaskAndResult !== null) {
 		parts.push('');
@@ -350,25 +394,51 @@ function buildPerTaskUserPrompt(input: BuildPerTaskMessagesInput): string {
 	if (retryAttempt > 0) {
 		parts.push('');
 		parts.push('## RETRY NOTICE');
-		parts.push('Your previous response had no tool_use block. You MUST emit a');
-		parts.push('`skill_invoke` tool_use block on this turn. Do not narrate, do not');
-		parts.push('explain -- just emit the structured tool_use call.');
+		if (lastErrorFeedback !== undefined && lastErrorFeedback.length > 0) {
+			parts.push(lastErrorFeedback);
+		} else {
+			parts.push('Your previous response had no tool_use block. You MUST emit a');
+			parts.push('`skill_invoke` tool_use block on this turn. Do not narrate, do not');
+			parts.push('explain -- just emit the structured tool_use call.');
+		}
 	}
 	return parts.join('\n');
 }
 
 /**
- * Look up the registered skill's input schema and format it as a JSON
- * string for inlining into the per-task user prompt. Falls back to a
- * minimal `{}` schema if the skill isn't registered (shouldn't happen
- * in production but defensive).
+ * Look up the registered SKILL's input schema (from the skills registry,
+ * NOT the tools registry) and format it as a JSON string for inlining
+ * into the per-task user prompt.
+ *
+ * The skills registry holds the actual analyzer skills like
+ * `code.entity.locate-by-name` and their concrete arg schemas
+ * (`Skill.inputs`). The tools registry only holds the THREE meta-tools
+ * (`skill_invoke`, `skill_describe`, `skill_load_page`); the meta-tool's
+ * `args` field is declared as `{type: 'object'}` with no constraints,
+ * which is useless to inline -- the model satisfies it with `args: {}`.
+ *
+ * Falls back to a minimal placeholder schema only when the skillId
+ * isn't registered at all (shouldn't happen in production: the planner
+ * names skills from the closed catalog).
  */
 function renderSkillSchema(skillId: string): string {
-	const tool = getTool(skillId);
-	if (tool === undefined) {
-		return '{\n  "type": "object",\n  "properties": {},\n  "additionalProperties": true\n}';
+	const skill = getSkill(skillId);
+	if (skill !== undefined) {
+		return JSON.stringify(skill.inputs, null, 2);
 	}
-	return JSON.stringify(tool.inputSchema, null, 2);
+	// Defensive fallback: skill not found in skills registry. Try the
+	// tools registry (covers the meta-tool case where skillId might be
+	// 'skill_invoke' itself), else emit an explicit "unknown" marker so
+	// the failure is loud in the prompt rather than a silent empty
+	// schema the model would happily satisfy with `args: {}`.
+	const tool = getTool(skillId);
+	if (tool !== undefined) {
+		return JSON.stringify(tool.inputSchema, null, 2);
+	}
+	return JSON.stringify({
+		_note: `Skill '${skillId}' is not registered. Emit args as best you can; the runner will reject invalid input.`,
+		type: 'object',
+	}, null, 2);
 }
 
 // ---------------------------------------------------------------------------
