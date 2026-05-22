@@ -1,5 +1,5 @@
 /**
- * executeStep -- per-result summarization + tool_result compaction.
+ * executeStep -- per-result summarization + windowed tool_result eviction.
  *
  * Mirrors [plans/code-analyzer-execute-step-per-result-summarization.md]:
  *
@@ -13,12 +13,15 @@
  *    immediately. This means a step's evidence is captured incrementally
  *    and is robust to the local model giving up partway through the
  *    loop -- partial progress survives.
- *  - After each capture, the corresponding `tool_result` block in
- *    `messages[]` is REWRITTEN to a slim ~250-char stub referencing the
- *    captured entry (Phase 2.5 "compaction"). This keeps the outer
- *    tool-loop conversation roughly flat in size across iterations,
- *    preventing the deep-multi-turn empty-text bug we've seen on
- *    devstral-small-2 + Ollama at ~10k+ input tokens.
+ *  - Phase 7 (2026-05-22): the most-recent `evictionWindow` (default 1)
+ *    evidence-producing tool_results stay RAW in the model's context.
+ *    Older results are rewritten in-place to a compact stub right before
+ *    the next inference call. This lets the model read concrete handles
+ *    (entityIds, paths, spillIds) from the immediately-prior tool result
+ *    when chaining skills, while keeping the outer conversation flat as
+ *    the loop deepens. Set `evictionWindow = 0` to restore the legacy
+ *    Phase 2.5 "stub immediately" behavior (used by paths that need to
+ *    work around devstral-small-2's deep-multi-turn empty-text bug).
  *  - `StepOutput.facts` + `.citations` are aggregated from the captured
  *    EvidenceEntry[]. There is NO final JSON-envelope inference -- the
  *    legacy Phase β pattern was abandoned because devstral fails the
@@ -66,6 +69,14 @@ export interface ExecuteStepInput {
 	 *  so it can score the relevance of each skill result. Falls back
 	 *  to a single criterion derived from `step.intent` if absent. */
 	readonly criteria?:       readonly string[] | undefined;
+	/** Sliding window for tool_result eviction (Phase 7). The most-recent
+	 *  N evidence-producing tool_results stay raw in the model's context;
+	 *  everything older is rewritten in-place to a stub before the next
+	 *  inference. Defaults to 1 (immediately-prior raw result preserved,
+	 *  all older stubbed). Set to 0 for the legacy Phase 2.5 "stub
+	 *  immediately" behavior; set higher for chains where the model needs
+	 *  handle continuity across several turns. */
+	readonly evictionWindow?: number | undefined;
 }
 
 export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> {
@@ -88,8 +99,10 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 	const plannedSkillIds = new Set(input.step.skills.map(s => s.skillId));
 	const calledSkillIds:  string[]        = [];
 	const evidence:        EvidenceEntry[] = [];
+	const evictableEntries: EvictableEntry[] = [];
 	const maxIterations = input.maxIterations ?? 16;
 	const maxTokens     = input.maxTokens     ?? 4096;
+	const evictionWindow = Math.max(0, input.evictionWindow ?? DEFAULT_EVICTION_WINDOW);
 	const criteria      = (input.criteria !== undefined && input.criteria.length > 0)
 		? input.criteria
 		: inferCriteriaForStep(input.step);
@@ -98,6 +111,12 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 	let stopReason: 'no-tools' | 'empty-output' | 'max-iter' = 'max-iter';
 
 	while (iteration < maxIterations) {
+		// Phase 7: rewrite older evidence-producing tool_results to their
+		// stub form before the next inference call. The most-recent
+		// `evictionWindow` entries stay raw so the model can extract
+		// concrete handles (entityIds, paths, spillIds) when chaining skills.
+		applyEvictionWindow(evictableEntries, evictionWindow);
+
 		const resp = await input.provider.complete(messages, { maxTokens, tools });
 		iteration++;
 		const text      = (resp.text ?? '').trim();
@@ -154,12 +173,19 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 					});
 					evidence.push(entry);
 
-					// Phase 2.5: compact this just-dispatched tool_result
-					// block in-place. The model's next tool-picking turn
-					// now sees a slim ~250-char stub instead of ~4KB raw
-					// result, which keeps the outer conversation flat.
+					// Phase 7: record this tool_result block as evictable.
+					// The block keeps its RAW content for now; the eviction
+					// pass at the top of the next iteration will rewrite it
+					// to the stub when it falls outside `evictionWindow`.
 					const entryId = `e_${evidence.length}`;
-					trBlock.content = renderEntryStub(entryId, entry, skillId, args);
+					evictableEntries.push({
+						block:    trBlock,
+						entryId,
+						entry,
+						skillId,
+						args,
+						evicted:  false,
+					});
 				} catch (err) {
 					log.warn(
 						{ err: (err as Error).message, skillId, stepId: input.step.id },
@@ -214,6 +240,54 @@ export async function executeStep(input: ExecuteStepInput): Promise<StepOutput> 
 		...(extraSkillsCalled.length > 0 ? { extraSkillsCalled } : {}),
 		durationMs: Date.now() - t0,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Internals -- Phase 7 eviction window
+// ---------------------------------------------------------------------------
+
+/** Default eviction window: keep the most-recent 1 evidence-producing
+ *  tool_result raw, stub everything older before the next inference. */
+const DEFAULT_EVICTION_WINDOW = 1;
+
+/** Mutable record tracking one evidence-producing tool_result that may
+ *  be rewritten in-place when it falls outside the eviction window.
+ *  `block` is the actual `tool_result` ContentBlock object pushed into
+ *  `messages[]` -- mutating `block.content` updates what the model sees
+ *  on the next inference call. */
+interface EvictableEntry {
+	readonly block:    { type: 'tool_result'; tool_use_id: string; content: string; isError?: true };
+	readonly entryId:  string;
+	readonly entry:    EvidenceEntry;
+	readonly skillId:  string;
+	readonly args:     Record<string, unknown>;
+	evicted:           boolean;
+}
+
+/**
+ * Phase 7 sliding-window eviction. Keep the most-recent `windowSize`
+ * entries' `block.content` as raw tool_result text; rewrite every older
+ * entry's `block.content` to the compaction stub (once, idempotent via
+ * the `evicted` flag). Mutates `entries[i].block.content` and
+ * `entries[i].evicted` in place.
+ *
+ * `windowSize = 0` matches the legacy Phase 2.5 behavior (stub every
+ * captured result before the next inference). Default in `executeStep`
+ * is 1, which preserves the most recent tool_result so the model can
+ * extract concrete handles (entityIds, paths, spillIds) when chaining.
+ */
+export function applyEvictionWindow(
+	entries: readonly EvictableEntry[],
+	windowSize: number,
+): void {
+	const w = Math.max(0, windowSize);
+	const cutoff = Math.max(0, entries.length - w);
+	for (let i = 0; i < cutoff; i++) {
+		const e = entries[i]!;
+		if (e.evicted) continue;
+		e.block.content = renderEntryStub(e.entryId, e.entry, e.skillId, e.args);
+		e.evicted = true;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -350,19 +424,25 @@ function inferCriteriaForStep(step: DiscoveryStep): readonly string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Internals -- Phase 2.5 compaction stub renderer
+// Internals -- evicted tool_result stub renderer
 // ---------------------------------------------------------------------------
 
 /**
- * Format a captured EvidenceEntry as the compact stub that replaces the
- * raw tool_result block in `messages[]`. Stable, parseable shape:
+ * Format a captured EvidenceEntry as the stub that replaces the raw
+ * tool_result block in `messages[]` once it falls outside the eviction
+ * window (Phase 7). Surfaces the captured `facts` + `citations` verbatim
+ * so the model retains the summarized content after raw eviction, and
+ * explicitly states that the original tool_result is no longer
+ * recoverable (correcting the Phase 2.5 stub's false promise that
+ * `skill_load_page` could be used to refetch).
  *
- *   [evidence e_3: code.entity.locate-by-name(name="FSDirectory")
- *     facts=2 cites=1 conf=high]
+ * Stable, machine-parseable header:
  *
- * ~200-300 chars vs ~4KB of raw tool_result -- ~15x compaction.
- * The full result remains accessible on disk via the SkillSpillRecord
- * (`skill_load_page` can fetch any specific page if the model needs it).
+ *   [evicted tool_result e_3: code.entity.locate-by-name(name="FSDirectory")
+ *
+ * Followed by `confidence`, the fact list, citations (if any), and a
+ * terminal "not recoverable" line so the model doesn't waste turns
+ * calling `skill_load_page` with the evidence id.
  */
 export function renderEntryStub(
 	entryId:  string,
@@ -370,11 +450,22 @@ export function renderEntryStub(
 	skillId:  string,
 	args:     Record<string, unknown>,
 ): string {
-	return [
-		`[evidence ${entryId}: ${skillId}(${formatArgsInline(args)})`,
-		`  facts=${entry.facts.length} cites=${entry.citations.length} conf=${entry.confidence}`,
-		`  raw result available via skill_load_page if needed.]`,
-	].join('\n');
+	const lines: string[] = [
+		`[evicted tool_result ${entryId}: ${skillId}(${formatArgsInline(args)})`,
+		`  confidence: ${entry.confidence}`,
+	];
+	if (entry.facts.length > 0) {
+		lines.push('  facts:');
+		for (const f of entry.facts) {
+			lines.push(`    - ${f}`);
+		}
+	}
+	if (entry.citations.length > 0) {
+		lines.push(`  citations: ${entry.citations.join('; ')}`);
+	}
+	lines.push('  (original tool_result evicted; not recoverable -- do NOT call skill_load_page with this id)');
+	lines.push(']');
+	return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -507,4 +598,6 @@ export const _determineStatusForTest         = determineStatus;
 export const _inferCriteriaForStepForTest    = inferCriteriaForStep;
 export const _uniqueFlattenFactsForTest      = uniqueFlattenFacts;
 export const _mergeCitationsForTest          = mergeCitations;
+export const _DEFAULT_EVICTION_WINDOW        = DEFAULT_EVICTION_WINDOW;
+export type _EvictableEntryForTest           = EvictableEntry;
 export const _parseLegacyCitationForTest     = parseLegacyCitation;

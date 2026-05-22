@@ -22,6 +22,7 @@ import {
 	executeStep,
 	renderEntryStub,
 	formatArgsInline,
+	applyEvictionWindow,
 	_buildStepSystemPromptForTest    as buildStepSystemPrompt,
 	_buildStepUserPromptForTest      as buildStepUserPrompt,
 	_determineStatusForTest          as determineStatus,
@@ -29,6 +30,8 @@ import {
 	_uniqueFlattenFactsForTest       as uniqueFlattenFacts,
 	_mergeCitationsForTest           as mergeCitations,
 	_parseLegacyCitationForTest      as parseLegacyCitation,
+	_DEFAULT_EVICTION_WINDOW         as DEFAULT_EVICTION_WINDOW,
+	type _EvictableEntryForTest      as EvictableEntry,
 } from '../execute-step.js';
 
 import type {
@@ -188,14 +191,37 @@ test('mergeCitations: prefers citationObjs when present', () => {
 });
 
 // ---------------------------------------------------------------------------
-// renderEntryStub (Phase 2.5 compaction)
+// renderEntryStub (Phase 7 evicted-tool_result stub)
 // ---------------------------------------------------------------------------
 
-test('renderEntryStub: golden format with simple args', () => {
+test('renderEntryStub: golden header with skillId + args', () => {
 	const stub = renderEntryStub('e_3', fixtureEntry(), 'code.entity.locate-by-name', { name: 'FSDirectory' });
-	assert.match(stub, /^\[evidence e_3: code\.entity\.locate-by-name\(name="FSDirectory"\)/);
-	assert.match(stub, /facts=1 cites=1 conf=high/);
-	assert.match(stub, /skill_load_page if needed/);
+	assert.match(stub, /^\[evicted tool_result e_3: code\.entity\.locate-by-name\(name="FSDirectory"\)/);
+});
+
+test('renderEntryStub: surfaces facts verbatim under "facts:" header', () => {
+	const stub = renderEntryStub('e_1', fixtureEntry({
+		facts: ['FSDirectory class at lines 106-2081', 'BlockManager has 3 callers'],
+	}), 'sk', {});
+	assert.match(stub, /facts:\n {4}- FSDirectory class at lines 106-2081\n {4}- BlockManager has 3 callers/);
+});
+
+test('renderEntryStub: surfaces citations and confidence', () => {
+	const stub = renderEntryStub('e_1', fixtureEntry({
+		facts:      ['fact1'],
+		citations:  ['path:/repo/a.ts#L1-L20', 'path:/repo/b.ts#L5'],
+		confidence: 'medium',
+	}), 'sk', {});
+	assert.match(stub, /confidence: medium/);
+	assert.match(stub, /citations: path:\/repo\/a\.ts#L1-L20; path:\/repo\/b\.ts#L5/);
+});
+
+test('renderEntryStub: states original is not recoverable + warns against skill_load_page', () => {
+	// Honest replacement for the Phase 2.5 "raw result available via skill_load_page" lie.
+	const stub = renderEntryStub('e_1', fixtureEntry(), 'sk', {});
+	assert.match(stub, /original tool_result evicted; not recoverable/);
+	assert.match(stub, /do NOT call skill_load_page with this id/);
+	assert.doesNotMatch(stub, /raw result available via skill_load_page/);
 });
 
 test('renderEntryStub: truncates very long string args', () => {
@@ -215,12 +241,113 @@ test('renderEntryStub: arrays + nested objects render as size markers', () => {
 	assert.match(stub, /nested=\{2 keys\}/);
 });
 
-test('renderEntryStub: stays under ~400 chars even for chunky entries', () => {
+test('renderEntryStub: stays under ~800 chars even for chunky entries with full facts', () => {
 	const stub = renderEntryStub('e_42', fixtureEntry({
 		facts:     ['f1', 'f2', 'f3', 'f4'],
 		citations: ['path:/repo/a.ts#L1-L10', 'path:/repo/b.ts#L100-L200'],
 	}), 'code.entity.locate-by-name', { name: 'FSDirectory', kinds: ['class', 'function'], language: 'java' });
-	assert.ok(stub.length < 400, `stub is ${stub.length} chars`);
+	// Phase 7 surfaces facts + citations verbatim (vs Phase 2.5's bare counts);
+	// budget loosens from ~400 to ~800 chars to accommodate.
+	assert.ok(stub.length < 800, `stub is ${stub.length} chars`);
+});
+
+// ---------------------------------------------------------------------------
+// applyEvictionWindow (Phase 7 sliding window)
+// ---------------------------------------------------------------------------
+
+function makeEvictableEntry(entryId: string): EvictableEntry {
+	return {
+		block:   { type: 'tool_result', tool_use_id: `tu_${entryId}`, content: `RAW_${entryId}` },
+		entryId,
+		entry:   fixtureEntry({ facts: [`${entryId} fact`] }),
+		skillId: 'code.entity.locate-by-name',
+		args:    { name: entryId },
+		evicted: false,
+	};
+}
+
+test('applyEvictionWindow: window=1 keeps the most recent raw, stubs older', () => {
+	const entries: EvictableEntry[] = [
+		makeEvictableEntry('e_1'),
+		makeEvictableEntry('e_2'),
+		makeEvictableEntry('e_3'),
+	];
+	applyEvictionWindow(entries, 1);
+	assert.equal(entries[0]!.evicted, true);
+	assert.equal(entries[1]!.evicted, true);
+	assert.equal(entries[2]!.evicted, false);
+	assert.match(entries[0]!.block.content, /^\[evicted tool_result e_1:/);
+	assert.match(entries[1]!.block.content, /^\[evicted tool_result e_2:/);
+	assert.equal(entries[2]!.block.content, 'RAW_e_3');   // most recent stays raw
+});
+
+test('applyEvictionWindow: window=0 stubs everything (legacy Phase 2.5 behavior)', () => {
+	const entries: EvictableEntry[] = [
+		makeEvictableEntry('e_1'),
+		makeEvictableEntry('e_2'),
+	];
+	applyEvictionWindow(entries, 0);
+	assert.equal(entries[0]!.evicted, true);
+	assert.equal(entries[1]!.evicted, true);
+	assert.match(entries[0]!.block.content, /^\[evicted tool_result e_1:/);
+	assert.match(entries[1]!.block.content, /^\[evicted tool_result e_2:/);
+});
+
+test('applyEvictionWindow: window=2 keeps the last two raw', () => {
+	const entries: EvictableEntry[] = [
+		makeEvictableEntry('e_1'),
+		makeEvictableEntry('e_2'),
+		makeEvictableEntry('e_3'),
+		makeEvictableEntry('e_4'),
+	];
+	applyEvictionWindow(entries, 2);
+	assert.equal(entries[0]!.evicted, true);
+	assert.equal(entries[1]!.evicted, true);
+	assert.equal(entries[2]!.evicted, false);
+	assert.equal(entries[3]!.evicted, false);
+	assert.equal(entries[2]!.block.content, 'RAW_e_3');
+	assert.equal(entries[3]!.block.content, 'RAW_e_4');
+});
+
+test('applyEvictionWindow: window >= entries.length is a no-op', () => {
+	const entries: EvictableEntry[] = [
+		makeEvictableEntry('e_1'),
+		makeEvictableEntry('e_2'),
+	];
+	applyEvictionWindow(entries, 5);
+	assert.equal(entries[0]!.evicted, false);
+	assert.equal(entries[1]!.evicted, false);
+	assert.equal(entries[0]!.block.content, 'RAW_e_1');
+	assert.equal(entries[1]!.block.content, 'RAW_e_2');
+});
+
+test('applyEvictionWindow: idempotent -- re-evicting an already-evicted entry is a no-op', () => {
+	const entries: EvictableEntry[] = [
+		makeEvictableEntry('e_1'),
+		makeEvictableEntry('e_2'),
+	];
+	applyEvictionWindow(entries, 1);
+	const stubAfterFirstCall = entries[0]!.block.content;
+	// Manually mutate to detect double-stubbing.
+	entries[0]!.block.content = 'TAMPERED';
+	applyEvictionWindow(entries, 1);
+	// Already-evicted entry was NOT re-written (the evicted flag short-circuits).
+	assert.equal(entries[0]!.block.content, 'TAMPERED');
+	// And the second entry (now older after a hypothetical new push) would be stubbed,
+	// but here it's still the most-recent so it stays raw.
+	assert.equal(entries[1]!.block.content, 'RAW_e_2');
+	// Sanity: the original stub format is what we expected.
+	assert.match(stubAfterFirstCall, /^\[evicted tool_result e_1:/);
+});
+
+test('applyEvictionWindow: negative window is treated as 0', () => {
+	const entries: EvictableEntry[] = [makeEvictableEntry('e_1')];
+	applyEvictionWindow(entries, -3);
+	assert.equal(entries[0]!.evicted, true);
+});
+
+test('DEFAULT_EVICTION_WINDOW is 1', () => {
+	assert.equal(DEFAULT_EVICTION_WINDOW, 1);
 });
 
 // ---------------------------------------------------------------------------

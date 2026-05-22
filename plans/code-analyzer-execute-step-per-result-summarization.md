@@ -564,6 +564,160 @@ boundary.
   (the only tier-conditional part). Catches regressions where someone
   re-introduces tier-conditional step-count language elsewhere.
 
+### Phase 7 -- configurable eviction window (delayed compaction)
+
+**Why.** The Phase 2.5 design rewrites a captured `tool_result` to its stub
+*immediately*, in the same iteration the tool was dispatched. The
+`trBlock.content = renderEntryStub(...)` mutation happens **before**
+`messages.push({ role: 'user', content: toolResultBlocks })`, so the
+model never sees the raw tool result in any subsequent inference call --
+not even the *next* one. Every concrete handle the raw result carried
+(32-char `entityId`, real `spillId`, file path, line range, etc.) is
+gone the instant the next tool-picking turn begins.
+
+Empirically (HDFS XL live run, 2026-05-22, post-Phase-6) this is
+catastrophic:
+
+- The model wants to chain `locate-by-name → entity.summary` /
+  `entity.callers`, all of which take a 32-char hex `entityId`.
+- `locate-by-name` returns the `entityId` inline in the raw
+  `tool_result` -- but Phase 2.5 evicts that content before the next
+  inference runs.
+- The model has no in-context source of truth for the id, so it
+  invents one (`d71f8c28-d9da-4c1d-bdda-3e1d7f1f9fba`, `0:0:code...`,
+  `8e7f7b8e8e7b8e7f...`, etc.).
+- Every fake id returns `entity-not-found`. The summarizer records
+  that as evidence. The cycle reviewer correctly judges the evidence
+  as worthless and returns `keep: []`. Three cycles in a row.
+- Net: 500+ inference calls per section to ship a "no evidence
+  available" paragraph. Same shape across every section in the run.
+
+The stub also advertises `skill_load_page` as a recovery path
+(`"raw result available via skill_load_page if needed"`), but the
+`e_N` identifier in the stub is the orchestrator's evidence-array
+index, *not* a real `spillId` -- there is nothing to load. The
+promise is a lie, and the model burns iterations trying to honor it.
+
+**Reshape.**
+
+Separate the two concerns Phase 2.5 fused:
+
+1. *Capturing structured evidence* (writing `EvidenceEntry` rows for
+   the writer + reviewer downstream) -- runs eagerly per result,
+   unchanged.
+2. *Managing the model's context window* (replacing raw tool_result
+   text with a stub) -- now driven by a sliding window.
+
+Add `evictionWindow?: number | undefined` to `ExecuteStepInput`,
+default `1`:
+
+- **`evictionWindow = 1`** (default): the most-recent evidence-producing
+  tool_result stays raw in the model's context. Everything older is
+  stubbed. The model gets exactly one inference turn to extract IDs
+  / paths from the raw result before it gets compacted.
+- **`evictionWindow = 0`** (legacy): stub immediately, before the next
+  inference -- the Phase 2.5 behavior preserved for the devstral
+  empty-text scenarios where that workaround was originally added.
+- **`evictionWindow = N`** for N > 1: keep the last N raw, useful
+  for multi-hop chains (locate → load_page → summary) where the
+  model needs handle continuity across several turns.
+
+**Mechanic.**
+
+- The in-place `trBlock.content = renderEntryStub(...)` mutation
+  inside the inner for-loop is removed. The `tool_result` block
+  ships into `messages[]` with raw content first.
+- A new orchestrator-side array `evictableEntries: EvictableEntry[]`
+  tracks `{ block, entryId, entry, skillId, args, evicted: boolean }`
+  for each evidence-producing call, in insertion order.
+- At the top of each `while` iteration -- right before
+  `provider.complete(messages, ...)` -- `applyEvictionWindow` walks
+  `evictableEntries`, leaves the most-recent `windowSize` untouched,
+  and rewrites `block.content` to the stub for everything older
+  (only once; the `evicted` flag guards against re-stubbing).
+- `skill_describe` results stay raw (schema docs the model needs to
+  reference); errored `skill_invoke` results stay raw (so the
+  corrective-schema injection from S.1 stays visible). Only
+  successful evidence-producing calls are evictable.
+
+**Honest stub format.**
+
+`renderEntryStub` is updated to:
+
+- Stop advertising `skill_load_page` as a recovery path. The line
+  `"raw result available via skill_load_page if needed"` is removed.
+- Replace it with `"(original tool_result has been evicted from context;
+  not recoverable)"`. The promise the orchestrator can keep, kept.
+- Surface the captured `facts` + `citations` verbatim inside the stub
+  (instead of just counts). After eviction the model still has the
+  natural-language facts ("FSDirectory at hadoop-hdfs/.../FSDirectory.java
+  lines 86-1563") in scope -- the same content the summarizer wrote.
+
+Example output for `evictionWindow = 1` after iteration 3:
+
+```
+<system>
+<user: task list, workspace root>
+
+<assistant: iter1 text + tool_use s1>
+<user: iter1 tool_result for s1 -- EVICTED stub>
+
+<assistant: iter2 text + tool_use s2>
+<user: iter2 tool_result for s2 -- EVICTED stub>
+
+<assistant: iter3 text + tool_use s3>
+<user: iter3 tool_result for s3 -- RAW>
+<assistant: -- about to be generated -->
+```
+
+The model picks iteration 4's tool based on:
+- Raw s3 result (most recent, full detail incl. concrete IDs)
+- s1/s2 captured-facts stubs (natural-language summaries)
+- Its own past assistant turns (text reasoning)
+
+**Why this fixes the run we just watched.** With `evictionWindow = 1`:
+
+- Iter 1: `locate-by-name(FSDirectory)` → raw result with real `entityId`.
+- Iter 2: model can read the `entityId` from iter 1's raw output and
+  call `entity.summary(entityId="a7f1c83b...")` with a real value.
+- Iter 3: iter 1's tool_result is now stubbed (older than window), but
+  by then the model has either chained off it or moved on.
+
+The hallucination cascade we watched -- fake spillIds, fake entityIds,
+fake hex strings -- becomes unreachable.
+
+**Non-goals for Phase 7.**
+
+- *Spilling raw content on eviction*: would let the model recover
+  evicted results via `skill_load_page`. Possible but doubles disk
+  writes and adds a backpath layer. Skip until empirical results
+  show the window alone isn't enough.
+- *Per-skill window overrides*: some skills (`code.source.module.describe`)
+  return huge results that probably DO need immediate compaction, while
+  others (`code.entity.locate-by-name`) are small and benefit from
+  staying raw. Out of scope for Phase 7; revisit if mixed-size results
+  cause budget pressure.
+
+**Files touched.**
+
+- `src/insrc/agent/tasks/code-analyzer/execute-step.ts`: add
+  `evictionWindow` to `ExecuteStepInput`, refactor inner loop to delay
+  eviction, add `applyEvictionWindow` helper, update `renderEntryStub`
+  format.
+- `src/insrc/agent/tasks/code-analyzer/__tests__/execute-step.test.ts`:
+  update existing `renderEntryStub` golden tests for the new format,
+  add unit tests for `applyEvictionWindow` covering `window = 0 / 1 / 2`
+  and idempotent re-evict.
+- This plan doc (Phase 7 section added; Phase 2.5 remains for history).
+
+**Risks.**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| `evictionWindow = 1` raises iteration-N input tokens above the devstral empty-text threshold (~6-8k) | medium | The original Phase 2.5 motivation. Default is 1 (so one raw result + N-1 stubs); if devstral regresses, callers (e.g. legacy local-only paths) can pass `evictionWindow = 0` to restore Phase 2.5 behavior. Cloud providers (the current executeStep callsite per Phase 6.5) don't have this failure mode. |
+| Eviction stub bloats with long facts/citations lists | low | Each `EvidenceEntry` is capped at 4 facts (`maxItems: 4` in `EVIDENCE_SUMMARY_SCHEMA`) and citations are small path strings. Total stub stays under ~500 chars even for chunky entries (existing `< 400 chars` golden test relaxes to `< 800`). |
+| Window setting drifts across callers | low | Single optional field with a documented default; only set explicitly when a chain requires it. Default-1 is the right value for the discovery flow's planned skill chains. |
+
 ## Risks
 
 | Risk | Likelihood | Mitigation |
