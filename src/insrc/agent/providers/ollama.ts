@@ -13,6 +13,17 @@ import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('ollama');
 
+// Retry budget for transient stream errors -- one extra attempt is
+// enough in practice (the underlying cause is usually a momentary
+// stream truncation; a fresh chat() call almost always succeeds).
+// Exposed for tests via the _retryConstantsForTest export below.
+const MAX_TRANSIENT_RETRIES         = 1;
+const TRANSIENT_RETRY_BASE_DELAY_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Lazy defaults -- calling `loadConfig()` at module load creates a circular
 // init (config.ts imports factory.ts imports this file), so we defer until
 // an OllamaProvider is actually constructed.
@@ -147,15 +158,44 @@ export class OllamaProvider implements LLMProvider {
       tools: tools?.map(t => t.function.name),
     }, 'ollama request');
 
-    try {
-      // Always use streaming internally to avoid headers-timeout on slow
-      // CPU inference. The non-streaming Ollama API waits for the entire
-      // response before sending HTTP headers, which can exceed the timeout
-      // for large-context calls on CPU-only machines.
-      return await this.completeStreaming(ollamaMessages, tools, opts);
-    } catch (err) {
-      throw wrapOllamaError(err);
+    // Retry transient stream-truncation errors before propagating.
+    // Observed in long analyzer runs: Ollama's HTTP stream occasionally
+    // ends without a final `done: true` chunk (or the SDK abandons the
+    // async-iterator early), which throws
+    // "Did not receive done or success response in stream." A single
+    // retry recovers in the vast majority of cases at the cost of one
+    // extra call, and is far cheaper than losing a 30+-minute multi-
+    // section analyzer run to one truncated stream. Connection-refused
+    // and model-not-found errors are NOT retried (they're config
+    // failures; retrying is wasted latency and a noisier failure mode).
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES + 1; attempt++) {
+      try {
+        // Always use streaming internally to avoid headers-timeout on slow
+        // CPU inference. The non-streaming Ollama API waits for the entire
+        // response before sending HTTP headers, which can exceed the timeout
+        // for large-context calls on CPU-only machines.
+        return await this.completeStreaming(ollamaMessages, tools, opts);
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_TRANSIENT_RETRIES && isTransientOllamaError(err)) {
+          const delayMs = TRANSIENT_RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+          log.warn({
+            model:    this.model,
+            attempt:  attempt + 1,
+            delayMs,
+            err:      err instanceof Error ? err.message : String(err),
+          }, 'ollama: transient stream error -- retrying');
+          await sleep(delayMs);
+          continue;
+        }
+        throw wrapOllamaError(err);
+      }
     }
+    // Unreachable in practice (the loop either returns or throws), but
+    // TypeScript can't prove it -- preserve the original wrapped error
+    // shape for the caller.
+    throw wrapOllamaError(lastErr);
   }
 
   private async completeStreaming(
@@ -445,3 +485,43 @@ function wrapOllamaError(err: unknown): Error {
   }
   return err instanceof Error ? err : new Error(String(err));
 }
+
+/**
+ * Classify an Ollama call error as transient (worth retrying) vs
+ * structural (retrying is wasted work and a noisier failure).
+ *
+ * Retry on:
+ *   - stream truncation: "Did not receive done or success response in stream"
+ *     -- observed mid-run, no `done: true` chunk reached the SDK
+ *   - dropped TCP / socket: ECONNRESET / EPIPE / socket hang up / aborted
+ *   - undici fetch failures: "fetch failed" / "other side closed"
+ *
+ * Do NOT retry:
+ *   - ECONNREFUSED (server down)
+ *   - 404 / "not found" (model not pulled)
+ *   - 400 / "invalid" (real client error)
+ *   - JSON-parse / schema errors (model output issue)
+ */
+export function isTransientOllamaError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  if (msg.includes('ECONNREFUSED')) return false;
+  if (msg.includes('not found') || msg.includes('404')) return false;
+  if (msg.includes('400')) return false;
+  return (
+    msg.includes('Did not receive done or success response in stream') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('EPIPE') ||
+    msg.includes('socket hang up') ||
+    msg.includes('aborted') ||
+    msg.includes('fetch failed') ||
+    msg.includes('other side closed')
+  );
+}
+
+// Test-only exports for unit coverage of the retry constants and the
+// transient-error classifier without exposing them to runtime callers.
+export const _retryConstantsForTest = {
+  MAX_TRANSIENT_RETRIES,
+  TRANSIENT_RETRY_BASE_DELAY_MS,
+};
