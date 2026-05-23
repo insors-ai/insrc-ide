@@ -18,8 +18,7 @@
  * the default.
  */
 
-import type { LLMProvider, LLMMessage } from '../../../shared/types.js';
-import type { PlannedAction } from '../../content-gen/plan-actions.js';
+import type { LLMMessage } from '../../../shared/types.js';
 import type { RepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getLogger } from '../../../shared/logger.js';
