@@ -863,12 +863,14 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         ...(opts.priorDescribedSkills !== undefined ? { priorDescribedSkills: opts.priorDescribedSkills } : {}),
       };
       const ledger = await gatherEvidence(gatherInput);
+      const repoRoot = this._repoSummary?.rootPath;
       const writeInput: Parameters<typeof writeSectionFromEvidence>[0] = {
         provider:    local,
         action:      opts.action,
         request:     opts.request,
         evidence:    ledger.evidence,
         ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+        ...(repoRoot !== undefined && repoRoot.length > 0 ? { repoPath: repoRoot } : {}),
       };
       const written = await writeSectionFromEvidence(writeInput);
       return {
@@ -909,6 +911,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // until Phase eta deletes the legacy fallback below.
       const { isDiscoveryFlowEnabled, runDiscoveryFlow } = await import('../../agent/tasks/code-analyzer/discovery-flow.js');
       if (isDiscoveryFlowEnabled()) {
+        const repoRoot = this._repoSummary?.rootPath;
         const discResult = await runDiscoveryFlow({
           localProvider: local,
           cloudProvider: cloud,
@@ -918,6 +921,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           tier,
           ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
           ...(summaryContext !== undefined && summaryContext.length > 0 ? { repoSummary: summaryContext } : {}),
+          ...(repoRoot !== undefined && repoRoot.length > 0 ? { repoPath: repoRoot } : {}),
           analyzerLabel: 'code-analyzer',
           onProgress: (msg: string) => {
             this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');

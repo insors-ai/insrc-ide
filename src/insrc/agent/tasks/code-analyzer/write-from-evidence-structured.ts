@@ -26,7 +26,7 @@ import { getLogger } from '../../../shared/logger.js';
 import { loadFlowPrompt } from './prompts/loader.js';
 import type { EvidenceEntry } from './summarize-result.js';
 import type { Citation } from '../../content-gen/discovery-plan.js';
-import { extractCitations } from './write-from-evidence.js';
+import { extractCitations, relativizeCitationPath } from './write-from-evidence.js';
 import type { WriteFromEvidenceInput, WriteFromEvidenceOutput } from './write-from-evidence.js';
 
 const log = getLogger('code-analyzer:write-structured');
@@ -122,7 +122,7 @@ export async function writeSectionStructured(
 		};
 	}
 
-	const renderResult = renderParagraphs(parsed, entryById);
+	const renderResult = renderParagraphs(parsed, entryById, input.repoPath);
 	const citationsUsed = extractCitations(renderResult.markdown);
 
 	log.info(
@@ -252,6 +252,7 @@ interface RenderResult {
 function renderParagraphs(
 	response: StructuredWriterResponse,
 	entryById: ReadonlyMap<string, EvidenceEntry>,
+	repoPath: string | undefined,
 ): RenderResult {
 	const out: string[] = [];
 	let droppedNoRef = 0;
@@ -262,7 +263,7 @@ function renderParagraphs(
 			.map(id => entryById.get(id))
 			.filter((e): e is EvidenceEntry => e !== undefined);
 		if (resolved.length === 0) { droppedBadRef++; continue; }
-		const rendered = renderOneParagraph(p.narrative, resolved);
+		const rendered = renderOneParagraph(p.narrative, resolved, repoPath);
 		if (rendered.length > 0) out.push(rendered);
 	}
 	return {
@@ -273,20 +274,26 @@ function renderParagraphs(
 	};
 }
 
-function renderOneParagraph(narrative: string, refs: readonly EvidenceEntry[]): string {
+function renderOneParagraph(narrative: string, refs: readonly EvidenceEntry[], repoPath: string | undefined): string {
 	// Gather all candidate citations from the referenced entries.
 	const allCitations: string[] = [];
 	for (const e of refs) {
 		// Structured citations first (preferred -- richer label data)
 		if (e.citationObjs !== undefined && e.citationObjs.length > 0) {
 			for (const c of e.citationObjs) {
-				allCitations.push(renderCitationLink(c));
+				allCitations.push(renderCitationLink(c, repoPath));
 			}
 		}
-		// Legacy string citations fall back
+		// Legacy string citations fall back -- peel off any `path:`
+		// prefix, relativize against the active repo root, re-attach.
+		// Preserves URL fragments (#Lx-Ly).
 		for (const c of e.citations) {
-			const url = c.startsWith('path:') ? c : `path:${c}`;
-			allCitations.push(`[ref](${url})`);
+			const raw = c.startsWith('path:') ? c.slice('path:'.length) : c;
+			const fragIdx = raw.indexOf('#');
+			const body    = fragIdx >= 0 ? raw.slice(0, fragIdx) : raw;
+			const frag    = fragIdx >= 0 ? raw.slice(fragIdx)    : '';
+			const rel     = relativizeCitationPath(body, repoPath);
+			allCitations.push(`[ref](path:${rel}${frag})`);
 		}
 	}
 	if (allCitations.length === 0) {
@@ -325,13 +332,14 @@ function renderOneParagraph(narrative: string, refs: readonly EvidenceEntry[]): 
 	return body;
 }
 
-function renderCitationLink(c: Citation): string {
+function renderCitationLink(c: Citation, repoPath: string | undefined): string {
 	const range = (c.startLine !== undefined && c.endLine !== undefined)
 		? `#L${c.startLine}-L${c.endLine}`
 		: (c.startLine !== undefined ? `#L${c.startLine}` : '');
 	const fallbackLabel = c.path.split('/').pop() ?? 'ref';
 	const label = c.label ?? (fallbackLabel.length > 0 ? fallbackLabel : 'ref');
-	return `[${label}](path:${c.path}${range})`;
+	const renderedPath = relativizeCitationPath(c.path, repoPath);
+	return `[${label}](path:${renderedPath}${range})`;
 }
 
 // ---------------------------------------------------------------------------

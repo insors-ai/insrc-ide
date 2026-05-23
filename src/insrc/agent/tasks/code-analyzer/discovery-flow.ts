@@ -60,6 +60,7 @@ import {
 	writeSectionFromEvidence,
 	validateCitationCoverage,
 	formatCitationCoverageNotes,
+	relativizeCitationPath,
 } from './write-from-evidence.js';
 import type { EvidenceEntry } from './summarize-result.js';
 import {
@@ -88,6 +89,9 @@ export interface RunDiscoveryFlowInput {
 	/** Hard cap on cycles. Default 3. */
 	readonly maxCycles?:       number | undefined;
 	readonly onProgress?:      ((msg: string) => void) | undefined;
+	/** Active indexed-repo root. Passed through to the writer so it can
+	 *  emit repo-relative citation paths (see WriteFromEvidenceInput). */
+	readonly repoPath?:        string | undefined;
 }
 
 export interface DiscoveryFlowResult {
@@ -225,6 +229,7 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 		request:   input.request,
 		evidence:  evidenceForWriter,
 		...(input.repoSizeSummary !== undefined ? { repoSizeSummary: input.repoSizeSummary } : {}),
+		...(input.repoPath        !== undefined ? { repoPath:        input.repoPath        } : {}),
 	});
 
 	// Prose-only review (cloud).
@@ -303,6 +308,7 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 			request:   `${input.request}\n\nREDRAFT requested. Reviewer notes:\n${mergedNotes.map(n => `- ${n}`).join('\n')}`,
 			evidence:  evidenceForWriter,
 			...(input.repoSizeSummary !== undefined ? { repoSizeSummary: input.repoSizeSummary } : {}),
+			...(input.repoPath        !== undefined ? { repoPath:        input.repoPath        } : {}),
 		});
 		// Phase 10.A.1 + 11.A + 11.B: if any structural check fired on
 		// the first draft, strongly prefer the redraft when it passes
@@ -321,10 +327,36 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 		// prompt explicitly asks the model to remove un-grounded claims,
 		// so we trust that and prefer the redraft when claim-grounding
 		// failed on the original.
+		//
+		// BUT: guard against redrafts that fix claim-grounding by
+		// silently dropping every citation. A redraft that breaks a
+		// check the original passed is strictly worse on the checks we
+		// can cheaply verify, so refuse it -- ship the original instead.
+		// Without this guard, the `claimGroundFail` short-circuit below
+		// picks any redraft sight-unseen, including ones with 0 cites.
+		const redraftBreaksCoverage      = coverage.ok && !redraftCoverage.ok;
+		const redraftBreaksTripwire      = !tripwire.hit && redraftTripwire.hit;
+		const redraftCitationsCollapsed  =
+			written.citationsUsed.length > 0 && redrafted.citationsUsed.length === 0;
+		const redraftRegressed =
+			redraftBreaksCoverage || redraftBreaksTripwire || redraftCitationsCollapsed;
 		const shouldUseRedraft =
-			redraftFixedTripwire || redraftFixedCoverage || claimGroundFail || moreCitations;
+			!redraftRegressed &&
+			(redraftFixedTripwire || redraftFixedCoverage || claimGroundFail || moreCitations);
 		if (shouldUseRedraft) {
 			finalMarkdown = redrafted.markdown;
+		} else if (redraftRegressed) {
+			log.warn(
+				{
+					actionId:                input.action.id,
+					originalCitations:       written.citationsUsed.length,
+					redraftCitations:        redrafted.citationsUsed.length,
+					redraftBreaksCoverage,
+					redraftBreaksTripwire,
+					redraftCitationsCollapsed,
+				},
+				'discovery-flow: redraft regressed on a check the original passed -- keeping original',
+			);
 		}
 	}
 
@@ -382,13 +414,18 @@ export function adaptStepOutputsForWriter(outputs: readonly StepOutput[]): Evide
  *  string-rendering format before the writer-side migration. After
  *  the migration, this helper is no longer the primary code path
  *  (the writer renders directly from Citation fields); kept for
- *  callers that still want a string form (e.g. for logs / telemetry). */
-export function renderCitationAsString(c: Citation): string {
+ *  callers that still want a string form (e.g. for logs / telemetry).
+ *
+ *  Optional `repoPath` arg relativizes absolute citation paths against
+ *  the active indexed-repo root so the IDE's `path:` opener doesn't
+ *  produce a doubled workspace prefix at click time. */
+export function renderCitationAsString(c: Citation, repoPath?: string): string {
 	const range = c.startLine !== undefined && c.endLine !== undefined
 		? `#L${c.startLine}-L${c.endLine}`
 		: (c.startLine !== undefined ? `#L${c.startLine}` : '');
 	const label = c.label ?? c.path.split('/').pop() ?? c.path;
-	return `[${label}](path:${c.path}${range})`;
+	const renderedPath = relativizeCitationPath(c.path, repoPath);
+	return `[${label}](path:${renderedPath}${range})`;
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import {
 	writeSectionFromEvidence,
 	stripWriterArtifacts,
 	extractCitations,
+	relativizeCitationPath,
 	_buildUserPromptForTest as buildUserPrompt,
 	_renderStructuredCitationLinkForTest as renderStructuredCitationLink,
 	type WriteFromEvidenceInput,
@@ -231,6 +232,78 @@ test('renderStructuredCitationLink: label falls back to file basename', () => {
 test('renderStructuredCitationLink: empty path tail -> falls back to ref label', () => {
 	const out = renderStructuredCitationLink({ path: '/' }, 0, 2);
 	assert.equal(out, '[ref 1.3](path:/)');
+});
+
+// ---------------------------------------------------------------------------
+// relativizeCitationPath -- IDE-side path: opener expects workspace-relative
+// paths; absolute citation paths produced a doubled prefix at click time.
+// ---------------------------------------------------------------------------
+
+test('relativizeCitationPath: undefined repoRoot -> path unchanged', () => {
+	assert.equal(relativizeCitationPath('/Users/foo/repo/src/Main.java', undefined), '/Users/foo/repo/src/Main.java');
+});
+
+test('relativizeCitationPath: empty repoRoot -> path unchanged', () => {
+	assert.equal(relativizeCitationPath('/Users/foo/repo/src/Main.java', ''), '/Users/foo/repo/src/Main.java');
+});
+
+test('relativizeCitationPath: absolute path under repoRoot -> repo-relative', () => {
+	assert.equal(
+		relativizeCitationPath('/Users/foo/repo/src/Main.java', '/Users/foo/repo'),
+		'src/Main.java',
+	);
+});
+
+test('relativizeCitationPath: trailing slash on repoRoot tolerated', () => {
+	assert.equal(
+		relativizeCitationPath('/Users/foo/repo/src/Main.java', '/Users/foo/repo/'),
+		'src/Main.java',
+	);
+});
+
+test('relativizeCitationPath: path outside repoRoot -> unchanged', () => {
+	assert.equal(
+		relativizeCitationPath('/Users/foo/other/x.java', '/Users/foo/repo'),
+		'/Users/foo/other/x.java',
+	);
+});
+
+test('relativizeCitationPath: already-relative path -> unchanged', () => {
+	assert.equal(relativizeCitationPath('src/Main.java', '/Users/foo/repo'), 'src/Main.java');
+});
+
+test('relativizeCitationPath: path === repoRoot -> "."', () => {
+	assert.equal(relativizeCitationPath('/Users/foo/repo', '/Users/foo/repo'), '.');
+});
+
+test('relativizeCitationPath: prefix match without /-boundary not stripped (no sibling-dir collision)', () => {
+	// '/Users/foo/repo-other/x.java' must NOT be relativized against
+	// '/Users/foo/repo' (would produce '-other/x.java'). The trailing
+	// '/' on the prefix guards this.
+	assert.equal(
+		relativizeCitationPath('/Users/foo/repo-other/x.java', '/Users/foo/repo'),
+		'/Users/foo/repo-other/x.java',
+	);
+});
+
+test('renderStructuredCitationLink: emits repo-relative path when repoPath supplied', () => {
+	const out = renderStructuredCitationLink(
+		{ path: '/Users/foo/repo/src/Main.java', startLine: 10, endLine: 20, label: 'Main' },
+		0,
+		0,
+		'/Users/foo/repo',
+	);
+	assert.equal(out, '[Main](path:src/Main.java#L10-L20)');
+});
+
+test('renderStructuredCitationLink: absolute path NOT under repoPath -> emitted as-is', () => {
+	const out = renderStructuredCitationLink(
+		{ path: '/usr/local/lib/external.java', startLine: 1, label: 'External' },
+		0,
+		0,
+		'/Users/foo/repo',
+	);
+	assert.equal(out, '[External](path:/usr/local/lib/external.java#L1)');
 });
 
 test('buildUserPrompt: citationObjs (Phase ε) -- renders structured links inline', () => {

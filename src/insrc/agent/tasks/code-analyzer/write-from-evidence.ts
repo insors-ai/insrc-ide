@@ -41,6 +41,13 @@ export interface WriteFromEvidenceInput {
 	 *  + headroom (2x) for the prose, since the budget is informational
 	 *  -- the model needs room to write a complete section. */
 	readonly maxTokens?:       number | undefined;
+	/** Active indexed-repo root. When supplied, absolute citation paths
+	 *  under this root are emitted as repo-relative paths so the IDE's
+	 *  `path:` opener (which joins against the workspace folder) doesn't
+	 *  produce a doubled prefix like
+	 *  `/workspace/Users/foo/repo/...`. Optional for back-compat with
+	 *  callers (and tests) that don't carry a repo root. */
+	readonly repoPath?:        string | undefined;
 }
 
 export interface WriteFromEvidenceOutput {
@@ -170,8 +177,18 @@ function buildUserPrompt(input: WriteFromEvidenceInput): string {
 			// string-citation path when `citationObjs` is undefined or
 			// empty (gather-evidence flow + back-compat).
 			const links = (e.citationObjs !== undefined && e.citationObjs.length > 0)
-				? e.citationObjs.map((c, idx) => renderStructuredCitationLink(c, i, idx))
-				: e.citations.map((c, idx) => `[ref ${i + 1}.${idx + 1}](${c.startsWith('path:') ? c : `path:${c}`})`);
+				? e.citationObjs.map((c, idx) => renderStructuredCitationLink(c, i, idx, input.repoPath))
+				: e.citations.map((c, idx) => {
+					// Legacy string-citation path: peel off any `path:`
+					// prefix, relativize against the active repo root,
+					// then re-attach. Preserves URL fragments (#Lx-Ly).
+					const raw = c.startsWith('path:') ? c.slice('path:'.length) : c;
+					const fragIdx = raw.indexOf('#');
+					const body    = fragIdx >= 0 ? raw.slice(0, fragIdx) : raw;
+					const frag    = fragIdx >= 0 ? raw.slice(fragIdx)    : '';
+					const rel     = relativizeCitationPath(body, input.repoPath);
+					return `[ref ${i + 1}.${idx + 1}](path:${rel}${frag})`;
+				});
 			if (e.facts.length === 0) {
 				if (links.length > 0) {
 					parts.push(`  - (no facts; raw citations: ${links.join(', ')})`);
@@ -249,6 +266,28 @@ export function stripWriterArtifacts(text: string): string {
  * single citation used in two places counts once.
  */
 /**
+ * Strip the active repo root prefix from an absolute citation path so
+ * the IDE's `path:` opener (`pathUriOpener.ts`) -- which joins the URI
+ * path against the workspace folder -- doesn't produce a doubled
+ * prefix like `<workspace>/Users/foo/repo/file.java`. Returns the
+ * input unchanged when `repoRoot` is absent or the path isn't a
+ * descendant of it.
+ *
+ * Examples (with repoRoot=`/Users/foo/hadoop`):
+ *   `/Users/foo/hadoop/src/Main.java` -> `src/Main.java`
+ *   `/Users/foo/other/x.java`         -> `/Users/foo/other/x.java`  (unchanged)
+ *   `src/Main.java`                    -> `src/Main.java`             (already relative)
+ */
+export function relativizeCitationPath(absOrRelPath: string, repoRoot: string | undefined): string {
+	if (repoRoot === undefined || repoRoot.length === 0) return absOrRelPath;
+	const root = repoRoot.replace(/\/+$/, '');
+	if (absOrRelPath === root) return '.';
+	const prefix = `${root}/`;
+	if (absOrRelPath.startsWith(prefix)) return absOrRelPath.slice(prefix.length);
+	return absOrRelPath;
+}
+
+/**
  * Render one structured Citation as an inline `[label](path:foo#L1-L20)`
  * markdown link. Phase epsilon of plans/code-analyzer-discovery-plan-loop.md:
  * the discovery flow's adapter populates `EvidenceEntry.citationObjs`
@@ -262,13 +301,14 @@ export function stripWriterArtifacts(text: string): string {
  *   3. The bare fact-pair "ref <evIdx+1>.<citIdx+1>" if both are
  *      missing (matches the legacy string path's label format).
  */
-function renderStructuredCitationLink(c: import('../../content-gen/discovery-plan.js').Citation, evIdx: number, citIdx: number): string {
+function renderStructuredCitationLink(c: import('../../content-gen/discovery-plan.js').Citation, evIdx: number, citIdx: number, repoPath?: string | undefined): string {
 	const range = (c.startLine !== undefined && c.endLine !== undefined)
 		? `#L${c.startLine}-L${c.endLine}`
 		: (c.startLine !== undefined ? `#L${c.startLine}` : '');
 	const fallbackLabel = c.path.split('/').pop() ?? '';
 	const label = c.label ?? (fallbackLabel.length > 0 ? fallbackLabel : `ref ${evIdx + 1}.${citIdx + 1}`);
-	return `[${label}](path:${c.path}${range})`;
+	const renderedPath = relativizeCitationPath(c.path, repoPath);
+	return `[${label}](path:${renderedPath}${range})`;
 }
 
 export function extractCitations(markdown: string): readonly string[] {
