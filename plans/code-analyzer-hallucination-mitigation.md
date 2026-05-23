@@ -266,6 +266,96 @@ not a comprehensive filter.
 | Pre-flight probe drops a legitimate section whose entity is mis-named in the title | low | Only drop when ALL top-2 candidates miss AND the title is concrete. Section titles like "Operational Observability" (no concrete entity) skip the probe by design. |
 | Pre-flight latency adds noticeable wall-clock to plan stage | low | `locate-by-name` is millisecond-level on the LMDB+Lance graph -- 12 of them is well under 1s total. |
 
+### Phase 10.B.1 -- vector-search fallback for the pre-flight probe
+
+**Why.** The first live run of Phase 10.B on the HDFS NameNode drill-
+down dropped **3 sections out of 12**:
+
+  - "High Availability & State Synchronization"
+    -- NER extracted `NameNodes`, `HA`
+  - "Monitoring, Metrics & Operational Observability"
+    -- NER extracted `HTTP`, `JMX`
+  - "NameNode Testing & Test Harnesses"
+    -- NER extracted `DataNodes`
+
+The candidate names the NER pulled are surface vocabulary (plurals
+and acronyms) rather than the real anchor classes in the codebase.
+The actual subsystems exist -- `HAServiceProtocol`,
+`ActiveStandbyElector`, `ZKFailoverController` for HA;
+`NameNodeMetrics`, `NamenodeBeanMetrics`, `JMXJsonServlet`,
+`AuditLogger` for Metrics; `MiniDFSCluster`, `TestNameNode`,
+`NameNodeAdapter` for Testing -- but the section TITLE didn't name
+them. The exact-match `locate-by-name` probe naturally returns 0 for
+"NameNodes" / "HA" / "JMX", so the section gets dropped.
+
+**Comparison with the pre-Phase-10 run** confirmed both dropped
+sections (Metrics, Testing) had genuinely useful real-entity content
+in the earlier run -- this is a material false positive, not just a
+theoretical risk. The risk table above rated this risk as "low" but
+the live evidence shows it's not.
+
+**What changes.**
+
+  - `agent/content-gen/verify-planned-actions.ts`:
+    when the NER + `locate-by-name` probe path returns 0 hits, fall
+    back to a SINGLE `code.entity.search-by-vector` call using the
+    section's title + objective as the query. If the vector search
+    returns ≥1 result with confidence high or medium, KEEP the
+    section. Only drop when BOTH the literal-name probe AND the
+    semantic probe miss.
+
+  - The NER stays as the FAST path -- when it produces candidates
+    that locate-by-name resolves, no embedding call is needed and the
+    probe stays millisecond-level. The fallback only fires for
+    candidates that all miss, capping the embedding cost at one call
+    per *dropped-candidate* section (≤ the total section count).
+
+**Why vector-search and not a domain-word allowlist.**
+
+A "skip the probe when the title contains domain words like Metrics
+/ Monitoring / Testing / HA / RPC" deny-list approach was considered
+and rejected:
+
+  - Deny-lists go stale -- new domain words emerge as analysis topics
+    expand.
+  - A vector search is a real semantic check, not a heuristic.
+    It directly answers "does the repo have entities semantically
+    close to this section title?" -- which is exactly the question
+    Phase 10.B is trying to answer.
+
+The combined cost of fallback embedding calls per report is bounded
+(≤12, typically ≤3 in practice; HDFS run had 3 vector-fallback
+candidates). At Ollama embedding speeds, that adds <1s of
+wall-clock per report.
+
+**Files changed.**
+
+  - `src/insrc/agent/content-gen/verify-planned-actions.ts`
+    (vector-search fallback added to `verifyPlannedActions`)
+  - `src/insrc/agent/content-gen/__tests__/verify-planned-actions.test.ts`
+    (new test verifying the fallback path keeps a section when NER
+    misses but vector search finds an anchor)
+  - This plan doc (Phase 10.B.1 entry)
+
+**Validation.**
+
+  - Re-run the HDFS NameNode drill-down. Expected: 0 or 1 sections
+    dropped (vs 3 dropped pre-fix). The "Caching Layer" type drop --
+    where the section title implies a subsystem the codebase doesn't
+    have -- should still drop, since vector search won't find a
+    meaningful anchor either.
+  - Synthetic unit test: action whose title NER extracts as "JMX"
+    (which has no exact match), but whose vector search returns
+    `NameNodeMetrics`-like results. Assert: kept.
+
+**Risks.**
+
+| Risk | Likelihood | Mitigation |
+|---|---|---|
+| Vector-search fallback restores genuinely-bad sections (e.g. "Caching Layer" for a no-cache codebase) by matching loosely related entities | medium | Require vector-search confidence to be 'high' or 'medium' (drop on 'low' or no results). The "Caching Layer" hallucination test from Phase 10.B's original validation should still drop the section because no entities are semantically close to "cache" in HDFS. Live-validate this assumption. |
+| Embedding call adds wall-clock to plan stage | low | Bounded at ≤12 embedding calls per report (one per section with NER misses). At Ollama speed, ~50-200ms each; total ≤1s. Acceptable. |
+| Local Ollama embedding model is unavailable / broken | low | Wrap the fallback in try/catch; on error, default to KEEP (conservative). Logs surface the issue without failing the report. |
+
 ### Phase 11 -- citation-required prose + claim-grounding reviewer pass
 
 **Why second.** Phase 10 catches the easy cases (templated boilerplate,

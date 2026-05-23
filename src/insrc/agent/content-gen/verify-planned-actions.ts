@@ -23,9 +23,12 @@
  * class.
  */
 
-import { findEntitiesByName } from '../../db/entities.js';
+import { findEntitiesByName as defaultFindEntitiesByName } from '../../db/entities.js';
+import { searchEntities as defaultSearchEntities } from '../../db/search.js';
+import { embedQuery as defaultEmbedQuery } from '../../indexer/embedder.js';
 import { getLogger } from '../../shared/logger.js';
 import type { PlannedAction } from './plan-actions.js';
+import type { Entity } from '../../shared/types.js';
 
 const log = getLogger('code-analyzer:verify-planned-actions');
 
@@ -109,6 +112,34 @@ export interface VerifyPlannedActionsOptions {
 	/** Max candidates per action to probe (capped to bound DB cost).
 	 *  Defaults to 2 (the longest two -- the anchor + a backup). */
 	readonly probeTopN?: number | undefined;
+	/** Phase 10.B.1: when the literal-name probe misses, fall back to
+	 *  a single vector-search call using the section title + objective
+	 *  as the query. Defaults to true. Set false in tests that don't
+	 *  want the embedder + Lance dependency. */
+	readonly vectorFallback?: boolean | undefined;
+	/** Phase 10.B.1: minimum number of vector-search hits required for
+	 *  the fallback to KEEP the section. Defaults to 1. Higher values
+	 *  make the fallback stricter (drop sections with thin semantic
+	 *  match). */
+	readonly vectorMinHits?: number | undefined;
+	/** Test seam: inject the three dependencies so unit tests don't
+	 *  need a live LMDB graph + Lance + embedder. Defaults to the real
+	 *  module exports. */
+	readonly _internals?: {
+		readonly findEntitiesByName?: (
+			db: never,
+			names: readonly string[],
+			opts: { repo?: string; limit?: number },
+		) => Promise<Entity[]>;
+		readonly embedQuery?:    (text: string) => Promise<number[]>;
+		readonly searchEntities?: (
+			db: never,
+			queryVec: number[],
+			closureRepos: string[],
+			limit?: number,
+			filter?: 'all' | 'code' | 'artifact',
+		) => Promise<Entity[]>;
+	} | undefined;
 }
 
 /**
@@ -128,7 +159,12 @@ export async function verifyPlannedActions(
 	actions: readonly PlannedAction[],
 	opts: VerifyPlannedActionsOptions = {},
 ): Promise<VerifyPlannedActionsResult> {
-	const probeTopN = opts.probeTopN ?? 2;
+	const probeTopN      = opts.probeTopN      ?? 2;
+	const vectorFallback = opts.vectorFallback ?? true;
+	const vectorMinHits  = opts.vectorMinHits  ?? 1;
+	const findFn   = opts._internals?.findEntitiesByName ?? defaultFindEntitiesByName;
+	const embedFn  = opts._internals?.embedQuery         ?? defaultEmbedQuery;
+	const searchFn = opts._internals?.searchEntities     ?? defaultSearchEntities;
 	const kept:    PlannedAction[] = [];
 	const dropped: VerifyPlannedActionsResult['dropped'][number][] = [];
 
@@ -146,7 +182,7 @@ export async function verifyPlannedActions(
 		let anyHit = false;
 		for (const name of probed) {
 			try {
-				const matches = await findEntitiesByName(
+				const matches = await findFn(
 					null as never,
 					[name],
 					opts.repoPath !== undefined ? { repo: opts.repoPath, limit: 1 } : { limit: 1 },
@@ -167,21 +203,70 @@ export async function verifyPlannedActions(
 
 		if (anyHit) {
 			kept.push(action);
-		} else {
-			dropped.push({
-				action,
-				candidates: probed,
-				reason: `No entity matches found for any of: ${probed.join(', ')}`,
-			});
-			log.warn(
-				{
-					actionId:   action.id,
-					title:      action.title,
-					candidates: probed,
-				},
-				'verifyPlannedActions: dropping section -- no anchor entity in index',
-			);
+			continue;
 		}
+
+		// Phase 10.B.1: literal-name probe missed. Before dropping, try
+		// a single vector-search fallback using the section title +
+		// objective as the free-form query. This catches the case where
+		// the NER extracted surface vocabulary (plurals like
+		// "NameNodes", acronyms like "HA" / "JMX") that don't exist as
+		// exact entity names but where the actual anchor classes
+		// (`HAServiceProtocol`, `NameNodeMetrics`, etc.) are
+		// semantically close to the title.
+		if (vectorFallback && opts.repoPath !== undefined && opts.repoPath.length > 0) {
+			try {
+				const query = `${action.title}. ${action.objective}`;
+				const queryVec = await embedFn(query);
+				if (queryVec.length > 0) {
+					const hits = await searchFn(
+						null as never,
+						queryVec,
+						[opts.repoPath],
+						Math.max(vectorMinHits, 3),
+						'code',
+					);
+					if (hits.length >= vectorMinHits) {
+						kept.push(action);
+						log.info(
+							{
+								actionId:   action.id,
+								title:      action.title,
+								candidates: probed,
+								vectorHits: hits.length,
+								vectorTopName: hits[0]?.name,
+							},
+							'verifyPlannedActions: literal probe missed but vector fallback kept the section',
+						);
+						continue;
+					}
+				}
+			} catch (err) {
+				// Embedder / Lance unavailable -- conservative: keep the
+				// section rather than drop on a transient infra error.
+				log.warn(
+					{ actionId: action.id, err: (err as Error).message },
+					'verifyPlannedActions: vector fallback errored; defaulting to keep',
+				);
+				kept.push(action);
+				continue;
+			}
+		}
+
+		dropped.push({
+			action,
+			candidates: probed,
+			reason: `No entity matches found for any of: ${probed.join(', ')} (vector fallback also returned no hits)`,
+		});
+		log.warn(
+			{
+				actionId:   action.id,
+				title:      action.title,
+				candidates: probed,
+				vectorFallback,
+			},
+			'verifyPlannedActions: dropping section -- no anchor entity in index, vector fallback also empty',
+		);
 	}
 
 	return { kept, dropped };

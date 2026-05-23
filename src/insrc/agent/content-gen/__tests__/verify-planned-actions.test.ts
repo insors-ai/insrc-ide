@@ -10,7 +10,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { _extractCandidateNamesForTest as extract } from '../verify-planned-actions.js';
+import {
+	_extractCandidateNamesForTest as extract,
+	verifyPlannedActions,
+} from '../verify-planned-actions.js';
+import type { PlannedAction } from '../plan-actions.js';
+import type { Entity } from '../../../shared/types.js';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -75,4 +80,143 @@ test('extractCandidateNames: handles dotted Java identifiers (last segment)', ()
 	);
 	// PascalCase regex picks up "ClientProtocol" from inside the dotted path
 	assert.ok(c.includes('ClientProtocol'));
+});
+
+// ---------------------------------------------------------------------------
+// verifyPlannedActions -- Phase 10.B.1 vector-fallback behaviour
+// ---------------------------------------------------------------------------
+
+function fakeEntity(name: string): Entity {
+	return {
+		id:        `id-${name}`,
+		repo:      '/repo',
+		file:      `/repo/${name}.java`,
+		name,
+		kind:      'class',
+		language:  'java',
+		startLine: 1,
+		endLine:   100,
+		children:  [],
+	} as unknown as Entity;
+}
+
+const HA_SECTION: PlannedAction = {
+	id:                'hdfs-ha',
+	title:             'High Availability & State Synchronization',
+	objective:         'Trace how NameNodes coordinate active/standby state via HA primitives.',
+	maxBudgetTokens:   2000,
+	reviewCriteria:    ['Names the HA classes'],
+};
+
+// Section with a concrete PascalCase anchor (`FooBarManager`) that
+// doesn't exist in the repo. NER will extract it, the literal probe
+// will miss, AND the vector search returns nothing -- the section
+// should drop.
+const NO_ANCHOR_SECTION: PlannedAction = {
+	id:                'no-anchor',
+	title:             'FooBarManager & Hypothetical Subsystem',
+	objective:         'Survey the FooBarManager cache eviction logic.',
+	maxBudgetTokens:   2000,
+	reviewCriteria:    ['Names FooBarManager'],
+};
+
+test('verifyPlannedActions: vector fallback rescues a section when literal probe misses', async () => {
+	const result = await verifyPlannedActions([HA_SECTION], {
+		repoPath: '/repo',
+		_internals: {
+			// Literal probe always misses (no entity named "NameNodes" or "HA")
+			findEntitiesByName: async () => [],
+			// Embedder returns a non-empty vector
+			embedQuery: async () => [0.1, 0.2, 0.3],
+			// Vector search finds a real anchor entity semantically close to the title
+			searchEntities: async () => [fakeEntity('HAServiceProtocol')],
+		},
+	});
+	assert.equal(result.kept.length, 1);
+	assert.equal(result.dropped.length, 0);
+	assert.equal(result.kept[0]!.id, 'hdfs-ha');
+});
+
+test('verifyPlannedActions: vector fallback still drops when no semantic match either', async () => {
+	const result = await verifyPlannedActions([NO_ANCHOR_SECTION], {
+		repoPath: '/repo',
+		_internals: {
+			findEntitiesByName: async () => [],
+			embedQuery: async () => [0.1, 0.2, 0.3],
+			searchEntities: async () => [],   // no semantic hits
+		},
+	});
+	assert.equal(result.kept.length, 0);
+	assert.equal(result.dropped.length, 1);
+	assert.match(result.dropped[0]!.reason, /vector fallback also returned no hits/);
+});
+
+test('verifyPlannedActions: vectorFallback=false disables the new behaviour (drops on literal miss)', async () => {
+	const result = await verifyPlannedActions([HA_SECTION], {
+		repoPath: '/repo',
+		vectorFallback: false,
+		_internals: {
+			findEntitiesByName: async () => [],
+			// embedder should not be called
+			embedQuery: async () => { throw new Error('embedQuery should not be called'); },
+			searchEntities: async () => { throw new Error('searchEntities should not be called'); },
+		},
+	});
+	assert.equal(result.kept.length, 0);
+	assert.equal(result.dropped.length, 1);
+});
+
+test('verifyPlannedActions: vector fallback errors -> conservative keep', async () => {
+	const result = await verifyPlannedActions([HA_SECTION], {
+		repoPath: '/repo',
+		_internals: {
+			findEntitiesByName: async () => [],
+			embedQuery: async () => { throw new Error('embedder offline'); },
+			searchEntities: async () => [],
+		},
+	});
+	// Embedder error -> keep (don't drop a section on transient infra failure)
+	assert.equal(result.kept.length, 1);
+	assert.equal(result.dropped.length, 0);
+});
+
+test('verifyPlannedActions: empty queryVec from embedder -> skips vector hit check, drops section', async () => {
+	const result = await verifyPlannedActions([HA_SECTION], {
+		repoPath: '/repo',
+		_internals: {
+			findEntitiesByName: async () => [],
+			embedQuery: async () => [],     // empty vec -> embedder unavailable
+			searchEntities: async () => { throw new Error('searchEntities should not be called with empty vec'); },
+		},
+	});
+	// Empty vec means searchEntities never runs -- falls through to drop
+	assert.equal(result.kept.length, 0);
+	assert.equal(result.dropped.length, 1);
+});
+
+test('verifyPlannedActions: literal hit -> vector fallback not needed', async () => {
+	const result = await verifyPlannedActions([HA_SECTION], {
+		repoPath: '/repo',
+		_internals: {
+			findEntitiesByName: async () => [fakeEntity('NameNodes')],   // literal hit (synthetic)
+			embedQuery: async () => { throw new Error('embedder should not be called when literal probe succeeds'); },
+			searchEntities: async () => [],
+		},
+	});
+	assert.equal(result.kept.length, 1);
+	assert.equal(result.dropped.length, 0);
+});
+
+test('verifyPlannedActions: vectorMinHits=2 -- single match no longer suffices', async () => {
+	const result = await verifyPlannedActions([HA_SECTION], {
+		repoPath: '/repo',
+		vectorMinHits: 2,
+		_internals: {
+			findEntitiesByName: async () => [],
+			embedQuery: async () => [0.1, 0.2, 0.3],
+			searchEntities: async () => [fakeEntity('HAServiceProtocol')],   // only 1 hit
+		},
+	});
+	assert.equal(result.kept.length, 0);
+	assert.equal(result.dropped.length, 1);
 });
