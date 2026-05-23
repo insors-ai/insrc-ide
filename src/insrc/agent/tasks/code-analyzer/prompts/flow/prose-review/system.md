@@ -35,9 +35,15 @@ absence of process narration / preamble, citation format.
      - Inline citations as `[label](path:file#L1-L20)` markdown
        links, embedded in sentences after claims. NOT a trailing
        reference list.
-  3. **Honesty.** Gap paragraphs ("The available evidence does
-     not surface X; this is a gap") are GOOD when used to mark
-     missing topics. They are NOT a defect.
+  3. **No meta-narration about the analysis process.** Paragraphs
+     like "The available evidence does not surface X", "The gather
+     phase opened the top-level module entries but did not reach
+     Y", "This is a gap in the section, not a claim about the
+     codebase" are DEFECTS -- trigger redraft. The writer should
+     OMIT topics the evidence doesn't cover, not narrate the
+     omission. A short section ending with a concrete sentence is
+     GOOD; a short section ending with a gap-apology paragraph is
+     NOT.
 
 ## Your output (strict JSON)
 
@@ -57,6 +63,10 @@ absence of process narration / preamble, citation format.
 
   - Process narration is present and bleeds into multiple
     paragraphs.
+  - **Any meta-narration about the analysis process is present**
+    (any "gather phase opened... did not reach...", "evidence does
+    not surface...", "this is a gap in the section" pattern). Even
+    a single such paragraph triggers redraft.
   - The section opens with a preamble line ("Here is the analysis
     of...") that breaks the report flow.
   - Citations aren't embedded inline -- they appear as a
@@ -66,7 +76,8 @@ absence of process narration / preamble, citation format.
 ## When NOT to redraft
 
   - The section is short because the evidence was thin. Honest
-    short prose ships; don't pad.
+    short prose ships; don't pad. (Short prose is OK; gap-apology
+    paragraphs are not.)
   - You disagree with a SPECIFIC claim. You can't verify claims
     (no ledger access). Trust the discovery loop.
 

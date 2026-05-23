@@ -196,7 +196,10 @@ the left and the corrected grounded shape on the right.
    "The `ManagedCursor` class ([`db/__init__.py:20-80`](path:insors/extraction/db/__init__.py#L20-L80)) ..."
    Why this is right: the line range comes from an actual evidence fact.
 
-### Confession failures (writer)
+### Gap-narration failures (writer)
+
+Both shapes below are WRONG. The right move when evidence is thin
+is to OMIT the paragraph entirely -- not to narrate the omission.
 
 ❌ LANGUAGE THAT CONFESSES THE GAP (do NOT do this)
    "While the evidence ledger did not provide specific code references
@@ -204,43 +207,82 @@ the left and the corrected grounded shape on the right.
     architecture as follows: ..."
    Why this is wrong: this is the writer telling the reader, in plain
    language, that the paragraph that follows is from prior knowledge,
-   not from the evidence. Reviewers MUST flag this immediately with a
-   `fix` work item -- it is a self-incriminating fabrication.
+   not from the evidence. Reviewers MUST flag this immediately -- it
+   is a self-incriminating fabrication.
 
-✅ EXPLICIT GAP ACKNOWLEDGEMENT (write this shape instead)
+❌ META-NARRATION ABOUT THE GATHER PROCESS (do NOT do this either)
    "The available evidence does not surface the request-routing
     subsystem. The gather phase opened the top-level module entries
     but did not reach the routing layer. This is a gap in the section,
     not a claim about the codebase."
-   Why this is right: the gap is named honestly. No general-knowledge
-   paragraph follows.
+   Why this is wrong: it's still meta-narration about the analysis
+   tooling instead of prose about the subject. Reviewers will flag
+   it; the Phase 10 tripwire (meta-narrative detector) will force a
+   redraft. A short section ending with a concrete evidence-anchored
+   sentence is GOOD; a short section ending with a paragraph that
+   apologises for what wasn't analysed is NOT.
+
+✅ OMIT THE PARAGRAPH (write this shape instead)
+   _(no text -- if the evidence ledger doesn't cover an aspect, drop
+   the paragraph; stop the section after the last concrete sentence
+   you can ground.)_
+   Why this is right: the reader's value comes from concrete
+   evidence-anchored claims. A shorter section that ends cleanly is
+   better than a padded one with gap-apology paragraphs.
 
 <!-- END SECTION: error-catalog -->
 
 <!-- BEGIN SECTION: gap-paragraph-template -->
-## When the evidence does not cover a topic
+## Subject discipline -- omit gaps, do not narrate them
 
-If the section's objective or a reviewer flag asks about something the
-evidence ledger does not surface, write a SHORT honest gap paragraph
-following this shape:
+Every sentence you emit MUST be about the **subject under review** --
+the classes, files, methods, behaviours, data flows of the
+codebase. No sentence may be about the **analysis process itself**:
 
-  "The available evidence does not surface <topic>. The gather phase
-   opened <files / entities the ledger DOES cover> but did not reach
-   <the path / kind of code that would have surfaced the topic>. This
-   is a gap in the section, not a claim about the codebase."
+  - Do NOT describe what the gather phase did or didn't reach.
+  - Do NOT describe what skills you ran, what evidence the index
+    surfaced, or which aspects weren't covered.
+  - Do NOT write meta-paragraphs explaining absence of evidence.
+  - Do NOT cite the section title back to the reader to apologise
+    for what the section doesn't contain.
 
-Rules:
-  - Do NOT pad the gap with general knowledge. The reader's value comes
-    from knowing what was NOT found, not from a plausible-sounding
-    summary of what the writer remembers.
-  - Do NOT cite paths that were not surfaced in the ledger to make the
-    gap look researched. A gap paragraph carries NO citations beyond
-    the ones for "the ledger DOES cover" portion (which are real).
-  - Keep the gap paragraph SHORT -- 50 to 80 words. Long gap
-    paragraphs read as defensive padding.
-  - A short honest gap is preferred over a long plausible fabrication.
-    The reviewer will accept a 200-character honest paragraph over a
-    3000-character one that fills in from memory.
+**If the evidence ledger does not cover an aspect implied by the
+section title, OMIT the paragraph entirely.** A shorter section is
+better than a section padded with meta-narration. The reader gets
+zero value from a paragraph that explains what wasn't analysed --
+they get value from concrete prose about what *was* found.
+
+### Examples
+
+**WRONG** -- gap narration (DO NOT WRITE PROSE LIKE THIS):
+
+  > The available evidence does not surface the request-routing
+  > subsystem. The gather phase opened the top-level module
+  > entries but did not reach the routing layer. This is a gap in
+  > the section, not a claim about the codebase.
+
+**RIGHT** -- omit the paragraph; let the section be shorter:
+
+  > _(no text -- the topic simply isn't covered; move to the next
+  > paragraph or end the section)_
+
+**RIGHT** -- ledger has SOME evidence but a sub-topic is missing;
+make a positive statement from what IS in the ledger and stop:
+
+  > The `BlockManager` class manages block replicas and tracks
+  > replication state ([`BlockManager.java:162-5558`](path:.../BlockManager.java#L162-L5558)).
+  > It coordinates with the `DatanodeManager` and `HeartbeatManager`
+  > to dispatch block commands ([`HeartbeatManager.java:46-560`](path:.../HeartbeatManager.java#L46-L560)).
+
+No apology paragraph at the end about the parts of replication that
+weren't traced. Just stop.
+
+### Why this rule exists
+
+A drafted section that includes "the gather phase did not reach X"
+paragraphs reads as defensive padding and erodes reader trust in the
+parts of the section that ARE evidence-anchored. Shorter, honest,
+all-concrete prose is the standard. Empty space is allowed.
 
 <!-- END SECTION: gap-paragraph-template -->
 

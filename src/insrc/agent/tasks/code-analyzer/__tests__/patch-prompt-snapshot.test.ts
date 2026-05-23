@@ -82,14 +82,17 @@ for (const kind of KINDS) {
 		}
 	});
 
-	test(`flow/patch/${kind}/system.md includes the error catalog + gap template`, () => {
+	test(`flow/patch/${kind}/system.md includes the error catalog + subject-discipline rule`, () => {
 		_clearCacheForTest();
 		const composed = loadPatchPrompt(kind, {
 			SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
 		});
 		assert.match(composed, /Common failure patterns/);
 		assert.match(composed, /FABRICATED PARAGRAPH/);
-		assert.match(composed, /When the evidence does not cover a topic/);
+		// Phase 10.A of plans/code-analyzer-hallucination-mitigation.md:
+		// gap template replaced with subject-discipline rule (OMIT, do
+		// not narrate the gap).
+		assert.match(composed, /(Subject discipline -- omit gaps|Gap-narration failures)/);
 	});
 }
 

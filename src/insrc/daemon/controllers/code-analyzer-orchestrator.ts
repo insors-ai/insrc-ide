@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
 import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { verifyPlannedActions } from '../../agent/content-gen/verify-planned-actions.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
@@ -717,9 +718,50 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       cloud,
     );
 
-    const actions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
+    const plannedActions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
       ? [synthesiseFallbackAction(ca, accepted)]
       : plan.actions;
+
+    // Phase 10.B of plans/code-analyzer-hallucination-mitigation.md:
+    // pre-flight probe -- light NER extracts candidate entity names
+    // from each planned action's title + objective and probes the
+    // index. Sections whose anchor entities don't exist (e.g.
+    // "Caching Layer" for a system with no real cache) are dropped
+    // here, before any per-section discovery cost is incurred. Loose
+    // titles with no extracted anchor pass through untouched.
+    // Skipped on the fallback path (single synthesised action).
+    let actions: readonly PlannedAction[] = plannedActions;
+    if (!plan.degraded && plannedActions.length > 0) {
+      try {
+        const repoPath = this.deps.session.repoPath;
+        const verifyResult = await verifyPlannedActions(plannedActions, {
+          ...(repoPath !== undefined && repoPath.length > 0 ? { repoPath } : {}),
+        });
+        if (verifyResult.dropped.length > 0) {
+          log.warn(
+            {
+              kept:           verifyResult.kept.length,
+              dropped:        verifyResult.dropped.length,
+              droppedTitles:  verifyResult.dropped.map(d => d.action.title),
+            },
+            'verifyPlannedActions: dropped sections with no anchor entity',
+          );
+          // Only commit the trimmed list if at least one action
+          // survived. If everything was dropped (unlikely but
+          // possible on a malformed plan), fall back to the original
+          // list so we always have something to render.
+          if (verifyResult.kept.length > 0) {
+            actions = verifyResult.kept;
+          }
+        }
+      } catch (err) {
+        // Probe error is non-fatal -- ship the unverified list.
+        log.warn(
+          { err: (err as Error).message },
+          'verifyPlannedActions: probe error; shipping unverified action list',
+        );
+      }
+    }
 
     this.emitMilestone(
       synthBubble,

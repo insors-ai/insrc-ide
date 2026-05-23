@@ -56,8 +56,17 @@ import {
 
 import { computeCoverage } from './cycle-memory.js';
 import { executeStep } from './execute-step.js';
-import { writeSectionFromEvidence } from './write-from-evidence.js';
+import {
+	writeSectionFromEvidence,
+	validateCitationCoverage,
+	formatCitationCoverageNotes,
+} from './write-from-evidence.js';
 import type { EvidenceEntry } from './summarize-result.js';
+import {
+	detectMetaNarrative,
+	formatMetaNarrativeNotes,
+} from './meta-narrative-detector.js';
+import { reviewClaimsGrounding } from './claim-grounding-reviewer.js';
 import { getLogger } from '../../../shared/logger.js';
 
 const log = getLogger('code-analyzer:discovery-flow');
@@ -225,22 +234,96 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 		...(input.analyzerLabel !== undefined ? { analyzerLabel: input.analyzerLabel } : {}),
 	}, input.cloudProvider);
 
+	// Phase 10.A.1 + 11.A + 11.B of plans/code-analyzer-hallucination-mitigation.md:
+	// merge the cloud reviewer's verdict with three hard checks --
+	//   (a) meta-narrative tripwire (regex on known boilerplate
+	//       paragraphs the writer should have omitted)
+	//   (b) citation coverage validator (every non-trivial paragraph
+	//       must contain an inline [label](path:...) link)
+	//   (c) claim-grounding reviewer (cloud pass; flags claims that
+	//       are not anchored to any EvidenceEntry fact)
+	// Any check failing forces redraft regardless of the cloud
+	// prose-reviewer's verdict; all corrective notes flow into
+	// the redraft prompt so the model gets targeted feedback.
+	const tripwire     = detectMetaNarrative(written.markdown);
+	const coverage     = validateCitationCoverage(written.markdown);
+	const claimGrounding = await reviewClaimsGrounding({
+		section:   input.action,
+		prose:     written.markdown,
+		evidence:  evidenceForWriter,
+		...(input.analyzerLabel !== undefined ? { analyzerLabel: input.analyzerLabel } : {}),
+	}, input.cloudProvider);
+	const tripwireNotes  = formatMetaNarrativeNotes(tripwire);
+	const coverageNotes  = formatCitationCoverageNotes(coverage);
+	const claimGroundFail = claimGrounding.verdict === 'redraft';
+	const structuralFail  = tripwire.hit || !coverage.ok || claimGroundFail;
+	const mergedVerdict: 'accept' | 'redraft' =
+		(proseReview.verdict === 'redraft' || structuralFail) ? 'redraft' : 'accept';
+	const mergedNotes: readonly string[] = structuralFail
+		? [
+			...proseReview.notes,
+			...tripwireNotes,
+			...coverageNotes,
+			...(claimGroundFail ? claimGrounding.notes : []),
+		]
+		: proseReview.notes;
+	if (structuralFail) {
+		const lowGroundedClaims = claimGrounding.claims.filter(c => c.evidenceMatch === 'low').length;
+		log.warn(
+			{
+				actionId:           input.action.id,
+				tripwireHit:        tripwire.hit,
+				tripwirePatterns:   tripwire.matches.length,
+				tripwireExcerpts:   tripwire.matches.map(m => m.excerpt),
+				coverageOk:         coverage.ok,
+				uncitedParagraphs:  coverage.uncitedParagraphs.length,
+				claimGroundFail,
+				lowGroundedClaims,
+				originalVerdict:    proseReview.verdict,
+			},
+			'discovery-flow: structural check failed -- forcing redraft',
+		);
+	}
+
 	let finalMarkdown      = written.markdown;
 	let proseRedraftFired  = false;
-	if (proseReview.verdict === 'redraft') {
+	if (mergedVerdict === 'redraft') {
 		proseRedraftFired = true;
-		input.onProgress?.(`  [${input.action.id}] prose-review requested redraft (${proseReview.notes.length} notes)`);
-		// One redraft attempt: ship whichever has more citations.
+		const progressLabel = [
+			tripwire.hit       ? 'meta-narrative tripwire' : null,
+			!coverage.ok       ? 'citation coverage'       : null,
+			claimGroundFail    ? 'claim grounding'         : null,
+		].filter(Boolean).join(' + ');
+		input.onProgress?.(`  [${input.action.id}] prose-review requested redraft (${mergedNotes.length} notes${progressLabel.length > 0 ? `, ${progressLabel} fired` : ''})`);
+		// One redraft attempt: ship whichever has more citations and
+		// passes the structural checks.
 		const redrafted = await writeSectionFromEvidence({
 			provider:  input.localProvider,
 			action:    input.action,
-			request:   `${input.request}\n\nREDRAFT requested. Reviewer notes:\n${proseReview.notes.map(n => `- ${n}`).join('\n')}`,
+			request:   `${input.request}\n\nREDRAFT requested. Reviewer notes:\n${mergedNotes.map(n => `- ${n}`).join('\n')}`,
 			evidence:  evidenceForWriter,
 			...(input.repoSizeSummary !== undefined ? { repoSizeSummary: input.repoSizeSummary } : {}),
 		});
-		// Pick the version with more citations (citation count is the
-		// only quality proxy we have without re-invoking the reviewer).
-		if (redrafted.citationsUsed.length > written.citationsUsed.length) {
+		// Phase 10.A.1 + 11.A + 11.B: if any structural check fired on
+		// the first draft, strongly prefer the redraft when it passes
+		// the failing check -- even if citation count would otherwise
+		// tip the other way. Without this, we'd ship the version that
+		// triggered the redraft in the first place.
+		const redraftTripwire = detectMetaNarrative(redrafted.markdown);
+		const redraftCoverage = validateCitationCoverage(redrafted.markdown);
+		const firstFailedTripwire   = tripwire.hit;
+		const firstFailedCoverage   = !coverage.ok;
+		const redraftFixedTripwire  = firstFailedTripwire && !redraftTripwire.hit;
+		const redraftFixedCoverage  = firstFailedCoverage && redraftCoverage.ok;
+		const moreCitations         = redrafted.citationsUsed.length > written.citationsUsed.length;
+		// Claim-grounding fix is harder to verify without re-running the
+		// cloud reviewer (which would double the latency). The redraft
+		// prompt explicitly asks the model to remove un-grounded claims,
+		// so we trust that and prefer the redraft when claim-grounding
+		// failed on the original.
+		const shouldUseRedraft =
+			redraftFixedTripwire || redraftFixedCoverage || claimGroundFail || moreCitations;
+		if (shouldUseRedraft) {
 			finalMarkdown = redrafted.markdown;
 		}
 	}
@@ -250,7 +333,10 @@ export async function runDiscoveryFlow(input: RunDiscoveryFlowInput): Promise<Di
 		retainedStepCount:  retainedLedger.length,
 		cyclesRun:           perCycleSummary.length,
 		proseRedraftFired,
-		proseVerdict:        proseReview.verdict,
+		// Surface the merged verdict (tripwire OR cloud review) so the
+		// orchestrator's `proseVerdict:` log field reflects the actual
+		// decision, not just the cloud review's standalone result.
+		proseVerdict:        mergedVerdict,
 		perCycleSummary,
 	};
 }

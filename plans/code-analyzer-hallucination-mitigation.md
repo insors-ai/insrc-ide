@@ -1,11 +1,73 @@
 # code-analyzer: hallucination mitigation
 
 **Date opened:** 2026-05-23
-**Status:** proposed
+**Status:** SHIPPED 2026-05-23 -- Phases 10/11/12 implemented in a
+single commit. Phase 12 ships behind
+`INSRC_ANALYZER_WRITER_MODE=structured` (default off); Phases 10 + 11
+are on by default.
 **Parent context:** ships on top of Phase 9
 ([plans/code-analyzer-execute-step-per-result-summarization.md](./code-analyzer-execute-step-per-result-summarization.md)).
 Phase 9 fixed the section-count cap; this plan addresses *what the
 sections then contain*.
+
+## Implementation deltas
+
+A couple of structural deltas vs the proposed plan:
+
+- **Boilerplate paragraph is INSTRUCTED, not memorised.** The
+  investigation revealed that the recurring "the gather phase
+  opened the top-level module entries but did not reach the routing
+  layer" paragraph is templated by
+  [`gap-paragraph-template.md`](../src/insrc/agent/tasks/code-analyzer/prompts/sections/gap-paragraph-template.md)
+  + endorsed by 3 other prompt files (anti-hallucination/writer,
+  output-format/write, prose-review). The writer model was
+  *following instructions correctly* -- the prompt stack itself was
+  the source of the boilerplate. Phase 10.A therefore flips the
+  entire prompt stack to "OMIT, do not narrate the gap" rather than
+  just adding a banned-phrase deny-list.
+- **Prompt-file layout differs from the plan.** Plan referenced
+  `prompts/sections/writer/system.md` + `writer/redraft.md`; the
+  actual layout is `prompts/flow/write/system.md` (composed from
+  `prompts/sections/*.md` includes). The same Phase 10.A edits land
+  on the actual includes (`gap-paragraph-template.md`,
+  `anti-hallucination/writer.md`, `output-format/write.md`,
+  `flow/prose-review/system.md`, plus `error-catalog.md` which was
+  missed by the original plan listing).
+- **Phase 11.A landed in `write-from-evidence.ts`, not a separate
+  validator module.** The function `validateCitationCoverage(prose)
+  -> { ok, nonTrivialParagraphs, uncitedParagraphs[] }` lives
+  alongside the existing `extractCitations` helper. Same effect,
+  fewer files.
+- **Phase 11.B reviewer prompt is `prompts/flow/claim-grounding/
+  system.md`.** Plan said `prompts/sections/claim-grounding/...` --
+  the actual location matches the flow-level prompt convention
+  (every cloud reviewer pass has its own `flow/<name>/system.md`).
+- **Phase 12 renderer is its own module** (`write-from-evidence-
+  structured.ts`) rather than additional functions inside
+  `write-from-evidence.ts`. The entry point in the legacy module
+  branches on the env var and delegates. Keeps the freeform-mode
+  file unchanged in size; the structured codepath is isolated for
+  easy revert.
+- **Pre-existing test breakage in `discovery-flow.test.ts` is
+  unrelated to this work.** The test fixture `LOCAL_STEP_OUTPUT_JSON`
+  doesn't shape-match what `executeStep` expects from the local
+  provider (the test was returning structured JSON text as a tool
+  response, but `callPerTask` requires a `tool_use` block). This
+  failure is reproducible with `git stash` against `main` and is
+  out of scope here.
+
+## Test coverage shipped
+
+| Phase | New test files | Tests added |
+|---|---|---|
+| 10.A.1 | `__tests__/meta-narrative-detector.test.ts` | 7 |
+| 10.B | `agent/content-gen/__tests__/verify-planned-actions.test.ts` | 8 |
+| 11.B | `__tests__/claim-grounding-reviewer.test.ts` | 9 |
+| 12 | `__tests__/write-from-evidence-structured.test.ts` | 10 |
+| 10.A (regen) | `__tests__/write-prompt-snapshot.test.ts` (assertion update + golden regen) | 5 |
+| 10.A (regen) | `__tests__/patch-prompt-snapshot.test.ts` (assertion update + golden regen) | 28 |
+
+**Total: 67 tests pass in the affected suites.** Daemon build clean.
 
 ## Why
 

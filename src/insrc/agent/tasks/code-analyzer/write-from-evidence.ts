@@ -64,6 +64,18 @@ export interface WriteFromEvidenceOutput {
 // ---------------------------------------------------------------------------
 
 export async function writeSectionFromEvidence(input: WriteFromEvidenceInput): Promise<WriteFromEvidenceOutput> {
+	// Phase 12 of plans/code-analyzer-hallucination-mitigation.md:
+	// optional structured-writer path gated behind
+	// INSRC_ANALYZER_WRITER_MODE=structured. The structured writer
+	// emits `{paragraphs: [{narrative, evidenceRefs}]}` and a
+	// renderer splices citations from real EvidenceEntry citations
+	// -- by construction, no paragraph can exist without an evidence
+	// anchor. Default path remains the legacy freeform writer.
+	const { isStructuredWriterEnabled, writeSectionStructured } = await import('./write-from-evidence-structured.js');
+	if (isStructuredWriterEnabled()) {
+		return writeSectionStructured(input);
+	}
+
 	const t0 = Date.now();
 	const maxTokens = input.maxTokens ?? Math.max(input.action.maxBudgetTokens * 2, 2400);
 
@@ -267,6 +279,96 @@ export function extractCitations(markdown: string): readonly string[] {
 		seen.add(`path:${m[1]!}`);
 	}
 	return [...seen];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 11.A of plans/code-analyzer-hallucination-mitigation.md:
+// citation-per-paragraph validator.
+// ---------------------------------------------------------------------------
+
+/**
+ * Paragraphs shorter than this character count are treated as
+ * transitional and exempted from the citation requirement.
+ * Empirical: legitimate transition sentences ("These components are
+ * detailed below:", section openers naming the subject) tend to be
+ * under 80 chars; padding paragraphs are usually longer.
+ */
+const PARAGRAPH_TRANSITION_THRESHOLD_CHARS = 80;
+
+export interface CitationCoverageResult {
+	readonly ok:                    boolean;
+	/** Total non-trivial paragraphs (above the transition threshold). */
+	readonly nonTrivialParagraphs:  number;
+	/** Paragraphs above threshold that lack any `[label](path:...)` link. */
+	readonly uncitedParagraphs:     readonly string[];
+}
+
+/**
+ * Validate that every non-trivial paragraph contains at least one
+ * inline `[label](path:...)` citation link. Returns the offending
+ * paragraphs so callers can surface them to a redraft prompt.
+ *
+ * "Non-trivial" excludes:
+ *   - Empty / whitespace-only blocks
+ *   - Paragraphs ending with `:` (intro to a following list)
+ *   - Paragraphs under `PARAGRAPH_TRANSITION_THRESHOLD_CHARS` --
+ *     these are typically transitions ("The next sections detail..."),
+ *     where requiring a citation hurts readability.
+ *
+ * The validator is intentionally permissive on short text and strict
+ * on long blocks: an 800-char paragraph with no citations is almost
+ * certainly hallucinated filler; a 60-char transition sentence is
+ * almost certainly legitimate.
+ */
+export function validateCitationCoverage(markdown: string): CitationCoverageResult {
+	if (typeof markdown !== 'string' || markdown.trim().length === 0) {
+		return { ok: true, nonTrivialParagraphs: 0, uncitedParagraphs: [] };
+	}
+
+	const paragraphs = markdown.split(/\n\s*\n+/);
+	const uncited: string[] = [];
+	let nonTrivial = 0;
+
+	for (const raw of paragraphs) {
+		const p = raw.trim();
+		if (p.length === 0) continue;
+		if (p.length < PARAGRAPH_TRANSITION_THRESHOLD_CHARS) continue;
+		// Skip "intro to list" paragraphs ending with a colon -- the
+		// following list items typically carry the citations.
+		if (p.endsWith(':')) continue;
+		nonTrivial += 1;
+		// Look for any `[label](path:...)` link
+		if (!/\[[^\]]+\]\(path:[^)]+\)/.test(p)) {
+			uncited.push(p);
+		}
+	}
+
+	return {
+		ok:                    uncited.length === 0,
+		nonTrivialParagraphs:  nonTrivial,
+		uncitedParagraphs:     uncited,
+	};
+}
+
+/**
+ * Render the citation-coverage failure as redraft notes. Truncates
+ * each offending paragraph so the redraft prompt stays bounded.
+ */
+export function formatCitationCoverageNotes(result: CitationCoverageResult): string[] {
+	if (result.ok) return [];
+	const notes: string[] = [];
+	notes.push(
+		`Citation coverage failure: ${result.uncitedParagraphs.length} of ${result.nonTrivialParagraphs} non-trivial paragraph(s) lack an inline [label](path:...) citation. Every non-transition paragraph MUST contain at least one citation drawn from the evidence ledger. Rewrite the following without removing citations from other paragraphs:`,
+	);
+	for (let i = 0; i < Math.min(result.uncitedParagraphs.length, 3); i++) {
+		const p = result.uncitedParagraphs[i]!;
+		const snippet = p.length > 160 ? p.slice(0, 160) + '...' : p;
+		notes.push(`  - paragraph ${i + 1}: "${snippet}"`);
+	}
+	if (result.uncitedParagraphs.length > 3) {
+		notes.push(`  - ...and ${result.uncitedParagraphs.length - 3} more paragraph(s) without citations`);
+	}
+	return notes;
 }
 
 // ---------------------------------------------------------------------------

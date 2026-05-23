@@ -47,7 +47,10 @@ the left and the corrected grounded shape on the right.
    "The `ManagedCursor` class ([`db/__init__.py:20-80`](path:insors/extraction/db/__init__.py#L20-L80)) ..."
    Why this is right: the line range comes from an actual evidence fact.
 
-### Confession failures (writer)
+### Gap-narration failures (writer)
+
+Both shapes below are WRONG. The right move when evidence is thin
+is to OMIT the paragraph entirely -- not to narrate the omission.
 
 ❌ LANGUAGE THAT CONFESSES THE GAP (do NOT do this)
    "While the evidence ledger did not provide specific code references
@@ -55,13 +58,25 @@ the left and the corrected grounded shape on the right.
     architecture as follows: ..."
    Why this is wrong: this is the writer telling the reader, in plain
    language, that the paragraph that follows is from prior knowledge,
-   not from the evidence. Reviewers MUST flag this immediately with a
-   `fix` work item -- it is a self-incriminating fabrication.
+   not from the evidence. Reviewers MUST flag this immediately -- it
+   is a self-incriminating fabrication.
 
-✅ EXPLICIT GAP ACKNOWLEDGEMENT (write this shape instead)
+❌ META-NARRATION ABOUT THE GATHER PROCESS (do NOT do this either)
    "The available evidence does not surface the request-routing
     subsystem. The gather phase opened the top-level module entries
     but did not reach the routing layer. This is a gap in the section,
     not a claim about the codebase."
-   Why this is right: the gap is named honestly. No general-knowledge
-   paragraph follows.
+   Why this is wrong: it's still meta-narration about the analysis
+   tooling instead of prose about the subject. Reviewers will flag
+   it; the Phase 10 tripwire (meta-narrative detector) will force a
+   redraft. A short section ending with a concrete evidence-anchored
+   sentence is GOOD; a short section ending with a paragraph that
+   apologises for what wasn't analysed is NOT.
+
+✅ OMIT THE PARAGRAPH (write this shape instead)
+   _(no text -- if the evidence ledger doesn't cover an aspect, drop
+   the paragraph; stop the section after the last concrete sentence
+   you can ground.)_
+   Why this is right: the reader's value comes from concrete
+   evidence-anchored claims. A shorter section that ends cleanly is
+   better than a padded one with gap-apology paragraphs.

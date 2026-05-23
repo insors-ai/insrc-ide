@@ -61,16 +61,23 @@ test('flow/write/system.md preserves BEGIN/END section markers', () => {
 	}
 });
 
-test('flow/write/system.md includes the error catalog + gap template (Phase 6)', () => {
+test('flow/write/system.md includes the error catalog + subject-discipline rule', () => {
 	_clearCacheForTest();
 	const composed = loadFlowPrompt('write', { REPO_CONTEXT: '' });
-	// Spot-check Phase 6 content is wired in.
+	// Spot-check error catalog content (carried from Phase 6).
 	assert.match(composed, /Common failure patterns/);
 	assert.match(composed, /FABRICATED PARAGRAPH/);
 	assert.match(composed, /GROUNDED PARAGRAPH/);
 	assert.match(composed, /HAND-ROLLED CITATION/);
-	assert.match(composed, /When the evidence does not cover a topic/);
-	assert.match(composed, /A short honest gap is preferred/);
+	// Phase 10.A of plans/code-analyzer-hallucination-mitigation.md:
+	// the previous "gap paragraph template" was replaced with the
+	// "subject discipline" rule that says OMIT, do not narrate.
+	assert.match(composed, /Subject discipline -- omit gaps/);
+	assert.match(composed, /If the evidence ledger does not cover an aspect/);
+	// Negative assertion: the old endorsed template should no longer
+	// be presented as the RIGHT shape -- it should appear only as a
+	// WRONG example in the error-catalog (or not at all).
+	assert.doesNotMatch(composed, /A short honest gap is preferred over a long plausible fabrication/);
 });
 
 test('flow/write/system.md carries the anti-hallucination contract + ledger references', () => {

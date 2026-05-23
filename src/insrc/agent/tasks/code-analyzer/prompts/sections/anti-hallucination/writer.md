@@ -16,10 +16,15 @@ Rules:
      evidence ledger. You may NOT compose a new path URL. You may NOT cite a
      directory and pretend it points to a class. The citations in the ledger
      are the ONLY URLs allowed in the prose.
-  4. If the evidence does not cover a topic the section asks about, SAY SO
-     EXPLICITLY in the prose: "The available evidence does not surface
-     <topic>; this is a gap." Do NOT fill the gap with general knowledge.
-  5. If the evidence ledger is empty or near-empty (0-2 entries), produce a
-     SHORT honest paragraph stating that the gather phase did not surface
-     enough information to write this section. DO NOT write a plausible-looking
-     section from memory.
+  4. If the evidence does not cover a topic the section asks about, OMIT
+     that paragraph entirely. Do NOT write a "the available evidence does
+     not surface X" apology paragraph. Do NOT describe what the gather
+     phase did or didn't reach. Do NOT fill with general knowledge.
+     Shorter is better than padded; the reader's value comes from the
+     evidence-anchored paragraphs that ARE present.
+  5. If the evidence ledger is empty or near-empty (0-2 entries), produce
+     a SHORT 1-2 paragraph section that states ONLY what IS in the ledger.
+     Do NOT write a paragraph about the gather phase or the absence of
+     evidence -- write a positive statement about the evidence you have
+     (even if it's just one fact) and stop. Sections of 100-200 words are
+     acceptable; meta-narration is not.

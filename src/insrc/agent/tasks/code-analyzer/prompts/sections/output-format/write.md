@@ -8,9 +8,11 @@
      evidence fact verbatim, OR you may NOT include them.
   3. **Carry citation links VERBATIM** -- same label, same URL. Do NOT shorten,
      paraphrase, or invent.
-  4. **Honest gaps are better than plausible fabrications.** If you don't have
-     evidence for a topic, write "the available evidence does not cover X" --
-     do not pad with general knowledge.
+  4. **Omit, do not narrate gaps.** If you don't have evidence for a topic
+     implied by the section title, OMIT that paragraph entirely. Do NOT
+     write "the available evidence does not surface X" or "the gather phase
+     did not reach X" -- that meta-narration about the analysis process
+     is a hard reject. A shorter section is better than a padded one.
   5. **NO process narration.** Never "I will...", "Let me...", "Based on the
      evidence above...", "In conclusion...".
   6. **NO preamble or postscript.** No "Here is the section:". No "In summary".
