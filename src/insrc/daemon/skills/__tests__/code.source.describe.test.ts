@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -137,6 +137,75 @@ test('file.describe: unknown path -> { found: false, reason: file-not-indexed }'
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], false);
 	assert.equal(v['reason'], 'file-not-indexed');
+});
+
+test('file.describe: indexed file but no parsed children -> reads file as fallback excerpt', async () => {
+	// Simulate Dockerfile / configmap.yaml: indexer recorded the file
+	// entity (graph has it) but tree-sitter has no grammar -> zero
+	// children + zero imports. Skill should fall back to reading the
+	// file from disk and surface bodyExcerpt.
+	const dockerfilePath = join(dir, 'Dockerfile');
+	writeFileSync(dockerfilePath, 'FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\nCOPY . .\nCMD ["python", "main.py"]\n');
+	const file = fileEnt(dockerfilePath, 'dockerfile' as Language);
+	await upsertEntities(null, [file]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.source.file.describe',
+		{ file: dockerfilePath, repoPath: REPO },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['entityCount'], 0);
+	assert.equal(v['bodyExcerptSource'], 'file-fallback');
+	assert.match(v['bodyExcerpt'] as string, /FROM python:3.11-slim/);
+	assert.match(v['bodyExcerpt'] as string, /pip install/);
+	assert.equal(result.confidence, 'medium');     // disk read worked
+	assert.equal(result.notes.length, 1);
+});
+
+test('file.describe: indexed file, no children, file missing from disk -> low confidence, no bodyExcerpt', async () => {
+	// Graph has the file row but disk read fails (e.g. file deleted
+	// after indexing). Skill should return found=true with 0 children
+	// and NO bodyExcerpt, plus a note explaining the gap. Honest
+	// signal that there's nothing to cite.
+	const file = fileEnt(`${REPO}/never-on-disk.yaml`, 'yaml' as Language);
+	await upsertEntities(null, [file]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.source.file.describe',
+		{ file: file.file, repoPath: REPO },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['entityCount'], 0);
+	assert.equal(v['bodyExcerpt'], undefined);
+	assert.equal(v['bodyExcerptSource'], undefined);
+	assert.equal(result.confidence, 'low');
+});
+
+test('file.describe: parsed file with children -> no fallback (graph wins)', async () => {
+	// Normal path: file has parsed children. Verify we DON'T read the
+	// file unnecessarily even if it exists -- structural data is
+	// strictly better than raw text, and the fallback path is meant
+	// to be a strict last resort.
+	const tsPath = `${REPO}/src/Real.ts`;
+	const file = fileEnt(tsPath);
+	const cls  = ent({ kind: 'class', name: 'Real', file: tsPath, startLine: 1, endLine: 5, isExported: true });
+	await upsertEntities(null, [file, cls]);
+	await upsertRelations(null, [{ kind: 'DEFINES', from: file.id, to: cls.id, resolved: true }]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.source.file.describe',
+		{ file: tsPath, repoPath: REPO },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['entityCount'], 1);
+	assert.equal(v['bodyExcerpt'], undefined);     // no spurious fallback
+	assert.equal(result.confidence, 'high');
 });
 
 // ---------------------------------------------------------------------------

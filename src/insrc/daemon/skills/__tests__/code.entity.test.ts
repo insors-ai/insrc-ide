@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -193,6 +193,84 @@ test('summary: missing id -> { found: false, reason: entity-not-found }', async 
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], false);
 	assert.equal(v['reason'], 'entity-not-found');
+});
+
+// ---------------------------------------------------------------------------
+// summary: file-read fallback (Dockerfile / YAML / shell-script case)
+// ---------------------------------------------------------------------------
+
+test('summary: empty body + real file on disk -> reads file as excerpt', async () => {
+	// Simulate the Dockerfile / configmap.yaml case: graph has a
+	// `kind: file` entity with an empty body (tree-sitter has no
+	// grammar for these formats), file exists on disk. Skill should
+	// read the file and surface it as the excerpt.
+	const yamlPath = join(dir, 'configmap.yaml');
+	writeFileSync(yamlPath, 'apiVersion: v1\nkind: ConfigMap\ndata:\n  key: value\n');
+	const fileEnt = ent({
+		kind:  'file',
+		name:  'configmap.yaml',
+		file:  yamlPath,
+		body:  '',                // <-- the bug condition: graph has no body
+		language: 'yaml' as Language,
+	});
+	await upsertEntities(null, [fileEnt]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.summary',
+		{ entityId: fileEnt.id },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['excerptSource'], 'file-fallback');
+	assert.match(v['excerpt'] as string, /apiVersion: v1/);
+	assert.match(v['excerpt'] as string, /ConfigMap/);
+	assert.equal(result.confidence, 'medium');   // file read worked
+	assert.equal(result.notes.length, 1);         // explains the fallback
+});
+
+test('summary: empty body + missing file -> low confidence, empty excerpt, honest', async () => {
+	// Graph has a file row but disk read fails (file deleted between
+	// indexing and lookup). Skill should NOT crash; should return
+	// excerpt='' with low confidence + a note explaining the gap.
+	const fileEnt = ent({
+		kind:  'file',
+		name:  'gone.yaml',
+		file:  join(dir, 'does-not-exist.yaml'),
+		body:  '',
+	});
+	await upsertEntities(null, [fileEnt]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.summary',
+		{ entityId: fileEnt.id },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['excerpt'], '');
+	assert.equal(v['excerptSource'], 'graph');   // no successful fallback
+	assert.equal(result.confidence, 'low');
+});
+
+test('summary: non-empty body -> excerptSource is graph (no spurious fallback)', async () => {
+	// Make sure the normal path still works: when body is non-empty,
+	// we use it and DON'T touch the disk.
+	const fn = ent({
+		kind: 'function', name: 'normalPath',
+		body: 'function normalPath(): void {}',
+	});
+	await upsertEntities(null, [fn]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.summary',
+		{ entityId: fn.id },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['excerptSource'], 'graph');
+	assert.match(v['excerpt'] as string, /normalPath/);
+	assert.equal(result.confidence, 'high');
 });
 
 // ---------------------------------------------------------------------------

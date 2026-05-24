@@ -18,6 +18,7 @@ import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { getEntity } from '../../../db/entities.js';
 import { findDefinedIn, findImports } from '../../../db/search.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
+import { tryReadFileForFallback } from './_fallback-file-read.js';
 
 interface FileDescribeInput {
 	readonly file:     string;
@@ -50,6 +51,18 @@ type FileDescribeOutput =
 		readonly entityCount:  number;
 		readonly entities:     readonly ChildEntity[];
 		readonly imports:      readonly ImportRef[];
+		/**
+		 * Head of the file contents, populated when the graph has no
+		 * parsed children for this file (typical for config-file kinds
+		 * like Dockerfile / YAML / shell / TOML that tree-sitter doesn't
+		 * parse). Lets the caller cite something concrete instead of a
+		 * 0-entity, 0-import shell. Absent when the graph already has
+		 * structural data (the normal path -- the LLM should read the
+		 * structured entities, not raw text).
+		 */
+		readonly bodyExcerpt?:       string;
+		readonly bodyExcerptTruncated?: boolean;
+		readonly bodyExcerptSource?:   'file-fallback';
 	}
 	| {
 		readonly found:  false;
@@ -99,6 +112,9 @@ const codeSourceFileDescribeSkill: Skill<FileDescribeInput, FileDescribeOutput> 
 					entityCount:  { type: 'number' },
 					entities:     { type: 'array' },
 					imports:      { type: 'array' },
+					bodyExcerpt:          { type: 'string' },
+					bodyExcerptTruncated: { type: 'boolean' },
+					bodyExcerptSource:    { type: 'string', enum: ['file-fallback'] },
 				},
 				required: ['found', 'file', 'language', 'fileEntityId', 'startLine', 'endLine', 'entityCount', 'entities', 'imports'],
 			},
@@ -141,6 +157,29 @@ const codeSourceFileDescribeSkill: Skill<FileDescribeInput, FileDescribeOutput> 
 		const entities = definedIn.map(toChildEntity);
 		const importRefs = imports.map(e => ({ target: e.name, resolved: e.kind !== 'module' || e.repo !== '' }));
 
+		// Fallback: when the graph has the file row but zero parsed
+		// children AND zero imports, the file is almost certainly a
+		// format tree-sitter doesn't parse (Dockerfile / YAML / shell /
+		// TOML / SQL). Read the file from disk so the caller has
+		// something concrete to cite. Without this branch the analyzer
+		// emits 0-evidence sections for deployment/config-heavy topics.
+		const isStructurallyEmpty = entities.length === 0 && importRefs.length === 0;
+		let bodyExcerpt: string | undefined;
+		let bodyExcerptTruncated: boolean | undefined;
+		let bodyExcerptSource: 'file-fallback' | undefined;
+		const fallbackNotes: string[] = [];
+		if (isStructurallyEmpty) {
+			const fb = await tryReadFileForFallback(input.file);
+			if (fb.ok) {
+				bodyExcerpt          = fb.content;
+				bodyExcerptTruncated = fb.truncated;
+				bodyExcerptSource    = 'file-fallback';
+				fallbackNotes.push(`graph has no parsed children for ${fileEntity.language} file; read excerpt from disk (${fb.byteSize} bytes)`);
+			} else {
+				fallbackNotes.push(`graph has no parsed children; disk fallback also failed: ${fb.reason}`);
+			}
+		}
+
 		const out: FileDescribeOutput = {
 			found:        true,
 			file:         input.file,
@@ -151,11 +190,17 @@ const codeSourceFileDescribeSkill: Skill<FileDescribeInput, FileDescribeOutput> 
 			entityCount:  entities.length,
 			entities,
 			imports:      importRefs,
+			...(bodyExcerpt          !== undefined ? { bodyExcerpt }          : {}),
+			...(bodyExcerptTruncated !== undefined ? { bodyExcerptTruncated } : {}),
+			...(bodyExcerptSource    !== undefined ? { bodyExcerptSource }    : {}),
 		};
 		return {
 			value: out,
-			confidence: 'high',
-			notes: [],
+			// Medium confidence when we had to fall back to disk; the
+			// graph couldn't structurally enumerate this file. High when
+			// the normal graph path worked.
+			confidence: isStructurallyEmpty ? (bodyExcerpt !== undefined ? 'medium' : 'low') : 'high',
+			notes: fallbackNotes,
 			toolCalls: [],
 		};
 	},

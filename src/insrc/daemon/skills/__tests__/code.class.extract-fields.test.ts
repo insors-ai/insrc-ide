@@ -21,6 +21,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { registerAllSkills } from '../index.js';
 import {
@@ -271,7 +274,7 @@ test('locate returns a malformed payload -> low confidence, refusal shape', asyn
 // Confidence shaping
 // ---------------------------------------------------------------------------
 
-test('empty fields -> confidence: medium (class exists, no parseable fields)', async () => {
+test('empty fields + unreadable source path -> confidence: low (file-read fallback failed)', async () => {
 	setup();
 	const fakeTools: FakeToolMap = {
 		code_class_locate: okTool({
@@ -293,7 +296,82 @@ test('empty fields -> confidence: medium (class exists, no parseable fields)', a
 	);
 	assert.equal(result.value.found, true);
 	assert.equal(result.value.fields?.length, 0);
-	assert.equal(result.confidence, 'medium');
+	// With the file-read fallback in place, an empty field set + an
+	// unreadable source path means we lost the structural data AND
+	// can't even quote raw source -- the honest signal is 'low'.
+	// (When the file IS readable, confidence stays 'medium' -- covered
+	// by the dedicated fallback test.)
+	assert.equal(result.confidence, 'low');
+});
+
+test('empty fields + readable source file -> bodyExcerpt populated, confidence medium', async () => {
+	setup();
+	// Write a real fixture file so the disk-fallback succeeds.
+	const dir = mkdtempSync(join(tmpdir(), 'insrc-extract-fields-fb-'));
+	try {
+		const path = join(dir, 'Marker.ts');
+		writeFileSync(path, 'export interface Marker {\n  // intentionally fieldless marker\n}\n');
+
+		const fakeTools: FakeToolMap = {
+			code_class_locate: okTool({
+				found: true, entityId: 'a'.repeat(32),
+				path, line: 1, language: 'typescript', kind: 'interface',
+			}),
+			code_class_fields: okTool({
+				entityId: 'a'.repeat(32),
+				className: 'Marker',
+				language: 'typescript',
+				source: 'body',
+				fields: [],
+			}),
+		};
+		const { result } = await runSkillIsolated<unknown, ExtractFieldsValue & {
+			bodyExcerpt?: string;
+			bodyExcerptSource?: string;
+		}>(
+			SKILL_ID,
+			{ className: 'Marker' },
+			{ fakeTools },
+		);
+		assert.equal(result.value.found, true);
+		assert.equal(result.value.fields?.length, 0);
+		assert.equal(result.value.bodyExcerptSource, 'file-fallback');
+		assert.match(result.value.bodyExcerpt ?? '', /Marker/);
+		assert.equal(result.confidence, 'medium');
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test('non-empty fields -> no bodyExcerpt (structural data wins)', async () => {
+	setup();
+	const fakeTools: FakeToolMap = {
+		code_class_locate: okTool({
+			found: true, entityId: 'a'.repeat(32),
+			path: '/repo/Real.ts', line: 1, language: 'typescript', kind: 'class',
+		}),
+		code_class_fields: okTool({
+			entityId: 'a'.repeat(32),
+			className: 'Real',
+			language: 'typescript',
+			source: 'graph',
+			fields: [{ name: 'id', declaredAt: { path: '/repo/Real.ts', line: 2 } }],
+		}),
+	};
+	const { result } = await runSkillIsolated<unknown, ExtractFieldsValue & {
+		bodyExcerpt?: string;
+		bodyExcerptSource?: string;
+	}>(
+		SKILL_ID,
+		{ className: 'Real' },
+		{ fakeTools },
+	);
+	assert.equal(result.value.fields?.length, 1);
+	// Even though /repo/Real.ts doesn't exist on disk, we should NOT
+	// have attempted the fallback because fields was already populated.
+	assert.equal(result.value.bodyExcerpt, undefined);
+	assert.equal(result.value.bodyExcerptSource, undefined);
+	assert.equal(result.confidence, 'high');
 });
 
 test('isAbstract from locate carries through to the output', async () => {

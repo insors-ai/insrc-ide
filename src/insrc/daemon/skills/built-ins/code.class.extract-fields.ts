@@ -32,6 +32,7 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import { tryReadFileForFallback } from './_fallback-file-read.js';
 
 interface ExtractFieldsInput {
 	readonly className: string;
@@ -66,6 +67,17 @@ type ExtractFieldsOutput =
 		readonly isAbstract?: boolean;
 		readonly source:    'graph' | 'body' | 'mixed' | 'none';
 		readonly fields:    readonly FieldInfo[];
+		/**
+		 * Head of the class's defining file, populated when `fields` is
+		 * empty (the regex/graph extractor couldn't classify anything --
+		 * common for unparsed-language classes like Pydantic-via-decorators
+		 * or annotation-heavy frameworks). Lets the caller cite raw source
+		 * instead of an empty field list. Absent when `fields.length > 0`
+		 * (structural data wins).
+		 */
+		readonly bodyExcerpt?:          string;
+		readonly bodyExcerptTruncated?: boolean;
+		readonly bodyExcerptSource?:    'file-fallback';
 	}
 	| {
 		readonly found:   false;
@@ -121,6 +133,9 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 					kind:       { type: 'string' },
 					isAbstract: { type: 'boolean' },
 					source:     { type: 'string', enum: ['graph', 'body', 'mixed', 'none'] },
+					bodyExcerpt:          { type: 'string' },
+					bodyExcerptTruncated: { type: 'boolean' },
+					bodyExcerptSource:    { type: 'string', enum: ['file-fallback'] },
 					fields: {
 						type: 'array',
 						items: {
@@ -252,6 +267,35 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 			};
 		}
 
+		// Fallback: when fields[] is empty, the regex / graph extractor
+		// found the class but couldn't classify any fields. Often this
+		// is a real "no fields" class (marker interface, sealed enum),
+		// but it's also the symptom of an annotation-heavy / unparsed-
+		// language class (Pydantic with custom decorators, Django models
+		// with manager classes, etc.). Read the file head from disk so
+		// the caller can cite raw source instead of an empty list.
+		const fallbackNotes: string[] = [];
+		let bodyExcerpt: string | undefined;
+		let bodyExcerptTruncated: boolean | undefined;
+		let bodyExcerptSource: 'file-fallback' | undefined;
+		if (fieldsData.fields.length === 0) {
+			const fb = await tryReadFileForFallback(locateData.path);
+			if (fb.ok) {
+				bodyExcerpt          = fb.content;
+				bodyExcerptTruncated = fb.truncated;
+				bodyExcerptSource    = 'file-fallback';
+				fallbackNotes.push(`extractor returned 0 fields; read source excerpt from disk (${fb.byteSize} bytes)`);
+			} else {
+				fallbackNotes.push(`extractor returned 0 fields; disk fallback also failed: ${fb.reason}`);
+			}
+		}
+
+		const fallback = {
+			...(bodyExcerpt          !== undefined ? { bodyExcerpt }          : {}),
+			...(bodyExcerptTruncated !== undefined ? { bodyExcerptTruncated } : {}),
+			...(bodyExcerptSource    !== undefined ? { bodyExcerptSource }    : {}),
+		};
+
 		const value: ExtractFieldsOutput = locateData.isAbstract === true
 			? {
 				found:      true,
@@ -264,6 +308,7 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 				isAbstract: true,
 				source:     fieldsData.source,
 				fields:     fieldsData.fields,
+				...fallback,
 			}
 			: {
 				found:     true,
@@ -275,6 +320,7 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 				kind:      locateData.kind,
 				source:    fieldsData.source,
 				fields:    fieldsData.fields,
+				...fallback,
 			};
 
 		return {
@@ -282,9 +328,13 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 			// High when fields came back; medium for an empty field set
 			// (the class exists but has no parseable fields -- could be
 			// a marker interface, a sealed enum class, or a body the
-			// regex extractor couldn't classify).
-			confidence: fieldsData.fields.length > 0 ? 'high' : 'medium',
-			notes:      [],
+			// regex extractor couldn't classify). The body excerpt
+			// fallback raises the floor from low to medium when it
+			// succeeds.
+			confidence: fieldsData.fields.length > 0
+				? 'high'
+				: (bodyExcerpt !== undefined ? 'medium' : 'low'),
+			notes:      fallbackNotes,
 			toolCalls: [],
 		};
 	},

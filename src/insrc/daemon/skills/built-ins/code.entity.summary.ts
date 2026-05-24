@@ -18,6 +18,7 @@ import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { getEntity } from '../../../db/entities.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
+import { tryReadFileForFallback } from './_fallback-file-read.js';
 
 const BODY_HEAD_LINES = 10;
 const BODY_MAX_CHARS  = 800;
@@ -51,6 +52,15 @@ type SummaryOutput =
 		readonly isAsync?:    boolean;
 		readonly excerpt:   string;
 		readonly excerptTruncated: boolean;
+		/**
+		 * Where the excerpt came from. 'graph' = the entity's parsed body
+		 * (the normal path). 'file-fallback' = the entity's body was empty
+		 * in the graph (typical for config-file kinds like Dockerfile /
+		 * YAML / shell scripts that aren't parsed by tree-sitter), so we
+		 * read the file directly from disk. Callers can use this to know
+		 * the excerpt represents raw file contents, not a parsed slice.
+		 */
+		readonly excerptSource: 'graph' | 'file-fallback';
 	}
 	| {
 		readonly found:  false;
@@ -97,8 +107,9 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 					isAsync:    { type: 'boolean' },
 					excerpt:   { type: 'string' },
 					excerptTruncated: { type: 'boolean' },
+					excerptSource:    { type: 'string', enum: ['graph', 'file-fallback'] },
 				},
-				required: ['found', 'entityId', 'name', 'kind', 'language', 'file', 'startLine', 'endLine', 'excerpt', 'excerptTruncated'],
+				required: ['found', 'entityId', 'name', 'kind', 'language', 'file', 'startLine', 'endLine', 'excerpt', 'excerptTruncated', 'excerptSource'],
 			},
 			{
 				type: 'object',
@@ -127,12 +138,45 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 		const maxChars = typeof input.excerptMaxChars === 'number' && input.excerptMaxChars >= 1
 			? input.excerptMaxChars
 			: BODY_MAX_CHARS;
-		const { excerpt, truncated } = buildExcerpt(e.body, maxChars);
-		const out = assembleFound(e, excerpt, truncated);
+
+		// Normal path: entity's parsed body is non-empty, use it.
+		if (e.body.length > 0) {
+			const { excerpt, truncated } = buildExcerpt(e.body, maxChars);
+			const out = assembleFound(e, excerpt, truncated, 'graph');
+			return {
+				value: out,
+				confidence: 'high',
+				notes: [],
+				toolCalls: [],
+			};
+		}
+
+		// Fallback path: body is empty in the graph -- typical for
+		// `kind: 'file'` entities of formats tree-sitter doesn't parse
+		// (Dockerfile, YAML, shell, TOML, ...). Read the file from disk
+		// so the caller gets something to cite instead of an empty
+		// excerpt that the writer would render as a content-free
+		// citation. See plans/file-read-fallback-for-skills (TBD).
+		const fb = await tryReadFileForFallback(e.file, maxChars);
+		if (fb.ok) {
+			const { excerpt, truncated } = buildExcerpt(fb.content, maxChars);
+			const out = assembleFound(e, excerpt, truncated || fb.truncated, 'file-fallback');
+			return {
+				value: out,
+				confidence: 'medium',
+				notes: [`graph body empty (${e.language} file); read excerpt from disk (${fb.byteSize} bytes)`],
+				toolCalls: [],
+			};
+		}
+
+		// Even the file-read fallback failed (missing on disk, binary,
+		// oversized, etc.). Honest empty result -- callers will see
+		// excerpt='' and excerptSource='graph' and degrade as before.
+		const out = assembleFound(e, '', false, 'graph');
 		return {
 			value: out,
-			confidence: 'high',
-			notes: [],
+			confidence: 'low',
+			notes: [`graph body empty AND disk read failed: ${fb.reason}`],
 			toolCalls: [],
 		};
 	},
@@ -151,7 +195,12 @@ function buildExcerpt(body: string, maxChars: number = BODY_MAX_CHARS): { excerp
 	return { excerpt: head + '\n... <truncated>', truncated: true };
 }
 
-function assembleFound(e: Entity, excerpt: string, excerptTruncated: boolean): SummaryOutput {
+function assembleFound(
+	e: Entity,
+	excerpt: string,
+	excerptTruncated: boolean,
+	excerptSource: 'graph' | 'file-fallback',
+): SummaryOutput {
 	type Found = Extract<SummaryOutput, { found: true }>;
 	let out: Found = {
 		found:     true,
@@ -164,6 +213,7 @@ function assembleFound(e: Entity, excerpt: string, excerptTruncated: boolean): S
 		endLine:   e.endLine,
 		excerpt,
 		excerptTruncated,
+		excerptSource,
 	};
 	if (e.signature !== undefined && e.signature.length > 0) out = { ...out, signature: e.signature };
 	if (e.isExported === true) out = { ...out, isExported: true };
