@@ -29,6 +29,7 @@
 import type { ToolCall, ToolResult } from '../shared/types.js';
 import { getSkill, listSkills } from '../daemon/skills/registry.js';
 import { getLogger } from '../shared/logger.js';
+import { getArgRenames, applyArgRenames } from './tool-call-guard-rules.js';
 
 const log = getLogger('tool-call-guard');
 
@@ -62,6 +63,12 @@ export type GuardOutcome =
 export interface GuardDeps {
 	readonly listSkillIds?:       () => readonly string[];
 	readonly getSkillInputSchema?: (id: string) => Record<string, unknown> | undefined;
+	/**
+	 * Per-skill arg-rename rules. Defaults to the curated map in
+	 * `tool-call-guard-rules.ts`. Tests inject synthetic rules to
+	 * exercise rename behaviour in isolation.
+	 */
+	readonly getArgRenames?:      (skillId: string) => Readonly<Record<string, string>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +98,7 @@ export async function guardLocalToolCall(
 ): Promise<GuardOutcome> {
 	const listIds = deps?.listSkillIds ?? defaultListSkillIds;
 	const getSchema = deps?.getSkillInputSchema ?? defaultGetSkillInputSchema;
+	const getRenames = deps?.getArgRenames ?? getArgRenames;
 
 	const knownIds = listIds();
 
@@ -102,13 +110,21 @@ export async function guardLocalToolCall(
 	const resolvedName  = nameOutcome.name;
 	const nameNotes     = nameOutcome.notes;
 
+	// Stage 2: per-skill arg renames (rules are data; see
+	// `tool-call-guard-rules.ts`). Runs AFTER name resolution so the
+	// rename map looks up by the canonical skill id, not by the
+	// model's possibly-misspelled emission. Runs BEFORE Stage 3 so
+	// the type coercer sees the right arg names.
+	const renames = getRenames(resolvedName);
+	const renamed = applyArgRenames(call.input, renames);
+
 	// Stage 3: type coercions against the resolved skill's input schema.
 	const schema = getSchema(resolvedName);
 	const coerced = schema !== undefined
-		? coerceInputTypes(call.input, schema)
-		: { input: call.input, notes: [] as string[] };
+		? coerceInputTypes(renamed.input, schema)
+		: { input: renamed.input, notes: [] as string[] };
 
-	const allNotes = [...nameNotes, ...coerced.notes];
+	const allNotes = [...nameNotes, ...renamed.notes, ...coerced.notes];
 	if (allNotes.length === 0) {
 		return { kind: 'pass', call };
 	}
@@ -123,7 +139,6 @@ export async function guardLocalToolCall(
 		{
 			originalName: call.name,
 			resolvedName,
-			coercedKeys:  Object.keys(coerced.notes.length > 0 ? coerced.input : {}),
 			notes:        allNotes,
 		},
 		'tool-call-guard: coerced before dispatch',

@@ -308,3 +308,71 @@ test('guard: original ToolCall.id is preserved through coercion', async () => {
 		assert.equal(result.call.id, 'call_xyz_123');
 	}
 });
+
+// ---------------------------------------------------------------------------
+// Stage 2 — arg-rename integration (uses real SKILL_ARG_RENAMES rules)
+// ---------------------------------------------------------------------------
+
+test('guard: Stage 2 renames id → entityId for code.entity.summary', async () => {
+	const result = await guardLocalToolCall(
+		call('code.entity.summary', { id: 'abc' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'coerced');
+	if (result.kind === 'coerced') {
+		assert.deepEqual(result.call.input, { entityId: 'abc' });
+		assert.ok(result.notes.some(n => n.includes("renamed arg 'id' -> 'entityId'")));
+	}
+});
+
+test('guard: Stage 2 renames path → file for code.source.file.describe', async () => {
+	const result = await guardLocalToolCall(
+		call('code.source.file.describe', { path: '/repo/Foo.ts', repoPath: '/repo' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'coerced');
+	if (result.kind === 'coerced') {
+		assert.deepEqual(result.call.input, { file: '/repo/Foo.ts', repoPath: '/repo' });
+		assert.ok(result.notes.some(n => n.includes("renamed arg 'path' -> 'file'")));
+	}
+});
+
+test('guard: Stage 2 + Stage 3 compose -- kind → kinds + scalar → array', async () => {
+	// `kind: 'class'` → first renamed to `kinds: 'class'` (Stage 2),
+	// then wrapped to `kinds: ['class']` (Stage 3).
+	const result = await guardLocalToolCall(
+		call('code.entity.locate-by-name', { name: 'Foo', kind: 'class' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'coerced');
+	if (result.kind === 'coerced') {
+		assert.deepEqual(result.call.input, { name: 'Foo', kinds: ['class'] });
+		assert.ok(result.notes.some(n => n.includes("renamed arg 'kind' -> 'kinds'")));
+		assert.ok(result.notes.some(n => n.includes('scalar to single-element array')));
+	}
+});
+
+test('guard: Stage 2 skips rename when target already present (no overwrite)', async () => {
+	// Model provided BOTH `entityId` (correct) and `id` (extra). We
+	// don't silently overwrite the real value with the extra.
+	const result = await guardLocalToolCall(
+		call('code.entity.summary', { entityId: 'real', id: 'wrong' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'coerced');
+	if (result.kind === 'coerced') {
+		// Both keys preserved; skill runner's downstream check will
+		// reject the unexpected 'id' property cleanly.
+		assert.deepEqual(result.call.input, { entityId: 'real', id: 'wrong' });
+		assert.ok(result.notes.some(n => n.includes('skipped rename') && n.includes('target already present')));
+	}
+});
+
+test('guard: pass-through when no rename rules match for the resolved skill', async () => {
+	// Use a name that resolves, with all-correct args already.
+	const result = await guardLocalToolCall(
+		call('code.entity.summary', { entityId: 'abc' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'pass');
+});
