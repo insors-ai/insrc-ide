@@ -28,6 +28,7 @@
 
 import type { ToolCall, ToolResult } from '../shared/types.js';
 import { getSkill, listSkills } from '../daemon/skills/registry.js';
+import { validate } from '../daemon/skills/json-schema.js';
 import { getLogger } from '../shared/logger.js';
 import { getArgRenames, applyArgRenames } from './tool-call-guard-rules.js';
 
@@ -123,6 +124,24 @@ export async function guardLocalToolCall(
 	const coerced = schema !== undefined
 		? coerceInputTypes(renamed.input, schema)
 		: { input: renamed.input, notes: [] as string[] };
+
+	// Stage 4: pre-dispatch schema validation. Runs after Stages 1-3
+	// have applied their auto-fixes; catches the residue (missing
+	// required args, unexpected props, type mismatches) and builds a
+	// targeted corrective prompt instead of paying a skill-runner
+	// round-trip to surface the same error.
+	if (schema !== undefined) {
+		const validation = validate(coerced.input, schema);
+		if (!validation.ok) {
+			return rejectFromSchemaFailure({
+				toolCallId:    call.id,
+				resolvedName,
+				schema,
+				input:         coerced.input,
+				validationErrors: validation.errors,
+			});
+		}
+	}
 
 	const allNotes = [...nameNotes, ...renamed.notes, ...coerced.notes];
 	if (allNotes.length === 0) {
@@ -309,6 +328,135 @@ export function levenshtein(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4 — pre-dispatch schema check + categorized corrective prompt
+// ---------------------------------------------------------------------------
+
+interface RejectFromSchemaInput {
+	readonly toolCallId:       string;
+	readonly resolvedName:     string;
+	readonly schema:           Record<string, unknown>;
+	readonly input:            Record<string, unknown>;
+	readonly validationErrors: readonly string[];
+}
+
+interface CategorizedErrors {
+	readonly missing:      readonly string[];   // required args not present
+	readonly unexpected:   readonly string[];   // properties not in schema
+	readonly typeMismatch: readonly string[];   // raw error messages for other failures
+}
+
+/**
+ * Parse the existing validator's error strings into categories so
+ * the corrective prompt can target each class specifically.
+ *
+ * Recognized formats (from `daemon/skills/json-schema.ts`):
+ *   - "<path>: missing required property 'X'"
+ *   - "<path>: unexpected property 'X'"
+ *   - everything else -> typeMismatch bucket
+ */
+function categorizeValidationErrors(errors: readonly string[]): CategorizedErrors {
+	const missing:      string[] = [];
+	const unexpected:   string[] = [];
+	const typeMismatch: string[] = [];
+
+	for (const e of errors) {
+		const missMatch = e.match(/missing required property '([^']+)'/);
+		if (missMatch) {
+			missing.push(missMatch[1]!);
+			continue;
+		}
+		const unexpMatch = e.match(/unexpected property '([^']+)'/);
+		if (unexpMatch) {
+			unexpected.push(unexpMatch[1]!);
+			continue;
+		}
+		typeMismatch.push(e);
+	}
+	return { missing, unexpected, typeMismatch };
+}
+
+/**
+ * Build a corrective prompt categorized by error class. Each section
+ * is only included when at least one error of that class is present.
+ * For missing required args, we pull the property's description (and
+ * type) from the schema so the model sees what the arg is FOR, not
+ * just its name.
+ */
+function buildCorrectivePrompt(input: RejectFromSchemaInput): string {
+	const { resolvedName, schema, validationErrors } = input;
+	const cats = categorizeValidationErrors(validationErrors);
+
+	const lines: string[] = [];
+	lines.push(
+		`Your previous call to \`${resolvedName}\` was rejected by the pre-dispatch validator.`,
+	);
+	lines.push('');
+
+	const properties = (schema['properties'] ?? {}) as Record<string, unknown>;
+
+	if (cats.missing.length > 0) {
+		lines.push('Missing required arguments:');
+		for (const argName of cats.missing) {
+			const prop = (properties[argName] ?? {}) as Record<string, unknown>;
+			const type = typeof prop['type'] === 'string' ? (prop['type'] as string) : 'value';
+			const desc = typeof prop['description'] === 'string' ? (prop['description'] as string) : '';
+			lines.push(`  - ${argName} (${type})${desc ? ': ' + desc : ''}`);
+		}
+		lines.push('');
+	}
+
+	if (cats.unexpected.length > 0) {
+		lines.push('Unexpected arguments (not in the schema — remove them):');
+		for (const argName of cats.unexpected) {
+			lines.push(`  - ${argName}`);
+		}
+		lines.push('');
+	}
+
+	if (cats.typeMismatch.length > 0) {
+		lines.push('Other validation errors:');
+		for (const err of cats.typeMismatch) {
+			lines.push(`  - ${err}`);
+		}
+		lines.push('');
+	}
+
+	lines.push('Re-emit your call with valid arguments matching the schema.');
+	return lines.join('\n');
+}
+
+function rejectFromSchemaFailure(input: RejectFromSchemaInput): GuardOutcome {
+	const correctiveText = buildCorrectivePrompt(input);
+	const cats = categorizeValidationErrors(input.validationErrors);
+	const reason = [
+		cats.missing.length    > 0 ? `missing=[${cats.missing.join(',')}]`     : null,
+		cats.unexpected.length > 0 ? `unexpected=[${cats.unexpected.join(',')}]` : null,
+		cats.typeMismatch.length > 0 ? `typeMismatch=${cats.typeMismatch.length}` : null,
+	].filter(Boolean).join(' ');
+
+	log.info(
+		{
+			toolCallId:   input.toolCallId,
+			resolvedName: input.resolvedName,
+			missing:      cats.missing,
+			unexpected:   cats.unexpected,
+			typeMismatch: cats.typeMismatch,
+		},
+		'tool-call-guard: pre-dispatch schema check rejected the call',
+	);
+
+	return {
+		kind:             'rejected',
+		reason:           `schema validation failed: ${reason}`,
+		correctiveResult: {
+			toolCallId: input.toolCallId,
+			content:    correctiveText,
+			isError:    true,
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Default registry-backed dependency providers
 // ---------------------------------------------------------------------------
 
@@ -325,6 +473,8 @@ function defaultGetSkillInputSchema(id: string): Record<string, unknown> | undef
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-export const _resolveToolNameForTest    = resolveToolName;
-export const _coerceInputTypesForTest   = coerceInputTypes;
-export const _normalizeSeparatorsForTest = normalizeSeparators;
+export const _resolveToolNameForTest          = resolveToolName;
+export const _coerceInputTypesForTest         = coerceInputTypes;
+export const _normalizeSeparatorsForTest      = normalizeSeparators;
+export const _categorizeValidationErrorsForTest = categorizeValidationErrors;
+export const _buildCorrectivePromptForTest    = buildCorrectivePrompt;

@@ -16,9 +16,11 @@ import assert from 'node:assert/strict';
 import {
 	guardLocalToolCall,
 	levenshtein,
-	_resolveToolNameForTest      as resolveToolName,
-	_coerceInputTypesForTest     as coerceInputTypes,
-	_normalizeSeparatorsForTest  as normalizeSeparators,
+	_resolveToolNameForTest             as resolveToolName,
+	_coerceInputTypesForTest            as coerceInputTypes,
+	_normalizeSeparatorsForTest         as normalizeSeparators,
+	_categorizeValidationErrorsForTest  as categorizeValidationErrors,
+	_buildCorrectivePromptForTest       as buildCorrectivePrompt,
 	type GuardDeps,
 	type GuardOutcome,
 } from '../tool-call-guard.js';
@@ -41,25 +43,28 @@ const FAKE_SCHEMAS: Record<string, Record<string, unknown>> = {
 	'code.entity.locate-by-name': {
 		type: 'object',
 		properties: {
-			name:  { type: 'string' },
+			name:  { type: 'string', description: 'unqualified class name' },
 			kinds: { type: 'array', items: { type: 'string' } },
 		},
 		required: ['name'],
+		additionalProperties: false,
 	},
 	'code.entity.summary': {
 		type: 'object',
 		properties: {
-			entityId: { type: 'string' },
+			entityId: { type: 'string', description: '32-char hex entity id' },
 		},
 		required: ['entityId'],
+		additionalProperties: false,
 	},
 	'code.source.file.describe': {
 		type: 'object',
 		properties: {
-			file:     { type: 'string' },
-			repoPath: { type: 'string' },
+			file:     { type: 'string', description: 'Absolute file path' },
+			repoPath: { type: 'string', description: 'Repo root absolute path' },
 		},
 		required: ['file', 'repoPath'],
+		additionalProperties: false,
 	},
 };
 
@@ -352,19 +357,22 @@ test('guard: Stage 2 + Stage 3 compose -- kind → kinds + scalar → array', as
 	}
 });
 
-test('guard: Stage 2 skips rename when target already present (no overwrite)', async () => {
-	// Model provided BOTH `entityId` (correct) and `id` (extra). We
-	// don't silently overwrite the real value with the extra.
+test('guard: Stage 2 skips rename when target already present; Stage 4 then rejects the unexpected property', async () => {
+	// Model provided BOTH `entityId` (correct) and `id` (extra).
+	// Stage 2 correctly refuses to silently overwrite. Stage 4 then
+	// catches the unexpected `id` against the schema's
+	// `additionalProperties: false` and rejects pre-dispatch with a
+	// targeted prompt — the round-trip the skill runner would have
+	// charged is avoided.
 	const result = await guardLocalToolCall(
 		call('code.entity.summary', { entityId: 'real', id: 'wrong' }),
 		fakeDeps(),
 	);
-	assert.equal(result.kind, 'coerced');
-	if (result.kind === 'coerced') {
-		// Both keys preserved; skill runner's downstream check will
-		// reject the unexpected 'id' property cleanly.
-		assert.deepEqual(result.call.input, { entityId: 'real', id: 'wrong' });
-		assert.ok(result.notes.some(n => n.includes('skipped rename') && n.includes('target already present')));
+	assert.equal(result.kind, 'rejected');
+	if (result.kind === 'rejected') {
+		assert.match(result.reason, /unexpected=\[id\]/);
+		assert.match(result.correctiveResult.content, /Unexpected arguments/);
+		assert.match(result.correctiveResult.content, /id/);
 	}
 });
 
@@ -375,4 +383,166 @@ test('guard: pass-through when no rename rules match for the resolved skill', as
 		fakeDeps(),
 	);
 	assert.equal(result.kind, 'pass');
+});
+
+// ---------------------------------------------------------------------------
+// Stage 4 — pre-dispatch schema check (categorization + corrective prompt)
+// ---------------------------------------------------------------------------
+
+test('categorizeValidationErrors: missing required property → missing bucket', () => {
+	const cats = categorizeValidationErrors([
+		"<root>: missing required property 'entityId'",
+	]);
+	assert.deepEqual(cats.missing, ['entityId']);
+	assert.deepEqual(cats.unexpected, []);
+	assert.deepEqual(cats.typeMismatch, []);
+});
+
+test('categorizeValidationErrors: unexpected property → unexpected bucket', () => {
+	const cats = categorizeValidationErrors([
+		"<root>: unexpected property 'path'",
+	]);
+	assert.deepEqual(cats.missing, []);
+	assert.deepEqual(cats.unexpected, ['path']);
+	assert.deepEqual(cats.typeMismatch, []);
+});
+
+test('categorizeValidationErrors: type-mismatch falls through to typeMismatch bucket', () => {
+	const cats = categorizeValidationErrors([
+		"<root>.entityId: expected type 'string', got 'number'",
+	]);
+	assert.deepEqual(cats.missing, []);
+	assert.deepEqual(cats.unexpected, []);
+	assert.equal(cats.typeMismatch.length, 1);
+});
+
+test('categorizeValidationErrors: multiple errors split across buckets', () => {
+	const cats = categorizeValidationErrors([
+		"<root>: missing required property 'file'",
+		"<root>: missing required property 'repoPath'",
+		"<root>: unexpected property 'path'",
+	]);
+	assert.deepEqual(cats.missing,    ['file', 'repoPath']);
+	assert.deepEqual(cats.unexpected, ['path']);
+	assert.deepEqual(cats.typeMismatch, []);
+});
+
+test('buildCorrectivePrompt: missing-required produces section with type + description', () => {
+	const prompt = buildCorrectivePrompt({
+		toolCallId:   'tc1',
+		resolvedName: 'code.entity.summary',
+		schema:       FAKE_SCHEMAS['code.entity.summary']!,
+		input:        {},
+		validationErrors: ["<root>: missing required property 'entityId'"],
+	});
+	assert.match(prompt, /code\.entity\.summary/);
+	assert.match(prompt, /Missing required arguments:/);
+	assert.match(prompt, /- entityId \(string\): 32-char hex entity id/);
+});
+
+test('buildCorrectivePrompt: unexpected-property section emitted only when present', () => {
+	const prompt = buildCorrectivePrompt({
+		toolCallId:   'tc1',
+		resolvedName: 'code.entity.summary',
+		schema:       FAKE_SCHEMAS['code.entity.summary']!,
+		input:        { entityId: 'abc', stray: 1 },
+		validationErrors: ["<root>: unexpected property 'stray'"],
+	});
+	assert.match(prompt, /Unexpected arguments/);
+	assert.match(prompt, /- stray/);
+	assert.doesNotMatch(prompt, /Missing required arguments:/);
+});
+
+test('buildCorrectivePrompt: composite error → all three categories surface in order', () => {
+	const prompt = buildCorrectivePrompt({
+		toolCallId:   'tc1',
+		resolvedName: 'code.source.file.describe',
+		schema:       FAKE_SCHEMAS['code.source.file.describe']!,
+		input:        { path: '/x', extra: 1 },
+		validationErrors: [
+			"<root>: missing required property 'file'",
+			"<root>: missing required property 'repoPath'",
+			"<root>: unexpected property 'path'",
+			"<root>: unexpected property 'extra'",
+		],
+	});
+	// Section ordering: missing first, then unexpected, then re-emit footer.
+	const missingIdx    = prompt.indexOf('Missing required arguments:');
+	const unexpectedIdx = prompt.indexOf('Unexpected arguments');
+	const footerIdx     = prompt.indexOf('Re-emit your call');
+	assert.ok(missingIdx >= 0);
+	assert.ok(unexpectedIdx > missingIdx);
+	assert.ok(footerIdx > unexpectedIdx);
+});
+
+test('guard Stage 4: missing required arg → rejected with the dominant log pattern', async () => {
+	// The 68 most-frequent failure shape: code.entity.summary called
+	// without entityId. Pre-Phase-3 this would have dispatched and
+	// paid a round-trip; post-Phase-3 it's caught here.
+	const result = await guardLocalToolCall(
+		call('code.entity.summary', {}),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'rejected');
+	if (result.kind === 'rejected') {
+		assert.match(result.reason, /missing=\[entityId\]/);
+		assert.match(result.correctiveResult.content, /code\.entity\.summary/);
+		assert.match(result.correctiveResult.content, /entityId/);
+		assert.equal(result.correctiveResult.isError, true);
+		assert.equal(result.correctiveResult.toolCallId, 'tc1');
+	}
+});
+
+test('guard Stage 4: missing two args (file + repoPath) → both surfaced', async () => {
+	// The other dominant shape from the logs.
+	const result = await guardLocalToolCall(
+		call('code.source.file.describe', {}),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'rejected');
+	if (result.kind === 'rejected') {
+		assert.match(result.reason, /missing=\[file,repoPath\]/);
+		assert.match(result.correctiveResult.content, /file \(string\)/);
+		assert.match(result.correctiveResult.content, /repoPath \(string\)/);
+	}
+});
+
+test('guard Stage 4: input fully valid after Stages 1-3 → pass (no spurious rejection)', async () => {
+	// Stage 1 fixes the name (separator); Stage 2 renames id → entityId;
+	// final input is valid → Stage 4 does NOT reject.
+	const result = await guardLocalToolCall(
+		call('code_entity_summary', { id: 'abc' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'coerced');
+	if (result.kind === 'coerced') {
+		assert.deepEqual(result.call.input, { entityId: 'abc' });
+	}
+});
+
+test('guard Stage 4: no schema available → Stage 4 skipped, falls through to pass/coerced', async () => {
+	// Resolves the name but schema lookup returns undefined.
+	const deps: GuardDeps = {
+		listSkillIds:        () => ['code.entity.summary'],
+		getSkillInputSchema: () => undefined,
+	};
+	const result = await guardLocalToolCall(
+		call('code.entity.summary', {}),     // would fail validation if schema existed
+		deps,
+	);
+	// No schema → no Stage 4 → no rejection.
+	assert.equal(result.kind, 'pass');
+});
+
+test('guard Stage 4: Stage 2 rename fixes the call → validation passes', async () => {
+	// path: '/repo/Foo.ts' is the wrong name; Stage 2 renames it to
+	// `file`; Stage 4 then sees a complete valid input.
+	const result = await guardLocalToolCall(
+		call('code.source.file.describe', { path: '/repo/Foo.ts', repoPath: '/repo' }),
+		fakeDeps(),
+	);
+	assert.equal(result.kind, 'coerced');
+	if (result.kind === 'coerced') {
+		assert.deepEqual(result.call.input, { file: '/repo/Foo.ts', repoPath: '/repo' });
+	}
 });
