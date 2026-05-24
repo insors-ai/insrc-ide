@@ -47,6 +47,8 @@ export class OpenAIProvider implements LLMProvider {
     if (opts.maxTokens !== undefined)    params['max_completion_tokens'] = opts.maxTokens;
     if (opts.temperature !== undefined)  params['temperature'] = opts.temperature;
     if (tools && tools.length > 0)       params['tools'] = tools;
+    const toolChoice = toOpenAIToolChoice(opts.toolChoice, tools);
+    if (toolChoice !== undefined)        params['tool_choice'] = toolChoice;
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,6 +168,31 @@ function toOpenAITools(tools: ToolDefinition[]): Array<{ type: 'function'; funct
   }));
 }
 
+/**
+ * Map our generic `CompletionOpts.toolChoice` to OpenAI's
+ * `tool_choice` parameter shape. Returns `undefined` when no
+ * constraint should be applied (caller didn't ask, or tools aren't
+ * being provided -- OpenAI rejects `tool_choice` without `tools`).
+ *
+ *   - 'auto' / 'required' / 'none' -> bare string (OpenAI native)
+ *   - { name }                     -> { type: 'function', function: { name } }
+ */
+function toOpenAIToolChoice(
+  toolChoice: 'auto' | 'required' | 'none' | { readonly name: string } | undefined,
+  tools: unknown[] | undefined,
+): string | { type: 'function'; function: { name: string } } | undefined {
+  if (toolChoice === undefined) {
+    return undefined;
+  }
+  if (!tools || tools.length === 0) {
+    return undefined;
+  }
+  if (typeof toolChoice === 'object') {
+    return { type: 'function', function: { name: toolChoice.name } };
+  }
+  return toolChoice;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function fromOpenAIResponse(response: any): LLMResponse {
   const choice = response?.choices?.[0];
@@ -223,3 +250,6 @@ function safeParseJson(s: unknown): Record<string, unknown> {
     return {};
   }
 }
+
+// Test exports
+export const _toOpenAIToolChoiceForTest = toOpenAIToolChoice;

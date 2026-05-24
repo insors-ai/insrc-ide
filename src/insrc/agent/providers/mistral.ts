@@ -45,6 +45,8 @@ export class MistralProvider implements LLMProvider {
     if (opts.maxTokens !== undefined)   request['maxTokens'] = opts.maxTokens;
     if (opts.temperature !== undefined) request['temperature'] = opts.temperature;
     if (tools && tools.length > 0)      request['tools'] = tools;
+    const toolChoice = toMistralToolChoice(opts.toolChoice, tools);
+    if (toolChoice !== undefined)       request['toolChoice'] = toolChoice;
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -146,6 +148,27 @@ function toMistralTools(tools: ToolDefinition[]): Array<{ type: 'function'; func
   }));
 }
 
+/**
+ * Map our generic `CompletionOpts.toolChoice` to Mistral's
+ * `toolChoice` parameter shape. Same wire format as OpenAI.
+ * Returns `undefined` when no constraint should be applied.
+ */
+function toMistralToolChoice(
+  toolChoice: 'auto' | 'required' | 'none' | { readonly name: string } | undefined,
+  tools: unknown[] | undefined,
+): string | { type: 'function'; function: { name: string } } | undefined {
+  if (toolChoice === undefined) {
+    return undefined;
+  }
+  if (!tools || tools.length === 0) {
+    return undefined;
+  }
+  if (typeof toolChoice === 'object') {
+    return { type: 'function', function: { name: toolChoice.name } };
+  }
+  return toolChoice;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function fromMistralResponse(response: any): LLMResponse {
   const choice = response?.choices?.[0];
@@ -216,3 +239,6 @@ function safeParseJson(s: any): Record<string, unknown> {
     return {};
   }
 }
+
+// Test exports
+export const _toMistralToolChoiceForTest = toMistralToolChoice;

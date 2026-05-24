@@ -237,15 +237,17 @@ export class OllamaProvider implements LLMProvider {
     // executeStep per-task driver (Phase 8) treats this as a HINT
     // and has a client-side retry path for the residual non-compliance.
     // Ollama SDK doesn't type the field yet; pass it through the
-    // request object via a cast.
-    const wantsToolChoice = opts.toolChoice !== undefined && tools !== undefined && tools.length > 0;
+    // request object via a cast. The specific-tool form (`{ name }`)
+    // maps to OpenAI-shape; whether the local model actually honors
+    // it is per-family (no enforcement guarantees).
+    const ollamaToolChoice = toOllamaToolChoice(opts.toolChoice, tools);
     const response = await this.client.chat({
       model: this.model,
       messages: ollamaMessages,
       ...(tools ? { tools } : {}),
       // Ollama SDK doesn't expose `tool_choice` in its TS types yet, but
       // the underlying HTTP API accepts it. Forward only when set.
-      ...(wantsToolChoice ? ({ tool_choice: opts.toolChoice } as Record<string, unknown>) : {}),
+      ...(ollamaToolChoice !== undefined ? ({ tool_choice: ollamaToolChoice } as Record<string, unknown>) : {}),
       ...(ollamaFormat !== undefined ? { format: ollamaFormat } : {}),
       ...(disableThinking ? { think: false } : {}),
       ...(keepAlive !== undefined ? { keep_alive: keepAlive } : {}),
@@ -470,6 +472,29 @@ function parseToolCalls(raw?: OllamaToolCall[]): ToolCall[] {
   }));
 }
 
+/**
+ * Map our generic `CompletionOpts.toolChoice` to Ollama's
+ * `tool_choice` request field. Ollama supports the OpenAI-shape
+ * specific-tool form; per-model compliance is best-effort (qwen
+ * ignores, devstral/mistral-family honor). Returns `undefined`
+ * when no constraint should be applied.
+ */
+function toOllamaToolChoice(
+  toolChoice: 'auto' | 'required' | 'none' | { readonly name: string } | undefined,
+  tools: unknown[] | undefined,
+): string | { type: 'function'; function: { name: string } } | undefined {
+  if (toolChoice === undefined) {
+    return undefined;
+  }
+  if (!tools || tools.length === 0) {
+    return undefined;
+  }
+  if (typeof toolChoice === 'object') {
+    return { type: 'function', function: { name: toolChoice.name } };
+  }
+  return toolChoice;
+}
+
 function wrapOllamaError(err: unknown): Error {
   if (err instanceof Error) {
     if (err.message.includes('ECONNREFUSED')) {
@@ -525,3 +550,5 @@ export const _retryConstantsForTest = {
   MAX_TRANSIENT_RETRIES,
   TRANSIENT_RETRY_BASE_DELAY_MS,
 };
+
+export const _toOllamaToolChoiceForTest = toOllamaToolChoice;

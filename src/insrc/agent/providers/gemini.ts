@@ -44,6 +44,8 @@ export class GeminiProvider implements LLMProvider {
     if (opts.temperature !== undefined) genConfig['temperature'] = opts.temperature;
     if (system)                          genConfig['systemInstruction'] = system;
     if (tools)                           genConfig['tools'] = tools;
+    const toolConfig = toGeminiToolConfig(opts.toolChoice, tools);
+    if (toolConfig !== undefined)        genConfig['toolConfig'] = toolConfig;
 
     try {
       const response = await this.client.models.generateContent({
@@ -143,6 +145,43 @@ function toGeminiTools(tools: ToolDefinition[]): Array<{ functionDeclarations: A
   }];
 }
 
+/**
+ * Map our generic `CompletionOpts.toolChoice` to Gemini's
+ * `toolConfig.functionCallingConfig.mode` shape.
+ *
+ *   - 'auto'      -> { mode: 'AUTO' }
+ *   - 'required'  -> { mode: 'ANY' }    (Gemini's name for "must use a tool")
+ *   - 'none'      -> { mode: 'NONE' }
+ *   - { name }    -> { mode: 'ANY', allowedFunctionNames: [name] }
+ *
+ * Returns `undefined` when no constraint should be applied
+ * (Gemini, like the other providers, rejects toolConfig without tools).
+ */
+function toGeminiToolConfig(
+  toolChoice: 'auto' | 'required' | 'none' | { readonly name: string } | undefined,
+  tools: unknown[] | undefined,
+): { functionCallingConfig: { mode: string; allowedFunctionNames?: string[] } } | undefined {
+  if (toolChoice === undefined) {
+    return undefined;
+  }
+  if (!tools || tools.length === 0) {
+    return undefined;
+  }
+  if (typeof toolChoice === 'object') {
+    return {
+      functionCallingConfig: {
+        mode: 'ANY',
+        allowedFunctionNames: [toolChoice.name],
+      },
+    };
+  }
+  switch (toolChoice) {
+    case 'auto':     return { functionCallingConfig: { mode: 'AUTO' } };
+    case 'required': return { functionCallingConfig: { mode: 'ANY'  } };
+    case 'none':     return { functionCallingConfig: { mode: 'NONE' } };
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function fromGeminiResponse(response: any): LLMResponse {
   const text = extractText(response) ?? '';
@@ -221,3 +260,6 @@ function extractToolCalls(response: any): ToolCall[] | undefined {
   }
   return calls.length > 0 ? calls : undefined;
 }
+
+// Test exports
+export const _toGeminiToolConfigForTest = toGeminiToolConfig;

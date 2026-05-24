@@ -377,11 +377,15 @@ function toAnthropicTools(tools: ToolDefinition[]): Anthropic.Tool[] {
  *   - 'none'     -> { type: 'none' }
  */
 function toAnthropicToolChoice(
-  toolChoice: 'auto' | 'required' | 'none' | undefined,
+  toolChoice: 'auto' | 'required' | 'none' | { readonly name: string } | undefined,
   tools: Anthropic.Tool[] | undefined,
 ): Anthropic.MessageCreateParams['tool_choice'] | undefined {
   if (toolChoice === undefined) return undefined;
   if (!tools || tools.length === 0) return undefined;
+  if (typeof toolChoice === 'object') {
+    // Force-specific-tool form. Anthropic shape: { type: 'tool', name }.
+    return { type: 'tool', name: toolChoice.name };
+  }
   switch (toolChoice) {
     case 'auto':     return { type: 'auto' };
     case 'required': return { type: 'any' };
@@ -426,8 +430,9 @@ function extractUsage(u: Anthropic.Usage): LLMResponse['usage'] {
 // Test exports (caching helpers)
 // ---------------------------------------------------------------------------
 
-export const _buildSystemParamForTest = buildSystemParam;
-export const _extractUsageForTest     = extractUsage;
+export const _buildSystemParamForTest    = buildSystemParam;
+export const _extractUsageForTest        = extractUsage;
+export const _toAnthropicToolChoiceForTest = toAnthropicToolChoice;
 
 function wrapError(err: unknown): never {
   if (err instanceof Anthropic.AuthenticationError) {

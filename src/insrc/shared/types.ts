@@ -126,27 +126,35 @@ export interface CompletionOpts {
   /**
    * Constrain the model's choice of tool use.
    *
-   *   - `'auto'`     (default) -- model may emit text, tool_use, or both.
-   *   - `'required'`           -- model MUST emit at least one tool_use
-   *                               block. Used by the executeStep per-task
-   *                               driver (Phase 8) so the local model
-   *                               can't punt to acknowledgement prose
-   *                               instead of calling a tool.
-   *   - `'none'`               -- model MUST NOT emit a tool_use block.
+   *   - `'auto'`         (default) -- model may emit text, tool_use, or both.
+   *   - `'required'`               -- model MUST emit at least one tool_use
+   *                                   block (any tool in the catalog).
+   *   - `'none'`                   -- model MUST NOT emit a tool_use block.
+   *   - `{ name: '<id>' }`         -- model MUST call this SPECIFIC tool. Used
+   *                                   by the tool-loop substrate's escalation
+   *                                   paths (force `submit_plan` on the final
+   *                                   turn; force-commit on degenerate-repeat
+   *                                   retry). Strict on cloud providers;
+   *                                   best-effort on local Ollama where
+   *                                   compliance is per-model-family.
    *
    * Provider plumbing maps this to the vendor-specific knob:
    *
    *   - Ollama:    `tool_choice` on the request (model-dependent).
-   *   - Anthropic: `tool_choice: { type: 'any' }` for `'required'`,
-   *                `{ type: 'auto' }` for `'auto'`,
-   *                `{ type: 'none' }` for `'none'`.
-   *   - OpenAI:    `tool_choice: 'required' | 'auto' | 'none'` (same).
+   *   - Anthropic: `{ type: 'any' }` for `'required'`, `{ type: 'auto' }`
+   *                for `'auto'`, `{ type: 'none' }` for `'none'`,
+   *                `{ type: 'tool', name }` for `{ name }`.
+   *   - OpenAI:    `'required' | 'auto' | 'none'` strings;
+   *                `{ type: 'function', function: { name } }` for `{ name }`.
+   *   - Mistral:   same as OpenAI.
+   *   - Gemini:    function_calling_config with mode `AUTO|ANY|NONE`,
+   *                plus `allowed_function_names: [name]` for `{ name }`.
    *
    * Providers that don't support the constraint silently ignore it;
    * callers should treat enforcement as best-effort and have a
    * client-side retry path for the residual non-compliance.
    */
-  toolChoice?: 'auto' | 'required' | 'none' | undefined;
+  toolChoice?: 'auto' | 'required' | 'none' | { readonly name: string } | undefined;
 }
 
 export interface LLMProvider {
