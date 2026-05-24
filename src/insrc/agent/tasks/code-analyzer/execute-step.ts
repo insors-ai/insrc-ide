@@ -33,6 +33,7 @@ import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { getTool } from '../../../daemon/tools/registry.js';
 import { getSkill } from '../../../daemon/skills/index.js';
 import { executeTool } from '../../tools/executor.js';
+import { guardLocalToolCall } from '../../tool-call-guard.js';
 import { getLogger } from '../../../shared/logger.js';
 import { loadFlowPrompt } from './prompts/loader.js';
 import { summarizeResult } from './summarize-result.js';
@@ -249,7 +250,43 @@ async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null>
 		// We instructed the model to emit exactly one tool_use; if it
 		// emitted more than one, the first is the canonical reply.
 		const toolCall = toolCalls[0]!;
-		const result = await executeTool(toolCall, { session: input.session });
+
+		// Plan 1 Phase 4: pre-dispatch guard for skill_invoke calls.
+		// Catches qwen's common tool-call hallucinations (wrong skill
+		// id, snake_case args, scalar-where-array-expected, missing
+		// required args) without paying the skill-runner round-trip.
+		// Disabled via INSRC_TOOL_GUARD=off (legacy behaviour preserved
+		// behind the flag for rollback).
+		const guarded = await tryGuardSkillInvoke(toolCall);
+		if (guarded.kind === 'rejected') {
+			log.warn(
+				{
+					stepId:       input.step.id,
+					taskId:       input.task.id,
+					attempt,
+					reason:       guarded.reason,
+				},
+				'callPerTask: pre-dispatch guard rejected the call; will retry without dispatch',
+			);
+			const correctiveText = guarded.correctiveText;
+			lastErroredOutcome = { toolCall, resultText: correctiveText };
+			lastErrorFeedback = `Your previous skill_invoke call was rejected by the pre-dispatch validator. Read the error below and re-emit the call with CORRECT args.\n\n--- Error from prior attempt ---\n${correctiveText}\n--- End error ---`;
+			continue;
+		}
+		const dispatchCall = guarded.kind === 'coerced' ? guarded.call : toolCall;
+		if (guarded.kind === 'coerced') {
+			log.info(
+				{
+					stepId:       input.step.id,
+					taskId:       input.task.id,
+					attempt,
+					notes:        guarded.notes,
+				},
+				'callPerTask: pre-dispatch guard coerced the call before dispatch',
+			);
+		}
+
+		const result = await executeTool(dispatchCall, { session: input.session });
 		const resultText = typeof result.content === 'string'
 			? result.content
 			: JSON.stringify(result.content);
@@ -273,6 +310,71 @@ async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null>
 	// last attempt produced no tool_use at all, return null and let
 	// the caller skip the task.
 	return lastErroredOutcome;
+}
+
+// ---------------------------------------------------------------------------
+// Internals -- pre-dispatch guard for skill_invoke
+// ---------------------------------------------------------------------------
+
+type GuardSkillInvokeOutcome =
+	| { readonly kind: 'pass';     readonly call: ToolCall }
+	| { readonly kind: 'coerced';  readonly call: ToolCall; readonly notes: readonly string[] }
+	| { readonly kind: 'rejected'; readonly correctiveText: string; readonly reason: string };
+
+/**
+ * Unwrap a `skill_invoke({skillId, args})` toolCall, run the pre-
+ * dispatch guard on the inner skill call, and rewrap any coercion
+ * back into the meta-tool's shape.
+ *
+ * Disabled via `INSRC_TOOL_GUARD=off` (rollback flag). For non-
+ * `skill_invoke` toolCalls (e.g. raw tool calls in legacy paths),
+ * the function passes through without guard processing.
+ */
+async function tryGuardSkillInvoke(toolCall: ToolCall): Promise<GuardSkillInvokeOutcome> {
+	if (process.env['INSRC_TOOL_GUARD'] === 'off') {
+		return { kind: 'pass', call: toolCall };
+	}
+	if (toolCall.name !== 'skill_invoke') {
+		return { kind: 'pass', call: toolCall };
+	}
+
+	const skillIdRaw = toolCall.input['skillId'];
+	const argsRaw    = toolCall.input['args'];
+	if (typeof skillIdRaw !== 'string' || skillIdRaw.length === 0) {
+		// Malformed skill_invoke (no skillId). Let the meta-tool's own
+		// validator surface the error -- pre-dispatch guard has nothing
+		// to do here.
+		return { kind: 'pass', call: toolCall };
+	}
+	const args: Record<string, unknown> = typeof argsRaw === 'object' && argsRaw !== null && !Array.isArray(argsRaw)
+		? { ...(argsRaw as Record<string, unknown>) }
+		: {};
+
+	// Build the synthetic ToolCall the guard expects (name=skillId,
+	// input=args). The guard's coercions/rejections then describe the
+	// underlying skill, not the meta-tool, which is what the corrective
+	// prompt needs to communicate.
+	const inner: ToolCall = { id: toolCall.id, name: skillIdRaw, input: args };
+	const result = await guardLocalToolCall(inner);
+
+	if (result.kind === 'rejected') {
+		return {
+			kind:            'rejected',
+			correctiveText:  result.correctiveResult.content,
+			reason:          result.reason,
+		};
+	}
+	if (result.kind === 'pass') {
+		return { kind: 'pass', call: toolCall };
+	}
+	// kind === 'coerced' -- rewrap the meta-tool's input with the
+	// coerced skill id + args so executeTool dispatches the fixed shape.
+	const rewrapped: ToolCall = {
+		id:    toolCall.id,
+		name:  toolCall.name,
+		input: { ...toolCall.input, skillId: result.call.name, args: result.call.input },
+	};
+	return { kind: 'coerced', call: rewrapped, notes: result.notes };
 }
 
 // ---------------------------------------------------------------------------
