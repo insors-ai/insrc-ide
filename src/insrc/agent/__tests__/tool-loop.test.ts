@@ -492,6 +492,119 @@ test('toolChoice forwarded to provider verbatim', async () => {
 	assert.deepEqual(calls[0]!.opts?.toolChoice, { name: 'foo' });
 });
 
+// ---------------------------------------------------------------------------
+// stopOnFirstDispatch + lastDispatch tracking
+// ---------------------------------------------------------------------------
+
+test('stopOnFirstDispatch: successful dispatch returns kind=dispatched immediately', async () => {
+	const { provider, calls } = fakeProvider([
+		resp({ toolCalls: [toolUse('foo', { a: 1 }, 'tc1')] }),
+		// next response not needed -- loop should stop after first dispatch
+	]);
+	const out = await runToolLoop({
+		provider,
+		messages: SEED,
+		tools:    [TOOL_FOO],
+		dispatchTool: okDispatch,
+		policy:   basePolicy({
+			maxTurns:            2,
+			toolChoice:          'required',
+			stopOnFirstDispatch: true,
+		}),
+	});
+	assert.equal(out.kind, 'dispatched');
+	if (out.kind === 'dispatched') {
+		assert.equal(out.call.name, 'foo');
+		assert.deepEqual(out.call.input, { a: 1 });
+		assert.equal(out.result.content, 'ok');
+		assert.equal(out.turnCount, 1);
+	}
+	// Only one cloud call -- second wasn't consumed.
+	assert.equal(calls.length, 1);
+});
+
+test('stopOnFirstDispatch: isError dispatch keeps looping with retry budget', async () => {
+	const { provider, calls } = fakeProvider([
+		resp({ toolCalls: [toolUse('foo', { a: 1 }, 'tc1')] }),   // isError -> retry
+		resp({ toolCalls: [toolUse('foo', { a: 2 }, 'tc2')] }),   // success -> stop
+	]);
+	const out = await runToolLoop({
+		provider,
+		messages: SEED,
+		tools:    [TOOL_FOO],
+		dispatchTool: (() => {
+			let n = 0;
+			return (call: ToolCall) => {
+				n++;
+				return Promise.resolve({
+					toolCallId: call.id,
+					content:    n === 1 ? 'first failed' : 'second ok',
+					isError:    n === 1,
+				});
+			};
+		})(),
+		policy:   basePolicy({
+			maxTurns:            3,
+			toolChoice:          'required',
+			stopOnFirstDispatch: true,
+		}),
+	});
+	assert.equal(out.kind, 'dispatched');
+	if (out.kind === 'dispatched') {
+		assert.equal(out.call.input['a'], 2);
+		assert.equal(out.result.content, 'second ok');
+		assert.equal(out.turnCount, 2);
+	}
+	assert.equal(calls.length, 2);
+});
+
+test('stopOnFirstDispatch: exhausted after only isError dispatches -> lastDispatch carried on exhausted', async () => {
+	const { provider } = fakeProvider([
+		resp({ toolCalls: [toolUse('foo', { a: 1 }, 'tc1')] }),
+		resp({ toolCalls: [toolUse('foo', { a: 2 }, 'tc2')] }),
+	]);
+	const out = await runToolLoop({
+		provider,
+		messages: SEED,
+		tools:    [TOOL_FOO],
+		dispatchTool: errDispatch('always fails'),
+		policy:   basePolicy({
+			maxTurns:            2,
+			toolChoice:          'required',
+			stopOnFirstDispatch: true,
+			// Default stopOnDegenerateRepeat=true -- 'foo' called with
+			// {a:1} then {a:2} are different args so this doesn't fire.
+		}),
+	});
+	assert.equal(out.kind, 'exhausted');
+	if (out.kind === 'exhausted') {
+		// Both dispatches errored; lastDispatch holds the most recent.
+		assert.ok(out.lastDispatch);
+		if (out.lastDispatch) {
+			assert.equal(out.lastDispatch.call.input['a'], 2);
+			assert.equal(out.lastDispatch.result.isError, true);
+		}
+	}
+});
+
+test('exhausted: lastDispatch absent when no tool ever dispatched', async () => {
+	const { provider } = fakeProvider([
+		resp({ text: 'no tools' }),
+		resp({ text: 'still no tools' }),
+	]);
+	const out = await runToolLoop({
+		provider,
+		messages: SEED,
+		tools:    [TOOL_FOO],
+		dispatchTool: okDispatch,
+		policy:   basePolicy({ maxTurns: 2, toolChoice: 'required' }),
+	});
+	assert.equal(out.kind, 'exhausted');
+	if (out.kind === 'exhausted') {
+		assert.equal(out.lastDispatch, undefined);
+	}
+});
+
 test('transcript grows: assistant turn + tool_result appended for each cycle', async () => {
 	const { provider } = fakeProvider([
 		resp({ toolCalls: [toolUse('foo', {}, 'a1')] }),

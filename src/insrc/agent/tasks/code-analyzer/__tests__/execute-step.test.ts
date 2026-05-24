@@ -466,12 +466,21 @@ test('executeStep: per-task retry on empty toolCalls; second response succeeds',
 	});
 	// 3 calls total = 1 first try (empty) + 1 retry + 1 summarizer.
 	assert.equal(calls.length, 3);
-	// First call's user prompt has NO retry notice; the retry (second
-	// call) DOES include it.
-	const firstUserMsg  = calls[0]!.messages[1]!.content as string;
-	const retryUserMsg  = calls[1]!.messages[1]!.content as string;
-	assert.doesNotMatch(firstUserMsg, /RETRY NOTICE/);
-	assert.match(retryUserMsg, /RETRY NOTICE/);
+	// Post-substrate migration (Plan 2 Phase 2): the substrate APPENDS
+	// a corrective user turn between cloud calls instead of rebuilding
+	// the initial prompt with a "RETRY NOTICE" inline. The semantic
+	// invariant is the same -- the model sees retry feedback before
+	// re-emitting -- but now it arrives as a separate user message at
+	// the END of the transcript on the retry call.
+	const firstCallMessages = calls[0]!.messages;
+	const retryCallMessages = calls[1]!.messages;
+	// First call: 2 messages (system + user), no corrective.
+	assert.equal(firstCallMessages.length, 2);
+	// Retry call: original 2 + assistant (empty response) + corrective.
+	assert.ok(retryCallMessages.length > firstCallMessages.length);
+	const lastRetryMsg = retryCallMessages[retryCallMessages.length - 1]!;
+	const retryCorrective = typeof lastRetryMsg.content === 'string' ? lastRetryMsg.content : '';
+	assert.match(retryCorrective, /no tool_use block/);
 	// First two calls used tool_choice=required; summarizer doesn't.
 	assert.equal(calls[0]!.opts?.toolChoice, 'required');
 	assert.equal(calls[1]!.opts?.toolChoice, 'required');

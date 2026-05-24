@@ -77,6 +77,15 @@ export interface ToolLoopPolicy<T> {
 	readonly onMultipleToolsPerTurn?: 'retry-with-correction' | 'terminate';
 	/** Default true. Detects same-call-twice-in-a-row -> exhaust. */
 	readonly stopOnDegenerateRepeat?: boolean;
+	/**
+	 * Default false. When true, the loop returns immediately after the
+	 * first SUCCESSFUL (isError !== true) tool dispatch with kind:
+	 * 'dispatched'. Used by single-shot consumers (analyzer's
+	 * callPerTask) that want "dispatch one tool, return its result, no
+	 * looping". On isError dispatch, the loop still applies the
+	 * retry-with-correction handler.
+	 */
+	readonly stopOnFirstDispatch?: boolean;
 }
 
 export interface ToolLoopInput<T> {
@@ -90,8 +99,9 @@ export interface ToolLoopInput<T> {
 
 export type ToolLoopResult<T> =
 	| { readonly kind: 'terminated';     readonly payload: T;            readonly turnCount: number; readonly transcript: readonly LLMMessage[] }
+	| { readonly kind: 'dispatched';     readonly call: ToolCall;        readonly result: ToolResult; readonly turnCount: number; readonly transcript: readonly LLMMessage[] }
 	| { readonly kind: 'no-tools';       readonly finalText: string;     readonly turnCount: number; readonly transcript: readonly LLMMessage[] }
-	| { readonly kind: 'exhausted';      readonly reason: string;        readonly turnCount: number; readonly transcript: readonly LLMMessage[]; readonly lastError?: string }
+	| { readonly kind: 'exhausted';      readonly reason: string;        readonly turnCount: number; readonly transcript: readonly LLMMessage[]; readonly lastError?: string; readonly lastDispatch?: { readonly call: ToolCall; readonly result: ToolResult } }
 	| { readonly kind: 'provider-error'; readonly err: Error;            readonly turnCount: number; readonly transcript: readonly LLMMessage[] };
 
 // ---------------------------------------------------------------------------
@@ -124,6 +134,7 @@ export async function runToolLoop<T = unknown>(input: ToolLoopInput<T>): Promise
 	let turnCount = 0;
 	let lastError: string | undefined;
 	let lastCall: { readonly name: string; readonly inputKey: string } | undefined;
+	let lastDispatch: { readonly call: ToolCall; readonly result: ToolResult } | undefined;
 
 	while (turnCount < policy.maxTurns) {
 		// ----- Provider call --------------------------------------------------
@@ -252,15 +263,33 @@ export async function runToolLoop<T = unknown>(input: ToolLoopInput<T>): Promise
 			result = await input.dispatchTool(call);
 		} catch (err) {
 			if (policy.onDispatchError === 'terminate') {
-				return { kind: 'exhausted', reason: `dispatch-error: ${(err as Error).message}`, turnCount, transcript };
+				return {
+					kind:       'exhausted',
+					reason:     `dispatch-error: ${(err as Error).message}`,
+					turnCount,
+					transcript,
+					...(lastDispatch !== undefined ? { lastDispatch } : {}),
+				};
 			}
 			pushToolResult(transcript, call.id, true, CORRECTIVE.dispatchError(call.name, (err as Error).message));
 			lastError = `dispatch-error: ${(err as Error).message}`;
 			continue;
 		}
 		pushToolResult(transcript, call.id, result.isError === true, result.content);
+		lastDispatch = { call, result };
 		if (result.isError === true) {
 			lastError = `tool-isError: ${result.content.slice(0, 120)}`;
+		}
+
+		// stopOnFirstDispatch: when configured AND the dispatch was a
+		// success (isError !== true), return immediately. isError keeps
+		// the loop going so the model can see the corrective and retry.
+		if (policy.stopOnFirstDispatch === true && result.isError !== true) {
+			log.info(
+				{ label: input.label, turnCount, toolName: call.name },
+				'tool-loop: complete (dispatched -- stopOnFirstDispatch)',
+			);
+			return { kind: 'dispatched', call, result, turnCount, transcript };
 		}
 	}
 
@@ -273,7 +302,8 @@ export async function runToolLoop<T = unknown>(input: ToolLoopInput<T>): Promise
 		reason:     'turn-cap',
 		turnCount,
 		transcript,
-		...(lastError !== undefined ? { lastError } : {}),
+		...(lastError    !== undefined ? { lastError }    : {}),
+		...(lastDispatch !== undefined ? { lastDispatch } : {}),
 	};
 }
 

@@ -26,7 +26,7 @@
  * multi-turn context to compact.
  */
 
-import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall } from '../../../shared/types.js';
+import type { LLMProvider, LLMMessage, ToolDefinition, ToolCall, ToolResult } from '../../../shared/types.js';
 import type { Session } from '../../session.js';
 import type { RepoSizeSummary } from '../../../daemon/repo-summary.js';
 import { formatRepoSizeSummary } from '../../../daemon/repo-summary.js';
@@ -34,6 +34,7 @@ import { getTool } from '../../../daemon/tools/registry.js';
 import { getSkill } from '../../../daemon/skills/index.js';
 import { executeTool } from '../../tools/executor.js';
 import { guardLocalToolCall } from '../../tool-call-guard.js';
+import { runToolLoop } from '../../tool-loop.js';
 import { getLogger } from '../../../shared/logger.js';
 import { loadFlowPrompt } from './prompts/loader.js';
 import { summarizeResult } from './summarize-result.js';
@@ -203,113 +204,127 @@ interface PerTaskCallInput {
 }
 
 /**
- * Make one (or two on retry) calls to the provider for `task`. Two
- * retry triggers share the same budget:
+ * Make one (or two on retry) calls to the provider for `task`,
+ * driven by the shared `runToolLoop` substrate. Two retry
+ * triggers share the same budget:
  *
  *   1. Empty toolCalls (provider violated `tool_choice: required`).
  *   2. Tool dispatched but the skill runner rejected the args
- *      (`result.isError === true`). The runner's error response
- *      typically includes the corrective schema; we surface that
- *      back to the model in the next attempt's prompt suffix so it
- *      can emit valid args.
+ *      (`result.isError === true`).
  *
  * Returns the (last) dispatched tool's raw result text + tool_call
  * shape -- even if it's an error -- or null if the model violated
  * `tool_choice: required` on every attempt.
+ *
+ * Plan 2 Phase 2: this used to be a bespoke retry loop. It now
+ * rides the substrate with `stopOnFirstDispatch: true` so a
+ * successful dispatch returns immediately, while empty / isError
+ * responses retry within the substrate's standard corrective
+ * cycle.
  */
 async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null> {
-	let lastErrorFeedback: string | null = null;
-	let lastErroredOutcome: CallOutcome | null = null;
+	const messages = buildPerTaskMessages({
+		stepIntent:         input.step.intent,
+		task:               input.task,
+		priorTaskAndResult: input.priorTaskAndResult,
+		repoSizeSummary:    input.repoSizeSummary,
+		retryAttempt:       0,
+	});
 
-	for (let attempt = 0; attempt <= PER_TASK_EMPTY_RETRIES; attempt++) {
-		const messages = buildPerTaskMessages({
-			stepIntent:         input.step.intent,
-			task:               input.task,
-			priorTaskAndResult: input.priorTaskAndResult,
-			repoSizeSummary:    input.repoSizeSummary,
-			retryAttempt:       attempt,
-			...(lastErrorFeedback !== null ? { lastErrorFeedback } : {}),
-		});
-
-		const resp = await input.provider.complete(messages, {
-			maxTokens:  input.maxTokens,
-			tools:      input.tools,
-			toolChoice: 'required',
-		});
-
-		const toolCalls = resp.toolCalls ?? [];
-		if (toolCalls.length === 0) {
-			log.warn(
-				{ stepId: input.step.id, taskId: input.task.id, attempt, textLen: (resp.text ?? '').length },
-				'callPerTask: provider returned no toolCalls; will retry if attempts remain',
-			);
-			lastErrorFeedback = 'Your previous response had no tool_use block. You MUST emit exactly one `skill_invoke` tool_use block on this turn.';
-			continue;
-		}
-
-		// We instructed the model to emit exactly one tool_use; if it
-		// emitted more than one, the first is the canonical reply.
-		const toolCall = toolCalls[0]!;
-
-		// Plan 1 Phase 4: pre-dispatch guard for skill_invoke calls.
-		// Catches qwen's common tool-call hallucinations (wrong skill
-		// id, snake_case args, scalar-where-array-expected, missing
-		// required args) without paying the skill-runner round-trip.
-		// Disabled via INSRC_TOOL_GUARD=off (legacy behaviour preserved
-		// behind the flag for rollback).
+	// The substrate's `dispatchTool` callback runs the existing
+	// pre-dispatch guard + executeTool flow per call.
+	const dispatcher = async (toolCall: ToolCall): Promise<ToolResult> => {
 		const guarded = await tryGuardSkillInvoke(toolCall);
 		if (guarded.kind === 'rejected') {
 			log.warn(
 				{
-					stepId:       input.step.id,
-					taskId:       input.task.id,
-					attempt,
-					reason:       guarded.reason,
+					stepId: input.step.id,
+					taskId: input.task.id,
+					reason: guarded.reason,
 				},
 				'callPerTask: pre-dispatch guard rejected the call; will retry without dispatch',
 			);
-			const correctiveText = guarded.correctiveText;
-			lastErroredOutcome = { toolCall, resultText: correctiveText };
-			lastErrorFeedback = `Your previous skill_invoke call was rejected by the pre-dispatch validator. Read the error below and re-emit the call with CORRECT args.\n\n--- Error from prior attempt ---\n${correctiveText}\n--- End error ---`;
-			continue;
+			return {
+				toolCallId: toolCall.id,
+				content:    guarded.correctiveText,
+				isError:    true,
+			};
 		}
 		const dispatchCall = guarded.kind === 'coerced' ? guarded.call : toolCall;
 		if (guarded.kind === 'coerced') {
 			log.info(
 				{
-					stepId:       input.step.id,
-					taskId:       input.task.id,
-					attempt,
-					notes:        guarded.notes,
+					stepId: input.step.id,
+					taskId: input.task.id,
+					notes:  guarded.notes,
 				},
 				'callPerTask: pre-dispatch guard coerced the call before dispatch',
 			);
 		}
+		return executeTool(dispatchCall, { session: input.session });
+	};
 
-		const result = await executeTool(dispatchCall, { session: input.session });
-		const resultText = typeof result.content === 'string'
-			? result.content
-			: JSON.stringify(result.content);
+	const outcome = await runToolLoop({
+		provider:     input.provider,
+		messages,
+		tools:        input.tools,
+		dispatchTool: dispatcher,
+		policy: {
+			maxTurns:             1 + PER_TASK_EMPTY_RETRIES,
+			toolChoice:           'required',
+			maxTokens:            input.maxTokens,
+			stopOnFirstDispatch:  true,
+			onEmptyToolCalls:     'retry-with-correction',
+			// Existing analyzer expects unknown-tool / dispatch-error
+			// to feed back through retry, not terminate the loop.
+			onUnknownTool:        'feed-error-back',
+			onDispatchError:      'feed-error-back',
+			// Same-tool-twice-in-a-row is exceedingly rare for callPerTask
+			// (each call has a fixed planned skill) and would cause a
+			// false-positive exhaust on legitimate retries with identical
+			// args. Disable degenerate-repeat detection at this call site.
+			stopOnDegenerateRepeat: false,
+		},
+		label: 'execute-step:per-task',
+	});
 
-		if (result.isError === true) {
-			log.warn(
-				{ stepId: input.step.id, taskId: input.task.id, attempt, errLen: resultText.length },
-				'callPerTask: tool dispatch returned isError; will retry with corrective schema if attempts remain',
-			);
-			lastErroredOutcome = { toolCall, resultText };
-			lastErrorFeedback  = `Your previous skill_invoke call was rejected by the skill runner. Read the error below and re-emit the call with CORRECT args.\n\n--- Error from prior attempt ---\n${resultText}\n--- End error ---`;
-			continue;
-		}
-
-		return { toolCall, resultText };
+	if (outcome.kind === 'dispatched') {
+		return {
+			toolCall:   outcome.call,
+			resultText: typeof outcome.result.content === 'string'
+				? outcome.result.content
+				: JSON.stringify(outcome.result.content),
+		};
 	}
-
-	// All attempts exhausted. If the last attempt errored but did
-	// produce a tool_use, return THAT outcome so the summarizer at
-	// least sees the error text (status will reflect partial). If the
-	// last attempt produced no tool_use at all, return null and let
-	// the caller skip the task.
-	return lastErroredOutcome;
+	if (outcome.kind === 'exhausted') {
+		log.warn(
+			{
+				stepId:    input.step.id,
+				taskId:    input.task.id,
+				reason:    outcome.reason,
+				turnCount: outcome.turnCount,
+				lastError: outcome.lastError,
+			},
+			'callPerTask: tool-loop exhausted; returning last errored outcome (if any)',
+		);
+		if (outcome.lastDispatch !== undefined) {
+			const r = outcome.lastDispatch.result;
+			return {
+				toolCall:   outcome.lastDispatch.call,
+				resultText: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
+			};
+		}
+		return null;
+	}
+	if (outcome.kind === 'provider-error') {
+		// Re-throw -- preserves the pre-migration behaviour where
+		// provider errors bubbled out of callPerTask to the caller.
+		throw outcome.err;
+	}
+	// kind === 'no-tools' or 'terminated' shouldn't fire for this
+	// call-site config (toolChoice=required + no terminationTool),
+	// but if it does, treat as "no tool dispatched" -> null.
+	return null;
 }
 
 // ---------------------------------------------------------------------------
