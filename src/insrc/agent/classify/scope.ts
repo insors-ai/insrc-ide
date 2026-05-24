@@ -1,17 +1,27 @@
 /**
- * Scope-only LLM classifier.
+ * Scope + subtype LLM classifier.
  *
- * The generic `classify()` module emits both a class id and a scope
- * tier alongside it -- useful when the caller doesn't yet know the
- * intent. But callers that ALREADY know the intent (e.g. the
- * /code-analyze slash command) shouldn't pay for a class-pick they
- * don't need; a focused scope-only prompt is half the tokens, half
- * the latency, and all the signal.
+ * Emits BOTH the size signal (`scope: ScopeSize`) and the work-shape
+ * signal (`subtype: AnalysisSubtype`) in a single LLM round-trip.
  *
- * This module is a thin wrapper that runs ONE round-trip with a
- * scope-only prompt. Output: `{ scope, reasoning, fallback }`. On
- * any failure (provider error, unparseable text, unknown tier),
- * falls back to `'M'` and sets `fallback: true`.
+ *   - `scope` answers "how big?" -- S / M / L / XL / XXL / XXXL / XXXXL
+ *   - `subtype` answers "what kind of work product?" -- review /
+ *     summarize / audit / explain / compare / document / diagnose
+ *
+ * `subtype` is consumed by the analyzer's planner-discovery loop
+ * (`plans/code-analyzer-planner-discovery-loop.md`) as a single-line
+ * bias in the planner's system prompt. It does not branch the seed
+ * shape, the toolset, the per-section budgets, or any other knob --
+ * the planner's tools handle scope resolution against repo reality.
+ *
+ * Backward compatibility: existing callers that read only `scope`
+ * are unaffected; `subtype` is a new field, ignored if unused.
+ *
+ * Fallback: on parse / provider failure, returns
+ * `{ scope: 'M', subtype: 'review', fallback: true }`. Default
+ * subtype is `'review'` because most analyzer requests are review-
+ * shaped; an honest "I'm not sure what kind" answer that doesn't
+ * mislead downstream emphasis biasing.
  */
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
@@ -23,6 +33,27 @@ const log = getLogger('classify:scope');
 
 const VALID_SCOPES: readonly ScopeSize[] = ['S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'XXXXL'];
 const VALID_SCOPES_SET = new Set<string>(VALID_SCOPES);
+
+/**
+ * Work-shape (verb) of the analysis request. Each value biases the
+ * planner's section emphasis via a single-line hint -- nothing else
+ * downstream branches on this.
+ */
+export type AnalysisSubtype =
+	| 'review'      // critical reading -- surface gaps, risks, improvement opportunities
+	| 'summarize'   // concise overview, broad strokes
+	| 'audit'       // exhaustive examination with explicit verdicts
+	| 'explain'     // pedagogical walkthrough -- how / why
+	| 'compare'     // X vs Y framing
+	| 'document'    // reference documentation; neutral and complete
+	| 'diagnose';   // find the cause of a problem; evidence-driven
+
+const VALID_SUBTYPES: readonly AnalysisSubtype[] = [
+	'review', 'summarize', 'audit', 'explain', 'compare', 'document', 'diagnose',
+];
+const VALID_SUBTYPES_SET = new Set<string>(VALID_SUBTYPES);
+
+const DEFAULT_SUBTYPE: AnalysisSubtype = 'review';
 
 export interface ScopeClassifyInput {
 	/** Free-form text to size. */
@@ -38,13 +69,14 @@ export interface ScopeClassifyInput {
 }
 
 export interface ScopeClassifyResult {
-	readonly scope: ScopeSize;
+	readonly scope:     ScopeSize;
+	readonly subtype:   AnalysisSubtype;
 	readonly reasoning: string;
-	readonly fallback: boolean;
+	readonly fallback:  boolean;
 }
 
 /**
- * Run a single scope-only classification. Caller owns provider
+ * Run a single scope + subtype classification. Caller owns provider
  * resolution (typically `session.resolver.resolve('classifier', 'scope')`).
  */
 export async function classifyScope(
@@ -55,19 +87,29 @@ export async function classifyScope(
 	let rawText: string;
 	try {
 		const response = await provider.complete(messages, {
-			maxTokens: 100,
+			maxTokens: 120,
 			temperature: 0,
 		});
 		rawText = response.text;
 	} catch (err) {
 		log.warn({ err, role: input.role }, 'classifyScope: provider call failed');
-		return { scope: 'M', reasoning: `provider error: ${(err as Error).message}`, fallback: true };
+		return {
+			scope:     'M',
+			subtype:   DEFAULT_SUBTYPE,
+			reasoning: `provider error: ${(err as Error).message}`,
+			fallback:  true,
+		};
 	}
 
 	const parsed = parseResponse(rawText);
 	if (!parsed) {
 		log.warn({ role: input.role, rawText: rawText.slice(0, 200) }, 'classifyScope: unparseable response');
-		return { scope: 'M', reasoning: 'unparseable LLM response', fallback: true };
+		return {
+			scope:     'M',
+			subtype:   DEFAULT_SUBTYPE,
+			reasoning: 'unparseable LLM response',
+			fallback:  true,
+		};
 	}
 	return parsed;
 }
@@ -80,7 +122,7 @@ function buildMessages(input: ScopeClassifyInput): LLMMessage[] {
 	const role = input.role ?? 'scope sizer';
 
 	const systemLines = [
-		`You are a ${role}. Given the text below, estimate the SCOPE of the work the user is asking about.`,
+		`You are a ${role}. Given the text below, classify the work the user is asking about on TWO axes: SIZE (\`scope\`) and WORK-SHAPE (\`subtype\`).`,
 		'',
 		'## Scope (size of the work)',
 		'These tiers apply to ANY intent -- analysis depth, query breadth, refactor span, etc. Pick the tier that gives the answer the right BREADTH.',
@@ -92,13 +134,28 @@ function buildMessages(input: ScopeClassifyInput): LLMMessage[] {
 		'- `XXXL`  -- cross-cutting concern that touches every subsystem',
 		'- `XXXXL` -- whole-product / multi-product / major rewrite',
 		'',
+		'## Subtype (kind of work product)',
+		'Alongside the tier, identify what KIND of work product the request asks for:',
+		'- `review`    -- critical reading; surface gaps, risks, weak spots, improvement opportunities',
+		'- `summarize` -- concise overview at the requested scope; broad strokes only',
+		'- `audit`     -- exhaustive examination with explicit verdicts ("this passes / this needs work")',
+		'- `explain`   -- pedagogical walkthrough -- how/why something works to someone learning',
+		'- `compare`   -- two-sided framing (X vs Y, before vs after)',
+		'- `document`  -- produce reference documentation; bias toward neutral, durable phrasing',
+		'- `diagnose`  -- find the cause of a problem; evidence-driven cause analysis',
+		'',
+		'When the request gives no strong subtype signal, default to `review`.',
+		'',
 		'## Examples (anchors -- match the SHAPE of the prompt, not its length)',
-		'- "describe what this repo does"             (large repo, 1000s of files) -> L  (broad-overview is multi-section by nature)',
-		'- "summarise this repo and its subsystems"   (large repo)                 -> XL (named multi-subsystem audit)',
-		'- "deep dive on architecture + design + ops" (large repo)                 -> XL (depth + breadth)',
-		'- "summarise the auth module"                (any size)                   -> M  (one module)',
-		'- "what does parseConfig do?"                (any size)                   -> S  (one function)',
-		'- "list everything in this codebase"         (large repo)                 -> XXL (repo-wide enumeration)',
+		'- "describe what this repo does"             (large repo) -> { scope: "L",  subtype: "summarize" }',
+		'- "summarise this repo and its subsystems"   (large repo) -> { scope: "XL", subtype: "summarize" }',
+		'- "review insors/extraction"                              -> { scope: "XL", subtype: "review" }',
+		'- "audit the data-access layer for SQL injection"         -> { scope: "L",  subtype: "audit" }',
+		'- "explain how the message consumer works"                -> { scope: "L",  subtype: "explain" }',
+		'- "compare the Anthropic and Mistral OCR backends"        -> { scope: "L",  subtype: "compare" }',
+		'- "document the public API of extraction.db"              -> { scope: "L",  subtype: "document" }',
+		'- "diagnose why the matching consumer is slow"            -> { scope: "L",  subtype: "diagnose" }',
+		'- "what does parseConfig do?"                             -> { scope: "S",  subtype: "explain" }',
 		'',
 		'Rules:',
 		'- Pick the tier that DOES THE PROMPT JUSTICE -- the smallest tier the answer would COMPLETELY fit into.',
@@ -106,10 +163,11 @@ function buildMessages(input: ScopeClassifyInput): LLMMessage[] {
 		'- "single sitting" is NOT the test -- BREADTH is the test. A one-sentence question can ask for an XL answer.',
 		'- When the context block lists a large repo size (1000+ files / 10+ top modules), bias UP for any overview-shaped question.',
 		'- `scope` MUST be one of S / M / L / XL / XXL / XXXL / XXXXL.',
+		'- `subtype` MUST be one of review / summarize / audit / explain / compare / document / diagnose. Default to `review` when ambiguous.',
 		'- Return ONLY valid JSON (no markdown fences, no prose).',
 		'',
 		'Schema:',
-		'{ "scope": "<S|M|L|XL|XXL|XXXL|XXXXL>", "reasoning": "<one sentence>" }',
+		'{ "scope": "<S|M|L|XL|XXL|XXXL|XXXXL>", "subtype": "<review|summarize|audit|explain|compare|document|diagnose>", "reasoning": "<one sentence>" }',
 	];
 
 	const userLines: string[] = [];
@@ -141,15 +199,37 @@ function parseResponse(rawText: string): ScopeClassifyResult | null {
 	}
 
 	const obj = parsed as Record<string, unknown>;
+
+	// scope: hard requirement -- if invalid, the whole parse fails.
 	const scopeRaw = typeof obj['scope'] === 'string' ? (obj['scope'] as string).trim().toUpperCase() : '';
 	if (!VALID_SCOPES_SET.has(scopeRaw)) {
 		return null;
 	}
+
+	// subtype: soft requirement -- if invalid or missing, default to
+	// 'review'. We don't fail the whole parse on subtype trouble,
+	// since the size axis is more load-bearing than the work-shape
+	// hint downstream.
+	const subtypeRaw = typeof obj['subtype'] === 'string'
+		? (obj['subtype'] as string).trim().toLowerCase()
+		: '';
+	const subtype: AnalysisSubtype = VALID_SUBTYPES_SET.has(subtypeRaw)
+		? subtypeRaw as AnalysisSubtype
+		: DEFAULT_SUBTYPE;
+
 	const reasoning = typeof obj['reasoning'] === 'string' ? obj['reasoning'] as string : '';
 
 	return {
-		scope: scopeRaw as ScopeSize,
+		scope:    scopeRaw as ScopeSize,
+		subtype,
 		reasoning,
 		fallback: false,
 	};
 }
+
+// ---------------------------------------------------------------------------
+// Test exports
+// ---------------------------------------------------------------------------
+
+export const _parseResponseForTest = parseResponse;
+export const _DEFAULT_SUBTYPE_FOR_TEST: AnalysisSubtype = DEFAULT_SUBTYPE;
