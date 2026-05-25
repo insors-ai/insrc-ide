@@ -77,9 +77,17 @@ const codeClassLocateTool: Tool = {
 			},
 			repoPath: {
 				type: 'string',
-				description: 'Optional repo root absolute path. When omitted, every registered repo ' +
-					'is probed; cross-repo hits are ranked by entity ordering. Use the active ' +
-					'workspace path to scope to one repo.',
+				description: 'Optional repo root absolute path. Mutually exclusive with `repos`. When ' +
+					'both are omitted, every registered repo is probed.',
+			},
+			repos: {
+				type: 'array',
+				items: { type: 'string' },
+				description: 'Plan SCS Phase 3 multi-repo filter (typically the active session\'s ' +
+					'dependency closure). Mutually exclusive with `repoPath`. When both are ' +
+					'omitted, every registered repo is probed.',
+				uniqueItems: true,
+				minItems: 1,
 			},
 			language: {
 				type: 'string',
@@ -100,6 +108,12 @@ const codeClassLocateTool: Tool = {
 		}
 		const repoPath = typeof input['repoPath'] === 'string' && input['repoPath'].length > 0
 			? input['repoPath'] : undefined;
+		const repos = Array.isArray(input['repos']) && input['repos'].every(x => typeof x === 'string')
+			? input['repos'] as readonly string[]
+			: undefined;
+		if (repoPath !== undefined && repos !== undefined) {
+			return fail('pass either `repoPath` (single) or `repos` (multi), not both');
+		}
 		const language = typeof input['language'] === 'string'
 			&& VALID_LANGUAGES.has(input['language'] as Language)
 			? input['language'] as Language : undefined;
@@ -108,6 +122,7 @@ const codeClassLocateTool: Tool = {
 		const matches = await findEntitiesByName(null, [className], {
 			kinds: CLASS_LIKE_KINDS,
 			...(repoPath !== undefined ? { repo: repoPath } : {}),
+			...(repos    !== undefined ? { repos } : {}),
 			limit: 10,
 		});
 		const filtered = language !== undefined
@@ -122,6 +137,7 @@ const codeClassLocateTool: Tool = {
 		// Step 2: not found -> nearest candidates by edit distance.
 		const nearest = await findNearestClasses(className, {
 			...(repoPath !== undefined ? { repoPath } : {}),
+			...(repos    !== undefined ? { repos } : {}),
 			...(language !== undefined ? { language } : {}),
 			limit: NEAREST_LIMIT,
 		});
@@ -169,6 +185,8 @@ interface NearestCandidate {
 
 interface NearestOpts {
 	readonly repoPath?: string | undefined;
+	/** Plan SCS Phase 3 multi-repo filter; mutually exclusive with `repoPath`. */
+	readonly repos?:    readonly string[] | undefined;
 	readonly language?: Language | undefined;
 	readonly limit:     number;
 }
@@ -195,9 +213,18 @@ async function findNearestClasses(
 ): Promise<NearestCandidate[]> {
 	const s = await getGraphStore();
 
-	// Resolve the repoId set we'll probe.
+	// Resolve the repoId set we'll probe. `repos` (multi) > `repoPath`
+	// (single) > unscoped (every registered workspace repo). Mirrors
+	// findEntitiesByName's precedence (db/entities.ts Phase 6).
 	const repoIds: number[] = [];
-	if (opts.repoPath !== undefined) {
+	if (opts.repos !== undefined) {
+		if (opts.repos.length === 0) return [];
+		for (const p of opts.repos) {
+			const id = lookupRepoIdInTxn(s, p);
+			if (id !== undefined) repoIds.push(id);
+		}
+		if (repoIds.length === 0) return [];
+	} else if (opts.repoPath !== undefined) {
 		const id = lookupRepoIdInTxn(s, opts.repoPath);
 		if (id === undefined) return [];
 		repoIds.push(id);

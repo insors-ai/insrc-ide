@@ -30,12 +30,19 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import { resolveSearchScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
 
 type RefKind = 'CALLS' | 'INHERITS' | 'IMPLEMENTS' | 'REFERENCES';
 
 interface LocateReferencesInput {
 	readonly className: string;
 	readonly repoPath?: string;
+	/**
+	 * Plan SCS Phase 3 scope override. Defaults to 'closure' -- the
+	 * lookup respects the active session's DEPENDS_ON closure.
+	 * Ignored when `repoPath` is set (explicit single-repo wins).
+	 */
+	readonly scope?:    SearchScope;
 	readonly language?: 'typescript' | 'javascript' | 'python' | 'go' | 'java' | 'scala';
 	readonly kinds?:    readonly RefKind[];
 }
@@ -87,7 +94,8 @@ const codeClassLocateReferencesSkill: Skill<LocateReferencesInput, LocateReferen
 		type: 'object',
 		properties: {
 			className: { type: 'string', description: 'Unqualified class name as referenced in source.' },
-			repoPath:  { type: 'string', description: 'Optional repo root absolute path.' },
+			repoPath:  { type: 'string', description: 'Optional repo root absolute path. Overrides `scope`.' },
+			scope:     SCOPE_SCHEMA_FRAGMENT,
 			language: {
 				type: 'string',
 				enum: ['typescript', 'javascript', 'python', 'go', 'java', 'scala'],
@@ -180,8 +188,16 @@ const codeClassLocateReferencesSkill: Skill<LocateReferencesInput, LocateReferen
 
 	async execute(input: LocateReferencesInput, deps: SkillDeps): Promise<SkillResult<LocateReferencesOutput>> {
 		// Step 1: locate.
+		// Plan SCS Phase 3: route scope into the tool's repos[] filter
+		// when no single-repo override is given. An explicit `repoPath`
+		// wins (most specific); 'global' opts out of the closure filter.
 		const locateInput: Record<string, unknown> = { className: input.className };
-		if (input.repoPath !== undefined) locateInput['repoPath'] = input.repoPath;
+		if (input.repoPath !== undefined) {
+			locateInput['repoPath'] = input.repoPath;
+		} else {
+			const repos = resolveSearchScope(deps, input.scope ?? 'closure');
+			if (repos !== null) locateInput['repos'] = [...repos];
+		}
 		if (input.language !== undefined) locateInput['language'] = input.language;
 
 		const locateResult = await deps.runTool({

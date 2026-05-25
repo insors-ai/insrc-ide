@@ -281,6 +281,51 @@ test('execute: unknown repoPath returns { found: false, nearest: [] }', async ()
 	assert.deepEqual(data['nearest'], []);
 });
 
+// ---- Plan SCS Phase 3: multi-repo `repos` filter ----
+
+test('execute: `repos` filter scopes to the listed workspace repos', async () => {
+	const inA = makeClassEntity('Shared', { repo: REPO_A, file: `${REPO_A}/src/Shared.ts` });
+	const inB = makeClassEntity('Shared', { repo: REPO_B, file: `${REPO_B}/src/Shared.ts` });
+	await upsertEntities(null, [inA, inB]);
+
+	// Only REPO_A in the filter -> finds the A copy.
+	const r = await tool.execute({ className: 'Shared', repos: [REPO_A] }, stubDeps);
+	const d = r.data as Record<string, unknown>;
+	assert.equal(d['found'], true);
+	assert.equal(d['entityId'], inA.id);
+});
+
+test('execute: `repos` and `repoPath` together -> error', async () => {
+	const r = await tool.execute(
+		{ className: 'Shared', repoPath: REPO_A, repos: [REPO_A, REPO_B] },
+		stubDeps,
+	);
+	// fail() shape: success=false + error message
+	assert.equal(r.success, false);
+	assert.match(String(r.error ?? r.output ?? ''), /either `repoPath` \(single\) or `repos` \(multi\)/);
+});
+
+test('execute: empty `repos` array short-circuits to { found: false, nearest: [] }', async () => {
+	await upsertEntities(null, [makeClassEntity('Foo')]);
+	const r = await tool.execute({ className: 'Foo', repos: [] }, stubDeps);
+	const data = r.data as Record<string, unknown>;
+	assert.equal(data['found'], false);
+	assert.deepEqual(data['nearest'], []);
+});
+
+test('execute: `repos` with unknown paths drops them silently', async () => {
+	const inA = makeClassEntity('Shared', { repo: REPO_A, file: `${REPO_A}/src/Shared.ts` });
+	await upsertEntities(null, [inA]);
+
+	const r = await tool.execute(
+		{ className: 'Shared', repos: [REPO_A, '/repo/never-registered'] },
+		stubDeps,
+	);
+	const data = r.data as Record<string, unknown>;
+	assert.equal(data['found'], true);
+	assert.equal(data['entityId'], inA.id);
+});
+
 test('execute: nearest dedupes same name across repos', async () => {
 	// 'PurchaseOrder' exists in both repos. Typo target should
 	// suggest it once, not twice.
