@@ -387,9 +387,26 @@ function buildSeedMessages(input: BuildSeedInput): LLMMessage[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Per-tool-result wire budget. Discovery skills like
+ * `code.source.repo.describe` return full module listings (30K+
+ * entities) that easily run 60-100K chars. With `dispatch-all` letting
+ * Anthropic fanout 5+ calls in one turn, the combined payload can blow
+ * the 200K-token context window (live repro: 216K tokens > 200K).
+ *
+ * 12000 chars (~3000 tokens) per call leaves room for ~10 parallel
+ * dispatches plus the system + user prompts within budget while still
+ * showing the planner enough structure to plan around (top-N module
+ * list, first dozen entities, etc. -- everything important fits in
+ * the head of a sorted result).
+ */
+const RENDER_VALUE_MAX_CHARS = 12000;
+
+/**
  * Render a SkillResult as the textual `content` of a ToolResult the
  * cloud planner will read. Kept compact; the planner doesn't need
- * markdown formatting like the per-section flow does.
+ * markdown formatting like the per-section flow does. Value JSON is
+ * head-truncated to RENDER_VALUE_MAX_CHARS so a batch of large skill
+ * results doesn't blow the cloud provider's context window.
  */
 function renderSkillResultForLLM(skillName: string, result: SkillResult<unknown>): string {
 	const parts: string[] = [];
@@ -406,6 +423,10 @@ function renderSkillResultForLLM(skillName: string, result: SkillResult<unknown>
 		valueJson = JSON.stringify(result.value, null, 2);
 	} catch {
 		valueJson = '<unserializable>';
+	}
+	if (valueJson.length > RENDER_VALUE_MAX_CHARS) {
+		const head = valueJson.slice(0, RENDER_VALUE_MAX_CHARS);
+		valueJson = head + `\n... <truncated; ${valueJson.length - RENDER_VALUE_MAX_CHARS} more chars in skill value omitted>`;
 	}
 	parts.push('value:');
 	parts.push(valueJson);

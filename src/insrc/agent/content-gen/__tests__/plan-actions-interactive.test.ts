@@ -263,6 +263,33 @@ test('renderSkillResultForLLM: handles unserializable values gracefully', () => 
 	assert.match(out, /<unserializable>/);
 });
 
+test('renderSkillResultForLLM: head-truncates large values to keep cloud context within budget', () => {
+	// Simulate `code.source.repo.describe` returning a 30K-entity
+	// module listing. Pre-truncation this easily exceeded 60K chars per
+	// call; with dispatch-all letting Anthropic fanout 5+ calls in one
+	// turn, the combined payload blew the 200K-token context window
+	// (live repro: 216K tokens > 200K).
+	const bigList = Array.from({ length: 1500 }, (_, i) => ({
+		path:    `/repo/some-repo/module-${i}`,
+		files:   42,
+		entities: 1024,
+	}));
+	const out = renderSkillResultForLLM('code.source.repo.describe', {
+		value:      { modules: bigList },
+		confidence: 'high',
+		notes:      [],
+		toolCalls:  [],
+	});
+	// Hard cap; whole rendered text stays a touch above the value cap
+	// (header + notes + truncation marker), well under any reasonable
+	// per-call budget.
+	assert.ok(out.length < 15000, `render too large: ${out.length} chars`);
+	assert.match(out, /<truncated; \d+ more chars in skill value omitted>/);
+	// Head of the JSON is preserved, so the planner still sees real
+	// repo structure at the top of the list.
+	assert.match(out, /module-0/);
+});
+
 // ---------------------------------------------------------------------------
 // End-to-end happy path
 // ---------------------------------------------------------------------------
