@@ -579,20 +579,20 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       throw new Error('buildSkillRunnerDeps: deps not attached');
     }
     const session = this.deps.session;
-    // INSRC_ANALYZER_LOCAL_AS_CLOUD: when set, even skills that declare
-    // `'local'` provider affinity route through cloud (Haiku). Matches
-    // the override applied in runPlanExpandReviewSynthesise so the
-    // diagnostic run is end-to-end cloud-only.
-    const localAsCloud = process.env['INSRC_ANALYZER_LOCAL_AS_CLOUD'] === '1';
+    // Provider affinity resolver for skills run inside this analyzer
+    // flow. Same default-cloud-for-local routing as
+    // runPlanExpandReviewSynthesise (see comment there): skills that
+    // declare `'local'` affinity get the cloud provider unless
+    // INSRC_ANALYZER_USE_LOCAL=1 is set.
+    const useLocal = process.env['INSRC_ANALYZER_USE_LOCAL'] === '1';
+    const cloudProvider = session.claudeProvider ?? session.ollamaProvider;
     const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
       switch (affinity) {
-        case 'local': return localAsCloud
-          ? (session.claudeProvider ?? session.ollamaProvider)
-          : session.ollamaProvider;
-        case 'cloud': return session.claudeProvider ?? session.ollamaProvider;
-        case 'auto':  return localAsCloud
-          ? (session.claudeProvider ?? session.resolver.resolve('skill', 'default'))
-          : session.resolver.resolve('skill', 'default');
+        case 'local': return useLocal ? session.ollamaProvider : cloudProvider;
+        case 'cloud': return cloudProvider;
+        case 'auto':  return useLocal
+          ? session.resolver.resolve('skill', 'default')
+          : cloudProvider;
       }
     };
     const toolExecCtx = {
@@ -687,21 +687,30 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[] = [];
     const session = this.deps.session;
     const cloud = session.resolver.resolve('code-analyzer', 'plan');
-    // Experimental escape hatch: setting INSRC_ANALYZER_LOCAL_AS_CLOUD=1
-    // routes every site that asks for the "local" LLM through the cloud
-    // (Haiku / Anthropic) provider instead. Used to A/B whether the
-    // "not indexed" / "validation error" footnotes we see in reports
-    // trace to qwen hallucinating args (Plan 1 guard-rejection chain)
-    // or to a real evidence/indexer gap. Defaults off; flip to "1" for
-    // diagnostic runs only -- cloud spend balloons because per-section
-    // discovery + writer + fact-extraction all run on the cloud
-    // provider for the duration of the run.
-    const localAsCloud = process.env['INSRC_ANALYZER_LOCAL_AS_CLOUD'] === '1';
-    const local = localAsCloud ? cloud : session.ollamaProvider;
-    if (localAsCloud) {
-      log.warn(
+    // Provider routing for sites that historically asked for the
+    // "local" LLM in this flow (per-section drafting, fact extraction,
+    // skill dispatch, planner-discovery dispatcher).
+    //
+    // NEW DEFAULT (2026-05-26): route through the cloud provider
+    // (Haiku) instead of local Ollama. The diagnosis run on
+    // 2026-05-25 showed qwen-driven local calls were the source of
+    // the 120+ tool-call-guard rejections per run, which in turn
+    // surfaced as misleading "not indexed" / "validation error"
+    // footnotes in the final report. Cloud Haiku doesn't hallucinate
+    // arg shapes the same way and produces cleaner reports.
+    //
+    // Opt-out: set INSRC_ANALYZER_USE_LOCAL=1 to revert to Ollama
+    // for these sites (useful for offline / no-cloud testing).
+    //
+    // Embeddings remain local-only regardless of this flag --
+    // `provider.embed` is bound to the local Ollama embedding model
+    // by design and is invoked via a different path.
+    const useLocal = process.env['INSRC_ANALYZER_USE_LOCAL'] === '1';
+    const local = useLocal ? session.ollamaProvider : cloud;
+    if (!useLocal) {
+      log.info(
         { provider: 'cloud-as-local' },
-        'INSRC_ANALYZER_LOCAL_AS_CLOUD=1: all "local" LLM sites in this run route through the cloud provider (Haiku); expect elevated cloud spend',
+        'code-analyzer: "local" LLM sites in this run route through the cloud provider (Haiku); set INSRC_ANALYZER_USE_LOCAL=1 to revert to Ollama',
       );
     }
     const reviewer = session.resolver.resolve('code-analyzer', 'review');
@@ -759,19 +768,18 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // classifier's subtype through to chat-handler; a follow-up
       // commit will thread it from chat-handler -> orchestrator
       // (likely on `this._tier` or a sibling field).
-      // Diagnostic-flag honored here too: planner-discovery dispatches
-      // skills via this resolver, so it has to match the runtime
-      // resolveProvider in buildSkillRunnerDeps.
-      const localAsCloudHere = process.env['INSRC_ANALYZER_LOCAL_AS_CLOUD'] === '1';
+      // Planner-discovery skill dispatcher uses the same default-
+      // cloud-for-local routing as buildSkillRunnerDeps. Embeddings
+      // remain local regardless (different code path).
+      const useLocalHere = process.env['INSRC_ANALYZER_USE_LOCAL'] === '1';
+      const cloudProviderHere = session.claudeProvider ?? session.ollamaProvider;
       const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
         switch (affinity) {
-          case 'local': return localAsCloudHere
-            ? (session.claudeProvider ?? session.ollamaProvider)
-            : session.ollamaProvider;
-          case 'cloud': return session.claudeProvider ?? session.ollamaProvider;
-          case 'auto':  return localAsCloudHere
-            ? (session.claudeProvider ?? session.resolver.resolve('skill', 'default'))
-            : session.resolver.resolve('skill', 'default');
+          case 'local': return useLocalHere ? session.ollamaProvider : cloudProviderHere;
+          case 'cloud': return cloudProviderHere;
+          case 'auto':  return useLocalHere
+            ? session.resolver.resolve('skill', 'default')
+            : cloudProviderHere;
         }
       };
       plan = await planActionsInteractive(
