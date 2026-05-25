@@ -343,9 +343,94 @@ function applyCorrectiveOrTerminate(
 	prompt:      string,
 ): 'terminate' | 'continue' {
 	if (mode === 'terminate') return 'terminate';
-	// All other modes feed back via a user message and continue.
-	transcript.push({ role: 'user', content: prompt });
+	// All other modes feed back via a user message and continue. If
+	// the prior assistant turn carried unsatisfied tool_use blocks
+	// (multi-tool rejection, mixed-termination rejection, schema
+	// violation on a termination call), Anthropic requires the next
+	// user message to contain a matching tool_result for each. Without
+	// this pairing the API 400s with `tool_use ids were found without
+	// tool_result blocks immediately after`. The helper falls back to
+	// a plain text user message when no orphans are present.
+	pushUserCorrective(transcript, prompt);
 	return 'continue';
+}
+
+/**
+ * Push a corrective message that satisfies any orphan tool_use blocks
+ * left in the previous assistant turn.
+ *
+ * Anthropic enforces strict tool_use <-> tool_result pairing: every
+ * `tool_use` in an assistant message must be followed by a
+ * `tool_result` with the same `tool_use_id` in the next user message,
+ * BEFORE any other content. Violating this is a 400. OpenAI / Mistral
+ * / Gemini are looser but accept the same shape, so the substrate
+ * applies the rule uniformly.
+ *
+ * When there are no orphans (the previous assistant turn was a plain
+ * text reply -- e.g. the empty-tool-calls corrective path), the helper
+ * pushes a regular `{ role: 'user', content: <text> }` message
+ * preserving the legacy shape.
+ */
+function pushUserCorrective(transcript: LLMMessage[], correctiveText: string): void {
+	const orphanIds = collectOrphanToolUseIds(transcript);
+	if (orphanIds.length === 0) {
+		transcript.push({ role: 'user', content: correctiveText });
+		return;
+	}
+	// Pair each orphan with an isError tool_result carrying the
+	// corrective text. The LLM reads the content via the tool_result
+	// channel and retries on the next turn.
+	const blocks = orphanIds.map(id => ({
+		type:        'tool_result' as const,
+		tool_use_id: id,
+		content:     correctiveText,
+		isError:     true,
+	}));
+	transcript.push({ role: 'user', content: blocks });
+}
+
+/**
+ * Collect tool_use ids from the last assistant message that have NOT
+ * been satisfied by an immediately-following tool_result. The check is
+ * conservative: it only inspects the most-recent assistant message
+ * and walks the most-recent user message (if any) to subtract already-
+ * matched ids. Sufficient for the substrate's flow where dispatch
+ * always emits tool_results in the user message right after the
+ * assistant's tool_use turn.
+ */
+function collectOrphanToolUseIds(transcript: readonly LLMMessage[]): string[] {
+	let lastAssistantIdx = -1;
+	for (let i = transcript.length - 1; i >= 0; i--) {
+		if (transcript[i]!.role === 'assistant') { lastAssistantIdx = i; break; }
+	}
+	if (lastAssistantIdx < 0) return [];
+	const assistant = transcript[lastAssistantIdx]!;
+	if (typeof assistant.content === 'string' || !Array.isArray(assistant.content)) return [];
+
+	const toolUseIds: string[] = [];
+	for (const b of assistant.content as readonly unknown[]) {
+		if (b !== null && typeof b === 'object' && (b as Record<string, unknown>)['type'] === 'tool_use') {
+			const id = (b as Record<string, unknown>)['id'];
+			if (typeof id === 'string') toolUseIds.push(id);
+		}
+	}
+	if (toolUseIds.length === 0) return [];
+
+	// Subtract any tool_result ids that already appear in user messages
+	// after the assistant turn (defensive against future call sites
+	// that push partial tool_results before the corrective).
+	const satisfied = new Set<string>();
+	for (let i = lastAssistantIdx + 1; i < transcript.length; i++) {
+		const m = transcript[i]!;
+		if (m.role !== 'user' || typeof m.content === 'string' || !Array.isArray(m.content)) continue;
+		for (const b of m.content as readonly unknown[]) {
+			if (b !== null && typeof b === 'object' && (b as Record<string, unknown>)['type'] === 'tool_result') {
+				const id = (b as Record<string, unknown>)['tool_use_id'];
+				if (typeof id === 'string') satisfied.add(id);
+			}
+		}
+	}
+	return toolUseIds.filter(id => !satisfied.has(id));
 }
 
 function pushToolResult(

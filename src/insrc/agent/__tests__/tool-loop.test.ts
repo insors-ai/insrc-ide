@@ -353,12 +353,56 @@ test('multi-tool-batch (serial-only enforcement) -> reject + retry corrective', 
 		policy:   basePolicy({ maxTurns: 5, toolChoice: 'auto' }),
 	});
 	// Corrective fired on turn 1; turn 2 succeeds.
+	// Plan-after-sanitize fix: the corrective is now delivered as
+	// `tool_result` blocks (one per orphan tool_use) so Anthropic's
+	// strict tool_use<->tool_result pairing isn't violated. Pre-fix
+	// the corrective was a plain `{ role: 'user', content: <text> }`
+	// which 400'd the Anthropic API ("tool_use ids were found without
+	// tool_result blocks immediately after").
 	const secondTurn = calls[1]!.messages;
 	const last = secondTurn[secondTurn.length - 1]!;
-	const content = typeof last.content === 'string' ? last.content : '';
-	assert.match(content, /substrate dispatches one tool per turn/);
+	assert.equal(last.role, 'user');
+	assert.ok(Array.isArray(last.content), 'orphan-satisfying corrective must use content blocks');
+	const blocks = last.content as ReadonlyArray<Record<string, unknown>>;
+	// Two tool_use ids in turn 1 -> two tool_result blocks in turn 2.
+	const trBlocks = blocks.filter(b => b['type'] === 'tool_result');
+	assert.equal(trBlocks.length, 2);
+	const ids = new Set(trBlocks.map(b => b['tool_use_id'] as string));
+	assert.ok(ids.has('a'));
+	assert.ok(ids.has('b'));
+	// Each tool_result carries the corrective text + isError flag.
+	for (const tr of trBlocks) {
+		assert.equal(tr['isError'], true);
+		assert.match(tr['content'] as string, /substrate dispatches one tool per turn/);
+	}
 	// Final outcome depends on turn 3's response (text -> no-tools).
 	assert.equal(out.kind, 'no-tools');
+});
+
+test('multi-tool-batch corrective: prior text content also satisfies API pairing', async () => {
+	// Belt-and-suspenders: even when the assistant turn includes text
+	// alongside the tool_use blocks, the corrective still emits a
+	// tool_result for each orphan. Anthropic only cares about
+	// satisfying the tool_use ids -- additional text on the assistant
+	// side is fine.
+	const { provider, calls } = fakeProvider([
+		resp({ text: 'thinking...', toolCalls: [toolUse('foo', {}, 'a'), toolUse('bar', {}, 'b')] }),
+		resp({ text: 'done' }),
+	]);
+	await runToolLoop({
+		provider,
+		messages: SEED,
+		tools:    [TOOL_FOO, TOOL_BAR],
+		dispatchTool: okDispatch,
+		policy:   basePolicy({ maxTurns: 3, toolChoice: 'auto' }),
+	});
+	const secondTurn = calls[1]!.messages;
+	const last = secondTurn[secondTurn.length - 1]!;
+	assert.ok(Array.isArray(last.content));
+	const ids = (last.content as ReadonlyArray<Record<string, unknown>>)
+		.filter(b => b['type'] === 'tool_result')
+		.map(b => b['tool_use_id'] as string);
+	assert.deepEqual(ids.sort(), ['a', 'b']);
 });
 
 test('unknown-tool: feed-error-back -> continue with corrective tool_result', async () => {
