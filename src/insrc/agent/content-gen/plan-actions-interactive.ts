@@ -49,7 +49,19 @@ import { PLANNER_DISCOVERY_SKILL_IDS } from './planner-discovery-skills.js';
 
 const log = getLogger('content-gen:plan-actions-interactive');
 
-const DEFAULT_MAX_TURNS = 4;
+/**
+ * Default per-call turn budget for the planner-discovery loop. Each
+ * turn maps to exactly one LLM round-trip; since the substrate
+ * dispatches discovery skills serially (no-parallel-LLM rule), each
+ * turn also yields exactly one skill invocation. 12 turns gives the
+ * planner enough room to walk a multi-module repo (repo summary +
+ * top-level modules + a couple of file probes + git changes + a
+ * subsystem deep-dive) before committing via submit_plan. The
+ * substrate's degenerate-repeat detector still fires earlier if the
+ * planner stalls on the same call, so the worst-case wall clock is
+ * bounded by either convergence or stall, not the raw cap.
+ */
+const DEFAULT_MAX_TURNS = 12;
 
 // ---------------------------------------------------------------------------
 // Public input/output
@@ -91,7 +103,7 @@ export async function planActionsInteractive(
 
 	const requested  = input.maxActions ?? DEFAULT_MAX_ACTIONS;
 	const maxActions = Math.max(1, Math.min(32, requested));
-	const maxTurns   = Math.max(2, Math.min(8, input.maxTurns ?? DEFAULT_MAX_TURNS));
+	const maxTurns   = Math.max(2, Math.min(20, input.maxTurns ?? DEFAULT_MAX_TURNS));
 	const subtype    = input.subtype ?? 'review';
 
 	// Build the tool catalog from the curated planner skill list.
