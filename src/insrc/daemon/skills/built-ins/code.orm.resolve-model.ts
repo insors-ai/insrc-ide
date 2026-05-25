@@ -28,6 +28,8 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import { resolveSearchScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
+import { listRepos } from '../../../db/repos.js';
 
 type OrmDialect =
 	| 'prisma'
@@ -41,7 +43,15 @@ type OrmDialect =
 interface ResolveModelInput {
 	readonly orm:        OrmDialect | 'auto';
 	readonly model:      string;
-	readonly repoPath:   string;
+	/**
+	 * Plan SCS Phase 4: optional. Pass to scan a specific repo
+	 * (single-repo override). When omitted, the skill scans every
+	 * repo in the active session's DEPENDS_ON closure (`scope:
+	 * 'closure'`, the default) or every registered workspace repo
+	 * (`scope: 'global'`).
+	 */
+	readonly repoPath?:  string;
+	readonly scope?:     SearchScope;
 }
 
 interface OrmColumn {
@@ -93,10 +103,12 @@ const codeOrmResolveModelSkill: Skill<ResolveModelInput, ResolveModelOutput> = {
 	name: 'Code: resolve an ORM model by name',
 	description:
 		'Locate a single ORM model by name in a repo. Wraps `code_orm_scan` with a name filter ' +
-		'and uniform output shape. Returns `{ found: true, model: { name, table?, columns, ' +
-		'relations, path, line, dialect, indexes } }` on hit, or `{ found: false, nearest: [...] }` ' +
-		'on miss (typo / unknown). Multi-dialect ties surface as `{ found: false, ambiguity: ' +
-		'{ kind: "multiple-matches", alternatives: ["<dialect>:<name>", ...] } }`.',
+		'and uniform output shape. Scoped to the active session\'s dependency closure by default ' +
+		"(`scope: 'closure'`); pass an explicit `repoPath` to scan one repo, or `scope: 'global'` " +
+		'to scan every indexed workspace repo. Returns `{ found: true, model: { name, table?, ' +
+		'columns, relations, path, line, dialect, indexes } }` on hit, or `{ found: false, ' +
+		'nearest: [...] }` on miss. Multi-dialect / multi-repo ties surface as ' +
+		'`{ found: false, ambiguity: { kind: "multiple-matches", alternatives: [...] } }`.',
 	family: 'code-binding',
 	owner: 'code-analyzer',
 	version: 1,
@@ -109,9 +121,10 @@ const codeOrmResolveModelSkill: Skill<ResolveModelInput, ResolveModelOutput> = {
 				description: 'ORM dialect, or "auto" to probe every supported one.',
 			},
 			model:    { type: 'string', description: 'Model class name as referenced in the schema / source.' },
-			repoPath: { type: 'string', description: 'Repo root absolute path.' },
+			repoPath: { type: 'string', description: 'Optional repo root absolute path. Overrides `scope`.' },
+			scope:    SCOPE_SCHEMA_FRAGMENT,
 		},
-		required: ['orm', 'model', 'repoPath'],
+		required: ['orm', 'model'],
 		additionalProperties: false,
 	},
 	outputs: {
@@ -149,31 +162,78 @@ const codeOrmResolveModelSkill: Skill<ResolveModelInput, ResolveModelOutput> = {
 	],
 
 	async execute(input: ResolveModelInput, deps: SkillDeps): Promise<SkillResult<ResolveModelOutput>> {
-		const scanResult = await deps.runTool({
-			id: makeCallId('scan'),
-			name: 'code_orm_scan',
-			input: { orm: input.orm, repoPath: input.repoPath },
-		});
+		// Plan SCS Phase 4: resolve the repo set to scan. Explicit
+		// `repoPath` wins (single-repo override); otherwise route the
+		// scope through resolveSearchScope. `'global'` -> every
+		// registered workspace repo (looked up via listRepos).
+		let repoPaths: readonly string[];
+		if (input.repoPath !== undefined) {
+			repoPaths = [input.repoPath];
+		} else {
+			const scope = input.scope ?? 'closure';
+			const resolved = resolveSearchScope(deps, scope);
+			if (resolved !== null) {
+				repoPaths = resolved;
+			} else {
+				// 'global' opt-in -- enumerate every registered workspace repo.
+				const registered = await listRepos(null);
+				repoPaths = registered.map(r => r.path);
+			}
+		}
 
-		if (scanResult.isError) {
+		if (repoPaths.length === 0) {
 			return {
 				value: { found: false, nearest: [] },
 				confidence: 'low',
-				notes: [`code_orm_scan returned error: ${scanResult.content.slice(0, 200)}`],
+				notes: ['code.orm.resolve-model: no repos in scope to scan'],
 				toolCalls: [],
 			};
 		}
 
-		if (!isScanData(scanResult.data)) {
+		// Scan each repo in the resolved scope and accumulate.
+		// `detected.orms` is a union (signals what dialects were found
+		// anywhere in scope); models concat (each carries its repo via
+		// `path`, so caller can disambiguate).
+		const detectedSet = new Set<OrmDialect>();
+		const allModels: ScanModel[] = [];
+		const errors:    string[]    = [];
+
+		for (const repoPath of repoPaths) {
+			const scanResult = await deps.runTool({
+				id: makeCallId('scan'),
+				name: 'code_orm_scan',
+				input: { orm: input.orm, repoPath },
+			});
+
+			if (scanResult.isError) {
+				errors.push(`${repoPath}: ${scanResult.content.slice(0, 160)}`);
+				continue;
+			}
+
+			if (!isScanData(scanResult.data)) {
+				errors.push(`${repoPath}: code_orm_scan returned an unexpected payload`);
+				continue;
+			}
+
+			for (const o of scanResult.data.detected.orms) detectedSet.add(o);
+			allModels.push(...scanResult.data.models);
+		}
+
+		const detectedOrms: readonly OrmDialect[] = [...detectedSet];
+
+		// All scans failed (every repo errored or returned malformed
+		// data) -> nothing to filter against; return low confidence so
+		// the caller knows the result is a scan failure, not a true
+		// "model doesn't exist" answer.
+		if (errors.length === repoPaths.length && allModels.length === 0) {
 			return {
 				value: { found: false, nearest: [] },
 				confidence: 'low',
-				notes: ['code_orm_scan returned a payload without the expected shape'],
+				notes: [`code_orm_scan failed in every scoped repo: ${errors.join(' | ')}`],
 				toolCalls: [],
 			};
 		}
 
-		const allModels = scanResult.data.models;
 		const matches = allModels.filter(m => m.name === input.model);
 
 		// Exact match path.
@@ -206,15 +266,22 @@ const codeOrmResolveModelSkill: Skill<ResolveModelInput, ResolveModelOutput> = {
 
 		// No matches -> typed refusal with nearest candidates.
 		const nearest = pickNearest(input.model, allModels);
+		const tailNotes: string[] = [];
+		if (errors.length > 0) {
+			tailNotes.push(`code_orm_scan errored in ${errors.length}/${repoPaths.length} repo(s): ${errors.join(' | ')}`);
+		}
 		return {
 			value: { found: false, nearest },
 			confidence: 'high',
-			notes: nearest.length > 0
-				? [`model '${input.model}' not found; nearest: ${nearest.map(n => `${n.dialect}:${n.name}`).join(', ')}`]
-				: [`model '${input.model}' not found; no nearby models in the index. ` +
-				   (scanResult.data.detected.orms.length === 0
-					   ? 'No ORM detected in the repo -- check that prisma/schema.prisma or @Entity classes exist.'
-					   : `Detected dialects: ${scanResult.data.detected.orms.join(', ')}.`)],
+			notes: [
+				nearest.length > 0
+					? `model '${input.model}' not found; nearest: ${nearest.map(n => `${n.dialect}:${n.name}`).join(', ')}`
+					: `model '${input.model}' not found; no nearby models in the index. ` +
+					   (detectedOrms.length === 0
+						   ? 'No ORM detected in the scanned repos -- check that prisma/schema.prisma or @Entity classes exist.'
+						   : `Detected dialects: ${detectedOrms.join(', ')}.`),
+				...tailNotes,
+			],
 			toolCalls: [],
 		};
 	},

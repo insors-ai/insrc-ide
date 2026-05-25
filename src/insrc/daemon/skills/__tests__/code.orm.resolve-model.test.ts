@@ -238,3 +238,90 @@ test('forwards orm + repoPath inputs to code_orm_scan', async () => {
 	assert.equal(seen.orm, 'prisma');
 	assert.equal(seen.repoPath, '/r');
 });
+
+// ---------------------------------------------------------------------------
+// Plan SCS Phase 4: closure-default scanning
+// ---------------------------------------------------------------------------
+
+test('closure default: scans every repo in the session closure', async () => {
+	setup();
+	const seenRepoPaths: string[] = [];
+	const fakeTools: FakeToolMap = {
+		code_orm_scan: (call) => {
+			const rp = call.input['repoPath'] as string;
+			seenRepoPaths.push(rp);
+			// Each repo "contains" a uniquely-named model so we can
+			// confirm both scans were merged.
+			const name = rp === '/repos/active' ? 'ActiveModel' : 'DepModel';
+			return okTool(scanPayload({ models: [{ name, dialect: 'prisma', path: `${rp}/schema.prisma` }] }));
+		},
+	};
+
+	// No explicit repoPath -> default 'closure' scope -> scans both.
+	const { result } = await runSkillIsolated<unknown, ResolveModelValue>(
+		SKILL_ID,
+		{ orm: 'auto', model: 'DepModel' },
+		{
+			fakeTools,
+			extraSessionFields: {
+				repoPath:     '/repos/active',
+				closureRepos: ['/repos/active', '/repos/dep'],
+			},
+		},
+	);
+	assert.deepEqual(seenRepoPaths.sort(), ['/repos/active', '/repos/dep']);
+	assert.equal(result.value.found, true);
+	assert.equal(result.value.model?.['name'], 'DepModel');
+});
+
+test('explicit repoPath overrides closure scope', async () => {
+	setup();
+	const seenRepoPaths: string[] = [];
+	const fakeTools: FakeToolMap = {
+		code_orm_scan: (call) => {
+			seenRepoPaths.push(call.input['repoPath'] as string);
+			return okTool(scanPayload({ models: [{ name: 'X', dialect: 'prisma' }] }));
+		},
+	};
+
+	await runSkillIsolated<unknown, ResolveModelValue>(
+		SKILL_ID,
+		{ orm: 'auto', model: 'X', repoPath: '/repos/just-this-one' },
+		{
+			fakeTools,
+			extraSessionFields: {
+				repoPath:     '/repos/active',
+				closureRepos: ['/repos/active', '/repos/dep'],
+			},
+		},
+	);
+	assert.deepEqual(seenRepoPaths, ['/repos/just-this-one']);
+});
+
+test('multi-repo same-name model -> ambiguity refusal', async () => {
+	setup();
+	const fakeTools: FakeToolMap = {
+		code_orm_scan: (call) => {
+			const rp = call.input['repoPath'] as string;
+			// Same model name, different dialects across repos -> the
+			// merged matches set has two entries -> ambiguity path.
+			const dialect = rp === '/repos/active' ? 'prisma' : 'typeorm';
+			return okTool(scanPayload({ models: [{ name: 'User', dialect, path: `${rp}/x` }] }));
+		},
+	};
+	const { result } = await runSkillIsolated<unknown, ResolveModelValue>(
+		SKILL_ID,
+		{ orm: 'auto', model: 'User' },
+		{
+			fakeTools,
+			extraSessionFields: {
+				repoPath:     '/repos/active',
+				closureRepos: ['/repos/active', '/repos/dep'],
+			},
+		},
+	);
+	assert.equal(result.value.found, false);
+	const amb = result.value.ambiguity as Record<string, unknown> | undefined;
+	assert.ok(amb !== undefined, 'expected ambiguity payload');
+	assert.equal(amb['kind'], 'multiple-matches');
+});
