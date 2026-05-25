@@ -183,6 +183,12 @@ export async function planActionsInteractive(
 			terminationTool:        submitPlan,
 			onMixedTermination:     'reject',
 			onSchemaViolation:      'retry-with-correction',
+			// Planner discovery is read-only and the individual skill
+			// calls are independent (each describes a different module
+			// / file / entity). Let Anthropic batch-dispatch them in
+			// parallel instead of forcing one-tool-per-turn rejections
+			// that burn the turn budget without making progress.
+			onMultipleToolsPerTurn: 'dispatch-all',
 			stopOnDegenerateRepeat: true,
 		},
 		label: 'planner-discovery',

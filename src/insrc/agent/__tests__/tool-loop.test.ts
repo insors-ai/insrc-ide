@@ -379,6 +379,47 @@ test('multi-tool-batch (serial-only enforcement) -> reject + retry corrective', 
 	assert.equal(out.kind, 'no-tools');
 });
 
+test("multi-tool-batch: onMultipleToolsPerTurn='dispatch-all' parallel-dispatches every call", async () => {
+	// Discovery-style loop: assistant emits 3 tool_use blocks in one
+	// turn; substrate should dispatch all three and emit a
+	// corresponding tool_result for each (no corrective).
+	const dispatched: string[] = [];
+	const dispatchTool = async (call: { name: string; id: string }) => {
+		dispatched.push(call.name);
+		return { toolCallId: call.id, content: `out-of-${call.name}`, isError: false };
+	};
+	const { provider, calls } = fakeProvider([
+		resp({ toolCalls: [
+			toolUse('foo', { x: 1 }, 'a'),
+			toolUse('bar', { y: 2 }, 'b'),
+			toolUse('foo', { x: 3 }, 'c'),
+		] }),
+		resp({ text: 'done' }),
+	]);
+	await runToolLoop({
+		provider,
+		messages: SEED,
+		tools:    [TOOL_FOO, TOOL_BAR],
+		dispatchTool,
+		policy:   basePolicy({
+			maxTurns: 3,
+			toolChoice: 'auto',
+			onMultipleToolsPerTurn: 'dispatch-all',
+		}),
+	});
+	// All three tools dispatched.
+	assert.deepEqual(dispatched.sort(), ['bar', 'foo', 'foo']);
+	// Second-turn request must carry 3 tool_result blocks paired by id.
+	const secondTurn = calls[1]!.messages;
+	const last = secondTurn[secondTurn.length - 1]!;
+	assert.equal(last.role, 'user');
+	assert.ok(Array.isArray(last.content));
+	const trIds = (last.content as ReadonlyArray<Record<string, unknown>>)
+		.filter(b => b['type'] === 'tool_result')
+		.map(b => b['tool_use_id'] as string);
+	assert.deepEqual(trIds.sort(), ['a', 'b', 'c']);
+});
+
 test('multi-tool-batch corrective: prior text content also satisfies API pairing', async () => {
 	// Belt-and-suspenders: even when the assistant turn includes text
 	// alongside the tool_use blocks, the corrective still emits a

@@ -74,7 +74,22 @@ export interface ToolLoopPolicy<T> {
 	readonly onDispatchError?:        'feed-error-back'       | 'terminate';
 	readonly onMixedTermination?:     'reject'                | 'accept-termination-discard-others';
 	readonly onSchemaViolation?:      'retry-with-correction' | 'terminate';
-	readonly onMultipleToolsPerTurn?: 'retry-with-correction' | 'terminate';
+	/**
+	 * What to do when the LLM emits 2+ tool_use blocks in one turn:
+	 *   - `'retry-with-correction'` (default): reject the batch, push
+	 *     isError tool_result blocks for every orphan tool_use + a
+	 *     corrective message ("substrate dispatches one tool per turn").
+	 *     Good when downstream skills must be serialised (e.g. each
+	 *     dispatch carries side effects that the LLM needs to see
+	 *     before choosing the next call).
+	 *   - `'terminate'`: bail out with `kind: 'exhausted'`.
+	 *   - `'dispatch-all'`: dispatch every tool in the batch in
+	 *     parallel, push a tool_result for each, and continue. The
+	 *     natural Anthropic-style fanout pattern. Use for read-only
+	 *     discovery loops (planner, broad exploration) where the
+	 *     calls are independent.
+	 */
+	readonly onMultipleToolsPerTurn?: 'retry-with-correction' | 'terminate' | 'dispatch-all';
 	/** Default true. Detects same-call-twice-in-a-row -> exhaust. */
 	readonly stopOnDegenerateRepeat?: boolean;
 	/**
@@ -184,8 +199,44 @@ export async function runToolLoop<T = unknown>(input: ToolLoopInput<T>): Promise
 			continue;
 		}
 
-		// Multi-tool batch rejection (substrate is serial)
+		// Multi-tool batch handling
 		if (toolCalls.length > 1) {
+			if (policy.onMultipleToolsPerTurn === 'dispatch-all') {
+				// Parallel-dispatch every call in the batch and push
+				// the matching tool_result blocks into ONE user
+				// message. Anthropic requires all tool_results for a
+				// given assistant turn's tool_use blocks to ship
+				// together; splitting them into N messages would
+				// orphan the later ids relative to the first reply.
+				const dispatchResults = await Promise.all(
+					toolCalls.map(async c => {
+						try {
+							return { call: c, result: await input.dispatchTool(c) };
+						} catch (err) {
+							return {
+								call: c,
+								result: {
+									toolCallId: c.id,
+									content:    CORRECTIVE.dispatchError(c.name, (err as Error).message),
+									isError:    true,
+								},
+							};
+						}
+					}),
+				);
+				const trBlocks = dispatchResults.map(({ call: c, result: r }) => ({
+					type:        'tool_result' as const,
+					tool_use_id: c.id,
+					content:     r.content,
+					...(r.isError === true ? { isError: true } : {}),
+				}));
+				transcript.push({ role: 'user', content: trBlocks });
+				// Track lastDispatch for exhaustion-result carrying;
+				// pick the first non-error dispatch as a representative.
+				const firstOk = dispatchResults.find(d => d.result.isError !== true);
+				if (firstOk !== undefined) lastDispatch = firstOk;
+				continue;
+			}
 			const names = toolCalls.map(c => c.name);
 			const handled = applyCorrectiveOrTerminate(
 				policy.onMultipleToolsPerTurn,
@@ -317,7 +368,7 @@ interface FullToolLoopPolicy<T> extends ToolLoopPolicy<T> {
 	readonly onDispatchError:        'feed-error-back'       | 'terminate';
 	readonly onMixedTermination:     'reject'                | 'accept-termination-discard-others';
 	readonly onSchemaViolation:      'retry-with-correction' | 'terminate';
-	readonly onMultipleToolsPerTurn: 'retry-with-correction' | 'terminate';
+	readonly onMultipleToolsPerTurn: 'retry-with-correction' | 'terminate' | 'dispatch-all';
 }
 
 function withDefaults<T>(p: ToolLoopPolicy<T>): FullToolLoopPolicy<T> {
