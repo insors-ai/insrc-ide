@@ -111,6 +111,17 @@ test('buildExcerpt: long body -> head + truncated marker', () => {
 // ---------------------------------------------------------------------------
 // code.entity.locate-by-name
 // ---------------------------------------------------------------------------
+//
+// Plan SCS Phase 2: locate-by-name now defaults to closure scope.
+// Every test below seeds `closureRepos: [REPO]` on the fake session
+// so the default scope resolves to the test repo. The dedicated
+// scope tests at the bottom override this to exercise the multi-repo,
+// 'global', and unrelated-repo cases.
+
+const LOCATE_SESSION_FIELDS = Object.freeze({
+	repoPath:     REPO,
+	closureRepos: [REPO],
+}) satisfies Record<string, unknown>;
 
 test('locate-by-name: returns matches across kinds, sorted hit-first', async () => {
 	const cls = ent({ kind: 'class',    name: 'Order', isExported: true });
@@ -120,13 +131,17 @@ test('locate-by-name: returns matches across kinds, sorted hit-first', async () 
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.locate-by-name',
 		{ name: 'Order' },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const v = result.value as Record<string, unknown>;
 	const matches = v['matches'] as Array<Record<string, unknown>>;
 	assert.equal(matches.length, 1);
 	assert.equal(matches[0]!['name'], 'Order');
 	assert.equal(matches[0]!['kind'], 'class');
+	// Phase 2: every match now carries its repo for cross-project
+	// disambiguation; the closure default puts every result in the
+	// active repo.
+	assert.equal(matches[0]!['repo'], REPO);
 });
 
 test('locate-by-name: kinds filter narrows', async () => {
@@ -137,7 +152,7 @@ test('locate-by-name: kinds filter narrows', async () => {
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.locate-by-name',
 		{ name: 'Foo', kinds: ['function'] },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const matches = (result.value as Record<string, unknown>)['matches'] as Array<Record<string, unknown>>;
 	assert.equal(matches.length, 1);
@@ -148,12 +163,151 @@ test('locate-by-name: empty result -> medium confidence with helpful note', asyn
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.locate-by-name',
 		{ name: 'NeverExists' },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	assert.equal(result.confidence, 'medium');
 	const matches = (result.value as Record<string, unknown>)['matches'] as unknown[];
 	assert.equal(matches.length, 0);
 	assert.ok((result.notes ?? []).some(n => n.includes('No entity named')));
+});
+
+// ---- Plan SCS Phase 2 scope behaviour ----
+
+test('locate-by-name: default scope is closure -- unrelated indexed repo NOT in results', async () => {
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const inScope = ent({ kind: 'class', name: 'Widget', file: `${REPO}/src/widget.ts`, isExported: true });
+	// Hand-build a cross-repo match so we don't have to teach `ent()` about a second repo.
+	const crossRepo: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/Widget.ts`, 'class', 'Widget'),
+		kind:      'class',
+		name:      'Widget',
+		language:  'typescript',
+		repoId:    2,
+		repo:      OTHER,
+		file:      `${OTHER}/lib/Widget.ts`,
+		startLine: 1,
+		endLine:   10,
+		body:      '',
+		embedding: [],
+		indexedAt: now,
+	};
+	await upsertEntities(null, [inScope, crossRepo]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.locate-by-name',
+		{ name: 'Widget' },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const matches = (result.value as Record<string, unknown>)['matches'] as Array<Record<string, unknown>>;
+	assert.equal(matches.length, 1, 'closure default must filter out the cross-repo match');
+	assert.equal(matches[0]!['repo'], REPO);
+});
+
+test("locate-by-name: scope='global' includes cross-repo matches with repo tag + note", async () => {
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const inScope: Entity = {
+		id:        mkId(REPO, `${REPO}/src/widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    1, repo: REPO, file: `${REPO}/src/widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	const crossRepo: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/Widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    2, repo: OTHER, file: `${OTHER}/lib/Widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [inScope, crossRepo]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.locate-by-name',
+		{ name: 'Widget', scope: 'global' },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const matches = (result.value as Record<string, unknown>)['matches'] as Array<Record<string, unknown>>;
+	assert.equal(matches.length, 2);
+	const repos = new Set(matches.map(m => m['repo'] as string));
+	assert.ok(repos.has(REPO));
+	assert.ok(repos.has(OTHER));
+	assert.ok((result.notes ?? []).some(n => n.includes("scope='global'")));
+});
+
+test('locate-by-name: closure with multiple dependent repos returns matches from all of them', async () => {
+	const DEP = '/repo/dependent';
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: DEP,   name: '', addedAt: now, status: 'pending' });
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const inActive: Entity = {
+		id:        mkId(REPO, `${REPO}/src/widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    1, repo: REPO, file: `${REPO}/src/widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	const inDep: Entity = {
+		id:        mkId(DEP, `${DEP}/src/Widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    2, repo: DEP, file: `${DEP}/src/Widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	const inUnrelated: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/Widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    3, repo: OTHER, file: `${OTHER}/lib/Widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [inActive, inDep, inUnrelated]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.locate-by-name',
+		{ name: 'Widget' },
+		// Closure includes the active repo + a genuine dependent. The
+		// unrelated indexed repo is NOT in the closure.
+		{ extraSessionFields: { repoPath: REPO, closureRepos: [REPO, DEP] } },
+	);
+	const matches = (result.value as Record<string, unknown>)['matches'] as Array<Record<string, unknown>>;
+	assert.equal(matches.length, 2);
+	const repos = new Set(matches.map(m => m['repo'] as string));
+	assert.ok(repos.has(REPO));
+	assert.ok(repos.has(DEP));
+	assert.ok(!repos.has(OTHER), 'unrelated repo must not appear in closure-scoped results');
+});
+
+test('locate-by-name: explicit repoPath overrides scope (single-repo)', async () => {
+	const DEP = '/repo/dependent';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: DEP, name: '', addedAt: now, status: 'pending' });
+
+	const inActive: Entity = {
+		id:        mkId(REPO, `${REPO}/src/widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    1, repo: REPO, file: `${REPO}/src/widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	const inDep: Entity = {
+		id:        mkId(DEP, `${DEP}/src/Widget.ts`, 'class', 'Widget'),
+		kind:      'class', name: 'Widget', language: 'typescript',
+		repoId:    2, repo: DEP, file: `${DEP}/src/Widget.ts`,
+		startLine: 1, endLine: 10, body: '', embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [inActive, inDep]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.locate-by-name',
+		// closure would return both; explicit repoPath narrows to just the dep
+		{ name: 'Widget', repoPath: DEP },
+		{ extraSessionFields: { repoPath: REPO, closureRepos: [REPO, DEP] } },
+	);
+	const matches = (result.value as Record<string, unknown>)['matches'] as Array<Record<string, unknown>>;
+	assert.equal(matches.length, 1);
+	assert.equal(matches[0]!['repo'], DEP);
 });
 
 // ---------------------------------------------------------------------------

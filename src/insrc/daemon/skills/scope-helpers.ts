@@ -67,12 +67,20 @@ export function resolveSearchScope(
 		return null;
 	}
 	const session = deps.session;
-	if (session.closureRepos.length > 0) {
-		return session.closureRepos;
+	// `closureRepos` is declared on `Session` with a `[]` default so
+	// production sessions always have it; the optional-chain is purely
+	// defensive against synthetic test sessions that omit the field.
+	const closure = session.closureRepos ?? [];
+	if (closure.length > 0) {
+		return closure;
 	}
 	// Defensive: session not initialised or closure resolution failed.
-	// Fall back to the active repo only so the skill still works.
-	return [session.repoPath];
+	// Fall back to the active repo only so the skill still works. When
+	// `repoPath` is also empty (smoke-fixture default), returns `['']`
+	// which the storage primitive treats as an unknown repo -> no
+	// matches. Same semantic as the pre-Plan-SCS behaviour when the
+	// session repoPath wasn't registered.
+	return [session.repoPath ?? ''];
 }
 
 /**

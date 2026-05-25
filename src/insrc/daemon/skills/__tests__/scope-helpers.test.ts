@@ -76,6 +76,27 @@ test('resolveSearchScope: empty closure falls back to [repoPath] (defensive)', (
 	assert.deepEqual(out, ['/repos/only-active']);
 });
 
+test('resolveSearchScope: missing closureRepos (test-harness synthetic session) -> falls back', () => {
+	// Synthetic fake sessions (e.g. from test-harness.makeFakeSession)
+	// don't always include `closureRepos`. The helper must tolerate
+	// `undefined` without throwing -- otherwise every smoke fixture
+	// breaks.
+	const session = { repoPath: '/repos/active' } as unknown as { repoPath: string };
+	const deps = { session } as unknown as SkillDeps;
+	const out = resolveSearchScope(deps);
+	assert.deepEqual(out, ['/repos/active']);
+});
+
+test('resolveSearchScope: missing closureRepos AND empty repoPath -> [""] (storage rejects unknown repo)', () => {
+	// Worst-case fake session: nothing set. Helper returns [''] which
+	// the storage primitive treats as an unknown repoId -> no matches.
+	// Equivalent to the pre-Plan-SCS no-such-repo behaviour, so smoke
+	// fixtures returning "no match -> medium confidence" still pass.
+	const deps = { session: {} } as unknown as SkillDeps;
+	const out = resolveSearchScope(deps);
+	assert.deepEqual(out, ['']);
+});
+
 test('resolveSearchScope: returns the readonly array reference (no copy)', () => {
 	const closure = ['/repos/active', '/repos/dep1'];
 	const deps = makeDeps({ closureRepos: closure });
