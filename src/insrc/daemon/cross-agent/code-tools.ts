@@ -257,24 +257,36 @@ export const codeTraceTool: Tool = {
 		// instead of hitting the DB directly. Same data shape preserved
 		// (lineRange.end depends on the skill output's `endLine` field
 		// added in step 9.2 alongside the shim).
+		//
+		// Plan SCS Phase 5: the skills now return a discriminated union
+		// `{ found: true, neighbors, ... } | { found: false, reason }`.
+		// We pass `scope: 'global'` so the cross-agent shim keeps its
+		// pre-Plan-SCS behaviour (no closure filtering at this layer);
+		// callers that DO want scoping go through the skill directly.
 		const runnerDeps = buildSkillRunnerDeps(deps);
 		const neighbours: CodeTraceNeighbour[] = [];
 		if (direction === 'callers' || direction === 'both') {
-			const r = await runSkill<{ entityId: string }, NeighborSkillOutput>(
+			const r = await runSkill<{ entityId: string; scope: 'global' }, NeighborSkillOutput>(
 				'code.entity.callers',
-				{ entityId },
+				{ entityId, scope: 'global' },
 				runnerDeps,
 			);
+			if (!r.value.found) {
+				return fail('code_trace', `no entity with id ${entityId} (${r.value.reason})`);
+			}
 			for (const n of r.value.neighbors) {
 				neighbours.push(neighbourFromSkill(n, 'callers'));
 			}
 		}
 		if (direction === 'callees' || direction === 'both') {
-			const r = await runSkill<{ entityId: string }, NeighborSkillOutput>(
+			const r = await runSkill<{ entityId: string; scope: 'global' }, NeighborSkillOutput>(
 				'code.entity.callees',
-				{ entityId },
+				{ entityId, scope: 'global' },
 				runnerDeps,
 			);
+			if (!r.value.found) {
+				return fail('code_trace', `no entity with id ${entityId} (${r.value.reason})`);
+			}
 			for (const n of r.value.neighbors) {
 				neighbours.push(neighbourFromSkill(n, 'callees'));
 			}
@@ -298,22 +310,29 @@ export const codeTraceTool: Tool = {
 	},
 };
 
-interface NeighborSkillOutput {
-	readonly entityId:   string;
-	readonly neighbors:  readonly {
-		readonly id:        string;
-		readonly name:      string;
-		readonly kind:      string;
-		readonly file:      string;
-		readonly startLine: number;
-		readonly endLine:   number;
-	}[];
-	readonly truncated:  boolean;
-	readonly direction:  'callers' | 'callees';
-}
+type NeighborSkillOutput =
+	| {
+		readonly found:     true;
+		readonly entityId:  string;
+		readonly neighbors: readonly {
+			readonly id:        string;
+			readonly name:      string;
+			readonly kind:      string;
+			readonly file:      string;
+			readonly startLine: number;
+			readonly endLine:   number;
+		}[];
+		readonly direction: 'callers' | 'callees';
+	}
+	| {
+		readonly found:  false;
+		readonly reason: 'entity-not-found' | 'entity-out-of-scope';
+	};
+
+type NeighborSkillFound = Extract<NeighborSkillOutput, { found: true }>;
 
 function neighbourFromSkill(
-	n: NeighborSkillOutput['neighbors'][number],
+	n: NeighborSkillFound['neighbors'][number],
 	edge: 'callers' | 'callees',
 ): CodeTraceNeighbour {
 	return {
@@ -388,9 +407,12 @@ export const codeDescribeTool: Tool = {
 		type SummaryMiss = { readonly found: false; readonly reason: string };
 		type SummaryOutput = SummaryFound | SummaryMiss;
 
-		const summaryResult = await runSkill<{ entityId: string; excerptMaxChars: number }, SummaryOutput>(
+		// Plan SCS Phase 5: cross-agent shim runs in 'global' scope (no
+		// closure filtering at this layer). The skill outputs are now
+		// discriminated unions -- check `found` before destructuring.
+		const summaryResult = await runSkill<{ entityId: string; excerptMaxChars: number; scope: 'global' }, SummaryOutput>(
 			'code.entity.summary',
-			{ entityId, excerptMaxChars: 4000 },
+			{ entityId, excerptMaxChars: 4000, scope: 'global' },
 			runnerDeps,
 		);
 		if (!summaryResult.value.found) {
@@ -399,11 +421,11 @@ export const codeDescribeTool: Tool = {
 		const summary = summaryResult.value;
 
 		const [callersResult, calleesResult] = await Promise.all([
-			runSkill<{ entityId: string }, NeighborSkillOutput>('code.entity.callers', { entityId }, runnerDeps),
-			runSkill<{ entityId: string }, NeighborSkillOutput>('code.entity.callees', { entityId }, runnerDeps),
+			runSkill<{ entityId: string; scope: 'global' }, NeighborSkillOutput>('code.entity.callers', { entityId, scope: 'global' }, runnerDeps),
+			runSkill<{ entityId: string; scope: 'global' }, NeighborSkillOutput>('code.entity.callees', { entityId, scope: 'global' }, runnerDeps),
 		]);
-		const callers = callersResult.value.neighbors;
-		const callees = calleesResult.value.neighbors;
+		const callers = callersResult.value.found ? callersResult.value.neighbors : [];
+		const callees = calleesResult.value.found ? calleesResult.value.neighbors : [];
 
 		const data: CodeDescribeData & { _shim?: true } = {
 			entityId,

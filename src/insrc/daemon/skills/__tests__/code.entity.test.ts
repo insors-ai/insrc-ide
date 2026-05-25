@@ -313,6 +313,12 @@ test('locate-by-name: explicit repoPath overrides scope (single-repo)', async ()
 // ---------------------------------------------------------------------------
 // code.entity.summary
 // ---------------------------------------------------------------------------
+//
+// Plan SCS Phase 5: summary now scope-checks the resolved entity's
+// repo against the active session closure. Existing tests seed
+// closureRepos:[REPO] so the default-closure check still passes for
+// REPO-owned entities; dedicated scope tests at the bottom exercise
+// the refusal.
 
 test('summary: returns metadata + body excerpt for a known entity', async () => {
 	const fn = ent({
@@ -327,7 +333,7 @@ test('summary: returns metadata + body excerpt for a known entity', async () => 
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.summary',
 		{ entityId: fn.id },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], true);
@@ -342,11 +348,66 @@ test('summary: missing id -> { found: false, reason: entity-not-found }', async 
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.summary',
 		{ entityId: 'a'.repeat(32) },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], false);
 	assert.equal(v['reason'], 'entity-not-found');
+});
+
+// ---- Plan SCS Phase 5 scope behaviour ----
+
+test('summary: entityId in out-of-closure repo -> { found: false, reason: entity-out-of-scope }', async () => {
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const crossRepo: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/CrossThing.ts`, 'function', 'crossThing'),
+		kind:      'function', name: 'crossThing', language: 'typescript',
+		repoId:    2, repo: OTHER, file: `${OTHER}/lib/CrossThing.ts`,
+		startLine: 1, endLine: 5,
+		body:      'function crossThing() {}',
+		embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [crossRepo]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.summary',
+		{ entityId: crossRepo.id },
+		// Closure does NOT include OTHER -- the entityId is real but the entity
+		// lives in a disconnected indexed repo.
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], false);
+	assert.equal(v['reason'], 'entity-out-of-scope');
+	assert.ok((result.notes ?? []).some(n => n.includes(OTHER)));
+});
+
+test("summary: scope='global' bypasses the closure check", async () => {
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const crossRepo: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/CrossThing.ts`, 'function', 'crossThing'),
+		kind:      'function', name: 'crossThing', language: 'typescript',
+		repoId:    2, repo: OTHER, file: `${OTHER}/lib/CrossThing.ts`,
+		startLine: 1, endLine: 5,
+		body:      'function crossThing() {}',
+		embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [crossRepo]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.summary',
+		{ entityId: crossRepo.id, scope: 'global' },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['name'], 'crossThing');
 });
 
 // ---------------------------------------------------------------------------
@@ -372,7 +433,7 @@ test('summary: empty body + real file on disk -> reads file as excerpt', async (
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.summary',
 		{ entityId: fileEnt.id },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], true);
@@ -398,7 +459,7 @@ test('summary: empty body + missing file -> low confidence, empty excerpt, hones
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.summary',
 		{ entityId: fileEnt.id },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], true);
@@ -419,7 +480,7 @@ test('summary: non-empty body -> excerptSource is graph (no spurious fallback)',
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.entity.summary',
 		{ entityId: fn.id },
-		{},
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['excerptSource'], 'graph');
@@ -430,6 +491,11 @@ test('summary: non-empty body -> excerptSource is graph (no spurious fallback)',
 // ---------------------------------------------------------------------------
 // code.entity.callers / callees
 // ---------------------------------------------------------------------------
+//
+// Plan SCS Phase 5: output shape is now a discriminated union
+// `{ found: true, entityId, neighbors, direction } | { found: false,
+// reason: 'entity-not-found' | 'entity-out-of-scope' }`. Callers
+// must check `found` before destructuring `neighbors`.
 
 test('callers + callees: 1-hop CALLS edges round-trip', async () => {
 	const a = ent({ kind: 'function', name: 'a', file: `${REPO}/src/a.ts` });
@@ -443,17 +509,23 @@ test('callers + callees: 1-hop CALLS edges round-trip', async () => {
 	]);
 
 	const callees = await runSkillIsolated<unknown, Record<string, unknown>>(
-		'code.entity.callees', { entityId: a.id }, {},
+		'code.entity.callees',
+		{ entityId: a.id },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const cv = callees.result.value as Record<string, unknown>;
+	assert.equal(cv['found'], true);
 	const cn = cv['neighbors'] as Array<Record<string, unknown>>;
 	const calleeNames = cn.map(n => n['name']).sort();
 	assert.deepEqual(calleeNames, ['b', 'c']);
 
 	const callers = await runSkillIsolated<unknown, Record<string, unknown>>(
-		'code.entity.callers', { entityId: b.id }, {},
+		'code.entity.callers',
+		{ entityId: b.id },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	const cr = callers.result.value as Record<string, unknown>;
+	assert.equal(cr['found'], true);
 	const crn = cr['neighbors'] as Array<Record<string, unknown>>;
 	assert.equal(crn.length, 1);
 	assert.equal(crn[0]!['name'], 'a');
@@ -463,11 +535,75 @@ test('callees: empty result -> medium confidence', async () => {
 	const a = ent({ kind: 'function', name: 'a' });
 	await upsertEntities(null, [a]);
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
-		'code.entity.callees', { entityId: a.id }, {},
+		'code.entity.callees',
+		{ entityId: a.id },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
 	);
 	assert.equal(result.confidence, 'medium');
 	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
 	assert.equal((v['neighbors'] as unknown[]).length, 0);
-	// Phase B.1 dropped the `truncated` output field (no skill-side cap).
-	assert.equal(v['truncated'], undefined);
+});
+
+// ---- Plan SCS Phase 5 callers/callees scope behaviour ----
+
+test('callers: missing entityId -> { found: false, reason: entity-not-found }', async () => {
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.callers',
+		{ entityId: 'a'.repeat(32) },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], false);
+	assert.equal(v['reason'], 'entity-not-found');
+});
+
+test('callers: out-of-closure entityId -> { found: false, reason: entity-out-of-scope }', async () => {
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const crossRepo: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/Thing.ts`, 'function', 'thing'),
+		kind:      'function', name: 'thing', language: 'typescript',
+		repoId:    2, repo: OTHER, file: `${OTHER}/lib/Thing.ts`,
+		startLine: 1, endLine: 5,
+		body:      'function thing() {}',
+		embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [crossRepo]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.callers',
+		{ entityId: crossRepo.id },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], false);
+	assert.equal(v['reason'], 'entity-out-of-scope');
+});
+
+test("callees: scope='global' bypasses the closure check on the source", async () => {
+	const OTHER = '/repo/unrelated';
+	const now = new Date().toISOString();
+	await addRepo(null, { path: OTHER, name: '', addedAt: now, status: 'pending' });
+
+	const crossRepo: Entity = {
+		id:        mkId(OTHER, `${OTHER}/lib/Thing.ts`, 'function', 'thing'),
+		kind:      'function', name: 'thing', language: 'typescript',
+		repoId:    2, repo: OTHER, file: `${OTHER}/lib/Thing.ts`,
+		startLine: 1, endLine: 5,
+		body:      'function thing() {}',
+		embedding: [], indexedAt: now,
+	};
+	await upsertEntities(null, [crossRepo]);
+
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.entity.callees',
+		{ entityId: crossRepo.id, scope: 'global' },
+		{ extraSessionFields: { ...LOCATE_SESSION_FIELDS } },
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['direction'], 'callees');
 });

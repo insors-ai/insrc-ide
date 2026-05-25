@@ -17,6 +17,7 @@
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { getEntity } from '../../../db/entities.js';
+import { isRepoInScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
 import { tryReadFileForFallback } from './_fallback-file-read.js';
 
@@ -34,6 +35,16 @@ interface SummaryInput {
 	 * length itself.
 	 */
 	readonly excerptMaxChars?: number;
+	/**
+	 * Plan SCS Phase 5: scope check on the resolved entity's repo.
+	 * Defaults to 'closure' -- if the entityId resolves to an entity
+	 * whose repo isn't in the active session's DEPENDS_ON closure
+	 * (e.g. a stale id pasted from a prior session, or an id that
+	 * leaked through a global-scope locate-by-name), the skill
+	 * refuses with `{ found: false, reason: 'entity-out-of-scope' }`.
+	 * Pass 'global' to bypass the check.
+	 */
+	readonly scope?: SearchScope;
 }
 
 type SummaryOutput =
@@ -64,15 +75,18 @@ type SummaryOutput =
 	}
 	| {
 		readonly found:  false;
-		readonly reason: 'entity-not-found';
+		readonly reason: 'entity-not-found' | 'entity-out-of-scope';
 	};
 
 const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 	id: 'code.entity.summary',
 	name: 'Code: summary card for one entity',
 	description:
-		'Return typed metadata + a capped body excerpt for one entity. Returns ' +
-		'`{ found: false, reason: "entity-not-found" }` when the id isn\'t in the graph.',
+		'Return typed metadata + a capped body excerpt for one entity. Scoped to the active ' +
+		"repo's dependency closure by default (`scope: 'closure'`). Returns " +
+		'`{ found: false, reason: "entity-not-found" }` when the id isn\'t in the graph, ' +
+		'or `{ found: false, reason: "entity-out-of-scope" }` when it resolves to a repo ' +
+		"outside the closure. Pass `scope: 'global'` to bypass the closure check.",
 	family: 'source-introspection',
 	owner: 'code-analyzer',
 	version: 1,
@@ -81,6 +95,7 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 		properties: {
 			entityId: { type: 'string', description: '32-char hex entity id from another lookup skill.', minLength: 32, maxLength: 32 },
 			excerptMaxChars: { type: 'number', description: 'Optional cap on body excerpt chars; default 800.', minimum: 1, maximum: 65536 },
+			scope:    SCOPE_SCHEMA_FRAGMENT,
 		},
 		required: ['entityId'],
 		additionalProperties: false,
@@ -115,7 +130,7 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 				type: 'object',
 				properties: {
 					found:  { type: 'boolean', enum: [false] },
-					reason: { type: 'string', enum: ['entity-not-found'] },
+					reason: { type: 'string', enum: ['entity-not-found', 'entity-out-of-scope'] },
 				},
 				required: ['found', 'reason'],
 			},
@@ -124,13 +139,31 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 	toolDeps: [],
 	providerAffinity: 'auto',
 
-	async execute(input: SummaryInput, _deps: SkillDeps): Promise<SkillResult<SummaryOutput>> {
+	async execute(input: SummaryInput, deps: SkillDeps): Promise<SkillResult<SummaryOutput>> {
 		const e = await getEntity(null, input.entityId);
 		if (e === null) {
 			return {
 				value: { found: false, reason: 'entity-not-found' },
 				confidence: 'high',
 				notes: [`Entity '${input.entityId}' not in the graph.`],
+				toolCalls: [],
+			};
+		}
+
+		// Plan SCS Phase 5: defensive scope check. Refuses entityIds
+		// resolving outside the active session's DEPENDS_ON closure --
+		// catches stale ids and cross-repo leaks from a prior
+		// global-scope lookup.
+		const scope = input.scope ?? 'closure';
+		if (!isRepoInScope(deps, e.repo, scope)) {
+			return {
+				value: { found: false, reason: 'entity-out-of-scope' },
+				confidence: 'high',
+				notes: [
+					`Entity '${input.entityId}' resolves to repo '${e.repo}', which is not in the ` +
+					"active session's dependency closure. Re-run with `scope: 'global'` if you " +
+					'really want cross-project resolution.',
+				],
 				toolCalls: [],
 			};
 		}
