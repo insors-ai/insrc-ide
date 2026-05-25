@@ -1,0 +1,390 @@
+/**
+ * Interactive (tool-using) cloud planner -- Plan 4 Phase 2 of
+ * plans/code-analyzer-planner-discovery-loop.md.
+ *
+ * The cloud planner runs as a tool-using agent on the tool-loop
+ * substrate. It is handed a curated subset of the existing skill
+ * catalog + a `submit_plan` termination tool; it probes the repo
+ * via real skill calls, then emits the final plan as a structured
+ * payload via submit_plan.
+ *
+ * Replaces the static `planActions()` one-shot with a discovery
+ * loop -- the planner sees what's actually in the repo instead of
+ * a precomputed summary that often surfaced test fixtures and SQL
+ * deltas instead of real subsystems.
+ *
+ * Same outward contract as `planActions`: returns
+ * `PlanActionsResult` (`{ intentBrief, actions, degraded, note? }`).
+ * On any failure path (turn-cap exhaustion, provider error,
+ * unrecoverable schema violation), returns `degraded: true` so the
+ * orchestrator can fall back to its existing synthetic action.
+ *
+ * Behind a feature flag (`INSRC_ANALYZER_PLANNER_FLOW`) so rollback
+ * is trivial -- caller dispatches to this vs. legacy `planActions`
+ * at the orchestrator integration point.
+ */
+
+import type {
+	LLMProvider,
+	LLMMessage,
+	ToolCall,
+	ToolDefinition,
+	ToolResult,
+} from '../../shared/types.js';
+import type { ScopeSize } from '../../shared/classify.js';
+import type { AnalysisSubtype } from '../classify/scope.js';
+import type { Session } from '../session.js';
+import { runToolLoop, type TerminationTool } from '../tool-loop.js';
+import { runSkill, getSkill } from '../../daemon/skills/index.js';
+import type { SkillResult } from '../../daemon/skills/types.js';
+import { getLogger } from '../../shared/logger.js';
+import { PLAN_ACTIONS_SCHEMA } from './schema.js';
+import {
+	DEFAULT_MAX_ACTIONS,
+	type PlanActionsResult,
+	type PlannedAction,
+	_validatePlanForTest as validatePlan,
+} from './plan-actions.js';
+import { PLANNER_DISCOVERY_SKILL_IDS } from './planner-discovery-skills.js';
+
+const log = getLogger('content-gen:plan-actions-interactive');
+
+const DEFAULT_MAX_TURNS = 4;
+
+// ---------------------------------------------------------------------------
+// Public input/output
+// ---------------------------------------------------------------------------
+
+export interface PlanActionsInteractiveInput {
+	readonly intent:         string;
+	readonly request:        string;
+	readonly repoPath:       string;
+	readonly tier:           ScopeSize;
+	/** Work-shape hint from the scope classifier (Plan 3). Used to
+	 *  bias the planner's section emphasis with a single-line note in
+	 *  the system prompt. Defaults to 'review'. */
+	readonly subtype?:       AnalysisSubtype | undefined;
+	/** Session needed by `runSkill` for the dispatcher's deps. */
+	readonly session:        Session;
+	/** Provider resolver used by `runSkill` for skills whose
+	 *  affinity matters (the discovery skills are all 'auto' so the
+	 *  resolver is rarely invoked, but kept for parity). */
+	readonly resolveProvider: (affinity: 'local' | 'cloud' | 'auto') => LLMProvider;
+	readonly maxActions?:    number | undefined;
+	readonly maxTurns?:      number | undefined;
+	readonly maxTokens?:     number | undefined;
+	readonly analyzerLabel?: string | undefined;
+}
+
+/**
+ * Run the interactive planner. Throws only if `request` is empty;
+ * every other error path returns `degraded: true` with an empty
+ * `actions` array.
+ */
+export async function planActionsInteractive(
+	input: PlanActionsInteractiveInput,
+	cloudProvider: LLMProvider,
+): Promise<PlanActionsResult> {
+	if (input.request.trim().length === 0) {
+		throw new Error('planActionsInteractive: `request` must be non-empty');
+	}
+
+	const requested  = input.maxActions ?? DEFAULT_MAX_ACTIONS;
+	const maxActions = Math.max(1, Math.min(32, requested));
+	const maxTurns   = Math.max(2, Math.min(8, input.maxTurns ?? DEFAULT_MAX_TURNS));
+	const subtype    = input.subtype ?? 'review';
+
+	// Build the tool catalog from the curated planner skill list.
+	// Skills not registered are silently skipped -- means tests can
+	// run with a subset registered without crashing the planner.
+	const tools = buildPlannerToolCatalog();
+	if (tools.length === 0) {
+		log.warn({ analyzer: input.analyzerLabel }, 'planActionsInteractive: no planner skills registered; degrading');
+		return { intentBrief: '', actions: [], degraded: true, note: 'no planner skills registered' };
+	}
+
+	const messages = buildSeedMessages({
+		intent:    input.intent,
+		request:   input.request,
+		repoPath:  input.repoPath,
+		tier:      input.tier,
+		subtype,
+		tools,
+	});
+
+	// Dispatcher: route each tool-call to the actual skill via runSkill.
+	// The tool name IS the skill id (no skill_invoke wrapping at this layer).
+	const dispatcher = async (call: ToolCall): Promise<ToolResult> => {
+		try {
+			const result = await runSkill(call.name, call.input, {
+				session:         input.session,
+				resolveProvider: input.resolveProvider,
+			});
+			return {
+				toolCallId: call.id,
+				content:    renderSkillResultForLLM(call.name, result),
+				isError:    result.confidence === 'low',
+			};
+		} catch (err) {
+			return {
+				toolCallId: call.id,
+				content:    `[planner-discovery] runSkill('${call.name}') threw: ${(err as Error).message}`,
+				isError:    true,
+			};
+		}
+	};
+
+	// Termination pseudo-tool. Reuses the existing PLAN_ACTIONS_SCHEMA
+	// as its inputSchema so the cloud provider validates server-side.
+	const submitPlan: TerminationTool<{ intentBrief: string; actions: readonly PlannedAction[] }> = {
+		name:        'submit_plan',
+		description:
+			'Submit the final section plan when discovery is complete. Input is the typed ' +
+			'PlanActionsResult payload: { intentBrief, actions: [...] }. The substrate intercepts ' +
+			'this call -- it is NOT dispatched as a regular tool. Emit it ONLY when you have ' +
+			'enough repo context to commit; if combined with other tool calls in the same turn ' +
+			'the batch is rejected.',
+		inputSchema: PLAN_ACTIONS_SCHEMA as unknown as Record<string, unknown>,
+		validate:    (raw) => {
+			const result = validatePlan(raw);
+			if (typeof result === 'string') {
+				return result;
+			}
+			return { intentBrief: result.intentBrief, actions: result.actions };
+		},
+	};
+
+	const outcome = await runToolLoop<{ intentBrief: string; actions: readonly PlannedAction[] }>({
+		provider:     cloudProvider,
+		messages,
+		tools,
+		dispatchTool: dispatcher,
+		policy: {
+			maxTurns,
+			toolChoice:             'auto',
+			...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+			terminationTool:        submitPlan,
+			onMixedTermination:     'reject',
+			onSchemaViolation:      'retry-with-correction',
+			stopOnDegenerateRepeat: true,
+		},
+		label: 'planner-discovery',
+	});
+
+	if (outcome.kind === 'terminated') {
+		const clamped = outcome.payload.actions.slice(0, maxActions);
+		log.info(
+			{
+				analyzer:        input.analyzerLabel,
+				turnCount:       outcome.turnCount,
+				actionCount:     clamped.length,
+				intentBriefLen:  outcome.payload.intentBrief.length,
+			},
+			'planActionsInteractive: complete (terminated via submit_plan)',
+		);
+		return {
+			intentBrief: outcome.payload.intentBrief,
+			actions:     clamped,
+			degraded:    false,
+		};
+	}
+
+	const note = describeOutcomeForDegraded(outcome);
+	log.warn(
+		{
+			analyzer:  input.analyzerLabel,
+			outcome:   outcome.kind,
+			turnCount: outcome.turnCount,
+			note,
+		},
+		'planActionsInteractive: degraded (loop did not terminate cleanly)',
+	);
+	return {
+		intentBrief: '',
+		actions:     [],
+		degraded:    true,
+		note:        `planner-discovery: ${note}`,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Tool catalog construction
+// ---------------------------------------------------------------------------
+
+function buildPlannerToolCatalog(): ToolDefinition[] {
+	const out: ToolDefinition[] = [];
+	for (const id of PLANNER_DISCOVERY_SKILL_IDS) {
+		const skill = getSkill(id);
+		if (skill === undefined) {
+			continue;
+		}
+		out.push({
+			name:        skill.id,
+			description: skill.description,
+			inputSchema: skill.inputs,
+		});
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------------
+// Subtype hints (Plan 3 consumer)
+// ---------------------------------------------------------------------------
+
+const SUBTYPE_HINTS: Readonly<Record<AnalysisSubtype, string>> = Object.freeze({
+	review:    'This is a review request -- bias your sections toward surfacing gaps, risks, weak spots, and improvement opportunities.',
+	summarize: 'This is a summarize request -- bias toward concise, broad-stroke sections. Prefer fewer sections; avoid exhaustive enumeration.',
+	audit:     'This is an audit request -- bias toward exhaustive coverage with explicit verdicts on each axis. Don\'t skip relevant axes; surface problems clearly.',
+	explain:   'This is an explain request -- bias toward pedagogical walkthrough. Sections should teach how/why things work, not just list what\'s there.',
+	compare:   'This is a compare request -- bias each section toward two-sided framing (X vs Y, before vs after).',
+	document:  'This is a document request -- bias toward neutral, complete reference documentation. Sections should read like docs, not opinions.',
+	diagnose:  'This is a diagnose request -- bias toward evidence-driven cause analysis. Sections should follow the investigation, not the codebase\'s structure.',
+});
+
+// ---------------------------------------------------------------------------
+// Seed prompt
+// ---------------------------------------------------------------------------
+
+interface BuildSeedInput {
+	readonly intent:   string;
+	readonly request:  string;
+	readonly repoPath: string;
+	readonly tier:     ScopeSize;
+	readonly subtype:  AnalysisSubtype;
+	readonly tools:    readonly ToolDefinition[];
+}
+
+function buildSeedMessages(input: BuildSeedInput): LLMMessage[] {
+	const systemLines: string[] = [
+		`You plan a ${input.intent} report for a coding assistant.`,
+		'',
+		'You have access to a curated set of discovery skills that let you',
+		'inspect the repo before committing to a section plan. Use them.',
+		'',
+		'## How to plan',
+		'',
+		'1. Read the request and the repo path below.',
+		'2. Use the discovery skills to learn what is ACTUALLY in this repo --',
+		'   list top-level subdirs, describe modules the request points at,',
+		'   read README files, grep for features, list git changes when the',
+		'   request mentions them.',
+		'3. Commit ONLY when you can name each section after a real subsystem',
+		'   you have observed (not a generic axis label). When ready, call',
+		'   `submit_plan({ intentBrief, actions })` with the final plan.',
+		'',
+		'## Discovery skills',
+		'',
+		'You have these skills available. Each one\'s schema is registered with',
+		'the provider -- the tool-use API will surface the inputs:',
+		'',
+		...input.tools.map(t => `- \`${t.name}\` -- ${t.description}`),
+		'',
+		'## Termination',
+		'',
+		'When the final plan is ready, emit a SINGLE tool_use for `submit_plan`',
+		'with the typed payload. Do NOT combine `submit_plan` with other tool',
+		'calls in the same turn -- the substrate rejects mixed batches.',
+		'',
+		'## Per-action requirements',
+		'',
+		'Each action in the submitted plan MUST have:',
+		'  - `id`              -- kebab-case stable key, deduped across actions',
+		'  - `title`           -- short heading naming a SPECIFIC subsystem /',
+		'                         module / file group from the repo you\'ve',
+		'                         observed via discovery. Generic axis titles',
+		'                         like "Testing Framework", "External Dependencies",',
+		'                         "Deployment & Build Artifacts" are CODE SMELLS --',
+		'                         they signal you didn\'t use discovery enough.',
+		'                         If you find yourself wanting to write one,',
+		'                         probe more first.',
+		'  - `objective`       -- ONE sentence stating WHAT the section answers.',
+		'                         Goal, not tool call.',
+		'  - `maxBudgetTokens` -- cap for the local writer (default 1500;',
+		'                         clamp 400-3000).',
+		'  - `reviewCriteria`  -- 3-5 concrete checkable statements (e.g.',
+		'                         "names the persistence client(s) used and',
+		'                         the table layout"), preferably referencing',
+		'                         class names / file paths you observed.',
+		'',
+		`## Subtype bias (${input.subtype})`,
+		SUBTYPE_HINTS[input.subtype],
+	];
+
+	const userLines: string[] = [
+		'## Intent',
+		input.intent,
+		'',
+		'## Request',
+		input.request.trim(),
+		'',
+		'## Active repo',
+		input.repoPath,
+		'',
+		'## Scope tier',
+		input.tier,
+		'',
+		'Begin your discovery now. Use the skills above; commit via',
+		'`submit_plan` when the plan is ready.',
+	];
+
+	return [
+		{ role: 'system', content: systemLines.join('\n') },
+		{ role: 'user',   content: userLines.join('\n') },
+	];
+}
+
+// ---------------------------------------------------------------------------
+// Skill result rendering
+// ---------------------------------------------------------------------------
+
+/**
+ * Render a SkillResult as the textual `content` of a ToolResult the
+ * cloud planner will read. Kept compact; the planner doesn't need
+ * markdown formatting like the per-section flow does.
+ */
+function renderSkillResultForLLM(skillName: string, result: SkillResult<unknown>): string {
+	const parts: string[] = [];
+	parts.push(`[skill:${skillName}] confidence=${result.confidence}`);
+	const notes = result.notes ?? [];
+	if (notes.length > 0) {
+		parts.push('notes:');
+		for (const n of notes) {
+			parts.push(`  - ${n}`);
+		}
+	}
+	let valueJson: string;
+	try {
+		valueJson = JSON.stringify(result.value, null, 2);
+	} catch {
+		valueJson = '<unserializable>';
+	}
+	parts.push('value:');
+	parts.push(valueJson);
+	return parts.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Outcome -> degraded note
+// ---------------------------------------------------------------------------
+
+function describeOutcomeForDegraded(outcome: {
+	readonly kind: 'no-tools' | 'exhausted' | 'provider-error' | 'dispatched';
+	readonly reason?: string;
+	readonly err?: Error;
+}): string {
+	switch (outcome.kind) {
+		case 'no-tools':       return 'planner emitted text instead of submit_plan';
+		case 'exhausted':      return `planner exhausted turn budget: ${outcome.reason ?? 'unknown'}`;
+		case 'provider-error': return `cloud provider error: ${outcome.err?.message ?? 'unknown'}`;
+		case 'dispatched':     return 'unexpected dispatched outcome (stopOnFirstDispatch should be off here)';
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test exports
+// ---------------------------------------------------------------------------
+
+export const _buildSeedMessagesForTest         = buildSeedMessages;
+export const _buildPlannerToolCatalogForTest   = buildPlannerToolCatalog;
+export const _renderSkillResultForLLMForTest   = renderSkillResultForLLM;
+export const _SUBTYPE_HINTS_FOR_TEST           = SUBTYPE_HINTS;
