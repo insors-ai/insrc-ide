@@ -97,7 +97,10 @@ export async function planActionsInteractive(
 	// Build the tool catalog from the curated planner skill list.
 	// Skills not registered are silently skipped -- means tests can
 	// run with a subset registered without crashing the planner.
-	const tools = buildPlannerToolCatalog();
+	// `nameToSkillId` maps the sanitized wire-format name (dots ->
+	// underscores) back to the original dotted skill id so the
+	// dispatcher can `runSkill` against the real registry key.
+	const { tools, nameToSkillId } = buildPlannerToolCatalog();
 	if (tools.length === 0) {
 		log.warn({ analyzer: input.analyzerLabel }, 'planActionsInteractive: no planner skills registered; degrading');
 		return { intentBrief: '', actions: [], degraded: true, note: 'no planner skills registered' };
@@ -113,22 +116,36 @@ export async function planActionsInteractive(
 	});
 
 	// Dispatcher: route each tool-call to the actual skill via runSkill.
-	// The tool name IS the skill id (no skill_invoke wrapping at this layer).
+	// `call.name` is the sanitized wire-format name (e.g.
+	// `code_source_repo_describe`); we resolve it back to the dotted
+	// skill id (`code.source.repo.describe`) via `nameToSkillId` before
+	// hitting runSkill. Unknown names get an explicit isError so the
+	// LLM sees the typed feedback instead of a stack trace.
 	const dispatcher = async (call: ToolCall): Promise<ToolResult> => {
+		const skillId = nameToSkillId.get(call.name);
+		if (skillId === undefined) {
+			return {
+				toolCallId: call.id,
+				content:
+					`[planner-discovery] '${call.name}' is not in the planner catalog. ` +
+					`Available tools: ${[...nameToSkillId.keys()].join(', ')}.`,
+				isError: true,
+			};
+		}
 		try {
-			const result = await runSkill(call.name, call.input, {
+			const result = await runSkill(skillId, call.input, {
 				session:         input.session,
 				resolveProvider: input.resolveProvider,
 			});
 			return {
 				toolCallId: call.id,
-				content:    renderSkillResultForLLM(call.name, result),
+				content:    renderSkillResultForLLM(skillId, result),
 				isError:    result.confidence === 'low',
 			};
 		} catch (err) {
 			return {
 				toolCallId: call.id,
-				content:    `[planner-discovery] runSkill('${call.name}') threw: ${(err as Error).message}`,
+				content:    `[planner-discovery] runSkill('${skillId}') threw: ${(err as Error).message}`,
 				isError:    true,
 			};
 		}
@@ -211,20 +228,46 @@ export async function planActionsInteractive(
 // Tool catalog construction
 // ---------------------------------------------------------------------------
 
-function buildPlannerToolCatalog(): ToolDefinition[] {
-	const out: ToolDefinition[] = [];
+/**
+ * Sanitize a dotted skill id (e.g. `code.source.repo.describe`) into
+ * a wire-format tool name (e.g. `code_source_repo_describe`).
+ *
+ * Anthropic enforces `^[a-zA-Z0-9_-]{1,128}$` on `tools[].custom.name`
+ * and rejects requests with a 400 if any tool carries a dotted name.
+ * OpenAI / Mistral / Gemini share the same alphanumeric+underscore
+ * convention. Underscoring is the lowest-friction transform that
+ * keeps the name unique (no two registered skill ids differ only in
+ * `.` vs `_`).
+ *
+ * Pure function; exported for testability.
+ */
+export function sanitizeToolName(skillId: string): string {
+	return skillId.replace(/\./g, '_');
+}
+
+interface PlannerToolCatalog {
+	readonly tools:         ToolDefinition[];
+	/** Map sanitized wire-format name -> original dotted skill id. */
+	readonly nameToSkillId: ReadonlyMap<string, string>;
+}
+
+function buildPlannerToolCatalog(): PlannerToolCatalog {
+	const tools: ToolDefinition[] = [];
+	const nameToSkillId = new Map<string, string>();
 	for (const id of PLANNER_DISCOVERY_SKILL_IDS) {
 		const skill = getSkill(id);
 		if (skill === undefined) {
 			continue;
 		}
-		out.push({
-			name:        skill.id,
+		const wireName = sanitizeToolName(skill.id);
+		nameToSkillId.set(wireName, skill.id);
+		tools.push({
+			name:        wireName,
 			description: skill.description,
 			inputSchema: skill.inputs,
 		});
 	}
-	return out;
+	return { tools, nameToSkillId };
 }
 
 // ---------------------------------------------------------------------------

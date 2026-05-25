@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
 	planActionsInteractive,
+	sanitizeToolName,
 	_buildSeedMessagesForTest         as buildSeedMessages,
 	_buildPlannerToolCatalogForTest   as buildPlannerToolCatalog,
 	_renderSkillResultForLLMForTest   as renderSkillResultForLLM,
@@ -160,30 +161,66 @@ test('buildSeedMessages: lists every supplied tool in the catalog section', () =
 // Tool catalog construction
 // ---------------------------------------------------------------------------
 
-test('buildPlannerToolCatalog: registers all 9 planner-discovery skill IDs after registerAllSkills', () => {
+test('buildPlannerToolCatalog: registers all 9 planner-discovery skill IDs after registerAllSkills (sanitized wire names)', () => {
 	setup();
-	const catalog = buildPlannerToolCatalog();
-	const names = catalog.map(t => t.name).sort();
+	const { tools, nameToSkillId } = buildPlannerToolCatalog();
+	const names = tools.map(t => t.name).sort();
+	// Wire-format names: dotted skill ids -> underscored tool names so
+	// Anthropic / OpenAI / Mistral / Gemini regexes accept them.
 	assert.deepEqual(names, [
-		'code.entity.locate-by-name',
-		'code.entity.search-by-vector',
-		'code.entity.summary',
-		'code.repo.git-recent',
-		'code.repo.git-status',
-		'code.source.file.describe',
-		'code.source.grep',
-		'code.source.module.describe',
-		'code.source.repo.describe',
+		'code_entity_locate-by-name',
+		'code_entity_search-by-vector',
+		'code_entity_summary',
+		'code_repo_git-recent',
+		'code_repo_git-status',
+		'code_source_file_describe',
+		'code_source_grep',
+		'code_source_module_describe',
+		'code_source_repo_describe',
 	]);
+	// Round-trip map: every wire name resolves back to its dotted skill id.
+	for (const n of names) {
+		const skillId = nameToSkillId.get(n);
+		assert.ok(skillId !== undefined, `${n}: missing reverse map entry`);
+		assert.equal(sanitizeToolName(skillId!), n);
+	}
 });
 
 test('buildPlannerToolCatalog: each tool carries its skill description and schema', () => {
 	setup();
-	const catalog = buildPlannerToolCatalog();
-	for (const t of catalog) {
+	const { tools } = buildPlannerToolCatalog();
+	for (const t of tools) {
 		assert.ok(t.description.length > 30, `${t.name}: description too short`);
 		assert.ok(typeof t.inputSchema === 'object', `${t.name}: no schema`);
 	}
+});
+
+test('buildPlannerToolCatalog: every wire name passes Anthropic / OpenAI tool-name regex', () => {
+	// `^[a-zA-Z0-9_-]{1,128}$` -- the strictest published constraint
+	// across the four cloud providers (Anthropic's tools[].custom.name).
+	// Plus the `submit_plan` termination tool name, which also has to
+	// pass since the substrate puts it through the same channel.
+	const PROVIDER_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+	setup();
+	const { tools } = buildPlannerToolCatalog();
+	for (const t of tools) {
+		assert.ok(
+			PROVIDER_REGEX.test(t.name),
+			`tool name '${t.name}' fails provider regex ^[a-zA-Z0-9_-]{1,128}$ -- ` +
+			'cloud providers (Anthropic / OpenAI / etc.) will 400 the request',
+		);
+	}
+	// `submit_plan` is the termination pseudo-tool name; assert directly
+	// since it's a static literal in the planner code.
+	assert.ok(PROVIDER_REGEX.test('submit_plan'));
+});
+
+test('sanitizeToolName: dots -> underscores, idempotent for already-safe ids', () => {
+	assert.equal(sanitizeToolName('code.source.repo.describe'), 'code_source_repo_describe');
+	assert.equal(sanitizeToolName('code.entity.locate-by-name'), 'code_entity_locate-by-name');
+	// Already-sanitized names round-trip unchanged.
+	assert.equal(sanitizeToolName('submit_plan'), 'submit_plan');
+	assert.equal(sanitizeToolName('plain'),       'plain');
 });
 
 // ---------------------------------------------------------------------------
@@ -246,7 +283,7 @@ test('planActionsInteractive: probe then submit_plan -> returns PlanActionsResul
 	};
 	const { provider, calls } = fakeProvider([
 		// Turn 1: probe (returns error -- skill will fail on missing fixtures, that's fine)
-		resp({ toolCalls: [toolUse('code.source.module.describe', { modulePath: '/nonexistent', repoPath: '/nonexistent' }, 't1')] }),
+		resp({ toolCalls: [toolUse('code_source_module_describe', { modulePath: '/nonexistent', repoPath: '/nonexistent' }, 't1')] }),
 		// Turn 2: commit via submit_plan
 		resp({ toolCalls: [toolUse('submit_plan', submitPayload, 't2')] }),
 	]);
@@ -298,10 +335,10 @@ test('planActionsInteractive: turn-cap exhausted -> degraded', async () => {
 	setup();
 	// 4 turns of probes, never commits -> exhausts at turn 4.
 	const { provider } = fakeProvider([
-		resp({ toolCalls: [toolUse('code.source.module.describe', { modulePath: '/a', repoPath: '/a' }, '1')] }),
-		resp({ toolCalls: [toolUse('code.source.module.describe', { modulePath: '/b', repoPath: '/b' }, '2')] }),
-		resp({ toolCalls: [toolUse('code.source.module.describe', { modulePath: '/c', repoPath: '/c' }, '3')] }),
-		resp({ toolCalls: [toolUse('code.source.module.describe', { modulePath: '/d', repoPath: '/d' }, '4')] }),
+		resp({ toolCalls: [toolUse('code_source_module_describe', { modulePath: '/a', repoPath: '/a' }, '1')] }),
+		resp({ toolCalls: [toolUse('code_source_module_describe', { modulePath: '/b', repoPath: '/b' }, '2')] }),
+		resp({ toolCalls: [toolUse('code_source_module_describe', { modulePath: '/c', repoPath: '/c' }, '3')] }),
+		resp({ toolCalls: [toolUse('code_source_module_describe', { modulePath: '/d', repoPath: '/d' }, '4')] }),
 	]);
 	const out = await planActionsInteractive({
 		intent: 'code-analysis', request: 'wander', repoPath: '/r', tier: 'XL',
