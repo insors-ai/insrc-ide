@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
 import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { planActionsInteractive } from '../../agent/content-gen/plan-actions-interactive.js';
 import { verifyPlannedActions } from '../../agent/content-gen/verify-planned-actions.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
@@ -706,17 +707,54 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       tierContext = '';
     }
 
-    const plan = await planActions(
-      {
-        intent:         'code-analysis',
-        request,
-        summaryContext,
-        tier,
-        tierContext,
-        analyzerLabel: 'code-analyzer',
-      },
-      cloud,
-    );
+    // Plan 4 Phase 4 of plans/code-analyzer-planner-discovery-loop.md:
+    // env-flag dispatch between the legacy one-shot planner and the
+    // interactive tool-using planner. Default = interactive; set
+    // INSRC_ANALYZER_PLANNER_FLOW=static for rollback to the legacy
+    // path. The two functions return the same `PlanActionsResult`
+    // shape, so the downstream verify + fallback code below is
+    // unchanged on either branch.
+    const plannerFlow = (process.env['INSRC_ANALYZER_PLANNER_FLOW'] ?? 'interactive').toLowerCase();
+    let plan;
+    if (plannerFlow === 'static') {
+      plan = await planActions(
+        {
+          intent:         'code-analysis',
+          request,
+          summaryContext,
+          tier,
+          tierContext,
+          analyzerLabel: 'code-analyzer',
+        },
+        cloud,
+      );
+    } else {
+      // TODO(plan-3-thread-subtype): subtype is hard-coded to 'review'
+      // here. Plan 3 (scope-classifier-subtype-extension) wires the
+      // classifier's subtype through to chat-handler; a follow-up
+      // commit will thread it from chat-handler -> orchestrator
+      // (likely on `this._tier` or a sibling field).
+      const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
+        switch (affinity) {
+          case 'local': return session.ollamaProvider;
+          case 'cloud': return session.claudeProvider ?? session.ollamaProvider;
+          case 'auto':  return session.resolver.resolve('skill', 'default');
+        }
+      };
+      plan = await planActionsInteractive(
+        {
+          intent:         'code-analysis',
+          request,
+          repoPath:       session.repoPath,
+          tier,
+          subtype:        'review',
+          session,
+          resolveProvider,
+          analyzerLabel:  'code-analyzer',
+        },
+        cloud,
+      );
+    }
 
     const plannedActions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
       ? [synthesiseFallbackAction(ca, accepted)]
