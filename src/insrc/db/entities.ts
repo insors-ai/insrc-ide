@@ -568,23 +568,44 @@ export async function findEntitiesByName(
 	names: readonly string[],
 	opts: {
 		readonly kinds?: readonly EntityKind[] | undefined;
-		readonly repo?: string | undefined;
+		readonly repo?:  string | undefined;
+		/**
+		 * Multi-repo filter (Phase 6 of plans/skill-closure-scoping.md).
+		 * Mutually exclusive with `repo`. Pass the active session's
+		 * closure here to scope name lookups to the session repo +
+		 * transitive DEPENDS_ON dependents. Empty array = no matches
+		 * (explicit empty scope); unknown paths are silently dropped.
+		 */
+		readonly repos?: readonly string[] | undefined;
 		readonly limit?: number | undefined;
 	} = {},
 ): Promise<Entity[]> {
 	if (names.length === 0) return [];
 
+	if (opts.repo !== undefined && opts.repos !== undefined) {
+		throw new Error(
+			'findEntitiesByName: pass either `repo` (single) or `repos` (multi), not both',
+		);
+	}
+
 	const store = await getGraphStore();
 	const limit = opts.limit ?? 50;
 	const repoCache = new Map<number, string>();
 
-	// Resolve the repo set we'll probe. With `opts.repo` set, that's
-	// just the one repoId; without it, we have to probe every
-	// registered repo (the name_index key is repo-scoped).
+	// Resolve the repo set we'll probe. `repos` (multi) > `repo`
+	// (single) > unscoped (every registered repo). The name_index key
+	// is repo-scoped, so we need explicit repoIds either way.
 	const repoIds: number[] = [];
-	if (opts.repo !== undefined) {
+	if (opts.repos !== undefined) {
+		if (opts.repos.length === 0) return [];   // explicit empty scope
+		for (const p of opts.repos) {
+			const id = lookupRepoIdInTxn(store, p);
+			if (id !== undefined) repoIds.push(id);
+		}
+		if (repoIds.length === 0) return [];     // none resolved
+	} else if (opts.repo !== undefined) {
 		const id = lookupRepoIdInTxn(store, opts.repo);
-		if (id === undefined) return []; // unknown repo -> no matches
+		if (id === undefined) return [];          // unknown repo
 		repoIds.push(id);
 	} else {
 		for (const { key } of store.repo.getRange()) {

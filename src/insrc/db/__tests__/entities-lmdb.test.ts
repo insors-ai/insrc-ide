@@ -59,7 +59,7 @@ let dir: string;
  * file so individual tests don't have to.
  */
 const TEST_REPO_PATHS = [
-	'/repo/foo', '/repo/x', '/repo/y', '/repo/a', '/repo/b', '/repo/c',
+	'/repo/foo', '/repo/x', '/repo/y', '/repo/z', '/repo/a', '/repo/b', '/repo/c',
 	'/repo/nonexistent', '/path/to/myrepo',
 ] as const;
 
@@ -271,6 +271,49 @@ test('findEntitiesByName respects repo filter', async () => {
 	const xs = await findEntitiesByName(null, ['foo'], { repo: '/repo/x' });
 	assert.equal(xs.length, 1);
 	assert.equal(xs[0]!.repo, '/repo/x');
+});
+
+test('findEntitiesByName respects multi-repo `repos` filter', async () => {
+	await upsertEntities(null, [
+		makeEntity({ name: 'foo', repo: '/repo/x', file: '/repo/x/a.ts' }),
+		makeEntity({ name: 'foo', repo: '/repo/y', file: '/repo/y/a.ts' }),
+		makeEntity({ name: 'foo', repo: '/repo/z', file: '/repo/z/a.ts' }),
+	]);
+	const xy = await findEntitiesByName(null, ['foo'], { repos: ['/repo/x', '/repo/y'] });
+	assert.equal(xy.length, 2);
+	const got = new Set(xy.map(e => e.repo));
+	assert.ok(got.has('/repo/x'));
+	assert.ok(got.has('/repo/y'));
+	assert.ok(!got.has('/repo/z'));
+});
+
+test('findEntitiesByName: empty `repos` array returns []', async () => {
+	await upsertEntities(null, [
+		makeEntity({ name: 'foo', repo: '/repo/x', file: '/repo/x/a.ts' }),
+	]);
+	const out = await findEntitiesByName(null, ['foo'], { repos: [] });
+	assert.deepEqual(out, []);
+});
+
+test('findEntitiesByName: `repos` with unknown paths drops them silently', async () => {
+	await upsertEntities(null, [
+		makeEntity({ name: 'foo', repo: '/repo/x', file: '/repo/x/a.ts' }),
+	]);
+	const out = await findEntitiesByName(null, ['foo'], {
+		repos: ['/repo/x', '/repo/does-not-exist'],
+	});
+	assert.equal(out.length, 1);
+	assert.equal(out[0]!.repo, '/repo/x');
+});
+
+test('findEntitiesByName: passing both `repo` and `repos` throws', async () => {
+	await assert.rejects(
+		() => findEntitiesByName(null, ['foo'], {
+			repo:  '/repo/x',
+			repos: ['/repo/y'],
+		}),
+		/either `repo` \(single\) or `repos` \(multi\), not both/,
+	);
 });
 
 test('findEntitiesByName respects limit', async () => {
