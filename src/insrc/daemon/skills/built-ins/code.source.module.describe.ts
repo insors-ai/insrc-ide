@@ -24,6 +24,8 @@
  * path, or filtered out by the indexer's exclusion rules).
  */
 
+import { readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { listEntitiesForRepo } from '../../../db/entities.js';
@@ -63,6 +65,22 @@ type ModuleDescribeOutput =
 		readonly files:         readonly ModuleFile[];
 		readonly entities:      readonly ModuleEntity[];
 		readonly publicSurface: readonly ModuleEntity[];
+		/**
+		 * Where the file listing came from. 'graph' = file entities
+		 * from the indexed code graph (the normal path, has parsed
+		 * entities). 'disk-listing' = the directory had no indexed
+		 * files, so we fell back to a filesystem walk; entities[] /
+		 * publicSurface[] / languages[] will be empty in this mode,
+		 * but `files[]` carries the basenames the planner can probe
+		 * via `code.source.file.describe` or `code.source.grep`.
+		 */
+		readonly source?:      'graph' | 'disk-listing';
+		/**
+		 * Subdirectory basenames (relative to modulePath). Only set in
+		 * 'disk-listing' mode so the planner can probe deeper without
+		 * a second tool call.
+		 */
+		readonly subdirs?:     readonly string[];
 	}
 	| {
 		readonly found:  false;
@@ -109,6 +127,8 @@ const codeSourceModuleDescribeSkill: Skill<ModuleDescribeInput, ModuleDescribeOu
 					files:         { type: 'array' },
 					entities:      { type: 'array' },
 					publicSurface: { type: 'array' },
+					source:        { type: 'string', enum: ['graph', 'disk-listing'] },
+					subdirs:       { type: 'array' },
 				},
 				required: ['found', 'modulePath', 'fileCount', 'entityCount', 'publicCount', 'languages', 'files', 'entities', 'publicSurface'],
 			},
@@ -154,6 +174,21 @@ const codeSourceModuleDescribeSkill: Skill<ModuleDescribeInput, ModuleDescribeOu
 		}
 
 		if (files.length === 0) {
+			// Plan 4 Phase 1b: when the graph has nothing indexed under
+			// this path, fall back to a filesystem walk. Catches the
+			// case of unparsed-language dirs (docker/, deployments/,
+			// config/, shell-script dirs) that the planner needs to
+			// know about. Mirrors the file-read fallback we shipped
+			// for code.source.file.describe.
+			const fallback = await tryDiskListingFallback(input.modulePath);
+			if (fallback !== null) {
+				return {
+					value: fallback,
+					confidence: 'medium',
+					notes: [`No indexed files under '${input.modulePath}'; returned a disk listing (no parsed entities).`],
+					toolCalls: [],
+				};
+			}
 			return {
 				value: { found: false, reason: 'no-files-in-module' },
 				confidence: 'high',
@@ -174,6 +209,7 @@ const codeSourceModuleDescribeSkill: Skill<ModuleDescribeInput, ModuleDescribeOu
 			files,
 			entities,
 			publicSurface,
+			source:        'graph',
 		};
 		return {
 			value: out,
@@ -183,6 +219,77 @@ const codeSourceModuleDescribeSkill: Skill<ModuleDescribeInput, ModuleDescribeOu
 		};
 	},
 };
+
+// ---------------------------------------------------------------------------
+// Disk-listing fallback (Plan 4 Phase 1b)
+// ---------------------------------------------------------------------------
+
+const FALLBACK_EXCLUDED_DIRS = new Set<string>([
+	'node_modules', '.git', '.svn', 'dist', 'build', 'out', 'target',
+	'__pycache__', '.venv', 'venv', '.pytest_cache', '.cache',
+]);
+const FALLBACK_MAX_FILES   = 100;
+const FALLBACK_MAX_SUBDIRS = 50;
+
+async function tryDiskListingFallback(
+	modulePath: string,
+): Promise<Extract<ModuleDescribeOutput, { found: true }> | null> {
+	try {
+		const s = await stat(modulePath);
+		if (!s.isDirectory()) {
+			return null;
+		}
+	} catch {
+		return null;
+	}
+	let entries: import('node:fs').Dirent[];
+	try {
+		entries = await readdir(modulePath, { withFileTypes: true });
+	} catch {
+		return null;
+	}
+
+	const fileBasenames: string[]   = [];
+	const subdirBasenames: string[] = [];
+	for (const ent of entries) {
+		if (FALLBACK_EXCLUDED_DIRS.has(ent.name)) {
+			continue;
+		}
+		if (ent.isFile()) {
+			if (fileBasenames.length < FALLBACK_MAX_FILES) {
+				fileBasenames.push(ent.name);
+			}
+		} else if (ent.isDirectory()) {
+			if (subdirBasenames.length < FALLBACK_MAX_SUBDIRS) {
+				subdirBasenames.push(ent.name);
+			}
+		}
+	}
+
+	// Build synthetic ModuleFile rows. No entityId (no graph backing),
+	// no language detection (cheap fallback), no endLine; we set
+	// minimal placeholder values the schema accepts.
+	const syntheticFiles: ModuleFile[] = fileBasenames.map(name => ({
+		path:     join(modulePath, name),
+		language: 'unknown' as Language,
+		endLine:  0,
+		entityId: '',
+	}));
+
+	return {
+		found:         true,
+		modulePath,
+		fileCount:     syntheticFiles.length,
+		entityCount:   0,
+		publicCount:   0,
+		languages:     [],
+		files:         syntheticFiles,
+		entities:      [],
+		publicSurface: [],
+		source:        'disk-listing',
+		subdirs:       subdirBasenames,
+	};
+}
 
 function toModuleEntity(e: Entity): ModuleEntity {
 	let m: ModuleEntity = {

@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -246,7 +246,7 @@ test('module.describe: directory with files -> aggregates files + entities + pub
 	assert.deepEqual(names, ['Order', 'User']);
 });
 
-test('module.describe: empty directory -> { found: false, reason: no-files-in-module }', async () => {
+test('module.describe: empty directory (not on disk either) -> { found: false, reason: no-files-in-module }', async () => {
 	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
 		'code.source.module.describe',
 		{ modulePath: `${REPO}/src/empty`, repoPath: REPO },
@@ -255,6 +255,79 @@ test('module.describe: empty directory -> { found: false, reason: no-files-in-mo
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['found'], false);
 	assert.equal(v['reason'], 'no-files-in-module');
+});
+
+test('module.describe: source=graph when indexed files exist (backward-compat marker)', async () => {
+	const filePath = `${REPO}/src/marker/Foo.ts`;
+	const file = fileEnt(filePath);
+	await upsertEntities(null, [file]);
+	const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+		'code.source.module.describe',
+		{ modulePath: `${REPO}/src/marker`, repoPath: REPO },
+		{},
+	);
+	const v = result.value as Record<string, unknown>;
+	assert.equal(v['found'], true);
+	assert.equal(v['source'], 'graph');
+});
+
+test('module.describe: no indexed files but dir exists on disk -> disk-listing fallback', async () => {
+	// Plan 4 Phase 1b: when the graph has nothing indexed under the
+	// path but the dir is on disk (config / deployment / shell-script
+	// dirs), return a basic file + subdir listing so the planner can
+	// still see what's there.
+	const realDir = mkdtempSync(join(tmpdir(), 'insrc-module-fallback-'));
+	try {
+		// Write some unparsed-language files
+		writeFileSync(join(realDir, 'Dockerfile'), 'FROM python:3.11\n');
+		writeFileSync(join(realDir, 'config.yaml'), 'key: value\n');
+		writeFileSync(join(realDir, 'build.sh'),    '#!/bin/bash\n');
+		// And a subdirectory
+		mkdirSync(join(realDir, 'subconfig'));
+
+		// Don't register the realDir as a repo -- listEntitiesForRepo
+		// will throw if we pass an unregistered path. Use REPO and let
+		// the under-modulePath filter find zero matches.
+		const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+			'code.source.module.describe',
+			{ modulePath: realDir, repoPath: REPO },
+			{},
+		);
+		const v = result.value as Record<string, unknown>;
+		assert.equal(v['found'], true);
+		assert.equal(v['source'], 'disk-listing');
+		assert.equal(v['entityCount'], 0);
+		const files = v['files'] as Array<{ path: string }>;
+		const subdirs = v['subdirs'] as string[];
+		assert.equal(files.length, 3);
+		assert.ok(files.some(f => f.path.endsWith('Dockerfile')));
+		assert.ok(files.some(f => f.path.endsWith('config.yaml')));
+		assert.deepEqual(subdirs, ['subconfig']);
+		assert.equal(result.confidence, 'medium');
+	} finally {
+		rmSync(realDir, { recursive: true, force: true });
+	}
+});
+
+test('module.describe: disk-listing excludes node_modules + .git', async () => {
+	const realDir = mkdtempSync(join(tmpdir(), 'insrc-module-fallback-excl-'));
+	try {
+		mkdirSync(join(realDir, 'node_modules'));
+		mkdirSync(join(realDir, '.git'));
+		mkdirSync(join(realDir, 'src'));
+		writeFileSync(join(realDir, 'README.md'), '# hi\n');
+
+		const { result } = await runSkillIsolated<unknown, Record<string, unknown>>(
+			'code.source.module.describe',
+			{ modulePath: realDir, repoPath: REPO },
+			{},
+		);
+		const v = result.value as Record<string, unknown>;
+		const subdirs = v['subdirs'] as string[];
+		assert.deepEqual(subdirs.sort(), ['src']);   // node_modules + .git excluded
+	} finally {
+		rmSync(realDir, { recursive: true, force: true });
+	}
 });
 
 // ---------------------------------------------------------------------------

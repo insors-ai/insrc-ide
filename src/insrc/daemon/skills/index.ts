@@ -24,6 +24,9 @@ import { registerCodeMigrationExtractHistorySkill } from './built-ins/code.migra
 import { registerCodeSourceFileDescribeSkill } from './built-ins/code.source.file.describe.js';
 import { registerCodeSourceModuleDescribeSkill } from './built-ins/code.source.module.describe.js';
 import { registerCodeSourceRepoDescribeSkill } from './built-ins/code.source.repo.describe.js';
+import { registerCodeSourceGrepSkill } from './built-ins/code.source.grep.js';
+import { registerCodeRepoGitStatusSkill } from './built-ins/code.repo.git-status.js';
+import { registerCodeRepoGitRecentSkill } from './built-ins/code.repo.git-recent.js';
 import { registerCodeEntityLocateByNameSkill } from './built-ins/code.entity.locate-by-name.js';
 import { registerCodeEntitySummarySkill } from './built-ins/code.entity.summary.js';
 import {
@@ -166,6 +169,10 @@ export function registerAllSkills(): void {
   registerCodeSourceFileDescribeSkill();
   registerCodeSourceModuleDescribeSkill();
   registerCodeSourceRepoDescribeSkill();
+  // Plan 4 (planner-discovery loop) -- bounded literal grep + git-state probes.
+  registerCodeSourceGrepSkill();
+  registerCodeRepoGitStatusSkill();
+  registerCodeRepoGitRecentSkill();
   // code-analyzer-skills.md Phase 2 -- entity-lookup skills.
   // Owner-facing typed wrappers over the shipped graph helpers.
   registerCodeEntityLocateByNameSkill();
