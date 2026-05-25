@@ -110,16 +110,18 @@ export const gatherContextStep: AgentStep<PlannerState> = {
       searches = [{ query: state.input.message.slice(0, 200), filter: 'all', limit: 15 }];
     }
 
-    // Execute searches in parallel
+    // Execute searches serially (no-parallel-LLM rule; each search
+    // runs an Ollama query-embedding through provider.search).
     const allEntities: Entity[] = [];
     const seenIds = new Set<string>();
 
-    const searchResults = await Promise.all(
-      searches.map(s =>
-        provider.search(s.query, s.limit || 10, (s.filter as 'all' | 'code' | 'artifact') || 'all')
+    const searchResults: Entity[][] = [];
+    for (const s of searches) {
+      searchResults.push(
+        await provider.search(s.query, s.limit || 10, (s.filter as 'all' | 'code' | 'artifact') || 'all')
           .catch(() => [] as Entity[]),
-      ),
-    );
+      );
+    }
 
     for (const entities of searchResults) {
       for (const e of entities) {
@@ -130,11 +132,13 @@ export const gatherContextStep: AgentStep<PlannerState> = {
       }
     }
 
-    // Expand top entities for neighbors
+    // Expand top entities for neighbors. Serial for pipeline-
+    // consistency even though `provider.expand` is graph-only.
     const topN = allEntities.slice(0, 5);
-    const expansions = await Promise.all(
-      topN.map(e => provider.expand(e.id).catch(() => ({ callers: [], callees: [] }))),
-    );
+    const expansions: { callers: Entity[]; callees: Entity[] }[] = [];
+    for (const e of topN) {
+      expansions.push(await provider.expand(e.id).catch(() => ({ callers: [], callees: [] })));
+    }
 
     // Format findings
     const findings = formatFindings(allEntities, topN, expansions);

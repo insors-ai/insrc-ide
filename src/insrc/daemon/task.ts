@@ -558,8 +558,13 @@ export async function runTaskPipeline(
       break;
     }
 
-    // Execute ready tasks (parallel if independent)
-    const execResults = await Promise.all(ready.map(async (idx) => {
+    // Execute ready tasks serially. Each task can spin up a full
+    // intent pipeline that invokes the LLM; the no-parallel-LLM rule
+    // bans Promise.all over `executeTask` so independent tasks in a
+    // batch run one after another instead of contending for the
+    // provider in flight.
+    const execResults: { idx: number; success: boolean }[] = [];
+    for (const idx of ready) {
       const task = tasks[idx]!;
       const isLast = idx === totalTasks - 1;
 
@@ -632,7 +637,7 @@ export async function runTaskPipeline(
         }
 
         log.info({ idx, kind: task.kind, intent: task.intent, format: result.format, success: result.success, depth }, 'task completed');
-        return { idx, success: result.success };
+        execResults.push({ idx, success: result.success });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         results[idx] = {
@@ -648,9 +653,9 @@ export async function runTaskPipeline(
         if (depth === 0) {
           send({ id: requestId, stream: 'delta', data: { text: `Task failed: ${errMsg}` } });
         }
-        return { idx, success: false };
+        execResults.push({ idx, success: false });
       }
-    }));
+    }
 
     // Process results — mark completed or abort on failure
     for (const { idx, success } of execResults) {

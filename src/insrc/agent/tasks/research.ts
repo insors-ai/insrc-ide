@@ -334,11 +334,12 @@ async function runCombinedResearch(
 ): Promise<ResearchResult> {
   log('  [research] Running combined graph + web research...');
 
-  // Run graph and web in parallel
-  const [graphResult, webResult] = await Promise.all([
-    runGraphResearch(message, codeContext, synthesisProvider, log, escalated),
-    runWebResearch(message, synthesisProvider, claudeProvider, braveApiKey, log, escalated),
-  ]);
+  // Serial (no-parallel-LLM rule). Both `runGraphResearch` and
+  // `runWebResearch` run their own LLM pipelines internally; the
+  // previous Promise.all could fire two cloud completions in flight
+  // concurrently, contending for context budget / rate limits.
+  const graphResult = await runGraphResearch(message, codeContext, synthesisProvider, log, escalated);
+  const webResult   = await runWebResearch(message, synthesisProvider, claudeProvider, braveApiKey, log, escalated);
 
   // Synthesise both
   const combinedMessages: LLMMessage[] = [

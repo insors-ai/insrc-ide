@@ -340,12 +340,14 @@ export async function runConceptExploration(
   const allEntities: Entity[] = [];
   const seenIds = new Set<string>();
 
-  const searchResults = await Promise.all(
-    searches.map(s =>
-      contextProvider.search(s.query, s.limit, s.filter)
-        .catch(() => [] as Entity[]),
-    ),
-  );
+  // Serial searches (no-parallel-LLM rule; each search runs an
+  // Ollama query-embedding through `provider.search`).
+  const searchResults: Entity[][] = [];
+  for (const s of searches) {
+    searchResults.push(
+      await contextProvider.search(s.query, s.limit, s.filter).catch(() => [] as Entity[]),
+    );
+  }
 
   for (const entities of searchResults) {
     for (const e of entities) {

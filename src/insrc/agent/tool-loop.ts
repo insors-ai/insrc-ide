@@ -202,28 +202,35 @@ export async function runToolLoop<T = unknown>(input: ToolLoopInput<T>): Promise
 		// Multi-tool batch handling
 		if (toolCalls.length > 1) {
 			if (policy.onMultipleToolsPerTurn === 'dispatch-all') {
-				// Parallel-dispatch every call in the batch and push
+				// Serial-dispatch every call in the batch, then pack
 				// the matching tool_result blocks into ONE user
 				// message. Anthropic requires all tool_results for a
 				// given assistant turn's tool_use blocks to ship
 				// together; splitting them into N messages would
 				// orphan the later ids relative to the first reply.
-				const dispatchResults = await Promise.all(
-					toolCalls.map(async c => {
-						try {
-							return { call: c, result: await input.dispatchTool(c) };
-						} catch (err) {
-							return {
-								call: c,
-								result: {
-									toolCallId: c.id,
-									content:    CORRECTIVE.dispatchError(c.name, (err as Error).message),
-									isError:    true,
-								},
-							};
-						}
-					}),
-				);
+				// SERIAL DISPATCH (not Promise.all): the dispatched
+				// skills may internally invoke LLM providers, and the
+				// project rule is no-parallel-LLM-anywhere -- parallel
+				// cloud calls blow context windows and saturate per-
+				// minute rate limits. The cost is sequential latency,
+				// which the planner's small (2-3) typical batch sizes
+				// keep tolerable.
+				const dispatchResults: { call: ToolCall; result: ToolResult }[] = [];
+				for (const c of toolCalls) {
+					try {
+						const result = await input.dispatchTool(c);
+						dispatchResults.push({ call: c, result });
+					} catch (err) {
+						dispatchResults.push({
+							call: c,
+							result: {
+								toolCallId: c.id,
+								content:    CORRECTIVE.dispatchError(c.name, (err as Error).message),
+								isError:    true,
+							},
+						});
+					}
+				}
 				const trBlocks = dispatchResults.map(({ call: c, result: r }) => ({
 					type:        'tool_result' as const,
 					tool_use_id: c.id,

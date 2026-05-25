@@ -44,27 +44,30 @@ export async function writeSketch(
   const classification = await classifyConcepts(todo, localProvider);
   log.debug({ requirement: todo.index, concepts: classification.concepts, reasoning: classification.reasoning }, 'concepts classified');
 
-  // 2. Generic codebase analysis (always runs — covers code-reuse)
+  // 2. Generic codebase analysis (always runs — covers code-reuse).
+  // SERIAL local + cross (no-parallel-LLM rule): both analyzers call
+  // `provider.search` -> Ollama embed; running them back-to-back
+  // costs an extra embed-call's latency but avoids contending for
+  // the embedding queue and matches the project-wide serialization
+  // policy.
   const searches = await planSearches(todo, localProvider);
   const contextProvider = createDaemonContextProvider();
-  const [localEntities, crossEntities] = await Promise.all([
-    analyzeLocalCodebase(contextProvider, input.session.repoPath, searches),
-    analyzeCrossProject(contextProvider, input.session.closureRepos, input.session.repoPath, searches),
-  ]);
+  const localEntities = await analyzeLocalCodebase(contextProvider, input.session.repoPath, searches);
+  const crossEntities = await analyzeCrossProject(contextProvider, input.session.closureRepos, input.session.repoPath, searches);
 
-  // 3. Concept-specific explorations (parallel, skip code-reuse — covered by generic)
+  // 3. Concept-specific explorations (serial, skip code-reuse — covered by generic).
+  // Each `runConceptExploration` runs a full local-LLM pipeline; the
+  // no-parallel-LLM rule prevents Promise.all here so concept calls
+  // don't pile onto the local provider concurrently.
   const nonGenericConcepts = classification.concepts.filter(c => c !== 'code-reuse');
   log.debug({ requirement: todo.index, conceptCount: nonGenericConcepts.length, concepts: nonGenericConcepts }, 'running concept explorations');
-  const conceptAnalyses: ConceptAnalysis[] = nonGenericConcepts.length > 0
-    ? await Promise.all(
-        nonGenericConcepts.map(async concept => {
-          log.debug({ requirement: todo.index, concept }, 'concept exploration started');
-          const result = await runConceptExploration(concept, todo, input.session.repoPath, input.session.closureRepos, localProvider);
-          log.debug({ requirement: todo.index, concept, entities: result.entities.length, findingsLen: result.findings.length }, 'concept exploration done');
-          return result;
-        }),
-      )
-    : [];
+  const conceptAnalyses: ConceptAnalysis[] = [];
+  for (const concept of nonGenericConcepts) {
+    log.debug({ requirement: todo.index, concept }, 'concept exploration started');
+    const result = await runConceptExploration(concept, todo, input.session.repoPath, input.session.closureRepos, localProvider);
+    log.debug({ requirement: todo.index, concept, entities: result.entities.length, findingsLen: result.findings.length }, 'concept exploration done');
+    conceptAnalyses.push(result);
+  }
 
   // 4. Build context for the LLM
   const analysisContext = formatAnalysisContext(localEntities, crossEntities);
@@ -217,10 +220,13 @@ async function analyzeLocalCodebase(
   currentRepo: string,
   searches: PlannedSearch[],
 ): Promise<AnalysisEntity[]> {
-  // Execute all planned searches in parallel
-  const allHits = await Promise.all(
-    searches.map(s => provider.search(s.query, s.limit, s.filter)),
-  );
+  // Execute all planned searches serially. `provider.search` runs an
+  // Ollama query-embedding under the hood; the no-parallel-LLM rule
+  // bans Promise.all here.
+  const allHits: Entity[][] = [];
+  for (const s of searches) {
+    allHits.push(await provider.search(s.query, s.limit, s.filter));
+  }
 
   // Deduplicate by entity ID, keep first occurrence (highest relevance)
   const seen = new Set<string>();
@@ -234,14 +240,16 @@ async function analyzeLocalCodebase(
     }
   }
 
-  // Expand top 5 for neighbour context (keep budget manageable)
+  // Expand top 5 for neighbour context (keep budget manageable).
+  // `provider.expand` is graph-only (no LLM) so Promise.all here is
+  // technically safe -- but we serialise for consistency with the
+  // surrounding pipeline so the IPC pressure profile matches the
+  // logged flow exactly.
   const toExpand = localHits.slice(0, 5);
-  const expanded = await Promise.all(
-    toExpand.map(async h => ({
-      entity: h,
-      neighbours: await provider.expand(h.id),
-    })),
-  );
+  const expanded: { entity: Entity; neighbours: { callers: Entity[]; callees: Entity[] } }[] = [];
+  for (const h of toExpand) {
+    expanded.push({ entity: h, neighbours: await provider.expand(h.id) });
+  }
 
   // Include remaining hits without expansion
   const rest = localHits.slice(5).map(h => ({
@@ -264,10 +272,12 @@ async function analyzeCrossProject(
 ): Promise<AnalysisEntity[]> {
   if (closureRepos.length <= 1) return []; // Only the current repo
 
-  // Execute all planned searches in parallel
-  const allHits = await Promise.all(
-    searches.map(s => provider.search(s.query, Math.min(s.limit, 8), s.filter)),
-  );
+  // Execute all planned searches serially (no-parallel-LLM rule;
+  // each `provider.search` runs an Ollama embed).
+  const allHits: Entity[][] = [];
+  for (const s of searches) {
+    allHits.push(await provider.search(s.query, Math.min(s.limit, 8), s.filter));
+  }
 
   // Deduplicate and filter to cross-project only
   const seen = new Set<string>();

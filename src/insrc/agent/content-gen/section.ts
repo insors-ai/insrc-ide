@@ -2,11 +2,13 @@
  * Pass 2 of the multi-pass content generator
  * (plans/content-generator.md commit 2).
  *
- * Per-section body drafting + parallel scheduler. Independent
- * sections (no `dependsOn`) fire in parallel via Promise.all;
- * dependent sections run in topological order with completed
- * bodies threaded into each section's prompt-build hook via the
- * `prior` map.
+ * Per-section body drafting + serial scheduler. Independent
+ * sections (no `dependsOn`) used to fire in parallel via Promise.all
+ * but the project rule is no-parallel-LLM-anywhere (parallel
+ * cloud completions blow context windows / saturate rate limits).
+ * They now run serially in outline order; dependent sections still
+ * run in topological order with completed bodies threaded into each
+ * section's prompt-build hook via the `prior` map.
  *
  * Failure modes (from plans/content-generator.md):
  *   - provider error  -> retry once; on second fail body='',
@@ -161,20 +163,16 @@ export async function runSections(
 	const completed = new Map<string, SectionResult>();
 
 	// ----- Independent pass --------------------------------------------------
-	if (input.parallel && independent.length > 1) {
-		const results = await Promise.all(
-			independent.map(s => runSection(s, input, completed, provider)),
-		);
-		for (const r of results) {
-			completed.set(r.id, r);
-		}
-	} else {
-		// Serial path -- preserves outline order for the user-visible
-		// `onSectionComplete` callbacks.
-		for (const s of independent) {
-			const r = await runSection(s, input, completed, provider);
-			completed.set(r.id, r);
-		}
+	// Always serial (per the no-parallel-LLM-anywhere rule). The
+	// `input.parallel` flag is honored as a no-op for back-compat with
+	// older callers; the parallel Promise.all branch was removed so a
+	// burst of N section drafts can never blow a cloud context window
+	// or saturate per-minute rate limits. Outline order also gives the
+	// user-visible `onSectionComplete` callback a predictable order.
+	void input.parallel;
+	for (const s of independent) {
+		const r = await runSection(s, input, completed, provider);
+		completed.set(r.id, r);
 	}
 
 	// ----- Dependent pass (topological serial) -------------------------------
