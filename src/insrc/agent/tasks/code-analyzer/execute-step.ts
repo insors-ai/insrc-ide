@@ -232,9 +232,13 @@ async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null>
 	});
 
 	// The substrate's `dispatchTool` callback runs the existing
-	// pre-dispatch guard + executeTool flow per call.
+	// pre-dispatch guard + executeTool flow per call. Pass the active
+	// session's repoPath so the guard can auto-inject it when the LLM
+	// omits the required arg on code.source.* / code.repo.* skills
+	// (the dominant rejection pattern seen with both qwen and Haiku).
+	const sessionRepoPath = input.session.repoPath;
 	const dispatcher = async (toolCall: ToolCall): Promise<ToolResult> => {
-		const guarded = await tryGuardSkillInvoke(toolCall);
+		const guarded = await tryGuardSkillInvoke(toolCall, sessionRepoPath);
 		if (guarded.kind === 'rejected') {
 			log.warn(
 				{
@@ -345,7 +349,10 @@ type GuardSkillInvokeOutcome =
  * `skill_invoke` toolCalls (e.g. raw tool calls in legacy paths),
  * the function passes through without guard processing.
  */
-async function tryGuardSkillInvoke(toolCall: ToolCall): Promise<GuardSkillInvokeOutcome> {
+async function tryGuardSkillInvoke(
+	toolCall:        ToolCall,
+	sessionRepoPath: string | undefined,
+): Promise<GuardSkillInvokeOutcome> {
 	if (process.env['INSRC_TOOL_GUARD'] === 'off') {
 		return { kind: 'pass', call: toolCall };
 	}
@@ -370,7 +377,10 @@ async function tryGuardSkillInvoke(toolCall: ToolCall): Promise<GuardSkillInvoke
 	// underlying skill, not the meta-tool, which is what the corrective
 	// prompt needs to communicate.
 	const inner: ToolCall = { id: toolCall.id, name: skillIdRaw, input: args };
-	const result = await guardLocalToolCall(inner);
+	const deps = sessionRepoPath !== undefined && sessionRepoPath.length > 0
+		? { sessionDefaults: { repoPath: sessionRepoPath } }
+		: undefined;
+	const result = await guardLocalToolCall(inner, deps);
 
 	if (result.kind === 'rejected') {
 		return {

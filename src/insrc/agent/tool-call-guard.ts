@@ -70,6 +70,25 @@ export interface GuardDeps {
 	 * exercise rename behaviour in isolation.
 	 */
 	readonly getArgRenames?:      (skillId: string) => Readonly<Record<string, string>>;
+	/**
+	 * Session-derived default values to inject into a tool call when
+	 * the resolved skill's schema requires a key AND the call's input
+	 * doesn't carry it. Applied AFTER the rename + type-coerce stages
+	 * and BEFORE the schema validation, so a defaulted value still has
+	 * to pass validation (typically just the type check on a string).
+	 *
+	 * Use case: every code.source.* / code.repo.* skill requires
+	 * `repoPath` but the LLM routinely omits it because the active
+	 * repo is contextually obvious. Caller passes `{ repoPath:
+	 * session.repoPath }` here so the guard quietly fills it in
+	 * instead of pinging the LLM with a corrective.
+	 *
+	 * Only keys declared as REQUIRED on the resolved schema are
+	 * eligible -- optional keys are never auto-injected (would change
+	 * skill semantics behind the LLM's back). Existing values on the
+	 * input always win; defaults only fill gaps.
+	 */
+	readonly sessionDefaults?:    Readonly<Record<string, unknown>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,25 +144,51 @@ export async function guardLocalToolCall(
 		? coerceInputTypes(renamed.input, schema)
 		: { input: renamed.input, notes: [] as string[] };
 
-	// Stage 4: pre-dispatch schema validation. Runs after Stages 1-3
+	// Stage 3.5: inject session-derived defaults for required schema
+	// keys the call is missing. Only required keys are eligible; only
+	// keys absent from the input get injected; existing values always
+	// win. This kills the recurring "LLM forgot to pass repoPath"
+	// rejection chain (see Plan 1 docs) without changing skill
+	// semantics behind the model's back.
+	let injectedInput = coerced.input;
+	const injectionNotes: string[] = [];
+	if (schema !== undefined && deps?.sessionDefaults !== undefined) {
+		const required = extractRequiredFieldNames(schema);
+		if (required.length > 0) {
+			const next: Record<string, unknown> = { ...injectedInput };
+			let dirty = false;
+			for (const key of Object.keys(deps.sessionDefaults)) {
+				if (!required.includes(key)) continue;
+				if (Object.prototype.hasOwnProperty.call(next, key) && next[key] !== undefined && next[key] !== null && next[key] !== '') continue;
+				const v = deps.sessionDefaults[key];
+				if (v === undefined || v === null || v === '') continue;
+				next[key] = v;
+				dirty = true;
+				injectionNotes.push(`injected session default for required arg '${key}' (LLM omitted it; using active session value)`);
+			}
+			if (dirty) injectedInput = next;
+		}
+	}
+
+	// Stage 4: pre-dispatch schema validation. Runs after Stages 1-3.5
 	// have applied their auto-fixes; catches the residue (missing
 	// required args, unexpected props, type mismatches) and builds a
 	// targeted corrective prompt instead of paying a skill-runner
 	// round-trip to surface the same error.
 	if (schema !== undefined) {
-		const validation = validate(coerced.input, schema);
+		const validation = validate(injectedInput, schema);
 		if (!validation.ok) {
 			return rejectFromSchemaFailure({
 				toolCallId:    call.id,
 				resolvedName,
 				schema,
-				input:         coerced.input,
+				input:         injectedInput,
 				validationErrors: validation.errors,
 			});
 		}
 	}
 
-	const allNotes = [...nameNotes, ...renamed.notes, ...coerced.notes];
+	const allNotes = [...nameNotes, ...renamed.notes, ...coerced.notes, ...injectionNotes];
 	if (allNotes.length === 0) {
 		return { kind: 'pass', call };
 	}
@@ -151,7 +196,7 @@ export async function guardLocalToolCall(
 	const coercedCall: ToolCall = {
 		id:    call.id,
 		name:  resolvedName,
-		input: coerced.input,
+		input: injectedInput,
 	};
 
 	log.info(
@@ -264,6 +309,20 @@ interface CoercionOutput {
  * type. Other coercions (string trimming, scalar number-string →
  * number) are deliberately omitted to keep the guard conservative.
  */
+/**
+ * Pull the `required` field-name list off a JSON-Schema object.
+ * Returns [] when the schema declares no required keys.
+ */
+function extractRequiredFieldNames(schema: Record<string, unknown>): string[] {
+	const req = schema['required'];
+	if (!Array.isArray(req)) return [];
+	const out: string[] = [];
+	for (const k of req) {
+		if (typeof k === 'string' && k.length > 0) out.push(k);
+	}
+	return out;
+}
+
 function coerceInputTypes(
 	rawInput: Record<string, unknown>,
 	schema:   Record<string, unknown>,

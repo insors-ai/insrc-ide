@@ -110,6 +110,9 @@ export const SKILL_ARG_RENAMES: Readonly<Record<string, Readonly<Record<string, 
 	// other args.
 	'code.entity.locate-by-name':     Object.freeze({
 		entity_name:  'name',
+		names:        'name',            // Haiku pluralisation (live repro 2026-05-26)
+		query:        'name',            // Haiku conflates with search verbs
+		identifier:   'name',
 		repo_path:    'repoPath',
 		kind:         'kinds',           // scalar `kind` -> array `kinds` (Stage 3 then wraps it)
 	}),
@@ -119,6 +122,25 @@ export const SKILL_ARG_RENAMES: Readonly<Record<string, Readonly<Record<string, 
 		q:            'query',
 		text:         'query',
 		repo_path:    'repoPath',
+	}),
+
+	// ---- Source grep: takes `path` (absolute file or directory) +
+	// `pattern`. The LLM has tried half a dozen path-y aliases across
+	// live runs; collapse them all here.
+	'code.source.grep':               Object.freeze({
+		file:         'path',
+		filePath:     'path',
+		file_path:    'path',
+		files:        'path',
+		paths:        'path',
+		directory:    'path',
+		dir:          'path',
+		repo:         'path',
+		repoPath:     'path',
+		repo_path:    'path',
+		query:        'pattern',
+		search:       'pattern',
+		regex:        'pattern',
 	}),
 });
 

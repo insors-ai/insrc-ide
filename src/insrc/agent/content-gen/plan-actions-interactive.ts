@@ -133,6 +133,14 @@ export async function planActionsInteractive(
 	// skill id (`code.source.repo.describe`) via `nameToSkillId` before
 	// hitting runSkill. Unknown names get an explicit isError so the
 	// LLM sees the typed feedback instead of a stack trace.
+	//
+	// Planner-discovery skills declare `repoPath` as required on most
+	// of their schemas but the LLM (cloud or local) routinely omits it
+	// because the active session has exactly one repo. We auto-inject
+	// `repoPath: input.repoPath` into any call missing it BEFORE
+	// hitting runSkill -- prevents the rejection chain that otherwise
+	// burns the discovery turn budget on schema-validation retries.
+	const sessionRepoPath = input.repoPath;
 	const dispatcher = async (call: ToolCall): Promise<ToolResult> => {
 		const skillId = nameToSkillId.get(call.name);
 		if (skillId === undefined) {
@@ -144,8 +152,18 @@ export async function planActionsInteractive(
 				isError: true,
 			};
 		}
+		const callInput: Record<string, unknown> = call.input === undefined || call.input === null
+			? {}
+			: { ...call.input };
+		if (
+			sessionRepoPath !== undefined &&
+			sessionRepoPath.length > 0 &&
+			(callInput['repoPath'] === undefined || callInput['repoPath'] === null || callInput['repoPath'] === '')
+		) {
+			callInput['repoPath'] = sessionRepoPath;
+		}
 		try {
-			const result = await runSkill(skillId, call.input, {
+			const result = await runSkill(skillId, callInput, {
 				session:         input.session,
 				resolveProvider: input.resolveProvider,
 			});
