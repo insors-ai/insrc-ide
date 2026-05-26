@@ -131,7 +131,7 @@ export async function summarizeResult(provider: LLMProvider, input: SummarizeInp
 
 	let parsed: { facts?: unknown; citations?: unknown; confidence?: unknown } | undefined;
 	try {
-		parsed = JSON.parse(resp.text.trim());
+		parsed = JSON.parse(stripJsonCodeFence(resp.text));
 	} catch {
 		// Fall through; we'll synthesize a low-confidence entry below.
 	}
@@ -155,3 +155,27 @@ export async function summarizeResult(provider: LLMProvider, input: SummarizeInp
 		confidence,
 	};
 }
+
+/**
+ * Strip a leading ```json (or bare ```) fence and the trailing ```
+ * fence off a model's structured-output response. Anthropic Haiku
+ * (live repro 2026-05-26) wraps JSON-formatted output in markdown
+ * fences even when the request supplies a `responseFormat.schema`,
+ * which used to break the bare `JSON.parse(resp.text.trim())` and
+ * silently zero out every step's facts + citations. Returns the
+ * input unchanged when no fence is present so qwen / other providers
+ * that already emit raw JSON keep working.
+ *
+ * Tolerant of optional language tag (`json`, `JSON`, `Json`) and
+ * surrounding whitespace.
+ */
+function stripJsonCodeFence(raw: string): string {
+	const trimmed = raw.trim();
+	const fenceOpen = /^```(?:json)?\s*\n?/i;
+	const fenceClose = /\n?```\s*$/;
+	if (!fenceOpen.test(trimmed)) return trimmed;
+	return trimmed.replace(fenceOpen, '').replace(fenceClose, '').trim();
+}
+
+// Test export.
+export const _stripJsonCodeFenceForTest = stripJsonCodeFence;

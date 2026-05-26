@@ -194,6 +194,50 @@ test('summarizeResult: missing confidence field defaults to low', async () => {
 	assert.deepEqual(entry.facts, ['x']);
 });
 
+test('summarizeResult: tolerates ```json``` markdown fence wrapping the response', async () => {
+	// Anthropic Haiku (live repro 2026-05-26) wraps structured-output
+	// JSON in markdown code fences even when responseFormat.schema is
+	// supplied. Pre-fix, JSON.parse on the fenced text threw and the
+	// catch silently zeroed facts + citations -- every step shipped
+	// citationCount=0, the cycle-reviewer dropped every step, and
+	// final reports came out with 0 evidence. After fix, the fence is
+	// stripped before parse.
+	const payload = JSON.stringify({
+		facts: ['Module X has 30 files'],
+		citations: ['/repo/foo.py#L1-L20'],
+		confidence: 'high',
+	});
+	const fenced = '```json\n' + payload + '\n```';
+	const { provider } = buildFakeProvider([
+		{ text: fenced, stopReason: 'end_turn' },
+	]);
+	const entry = await _summarizeResultForTest(provider, {
+		skillId: 'code.source.module.describe',
+		args:    { modulePath: 'x' },
+		resultText: '...',
+		objective:  'o',
+		criteria:   ['c'],
+	});
+	assert.deepEqual(entry.facts,      ['Module X has 30 files']);
+	assert.deepEqual(entry.citations,  ['/repo/foo.py#L1-L20']);
+	assert.equal   (entry.confidence, 'high');
+});
+
+test('summarizeResult: tolerates bare ``` fence (no language tag)', async () => {
+	const payload = JSON.stringify({
+		facts: ['y'], citations: [], confidence: 'medium',
+	});
+	const fenced = '```\n' + payload + '\n```';
+	const { provider } = buildFakeProvider([
+		{ text: fenced, stopReason: 'end_turn' },
+	]);
+	const entry = await _summarizeResultForTest(provider, {
+		skillId: 's', args: {}, resultText: '', objective: 'o', criteria: [],
+	});
+	assert.deepEqual(entry.facts, ['y']);
+	assert.equal(entry.confidence, 'medium');
+});
+
 // ---------------------------------------------------------------------------
 // gatherEvidence end-to-end (no real skill dispatch needed for these)
 // ---------------------------------------------------------------------------
