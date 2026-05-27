@@ -279,3 +279,149 @@ gate.
   expand only if real cases slip through.
 - **Phase 5 turn-budget impact**: open question (3) above; lean on
   the deferred-pass option to keep planner-discovery latency stable.
+
+---
+
+## Post-rollout findings (2026-05-26 / 2026-05-27)
+
+Two live runs against `insors-extraction` after the fence-strip fix +
+session-default-injection + cloud-as-default-LLM changes. The
+fence-strip fix worked end-to-end (citations populated in every
+section, vs. always 0 in the prior cloud-only run). New findings
+surface below as TODOs in priority order. Each is scoped narrowly --
+the underlying pipelines from Phases 1-7 stand.
+
+### Broad 8-section run (Haiku, 2026-05-26)
+
+Final report at `~/.insrc/tmp/code-analysis-report-f2db773cc8a2f65ca3b816fbaa69bca9.md`.
+Citation totals per section after redraft: §1=8, §2=10, §3=16, §4=14,
+§5=11, §6=10, §7=20, §8=7. Plan SCS held (no hadoop / cross-repo
+leaks). Remaining issues:
+
+- [ ] **TODO-A1: stale "not indexed" footnote in §8**. Writer claimed
+      `invoice_data_services.py … was not indexed by the code analyzer
+      at the time of review` -- false. Phase-1 audit confirmed the
+      file is indexed, AND the writer fabricated the wrong path
+      (`insors/extraction/db/invoice_data_services.py` doesn't exist;
+      real file lives in `insors/extraction/services/`). This is
+      Phase 2's "skill nearest-match for file-not-indexed refusal"
+      territory, but the writer is *also* hallucinating the path it
+      claims is missing -- a separate, simpler fix: when the writer
+      composes a "not indexed" footnote, the path MUST come verbatim
+      from an evidence entry, not from the writer's own paraphrase.
+      Add an assertion in the writer prompt and a structural check
+      that rejects "not indexed" claims whose path doesn't appear in
+      any evidence citation.
+
+### Drill-down 5-section run (Haiku, 2026-05-27)
+
+5 sections, dead-code/unused-export focus. Backend completed cleanly
+(24 KB across 237 streaming chunks, `done:true` reached) but the IDE
+report pane never materialized -- no `.md` saved under
+`~/.insrc/tmp/`. Findings:
+
+- [ ] **TODO-B1: redraft pass is *degrading* output, not tightening
+      it.** Across the 5 sections, the structural-check-induced
+      redraft shrank prose every time except §2:
+      §1 1987→1201 chars (5→3 citations),
+      §3 3975→3407 (22→18),
+      §5 2401→1717 (7→7).
+      Only §2 grew (2501→2756, 8→12). The redraft is dropping content
+      under the "low-grounded claims" rule rather than adding more
+      grounding. Add a `redraft-must-grow-or-stay-equal` guard: if
+      the redraft's `textLen × citationCount` product is lower than
+      the original by >10%, KEEP the original and emit a structured-
+      check warning instead. This stops the redraft from being a
+      net-negative pass.
+
+- [ ] **TODO-B2: bare-filename citation drift (~30% in drill-down)**.
+      Many citations dropped the directory prefix:
+      `path:schema_integration.py`, `path:mapping_validation.py`,
+      `path:custom_rules_types.py`, `path:reference_client.py`,
+      `path:paymentMethods.py`, `path:countryCodes.py`. The writer
+      sometimes renders the full path
+      (`path:insors/core/model/common/countryCodes.py:L2247-L2437`)
+      and sometimes the bare filename for the same file. The
+      `EvidenceEntry.citations` strings ARE fully qualified when
+      summarized; the writer's prompt-side rewrite is collapsing
+      them. Tighten the writer system prompt to: "Citations MUST
+      use the EXACT path string from the evidence -- do NOT abbreviate,
+      do NOT drop directories." Pair with a structural check that
+      rejects citations whose path doesn't appear verbatim in any
+      evidence entry.
+
+- [ ] **TODO-B3: hybrid citation shape with class names in path slot**.
+      Writer emitted `path:extraction_output.py:Word#L262-L325` --
+      class-name "Word" jammed into the path. The intended markdown
+      shape is `path:<file>#L<a>-L<b>`; the class name should be in
+      the LABEL, not the path. Same writer-prompt tightening as
+      TODO-B2 plus an explicit example in the writer prompt of
+      "correct" vs "wrong" shapes.
+
+- [ ] **TODO-B4: same citation repeated within a paragraph**. §2
+      cited `LLMErrorHandler.py:L19-L771` three times in three
+      consecutive sentences of the same paragraph -- no drill, just
+      restatement. Add a writer-prompt rule: "Within a paragraph,
+      cite each (path, line-range) tuple at most once." Easy
+      structural check: per-paragraph, count duplicate
+      `(path, line-range)` pairs -- reject on duplicate count > 0.
+
+### Tool-call-guard live observations (both runs)
+
+Guard observed dozens of recurring rejection patterns. Fixes shipped
+during the runs; some patterns remain too ambiguous to auto-rename.
+
+- [x] **Done**: `name: [...]` array -> scalar on
+      `code.entity.locate-by-name` (Stage 3 single-element-array
+      coercion, tool-call-guard.ts).
+- [x] **Done**: `filePattern -> path` on `code.source.grep`
+      (rename map).
+- [x] **Done**: `name -> className` on `code.class.locate-references`
+      + `code.class.extract-fields` (rename map; Haiku bleeds the
+      `locate-by-name` arg shape).
+- [ ] **TODO-C1: `text`, `fileFilter`, `includeFileTypes` on grep
+      are NOT auto-renamed (semantics ambiguous)**. These need a
+      richer corrective prompt instead -- the existing
+      `buildCorrectivePrompt` lists property names + types but
+      doesn't *describe* the args (other than `description` if the
+      schema has one). Surface the args' `description` field in the
+      corrective so Haiku stops inventing `text`/`fileFilter` shapes.
+- [ ] **TODO-C2: invented non-existent tool names beyond fuzzy
+      threshold**. Live observed: `code.source.file.locate`,
+      `code.source.file.read-lines`, `code.source.file.read-section`,
+      `entity-callers-and-references`, `cross-reference-analysis`,
+      `definition-and-export-analysis`, `code-pattern-search`,
+      `search_entities`, `read_file`, `analyze_outgoing_refs`,
+      `code.source.search`. The Levenshtein threshold (≤2) is right;
+      these are too far. Improve the corrective by listing TOP-N
+      tool ids alongside their *one-line description*, not just the
+      name -- Haiku is guessing semantic names because it doesn't
+      see what the catalog actually offers.
+- [ ] **TODO-C3: `startLine/endLine` on
+      `code.source.file.describe`**. Haiku tries line-range slicing
+      on a skill that returns whole-file descriptions. Either:
+      (a) add a new `code.source.file.read-section` skill that
+      genuinely takes a line range (closes the hallucination
+      reflected in TODO-C2), or (b) tighten the file.describe
+      skill description to explicitly say "returns the WHOLE file
+      structure; no line-range filtering". (a) is the better fix
+      since the model clearly wants line-range reads.
+- [ ] **TODO-C4: `ripgrep unavailable` on `code.source.grep`**.
+      The grep skill failed in one step with `ripgrep unavailable`
+      -- environment issue (ripgrep not on `$PATH` from the daemon's
+      working directory). Either bundle ripgrep, fall back to
+      plain `grep`/`git grep`, or document the dependency
+      prominently. Worth fixing because a failed grep eats a step
+      with zero citations.
+
+### IDE-side disconnect (drill-down only)
+
+- [ ] **TODO-D1: drill-down run completed backend-side but IDE
+      report pane never materialized**. Daemon emitted 24 KB across
+      237 stream chunks ending in `done:true`. IDE didn't save the
+      `.md` to `~/.insrc/tmp/`. This is a frontend bug (chat-stream
+      subscription dropped, or the pane closed before `done:true`
+      arrived). Reproduce: run a drill-down, watch the report pane
+      stay focused. If it disappears again, add a renderer-side
+      log on `chat-stream subscription closed` so we know whether
+      it's the React side or the IPC side dropping.

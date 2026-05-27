@@ -9,6 +9,12 @@ added late or rediscovered as bugs there are landed up-front here.
 
 ## Related plans
 
+- [plans/analyzers/data-analyzer-parity.md](./data-analyzer-parity.md) --
+  **post-rollout parity work.** Brings the per-task loop, writer, and
+  tool-call-guard layer up to the code-analyzer's state after the
+  2026-05 testing cycle. Folds in the ten TODOs from
+  [code-analyzer-output-quality-followup.md](../code-analyzer-output-quality-followup.md)
+  before first live run.
 - [plans/analyzers/data-analyzer-skills.md](./data-analyzer-skills.md) --
   **the analyzer-logic layer.** This plan owns the operational surface
   (orchestrator, pane, slash, checkpoint, save / re-run / drill-down,

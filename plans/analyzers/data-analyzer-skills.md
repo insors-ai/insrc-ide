@@ -40,6 +40,10 @@ the fact.
   data-analyzer. Orchestrator stays; per-task runner becomes a skill
   composer. The `db_*` tool surface stays as the primitive layer skills
   call into.
+- [plans/analyzers/data-analyzer-parity.md](./data-analyzer-parity.md) --
+  brings the per-task loop, writer, and a new data-side tool-call-guard
+  layer to parity with the code analyzer's post-rollout state. Folds in
+  the ten TODOs from code-analyzer-output-quality-followup.md.
 - [plans/analyzers/code-analyzer-skills.md](./code-analyzer-skills.md) --
   decomposes the code-analyzer the same way this plan decomposes the
   data-analyzer. Its Phase 3 (code-binding skills:
