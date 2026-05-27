@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
-import { planActions, type PlannedAction } from '../../agent/content-gen/plan-actions.js';
+import type { PlannedAction } from '../../agent/content-gen/plan-actions.js';
 import { planActionsInteractive } from '../../agent/content-gen/plan-actions-interactive.js';
 import { verifyPlannedActions } from '../../agent/content-gen/verify-planned-actions.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
@@ -705,77 +705,38 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // ----- Stage 1: plan (cloud, lean input) ----------------------------
     this.emitMilestone(synthBubble, 'planning report sections...');
 
-    // Phase E of plans/code-analyzer-scope-tier-prompts.md: load the
-    // per-tier decomposition guidance MD and inject it into the planner
-    // call as tierContext. The shared planner framework treats this
-    // as opaque text; the orchestrator owns analyzer-specific content.
-    const { loadPromptFile, normalizeTier } = await import('../../agent/tasks/code-analyzer/prompts/loader.js');
-    let tierContext: string;
-    try {
-      tierContext = loadPromptFile(
-        `sections/planner-context/${normalizeTier(tier)}.md`,
-        {},
-      );
-    } catch (err) {
-      log.warn({ tier, err: (err as Error).message }, 'failed to load planner-context; planner will run without per-tier guidance');
-      tierContext = '';
-    }
-
-    // Plan 4 Phase 4 of plans/code-analyzer-planner-discovery-loop.md:
-    // env-flag dispatch between the legacy one-shot planner and the
-    // interactive tool-using planner. Default = interactive; set
-    // INSRC_ANALYZER_PLANNER_FLOW=static for rollback to the legacy
-    // path. The two functions return the same `PlanActionsResult`
-    // shape, so the downstream verify + fallback code below is
-    // unchanged on either branch.
-    const plannerFlow = (process.env['INSRC_ANALYZER_PLANNER_FLOW'] ?? 'interactive').toLowerCase();
-    let plan;
-    if (plannerFlow === 'static') {
-      plan = await planActions(
-        {
-          intent:         'code-analysis',
-          request,
-          summaryContext,
-          tier,
-          tierContext,
-          analyzerLabel: 'code-analyzer',
-        },
-        cloud,
-      );
-    } else {
-      // TODO(plan-3-thread-subtype): subtype is hard-coded to 'review'
-      // here. Plan 3 (scope-classifier-subtype-extension) wires the
-      // classifier's subtype through to chat-handler; a follow-up
-      // commit will thread it from chat-handler -> orchestrator
-      // (likely on `this._tier` or a sibling field).
-      // Planner-discovery skill dispatcher uses the same default-
-      // cloud-for-local routing as buildSkillRunnerDeps. Embeddings
-      // remain local regardless (different code path).
-      const useLocalHere = session.config.analyzer?.useLocal === true;
-      const cloudProviderHere = session.claudeProvider ?? session.ollamaProvider;
-      const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
-        switch (affinity) {
-          case 'local': return useLocalHere ? session.ollamaProvider : cloudProviderHere;
-          case 'cloud': return cloudProviderHere;
-          case 'auto':  return useLocalHere
-            ? session.resolver.resolve('skill', 'default')
-            : cloudProviderHere;
-        }
-      };
-      plan = await planActionsInteractive(
-        {
-          intent:         'code-analysis',
-          request,
-          repoPath:       session.repoPath,
-          tier,
-          subtype:        'review',
-          session,
-          resolveProvider,
-          analyzerLabel:  'code-analyzer',
-        },
-        cloud,
-      );
-    }
+    // TODO(plan-3-thread-subtype): subtype is hard-coded to 'review'
+    // here. Plan 3 (scope-classifier-subtype-extension) wires the
+    // classifier's subtype through to chat-handler; a follow-up
+    // commit will thread it from chat-handler -> orchestrator
+    // (likely on `this._tier` or a sibling field).
+    // Planner-discovery skill dispatcher uses the same default-
+    // cloud-for-local routing as buildSkillRunnerDeps. Embeddings
+    // remain local regardless (different code path).
+    const useLocalHere = session.config.analyzer?.useLocal === true;
+    const cloudProviderHere = session.claudeProvider ?? session.ollamaProvider;
+    const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
+      switch (affinity) {
+        case 'local': return useLocalHere ? session.ollamaProvider : cloudProviderHere;
+        case 'cloud': return cloudProviderHere;
+        case 'auto':  return useLocalHere
+          ? session.resolver.resolve('skill', 'default')
+          : cloudProviderHere;
+      }
+    };
+    const plan = await planActionsInteractive(
+      {
+        intent:         'code-analysis',
+        request,
+        repoPath:       session.repoPath,
+        tier,
+        subtype:        'review',
+        session,
+        resolveProvider,
+        analyzerLabel:  'code-analyzer',
+      },
+      cloud,
+    );
 
     const plannedActions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
       ? [synthesiseFallbackAction(ca, accepted)]

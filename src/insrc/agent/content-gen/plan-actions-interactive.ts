@@ -19,9 +19,11 @@
  * unrecoverable schema violation), returns `degraded: true` so the
  * orchestrator can fall back to its existing synthetic action.
  *
- * Behind a feature flag (`INSRC_ANALYZER_PLANNER_FLOW`) so rollback
- * is trivial -- caller dispatches to this vs. legacy `planActions`
- * at the orchestrator integration point.
+ * This is the only code-analyzer planner. The legacy
+ * `INSRC_ANALYZER_PLANNER_FLOW=static` rollback hatch was removed
+ * once the discovery loop accumulated enough live miles; data-
+ * analyzer callers still use the static `planActions` directly
+ * because their planning shape differs.
  */
 
 import type {
