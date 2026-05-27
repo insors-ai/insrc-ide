@@ -1,29 +1,22 @@
 /**
- * Cloud-by-default LLM provider resolution for the data analyzer
- * (DA-E1 of plans/analyzers/data-analyzer-parity.md).
+ * Cloud-by-default LLM provider resolution for the data analyzer.
  *
- * Mirrors the code-analyzer's
- * `INSRC_ANALYZER_USE_LOCAL=1` opt-out pattern from
- * daemon/controllers/code-analyzer-orchestrator.ts (the
- * `useLocal` branch of `resolveProvider` in `buildSkillRunnerDeps`
- * + `runPlanExpandReviewSynthesise`).
+ * Mirrors the code-analyzer's parallel routing logic (in
+ * daemon/controllers/code-analyzer-orchestrator.ts). Both analyzers
+ * default to the cloud provider for multi-turn structured-output
+ * calls because live testing on the code-analyzer side (2026-05)
+ * showed local Ollama models like Devstral-Small-2 drop tokens to
+ * empty content in deep multi-turn loops. Cloud (Haiku) handles the
+ * same loops reliably.
  *
- * Why cloud-by-default: live testing on the code-analyzer side
- * (2026-05) showed local Ollama models like Devstral-Small-2 drop
- * tokens to empty content in deep multi-turn loops. The cloud
- * provider (Haiku) handles the same loops reliably. The data
- * analyzer's summarizer / future writer / future cycle reviewer
- * are all multi-turn-style structured-output calls; they get the
- * cloud provider unless explicitly opted out.
+ * Opt-out: set `analyzer.useLocal: true` in `~/.insrc/config.json`
+ * to force local Ollama at every analyzer call site (both code- AND
+ * data-analyzer). Single shared toggle by design: there's no use
+ * case for "cloud here, local there" mid-run.
  *
- * Future Phase C / E callers (execute-step.ts, write-from-evidence.ts,
- * claim-grounding-reviewer.ts) should import + use this helper
- * rather than calling `session.resolver.resolve(...)` directly. The
- * existing pre-parity orchestrator call sites
- * (data-analyzer-orchestrator.ts, cross-agent/data-analyze.ts) stay
- * on the resolver for now -- their routing behaviour can be
- * migrated in a follow-up PR once the new code paths are wired in
- * and validated.
+ * Falls back to local automatically when cloud is unconfigured (no
+ * Anthropic API key), regardless of the `useLocal` setting. Cloud-
+ * preferred but never hard-fails when cloud isn't available.
  */
 
 import type { Session } from '../../session.js';
@@ -49,24 +42,19 @@ export type DataAnalyzerStep =
 /**
  * Resolve the LLM provider for one data-analyzer LLM call site.
  *
- * Default: cloud (Anthropic Haiku) when available.
- * Fallback when cloud is unavailable (no Anthropic API key in
- * config): local Ollama. Same fallback the code-analyzer uses --
- * cloud-by-default but never hard-fail when cloud is unconfigured.
- * Opt-out: set `INSRC_DATA_ANALYZER_USE_LOCAL=1` to revert to local.
+ * Default: cloud when configured; local Ollama otherwise. Opt-out
+ * via `analyzer.useLocal: true` in config.json.
  *
  * The `step` parameter is currently unused for routing but is
  * accepted so future callers can rely on a stable signature. When
  * per-step overrides become useful (e.g. force `synthesise` to
- * cloud even when `INSRC_DATA_ANALYZER_USE_LOCAL=1`), the branch
- * lands here.
+ * cloud even when `useLocal: true`), the branch lands here.
  */
 export function resolveDataAnalyzerProvider(
 	session: Session,
 	step:    DataAnalyzerStep,
 ): LLMProvider {
-	const useLocal = process.env['INSRC_DATA_ANALYZER_USE_LOCAL'] === '1';
-	if (useLocal) {
+	if (isAnalyzerLocalOptIn(session)) {
 		return session.ollamaProvider;
 	}
 	// `step` reserved for future per-step routing overrides.
@@ -75,10 +63,22 @@ export function resolveDataAnalyzerProvider(
 }
 
 /**
- * True when this run is opted into the local LLM. Surface so callers
- * (logger calls, run banners) can announce the routing decision
- * without re-reading the env var.
+ * True when the active config opts every analyzer call site into the
+ * local LLM. Used both here for routing and by callers (logger
+ * banners) to announce the routing decision once per run instead of
+ * re-reading config on every call.
+ *
+ * Reads from `session.config.analyzer.useLocal`; defaults to false
+ * (cloud routing) when the field is absent.
  */
-export function isDataAnalyzerLocalOptIn(): boolean {
-	return process.env['INSRC_DATA_ANALYZER_USE_LOCAL'] === '1';
+export function isAnalyzerLocalOptIn(session: Session): boolean {
+	return session.config.analyzer?.useLocal === true;
 }
+
+/**
+ * Back-compat alias preserved for callers that imported the old
+ * name. New code should use `isAnalyzerLocalOptIn` directly --
+ * the data-analyzer-specific naming is misleading now that one
+ * config field controls both analyzers.
+ */
+export const isDataAnalyzerLocalOptIn = isAnalyzerLocalOptIn;

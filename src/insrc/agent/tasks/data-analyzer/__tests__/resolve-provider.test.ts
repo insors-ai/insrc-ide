@@ -1,8 +1,9 @@
 /**
- * Tests for `resolve-provider.ts` (DA-E1 of
- * plans/analyzers/data-analyzer-parity.md).
+ * Tests for `resolve-provider.ts`.
  *
- * Pins the cloud-by-default routing decision + env-flag opt-out.
+ * Pins the cloud-by-default routing decision + the shared
+ * `analyzer.useLocal` config opt-out (replacing the legacy
+ * INSRC_DATA_ANALYZER_USE_LOCAL env var).
  */
 
 import { test } from 'node:test';
@@ -10,94 +11,75 @@ import assert from 'node:assert/strict';
 
 import {
 	resolveDataAnalyzerProvider,
+	isAnalyzerLocalOptIn,
 	isDataAnalyzerLocalOptIn,
 } from '../resolve-provider.js';
 import type { Session } from '../../../session.js';
-import type { LLMProvider } from '../../../../shared/types.js';
+import type { AgentConfig, LLMProvider } from '../../../../shared/types.js';
 
-function fakeSession(opts: { local: LLMProvider; cloud: LLMProvider | null }): Session {
+function fakeSession(opts: {
+	local:    LLMProvider;
+	cloud:    LLMProvider | null;
+	useLocal?: boolean;
+}): Session {
+	const config = {
+		analyzer: opts.useLocal !== undefined ? { useLocal: opts.useLocal } : undefined,
+	} as unknown as AgentConfig;
 	return {
 		ollamaProvider: opts.local,
 		claudeProvider: opts.cloud,
+		config,
 	} as unknown as Session;
 }
 
 const localProvider: LLMProvider = { name: () => 'local' } as unknown as LLMProvider;
 const cloudProvider: LLMProvider = { name: () => 'cloud' } as unknown as LLMProvider;
 
-function withEnv<T>(key: string, value: string | undefined, fn: () => T): T {
-	const prior = process.env[key];
-	if (value === undefined) {
-		delete process.env[key];
-	} else {
-		process.env[key] = value;
-	}
-	try {
-		return fn();
-	} finally {
-		if (prior === undefined) {
-			delete process.env[key];
-		} else {
-			process.env[key] = prior;
-		}
-	}
-}
-
 test('resolveDataAnalyzerProvider: defaults to cloud when configured', () => {
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', undefined, () => {
-		const s = fakeSession({ local: localProvider, cloud: cloudProvider });
-		const p = resolveDataAnalyzerProvider(s, 'summarize-result');
-		assert.equal(p, cloudProvider);
-	});
+	const s = fakeSession({ local: localProvider, cloud: cloudProvider });
+	const p = resolveDataAnalyzerProvider(s, 'summarize-result');
+	assert.equal(p, cloudProvider);
 });
 
 test('resolveDataAnalyzerProvider: falls back to local when cloud is unconfigured', () => {
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', undefined, () => {
-		const s = fakeSession({ local: localProvider, cloud: null });
-		const p = resolveDataAnalyzerProvider(s, 'summarize-result');
-		assert.equal(p, localProvider);
-	});
+	const s = fakeSession({ local: localProvider, cloud: null });
+	const p = resolveDataAnalyzerProvider(s, 'summarize-result');
+	assert.equal(p, localProvider);
 });
 
-test('resolveDataAnalyzerProvider: INSRC_DATA_ANALYZER_USE_LOCAL=1 opts into local even when cloud is available', () => {
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', '1', () => {
-		const s = fakeSession({ local: localProvider, cloud: cloudProvider });
-		const p = resolveDataAnalyzerProvider(s, 'summarize-result');
-		assert.equal(p, localProvider);
-	});
+test('resolveDataAnalyzerProvider: analyzer.useLocal: true opts into local even when cloud is available', () => {
+	const s = fakeSession({ local: localProvider, cloud: cloudProvider, useLocal: true });
+	const p = resolveDataAnalyzerProvider(s, 'summarize-result');
+	assert.equal(p, localProvider);
 });
 
-test('resolveDataAnalyzerProvider: opt-out only fires on exact "1" (not "true", not "yes")', () => {
+test('resolveDataAnalyzerProvider: analyzer.useLocal: false stays on cloud', () => {
+	const s = fakeSession({ local: localProvider, cloud: cloudProvider, useLocal: false });
+	const p = resolveDataAnalyzerProvider(s, 'summarize-result');
+	assert.equal(p, cloudProvider);
+});
+
+test('resolveDataAnalyzerProvider: missing analyzer config defaults to cloud', () => {
+	// fakeSession without useLocal -> analyzer field is undefined entirely
 	const s = fakeSession({ local: localProvider, cloud: cloudProvider });
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', 'true', () => {
-		assert.equal(resolveDataAnalyzerProvider(s, 'summarize-result'), cloudProvider);
-	});
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', 'yes', () => {
-		assert.equal(resolveDataAnalyzerProvider(s, 'summarize-result'), cloudProvider);
-	});
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', '0', () => {
-		assert.equal(resolveDataAnalyzerProvider(s, 'summarize-result'), cloudProvider);
-	});
+	assert.equal(resolveDataAnalyzerProvider(s, 'summarize-result'), cloudProvider);
 });
 
 test('resolveDataAnalyzerProvider: step label does not affect today\'s routing', () => {
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', undefined, () => {
-		const s = fakeSession({ local: localProvider, cloud: cloudProvider });
-		const steps = ['plan', 'analyzer', 'review', 'synthesise', 'meta', 'summarize-result', 'cycle-review', 'writer', 'claim-grounding'] as const;
-		for (const step of steps) {
-			assert.equal(resolveDataAnalyzerProvider(s, step), cloudProvider);
-		}
-	});
+	const s = fakeSession({ local: localProvider, cloud: cloudProvider });
+	const steps = ['plan', 'analyzer', 'review', 'synthesise', 'meta', 'summarize-result', 'cycle-review', 'writer', 'claim-grounding'] as const;
+	for (const step of steps) {
+		assert.equal(resolveDataAnalyzerProvider(s, step), cloudProvider);
+	}
 });
 
-test('isDataAnalyzerLocalOptIn: reports env-flag state', () => {
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', undefined, () => {
-		assert.equal(isDataAnalyzerLocalOptIn(), false);
-	});
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', '1', () => {
-		assert.equal(isDataAnalyzerLocalOptIn(), true);
-	});
-	withEnv('INSRC_DATA_ANALYZER_USE_LOCAL', '0', () => {
-		assert.equal(isDataAnalyzerLocalOptIn(), false);
-	});
+test('isAnalyzerLocalOptIn: reports config state', () => {
+	assert.equal(isAnalyzerLocalOptIn(fakeSession({ local: localProvider, cloud: cloudProvider                       })), false);
+	assert.equal(isAnalyzerLocalOptIn(fakeSession({ local: localProvider, cloud: cloudProvider, useLocal: true       })), true);
+	assert.equal(isAnalyzerLocalOptIn(fakeSession({ local: localProvider, cloud: cloudProvider, useLocal: false      })), false);
+});
+
+test('isDataAnalyzerLocalOptIn: back-compat alias delegates to isAnalyzerLocalOptIn', () => {
+	const s = fakeSession({ local: localProvider, cloud: cloudProvider, useLocal: true });
+	assert.equal(isDataAnalyzerLocalOptIn(s), true);
 });

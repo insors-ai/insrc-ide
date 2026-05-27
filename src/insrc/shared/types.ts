@@ -340,6 +340,28 @@ export interface AgentConfig {
      */
     confirmIntent?: boolean | undefined;
   } | undefined;
+  /**
+   * Analyzer routing config. Applies to BOTH the code analyzer
+   * (daemon/controllers/code-analyzer-orchestrator.ts) and the data
+   * analyzer (agent/tasks/data-analyzer/resolve-provider.ts).
+   *
+   * Replaces the legacy env-var pair INSRC_ANALYZER_USE_LOCAL +
+   * INSRC_DATA_ANALYZER_USE_LOCAL. Re-read on every call site, so a
+   * runtime config edit takes effect on the next analyzer task
+   * without a daemon restart.
+   */
+  analyzer?: {
+    /**
+     * When true, analyzer LLM call sites that DEFAULT to cloud routing
+     * revert to the local Ollama provider. Use case: regression
+     * comparison against the cloud-only path, or running offline with
+     * no Anthropic API key. Default: false (cloud routing).
+     *
+     * Falls back to local automatically when cloud is unconfigured
+     * (no Anthropic API key), regardless of this setting.
+     */
+    useLocal?: boolean | undefined;
+  } | undefined;
 }
 
 // ---------------------------------------------------------------------------

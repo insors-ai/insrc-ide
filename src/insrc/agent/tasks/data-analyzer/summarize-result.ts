@@ -18,8 +18,8 @@
  * empty content.
  *
  * Routes through the cloud LLM by default (DA-E1 of the parity
- * plan). Opt-out via INSRC_DATA_ANALYZER_USE_LOCAL=1, matching the
- * code-analyzer's cloud-as-default routing pattern.
+ * plan). Opt-out via `analyzer.useLocal: true` in ~/.insrc/config.json,
+ * matching the code-analyzer's cloud-as-default routing pattern.
  *
  * Callers:
  *   - Phase B's silent guard wraps runSkill dispatch; after each

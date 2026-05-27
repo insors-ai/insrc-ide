@@ -582,9 +582,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // Provider affinity resolver for skills run inside this analyzer
     // flow. Same default-cloud-for-local routing as
     // runPlanExpandReviewSynthesise (see comment there): skills that
-    // declare `'local'` affinity get the cloud provider unless
-    // INSRC_ANALYZER_USE_LOCAL=1 is set.
-    const useLocal = process.env['INSRC_ANALYZER_USE_LOCAL'] === '1';
+    // declare `'local'` affinity get the cloud provider unless the
+    // shared `analyzer.useLocal` config opt-out is set.
+    const useLocal = session.config.analyzer?.useLocal === true;
     const cloudProvider = session.claudeProvider ?? session.ollamaProvider;
     const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
       switch (affinity) {
@@ -699,18 +699,19 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // footnotes in the final report. Cloud Haiku doesn't hallucinate
     // arg shapes the same way and produces cleaner reports.
     //
-    // Opt-out: set INSRC_ANALYZER_USE_LOCAL=1 to revert to Ollama
-    // for these sites (useful for offline / no-cloud testing).
+    // Opt-out: set `analyzer.useLocal: true` in ~/.insrc/config.json
+    // to revert to Ollama for these sites (useful for offline /
+    // no-cloud testing).
     //
     // Embeddings remain local-only regardless of this flag --
     // `provider.embed` is bound to the local Ollama embedding model
     // by design and is invoked via a different path.
-    const useLocal = process.env['INSRC_ANALYZER_USE_LOCAL'] === '1';
+    const useLocal = session.config.analyzer?.useLocal === true;
     const local = useLocal ? session.ollamaProvider : cloud;
     if (!useLocal) {
       log.info(
         { provider: 'cloud-as-local' },
-        'code-analyzer: "local" LLM sites in this run route through the cloud provider (Haiku); set INSRC_ANALYZER_USE_LOCAL=1 to revert to Ollama',
+        'code-analyzer: "local" LLM sites in this run route through the cloud provider (Haiku); set `analyzer.useLocal: true` in config.json to revert to Ollama',
       );
     }
     const reviewer = session.resolver.resolve('code-analyzer', 'review');
@@ -771,7 +772,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // Planner-discovery skill dispatcher uses the same default-
       // cloud-for-local routing as buildSkillRunnerDeps. Embeddings
       // remain local regardless (different code path).
-      const useLocalHere = process.env['INSRC_ANALYZER_USE_LOCAL'] === '1';
+      const useLocalHere = session.config.analyzer?.useLocal === true;
       const cloudProviderHere = session.claudeProvider ?? session.ollamaProvider;
       const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
         switch (affinity) {
