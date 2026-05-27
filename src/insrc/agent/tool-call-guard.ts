@@ -111,11 +111,97 @@ const SUGGEST_TOP_N = 3;
  * Run the pre-dispatch guard pipeline on a ToolCall. Returns a
  * GuardOutcome describing whether to dispatch as-is, dispatch a
  * coerced shape, or skip dispatch entirely.
+ *
+ * Composes `runSilentGuardStages` (Stages 1-3.5) with Stage 4
+ * (typed schema-rejection corrective). Phase-B-style callers
+ * that don't have a tool-loop to feed correctives back to use
+ * `runSilentGuardStages` directly instead -- it skips Stage 4
+ * so schema mismatches fall through to the underlying dispatch
+ * (runSkill / executeTool) where they surface as runtime errors.
  */
 export async function guardLocalToolCall(
 	call:   ToolCall,
 	deps?:  GuardDeps,
 ): Promise<GuardOutcome> {
+	const silent = runSilentGuardStages(call, deps);
+	if (silent.kind === 'rejected') {
+		return silent;
+	}
+
+	// Stage 4: pre-dispatch schema validation. Runs after Stages 1-3.5
+	// have applied their auto-fixes; catches the residue (missing
+	// required args, unexpected props, type mismatches) and builds a
+	// targeted corrective prompt instead of paying a skill-runner
+	// round-trip to surface the same error.
+	if (silent.schema !== undefined) {
+		const validation = validate(silent.coercedCall.input, silent.schema);
+		if (!validation.ok) {
+			return rejectFromSchemaFailure({
+				toolCallId:       call.id,
+				resolvedName:     silent.coercedCall.name,
+				schema:           silent.schema,
+				input:            silent.coercedCall.input,
+				validationErrors: validation.errors,
+			});
+		}
+	}
+
+	if (silent.notes.length === 0) {
+		return { kind: 'pass', call };
+	}
+
+	log.info(
+		{
+			originalName: call.name,
+			resolvedName: silent.coercedCall.name,
+			notes:        silent.notes,
+		},
+		'tool-call-guard: coerced before dispatch',
+	);
+
+	return { kind: 'coerced', call: silent.coercedCall, notes: silent.notes };
+}
+
+/**
+ * Outcome of the silent (Stage 1-3.5) phase of the guard pipeline.
+ * Mirrors `GuardOutcome` but with the resolved schema attached so
+ * Stage-4 callers can validate without re-fetching, and Phase-B
+ * callers that *skip* Stage 4 can still see the schema if they want
+ * to log it.
+ *
+ * The `rejected` variant fires only for Stage 1 (unknown tool name);
+ * Stages 2-3.5 cannot reject -- they either pass through or coerce.
+ */
+export type SilentGuardOutcome =
+	| {
+		readonly kind:        'pass-or-coerce';
+		readonly coercedCall: ToolCall;
+		readonly notes:       readonly string[];
+		readonly schema:      Record<string, unknown> | undefined;
+	}
+	| Extract<GuardOutcome, { kind: 'rejected' }>;
+
+/**
+ * Run Stages 1-3.5 of the guard (silent rename + coerce + inject)
+ * WITHOUT Stage 4 (typed schema-rejection corrective).
+ *
+ * Why split: callers without a tool-loop can't feed Stage-4's
+ * corrective text back to the LLM, so the corrective would just be
+ * dropped on the floor. For those callers (e.g. the data-analyzer's
+ * skills-pipeline.ts which dispatches pre-planned `ScopedInvocation`s
+ * via `runSkill`), use `runSilentGuardStages` directly: rename and
+ * inject apply silently before dispatch, schema validation is
+ * deferred to the underlying runner/executor.
+ *
+ * Stage 1 (unknown-tool-name rejection) still applies -- there's no
+ * point dispatching to a tool that doesn't exist, and the unknown-
+ * name corrective is still useful even without a tool loop (the
+ * caller can log it for diagnosis).
+ */
+export function runSilentGuardStages(
+	call:   ToolCall,
+	deps?:  GuardDeps,
+): SilentGuardOutcome {
 	const listIds = deps?.listSkillIds ?? defaultListSkillIds;
 	const getSchema = deps?.getSkillInputSchema ?? defaultGetSkillInputSchema;
 	const getRenames = deps?.getArgRenames ?? getArgRenames;
@@ -170,45 +256,19 @@ export async function guardLocalToolCall(
 		}
 	}
 
-	// Stage 4: pre-dispatch schema validation. Runs after Stages 1-3.5
-	// have applied their auto-fixes; catches the residue (missing
-	// required args, unexpected props, type mismatches) and builds a
-	// targeted corrective prompt instead of paying a skill-runner
-	// round-trip to surface the same error.
-	if (schema !== undefined) {
-		const validation = validate(injectedInput, schema);
-		if (!validation.ok) {
-			return rejectFromSchemaFailure({
-				toolCallId:    call.id,
-				resolvedName,
-				schema,
-				input:         injectedInput,
-				validationErrors: validation.errors,
-			});
-		}
-	}
-
 	const allNotes = [...nameNotes, ...renamed.notes, ...coerced.notes, ...injectionNotes];
-	if (allNotes.length === 0) {
-		return { kind: 'pass', call };
-	}
-
 	const coercedCall: ToolCall = {
 		id:    call.id,
 		name:  resolvedName,
 		input: injectedInput,
 	};
 
-	log.info(
-		{
-			originalName: call.name,
-			resolvedName,
-			notes:        allNotes,
-		},
-		'tool-call-guard: coerced before dispatch',
-	);
-
-	return { kind: 'coerced', call: coercedCall, notes: allNotes };
+	return {
+		kind:        'pass-or-coerce',
+		coercedCall,
+		notes:       allNotes,
+		schema,
+	};
 }
 
 // ---------------------------------------------------------------------------

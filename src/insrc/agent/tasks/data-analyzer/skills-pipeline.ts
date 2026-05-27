@@ -31,6 +31,7 @@
  */
 
 import { runSkill } from '../../../daemon/skills/invoke.js';
+import { runDataAnalyzerGuard, type DataSessionDefaults } from './tool-call-guard.js';
 import type { Session } from '../../session.js';
 import type {
 	AcceptedTask,
@@ -193,19 +194,54 @@ export async function runSkillsPipeline(
 	// 3. Per-scoped runSkill (sequential v1).
 	const executions: PerSkillExecution[] = [];
 	for (const inv of select.value.scoped) {
-		try {
-			const result = await runSkill<Record<string, unknown>, unknown>(
-				inv.skillId,
-				inv.args,
-				buildSkillRunnerDeps(deps),
-			);
+		// Phase B of plans/analyzers/data-analyzer-parity.md: run the
+		// silent guard (Stages 1-3.5: fuzzy name resolve / arg rename /
+		// type coerce / session-default inject) before dispatch. Acts
+		// as defense-in-depth on top of select-scope's output -- the
+		// LLM behind select-scope usually picks the right shape, but
+		// the guard catches arg-name drift and array/scalar mistakes
+		// before they hit runSkill's hard input validation. Stage-4
+		// rejection is deliberately NOT invoked (see the data-side
+		// guard module's doc for why).
+		const guarded = runDataAnalyzerGuard(
+			{ id: `scoped-${inv.skillId}`, name: inv.skillId, input: inv.args },
+			buildSessionDefaults(inv.resolvedScope),
+		);
+		const dispatchSkillId = guarded.kind === 'coerced' ? guarded.call.name  : inv.skillId;
+		const dispatchArgs    = guarded.kind === 'coerced' ? guarded.call.input : inv.args;
+		const guardNotes      = guarded.kind === 'coerced' ? guarded.notes      : [];
+
+		// Stage 1 unknown-tool-name rejection is the only path that
+		// still refuses dispatch in Phase B. Record as an errored
+		// execution -- the corrective text is captured in notes for
+		// downstream visibility.
+		if (guarded.kind === 'rejected') {
 			executions.push({
 				skillId:       inv.skillId,
 				args:          inv.args,
 				resolvedScope: inv.resolvedScope,
+				value:         null,
+				confidence:    'low',
+				notes:         [`data-analyzer:tool-call-guard rejected: ${guarded.reason}`],
+				toolCalls:     [],
+				errored:       true,
+			});
+			continue;
+		}
+
+		try {
+			const result = await runSkill<Record<string, unknown>, unknown>(
+				dispatchSkillId,
+				dispatchArgs,
+				buildSkillRunnerDeps(deps),
+			);
+			executions.push({
+				skillId:       inv.skillId,
+				args:          dispatchArgs,
+				resolvedScope: inv.resolvedScope,
 				value:         result.value,
 				confidence:    result.confidence,
-				notes:         result.notes ?? [],
+				notes:         [...guardNotes, ...(result.notes ?? [])],
 				toolCalls:     result.toolCalls.map(tc => ({
 					toolId:     tc.toolId,
 					durationMs: tc.durationMs,
@@ -317,6 +353,20 @@ function buildSkillRunnerDeps(deps: SkillsPipelineDeps): {
 		resolveProvider: deps.resolveProvider,
 		...(deps.signal !== undefined ? { signal: deps.signal } : {}),
 	};
+}
+
+/**
+ * Project a select-scope `resolvedScope` into the Phase-B guard's
+ * `DataSessionDefaults` shape. Today this is just `connectionId` --
+ * `schema` + `database` aren't present on the resolved-scope shape
+ * yet. When richer scope concepts land (e.g. select-scope emitting
+ * a fully-qualified `(connection, schema)` tuple), the additional
+ * fields wire through here.
+ */
+function buildSessionDefaults(
+	scope: { readonly connectionId: string; readonly target?: string },
+): DataSessionDefaults {
+	return scope.connectionId !== '' ? { connectionId: scope.connectionId } : {};
 }
 
 // ---------------------------------------------------------------------------
