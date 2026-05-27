@@ -89,6 +89,20 @@ export interface GuardDeps {
 	 * input always win; defaults only fill gaps.
 	 */
 	readonly sessionDefaults?:    Readonly<Record<string, unknown>>;
+	/**
+	 * Skill-description provider for the unknown-tool-name corrective.
+	 * When supplied, Stage 1's "closest tools in the catalog" suggestions
+	 * include each candidate's one-line description -- not just its id.
+	 *
+	 * Addresses DA-C2 of plans/analyzers/data-analyzer-parity.md: with a
+	 * 100+-skill catalog and ids as terse as `data.quality.scorecard.rdbms`,
+	 * an id-only suggestion list isn't enough for the model to pick the
+	 * right one. Descriptions give it the semantic hook.
+	 *
+	 * Defaults to undefined; when absent, suggestions render id-only
+	 * (the original code-side behaviour).
+	 */
+	readonly getSkillDescription?: (id: string) => string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,11 +219,12 @@ export function runSilentGuardStages(
 	const listIds = deps?.listSkillIds ?? defaultListSkillIds;
 	const getSchema = deps?.getSkillInputSchema ?? defaultGetSkillInputSchema;
 	const getRenames = deps?.getArgRenames ?? getArgRenames;
+	const getDescription = deps?.getSkillDescription;
 
 	const knownIds = listIds();
 
 	// Stage 1: tool-name resolution.
-	const nameOutcome = resolveToolName(call, knownIds);
+	const nameOutcome = resolveToolName(call, knownIds, getDescription);
 	if (nameOutcome.kind === 'rejected') {
 		return nameOutcome;
 	}
@@ -279,7 +294,11 @@ type NameOutcome =
 	| { readonly kind: 'pass-or-coerce'; readonly name: string; readonly notes: readonly string[] }
 	| Extract<GuardOutcome, { kind: 'rejected' }>;
 
-function resolveToolName(call: ToolCall, knownIds: readonly string[]): NameOutcome {
+function resolveToolName(
+	call:           ToolCall,
+	knownIds:       readonly string[],
+	getDescription?: (id: string) => string | undefined,
+): NameOutcome {
 	const raw = call.name;
 
 	// Exact hit.
@@ -325,7 +344,7 @@ function resolveToolName(call: ToolCall, knownIds: readonly string[]): NameOutco
 
 	// Unknown -- build a rejection with top-N suggestions.
 	const suggestions = ranked.slice(0, SUGGEST_TOP_N).map(r => r.id);
-	const correctiveText = formatUnknownToolCorrective(raw, suggestions);
+	const correctiveText = formatUnknownToolCorrective(raw, suggestions, getDescription);
 	return {
 		kind:             'rejected',
 		reason:           `unknown tool name '${raw}'`,
@@ -342,9 +361,24 @@ function normalizeSeparators(s: string): string {
 	return s.toLowerCase().replace(/[_\-]/g, '.');
 }
 
-function formatUnknownToolCorrective(name: string, suggestions: readonly string[]): string {
+function formatUnknownToolCorrective(
+	name:           string,
+	suggestions:    readonly string[],
+	getDescription?: (id: string) => string | undefined,
+): string {
+	// When a description provider is supplied (DA-C2 of
+	// data-analyzer-parity.md), surface each suggestion's one-line
+	// description so the model can pick by intent, not by id-spelling.
+	const renderSuggestion = (id: string): string => {
+		const desc = getDescription?.(id);
+		if (desc !== undefined && desc.trim().length > 0) {
+			const oneLine = desc.split('\n')[0]!.trim().slice(0, 160);
+			return `  - ${id} — ${oneLine}`;
+		}
+		return `  - ${id}`;
+	};
 	const suggestionLines = suggestions.length > 0
-		? `\nClosest tools in the catalog:\n${suggestions.map(s => `  - ${s}`).join('\n')}`
+		? `\nClosest tools in the catalog:\n${suggestions.map(renderSuggestion).join('\n')}`
 		: '\n(no close matches found)';
 	return (
 		`Your call to \`${name}\` failed: that tool is not in the skill catalog.` +
@@ -544,6 +578,25 @@ function buildCorrectivePrompt(input: RejectFromSchemaInput): string {
 		lines.push('Unexpected arguments (not in the schema — remove them):');
 		for (const argName of cats.unexpected) {
 			lines.push(`  - ${argName}`);
+		}
+		// DA-C1 strengthening (plans/analyzers/data-analyzer-parity.md):
+		// the LLM that emitted unexpected args almost certainly meant one
+		// of the valid args -- showing the full valid-arg list with
+		// descriptions gives the model the right names to swap to. Costs
+		// a few extra prompt tokens; pays them back by avoiding another
+		// retry round trip on `name -> className`-style mistakes.
+		const validArgs = Object.keys(properties);
+		if (validArgs.length > 0) {
+			const requiredSet = new Set(Array.isArray(schema['required']) ? (schema['required'] as string[]) : []);
+			lines.push('');
+			lines.push('Valid arguments on this skill\'s schema (use these instead):');
+			for (const argName of validArgs) {
+				const prop = (properties[argName] ?? {}) as Record<string, unknown>;
+				const type    = typeof prop['type']        === 'string' ? (prop['type']        as string) : 'value';
+				const desc    = typeof prop['description'] === 'string' ? (prop['description'] as string) : '';
+				const reqTag  = requiredSet.has(argName) ? ' [required]' : '';
+				lines.push(`  - ${argName} (${type})${reqTag}${desc ? ': ' + desc : ''}`);
+			}
 		}
 		lines.push('');
 	}

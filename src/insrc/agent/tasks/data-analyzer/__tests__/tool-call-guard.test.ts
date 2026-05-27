@@ -90,21 +90,21 @@ test('normalizeDefaults: drops undefined and empty-string entries', () => {
 // runDataAnalyzerGuard end-to-end
 // ---------------------------------------------------------------------------
 
-test('runDataAnalyzerGuard: pass-through for valid call with no transforms', () => {
+test('runDataAnalyzerGuard: pass-through for valid call with no transforms', async () => {
 	setupRegistry();
 	const ids = listDataSkillIds();
 	const first = ids[0]!;
 	// Use any valid skill id; we only care that no transforms apply
 	// when input matches expected name + has no rename candidates.
-	const result = runDataAnalyzerGuard(call(first, {}));
+	const result = await runDataAnalyzerGuard(call(first, {}));
 	// May be 'pass' or 'coerced' depending on whether session defaults
 	// are needed; both are non-rejected outcomes.
 	assert.notEqual(result.kind, 'rejected');
 });
 
-test('runDataAnalyzerGuard: unknown tool name -> rejected with corrective', () => {
+test('runDataAnalyzerGuard: unknown tool name -> rejected with corrective', async () => {
 	setupRegistry();
-	const result = runDataAnalyzerGuard(call('data.totally.fictitious.skill', {}));
+	const result = await runDataAnalyzerGuard(call('data.totally.fictitious.skill', {}));
 	assert.equal(result.kind, 'rejected');
 	if (result.kind === 'rejected') {
 		assert.match(result.reason, /unknown tool name/);
@@ -112,9 +112,9 @@ test('runDataAnalyzerGuard: unknown tool name -> rejected with corrective', () =
 	}
 });
 
-test('runDataAnalyzerGuard: unknown tool name suggestions are data-only', () => {
+test('runDataAnalyzerGuard: unknown tool name suggestions are data-only', async () => {
 	setupRegistry();
-	const result = runDataAnalyzerGuard(call('data.profile.numeric.invented', {}));
+	const result = await runDataAnalyzerGuard(call('data.profile.numeric.invented', {}));
 	assert.equal(result.kind, 'rejected');
 	if (result.kind === 'rejected') {
 		// Suggestions should not include any code.* skills even if
@@ -125,21 +125,36 @@ test('runDataAnalyzerGuard: unknown tool name suggestions are data-only', () => 
 	}
 });
 
-test('runDataAnalyzerGuard: separator-normalized fuzzy match', () => {
+test('runDataAnalyzerGuard: DA-C2 unknown-tool corrective includes skill descriptions', async () => {
+	setupRegistry();
+	const result = await runDataAnalyzerGuard(call('data.profile.numeric.invented', {}));
+	assert.equal(result.kind, 'rejected');
+	if (result.kind === 'rejected') {
+		// The corrective should list candidate ids followed by their
+		// one-line descriptions (separated by an em-dash). At least one
+		// suggestion's description should be present in the corrective.
+		const corrective = result.correctiveResult.content;
+		// Look for "  - data.<id> — <desc>" pattern.
+		assert.match(corrective, /  - data\.[^\s]+ — /,
+			'corrective should include "id — description" lines for suggestions');
+	}
+});
+
+test('runDataAnalyzerGuard: separator-normalized fuzzy match', async () => {
 	setupRegistry();
 	const ids = listDataSkillIds();
 	// Pick a real skill, then mangle separators (dots -> underscores).
 	// Should fuzzy-match back to the canonical id.
 	const target = ids.find(id => id.includes('.')) ?? ids[0]!;
 	const mangled = target.replace(/\./g, '_');
-	const result = runDataAnalyzerGuard(call(mangled, {}));
+	const result = await runDataAnalyzerGuard(call(mangled, {}));
 	assert.notEqual(result.kind, 'rejected');
 	if (result.kind === 'coerced') {
 		assert.equal(result.call.name, target);
 	}
 });
 
-test('runDataAnalyzerGuard: session defaults inject when required and missing', () => {
+test('runDataAnalyzerGuard: session defaults inject when required and missing', async () => {
 	setupRegistry();
 	// Find a data skill whose schema declares connectionId as required.
 	const ids = listDataSkillIds();
@@ -159,7 +174,7 @@ test('runDataAnalyzerGuard: session defaults inject when required and missing', 
 		// (no inject when key is not required).
 		return;
 	}
-	const result = runDataAnalyzerGuard(call(pick, {}), { connectionId: 'pg-primary' });
+	const result = await runDataAnalyzerGuard(call(pick, {}), { connectionId: 'pg-primary' });
 	assert.notEqual(result.kind, 'rejected');
 	if (result.kind === 'coerced') {
 		assert.equal(result.call.input['connectionId'], 'pg-primary');
@@ -167,7 +182,7 @@ test('runDataAnalyzerGuard: session defaults inject when required and missing', 
 	}
 });
 
-test('runDataAnalyzerGuard: existing connectionId is NOT overwritten by session default', () => {
+test('runDataAnalyzerGuard: existing connectionId is NOT overwritten by session default', async () => {
 	setupRegistry();
 	const ids = listDataSkillIds();
 	let pick: string | undefined;
@@ -180,7 +195,7 @@ test('runDataAnalyzerGuard: existing connectionId is NOT overwritten by session 
 		}
 	}
 	if (pick === undefined) return;
-	const result = runDataAnalyzerGuard(
+	const result = await runDataAnalyzerGuard(
 		call(pick, { connectionId: 'pg-explicit' }),
 		{ connectionId: 'pg-default' },
 	);
@@ -193,7 +208,7 @@ test('runDataAnalyzerGuard: existing connectionId is NOT overwritten by session 
 	}
 });
 
-test('runDataAnalyzerGuard: Phase-B schema mismatches PASS THROUGH (no Stage-4 reject)', () => {
+test('runDataAnalyzerGuard: Phase-B schema mismatches PASS THROUGH (no Stage-4 reject)', async () => {
 	setupRegistry();
 	const ids = listDataSkillIds();
 	const target = ids[0]!;
@@ -202,7 +217,7 @@ test('runDataAnalyzerGuard: Phase-B schema mismatches PASS THROUGH (no Stage-4 r
 	// would normally fire; we assert here that the data-side wrapper
 	// does NOT invoke it -- the outcome is pass or coerced, never
 	// rejected for schema reasons.
-	const result = runDataAnalyzerGuard(call(target, {
+	const result = await runDataAnalyzerGuard(call(target, {
 		bogus: 'extra',
 		junk:  ['array', 'where', 'no', 'array', 'expected'],
 	}));
@@ -211,5 +226,84 @@ test('runDataAnalyzerGuard: Phase-B schema mismatches PASS THROUGH (no Stage-4 r
 	if (result.kind === 'rejected') {
 		assert.doesNotMatch(result.reason, /schema validation failed/,
 			'Phase B should NOT reject on schema mismatch; defer to Phase D');
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Phase D (enableSchemaReject: true) -- Stage 4 typed corrective
+// ---------------------------------------------------------------------------
+
+test('runDataAnalyzerGuard: Phase D rejects unexpected args with categorised corrective', async () => {
+	setupRegistry();
+	const ids = listDataSkillIds();
+	// Pick a skill with at least one required arg so we can violate
+	// the schema in a way that produces an "unexpected" failure.
+	let target: string | undefined;
+	for (const id of ids) {
+		const sk = getSkill(id);
+		const required = (sk?.inputs as { required?: unknown } | undefined)?.required;
+		if (Array.isArray(required) && required.length > 0) {
+			target = id;
+			break;
+		}
+	}
+	assert.ok(target !== undefined, 'expected at least one skill with required args');
+	// Pass nothing required + extra junk.
+	const result = await runDataAnalyzerGuard(
+		call(target!, { bogus: 'extra', junk: 'value' }),
+		undefined,
+		{ enableSchemaReject: true },
+	);
+	if (result.kind === 'rejected') {
+		assert.match(result.correctiveResult.content, /Missing required arguments|Unexpected arguments/);
+	}
+	// Even a 'coerced' outcome is fine if all required args got injected
+	// by session-default elsewhere; assertion is just that no throw.
+});
+
+test('runDataAnalyzerGuard: Phase D corrective for unexpected lists full valid arg set (DA-C1 strengthening)', async () => {
+	setupRegistry();
+	const ids = listDataSkillIds();
+	// Find a skill whose schema has additionalProperties: false so
+	// unexpected args trigger a reject.
+	let target: string | undefined;
+	for (const id of ids) {
+		const sk = getSkill(id);
+		const inputs = sk?.inputs as { additionalProperties?: unknown; required?: unknown; properties?: unknown } | undefined;
+		if (
+			inputs?.additionalProperties === false &&
+			Array.isArray(inputs.required) &&
+			inputs.required.length > 0 &&
+			typeof inputs.properties === 'object' && inputs.properties !== null
+		) {
+			target = id;
+			break;
+		}
+	}
+	if (target === undefined) {
+		// No matching skill in the live registry; skip the assertion.
+		return;
+	}
+	const sk = getSkill(target)!;
+	const required = ((sk.inputs as { required: string[] }).required);
+	// Build an input that satisfies required but ALSO has an extra prop.
+	const validInput: Record<string, unknown> = {};
+	for (const k of required) validInput[k] = 'placeholder';
+	const result = await runDataAnalyzerGuard(
+		call(target, { ...validInput, __unexpected_junk__: 'value' }),
+		undefined,
+		{ enableSchemaReject: true },
+	);
+	assert.equal(result.kind, 'rejected');
+	if (result.kind === 'rejected') {
+		const text = result.correctiveResult.content;
+		assert.match(text, /Unexpected arguments/);
+		assert.match(text, /__unexpected_junk__/);
+		// DA-C1 strengthening: should also surface the full valid-arg
+		// list to give the LLM the right names to swap to.
+		assert.match(text, /Valid arguments on this skill's schema/);
+		// At least one required arg name should appear in the valid-arg list.
+		assert.ok(required.some(r => text.includes(`  - ${r}`)),
+			`valid-arg list should include at least one required arg name; got:\n${text}`);
 	}
 });

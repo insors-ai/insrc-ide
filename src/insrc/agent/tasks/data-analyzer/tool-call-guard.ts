@@ -23,7 +23,7 @@
  * loop lands.
  */
 
-import { runSilentGuardStages, type GuardDeps, type GuardOutcome } from '../../tool-call-guard.js';
+import { runSilentGuardStages, guardLocalToolCall, type GuardDeps, type GuardOutcome } from '../../tool-call-guard.js';
 import type { ToolCall } from '../../../shared/types.js';
 import { listSkills, getSkill } from '../../../daemon/skills/registry.js';
 import { getDataSkillArgRenames } from './tool-call-guard-rules.js';
@@ -56,34 +56,66 @@ export type DataGuardOutcome =
 	| Extract<GuardOutcome, { kind: 'rejected' }>;
 
 /**
- * Run Phase-B silent stages (1-3.5) on one tool call before
- * dispatch. Returns:
+ * Options for the data-side guard wrapper. The Phase-B default
+ * suppresses Stage-4 schema-reject; Phase-D mode (`enableSchemaReject:
+ * true`) turns it on. executeDataStep -- which DOES have a tool-loop
+ * that can feed correctives back to the LLM -- uses Phase-D mode.
+ * The skills-pipeline (which has no LLM tool-loop) stays on Phase-B
+ * mode (default).
+ */
+export interface DataGuardOpts {
+	/**
+	 * When true, run Stage 4 (typed schema-rejection corrective). The
+	 * rejected outcome carries a categorised corrective prompt
+	 * (missing / unexpected / typeMismatch) the caller should feed
+	 * back to the LLM as the next-turn `tool_result`. Phase D of
+	 * plans/analyzers/data-analyzer-parity.md.
+	 *
+	 * Default `false` (Phase B silent behaviour: schema mismatches
+	 * fall through to the underlying runner).
+	 */
+	readonly enableSchemaReject?: boolean;
+}
+
+/**
+ * Run the data-side guard on one tool call before dispatch.
  *
+ * Returns:
  *   - `pass`     -- nothing changed; dispatch the original call.
  *   - `coerced`  -- one or more silent transforms applied (rename,
  *                   type-coerce, session-default inject); dispatch
  *                   the coerced call instead.
- *   - `rejected` -- ONLY for Stage-1 unknown-tool-name failures
- *                   (the tool doesn't exist in the data-skill
- *                   catalog). Caller should NOT dispatch; the
- *                   corrective ToolResult is in `correctiveResult`.
- *
- * Schema-mismatch cases (missing required, unexpected, type
- * mismatch) fall through silently in Phase B -- they surface as
- * runtime errors from the underlying runner. Phase D upgrades these
- * to typed correctives once the discovery-flow tool loop lands.
+ *   - `rejected` -- Stage-1 unknown-tool-name OR (Phase-D only)
+ *                   Stage-4 schema mismatch. Caller should NOT
+ *                   dispatch; the corrective ToolResult is in
+ *                   `correctiveResult`. In Phase D mode the
+ *                   corrective lists the schema's full valid arg set
+ *                   with descriptions (DA-C1) and unknown-tool
+ *                   suggestions include their one-line descriptions
+ *                   (DA-C2).
  */
-export function runDataAnalyzerGuard(
+export async function runDataAnalyzerGuard(
 	call:             ToolCall,
 	sessionDefaults?: DataSessionDefaults,
-): DataGuardOutcome {
+	opts?:            DataGuardOpts,
+): Promise<DataGuardOutcome> {
 	const deps: GuardDeps = {
 		listSkillIds:        listDataSkillIds,
 		getSkillInputSchema: defaultGetDataSkillSchema,
 		getArgRenames:       getDataSkillArgRenames,
+		getSkillDescription: defaultGetDataSkillDescription,
 		...(sessionDefaults !== undefined ? { sessionDefaults: normalizeDefaults(sessionDefaults) } : {}),
 	};
 
+	// Phase D mode: route through the full guard pipeline (Stages 1-4).
+	// Stage-4 reject builds a categorised corrective that the caller's
+	// tool-loop should feed back as a tool_result on the next turn.
+	if (opts?.enableSchemaReject === true) {
+		const outcome = await guardLocalToolCall(call, deps);
+		return outcome as DataGuardOutcome;
+	}
+
+	// Phase B mode (default): silent stages only.
 	const silent = runSilentGuardStages(call, deps);
 	if (silent.kind === 'rejected') {
 		return silent;
@@ -123,6 +155,17 @@ export function listDataSkillIds(): readonly string[] {
 function defaultGetDataSkillSchema(id: string): Record<string, unknown> | undefined {
 	const skill = getSkill(id);
 	return skill?.inputs;
+}
+
+/**
+ * Source the skill's one-line description for unknown-tool corrective
+ * suggestions (DA-C2). The Skill registry stores a `description` field
+ * (which may be a paragraph); we surface it verbatim and let the
+ * formatter truncate.
+ */
+function defaultGetDataSkillDescription(id: string): string | undefined {
+	const skill = getSkill(id);
+	return skill?.description;
 }
 
 /**

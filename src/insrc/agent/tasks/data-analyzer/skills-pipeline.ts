@@ -203,7 +203,7 @@ export async function runSkillsPipeline(
 		// before they hit runSkill's hard input validation. Stage-4
 		// rejection is deliberately NOT invoked (see the data-side
 		// guard module's doc for why).
-		const guarded = runDataAnalyzerGuard(
+		const guarded = await runDataAnalyzerGuard(
 			{ id: `scoped-${inv.skillId}`, name: inv.skillId, input: inv.args },
 			buildSessionDefaults(inv.resolvedScope),
 		);

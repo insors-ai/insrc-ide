@@ -247,7 +247,17 @@ async function callPerTask(input: PerTaskCallInput): Promise<CallOutcome | null>
 	// the Phase-B silent guard. Rename / coerce / inject apply
 	// silently; Stage-4 reject is suppressed (Phase D will turn it on).
 	const dispatcher = async (toolCall: ToolCall): Promise<ToolResult> => {
-		const guarded = runDataAnalyzerGuard(toolCall, input.sessionDefaults);
+		// Phase D: enableSchemaReject lets Stage-4 build a categorised
+		// corrective (missing / unexpected / typeMismatch) that the
+		// tool-loop's onDispatchError handler feeds back as a
+		// tool_result. The LLM sees the corrective + valid-arg list +
+		// retries with the right shape. Skills-pipeline (no tool-loop)
+		// stays on Phase-B silent mode.
+		const guarded = await runDataAnalyzerGuard(
+			toolCall,
+			input.sessionDefaults,
+			{ enableSchemaReject: true },
+		);
 		if (guarded.kind === 'rejected') {
 			log.warn(
 				{
