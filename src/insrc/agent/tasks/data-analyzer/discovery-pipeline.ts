@@ -3,10 +3,10 @@
  * plans/analyzers/data-analyzer-parity.md.
  *
  * Wires Phase C.2 (discovery-flow) + Phase E (writer + claim-grounding)
- * into a single per-task pipeline that produces a legacy-shaped
- * `DataAnalyzerResult`. Drop-in replacement for `runDataAnalyzer` --
- * the orchestrator's `runNextAnalyzerTask` branches on
- * `isDataDiscoveryFlowEnabled()` and calls this when the flag is set.
+ * into a single per-task pipeline that produces a
+ * `DataAnalyzerResult`. The orchestrator's `runNextAnalyzerTask` and
+ * the cross-agent flow-2 entry point both invoke this directly --
+ * it is the only data-analyzer per-task pipeline.
  *
  * Pipeline:
  *
@@ -29,11 +29,6 @@
  *
  *   5. Adapt → DataAnalyzerResult so the existing review / synthesise
  *      pipeline downstream consumes the result unchanged.
- *
- * The pipeline is OPT-IN. Setting INSRC_DATA_ANALYZER_FLOW=discovery
- * enables it; absent the flag, the orchestrator stays on the legacy
- * `runDataAnalyzer` path. This keeps the legacy flow available for
- * regression comparison while the new flow stabilises.
  */
 
 import type { LLMProvider } from '../../../shared/types.js';
@@ -67,23 +62,6 @@ import type {
 } from './types.js';
 
 const log = getLogger('data-analyzer:discovery-pipeline');
-
-// ---------------------------------------------------------------------------
-// Feature flag
-// ---------------------------------------------------------------------------
-
-/**
- * True when the orchestrator should route the analyzing phase through
- * the Phase-C.2/E discovery pipeline instead of the legacy
- * `runDataAnalyzer` path. Off by default; set
- * `INSRC_DATA_ANALYZER_FLOW=discovery` to opt in.
- *
- * The flag is checked per-task (cheap env read) so a runtime toggle
- * takes effect on the next task without restarting the daemon.
- */
-export function isDataDiscoveryFlowEnabled(): boolean {
-	return process.env['INSRC_DATA_ANALYZER_FLOW'] === 'discovery';
-}
 
 // ---------------------------------------------------------------------------
 // Public surface

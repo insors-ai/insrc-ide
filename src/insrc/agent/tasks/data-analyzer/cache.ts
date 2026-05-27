@@ -3,9 +3,9 @@
  * (plans/analyzers/data-analyzer.md Phase 2.4).
  *
  * Cache hit path: orchestrator's `runNextAnalyzerTask` checks the
- * cache before invoking `runDataAnalyzer`; on hit, it skips the
- * analyzer + reviewer pair entirely and treats the cached result as
- * accepted-with-original-confidence.
+ * cache before invoking `runDataDiscoveryPipeline`; on hit, it skips
+ * the analyzer + reviewer pair entirely and treats the cached result
+ * as accepted-with-original-confidence.
  *
  * Cache miss path: existing analyzer + reviewer flow runs; on a
  * reviewer `accept`, the result is written to cache via

@@ -8,7 +8,6 @@
  * composed piece; these tests pin the ADAPTER logic that converts
  * discovery output -> DataAnalyzerResult fields:
  *
- *   - isDataDiscoveryFlowEnabled: env-flag toggle
  *   - synthesiseFindings: per-evidence finding, downgrade on grounding,
  *     citation-invariant (skip evidence with empty citations),
  *     empty-evidence placeholder
@@ -24,7 +23,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-	isDataDiscoveryFlowEnabled,
 	synthesiseFindings,
 	aggregateConfidence,
 	flattenEvidenceCitations,
@@ -44,18 +42,6 @@ void {} as ConnectionSummary | undefined;  // silence unused import in pure-help
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function withEnv<T>(key: string, value: string | undefined, fn: () => T): T {
-	const prior = process.env[key];
-	if (value === undefined) delete process.env[key];
-	else process.env[key] = value;
-	try {
-		return fn();
-	} finally {
-		if (prior === undefined) delete process.env[key];
-		else process.env[key] = prior;
-	}
-}
-
 function entry(
 	citations: DataCitation[],
 	confidence: 'high' | 'medium' | 'low',
@@ -68,34 +54,6 @@ function entry(
 function grounding(verdict: 'accept' | 'redraft'): DataClaimGroundingResponse {
 	return { claims: [], verdict, notes: [] };
 }
-
-// ---------------------------------------------------------------------------
-// isDataDiscoveryFlowEnabled
-// ---------------------------------------------------------------------------
-
-test('isDataDiscoveryFlowEnabled: false when flag unset', () => {
-	withEnv('INSRC_DATA_ANALYZER_FLOW', undefined, () => {
-		assert.equal(isDataDiscoveryFlowEnabled(), false);
-	});
-});
-
-test('isDataDiscoveryFlowEnabled: true when flag = "discovery"', () => {
-	withEnv('INSRC_DATA_ANALYZER_FLOW', 'discovery', () => {
-		assert.equal(isDataDiscoveryFlowEnabled(), true);
-	});
-});
-
-test('isDataDiscoveryFlowEnabled: false for unrecognised flag values', () => {
-	withEnv('INSRC_DATA_ANALYZER_FLOW', 'legacy', () => {
-		assert.equal(isDataDiscoveryFlowEnabled(), false);
-	});
-	withEnv('INSRC_DATA_ANALYZER_FLOW', 'true', () => {
-		assert.equal(isDataDiscoveryFlowEnabled(), false);
-	});
-	withEnv('INSRC_DATA_ANALYZER_FLOW', '', () => {
-		assert.equal(isDataDiscoveryFlowEnabled(), false);
-	});
-});
 
 // ---------------------------------------------------------------------------
 // synthesiseFindings

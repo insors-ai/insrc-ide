@@ -23,7 +23,8 @@
  * fresh connections trip the universal access gate UI.
  */
 
-import { runDataAnalyzer } from '../../agent/tasks/data-analyzer/analyzer/runner.js';
+import { runDataDiscoveryPipeline } from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
+import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
 import { registerTool } from '../tools/registry.js';
 import {
 	CROSS_AGENT_DEPTH_FIELD,
@@ -173,7 +174,10 @@ export const dataAnalyzeTool: Tool = {
 		);
 
 		// 60 s overall envelope; per-task wallclock at 45 s.
-		const provider = deps.session.resolver.resolve('data-analyzer', 'analyzer');
+		// Connection discovery: the discovery pipeline needs the active
+		// connection set up front (the legacy runDataAnalyzer used to do
+		// this internally via its db_list_connections tool call).
+		const connections = await loadActiveConnections(deps.session);
 		const startedAt = Date.now();
 		const overall = (() => {
 			const ctrl = new AbortController();
@@ -209,24 +213,16 @@ export const dataAnalyzeTool: Tool = {
 				continue;
 			}
 			try {
-				const result = await runDataAnalyzer(task, {
-					provider,
+				const outcome = await runDataDiscoveryPipeline({
 					session: deps.session,
-					signal: overall.ctrl.signal,
-					wallClockMs: FLOW2_PER_TASK_WALLCLOCK_MS,
-					tier,
-					// Plumb send/channel/requestId so the universal
-					// access gate (Phase 4 of plans/access-gate.md) can
-					// surface UI prompts when the caller's flow asks
-					// about a connection that hasn't been approved yet.
-					...(deps.send !== undefined ? { send: deps.send } : {}),
-					...(deps.channel !== undefined ? { channel: deps.channel } : {}),
-					...(deps.requestId !== undefined ? { requestId: deps.requestId } : {}),
+					task,
+					connections,
+					...(overall.ctrl.signal ? { signal: overall.ctrl.signal } : {}),
 				});
-				if (result.truncated) {
+				if (outcome.truncated) {
 					perTaskTruncated = true;
 				}
-				completed.push({ task, outcome: result.result });
+				completed.push({ task, outcome: outcome.result });
 			} catch (err) {
 				const message = (err as Error).message ?? String(err);
 				log.warn({ task: shortTitle(task), err: message }, 'data_analyze: task threw');

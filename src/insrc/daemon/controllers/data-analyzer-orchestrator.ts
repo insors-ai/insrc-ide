@@ -26,11 +26,8 @@
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { runDataAnalyzer } from '../../agent/tasks/data-analyzer/analyzer/runner.js';
-import {
-  isDataDiscoveryFlowEnabled,
-  runDataDiscoveryPipeline,
-} from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
+import { runDataDiscoveryPipeline } from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
+import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
 import {
   buildPlanSystemPrompt,
   renderPlanUserMessage,
@@ -313,38 +310,8 @@ export class DataAnalyzerOrchestratorController implements TaskController {
 
   private async _loadConnections(input: ControllerInput): Promise<readonly ConnectionSummary[]> {
     if (this.deps === undefined) return [];
-    try {
-      const r = await executeTool(
-        { id: 'discover', name: 'db_list_connections', input: {} },
-        { session: this.deps.session },
-      );
-      if (r.isError) {
-        log.warn({ content: r.content.slice(0, 200) }, '_loadConnections: db:list_connections failed');
-        return [];
-      }
-      // The driver returns structured rows alongside the markdown
-      // summary in `r.metadata`. Until we tighten the executor's
-      // return shape, parse the JSON-ish rows out of metadata when
-      // present; fall back to an empty list.
-      const rawRows = (r as { metadata?: { rows?: unknown } }).metadata?.rows;
-      const rows = Array.isArray(rawRows) ? rawRows : [];
-      void input;
-      return rows.map((row): ConnectionSummary => {
-        const r2 = row as Record<string, unknown>;
-        const family = (typeof r2['family'] === 'string' ? r2['family'] : 'other') as ConnectionSummary['family'];
-        return {
-          id:          typeof r2['id'] === 'string' ? r2['id'] : '',
-          family,
-          kind:        typeof r2['kind'] === 'string' ? r2['kind'] : '',
-          ...(typeof r2['label'] === 'string' ? { label: r2['label'] as string } : {}),
-          prod:        r2['prod'] === true,
-          hasPiiConfig: r2['hasPiiConfig'] === true,
-        };
-      }).filter(c => c.id.length > 0);
-    } catch (err) {
-      log.warn({ err: (err as Error).message }, '_loadConnections: threw');
-      return [];
-    }
+    void input;
+    return loadActiveConnections(this.deps.session);
   }
 
   // -- state init ----------------------------------------------------------
@@ -841,42 +808,19 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       return this.runNextAnalyzerTask(state);
     }
 
-    // Phase F of plans/analyzers/data-analyzer-parity.md: branch to
-    // the new discovery-flow pipeline when
-    // INSRC_DATA_ANALYZER_FLOW=discovery is set. The legacy
-    // runDataAnalyzer path stays the default until the discovery
-    // flow has accumulated enough live miles to swap defaults.
-    let result: DataAnalyzerResult;
-    if (isDataDiscoveryFlowEnabled()) {
-      log.info({ itemId: next.itemId, tier: this._tier }, 'analyzing: routing through discovery-flow pipeline');
-      const outcome = await runDataDiscoveryPipeline({
-        session:     this.deps.session,
-        task:        next,
-        connections: this._connections,
-        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      });
-      result = outcome.result;
-    } else {
-      // Resolve the analyzer provider via the per-step resolver.
-      const provider = this.deps.session.resolver.resolve('data-analyzer', 'analyzer');
-
-      const legacyOutcome = await runDataAnalyzer(next, {
-        provider,
-        session: this.deps.session,
-        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-        // Phase 4 of plans/access-gate.md: drop the per-call
-        // checkConnectionAccess hook in favour of seeding Session.access
-        // at task start (ephemeral connections auto-approved on
-        // registration). The dispatcher inside executeTool fires the
-        // gate UI on miss using the send / channel / requestId we plumb
-        // here.
-        send:      this.deps.send,
-        channel:   this.deps.channel,
-        requestId: this.deps.requestId,
-        tier: this._tier,
-      });
-      result = legacyOutcome.result;
-    }
+    // Phase F of plans/analyzers/data-analyzer-parity.md: the
+    // discovery-pipeline (Phase A-F work) is the only analyzing
+    // path. The legacy `runDataAnalyzer` per-task runner and its
+    // env-var feature flag were removed once the discovery flow
+    // accumulated enough live miles.
+    log.info({ itemId: next.itemId, tier: this._tier }, 'analyzing: routing through discovery-flow pipeline');
+    const outcome = await runDataDiscoveryPipeline({
+      session:     this.deps.session,
+      task:        next,
+      connections: this._connections,
+      ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+    });
+    const result: DataAnalyzerResult = outcome.result;
 
     if (this.deps.todos !== undefined) {
       try {
