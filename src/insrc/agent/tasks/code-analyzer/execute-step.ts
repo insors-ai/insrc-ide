@@ -345,17 +345,13 @@ type GuardSkillInvokeOutcome =
  * dispatch guard on the inner skill call, and rewrap any coercion
  * back into the meta-tool's shape.
  *
- * Disabled via `INSRC_TOOL_GUARD=off` (rollback flag). For non-
- * `skill_invoke` toolCalls (e.g. raw tool calls in legacy paths),
- * the function passes through without guard processing.
+ * For non-`skill_invoke` toolCalls (e.g. raw tool calls in legacy
+ * paths), the function passes through without guard processing.
  */
 async function tryGuardSkillInvoke(
 	toolCall:        ToolCall,
 	sessionRepoPath: string | undefined,
 ): Promise<GuardSkillInvokeOutcome> {
-	if (process.env['INSRC_TOOL_GUARD'] === 'off') {
-		return { kind: 'pass', call: toolCall };
-	}
 	if (toolCall.name !== 'skill_invoke') {
 		return { kind: 'pass', call: toolCall };
 	}

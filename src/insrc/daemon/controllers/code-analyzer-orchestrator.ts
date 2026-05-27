@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
-import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+import { planActions, type PlannedAction } from '../../agent/content-gen/plan-actions.js';
 import { planActionsInteractive } from '../../agent/content-gen/plan-actions-interactive.js';
 import { verifyPlannedActions } from '../../agent/content-gen/verify-planned-actions.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
@@ -94,26 +94,6 @@ const K_SYNTH_RESULT   = 'synthResult';           // final markdown
 const K_LIST_ID        = 'listId';
 
 type Phase = 'synthesising' | 'done';
-
-// Subset of CapturedSkillCall the reviewer + TodoList stamping read.
-// Both writeSectionWithTools and patchSectionWithTools emit values
-// shaped this way, so the per-round loop can accumulate them across
-// rounds without importing both interfaces.
-//
-// Phase M.2: the orchestrator tags each entry with the round it came
-// from so the reviewer-evidence builder can compress older rounds for
-// round-2/3 reviews (cumulative evidence routinely blew the reviewer's
-// input budget in run #2).
-interface CapturedSkillCallLike {
-  readonly skillId:          string;
-  readonly args:             Record<string, unknown>;
-  readonly resultText:       string;
-  readonly errored:          boolean;
-  readonly rejectionReason?: string | undefined;
-}
-interface TaggedSkillCall extends CapturedSkillCallLike {
-  readonly round: 1 | 2 | 3;
-}
 
 // ---------------------------------------------------------------------------
 // Controller
@@ -714,7 +694,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         'code-analyzer: "local" LLM sites in this run route through the cloud provider (Haiku); set `analyzer.useLocal: true` in config.json to revert to Ollama',
       );
     }
-    const reviewer = session.resolver.resolve('code-analyzer', 'review');
     const request = ca?.request ?? '';
 
     // Lean summary context: repo descriptor + memory line.
@@ -901,72 +880,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // and forcing the writer to hedge ("appears to lack indexed
     // files"). The tool loop avoids that by giving the writer the
     // section title + tool catalog directly.
-    const { writeSectionWithTools, patchSectionWithTools, patchSectionItemwise } = await import('../../agent/tasks/code-analyzer/write-section.js');
-    const { gatherEvidence } = await import('../../agent/tasks/code-analyzer/gather-evidence.js');
-    const { writeSectionFromEvidence } = await import('../../agent/tasks/code-analyzer/write-from-evidence.js');
-    type DraftLike = Awaited<ReturnType<typeof writeSectionWithTools>>;
-    // Phase R.1: per-item patch loop. Default ON -- eliminates the ghost-ID
-    // failure mode where the writer emits `patch:<id>` blocks with IDs that
-    // don't match workItems[].id (observed across both qwen + devstral; runs
-    // #4-#6 had 10+ such silent miscalls). Set INSRC_ANALYZER_PATCH_MODE=legacy
-    // to fall back to the fenced-block patchSectionWithTools path.
-    const patchMode = process.env['INSRC_ANALYZER_PATCH_MODE'] === 'legacy' ? 'legacy' : 'itemwise';
-    // plans/code-analyzer-gather-then-write.md D3. Default = gather+write
-    // (Phase G + Phase W). Setting INSRC_ANALYZER_WRITE_MODE=interleaved-legacy
-    // restores the run-#9 interleaved writer (writeSectionWithTools). Same
-    // structural reason as patchMode: the new path is the fix for a real
-    // failure (run-#9 had section 2 emit the same anchor paragraph 20+
-    // times due to eviction thrashing inside the interleaved loop) and we
-    // keep the legacy path one env-var away during the transition.
-    const writeMode = process.env['INSRC_ANALYZER_WRITE_MODE'] === 'interleaved-legacy' ? 'interleaved-legacy' : 'gather-write';
-    log.info({ patchMode, writeMode }, 'analyzer modes selected');
-
-    // Adapter that runs the new gather+write pipeline and reshapes the
-    // result into the legacy DraftLike contract so the downstream
-    // patch / review / picker code can stay as-is. Wraps both R1 calls
-    // (the initial draft AND the F.4 recovery redraft) consistently.
-    const runGatherWrite = async (opts: {
-      action:          PlannedAction,
-      request:         string,
-      onProgress:      ((msg: string) => void) | undefined,
-      priorDescribedSkills?: ReadonlySet<string> | undefined,
-    }): Promise<DraftLike> => {
-      const gatherInput: Parameters<typeof gatherEvidence>[0] = {
-        provider:    local,
-        session,
-        action:      opts.action,
-        request:     opts.request,
-        repoContext: {},
-        tier:        this._tier,
-        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-        ...(opts.onProgress !== undefined ? { onProgress: opts.onProgress } : {}),
-        ...(opts.priorDescribedSkills !== undefined ? { priorDescribedSkills: opts.priorDescribedSkills } : {}),
-      };
-      const ledger = await gatherEvidence(gatherInput);
-      const repoRoot = this._repoSummary?.rootPath;
-      const writeInput: Parameters<typeof writeSectionFromEvidence>[0] = {
-        provider:    local,
-        action:      opts.action,
-        request:     opts.request,
-        evidence:    ledger.evidence,
-        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-        ...(repoRoot !== undefined && repoRoot.length > 0 ? { repoPath: repoRoot } : {}),
-      };
-      const written = await writeSectionFromEvidence(writeInput);
-      return {
-        markdown:        written.markdown,
-        toolCallCount:   ledger.iterations,
-        hitLimit:        ledger.hitLimit,
-        skillsCalled:    ledger.skillsCalled,
-        skillCalls:      ledger.skillCalls,
-        describedSkills: ledger.describedSkills,
-      };
-    };
-
-    const { reviewAction } = await import('../../agent/content-gen/review-action.js');
-    const { pickBestRound } = await import('../../agent/tasks/code-analyzer/pick-best-draft.js');
-    type RoundCandidate = import('../../agent/tasks/code-analyzer/pick-best-draft.js').RoundCandidate;
-    log.info({ sections: actions.length }, 'per-action tool-loop writer starting');
+    log.info({ sections: actions.length }, 'starting per-action discovery flow');
 
     const sections: { id: string; title: string; markdown: string }[] = [];
     for (let i = 0; i < actions.length; i++) {
@@ -987,534 +901,46 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       // the discovery-plan loop replaces the entire per-section
       // gather + write + patch + picker pipeline with a cloud-driven
       // multi-cycle discovery + structured-citation + prose-review
-      // flow. Default-on; opt out with INSRC_ANALYZER_FLOW=gather-write
-      // until Phase eta deletes the legacy fallback below.
-      const { isDiscoveryFlowEnabled, runDiscoveryFlow } = await import('../../agent/tasks/code-analyzer/discovery-flow.js');
-      if (isDiscoveryFlowEnabled()) {
-        const repoRoot = this._repoSummary?.rootPath;
-        const discResult = await runDiscoveryFlow({
-          localProvider: local,
-          cloudProvider: cloud,
-          session,
-          action,
-          request,
-          tier,
-          ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-          ...(summaryContext !== undefined && summaryContext.length > 0 ? { repoSummary: summaryContext } : {}),
-          ...(repoRoot !== undefined && repoRoot.length > 0 ? { repoPath: repoRoot } : {}),
-          analyzerLabel: 'code-analyzer',
-          onProgress: (msg: string) => {
-            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-          },
-        });
-        log.info(
-          {
-            actionId:           action.id,
-            flow:               'discovery',
-            cyclesRun:          discResult.cyclesRun,
-            retainedStepCount:  discResult.retainedStepCount,
-            proseVerdict:       discResult.proseVerdict,
-            proseRedraftFired:  discResult.proseRedraftFired,
-            perCycle:           discResult.perCycleSummary,
-          },
-          'section drafting complete (discovery flow)',
-        );
-        this.emitMilestone(
-          synthBubble,
-          `[${i + 1}/${actions.length}] "${action.title}" -- discovery (${discResult.cyclesRun} cycle${discResult.cyclesRun === 1 ? '' : 's'}; ${discResult.retainedStepCount} retained step${discResult.retainedStepCount === 1 ? '' : 's'}; prose: ${discResult.proseVerdict}${discResult.proseRedraftFired ? ' [redrafted]' : ''})`,
-        );
-        sections.push({ id: action.id, title: action.title, markdown: discResult.markdown });
-        if (itemId !== undefined && this.deps.todos !== undefined) {
-          try { await this.deps.todos.markComplete(itemId); }
-          catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)'); }
-        }
-        continue;   // skip the legacy gather-write + patch pipeline below
-      }
-
-      // repoContext drives the skill-catalog filter (ORM / migration
-      // family gates). RepoSummary doesn't currently surface ORM
-      // detection -- pass an empty repoContext so those families
-      // get filtered out by default. Future: thread ORM detection
-      // through the indexer + RepoSummary so the section writer can
-      // see code.orm.* and code.migration.* when applicable.
-      // Two-round contract: draft -> review -> [if refine, redraft with hint -> review].
-      // Mirrors the legacy `expandThenReview` shape from
-      // agent/content-gen/review-action.ts so reviewer hints actually
-      // drive a retry instead of being silently dropped.
-      // Phase F.5 of plans/code-analyzer-structured-review.md: replace
-      // the 2-round write+redraft loop with a 3-round write+patch loop.
-      // Round 1: writeSectionWithTools (initial investigation).
-      // Round 2/3: patchSectionWithTools (iterate over reviewer's
-      //            workItems and patch the prior draft).
-      // F.4 escape hatch: if the patch loop emits zero patch/skip
-      //            blocks (protocol non-compliance), fall back to a
-      //            redraft via writeSectionWithTools with the work-item
-      //            list collapsed into a hint string.
-      // The ship policy below (Phase G next) currently ships the last
-      // round's draft; Phase G adds the best-of-rounds picker + footer.
-      const r1OnProgress = (msg: string) => {
-        this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-      };
-      let draft: DraftLike = writeMode === 'gather-write'
-        ? await runGatherWrite({ action, request, onProgress: r1OnProgress })
-        : await writeSectionWithTools({
-            provider:    local,
-            session,
-            action,
-            request,
-            repoContext: {},
-            ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-            onProgress: r1OnProgress,
-          });
-
-      const reviewDraft = async (
-        d:               DraftLike,
-        cumulativeCalls: readonly TaggedSkillCall[],
-        currentRound:    1 | 2 | 3,
-        priorReviews:    readonly { round: 1 | 2; verdict: 'accept' | 'needs-work'; workItems: readonly import('../../agent/content-gen/review-action.js').ReviewWorkItem[] }[] = [],
-      ) => {
-        // Fix 11.8: partition the captured calls into successful
-        // evidence (used for scoring) and failed calls (CONTEXT
-        // only -- so the reviewer doesn't refine just because the
-        // writer's first invocation got rejected on schema).
-        //
-        // Phase M.2: prune older rounds' evidence for round-2/3
-        // reviews. Round-1 calls remain verbatim only for the round-1
-        // review; rounds 2 and 3 see round-1 calls compressed to
-        // one-line summaries (skillId + arg keys), with the most
-        // recent round's calls verbatim.
-        const reviewerEvidence: PlanExecution[] = [];
-        const failedCalls: import('../../agent/content-gen/review-action.js').FailedToolCall[] = [];
-        for (const c of cumulativeCalls) {
-          if (c.errored) {
-            failedCalls.push({
-              skillId:           c.skillId,
-              args:              c.args,
-              output:            c.resultText,
-              ...(c.rejectionReason !== undefined ? { rejectionReason: c.rejectionReason } : {}),
-            });
-            continue;
-          }
-          const compressForReview = currentRound > 1 && c.round < currentRound;
-          if (compressForReview) {
-            // Older round in a 2nd/3rd review -- replace the full
-            // resultText with a brief summary so the reviewer still
-            // sees what was investigated without paying the full
-            // token cost.
-            const argKeys = Object.keys(c.args).slice(0, 4).join(', ');
-            const resultLen = c.resultText.length;
-            reviewerEvidence.push({
-              skillId:    c.skillId,
-              value:      {
-                args:           c.args,
-                output:         `_(round ${c.round} evidence summarised: ${resultLen} chars, args: { ${argKeys} })_`,
-                evidenceRound:  c.round,
-                summarised:     true,
-              } as unknown,
-              confidence: 'high',
-              notes:      [],
-            });
-          } else {
-            reviewerEvidence.push({
-              skillId:    c.skillId,
-              value:      { args: c.args, output: c.resultText } as unknown,
-              confidence: 'high',
-              notes:      [],
-            });
-          }
-        }
-        return reviewAction(
-          {
-            action,
-            draft: {
-              actionId:      action.id,
-              markdown:      d.markdown,
-              tokenEstimate: Math.ceil(d.markdown.length / 4),
-              truncated:     false,
-              degraded:      false,
-            },
-            evidence:      reviewerEvidence,
-            ...(failedCalls.length > 0 ? { failedCalls } : {}),
-            ...(priorReviews.length > 0 ? { priorReviews } : {}),
-            analyzerLabel: 'code-analyzer',
-          },
-          reviewer,
-        );
-      };
-
-      let cumulativeCalls: TaggedSkillCall[] = draft.skillCalls.map(c => ({ ...c, round: 1 as const }));
-      let review = await reviewDraft(draft, cumulativeCalls, 1);
-
-      // Track each round's candidate -- the picker (Phase G) reads
-      // these and chooses best-of-rounds when no round verdicts accept.
-      const candidates: RoundCandidate[] = [
-        { round: 1, markdown: draft.markdown, review },
-      ];
-
-      // Phase I instrumentation: per-round patch-protocol + escape-hatch
-      // signals. Indexed by round number (2 or 3); absent for round 1.
-      const patchSignals: { round: 2 | 3; protocolFollowed: boolean; redraftFallback: boolean; itemsAddressed: number }[] = [];
-
-      for (let r: 2 | 3 = 2; r <= 3 && review.verdict === 'needs-work'; r = (r + 1) as 2 | 3) {
-        const priorWorkItems = review.workItems;   // captured BEFORE the patch
-        const hintFromItems  = priorWorkItems.map(w => w.action).join('; ');
-
-        log.info(
-          { actionId: action.id, round: r, workItems: priorWorkItems.length },
-          `reviewer requested needs-work; running round ${r}`,
-        );
-        this.emitMilestone(
-          synthBubble,
-          `[${i + 1}/${actions.length}] "${action.title}" -- patch (round ${r}, ${priorWorkItems.length} work item${priorWorkItems.length === 1 ? '' : 's'})`,
-        );
-
-        const patchInput = {
-          provider:             local,
-          session,
-          action,
-          request,
-          repoContext:          {},
-          draftMarkdown:        draft.markdown,
-          workItems:            priorWorkItems,
-          priorDescribedSkills: draft.describedSkills,
-          priorSkillCalls:      cumulativeCalls,
-          round:                r,
-          tier:                 this._tier,
-          ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-          onProgress: (msg: string) => {
-            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-          },
-        };
-        const patched = patchMode === 'itemwise'
-          ? await patchSectionItemwise(patchInput)
-          : await patchSectionWithTools(patchInput);
-
-        let nextDraft: DraftLike;
-        let patchInfo: { priorWorkItems: typeof priorWorkItems; itemStatuses: typeof patched.itemStatuses } | undefined;
-        if (!patched.patchProtocolFollowed) {
-          // F.4 escape hatch: model didn't follow the patch protocol.
-          // Fall back to a fresh writeSectionWithTools with the
-          // work-item list collapsed into a hint string. The redraft
-          // doesn't emit per-item statuses, so we omit `patch` from
-          // the candidate -- the picker treats it like a round-1-style
-          // fresh draft (no fix-items-addressed credit).
-          //
-          // Phase M.1: pass recoveryContext so the redraft uses the
-          // recovery-mode preamble + soft-targets from the prior draft.
-          // The 2026-05-16 run #2 showed F.4 redrafts consistently
-          // producing much shorter / weaker output than round 1; the
-          // recovery mode tells the model to match the prior scope.
-          log.warn(
-            { actionId: action.id, round: r },
-            'patch loop emitted no patch/skip blocks; falling back to redraft',
-          );
-          // Use draft's signals (round 1 if r=2, round 2 if r=3) as
-          // the recovery target. Round-1 signals are the most reliable
-          // baseline so we use them for any round's recovery.
-          const baseline = candidates[0]!;
-          const baselineCitationCount = (baseline.markdown.match(/\[[^\]]+\]\(path:[^)]+\)/g) ?? []).length;
-          const baselineParagraphCount = baseline.markdown.trim().split(/\n\s*\n/).filter(p => p.trim().length > 0).length;
-          const recoveryContext = {
-            priorDraftLength:    baseline.markdown.length,
-            priorParagraphCount: baselineParagraphCount,
-            priorCitationCount:  baselineCitationCount,
-          };
-          const recoveryOnProgress = (msg: string) => {
-            this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-          };
-          // Phase G (gather-then-write) F.4 fallback = fresh re-gather +
-          // re-write. The legacy interleaved-writer recovery path (with
-          // refineHint + recoveryContext) is preserved when WRITE_MODE
-          // is interleaved-legacy so the env-flag is the only switch.
-          nextDraft = writeMode === 'gather-write'
-            ? await runGatherWrite({ action, request, onProgress: recoveryOnProgress, priorDescribedSkills: patched.describedSkills })
-            : await writeSectionWithTools({
-                provider:    local,
-                session,
-                action,
-                request,
-                repoContext: {},
-                refineHint:           hintFromItems,
-                priorDescribedSkills: patched.describedSkills,
-                recoveryContext,
-                ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-                onProgress: recoveryOnProgress,
-              });
-          // Phase P.7: F.4 empty-redraft guard. Run #3 section 7
-          // produced textLength: 0 in recovery mode -- the redraft
-          // returned with no text, leaving the picker with nothing
-          // useful to work with. Retry ONCE with a more direct
-          // re-prompt before accepting the empty output.
-          if (nextDraft.markdown.trim().length === 0) {
-            log.error(
-              { actionId: action.id, round: r },
-              'F.4 recovery redraft produced empty output; retrying once with direct re-prompt',
-            );
-            nextDraft = writeMode === 'gather-write'
-              ? await runGatherWrite({ action, request, onProgress: recoveryOnProgress, priorDescribedSkills: nextDraft.describedSkills })
-              : await writeSectionWithTools({
-                  provider:    local,
-                  session,
-                  action,
-                  request,
-                  repoContext: {},
-                  // Direct re-prompt: bypass the hint (which may have
-                  // primed the model to bail) and ask for a topic-sentence
-                  // opener directly.
-                  refineHint:           `Your previous recovery attempt returned empty output. Begin THIS attempt with a topic sentence about the SUBJECT (the code, the subsystem, the pattern named in the section objective), then drill into evidence with skill calls. Produce a comparably-full draft. The reviewer items you were addressing are: ${hintFromItems}`,
-                  priorDescribedSkills: nextDraft.describedSkills,
-                  recoveryContext,
-                  ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
-                  onProgress: recoveryOnProgress,
-                });
-            if (nextDraft.markdown.trim().length === 0) {
-              log.error(
-                { actionId: action.id, round: r },
-                'F.4 recovery redraft EMPTY on second attempt too; picker will rescue',
-              );
-            }
-          }
-          patchInfo = undefined;
-        } else {
-          // Strip the patch-specific fields; the orchestrator works
-          // against the WriteSectionOutput-shaped subset.
-          nextDraft = {
-            markdown:        patched.markdown,
-            toolCallCount:   patched.toolCallCount,
-            hitLimit:        patched.hitLimit,
-            skillsCalled:    patched.skillsCalled,
-            skillCalls:      patched.skillCalls,
-            describedSkills: patched.describedSkills,
-          };
-          patchInfo = { priorWorkItems, itemStatuses: patched.itemStatuses };
-        }
-
-        cumulativeCalls = [
-          ...cumulativeCalls,
-          ...nextDraft.skillCalls.map(c => ({ ...c, round: r })),
-        ];
-        draft  = nextDraft;
-        // Phase N.2: surface prior rounds' work-item lists to the
-        // reviewer so it can judge whether the new draft addressed
-        // earlier flags. We only carry round-1 and (for r=3) round-2.
-        const priorReviewsForR: { round: 1 | 2; verdict: 'accept' | 'needs-work'; workItems: readonly import('../../agent/content-gen/review-action.js').ReviewWorkItem[] }[] = [
-          { round: 1, verdict: candidates[0]!.review.verdict, workItems: candidates[0]!.review.workItems },
-        ];
-        if (r === 3 && candidates[1] !== undefined) {
-          priorReviewsForR.push({ round: 2, verdict: candidates[1]!.review.verdict, workItems: candidates[1]!.review.workItems });
-        }
-        review = await reviewDraft(draft, cumulativeCalls, r, priorReviewsForR);
-
-        candidates.push(
-          patchInfo !== undefined
-            ? { round: r, markdown: draft.markdown, review, patch: patchInfo }
-            : { round: r, markdown: draft.markdown, review },
-        );
-        patchSignals.push({
-          round:            r,
-          protocolFollowed: patched.patchProtocolFollowed,
-          redraftFallback:  !patched.patchProtocolFollowed,
-          itemsAddressed:   patched.itemStatuses.filter(s => s.status === 'addressed').length,
-        });
-      }
-
-      // -----------------------------------------------------------------
-      // Phase G: ship policy.
-      //   1. Short-circuit on the FIRST round that verdicted accept.
-      //   2. Otherwise pick the best draft by the lexicographic signal
-      //      order (fix-items-addressed, citations, paragraphs, length)
-      //      and append a footer listing the winning round's still-
-      //      unaddressed reviewer work-items.
-      // -----------------------------------------------------------------
-      let final: string;
-      let shippedRound: 1 | 2 | 3;
-      let shipDecisionReason: string;
-      let confidenceBasis:
-        | 'accept-r1'
-        | 'accept-r2-or-r3'
-        | 'degraded-accept'
-        | 'needs-work-no-fix'
-        | 'needs-work-fix-pending';
-
-      // Phase K.1: ONLY a non-degraded accept short-circuits the
-      // picker. A degraded soft-accept (reviewer JSON malformed twice
-      // -> review-action.ts soft-accepts with workItems=[]) carries
-      // `review.degraded === true`; treating it as a real accept
-      // ships the round's draft without ever scoring it against the
-      // other rounds. Run #2 (2026-05-16) had sections 5 and 7 ship a
-      // weaker round-2 redraft over a stronger round-1 draft because
-      // of this. The picker now runs on the candidates set whenever
-      // there is NO non-degraded accept; degraded candidates can
-      // still win on length / citations.
-      const acceptIdx = candidates.findIndex(
-        c => c.review.verdict === 'accept' && c.review.degraded === false,
-      );
-      const hasDegradedAccept = candidates.some(
-        c => c.review.verdict === 'accept' && c.review.degraded === true,
-      );
-
-      if (acceptIdx >= 0) {
-        const accepted = candidates[acceptIdx]!;
-        final = accepted.review.accepted?.markdown ?? accepted.markdown;
-        shippedRound = accepted.round;
-        shipDecisionReason = `accept@round${accepted.round}`;
-        confidenceBasis = accepted.round === 1 ? 'accept-r1' : 'accept-r2-or-r3';
-      } else {
-        const pick = pickBestRound(candidates);
-        const winner = pick.winner;
-        // Reviewer misses (unaddressed work items, degraded-review
-        // notes) are intentionally NOT appended to the section body.
-        // They live in:
-        //   - the per-section log line (degradedReviews, fixItemsUnaddressedFinal)
-        //   - the TodoList item's reviewRounds[] trace (per-round
-        //     workItems + itemStatuses, with degraded flag per round)
-        //   - the chat-panel milestone (confidence + unaddressed count)
-        // so the operator has full visibility without polluting the
-        // report markdown.
-        final = winner.markdown;
-        shippedRound = winner.round;
-        shipDecisionReason = winner.review.degraded || hasDegradedAccept
-          ? `${pick.reason} (degraded review)`
-          : pick.reason;
-        const fixUnaddressed = winner.review.workItems.filter(w => w.kind === 'fix').length;
-        if (winner.review.degraded || hasDegradedAccept) {
-          confidenceBasis = 'degraded-accept';
-        } else if (fixUnaddressed > 0) {
-          confidenceBasis = 'needs-work-fix-pending';
-        } else {
-          confidenceBasis = 'needs-work-no-fix';
-        }
-      }
-
-      // Phase K.4 confidence semantics:
-      //  - real accept @ round 1                -> high
-      //  - real accept @ round 2/3              -> medium
-      //  - degraded accept anywhere on the path -> medium (NOT high; reviewer crashed)
-      //  - all needs-work, no `fix` pending     -> medium
-      //  - all needs-work, `fix` items pending  -> low
-      const itemConfidence: 'high' | 'medium' | 'low' =
-        confidenceBasis === 'accept-r1' ? 'high' :
-        confidenceBasis === 'needs-work-fix-pending' ? 'low' :
-        'medium';
-
-      // ---- Phase G.4: TodoList persistence with per-round trace ------
-      // failureReason now reflects what the WINNING round did NOT
-      // address; the per-round trace is stamped on the item meta for
-      // the workbench to render as a checklist.
-      const winnerCandidate = acceptIdx >= 0 ? candidates[acceptIdx]! : candidates.find(c => c.round === shippedRound)!;
-      const failureReason = acceptIdx < 0 && winnerCandidate.review.workItems.length > 0
-        ? winnerCandidate.review.workItems.map(w => `${w.kind}: ${w.action}`).join('\n')
-        : undefined;
-
-      // Phase G.4: per-round trace persisted on the TodoList item so
-      // the workbench can render the reviewer's punch list + the
-      // writer's per-item statuses as a checklist alongside the
-      // section body. Fields are typed as Record<string, unknown> by
-      // the updateItemMeta API; the workbench will type-narrow these
-      // when it consumes them.
-      const reviewRoundsTrace = candidates.map(c => ({
-        round:        c.round,
-        verdict:      c.review.verdict,
-        // Phase K.4: surface degraded soft-accept so the workbench can
-        // render a "review crashed" icon next to that round.
-        degraded:     c.review.degraded,
-        workItems:    c.review.workItems.map(w => ({
-          id:     w.id,
-          kind:   w.kind,
-          where:  w.where,
-          issue:  w.issue,
-          action: w.action,
-        })),
-        itemStatuses: c.patch?.itemStatuses ?? [],
-      }));
-
-      if (itemId !== undefined && this.deps.todos !== undefined) {
-        try {
-          await this.deps.todos.updateItemMeta(itemId, {
-            kind:       'plan-action',
-            origin:     'planner',
-            retryCount: shippedRound - 1,
-            answer:     final,
-            findings:   [],
-            citations:  [],
-            confidence: itemConfidence,
-            toolCalls:  cumulativeCalls.map(c => ({
-              kind:     'skill',
-              skillId:  c.skillId,
-              args:     c.args,
-              durationMs: 0,
-              status:   c.errored ? 'failed' : 'ok',
-            })),
-            // Phase G.4 per-round trace.
-            rounds:             shippedRound,
-            shippedDraft:       `round${shippedRound}`,
-            shipDecisionReason,
-            reviewRounds:       reviewRoundsTrace,
-            ...(failureReason !== undefined ? { failureReason } : {}),
-          });
-          await this.deps.todos.markComplete(itemId);
-        } catch (err) {
-          log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)');
-        }
-      }
-
-      // Phase I.1: flat per-section instrumentation. Fields here are
-      // mined by scripts/analyzer-metrics.ts -- keep names stable.
-      const r2signal = patchSignals.find(s => s.round === 2);
-      const r3signal = patchSignals.find(s => s.round === 3);
-      const fixItemsUnaddressedFinal = winnerCandidate.review.workItems.filter(w => w.kind === 'fix').length;
-      const redraftFallbackFired = patchSignals.some(s => s.redraftFallback);
-      // Phase K.4: degradedReviews counts the rounds whose review
-      // came back via the soft-accept fallback. A high rate means
-      // the cloud reviewer is hitting its output budget; combined
-      // with patchProtocolFollowed=false it's the leading indicator
-      // for the "broke before it tried" failure mode.
-      const degradedReviews = candidates.filter(c => c.review.degraded).length;
+      // flow.
+      const { runDiscoveryFlow } = await import('../../agent/tasks/code-analyzer/discovery-flow.js');
+      const repoRoot = this._repoSummary?.rootPath;
+      const discResult = await runDiscoveryFlow({
+        localProvider: local,
+        cloudProvider: cloud,
+        session,
+        action,
+        request,
+        tier,
+        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
+        ...(summaryContext !== undefined && summaryContext.length > 0 ? { repoSummary: summaryContext } : {}),
+        ...(repoRoot !== undefined && repoRoot.length > 0 ? { repoPath: repoRoot } : {}),
+        analyzerLabel: 'code-analyzer',
+        onProgress: (msg: string) => {
+          this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
+        },
+      });
       log.info(
         {
-          actionId:                action.id,
-          roundsRun:               candidates.length,
-          shippedRound,
-          shippedDraft:            `round${shippedRound}`,
-          shipDecisionReason,
-          confidence:              itemConfidence,
-          workItemsR1:             candidates[0]!.review.workItems.length,
-          workItemsR2:             candidates[1]?.review.workItems.length ?? 0,
-          itemsAddressedR2:        r2signal?.itemsAddressed ?? 0,
-          itemsAddressedR3:        r3signal?.itemsAddressed ?? 0,
-          patchProtocolFollowedR2: r2signal?.protocolFollowed,
-          patchProtocolFollowedR3: r3signal?.protocolFollowed,
-          redraftFallbackFired,
-          redraftFallbackReason:   redraftFallbackFired ? 'protocol' : undefined,
-          fixItemsUnaddressedFinal,
-          degradedReviews,
-          traces: candidates.map(c => ({
-            round:        c.round,
-            verdict:      c.review.verdict,
-            degraded:     c.review.degraded,
-            markdownLen:  c.markdown.length,
-            workItems:    c.review.workItems.length,
-            itemStatuses: c.patch?.itemStatuses.length ?? 0,
-          })),
+          actionId:           action.id,
+          flow:               'discovery',
+          cyclesRun:          discResult.cyclesRun,
+          retainedStepCount:  discResult.retainedStepCount,
+          proseVerdict:       discResult.proseVerdict,
+          proseRedraftFired:  discResult.proseRedraftFired,
+          perCycle:           discResult.perCycleSummary,
         },
-        'section drafting complete',
+        'section drafting complete (discovery flow)',
       );
-      // Phase O.1: shipDecisionReason for accept paths already
-      // contains "accept@roundN"; strip a trailing "@round\d+" if
-      // present so we don't end up with "accept@round2@round2".
-      // Phase O.2: surface confidence + unaddressed-item count in the
-      // milestone so the chat panel shows the operator-relevant info
-      // without them having to read the footer.
-      const baseLabel = shipDecisionReason.replace(/@round\d+(\s*\(degraded review\))?$/, '$1');
-      const unaddressedCount = winnerCandidate.review.workItems.length;
-      const unaddressedNote = unaddressedCount > 0
-        ? `; ${unaddressedCount} reviewer item${unaddressedCount === 1 ? '' : 's'} unaddressed`
-        : '';
       this.emitMilestone(
         synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- ${baseLabel} @ round ${shippedRound} (${cumulativeCalls.length} cumulative skill call${cumulativeCalls.length === 1 ? '' : 's'}; confidence: ${itemConfidence}${unaddressedNote})`,
+        `[${i + 1}/${actions.length}] "${action.title}" -- discovery (${discResult.cyclesRun} cycle${discResult.cyclesRun === 1 ? '' : 's'}; ${discResult.retainedStepCount} retained step${discResult.retainedStepCount === 1 ? '' : 's'}; prose: ${discResult.proseVerdict}${discResult.proseRedraftFired ? ' [redrafted]' : ''})`,
       );
-      sections.push({ id: action.id, title: action.title, markdown: final });
+      sections.push({ id: action.id, title: action.title, markdown: discResult.markdown });
+      if (itemId !== undefined && this.deps.todos !== undefined) {
+        try { await this.deps.todos.markComplete(itemId); }
+        catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)'); }
+      }
+
     }
 
     this.emitMilestone(synthBubble, 'stitching final report...');

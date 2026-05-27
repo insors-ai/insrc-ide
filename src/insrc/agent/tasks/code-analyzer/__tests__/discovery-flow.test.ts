@@ -10,7 +10,6 @@
  *   - Cycle-3 termination: cloud keeps asking; loop hits maxCycles
  *   - Early termination at cycle 2 (cloud says empty new_steps)
  *   - Redraft path: prose reviewer says redraft -> one redraft attempt
- *   - Feature flag toggle (isDiscoveryFlowEnabled)
  *   - Adapter (StepOutput[] -> EvidenceEntry[] for writer)
  */
 
@@ -19,7 +18,6 @@ import assert from 'node:assert/strict';
 
 import {
 	runDiscoveryFlow,
-	isDiscoveryFlowEnabled,
 	_adaptStepOutputsForWriterForTest as adaptStepOutputsForWriter,
 	_renderCitationAsStringForTest    as renderCitationAsString,
 } from '../discovery-flow.js';
@@ -183,53 +181,6 @@ test('renderCitationAsString: handles each optional combo', () => {
 		renderCitationAsString({ path: '/foo.ts' }),
 		'[foo.ts](path:/foo.ts)',
 	);
-});
-
-// ---------------------------------------------------------------------------
-// isDiscoveryFlowEnabled
-// ---------------------------------------------------------------------------
-
-test('isDiscoveryFlowEnabled: env unset -> true (default-on)', () => {
-	const prior = process.env['INSRC_ANALYZER_FLOW'];
-	delete process.env['INSRC_ANALYZER_FLOW'];
-	try {
-		assert.equal(isDiscoveryFlowEnabled(), true);
-	} finally {
-		if (prior !== undefined) process.env['INSRC_ANALYZER_FLOW'] = prior;
-	}
-});
-
-test('isDiscoveryFlowEnabled: env=discovery -> true', () => {
-	const prior = process.env['INSRC_ANALYZER_FLOW'];
-	process.env['INSRC_ANALYZER_FLOW'] = 'discovery';
-	try {
-		assert.equal(isDiscoveryFlowEnabled(), true);
-	} finally {
-		if (prior !== undefined) process.env['INSRC_ANALYZER_FLOW'] = prior;
-		else delete process.env['INSRC_ANALYZER_FLOW'];
-	}
-});
-
-test('isDiscoveryFlowEnabled: env=gather-write -> false (explicit opt-out)', () => {
-	const prior = process.env['INSRC_ANALYZER_FLOW'];
-	process.env['INSRC_ANALYZER_FLOW'] = 'gather-write';
-	try {
-		assert.equal(isDiscoveryFlowEnabled(), false);
-	} finally {
-		if (prior !== undefined) process.env['INSRC_ANALYZER_FLOW'] = prior;
-		else delete process.env['INSRC_ANALYZER_FLOW'];
-	}
-});
-
-test('isDiscoveryFlowEnabled: any unrecognised value -> true (treated as default-on)', () => {
-	const prior = process.env['INSRC_ANALYZER_FLOW'];
-	process.env['INSRC_ANALYZER_FLOW'] = 'something-else';
-	try {
-		assert.equal(isDiscoveryFlowEnabled(), true);
-	} finally {
-		if (prior !== undefined) process.env['INSRC_ANALYZER_FLOW'] = prior;
-		else delete process.env['INSRC_ANALYZER_FLOW'];
-	}
 });
 
 // ---------------------------------------------------------------------------

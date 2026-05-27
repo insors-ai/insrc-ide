@@ -429,25 +429,6 @@ export function renderCitationAsString(c: Citation, repoPath?: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Feature-flag helper -- consumed by the orchestrator
-// ---------------------------------------------------------------------------
-
-/**
- * True when the discovery flow is the active path. Read at function-
- * call time (not module-init) so tests can override `process.env`
- * without re-importing.
- *
- * **Default is `true`** (the discovery flow is the default path).
- * The legacy gather-write + patch flow remains opt-in until Phase
- * eta deletes it -- set `INSRC_ANALYZER_FLOW=gather-write` to fall
- * back to the prior pipeline. Any other value (or unset) selects
- * the new discovery flow.
- */
-export function isDiscoveryFlowEnabled(): boolean {
-	return process.env['INSRC_ANALYZER_FLOW'] !== 'gather-write';
-}
-
-// ---------------------------------------------------------------------------
 // Test exports
 // ---------------------------------------------------------------------------
 
