@@ -350,6 +350,22 @@ function coerceInputTypes(
 				next[key] = [value];
 				notes.push(`coerced arg '${key}' from scalar to single-element array`);
 			}
+			continue;
+		}
+
+		// [scalar] → scalar when schema expects a scalar string AND the
+		// array contains exactly one string element. Haiku (live repro
+		// 2026-05-26) wraps `name: "foo"` as `name: ["foo"]` on
+		// `code.entity.locate-by-name` despite the schema declaring
+		// `name` as a scalar string. Multi-element arrays are NOT
+		// coerced (we'd be silently dropping information); they fall
+		// through to Stage 4's typed corrective prompt.
+		if (expectedType === 'string' && Array.isArray(value) && value.length === 1) {
+			const only = value[0];
+			if (typeof only === 'string' && only.length > 0) {
+				next[key] = only;
+				notes.push(`coerced arg '${key}' from single-element array to scalar string`);
+			}
 		}
 	}
 

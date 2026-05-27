@@ -230,6 +230,40 @@ test('coerceInputTypes: non-coercible scalar (number where string array expected
 	assert.equal(out.notes.length, 1);
 });
 
+test('coerceInputTypes: [scalar] → scalar when schema expects string (Haiku live repro)', () => {
+	// Live repro 2026-05-26: Haiku wraps `name: "foo"` as `name: ["foo"]`
+	// on code.entity.locate-by-name, where the schema declares `name`
+	// as a scalar string. Single-element coercion unwraps it.
+	const out = coerceInputTypes(
+		{ name: ['Foo'] },
+		FAKE_SCHEMAS['code.entity.locate-by-name']!,
+	);
+	assert.deepEqual(out.input, { name: 'Foo' });
+	assert.equal(out.notes.length, 1);
+	assert.match(out.notes[0]!, /single-element array to scalar string/);
+});
+
+test('coerceInputTypes: multi-element array does NOT coerce to scalar (avoid info loss)', () => {
+	// Schema expects scalar string; model gave 2 elements. Coercing
+	// would silently drop one. Pass through; Stage 4 surfaces the
+	// type mismatch.
+	const out = coerceInputTypes(
+		{ name: ['Foo', 'Bar'] },
+		FAKE_SCHEMAS['code.entity.locate-by-name']!,
+	);
+	assert.deepEqual(out.input, { name: ['Foo', 'Bar'] });
+	assert.equal(out.notes.length, 0);
+});
+
+test('coerceInputTypes: empty array does NOT coerce to scalar', () => {
+	const out = coerceInputTypes(
+		{ name: [] },
+		FAKE_SCHEMAS['code.entity.locate-by-name']!,
+	);
+	assert.deepEqual(out.input, { name: [] });
+	assert.equal(out.notes.length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // guardLocalToolCall — end-to-end
 // ---------------------------------------------------------------------------

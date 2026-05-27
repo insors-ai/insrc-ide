@@ -96,11 +96,13 @@ export const SKILL_ARG_RENAMES: Readonly<Record<string, Readonly<Record<string, 
 	'code.class.extract-fields':      Object.freeze({
 		class_name:   'className',
 		clazz:        'className',
+		name:         'className',      // Haiku live repro 2026-05-26: bleeds locate-by-name arg shape
 		repo_path:    'repoPath',
 	}),
 	'code.class.locate-references':   Object.freeze({
 		class_name:   'className',
 		clazz:        'className',
+		name:         'className',      // Haiku live repro 2026-05-26: bleeds locate-by-name arg shape
 		repo_path:    'repoPath',
 	}),
 
@@ -131,6 +133,7 @@ export const SKILL_ARG_RENAMES: Readonly<Record<string, Readonly<Record<string, 
 		file:         'path',
 		filePath:     'path',
 		file_path:    'path',
+		filePattern:  'path',           // Haiku live repro 2026-05-26
 		files:        'path',
 		paths:        'path',
 		directory:    'path',
@@ -142,6 +145,7 @@ export const SKILL_ARG_RENAMES: Readonly<Record<string, Readonly<Record<string, 
 		search:       'pattern',
 		regex:        'pattern',
 	}),
+
 });
 
 /**
