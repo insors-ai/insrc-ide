@@ -28,6 +28,10 @@
 import { getLogger } from '../../shared/logger.js';
 import { runDataAnalyzer } from '../../agent/tasks/data-analyzer/analyzer/runner.js';
 import {
+  isDataDiscoveryFlowEnabled,
+  runDataDiscoveryPipeline,
+} from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
+import {
   buildPlanSystemPrompt,
   renderPlanUserMessage,
 } from '../../agent/tasks/data-analyzer/prompts/plan.js';
@@ -837,26 +841,42 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       return this.runNextAnalyzerTask(state);
     }
 
-    // Resolve the analyzer provider via the per-step resolver.
-    const provider = this.deps.session.resolver.resolve('data-analyzer', 'analyzer');
+    // Phase F of plans/analyzers/data-analyzer-parity.md: branch to
+    // the new discovery-flow pipeline when
+    // INSRC_DATA_ANALYZER_FLOW=discovery is set. The legacy
+    // runDataAnalyzer path stays the default until the discovery
+    // flow has accumulated enough live miles to swap defaults.
+    let result: DataAnalyzerResult;
+    if (isDataDiscoveryFlowEnabled()) {
+      log.info({ itemId: next.itemId, tier: this._tier }, 'analyzing: routing through discovery-flow pipeline');
+      const outcome = await runDataDiscoveryPipeline({
+        session:     this.deps.session,
+        task:        next,
+        connections: this._connections,
+        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+      });
+      result = outcome.result;
+    } else {
+      // Resolve the analyzer provider via the per-step resolver.
+      const provider = this.deps.session.resolver.resolve('data-analyzer', 'analyzer');
 
-    const outcome = await runDataAnalyzer(next, {
-      provider,
-      session: this.deps.session,
-      ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-      // Phase 4 of plans/access-gate.md: drop the per-call
-      // checkConnectionAccess hook in favour of seeding Session.access
-      // at task start (ephemeral connections auto-approved on
-      // registration). The dispatcher inside executeTool fires the
-      // gate UI on miss using the send / channel / requestId we plumb
-      // here.
-      send:      this.deps.send,
-      channel:   this.deps.channel,
-      requestId: this.deps.requestId,
-      tier: this._tier,
-    });
-
-    const result = outcome.result;
+      const legacyOutcome = await runDataAnalyzer(next, {
+        provider,
+        session: this.deps.session,
+        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+        // Phase 4 of plans/access-gate.md: drop the per-call
+        // checkConnectionAccess hook in favour of seeding Session.access
+        // at task start (ephemeral connections auto-approved on
+        // registration). The dispatcher inside executeTool fires the
+        // gate UI on miss using the send / channel / requestId we plumb
+        // here.
+        send:      this.deps.send,
+        channel:   this.deps.channel,
+        requestId: this.deps.requestId,
+        tier: this._tier,
+      });
+      result = legacyOutcome.result;
+    }
 
     if (this.deps.todos !== undefined) {
       try {

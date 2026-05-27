@@ -243,6 +243,30 @@ Listed once, referenced inline above:
 | (memory rule) | DA-D1 | A | no-parallel-LLM-calls audit |
 | (memory rule) | DA-E1 | A | cloud-LLM-by-default routing + `INSRC_DATA_ANALYZER_USE_LOCAL=1` opt-out |
 
+### Phase F -- orchestrator wiring (depends on C.2 + E)
+
+| New file | Purpose |
+|---|---|
+| `src/insrc/agent/tasks/data-analyzer/discovery-pipeline.ts` | Composes A + C.2 + E into a per-task pipeline. Returns a `DataAnalyzerResult` so the orchestrator's existing review / synthesise chain consumes it unchanged. |
+
+Wiring: `daemon/controllers/data-analyzer-orchestrator.ts`
+`runNextAnalyzerTask` branches on `isDataDiscoveryFlowEnabled()`:
+
+- flag set (`INSRC_DATA_ANALYZER_FLOW=discovery`): route through
+  `runDataDiscoveryPipeline` -> discovery flow + writer +
+  claim-grounding + optional redraft (with DA-B1 regression guard
+  and structural-break guard).
+- flag unset (default): legacy `runDataAnalyzer` path stays in place.
+
+The pipeline degrades to a low-confidence result on any unexpected
+error (never throws past the orchestrator), and short-circuits with
+a `blockedReason: 'no-connections'` outcome when there are no
+connections to analyse.
+
+Once the flag has accumulated enough live miles, the default flips
+to the new flow and the legacy path is removed. Until then, the two
+paths coexist for safe regression comparison.
+
 ## Sequencing
 
 - **A** ships first (foundation; no deps). PR includes DA-D1 + DA-E1.
@@ -250,10 +274,9 @@ Listed once, referenced inline above:
 - **C** ships after both A + B land. Consumes evidence entries (A) and dispatches through the silent guard (B).
 - **D** ships immediately after C lands (or in the same PR if C is small). Adds Stage 4 reject + corrective. PR includes DA-C1 + DA-C2.
 - **E** ships in parallel with C (depends only on A). PR includes DA-A1, DA-B1, DA-B2, DA-B3, DA-B4.
+- **F** ships after C.2 + E land. Orchestrator wire-up behind the `INSRC_DATA_ANALYZER_FLOW=discovery` flag. No flag default change in this PR.
 
-PR map: 4 PRs total (A, B, C+D, E).
-  4; DA-C1, C2 → Phase 1; DA-C3 → Phase 1 + skill audit; DA-D1, E1
-  → cross-cutting, do in PR 1).
+PR map: 5 PRs total (A, B, C+D, E, F).
 
 ## Non-goals (recap)
 
