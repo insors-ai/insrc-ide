@@ -66,36 +66,50 @@ post-rollout-findings section).
 - New skills. Composite skills + meta-skills are tracked in
   [data-analyzer-skills.md](./data-analyzer-skills.md).
 
-## Phases (smallest-blast-radius first)
+## Phase ordering (strict DAG, no cycles)
 
-### Phase 1 -- data-side tool-call-guard (TODO-D1)
+Original draft had a cyclic dependency: a single "Phase 1 tool-call-
+guard" wanted to ship Stage 4 (typed corrective prompt) which needs
+a tool-loop to feed back to, but the tool-loop only lands in "Phase 3
+discovery flow," which itself wanted the guard from day-1. Resolution:
+**split the guard into early (Stages 1-3) + late (Stage 4) phases**.
+Now everything ships as a strict DAG.
 
-Mirror the code-analyzer guard structure exactly:
+```
+Phase A ──┐
+          ├──> Phase C ──> Phase D
+Phase B ──┘
+              │
+              └─────────> Phase E
+```
+
+| Phase | Depends on | Inline (was) |
+|---|---|---|
+| A -- per-result summarization | -- | old Phase 2 |
+| B -- guard Stages 1-3 (rename + coerce + inject) | -- | old Phase 1 (silent stages) |
+| C -- multi-cycle discovery flow + execute-step | A, B | old Phase 3 |
+| D -- guard Stage 4 (typed corrective + reject) | C | old Phase 1 (corrective stage) |
+| E -- evidence-anchored writer + claim grounding | A | old Phase 4 |
+
+Phase 5 (post-rollout learnings) is distributed inline into the
+phase whose surface area it touches -- no separate phase. Mapping:
+
+- **DA-D1, DA-E1** (no-parallel-LLM-calls audit, cloud-by-default
+  routing): cross-cutting; ship in Phase A's PR (the earliest phase).
+- **DA-C3** (no half-implemented line-range args): Phase B (schema
+  audit done WITH the guard rules).
+- **DA-C1, DA-C2** (corrective surfaces arg / skill descriptions):
+  Phase D (Stage 4 corrective lives here).
+- **DA-A1, DA-B1, DA-B2, DA-B3, DA-B4** (writer-side checks):
+  Phase E.
+
+## Phases
+
+### Phase A -- per-result summarization (foundation; no deps)
 
 | New file | Mirrors | Purpose |
 |---|---|---|
-| `src/insrc/agent/tasks/data-analyzer/tool-call-guard.ts` | [tool-call-guard.ts](../../src/insrc/agent/tool-call-guard.ts) | Same five stages: tool-name fuzzy resolve, arg-rename, type-coerce, session-default inject, schema validate |
-| `src/insrc/agent/tasks/data-analyzer/tool-call-guard-rules.ts` | [tool-call-guard-rules.ts](../../src/insrc/agent/tool-call-guard-rules.ts) | Per-skill arg-rename map; populated empirically (start empty; add patterns as live runs surface them) |
-
-**Session defaults specific to data**: `connectionId`, `schema`,
-`database`. Same shape as the code-side's `repoPath` injection but
-keyed off the active connection in the data-analyzer session state.
-
-Wire the guard into [analyzer/runner.ts](../../src/insrc/agent/tasks/data-analyzer/analyzer/runner.ts)
-ahead of the existing per-skill validation. Both layers stay; the
-guard is the cheap pre-filter, runner validation is the
-authoritative check.
-
-**Open question**: are there 108-skill-specific arg patterns worth
-populating *before* the first live run? Likely no -- start empty
-and let live failures drive entries (same approach as the code
-side).
-
-### Phase 2 -- per-result summarization (mirrors code Phase 1 of execute-step plan)
-
-| New file | Mirrors | Purpose |
-|---|---|---|
-| `src/insrc/agent/tasks/data-analyzer/summarize-result.ts` | [summarize-result.ts](../../src/insrc/agent/tasks/code-analyzer/summarize-result.ts) | Extract `DataEvidenceEntry { facts[], citations[], confidence }` from one skill_invoke |
+| `src/insrc/agent/tasks/data-analyzer/summarize-result.ts` | [summarize-result.ts](../../src/insrc/agent/tasks/code-analyzer/summarize-result.ts) | Extract `DataEvidenceEntry { facts[], citations[], confidence }` from one skill_invoke or db_* tool result |
 
 `DataEvidenceEntry` shape: same as `EvidenceEntry` but with
 `citations` typed as `DataCitation[]` (using the existing type from
@@ -110,15 +124,52 @@ parser from
 [summarize-result.ts:172](../../src/insrc/agent/tasks/code-analyzer/summarize-result.ts#L172)
 applies verbatim.
 
-### Phase 3 -- multi-cycle discovery flow (mirrors code's discovery-flow.ts)
+**Bake in Phase 5 cross-cutting items here**:
+- **DA-D1**: audit every `Promise.all` / parallel map under
+  `src/insrc/agent/tasks/data-analyzer/` and
+  `src/insrc/daemon/cross-agent/data-*.ts` that reaches an LLM
+  provider. Replace with serial `for...of` + sequential await.
+- **DA-E1**: add `INSRC_DATA_ANALYZER_USE_LOCAL=1` opt-out plumbing;
+  default routing for `summarize-result.ts` is cloud LLM.
+
+### Phase B -- guard Stages 1-3 (silent rename / coerce / inject; no deps)
+
+Mirrors the code-analyzer guard but ships ONLY the silent stages
+that need no feedback loop: tool-name resolution, arg-rename, type-
+coerce, session-default inject. Stage 4 (typed corrective + reject)
+is **deferred to Phase D** because today's data-analyzer dispatch
+paths (`skills-pipeline.ts` + `analyzer/runner.ts` short loops) lack
+the tool-loop that feeds typed correctives back to the LLM.
 
 | New file | Mirrors | Purpose |
 |---|---|---|
+| `src/insrc/agent/tasks/data-analyzer/tool-call-guard.ts` | [tool-call-guard.ts](../../src/insrc/agent/tool-call-guard.ts) (subset) | Stages 1-3 only: fuzzy tool-name resolve, arg-rename, type-coerce, session-default inject. Schema-validate happens but returns `pass` or silent `coerced` -- not `rejected` (yet). |
+| `src/insrc/agent/tasks/data-analyzer/tool-call-guard-rules.ts` | [tool-call-guard-rules.ts](../../src/insrc/agent/tool-call-guard-rules.ts) | Per-skill arg-rename map; **starts empty** (populated empirically from live runs). |
+
+**Session defaults specific to data**: `connectionId`, `schema`,
+`database`. Same shape as the code-side's `repoPath` injection but
+keyed off the active connection in the data-analyzer session state.
+
+**Wire points**:
+- [skills-pipeline.ts:197](../../src/insrc/agent/tasks/data-analyzer/skills-pipeline.ts#L197) -- right before `runSkill(inv.skillId, inv.args, ...)`. Silent rename + inject + coerce on the `ScopedInvocation` before dispatch.
+- [analyzer/runner.ts:421](../../src/insrc/agent/tasks/data-analyzer/analyzer/runner.ts#L421) -- right before `executeTool(call, execCtx)`. Same silent pre-filter on `db_*` tool calls. Need a small adapter to feed `db_*` tool schemas (not skill schemas) into the guard's `getSkillInputSchema` dep.
+
+**Bake in Phase 5**:
+- **DA-C3**: audit the 108-skill registry for any skill that takes
+  `startLine` / `endLine` / line-range args but doesn't actually
+  implement slicing. None should ship with the guard; either fix the
+  skill (full slicing) or drop the args from its schema.
+
+### Phase C -- multi-cycle discovery flow + execute-step (depends on A + B)
+
+| New file | Mirrors | Purpose |
+|---|---|---|
+| `src/insrc/agent/tasks/data-analyzer/execute-step.ts` | [execute-step.ts](../../src/insrc/agent/tasks/code-analyzer/execute-step.ts) | Per-discovery-step tool-loop. Calls into runSkill / executeTool through the Phase B guard; collects results into `DataEvidenceEntry[]` via Phase A summarizer. |
 | `src/insrc/agent/tasks/data-analyzer/discovery-flow.ts` | [discovery-flow.ts](../../src/insrc/agent/tasks/code-analyzer/discovery-flow.ts) | Multi-cycle expand-step / execute-step / review-cycle / retain-or-drop |
 
 **Per-task cycle structure** (same as code side):
 1. Cycle 1: planner emits N drill steps; each step runs through
-   `runDataAnalyzer` → produces `DataEvidenceEntry[]`.
+   `execute-step.ts` → produces `DataEvidenceEntry[]`.
 2. Cycle-reviewer keeps steps with `citations.length > 0`; drops
    the rest; asks for K new drill steps based on what was kept.
 3. Cycle 2-3: repeat until either retain growth flatlines or
@@ -131,97 +182,76 @@ analyzing `connectionA` MUST be rejected the way cross-repo
 queries get rejected in the code-analyzer's Plan SCS. Hook it
 into the connection-approval gate.
 
-### Phase 4 -- evidence-anchored writer
+### Phase D -- guard Stage 4 (typed corrective + reject path; depends on C)
+
+Add the reject path to the guard. Wires INTO Phase C's tool-loop in
+`execute-step.ts`: a `GuardOutcome.kind === 'rejected'` produces a
+`ToolResult { isError: true, content: <corrective prompt> }` that
+gets fed back to the LLM as the next turn's tool_result block,
+exactly like the code-side. The LLM re-emits the call with the
+guidance from the corrective.
+
+**Bake in Phase 5**:
+- **DA-C1**: when the corrective lists "missing required argument",
+  surface the arg's `description` field from the skill schema, not
+  just `(<type>)`. With 108 skills sharing arg names like `column`,
+  `field`, `name`, descriptions are necessary disambiguation.
+- **DA-C2**: when the corrective lists "unknown tool name", show
+  TOP-N closest skill ids WITH their one-line descriptions, not
+  just ids.
+
+### Phase E -- evidence-anchored writer + claim grounding (depends on A; parallel with C/D)
 
 | New file | Mirrors | Purpose |
 |---|---|---|
 | `src/insrc/agent/tasks/data-analyzer/write-from-evidence.ts` | [write-from-evidence.ts](../../src/insrc/agent/tasks/code-analyzer/write-from-evidence.ts) | Render `DataEvidenceEntry[]` → markdown with inline citations |
 | `src/insrc/agent/tasks/data-analyzer/claim-grounding-reviewer.ts` | [claim-grounding-reviewer.ts](../../src/insrc/agent/tasks/code-analyzer/claim-grounding-reviewer.ts) | Per-claim evidence check; emit redraft verdict |
 
+**Bake in Phase 5**:
+- **DA-A1**: "not found" footnotes must cite a verbatim evidence
+  identifier; no writer paraphrase.
+- **DA-B1**: redraft-must-grow-or-stay-equal guard (textLen ×
+  citationCount).
+- **DA-B2**: citation identifiers must come verbatim from evidence
+  (no abbreviating `schema.table.column` to `column`).
+- **DA-B3**: no hybrid citation shapes (one of `(connection, schema,
+  table, column?, rowRange?)`).
+- **DA-B4**: per-paragraph dedup on `(connection, schema, table,
+  column)` tuples.
+
 The writer lives *under* `generateMultiPass` -- per-task prose is
 generated by the new evidence-anchored writer, then `generateMultiPass`
 stitches per-task prose into the final report.
 
-### Phase 5 -- post-rollout learnings baked in BEFORE first run
+## Phase-5 (post-rollout) traceability
 
-These TODOs were live-discovered on the code side. They get
-implemented up front on the data side, not later.
+Every TODO from
+[code-analyzer-output-quality-followup.md](../code-analyzer-output-quality-followup.md)
+post-rollout section maps to the data-side phase that implements it.
+Listed once, referenced inline above:
 
-- [ ] **DA-A1 (from TODO-A1)**: "not found" footnotes MUST cite a
-      verbatim evidence path. If the writer claims `connectionA.schema.tableX
-      has no PK`, the path `connectionA.schema.tableX` MUST appear in
-      a `DataCitation` on at least one evidence entry, or the claim is
-      rejected. No writer-paraphrased identifiers in "not found"
-      footnotes.
-
-- [ ] **DA-B1 (from TODO-B1)**: redraft-must-grow-or-stay-equal
-      guard. If `redraft.textLen × redraft.citationCount` is < 90% of
-      `original.textLen × original.citationCount`, KEEP the original
-      and emit a structured-check warning. The redraft pass is for
-      *adding grounding*, never for trimming.
-
-- [ ] **DA-B2 (from TODO-B2)**: citation paths MUST come verbatim
-      from evidence entries -- no abbreviating
-      `schema.table.column` to `table.column` or `column`. Same
-      structural check: reject citations whose identifier doesn't
-      appear verbatim in any evidence entry. The data side's
-      equivalent of "bare filename" is "bare column name" or "bare
-      table name without schema qualifier".
-
-- [ ] **DA-B3 (from TODO-B3)**: no hybrid citation shapes. The
-      writer must emit ONE of:
-      `(connection, schema, table, column?, rowRange?)` -- not mix
-      identifiers and labels into the path slot. Example anti-pattern
-      from the code side that maps here: `path:extraction_output.py:Word#L262-L325`
-      would map to a malformed `connection:schema:table:row-range#column-name`
-      shape; reject in the writer system prompt + structural check.
-
-- [ ] **DA-B4 (from TODO-B4)**: within a paragraph, each
-      `(connection, schema, table, column)` tuple appears at most once.
-      Same per-paragraph duplicate-citation reject as the code side.
-
-- [ ] **DA-C1 (from TODO-C1)**: when the guard rejects a call with
-      "unexpected property X" or "missing required Y", surface the
-      arg's `description` in the corrective, not just its name + type.
-      Particularly important for the 108-skill data registry where
-      arg names like `column`, `field`, `name` recur across skills
-      with different semantics.
-
-- [ ] **DA-C2 (from TODO-C2)**: corrective for unknown-tool
-      rejections lists TOP-N closest skills WITH their one-line
-      descriptions, not just ids. The data registry has 108 skills
-      across 17 families; ids alone aren't enough for Haiku to pick.
-
-- [ ] **DA-C3 (from TODO-C3)**: do not ship the data analyzer with
-      any skill that takes a `startLine/endLine` arg unless it
-      genuinely implements line-range slicing on the underlying
-      source. Haiku will absolutely try to pass line ranges to skills
-      that don't take them; the schema is the contract, no half-
-      implementations.
-
-- [ ] **DA-D1 (from no-parallel-LLM-calls memory rule)**: audit
-      every code path in `src/insrc/agent/tasks/data-analyzer/`
-      and `src/insrc/daemon/cross-agent/data-*.ts` for `Promise.all`
-      / `Promise.allSettled` / parallel map that reaches an LLM
-      provider (cloud OR local Ollama embed/complete). Replace with
-      serial `for...of` + sequential `await`. The code side has been
-      bitten by this rule three times; head it off here.
-
-- [ ] **DA-E1**: every per-task LLM call (skill_invoke decoder,
-      result summarizer, cycle reviewer, writer, claim-grounding
-      reviewer) routes through the cloud LLM by default. Opt-out via
-      `INSRC_DATA_ANALYZER_USE_LOCAL=1`, mirroring the code
-      analyzer's
-      [code-analyzer-orchestrator.ts cloud-as-default](../../src/insrc/daemon/controllers/code-analyzer-orchestrator.ts).
-      Local Ollama is single-call-only material; multi-turn skill
-      loops drop tokens silently on the qwen/devstral family.
+| Code-side TODO | Data-side label | Phase | Description |
+|---|---|---|---|
+| TODO-A1 | DA-A1 | E | "not found" footnotes must cite verbatim evidence identifiers |
+| TODO-B1 | DA-B1 | E | redraft-must-grow-or-stay-equal guard |
+| TODO-B2 | DA-B2 | E | citation identifiers must come verbatim from evidence (no abbreviation) |
+| TODO-B3 | DA-B3 | E | no hybrid citation shapes |
+| TODO-B4 | DA-B4 | E | per-paragraph dedup on `(connection, schema, table, column)` tuples |
+| TODO-C1 | DA-C1 | D | corrective surfaces arg `description`, not just name + type |
+| TODO-C2 | DA-C2 | D | corrective surfaces skill descriptions on unknown-tool, not just ids |
+| TODO-C3 | DA-C3 | B | no skill ships with line-range args unless slicing is real |
+| (memory rule) | DA-D1 | A | no-parallel-LLM-calls audit |
+| (memory rule) | DA-E1 | A | cloud-LLM-by-default routing + `INSRC_DATA_ANALYZER_USE_LOCAL=1` opt-out |
 
 ## Sequencing
 
-- Phases 1-2 are independent and ship in one PR each.
-- Phase 3 depends on Phase 2 (cycle reviewer needs `DataEvidenceEntry`).
-- Phase 4 depends on Phase 2 (writer reads evidence entries).
-- Phase 5 items are scoped to specific phases (DA-A1, B1-B4 → Phase
+- **A** ships first (foundation; no deps). PR includes DA-D1 + DA-E1.
+- **B** ships in parallel with A (no deps). PR includes DA-C3.
+- **C** ships after both A + B land. Consumes evidence entries (A) and dispatches through the silent guard (B).
+- **D** ships immediately after C lands (or in the same PR if C is small). Adds Stage 4 reject + corrective. PR includes DA-C1 + DA-C2.
+- **E** ships in parallel with C (depends only on A). PR includes DA-A1, DA-B1, DA-B2, DA-B3, DA-B4.
+
+PR map: 4 PRs total (A, B, C+D, E).
   4; DA-C1, C2 → Phase 1; DA-C3 → Phase 1 + skill audit; DA-D1, E1
   → cross-cutting, do in PR 1).
 
@@ -236,7 +266,7 @@ implemented up front on the data side, not later.
 
 ## Risk
 
-- **Phase 3 multi-cycle latency**: the code side's discovery flow
+- **Phase C multi-cycle latency**: the code side's discovery flow
   runs 3 cycles per section, 5-15 steps per cycle. For data, each
   step is potentially a real DB query -- latency could balloon.
   Mitigation: hard cap `stepsPerCycle ≤ 4` and `cyclesPerTask ≤ 3`,
@@ -244,7 +274,7 @@ implemented up front on the data side, not later.
   driver's existing 60s envelope (see
   [data-analyze.ts](../../src/insrc/daemon/cross-agent/data-analyze.ts)).
 
-- **Phase 1 guard over-rewrites**: the data side has many overlapping
+- **Phase B guard over-rewrites**: the data side has many overlapping
   arg names (`column` on profile skills vs `field` on
   validation skills). A rename rule that's right for one skill could
   silently corrupt input to another. Mitigation: start with an
@@ -252,7 +282,7 @@ implemented up front on the data side, not later.
   observed in live logs (criterion from
   [tool-call-guard-rules.ts:21](../../src/insrc/agent/tool-call-guard-rules.ts#L21)).
 
-- **Phase 4 writer regression**: replacing the existing
+- **Phase E writer regression**: replacing the existing
   `generateMultiPass`-only synthesis path with an evidence-anchored
   writer underneath it could regress the multi-pass outline quality.
   Mitigation: gate the new writer behind

@@ -225,6 +225,47 @@ export interface DataAnalysisItemMeta {
 }
 
 // ---------------------------------------------------------------------------
+// Evidence entry (Phase A of plans/analyzers/data-analyzer-parity.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured summary of one runSkill or db_* tool result. Produced by
+ * `summarizeResult` in summarize-result.ts; consumed by the upcoming
+ * Phase E evidence-anchored writer and by Phase C's discovery-flow
+ * cycle reviewer.
+ *
+ * Mirrors `EvidenceEntry` from
+ * agent/tasks/code-analyzer/summarize-result.ts but typed for data
+ * citations and with an optional `numericFacts` slot for histogram
+ * bins / percentiles / cardinality counts (the writer prefers
+ * structured numerics when present, falls back to prose facts when
+ * not).
+ *
+ * Bounded prompt size on the summarizer call (~2-3k tokens of input)
+ * keeps it under the deep-multi-turn regime where local models like
+ * Devstral-Small-2 start dropping tokens to empty content.
+ */
+export interface DataEvidenceEntry {
+  readonly skillId: string;
+  readonly args: Record<string, unknown>;
+  /** 1-3 short key facts extracted from the skill / tool result. */
+  readonly facts: readonly string[];
+  /**
+   * Structured citations from the skill result. Empty array is fine
+   * when the result didn't surface any (Stage 4 of summarizeResult
+   * downgrades confidence in that case).
+   */
+  readonly citations: readonly DataCitation[];
+  /**
+   * Optional structured numerics surfaced by profile / quality /
+   * distribution skills. Writer renders these as table cells or
+   * histogram blocks; falls back to prose paraphrase when absent.
+   */
+  readonly numericFacts?: readonly { readonly name: string; readonly value: number; readonly unit?: string }[] | undefined;
+  readonly confidence: Confidence;
+}
+
+// ---------------------------------------------------------------------------
 // Connection summary (for the plan prompt + access gate)
 // ---------------------------------------------------------------------------
 

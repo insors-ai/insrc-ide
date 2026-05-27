@@ -185,12 +185,29 @@ export const dataAnalyzeTool: Tool = {
 			return { ctrl, tid };
 		})();
 
-		const runs = tasks.map(async (task): Promise<{
-			task: DataAnalysisTask;
-			outcome: DataAnalyzerResult | null;
-			truncated: boolean;
-			error?: string;
-		}> => {
+		// Serial dispatch. DA-D1 of plans/analyzers/data-analyzer-parity.md:
+		// NEVER run analyzer tasks in parallel -- each reaches the LLM
+		// provider, and the no-parallel-LLM-calls rule (saved-memory
+		// "no_parallel_llm_calls.md") forbids it. The previous
+		// `Promise.allSettled` violated the rule; the code-analyzer side
+		// got bitten by similar parallelism three different times before
+		// being headed off.
+		//
+		// The overall envelope is still enforced by `overall.ctrl.signal`:
+		// when the deadline fires, the signal aborts the in-flight task
+		// AND every remaining task short-circuits as "envelope exceeded"
+		// without starting (no LLM call made).
+		const completed: { task: DataAnalysisTask; outcome: DataAnalyzerResult }[] = [];
+		const failed: { task: DataAnalysisTask; reason: string }[] = [];
+		let perTaskTruncated = false;
+		let timedOutTasks = 0;
+		for (const task of tasks) {
+			if (overall.ctrl.signal.aborted) {
+				// Envelope already exceeded -- count this task as a
+				// timeout without starting its LLM tool loop.
+				timedOutTasks += 1;
+				continue;
+			}
 			try {
 				const result = await runDataAnalyzer(task, {
 					provider,
@@ -206,41 +223,22 @@ export const dataAnalyzeTool: Tool = {
 					...(deps.channel !== undefined ? { channel: deps.channel } : {}),
 					...(deps.requestId !== undefined ? { requestId: deps.requestId } : {}),
 				});
-				return { task, outcome: result.result, truncated: result.truncated };
+				if (result.truncated) {
+					perTaskTruncated = true;
+				}
+				completed.push({ task, outcome: result.result });
 			} catch (err) {
 				const message = (err as Error).message ?? String(err);
 				log.warn({ task: shortTitle(task), err: message }, 'data_analyze: task threw');
-				return { task, outcome: null, truncated: false, error: message };
+				if (overall.ctrl.signal.aborted) {
+					timedOutTasks += 1;
+				} else {
+					failed.push({ task, reason: message });
+				}
 			}
-		});
-
-		const settled = await Promise.allSettled(runs);
+		}
 		clearTimeout(overall.tid);
 		const elapsed = Date.now() - startedAt;
-		const envelopeExceeded = elapsed >= FLOW2_TOTAL_TIMEOUT_MS;
-
-		const completed: { task: DataAnalysisTask; outcome: DataAnalyzerResult }[] = [];
-		const failed: { task: DataAnalysisTask; reason: string }[] = [];
-		let perTaskTruncated = false;
-		let timedOutTasks = 0;
-		for (const s of settled) {
-			if (s.status === 'rejected') {
-				timedOutTasks += 1;
-				continue;
-			}
-			const v = s.value;
-			if (v.outcome === null) {
-				if (envelopeExceeded) {
-					timedOutTasks += 1;
-				}
-				failed.push({ task: v.task, reason: v.error ?? 'unknown' });
-				continue;
-			}
-			if (v.truncated) {
-				perTaskTruncated = true;
-			}
-			completed.push({ task: v.task, outcome: v.outcome });
-		}
 
 		const truncated = droppedTasks > 0 || timedOutTasks > 0 || perTaskTruncated;
 		const report = stitchFlow2Report(completed, failed, callerAgent);
