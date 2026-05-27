@@ -4,7 +4,11 @@
  *
  * Phase 1.E of plans/analyzers/data-analyzer.md. State machine:
  *
- *   planning            -> [plan LLM task]
+ *   planning            -> [skills-routing bootstrap pass-through]
+ *                          The bootstrap task fires `runSkillsPipeline`
+ *                          (classify-question -> select-scope -> per-skill
+ *                          runSkill -> calibrate-confidence) inline; the
+ *                          legacy plan LLM task has been removed.
  *   plan-approval       -> [plan-size gate]   (only when |tasks| > softCap)
  *   analyzing           -> runDataAnalyzer() (inline in next()) +
  *                          [review LLM task]
@@ -13,9 +17,9 @@
  *   present             -> [present gate]
  *   done                  (writes list.body)
  *
- * Cloud LLM defaults: plan + review. Local LLM defaults: analyzer
- * tool loop + synthesise. Per-step rebind via the Model Providers
- * pane (see plans/analyzers/data-analyzer.md "LLM routing" section).
+ * Cloud LLM defaults: review. Local LLM defaults: analyzer tool loop +
+ * synthesise. Per-step rebind via the Model Providers pane (see
+ * plans/analyzers/data-analyzer.md "LLM routing" section).
  *
  * Resume: restoreState + buildResumeTask + afterResumeBootstrap mirror
  * the code-analyzer's slice-C pattern. Connection approvals are NOT
@@ -28,10 +32,6 @@
 import { getLogger } from '../../shared/logger.js';
 import { runDataDiscoveryPipeline } from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
 import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
-import {
-  buildPlanSystemPrompt,
-  renderPlanUserMessage,
-} from '../../agent/tasks/data-analyzer/prompts/plan.js';
 import {
   buildReviewPrompt,
   REVIEW_SYSTEM,
@@ -71,7 +71,6 @@ import {
 } from '../../agent/tasks/data-analyzer/state.js';
 import {
   pipelineResultToAcceptedTasks,
-  readSkillsRoutingFromEnv,
   runSkillsPipeline,
 } from '../../agent/tasks/data-analyzer/skills-pipeline.js';
 import type {
@@ -126,9 +125,9 @@ const MAX_FOLLOWUPS = 6;
 
 /**
  * Sentinel that buildInitialTasks emits when `rerunFromListId` is
- * set (Phase 5.1 of plans/analyzers/data-analyzer.md). The afterPlan
- * handler detects the sentinel and reconstructs DataAnalysisTask[]
- * from the prior list's items instead of parsing planner output.
+ * set (Phase 5.1 of plans/analyzers/data-analyzer.md). The
+ * `afterRerunBootstrap` handler detects the sentinel and
+ * reconstructs DataAnalysisTask[] from the prior list's items.
  */
 const RERUN_BOOTSTRAP_MARKER = '__rerun-bootstrap__';
 const MAX_RETRIES_PER_TASK = 2;
@@ -211,42 +210,19 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       }];
     }
 
-    // data-analyzer-skills.md step 4b: skills-routing path -- when
-    // the feature flag is on, emit a bootstrap pass-through task; the
-    // orchestrator's `next()` detects the marker and runs the skills
-    // pipeline (classify → select → runSkill per scoped → calibrate)
-    // inline, then queues the legacy synthesise step. The legacy plan
-    // LLM call + per-task analyzer runner are bypassed entirely. The
-    // flag is also captured in `state.skillsRouting` (via
-    // `ensureStateInitialized`) so a resume of an in-flight run
-    // dispatches consistently regardless of env-var changes.
-    if (readSkillsRoutingFromEnv()) {
-      log.info({ }, 'data-analyzer: skills-routing path enabled via env var');
-      return [{
-        index: 0,
-        description: 'Data Analyzer: routing question through skills pipeline...',
-        kind: 'transform',
-        intent: 'data-analysis',
-        passThrough: true,
-        userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
-        outputFormat: 'text',
-        stateKey: K_PLAN_RESULT,
-        persisted: true,
-      }];
-    }
-
+    // data-analyzer-skills.md step 4b: skills-routing is the only
+    // path. Emit a bootstrap pass-through task; the orchestrator's
+    // `next()` detects the marker and runs the skills pipeline
+    // (classify -> select -> runSkill per scoped -> calibrate) inline,
+    // then queues the legacy synthesise step.
     return [{
       index: 0,
-      description: `Data Analyzer: planning tasks (tier ${this._tier})...`,
-      kind: 'llm',
+      description: 'Data Analyzer: routing question through skills pipeline...',
+      kind: 'transform',
       intent: 'data-analysis',
-      systemPrompt: buildPlanSystemPrompt(this._tier),
-      userMessage: renderPlanUserMessage(this._request, this._connections, this._tier),
-      resolverAgent: 'data-analyzer',
-      resolverStep: 'plan',
-      providerHint: 'claude',
-      temperature: 0,
-      maxTokens: 2500,
+      passThrough: true,
+      userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+      outputFormat: 'text',
       stateKey: K_PLAN_RESULT,
       persisted: true,
     }];
@@ -330,10 +306,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       childListIds: [],
       truncated:    false,
       cancelled:    false,
-      // data-analyzer-skills.md step 4b: capture the routing flag at
-      // run start so a re-run / resume keeps the original behaviour
-      // even if the env var has flipped in the meantime.
-      skillsRouting: readSkillsRoutingFromEnv(),
     };
     state.set(K_STATE, initial);
     state.set(K_PHASE, 'planning' as DataAnalyzerPhase);
@@ -371,12 +343,15 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     // data-analyzer-skills.md step 4b: skills-routing path.
     // buildInitialTasks emitted SKILLS_ROUTING_BOOTSTRAP_MARKER;
     // run the meta-skills pipeline inline + queue synthesise.
+    // This is the only entry into `planning` -- the legacy plan-LLM
+    // task and its `afterPlan` dispatch were removed when skills-
+    // routing became the only path.
     if (completed.output.trim() === SKILLS_ROUTING_BOOTSTRAP_MARKER) {
       return this.afterSkillsRoutingBootstrap(state);
     }
 
     switch (phase) {
-      case 'planning':       return this.afterPlan(completed, state);
+      case 'planning':       return this.afterSkillsRoutingBootstrap(state);
       case 'plan-approval':  return this.afterPlanApprovalGate(gateReply, state);
       case 'analyzing':      return this.runNextAnalyzerTask(state);
       case 'reviewing':      return this.afterReview(completed, state);
@@ -386,80 +361,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     }
   }
 
-  // -- plan -> approval ----------------------------------------------------
-
-  private async afterPlan(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    const planRaw = completed.output;
-    let parsed: { tasks: unknown[] } | null = null;
-    try {
-      parsed = JSON.parse(stripFences(planRaw));
-    } catch (err) {
-      log.error({ err: (err as Error).message }, 'afterPlan: plan output not parseable');
-    }
-    if (!parsed || !Array.isArray(parsed.tasks)) {
-      // Plan failed to parse. Mark cancelled and finalise; subsequent
-      // resume sees cancelled=true and exits cleanly.
-      const ca = state.get<DataAnalysisState>(K_STATE)!;
-      state.set(K_STATE, { ...ca, cancelled: true });
-      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
-      return null;
-    }
-
-    const caps = capsForTier(this._tier);
-    const planned: DataAnalysisTask[] = (parsed.tasks as Array<Record<string, unknown>>)
-      .slice(0, caps.hardTaskCap)
-      .map((raw): DataAnalysisTask => {
-        const kind = (typeof raw['kind'] === 'string' ? raw['kind'] : 'free-form') as DataAnalysisTask['kind'];
-        const question = typeof raw['question'] === 'string' ? raw['question'] : '';
-        const scopeRaw = (raw['scope'] ?? {}) as Record<string, unknown>;
-        const scope: DataAnalysisTask['scope'] = {
-          ...(Array.isArray(scopeRaw['connections']) ? { connections: scopeRaw['connections'].filter((s): s is string => typeof s === 'string') } : {}),
-          ...(Array.isArray(scopeRaw['targets']) ? { targets: scopeRaw['targets'].filter((s): s is string => typeof s === 'string') } : {}),
-        };
-        // Placeholder itemId; replaced with the framework-assigned
-        // id by the addItem block below before the plan lands in
-        // K_PLAN_TASKS.
-        return {
-          itemId: '',
-          kind,
-          question,
-          ...(scope.connections !== undefined || scope.targets !== undefined ? { scope } : {}),
-          origin: 'plan',
-        };
-      });
-
-    state.set(K_PLAN_TASKS, planned);
-
-    // Create TodoList + per-task items. The block is shared with
-    // afterRerunBootstrap (Phase 5.1) so both entry points end up
-    // with the same persisted-todos shape.
-    await this._persistTaskList(planned, state);
-
-    // Plan-approval gate fires when planner emitted more than the soft cap.
-    if (planned.length > caps.softTaskCap) {
-      state.set(K_PHASE, 'plan-approval' as DataAnalyzerPhase);
-      return [{
-        index: 1,
-        description: `Plan has ${planned.length} tasks (tier ${this._tier}). Approve, trim, or cancel?`,
-        kind: 'transform',
-        intent: 'data-analysis',
-        passThrough: true,
-        userMessage: renderPlanSummary(planned, caps),
-        outputFormat: 'markdown',
-        requiresGate: true,
-        gateTitle: `Data Analyzer plan size approval (tier ${this._tier})`,
-        gateActions: [
-          { name: 'approve', label: 'Approve all' },
-          { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
-          { name: 'cancel', label: 'Cancel run' },
-        ],
-        persisted: true,
-      }];
-    }
-
-    // No gate -- begin analysis directly.
-    return this.beginAnalysis(planned, state);
-  }
+  // -- plan-approval -------------------------------------------------------
 
   private async afterPlanApprovalGate(
     gateReply: GateReply | undefined,
@@ -485,10 +387,10 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   /**
    * Create the TodoList + addItem rows for a planned task list and
    * stamp the framework-assigned item ids back onto K_PLAN_TASKS.
-   * Shared between afterPlan (planner-driven) and afterRerunBootstrap
-   * (Phase 5.1, prior-list-driven). Best-effort: a failure here just
-   * means the run proceeds without the persisted list (degraded UX
-   * but the analyzer still does its job).
+   * Shared between afterSkillsRoutingBootstrap (skills-pipeline driven)
+   * and afterRerunBootstrap (Phase 5.1, prior-list-driven).
+   * Best-effort: a failure here just means the run proceeds without
+   * the persisted list (degraded UX but the analyzer still does its job).
    */
   private async _persistTaskList(
     planned: DataAnalysisTask[],
@@ -1300,20 +1202,18 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     log.info({ phase, listId: this._listId }, 'data-analyzer resume entry');
     switch (phase) {
       case 'planning':
-        // Re-fire the plan task verbatim.
+        // Re-fire the skills-routing bootstrap. With the legacy plan
+        // LLM path removed, resuming from `planning` just re-runs the
+        // meta-skills pipeline against the persisted request.
         if (this._request === undefined) return null;
         return [{
           index: 0,
-          description: `Data Analyzer: re-planning (resume; tier ${this._tier})...`,
-          kind: 'llm',
+          description: `Data Analyzer: re-routing through skills pipeline (resume; tier ${this._tier})...`,
+          kind: 'transform',
           intent: 'data-analysis',
-          systemPrompt: buildPlanSystemPrompt(this._tier),
-          userMessage: renderPlanUserMessage(this._request, this._connections, this._tier),
-          resolverAgent: 'data-analyzer',
-          resolverStep: 'plan',
-          providerHint: 'claude',
-          temperature: 0,
-          maxTokens: 2500,
+          passThrough: true,
+          userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+          outputFormat: 'text',
           stateKey: K_PLAN_RESULT,
           persisted: true,
         }];

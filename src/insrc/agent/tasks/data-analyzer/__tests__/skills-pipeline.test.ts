@@ -9,8 +9,6 @@
  *   - early abort: select returns no scoped → aborted=true
  *   - per-skill error path: skill execution throws → recorded with errored=true
  *   - adapter: pipeline result → AcceptedTask[] shape
- *   - feature flag default: isSkillsRoutingEnabled returns false until
- *     step 4b populates the state slot
  */
 
 import { test } from 'node:test';
@@ -26,7 +24,6 @@ import { registerSkillTools } from '../../../../daemon/tools/builtins/skills/inv
 import {
 	runSkillsPipeline,
 	pipelineResultToAcceptedTasks,
-	isSkillsRoutingEnabled,
 	type SkillsPipelineDeps,
 } from '../skills-pipeline.js';
 import type { Session } from '../../../session.js';
@@ -306,65 +303,3 @@ test('pipelineResultToAcceptedTasks: derives concern from skill family-prefix', 
 	assert.equal(make('data.timeseries.trend.rdbms')[0]!.result.findings[0]!.concern,       'consistency');
 });
 
-// ---------------------------------------------------------------------------
-// Feature flag
-// ---------------------------------------------------------------------------
-
-test('isSkillsRoutingEnabled: state precedence over env var', () => {
-	const baseState = {
-		request: 'q',
-		tier: 'M' as const,
-		connections: [],
-		listId: '',
-		childListIds: [],
-		truncated: false,
-		cancelled: false,
-	};
-
-	// Save + clear env var so the test isn't polluted by ambient state.
-	const originalEnv = process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'];
-	delete process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'];
-
-	try {
-		// No state, no env var → false.
-		assert.equal(isSkillsRoutingEnabled(undefined), false);
-		assert.equal(isSkillsRoutingEnabled(baseState), false);
-
-		// Explicit state value wins regardless of env var.
-		assert.equal(isSkillsRoutingEnabled({ ...baseState, skillsRouting: false } as never), false);
-		assert.equal(isSkillsRoutingEnabled({ ...baseState, skillsRouting: true } as never), true);
-
-		// Env-var fallback when state.skillsRouting is undefined.
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = '1';
-		assert.equal(isSkillsRoutingEnabled(undefined), true);
-		assert.equal(isSkillsRoutingEnabled(baseState), true);
-
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = 'true';
-		assert.equal(isSkillsRoutingEnabled(undefined), true);
-
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = 'TRUE';
-		assert.equal(isSkillsRoutingEnabled(undefined), true);
-
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = 'on';
-		assert.equal(isSkillsRoutingEnabled(undefined), true);
-
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = '0';
-		assert.equal(isSkillsRoutingEnabled(undefined), false);
-
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = 'false';
-		assert.equal(isSkillsRoutingEnabled(undefined), false);
-
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = 'gibberish';
-		assert.equal(isSkillsRoutingEnabled(undefined), false);
-
-		// State precedence: explicit false beats truthy env.
-		process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = '1';
-		assert.equal(isSkillsRoutingEnabled({ ...baseState, skillsRouting: false } as never), false);
-	} finally {
-		if (originalEnv === undefined) {
-			delete process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'];
-		} else {
-			process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'] = originalEnv;
-		}
-	}
-});

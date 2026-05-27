@@ -2,8 +2,7 @@
  * Skills-routing pipeline for the data-analyzer (data-analyzer-skills.md
  * §7 + §8).
  *
- * Drop-in replacement for the legacy plan / per-task / runner path that
- * routes a free-form question through the meta-skills:
+ * Routes a free-form question through the meta-skills:
  *
  *     classify-question → select-scope → runSkill per ScopedInvocation
  *                       → calibrate-confidence
@@ -12,9 +11,8 @@
  * `AcceptedTask[]` + `DataAnalyzerResult[]` (the legacy shapes the
  * synthesise step still consumes).
  *
- * Gated behind `insrc.dataAnalyzer.skillsRouting` (off by default).
- * The legacy code path stays untouched; flipping the flag back off
- * restores the original behaviour.
+ * This is the only data-analyzer routing path; the legacy plan-LLM
+ * pipeline has been removed.
  *
  * v1 scope:
  *   - Sequential skill execution. Per-skill streaming progress is a
@@ -23,11 +21,7 @@
  *     `TaskResult` to surface structured `data` -- deferred).
  *   - The review step is skipped in skills-routing mode. SkillResults
  *     carry their own confidence + notes which the calibrate-confidence
- *     skill rolls into a final verdict; the legacy reviewer's per-task
- *     contract doesn't fit one-shot skill results.
- *   - Drill-down / rerun / diff stay legacy-only for v1. The flag is
- *     captured at run start; re-running an old report keeps using its
- *     captured value.
+ *     skill rolls into a final verdict.
  */
 
 import { runSkill } from '../../../daemon/skills/invoke.js';
@@ -35,7 +29,6 @@ import { runDataAnalyzerGuard, type DataSessionDefaults } from './tool-call-guar
 import type { Session } from '../../session.js';
 import type {
 	AcceptedTask,
-	DataAnalysisState,
 } from './state.js';
 import type {
 	BlockedReason,
@@ -518,46 +511,6 @@ function safePreview(value: unknown): string {
 	} catch {
 		return '<unserializable value>';
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Feature flag
-// ---------------------------------------------------------------------------
-
-/**
- * Read site for the skills-routing feature flag. Two sources, in
- * precedence order:
- *
- *   1. `state.skillsRouting` -- captured at orchestrator-run start
- *      so a re-run of an old report keeps the original routing
- *      behaviour even if the toggle source has flipped in the
- *      meantime.
- *
- *   2. `INSRC_DATA_ANALYZER_SKILLS_ROUTING` env var -- read at
- *      orchestrator-run start when `state.skillsRouting` is unset.
- *      Truthy values: '1', 'true', 'on' (case-insensitive). Lets a
- *      developer flip the flag without IDE-side IPC plumbing.
- *
- * IDE-side toggle through `tools.config.set` is a follow-up; the
- * env-var path is the v1 control surface.
- */
-export function isSkillsRoutingEnabled(state: DataAnalysisState | undefined): boolean {
-	const ss = state as DataAnalysisState & { readonly skillsRouting?: boolean } | undefined;
-	if (ss?.skillsRouting === true)  { return true; }
-	if (ss?.skillsRouting === false) { return false; }
-	return readSkillsRoutingFromEnv();
-}
-
-/**
- * Read the env-var fallback. Exported for the orchestrator to
- * snapshot at run start (so the captured value persists into
- * `state.skillsRouting` and survives env-var flips mid-session).
- */
-export function readSkillsRoutingFromEnv(): boolean {
-	const raw = process.env['INSRC_DATA_ANALYZER_SKILLS_ROUTING'];
-	if (raw === undefined) { return false; }
-	const v = raw.trim().toLowerCase();
-	return v === '1' || v === 'true' || v === 'on';
 }
 
 // ---------------------------------------------------------------------------

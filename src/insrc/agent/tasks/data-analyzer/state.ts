@@ -36,13 +36,6 @@ export type DataAnalyzerPhase =
  * connection list, and the controller-managed list id. Connection
  * approvals are NOT persisted here -- they live in session memory
  * only and re-prompt on resume per design §14.
- *
- * `skillsRouting` is captured at run start (data-analyzer-skills.md
- * step 4b). When true, the orchestrator routes the question through
- * the meta-skills (`runSkillsPipeline`) and bypasses the legacy plan
- * + per-task analyzer pipeline. Captured in run state so a re-run of
- * an old report keeps the original routing behaviour even if the
- * caller has flipped the flag in the meantime.
  */
 export interface DataAnalysisState {
   readonly request: string;
@@ -52,8 +45,6 @@ export interface DataAnalysisState {
   readonly childListIds: readonly string[];
   readonly truncated: boolean;
   readonly cancelled: boolean;
-  /** When true, this run uses the skills-routing path. */
-  readonly skillsRouting?: boolean | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,11 +71,11 @@ export const K_RAW_EXECUTIONS = 'rawExecutions';    // PerSkillExecution[] from 
 export const RESUME_BOOTSTRAP_MARKER = '__data_analyzer_resume_bootstrap__';
 
 /**
- * Sentinel emitted by `buildInitialTasks` when `state.skillsRouting`
- * is true (data-analyzer-skills.md step 4b). The orchestrator's
- * `next()` detects this marker and dispatches into the skills-routing
- * pipeline (`runSkillsPipeline` → adapter → synthesise) instead of
- * the legacy plan + per-task analyzer flow.
+ * Sentinel emitted by `buildInitialTasks` (data-analyzer-skills.md
+ * step 4b). The orchestrator's `next()` detects this marker and
+ * dispatches into the skills-routing pipeline (`runSkillsPipeline`
+ * → adapter → synthesise). Skills-routing is now the only path; the
+ * legacy plan + per-task analyzer flow has been removed.
  */
 export const SKILLS_ROUTING_BOOTSTRAP_MARKER = '__data_analyzer_skills_routing_bootstrap__';
 
