@@ -6,6 +6,8 @@
 
 **This doc depends on** [`plans/memory-context-substrate.md`](plans/memory-context-substrate.md) — the shared memory + context + working-state framework every skill and agent inherits. Memory, context assembly, working-state ledgers, bootstrap, feedback, indexing, and the user-assertion classifier live in the substrate. This doc covers only what's specific to the L1/L2 skill model: the agentic runtime, the L1/L2 split, the L2 evidence-ledger discipline that sits on top of working state, and the migration plan to get there.
 
+**Sibling:** [`plans/code-analyzer-migration.md`](plans/code-analyzer-migration.md) — the priority pilot adoption path for this framework. Applies the substrate + L2 model concretely to the code-analyzer, identifies code-specific context builders, L1 skills to migrate, user-assertion routing, and pilot L2 skill choice. Implementation should start there.
+
 **L1 skills evolve too.** Even capability skills become substrate consumers. Each L1 skill declares context builders that the substrate's indexer dispatches at bootstrap time, reads from context slots the substrate assembles per-execution, and pins working-state entries that the substrate distills back to memory. Cold execution is the slow path; warm execution against an already-populated substrate is the norm.
 
 ## Why
@@ -339,9 +341,9 @@ The L2 layer is **additive**. Today's skills, today's classify/select-scope/grou
 - Skills can implement `applyFeedback`; for the first release, just log + verify the events are well-formed. No mutation.
 
 **Phase 3 — One pilot L2 skill.**
-- Pick the loudest pain point. Suggestion: `data.answer-question` — takes the user's question + the connection roster (via session state + context slots), plans its own discovery, drafts an answer, self-grounds against its working-state ledger.
-- Wire it as an opt-in path in the data-analyzer orchestrator behind a feature flag.
-- L2 skill reads from the L1 context populated in Phase 1. This is where the substrate investment starts paying off.
+- **Priority migration target: the code-analyzer.** See [`plans/code-analyzer-migration.md`](plans/code-analyzer-migration.md) for the code-analyzer-specific phasing, context builders, and pilot strawman (`code.audit-module` → `code.answer-question`). The code-analyzer has more prompts, more LLM round-trips per question, and a richer indexed substrate (the code KG) than the data-analyzer; it benefits more from the substrate + L2 model.
+- The data-analyzer's `data.answer-question` is a separate pilot that follows the code-analyzer one. Both are L2 skills using the same framework; sequencing puts code-analyzer first.
+- Wire the chosen pilot as an opt-in path in its orchestrator behind a feature flag. Existing pipeline stays as default.
 - Measure: tokens-per-question, sections-with-real-evidence, citation-hallucination rate.
 
 **Phase 4 — Skills act on feedback.**
