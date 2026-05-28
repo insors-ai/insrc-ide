@@ -31,10 +31,10 @@
  * structured `Citation[]` directly, at which point the adapter
  * goes away.
  *
- * Default behavior: this is the active code path. Set
- * `INSRC_ANALYZER_FLOW=gather-write` in the daemon env to opt
- * out (legacy patch-loop flow stays available until Phase eta
- * deletes it).
+ * This is the only code-analyzer per-section drafter. The legacy
+ * gather-write + patch-loop flow that lived behind
+ * `INSRC_ANALYZER_FLOW=gather-write` was removed in the
+ * env-var-cleanup sweep.
  */
 
 import type { LLMProvider } from '../../../shared/types.js';

@@ -55,10 +55,7 @@ export type PromptFlow =
 	| 'prose-review'
 	// Phase 11.B of plans/code-analyzer-hallucination-mitigation.md:
 	// dedicated reviewer that scores each claim's evidence-backing.
-	| 'claim-grounding'
-	// Phase 12 of plans/code-analyzer-hallucination-mitigation.md:
-	// structured writer behind INSRC_ANALYZER_WRITER_MODE=structured.
-	| 'write-structured';
+	| 'claim-grounding';
 
 export type PatchKind = 'fix' | 'add';
 
