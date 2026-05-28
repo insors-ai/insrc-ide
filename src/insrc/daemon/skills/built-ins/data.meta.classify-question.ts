@@ -589,7 +589,7 @@ const skill: Skill<ClassifyInput, ClassifyOutput> = {
   inputs:  INPUT_SCHEMA as unknown as Record<string, unknown>,
   outputs: OUTPUT_SCHEMA as unknown as Record<string, unknown>,
   toolDeps: ['skill_describe'],
-  providerAffinity: 'local',
+  providerAffinity: 'cloud',
   preconditions: [
     {
       kind: 'required-tools',

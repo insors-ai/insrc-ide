@@ -492,7 +492,7 @@ const skill: Skill<SelectScopeInput, SelectScopeOutput> = {
   inputs:  INPUT_SCHEMA as unknown as Record<string, unknown>,
   outputs: OUTPUT_SCHEMA as unknown as Record<string, unknown>,
   toolDeps: [],
-  providerAffinity: 'local',
+  providerAffinity: 'cloud',
   preconditions: [],
 
   async execute(input, deps): Promise<SkillResult<SelectScopeOutput>> {
