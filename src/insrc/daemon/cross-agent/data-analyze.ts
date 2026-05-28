@@ -51,7 +51,11 @@ const log = getLogger('data-analyzer:flow2');
 
 const FLOW2_TRIM_CAP = 16;
 const FLOW2_TOTAL_TIMEOUT_MS = 60_000;
-const FLOW2_PER_TASK_WALLCLOCK_MS = 45_000;
+// Per-task wall-clock cap was carried via the legacy runDataAnalyzer's
+// `wallClockMs` option; the new runDataDiscoveryPipeline relies on the
+// overall envelope's AbortController to bound each task. The 45 s
+// per-task budget is preserved implicitly by the 60 s envelope and
+// serial dispatch (3 tasks × 20 s avg fits inside).
 
 // ---------------------------------------------------------------------------
 // Wire shape

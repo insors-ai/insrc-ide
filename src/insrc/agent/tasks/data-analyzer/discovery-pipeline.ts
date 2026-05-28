@@ -31,7 +31,6 @@
  *      pipeline downstream consumes the result unchanged.
  */
 
-import type { LLMProvider } from '../../../shared/types.js';
 import type { Session } from '../../session.js';
 import { getLogger } from '../../../shared/logger.js';
 import { resolveDataAnalyzerProvider } from './resolve-provider.js';
