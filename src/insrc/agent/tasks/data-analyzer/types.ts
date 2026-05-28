@@ -281,6 +281,19 @@ export interface ConnectionSummary {
   readonly kind: string;
   /** User-supplied label or auto-generated ("primary", "cache", ...). */
   readonly label?: string | undefined;
+  /**
+   * Filesystem path for file-family connections (single-file or
+   * directory-as-table). Lets the data-analyzer's meta-skills
+   * (classify-question / select-scope) map question targets like
+   * "/data/exports" or "the GRN test files" to a specific connection
+   * id instead of guessing from an opaque `ephemeral:<hash>` id.
+   *
+   * Omitted for rdbms / kv connections (the path concept doesn't
+   * apply there; their identifier is host/db/schema in the driver
+   * config). Always present for file-family ephemerals registered
+   * by the orchestrator's `_registerEphemeralFromPrompt`.
+   */
+  readonly path?: string | undefined;
   /** True when the connection is flagged production in db-connections.json. */
   readonly prod: boolean;
   /** True when the connection has at least one PII pattern config. */

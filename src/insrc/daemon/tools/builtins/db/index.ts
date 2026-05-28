@@ -175,9 +175,9 @@ async function acquireDriver(
 
 function summariseConnections(conns: readonly ConnectionConfig[]): string {
 	if (conns.length === 0) { return '(no connections configured)'; }
-	const rows = ['| id | kind | family | label |', '|---|---|---|---|'];
+	const rows = ['| id | kind | family | label | path |', '|---|---|---|---|---|'];
 	for (const c of conns) {
-		rows.push(`| ${c.id} | ${c.kind} | ${c.family ?? '?'} | ${c.label ?? ''} |`);
+		rows.push(`| ${c.id} | ${c.kind} | ${c.family ?? '?'} | ${c.label ?? ''} | ${c.path ?? ''} |`);
 	}
 	return rows.join('\n');
 }
@@ -217,7 +217,9 @@ const listConnectionsTool: Tool = {
 	id: 'db_list_connections',
 	description:
 		'List every data-driver connection configured for the active repo. ' +
-		'Each entry: { id, kind, family, label }. Use this first to discover which ' +
+		'Each entry: { id, kind, family, label, path? }. The `path` field is set ' +
+		'for file-family connections (single file or directory-as-table); for ' +
+		'rdbms / kv it is omitted. Use this first to discover which ' +
 		'db:sql:* / db:kv:* / db:file:* calls are available and what connectionId to pass.',
 	inputSchema: { type: 'object', additionalProperties: false, properties: {} },
 	async execute(_input: ToolInput, deps: ToolDeps): Promise<ToolResult> {
@@ -229,7 +231,16 @@ const listConnectionsTool: Tool = {
 			return ok(
 				summariseConnections(list),
 				list.map(c => ({
-					id: c.id, kind: c.kind, family: c.family, label: c.label,
+					id:     c.id,
+					kind:   c.kind,
+					family: c.family,
+					label:  c.label,
+					// `path` is meaningful for file-family connections
+					// (single file or directory-as-table); included so the
+					// data-analyzer's meta-skills can resolve question
+					// targets like "/data/exports" to the right connection.
+					// Omitted for non-file connections where path is undef.
+					...(c.path !== undefined ? { path: c.path } : {}),
 				})),
 			);
 		} catch (err) {

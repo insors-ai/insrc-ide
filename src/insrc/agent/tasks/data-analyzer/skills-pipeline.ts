@@ -124,19 +124,34 @@ export async function runSkillsPipeline(
 	const notes: string[] = [];
 
 	// Project the full ConnectionSummary down to the lean shape the
-	// meta-skills' input schemas accept ({ id, family, kind? }).
-	// classify-question and select-scope both declare
-	// `additionalProperties: false` on their connection items, so
-	// passing the full summary (which has `name`, `tier`, etc.)
-	// trips input validation.
-	const connectionsForMeta = input.connections.map((c): { id: string; family: string; kind?: string } => ({
+	// meta-skills' input schemas accept. classify-question and
+	// select-scope both declare `additionalProperties: false`, so
+	// only the documented keys flow through.
+	//
+	// `path` + `label` are included so the meta-skills can map
+	// question targets (file paths, directory paths, user-assigned
+	// labels) to the right connection id. Without them, the LLM sees
+	// only opaque `ephemeral:<hash>` strings and can't disambiguate
+	// which connection matches a path-shaped target -- the source
+	// of the "select-scope returned confidence=low" failure that
+	// motivated the connection-roster-enrichment fix.
+	type MetaConnection = {
+		readonly id:     string;
+		readonly family: string;
+		readonly kind?:  string;
+		readonly label?: string;
+		readonly path?:  string;
+	};
+	const connectionsForMeta: readonly MetaConnection[] = input.connections.map((c): MetaConnection => ({
 		id:     c.id,
 		family: c.family,
-		...(c.kind !== undefined ? { kind: c.kind } : {}),
+		...(c.kind  !== undefined && c.kind.length  > 0 ? { kind:  c.kind  } : {}),
+		...(c.label !== undefined && c.label.length > 0 ? { label: c.label } : {}),
+		...(c.path  !== undefined && c.path.length  > 0 ? { path:  c.path  } : {}),
 	}));
 
 	// 1. classify-question.
-	const classify = await runSkill<{ question: string; connections: readonly { id: string; family: string; kind?: string }[] }, ClassifyOutputView>(
+	const classify = await runSkill<{ question: string; connections: readonly MetaConnection[] }, ClassifyOutputView>(
 		'data.meta.classify-question',
 		{ question: input.question, connections: connectionsForMeta },
 		buildSkillRunnerDeps(deps),
@@ -158,7 +173,7 @@ export async function runSkillsPipeline(
 
 	// 2. select-scope (uses the same lean connections shape).
 	const select = await runSkill<
-		{ question: string; candidates: ClassifyOutputView['candidates']; connections: readonly { id: string; family: string; kind?: string }[] },
+		{ question: string; candidates: ClassifyOutputView['candidates']; connections: readonly MetaConnection[] },
 		SelectScopeOutputView
 	>(
 		'data.meta.select-scope',

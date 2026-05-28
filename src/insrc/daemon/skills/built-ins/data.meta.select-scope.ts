@@ -79,6 +79,8 @@ interface ConnectionInfo {
   readonly id:     string;
   readonly family: string;
   readonly kind?:  string;
+  readonly label?: string;
+  readonly path?:  string;
 }
 
 interface SelectScopeInput {
@@ -120,6 +122,13 @@ const CONNECTION_INFO_SCHEMA = {
     id:     { type: 'string' },
     family: { type: 'string' },
     kind:   { type: 'string' },
+    // `label` and `path` are passed through so the LLM can map a
+    // question target (e.g. "/data/exports/customers.json" or
+    // "the GRN test files") to the right connection. Without these
+    // the LLM only sees opaque `ephemeral:<hash>`-style ids and
+    // returns confidence:low for any path-shaped target.
+    label:  { type: 'string' },
+    path:   { type: 'string' },
   },
   required: ['id', 'family'],
   additionalProperties: false,
@@ -265,9 +274,13 @@ function buildUserMessage(
   input: SelectScopeInput,
   manifests: readonly CandidateManifest[],
 ): string {
-  const connLines = input.connections.map(c =>
-    `- \`${c.id}\` family=${c.family}${c.kind !== undefined ? ` kind=${c.kind}` : ''}`,
-  );
+  const connLines = input.connections.map(c => {
+    const parts = [`- \`${c.id}\` family=${c.family}`];
+    if (c.kind  !== undefined) parts.push(`kind=${c.kind}`);
+    if (c.label !== undefined && c.label.length > 0) parts.push(`label="${c.label}"`);
+    if (c.path  !== undefined && c.path.length > 0)  parts.push(`path=${c.path}`);
+    return parts.join(' ');
+  });
   const candidateBlocks = input.candidates.map((c, i) => {
     const manifest = manifests.find(m => m.skillId === c.skillId);
     if (manifest === undefined) {

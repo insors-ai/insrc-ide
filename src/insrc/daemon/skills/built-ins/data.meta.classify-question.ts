@@ -70,6 +70,8 @@ interface ConnectionInfo {
   readonly id:     string;
   readonly family: string;          // 'rdbms' | 'kv' | 'file' | ...
   readonly kind?:  string;          // 'postgres' | 'mongodb' | 'csv' | ...
+  readonly label?: string;
+  readonly path?:  string;
 }
 
 interface PriorContext {
@@ -106,6 +108,11 @@ const CONNECTION_INFO_SCHEMA = {
     id:     { type: 'string' },
     family: { type: 'string' },
     kind:   { type: 'string' },
+    // `label` and `path` mirror the select-scope schema -- both meta-
+    // skills see the same connection-roster projection so the LLM can
+    // pick candidates based on path/label, not just opaque ids.
+    label:  { type: 'string' },
+    path:   { type: 'string' },
   },
   required: ['id', 'family'],
   additionalProperties: false,
@@ -379,9 +386,13 @@ function buildUserMessage(
   catalog: readonly CatalogEntry[],
 ): string {
   const catalogLines = catalog.map(e => `- \`${e.id}\` [${e.family}] -- ${e.summary}`);
-  const connLines    = input.connections.map(c =>
-    `- \`${c.id}\` family=${c.family}${c.kind !== undefined ? ` kind=${c.kind}` : ''}`,
-  );
+  const connLines    = input.connections.map(c => {
+    const parts = [`- \`${c.id}\` family=${c.family}`];
+    if (c.kind  !== undefined) parts.push(`kind=${c.kind}`);
+    if (c.label !== undefined && c.label.length > 0) parts.push(`label="${c.label}"`);
+    if (c.path  !== undefined && c.path.length > 0)  parts.push(`path=${c.path}`);
+    return parts.join(' ');
+  });
   return [
     `Question:`,
     input.question,

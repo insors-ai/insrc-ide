@@ -46,6 +46,9 @@ export async function loadActiveConnections(session: Session): Promise<readonly 
 				family,
 				kind:        typeof r2['kind'] === 'string' ? r2['kind'] : '',
 				...(typeof r2['label'] === 'string' ? { label: r2['label'] as string } : {}),
+				// `path` is meaningful for file-family connections only;
+				// db_list_connections omits it for rdbms / kv rows.
+				...(typeof r2['path'] === 'string' ? { path: r2['path'] as string } : {}),
 				prod:        r2['prod'] === true,
 				hasPiiConfig: r2['hasPiiConfig'] === true,
 			};

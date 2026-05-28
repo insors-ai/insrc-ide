@@ -74,11 +74,20 @@ const DIR_TOKEN_REGEX =
  */
 const DIR_WALK_MAX_DEPTH = 1;
 
-// Note: there's no cap on how many ephemeral files we register from
-// a directory. A 500-file dir registers 500 ephemerals. The planner
-// is guided to BATCH (one task per group-of-N connections, typically
-// 6-per-task to fit the analyzer's 8-tool-call budget) rather than
-// emit one task per file. See plan.ts's tier guidance.
+/**
+ * Threshold above which a directory walk's per-file registrations are
+ * COLLAPSED into a single directory-group connection. Below threshold
+ * we keep per-file ephemerals (small handful is easier for the planner
+ * to reason about); at-or-above threshold the duckdb-file driver's
+ * native directory-as-table support (a single connection whose path is
+ * the directory, kind = json/csv/etc., driver globs `*.{ext}` at
+ * sample-time) takes over.
+ *
+ * Two-file threshold chosen empirically: a single file is just a
+ * single file; two-plus files of the same kind in one directory are
+ * almost always "the dataset" the user meant.
+ */
+const DIR_COLLAPSE_MIN_FILES = 2;
 
 export interface DetectedFile {
   /** Absolute resolved path (existed at detection time). */
@@ -87,8 +96,24 @@ export interface DetectedFile {
   readonly typed: string;
   /** Inferred file kind ('json', 'csv', ...). */
   readonly kind: string;
-  /** Auto-derived ephemeral connection id (`ephemeral:<basename>`). */
+  /** Auto-derived ephemeral connection id. For single files
+   *  `ephemeral:<basename>-<hash>`; for directory groups
+   *  `ephemeral:<dirname>-<kind>-<hash>`. */
   readonly connectionId: string;
+  /**
+   * True when this entry represents a directory aggregated across all
+   * files of `kind` inside it. The driver's `statSync().isDirectory()`
+   * detection picks this up and switches to glob mode at sample-time.
+   *
+   * When false (the default), the entry is a single-file ephemeral.
+   */
+  readonly isDirectory?: boolean;
+  /**
+   * Number of files of this kind under the directory at detection
+   * time. Only set when `isDirectory: true`. Informational; the driver
+   * doesn't pre-enumerate at runtime.
+   */
+  readonly memberCount?: number;
 }
 
 /**
@@ -143,7 +168,13 @@ export function detectFilePaths(prompt: string, cwd: string): readonly DetectedF
     });
   }
 
-  // Pass 2: directories. Walk shallow for known-extension files.
+  // Pass 2: directories. Walk shallow for known-extension files and
+  // collapse same-kind file groups into single directory-group
+  // connections (one per (dir, kind) pair). The duckdb-file driver
+  // natively handles directory connections: `statSync(path).isDirectory()`
+  // switches it to glob mode (`<dir>/*.{ext}`), so registering one
+  // directory entry per kind gives the planner a single handle for
+  // "the dataset" without 30 individual file ephemerals.
   DIR_TOKEN_REGEX.lastIndex = 0;
   while ((m = DIR_TOKEN_REGEX.exec(prompt)) !== null) {
     const typed = m[1];
@@ -160,27 +191,83 @@ export function detectFilePaths(prompt: string, cwd: string): readonly DetectedF
       continue;
     }
     if (!isDir) continue;
-    walkDir(abs, typed, 0, out);
+    walkDirCollapsing(abs, typed, out);
   }
 
   return Array.from(out.values());
 }
 
 /**
- * Shallow walk of a directory; registers known-extension files as
- * ephemerals. Bounded by DIR_WALK_MAX_DEPTH only -- caller doesn't
- * cap on count.
+ * Shallow walk of a directory; collapses same-kind file groups into
+ * single directory-group ephemerals. Bounded by DIR_WALK_MAX_DEPTH.
+ *
+ * Algorithm:
+ *   1. Scan the directory's immediate children (and one level of
+ *      subdirs per DIR_WALK_MAX_DEPTH=1) for known-extension files.
+ *   2. Tally by file kind: how many .json files, how many .csv, etc.
+ *   3. For each kind with >= DIR_COLLAPSE_MIN_FILES (2) files,
+ *      register ONE directory-group ephemeral whose path is the
+ *      directory (the duckdb-file driver handles dir-as-table
+ *      natively via glob).
+ *   4. For each kind with < DIR_COLLAPSE_MIN_FILES files, register
+ *      per-file (one ephemeral per file). A single .csv in a dir of
+ *      mostly .json files still gets its own entry.
  *
  * Hidden entries (dotfiles / dotdirs) are skipped to avoid
- * accidentally pulling .git, OS metadata files, etc.
- * `node_modules` is excluded explicitly for safety even though
- * its files don't normally have data extensions.
+ * accidentally pulling .git, OS metadata files, etc. `node_modules`
+ * is excluded explicitly even though it has few data-extension files.
  */
-function walkDir(
+function walkDirCollapsing(
   dirAbs: string,
   dirTyped: string,
-  depth: number,
   out: Map<string, DetectedFile>,
+): void {
+  // Tally same-kind groups. For each kind we observe under this dir
+  // (or its immediate subdirs), collect the absolute paths.
+  const byKind: Map<string, string[]> = new Map();
+  collectFilesByKind(dirAbs, byKind, 0);
+  if (byKind.size === 0) return;
+
+  for (const [kind, files] of byKind) {
+    if (files.length >= DIR_COLLAPSE_MIN_FILES) {
+      // Collapse: register ONE directory-group ephemeral. The driver
+      // statSyncs the path and switches to glob mode automatically.
+      const groupId = makeDirGroupId(dirAbs, kind);
+      if (out.has(dirAbs + '\0' + kind)) continue;  // dedup across multiple typed mentions
+      out.set(dirAbs + '\0' + kind, {
+        absPath:      dirAbs,
+        typed:        dirTyped,
+        kind,
+        connectionId: groupId,
+        isDirectory:  true,
+        memberCount:  files.length,
+      });
+      continue;
+    }
+    // Below threshold: register per-file.
+    for (const childAbs of files) {
+      if (out.has(childAbs)) continue;
+      out.set(childAbs, {
+        absPath:      childAbs,
+        typed:        `${dirTyped}/${basename(childAbs)}`,
+        kind,
+        connectionId: makeEphemeralId(childAbs),
+      });
+    }
+  }
+}
+
+/**
+ * Recursive collector: walks `dirAbs` up to DIR_WALK_MAX_DEPTH and
+ * appends every known-extension file's absolute path to `byKind`
+ * grouped by its inferred kind.
+ *
+ * Symlinks aren't followed beyond statSync's default behaviour.
+ */
+function collectFilesByKind(
+  dirAbs: string,
+  byKind: Map<string, string[]>,
+  depth: number,
 ): void {
   if (depth > DIR_WALK_MAX_DEPTH) return;
   let entries: string[];
@@ -203,20 +290,16 @@ function walkDir(
       continue;
     }
     if (childIsDir) {
-      walkDir(childAbs, `${dirTyped}/${name}`, depth + 1, out);
+      collectFilesByKind(childAbs, byKind, depth + 1);
       continue;
     }
     if (!childIsFile) continue;
     const ext = extname(name).slice(1).toLowerCase();
     const kind = EXTENSION_TO_KIND[ext];
     if (kind === undefined) continue;
-    if (out.has(childAbs)) continue;
-    out.set(childAbs, {
-      absPath: childAbs,
-      typed: `${dirTyped}/${name}`,
-      kind,
-      connectionId: makeEphemeralId(childAbs),
-    });
+    const list = byKind.get(kind);
+    if (list === undefined) byKind.set(kind, [childAbs]);
+    else list.push(childAbs);
   }
 }
 
@@ -239,4 +322,28 @@ function makeEphemeralId(absPath: string): string {
   }
   const hashSuffix = (h >>> 0).toString(16).padStart(8, '0');
   return `ephemeral:${slug || 'file'}-${hashSuffix}`;
+}
+
+/**
+ * Build an ephemeral directory-group connection id. The id encodes the
+ * directory's basename + the file kind so a single directory hosting
+ * multiple kinds (e.g. `data/` with both .csv and .parquet) gets two
+ * distinct ids -- one per kind, matching the data-driver's one-kind-
+ * per-connection contract.
+ *
+ * Stable across calls (same dir + kind always hashes to the same id),
+ * so a re-run of the same prompt reuses the existing entry.
+ */
+function makeDirGroupId(dirAbs: string, kind: string): string {
+  const base = basename(dirAbs);
+  const slug = base.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  // Hash off (path + kind) so two same-named dirs holding different
+  // kinds stay distinct.
+  const composite = `${dirAbs}|${kind}`;
+  let h = 0;
+  for (let i = 0; i < composite.length; i++) {
+    h = ((h << 5) - h + composite.charCodeAt(i)) | 0;
+  }
+  const hashSuffix = (h >>> 0).toString(16).padStart(8, '0');
+  return `ephemeral:${slug || 'dir'}-${kind}-${hashSuffix}`;
 }
