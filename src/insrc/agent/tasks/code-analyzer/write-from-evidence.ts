@@ -71,18 +71,6 @@ export interface WriteFromEvidenceOutput {
 // ---------------------------------------------------------------------------
 
 export async function writeSectionFromEvidence(input: WriteFromEvidenceInput): Promise<WriteFromEvidenceOutput> {
-	// Phase 12 of plans/code-analyzer-hallucination-mitigation.md:
-	// optional structured-writer path gated behind
-	// INSRC_ANALYZER_WRITER_MODE=structured. The structured writer
-	// emits `{paragraphs: [{narrative, evidenceRefs}]}` and a
-	// renderer splices citations from real EvidenceEntry citations
-	// -- by construction, no paragraph can exist without an evidence
-	// anchor. Default path remains the legacy freeform writer.
-	const { isStructuredWriterEnabled, writeSectionStructured } = await import('./write-from-evidence-structured.js');
-	if (isStructuredWriterEnabled()) {
-		return writeSectionStructured(input);
-	}
-
 	const t0 = Date.now();
 	const maxTokens = input.maxTokens ?? Math.max(input.action.maxBudgetTokens * 2, 2400);
 
