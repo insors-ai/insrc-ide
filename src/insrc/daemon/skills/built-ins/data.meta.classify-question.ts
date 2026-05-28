@@ -402,6 +402,11 @@ function buildUserMessage(
     if (c.path  !== undefined && c.path.length > 0)  parts.push(`path=${c.path}`);
     return parts.join(' ');
   });
+  // Catalog sits at the trailing end of the prompt so it stays
+  // fresh in the model's attention when it emits the tool_use
+  // payload. Smaller / local models otherwise hallucinate skill ids
+  // when the catalog is buried in the middle and the action
+  // instruction is the most-recent token.
   return [
     `Question:`,
     input.question,
@@ -409,13 +414,15 @@ function buildUserMessage(
     `Available connections (${input.connections.length}):`,
     connLines.length > 0 ? connLines.join('\n') : '(none)',
     '',
-    `Skill catalog (${catalog.length} skills, pre-filtered for connection feasibility):`,
-    catalog.length > 0 ? catalogLines.join('\n') : '(empty)',
-    '',
     'Use `skill_describe` to pull a full input/output schema for any',
     'skill before picking it if the one-line summary is ambiguous.',
     '',
-    `Now call \`${SUBMIT_TOOL_NAME}\` with the populated classification payload.`,
+    'EVERY skillId you emit in `candidates` or `fallbacks` MUST come',
+    'verbatim from the catalog below. Hallucinated ids are rejected',
+    'and the call retried, so just don\'t.',
+    '',
+    `Skill catalog (${catalog.length} skills, pre-filtered for connection feasibility):`,
+    catalog.length > 0 ? catalogLines.join('\n') : '(empty)',
   ].join('\n');
 }
 

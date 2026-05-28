@@ -304,6 +304,13 @@ function buildUserMessage(
       '```',
     ].join('\n');
   });
+  // Candidate manifests + per-skill JSON inputSchemas sit at the
+  // trailing end of the prompt so they stay fresh in the model's
+  // attention when it emits the tool_use payload. Required-keys
+  // declared inside each inputSchema (e.g. `connectionId`) are the
+  // most-violated part of the contract on smaller / local models
+  // when the schemas are buried mid-prompt and the action
+  // instruction is the most-recent token.
   return [
     `Question:`,
     input.question,
@@ -311,10 +318,12 @@ function buildUserMessage(
     `Available connections (${input.connections.length}):`,
     connLines.length > 0 ? connLines.join('\n') : '(none)',
     '',
+    'For each candidate below, emit one entry in `scoped` whose `args`',
+    'satisfies the candidate\'s inputSchema. Every required property',
+    '(especially `connectionId`) MUST be present.',
+    '',
     `Candidates (${input.candidates.length}):`,
     candidateBlocks.length > 0 ? candidateBlocks.join('\n\n') : '(empty)',
-    '',
-    `Now call \`${SUBMIT_TOOL_NAME}\` with the populated scoped + notes payload.`,
   ].join('\n');
 }
 
