@@ -45,7 +45,14 @@ import { getLogger } from '../../../shared/logger.js';
 import { registerSkill } from '../registry.js';
 import { listSkills } from '../registry.js';
 import type { Skill, SkillContext, SkillResult } from '../types.js';
-import type { LLMMessage, LLMProvider } from '../../../shared/types.js';
+import type { LLMMessage, LLMProvider, ToolDefinition } from '../../../shared/types.js';
+
+/**
+ * Tool name the model emits to submit its classification. Drives the
+ * provider via tool-calling (not JSON-as-text) so the payload is
+ * structurally well-formed by construction.
+ */
+const SUBMIT_TOOL_NAME = 'submit_classification';
 
 const log = getLogger('skill.meta.classify-question');
 
@@ -354,11 +361,13 @@ function buildSystemPrompt(): string {
   return [
     'You are a data-analyzer skill router. Map the user question to one or',
     'more candidate skill ids from the closed catalog the user message',
-    'provides. Output STRICT JSON matching this schema:',
+    'provides.',
     '',
-    '```json',
-    JSON.stringify(OUTPUT_SCHEMA, null, 2),
-    '```',
+    `Emit your output by calling the \`${SUBMIT_TOOL_NAME}\` tool exactly once`,
+    'with the structured payload as its `input`. Do NOT emit prose, do NOT',
+    'restate the payload as JSON in the message body -- the tool call IS the',
+    'output. The tool\'s inputSchema (visible to you on every call) is the',
+    'authoritative shape contract.',
     '',
     'Hard rules:',
     '1. EVERY skillId in `candidates` and `fallbacks` MUST appear in the',
@@ -406,8 +415,7 @@ function buildUserMessage(
     'Use `skill_describe` to pull a full input/output schema for any',
     'skill before picking it if the one-line summary is ambiguous.',
     '',
-    'Return ONLY the JSON object matching the schema; no preamble, no',
-    'fenced block, no commentary.',
+    `Now call \`${SUBMIT_TOOL_NAME}\` with the populated classification payload.`,
   ].join('\n');
 }
 
@@ -425,21 +433,21 @@ type ParseResult =
   | { readonly ok: false; readonly failure: ParseFailure };
 
 function parseAndValidate(
-  raw: string,
+  parsed: unknown,
   catalog: readonly CatalogEntry[],
 ): ParseResult {
-  const text = stripFences(raw).trim();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
+  // Input is the tool-call's `input` payload -- already a parsed
+  // object via the provider's wire protocol. No JSON.parse / fence
+  // stripping needed; the truncation-mid-string class of failure
+  // can't happen on this protocol.
+  if (parsed === undefined || parsed === null) {
     return {
       ok: false,
-      failure: { kind: 'parse', message: `JSON parse failed: ${(err as Error).message}` },
+      failure: { kind: 'parse', message: 'no tool_use payload returned by provider' },
     };
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, failure: { kind: 'validation', message: 'output must be a JSON object' } };
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, failure: { kind: 'validation', message: 'tool_use payload must be a JSON object' } };
   }
   const obj = parsed as Record<string, unknown>;
 
@@ -512,27 +520,29 @@ function parseAndValidate(
   };
 }
 
-/**
- * Strip a fenced ```json code block if the model wrapped its response.
- * Matches the same shape as the analyzer's `stripFences` helper but
- * scoped here to avoid taking a cross-module dependency on the
- * legacy data-analyzer code that's about to be replaced.
- */
-function stripFences(text: string): string {
-  const fenceMatch = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(text);
-  return fenceMatch !== null ? fenceMatch[1]! : text;
-}
-
 // ---------------------------------------------------------------------------
 // LLM call
 // ---------------------------------------------------------------------------
+
+/**
+ * Submission tool. The model emits ONE tool_use block whose `input`
+ * carries the structured classify-question output. The inputSchema
+ * mirrors `OUTPUT_SCHEMA` so the provider's tool-call validation
+ * enforces shape -- truncation mid-payload simply can't happen
+ * (provider serializes after token selection, not before).
+ */
+const SUBMIT_TOOL: ToolDefinition = {
+  name:        SUBMIT_TOOL_NAME,
+  description: 'Submit the classify-question output: questionType + ordered candidate skill ids + fallbacks + uncertainty notes.',
+  inputSchema: OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+};
 
 async function callLLM(
   provider: LLMProvider,
   systemPrompt: string,
   userMessage: string,
   signal?: AbortSignal | undefined,
-): Promise<string> {
+): Promise<unknown | undefined> {
   const messages: LLMMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user',   content: userMessage },
@@ -540,11 +550,18 @@ async function callLLM(
   void signal;  // provider.complete signature doesn't take signal directly;
                 // cancellation lives at the outer SkillDeps.signal level.
   const response = await provider.complete(messages, {
-    maxTokens: 1024,
+    // 3000 tokens of structured-output budget. Higher than the 1024
+    // the old responseFormat path used because catalog summaries +
+    // few-shot examples + the candidate list grow with the registry
+    // size. Tool-call protocol prevents the *parse* failure mode
+    // entirely; this cap just stops the model running indefinitely.
+    maxTokens:   3000,
     temperature: 0.2,
-    responseFormat: { schema: OUTPUT_SCHEMA as Record<string, unknown> },
+    tools:       [SUBMIT_TOOL],
+    toolChoice:  { name: SUBMIT_TOOL_NAME },
   });
-  return response.text;
+  const toolCall = response.toolCalls?.find(tc => tc.name === SUBMIT_TOOL_NAME);
+  return toolCall?.input;
 }
 
 // ---------------------------------------------------------------------------
@@ -598,9 +615,9 @@ const skill: Skill<ClassifyInput, ClassifyOutput> = {
     const sys      = buildSystemPrompt();
     const user     = buildUserMessage(input, catalog);
 
-    let raw: string;
+    let rawPayload: unknown;
     try {
-      raw = await callLLM(provider, sys, user, deps.signal);
+      rawPayload = await callLLM(provider, sys, user, deps.signal);
     } catch (err) {
       log.warn({ err: (err as Error).message }, 'classify-question LLM call failed');
       return {
@@ -611,17 +628,17 @@ const skill: Skill<ClassifyInput, ClassifyOutput> = {
       };
     }
 
-    let parsed = parseAndValidate(raw, catalog);
+    let parsed = parseAndValidate(rawPayload, catalog);
     if (parsed.ok !== true) {
       // One retry with the rejection text appended to the user
       // message. Per the design: structured-output validation
       // failures get exactly one retry; further failures degrade to
       // confidence: low with the unfilled output surfaced in notes.
       log.info({ kind: parsed.failure.kind, message: parsed.failure.message }, 'classify-question first-pass rejected; retrying');
-      const retryUser = `${user}\n\nThe previous attempt was rejected: ${parsed.failure.message}\nReturn ONLY a JSON object matching the schema; no other text.`;
-      let retryRaw: string;
+      const retryUser = `${user}\n\nThe previous attempt was rejected: ${parsed.failure.message}\nRe-emit a corrected \`${SUBMIT_TOOL_NAME}\` tool call.`;
+      let retryPayload: unknown;
       try {
-        retryRaw = await callLLM(provider, sys, retryUser, deps.signal);
+        retryPayload = await callLLM(provider, sys, retryUser, deps.signal);
       } catch (err) {
         return {
           value:      emptyOutput(),
@@ -630,13 +647,13 @@ const skill: Skill<ClassifyInput, ClassifyOutput> = {
           toolCalls:  [],
         };
       }
-      parsed = parseAndValidate(retryRaw, catalog);
+      parsed = parseAndValidate(retryPayload, catalog);
       if (parsed.ok !== true) {
         log.warn({ kind: parsed.failure.kind, message: parsed.failure.message }, 'classify-question retry rejected; surfacing low confidence');
         return {
           value:      emptyOutput(),
           confidence: 'low',
-          notes:      [`LLM output failed validation twice: ${parsed.failure.message}`],
+          notes:      [`tool_use payload failed validation twice: ${parsed.failure.message}`],
           toolCalls:  [],
         };
       }

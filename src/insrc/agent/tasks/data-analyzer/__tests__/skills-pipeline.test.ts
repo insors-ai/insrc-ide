@@ -40,6 +40,7 @@ interface QueuedResponse {
 }
 
 function buildFakeProvider(responses: readonly QueuedResponse[]): LLMProvider {
+	let callIdx = 0;
 	return {
 		async complete(messages): Promise<LLMResponse> {
 			const flat = messages.map(m => ({
@@ -48,6 +49,36 @@ function buildFakeProvider(responses: readonly QueuedResponse[]): LLMProvider {
 			}));
 			for (const r of responses) {
 				if (r.skillFilter(flat)) {
+					callIdx++;
+					// classify-question + select-scope both moved to
+					// tool-call protocol -- providers emit tool_use blocks
+					// with the structured payload, not JSON-as-text.
+					// Detect which meta-skill is calling via the system
+					// prompt and wrap the canned text into the matching
+					// tool_use block.
+					const sys = flat.find(m => m.role === 'system')?.content ?? '';
+					const toolName = sys.includes('scope-selector')
+						? 'submit_scope'
+						: sys.includes('skill router')
+							? 'submit_classification'
+							: undefined;
+					if (toolName !== undefined) {
+						const unwrapped = r.text
+							.replace(/^\s*```(?:json)?\s*/, '')
+							.replace(/\s*```\s*$/, '');
+						try {
+							const parsed = JSON.parse(unwrapped) as Record<string, unknown>;
+							return {
+								text:       '',
+								stopReason: 'tool_use',
+								toolCalls:  [{ id: `tc-${callIdx}`, name: toolName, input: parsed }],
+							};
+						} catch {
+							// Fall through to text response -- lets tests
+							// exercise the parse-fail retry path if they
+							// pass non-JSON intentionally.
+						}
+					}
 					return { text: r.text, stopReason: 'end_turn' };
 				}
 			}

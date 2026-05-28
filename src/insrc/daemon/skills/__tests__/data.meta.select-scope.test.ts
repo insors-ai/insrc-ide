@@ -45,13 +45,30 @@ function setup(): void {
 	assert.ok(getSkill('data.source.rdbms.describe-table'));
 }
 
+/**
+ * Stub provider that emits canned responses. Same shape as the
+ * classify-question test fake: parses each input string and emits
+ * a `tool_use` block with the parsed object as `input`. Strings
+ * that don't parse emit an end_turn with no tool_use, simulating
+ * a provider that didn't honor `toolChoice: { name: '...' }`.
+ */
 function fakeProviderReturning(...texts: readonly string[]): FakeProvider {
 	let i = 0;
 	return {
 		async complete(): Promise<LLMResponse> {
 			const text = texts[Math.min(i, texts.length - 1)] ?? '';
 			i++;
-			return { text, stopReason: 'end_turn' };
+			const unwrapped = text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '');
+			try {
+				const parsed = JSON.parse(unwrapped);
+				return {
+					text:       '',
+					stopReason: 'tool_use',
+					toolCalls:  [{ id: `tc-${i}`, name: 'submit_scope', input: parsed }],
+				};
+			} catch {
+				return { text, stopReason: 'end_turn' };
+			}
 		},
 	};
 }

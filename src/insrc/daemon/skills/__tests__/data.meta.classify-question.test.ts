@@ -41,13 +41,38 @@ function setup(): void {
 	assert.ok(getSkill(CLASSIFY), `${CLASSIFY} must be in the registry`);
 }
 
+/**
+ * Stub provider that emits canned responses. Each input string is
+ * interpreted as the LLM's intended structured payload:
+ *   - Parses cleanly -> emits a `tool_use` block with
+ *     `input: <parsed object>`. Mirrors the runtime tool-call
+ *     protocol the skill expects after the migration.
+ *   - Doesn't parse (test sends 'not-json-at-all' / 'garbage') ->
+ *     emits an end_turn with no tool_use, simulating a provider
+ *     that didn't honor `toolChoice: { name: '...' }`. The skill
+ *     surfaces this as a "no tool_use payload" rejection.
+ * Strings that contain a fenced ```json``` block are unwrapped
+ * before parsing to keep the legacy fence-stripping test
+ * meaningful (it now exercises payload tolerance in the fake,
+ * not in the skill).
+ */
 function fakeProviderReturning(...texts: readonly string[]): FakeProvider {
 	let i = 0;
 	return {
 		async complete(): Promise<LLMResponse> {
 			const text = texts[Math.min(i, texts.length - 1)] ?? '';
 			i++;
-			return { text, stopReason: 'end_turn' };
+			const unwrapped = text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '');
+			try {
+				const parsed = JSON.parse(unwrapped);
+				return {
+					text:       '',
+					stopReason: 'tool_use',
+					toolCalls:  [{ id: `tc-${i}`, name: 'submit_classification', input: parsed }],
+				};
+			} catch {
+				return { text, stopReason: 'end_turn' };
+			}
 		},
 	};
 }
@@ -273,22 +298,27 @@ test('classify-question: KV roster excludes rdbms-only skills from the catalog',
 					if (typeof userMsg?.content === 'string') {
 						capturedUser = userMsg.content;
 					}
-					// Return a valid kv pick so the assertion below
-					// can run against capturedUser.
+					// Return a valid kv pick as a tool_use block (matches
+					// the migrated tool-call protocol).
 					return {
-						text: JSON.stringify({
-							questionType: 'sample-data',
-							candidates: [
-								{
-									skillId: 'data.source.kv.scan-keys',
-									rationale: 'KV key scan.',
-									mustHaveScope: 'connection',
-								},
-							],
-							fallbacks: [],
-							uncertaintyNotes: [],
-						}),
-						stopReason: 'end_turn',
+						text:       '',
+						stopReason: 'tool_use',
+						toolCalls: [{
+							id:   'tc-1',
+							name: 'submit_classification',
+							input: {
+								questionType: 'sample-data',
+								candidates: [
+									{
+										skillId: 'data.source.kv.scan-keys',
+										rationale: 'KV key scan.',
+										mustHaveScope: 'connection',
+									},
+								],
+								fallbacks: [],
+								uncertaintyNotes: [],
+							},
+						}],
 					};
 				},
 			},
