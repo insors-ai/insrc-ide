@@ -390,7 +390,18 @@ async function runToolForSkill(
       ...(exec.requestId !== undefined ? { requestId: exec.requestId } : {}),
       ...(runnerDeps.signal !== undefined ? { signal: runnerDeps.signal } : {}),
     });
-    result = { content: r.content, isError: r.isError === true };
+    // `data` carries the tool's structured payload (the typed object
+    // skills validate with their `isXxx(data)` guards). Forwarding it
+    // is the whole point of SkillToolResult.data; dropping it makes
+    // every skill that reads `tool.data` fall through to its
+    // empty-result path with confidence:low.
+    result = {
+      content: r.content,
+      isError: r.isError === true,
+      ...((r as { data?: unknown }).data !== undefined
+        ? { data: (r as { data?: unknown }).data }
+        : {}),
+    };
   }
   const durationMs = Date.now() - t0;
   const summary: SkillToolCallSummary = {

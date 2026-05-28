@@ -86,6 +86,32 @@ import type { FileConverter } from './converters/types.js';
 
 const log = getLogger('db-duckdb-file');
 
+/**
+ * DuckDB's Node binding returns BIGINT / HUGEINT columns as JS `bigint`.
+ * BigInt is opaque to `JSON.stringify` (which throws) and not safely
+ * representable when the value crosses IPC. Normalize at the driver
+ * boundary: safe-integer bigints become `number`; everything else
+ * becomes a string. Other typed values pass through. Recurses into
+ * nested objects + arrays so list/struct columns are covered.
+ */
+function normalizeBigInts<T>(value: T): T {
+	if (typeof value === 'bigint') {
+		const b = value as bigint;
+		return (b >= Number.MIN_SAFE_INTEGER && b <= Number.MAX_SAFE_INTEGER
+			? Number(b)
+			: b.toString()) as unknown as T;
+	}
+	if (value === null || typeof value !== 'object') return value;
+	if (Array.isArray(value)) {
+		return value.map(v => normalizeBigInts(v)) as unknown as T;
+	}
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+		out[k] = normalizeBigInts(v);
+	}
+	return out as T;
+}
+
 // ---------------------------------------------------------------------------
 // File kinds + reader-expression mapping
 // ---------------------------------------------------------------------------
@@ -376,7 +402,7 @@ class DuckDBFileDriver implements FileDriver {
 		const params = [readPath, ...where.values];
 		const rows = await withConnection(async (conn) => {
 			const reader = await conn.runAndReadAll(sql, params as never[]);
-			return reader.getRowObjects();
+			return normalizeBigInts(reader.getRowObjects());
 		});
 
 		return {
@@ -400,7 +426,7 @@ class DuckDBFileDriver implements FileDriver {
 		const sql = `SELECT * FROM ${expr} LIMIT ${limit}`;
 		const rows = await withConnection(async (conn) => {
 			const reader = await conn.runAndReadAll(sql, [readPath]);
-			return reader.getRowObjects() as readonly unknown[];
+			return normalizeBigInts(reader.getRowObjects()) as readonly unknown[];
 		});
 		return inferShape(rows);
 	}
@@ -425,7 +451,8 @@ class DuckDBFileDriver implements FileDriver {
 		const params = [readPath, ...aggExprs.values, ...where.values];
 		const row = await withConnection(async (conn) => {
 			const reader = await conn.runAndReadAll(sql, params as never[]);
-			return reader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
+			const first = reader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
+			return first === undefined ? undefined : normalizeBigInts(first);
 		});
 		return { target: target ?? this.path, values: readAggregateRow(row, aggExprs.keys) };
 	}
@@ -449,9 +476,11 @@ class DuckDBFileDriver implements FileDriver {
 		const [countRow, valueRows] = await withConnection(async (conn) => {
 			const cReader = await conn.runAndReadAll(compiled.distinctCountSql, [readPath]);
 			const vReader = await conn.runAndReadAll(compiled.topValuesSql,    [readPath]);
+			const cRaw = cReader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined;
+			const vRaw = vReader.getRowObjects() as readonly Readonly<Record<string, unknown>>[];
 			return [
-				cReader.getRowObjects()[0] as Readonly<Record<string, unknown>> | undefined,
-				vReader.getRowObjects() as readonly Readonly<Record<string, unknown>>[],
+				cRaw === undefined ? undefined : normalizeBigInts(cRaw),
+				normalizeBigInts(vRaw),
 			] as const;
 		});
 		return {
@@ -500,7 +529,9 @@ class DuckDBFileDriver implements FileDriver {
 				const params = [readPath, ...values];
 				return await withConnection(async (conn) => {
 					const reader = await conn.runAndReadAll(sql, params as never[]);
-					return reader.getRowObjects() as readonly Readonly<Record<string, unknown>>[];
+					return normalizeBigInts(
+						reader.getRowObjects() as readonly Readonly<Record<string, unknown>>[],
+					);
 				});
 			},
 		};

@@ -2086,6 +2086,7 @@ function fmtCell(v: unknown): string {
 	if (v === null || v === undefined) { return ''; }
 	if (typeof v === 'string') { return v.length > 200 ? v.slice(0, 200) + '…' : v; }
 	if (typeof v === 'number' || typeof v === 'boolean') { return String(v); }
+	if (typeof v === 'bigint') { return v.toString(); }
 	if (v instanceof Date) { return v.toISOString(); }
 	const s = JSON.stringify(v);
 	return s.length > 200 ? s.slice(0, 200) + '…' : s;
