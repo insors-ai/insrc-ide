@@ -36,7 +36,16 @@ export async function loadActiveConnections(session: Session): Promise<readonly 
 			log.warn({ content: r.content.slice(0, 200) }, 'loadActiveConnections: db_list_connections failed');
 			return [];
 		}
-		const rawRows = (r as { metadata?: { rows?: unknown } }).metadata?.rows;
+		// `executeTool` translates the tool's unified result into the
+		// legacy ToolResult: the typed payload lives on `r.data`, NOT
+		// on `r.metadata.rows`. (The legacy `_loadConnections` had
+		// `r.metadata.rows` -- always undefined under the translation
+		// -- so `this._connections` was silently always [] since
+		// bda71fbf481. The legacy runDataAnalyzer's per-task internal
+		// `db_list_connections` call masked the bug; the discovery
+		// pipeline's reliance on the orchestrator-cached list exposed
+		// it.)
+		const rawRows = (r as { data?: unknown }).data;
 		const rows = Array.isArray(rawRows) ? rawRows : [];
 		return rows.map((row): ConnectionSummary => {
 			const r2 = row as Record<string, unknown>;
