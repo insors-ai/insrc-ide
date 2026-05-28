@@ -41,10 +41,13 @@ import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('duckdb-pool');
 
-// 512 MB default per the plan's memory-budget table. Configurable via
-// daemon settings (`duckdb.memoryMb`); env-var override (`INSRC_DUCKDB_MEMORY_MB`)
-// is provided as an escape hatch for ops scenarios without a config push.
-const DEFAULT_MEMORY_MB = 512;
+// 2 GB default. Aggregate-class skills over JSON / directory globs hold
+// the column buffers in memory while scanning, and 512 MB was too tight
+// for real workloads (the data-analyzer's quality skills OOM'd on a
+// ~30-file GRN directory). Configurable via daemon settings
+// (`duckdb.memoryMb`); env-var override (`INSRC_DUCKDB_MEMORY_MB`) is
+// provided as an escape hatch for ops scenarios without a config push.
+const DEFAULT_MEMORY_MB = 2048;
 
 let _instance: DuckDBInstance | null = null;
 let _initPromise: Promise<DuckDBInstance> | null = null;
