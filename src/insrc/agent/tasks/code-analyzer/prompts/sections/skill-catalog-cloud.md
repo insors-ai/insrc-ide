@@ -14,13 +14,13 @@ job: pick the right skills + provide semantic context for each call.
 
 - **`code.source.module.describe`** -- summarise one module
   (filesystem directory). Returns files + entity ids + sub-modules.
-  Context: the module's path or descriptive name ("the
-  hadoop-hdfs-project module", "src/insrc/agent").
+  Context: the module's path or descriptive name (e.g. "the
+  authentication module", or a workspace-relative path).
 
 - **`code.source.file.describe`** -- enumerate entities + imports in
   one file. Returns language + entity ids + imports list.
-  Context: the file path or descriptive locator ("the FSDirectory.java
-  file", "src/main/java/.../FSDirectory.java").
+  Context: the file path or descriptive locator (e.g. "the file
+  containing the auth middleware" or a workspace-relative path).
 
 - **`code.entity.locate-by-name`** -- find entities matching an exact
   name across kinds (class / function / method / ...). Returns

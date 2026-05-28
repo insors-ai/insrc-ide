@@ -155,7 +155,15 @@ test('buildExpandMessages: system prompt mandates clickable-citation Markdown li
 	const sys = msgs[0]!.content as string;
 	assert.match(sys, /CLICKABLE CITATIONS/);
 	assert.match(sys, /Markdown link the IDE recognises/);
-	assert.match(sys, /path:.*#L\d+/, 'system prompt must show a path: URI with a line-fragment example');
+	// URI shape must be specified with a line-fragment form. After the
+	// HDFS-example purge (writer kept parroting `hadoop-hdfs/...` paths
+	// from the prompt) the examples use `<startLine>` placeholders
+	// instead of literal digits, so match the schematic form.
+	assert.match(
+		sys,
+		/path:.*#L<startLine>/,
+		'system prompt must show a path: URI with a line-fragment placeholder',
+	);
 	assert.match(sys, /NEVER mention an entity as plain text/,
 		'system prompt must forbid plain-text entity mentions when a file is available');
 });

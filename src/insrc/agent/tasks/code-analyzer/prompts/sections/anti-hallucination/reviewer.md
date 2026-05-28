@@ -18,7 +18,7 @@ check the EVIDENCE block:
        - "The module contains 135 files" but no evidence entry confirms 135.
        - "`DistributedFileSystem` extends `FileSystem`" but no evidence
          surfaces either class.
-       - Citations linking to DIRECTORIES (e.g. `path:hadoop-hdfs/.../fs`)
+       - Citations linking to DIRECTORIES (e.g. `path:<some-module>/.../<subdir>`)
          when the prose claims a specific class lives there but no evidence
          entry opened that class -- the citation is hand-rolled, not real.
   3. If the draft contains LANGUAGE ACKNOWLEDGING the gap ("the evidence

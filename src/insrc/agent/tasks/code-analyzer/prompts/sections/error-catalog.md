@@ -28,15 +28,16 @@ the left and the corrected grounded shape on the right.
 ### Citation-level failures
 
 ❌ HAND-ROLLED CITATION (do NOT write this)
-   "`HDFSNamenode` orchestrates the journal ([hadoop-hdfs/.../namenode](path:hadoop-hdfs/src/main/java))"
+   "`<SomeClass>` orchestrates the journal ([<module>/.../<subdir>](path:<module>/src/main/java))"
    Why this is wrong: the path points at a DIRECTORY, with no `#L`
    line-range suffix. The writer composed the URL from prior knowledge
    -- the ledger never surfaced this class.
 
 ✅ EVIDENCE-BACKED CITATION (write this shape instead)
-   "Lookup happens in `resolve_module` ([`paths.py:88-104`](path:insors/extraction/paths.py#L88-L104))."
+   "Lookup happens in `<funcName>` ([`<file>:<startLine>-<endLine>`](path:<rel-path>#L<startLine>-L<endLine>))."
    Why this is right: the link points to a file + a specific line range
-   that appears verbatim in an evidence entry.
+   that appears verbatim in an evidence entry. Substitute concrete
+   `<...>` tokens with names + paths surfaced by your evidence.
 
 ❌ FAKE LINE RANGE (do NOT write this)
    "The entire `db` module ([`db/__init__.py:1-500`](path:insors/extraction/db/__init__.py#L1-L500)) ..."
