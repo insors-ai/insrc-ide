@@ -16,7 +16,7 @@
 | **P1** | First skill migration (`code.class.extract-fields`, narrow wiring) | The substrate is consumed end-to-end by one real skill; Hadoop integration tests validate against real data. | not-started |
 | **P2** | Lance index + `byEmbedding` | Semantic recall (fuzzy name match, observation similarity). | done |
 | **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | deferred (future) |
-| **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | deferred (future) |
+| **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | done |
 | **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | deferred (future) |
 | **P6+** | Remaining skill migrations + L2 framework | Per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) + [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md). | deferred (future) |
 
@@ -167,6 +167,45 @@ Captured in the "Deferred (declared but inert in P1)" table above. The substrate
 
 ---
 
+## P4 — Context providers (D5a)
+
+**Goal:** route slot requests at `provider:<id>` through a typed read-only provider registry. Add the three day-one providers: `user-config`, `active-session`, `code-kg`. No skill is required to consume them yet -- the substrate gains the capability; per-skill wiring lands when a specific consumer needs it.
+
+**Prerequisites:** P0, P1, P2 done.
+
+### Components
+
+| # | Component | File path | Depends on |
+|---|---|---|---|
+| P4.1 | `ContextProvider` type + provider registry | [`provider-registry.ts`](../../src/insrc/daemon/substrate/provider-registry.ts) + types.ts | (none) |
+| P4.2 | Context assembler routes `provider:*` slots through the registry | [`context-assembler.ts`](../../src/insrc/daemon/substrate/context-assembler.ts) (modify) | P4.1 |
+| P4.3 | `provider:user-config` reads `~/.insrc/config.json` | [`providers/user-config.ts`](../../src/insrc/daemon/substrate/providers/user-config.ts) | P4.1 |
+| P4.4 | `provider:code-kg` exposes LMDB entity lookups | [`providers/code-kg.ts`](../../src/insrc/daemon/substrate/providers/code-kg.ts) | P4.1 |
+| P4.5 | `provider:active-session` exposes a whitelisted set of Session fields | [`providers/active-session.ts`](../../src/insrc/daemon/substrate/providers/active-session.ts) | P4.1 |
+| P4.6 | Runtime wires the registry; `prepareForSkill` threads `session` into provider deps | [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts) (modify) | P4.2 |
+| P4.7 | Unit tests | [`provider-registry.test.ts`](../../src/insrc/daemon/substrate/__tests__/provider-registry.test.ts) | P4.6 |
+
+### Done criteria for P4
+
+- [x] All components compile clean (`scripts/build.sh daemon`).
+- [x] P4.7 unit tests pass (13/13): registry round-trip, replacement-on-reregister, non-provider owner falls through, unknown provider returns empty, source-stamping contract, assembler routing, no-registry fallback, mixed memory+provider request, active-session whitelist enforcement + prefix scan + missing-session fallback, user-config nested byKey + missing path.
+- [x] No regressions across substrate + extract-fields suites.
+- [x] Skills without provider slots are unaffected (`fromOwner: 'provider:'` is opt-in; legacy memory-only paths are unchanged).
+- [x] Status table in this doc updated; decision row D5a marked landed.
+
+### Out of scope for P4 (deferred to later phases)
+
+| Component | Deferred to | Why not in P4 |
+|---|---|---|
+| `code-kg` prefix scan / filter / embedding paths | P6+ (per-skill migration) | LMDB's name index is exact-match; substring scan needs its own API in `db/entities`. Skills wanting fuzzy lookup go through `code_class_locate` until then. |
+| `provider:chat-memory` | (Not on day one per D5a) | Value unclear, blast radius high. |
+| `provider:mcp:<id>` | MCP-integration work | Defer to that scope. |
+| Per-provider timeout enforcement in the registry | When telemetry surfaces a slow provider | Providers are trusted; a misbehaving one blocks assembly. |
+| Cross-call caching keyed on provider+slot | When repeated identical assembly shows up | Day-one providers are cheap; caching adds complexity without a measurable win. |
+| Skill consumption of provider slots (e.g. `code.class.extract-fields` reading `provider:active-session.closureRepos` instead of `deps.session.closureRepos`) | Per-skill migration follow-ups | The provider is available; consumers opt in when they want to. |
+
+---
+
 ## Component status tracker
 
 Updated as each component lands. Status: `not-started` / `in-progress` / `done` / `deferred`.
@@ -189,6 +228,21 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P2.2 | Indexing engine (per-namespace policy) | done | [`indexer.ts`](../../src/insrc/daemon/substrate/indexer.ts); reads `IndexingPolicy` at write time (`always` / `never` / `derived` wired; `on-flag` deferred); fire-and-forget failure swallow; `Embedder` interface added to types. |
 | P2.3 | Memory store `searchByEmbedding` | done | [`memory-store-indexed.ts`](../../src/insrc/daemon/substrate/memory-store-indexed.ts); wraps base store so put/delete mirror into Lance and `searchByEmbedding` routes through `indexer.search()`; runtime opts in via `{ embedder, workspaceId }`. |
 | P2.4 | P2 unit tests | done | 8 tests pass: `always`/`never`/`derived` policies, delete cascade, distance ordering, `(owner, namespace)` scope isolation, runtime-without-embedder falls back to empty, embedder-failure swallow. |
+| P4.1 | `ContextProvider` type + provider registry | done | [`provider-registry.ts`](../../src/insrc/daemon/substrate/provider-registry.ts); types add `ContextProvider`, `ProviderDeps`, `PROVIDER_OWNER_PREFIX`, `isProviderOwner`, `providerIdOf`, and the `provider` EntrySource variant. |
+| P4.2 | Assembler routes `provider:*` slots | done | [`context-assembler.ts`](../../src/insrc/daemon/substrate/context-assembler.ts); per-call `AssembleDeps` plumbs `session` + `signal` into providers; missing-registry callers see empty results (back-compat). |
+| P4.3 | `provider:user-config` | done | [`providers/user-config.ts`](../../src/insrc/daemon/substrate/providers/user-config.ts); dot-path byKey + prefix walk + filter walk against `loadConfig()`; mtime stamping; ANN returns empty. |
+| P4.4 | `provider:code-kg` | done | [`providers/code-kg.ts`](../../src/insrc/daemon/substrate/providers/code-kg.ts); byKey routes to `findEntitiesByName` scoped by `session.closureRepos`. Prefix / filter / ANN return empty (deferred to per-skill needs). |
+| P4.5 | `provider:active-session` | done | [`providers/active-session.ts`](../../src/insrc/daemon/substrate/providers/active-session.ts); whitelisted field surface (id / repoPath / closureRepos / turnIndex / startedAt / permissionMode / intent); non-whitelisted fields are filtered out. |
+| P4.6 | Runtime wires registry | done | [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts); `CreateSubstrateRuntimeOpts.providers?` seeds the registry; `runtime.providers` is publicly exposed; `prepareForSkill` threads session into the assembler's per-call deps. |
+| P4.7 | P4 unit tests | done | 13 tests pass: registry round-trip, replacement, non-provider owner -> [], unknown id -> [], source stamping, assembler routing, no-registry empty fallback, memory+provider coexistence in one request, active-session whitelist + prefix + missing-session, user-config nested byKey + missing path. |
+
+### P4 done criteria — verified
+
+- [x] All P4 components compile clean.
+- [x] P4 unit tests pass (13/13).
+- [x] No regressions across the substrate + skills suites.
+- [x] Skills without provider slots are unaffected (provider routing is `fromOwner`-prefix opt-in).
+- [x] Status table updated; decision row D5a marked landed.
 
 ### P2 done criteria — verified
 
@@ -225,7 +279,7 @@ MVP cuts captured against their landing phase, not as flat "deferred to next ite
 | # | Substrate doc says | P0 / P1 behavior | Lands in |
 |---|---|---|---|
 | 1 | Lance index for `byEmbedding` | P2: `byEmbedding` routes through Lance when an `Embedder` is wired; falls back to empty when not (legacy P0/P1 behavior preserved) | P2 — done |
-| 2 | Context providers (D5a) | Slots that would target providers fall back to inline computation | P4 |
+| 2 | Context providers (D5a) | P4: `provider:user-config` / `provider:code-kg` / `provider:active-session` are first-class, registered, slot-routable; `source.kind: 'provider'` stamping enforced by the registry. Per-skill consumption opt-in. | P4 — done |
 | 3 | Async indexer + queue (D15) | `bootstrap` runs synchronously at registration | P3 |
 | 4 | Context builder DAG (D15) | Single-builder skill migrations only; no topological ordering | P3 |
 | 5 | User-assertion classifier (D6) | User assertions enter via direct test writes to `class-aliases` namespace | P5 |

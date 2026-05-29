@@ -19,6 +19,7 @@
 
 import { getLogger } from '../../shared/logger.js';
 
+import type { ProviderRegistry } from './provider-registry.js';
 import type {
 	AssembleRequest,
 	AssembledContext,
@@ -29,7 +30,9 @@ import type {
 	EntryKind,
 	MemoryEntry,
 	MemoryStore,
+	ProviderDeps,
 } from './types.js';
+import { isProviderOwner } from './types.js';
 
 const log = getLogger('substrate:context-assembler');
 
@@ -40,6 +43,13 @@ const log = getLogger('substrate:context-assembler');
 export interface CreateContextAssemblerOpts {
 	readonly memory: MemoryStore;
 	/**
+	 * Optional provider registry. When present, slots whose
+	 * `fromOwner` starts with `provider:` route through the registry
+	 * instead of memory. When absent, provider slots resolve empty
+	 * (back-compat with P1-P2 callers that don't supply providers).
+	 */
+	readonly providers?: ProviderRegistry;
+	/**
 	 * Token estimator. Defaults to chars/3 -- matches the existing
 	 * codebase convention (see CLAUDE.md "Context management").
 	 */
@@ -47,14 +57,24 @@ export interface CreateContextAssemblerOpts {
 }
 
 export interface ContextAssembler {
-	assemble(req: AssembleRequest): Promise<AssembledContext>;
+	assemble(req: AssembleRequest, deps?: AssembleDeps): Promise<AssembledContext>;
+}
+
+/**
+ * Per-call dependencies the assembler may pass to providers. Optional --
+ * the assembler builds a no-op AbortSignal when omitted so tests don't
+ * have to fabricate one.
+ */
+export interface AssembleDeps {
+	readonly signal?:  AbortSignal;
+	readonly session?: unknown;
 }
 
 export function createContextAssembler(opts: CreateContextAssemblerOpts): ContextAssembler {
 	const estimateTokens = opts.estimateTokens ?? defaultEstimateTokens;
 	return {
-		async assemble(req: AssembleRequest): Promise<AssembledContext> {
-			return assemble(req, opts.memory, estimateTokens);
+		async assemble(req: AssembleRequest, deps?: AssembleDeps): Promise<AssembledContext> {
+			return assemble(req, opts.memory, opts.providers, deps, estimateTokens);
 		},
 	};
 }
@@ -66,14 +86,23 @@ export function createContextAssembler(opts: CreateContextAssemblerOpts): Contex
 async function assemble(
 	req: AssembleRequest,
 	memory: MemoryStore,
+	providers: ProviderRegistry | undefined,
+	deps: AssembleDeps | undefined,
 	estimateTokens: (value: unknown) => number,
 ): Promise<AssembledContext> {
 	const notes: string[] = [];
 	const slotResults = new Map<string, MemoryEntry<unknown>[]>();
 
+	// Per-call provider deps -- providers see the AssembleDeps signal +
+	// session. Caller's signal is honored; absent means no cancellation.
+	const providerDeps: ProviderDeps = {
+		signal:  deps?.signal ?? new AbortController().signal,
+		...(deps?.session !== undefined ? { session: deps.session } : {}),
+	};
+
 	// Per-slot fill.
 	for (const slot of req.slots) {
-		const entries = await fillSlot(slot, req, memory);
+		const entries = await fillSlot(slot, req, memory, providers, providerDeps);
 		const ranked = rank(entries);
 		const limited = slot.limit !== undefined ? ranked.slice(0, slot.limit) : ranked;
 
@@ -113,7 +142,21 @@ async function fillSlot(
 	slot: ContextSlotRequest,
 	req: AssembleRequest,
 	memory: MemoryStore,
+	providers: ProviderRegistry | undefined,
+	providerDeps: ProviderDeps,
 ): Promise<MemoryEntry<unknown>[]> {
+	// D5a: provider routing. Slot's `fromOwner` of the form `provider:<id>`
+	// routes to the registry; the provider returns transient entries
+	// (uncached, tagged with `source.kind: 'provider'`).
+	if (isProviderOwner(slot.fromOwner)) {
+		if (providers === undefined) {
+			log.debug({ slot: slot.name, owner: slot.fromOwner }, 'assemble: provider slot without registry -- empty');
+			return [];
+		}
+		const out = await providers.resolve(slot, providerDeps);
+		return out.slice();
+	}
+
 	const query: ContextQuery = typeof slot.query === 'function' ? slot.query(req) : slot.query;
 	const ns = memory.scope(slot.fromOwner, slot.namespace);
 

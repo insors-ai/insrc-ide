@@ -57,6 +57,7 @@ export type EntrySource =
 	| { readonly kind: 'observation';   readonly ledgerRef: LedgerRef; readonly executionRef: ExecutionRef; readonly tier: 'system-constraint' | 'pattern' | 'incidental' }
 	| { readonly kind: 'feedback';      readonly eventId: string }
 	| { readonly kind: 'user-asserted'; readonly turnId: string; readonly classifierDecisionRef?: MemoryEntryRef }
+	| { readonly kind: 'provider';      readonly providerId: string }
 	| { readonly kind: 'test';          readonly note?: string };
 
 /**
@@ -403,6 +404,68 @@ export interface SubstrateSkillExtension {
 export interface FeedbackHandlerDeps {
 	readonly memory: MemoryStore;
 	readonly signal: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
+// Context providers (substrate D5a -- P4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-only external source for context. Distinct from memory:
+ *   - Providers don't accept writes / feedback / distillation.
+ *   - One slot, one source -- consumer picks memory OR a provider.
+ *   - Entries from a provider carry `source.kind: 'provider:<id>'`
+ *     so consumers + grounding-review know not to "correct" them.
+ *
+ * Providers are referenced by `provider:<id>` in a slot's `fromOwner`.
+ * The assembler routes the slot to the registered provider instead of
+ * the memory store. Providers must answer cheaply -- assembly is
+ * synchronous and blocks execution.
+ *
+ * Day-one providers (substrate doc §D5a):
+ *   - 'user-config'    -- ~/.insrc/config.json
+ *   - 'code-kg'        -- LMDB+Lance code knowledge graph
+ *   - 'active-session' -- in-process session state
+ */
+export interface ContextProvider {
+	readonly id:            string;
+	readonly schemaVersion: number;
+	read(slot: ContextSlotRequest, deps: ProviderDeps): Promise<readonly MemoryEntry<unknown>[]>;
+}
+
+/**
+ * Dependencies a provider may consult. All optional -- a provider that
+ * only reads disk doesn't need any of these. Adding a new dep here is
+ * the right way to give a new provider what it needs; providers should
+ * NOT reach for module-global state.
+ */
+export interface ProviderDeps {
+	readonly signal:  AbortSignal;
+	/** Active session (where applicable -- provider:active-session reads it). */
+	readonly session?: unknown;
+}
+
+/**
+ * Prefix used in `ContextSlotRequest.fromOwner` to route to the
+ * provider registry instead of memory. Exported so consumers don't
+ * have to hard-code the string.
+ */
+export const PROVIDER_OWNER_PREFIX = 'provider:';
+
+/**
+ * Helper: check whether a slot targets a provider rather than memory.
+ * The assembler uses this to pick the routing path.
+ */
+export function isProviderOwner(owner: OwnerId): boolean {
+	return owner.startsWith(PROVIDER_OWNER_PREFIX);
+}
+
+/** Pull the provider id out of `provider:<id>`. Throws on a non-provider owner. */
+export function providerIdOf(owner: OwnerId): string {
+	if (!isProviderOwner(owner)) {
+		throw new SubstrateError(`not a provider owner: '${owner}'`, 'NOT_PROVIDER_OWNER');
+	}
+	return owner.slice(PROVIDER_OWNER_PREFIX.length);
 }
 
 // ---------------------------------------------------------------------------

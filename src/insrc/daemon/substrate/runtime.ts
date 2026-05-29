@@ -32,12 +32,14 @@ import { createDistillEngine, type DistillEngine, schemaKeyFor } from './distill
 import { createSubstrateIndexer } from './indexer.js';
 import { createLifecycleRunner, type LifecycleRunner, type TriggerReport } from './lifecycle-runner.js';
 import { withIndexer } from './memory-store-indexed.js';
+import { createProviderRegistry, type ProviderRegistry } from './provider-registry.js';
 import { createWorkingStateLedger } from './working-state.js';
 import type {
 	AssembleRequest,
 	AssembledContext,
 	BootstrapTrigger,
 	ContextBudget,
+	ContextProvider,
 	Embedder,
 	MemoryStore,
 	NamespaceSpec,
@@ -54,6 +56,7 @@ export interface SubstrateRuntime {
 	readonly assembler:  ContextAssembler;
 	readonly lifecycle:  LifecycleRunner;
 	readonly distill:    DistillEngine;
+	readonly providers:  ProviderRegistry;
 
 	/**
 	 * Register a skill's substrate-facing declarations. Idempotent on
@@ -135,6 +138,14 @@ export interface CreateSubstrateRuntimeOpts {
 	 * store; production wires the active session's workspaceId.
 	 */
 	readonly workspaceId?: string;
+	/**
+	 * Context providers (D5a) to seed the registry with. Additional
+	 * providers can be registered post-creation via
+	 * `runtime.providers.register(...)`. Slots whose `fromOwner` starts
+	 * with `provider:` route through the registry; without any
+	 * providers registered they resolve empty (legacy P1-P3 behavior).
+	 */
+	readonly providers?:   readonly ContextProvider[];
 }
 
 export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): SubstrateRuntime {
@@ -159,7 +170,12 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 		}))
 		: opts.memory;
 
-	const assembler = createContextAssembler({ memory });
+	const providers = createProviderRegistry();
+	for (const p of opts.providers ?? []) {
+		providers.register(p);
+	}
+
+	const assembler = createContextAssembler({ memory, providers });
 	const lifecycle = createLifecycleRunner({ memory });
 	const distill   = createDistillEngine({ memory });
 
@@ -168,6 +184,7 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 		assembler,
 		lifecycle,
 		distill,
+		providers,
 
 		registerSkill(skill: Skill): RegistrationToken {
 			const ext = (skill as unknown as SubstrateSkillExtension);
@@ -225,7 +242,13 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 				budget:  prepOpts.budget ?? {},
 				slots:   ext.contextSlots ?? [],
 			};
-			const context = await assembler.assemble(req);
+			// Hand the session through to providers (D5a: provider:active-session
+			// reads it). Provider slots without registered providers still
+			// resolve empty.
+			const context = await assembler.assemble(req, {
+				...(prepOpts.signal !== undefined  ? { signal:  prepOpts.signal  } : {}),
+				...(prepOpts.session !== undefined ? { session: prepOpts.session } : {}),
+			});
 
 			// Fresh ledger per execution.
 			const workingState = createWorkingStateLedger();
