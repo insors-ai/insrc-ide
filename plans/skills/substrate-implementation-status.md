@@ -138,10 +138,10 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | Phase | Component | Status | Notes |
 |---|---|---|---|
 | meta | MVP scope locked | done | This doc. |
-| P0.1 | Memory store (files; `byKey`, `prefix`, `filter`) | not-started | |
-| P0.2 | Working-state ledger | not-started | |
-| P0.3 | Skill-interface extension types | not-started | |
-| P0.4 | P0 unit tests | not-started | |
+| P0.1 | Memory store (files; `byKey`, `prefix`, `filter`) | done | [`memory-store.ts`](../../src/insrc/daemon/substrate/memory-store.ts); D4 default conflict resolution applied as read-before-write. |
+| P0.2 | Working-state ledger | done | [`working-state.ts`](../../src/insrc/daemon/substrate/working-state.ts); D12 soft warn + hard cap enforced. |
+| P0.3 | Skill-interface extension types | done | [`types.ts`](../../src/insrc/daemon/substrate/types.ts); SubstrateSkillExtension is fully optional, declared but not yet consumed by the skill runner (P1.4). |
+| P0.4 | P0 unit tests | done | 27 tests pass: round-trips, key sanitization, prefix scan, filter scan, D4 conflict resolution, file layout, expiry handling, soft warn, hard cap (entries + bytes), ledger isolation. |
 | P1.1 | Context assembler (memory only) | not-started | |
 | P1.2 | Sync lifecycle runner | not-started | |
 | P1.3 | Distillation engine | not-started | |
@@ -149,6 +149,14 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P1.5 | `code.class.extract-fields` migration (narrow) | not-started | |
 | P1.6 | Skill unit tests | not-started | |
 | P1.7 | Hadoop integration tests | not-started | |
+
+### P0 done criteria — verified
+
+- [x] All four components compile clean against the existing daemon build.
+- [x] Unit tests pass (27/27).
+- [x] No existing skill behavior changes — 21/21 meta-skill tests still pass; no other existing tests touched.
+- [x] Skill registry continues to accept skills without the new optional fields (SubstrateSkillExtension is fully optional; not consumed yet).
+- [x] Component status table updated.
 
 ---
 
