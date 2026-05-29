@@ -330,6 +330,8 @@ The L2 layer is **additive**. Today's skills, today's classify/select-scope/grou
 - Implement the user-assertion classifier (D6) with default heuristics + LLM stub.
 - Ship behind no skill / agent changes — just the framework exists. Verify with substrate-internal tests.
 
+> **Fine-grained sequencing:** Phase 0 is implemented as sub-phases `P0`–`P5` in [`plans/skills/substrate-implementation-status.md`](plans/skills/substrate-implementation-status.md). Each sub-phase has explicit done criteria. The first L1 skill migration (this doc's Phase 1, first item) actually lands as the substrate-status doc's `P1`, before all of Phase 0 is complete — by design, validating the substrate against one real skill before building the remaining components (Lance index, providers, classifier, feedback bus).
+
 **Phase 1 — Migrate the loudest L1 skills onto the substrate.**
 - Pick 3–4 highest-value skills (`data.source.file.describe`, `data.source.file.sample-shape`, an rdbms equivalent, the codebase entity locator).
 - Each declares `ownerId`, `schemaVersion`, `interestedTriggers`, `contextSlots`, `memorySchema`, and a `contextBuilders` spec for the indexer's bootstrap path.

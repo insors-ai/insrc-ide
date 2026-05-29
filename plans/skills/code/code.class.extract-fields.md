@@ -12,6 +12,32 @@
 - [`plans/memory-context-substrate.md`](../../memory-context-substrate.md) — D1–D15 + D5a.
 - [`plans/agentic-skills-architecture.md`](../../agentic-skills-architecture.md) — A1–A6 (this is an L1 skill, so A1's self-grounding doesn't apply; the others do).
 - [`plans/code-analyzer-migration.md`](../../code-analyzer-migration.md) — overall migration plan (this skill is the highest-priority migration in Phase 1).
+- [`plans/skills/substrate-implementation-status.md`](../substrate-implementation-status.md) — implementation phasing. **This skill's narrow wiring lands in P1; full wiring fills in across P3–P5.**
+
+## Implementation phase status
+
+The full design below declares 7 context slots, 5 memory namespaces, 2 `assertionInterests`, and 1 `contextBuilder`. The substrate phases land these incrementally. The skill's **substrate-facing declaration matches the eventual target shape from P1 onward**; deferred slots are inert (return empty / fall through) until the substrate phase that activates them lands.
+
+| Item | Lands in | What happens in earlier phases |
+|---|---|---|
+| `contextSlots.cached-extraction` | **P1** | — |
+| `contextSlots.class-aliases` | **P1** (read path); P5 (auto-populate from D6 classifier) | P1 tests write directly to populate |
+| `contextSlots.recent-misses` | **P1** | — |
+| `contextSlots.active-closure` | **P4** (when `provider:active-session` lands) | P1: fall back to inline `resolveSearchScope` |
+| `contextSlots.language-by-file` | **P3** (when async indexer + `language-detection` builder land) | P1: read language from entity record returned by `code_class_locate` |
+| `contextSlots.workspace-patterns` | **P5** (when observation distillation wires into skill body) | P1: slot returns empty; skill body doesn't emit Pydantic-shape observations yet |
+| `contextSlots.user-assertions` | **P5** (when D6 classifier writes to namespace) | P1: slot returns empty (or populated by tests directly) |
+| `memorySchema.extracted-classes` | **P1** | — |
+| `memorySchema.class-aliases` | **P1** | — |
+| `memorySchema.recent-misses` | **P1** | — |
+| `memorySchema.observations` | **P5** | Schema declared in P1; no writes |
+| `memorySchema.user-assertions` | **P5** | Schema declared in P1; no writes |
+| `assertionInterests.class-aliases` | **P5** | Declared in P1; routing inert until classifier lands |
+| `assertionInterests.preferred-repo-for-class` | **P5** | Declared in P1; routing inert until classifier lands |
+| `contextBuilders.prewarm-top` | **P3** (when DAG + `entity-name-index` land) | P1: builder not registered; cache populates lazily on first call |
+| `applyFeedback` hook | **P5** (when feedback bus lands) | P1: hook registered; never fires |
+
+This is intentional: the skill declares its full target shape once. New substrate phases wire up the deferred items without re-touching the skill registration.
 
 ## What the skill does today
 
