@@ -115,6 +115,19 @@ export interface SkillRunnerDeps {
   }) => Promise<import('./types.js').SkillSpillRecord | void>
       | import('./types.js').SkillSpillRecord
       | void) | undefined;
+
+  /**
+   * Substrate runtime (P1+). When provided, `runSkill` populates
+   * `deps.context`, `deps.workingState`, and `deps.memory` on the
+   * SkillDeps before calling `skill.execute`, and distills pinned
+   * working-state entries on successful return. Skills without
+   * substrate-facing declarations get a no-op prep so existing skill
+   * behavior is unchanged.
+   *
+   * In tests this is the runtime built off a per-test memory store;
+   * in production it's the daemon-wide substrate singleton.
+   */
+  readonly substrate?: import('../substrate/runtime.js').SubstrateRuntime | undefined;
 }
 
 export async function runSkill<I = unknown, O = unknown>(
@@ -229,6 +242,16 @@ export async function runSkill<I = unknown, O = unknown>(
     return childResult;
   };
 
+  // 6a. Substrate prep (P1+). No-op if runner has no substrate or the
+  //     skill doesn't declare substrate-facing fields.
+  const substratePrep = runnerDeps.substrate !== undefined
+    ? await runnerDeps.substrate.prepareForSkill(skill, {
+        task: input,
+        session: runnerDeps.session,
+        ...(runnerDeps.signal !== undefined ? { signal: runnerDeps.signal } : {}),
+      })
+    : undefined;
+
   const skillDeps: SkillDeps = {
     session: runnerDeps.session,
     runSkill: childRunner,
@@ -236,6 +259,9 @@ export async function runSkill<I = unknown, O = unknown>(
     resolveProvider: () => runnerDeps.resolveProvider(skill.providerAffinity),
     emit,
     ...(runnerDeps.signal !== undefined ? { signal: runnerDeps.signal } : {}),
+    ...(substratePrep?.context      !== undefined ? { context:      substratePrep.context      } : {}),
+    ...(substratePrep?.workingState !== undefined ? { workingState: substratePrep.workingState } : {}),
+    ...(runnerDeps.substrate        !== undefined ? { memory:       runnerDeps.substrate.memory } : {}),
   };
 
   // 7. Execute.
@@ -243,6 +269,12 @@ export async function runSkill<I = unknown, O = unknown>(
   try {
     bodyResult = await skill.execute(input, skillDeps) as SkillResult<O>;
   } catch (err) {
+    // Substrate: discard working state on failure -- pinned entries do
+    // not distill. Settlement callback handles the no-op.
+    if (substratePrep !== undefined) {
+      try { await substratePrep.complete(false); } catch { /* swallow */ }
+    }
+
     const msg = err instanceof Error ? err.message : String(err);
     emit({ kind: 'skill-error', skillId: id, error: msg });
     log.warn({ id, err: msg }, 'runSkill: execute threw');
@@ -266,6 +298,17 @@ export async function runSkill<I = unknown, O = unknown>(
       ...(subSkillTrace.length > 0 ? { subSkillCalls: subSkillTrace } : {}),
       rejectionReason: 'execute-threw',
     };
+  }
+
+  // 7a. Substrate: distill pinned working-state entries on success. Errors
+  //     here are logged but don't alter the SkillResult -- the skill body
+  //     has already returned its value; distillation failure is a substrate
+  //     concern.
+  if (substratePrep !== undefined) {
+    try { await substratePrep.complete(true); }
+    catch (err) {
+      log.warn({ id, err: (err as Error).message }, 'runSkill: substrate distill threw');
+    }
   }
 
   // 8. Output validation. Clamps to low on failure but doesn't drop

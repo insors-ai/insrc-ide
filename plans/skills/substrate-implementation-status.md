@@ -142,13 +142,23 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P0.2 | Working-state ledger | done | [`working-state.ts`](../../src/insrc/daemon/substrate/working-state.ts); D12 soft warn + hard cap enforced. |
 | P0.3 | Skill-interface extension types | done | [`types.ts`](../../src/insrc/daemon/substrate/types.ts); SubstrateSkillExtension is fully optional, declared but not yet consumed by the skill runner (P1.4). |
 | P0.4 | P0 unit tests | done | 27 tests pass: round-trips, key sanitization, prefix scan, filter scan, D4 conflict resolution, file layout, expiry handling, soft warn, hard cap (entries + bytes), ledger isolation. |
-| P1.1 | Context assembler (memory only) | not-started | |
-| P1.2 | Sync lifecycle runner | not-started | |
-| P1.3 | Distillation engine | not-started | |
-| P1.4 | Skill-runner integration (`invoke.ts`) | not-started | |
-| P1.5 | `code.class.extract-fields` migration (narrow) | not-started | |
-| P1.6 | Skill unit tests | not-started | |
-| P1.7 | Hadoop integration tests | not-started | |
+| P1.1 | Context assembler (memory only) | done | [`context-assembler.ts`](../../src/insrc/daemon/substrate/context-assembler.ts); four query modes minus `byEmbedding`; D4 ranking + caller-owned budget (D2) with proportional truncation. |
+| P1.2 | Sync lifecycle runner | done | [`lifecycle-runner.ts`](../../src/insrc/daemon/substrate/lifecycle-runner.ts); `fireTrigger` dispatches matching builders sequentially. |
+| P1.3 | Distillation engine | done | [`distill.ts`](../../src/insrc/daemon/substrate/distill.ts); walks pins, looks up the namespace's `autoDistill` policy, writes to memory. |
+| P1.4 | Skill-runner integration (`invoke.ts`) | done | Substrate runtime facade ([`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts)) wires assembler + lifecycle + distill; `runSkill` populates `deps.context` / `deps.workingState` / `deps.memory` when substrate is provided. Skills without substrate-facing declarations are unaffected. |
+| P1.5 | `code.class.extract-fields` migration (narrow) | done | 3 context slots wired (cached-extraction / class-aliases / recent-misses); 5 memorySchema namespaces declared; 2 assertionInterests declared. Deferred-component slots return empty and skill body falls through (per the per-skill plan's P1 narrow-wiring table). |
+| P1.6 | Skill unit tests | done | 5 substrate-aware tests pass: cache-hit short-circuit, cold-path distillation, alias resolution, miss persistence, legacy-compat (skill works without substrate). |
+| P1.7 | Hadoop integration tests | done | 5 integration tests against the real LMDB graph + entity-vec; pass against NameNode / BlockManager / Configuration (multi-match) / nonexistent class; second-call cache-hit verified. |
+
+### P1 done criteria — verified
+
+- [x] All P1 components compile clean.
+- [x] Existing `code.class.extract-fields` unit tests pass unchanged (11/11).
+- [x] New unit tests verify cache-hit short-circuit, cold-path distillation, alias resolution, miss persistence, legacy-compat (5/5).
+- [x] Hadoop integration tests pass (5/5): NameNode single-match, second-call cache hit, BlockManager single-match, Configuration ambiguity (returns one of the two real entities), nonexistent-class miss with persisted nearest candidates.
+- [x] Whole-daemon build still clean.
+- [x] No regressions: 21/21 meta-skill tests + 27/27 P0 substrate tests still pass.
+- [x] Status table updated.
 
 ### P0 done criteria — verified
 

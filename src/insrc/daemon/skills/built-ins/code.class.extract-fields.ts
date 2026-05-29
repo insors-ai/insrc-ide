@@ -34,6 +34,15 @@ import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { resolveSearchScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
 import { tryReadFileForFallback } from './_fallback-file-read.js';
+import type {
+	AssertionInterest,
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface ExtractFieldsInput {
 	readonly className: string;
@@ -201,11 +210,31 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 	],
 
 	async execute(input: ExtractFieldsInput, deps: SkillDeps): Promise<SkillResult<ExtractFieldsOutput>> {
+		// Substrate P1: apply learned aliases (e.g., user said `User`, the
+		// workspace canonicalised that to `UserModel`). Falls through to
+		// the literal className when no alias matches or context is absent.
+		const resolvedClassName = resolveAlias(input.className, input.repoPath, deps);
+		if (resolvedClassName !== input.className) {
+			// Don't mutate input -- thread the resolved name through locally.
+		}
+
+		// Substrate P1: cache hit short-circuit. Cached extractions live in
+		// the `extracted-classes` namespace keyed by `<repoPath>::<className>`.
+		const cached = readCachedExtraction(resolvedClassName, input.repoPath, deps);
+		if (cached !== undefined && cached.value.found === true) {
+			return {
+				value: cached.value,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		// Step 1: locate.
 		// Plan SCS Phase 3: route scope into the tool's repos[] filter
 		// when no single-repo override is given. An explicit `repoPath`
 		// wins (most specific); 'global' opts out of the closure filter.
-		const locateInput: Record<string, unknown> = { className: input.className };
+		const locateInput: Record<string, unknown> = { className: resolvedClassName };
 		if (input.repoPath !== undefined) {
 			locateInput['repoPath'] = input.repoPath;
 		} else {
@@ -241,6 +270,9 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 
 		// Typed-refusal arm: missing class -> surface nearest candidates.
 		if (locateData.found === false) {
+			// Substrate P1: persist the miss for nearest-candidate warmth on
+			// re-attempts of the same name within the TTL window.
+			pinRecentMiss(resolvedClassName, locateData.nearest, deps);
 			return {
 				value: { found: false, nearest: locateData.nearest },
 				// High confidence in the *refusal* itself: the lookup
@@ -248,8 +280,8 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 				// that want a "did-you-mean" UX have the top-3 candidates.
 				confidence: 'high',
 				notes: locateData.nearest.length > 0
-					? [`class '${input.className}' not found; nearest candidates: ${locateData.nearest.map(n => n.className).join(', ')}`]
-					: [`class '${input.className}' not found; no nearby candidates in the index`],
+					? [`class '${resolvedClassName}' not found; nearest candidates: ${locateData.nearest.map(n => n.className).join(', ')}`]
+					: [`class '${resolvedClassName}' not found; no nearby candidates in the index`],
 				toolCalls: [],
 			};
 		}
@@ -339,6 +371,11 @@ const codeClassExtractFieldsSkill: Skill<ExtractFieldsInput, ExtractFieldsOutput
 				...fallback,
 			};
 
+		// Substrate P1: pin successful extraction. The namespace's
+		// autoDistill: 'always-on-success' policy promotes it to memory
+		// when the skill returns cleanly. Cache TTL is 7 days.
+		pinSuccessfulExtraction(resolvedClassName, input.repoPath, value, deps);
+
 		return {
 			value,
 			// High when fields came back; medium for an empty field set
@@ -418,11 +455,241 @@ function makeCallId(stage: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (P1 narrow wiring; see
+// plans/skills/code/code.class.extract-fields.md for the eventual
+// target shape and the per-phase wiring table)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:code.class.extract-fields';
+
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = [
+	'repo-add', 'reindex', 'connection-add', 'manual',
+];
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	// Warm-hit cache: prior successful extraction for this (repo, class).
+	{
+		name:      'cached-extraction',
+		fromOwner: OWNER_ID,
+		namespace: 'extracted-classes',
+		query: (req) => {
+			const task = (req.task ?? {}) as { repoPath?: string; className?: string };
+			return { kind: 'byKey', key: cacheKey(task.className ?? '', task.repoPath) };
+		},
+		limit: 1,
+	},
+	// Workspace-specific class-name aliases (user said `User`, repo has `UserModel`).
+	{
+		name:      'class-aliases',
+		fromOwner: OWNER_ID,
+		namespace: 'class-aliases',
+		query: (req) => {
+			const task = (req.task ?? {}) as { repoPath?: string };
+			return { kind: 'prefix', prefix: `${task.repoPath ?? '*'}::` };
+		},
+	},
+	// Short-TTL miss cache; used for repeated lookups of the same name.
+	{
+		name:      'recent-misses',
+		fromOwner: OWNER_ID,
+		namespace: 'recent-misses',
+		query: (req) => {
+			const task = (req.task ?? {}) as { className?: string };
+			return { kind: 'byKey', key: task.className ?? '' };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:  'extracted-classes',
+		valueType:  'ExtractedClassRecord',
+		autoDistill: 'always-on-success',     // cache
+		indexing:   { kind: 'never' },        // lookup by key
+		ttl:        '7d',
+	},
+	{
+		namespace:  'class-aliases',
+		valueType:  'ClassAlias',
+		autoDistill: 'on-pin',                // user-asserted / classifier-routed
+		indexing:   { kind: 'never' },        // P1: derived embedding lands in P2
+		ttl:        'until-contradicted',
+	},
+	{
+		namespace:  'recent-misses',
+		valueType:  'MissRecord',
+		autoDistill: 'always-on-success',
+		indexing:   { kind: 'never' },
+		ttl:        '24h',
+	},
+	{
+		// Declared in P1, populated in P5 when observation distillation
+		// wires into skill bodies.
+		namespace:  'observations',
+		valueType:  'WorkspacePatternObservation',
+		autoDistill: 'on-pin',
+		indexing:   { kind: 'never' },
+		ttl:        '30d',
+	},
+	{
+		// Declared in P1, populated in P5 when the D6 classifier lands.
+		namespace:  'user-assertions',
+		valueType:  'UserAssertion',
+		autoDistill: 'on-pin',
+		indexing:   { kind: 'never' },
+		ttl:        'until-contradicted',
+	},
+];
+
+const ASSERTION_INTERESTS: readonly AssertionInterest[] = [
+	// Declared in P1; routing inert until P5 (D6 classifier + D14 router).
+	{ subjectPattern: 'class-aliases',
+	  description: 'Workspace-specific class name aliases (e.g., "User means UserModel here").' },
+	{ subjectPattern: 'preferred-repo-for-class',
+	  description: 'Which repo wins when a class name is ambiguous across the closure.' },
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: ASSERTION_INTERESTS,
+};
+
+// ---------------------------------------------------------------------------
+// Substrate helper functions
+// ---------------------------------------------------------------------------
+
+interface AliasValue {
+	readonly userTerm:  string;
+	readonly canonical: string;
+	readonly repoPath?: string | null;
+}
+
+interface MissValue {
+	readonly attemptedName: string;
+	readonly nearest:       readonly NearestCandidate[];
+}
+
+function cacheKey(className: string, repoPath: string | undefined): string {
+	return `${repoPath ?? '*'}::${className}`;
+}
+
+/**
+ * Read the cached extraction from the substrate-assembled
+ * `cached-extraction` slot. Returns undefined when no substrate context
+ * or the cache is cold.
+ */
+function readCachedExtraction(
+	className: string,
+	repoPath: string | undefined,
+	deps: SkillDeps,
+): { value: ExtractFieldsOutput } | undefined {
+	const slot = deps.context?.slots.get('cached-extraction');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ExtractFieldsOutput>;
+	// Defensive: only return if it really matches this className.
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(className, repoPath)) { return undefined; }
+	return { value: hit.value };
+}
+
+/**
+ * Resolve the user-provided className through any learned aliases.
+ * Returns the canonical name when an alias matches, otherwise returns
+ * the input unchanged.
+ */
+function resolveAlias(className: string, repoPath: string | undefined, deps: SkillDeps): string {
+	const slot = deps.context?.slots.get('class-aliases');
+	if (slot === undefined || slot.length === 0) { return className; }
+
+	for (const entry of slot) {
+		const v = (entry as MemoryEntry<AliasValue>).value;
+		if (v === undefined) continue;
+		if (v.userTerm !== className) continue;
+		// Repo scoping: '*' or matching repoPath wins.
+		if (v.repoPath != null && repoPath !== undefined && v.repoPath !== repoPath) { continue; }
+		return v.canonical;
+	}
+	return className;
+}
+
+/**
+ * Pin a successful extraction to working state. The substrate's
+ * distillation engine promotes it to memory on successful skill
+ * return (D3 'always-on-success' policy on `extracted-classes`).
+ *
+ * No-op when the runtime didn't provide a working-state ledger.
+ */
+function pinSuccessfulExtraction(
+	className: string,
+	repoPath: string | undefined,
+	value: ExtractFieldsOutput,
+	deps: SkillDeps,
+): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'code_class_fields' },
+		payload: value,
+		claims:  [`extracted:${className}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: 'extracted-classes',
+		key:       cacheKey(className, repoPath),
+		kind:      'fact',
+		ttlMs:     7 * 24 * 60 * 60 * 1000,
+	});
+}
+
+/**
+ * Pin a miss + its nearest candidates so a re-attempt of the same name
+ * within the TTL window returns warm.
+ *
+ * No-op when the runtime didn't provide a working-state ledger.
+ */
+function pinRecentMiss(
+	className: string,
+	nearest: readonly NearestCandidate[],
+	deps: SkillDeps,
+): void {
+	if (deps.workingState === undefined) { return; }
+	const payload: MissValue = { attemptedName: className, nearest };
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'code_class_locate' },
+		payload,
+		claims:  [`miss:${className}`],
+		confidence: 0.9,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: 'recent-misses',
+		key:       className,
+		kind:      'fact',
+		ttlMs:     24 * 60 * 60 * 1000,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+/**
+ * Compose the substrate-facing fields onto the skill at registration.
+ * The legacy `Skill<I, O>` shape ignores the extra fields; the substrate
+ * runtime inspects them via the SubstrateSkillExtension cast.
+ */
+const codeClassExtractFieldsSkillWithSubstrate = {
+	...codeClassExtractFieldsSkill,
+	...substrateExtension,
+};
+
 export function registerCodeClassExtractFieldsSkill(): void {
-	registerSkill(codeClassExtractFieldsSkill as unknown as Skill);
+	registerSkill(codeClassExtractFieldsSkillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.

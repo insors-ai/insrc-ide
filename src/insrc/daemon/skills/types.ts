@@ -182,6 +182,19 @@ export interface SkillDeps {
   readonly emit: (event: SkillEvent) => void;
   /** Cancellation. */
   readonly signal?: AbortSignal;
+
+  // --------------------------------------------------------------------
+  // Substrate fields (P1+). Optional -- skills that don't declare
+  // substrate-facing fields (SubstrateSkillExtension on the Skill
+  // object) get `undefined` here. See plans/memory-context-substrate.md.
+  // --------------------------------------------------------------------
+
+  /** Substrate-assembled context briefing for this execution. */
+  readonly context?: import('../substrate/types.js').AssembledContext;
+  /** Per-execution working-state ledger. Pinned entries distill to memory on success. */
+  readonly workingState?: import('../substrate/types.js').WorkingStateLedger;
+  /** Cold-path memory access for slot misses + dynamic lookups. */
+  readonly memory?: import('../substrate/types.js').MemoryStore;
 }
 
 // ---------------------------------------------------------------------------

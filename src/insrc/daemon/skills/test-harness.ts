@@ -78,6 +78,17 @@ export interface RunSkillIsolatedOpts {
   readonly extraSessionFields?: Record<string, unknown>;
   /** Forwarded to runSkill (version pin, callerOwner, sample-size, ...). */
   readonly runOpts?: RunSkillOpts;
+  /**
+   * Optional substrate runtime. When provided, the skill's substrate-
+   * facing declarations (contextSlots, memorySchema, contextBuilders,
+   * applyFeedback) are honored: context is assembled before execute,
+   * pinned working-state entries distill on success.
+   *
+   * Tests that want to verify substrate behavior pass one built off a
+   * per-test temp memory store. Tests that don't care omit it; existing
+   * skill behavior is unchanged.
+   */
+  readonly substrate?: import('../substrate/runtime.js').SubstrateRuntime;
 }
 
 export interface RunSkillIsolatedResult<O = unknown> {
@@ -115,6 +126,7 @@ export async function runSkillIsolated<I = unknown, O = unknown>(
     session,
     resolveProvider: (_affinity: ProviderAffinity) => provider,
     runTool: async (call) => dispatchFakeTool(call, fakeTools),
+    ...(opts.substrate !== undefined ? { substrate: opts.substrate } : {}),
   };
 
   const result = await runSkill<I, O>(id, input, runnerDeps, opts.runOpts);
