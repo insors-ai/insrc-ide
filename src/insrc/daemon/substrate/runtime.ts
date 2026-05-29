@@ -29,13 +29,16 @@ import { getLogger } from '../../shared/logger.js';
 import type { Skill } from '../skills/types.js';
 import { createContextAssembler, type ContextAssembler } from './context-assembler.js';
 import { createDistillEngine, type DistillEngine, schemaKeyFor } from './distill.js';
+import { createSubstrateIndexer } from './indexer.js';
 import { createLifecycleRunner, type LifecycleRunner, type TriggerReport } from './lifecycle-runner.js';
+import { withIndexer } from './memory-store-indexed.js';
 import { createWorkingStateLedger } from './working-state.js';
 import type {
 	AssembleRequest,
 	AssembledContext,
 	BootstrapTrigger,
 	ContextBudget,
+	Embedder,
 	MemoryStore,
 	NamespaceSpec,
 	SubstrateSkillExtension,
@@ -117,21 +120,51 @@ export interface DistillSummary {
 // ---------------------------------------------------------------------------
 
 export interface CreateSubstrateRuntimeOpts {
-	readonly memory: MemoryStore;
+	readonly memory:       MemoryStore;
+	/**
+	 * If provided, every put / delete on the substrate's memory store
+	 * is mirrored to the Lance index (substrate_vec), and
+	 * searchByEmbedding routes through Lance. Without an embedder the
+	 * indexer is inactive and searchByEmbedding falls back to the base
+	 * store's empty-list stub.
+	 */
+	readonly embedder?:    Embedder;
+	/**
+	 * Required when `embedder` is provided -- the Lance row's scoping
+	 * column. Tests pass the same id used to construct the memory
+	 * store; production wires the active session's workspaceId.
+	 */
+	readonly workspaceId?: string;
 }
 
 export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): SubstrateRuntime {
-	const assembler = createContextAssembler({ memory: opts.memory });
-	const lifecycle = createLifecycleRunner({ memory: opts.memory });
-	const distill   = createDistillEngine({ memory: opts.memory });
-
-	// (owner, namespace) -> NamespaceSpec, used by the distill engine.
+	// (owner, namespace) -> NamespaceSpec, used by the distill engine
+	// AND (when present) the indexer. Single source of truth -- the
+	// indexer reads at write-time so newly-registered skills become
+	// indexable without rebuilding.
 	const schemas = new Map<string, NamespaceSpec>();
 	// skillId -> [(owner, namespace)] declared by that skill (for deregister).
 	const ownedSchemas = new Map<string, string[]>();
 
+	// Wrap the base memory store with the indexer when the caller
+	// provides an embedder + workspaceId. The wrapped store is what
+	// everything downstream sees (assembler, distill, the runtime's
+	// public `memory`), so writes via any path go through the index.
+	const memory: MemoryStore = (opts.embedder !== undefined && opts.workspaceId !== undefined)
+		? withIndexer(opts.memory, createSubstrateIndexer({
+			workspaceId: opts.workspaceId,
+			embedder:    opts.embedder,
+			schemas,
+			memory:      opts.memory,
+		}))
+		: opts.memory;
+
+	const assembler = createContextAssembler({ memory });
+	const lifecycle = createLifecycleRunner({ memory });
+	const distill   = createDistillEngine({ memory });
+
 	return {
-		memory: opts.memory,
+		memory,
 		assembler,
 		lifecycle,
 		distill,

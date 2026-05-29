@@ -406,6 +406,42 @@ export interface FeedbackHandlerDeps {
 }
 
 // ---------------------------------------------------------------------------
+// Indexing (substrate "Indexing framework" -- P2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Text embedder. The substrate uses the local Ollama embed model in
+ * production; tests inject deterministic fakes. The substrate never
+ * calls an embedder in parallel -- per the user's "no parallel LLM
+ * calls" rule, indexing is serial.
+ */
+export interface Embedder {
+	embed(text: string): Promise<Float32Array>;
+}
+
+/**
+ * Indexer hook. Called by the memory-store wrapper after a successful
+ * put / delete. Implementations look up the namespace's IndexingPolicy
+ * and (if eligible) embed + write a Lance row.
+ *
+ * Per substrate doc §"Indexing framework", failures are fire-and-
+ * forget: the file-side write is canonical, the index is a best-effort
+ * accelerator. The wrapper logs + swallows errors so a flaky embedder
+ * never breaks a memory write.
+ */
+export interface Indexer {
+	onPut<T>(owner: OwnerId, namespace: string, entry: MemoryEntry<T>): Promise<void>;
+	onDelete(owner: OwnerId, namespace: string, key: string): Promise<void>;
+	/**
+	 * Resolve a vector search: query the Lance index for the (owner,
+	 * namespace) scope and read back the file entries for each hit.
+	 * Returns entries in distance order. Stale / missing rows (file
+	 * deleted out from under us) are skipped silently.
+	 */
+	search<T>(owner: OwnerId, namespace: string, queryEmbedding: Float32Array, opts: AnnOpts): Promise<readonly MemoryEntry<T>[]>;
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 

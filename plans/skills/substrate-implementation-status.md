@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **P0** | Substrate primitives (no consumers) | Memory store + working-state ledger + skill-interface extensions exist as standalone modules with unit tests. | not-started |
 | **P1** | First skill migration (`code.class.extract-fields`, narrow wiring) | The substrate is consumed end-to-end by one real skill; Hadoop integration tests validate against real data. | not-started |
-| **P2** | Lance index + `byEmbedding` | Semantic recall (fuzzy name match, observation similarity). | deferred (future) |
+| **P2** | Lance index + `byEmbedding` | Semantic recall (fuzzy name match, observation similarity). | done |
 | **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | deferred (future) |
 | **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | deferred (future) |
 | **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | deferred (future) |
@@ -131,6 +131,42 @@ Captured in the "Deferred (declared but inert in P1)" table above. The substrate
 
 ---
 
+## P2 — Lance index + `byEmbedding`
+
+**Goal:** wire the substrate to LanceDB so `MemoryNamespace.searchByEmbedding` returns real semantic hits, without changing any existing skill behavior or requiring the indexer to be present.
+
+**Prerequisites:** P0, P1 done.
+
+### Components
+
+| # | Component | File path | Depends on |
+|---|---|---|---|
+| P2.1 | Substrate vector index (one shared `substrate_vec` Lance table with `(workspace_id, owner, namespace)` filter columns) | [`substrate-vec.ts`](../../src/insrc/daemon/substrate/substrate-vec.ts) | (none) |
+| P2.2 | Indexing engine (per-namespace policy resolution; embed-then-write hook for memory puts/deletes) | [`indexer.ts`](../../src/insrc/daemon/substrate/indexer.ts) | P2.1, P0.3 |
+| P2.3 | Memory store `searchByEmbedding` (wrapper that hooks indexer into `put` / `delete` / `searchByEmbedding`; runtime wires it when an `Embedder` is provided) | [`memory-store-indexed.ts`](../../src/insrc/daemon/substrate/memory-store-indexed.ts) + [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts) | P2.2 |
+| P2.4 | Unit tests (deterministic fake embedder; per-policy coverage; distance ordering; scope filtering; legacy compat; failure swallow) | [`indexer.test.ts`](../../src/insrc/daemon/substrate/__tests__/indexer.test.ts) | P2.3 |
+
+### Done criteria for P2
+
+- [x] All four components compile clean (`scripts/build.sh daemon`).
+- [x] P2.4 unit tests pass: `always` policy embeds + writes Lance row; `never` policy skips embedder; `derived` policy embeds `from(entry)` output; delete removes file + Lance row; `searchByEmbedding` returns hits in distance order; scoping isolates `(owner, namespace)`; runtime without embedder falls back to empty `searchByEmbedding`; flaky embedder failures are swallowed (file write still succeeds).
+- [x] No regressions: P0 + P1 substrate suites still green; `code.class.extract-fields` legacy/substrate/Hadoop suites still pass.
+- [x] Skill-runner behavior unchanged for skills that don't declare a `byEmbedding` slot (the indexer is purely additive on top of file writes).
+- [x] Status table in this doc updated: all P2 components marked `done`.
+
+### Out of scope for P2 (deferred to later phases)
+
+| Component | Deferred to | Why not in P2 |
+|---|---|---|
+| `on-flag` indexing policy (caller-driven flag) | P3+ | No skill consumer flags entries yet; treating as `never` keeps the policy table honest while avoiding dead code. |
+| Async indexer DAG (D15) | P3 | Single embedder, single Lance writer; the synchronous `onPut` hook is sufficient for substrate-scale namespaces. |
+| Per-namespace Lance tables | When a single namespace approaches ~1M entries | Shared table cleaner to migrate later; row counts at substrate scale stay well below the threshold. |
+| `byEmbedding` integration into `code.class.extract-fields` (fuzzy name match) | P3+ (per-skill migration) | The substrate gains the capability here; consumer wiring lands when a specific skill needs it. |
+| Lance index (ANN build) on `substrate_vec` | When per-namespace row counts trigger | Exact KNN is fast at substrate scale; the table seed + mergeInsert path is correct as-is. |
+| Eviction / cold-row pruning | P3+ | TTL expiry on the file side drops the canonical row; orphan Lance rows are skipped by the resolver. |
+
+---
+
 ## Component status tracker
 
 Updated as each component lands. Status: `not-started` / `in-progress` / `done` / `deferred`.
@@ -149,6 +185,18 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P1.5 | `code.class.extract-fields` migration (narrow) | done | 3 context slots wired (cached-extraction / class-aliases / recent-misses); 5 memorySchema namespaces declared; 2 assertionInterests declared. Deferred-component slots return empty and skill body falls through (per the per-skill plan's P1 narrow-wiring table). |
 | P1.6 | Skill unit tests | done | 5 substrate-aware tests pass: cache-hit short-circuit, cold-path distillation, alias resolution, miss persistence, legacy-compat (skill works without substrate). |
 | P1.7 | Hadoop integration tests | done | 5 integration tests against the real LMDB graph + entity-vec; pass against NameNode / BlockManager / Configuration (multi-match) / nonexistent class; second-call cache-hit verified. |
+| P2.1 | Substrate vector index (`substrate_vec` Lance table) | done | [`substrate-vec.ts`](../../src/insrc/daemon/substrate/substrate-vec.ts); one shared table; id derived from `(workspace, owner, namespace, key)`; mergeInsert upserts; per-row delete + per-namespace delete. |
+| P2.2 | Indexing engine (per-namespace policy) | done | [`indexer.ts`](../../src/insrc/daemon/substrate/indexer.ts); reads `IndexingPolicy` at write time (`always` / `never` / `derived` wired; `on-flag` deferred); fire-and-forget failure swallow; `Embedder` interface added to types. |
+| P2.3 | Memory store `searchByEmbedding` | done | [`memory-store-indexed.ts`](../../src/insrc/daemon/substrate/memory-store-indexed.ts); wraps base store so put/delete mirror into Lance and `searchByEmbedding` routes through `indexer.search()`; runtime opts in via `{ embedder, workspaceId }`. |
+| P2.4 | P2 unit tests | done | 8 tests pass: `always`/`never`/`derived` policies, delete cascade, distance ordering, `(owner, namespace)` scope isolation, runtime-without-embedder falls back to empty, embedder-failure swallow. |
+
+### P2 done criteria — verified
+
+- [x] All P2 components compile clean.
+- [x] P2.4 unit tests pass (8/8): policy coverage, delete cascade, ordering, scoping, legacy compat, failure swallow.
+- [x] No regressions: 35/35 substrate tests (27 P0/P1 + 8 P2) still pass; `code.class.extract-fields` legacy/substrate/Hadoop suites still pass.
+- [x] Skill-runner behavior unchanged for skills without an embedder declared.
+- [x] Status table updated.
 
 ### P1 done criteria — verified
 
@@ -176,7 +224,7 @@ MVP cuts captured against their landing phase, not as flat "deferred to next ite
 
 | # | Substrate doc says | P0 / P1 behavior | Lands in |
 |---|---|---|---|
-| 1 | Lance index for `byEmbedding` | `byEmbedding` returns empty | P2 |
+| 1 | Lance index for `byEmbedding` | P2: `byEmbedding` routes through Lance when an `Embedder` is wired; falls back to empty when not (legacy P0/P1 behavior preserved) | P2 — done |
 | 2 | Context providers (D5a) | Slots that would target providers fall back to inline computation | P4 |
 | 3 | Async indexer + queue (D15) | `bootstrap` runs synchronously at registration | P3 |
 | 4 | Context builder DAG (D15) | Single-builder skill migrations only; no topological ordering | P3 |
