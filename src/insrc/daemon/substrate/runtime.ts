@@ -27,8 +27,18 @@
 import { getLogger } from '../../shared/logger.js';
 
 import type { Skill } from '../skills/types.js';
+import { createAssertionIndex, type AssertionIndex } from './assertion-index.js';
+import {
+	createDefaultClassifier,
+	type ClassifyInput,
+	type ClassifyResult,
+	type CreateClassifierOpts,
+	type UserAssertionClassifier,
+	type UserAssertionPayload,
+} from './classifier/user-assertion.js';
 import { createContextAssembler, type ContextAssembler } from './context-assembler.js';
 import { createDistillEngine, type DistillEngine, schemaKeyFor } from './distill.js';
+import { createFeedbackBus, type FeedbackBus, type FeedbackSubscription } from './feedback-bus.js';
 import { createSubstrateIndexer } from './indexer.js';
 import { createLifecycleRunner, type LifecycleRunner, type TriggerReport } from './lifecycle-runner.js';
 import { withIndexer } from './memory-store-indexed.js';
@@ -41,8 +51,10 @@ import type {
 	ContextBudget,
 	ContextProvider,
 	Embedder,
+	FeedbackEvent,
 	MemoryStore,
 	NamespaceSpec,
+	OwnerId,
 	SubstrateSkillExtension,
 	WorkingStateLedger,
 } from './types.js';
@@ -52,11 +64,14 @@ const log = getLogger('substrate:runtime');
 // ---------------------------------------------------------------------------
 
 export interface SubstrateRuntime {
-	readonly memory:     MemoryStore;
-	readonly assembler:  ContextAssembler;
-	readonly lifecycle:  LifecycleRunner;
-	readonly distill:    DistillEngine;
-	readonly providers:  ProviderRegistry;
+	readonly memory:          MemoryStore;
+	readonly assembler:       ContextAssembler;
+	readonly lifecycle:       LifecycleRunner;
+	readonly distill:         DistillEngine;
+	readonly providers:       ProviderRegistry;
+	readonly feedbackBus:     FeedbackBus;
+	readonly assertionIndex:  AssertionIndex;
+	readonly classifier:      UserAssertionClassifier;
 
 	/**
 	 * Register a skill's substrate-facing declarations. Idempotent on
@@ -83,6 +98,23 @@ export interface SubstrateRuntime {
 
 	/** Fire a bootstrap trigger; dispatches every interested context builder. */
 	fireTrigger(trigger: BootstrapTrigger): Promise<TriggerReport>;
+
+	/**
+	 * Classify a user-turn text for assertions, persist accepted ones
+	 * as constraints in each target's `user-assertions` namespace, and
+	 * dispatch `applyFeedback` events on the feedback bus.
+	 *
+	 * Returns the classification result for caller-side audit + UI.
+	 * Owners with no `applyFeedback` subscription still get their
+	 * memory writes; the bus just no-ops the dispatch.
+	 */
+	classifyAssertion(input: ClassifyInput): Promise<ClassifyAssertionResult>;
+}
+
+export interface ClassifyAssertionResult {
+	readonly classification: ClassifyResult;
+	readonly persisted:      readonly { readonly owner: OwnerId; readonly key: string }[];
+	readonly dispatched:     readonly { readonly owner: OwnerId; readonly eventId: string }[];
 }
 
 export interface RegistrationToken {
@@ -146,6 +178,15 @@ export interface CreateSubstrateRuntimeOpts {
 	 * providers registered they resolve empty (legacy P1-P3 behavior).
 	 */
 	readonly providers?:   readonly ContextProvider[];
+	/**
+	 * User-assertion classifier options (D6). The default classifier
+	 * ships Layer 1 heuristic only; daemon wires the LLM-backed
+	 * Layer 2 + UI-backed Layer 3 hooks via these opts. Caller may
+	 * also pass a fully-replaced classifier via `customClassifier`.
+	 */
+	readonly classifier?:  CreateClassifierOpts;
+	/** Replace the default classifier wholesale (test injection). */
+	readonly customClassifier?: UserAssertionClassifier;
 }
 
 export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): SubstrateRuntime {
@@ -175,9 +216,17 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 		providers.register(p);
 	}
 
-	const assembler = createContextAssembler({ memory, providers });
-	const lifecycle = createLifecycleRunner({ memory });
-	const distill   = createDistillEngine({ memory });
+	const assembler      = createContextAssembler({ memory, providers });
+	const lifecycle      = createLifecycleRunner({ memory });
+	const distill        = createDistillEngine({ memory });
+	const feedbackBus    = createFeedbackBus({ memory });
+	const assertionIndex = createAssertionIndex();
+	const classifier     = opts.customClassifier ?? createDefaultClassifier(opts.classifier);
+
+	// skillId -> active feedback subscription handle (for deregister).
+	const ownedSubscriptions = new Map<string, FeedbackSubscription>();
+	// skillId -> assertion-index owner key (for deregister).
+	const ownedAssertionOwners = new Map<string, OwnerId>();
 
 	return {
 		memory,
@@ -185,6 +234,9 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 		lifecycle,
 		distill,
 		providers,
+		feedbackBus,
+		assertionIndex,
+		classifier,
 
 		registerSkill(skill: Skill): RegistrationToken {
 			const ext = (skill as unknown as SubstrateSkillExtension);
@@ -203,10 +255,32 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 					lifecycle.registerContextBuilder(b);
 				}
 			}
+			// D14: assertion-interest routing index.
+			if (ext.assertionInterests !== undefined && ext.assertionInterests.length > 0) {
+				assertionIndex.register(ownerId, ext.assertionInterests);
+				ownedAssertionOwners.set(skill.id, ownerId);
+			}
+			// D8: feedback-bus subscription. Skill's applyFeedback receives
+			// every event whose `targetOwner` matches this skill's ownerId.
+			if (ext.applyFeedback !== undefined) {
+				const handler = ext.applyFeedback.bind(ext);
+				const sub = feedbackBus.subscribe(
+					ownerId,
+					async (event, deps) => { await handler([event], deps); },
+				);
+				ownedSubscriptions.set(skill.id, sub);
+			}
 
 			ownedSchemas.set(skill.id, own);
 			log.debug(
-				{ skillId: skill.id, ownerId, namespaces: own.length, builders: ext.contextBuilders?.length ?? 0 },
+				{
+					skillId:    skill.id,
+					ownerId,
+					namespaces: own.length,
+					builders:   ext.contextBuilders?.length    ?? 0,
+					interests:  ext.assertionInterests?.length ?? 0,
+					feedback:   ext.applyFeedback !== undefined,
+				},
 				'substrate: skill registered',
 			);
 
@@ -215,6 +289,16 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 				deregister(): void {
 					for (const k of own) { schemas.delete(k); }
 					ownedSchemas.delete(skill.id);
+					const sub = ownedSubscriptions.get(skill.id);
+					if (sub !== undefined) {
+						sub.unsubscribe();
+						ownedSubscriptions.delete(skill.id);
+					}
+					const assertOwner = ownedAssertionOwners.get(skill.id);
+					if (assertOwner !== undefined) {
+						assertionIndex.deregister(assertOwner);
+						ownedAssertionOwners.delete(skill.id);
+					}
 				},
 			};
 		},
@@ -276,5 +360,70 @@ export function createSubstrateRuntime(opts: CreateSubstrateRuntimeOpts): Substr
 		async fireTrigger(trigger: BootstrapTrigger): Promise<TriggerReport> {
 			return lifecycle.fireTrigger(trigger);
 		},
+
+		async classifyAssertion(input: ClassifyInput): Promise<ClassifyAssertionResult> {
+			const classification = await classifier.classify(input);
+
+			const persisted:  { owner: OwnerId; key: string }[]     = [];
+			const dispatched: { owner: OwnerId; eventId: string }[] = [];
+
+			// For each accepted assertion: resolve targetOwners (from the
+			// payload if non-empty, otherwise via index lookup), then for
+			// each target -> persist + emit feedback.
+			for (const payload of classification.accepted) {
+				const targets = resolveTargets(payload, assertionIndex);
+				if (targets.length === 0) {
+					log.debug({ subject: payload.subject, turnId: input.turnId }, 'classifyAssertion: no targets matched');
+					continue;
+				}
+
+				for (const owner of targets) {
+					try {
+						const key = `${input.turnId}::${payload.subject}`;
+						const ref = await memory.scope(owner, 'user-assertions').put(key, payload, {
+							kind:       'constraint',
+							source:     { kind: 'user-asserted', turnId: input.turnId },
+							confidence: payload.confidence,
+						});
+						persisted.push({ owner, key });
+
+						// Best-effort feedback dispatch (D8). The bus serializes;
+						// failures are logged and swallowed by the bus itself.
+						const event: FeedbackEvent = {
+							id:          `assert-${input.turnId}-${owner}-${payload.subject}`,
+							kind:        'user-correction',
+							targetOwner: owner,
+							memoryRefs:  [ref],
+							payload,
+							source:      'classifier:user-assertion',
+							at:          Date.now(),
+						};
+						await feedbackBus.emit(event);
+						dispatched.push({ owner, eventId: event.id });
+					} catch (err) {
+						log.warn({ owner, err: (err as Error).message }, 'classifyAssertion: persist/dispatch failed');
+					}
+				}
+			}
+
+			return { classification, persisted, dispatched };
+		},
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Find target owners for an assertion. The classifier (Layer 2 LLM)
+ * may name `targetOwners` directly; otherwise the substrate consults
+ * the D14 assertion-interest index.
+ */
+function resolveTargets(payload: UserAssertionPayload, index: AssertionIndex): readonly OwnerId[] {
+	if (payload.targetOwners.length > 0) {
+		return payload.targetOwners;
+	}
+	const matches = index.lookup(payload.subject);
+	return matches.map(m => m.owner);
 }

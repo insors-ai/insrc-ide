@@ -17,7 +17,7 @@
 | **P2** | Lance index + `byEmbedding` | Semantic recall (fuzzy name match, observation similarity). | done |
 | **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | done (DAG + queue + skip-dependents) |
 | **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | done |
-| **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | deferred (future) |
+| **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | done |
 | **P6+** | Remaining skill migrations + L2 framework | Per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) + [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md). | deferred (future) |
 
 Phases P2 through P5 are independent and can be reordered based on what next-skill migrations need most. P0 → P1 is the only strict prefix.
@@ -240,6 +240,19 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P3.3 | Trigger serialization queue | done | Same file; concurrent `fireTrigger` calls are chained off a tail Promise; `drain()` exposed. |
 | P3.4 | Skip-dependents-on-failure | done | Same file; per-builder `BuilderRunResult` with `succeeded`/`failed`/`skipped` + `skippedBecause` lineage; back-compat `failures` preserved. |
 | P3.5 | P3 unit tests | done | 13 tests pass: linear / diamond / reverse-registration / cycle / self-loop / validateDag / failure-skip / unrelated-survives / trigger-filter / concurrent-serialization / drain / empty / external-dep-treated-as-satisfied. |
+| P5.1 | Feedback bus (D8) | done | [`feedback-bus.ts`](../../src/insrc/daemon/substrate/feedback-bus.ts); subscribe / emit / drain; global serial dispatch (parallel-cross-target deferred to `parallelSafe` flag); per-target ordering via insertion-order snapshots. |
+| P5.2 | Assertion-interest index (D14) | done | [`assertion-index.ts`](../../src/insrc/daemon/substrate/assertion-index.ts); exact `subjectPattern` lookup; priority-descending ordering with stable owner-id tiebreak; embedding similarity deferred. |
+| P5.3 | User-assertion classifier (D6) | done | [`classifier/user-assertion.ts`](../../src/insrc/daemon/substrate/classifier/user-assertion.ts); Layer 1 heuristic ships in-substrate; Layer 2 LLM + Layer 3 user-confirm are injectable hooks (default no-op defers). |
+| P5.4 | Runtime `classifyAssertion` | done | [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts); accepted payloads -> resolve targets (payload-explicit, else index lookup) -> persist constraint to `<owner>/user-assertions` -> emit `user-correction` event on bus. |
+| P5.5 | Skill registration wires interests + feedback | done | Same file; `assertionInterests` -> index; `applyFeedback` -> bus subscription; deregister unwinds both. |
+| P5.6 | P5 unit + integration tests | done | 30 tests pass across 4 files: feedback-bus (8) round-trip / multi-handler / failure-isolation / per-target order / serial dispatch / drain / cross-owner; assertion-index (8) register/lookup/replace/priority/multi-owner; classifier (9) `always` / `never` / `use X for Y` / task-local / no-marker / Layer 2 accept-above-threshold / Layer 3 escalation / Layer 2 reject / default-defer; integration (5) full flow / explicit-target / no-index-match / rejected / no-feedback-handler. |
+
+### P5 done criteria — verified
+
+- [x] All P5 components compile clean.
+- [x] P5 unit tests pass (30/30).
+- [x] No regressions across substrate + skills suites (128/128 total).
+- [x] Status table updated; decision rows D6 / D8 / D14 marked landed.
 
 ### P3 done criteria — verified
 
@@ -247,6 +260,48 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 - [x] P3 unit tests pass (13/13).
 - [x] No regressions across substrate + skills suites (98/98 total).
 - [x] Status table updated; decision row D15 marked landed.
+
+---
+
+## P5 — Feedback bus + user-assertion classifier (D6, D8, D14)
+
+**Goal:** wire the last three locked decisions -- in-process feedback dispatch (D8), assertion-interest routing (D14), and the three-layer user-assertion classifier (D6) -- and bolt them into the runtime so a user-turn text flows end-to-end: classifier -> assertion-index lookup -> per-target memory write + applyFeedback dispatch.
+
+**Prerequisites:** P0, P1 done. (Independent of P2, P3, P4.)
+
+### Components
+
+| # | Component | File path | Depends on |
+|---|---|---|---|
+| P5.1 | Feedback bus (D8) | [`feedback-bus.ts`](../../src/insrc/daemon/substrate/feedback-bus.ts) | (none) |
+| P5.2 | Assertion-interest index (D14) | [`assertion-index.ts`](../../src/insrc/daemon/substrate/assertion-index.ts) | P0.3 |
+| P5.3 | User-assertion classifier (D6) -- interface + Layer 1 heuristic + injectable Layer 2/3 hooks | [`classifier/user-assertion.ts`](../../src/insrc/daemon/substrate/classifier/user-assertion.ts) | (none) |
+| P5.4 | Runtime `classifyAssertion` -- classifier output -> index lookup -> memory write + bus dispatch | [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts) (modify) | P5.1, P5.2, P5.3 |
+| P5.5 | Skill registration wires `assertionInterests` into the index + `applyFeedback` into the bus | [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts) (modify) | P5.4 |
+| P5.6 | Unit + integration tests | [`feedback-bus.test.ts`](../../src/insrc/daemon/substrate/__tests__/feedback-bus.test.ts), [`assertion-index.test.ts`](../../src/insrc/daemon/substrate/__tests__/assertion-index.test.ts), [`classifier-user-assertion.test.ts`](../../src/insrc/daemon/substrate/__tests__/classifier-user-assertion.test.ts), [`classify-assertion-integration.test.ts`](../../src/insrc/daemon/substrate/__tests__/classify-assertion-integration.test.ts) | P5.5 |
+
+### Done criteria for P5
+
+- [x] All P5 components compile clean (`scripts/build.sh daemon`).
+- [x] P5.6 unit tests pass (30/30 across 4 files): feedback-bus (8), assertion-index (8), classifier (9), classify-assertion integration (5).
+- [x] No regressions across substrate + skills suites (128/128 total).
+- [x] Skills opt in by declaring `assertionInterests` + `applyFeedback`; skills without either are unaffected.
+- [x] Status table in this doc updated; decision rows D6 / D8 / D14 marked landed.
+
+### Out of scope for P5 (deferred to later phases)
+
+| Component | Deferred to | Why not in P5 |
+|---|---|---|
+| Parallel-cross-target fan-out (D8 ships this) | When a `parallelSafe` per-subscription flag lands | CLAUDE.md's "no parallel LLM calls" rule applies to handlers that may reach an LLM; serial-cross-target is the safe default. |
+| Embedding-similarity fallback for assertion subjects (D14 step 2) | When a real consumer needs fuzzy routing | Exact `subjectPattern` is enough for the day-one Layer 1 heuristic + LLM-emitted canonical subjects. |
+| LLM-backed Layer 2 classifier | When daemon wires the active provider into the classifier | Substrate ships the hook + the deterministic Layer 1; Layer 2 lives outside the substrate primitive. |
+| UI-backed Layer 3 user-confirm | When chat-UI integration ships | Same -- substrate ships the hook. |
+| `(turnId, span)` decision cache | When telemetry shows repeated identical spans | Premature without data. |
+| Classifier-owned `decisions` namespace persistence (D6 audit trail) | When telemetry / UI needs the trail | The `ClassifyResult.decisions` array is the in-memory equivalent; persisting it is its own scope. |
+| `acceptAssertion` per-target validation hook (D6) | When a skill needs to refine / reject incoming assertions | `applyFeedback` is the existing hook; `acceptAssertion` is an optional pre-persist filter that can layer on. |
+| Full D7 supersession-marking (`supersededBy` on conflicting constraints) | When a real conflict shows up in usage | D4's default conflict resolution (constraint+constraint: confidence -> recency) gives correct behavior; full supersession marking is audit-trail sugar. |
+
+---
 
 ### P4 done criteria — verified
 
@@ -331,8 +386,8 @@ MVP cuts captured against their landing phase, not as flat "deferred to next ite
 | 2 | Context providers (D5a) | P4: `provider:user-config` / `provider:code-kg` / `provider:active-session` are first-class, registered, slot-routable; `source.kind: 'provider'` stamping enforced by the registry. Per-skill consumption opt-in. | P4 — done |
 | 3 | Async indexer + queue (D15) | P3: trigger queue serializes concurrent fires; bootstrap still caller-driven (no auto-fire from registration) | P3 — done |
 | 4 | Context builder DAG (D15) | P3: Kahn-level topo-sort + Tarjan cycle detection + skip-dependents-on-failure; serial-within-level (parallel-within-level deferred to `parallelSafe` flag) | P3 — done |
-| 5 | User-assertion classifier (D6) | User assertions enter via direct test writes to `class-aliases` namespace | P5 |
-| 6 | Feedback bus + fan-out (D8) | `applyFeedback` hook registered but never fired | P5 |
+| 5 | User-assertion classifier (D6) | P5: three-layer pipeline (Layer 1 heuristic in-substrate; Layer 2 LLM + Layer 3 user-confirm hooks injectable); runtime.classifyAssertion is the entry point | P5 — done |
+| 6 | Feedback bus + fan-out (D8) | P5: in-process global-serial dispatch (parallel-cross-target deferred to `parallelSafe` flag); per-target ordering preserved; subscribe via skill `applyFeedback`. D14 assertion routing wires into the same bus. | P5 — done |
 | 7 | Two-level hex sharding | Files land flat under namespace | When entry count approaches ~10k per namespace |
 | 8 | Spill policy for >64KB entries | Entries stay inline | When first skill writes a large value |
 | 9 | Schema migration (D9) wipe-and-rebootstrap | No migration path; all schemas at `v1` | First `schemaVersion` bump |
