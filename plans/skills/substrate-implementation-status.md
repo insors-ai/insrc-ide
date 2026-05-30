@@ -15,7 +15,7 @@
 | **P0** | Substrate primitives (no consumers) | Memory store + working-state ledger + skill-interface extensions exist as standalone modules with unit tests. | not-started |
 | **P1** | First skill migration (`code.class.extract-fields`, narrow wiring) | The substrate is consumed end-to-end by one real skill; Hadoop integration tests validate against real data. | not-started |
 | **P2** | Lance index + `byEmbedding` | Semantic recall (fuzzy name match, observation similarity). | done |
-| **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | deferred (future) |
+| **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | done (DAG + queue + skip-dependents) |
 | **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | done |
 | **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | deferred (future) |
 | **P6+** | Remaining skill migrations + L2 framework | Per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) + [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md). | deferred (future) |
@@ -218,7 +218,7 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P0.3 | Skill-interface extension types | done | [`types.ts`](../../src/insrc/daemon/substrate/types.ts); SubstrateSkillExtension is fully optional, declared but not yet consumed by the skill runner (P1.4). |
 | P0.4 | P0 unit tests | done | 27 tests pass: round-trips, key sanitization, prefix scan, filter scan, D4 conflict resolution, file layout, expiry handling, soft warn, hard cap (entries + bytes), ledger isolation. |
 | P1.1 | Context assembler (memory only) | done | [`context-assembler.ts`](../../src/insrc/daemon/substrate/context-assembler.ts); four query modes minus `byEmbedding`; D4 ranking + caller-owned budget (D2) with proportional truncation. |
-| P1.2 | Sync lifecycle runner | done | [`lifecycle-runner.ts`](../../src/insrc/daemon/substrate/lifecycle-runner.ts); `fireTrigger` dispatches matching builders sequentially. |
+| P1.2 | Sync lifecycle runner | done | [`lifecycle-runner.ts`](../../src/insrc/daemon/substrate/lifecycle-runner.ts); `fireTrigger` dispatches matching builders sequentially. Superseded by P3.1-P3.4 (DAG + queue + skip-dependents) -- same file. |
 | P1.3 | Distillation engine | done | [`distill.ts`](../../src/insrc/daemon/substrate/distill.ts); walks pins, looks up the namespace's `autoDistill` policy, writes to memory. |
 | P1.4 | Skill-runner integration (`invoke.ts`) | done | Substrate runtime facade ([`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts)) wires assembler + lifecycle + distill; `runSkill` populates `deps.context` / `deps.workingState` / `deps.memory` when substrate is provided. Skills without substrate-facing declarations are unaffected. |
 | P1.5 | `code.class.extract-fields` migration (narrow) | done | 3 context slots wired (cached-extraction / class-aliases / recent-misses); 5 memorySchema namespaces declared; 2 assertionInterests declared. Deferred-component slots return empty and skill body falls through (per the per-skill plan's P1 narrow-wiring table). |
@@ -235,6 +235,18 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 | P4.5 | `provider:active-session` | done | [`providers/active-session.ts`](../../src/insrc/daemon/substrate/providers/active-session.ts); whitelisted field surface (id / repoPath / closureRepos / turnIndex / startedAt / permissionMode / intent); non-whitelisted fields are filtered out. |
 | P4.6 | Runtime wires registry | done | [`runtime.ts`](../../src/insrc/daemon/substrate/runtime.ts); `CreateSubstrateRuntimeOpts.providers?` seeds the registry; `runtime.providers` is publicly exposed; `prepareForSkill` threads session into the assembler's per-call deps. |
 | P4.7 | P4 unit tests | done | 13 tests pass: registry round-trip, replacement, non-provider owner -> [], unknown id -> [], source stamping, assembler routing, no-registry empty fallback, memory+provider coexistence in one request, active-session whitelist + prefix + missing-session, user-config nested byKey + missing path. |
+| P3.1 | Topo-sort + cycle detection | done | [`lifecycle-runner.ts`](../../src/insrc/daemon/substrate/lifecycle-runner.ts); Kahn levels + Tarjan SCC; cycles raise `DagCycleError` at registration with rollback. |
+| P3.2 | DAG-ordered execution | done | Same file; serial-within-level (parallel-within-level deferred until per-spec `parallelSafe` flag lands). |
+| P3.3 | Trigger serialization queue | done | Same file; concurrent `fireTrigger` calls are chained off a tail Promise; `drain()` exposed. |
+| P3.4 | Skip-dependents-on-failure | done | Same file; per-builder `BuilderRunResult` with `succeeded`/`failed`/`skipped` + `skippedBecause` lineage; back-compat `failures` preserved. |
+| P3.5 | P3 unit tests | done | 13 tests pass: linear / diamond / reverse-registration / cycle / self-loop / validateDag / failure-skip / unrelated-survives / trigger-filter / concurrent-serialization / drain / empty / external-dep-treated-as-satisfied. |
+
+### P3 done criteria — verified
+
+- [x] All P3 components compile clean.
+- [x] P3 unit tests pass (13/13).
+- [x] No regressions across substrate + skills suites (98/98 total).
+- [x] Status table updated; decision row D15 marked landed.
 
 ### P4 done criteria — verified
 
@@ -243,6 +255,43 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 - [x] No regressions across the substrate + skills suites.
 - [x] Skills without provider slots are unaffected (provider routing is `fromOwner`-prefix opt-in).
 - [x] Status table updated; decision row D5a marked landed.
+
+---
+
+## P3 — Context-builder DAG (D15)
+
+**Goal:** replace the P1 sequential lifecycle runner with a substrate-managed DAG that topo-sorts builders by `dependsOn`, detects cycles at registration time, skips transitive dependents on failure, and serializes concurrent triggers.
+
+**Prerequisites:** P0, P1 done. (Independent of P2, P4.)
+
+### Components
+
+| # | Component | File path | Depends on |
+|---|---|---|---|
+| P3.1 | Topo-sort (Kahn levels) + cycle detection (Tarjan SCC) | [`lifecycle-runner.ts`](../../src/insrc/daemon/substrate/lifecycle-runner.ts) (rewrite) | P0.3 |
+| P3.2 | DAG-ordered execution; serial-within-level | same | P3.1 |
+| P3.3 | Trigger serialization queue with `drain()` | same | P3.1 |
+| P3.4 | Skip-dependents-on-failure semantics; per-builder `BuilderRunResult`; extended `TriggerReport` | same | P3.2 |
+| P3.5 | Unit tests | [`lifecycle-runner.test.ts`](../../src/insrc/daemon/substrate/__tests__/lifecycle-runner.test.ts) | P3.4 |
+
+### Done criteria for P3
+
+- [x] All P3 components compile clean (`scripts/build.sh daemon`).
+- [x] P3.5 unit tests pass (13/13): linear / diamond / reverse-registration / cycle / self-loop / validateDag / failure-skip / unrelated-survives / trigger-filter / concurrent-serialization / drain / empty / external-dep-treated-as-satisfied.
+- [x] No regressions across substrate + skills suites (98/98 total).
+- [x] Per-builder result shape (`BuilderRunResult`) lets callers tell `succeeded` / `failed` / `skipped` apart. Back-compat `failures` array preserved.
+- [x] Status table in this doc updated.
+
+### Out of scope for P3 (deferred to later phases)
+
+| Component | Deferred to | Why not in P3 |
+|---|---|---|
+| Parallel-within-level execution (D15 ships this; substrate runs serial-within-level for now) | When per-builder `parallelSafe` flag lands | CLAUDE.md's "no parallel LLM calls" rule disqualifies blind Promise.all on builders that may reach an LLM. Gated on a per-spec opt-in. |
+| Incremental dirty-input tracking | When a real incremental refresh shows up | No consumer fires partial-reindex triggers yet; topo-sort over the full matched subset is fine. |
+| Background scheduler / periodic refresh | When a scheduled refresh consumer shows up | Triggers are caller-driven today (manual / repo-add); a scheduler is its own scope. |
+| Selective re-run after a builder retry | When user-triggered retry shows up in the UI | Tests can re-fire the whole trigger; selective retry is UI sugar over the same primitive. |
+
+---
 
 ### P2 done criteria — verified
 
@@ -280,8 +329,8 @@ MVP cuts captured against their landing phase, not as flat "deferred to next ite
 |---|---|---|---|
 | 1 | Lance index for `byEmbedding` | P2: `byEmbedding` routes through Lance when an `Embedder` is wired; falls back to empty when not (legacy P0/P1 behavior preserved) | P2 — done |
 | 2 | Context providers (D5a) | P4: `provider:user-config` / `provider:code-kg` / `provider:active-session` are first-class, registered, slot-routable; `source.kind: 'provider'` stamping enforced by the registry. Per-skill consumption opt-in. | P4 — done |
-| 3 | Async indexer + queue (D15) | `bootstrap` runs synchronously at registration | P3 |
-| 4 | Context builder DAG (D15) | Single-builder skill migrations only; no topological ordering | P3 |
+| 3 | Async indexer + queue (D15) | P3: trigger queue serializes concurrent fires; bootstrap still caller-driven (no auto-fire from registration) | P3 — done |
+| 4 | Context builder DAG (D15) | P3: Kahn-level topo-sort + Tarjan cycle detection + skip-dependents-on-failure; serial-within-level (parallel-within-level deferred to `parallelSafe` flag) | P3 — done |
 | 5 | User-assertion classifier (D6) | User assertions enter via direct test writes to `class-aliases` namespace | P5 |
 | 6 | Feedback bus + fan-out (D8) | `applyFeedback` hook registered but never fired | P5 |
 | 7 | Two-level hex sharding | Files land flat under namespace | When entry count approaches ~10k per namespace |
