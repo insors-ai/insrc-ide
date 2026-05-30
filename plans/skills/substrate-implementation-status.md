@@ -18,7 +18,7 @@
 | **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | done (DAG + queue + skip-dependents) |
 | **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | done |
 | **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | done |
-| **P6+** | Remaining skill migrations + L2 framework | Per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) + [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md). | deferred (future) |
+| **P6+** | Remaining skill migrations + L2 framework | Per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) + [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md). | in progress (2 of N L1 skills migrated; L2 framework not started) |
 
 Phases P2 through P5 are independent and can be reordered based on what next-skill migrations need most. P0 → P1 is the only strict prefix.
 
@@ -373,6 +373,41 @@ Updated as each component lands. Status: `not-started` / `in-progress` / `done` 
 - [x] No existing skill behavior changes — 21/21 meta-skill tests still pass; no other existing tests touched.
 - [x] Skill registry continues to accept skills without the new optional fields (SubstrateSkillExtension is fully optional; not consumed yet).
 - [x] Component status table updated.
+
+---
+
+## P6+ — Per-skill L1 migrations (in progress)
+
+The substrate is feature-complete (P0–P5 done). Subsequent work is per-skill L1 migration onto the substrate per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) §"Migration of existing L1 skills" + the priority order in [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md) §"Code-analyzer L1 skill migrations (priority order)".
+
+Each migration:
+1. Per-skill plan in [`plans/skills/code/`](.) or [`plans/skills/data/`](.) (target shape -- contextSlots, memorySchema, assertionInterests).
+2. Add substrate-facing declarations to the skill file (mechanical wiring).
+3. Rewrite `execute()` to consult `deps.context.slots` before tool/DB calls; pin successful results to working state for distillation.
+4. Substrate-aware unit tests + (where applicable) Hadoop integration tests.
+
+### Migrated skills
+
+| # | Skill | Plan doc | Implementation | Tests |
+|---|---|---|---|---|
+| 1 | `code.class.extract-fields` | [`code/code.class.extract-fields.md`](code/code.class.extract-fields.md) | [`code.class.extract-fields.ts`](../../src/insrc/daemon/skills/built-ins/code.class.extract-fields.ts) | substrate (5), Hadoop (5), legacy (11) |
+| 2 | `code.entity.locate-by-name` | [`code/code.entity.locate-by-name.md`](code/code.entity.locate-by-name.md) | [`code.entity.locate-by-name.ts`](../../src/insrc/daemon/skills/built-ins/code.entity.locate-by-name.ts) | substrate (6), Hadoop (6), legacy (22) |
+
+### Pending priority migrations (from code-analyzer-migration.md)
+
+| Priority | Skill | Why |
+|---|---|---|
+| 3 | `code.source.module.describe` | Heavy LLM work today; full bootstrap to memory (module-summary builder) is high-value. |
+| 4 | `code.source.file.describe` | Same story per-file. |
+| 5 | `code.meta.classify-question` | Evolve per A5 to emit goals. |
+| 6 | `code.meta.select-scope` | Demote to L1 arg-filler utility per A5. |
+| 7 | `code.entity.summary` | Cacheable per-entity. |
+| 8 | `code.quality.complexity` | Pre-compute at indexing time. |
+| 9 | `code.quality.cyclic-deps` | Same. |
+| 10 | `code.quality.duplication` | Same. |
+| 11 | `code.quality.unused-exports` | Same. |
+
+L2 framework (`L2Runtime`, `L2Skill<I, O>`, evidence-ledger discipline, `code.answer-question` / `code.audit-module` pilot) is separately scoped per the agentic-skills doc Phase 3.
 
 ---
 
