@@ -169,8 +169,8 @@ test('complexity skill: surfaces histogram + top-N', async () => {
 	);
 	const v = result.value as Record<string, unknown>;
 	assert.equal(v['entryCount'], 2);
-	const top = v['top'] as Array<Record<string, unknown>>;
-	assert.equal(top[0]!['name'], 'complex'); // higher cyclomatic
+	const entries = v['entries'] as Array<Record<string, unknown>>;
+	assert.equal(entries[0]!['name'], 'complex'); // higher cyclomatic, sorted first
 	const hist = v['histogram'] as Record<string, number>;
 	assert.equal(hist['low'], 2); // both still under 10
 });

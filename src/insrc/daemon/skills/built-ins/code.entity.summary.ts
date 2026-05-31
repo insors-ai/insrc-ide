@@ -20,6 +20,15 @@ import { getEntity } from '../../../db/entities.js';
 import { isRepoInScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
 import { tryReadFileForFallback } from './_fallback-file-read.js';
+import type {
+	AssertionInterest,
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const BODY_HEAD_LINES = 10;
 const BODY_MAX_CHARS  = 800;
@@ -140,8 +149,31 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 	providerAffinity: 'auto',
 
 	async execute(input: SummaryInput, deps: SkillDeps): Promise<SkillResult<SummaryOutput>> {
+		// Substrate: cache hit short-circuits the LMDB read + excerpt build.
+		const cached = readCachedSummary(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
+		// Substrate: recent-miss short-circuits for known-not-found ids.
+		const missCached = readRecentMiss(input.entityId, deps);
+		if (missCached !== undefined) {
+			return {
+				value: { found: false, reason: 'entity-not-found' },
+				confidence: 'high',
+				notes: ['from miss cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const e = await getEntity(null, input.entityId);
 		if (e === null) {
+			pinRecentMiss(input.entityId, deps);
 			return {
 				value: { found: false, reason: 'entity-not-found' },
 				confidence: 'high',
@@ -176,6 +208,7 @@ const codeEntitySummarySkill: Skill<SummaryInput, SummaryOutput> = {
 		if (e.body.length > 0) {
 			const { excerpt, truncated } = buildExcerpt(e.body, maxChars);
 			const out = assembleFound(e, excerpt, truncated, 'graph');
+			pinSuccessfulSummary(input, out as Extract<SummaryOutput, { found: true }>, deps);
 			return {
 				value: out,
 				confidence: 'high',
@@ -255,9 +288,154 @@ function assembleFound(
 	return out;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (per plans/skills/code/code.entity.summary.md)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:code.entity.summary';
+
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = [
+	'repo-add', 'reindex', 'manual',
+];
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-summary',
+		fromOwner: OWNER_ID,
+		namespace: 'entity-summaries',
+		query: (req) => {
+			const task = (req.task ?? {}) as SummaryInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+	{
+		name:      'recent-misses',
+		fromOwner: OWNER_ID,
+		namespace: 'recent-misses',
+		query: (req) => {
+			const task = (req.task ?? {}) as SummaryInput;
+			return { kind: 'byKey', key: task.entityId };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   'entity-summaries',
+		valueType:   'SummaryOutput (found:true, confidence:high)',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+	{
+		namespace:   'recent-misses',
+		valueType:   'MissRecord',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const ASSERTION_INTERESTS: readonly AssertionInterest[] = [];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: ASSERTION_INTERESTS,
+};
+
+// ---------------------------------------------------------------------------
+// Substrate helpers
+// ---------------------------------------------------------------------------
+
+interface MissValue {
+	readonly entityId:    string;
+	readonly attemptedAt: number;
+}
+
+function cacheKey(input: SummaryInput): string {
+	const max   = input.excerptMaxChars ?? BODY_MAX_CHARS;
+	const scope = input.scope ?? 'closure';
+	return `${input.entityId}::${max}::${scope}`;
+}
+
+function readCachedSummary(
+	input: SummaryInput,
+	deps: SkillDeps,
+): Extract<SummaryOutput, { found: true }> | undefined {
+	const slot = deps.context?.slots.get('cached-summary');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<Extract<SummaryOutput, { found: true }>>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function readRecentMiss(entityId: string, deps: SkillDeps): MissValue | undefined {
+	const slot = deps.context?.slots.get('recent-misses');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<MissValue>;
+	if (hit.value === undefined || hit.value.entityId !== entityId) { return undefined; }
+	return hit.value;
+}
+
+function pinSuccessfulSummary(
+	input: SummaryInput,
+	value: Extract<SummaryOutput, { found: true }>,
+	deps: SkillDeps,
+): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'getEntity' },
+		payload: value,
+		claims:  [`summary:${input.entityId}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: 'entity-summaries',
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     7 * 24 * 60 * 60 * 1000,
+	});
+}
+
+function pinRecentMiss(entityId: string, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const payload: MissValue = { entityId, attemptedAt: Date.now() };
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'getEntity' },
+		payload,
+		claims:  [`summary-miss:${entityId}`],
+		confidence: 0.9,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: 'recent-misses',
+		key:       entityId,
+		kind:      'fact',
+		ttlMs:     24 * 60 * 60 * 1000,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+const codeEntitySummarySkillWithSubstrate = {
+	...codeEntitySummarySkill,
+	...substrateExtension,
+};
+
 export function registerCodeEntitySummarySkill(): void {
-	registerSkill(codeEntitySummarySkill as unknown as Skill);
+	registerSkill(codeEntitySummarySkillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.
 export const _buildExcerptForTest = buildExcerpt;
+export const _cacheKeyForTest     = cacheKey;

@@ -20,6 +20,14 @@ import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { listEntitiesForRepo, entityU64ForId } from '../../../db/entities.js';
 import { inNeighbors } from '../../../db/graph/edges.js';
 import type { Entity, EntityKind } from '../../../shared/types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const CANDIDATE_KINDS: ReadonlySet<EntityKind> = new Set([
 	'function', 'method', 'class', 'interface', 'type', 'variable',
@@ -89,7 +97,18 @@ const codeQualityUnusedExportsSkill: Skill<UnusedExportsInput, UnusedExportsOutp
 	toolDeps: [],
 	providerAffinity: 'auto',
 
-	async execute(input: UnusedExportsInput, _deps: SkillDeps): Promise<SkillResult<UnusedExportsOutput>> {
+	async execute(input: UnusedExportsInput, deps: SkillDeps): Promise<SkillResult<UnusedExportsOutput>> {
+		// Substrate: cache hit short-circuits the per-candidate in-edge walks.
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.candidateCount > 0 ? 'high' : 'low',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const kinds = input.kinds !== undefined && input.kinds.length > 0
 			? new Set<EntityKind>(input.kinds)
 			: CANDIDATE_KINDS;
@@ -113,6 +132,7 @@ const codeQualityUnusedExportsSkill: Skill<UnusedExportsInput, UnusedExportsOutp
 			unusedCount:    unused.length,
 			unused,
 		};
+		pinReport(input, out, deps);
 		return {
 			value: out,
 			confidence: candidates.length > 0 ? 'high' : 'low',
@@ -137,6 +157,85 @@ function toEntry(e: Entity): UnusedEntry {
 	return x;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (per plans/skills/code/code.quality.suite.md)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:code.quality.unused-exports';
+const NAMESPACE = 'unused-exports-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: UnusedExportsInput): string {
+	const kinds = input.kinds === undefined || input.kinds.length === 0
+		? '*'
+		: [...input.kinds].sort().join(',');
+	return `${input.repoPath}::${kinds}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as UnusedExportsInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'UnusedExportsOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: UnusedExportsInput, deps: SkillDeps): UnusedExportsOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<UnusedExportsOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: UnusedExportsInput, value: UnusedExportsOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'inNeighbors' },
+		payload: value,
+		claims:  [`unused-exports:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const codeQualityUnusedExportsSkillWithSubstrate = {
+	...codeQualityUnusedExportsSkill,
+	...substrateExtension,
+};
+
 export function registerCodeQualityUnusedExportsSkill(): void {
-	registerSkill(codeQualityUnusedExportsSkill as unknown as Skill);
+	registerSkill(codeQualityUnusedExportsSkillWithSubstrate as unknown as Skill);
 }

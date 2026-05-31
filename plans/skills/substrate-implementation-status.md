@@ -394,8 +394,15 @@ Each migration:
 | 2 | `code.entity.locate-by-name` | [`code/code.entity.locate-by-name.md`](code/code.entity.locate-by-name.md) | [`code.entity.locate-by-name.ts`](../../src/insrc/daemon/skills/built-ins/code.entity.locate-by-name.ts) | substrate (6), Hadoop (6), legacy (22) |
 | 3 | `code.source.module.describe` | [`code/code.source.module.describe.md`](code/code.source.module.describe.md) | [`code.source.module.describe.ts`](../../src/insrc/daemon/skills/built-ins/code.source.module.describe.ts) | substrate (5), Hadoop (3), legacy (12). **Measured cold->warm latency drop: ~4.5s -> ~1.0s on Hadoop namenode dir.** |
 | 4 | `code.source.file.describe` | [`code/code.source.file.describe.md`](code/code.source.file.describe.md) | [`code.source.file.describe.ts`](../../src/insrc/daemon/skills/built-ins/code.source.file.describe.ts) | substrate (5), Hadoop (3). **Cold->warm: ~104ms -> ~5ms (~20x) on NameNode.java.** This migration also surfaced + fixed a memory-store long-key ENAMETOOLONG bug (substrate fix: hash-fallback filename for keys whose encoded form exceeds 200 bytes; reverse-mapped via `_meta.key`). |
+| 7  | `code.entity.summary`           | [`code/code.entity.summary.md`](code/code.entity.summary.md)        | [`code.entity.summary.ts`](../../src/insrc/daemon/skills/built-ins/code.entity.summary.ts)               | substrate (6). out-of-scope + disk-fallback paths intentionally not cached. |
+| 8  | `code.quality.complexity`       | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.complexity.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.complexity.ts)       | substrate (2 of 7 in suite). |
+| 9  | `code.quality.cyclic-deps`      | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.cyclic-deps.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.cyclic-deps.ts)     | substrate (1 of 7 in suite). |
+| 10 | `code.quality.duplication`      | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.duplication.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.duplication.ts)     | substrate (2 of 7 in suite). |
+| 11 | `code.quality.unused-exports`   | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.unused-exports.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.unused-exports.ts) | substrate (1 of 7 in suite) + legacy compat (1). All quality skills: 24h TTL (shorter than 7d -- code quality drifts with edits). |
 
 ### Pending priority migrations (from code-analyzer-migration.md)
+
+The remaining two are different in shape -- not just cache wiring. Per A5 (`plans/agentic-skills-architecture.md` §A5), they need a design pass before migration.
 
 | Priority | Skill | Why |
 |---|---|---|
