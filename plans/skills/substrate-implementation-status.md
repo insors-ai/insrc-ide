@@ -18,7 +18,9 @@
 | **P3** | Async indexer + queue + context-builder DAG (D15) | Bootstrap moves off the registration hot path; multi-builder skill migrations become possible. | done (DAG + queue + skip-dependents) |
 | **P4** | Context providers (D5a) | `provider:active-session`, `provider:code-kg`, `provider:user-config` flow into context slots. | done |
 | **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | done |
-| **P6+** | Remaining skill migrations + L2 framework | Per [`plans/agentic-skills-architecture.md`](../agentic-skills-architecture.md) + [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md). | in progress (2 of N L1 skills migrated; L2 framework not started) |
+| **P6** | L1 skill migrations (code + data) | All L1 priority migrations done -- 85 skills across both sides. | done |
+| **P7** | L2 framework core (runtime + budget + grounding + registry) | Per [`plans/skills/l2-framework.md`](../skills/l2-framework.md). Runtime, BudgetTracker, L2LlmAccess, self-grounding validator, L2 registry all shipped. Pilot L2 skill (code.audit-module / code.answer-question) is its own next phase. | done |
+| **P8+** | L2 pilot skill | First pilot per [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md) -- `code.audit-module` strawman, then `code.answer-question`. | not-started |
 
 Phases P2 through P5 are independent and can be reordered based on what next-skill migrations need most. P0 → P1 is the only strict prefix.
 
@@ -412,7 +414,7 @@ All 7 code-analyzer L1 migrations done. Remaining migration work (per agentic-sk
 | done | `data.meta.select-scope`      | A5 demotion shipped 2026-05-31 (mirrors the code-side migration). |
 | done | Data L1 skill migrations      | 73 data L1 skills migrated 2026-05-31 across all families (data.source / data.quality / data.profile / data.distribution / data.drift / data.correlation / data.pii / data.dependency / data.cardinality / data.anomaly / data.timeseries / data.sensitivity / data.code / data-lineage). 6 `data.synth.*` skills skipped (synthesis renderers; low cache-hit rate). 24 `.algo.ts` math helpers skipped (no Skill object). |
 
-L2 framework (`L2Runtime`, `L2Skill<I, O>`, evidence-ledger discipline, `code.answer-question` / `code.audit-module` pilot) is separately scoped per the agentic-skills doc Phase 3.
+**L2 framework (P7) shipped** -- the runtime is now available; the pilot L2 skill (`code.audit-module` / `code.answer-question`) is the next phase. See [`plans/skills/l2-framework.md`](l2-framework.md) for the locked interface decisions.
 
 ---
 
