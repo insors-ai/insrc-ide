@@ -13,7 +13,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface KvScanKeysInput {
 	readonly connectionId: string;
@@ -81,6 +89,17 @@ const skill: Skill<KvScanKeysInput, KvScanKeysOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<KvScanKeysOutput>> {
+		// Substrate: cache hit short-circuits the tool call.
+		const cached = readCachedScan(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.keys.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const limit = clampLimit(input.limit);
 		const toolInput: Record<string, unknown> = { connectionId: input.connectionId, limit };
@@ -108,8 +127,12 @@ const skill: Skill<KvScanKeysInput, KvScanKeysOutput> = {
 			};
 		}
 
+		const value: KvScanKeysOutput = { keys: data.keys, truncated: data.truncated };
+		if (data.keys.length > 0) {
+			pinScan(input, value, deps);
+		}
 		return {
-			value: { keys: data.keys, truncated: data.truncated },
+			value,
 			confidence: data.keys.length > 0 ? 'high' : 'medium',
 			...(data.truncated ? { truncated: true } : {}),
 			toolCalls: [],
@@ -133,6 +156,83 @@ function isKeyList(v: unknown): v is KeyListRaw {
 	return Array.isArray(o['keys']) && typeof o['truncated'] === 'boolean';
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Scanned key lists reflect live data; 1h TTL keeps the cache short
+// while still skipping repeat scans within an analyzer loop.
+
+const OWNER_ID: OwnerId = 'skill:data.source.kv.scan-keys';
+const NAMESPACE = 'kv-key-scans';
+const TTL_MS = 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: KvScanKeysInput): string {
+	const limit = clampLimit(input.limit);
+	return `${input.connectionId}::${input.pattern ?? ''}::${input.prefix ?? ''}::${limit}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-scan',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as KvScanKeysInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'KvScanKeysOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '1h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedScan(input: KvScanKeysInput, deps: SkillDeps): KvScanKeysOutput | undefined {
+	const slot = deps.context?.slots.get('cached-scan');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<KvScanKeysOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinScan(input: KvScanKeysInput, value: KvScanKeysOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_kv_scan' },
+		payload: value,
+		claims:  [`kv-scan:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataSourceKvScanKeysSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

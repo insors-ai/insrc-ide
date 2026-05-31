@@ -15,7 +15,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type ColumnScorecard,
 	type ConformityStats,
@@ -109,6 +117,16 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<QualityScorecardOutput>> {
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.overallScore !== null ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const subInput: Record<string, unknown> = {
 			connectionId: input.connectionId,
 			target:       input.target,
@@ -258,24 +276,116 @@ const skill: Skill<QualityScorecardInput, QualityScorecardOutput> = {
 
 		const topIssues = pickTopIssues(merged, consistency);
 
+		const value: QualityScorecardOutput = {
+			target: completeness.target,
+			totalRows,
+			weights,
+			columns: merged,
+			primaryKeyCandidates: uniqueness.primaryKeyCandidates,
+			overallScore,
+			topIssues,
+			consistency,
+			truncated: completeness.truncated || uniqueness.truncated,
+		};
+		const confidence: 'high' | 'medium' = overallScore !== null ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinReport(input, value, deps);
+		}
 		return {
-			value: {
-				target: completeness.target,
-				totalRows,
-				weights,
-				columns: merged,
-				primaryKeyCandidates: uniqueness.primaryKeyCandidates,
-				overallScore,
-				topIssues,
-				consistency,
-				truncated: completeness.truncated || uniqueness.truncated,
-			},
-			confidence: overallScore !== null ? 'high' : 'medium',
+			value,
+			confidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Composite scorecard: rule maps + consistency rules dominate the output.
+// We cache the FULL rolled-up output; sub-skill caches still kick in on cold
+// path automatically.
+
+const OWNER_ID: OwnerId = 'skill:data.quality.scorecard.rdbms';
+const NAMESPACE = 'scorecard-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: QualityScorecardInput): string {
+	const cols = (input.columns ?? []).slice().sort().join(',');
+	const validity = stringifySortedMap(input.validityPatterns);
+	const conformity = stringifySortedMap(input.conformityRules);
+	const consistencyKey = JSON.stringify(input.consistencyRules ?? []);
+	return `${input.connectionId}::${input.target}::${cols}::${validity}::${conformity}::${consistencyKey}`;
+}
+
+function stringifySortedMap(m: Readonly<Record<string, string>> | undefined): string {
+	if (m === undefined) { return ''; }
+	const keys = Object.keys(m).sort();
+	return keys.map(k => `${k}=${m[k]}`).join(',');
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as QualityScorecardInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'QualityScorecardOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: QualityScorecardInput, deps: SkillDeps): QualityScorecardOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<QualityScorecardOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: QualityScorecardInput, value: QualityScorecardOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'internal', note: 'data.quality.scorecard.rdbms (composite rollup)' },
+		payload: value,
+		claims:  [`scorecard:${input.connectionId}::${input.target}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataQualityScorecardRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

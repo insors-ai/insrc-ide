@@ -30,7 +30,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface PiiColumnClassifierInput {
 	readonly connectionId: string;
@@ -122,6 +130,16 @@ const skill: Skill<PiiColumnClassifierInput, PiiColumnClassifierOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<PiiColumnClassifierOutput>> {
+		const cached = readCachedPiiClassification(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.verdict === 'pii' ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		// Step 1: column-name heuristic (no tools, fast).
 		const nameMatches: string[] = [];
 		for (const rule of COLUMN_NAME_RULES) {
@@ -186,17 +204,21 @@ const skill: Skill<PiiColumnClassifierInput, PiiColumnClassifierOutput> = {
 		// `high` only when both signals agree on PII; `medium` for any
 		// degraded path. Sub-skill confidence is independently clamped
 		// by the registry's calibration.
-		const confidence = verdict === 'pii' ? 'high' : 'medium';
+		const confidence: 'high' | 'medium' = verdict === 'pii' ? 'high' : 'medium';
 
+		const value: PiiColumnClassifierOutput = {
+			target:       input.target,
+			column:       input.column,
+			verdict,
+			nameMatches,
+			valueMatches,
+			evidence,
+		};
+		if (confidence === 'high') {
+			pinPiiClassification(input, value, deps);
+		}
 		return {
-			value: {
-				target:       input.target,
-				column:       input.column,
-				verdict,
-				nameMatches,
-				valueMatches,
-				evidence,
-			},
+			value,
 			confidence,
 			toolCalls: [],
 		};
@@ -220,6 +242,80 @@ function isPatternsResult(v: unknown): v is PatternsResult {
 		&& Array.isArray(o['detections']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.pii.column-classifier.rdbms';
+const NAMESPACE = 'pii-classifications';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: PiiColumnClassifierInput): string {
+	const ss = input.sampleSize ?? '';
+	return `${input.connectionId}::${input.target}::${input.column}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-pii-classification',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as PiiColumnClassifierInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'PiiColumnClassifierOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedPiiClassification(input: PiiColumnClassifierInput, deps: SkillDeps): PiiColumnClassifierOutput | undefined {
+	const slot = deps.context?.slots.get('cached-pii-classification');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<PiiColumnClassifierOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinPiiClassification(input: PiiColumnClassifierInput, value: PiiColumnClassifierOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'sub-call', skillId: 'data.pii.detect-patterns.rdbms', callRef: 'composite' },
+		payload: value,
+		claims:  [`pii-classification:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataPiiColumnClassifierRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

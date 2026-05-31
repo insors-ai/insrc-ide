@@ -12,7 +12,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface RdbmsDescribeTableInput {
 	readonly connectionId: string;
@@ -113,6 +121,17 @@ const skill: Skill<RdbmsDescribeTableInput, SchemaDescriptionOut> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<SchemaDescriptionOut>> {
+		// Substrate: cache hit short-circuits the tool call.
+		const cached = readCachedDescription(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.columns.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const tool = await deps.runTool({
 			id: callId,
@@ -139,12 +158,14 @@ const skill: Skill<RdbmsDescribeTableInput, SchemaDescriptionOut> = {
 			};
 		}
 
+		const value: SchemaDescriptionOut = {
+			target:  data.target,
+			columns: data.columns,
+			source:  data.source,
+		};
+		pinDescription(input, value, deps);
 		return {
-			value: {
-				target:  data.target,
-				columns: data.columns,
-				source:  data.source,
-			},
+			value,
 			confidence: data.columns.length > 0 ? 'high' : 'medium',
 			toolCalls: [],
 		};
@@ -165,6 +186,83 @@ function isSchemaDescription(v: unknown): v is SchemaDescriptionOut {
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Schema introspection is stable per (connectionId, target) until the
+// indexer detects a schema change. 7d TTL is generous for normal DDL
+// rates; consumers can force-refresh via a reindex trigger when needed.
+
+const OWNER_ID: OwnerId = 'skill:data.source.rdbms.describe-table';
+const NAMESPACE = 'table-descriptions';
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: RdbmsDescribeTableInput): string {
+	return `${input.connectionId}::${input.target}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-description',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as RdbmsDescribeTableInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'SchemaDescriptionOut',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDescription(input: RdbmsDescribeTableInput, deps: SkillDeps): SchemaDescriptionOut | undefined {
+	const slot = deps.context?.slots.get('cached-description');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<SchemaDescriptionOut>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDescription(input: RdbmsDescribeTableInput, value: SchemaDescriptionOut, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_describe' },
+		payload: value,
+		claims:  [`describe-table:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataSourceRdbmsDescribeTableSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

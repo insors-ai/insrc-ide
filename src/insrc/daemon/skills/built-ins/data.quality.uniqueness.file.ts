@@ -4,6 +4,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type QualityUniquenessOutput,
 	UNIQUENESS_COL_CAP,
@@ -63,6 +71,16 @@ const skill: Skill<QualityUniquenessFileInput, QualityUniquenessOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<QualityUniquenessOutput>> {
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.totalRows !== null && cached.totalRows > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const notes: string[] = [];
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -96,9 +114,13 @@ const skill: Skill<QualityUniquenessFileInput, QualityUniquenessOutput> = {
 		}
 
 		const out = buildUniqueness(aggResult.data.target, usedCols, truncated, aggResult.data.values, compositeCandidates);
+		const confidence: 'high' | 'medium' = out.totalRows !== null && out.totalRows > 0 ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinReport(input, out, deps);
+		}
 		return {
 			value: out,
-			confidence: out.totalRows !== null && out.totalRows > 0 ? 'high' : 'medium',
+			confidence,
 			...(notes.length > 0 ? { notes } : {}),
 			toolCalls: [],
 		};
@@ -117,6 +139,84 @@ async function resolveColumns(input: QualityUniquenessFileInput, deps: SkillDeps
 	return cols;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.quality.uniqueness.file';
+const NAMESPACE = 'uniqueness-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: QualityUniquenessFileInput): string {
+	const cols = (input.columns ?? []).slice().sort().join(',');
+	const composites = (input.compositePkCandidates ?? [])
+		.map(t => t.slice().sort().join('+'))
+		.sort()
+		.join('|');
+	return `${input.connectionId}::${input.target ?? ''}::${cols}::${composites}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as QualityUniquenessFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'QualityUniquenessOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: QualityUniquenessFileInput, deps: SkillDeps): QualityUniquenessOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<QualityUniquenessOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: QualityUniquenessFileInput, value: QualityUniquenessOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`uniqueness:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataQualityUniquenessFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

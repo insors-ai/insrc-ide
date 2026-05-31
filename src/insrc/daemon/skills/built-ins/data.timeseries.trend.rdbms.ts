@@ -29,6 +29,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const SAMPLE_DEFAULT = 50;
 const MS_PER_DAY = 86_400_000;
@@ -138,6 +146,16 @@ const skill: Skill<TimeseriesTrendInput, TimeseriesTrendOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<TimeseriesTrendOutput>> {
+		const cached = readCachedTrend(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampSample(input.sampleSize);
 
@@ -274,18 +292,20 @@ const skill: Skill<TimeseriesTrendInput, TimeseriesTrendOutput> = {
 		const interpretation = describeTrend(direction, strength, slopePerDay, rSquared, n);
 
 		void tRange;
+		const value: TimeseriesTrendOutput = {
+			target: aggData.target,
+			timestampColumn: input.timestampColumn,
+			valueColumn: input.valueColumn,
+			sampleSize: n,
+			count, valueMean,
+			slope, slopePerDay, intercept, rSquared,
+			direction, strength,
+			interpretation,
+			source: 'sample',
+		};
+		pinTrend(input, value, deps);
 		return {
-			value: {
-				target: aggData.target,
-				timestampColumn: input.timestampColumn,
-				valueColumn: input.valueColumn,
-				sampleSize: n,
-				count, valueMean,
-				slope, slopePerDay, intercept, rSquared,
-				direction, strength,
-				interpretation,
-				source: 'sample',
-			},
+			value,
 			confidence: 'high',
 			toolCalls: [],
 		};
@@ -408,18 +428,20 @@ async function runFullTable(
 		: rSquared >= 0   ? 'weak'
 		: 'inconclusive';
 
+	const value: TimeseriesTrendOutput = {
+		target: t.target,
+		timestampColumn: input.timestampColumn,
+		valueColumn: input.valueColumn,
+		sampleSize: 0,
+		count, valueMean,
+		slope: slope_ms, slopePerDay, intercept, rSquared,
+		direction, strength,
+		interpretation: describeTrend(direction, strength, slopePerDay ?? 0, rSquared ?? 0, t.n) + ' (full-table)',
+		source: 'full-table',
+	};
+	pinTrend(input, value, deps);
 	return {
-		value: {
-			target: t.target,
-			timestampColumn: input.timestampColumn,
-			valueColumn: input.valueColumn,
-			sampleSize: 0,
-			count, valueMean,
-			slope: slope_ms, slopePerDay, intercept, rSquared,
-			direction, strength,
-			interpretation: describeTrend(direction, strength, slopePerDay ?? 0, rSquared ?? 0, t.n) + ' (full-table)',
-			source: 'full-table',
-		},
+		value,
 		confidence: 'high',
 		toolCalls: [],
 	};
@@ -537,6 +559,81 @@ function isSampleResult(v: unknown): v is SampleResultRaw {
 		&& Array.isArray(o['rows']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.timeseries.trend.rdbms';
+const NAMESPACE = 'trend-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: TimeseriesTrendInput): string {
+	const ss = input.sampleSize ?? '';
+	const m = input.mode ?? 'sample';
+	return `${input.connectionId}::${input.target}::${input.timestampColumn}::${input.valueColumn}::${m}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-trend',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as TimeseriesTrendInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'TimeseriesTrendOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedTrend(input: TimeseriesTrendInput, deps: SkillDeps): TimeseriesTrendOutput | undefined {
+	const slot = deps.context?.slots.get('cached-trend');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<TimeseriesTrendOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinTrend(input: TimeseriesTrendInput, value: TimeseriesTrendOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_temporal_trend' },
+		payload: value,
+		claims:  [`trend:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataTimeseriesTrendRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

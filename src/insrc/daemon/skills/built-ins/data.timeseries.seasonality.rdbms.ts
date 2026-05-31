@@ -36,7 +36,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const SAMPLE_DEFAULT  = 50;
 const MIN_SAMPLE      = 20;
@@ -158,6 +166,16 @@ const skill: Skill<TimeseriesSeasonalityInput, TimeseriesSeasonalityOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<TimeseriesSeasonalityOutput>> {
+		const cached = readCachedSeasonality(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampSample(input.sampleSize);
 
@@ -317,23 +335,25 @@ const skill: Skill<TimeseriesSeasonalityInput, TimeseriesSeasonalityOutput> = {
 			significanceThreshold, n,
 		);
 
+		const value: TimeseriesSeasonalityOutput = {
+			target: aggData.target,
+			timestampColumn: input.timestampColumn,
+			valueColumn: input.valueColumn,
+			sampleSize: n,
+			count,
+			medianSpacingMs,
+			significanceThreshold,
+			topPeaks,
+			bestPeriodLag,
+			bestPeriodSpanMs,
+			bestPeriodHumanReadable,
+			bestAutocorrelation,
+			verdict,
+			interpretation,
+		};
+		pinSeasonality(input, value, deps);
 		return {
-			value: {
-				target: aggData.target,
-				timestampColumn: input.timestampColumn,
-				valueColumn: input.valueColumn,
-				sampleSize: n,
-				count,
-				medianSpacingMs,
-				significanceThreshold,
-				topPeaks,
-				bestPeriodLag,
-				bestPeriodSpanMs,
-				bestPeriodHumanReadable,
-				bestAutocorrelation,
-				verdict,
-				interpretation,
-			},
+			value,
 			confidence: 'high',
 			toolCalls: [],
 		};
@@ -452,6 +472,80 @@ function isSampleResult(v: unknown): v is SampleResultRaw {
 		&& Array.isArray(o['rows']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.timeseries.seasonality.rdbms';
+const NAMESPACE = 'seasonality-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: TimeseriesSeasonalityInput): string {
+	const ss = input.sampleSize ?? '';
+	return `${input.connectionId}::${input.target}::${input.timestampColumn}::${input.valueColumn}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-seasonality',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as TimeseriesSeasonalityInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'TimeseriesSeasonalityOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedSeasonality(input: TimeseriesSeasonalityInput, deps: SkillDeps): TimeseriesSeasonalityOutput | undefined {
+	const slot = deps.context?.slots.get('cached-seasonality');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<TimeseriesSeasonalityOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinSeasonality(input: TimeseriesSeasonalityInput, value: TimeseriesSeasonalityOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_sample' },
+		payload: value,
+		claims:  [`seasonality:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataTimeseriesSeasonalityRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

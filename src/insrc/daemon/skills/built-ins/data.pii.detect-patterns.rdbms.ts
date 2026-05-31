@@ -8,7 +8,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type PiiDetectPatternsOutput,
 	PII_OUTPUT_SCHEMA,
@@ -62,6 +70,16 @@ const skill: Skill<PiiDetectPatternsRdbmsInput, PiiDetectPatternsOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<PiiDetectPatternsOutput>> {
+		const cached = readCachedPiiPatterns(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.detections.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampPiiSample(input.sampleSize);
 
@@ -92,14 +110,92 @@ const skill: Skill<PiiDetectPatternsRdbmsInput, PiiDetectPatternsOutput> = {
 			};
 		}
 		const hasMatches = built.output.detections.length > 0;
+		const confidence: 'high' | 'medium' | 'low' = hasMatches ? 'high' : (built.output.sampleSize > 0 ? 'medium' : 'low');
+		if (confidence === 'high') {
+			pinPiiPatterns(input, built.output, deps);
+		}
 		return {
 			value: built.output,
-			confidence: hasMatches ? 'high' : (built.output.sampleSize > 0 ? 'medium' : 'low'),
+			confidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.pii.detect-patterns.rdbms';
+const NAMESPACE = 'pii-classifications';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: PiiDetectPatternsRdbmsInput): string {
+	const ss = input.sampleSize ?? '';
+	return `${input.connectionId}::${input.target}::${input.column}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-pii-patterns',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as PiiDetectPatternsRdbmsInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'PiiDetectPatternsOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedPiiPatterns(input: PiiDetectPatternsRdbmsInput, deps: SkillDeps): PiiDetectPatternsOutput | undefined {
+	const slot = deps.context?.slots.get('cached-pii-patterns');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<PiiDetectPatternsOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinPiiPatterns(input: PiiDetectPatternsRdbmsInput, value: PiiDetectPatternsOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_sample' },
+		payload: value,
+		claims:  [`pii-patterns:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataPiiDetectPatternsRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -4,6 +4,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type ConsistencyOutput,
 	type ConsistencyRule,
@@ -62,6 +70,16 @@ const skill: Skill<ConsistencyFileInput, ConsistencyOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<ConsistencyOutput>> {
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.verdict === 'inconclusive' ? 'medium' : 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampConsistencySample(input.sampleSize);
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -71,9 +89,13 @@ const skill: Skill<ConsistencyFileInput, ConsistencyOutput> = {
 			if (typeof fullResult === 'string') {
 				return { value: emptyConsistency(input.target ?? '', input.rules), confidence: 'low', notes: [fullResult], toolCalls: [] };
 			}
+			const fullConfidence: 'high' | 'medium' = fullResult.verdict === 'inconclusive' ? 'medium' : 'high';
+			if (fullConfidence === 'high') {
+				pinReport(input, fullResult, deps);
+			}
 			return {
 				value: fullResult,
-				confidence: fullResult.verdict === 'inconclusive' ? 'medium' : 'high',
+				confidence: fullConfidence,
 				toolCalls: [],
 			};
 		}
@@ -102,9 +124,13 @@ const skill: Skill<ConsistencyFileInput, ConsistencyOutput> = {
 				toolCalls: [],
 			};
 		}
+		const sampleConfidence: 'high' | 'medium' = built.output.verdict === 'inconclusive' ? 'medium' : 'high';
+		if (sampleConfidence === 'high') {
+			pinReport(input, built.output, deps);
+		}
 		return {
 			value: built.output,
-			confidence: built.output.verdict === 'inconclusive' ? 'medium' : 'high',
+			confidence: sampleConfidence,
 			toolCalls: [],
 		};
 	},
@@ -147,6 +173,82 @@ async function runFullTable(
 	return buildConsistencyFromCounts(input.target ?? '', input.rules, totalRows, perRuleCounts);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.quality.consistency.file';
+const NAMESPACE = 'consistency-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ConsistencyFileInput): string {
+	const mode = input.mode ?? 'sample';
+	const sampleSize = input.sampleSize ?? '';
+	const rulesKey = JSON.stringify(input.rules);
+	return `${input.connectionId}::${input.target ?? ''}::${mode}::${sampleSize}::${rulesKey}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ConsistencyFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ConsistencyOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: ConsistencyFileInput, deps: SkillDeps): ConsistencyOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ConsistencyOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: ConsistencyFileInput, value: ConsistencyOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: input.mode === 'full-table' ? 'db_file_aggregate' : 'db_file_sample' },
+		payload: value,
+		claims:  [`consistency:${input.connectionId}::${input.target ?? ''}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataQualityConsistencyFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

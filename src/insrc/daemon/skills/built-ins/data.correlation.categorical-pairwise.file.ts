@@ -5,6 +5,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type CorrelationCatOutput,
 	CORR_CAT_MAX_COLUMNS,
@@ -64,6 +72,16 @@ const skill: Skill<CorrelationCatFileInput, CorrelationCatOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<CorrelationCatOutput>> {
+		const cached = readCachedCorrelationCat(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampCorrCatSample(input.sampleSize);
 		const maxDistinct = clampMaxDistinct(input.maxDistinctPerColumn);
@@ -107,8 +125,10 @@ const skill: Skill<CorrelationCatFileInput, CorrelationCatOutput> = {
 			};
 		}
 
+		const value = buildCorrelationCatOutput(sampleTool.data.target, evaluatedColumns, droppedHighCardinality, truncatedColumns, rows);
+		pinCorrelationCat(input, value, deps);
 		return {
-			value: buildCorrelationCatOutput(sampleTool.data.target, evaluatedColumns, droppedHighCardinality, truncatedColumns, rows),
+			value,
 			confidence: 'high',
 			toolCalls: [],
 		};
@@ -127,6 +147,83 @@ async function resolveColumns(input: CorrelationCatFileInput, deps: SkillDeps, c
 	return categorical;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.correlation.categorical-pairwise.file';
+const NAMESPACE = 'correlation-cat-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: CorrelationCatFileInput): string {
+	const cols = input.columns ? JSON.stringify(input.columns) : '';
+	const ss = input.sampleSize ?? '';
+	const md = input.maxDistinctPerColumn ?? '';
+	const tgt = input.target ?? '';
+	return `${input.connectionId}::${tgt}::${cols}::${ss}::${md}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-correlation-cat',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as CorrelationCatFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'CorrelationCatOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedCorrelationCat(input: CorrelationCatFileInput, deps: SkillDeps): CorrelationCatOutput | undefined {
+	const slot = deps.context?.slots.get('cached-correlation-cat');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<CorrelationCatOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinCorrelationCat(input: CorrelationCatFileInput, value: CorrelationCatOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_sample' },
+		payload: value,
+		claims:  [`correlation-cat:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataCorrelationCategoricalPairwiseFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

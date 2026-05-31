@@ -29,6 +29,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const COL_CAP = 10;            // ordered pairs grow O(n^2 * 2); 10 cols = 90 pairs
 const PAIR_OUTPUT_CAP = 50;
@@ -180,6 +188,16 @@ const skill: Skill<FunctionalDepInput, FunctionalDepOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<FunctionalDepOutput>> {
+		const cached = readCachedFunctionalDep(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampSample(input.sampleSize);
 		const notes: string[] = [];
@@ -258,15 +276,20 @@ const skill: Skill<FunctionalDepInput, FunctionalDepOutput> = {
 			const totalRows = fds.length > 0 ? fds[0]!.fromDistinctCount : 0;
 			void totalRows;
 			const anyInformative = fds.some(f => f.informativeGroups > 0);
+			const value: FunctionalDepOutput = {
+				target: input.target,
+				sampleSize: 0,  // full-table: sampleSize is meaningless; consumers use determinationScore
+				columns: usedCols,
+				fds: cappedFds,
+				truncated,
+			};
+			const confidence: 'high' | 'medium' = anyInformative ? 'high' : 'medium';
+			if (confidence === 'high') {
+				pinFunctionalDep(input, value, deps);
+			}
 			return {
-				value: {
-					target: input.target,
-					sampleSize: 0,  // full-table: sampleSize is meaningless; consumers use determinationScore
-					columns: usedCols,
-					fds: cappedFds,
-					truncated,
-				},
-				confidence: anyInformative ? 'high' : 'medium',
+				value,
+				confidence,
 				...(notes.length > 0 ? { notes } : {}),
 				toolCalls: [],
 			};
@@ -329,18 +352,23 @@ const skill: Skill<FunctionalDepInput, FunctionalDepOutput> = {
 		}
 
 		const anyInformative = fds.some(f => f.informativeGroups > 0);
+		const value: FunctionalDepOutput = {
+			target: sampleData.target,
+			sampleSize: sampleData.rows.length,
+			columns: presentCols,
+			fds: cappedFds,
+			truncated,
+		};
+		// `high` when at least one pair had informative groups (we
+		// have signal worth surfacing). `medium` when every pair
+		// had at most singletons -- the FD claims are weak.
+		const confidence: 'high' | 'medium' = anyInformative ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinFunctionalDep(input, value, deps);
+		}
 		return {
-			value: {
-				target: sampleData.target,
-				sampleSize: sampleData.rows.length,
-				columns: presentCols,
-				fds: cappedFds,
-				truncated,
-			},
-			// `high` when at least one pair had informative groups (we
-			// have signal worth surfacing). `medium` when every pair
-			// had at most singletons -- the FD claims are weak.
-			confidence: anyInformative ? 'high' : 'medium',
+			value,
+			confidence,
 			...(notes.length > 0 ? { notes } : {}),
 			toolCalls: [],
 		};
@@ -501,6 +529,82 @@ function isSampleResult(v: unknown): v is SampleResultRaw {
 		&& Array.isArray(o['rows']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.dependency.functional.rdbms';
+const NAMESPACE = 'functional-dep-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: FunctionalDepInput): string {
+	const cols = input.columns ? JSON.stringify(input.columns) : '';
+	const ss = input.sampleSize ?? '';
+	const m = input.mode ?? 'sample';
+	return `${input.connectionId}::${input.target}::${m}::${cols}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-functional-dep',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as FunctionalDepInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'FunctionalDepOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedFunctionalDep(input: FunctionalDepInput, deps: SkillDeps): FunctionalDepOutput | undefined {
+	const slot = deps.context?.slots.get('cached-functional-dep');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<FunctionalDepOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinFunctionalDep(input: FunctionalDepInput, value: FunctionalDepOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_functional_dependency' },
+		payload: value,
+		claims:  [`functional-dep:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataDependencyFunctionalRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

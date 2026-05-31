@@ -5,6 +5,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type QualityCompletenessOutput,
 	COMPLETENESS_COL_CAP,
@@ -55,6 +63,16 @@ const skill: Skill<QualityCompletenessFileInput, QualityCompletenessOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<QualityCompletenessOutput>> {
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.totalRows !== null && cached.totalRows > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const notes: string[] = [];
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -83,9 +101,13 @@ const skill: Skill<QualityCompletenessFileInput, QualityCompletenessOutput> = {
 		}
 
 		const out = buildCompleteness(aggResult.data.target, usedCols, truncated, aggResult.data.values);
+		const confidence: 'high' | 'medium' = out.totalRows !== null && out.totalRows > 0 ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinReport(input, out, deps);
+		}
 		return {
 			value: out,
-			confidence: out.totalRows !== null && out.totalRows > 0 ? 'high' : 'medium',
+			confidence,
 			...(notes.length > 0 ? { notes } : {}),
 			toolCalls: [],
 		};
@@ -104,6 +126,80 @@ async function resolveColumns(input: QualityCompletenessFileInput, deps: SkillDe
 	return cols;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.quality.completeness.file';
+const NAMESPACE = 'completeness-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: QualityCompletenessFileInput): string {
+	const cols = (input.columns ?? []).slice().sort().join(',');
+	return `${input.connectionId}::${input.target ?? ''}::${cols}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as QualityCompletenessFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'QualityCompletenessOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: QualityCompletenessFileInput, deps: SkillDeps): QualityCompletenessOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<QualityCompletenessOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: QualityCompletenessFileInput, value: QualityCompletenessOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`completeness:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataQualityCompletenessFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

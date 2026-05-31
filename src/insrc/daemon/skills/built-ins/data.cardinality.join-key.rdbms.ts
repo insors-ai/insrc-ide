@@ -34,7 +34,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const ORPHAN_EXAMPLES = 5;
 
@@ -157,6 +165,16 @@ const skill: Skill<JoinKeyInput, JoinKeyOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<JoinKeyOutput>> {
+		const cached = readCachedJoinKey(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
 		const aggArgs = (target: string, column: string) => ({
@@ -229,22 +247,27 @@ const skill: Skill<JoinKeyInput, JoinKeyOutput> = {
 		const orphanCount = antiJoinData.orphanCount;
 		const orphanRate = examined > 0 ? orphanCount / examined : null;
 
-		return {
-			value: {
-				left,
-				right,
-				cardinality,
-				leftFanOut,
-				rightFanOut,
-				orphans: {
-					examined,
-					orphanCount,
-					orphanRate,
-					examples: [...antiJoinData.examples],
-					valueSetTruncated: false,
-				},
+		const value: JoinKeyOutput = {
+			left,
+			right,
+			cardinality,
+			leftFanOut,
+			rightFanOut,
+			orphans: {
+				examined,
+				orphanCount,
+				orphanRate,
+				examples: [...antiJoinData.examples],
+				valueSetTruncated: false,
 			},
-			confidence: left.totalRows !== null && right.totalRows !== null ? 'high' : 'medium',
+		};
+		const confidence: 'high' | 'medium' = left.totalRows !== null && right.totalRows !== null ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinJoinKey(input, value, deps);
+		}
+		return {
+			value,
+			confidence,
 			toolCalls: [],
 		};
 	},
@@ -329,6 +352,79 @@ function isAntiJoinResult(v: unknown): v is AntiJoinResultRaw {
 		&& Array.isArray(o['examples']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.cardinality.join-key.rdbms';
+const NAMESPACE = 'join-key-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: JoinKeyInput): string {
+	return `${input.connectionId}::${input.leftTarget}::${input.leftColumn}::${input.rightTarget}::${input.rightColumn}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-join-key',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as JoinKeyInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'JoinKeyOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedJoinKey(input: JoinKeyInput, deps: SkillDeps): JoinKeyOutput | undefined {
+	const slot = deps.context?.slots.get('cached-join-key');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<JoinKeyOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinJoinKey(input: JoinKeyInput, value: JoinKeyOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_anti_join' },
+		payload: value,
+		claims:  [`join-key:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataCardinalityJoinKeyRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -11,7 +11,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface KvListNamespacesInput {
 	readonly connectionId: string;
@@ -93,6 +101,17 @@ const skill: Skill<KvListNamespacesInput, KvListNamespacesOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<KvListNamespacesOutput>> {
+		// Substrate: cache hit short-circuits the tool call.
+		const cached = readCachedListing(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.namespaces.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const toolInput: Record<string, unknown> = { connectionId: input.connectionId };
 		if (input.limit !== undefined) toolInput['limit'] = input.limit;
@@ -127,6 +146,9 @@ const skill: Skill<KvListNamespacesInput, KvListNamespacesOutput> = {
 			};
 		}
 
+		if (data.namespaces.length > 0) {
+			pinListing(input, data, deps);
+		}
 		return {
 			value: data,
 			confidence: data.namespaces.length > 0 ? 'high' : 'medium',
@@ -143,6 +165,83 @@ function isKvNamespaceList(v: unknown): v is KvListNamespacesOutput {
 		&& typeof o['supported'] === 'boolean';
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Top-level KV namespace lists change slowly (DDL-ish for mongo /
+// cassandra; key-space changes for redis / etcd); 7d TTL matches the
+// other describe / introspect skills.
+
+const OWNER_ID: OwnerId = 'skill:data.source.kv.list-namespaces';
+const NAMESPACE = 'kv-namespace-listings';
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: KvListNamespacesInput): string {
+	return `${input.connectionId}::${input.limit ?? ''}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-listing',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as KvListNamespacesInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'KvListNamespacesOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedListing(input: KvListNamespacesInput, deps: SkillDeps): KvListNamespacesOutput | undefined {
+	const slot = deps.context?.slots.get('cached-listing');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<KvListNamespacesOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinListing(input: KvListNamespacesInput, value: KvListNamespacesOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_kv_list_namespaces' },
+		payload: value,
+		claims:  [`kv-list-namespaces:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataSourceKvListNamespacesSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

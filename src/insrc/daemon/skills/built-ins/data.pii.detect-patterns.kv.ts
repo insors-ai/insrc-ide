@@ -11,6 +11,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type PiiDetectPatternsOutput,
 	PII_OUTPUT_SCHEMA,
@@ -119,6 +127,16 @@ const skill: Skill<PiiDetectPatternsKvInput, PiiDetectPatternsOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<PiiDetectPatternsOutput>> {
+		const cached = readCachedPiiPatterns(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.detections.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampPiiSample(input.sampleSize);
 		const target = input.namespace ?? input.connectionId;
@@ -157,9 +175,13 @@ const skill: Skill<PiiDetectPatternsKvInput, PiiDetectPatternsOutput> = {
 
 		const out = buildPiiDetectionsFromValues(target, sampledNamespaces.join(','), allValues);
 		const hasMatches = out.detections.length > 0;
+		const confidence: 'high' | 'medium' | 'low' = hasMatches ? 'high' : (out.sampleSize > 0 ? 'medium' : 'low');
+		if (confidence === 'high') {
+			pinPiiPatterns(input, out, deps);
+		}
 		return {
 			value: out,
-			confidence: hasMatches ? 'high' : (out.sampleSize > 0 ? 'medium' : 'low'),
+			confidence,
 			toolCalls: [],
 		};
 	},
@@ -182,6 +204,82 @@ async function resolveNamespaces(
 	return listRes.data.namespaces.map(n => n.name).slice(0, cap);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.pii.detect-patterns.kv';
+const NAMESPACE = 'pii-classifications';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: PiiDetectPatternsKvInput): string {
+	const ns = input.namespace ?? '';
+	const max = input.maxNamespaces ?? '';
+	const ss = input.sampleSize ?? '';
+	return `${input.connectionId}::${ns}::${max}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-pii-patterns',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as PiiDetectPatternsKvInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'PiiDetectPatternsOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedPiiPatterns(input: PiiDetectPatternsKvInput, deps: SkillDeps): PiiDetectPatternsOutput | undefined {
+	const slot = deps.context?.slots.get('cached-pii-patterns');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<PiiDetectPatternsOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinPiiPatterns(input: PiiDetectPatternsKvInput, value: PiiDetectPatternsOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_kv_get' },
+		payload: value,
+		claims:  [`pii-patterns:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataPiiDetectPatternsKvSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

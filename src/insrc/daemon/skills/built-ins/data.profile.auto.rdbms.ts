@@ -29,7 +29,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 type ProfileKind = 'numeric' | 'text' | 'boolean' | 'temporal' | 'categorical';
 
@@ -110,6 +118,19 @@ const skill: Skill<ProfileAutoInput, ProfileAutoOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<ProfileAutoOutput>> {
+		// Substrate: cache hit short-circuits the describe call AND the
+		// downstream sub-skill dispatch. Sub-skill caches operate
+		// independently on cold paths.
+		const cached = readCachedProfile(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const describe = await deps.runTool({
 			id: callId,
@@ -167,6 +188,9 @@ const skill: Skill<ProfileAutoInput, ProfileAutoOutput> = {
 			kind,
 			profile: sub.value,
 		};
+		if (sub.confidence === 'high') {
+			pinProfile(input, result, deps);
+		}
 		return {
 			value: result,
 			confidence: sub.confidence,
@@ -227,6 +251,84 @@ function isSchemaDescription(v: unknown): v is SchemaDescriptionRaw {
 	return typeof o['target'] === 'string' && Array.isArray(o['columns']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Composite skill caches the FULL output (describe + classified kind +
+// sub-skill profile). 24h TTL is the standard for every data.profile.*
+// skill. sampleSize forwards to the text sub-profiler, so it affects
+// the output when kind classifies as 'text' -- include it in the key.
+
+const OWNER_ID: OwnerId = 'skill:data.profile.auto.rdbms';
+const NAMESPACE = 'auto-profiles';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ProfileAutoInput): string {
+	return `${input.connectionId}::${input.target}::${input.column}::sample=${input.sampleSize ?? ''}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-profile',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ProfileAutoInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ProfileAutoOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedProfile(input: ProfileAutoInput, deps: SkillDeps): ProfileAutoOutput | undefined {
+	const slot = deps.context?.slots.get('cached-profile');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ProfileAutoOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinProfile(input: ProfileAutoInput, value: ProfileAutoOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_describe' },
+		payload: value,
+		claims:  [`auto-profile:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataProfileAutoRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -4,7 +4,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type ModesOutput,
 	MODES_OUTPUT_SCHEMA,
@@ -90,6 +98,18 @@ const skill: Skill<ModesInput, ModesOutput> = {
 		const sampleSize = clampModesSample(input.sampleSize);
 		const binCount = clampModesBins(input.bins);
 		const minProminence = clampModesProminence(input.minProminence);
+		const normalized: ModesInput = { ...input, sampleSize, bins: binCount, minProminence };
+
+		// Substrate: cache hit short-circuits the tool calls.
+		const cached = readCachedDistribution(normalized, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.modality === 'inconclusive' ? 'medium' : 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
 
 		if (input.mode === 'full-table') {
 			const [histTool, aggTool] = await Promise.all([
@@ -134,9 +154,13 @@ const skill: Skill<ModesInput, ModesOutput> = {
 				meanNum !== null && Number.isFinite(meanNum) ? meanNum : null,
 				minProminence,
 			);
+			const confidence = out.modality === 'inconclusive' ? 'medium' : 'high';
+			if (confidence === 'high') {
+				pinDistribution(normalized, out, deps);
+			}
 			return {
 				value: out,
-				confidence: out.modality === 'inconclusive' ? 'medium' : 'high',
+				confidence,
 				toolCalls: [],
 			};
 		}
@@ -179,14 +203,91 @@ const skill: Skill<ModesInput, ModesOutput> = {
 			aggTool.data.values,
 			{ columns: sampleTool.data.columns, rows: sampleTool.data.rows },
 		);
+		const confidence = out.modality === 'inconclusive' ? 'medium' : 'high';
+		if (confidence === 'high') {
+			pinDistribution(normalized, out, deps);
+		}
 		return {
 			value: out,
-			confidence: out.modality === 'inconclusive' ? 'medium' : 'high',
+			confidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.distribution.modes.rdbms';
+const NAMESPACE = 'modes-distributions';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ModesInput): string {
+	return `${input.connectionId}::${input.target}::${input.column}::${input.sampleSize ?? ''}::${input.bins ?? ''}::${input.minProminence ?? ''}::${input.mode ?? ''}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-distribution',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ModesInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ModesOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDistribution(input: ModesInput, deps: SkillDeps): ModesOutput | undefined {
+	const slot = deps.context?.slots.get('cached-distribution');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ModesOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDistribution(input: ModesInput, value: ModesOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_aggregate' },
+		payload: value,
+		claims:  [`modes:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataDistributionModesRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

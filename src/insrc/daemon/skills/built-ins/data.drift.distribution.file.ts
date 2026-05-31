@@ -11,6 +11,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type DriftDistributionOutput,
 	type DriftSource,
@@ -94,6 +102,16 @@ const skill: Skill<DriftDistributionFileInput, DriftDistributionOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<DriftDistributionOutput>> {
+		const cached = readCachedDriftDistribution(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const binCount = clampDriftBins(input.bins);
 		const col = input.column;
@@ -135,6 +153,7 @@ const skill: Skill<DriftDistributionFileInput, DriftDistributionOutput> = {
 		if (built.degradedConfidence !== null) {
 			return { value: built.output, confidence: built.degradedConfidence, notes: [...built.notes], toolCalls: [] };
 		}
+		pinDriftDistribution(input, built.output, deps);
 		return { value: built.output, confidence: 'high', toolCalls: [] };
 	},
 };
@@ -251,9 +270,87 @@ async function runFullTableFile(
 	if (built.degradedConfidence !== null) {
 		return { value: built.output, confidence: built.degradedConfidence, notes: [...built.notes], toolCalls: [] };
 	}
+	pinDriftDistribution(input, built.output, deps);
 	return { value: built.output, confidence: 'high', toolCalls: [] };
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.drift.distribution.file';
+const NAMESPACE = 'drift-distribution-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: DriftDistributionFileInput): string {
+	const ss = input.sampleSize ?? '';
+	const b = input.bins ?? '';
+	const m = input.mode ?? 'sample';
+	const tgt = input.target ?? '';
+	return `${input.connectionId}::${tgt}::${input.column}::${m}::${ss}::${b}::${JSON.stringify(input.windowAWhere)}::${JSON.stringify(input.windowBWhere)}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-drift-distribution',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as DriftDistributionFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'DriftDistributionOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDriftDistribution(input: DriftDistributionFileInput, deps: SkillDeps): DriftDistributionOutput | undefined {
+	const slot = deps.context?.slots.get('cached-drift-distribution');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<DriftDistributionOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDriftDistribution(input: DriftDistributionFileInput, value: DriftDistributionOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`drift-distribution:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataDriftDistributionFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

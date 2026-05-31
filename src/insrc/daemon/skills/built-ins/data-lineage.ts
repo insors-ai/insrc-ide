@@ -23,6 +23,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+  BootstrapTriggerKind,
+  ContextSlotRequest,
+  MemoryEntry,
+  NamespaceSpec,
+  OwnerId,
+  SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface DataLineageInput {
   readonly connectionId: string;
@@ -125,6 +133,16 @@ const dataLineageSkill: Skill<DataLineageInput, DataLineageOutput> = {
   ],
 
   async execute(input: DataLineageInput, deps: SkillDeps): Promise<SkillResult<DataLineageOutput>> {
+    const cached = readCachedLineage(input, deps);
+    if (cached !== undefined) {
+      return {
+        value: cached,
+        confidence: cached.hits.length > 0 ? 'high' : 'medium',
+        notes: ['from cache (substrate)'],
+        toolCalls: [],
+      };
+    }
+
     const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const toolResult = await deps.runTool({
       id: callId,
@@ -158,18 +176,23 @@ const dataLineageSkill: Skill<DataLineageInput, DataLineageOutput> = {
       };
     }
 
+    const value: DataLineageOutput = {
+      target: data.target,
+      connectionId: data.connectionId,
+      hits: data.hits,
+      truncated: data.truncated,
+      counts: data.counts,
+    };
+    // High when we got hits, medium when we got zero (the search
+    // ran cleanly but found nothing -- which is itself information).
+    // The runner's calibration may clamp further.
+    const confidence: 'high' | 'medium' = data.hits.length > 0 ? 'high' : 'medium';
+    if (confidence === 'high') {
+      pinLineage(input, value, deps);
+    }
     return {
-      value: {
-        target: data.target,
-        connectionId: data.connectionId,
-        hits: data.hits,
-        truncated: data.truncated,
-        counts: data.counts,
-      },
-      // High when we got hits, medium when we got zero (the search
-      // ran cleanly but found nothing -- which is itself information).
-      // The runner's calibration may clamp further.
-      confidence: data.hits.length > 0 ? 'high' : 'medium',
+      value,
+      confidence,
       ...(data.truncated ? { truncated: true } : {}),
       toolCalls: [],
     };
@@ -197,6 +220,84 @@ function isLineageData(v: unknown): v is DataLineageOutput {
     && o['counts'] !== null;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Code-to-data lineage is reasonably stable: it changes when code edits
+// touch callsites or when the indexer re-emits relations. 7d TTL is
+// generous; a reindex trigger forces invalidation when needed.
+
+const OWNER_ID: OwnerId = 'skill:data.lineage.read-write-callsites';
+const NAMESPACE = 'lineage-callsites';
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: DataLineageInput): string {
+  const lim = input.limit ?? '';
+  return `${input.connectionId}::${input.target}::${lim}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+  {
+    name:      'cached-lineage',
+    fromOwner: OWNER_ID,
+    namespace: NAMESPACE,
+    query: (req) => {
+      const task = (req.task ?? {}) as DataLineageInput;
+      return { kind: 'byKey', key: cacheKey(task) };
+    },
+    limit: 1,
+  },
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+  {
+    namespace:   NAMESPACE,
+    valueType:   'DataLineageOutput',
+    autoDistill: 'always-on-success',
+    indexing:    { kind: 'never' },
+    ttl:         '7d',
+  },
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+  ownerId:            OWNER_ID,
+  schemaVersion:      1,
+  interestedTriggers: INTERESTED_TRIGGERS,
+  contextSlots:       CONTEXT_SLOTS,
+  memorySchema:       MEMORY_SCHEMA,
+  assertionInterests: [],
+};
+
+function readCachedLineage(input: DataLineageInput, deps: SkillDeps): DataLineageOutput | undefined {
+  const slot = deps.context?.slots.get('cached-lineage');
+  if (slot === undefined || slot.length === 0) { return undefined; }
+  const hit = slot[0] as MemoryEntry<DataLineageOutput>;
+  if (hit.value === undefined) { return undefined; }
+  if (hit.key !== cacheKey(input)) { return undefined; }
+  return hit.value;
+}
+
+function pinLineage(input: DataLineageInput, value: DataLineageOutput, deps: SkillDeps): void {
+  if (deps.workingState === undefined) { return; }
+  const ref = deps.workingState.append({
+    source:  { kind: 'tool', toolId: 'data_lineage' },
+    payload: value,
+    claims:  [`lineage:${cacheKey(input)}`],
+    confidence: 0.95,
+  });
+  deps.workingState.pin(ref, {
+    owner:     OWNER_ID,
+    namespace: NAMESPACE,
+    key:       cacheKey(input),
+    kind:      'fact',
+    ttlMs:     TTL_MS,
+  });
+}
+
+const skillWithSubstrate = { ...dataLineageSkill, ...substrateExtension };
+
 export function registerDataLineageSkill(): void {
-  registerSkill(dataLineageSkill as unknown as Skill);
+  registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -39,6 +39,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const SAMPLE_DEFAULT = 50;
 const MIN_SAMPLE     = 20;
@@ -169,6 +177,16 @@ const skill: Skill<TimeseriesStationarityInput, TimeseriesStationarityOutput> = 
 	],
 
 	async execute(input, deps): Promise<SkillResult<TimeseriesStationarityOutput>> {
+		const cached = readCachedStationarity(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampSample(input.sampleSize);
 
@@ -318,23 +336,25 @@ const skill: Skill<TimeseriesStationarityInput, TimeseriesStationarityOutput> = 
 		const verdict: Verdict = rejectsAtLevel === 'none' ? 'non-stationary' : 'stationary';
 		const interpretation = describe(verdict, rejectsAtLevel, tStatistic, n);
 
+		const value: TimeseriesStationarityOutput = {
+			target: aggData.target,
+			timestampColumn: input.timestampColumn,
+			valueColumn: input.valueColumn,
+			sampleSize: n,
+			count,
+			tStatistic,
+			beta, betaStdErr, alpha,
+			criticalValue1pct:  CV_50.pct1,
+			criticalValue5pct:  CV_50.pct5,
+			criticalValue10pct: CV_50.pct10,
+			rejectsAtLevel,
+			verdict,
+			interpretation,
+			source: 'sample',
+		};
+		pinStationarity(input, value, deps);
 		return {
-			value: {
-				target: aggData.target,
-				timestampColumn: input.timestampColumn,
-				valueColumn: input.valueColumn,
-				sampleSize: n,
-				count,
-				tStatistic,
-				beta, betaStdErr, alpha,
-				criticalValue1pct:  CV_50.pct1,
-				criticalValue5pct:  CV_50.pct5,
-				criticalValue10pct: CV_50.pct10,
-				rejectsAtLevel,
-				verdict,
-				interpretation,
-				source: 'sample',
-			},
+			value,
 			confidence: 'high',
 			toolCalls: [],
 		};
@@ -425,21 +445,23 @@ async function runFullTable(
 	const verdict: Verdict = rejectsAtLevel === 'none' ? 'non-stationary' : 'stationary';
 	const interpretation = describeAsymptotic(verdict, rejectsAtLevel, df.tStat, df.n);
 
+	const value: TimeseriesStationarityOutput = {
+		target: df.target,
+		timestampColumn: input.timestampColumn,
+		valueColumn: input.valueColumn,
+		sampleSize: 0,
+		count,
+		tStatistic: df.tStat,
+		beta: df.beta, betaStdErr: df.seBeta, alpha: null,
+		criticalValue1pct:  CV_ASYMPTOTIC.pct1,
+		criticalValue5pct:  CV_ASYMPTOTIC.pct5,
+		criticalValue10pct: CV_ASYMPTOTIC.pct10,
+		rejectsAtLevel, verdict, interpretation,
+		source: 'full-table',
+	};
+	pinStationarity(input, value, deps);
 	return {
-		value: {
-			target: df.target,
-			timestampColumn: input.timestampColumn,
-			valueColumn: input.valueColumn,
-			sampleSize: 0,
-			count,
-			tStatistic: df.tStat,
-			beta: df.beta, betaStdErr: df.seBeta, alpha: null,
-			criticalValue1pct:  CV_ASYMPTOTIC.pct1,
-			criticalValue5pct:  CV_ASYMPTOTIC.pct5,
-			criticalValue10pct: CV_ASYMPTOTIC.pct10,
-			rejectsAtLevel, verdict, interpretation,
-			source: 'full-table',
-		},
+		value,
 		confidence: 'high',
 		toolCalls: [],
 	};
@@ -562,6 +584,81 @@ function isSampleResult(v: unknown): v is SampleResultRaw {
 		&& Array.isArray(o['rows']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.timeseries.stationarity.rdbms';
+const NAMESPACE = 'stationarity-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: TimeseriesStationarityInput): string {
+	const ss = input.sampleSize ?? '';
+	const m = input.mode ?? 'sample';
+	return `${input.connectionId}::${input.target}::${input.timestampColumn}::${input.valueColumn}::${m}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-stationarity',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as TimeseriesStationarityInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'TimeseriesStationarityOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedStationarity(input: TimeseriesStationarityInput, deps: SkillDeps): TimeseriesStationarityOutput | undefined {
+	const slot = deps.context?.slots.get('cached-stationarity');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<TimeseriesStationarityOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinStationarity(input: TimeseriesStationarityInput, value: TimeseriesStationarityOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_dickey_fuller' },
+		payload: value,
+		claims:  [`stationarity:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataTimeseriesStationarityRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

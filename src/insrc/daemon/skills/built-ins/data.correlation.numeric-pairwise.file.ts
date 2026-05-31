@@ -5,6 +5,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type CorrelationOutput,
 	CORRELATION_MAX_COLUMNS,
@@ -77,6 +85,16 @@ const skill: Skill<CorrelationFileInput, CorrelationOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<CorrelationOutput>> {
+		const cached = readCachedCorrelationNum(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampCorrelationSample(input.sampleSize);
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -129,6 +147,7 @@ const skill: Skill<CorrelationFileInput, CorrelationOutput> = {
 				pearsonRes.data.matrix,
 				spearmanMatrix,
 			);
+			pinCorrelationNum(input, out, deps);
 			return { value: out, confidence: 'high', toolCalls: [] };
 		}
 
@@ -150,8 +169,10 @@ const skill: Skill<CorrelationFileInput, CorrelationOutput> = {
 				toolCalls: [],
 			};
 		}
+		const out = buildCorrelationOutput(sampleTool.data.target, evaluatedColumns, truncatedColumns, sampleTool.data.rows);
+		pinCorrelationNum(input, out, deps);
 		return {
-			value: buildCorrelationOutput(sampleTool.data.target, evaluatedColumns, truncatedColumns, sampleTool.data.rows),
+			value: out,
 			confidence: 'high',
 			toolCalls: [],
 		};
@@ -172,6 +193,83 @@ async function resolveColumns(input: CorrelationFileInput, deps: SkillDeps, call
 	return numeric;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.correlation.numeric-pairwise.file';
+const NAMESPACE = 'correlation-num-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: CorrelationFileInput): string {
+	const cols = input.columns ? JSON.stringify(input.columns) : '';
+	const ss = input.sampleSize ?? '';
+	const m = input.mode ?? 'sample';
+	const tgt = input.target ?? '';
+	return `${input.connectionId}::${tgt}::${m}::${cols}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-correlation-num',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as CorrelationFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'CorrelationOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedCorrelationNum(input: CorrelationFileInput, deps: SkillDeps): CorrelationOutput | undefined {
+	const slot = deps.context?.slots.get('cached-correlation-num');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<CorrelationOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinCorrelationNum(input: CorrelationFileInput, value: CorrelationOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_correlation_matrix' },
+		payload: value,
+		claims:  [`correlation-num:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataCorrelationNumericPairwiseFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

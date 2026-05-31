@@ -10,7 +10,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type OutliersIqrOutput,
 	type OutliersSource,
@@ -102,7 +110,19 @@ const skill: Skill<OutliersIqrFileInput, OutliersIqrOutput> = {
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const k = clampIqrMultiplier(input.k);
 		const sampleSize = clampSampleSize(input.sampleSize);
+		const normalized: OutliersIqrFileInput = { ...input, k, sampleSize };
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
+
+		// Substrate: cache hit short-circuits the tool calls.
+		const cached = readCachedDistribution(normalized, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.lowerBound !== null && cached.upperBound !== null && cached.sampleSize > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
 
 		if (input.mode === 'full-table') {
 			const toolInput: Record<string, unknown> = {
@@ -125,9 +145,13 @@ const skill: Skill<OutliersIqrFileInput, OutliersIqrOutput> = {
 				};
 			}
 			const out = buildOutliersIqrFromOutlierTool(tool.data);
+			const confidence = out.lowerBound !== null && out.upperBound !== null ? 'high' : 'medium';
+			if (confidence === 'high') {
+				pinDistribution(normalized, out, deps);
+			}
 			return {
 				value: out,
-				confidence: out.lowerBound !== null && out.upperBound !== null ? 'high' : 'medium',
+				confidence,
 				toolCalls: [],
 			};
 		}
@@ -165,14 +189,91 @@ const skill: Skill<OutliersIqrFileInput, OutliersIqrOutput> = {
 			aggTool.data.values,
 			{ columns: sampleTool.data.columns, rows: sampleTool.data.rows },
 		);
+		const confidence = out.lowerBound !== null && out.upperBound !== null && out.sampleSize > 0 ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinDistribution(normalized, out, deps);
+		}
 		return {
 			value: out,
-			confidence: out.lowerBound !== null && out.upperBound !== null && out.sampleSize > 0 ? 'high' : 'medium',
+			confidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.distribution.outliers-iqr.file';
+const NAMESPACE = 'outliers-iqr-distributions';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: OutliersIqrFileInput): string {
+	return `${input.connectionId}::${input.target ?? ''}::${input.column}::${input.k ?? ''}::${input.sampleSize ?? ''}::${input.mode ?? ''}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-distribution',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as OutliersIqrFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'OutliersIqrOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDistribution(input: OutliersIqrFileInput, deps: SkillDeps): OutliersIqrOutput | undefined {
+	const slot = deps.context?.slots.get('cached-distribution');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<OutliersIqrOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDistribution(input: OutliersIqrFileInput, value: OutliersIqrOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`outliers-iqr:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataDistributionOutliersIqrFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

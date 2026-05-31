@@ -15,7 +15,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface WhereClauseIn {
 	readonly column: string;
@@ -107,6 +115,17 @@ const skill: Skill<FileSampleRowsInput, FileSampleRowsOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<FileSampleRowsOutput>> {
+		// Substrate: cache hit short-circuits the tool call.
+		const cached = readCachedSample(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.rows.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const limit = clampLimit(input.limit);
 		const toolInput: Record<string, unknown> = {
@@ -137,14 +156,18 @@ const skill: Skill<FileSampleRowsInput, FileSampleRowsOutput> = {
 			};
 		}
 
+		const value: FileSampleRowsOutput = {
+			target:         data.target,
+			columns:        data.columns,
+			rows:           data.rows,
+			truncated:      data.truncated,
+			samplingMethod: data.metadata?.samplingMethod ?? 'first',
+		};
+		if (data.rows.length > 0) {
+			pinSample(input, value, deps);
+		}
 		return {
-			value: {
-				target:         data.target,
-				columns:        data.columns,
-				rows:           data.rows,
-				truncated:      data.truncated,
-				samplingMethod: data.metadata?.samplingMethod ?? 'first',
-			},
+			value,
 			confidence: data.rows.length > 0 ? 'high' : 'medium',
 			...(data.truncated ? { truncated: true } : {}),
 			toolCalls: [],
@@ -178,6 +201,84 @@ function isSampleResult(v: unknown): v is SampleResultRaw {
 		&& typeof o['truncated'] === 'boolean';
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Row samples reflect live data; 1h TTL keeps them fresh while still
+// short-circuiting repeat lookups within a single analyzer loop.
+
+const OWNER_ID: OwnerId = 'skill:data.source.file.sample-rows';
+const NAMESPACE = 'file-samples';
+const TTL_MS = 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: FileSampleRowsInput): string {
+	const limit = clampLimit(input.limit);
+	const where = input.where !== undefined ? JSON.stringify(input.where) : '';
+	return `${input.connectionId}::${input.target ?? ''}::${limit}::${where}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-sample',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as FileSampleRowsInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'FileSampleRowsOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '1h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedSample(input: FileSampleRowsInput, deps: SkillDeps): FileSampleRowsOutput | undefined {
+	const slot = deps.context?.slots.get('cached-sample');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<FileSampleRowsOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinSample(input: FileSampleRowsInput, value: FileSampleRowsOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_sample' },
+		payload: value,
+		claims:  [`file-sample:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataSourceFileSampleRowsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

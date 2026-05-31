@@ -34,6 +34,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const SAMPLE_DEFAULT     = 50;
 const MIN_SAMPLE         = 10;
@@ -162,6 +170,16 @@ const skill: Skill<TimeseriesGapAnalysisInput, TimeseriesGapAnalysisOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<TimeseriesGapAnalysisOutput>> {
+		const cached = readCachedGapAnalysis(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampSample(input.sampleSize);
 		const gapRatio   = input.gapRatio !== undefined && Number.isFinite(input.gapRatio) && input.gapRatio >= 1.5
@@ -282,21 +300,23 @@ const skill: Skill<TimeseriesGapAnalysisInput, TimeseriesGapAnalysisOutput> = {
 		const cadenceHumanReadable = humanReadableSpan(medianSpacingMs);
 		const interpretation = describe(verdict, regularityScore, cadenceHumanReadable, gapsRaw.length, n);
 
+		const value: TimeseriesGapAnalysisOutput = {
+			target: aggData.target,
+			timestampColumn: input.timestampColumn,
+			sampleSize: n,
+			count,
+			medianSpacingMs,
+			cadenceHumanReadable,
+			regularityScore,
+			gapCount: gapsRaw.length,
+			topGaps,
+			verdict,
+			interpretation,
+			source: 'sample',
+		};
+		pinGapAnalysis(input, value, deps);
 		return {
-			value: {
-				target: aggData.target,
-				timestampColumn: input.timestampColumn,
-				sampleSize: n,
-				count,
-				medianSpacingMs,
-				cadenceHumanReadable,
-				regularityScore,
-				gapCount: gapsRaw.length,
-				topGaps,
-				verdict,
-				interpretation,
-				source: 'sample',
-			},
+			value,
 			confidence: 'high',
 			toolCalls: [],
 		};
@@ -375,21 +395,23 @@ async function runFullTable(
 
 	const interpretation = describe(verdict, t.regularityScore, cadenceHumanReadable, t.gapCount, t.n) + ' (full-table)';
 
+	const value: TimeseriesGapAnalysisOutput = {
+		target: t.target,
+		timestampColumn: input.timestampColumn,
+		sampleSize: 0,
+		count: t.n,
+		medianSpacingMs,
+		cadenceHumanReadable,
+		regularityScore: t.regularityScore,
+		gapCount: t.gapCount,
+		topGaps,
+		verdict,
+		interpretation,
+		source: 'full-table',
+	};
+	pinGapAnalysis(input, value, deps);
 	return {
-		value: {
-			target: t.target,
-			timestampColumn: input.timestampColumn,
-			sampleSize: 0,
-			count: t.n,
-			medianSpacingMs,
-			cadenceHumanReadable,
-			regularityScore: t.regularityScore,
-			gapCount: t.gapCount,
-			topGaps,
-			verdict,
-			interpretation,
-			source: 'full-table',
-		},
+		value,
 		confidence: 'high',
 		toolCalls: [],
 	};
@@ -533,6 +555,82 @@ function isSampleResult(v: unknown): v is SampleResultRaw {
 		&& Array.isArray(o['rows']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.timeseries.gap-analysis.rdbms';
+const NAMESPACE = 'gap-analysis-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: TimeseriesGapAnalysisInput): string {
+	const ss = input.sampleSize ?? '';
+	const gr = input.gapRatio ?? '';
+	const m = input.mode ?? 'sample';
+	return `${input.connectionId}::${input.target}::${input.timestampColumn}::${m}::${ss}::${gr}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-gap-analysis',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as TimeseriesGapAnalysisInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'TimeseriesGapAnalysisOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedGapAnalysis(input: TimeseriesGapAnalysisInput, deps: SkillDeps): TimeseriesGapAnalysisOutput | undefined {
+	const slot = deps.context?.slots.get('cached-gap-analysis');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<TimeseriesGapAnalysisOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinGapAnalysis(input: TimeseriesGapAnalysisInput, value: TimeseriesGapAnalysisOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_temporal_gap_stats' },
+		payload: value,
+		claims:  [`gap-analysis:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataTimeseriesGapAnalysisRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

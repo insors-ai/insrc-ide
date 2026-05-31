@@ -11,7 +11,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface KvDescribeNamespaceInput {
 	readonly connectionId: string;
@@ -103,6 +111,18 @@ const skill: Skill<KvDescribeNamespaceInput, KvDescribeNamespaceOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<KvDescribeNamespaceOutput>> {
+		// Substrate: cache hit short-circuits the tool call.
+		const cached = readCachedDescription(input, deps);
+		if (cached !== undefined) {
+			const haveEvidence = cached.fields.length > 0 || cached.sampleKeys.length > 0;
+			return {
+				value: cached,
+				confidence: haveEvidence ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const toolInput: Record<string, unknown> = {
 			connectionId: input.connectionId,
@@ -143,6 +163,9 @@ const skill: Skill<KvDescribeNamespaceInput, KvDescribeNamespaceOutput> = {
 		// Confidence ladder: high when we have either schema fields or sample keys; medium when neither
 		// (empty namespace, supported driver); low handled above for unsupported / errors.
 		const haveEvidence = data.fields.length > 0 || data.sampleKeys.length > 0;
+		if (haveEvidence) {
+			pinDescription(input, data, deps);
+		}
 		return {
 			value: data,
 			confidence: haveEvidence ? 'high' : 'medium',
@@ -165,6 +188,85 @@ function isKvNamespaceDescription(v: unknown): v is KvDescribeNamespaceOutput {
 		&& (o['approxCount'] === null || typeof o['approxCount'] === 'number');
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// KV namespace shape (fields + sample keys) is stable per
+// (connectionId, namespace, sampleSize) for collection-shaped stores;
+// 7d TTL mirrors the RDBMS describe-table TTL. Unsupported / empty
+// arms intentionally bypass the cache so a later supported call can
+// re-populate.
+
+const OWNER_ID: OwnerId = 'skill:data.source.kv.describe-namespace';
+const NAMESPACE = 'kv-namespace-descriptions';
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: KvDescribeNamespaceInput): string {
+	return `${input.connectionId}::${input.namespace}::${input.sampleSize ?? ''}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-description',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as KvDescribeNamespaceInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'KvDescribeNamespaceOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDescription(input: KvDescribeNamespaceInput, deps: SkillDeps): KvDescribeNamespaceOutput | undefined {
+	const slot = deps.context?.slots.get('cached-description');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<KvDescribeNamespaceOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDescription(input: KvDescribeNamespaceInput, value: KvDescribeNamespaceOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_kv_describe_namespace' },
+		payload: value,
+		claims:  [`kv-describe-namespace:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataSourceKvDescribeNamespaceSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

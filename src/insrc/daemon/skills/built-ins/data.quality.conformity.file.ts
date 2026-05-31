@@ -3,7 +3,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type QualityConformityOutput,
 	CONFORMITY_OUTPUT_SCHEMA,
@@ -57,6 +65,16 @@ const skill: Skill<ConformityFileInput, QualityConformityOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<QualityConformityOutput>> {
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.verdict === 'mixed' || cached.verdict === 'inconclusive' ? 'medium' : 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampConformitySample(input.sampleSize);
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -90,14 +108,93 @@ const skill: Skill<ConformityFileInput, QualityConformityOutput> = {
 				toolCalls: [],
 			};
 		}
+		const confidence: 'high' | 'medium' = built.output.verdict === 'mixed' || built.output.verdict === 'inconclusive' ? 'medium' : 'high';
+		if (confidence === 'high') {
+			pinReport(input, built.output, deps);
+		}
 		return {
 			value: built.output,
-			confidence: built.output.verdict === 'mixed' || built.output.verdict === 'inconclusive' ? 'medium' : 'high',
+			confidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.quality.conformity.file';
+const NAMESPACE = 'conformity-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ConformityFileInput): string {
+	const formats = (input.formats ?? []).slice().sort().join(',');
+	const sampleSize = input.sampleSize ?? '';
+	return `${input.connectionId}::${input.target ?? ''}::${input.column}::${sampleSize}::${formats}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ConformityFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'QualityConformityOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: ConformityFileInput, deps: SkillDeps): QualityConformityOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<QualityConformityOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: ConformityFileInput, value: QualityConformityOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_sample' },
+		payload: value,
+		claims:  [`conformity:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataQualityConformityFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -10,7 +10,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import {
 	type ProfileBooleanOutput,
 	BOOLEAN_DISTINCT_TOP_N,
@@ -19,6 +19,14 @@ import {
 	emptyBooleanProfile,
 	isDistinctResult,
 } from './data.profile.boolean.algo.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface ProfileBooleanInput {
 	readonly connectionId: string;
@@ -69,6 +77,18 @@ const skill: Skill<ProfileBooleanInput, ProfileBooleanOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<ProfileBooleanOutput>> {
+		// Substrate: cache hit short-circuits the tool call.
+		const cached = readCachedProfile(input, deps);
+		if (cached !== undefined) {
+			const nonNullObserved = cached.trueCount + cached.falseCount + cached.otherCount;
+			return {
+				value: cached,
+				confidence: nonNullObserved > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callId = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const tool = await deps.runTool({
 			id: callId,
@@ -100,6 +120,9 @@ const skill: Skill<ProfileBooleanInput, ProfileBooleanOutput> = {
 
 		const profile = buildBooleanProfile(tool.data.target, input.column, tool.data.topValues);
 		const nonNullObserved = profile.trueCount + profile.falseCount + profile.otherCount;
+		if (nonNullObserved > 0) {
+			pinProfile(input, profile, deps);
+		}
 		return {
 			value: profile,
 			confidence: nonNullObserved > 0 ? 'high' : 'medium',
@@ -108,6 +131,82 @@ const skill: Skill<ProfileBooleanInput, ProfileBooleanOutput> = {
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Boolean profile drifts with the underlying data; 24h TTL is the
+// standard for every data.profile.* skill.
+
+const OWNER_ID: OwnerId = 'skill:data.profile.boolean.rdbms';
+const NAMESPACE = 'boolean-profiles';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ProfileBooleanInput): string {
+	return `${input.connectionId}::${input.target}::${input.column}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-profile',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ProfileBooleanInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ProfileBooleanOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedProfile(input: ProfileBooleanInput, deps: SkillDeps): ProfileBooleanOutput | undefined {
+	const slot = deps.context?.slots.get('cached-profile');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ProfileBooleanOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinProfile(input: ProfileBooleanInput, value: ProfileBooleanOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_distinct' },
+		payload: value,
+		claims:  [`boolean-profile:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataProfileBooleanRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

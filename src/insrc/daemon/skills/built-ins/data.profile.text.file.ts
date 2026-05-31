@@ -8,7 +8,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
 import {
 	type ProfileTextOutput,
 	TEXT_PROFILE_OUTPUT_SCHEMA,
@@ -19,6 +19,14 @@ import {
 	isSampleResult,
 	textAggregationsFor,
 } from './data.profile.text.algo.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface ProfileTextFileInput {
 	readonly connectionId: string;
@@ -72,6 +80,17 @@ const skill: Skill<ProfileTextFileInput, ProfileTextOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<ProfileTextOutput>> {
+		// Substrate: cache hit short-circuits the two tool calls.
+		const cached = readCachedProfile(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: (cached.nonNullCount ?? 0) > 0 && cached.sampleSize > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sampleSize = clampTextSample(input.sampleSize);
 		const sheetPath = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -115,9 +134,13 @@ const skill: Skill<ProfileTextFileInput, ProfileTextOutput> = {
 			aggTool.data.values,
 			{ columns: sampleTool.data.columns, rows: sampleTool.data.rows },
 		);
+		const confidence = (profile.nonNullCount ?? 0) > 0 && profile.sampleSize > 0 ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinProfile(input, profile, deps);
+		}
 		return {
 			value: profile,
-			confidence: (profile.nonNullCount ?? 0) > 0 && profile.sampleSize > 0 ? 'high' : 'medium',
+			confidence,
 			toolCalls: [],
 		};
 	},
@@ -133,6 +156,83 @@ function collectToolErrors(
 	return out;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Text profile drifts with the underlying data; 24h TTL is the standard
+// for every data.profile.* skill. sampleSize is part of the cache key
+// because it changes the sample-derived length / encoding statistics.
+
+const OWNER_ID: OwnerId = 'skill:data.profile.text.file';
+const NAMESPACE = 'text-profiles';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ProfileTextFileInput): string {
+	return `${input.connectionId}::${input.target ?? ''}::${input.column}::sample=${clampTextSample(input.sampleSize)}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-profile',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ProfileTextFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ProfileTextOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedProfile(input: ProfileTextFileInput, deps: SkillDeps): ProfileTextOutput | undefined {
+	const slot = deps.context?.slots.get('cached-profile');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ProfileTextOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinProfile(input: ProfileTextFileInput, value: ProfileTextOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`text-profile:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataProfileTextFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -8,7 +8,7 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult, SkillToolResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult, SkillToolResult } from '../types.js';
 import {
 	type ProfileCategoricalOutput,
 	CATEGORICAL_DEFAULT_TOP_N,
@@ -19,6 +19,14 @@ import {
 	isAggregateResult,
 	isDistinctResult,
 } from './data.profile.categorical.algo.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface ProfileCategoricalFileInput {
 	readonly connectionId: string;
@@ -72,6 +80,17 @@ const skill: Skill<ProfileCategoricalFileInput, ProfileCategoricalOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<ProfileCategoricalOutput>> {
+		// Substrate: cache hit short-circuits the two tool calls.
+		const cached = readCachedProfile(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: (cached.nonNullCount ?? 0) > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const topN = input.topN ?? CATEGORICAL_DEFAULT_TOP_N;
 		const sheetPath = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
@@ -114,9 +133,13 @@ const skill: Skill<ProfileCategoricalFileInput, ProfileCategoricalOutput> = {
 			distTool.data.distinctCount,
 			distTool.data.topValues,
 		);
+		const confidence = (profile.nonNullCount ?? 0) > 0 ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinProfile(input, profile, deps);
+		}
 		return {
 			value: profile,
-			confidence: (profile.nonNullCount ?? 0) > 0 ? 'high' : 'medium',
+			confidence,
 			toolCalls: [],
 		};
 	},
@@ -132,6 +155,83 @@ function collectToolErrors(
 	return out;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Categorical profile drifts with the underlying data; 24h TTL is the
+// standard for every data.profile.* skill. topN affects the output
+// (changes the top-N values list), so it's part of the cache key.
+
+const OWNER_ID: OwnerId = 'skill:data.profile.categorical.file';
+const NAMESPACE = 'categorical-profiles';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: ProfileCategoricalFileInput): string {
+	return `${input.connectionId}::${input.target ?? ''}::${input.column}::topN=${input.topN ?? CATEGORICAL_DEFAULT_TOP_N}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-profile',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ProfileCategoricalFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ProfileCategoricalOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedProfile(input: ProfileCategoricalFileInput, deps: SkillDeps): ProfileCategoricalOutput | undefined {
+	const slot = deps.context?.slots.get('cached-profile');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ProfileCategoricalOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinProfile(input: ProfileCategoricalFileInput, value: ProfileCategoricalOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`categorical-profile:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataProfileCategoricalFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

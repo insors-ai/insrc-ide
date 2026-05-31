@@ -9,7 +9,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type QualityValidityOutput,
 	type ValiditySource,
@@ -78,6 +86,16 @@ const skill: Skill<QualityValidityInput, QualityValidityOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<QualityValidityOutput>> {
+		const cached = readCachedReport(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.matchRate !== null && (cached.nonNullCount ?? cached.sampleSize) > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		// Validate the pattern up-front (fails fast for both modes).
 		let re: RegExp;
 		try {
@@ -120,9 +138,13 @@ const skill: Skill<QualityValidityInput, QualityValidityOutput> = {
 				};
 			}
 			const out = buildValidityFromAggregate(tool.data.target, input.column, input.pattern, tool.data.values);
+			const confidence: 'high' | 'medium' = out.matchRate !== null && (out.nonNullCount ?? 0) > 0 ? 'high' : 'medium';
+			if (confidence === 'high') {
+				pinReport(input, out, deps);
+			}
 			return {
 				value: out,
-				confidence: out.matchRate !== null && (out.nonNullCount ?? 0) > 0 ? 'high' : 'medium',
+				confidence,
 				toolCalls: [],
 			};
 		}
@@ -160,14 +182,93 @@ const skill: Skill<QualityValidityInput, QualityValidityOutput> = {
 				toolCalls: [],
 			};
 		}
+		const sampleConfidence: 'high' | 'medium' = built.output.sampleSize > 0 ? 'high' : 'medium';
+		if (sampleConfidence === 'high') {
+			pinReport(input, built.output, deps);
+		}
 		return {
 			value: built.output,
-			confidence: built.output.sampleSize > 0 ? 'high' : 'medium',
+			confidence: sampleConfidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.quality.validity.rdbms';
+const NAMESPACE = 'validity-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: QualityValidityInput): string {
+	const mode = input.mode ?? 'sample';
+	const sampleSize = input.sampleSize ?? '';
+	return `${input.connectionId}::${input.target}::${input.column}::${input.pattern}::${mode}::${sampleSize}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-report',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as QualityValidityInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'QualityValidityOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReport(input: QualityValidityInput, deps: SkillDeps): QualityValidityOutput | undefined {
+	const slot = deps.context?.slots.get('cached-report');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<QualityValidityOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReport(input: QualityValidityInput, value: QualityValidityOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: input.mode === 'full-table' ? 'db_sql_aggregate' : 'db_sql_sample' },
+		payload: value,
+		claims:  [`validity:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataQualityValidityRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

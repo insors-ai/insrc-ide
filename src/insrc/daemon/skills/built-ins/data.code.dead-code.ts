@@ -47,6 +47,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import type { Entity, EntityKind, RelationKind } from '../../../shared/types.js';
 import { listEntitiesForRepo } from '../../../db/entities.js';
 import { unreachableEntities } from '../../../db/search.js';
@@ -139,7 +147,17 @@ const dataCodeDeadCodeSkill: Skill<DeadCodeInput, DeadCodeOutput> = {
 	toolDeps: [],
 	providerAffinity: 'auto',
 
-	async execute(input: DeadCodeInput, _deps: SkillDeps): Promise<SkillResult<DeadCodeOutput>> {
+	async execute(input: DeadCodeInput, deps: SkillDeps): Promise<SkillResult<DeadCodeOutput>> {
+		const cached = readCachedDeadCode(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const candidateKinds = input.candidateKinds ?? DEFAULT_CANDIDATE_KINDS;
 		const relationKinds  = input.relationKinds  ?? DEFAULT_RELATION_KINDS;
 
@@ -192,13 +210,15 @@ const dataCodeDeadCodeSkill: Skill<DeadCodeInput, DeadCodeOutput> = {
 		//    The renderer pages it for the LLM; the spill carries it whole.
 		const dead = scoped.map(toDeadEntity);
 
+		const value: DeadCodeOutput = {
+			repo:      input.repo,
+			rootCount: roots.length,
+			deadCount: scoped.length,
+			dead,
+		};
+		pinDeadCode(input, value, deps);
 		return {
-			value: {
-				repo:      input.repo,
-				rootCount: roots.length,
-				deadCount: scoped.length,
-				dead,
-			},
+			value,
 			confidence: 'high',
 			notes,
 			toolCalls: [],
@@ -221,6 +241,83 @@ function toDeadEntity(e: Entity): DeadEntity {
 		: out;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.code.dead-code';
+const NAMESPACE = 'dead-code-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: DeadCodeInput): string {
+	const ep = input.entryPoints ? JSON.stringify(input.entryPoints) : '';
+	const ck = input.candidateKinds ? JSON.stringify(input.candidateKinds) : '';
+	const rk = input.relationKinds ? JSON.stringify(input.relationKinds) : '';
+	const md = input.maxDepth ?? '';
+	return `${input.repo}::${ep}::${ck}::${rk}::${md}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-dead-code',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as DeadCodeInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'DeadCodeOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDeadCode(input: DeadCodeInput, deps: SkillDeps): DeadCodeOutput | undefined {
+	const slot = deps.context?.slots.get('cached-dead-code');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<DeadCodeOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDeadCode(input: DeadCodeInput, value: DeadCodeOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'internal', note: 'graph-reachability' },
+		payload: value,
+		claims:  [`dead-code:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...dataCodeDeadCodeSkill, ...substrateExtension };
+
 export function registerDataCodeDeadCodeSkill(): void {
-	registerSkill(dataCodeDeadCodeSkill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

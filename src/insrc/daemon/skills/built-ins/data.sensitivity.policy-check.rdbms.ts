@@ -26,7 +26,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface PolicyCheckInput {
 	readonly connectionId: string;
@@ -137,6 +145,16 @@ const skill: Skill<PolicyCheckInput, PolicyCheckOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<PolicyCheckOutput>> {
+		const cached = readCachedPolicyCheck(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const declaredSet = new Set(input.declaredPiiColumns);
 
 		// Parallel dispatch -- each column is independent, the
@@ -200,19 +218,24 @@ const skill: Skill<PolicyCheckInput, PolicyCheckOutput> = {
 		else if (mutableSummary.overDeclared > 0 || mutableSummary.reviewNeeded > 0) topVerdict = 'mismatch';
 		else topVerdict = 'conformant';
 
+		const value: PolicyCheckOutput = {
+			target: input.target,
+			declared: input.declaredPiiColumns,
+			columns,
+			summary: mutableSummary,
+			verdict: topVerdict,
+		};
+		// `high` when the verdict landed cleanly (all sub-skills
+		// returned classifier shapes); `medium` if any sub-skill
+		// returned a degraded shape (we couldn't classify some
+		// columns confidently).
+		const confidence: 'high' | 'medium' = subResults.every(s => isClassifierOutput(s.value)) ? 'high' : 'medium';
+		if (confidence === 'high') {
+			pinPolicyCheck(input, value, deps);
+		}
 		return {
-			value: {
-				target: input.target,
-				declared: input.declaredPiiColumns,
-				columns,
-				summary: mutableSummary,
-				verdict: topVerdict,
-			},
-			// `high` when the verdict landed cleanly (all sub-skills
-			// returned classifier shapes); `medium` if any sub-skill
-			// returned a degraded shape (we couldn't classify some
-			// columns confidently).
-			confidence: subResults.every(s => isClassifierOutput(s.value)) ? 'high' : 'medium',
+			value,
+			confidence,
 			toolCalls: [],
 		};
 	},
@@ -236,6 +259,82 @@ function isClassifierOutput(v: unknown): v is ClassifierOutput {
 		&& Array.isArray(o['evidence']);
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.sensitivity.policy-check.rdbms';
+const NAMESPACE = 'policy-check-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: PolicyCheckInput): string {
+	const cols = JSON.stringify(input.columns);
+	const dec = JSON.stringify(input.declaredPiiColumns);
+	const ss = input.sampleSize ?? '';
+	return `${input.connectionId}::${input.target}::${cols}::${dec}::${ss}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-policy-check',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as PolicyCheckInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'PolicyCheckOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedPolicyCheck(input: PolicyCheckInput, deps: SkillDeps): PolicyCheckOutput | undefined {
+	const slot = deps.context?.slots.get('cached-policy-check');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<PolicyCheckOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinPolicyCheck(input: PolicyCheckInput, value: PolicyCheckOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'sub-call', skillId: 'data.pii.column-classifier.rdbms', callRef: 'composite' },
+		payload: value,
+		claims:  [`policy-check:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataSensitivityPolicyCheckRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

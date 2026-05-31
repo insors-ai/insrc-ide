@@ -4,7 +4,15 @@
  */
 
 import { registerSkill } from '../registry.js';
-import type { Skill, SkillResult } from '../types.js';
+import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type HeavyTailOutput,
 	HEAVY_TAIL_OUTPUT_SCHEMA,
@@ -62,6 +70,18 @@ const skill: Skill<HeavyTailInput, HeavyTailOutput> = {
 	async execute(input, deps): Promise<SkillResult<HeavyTailOutput>> {
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const threshold = clampHeavyTailThreshold(input.threshold);
+		const normalized: HeavyTailInput = { ...input, threshold };
+
+		// Substrate: cache hit short-circuits the tool calls.
+		const cached = readCachedDistribution(normalized, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.verdict === 'inconclusive' ? 'medium' : 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
 
 		const [aggTool, sampleTool] = await Promise.all([
 			deps.runTool({
@@ -100,14 +120,91 @@ const skill: Skill<HeavyTailInput, HeavyTailOutput> = {
 			aggTool.data.values,
 			{ columns: sampleTool.data.columns, rows: sampleTool.data.rows },
 		);
+		const confidence = out.verdict === 'inconclusive' ? 'medium' : 'high';
+		if (confidence === 'high') {
+			pinDistribution(normalized, out, deps);
+		}
 		return {
 			value: out,
-			confidence: out.verdict === 'inconclusive' ? 'medium' : 'high',
+			confidence,
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.distribution.heavy-tail-check.rdbms';
+const NAMESPACE = 'heavy-tail-distributions';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: HeavyTailInput): string {
+	return `${input.connectionId}::${input.target}::${input.column}::${input.threshold ?? ''}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-distribution',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as HeavyTailInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'HeavyTailOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDistribution(input: HeavyTailInput, deps: SkillDeps): HeavyTailOutput | undefined {
+	const slot = deps.context?.slots.get('cached-distribution');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<HeavyTailOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDistribution(input: HeavyTailInput, value: HeavyTailOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_sql_aggregate' },
+		payload: value,
+		claims:  [`heavy-tail:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataDistributionHeavyTailCheckRdbmsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

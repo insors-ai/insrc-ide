@@ -408,9 +408,9 @@ All 7 code-analyzer L1 migrations done. Remaining migration work (per agentic-sk
 
 | Priority | Skill | Why |
 |---|---|---|
-| -- | `data.meta.classify-question` | Same A5 evolution as code (`goal` per candidate). Independent per-skill pass. |
-| -- | `data.meta.select-scope`      | Same A5 demotion as code (`goal` required + load-bearing in prompt). Independent per-skill pass. Depends on the data classify migration shipping first. |
-| -- | Data L1 skill migrations      | Data-analyzer pipeline equivalents to the code-analyzer ones (priorities 7-11 done on the code side). |
+| done | `data.meta.classify-question` | A5 evolution shipped 2026-05-31 (mirrors the code-side migration). |
+| done | `data.meta.select-scope`      | A5 demotion shipped 2026-05-31 (mirrors the code-side migration). |
+| done | Data L1 skill migrations      | 73 data L1 skills migrated 2026-05-31 across all families (data.source / data.quality / data.profile / data.distribution / data.drift / data.correlation / data.pii / data.dependency / data.cardinality / data.anomaly / data.timeseries / data.sensitivity / data.code / data-lineage). 6 `data.synth.*` skills skipped (synthesis renderers; low cache-hit rate). 24 `.algo.ts` math helpers skipped (no Skill object). |
 
 L2 framework (`L2Runtime`, `L2Skill<I, O>`, evidence-ledger discipline, `code.answer-question` / `code.audit-module` pilot) is separately scoped per the agentic-skills doc Phase 3.
 

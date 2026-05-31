@@ -4,6 +4,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 import {
 	type DriftVolumeOutput,
 	type DriftVolumeWhereClauseIn,
@@ -62,6 +70,16 @@ const skill: Skill<DriftVolumeFileInput, DriftVolumeOutput> = {
 	],
 
 	async execute(input, deps): Promise<SkillResult<DriftVolumeOutput>> {
+		const cached = readCachedDriftVolume(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const callBase = `skill-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 		const sheet = input.target !== undefined && input.target.length > 0 ? input.target : undefined;
 
@@ -108,6 +126,7 @@ const skill: Skill<DriftVolumeFileInput, DriftVolumeOutput> = {
 		if (built.degradedConfidence !== null) {
 			return { value: built.output, confidence: built.degradedConfidence, toolCalls: [] };
 		}
+		pinDriftVolume(input, built.output, deps);
 		return { value: built.output, confidence: 'high', toolCalls: [] };
 	},
 };
@@ -138,6 +157,81 @@ async function resolveCountColumn(input: DriftVolumeFileInput, deps: SkillDeps, 
 	return { ok: true, column: picked };
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.drift.volume.file';
+const NAMESPACE = 'drift-volume-reports';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['connection-add', 'refresh', 'manual'];
+
+function cacheKey(input: DriftVolumeFileInput): string {
+	const cc = input.countColumn ?? '';
+	const tgt = input.target ?? '';
+	return `${input.connectionId}::${tgt}::${cc}::${JSON.stringify(input.windowAWhere)}::${JSON.stringify(input.windowBWhere)}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-drift-volume',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as DriftVolumeFileInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'DriftVolumeOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDriftVolume(input: DriftVolumeFileInput, deps: SkillDeps): DriftVolumeOutput | undefined {
+	const slot = deps.context?.slots.get('cached-drift-volume');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<DriftVolumeOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDriftVolume(input: DriftVolumeFileInput, value: DriftVolumeOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'db_file_aggregate' },
+		payload: value,
+		claims:  [`drift-volume:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataDriftVolumeFileSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
