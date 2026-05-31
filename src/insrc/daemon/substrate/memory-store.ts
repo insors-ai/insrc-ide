@@ -26,6 +26,7 @@
 
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 import { getLogger } from '../../shared/logger.js';
 
@@ -57,6 +58,12 @@ interface OnDiskMeta {
 	readonly expiresAt?:     number;
 	readonly supersedes?:    readonly MemoryEntryRef[];
 	readonly supersededBy?:  MemoryEntryRef;
+	/**
+	 * Original key. Recorded so a directory scan can recover the key
+	 * even when the filename is the sha256-prefixed form (used for
+	 * keys whose URL-encoded length exceeds the POSIX 255-byte limit).
+	 */
+	readonly key?:           string;
 }
 
 interface OnDiskEntry<T = unknown> {
@@ -127,6 +134,9 @@ function createMemoryNamespace(nsDir: string): MemoryNamespace {
 					writtenAt:    next.writtenAt,
 					expiresAt:    next.expiresAt,
 					supersedes:   next.supersedes,
+					// Record the key so directory scans can recover it even
+					// when the filename is hash-encoded.
+					key,
 				}) as unknown as OnDiskMeta,
 				value: next.value,
 			};
@@ -169,16 +179,45 @@ function createMemoryNamespace(nsDir: string): MemoryNamespace {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Map a key to its file path. URL-encode the key to handle `:` etc. */
+/**
+ * macOS / Linux POSIX filename limit is 255 bytes. We leave headroom for
+ * the temp-file suffix (`.tmp.<pid>.<ts>` = up to ~22 bytes) so atomic
+ * writes don't trip ENAMETOOLONG on the rename target. The 200-byte
+ * threshold below targets the *encoded* filename including `.json`.
+ */
+const MAX_ENCODED_FILENAME_BYTES = 200;
+
+/** Prefix marker for hash-encoded long-key files. */
+const HASHED_KEY_PREFIX = '__h_';
+
+/**
+ * Map a key to its file path. Short keys use the URL-encoded form so the
+ * filename is human-readable + reverse-mappable. Long keys (would exceed
+ * the POSIX 255-byte limit) fall back to a sha256-prefixed filename;
+ * the real key is recovered from the file's `_meta.key` field.
+ */
 function entryPath(nsDir: string, key: string): string {
 	if (key.includes('..')) { throw new Error(`memory-store: invalid key '${key}' (contains '..')`); }
-	return join(nsDir, `${encodeURIComponent(key)}.json`);
+	const encoded = encodeURIComponent(key);
+	const filename = (encoded.length + 5 /* .json */) > MAX_ENCODED_FILENAME_BYTES
+		? `${HASHED_KEY_PREFIX}${sha256Hex(key)}.json`
+		: `${encoded}.json`;
+	return join(nsDir, filename);
 }
 
-/** Reverse entryPath's encoding when listing a directory. */
+/**
+ * Reverse `entryPath` when scanning a directory. Returns `undefined`
+ * for hash-encoded filenames -- the caller (`walkNamespace`) recovers
+ * the real key from the file's `_meta.key` after reading.
+ */
 function fileToKey(file: string): string | undefined {
 	if (!file.endsWith('.json')) { return undefined; }
+	if (file.startsWith(HASHED_KEY_PREFIX)) { return undefined; }
 	return decodeURIComponent(file.slice(0, -5));
+}
+
+function sha256Hex(s: string): string {
+	return createHash('sha256').update(s).digest('hex');
 }
 
 function isExpired(meta: OnDiskMeta): boolean {
@@ -316,16 +355,23 @@ async function* walkNamespace<T>(
 	const includeSuperseded = opts?.includeSuperseded === true;
 
 	for (const file of files) {
-		const key = fileToKey(file);
-		if (key === undefined) { continue; }
-
+		if (!file.endsWith('.json')) { continue; }
+		const decodedKey = fileToKey(file);
+		// `fileToKey` returns undefined for hash-encoded filenames; for
+		// those we recover the original key from `_meta.key` after reading.
 		const path = join(nsDir, file);
+
 		let entry: MemoryEntry<T>;
 		try {
 			const raw = await fs.readFile(path, 'utf8');
 			const parsed = JSON.parse(raw) as OnDiskEntry<T>;
 			if (isExpired(parsed._meta)) { continue; }
 			if (!includeSuperseded && parsed._meta.supersededBy !== undefined) { continue; }
+			const key = decodedKey ?? parsed._meta.key;
+			if (key === undefined) {
+				log.warn({ path }, 'memory:walk skip-keyless-file');
+				continue;
+			}
 			entry = hydrate<T>(key, path, parsed);
 		} catch (err) {
 			log.warn({ path, err: (err as Error).message }, 'memory:walk skip-bad-file');

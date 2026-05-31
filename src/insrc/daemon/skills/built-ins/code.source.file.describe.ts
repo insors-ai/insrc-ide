@@ -19,6 +19,15 @@ import { getEntity } from '../../../db/entities.js';
 import { findDefinedIn, findImports } from '../../../db/search.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
 import { tryReadFileForFallback } from './_fallback-file-read.js';
+import type {
+	AssertionInterest,
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface FileDescribeInput {
 	readonly file:     string;
@@ -131,11 +140,34 @@ const codeSourceFileDescribeSkill: Skill<FileDescribeInput, FileDescribeOutput> 
 	toolDeps: [],
 	providerAffinity: 'auto',
 
-	async execute(input: FileDescribeInput, _deps: SkillDeps): Promise<SkillResult<FileDescribeOutput>> {
+	async execute(input: FileDescribeInput, deps: SkillDeps): Promise<SkillResult<FileDescribeOutput>> {
+		// Substrate: cache hit short-circuits the LMDB walk.
+		const cached = readCachedDescription(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
+		// Substrate: recent-miss short-circuits for known-not-indexed files.
+		const missCached = readRecentMiss(input, deps);
+		if (missCached !== undefined) {
+			return {
+				value: { found: false, reason: 'file-not-indexed' },
+				confidence: 'high',
+				notes: ['from miss cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const fileEntityId = makeFileEntityId(input.repoPath, input.file);
 		const fileEntity   = await getEntity(null, fileEntityId);
 
 		if (fileEntity === null || fileEntity.kind !== 'file') {
+			pinRecentMiss(input, deps);
 			return {
 				value: { found: false, reason: 'file-not-indexed' },
 				confidence: 'high',
@@ -180,7 +212,7 @@ const codeSourceFileDescribeSkill: Skill<FileDescribeInput, FileDescribeOutput> 
 			}
 		}
 
-		const out: FileDescribeOutput = {
+		const out: Extract<FileDescribeOutput, { found: true }> = {
 			found:        true,
 			file:         input.file,
 			language:     fileEntity.language,
@@ -194,12 +226,20 @@ const codeSourceFileDescribeSkill: Skill<FileDescribeInput, FileDescribeOutput> 
 			...(bodyExcerptTruncated !== undefined ? { bodyExcerptTruncated } : {}),
 			...(bodyExcerptSource    !== undefined ? { bodyExcerptSource }    : {}),
 		};
+		const confidence: 'high' | 'medium' | 'low' = isStructurallyEmpty
+			? (bodyExcerpt !== undefined ? 'medium' : 'low')
+			: 'high';
+
+		// Substrate: only cache the high-confidence graph-backed shape.
+		// Disk-fallback payloads (bodyExcerpt) intentionally stay fresh --
+		// the filesystem mutates outside the substrate's knowledge.
+		if (confidence === 'high') {
+			pinSuccessfulDescription(input, out, deps);
+		}
+
 		return {
 			value: out,
-			// Medium confidence when we had to fall back to disk; the
-			// graph couldn't structurally enumerate this file. High when
-			// the normal graph path worked.
-			confidence: isStructurallyEmpty ? (bodyExcerpt !== undefined ? 'medium' : 'low') : 'high',
+			confidence,
 			notes: fallbackNotes,
 			toolCalls: [],
 		};
@@ -219,9 +259,161 @@ function toChildEntity(e: Entity): ChildEntity {
 	return c;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (per plans/skills/code/code.source.file.describe.md)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:code.source.file.describe';
+
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = [
+	'repo-add', 'reindex', 'manual',
+];
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-description',
+		fromOwner: OWNER_ID,
+		namespace: 'file-descriptions',
+		query: (req) => {
+			const task = (req.task ?? {}) as FileDescribeInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+	{
+		name:      'recent-misses',
+		fromOwner: OWNER_ID,
+		namespace: 'recent-misses',
+		query: (req) => {
+			const task = (req.task ?? {}) as FileDescribeInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   'file-descriptions',
+		valueType:   'FileDescribeOutput (found:true, confidence:high)',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+	{
+		namespace:   'recent-misses',
+		valueType:   'MissRecord',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+	{
+		namespace:   'observations',
+		valueType:   'WorkspacePatternObservation',
+		autoDistill: 'never',
+		indexing:    { kind: 'never' },
+		ttl:         '30d',
+	},
+];
+
+const ASSERTION_INTERESTS: readonly AssertionInterest[] = [];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: ASSERTION_INTERESTS,
+};
+
+// ---------------------------------------------------------------------------
+// Substrate helpers
+// ---------------------------------------------------------------------------
+
+interface MissValue {
+	readonly file:        string;
+	readonly repoPath:    string;
+	readonly attemptedAt: number;
+}
+
+function cacheKey(input: FileDescribeInput): string {
+	return `${input.repoPath}::${input.file}`;
+}
+
+function readCachedDescription(
+	input: FileDescribeInput,
+	deps: SkillDeps,
+): Extract<FileDescribeOutput, { found: true }> | undefined {
+	const slot = deps.context?.slots.get('cached-description');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<Extract<FileDescribeOutput, { found: true }>>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function readRecentMiss(input: FileDescribeInput, deps: SkillDeps): MissValue | undefined {
+	const slot = deps.context?.slots.get('recent-misses');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<MissValue>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinSuccessfulDescription(
+	input: FileDescribeInput,
+	value: Extract<FileDescribeOutput, { found: true }>,
+	deps: SkillDeps,
+): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'getEntity+findDefinedIn+findImports' },
+		payload: value,
+		claims:  [`file-described:${input.file}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: 'file-descriptions',
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     7 * 24 * 60 * 60 * 1000,
+	});
+}
+
+function pinRecentMiss(input: FileDescribeInput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const payload: MissValue = { file: input.file, repoPath: input.repoPath, attemptedAt: Date.now() };
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'getEntity' },
+		payload,
+		claims:  [`file-miss:${input.file}`],
+		confidence: 0.9,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: 'recent-misses',
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     24 * 60 * 60 * 1000,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+const codeSourceFileDescribeSkillWithSubstrate = {
+	...codeSourceFileDescribeSkill,
+	...substrateExtension,
+};
+
 export function registerCodeSourceFileDescribeSkill(): void {
-	registerSkill(codeSourceFileDescribeSkill as unknown as Skill);
+	registerSkill(codeSourceFileDescribeSkillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.
 export const _makeFileEntityIdForTest = makeFileEntityId;
+export const _cacheKeyForTest         = cacheKey;

@@ -259,3 +259,43 @@ test('memory-store: searchByEmbedding returns empty in P0', async () => {
 		assert.equal(hits.length, 0);
 	} finally { dispose(); }
 });
+
+// ---------------------------------------------------------------------------
+// Long-key handling (POSIX filename limit)
+// ---------------------------------------------------------------------------
+
+test('memory-store: long key (encoded > 200 bytes) round-trips via hash fallback', async () => {
+	const { store, dispose } = freshStore();
+	try {
+		const ns = store.scope('skill:long', 'cache');
+		// 250 char key with lots of slashes -- URL-encoded grows to
+		// 250 * len('%2F')/1 ~= 750 bytes, well past the threshold.
+		const longKey = '/'.repeat(0) + Array.from({ length: 250 }, (_, i) => `seg${i}`).join('/');
+		await ns.put(longKey, { payload: 'big' }, { kind: 'fact', source: SRC, confidence: 0.9 });
+
+		// byKey round-trip works.
+		const got = await ns.get<{ payload: string }>(longKey);
+		assert.ok(got);
+		assert.equal(got.key, longKey, 'key should be recovered intact from _meta');
+		assert.equal(got.value.payload, 'big');
+	} finally { dispose(); }
+});
+
+test('memory-store: scan recovers long-key entries via _meta.key', async () => {
+	const { store, dispose } = freshStore();
+	try {
+		const ns = store.scope('skill:long', 'cache');
+		const shortKey = 'short';
+		const longKey  = Array.from({ length: 250 }, (_, i) => `seg${i}`).join('/');
+		await ns.put(shortKey, { x: 1 }, { kind: 'fact', source: SRC, confidence: 0.9 });
+		await ns.put(longKey,  { x: 2 }, { kind: 'fact', source: SRC, confidence: 0.9 });
+
+		// Empty prefix: every entry returned, both short + long keys
+		// correctly recovered.
+		const entries = await collect(ns.scan(''));
+		const keys = entries.map(e => e.key).sort();
+		assert.equal(keys.length, 2);
+		assert.ok(keys.includes(shortKey));
+		assert.ok(keys.includes(longKey), 'long key must be recovered via _meta.key');
+	} finally { dispose(); }
+});

@@ -393,12 +393,12 @@ Each migration:
 | 1 | `code.class.extract-fields` | [`code/code.class.extract-fields.md`](code/code.class.extract-fields.md) | [`code.class.extract-fields.ts`](../../src/insrc/daemon/skills/built-ins/code.class.extract-fields.ts) | substrate (5), Hadoop (5), legacy (11) |
 | 2 | `code.entity.locate-by-name` | [`code/code.entity.locate-by-name.md`](code/code.entity.locate-by-name.md) | [`code.entity.locate-by-name.ts`](../../src/insrc/daemon/skills/built-ins/code.entity.locate-by-name.ts) | substrate (6), Hadoop (6), legacy (22) |
 | 3 | `code.source.module.describe` | [`code/code.source.module.describe.md`](code/code.source.module.describe.md) | [`code.source.module.describe.ts`](../../src/insrc/daemon/skills/built-ins/code.source.module.describe.ts) | substrate (5), Hadoop (3), legacy (12). **Measured cold->warm latency drop: ~4.5s -> ~1.0s on Hadoop namenode dir.** |
+| 4 | `code.source.file.describe` | [`code/code.source.file.describe.md`](code/code.source.file.describe.md) | [`code.source.file.describe.ts`](../../src/insrc/daemon/skills/built-ins/code.source.file.describe.ts) | substrate (5), Hadoop (3). **Cold->warm: ~104ms -> ~5ms (~20x) on NameNode.java.** This migration also surfaced + fixed a memory-store long-key ENAMETOOLONG bug (substrate fix: hash-fallback filename for keys whose encoded form exceeds 200 bytes; reverse-mapped via `_meta.key`). |
 
 ### Pending priority migrations (from code-analyzer-migration.md)
 
 | Priority | Skill | Why |
 |---|---|---|
-| 4 | `code.source.file.describe` | Same per-file pattern as #3. |
 | 5 | `code.meta.classify-question` | Evolve per A5 to emit goals. |
 | 6 | `code.meta.select-scope` | Demote to L1 arg-filler utility per A5. |
 | 7 | `code.entity.summary` | Cacheable per-entity. |
