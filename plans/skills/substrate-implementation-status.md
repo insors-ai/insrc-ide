@@ -399,10 +399,9 @@ Each migration:
 | 9  | `code.quality.cyclic-deps`      | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.cyclic-deps.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.cyclic-deps.ts)     | substrate (1 of 7 in suite). |
 | 10 | `code.quality.duplication`      | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.duplication.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.duplication.ts)     | substrate (2 of 7 in suite). |
 | 11 | `code.quality.unused-exports`   | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.unused-exports.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.unused-exports.ts) | substrate (1 of 7 in suite) + legacy compat (1). All quality skills: 24h TTL (shorter than 7d -- code quality drifts with edits). |
+| 5  | `code.meta.classify-question`   | [`code/code.meta.classify-question.md`](code/code.meta.classify-question.md) (A5 evolution) | [`code.meta.classify-question.ts`](../../src/insrc/daemon/skills/built-ins/code.meta.classify-question.ts) | **NOT a cache wiring -- A5 schema evolution.** Adds `goal: string` to each `Candidate` (natural-language instruction the routed skill plans against). System prompt + few-shot examples + validator all updated to require non-empty goal; one retry on missing. Substrate declaration is "ownership only" (no `contextSlots` -- caching offers near-zero win for question-driven LLM routing). Legacy `code.meta.select-scope` accepts `goal` as an optional pass-through (becomes load-bearing in #6). Tests: 20/20 (covers existing 17 + 3 new A5: missing-goal-rejected / empty-goal-rejected / goal-threaded-through). |
 
 ### Pending priority migrations (from code-analyzer-migration.md)
-
-The remaining two are different in shape -- not just cache wiring. Per A5 (`plans/agentic-skills-architecture.md` §A5), they need a design pass before migration.
 
 | Priority | Skill | Why |
 |---|---|---|

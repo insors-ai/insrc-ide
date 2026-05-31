@@ -39,6 +39,12 @@ import { getLogger } from '../../../shared/logger.js';
 import { registerSkill, listSkills } from '../registry.js';
 import type { Skill, SkillContext, SkillResult } from '../types.js';
 import type { LLMMessage, LLMProvider } from '../../../shared/types.js';
+import type {
+	BootstrapTriggerKind,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const log = getLogger('skill.code.meta.classify-question');
 
@@ -86,6 +92,20 @@ interface ClassifyInput {
 interface Candidate {
 	readonly skillId:       string;
 	readonly rationale:     string;
+	/**
+	 * Natural-language instruction telling the routed skill WHAT to achieve.
+	 * Per A5 (plans/agentic-skills-architecture.md §A5): "Analyze file abc"
+	 * is directionless; "Identify the join keys between this file's records
+	 * and the GRN domain model's expected structure, focusing on field name
+	 * overlap" is a goal a skill can plan against.
+	 *
+	 * Consumers:
+	 *   - L2 skills: receive this as `invocationContext.goal` and plan how
+	 *     to fulfill it.
+	 *   - L1 skills: `code.meta.select-scope` reads this alongside the
+	 *     skill's input schema to fill `input: I`.
+	 */
+	readonly goal:          string;
 	readonly mustHaveScope: MustHaveScope;
 }
 
@@ -145,9 +165,11 @@ const OUTPUT_SCHEMA = {
 				properties: {
 					skillId:       { type: 'string' },
 					rationale:     { type: 'string', maxLength: 280 },
+					// Per A5: natural-language instruction for the routed skill.
+					goal:          { type: 'string', minLength: 1, maxLength: 500 },
 					mustHaveScope: { type: 'string', enum: MUST_HAVE_SCOPES },
 				},
-				required: ['skillId', 'rationale', 'mustHaveScope'],
+				required: ['skillId', 'rationale', 'goal', 'mustHaveScope'],
 				additionalProperties: false,
 			},
 		},
@@ -229,7 +251,12 @@ Output:
 {
   "questionType": "describe-file",
   "candidates": [
-    { "skillId": "code.source.file.describe", "rationale": "Single-file enumeration of declared entities + imports.", "mustHaveScope": "repo+file" }
+    {
+      "skillId": "code.source.file.describe",
+      "rationale": "Single-file enumeration of declared entities + imports.",
+      "goal": "Enumerate every entity declared in src/User.ts plus its imports; return the structured surface so the caller can decide what to drill into.",
+      "mustHaveScope": "repo+file"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": []
@@ -241,8 +268,18 @@ Output:
 {
   "questionType": "find-callers",
   "candidates": [
-    { "skillId": "code.entity.locate-by-name", "rationale": "Resolve 'compute' to a stable entity id first.", "mustHaveScope": "repo+entity" },
-    { "skillId": "code.entity.callers", "rationale": "1-hop CALLS in-edges from the resolved entity.", "mustHaveScope": "repo+entity" }
+    {
+      "skillId": "code.entity.locate-by-name",
+      "rationale": "Resolve 'compute' to a stable entity id first.",
+      "goal": "Locate the function or method named 'compute' in the active repo; return its entity id so a callers walk can target it.",
+      "mustHaveScope": "repo+entity"
+    },
+    {
+      "skillId": "code.entity.callers",
+      "rationale": "1-hop CALLS in-edges from the resolved entity.",
+      "goal": "From the resolved 'compute' entity id, walk one hop of CALLS in-edges to identify every caller; return the caller list with file + line.",
+      "mustHaveScope": "repo+entity"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": []
@@ -254,7 +291,12 @@ Output:
 {
   "questionType": "orm-model",
   "candidates": [
-    { "skillId": "code.orm.resolve-model", "rationale": "Locate the ORM-defined User model with normalised columns + relations.", "mustHaveScope": "repo+model" }
+    {
+      "skillId": "code.orm.resolve-model",
+      "rationale": "Locate the ORM-defined User model with normalised columns + relations.",
+      "goal": "Find the prisma 'User' model in the repo; return its normalised column list (name + type + nullability) and any declared relations so the caller can present the schema.",
+      "mustHaveScope": "repo+model"
+    }
   ],
   "fallbacks": ["code.class.extract-fields"],
   "uncertaintyNotes": []
@@ -266,7 +308,12 @@ Output:
 {
   "questionType": "quality",
   "candidates": [
-    { "skillId": "code.quality.unused-exports", "rationale": "Exported entities with empty in-edge across IMPORTS / CALLS / REFERENCES.", "mustHaveScope": "repo" }
+    {
+      "skillId": "code.quality.unused-exports",
+      "rationale": "Exported entities with empty in-edge across IMPORTS / CALLS / REFERENCES.",
+      "goal": "Identify every exported function / class / interface / type / variable in the repo whose in-edge set across IMPORTS, CALLS, and REFERENCES is empty; return the list grouped by file so the caller can recommend removal or downgrade.",
+      "mustHaveScope": "repo"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": []
@@ -278,8 +325,18 @@ Output:
 {
   "questionType": "version-diff",
   "candidates": [
-    { "skillId": "code.entity.locate-by-name", "rationale": "Resolve 'parseConfig' to an entity id at HEAD.", "mustHaveScope": "repo+entity" },
-    { "skillId": "code.compare.entity-versions", "rationale": "Diff one entity across two git refs.", "mustHaveScope": "repo+entity" }
+    {
+      "skillId": "code.entity.locate-by-name",
+      "rationale": "Resolve 'parseConfig' to an entity id at HEAD.",
+      "goal": "Locate the function 'parseConfig' in the active repo at HEAD; return its entity id so a version-diff can target it.",
+      "mustHaveScope": "repo+entity"
+    },
+    {
+      "skillId": "code.compare.entity-versions",
+      "rationale": "Diff one entity across two git refs.",
+      "goal": "Diff the parseConfig function body between git ref v1.5 and HEAD; return the structural delta (signature change, body added/removed/changed lines) so the caller can summarise what evolved.",
+      "mustHaveScope": "repo+entity"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": []
@@ -291,7 +348,12 @@ Output:
 {
   "questionType": "quality",
   "candidates": [
-    { "skillId": "code.quality.complexity", "rationale": "Cyclomatic per function/method with histogram + top-N.", "mustHaveScope": "repo" }
+    {
+      "skillId": "code.quality.complexity",
+      "rationale": "Cyclomatic per function/method with histogram + top-N.",
+      "goal": "Compute cyclomatic complexity for every function and method in the repo; return the full sorted list plus the severity histogram so the caller can filter to entries with cyclomatic > 30.",
+      "mustHaveScope": "repo"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": ["The user said >30 (high tier); the skill returns top-N regardless of threshold so the caller must filter."]
@@ -303,7 +365,12 @@ Output:
 {
   "questionType": "impl-vs-doc",
   "candidates": [
-    { "skillId": "code.compare.impl-vs-doc", "rationale": "Field-set drift between the implementation and a Markdown doc.", "mustHaveScope": "repo+class" }
+    {
+      "skillId": "code.compare.impl-vs-doc",
+      "rationale": "Field-set drift between the implementation and a Markdown doc.",
+      "goal": "Compare the User class's field set against the structure described in docs/user.md; return the drift (fields-only-in-impl, fields-only-in-docs, type mismatches) so the caller can flag what needs updating.",
+      "mustHaveScope": "repo+class"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": []
@@ -329,13 +396,27 @@ function buildSystemPrompt(): string {
 		'3. `mustHaveScope` declares the smallest scope the candidate needs:',
 		'   "repo" / "repo+entity" / "repo+file" / "repo+class" / "repo+model"',
 		'   / "none". select-scope (the next pipeline step) fills the args.',
-		'4. `uncertaintyNotes` should surface anything the question did not',
+		'4. EVERY candidate MUST include a `goal` -- a natural-language',
+		'   instruction telling the routed skill WHAT to achieve, not just',
+		'   THAT it should be called. Bad: "Analyze file abc". Good:',
+		'   "Enumerate the field metadata for the User class; focus on',
+		'   which fields are exported vs internal so the caller can decide',
+		'   what to expose in the public API summary." The goal should:',
+		'     - State the WHAT (what to find / compute / compare).',
+		'     - State the WHERE (which file / entity / scope, when known).',
+		'     - State the WHY-CALLER-NEEDS-IT (one short clause -- helps the',
+		'       skill prioritise + decide how much detail to return).',
+		'   The goal is what gives the skill direction beyond its catalog',
+		'   summary. L2 skills consume it as planning input; L1 skills',
+		'   ride select-scope, which reads the goal alongside the input',
+		'   schema to fill concrete args.',
+		'5. `uncertaintyNotes` should surface anything the question did not',
 		'   specify (which file, which entity name, which git ref, which',
 		'   threshold). Empty array if the question is fully scoped.',
-		'5. Use `fallbacks` for second-choice skills the planner can pivot to',
+		'6. Use `fallbacks` for second-choice skills the planner can pivot to',
 		'   if the first candidates fail their preconditions or return',
 		'   confidence: low.',
-		'6. Set `questionType` to the closest fit; "free-form" only when no',
+		'7. Set `questionType` to the closest fit; "free-form" only when no',
 		'   other type matches.',
 		'',
 		FEW_SHOT,
@@ -417,6 +498,7 @@ function parseAndValidate(raw: string, catalog: readonly CatalogEntry[]): ParseR
 		const cc = c as Record<string, unknown>;
 		const skillId   = cc['skillId'];
 		const rationale = cc['rationale'];
+		const goal      = cc['goal'];
 		const scope     = cc['mustHaveScope'];
 		if (typeof skillId !== 'string' || !knownIds.has(skillId)) {
 			return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].skillId='${skillId}' not in the catalog` } };
@@ -424,10 +506,15 @@ function parseAndValidate(raw: string, catalog: readonly CatalogEntry[]): ParseR
 		if (typeof rationale !== 'string') {
 			return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].rationale must be a string` } };
 		}
+		// Per A5: goal is the natural-language instruction that gives the
+		// routed skill direction. Non-empty required.
+		if (typeof goal !== 'string' || goal.length === 0) {
+			return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].goal must be a non-empty string (per A5; see plans/skills/code/code.meta.classify-question.md)` } };
+		}
 		if (typeof scope !== 'string' || !MUST_HAVE_SCOPES.includes(scope as MustHaveScope)) {
 			return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].mustHaveScope must be one of: ${MUST_HAVE_SCOPES.join(', ')}` } };
 		}
-		candidates.push({ skillId, rationale, mustHaveScope: scope as MustHaveScope });
+		candidates.push({ skillId, rationale, goal, mustHaveScope: scope as MustHaveScope });
 	}
 
 	const fallbacksRaw = obj['fallbacks'];
@@ -607,8 +694,49 @@ function emptyOutput(): ClassifyOutput {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (per plans/skills/code/code.meta.classify-question.md)
+// ---------------------------------------------------------------------------
+//
+// Light wiring: this skill calls an LLM whose output varies per turn,
+// so caching offers near-zero win. The declaration lands so D14 routing
+// + future observation distillation (e.g. "questions about X always
+// route through Y first") know who owns the routing decisions.
+
+const OWNER_ID: OwnerId = 'skill:code.meta.classify-question';
+
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = [
+	'repo-add', 'reindex', 'manual',
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		// Future L2-distilled observations about routing patterns.
+		// No writes from this L1 today.
+		namespace:   'observations',
+		valueType:   'WorkspacePatternObservation',
+		autoDistill: 'never',
+		indexing:    { kind: 'never' },
+		ttl:         '30d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       [],
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+const skillWithSubstrate = {
+	...skill,
+	...substrateExtension,
+};
+
 export function registerCodeMetaClassifyQuestionSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.

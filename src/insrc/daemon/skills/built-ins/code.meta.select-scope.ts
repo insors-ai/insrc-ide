@@ -59,6 +59,15 @@ interface CandidateIn {
 	readonly skillId:       string;
 	readonly rationale:     string;
 	readonly mustHaveScope: MustHaveScope;
+	/**
+	 * Per A5 (plans/skills/code/code.meta.classify-question.md): the
+	 * natural-language instruction classify-question emits for each
+	 * candidate. Optional here for back-compat -- this migration accepts
+	 * it as a pass-through field but doesn't yet wire it into the
+	 * scope-resolution prompt. Becomes load-bearing in the #6 select-
+	 * scope migration.
+	 */
+	readonly goal?:         string;
 }
 
 interface RepoContext {
@@ -137,6 +146,9 @@ const CANDIDATE_IN_SCHEMA = {
 	properties: {
 		skillId:       { type: 'string' },
 		rationale:     { type: 'string' },
+		// Per A5: optional pass-through for now; #6 migration makes it
+		// required + wires into the scope-resolution prompt.
+		goal:          { type: 'string', maxLength: 500 },
 		mustHaveScope: {
 			type: 'string',
 			enum: ['repo', 'repo+entity', 'repo+file', 'repo+class', 'repo+model', 'none'],

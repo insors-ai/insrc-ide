@@ -49,7 +49,12 @@ const REPO = { path: '/repo/alpha', primaryLanguages: ['typescript'] };
 
 interface ClassifyValue {
 	readonly questionType: string;
-	readonly candidates: readonly { readonly skillId: string; readonly rationale: string; readonly mustHaveScope: string }[];
+	readonly candidates: readonly {
+		readonly skillId: string;
+		readonly rationale: string;
+		readonly goal: string;
+		readonly mustHaveScope: string;
+	}[];
 	readonly fallbacks: readonly string[];
 	readonly uncertaintyNotes: readonly string[];
 }
@@ -122,7 +127,12 @@ test('classify-question: valid LLM JSON -> high confidence', async () => {
 	const validJson = JSON.stringify({
 		questionType: 'describe-file',
 		candidates: [
-			{ skillId: 'code.source.file.describe', rationale: 'single file enumeration', mustHaveScope: 'repo+file' },
+			{
+				skillId: 'code.source.file.describe',
+				rationale: 'single file enumeration',
+				goal: 'Enumerate entities + imports declared in src/User.ts so the caller can render the file surface.',
+				mustHaveScope: 'repo+file',
+			},
 		],
 		fallbacks: [],
 		uncertaintyNotes: [],
@@ -133,7 +143,11 @@ test('classify-question: valid LLM JSON -> high confidence', async () => {
 		{ fakeProvider: fakeProviderReturning(validJson) },
 	);
 	assert.equal(result.confidence, 'high');
-	assert.equal(result.value.candidates[0]!.skillId, 'code.source.file.describe');
+	const cand = result.value.candidates[0]!;
+	assert.equal(cand.skillId, 'code.source.file.describe');
+	// A5: every candidate carries a non-empty goal.
+	assert.ok(typeof cand.goal === 'string' && cand.goal.length > 0,
+		'candidate must include a non-empty goal per A5');
 });
 
 test('classify-question: uncertainty notes -> medium confidence', async () => {
@@ -141,7 +155,12 @@ test('classify-question: uncertainty notes -> medium confidence', async () => {
 	const json = JSON.stringify({
 		questionType: 'version-diff',
 		candidates: [
-			{ skillId: 'code.compare.entity-versions', rationale: 'two-ref diff', mustHaveScope: 'repo+entity' },
+			{
+				skillId: 'code.compare.entity-versions',
+				rationale: 'two-ref diff',
+				goal: 'Diff parseConfig across two git refs and return the structural delta.',
+				mustHaveScope: 'repo+entity',
+			},
 		],
 		fallbacks: [],
 		uncertaintyNotes: ['baseRef not specified in question'],
@@ -159,7 +178,12 @@ test('classify-question: hallucinated skillId rejected on retry -> low', async (
 	setup();
 	const hallucination = JSON.stringify({
 		questionType: 'free-form',
-		candidates: [{ skillId: 'code.does.not.exist', rationale: 'fake', mustHaveScope: 'repo' }],
+		candidates: [{
+			skillId: 'code.does.not.exist',
+			rationale: 'fake',
+			goal: 'whatever',
+			mustHaveScope: 'repo',
+		}],
 		fallbacks: [],
 		uncertaintyNotes: [],
 	});
@@ -178,7 +202,12 @@ test('classify-question: first-pass invalid + second-pass valid -> high', async 
 	const valid = JSON.stringify({
 		questionType: 'quality',
 		candidates: [
-			{ skillId: 'code.quality.complexity', rationale: 'after retry', mustHaveScope: 'repo' },
+			{
+				skillId: 'code.quality.complexity',
+				rationale: 'after retry',
+				goal: 'Compute cyclomatic per function across the repo so the caller can filter to high-complexity entries.',
+				mustHaveScope: 'repo',
+			},
 		],
 		fallbacks: [],
 		uncertaintyNotes: [],
@@ -190,6 +219,73 @@ test('classify-question: first-pass invalid + second-pass valid -> high', async 
 	);
 	assert.equal(result.confidence, 'high');
 	assert.equal(result.value.candidates[0]!.rationale, 'after retry');
+});
+
+// ---------------------------------------------------------------------------
+// classify-question A5: goal validation (per plans/skills/code/code.meta.classify-question.md)
+// ---------------------------------------------------------------------------
+
+test('classify-question (A5): missing goal -> rejected on retry -> low confidence', async () => {
+	setup();
+	const noGoal = JSON.stringify({
+		questionType: 'describe-file',
+		candidates: [
+			// `goal` field omitted -- must be rejected by parseAndValidate.
+			{ skillId: 'code.source.file.describe', rationale: 'single file', mustHaveScope: 'repo+file' },
+		],
+		fallbacks: [],
+		uncertaintyNotes: [],
+	});
+	const { result } = await runSkillIsolated<unknown, ClassifyValue>(
+		CLASSIFY,
+		{ question: 'q', repo: REPO },
+		{ fakeProvider: fakeProviderReturning(noGoal, noGoal) },
+	);
+	assert.equal(result.confidence, 'low');
+	const noteText = (result.notes ?? []).join(' | ');
+	assert.match(noteText, /goal must be a non-empty string/,
+		`expected goal-validation note; got: ${noteText}`);
+});
+
+test('classify-question (A5): empty-string goal -> rejected', async () => {
+	setup();
+	const emptyGoal = JSON.stringify({
+		questionType: 'describe-file',
+		candidates: [
+			{ skillId: 'code.source.file.describe', rationale: 'single file', goal: '', mustHaveScope: 'repo+file' },
+		],
+		fallbacks: [],
+		uncertaintyNotes: [],
+	});
+	const { result } = await runSkillIsolated<unknown, ClassifyValue>(
+		CLASSIFY,
+		{ question: 'q', repo: REPO },
+		{ fakeProvider: fakeProviderReturning(emptyGoal, emptyGoal) },
+	);
+	assert.equal(result.confidence, 'low');
+	const noteText = (result.notes ?? []).join(' | ');
+	assert.match(noteText, /goal must be a non-empty string/);
+});
+
+test('classify-question (A5): goal present + non-empty -> threaded through to the candidate', async () => {
+	setup();
+	const detailedGoal = 'Enumerate every entity declared in src/User.ts plus its imports; surface exports vs internals so the caller can render an API summary.';
+	const json = JSON.stringify({
+		questionType: 'describe-file',
+		candidates: [
+			{ skillId: 'code.source.file.describe', rationale: 'enum file', goal: detailedGoal, mustHaveScope: 'repo+file' },
+		],
+		fallbacks: [],
+		uncertaintyNotes: [],
+	});
+	const { result } = await runSkillIsolated<unknown, ClassifyValue>(
+		CLASSIFY,
+		{ question: 'What does src/User.ts define?', repo: REPO },
+		{ fakeProvider: fakeProviderReturning(json) },
+	);
+	assert.equal(result.confidence, 'high');
+	assert.equal(result.value.candidates[0]!.goal, detailedGoal,
+		'goal must be threaded through unchanged from the LLM output');
 });
 
 // ---------------------------------------------------------------------------
