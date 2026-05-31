@@ -325,7 +325,7 @@ test('select-scope: valid args validated against the skill\'s inputSchema -> hig
 		{
 			question: 'Describe the repo.',
 			candidates: [
-				{ skillId: 'code.source.repo.describe', rationale: 'repo summary', mustHaveScope: 'repo' },
+				{ skillId: 'code.source.repo.describe', rationale: 'repo summary', goal: 'Summarise the active repo for the caller.', mustHaveScope: 'repo' },
 			],
 			repo: REPO,
 		},
@@ -350,7 +350,7 @@ test('select-scope: args missing required field -> validation rejects -> retry; 
 		{
 			question: 'q',
 			candidates: [
-				{ skillId: 'code.source.repo.describe', rationale: 'r', mustHaveScope: 'repo' },
+				{ skillId: 'code.source.repo.describe', rationale: 'r', goal: 'Describe the repo for the caller.', mustHaveScope: 'repo' },
 			],
 			repo: REPO,
 		},
@@ -379,7 +379,7 @@ test('select-scope: ambiguity surfaces medium confidence', async () => {
 		{
 			question: 'Show me compute.',
 			candidates: [
-				{ skillId: 'code.entity.summary', rationale: 'r', mustHaveScope: 'repo+entity' },
+				{ skillId: 'code.entity.summary', rationale: 'r', goal: 'Return the summary card for the resolved entity.', mustHaveScope: 'repo+entity' },
 			],
 			repo: REPO,
 		},
@@ -402,7 +402,7 @@ test('select-scope: repoPath mismatch is rejected', async () => {
 		{
 			question: 'q',
 			candidates: [
-				{ skillId: 'code.source.repo.describe', rationale: 'r', mustHaveScope: 'repo' },
+				{ skillId: 'code.source.repo.describe', rationale: 'r', goal: 'Describe the repo for the caller.', mustHaveScope: 'repo' },
 			],
 			repo: REPO,
 		},
@@ -458,7 +458,7 @@ test('select-scope: priorFacts.modules render in the LLM prompt with path + labe
 		{
 			question: 'describe HDFS Core',
 			candidates: [
-				{ skillId: 'code.source.module.describe', rationale: 'module summary', mustHaveScope: 'repo' },
+				{ skillId: 'code.source.module.describe', rationale: 'module summary', goal: 'Describe the module surface for the caller.', mustHaveScope: 'repo' },
 			],
 			repo: REPO,
 			priorFacts: {
@@ -497,7 +497,7 @@ test('select-scope: priorFacts.entities + tables + ormModels all render in the p
 		{
 			question: 'tell me about compute',
 			candidates: [
-				{ skillId: 'code.entity.summary', rationale: 'r', mustHaveScope: 'repo+entity' },
+				{ skillId: 'code.entity.summary', rationale: 'r', goal: 'Return the summary card for the resolved entity.', mustHaveScope: 'repo+entity' },
 			],
 			repo: REPO,
 			priorFacts: {
@@ -518,6 +518,73 @@ test('select-scope: priorFacts.entities + tables + ormModels all render in the p
 	assert.match(body, /prisma: Order -> orders/);
 });
 
+// ---------------------------------------------------------------------------
+// select-scope A5: goal is required + load-bearing
+// ---------------------------------------------------------------------------
+
+test('select-scope (A5): missing goal on a candidate -> input validation fails', async () => {
+	setup();
+	// Pre-#6: this candidate shape worked (goal was optional).
+	// Post-#6: schema requires `goal` -- skill must reject at input
+	// validation before reaching the LLM.
+	const { result } = await runSkillIsolated<unknown, SelectValue>(
+		SELECT,
+		{
+			question: 'q',
+			candidates: [
+				// `goal` deliberately omitted.
+				{ skillId: 'code.source.repo.describe', rationale: 'r', mustHaveScope: 'repo' },
+			],
+			repo: REPO,
+		},
+		{ fakeProvider: fakeProviderReturning('{}') },
+	);
+	// runSkill clamps to 'low' on input schema validation failure.
+	assert.equal(result.confidence, 'low');
+});
+
+test('select-scope (A5): goal renders in the LLM prompt for each candidate', async () => {
+	setup();
+	const valid = JSON.stringify({
+		scoped: [
+			{
+				skillId: 'code.source.repo.describe',
+				args: { repoPath: REPO.path },
+				resolvedScope: { repoPath: REPO.path },
+			},
+		],
+		notes: [],
+	});
+	const cap = captureProvider(valid);
+	const goalA = 'Summarise the active repo so the caller can decide which module to drill into next.';
+	const goalB = 'Enumerate fields on the User class so the caller can render the schema.';
+	await runSkillIsolated<unknown, SelectValue>(
+		SELECT,
+		{
+			question: 'q',
+			candidates: [
+				{ skillId: 'code.source.repo.describe',   rationale: 'a', goal: goalA, mustHaveScope: 'repo' },
+				{ skillId: 'code.class.extract-fields',   rationale: 'b', goal: goalB, mustHaveScope: 'repo+class' },
+			],
+			repo: REPO,
+		},
+		{ fakeProvider: cap.provider },
+	);
+
+	const userMsg = cap.getCapturedMessages().find(m => m.role === 'user');
+	assert.ok(userMsg, 'user message should reach the provider');
+	const body = userMsg!.content as string;
+
+	// Both goals should render verbatim in the user prompt.
+	assert.ok(body.includes(goalA), 'goal A must appear in the rendered prompt');
+	assert.ok(body.includes(goalB), 'goal B must appear in the rendered prompt');
+	// Goal renders BEFORE rationale per A5 (rationale is informational).
+	const goalAIdx = body.indexOf(goalA);
+	const ratAIdx  = body.indexOf('rationale (informational only): a');
+	assert.ok(goalAIdx >= 0 && ratAIdx >= 0 && goalAIdx < ratAIdx,
+		'goal should render before rationale per A5 (goal is primary signal)');
+});
+
 test('select-scope: no priorFacts -> Prior facts header is NOT in the prompt', async () => {
 	setup();
 	const valid = JSON.stringify({
@@ -536,7 +603,7 @@ test('select-scope: no priorFacts -> Prior facts header is NOT in the prompt', a
 		{
 			question: 'describe the repo',
 			candidates: [
-				{ skillId: 'code.source.repo.describe', rationale: 'r', mustHaveScope: 'repo' },
+				{ skillId: 'code.source.repo.describe', rationale: 'r', goal: 'Describe the repo for the caller.', mustHaveScope: 'repo' },
 			],
 			repo: REPO,
 			// no priorFacts

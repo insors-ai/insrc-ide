@@ -38,6 +38,12 @@ import { validate as validateJsonSchema } from '../json-schema.js';
 import type { Skill, SkillResult } from '../types.js';
 import type { LLMMessage, LLMProvider } from '../../../shared/types.js';
 import { stripJsonFences } from '../../../shared/json-fences.js';
+import type {
+	BootstrapTriggerKind,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 const log = getLogger('skill.code.meta.select-scope');
 
@@ -60,14 +66,13 @@ interface CandidateIn {
 	readonly rationale:     string;
 	readonly mustHaveScope: MustHaveScope;
 	/**
-	 * Per A5 (plans/skills/code/code.meta.classify-question.md): the
+	 * Per A5 (plans/skills/code/code.meta.select-scope.md): the
 	 * natural-language instruction classify-question emits for each
-	 * candidate. Optional here for back-compat -- this migration accepts
-	 * it as a pass-through field but doesn't yet wire it into the
-	 * scope-resolution prompt. Becomes load-bearing in the #6 select-
-	 * scope migration.
+	 * candidate. This is the PRIMARY signal select-scope reads when
+	 * filling args -- description + inputSchema tell us the structure;
+	 * the goal tells us the content. Required since #6.
 	 */
-	readonly goal?:         string;
+	readonly goal:          string;
 }
 
 interface RepoContext {
@@ -146,15 +151,16 @@ const CANDIDATE_IN_SCHEMA = {
 	properties: {
 		skillId:       { type: 'string' },
 		rationale:     { type: 'string' },
-		// Per A5: optional pass-through for now; #6 migration makes it
-		// required + wires into the scope-resolution prompt.
-		goal:          { type: 'string', maxLength: 500 },
+		// Per A5 (#6): goal is REQUIRED. It's the primary signal
+		// select-scope reads to fill args; inputSchema provides shape,
+		// goal provides content.
+		goal:          { type: 'string', minLength: 1, maxLength: 500 },
 		mustHaveScope: {
 			type: 'string',
 			enum: ['repo', 'repo+entity', 'repo+file', 'repo+class', 'repo+model', 'none'],
 		},
 	},
-	required: ['skillId', 'rationale', 'mustHaveScope'],
+	required: ['skillId', 'rationale', 'goal', 'mustHaveScope'],
 	additionalProperties: false,
 } as const;
 
@@ -314,6 +320,15 @@ function buildSystemPrompt(): string {
 		'You are a code-analyzer scope-selector. For each candidate skill the',
 		'planner picked, fill in concrete `args` (matching the skill\'s input',
 		'schema) using information from the user question + active repo.',
+		'',
+		'PRIMARY SIGNAL: each candidate carries a `goal` -- a natural-language',
+		'instruction from classify-question that tells you WHAT the skill',
+		'should achieve. Read the goal carefully; it usually hints at the',
+		'concrete scope you need to fill (which file, which entity, which',
+		'ref, which threshold). The `inputSchema` tells you the STRUCTURE',
+		'of the args; the goal tells you the CONTENT. The `rationale` is',
+		'informational only -- do not rely on it as a routing signal.',
+		'',
 		'Output STRICT JSON matching this schema:',
 		'',
 		'```json',
@@ -326,27 +341,31 @@ function buildSystemPrompt(): string {
 		'2. `args` MUST satisfy the candidate\'s declared input schema. Read',
 		'   the schema in the user message; only emit properties the schema',
 		'   declares; respect required fields and enum constraints.',
-		'3. `resolvedScope.repoPath` MUST equal the active repo\'s path.',
-		'4. When the question references a name that could match several',
+		'3. Read the candidate `goal` first; let it guide which scope fields',
+		'   matter for THIS candidate. The goal often names the concrete',
+		'   target (file path, entity name, git ref) -- pull those into',
+		'   `args` directly when the schema accepts them.',
+		'4. `resolvedScope.repoPath` MUST equal the active repo\'s path.',
+		'5. When the question references a name that could match several',
 		'   things in the codebase ("the User class" with both a model class',
 		'   and an enum), EMIT ONE entry per plausible match and set',
 		'   `ambiguity: { kind: "multiple-matches", alternatives: [<labels>] }`.',
 		'   The planner gates on this for a user clarification.',
-		'5. When the question references a name that no obvious entity / file',
+		'6. When the question references a name that no obvious entity / file',
 		'   matches, emit ONE entry with the best-effort fill + `ambiguity:',
 		'   { kind: "no-match" }` and surface the issue in `notes`. Do NOT',
 		'   silently pick a default.',
-		'6. Use `notes` to flag anything ambiguous in the question that you',
+		'7. Use `notes` to flag anything ambiguous in the question that you',
 		'   had to guess (default git refs, default thresholds, etc.).',
 		'   Empty array if every arg came directly from the question.',
-		'7. PRIOR FACTS: when the user message includes a `Prior facts`',
+		'8. PRIOR FACTS: when the user message includes a `Prior facts`',
 		'   section, prefer those concrete identifiers over guessing. A',
 		'   reference like "HDFS Core" that maps uniquely to one of the',
 		'   listed `modules.label` MUST be replaced by that module\'s',
 		'   `path` in the skill `args`. Same rule for entities, tables,',
 		'   and ORM models. If a label matches multiple prior facts,',
-		'   surface via the existing ambiguity arm (rule 4). If no fact',
-		'   matches, treat the reference as cold per rule 5 -- DO NOT',
+		'   surface via the existing ambiguity arm (rule 5). If no fact',
+		'   matches, treat the reference as cold per rule 6 -- DO NOT',
 		'   invent a fact-shaped identifier.',
 		'',
 		'Output ONLY the JSON object; no preamble, no fenced block.',
@@ -371,8 +390,12 @@ function buildUserMessage(input: SelectScopeInput, manifests: readonly Candidate
 		}
 		return [
 			`### Candidate ${i + 1}: \`${c.skillId}\``,
+			// Per A5: goal leads -- it's the primary signal for what
+			// args to fill. Description + schema follow as structural
+			// reference.
+			`goal: ${c.goal}`,
 			`mustHaveScope: ${c.mustHaveScope}`,
-			`rationale (from classify-question): ${c.rationale}`,
+			`rationale (informational only): ${c.rationale}`,
 			`description: ${manifest.description}`,
 			'inputSchema:',
 			'```json',
@@ -565,14 +588,17 @@ async function callLLM(
 
 const skill: Skill<SelectScopeInput, SelectScopeOutput> = {
 	id: 'code.meta.select-scope',
-	name: 'Meta: select-scope (fill skill args from question + repo context)',
+	name: 'Meta: select-scope (arg-filler utility for L1 candidates)',
 	description:
-		'Take classify-question\'s candidate list and the user question and fill ' +
-		'concrete args per candidate against its inputSchema. Resolves entity / ' +
-		'file / class / model refs to skill args and surfaces ambiguity ' +
-		'(multiple-matches / no-match) for the planner to gate on. Cloud-routed; ' +
-		'structured JSON output validated against each skill\'s inputSchema before ' +
-		'returning.',
+		'L1 arg-filling utility (per A5 -- demoted from primary routing). Takes ' +
+		'classify-question\'s candidate list -- each carrying a `goal` -- and ' +
+		'fills concrete `args` per candidate against its inputSchema. The goal ' +
+		'is the primary signal (content); the inputSchema is the structural ' +
+		'reference. Resolves entity / file / class / model refs to skill args ' +
+		'and surfaces ambiguity (multiple-matches / no-match) for the planner ' +
+		'to gate on. Cloud-routed; structured JSON output validated against ' +
+		'each skill\'s inputSchema before returning. L2 skills bypass this ' +
+		'utility -- they consume the goal directly.',
 	family: 'meta',
 	owner: 'code-analyzer',
 	version: 1,
@@ -670,10 +696,50 @@ function emptyOutput(): SelectScopeOutput {
 	return { scoped: [], notes: [] };
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (per plans/skills/code/code.meta.select-scope.md)
+// ---------------------------------------------------------------------------
+//
+// Ownership-only declaration -- same shape as classify-question. No
+// contextSlots (the LLM-driven arg-fill varies per turn so caching
+// offers near-zero win). The observations namespace is declared for
+// the eventual L2 distillation path.
+
+const OWNER_ID: OwnerId = 'skill:code.meta.select-scope';
+
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = [
+	'repo-add', 'reindex', 'manual',
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   'observations',
+		valueType:   'WorkspacePatternObservation',
+		autoDistill: 'never',
+		indexing:    { kind: 'never' },
+		ttl:         '30d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       [],
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+const skillWithSubstrate = {
+	...skill,
+	...substrateExtension,
+};
+
 export function registerCodeMetaSelectScopeSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.
-export const _parseAndValidateForTest      = parseAndValidate;
+export const _parseAndValidateForTest        = parseAndValidate;
 export const _buildCandidateManifestsForTest = buildCandidateManifests;
+export const _buildUserMessageForTest        = buildUserMessage;

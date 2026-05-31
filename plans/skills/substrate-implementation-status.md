@@ -399,19 +399,18 @@ Each migration:
 | 9  | `code.quality.cyclic-deps`      | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.cyclic-deps.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.cyclic-deps.ts)     | substrate (1 of 7 in suite). |
 | 10 | `code.quality.duplication`      | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.duplication.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.duplication.ts)     | substrate (2 of 7 in suite). |
 | 11 | `code.quality.unused-exports`   | [`code/code.quality.suite.md`](code/code.quality.suite.md) (shared) | [`code.quality.unused-exports.ts`](../../src/insrc/daemon/skills/built-ins/code.quality.unused-exports.ts) | substrate (1 of 7 in suite) + legacy compat (1). All quality skills: 24h TTL (shorter than 7d -- code quality drifts with edits). |
-| 5  | `code.meta.classify-question`   | [`code/code.meta.classify-question.md`](code/code.meta.classify-question.md) (A5 evolution) | [`code.meta.classify-question.ts`](../../src/insrc/daemon/skills/built-ins/code.meta.classify-question.ts) | **NOT a cache wiring -- A5 schema evolution.** Adds `goal: string` to each `Candidate` (natural-language instruction the routed skill plans against). System prompt + few-shot examples + validator all updated to require non-empty goal; one retry on missing. Substrate declaration is "ownership only" (no `contextSlots` -- caching offers near-zero win for question-driven LLM routing). Legacy `code.meta.select-scope` accepts `goal` as an optional pass-through (becomes load-bearing in #6). Tests: 20/20 (covers existing 17 + 3 new A5: missing-goal-rejected / empty-goal-rejected / goal-threaded-through). |
+| 5  | `code.meta.classify-question`   | [`code/code.meta.classify-question.md`](code/code.meta.classify-question.md) (A5 evolution) | [`code.meta.classify-question.ts`](../../src/insrc/daemon/skills/built-ins/code.meta.classify-question.ts) | **NOT a cache wiring -- A5 schema evolution.** Adds `goal: string` to each `Candidate` (natural-language instruction the routed skill plans against). System prompt + few-shot examples + validator all updated to require non-empty goal; one retry on missing. Substrate declaration is "ownership only" (no `contextSlots` -- caching offers near-zero win for question-driven LLM routing). |
+| 6  | `code.meta.select-scope`        | [`code/code.meta.select-scope.md`](code/code.meta.select-scope.md) (A5 demotion) | [`code.meta.select-scope.ts`](../../src/insrc/daemon/skills/built-ins/code.meta.select-scope.ts) | **A5 demotion: arg-filler utility, not routing.** Makes `goal` required (was optional pass-through from #5); renders goal prominently in the LLM prompt; system prompt rule explains goal is primary signal for filling args (inputSchema = structure, goal = content). Substrate ownership-only. Tests: 22/22 (existing 20 + 2 new A5: missing-goal-rejected-at-input + goal-renders-before-rationale). |
 
 ### Pending priority migrations (from code-analyzer-migration.md)
 
+All 7 code-analyzer L1 migrations done. Remaining migration work (per agentic-skills-architecture.md):
+
 | Priority | Skill | Why |
 |---|---|---|
-| 5 | `code.meta.classify-question` | Evolve per A5 to emit goals. |
-| 6 | `code.meta.select-scope` | Demote to L1 arg-filler utility per A5. |
-| 7 | `code.entity.summary` | Cacheable per-entity. |
-| 8 | `code.quality.complexity` | Pre-compute at indexing time. |
-| 9 | `code.quality.cyclic-deps` | Same. |
-| 10 | `code.quality.duplication` | Same. |
-| 11 | `code.quality.unused-exports` | Same. |
+| -- | `data.meta.classify-question` | Same A5 evolution as code (`goal` per candidate). Independent per-skill pass. |
+| -- | `data.meta.select-scope`      | Same A5 demotion as code (`goal` required + load-bearing in prompt). Independent per-skill pass. Depends on the data classify migration shipping first. |
+| -- | Data L1 skill migrations      | Data-analyzer pipeline equivalents to the code-analyzer ones (priorities 7-11 done on the code side). |
 
 L2 framework (`L2Runtime`, `L2Skill<I, O>`, evidence-ledger discipline, `code.answer-question` / `code.audit-module` pilot) is separately scoped per the agentic-skills doc Phase 3.
 
