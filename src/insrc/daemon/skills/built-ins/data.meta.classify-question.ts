@@ -46,6 +46,12 @@ import { registerSkill } from '../registry.js';
 import { listSkills } from '../registry.js';
 import type { Skill, SkillContext, SkillResult } from '../types.js';
 import type { LLMMessage, LLMProvider, ToolDefinition } from '../../../shared/types.js';
+import type {
+  BootstrapTriggerKind,
+  NamespaceSpec,
+  OwnerId,
+  SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 /**
  * Tool name the model emits to submit its classification. Drives the
@@ -95,6 +101,20 @@ interface ClassifyInput {
 interface Candidate {
   readonly skillId:       string;
   readonly rationale:     string;
+  /**
+   * Natural-language instruction telling the routed skill WHAT to achieve.
+   * Per A5 (plans/agentic-skills-architecture.md §A5) -- mirrors
+   * `code.meta.classify-question` candidate.goal. "Profile orders" is
+   * directionless; "Run completeness + uniqueness + validity dimensions
+   * across the orders table on the warehouse connection; flag columns
+   * with > 5% null rate" is a goal a skill can plan against.
+   *
+   * Consumers:
+   *   - L2 skills: receive this as `invocationContext.goal`.
+   *   - L1 skills: `data.meta.select-scope` reads this alongside the
+   *     skill's input schema to fill `input: I`.
+   */
+  readonly goal:          string;
   readonly mustHaveScope: MustHaveScope;
 }
 
@@ -169,9 +189,11 @@ const OUTPUT_SCHEMA = {
         properties: {
           skillId:       { type: 'string' },
           rationale:     { type: 'string', maxLength: 280 },
+          // Per A5: natural-language instruction for the routed skill.
+          goal:          { type: 'string', minLength: 1, maxLength: 500 },
           mustHaveScope: { type: 'string', enum: MUST_HAVE_SCOPES },
         },
-        required: ['skillId', 'rationale', 'mustHaveScope'],
+        required: ['skillId', 'rationale', 'goal', 'mustHaveScope'],
         additionalProperties: false,
       },
     },
@@ -277,7 +299,12 @@ Output:
 {
   "questionType": "describe-schema",
   "candidates": [
-    { "skillId": "data.source.rdbms.describe-table", "rationale": "RDBMS schema introspection over a single named target.", "mustHaveScope": "connection+target" }
+    {
+      "skillId": "data.source.rdbms.describe-table",
+      "rationale": "RDBMS schema introspection over a single named target.",
+      "goal": "Introspect the 'orders' table on the prod-db connection; return the column list with types, nullability, primary key and indexes so the caller can render the schema.",
+      "mustHaveScope": "connection+target"
+    }
   ],
   "fallbacks": ["data.source.rdbms.list-tables"],
   "uncertaintyNotes": []
@@ -289,7 +316,12 @@ Output:
 {
   "questionType": "sample-data",
   "candidates": [
-    { "skillId": "data.source.rdbms.sample-rows", "rationale": "Row sampling with structured WHERE.", "mustHaveScope": "connection+target" }
+    {
+      "skillId": "data.source.rdbms.sample-rows",
+      "rationale": "Row sampling with structured WHERE.",
+      "goal": "Sample 20 rows from the 'users' table on prod-db filtered to status='active'; return the rows so the caller can preview matching records.",
+      "mustHaveScope": "connection+target"
+    }
   ],
   "fallbacks": ["data.source.rdbms.describe-table"],
   "uncertaintyNotes": []
@@ -301,8 +333,18 @@ Output:
 {
   "questionType": "profile-quality",
   "candidates": [
-    { "skillId": "data.quality.scorecard.rdbms", "rationale": "Composite that runs completeness + uniqueness + validity dimensions.", "mustHaveScope": "connection+target" },
-    { "skillId": "data.profile.auto.rdbms", "rationale": "Per-column type-aware profile to find the right validity patterns.", "mustHaveScope": "connection+target" }
+    {
+      "skillId": "data.quality.scorecard.rdbms",
+      "rationale": "Composite that runs completeness + uniqueness + validity dimensions.",
+      "goal": "Run the quality scorecard (completeness + uniqueness + validity) across every column of the 'orders' table on the warehouse connection; return the per-column scores so the caller can flag problem columns.",
+      "mustHaveScope": "connection+target"
+    },
+    {
+      "skillId": "data.profile.auto.rdbms",
+      "rationale": "Per-column type-aware profile to find the right validity patterns.",
+      "goal": "Run a type-aware column profile on 'orders' on the warehouse connection; surface candidate validity patterns (date formats, email shapes, enum ranges) so a follow-up scorecard call can be parametrised correctly.",
+      "mustHaveScope": "connection+target"
+    }
   ],
   "fallbacks": ["data.quality.completeness.rdbms", "data.quality.uniqueness.rdbms"],
   "uncertaintyNotes": ["The user did not name validity patterns; scorecard runs without validity unless caller supplies validityPatterns."]
@@ -314,7 +356,12 @@ Output:
 {
   "questionType": "sensitivity",
   "candidates": [
-    { "skillId": "data.pii.column-classifier.rdbms", "rationale": "Per-column PII verdict with both pattern and column-name evidence.", "mustHaveScope": "connection+target" }
+    {
+      "skillId": "data.pii.column-classifier.rdbms",
+      "rationale": "Per-column PII verdict with both pattern and column-name evidence.",
+      "goal": "Classify every column of the 'users' table on prod-db for PII risk; combine value-pattern evidence (emails / phones / SSNs) with column-name signals; return the verdict per column with confidence.",
+      "mustHaveScope": "connection+target"
+    }
   ],
   "fallbacks": ["data.pii.detect-patterns.rdbms"],
   "uncertaintyNotes": []
@@ -326,7 +373,12 @@ Output:
 {
   "questionType": "lineage",
   "candidates": [
-    { "skillId": "data.lineage.read-write-callsites", "rationale": "Cross-link a DB target to its read/write call sites.", "mustHaveScope": "connection+target" }
+    {
+      "skillId": "data.lineage.read-write-callsites",
+      "rationale": "Cross-link a DB target to its read/write call sites.",
+      "goal": "Find every read and write call site in the codebase that references the 'orders' table on prod-db; return the file + line list grouped by read vs write so the caller can present the data-access surface.",
+      "mustHaveScope": "connection+target"
+    }
   ],
   "fallbacks": [],
   "uncertaintyNotes": []
@@ -338,7 +390,12 @@ Output:
 {
   "questionType": "drift-analysis",
   "candidates": [
-    { "skillId": "data.drift.volume.rdbms", "rationale": "Volume comparison between two windows; caller supplies WHERE filters.", "mustHaveScope": "connection+target" }
+    {
+      "skillId": "data.drift.volume.rdbms",
+      "rationale": "Volume comparison between two windows; caller supplies WHERE filters.",
+      "goal": "Compare request volume on the events connection between this-week and last-week windows; return the delta plus the per-day breakdown so the caller can highlight the shift.",
+      "mustHaveScope": "connection+target"
+    }
   ],
   "fallbacks": ["data.timeseries.trend.rdbms"],
   "uncertaintyNotes": ["Window boundaries are not specified; planner / select-scope must derive from the question text."]
@@ -350,7 +407,12 @@ Output:
 {
   "questionType": "timeseries",
   "candidates": [
-    { "skillId": "data.timeseries.trend.rdbms", "rationale": "OLS regression on (timestamp, value) pairs to surface slope + R².", "mustHaveScope": "connection+target+columns" }
+    {
+      "skillId": "data.timeseries.trend.rdbms",
+      "rationale": "OLS regression on (timestamp, value) pairs to surface slope + R².",
+      "goal": "Compute the daily-signups trend over the last 30 days on prod-db; OLS regression on (day, count) pairs; return slope + R² + the daily count series so the caller can render the chart and verdict.",
+      "mustHaveScope": "connection+target+columns"
+    }
   ],
   "fallbacks": ["data.timeseries.gap-analysis.rdbms"],
   "uncertaintyNotes": []
@@ -377,13 +439,29 @@ function buildSystemPrompt(): string {
     '3. `mustHaveScope` declares the smallest scope the candidate needs:',
     '   "connection" / "connection+target" / "connection+target+columns" /',
     '   "none". select-scope (the next pipeline step) will fill the args.',
-    '4. `uncertaintyNotes` should surface anything the user message did',
+    '4. EVERY candidate MUST include a `goal` -- a natural-language',
+    '   instruction telling the routed skill WHAT to achieve, not just',
+    '   THAT it should be called. Bad: "Profile orders". Good: "Run',
+    '   completeness + uniqueness + validity dimensions across every',
+    '   column of the orders table on the warehouse connection; flag',
+    '   columns with > 5% null rate so the caller can highlight quality',
+    '   risks." The goal should:',
+    '     - State the WHAT (what to find / compute / compare).',
+    '     - State the WHERE (which connection / target / columns / window,',
+    '       when known).',
+    '     - State the WHY-CALLER-NEEDS-IT (one short clause -- helps the',
+    '       skill prioritise + decide how much detail to return).',
+    '   The goal is what gives the skill direction beyond its catalog',
+    '   summary. L2 skills consume it as planning input; L1 skills',
+    '   ride select-scope, which reads the goal alongside the input',
+    '   schema to fill concrete args.',
+    '5. `uncertaintyNotes` should surface anything the user message did',
     '   not specify (windows, validity patterns, sampling sizes). Empty',
     '   array if the question is fully scoped.',
-    '5. Use `fallbacks` for second-choice skills the planner can pivot to',
+    '6. Use `fallbacks` for second-choice skills the planner can pivot to',
     '   if the first candidates fail their preconditions or return',
     '   confidence: low.',
-    '6. Set `questionType` to the closest fit; "free-form" only when no',
+    '7. Set `questionType` to the closest fit; "free-form" only when no',
     '   other type matches.',
     '',
     FEW_SHOT,
@@ -477,6 +555,7 @@ function parseAndValidate(
     const cc = c as Record<string, unknown>;
     const skillId   = cc['skillId'];
     const rationale = cc['rationale'];
+    const goal      = cc['goal'];
     const scope     = cc['mustHaveScope'];
     if (typeof skillId !== 'string' || !knownIds.has(skillId)) {
       return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].skillId='${skillId}' not in the catalog` } };
@@ -484,10 +563,15 @@ function parseAndValidate(
     if (typeof rationale !== 'string') {
       return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].rationale must be a string` } };
     }
+    // Per A5: goal is the natural-language instruction that gives the
+    // routed skill direction. Non-empty required.
+    if (typeof goal !== 'string' || goal.length === 0) {
+      return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].goal must be a non-empty string (per A5; see plans/skills/code/code.meta.classify-question.md)` } };
+    }
     if (typeof scope !== 'string' || !MUST_HAVE_SCOPES.includes(scope as MustHaveScope)) {
       return { ok: false, failure: { kind: 'validation', message: `candidates[${i}].mustHaveScope must be one of: ${MUST_HAVE_SCOPES.join(', ')}` } };
     }
-    candidates.push({ skillId, rationale, mustHaveScope: scope as MustHaveScope });
+    candidates.push({ skillId, rationale, goal, mustHaveScope: scope as MustHaveScope });
   }
 
   const fallbacksRaw = obj['fallbacks'];
@@ -689,6 +773,33 @@ function emptyOutput(): ClassifyOutput {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (ownership only -- mirrors code.meta side)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.meta.classify-question';
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+  {
+    namespace:   'observations',
+    valueType:   'WorkspacePatternObservation',
+    autoDistill: 'never',
+    indexing:    { kind: 'never' },
+    ttl:         '30d',
+  },
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+  ownerId:            OWNER_ID,
+  schemaVersion:      1,
+  interestedTriggers: INTERESTED_TRIGGERS,
+  contextSlots:       [],
+  memorySchema:       MEMORY_SCHEMA,
+  assertionInterests: [],
+};
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataMetaClassifyQuestionSkill(): void {
-  registerSkill(skill as unknown as Skill);
+  registerSkill(skillWithSubstrate as unknown as Skill);
 }

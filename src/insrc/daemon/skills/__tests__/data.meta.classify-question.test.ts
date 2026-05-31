@@ -28,7 +28,12 @@ const CLASSIFY = 'data.meta.classify-question';
 
 interface ClassifyOutput {
 	readonly questionType: string;
-	readonly candidates: readonly { readonly skillId: string; readonly rationale: string; readonly mustHaveScope: string }[];
+	readonly candidates: readonly {
+		readonly skillId: string;
+		readonly rationale: string;
+		readonly goal: string;
+		readonly mustHaveScope: string;
+	}[];
 	readonly fallbacks: readonly string[];
 	readonly uncertaintyNotes: readonly string[];
 }
@@ -93,6 +98,7 @@ test('classify-question: returns LLM output verbatim when JSON is valid', async 
 			{
 				skillId: 'data.source.rdbms.describe-table',
 				rationale: 'RDBMS schema introspection.',
+				goal: 'Introspect the orders table on prod-db; return columns + types so the caller can render the schema.',
 				mustHaveScope: 'connection+target',
 			},
 		],
@@ -125,6 +131,7 @@ test('classify-question: confidence is medium when uncertaintyNotes present', as
 			{
 				skillId: 'data.drift.volume.rdbms',
 				rationale: 'Two-window volume comparison.',
+				goal: 'Compare event volume between two windows on the events connection so the caller can flag the shift.',
 				mustHaveScope: 'connection+target',
 			},
 		],
@@ -153,6 +160,7 @@ test('classify-question: strips a fenced ```json block if the model wraps the re
 			{
 				skillId: 'data.source.rdbms.sample-rows',
 				rationale: 'Row sampling.',
+				goal: 'Sample rows from prod-db.users so the caller can preview.',
 				mustHaveScope: 'connection+target',
 			},
 		],
@@ -186,6 +194,7 @@ test('classify-question: retries once on invalid JSON; second-pass valid → suc
 			{
 				skillId: 'data.source.rdbms.describe-table',
 				rationale: 'after retry.',
+				goal: 'Describe the orders schema (after retry).',
 				mustHaveScope: 'connection+target',
 			},
 		],
@@ -211,7 +220,7 @@ test('classify-question: retry path with hallucinated skillId rejected → low',
 	const hallucination = JSON.stringify({
 		questionType: 'describe-schema',
 		candidates: [
-			{ skillId: 'data.does.not.exist', rationale: 'fake', mustHaveScope: 'connection' },
+			{ skillId: 'data.does.not.exist', rationale: 'fake', goal: 'whatever', mustHaveScope: 'connection' },
 		],
 		fallbacks: [],
 		uncertaintyNotes: [],
@@ -312,6 +321,7 @@ test('classify-question: KV roster excludes rdbms-only skills from the catalog',
 									{
 										skillId: 'data.source.kv.scan-keys',
 										rationale: 'KV key scan.',
+											goal: 'Scan keys in the cache connection so the caller can see what is stored.',
 										mustHaveScope: 'connection',
 									},
 								],

@@ -82,6 +82,7 @@ const TWO_RDBMS    = [
 const DESCRIBE_CANDIDATE = {
 	skillId: 'data.source.rdbms.describe-table',
 	rationale: 'RDBMS schema introspection.',
+	goal: 'Introspect the requested table schema so the caller can render columns + types.',
 	mustHaveScope: 'connection+target' as const,
 };
 
@@ -343,6 +344,7 @@ test('select-scope: candidate not in registry surfaces in notes', async () => {
 				{
 					skillId: 'data.does.not.exist',
 					rationale: 'phantom',
+					goal: 'whatever',
 					mustHaveScope: 'connection',
 				},
 			],
@@ -363,8 +365,8 @@ test('select-scope: every candidate missing from registry → low', async () => 
 		{
 			question: 'whatever',
 			candidates: [
-				{ skillId: 'data.does.not.exist',     rationale: 'a', mustHaveScope: 'connection' },
-				{ skillId: 'data.also.does.not.exist', rationale: 'b', mustHaveScope: 'connection' },
+				{ skillId: 'data.does.not.exist',     rationale: 'a', goal: 'whatever a', mustHaveScope: 'connection' },
+				{ skillId: 'data.also.does.not.exist', rationale: 'b', goal: 'whatever b', mustHaveScope: 'connection' },
 			],
 			connections: RDBMS_ROSTER,
 		},

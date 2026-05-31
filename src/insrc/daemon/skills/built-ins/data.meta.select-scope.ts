@@ -58,6 +58,12 @@ import { registerSkill, getSkill } from '../registry.js';
 import { validate as validateJsonSchema } from '../json-schema.js';
 import type { Skill, SkillResult } from '../types.js';
 import type { LLMMessage, LLMProvider, ToolDefinition } from '../../../shared/types.js';
+import type {
+  BootstrapTriggerKind,
+  NamespaceSpec,
+  OwnerId,
+  SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 /**
  * Tool name the model must emit to submit its select-scope output. The
@@ -81,6 +87,14 @@ interface CandidateIn {
   readonly skillId:       string;
   readonly rationale:     string;
   readonly mustHaveScope: MustHaveScope;
+  /**
+   * Per A5 (mirrors `code.meta.select-scope` migration): the natural-
+   * language instruction `data.meta.classify-question` emits for each
+   * candidate. This is the PRIMARY signal select-scope reads when
+   * filling args -- description + inputSchema tell us the structure;
+   * the goal tells us the content.
+   */
+  readonly goal:          string;
 }
 
 interface ConnectionInfo {
@@ -147,12 +161,14 @@ const CANDIDATE_IN_SCHEMA = {
   properties: {
     skillId:       { type: 'string' },
     rationale:     { type: 'string' },
+    // Per A5: goal is the primary signal for filling args. Required.
+    goal:          { type: 'string', minLength: 1, maxLength: 500 },
     mustHaveScope: {
       type: 'string',
       enum: ['connection', 'connection+target', 'connection+target+columns', 'none'],
     },
   },
-  required: ['skillId', 'rationale', 'mustHaveScope'],
+  required: ['skillId', 'rationale', 'goal', 'mustHaveScope'],
   additionalProperties: false,
 } as const;
 
@@ -246,6 +262,15 @@ function buildSystemPrompt(): string {
     'planner picked, fill in concrete `args` (matching the skill\'s input',
     'schema) using information from the user question + connection roster.',
     '',
+    'PRIMARY SIGNAL: each candidate carries a `goal` -- a natural-language',
+    'instruction from classify-question that tells you WHAT the skill',
+    'should achieve. Read the goal carefully; it usually hints at the',
+    'concrete scope you need to fill (which connection, which target,',
+    'which columns, which window, which thresholds). The `inputSchema`',
+    'tells you the STRUCTURE of the args; the goal tells you the',
+    'CONTENT. The `rationale` is informational only -- do not rely on',
+    'it as a routing signal.',
+    '',
     `Emit your output by calling the \`${SUBMIT_TOOL_NAME}\` tool exactly once`,
     'with the structured payload as its `input`. Do NOT emit prose, do NOT',
     'restate the payload as JSON in the message body -- the tool call IS the',
@@ -258,20 +283,24 @@ function buildSystemPrompt(): string {
     '2. `args` MUST satisfy the candidate\'s declared input schema. Read',
     '   the schema in the user message; only emit properties the schema',
     '   declares; respect required fields and enum constraints.',
-    '3. `resolvedScope.connectionId` MUST come from the connection roster.',
+    '3. Read the candidate `goal` first; let it guide which scope fields',
+    '   matter for THIS candidate. The goal often names the concrete',
+    '   target (connection / table / columns / time window) -- pull',
+    '   those into `args` directly when the schema accepts them.',
+    '4. `resolvedScope.connectionId` MUST come from the connection roster.',
     '   Pick the connection whose `family` matches the skill\'s declared',
     '   `connection-family` precondition (if any) and whose name / role',
-    '   best fits the question.',
-    '4. When the question references a target ("the orders table") and',
+    '   best fits the question + goal.',
+    '5. When the question references a target ("the orders table") and',
     '   multiple connections plausibly hold it, EMIT ONE entry per',
     '   matching connection and set `ambiguity: { kind:',
     '   "multiple-matches", alternatives: [<connectionId>, ...] }`. The',
     '   planner gates on this for a user clarification.',
-    '5. When the question references a target that no connection clearly',
+    '6. When the question references a target that no connection clearly',
     '   matches, emit ONE entry with the LLM\'s best guess + `ambiguity:',
     '   { kind: "no-match" }` and surface the issue in `notes`. Do NOT',
     '   silently pick a default.',
-    '6. Use `notes` to flag anything ambiguous in the question that the',
+    '7. Use `notes` to flag anything ambiguous in the question that the',
     '   LLM had to guess (default sample sizes, default modes, etc.).',
     '   Empty array if every arg came directly from the question.',
   ].join('\n');
@@ -295,8 +324,11 @@ function buildUserMessage(
     }
     return [
       `### Candidate ${i + 1}: \`${c.skillId}\``,
+      // Per A5: goal leads -- it's the primary signal for what args
+      // to fill. Description + schema follow as structural reference.
+      `goal: ${c.goal}`,
       `mustHaveScope: ${c.mustHaveScope}`,
-      `rationale (from classify-question): ${c.rationale}`,
+      `rationale (informational only): ${c.rationale}`,
       `description: ${manifest.description}`,
       'inputSchema:',
       '```json',
@@ -478,14 +510,17 @@ async function callLLM(
 
 const skill: Skill<SelectScopeInput, SelectScopeOutput> = {
   id: 'data.meta.select-scope',
-  name: 'Meta: select-scope (fill skill args from question + connection roster)',
+  name: 'Meta: select-scope (arg-filler utility for L1 candidates)',
   description:
-    'Take classify-question\'s candidate list and the user question and fill ' +
-    'concrete args per candidate against its inputSchema. Resolves target ' +
-    'names to real (connectionId, target?, columns?) refs and surfaces ' +
-    'ambiguity explicitly (multiple-matches / no-match) for the planner to ' +
-    'gate on. Cloud-routed; structured JSON output validated against each ' +
-    'skill\'s inputSchema before returning.',
+    'L1 arg-filling utility (per A5 -- demoted from primary routing). Takes ' +
+    'classify-question\'s candidate list -- each carrying a `goal` -- and ' +
+    'fills concrete `args` per candidate against its inputSchema. The goal ' +
+    'is the primary signal (content); the inputSchema is the structural ' +
+    'reference. Resolves target names to real (connectionId, target?, ' +
+    'columns?) refs and surfaces ambiguity explicitly (multiple-matches / ' +
+    'no-match) for the planner to gate on. Cloud-routed; structured JSON ' +
+    'output validated against each skill\'s inputSchema before returning. ' +
+    'L2 skills bypass this utility -- they consume the goal directly.',
   family: 'meta',
   owner: 'data-analyzer',
   version: 1,
@@ -586,6 +621,33 @@ function emptyOutput(): SelectScopeOutput {
   return { scoped: [], notes: [] };
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (ownership only -- mirrors code.meta side)
+// ---------------------------------------------------------------------------
+
+const OWNER_ID: OwnerId = 'skill:data.meta.select-scope';
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+  {
+    namespace:   'observations',
+    valueType:   'WorkspacePatternObservation',
+    autoDistill: 'never',
+    indexing:    { kind: 'never' },
+    ttl:         '30d',
+  },
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+  ownerId:            OWNER_ID,
+  schemaVersion:      1,
+  interestedTriggers: INTERESTED_TRIGGERS,
+  contextSlots:       [],
+  memorySchema:       MEMORY_SCHEMA,
+  assertionInterests: [],
+};
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerDataMetaSelectScopeSkill(): void {
-  registerSkill(skill as unknown as Skill);
+  registerSkill(skillWithSubstrate as unknown as Skill);
 }
