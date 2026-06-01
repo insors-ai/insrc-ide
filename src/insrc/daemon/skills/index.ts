@@ -133,6 +133,7 @@ import { registerDataAnomalyChangePointRdbmsSkill } from './built-ins/data.anoma
 
 // L2 pilot skills.
 import { registerCodeAuditModuleSkill } from './built-ins-l2/code.audit-module.js';
+import { registerCodeAnswerQuestionSkill } from './built-ins-l2/code.answer-question.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -339,6 +340,12 @@ export function registerAllSkills(): void {
   // Per plans/skills/code/code.audit-module.md -- the first L2 skill
   // exercising the runtime end-to-end.
   registerCodeAuditModuleSkill();
+  // Per plans/skills/code/code.answer-question.md -- the open-ended
+  // Q&A pilot. Plans its own discovery via classify-question +
+  // select-scope, dispatches L1 sub-calls, drafts a section-shaped
+  // answer, self-grounds. Replaces the legacy writer + grounding-
+  // review pingpong per migration plan Phase 6.
+  registerCodeAnswerQuestionSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }

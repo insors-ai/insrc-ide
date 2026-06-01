@@ -21,7 +21,7 @@
 | **P6** | L1 skill migrations (code + data) | All L1 priority migrations done -- 85 skills across both sides. | done |
 | **P7** | L2 framework core (runtime + budget + grounding + registry) | Per [`plans/skills/l2-framework.md`](../skills/l2-framework.md). Runtime, BudgetTracker, L2LlmAccess, self-grounding validator, L2 registry all shipped. Pilot L2 skill (code.audit-module / code.answer-question) is its own next phase. | done |
 | **P8**  | L2 pilot skill: `code.audit-module` | First L2 skill exercising the runtime end-to-end. Plans its own sub-calls (`code.source.module.describe` + `code.quality.*`), drafts findings via the LLM, self-grounds against the working-state ledger, returns `SkillOutput<AuditModuleOutput>`. Per A6: 7/7 unit tests (deterministic fakes for code-path coverage) + 1/1 live local-LLM integration test (qwen3-coder on a fixture module; 17.3s end-to-end). | done |
-| **P9+** | `code.answer-question` (full L2 pilot) | The open-ended question-answer pilot. Mirrors `data.answer-question`. Per [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md) Phase 4. | not-started |
+| **P9**  | L2 pilot skill: `code.answer-question` | Open-ended Q&A pilot. Plans its own discovery via `code.meta.classify-question` + `code.meta.select-scope` (A5 goal-driven), dispatches L1 sub-calls, drafts a section-shaped answer via `submit_answer`, self-grounds every section's citationRefs against the working-state ledger. Replaces the legacy writer + grounding-review pingpong per migration plan Phase 6. Per A6: 7/7 unit tests (deterministic-fake provider) + 1/1 live local-LLM integration test (qwen3-coder; 25s end-to-end; 2 sections, both grounded, confidence high). | done |
 
 Phases P2 through P5 are independent and can be reordered based on what next-skill migrations need most. P0 → P1 is the only strict prefix.
 
@@ -426,7 +426,7 @@ All 7 code-analyzer L1 migrations done. Remaining migration work (per agentic-sk
 | done | `data.meta.select-scope`      | A5 demotion shipped 2026-05-31 (mirrors the code-side migration). |
 | done | Data L1 skill migrations      | 73 data L1 skills migrated 2026-05-31 across all families (data.source / data.quality / data.profile / data.distribution / data.drift / data.correlation / data.pii / data.dependency / data.cardinality / data.anomaly / data.timeseries / data.sensitivity / data.code / data-lineage). 6 `data.synth.*` skills skipped (synthesis renderers; low cache-hit rate). 24 `.algo.ts` math helpers skipped (no Skill object). |
 
-**L2 framework (P7) shipped** -- the runtime is now available; the pilot L2 skill (`code.audit-module` / `code.answer-question`) is the next phase. See [`plans/skills/l2-framework.md`](l2-framework.md) for the locked interface decisions.
+**L2 framework (P7) shipped** -- the runtime is now available. Both L2 pilots are also shipped: `code.audit-module` (P8 -- narrow surface) and `code.answer-question` (P9 -- open-ended Q&A; replaces the legacy writer + grounding-review pingpong per migration plan Phase 6). See [`plans/skills/l2-framework.md`](l2-framework.md) for the locked interface decisions.
 
 ---
 
