@@ -18,6 +18,14 @@ import { findCallers, findCallees } from '../../../db/search.js';
 import { getEntity } from '../../../db/entities.js';
 import { isRepoInScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface NeighborInput {
 	readonly entityId: string;
@@ -156,14 +164,28 @@ const callersSkill: Skill<NeighborInput, NeighborOutput> = {
 	providerAffinity: 'auto',
 
 	async execute(input: NeighborInput, deps: SkillDeps): Promise<SkillResult<NeighborOutput>> {
+		// Substrate: cache hit short-circuits the gate + LMDB walk.
+		const cached = readCachedCallers(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.found && cached.neighbors.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const gate = await gateSourceEntity(input.entityId, input.scope ?? 'closure', deps);
 		if (gate.kind === 'refusal') return gate.result;
 
 		const all = await findCallers(null, input.entityId);
 		const neighbors = all.map(toEntry);
+		const value: NeighborOutput = { found: true, entityId: input.entityId, neighbors, direction: 'callers' };
+		const confidence: 'high' | 'medium' = neighbors.length > 0 ? 'high' : 'medium';
+		if (confidence === 'high') pinCallers(input, value, deps);
 		return {
-			value: { found: true, entityId: input.entityId, neighbors, direction: 'callers' },
-			confidence: neighbors.length > 0 ? 'high' : 'medium',
+			value,
+			confidence,
 			notes: [],
 			toolCalls: [],
 		};
@@ -187,24 +209,180 @@ const calleesSkill: Skill<NeighborInput, NeighborOutput> = {
 	providerAffinity: 'auto',
 
 	async execute(input: NeighborInput, deps: SkillDeps): Promise<SkillResult<NeighborOutput>> {
+		// Substrate: cache hit short-circuits the gate + LMDB walk.
+		const cached = readCachedCallees(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.found && cached.neighbors.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const gate = await gateSourceEntity(input.entityId, input.scope ?? 'closure', deps);
 		if (gate.kind === 'refusal') return gate.result;
 
 		const all = await findCallees(null, input.entityId);
 		const neighbors = all.map(toEntry);
+		const value: NeighborOutput = { found: true, entityId: input.entityId, neighbors, direction: 'callees' };
+		const confidence: 'high' | 'medium' = neighbors.length > 0 ? 'high' : 'medium';
+		if (confidence === 'high') pinCallees(input, value, deps);
 		return {
-			value: { found: true, entityId: input.entityId, neighbors, direction: 'callees' },
-			confidence: neighbors.length > 0 ? 'high' : 'medium',
+			value,
+			confidence,
 			notes: [],
 			toolCalls: [],
 		};
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// 1-hop CALLS edges are stable per source entity until the indexer
+// rewrites the graph (repo-add / reindex). 24h TTL keeps the cache
+// fresh against edit drift; consumers can force-refresh via reindex.
+
+const CALLERS_OWNER_ID: OwnerId = 'skill:code.entity.callers';
+const CALLERS_NAMESPACE = 'callers';
+const CALLEES_OWNER_ID: OwnerId = 'skill:code.entity.callees';
+const CALLEES_NAMESPACE = 'callees';
+const NEIGHBORS_TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function callersCacheKey(input: NeighborInput): string {
+	return input.entityId;
+}
+
+function calleesCacheKey(input: NeighborInput): string {
+	return input.entityId;
+}
+
+const CALLERS_CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-callers',
+		fromOwner: CALLERS_OWNER_ID,
+		namespace: CALLERS_NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as NeighborInput;
+			return { kind: 'byKey', key: callersCacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const CALLEES_CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-callees',
+		fromOwner: CALLEES_OWNER_ID,
+		namespace: CALLEES_NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as NeighborInput;
+			return { kind: 'byKey', key: calleesCacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const CALLERS_MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   CALLERS_NAMESPACE,
+		valueType:   'NeighborOutput (found:true, direction:callers)',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const CALLEES_MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   CALLEES_NAMESPACE,
+		valueType:   'NeighborOutput (found:true, direction:callees)',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const callersSubstrateExtension: SubstrateSkillExtension = {
+	ownerId:            CALLERS_OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CALLERS_CONTEXT_SLOTS,
+	memorySchema:       CALLERS_MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+const calleesSubstrateExtension: SubstrateSkillExtension = {
+	ownerId:            CALLEES_OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CALLEES_CONTEXT_SLOTS,
+	memorySchema:       CALLEES_MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedCallers(input: NeighborInput, deps: SkillDeps): NeighborOutput | undefined {
+	const slot = deps.context?.slots.get('cached-callers');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<NeighborOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== callersCacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function readCachedCallees(input: NeighborInput, deps: SkillDeps): NeighborOutput | undefined {
+	const slot = deps.context?.slots.get('cached-callees');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<NeighborOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== calleesCacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinCallers(input: NeighborInput, value: NeighborOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'findCallers' },
+		payload: value,
+		claims:  [`callers:${input.entityId}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     CALLERS_OWNER_ID,
+		namespace: CALLERS_NAMESPACE,
+		key:       callersCacheKey(input),
+		kind:      'fact',
+		ttlMs:     NEIGHBORS_TTL_MS,
+	});
+}
+
+function pinCallees(input: NeighborInput, value: NeighborOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'findCallees' },
+		payload: value,
+		claims:  [`callees:${input.entityId}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     CALLEES_OWNER_ID,
+		namespace: CALLEES_NAMESPACE,
+		key:       calleesCacheKey(input),
+		kind:      'fact',
+		ttlMs:     NEIGHBORS_TTL_MS,
+	});
+}
+
+const callersSkillWithSubstrate = { ...callersSkill, ...callersSubstrateExtension };
+const calleesSkillWithSubstrate = { ...calleesSkill, ...calleesSubstrateExtension };
+
 export function registerCodeEntityCallersSkill(): void {
-	registerSkill(callersSkill as unknown as Skill);
+	registerSkill(callersSkillWithSubstrate as unknown as Skill);
 }
 
 export function registerCodeEntityCalleesSkill(): void {
-	registerSkill(calleesSkill as unknown as Skill);
+	registerSkill(calleesSkillWithSubstrate as unknown as Skill);
 }

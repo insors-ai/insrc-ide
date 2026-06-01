@@ -30,6 +30,14 @@ import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { resolveSearchScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
 import { listRepos } from '../../../db/repos.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 type OrmDialect =
 	| 'prisma'
@@ -162,6 +170,17 @@ const codeOrmResolveModelSkill: Skill<ResolveModelInput, ResolveModelOutput> = {
 	],
 
 	async execute(input: ResolveModelInput, deps: SkillDeps): Promise<SkillResult<ResolveModelOutput>> {
+		// Substrate: cache hit short-circuits all repo scans.
+		const cached = readCachedModel(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		// Plan SCS Phase 4: resolve the repo set to scan. Explicit
 		// `repoPath` wins (single-repo override); otherwise route the
 		// scope through resolveSearchScope. `'global'` -> every
@@ -238,8 +257,10 @@ const codeOrmResolveModelSkill: Skill<ResolveModelInput, ResolveModelOutput> = {
 
 		// Exact match path.
 		if (matches.length === 1) {
+			const value: ResolveModelOutput = { found: true, model: normaliseModel(matches[0]!) };
+			pinModel(input, value, deps);
 			return {
-				value: { found: true, model: normaliseModel(matches[0]!) },
+				value,
 				confidence: 'high',
 				notes: [],
 				toolCalls: [],
@@ -411,11 +432,90 @@ function makeCallId(stage: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// ORM model schemas drift with edits but slower than data. 24h TTL.
+// Cache key includes orm (dialect or 'auto'), model name, and the
+// optional repoPath / scope (placeholders for nullable inputs).
+
+const OWNER_ID: OwnerId = 'skill:code.orm.resolve-model';
+const NAMESPACE = 'orm-models';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: ResolveModelInput): string {
+	const repo  = input.repoPath ?? '*';
+	const scope = input.scope ?? 'closure';
+	return `${input.model}::${input.orm}::${repo}::${scope}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-model',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ResolveModelInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ResolveModelOutput (found:true)',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedModel(input: ResolveModelInput, deps: SkillDeps): ResolveModelOutput | undefined {
+	const slot = deps.context?.slots.get('cached-model');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ResolveModelOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinModel(input: ResolveModelInput, value: ResolveModelOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'code_orm_scan' },
+		payload: value,
+		claims:  [`orm-model:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+const skillWithSubstrate = { ...codeOrmResolveModelSkill, ...substrateExtension };
+
 export function registerCodeOrmResolveModelSkill(): void {
-	registerSkill(codeOrmResolveModelSkill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.

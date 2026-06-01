@@ -25,6 +25,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface EntityVersionsInput {
 	readonly entityId: string;
@@ -125,6 +133,18 @@ const skill: Skill<EntityVersionsInput, EntityVersionsOutput> = {
 	async execute(input: EntityVersionsInput, deps: SkillDeps): Promise<SkillResult<EntityVersionsOutput>> {
 		const headRef = input.headRef ?? 'HEAD';
 
+		// Substrate: cache hit short-circuits the summary + git_diff calls.
+		const cached = readCachedDiff(input, deps);
+		if (cached !== undefined) {
+			const r: SkillResult<EntityVersionsOutput> = {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+			return cached.found && cached.truncated ? { ...r, truncated: true } : r;
+		}
+
 		// Step 1: locate the entity at HEAD.
 		const summary = await deps.runSkill<{ entityId: string }, EntitySummaryFound>('code.entity.summary', { entityId: input.entityId });
 		if (!summary.value.found) {
@@ -183,6 +203,7 @@ const skill: Skill<EntityVersionsInput, EntityVersionsOutput> = {
 			totalDeletions,
 			truncated,
 		};
+		pinDiff(input, headRef, out, deps);
 		const result: SkillResult<EntityVersionsOutput> = {
 			value: out,
 			confidence: 'high',
@@ -278,9 +299,94 @@ function extractTruncated(toolResult: { data?: unknown }): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Git history between two refs is immutable once both refs exist, so
+// the diff for (entityId, baseRef, headRef) never changes. 7d TTL is
+// chosen for cache hygiene rather than correctness; longer would also
+// be safe. Note that we key on the resolved `headRef` value (with the
+// `HEAD` default already expanded) so that two invocations of the same
+// effective comparison share the entry.
+
+const OWNER_ID: OwnerId = 'skill:code.compare.entity-versions';
+const NAMESPACE = 'entity-version-diffs';
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(entityId: string, baseRef: string, headRef: string): string {
+	return `${entityId}::${baseRef}::${headRef}`;
+}
+
+function inputCacheKey(input: EntityVersionsInput): string {
+	return cacheKey(input.entityId, input.baseRef, input.headRef ?? 'HEAD');
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-diff',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as EntityVersionsInput;
+			return { kind: 'byKey', key: inputCacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'EntityVersionsOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDiff(input: EntityVersionsInput, deps: SkillDeps): EntityVersionsOutput | undefined {
+	const slot = deps.context?.slots.get('cached-diff');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<EntityVersionsOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== inputCacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDiff(input: EntityVersionsInput, headRef: string, value: EntityVersionsOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const key = cacheKey(input.entityId, input.baseRef, headRef);
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'git_diff' },
+		payload: value,
+		claims:  [`entity-version-diff:${key}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key,
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerCodeCompareEntityVersionsSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

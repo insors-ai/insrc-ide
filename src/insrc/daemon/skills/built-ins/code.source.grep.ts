@@ -19,6 +19,14 @@ import { join, relative } from 'node:path';
 import { Dirent, readdirSync } from 'node:fs';
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface GrepInput {
 	readonly path:     string;
@@ -79,7 +87,7 @@ const codeSourceGrepSkill: Skill<GrepInput, GrepOutput> = {
 	toolDeps: [],
 	providerAffinity: 'auto',
 
-	async execute(input: GrepInput, _deps: SkillDeps): Promise<SkillResult<GrepOutput>> {
+	async execute(input: GrepInput, deps: SkillDeps): Promise<SkillResult<GrepOutput>> {
 		const maxHits = clampMaxHits(input.maxHits);
 
 		// Refuse non-absolute paths -- the catalog convention.
@@ -89,6 +97,17 @@ const codeSourceGrepSkill: Skill<GrepInput, GrepOutput> = {
 		// Refuse empty patterns to avoid runaway matches.
 		if (typeof input.pattern !== 'string' || input.pattern.length === 0) {
 			return rejectInvalid('pattern must be a non-empty string');
+		}
+
+		// Substrate: cache hit short-circuits ripgrep / fallback walk.
+		const cached = readCachedGrep(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.hits.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
 		}
 
 		// Probe the path exists + is a directory.
@@ -104,6 +123,9 @@ const codeSourceGrepSkill: Skill<GrepInput, GrepOutput> = {
 		// Try ripgrep first.
 		const rgResult = await tryRipgrep(input.path, input.pattern, maxHits);
 		if (rgResult !== null) {
+			if (rgResult.hits.length > 0) {
+				pinGrep(input, rgResult, deps);
+			}
 			return {
 				value: rgResult,
 				confidence: rgResult.hits.length > 0 ? 'high' : 'medium',
@@ -287,11 +309,89 @@ function rejectInvalid(reason: string): SkillResult<GrepOutput> {
 void relative;
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// File contents change with edits; short TTL bounds staleness. Cache
+// key conservatively includes path + pattern + maxHits so callers with
+// different bounds don't collide.
+
+const OWNER_ID: OwnerId = 'skill:code.source.grep';
+const NAMESPACE = 'grep-results';
+const TTL_MS = 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: GrepInput): string {
+	const maxHits = clampMaxHits(input.maxHits);
+	return `${input.path}::${input.pattern}::${maxHits}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-grep',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as GrepInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'GrepOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '1h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedGrep(input: GrepInput, deps: SkillDeps): GrepOutput | undefined {
+	const slot = deps.context?.slots.get('cached-grep');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<GrepOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinGrep(input: GrepInput, value: GrepOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'rg' },
+		payload: value,
+		claims:  [`grep:${cacheKey(input)}`],
+		confidence: 0.9,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+const skillWithSubstrate = { ...codeSourceGrepSkill, ...substrateExtension };
+
 export function registerCodeSourceGrepSkill(): void {
-	registerSkill(codeSourceGrepSkill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
 
 // ---------------------------------------------------------------------------

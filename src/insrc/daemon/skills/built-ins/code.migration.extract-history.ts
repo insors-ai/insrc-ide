@@ -31,6 +31,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 type MigrationTool =
 	| 'flyway'
@@ -146,6 +154,17 @@ const codeMigrationExtractHistorySkill: Skill<ExtractHistoryInput, ExtractHistor
 	],
 
 	async execute(input: ExtractHistoryInput, deps: SkillDeps): Promise<SkillResult<ExtractHistoryOutput>> {
+		// Substrate: cache hit short-circuits the migration-walk tool call.
+		const cached = readCachedHistory(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const walkResult = await deps.runTool({
 			id: makeCallId('walk'),
 			name: 'code_migration_walk',
@@ -184,12 +203,16 @@ const codeMigrationExtractHistorySkill: Skill<ExtractHistoryInput, ExtractHistor
 		// Confidence shaping based on parse coverage.
 		const confidence = scoreConfidence(walkData.migrations);
 
+		const value: Extract<ExtractHistoryOutput, { found: true }> = {
+			found:      true,
+			tool:       walkData.tool,
+			migrations: walkData.migrations,
+		};
+		if (confidence === 'high') {
+			pinHistory(input, value, deps);
+		}
 		const result: SkillResult<ExtractHistoryOutput> = {
-			value: {
-				found:      true,
-				tool:       walkData.tool,
-				migrations: walkData.migrations,
-			},
+			value,
 			confidence,
 			notes:     buildNotes(walkData.migrations),
 			toolCalls: [],
@@ -267,11 +290,94 @@ function makeCallId(stage: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Migration history grows monotonically: new migrations append, older
+// entries stay stable. 24h TTL balances freshness against scan cost.
+
+const OWNER_ID: OwnerId = 'skill:code.migration.extract-history';
+const NAMESPACE = 'migration-histories';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: ExtractHistoryInput): string {
+	return `${input.repoPath}::${input.tool}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-history',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ExtractHistoryInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ExtractHistoryOutput (found:true)',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedHistory(
+	input: ExtractHistoryInput,
+	deps: SkillDeps,
+): Extract<ExtractHistoryOutput, { found: true }> | undefined {
+	const slot = deps.context?.slots.get('cached-history');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<Extract<ExtractHistoryOutput, { found: true }>>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinHistory(
+	input: ExtractHistoryInput,
+	value: Extract<ExtractHistoryOutput, { found: true }>,
+	deps: SkillDeps,
+): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'code_migration_walk' },
+		payload: value,
+		claims:  [`migration-history:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+const skillWithSubstrate = { ...codeMigrationExtractHistorySkill, ...substrateExtension };
+
 export function registerCodeMigrationExtractHistorySkill(): void {
-	registerSkill(codeMigrationExtractHistorySkill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.

@@ -20,6 +20,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface ImplVsDocInput {
 	readonly className: string;
@@ -108,6 +116,17 @@ const skill: Skill<ImplVsDocInput, ImplVsDocOutput> = {
 	],
 
 	async execute(input: ImplVsDocInput, deps: SkillDeps): Promise<SkillResult<ImplVsDocOutput>> {
+		// Substrate: cache hit short-circuits the field extract + file read.
+		const cached = readCachedDrift(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		// Step 1: actual fields.
 		const fields = await deps.runSkill<unknown, ExtractFields>('code.class.extract-fields', {
 			className: input.className,
@@ -190,6 +209,7 @@ const skill: Skill<ImplVsDocInput, ImplVsDocOutput> = {
 			both,
 			drift,
 		};
+		pinDrift(input, out, deps);
 		return {
 			value: out,
 			confidence: 'high',
@@ -297,9 +317,86 @@ function firstCellOf(line: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Drift between impl + doc shifts on either side: field edits, doc
+// rewrites, repo reindex. 24h TTL matches the parent code.class.extract-
+// fields cache rhythm; reindex triggers force a refresh sooner.
+
+const OWNER_ID: OwnerId = 'skill:code.compare.impl-vs-doc';
+const NAMESPACE = 'impl-vs-doc-drift';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: ImplVsDocInput): string {
+	return `${input.className}::${input.repoPath}::${input.docPath}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-drift',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as ImplVsDocInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'ImplVsDocOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedDrift(input: ImplVsDocInput, deps: SkillDeps): ImplVsDocOutput | undefined {
+	const slot = deps.context?.slots.get('cached-drift');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<ImplVsDocOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinDrift(input: ImplVsDocInput, value: ImplVsDocOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'file_read' },
+		payload: value,
+		claims:  [`impl-vs-doc:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerCodeCompareImplVsDocSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

@@ -27,6 +27,14 @@ import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { searchEntities, type SearchFilter } from '../../../db/search.js';
 import { embedQuery } from '../../../indexer/embedder.js';
 import type { Entity, EntityKind, Language } from '../../../shared/types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 // ANN top-K is a SEMANTIC parameter, not an output-truncation cap:
 // the search returns the K most-similar hits by similarity score and
@@ -113,6 +121,17 @@ const skill: Skill<SearchByVectorInput, SearchByVectorOutput> = {
 			};
 		}
 
+		// Substrate: cache hit short-circuits the embed + Lance ANN.
+		const cached = readCachedHits(input, closure, filter, limit, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: cached.hits.length > 0 ? 'high' : 'medium',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const vec = await embedQuery(input.query);
 		if (vec.length === 0) {
 			return {
@@ -128,9 +147,12 @@ const skill: Skill<SearchByVectorInput, SearchByVectorOutput> = {
 		const truncated = raw.length > limit;
 		const hits = raw.slice(0, limit).map(toHit);
 
+		const value: SearchByVectorOutput = { query: input.query, hits, truncated };
+		const confidence: 'high' | 'medium' = hits.length > 0 ? 'high' : 'medium';
+		if (confidence === 'high') pinHits(input, closure, filter, limit, value, deps);
 		return {
-			value: { query: input.query, hits, truncated },
-			confidence: hits.length > 0 ? 'high' : 'medium',
+			value,
+			confidence,
 			notes: hits.length === 0
 				? [`no semantic matches for '${input.query}' in [${closure.join(', ')}]`]
 				: [],
@@ -155,6 +177,115 @@ function toHit(e: Entity): VectorHit {
 		: h;
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// ANN results can shift whenever the vector index is rebuilt
+// (reindex / repo-add). 1h TTL is conservative -- shorter than other
+// caches because vector freshness matters more than for exact-key
+// LMDB reads. Cache key folds together every input that affects the
+// hit list: trimmed query text, filter, sorted closure fingerprint,
+// and limit.
+
+const OWNER_ID: OwnerId = 'skill:code.entity.search-by-vector';
+const NAMESPACE = 'vector-search-hits';
+const TTL_MS = 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function closureFingerprint(closure: readonly string[]): string {
+	return [...closure].sort().join('|');
+}
+
+function cacheKey(query: string, filter: SearchFilter, closure: readonly string[], limit: number): string {
+	return `${query.trim()}::${filter}::${closureFingerprint(closure)}::${limit}`;
+}
+
+function inputCacheKey(input: SearchByVectorInput, sessionClosure: readonly string[]): string {
+	const limit  = Math.max(1, Math.min(MAX_LIMIT, input.limit ?? DEFAULT_LIMIT));
+	const filter = input.filter ?? 'all';
+	const closure = input.closureRepos !== undefined && input.closureRepos.length > 0
+		? input.closureRepos
+		: sessionClosure;
+	return cacheKey(input.query, filter, closure, limit);
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-hits',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as SearchByVectorInput;
+			const session = (req.session ?? {}) as { closureRepos?: readonly string[] };
+			const sessClosure = session.closureRepos ?? [];
+			return { kind: 'byKey', key: inputCacheKey(task, sessClosure) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'SearchByVectorOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '1h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedHits(
+	input: SearchByVectorInput,
+	closure: readonly string[],
+	filter: SearchFilter,
+	limit: number,
+	deps: SkillDeps,
+): SearchByVectorOutput | undefined {
+	const slot = deps.context?.slots.get('cached-hits');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<SearchByVectorOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input.query, filter, closure, limit)) { return undefined; }
+	return hit.value;
+}
+
+function pinHits(
+	input: SearchByVectorInput,
+	closure: readonly string[],
+	filter: SearchFilter,
+	limit: number,
+	value: SearchByVectorOutput,
+	deps: SkillDeps,
+): void {
+	if (deps.workingState === undefined) { return; }
+	const key = cacheKey(input.query, filter, closure, limit);
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'searchEntities' },
+		payload: value,
+		claims:  [`vector-search:${key}`],
+		confidence: 0.9,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key,
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerCodeEntitySearchByVectorSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }

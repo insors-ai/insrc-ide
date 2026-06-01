@@ -31,6 +31,14 @@
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
 import { resolveSearchScope, SCOPE_SCHEMA_FRAGMENT, type SearchScope } from '../scope-helpers.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 type RefKind = 'CALLS' | 'INHERITS' | 'IMPLEMENTS' | 'REFERENCES';
 
@@ -187,6 +195,18 @@ const codeClassLocateReferencesSkill: Skill<LocateReferencesInput, LocateReferen
 	],
 
 	async execute(input: LocateReferencesInput, deps: SkillDeps): Promise<SkillResult<LocateReferencesOutput>> {
+		// Substrate: cache hit short-circuits both tool round-trips.
+		const cached = readCachedReferences(input, deps);
+		if (cached !== undefined) {
+			const conf = cached.found && cached.references.length > 0 ? 'high' : 'medium';
+			return {
+				value: cached,
+				confidence: conf,
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		// Step 1: locate.
 		// Plan SCS Phase 3: route scope into the tool's repos[] filter
 		// when no single-repo override is given. An explicit `repoPath`
@@ -290,6 +310,8 @@ const codeClassLocateReferencesSkill: Skill<LocateReferencesInput, LocateReferen
 		//            callers"; callers may want to widen scope).
 		const confidence = refsData.references.length > 0 ? 'high' : 'medium';
 
+		if (confidence === 'high') pinReferences(input, value, deps);
+
 		const result: SkillResult<LocateReferencesOutput> = {
 			value,
 			confidence,
@@ -362,11 +384,91 @@ function makeCallId(stage: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// Reference walks drift with edits: a single commit touching the source
+// class or any caller invalidates the result. 24h TTL is a defensive
+// upper bound; reindex triggers force a refresh sooner.
+
+const OWNER_ID: OwnerId = 'skill:code.class.locate-references';
+const NAMESPACE = 'class-references';
+const TTL_MS = 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: LocateReferencesInput): string {
+	return `${input.className}::${input.repoPath ?? '*'}::${input.scope ?? 'closure'}::${input.language ?? '*'}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-references',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as LocateReferencesInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'LocateReferencesOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '24h',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedReferences(input: LocateReferencesInput, deps: SkillDeps): LocateReferencesOutput | undefined {
+	const slot = deps.context?.slots.get('cached-references');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<LocateReferencesOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinReferences(input: LocateReferencesInput, value: LocateReferencesOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'code_class_references' },
+		payload: value,
+		claims:  [`class-references:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
+const codeClassLocateReferencesSkillWithSubstrate = {
+	...codeClassLocateReferencesSkill,
+	...substrateExtension,
+};
+
 export function registerCodeClassLocateReferencesSkill(): void {
-	registerSkill(codeClassLocateReferencesSkill as unknown as Skill);
+	registerSkill(codeClassLocateReferencesSkillWithSubstrate as unknown as Skill);
 }
 
 // Test exports.

@@ -22,6 +22,14 @@
 
 import { registerSkill } from '../registry.js';
 import type { Skill, SkillDeps, SkillResult } from '../types.js';
+import type {
+	BootstrapTriggerKind,
+	ContextSlotRequest,
+	MemoryEntry,
+	NamespaceSpec,
+	OwnerId,
+	SubstrateSkillExtension,
+} from '../../substrate/types.js';
 
 interface CompareSignatureInput {
 	readonly aEntityId: string;
@@ -97,6 +105,19 @@ const skill: Skill<CompareSignatureInput, CompareSignatureOutput> = {
 	providerAffinity: 'auto',
 
 	async execute(input: CompareSignatureInput, deps: SkillDeps): Promise<SkillResult<CompareSignatureOutput>> {
+		// Substrate: cache hit short-circuits both summary lookups. The
+		// signature diff is symmetric on entity ids, so cmp(A, B) and
+		// cmp(B, A) share the entry (the cache key sorts ids).
+		const cached = readCachedSignatureDiff(input, deps);
+		if (cached !== undefined) {
+			return {
+				value: cached,
+				confidence: 'high',
+				notes: ['from cache (substrate)'],
+				toolCalls: [],
+			};
+		}
+
 		const a = await deps.runSkill<{ entityId: string }, EntitySummary>('code.entity.summary', { entityId: input.aEntityId });
 		if (!a.value.found) {
 			return {
@@ -127,14 +148,16 @@ const skill: Skill<CompareSignatureInput, CompareSignatureOutput> = {
 		boolDiff(changes,  'isAbstract', A.isAbstract, B.isAbstract);
 		boolDiff(changes,  'isAsync',    A.isAsync,    B.isAsync);
 
+		const value: CompareSignatureOutput = {
+			found:      true,
+			aEntityId:  input.aEntityId,
+			bEntityId:  input.bEntityId,
+			changed:    changes.length > 0,
+			changes,
+		};
+		pinSignatureDiff(input, value, deps);
 		return {
-			value: {
-				found:      true,
-				aEntityId:  input.aEntityId,
-				bEntityId:  input.bEntityId,
-				changed:    changes.length > 0,
-				changes,
-			},
+			value,
 			confidence: 'high',
 			notes: [],
 			toolCalls: [],
@@ -172,6 +195,89 @@ function boolDiff(out: SignatureChange[], field: SignatureChange['field'], a: bo
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Substrate-facing declarations (cache wiring)
+// ---------------------------------------------------------------------------
+//
+// A signature diff between two entity ids is symmetric: cmp(A, B) and
+// cmp(B, A) produce equivalent change lists (just flipped). Cache key
+// sorts the ids so both orientations share one entry. The cached
+// payload's `aEntityId`/`bEntityId` reflect whichever invocation
+// populated the entry first. Entity signatures change with edits, so
+// 7d is the upper bound; reindex triggers force a refresh sooner.
+
+const OWNER_ID: OwnerId = 'skill:code.compare.signature';
+const NAMESPACE = 'signature-diffs';
+const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const INTERESTED_TRIGGERS: readonly BootstrapTriggerKind[] = ['repo-add', 'reindex', 'manual'];
+
+function cacheKey(input: CompareSignatureInput): string {
+	const [lo, hi] = input.aEntityId <= input.bEntityId
+		? [input.aEntityId, input.bEntityId]
+		: [input.bEntityId, input.aEntityId];
+	return `${lo}::${hi}`;
+}
+
+const CONTEXT_SLOTS: readonly ContextSlotRequest[] = [
+	{
+		name:      'cached-signature-diff',
+		fromOwner: OWNER_ID,
+		namespace: NAMESPACE,
+		query: (req) => {
+			const task = (req.task ?? {}) as CompareSignatureInput;
+			return { kind: 'byKey', key: cacheKey(task) };
+		},
+		limit: 1,
+	},
+];
+
+const MEMORY_SCHEMA: readonly NamespaceSpec[] = [
+	{
+		namespace:   NAMESPACE,
+		valueType:   'CompareSignatureOutput',
+		autoDistill: 'always-on-success',
+		indexing:    { kind: 'never' },
+		ttl:         '7d',
+	},
+];
+
+const substrateExtension: SubstrateSkillExtension = {
+	ownerId:            OWNER_ID,
+	schemaVersion:      1,
+	interestedTriggers: INTERESTED_TRIGGERS,
+	contextSlots:       CONTEXT_SLOTS,
+	memorySchema:       MEMORY_SCHEMA,
+	assertionInterests: [],
+};
+
+function readCachedSignatureDiff(input: CompareSignatureInput, deps: SkillDeps): CompareSignatureOutput | undefined {
+	const slot = deps.context?.slots.get('cached-signature-diff');
+	if (slot === undefined || slot.length === 0) { return undefined; }
+	const hit = slot[0] as MemoryEntry<CompareSignatureOutput>;
+	if (hit.value === undefined) { return undefined; }
+	if (hit.key !== cacheKey(input)) { return undefined; }
+	return hit.value;
+}
+
+function pinSignatureDiff(input: CompareSignatureInput, value: CompareSignatureOutput, deps: SkillDeps): void {
+	if (deps.workingState === undefined) { return; }
+	const ref = deps.workingState.append({
+		source:  { kind: 'tool', toolId: 'code.entity.summary' },
+		payload: value,
+		claims:  [`signature-diff:${cacheKey(input)}`],
+		confidence: 0.95,
+	});
+	deps.workingState.pin(ref, {
+		owner:     OWNER_ID,
+		namespace: NAMESPACE,
+		key:       cacheKey(input),
+		kind:      'fact',
+		ttlMs:     TTL_MS,
+	});
+}
+
+const skillWithSubstrate = { ...skill, ...substrateExtension };
+
 export function registerCodeCompareSignatureSkill(): void {
-	registerSkill(skill as unknown as Skill);
+	registerSkill(skillWithSubstrate as unknown as Skill);
 }
