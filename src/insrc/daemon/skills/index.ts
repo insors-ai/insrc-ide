@@ -131,6 +131,9 @@ import { registerDataCorrelationCategoricalPairwiseRdbmsSkill } from './built-in
 import { registerDataCorrelationCategoricalPairwiseFileSkill } from './built-ins/data.correlation.categorical-pairwise.file.js';
 import { registerDataAnomalyChangePointRdbmsSkill } from './built-ins/data.anomaly.change-point.rdbms.js';
 
+// L2 pilot skills.
+import { registerCodeAuditModuleSkill } from './built-ins-l2/code.audit-module.js';
+
 const log = getLogger('skills-bootstrap');
 
 export function registerAllSkills(): void {
@@ -331,6 +334,11 @@ export function registerAllSkills(): void {
   registerDataMetaCalibrateConfidenceSkill();
   registerDataMetaClassifyQuestionSkill();
   registerDataMetaSelectScopeSkill();
+
+  // L2 pilot skills (registered against the separate L2 registry).
+  // Per plans/skills/code/code.audit-module.md -- the first L2 skill
+  // exercising the runtime end-to-end.
+  registerCodeAuditModuleSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }

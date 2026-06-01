@@ -20,7 +20,8 @@
 | **P5** | Feedback bus + user-assertion classifier (D6, D8, D14) | User assertions land via the classifier; downstream consumers' `applyFeedback` fires. | done |
 | **P6** | L1 skill migrations (code + data) | All L1 priority migrations done -- 85 skills across both sides. | done |
 | **P7** | L2 framework core (runtime + budget + grounding + registry) | Per [`plans/skills/l2-framework.md`](../skills/l2-framework.md). Runtime, BudgetTracker, L2LlmAccess, self-grounding validator, L2 registry all shipped. Pilot L2 skill (code.audit-module / code.answer-question) is its own next phase. | done |
-| **P8+** | L2 pilot skill | First pilot per [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md) -- `code.audit-module` strawman, then `code.answer-question`. | not-started |
+| **P8**  | L2 pilot skill: `code.audit-module` | First L2 skill exercising the runtime end-to-end. Plans its own sub-calls (`code.source.module.describe` + `code.quality.*`), drafts findings via the LLM, self-grounds against the working-state ledger, returns `SkillOutput<AuditModuleOutput>`. Per A6: 7/7 unit tests (deterministic fakes for code-path coverage) + 1/1 live local-LLM integration test (qwen3-coder on a fixture module; 17.3s end-to-end). | done |
+| **P9+** | `code.answer-question` (full L2 pilot) | The open-ended question-answer pilot. Mirrors `data.answer-question`. Per [`plans/code-analyzer-migration.md`](../code-analyzer-migration.md) Phase 4. | not-started |
 
 Phases P2 through P5 are independent and can be reordered based on what next-skill migrations need most. P0 → P1 is the only strict prefix.
 
