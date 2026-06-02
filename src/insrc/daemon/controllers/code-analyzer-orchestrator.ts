@@ -856,25 +856,32 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markInProgress failed (best-effort)'); }
       }
 
-      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via tool loop...`);
+      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via code.answer-question...`);
 
-      // Phase delta of plans/code-analyzer-discovery-plan-loop.md:
-      // the discovery-plan loop replaces the entire per-section
-      // gather + write + patch + picker pipeline with a cloud-driven
-      // multi-cycle discovery + structured-citation + prose-review
-      // flow.
-      const { runDiscoveryFlow } = await import('../../agent/tasks/code-analyzer/discovery-flow.js');
-      const repoRoot = this._repoSummary?.rootPath;
-      const discResult = await runDiscoveryFlow({
+      // Phase 6 of plans/code-analyzer-migration.md: the per-section
+      // synthesis is now driven by the `code.answer-question` L2 skill
+      // (P9). The skill plans its own discovery (classify-question +
+      // select-scope), dispatches L1 sub-calls, drafts a section-shaped
+      // answer, and self-grounds every citation against its working-
+      // state ledger (A1). The legacy discovery-flow + writer + claim-
+      // grounding-reviewer + meta-narrative-detector pipeline was
+      // removed in the same commit -- no feature flag, no fallback.
+      const { runAnswerQuestionSection } = await import('../../agent/tasks/code-analyzer/answer-question-section.js');
+      const repoRoot = this._repoSummary?.rootPath ?? '';
+      if (repoRoot.length === 0) {
+        log.warn({ actionId: action.id }, 'code-analyzer: no active repo root; skipping section');
+        sections.push({ id: action.id, title: action.title, markdown: `*No active repo path; cannot run code.answer-question for "${action.title}".*` });
+        continue;
+      }
+      const sectionResult = await runAnswerQuestionSection({
         localProvider: local,
         cloudProvider: cloud,
         session,
         action,
         request,
         tier,
-        ...(this._repoSizeSummary !== undefined ? { repoSizeSummary: this._repoSizeSummary } : {}),
         ...(summaryContext !== undefined && summaryContext.length > 0 ? { repoSummary: summaryContext } : {}),
-        ...(repoRoot !== undefined && repoRoot.length > 0 ? { repoPath: repoRoot } : {}),
+        repoPath: repoRoot,
         analyzerLabel: 'code-analyzer',
         onProgress: (msg: string) => {
           this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
@@ -882,21 +889,21 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       });
       log.info(
         {
-          actionId:           action.id,
-          flow:               'discovery',
-          cyclesRun:          discResult.cyclesRun,
-          retainedStepCount:  discResult.retainedStepCount,
-          proseVerdict:       discResult.proseVerdict,
-          proseRedraftFired:  discResult.proseRedraftFired,
-          perCycle:           discResult.perCycleSummary,
+          actionId:        action.id,
+          flow:            'code.answer-question',
+          sectionCount:    sectionResult.sectionCount,
+          groundedCount:   sectionResult.groundedCount,
+          droppedCount:    sectionResult.droppedCount,
+          dispatchedCount: sectionResult.dispatched.length,
+          confidence:      sectionResult.confidence,
         },
-        'section drafting complete (discovery flow)',
+        'section drafting complete (code.answer-question)',
       );
       this.emitMilestone(
         synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- discovery (${discResult.cyclesRun} cycle${discResult.cyclesRun === 1 ? '' : 's'}; ${discResult.retainedStepCount} retained step${discResult.retainedStepCount === 1 ? '' : 's'}; prose: ${discResult.proseVerdict}${discResult.proseRedraftFired ? ' [redrafted]' : ''})`,
+        `[${i + 1}/${actions.length}] "${action.title}" -- ${sectionResult.sectionCount} sub-section${sectionResult.sectionCount === 1 ? '' : 's'}; ${sectionResult.dispatched.length} skill${sectionResult.dispatched.length === 1 ? '' : 's'} dispatched; confidence=${sectionResult.confidence}${sectionResult.droppedCount > 0 ? ` (${sectionResult.droppedCount} dropped)` : ''}`,
       );
-      sections.push({ id: action.id, title: action.title, markdown: discResult.markdown });
+      sections.push({ id: action.id, title: action.title, markdown: sectionResult.markdown });
       if (itemId !== undefined && this.deps.todos !== undefined) {
         try { await this.deps.todos.markComplete(itemId); }
         catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)'); }

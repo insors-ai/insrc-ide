@@ -1,10 +1,15 @@
 /**
- * Phase 1 of plans/code-analyzer-externalize-prompts.md.
+ * Loader unit tests.
  *
- * Loader unit tests: section file lookup, include expansion,
- * variable substitution, error modes (missing file, missing var,
- * include cycle), and per-flow composition smoke tests against the
- * Phase 1 stub contents.
+ * Phase 6 of plans/code-analyzer-migration.md collapsed the prompt
+ * surface to a single flow: `review`. The writer + gather + patch +
+ * discovery-* flows were deleted with the legacy pingpong; per-tier
+ * coverage-angles / planner-context sections went with them. The
+ * loader's section-include + variable-substitution machinery still
+ * matters (review composes via {{section:...}} includes, and the
+ * `code.answer-question` L2 skill could grow inline `loadPromptFile`
+ * uses later), so the test surface keeps those paths covered against
+ * the test-fixture sections in `sections/_test-fixtures/`.
  *
  * These tests run against the SRC tree (no build step) because
  * import.meta.url in `loader.ts` resolves to the .ts location under
@@ -19,12 +24,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
 	loadFlowPrompt,
-	loadPatchPrompt,
 	loadPromptFile,
 	readSection,
 	_clearCacheForTest,
-	type PromptFlow,
-	type PatchKind,
 } from '../prompts/loader.js';
 
 const HERE         = dirname(fileURLToPath(import.meta.url));
@@ -45,12 +47,6 @@ test('every section under sections/ loads without throwing', () => {
 });
 
 test('every section file has non-empty content', () => {
-	// Section files hold raw content (Markdown). BEGIN/END markers live
-	// in the flow composition files that include them, not in the
-	// sections themselves. The only invariant here is non-emptiness
-	// and that no section accidentally contains an unresolved
-	// {{section:...}} placeholder (sections can include each other,
-	// but the loader expands them recursively).
 	_clearCacheForTest();
 	const sectionFiles = listMdFiles(join(PROMPTS_ROOT, 'sections'))
 		.map(abs => relPathFromSections(abs));
@@ -61,77 +57,25 @@ test('every section file has non-empty content', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Flow composition smoke tests (Phase 1 stubs)
+// The lone remaining flow composes cleanly
 // ---------------------------------------------------------------------------
 
-const SINGLE_FOLDER_FLOWS: readonly PromptFlow[] = ['gather', 'write', 'review'];
-
-for (const flow of SINGLE_FOLDER_FLOWS) {
-	test(`loadFlowPrompt: ${flow} composes without throwing`, () => {
-		_clearCacheForTest();
-		// Each flow accepts its own variables. Pass them as empty strings
-		// here -- the goal is structural validation (section includes
-		// resolve, BEGIN/END markers preserved), not content snapshotting.
-		// Per-flow snapshot tests verify content separately.
-		const out = loadFlowPrompt(flow, flowVarsForSmoke(flow));
-		assert.ok(out.length > 0, `${flow} composed prompt is empty`);
-		assert.match(out, /<!-- BEGIN SECTION: compliance -->/);
-		assert.match(out, /<!-- END SECTION: compliance -->/);
-		// Every {{section:...}} include must have been resolved.
-		assert.doesNotMatch(out, /\{\{section:/);
-	});
-}
-
-const PATCH_KINDS: readonly PatchKind[] = ['fix', 'add'];
-
-for (const kind of PATCH_KINDS) {
-	test(`loadPatchPrompt: ${kind} composes without throwing`, () => {
-		_clearCacheForTest();
-		// Patch flow requires SKILL_CATALOG + REPO_CONTEXT + TIER. Phase D
-		// added per-tier dispatch on coverage-angles-patch/. `enhance` was
-		// folded into `fix` in Phase B -- see plans/code-analyzer-scope-
-		// tier-prompts.md.
-		const out = loadPatchPrompt(kind, {
-			SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm',
-		});
-		assert.ok(out.length > 0, `patch/${kind} composed prompt is empty`);
-		assert.match(out, /<!-- BEGIN SECTION: role -->/);
-		// Role intro varies per-kind; spot-check the verb is right.
-		const verb = kind === 'fix' ? /CORRECTING ONE/ : /ADDING ONE new/;
-		assert.match(out, verb);
-		assert.doesNotMatch(out, /\{\{section:/);
-		assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/);
-	});
-}
-
-// ---------------------------------------------------------------------------
-// Variable substitution
-// ---------------------------------------------------------------------------
-
-test('expandVars: substitutes {{VAR}} placeholders from flow vars', () => {
+test('loadFlowPrompt: review composes without throwing', () => {
 	_clearCacheForTest();
-	// Gather flow requires SKILL_CATALOG + REPO_CONTEXT + TIER
-	// (Phase D added the tier dispatch). Pass sentinel values so we
-	// can verify all placeholders were resolved.
-	const out = loadPromptFile('flow/gather/system.md', {
-		SKILL_CATALOG: '## SENTINEL_CATALOG_BLOCK',
-		REPO_CONTEXT:  '',
-		TIER:          'm',
-	});
-	assert.ok(out.includes('## SENTINEL_CATALOG_BLOCK'),
-		'SKILL_CATALOG should be substituted verbatim');
-	// All placeholders must be resolved.
-	assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/);
+	const out = loadFlowPrompt('review', {});
+	assert.ok(out.length > 0, 'review composed prompt is empty');
+	assert.match(out, /<!-- BEGIN SECTION: compliance -->/);
+	assert.match(out, /<!-- END SECTION: compliance -->/);
+	// Every {{section:...}} include must have been resolved.
+	assert.doesNotMatch(out, /\{\{section:/);
 });
 
-test('expandVars: throws on missing variable', () => {
+// ---------------------------------------------------------------------------
+// Error modes
+// ---------------------------------------------------------------------------
+
+test('loadPromptFile throws ENOENT on a missing file', () => {
 	_clearCacheForTest();
-	// Once any real var lands in a stub, this test will protect against
-	// silently dropping it. For Phase 1 we exercise the loader's missing-
-	// var path through loadPromptFile with an inline template via the
-	// cache. The cleanest portable test is to seed a temp file -- skip
-	// that complexity here and rely on the runtime contract being
-	// tested again in the snapshot phase. Smoke-only assertion:
 	assert.throws(
 		() => loadPromptFile('flow/__nonexistent__/system.md', {}),
 		/ENOENT|no such file/i,
@@ -139,64 +83,7 @@ test('expandVars: throws on missing variable', () => {
 });
 
 // ---------------------------------------------------------------------------
-// File-cache hygiene
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Per-tier section dispatch (Phase C -- files exist + tier dispatch works)
-// ---------------------------------------------------------------------------
-
-const TIERS = ['xl', 'l', 'm', 's'] as const;
-
-for (const tier of TIERS) {
-	test(`tier=${tier}: coverage-angles/${tier}.md loads and is non-empty`, () => {
-		_clearCacheForTest();
-		const out = readSection(`coverage-angles/${tier}`);
-		assert.ok(out.trim().length > 200, `coverage-angles/${tier}.md unexpectedly short (${out.length} chars)`);
-		// Per-tier files should name their tier.
-		assert.match(out, new RegExp(`tier[ -](?:${tier === 'xl' ? 'XL\\+?' : tier.toUpperCase()})`, 'i'));
-	});
-
-	test(`tier=${tier}: coverage-angles-patch/${tier}.md loads and is non-empty`, () => {
-		_clearCacheForTest();
-		const out = readSection(`coverage-angles-patch/${tier}`);
-		assert.ok(out.trim().length > 200, `coverage-angles-patch/${tier}.md unexpectedly short (${out.length} chars)`);
-	});
-
-	test(`tier=${tier}: planner-context/${tier}.md loads and is non-empty`, () => {
-		_clearCacheForTest();
-		const out = readSection(`planner-context/${tier}`);
-		assert.ok(out.trim().length > 200, `planner-context/${tier}.md unexpectedly short (${out.length} chars)`);
-	});
-}
-
-test('skill-glossary.md loads and names the canonical chains', () => {
-	_clearCacheForTest();
-	const out = readSection('skill-glossary');
-	assert.ok(out.trim().length > 200);
-	assert.match(out, /Chain A: name-known investigation/);
-	assert.match(out, /Chain B: module-down investigation/);
-	assert.match(out, /Common arg-shape mistakes/);
-});
-
-test('Phase D readiness: dispatch via {{TIER}} resolves to each per-tier coverage-angles', () => {
-	// Once Phase D wires `{{section:coverage-angles/{{TIER}}}}` into the
-	// flow files, the loader will dispatch by tier. Exercise that resolution
-	// against the fixture sections we just landed (production wiring lands
-	// in Phase D).
-	_clearCacheForTest();
-	for (const tier of TIERS) {
-		const out = loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'a' });
-		// fixture dispatch already covers the var-in-section-path path;
-		// here we just verify each tier file is reachable via readSection.
-		const tierContent = readSection(`coverage-angles/${tier}`);
-		assert.ok(tierContent.length > 0, `tier ${tier} coverage-angles unreachable`);
-		void out;
-	}
-});
-
-// ---------------------------------------------------------------------------
-// Variable substitution INSIDE {{section:path}} (Phase A)
+// Variable substitution INSIDE {{section:path}} (still load-bearing)
 // ---------------------------------------------------------------------------
 
 test('{{section:path/{{VAR}}}} dispatches to the right file when VAR is set', () => {
@@ -217,9 +104,6 @@ test('{{section:path/{{VAR}}}} dispatches to the right file when VAR is set', ()
 test('{{section:path/{{VAR}}}} preserves outer text around the dispatch', () => {
 	_clearCacheForTest();
 	const out = loadPromptFile('sections/_test-fixtures/dispatch-root.md', { LEAF: 'a' });
-	// dispatch-root.md wraps the section include with START / END markers
-	// (after an HTML-comment header), and the resolved leaf content sits
-	// between them.
 	assert.match(out, /START\nLEAF_A_CONTENT\n.*END$/s);
 });
 
@@ -248,9 +132,6 @@ test('_clearCacheForTest allows re-read after cache invalidation', () => {
 	const first  = readSection('compliance');
 	_clearCacheForTest();
 	const second = readSection('compliance');
-	// Same content on disk -> same string. The test asserts the API
-	// is reachable both times (no stuck-empty cache, no cross-test
-	// pollution).
 	assert.equal(first, second);
 });
 
@@ -274,17 +155,4 @@ function listMdFiles(root: string): string[] {
 function relPathFromSections(abs: string): string {
 	const sectionsRoot = join(PROMPTS_ROOT, 'sections') + '/';
 	return abs.slice(sectionsRoot.length).replace(/\.md$/, '');
-}
-
-/**
- * Variables expected by each flow's stubs / current composition.
- * Phase 2 has filled in gather; write + review are still stubs
- * (filled in during Phases 3 + 5) and need no vars yet.
- */
-function flowVarsForSmoke(flow: PromptFlow): Record<string, string> {
-	switch (flow) {
-		case 'gather': return { SKILL_CATALOG: '', REPO_CONTEXT: '', TIER: 'm' };
-		case 'write':  return { REPO_CONTEXT: '' };
-		case 'review': return {};
-	}
 }

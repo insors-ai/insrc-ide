@@ -40,50 +40,17 @@ const VAR_RE              = /\{\{([A-Z_][A-Z0-9_]*)\}\}/g;
 // ---------------------------------------------------------------------------
 
 /**
- * Single-folder flows (one `flow/<name>/system.md`). The patch flow
- * is per-kind -- see `loadPatchPrompt` -- and is not listed here.
+ * Single-folder flows (one `flow/<name>/system.md`). Post-Phase 6
+ * (plans/code-analyzer-migration.md): only the `review` flow remains.
+ * Every other flow (gather / write / patch / discovery-expand /
+ * discovery-review / execute-step / prose-review / claim-grounding /
+ * write-structured) was deleted with the writer + grounding-review
+ * pingpong; the L2 skill `code.answer-question` carries those prompts
+ * inline.
  */
-export type PromptFlow =
-	| 'gather'
-	| 'write'
-	| 'review'
-	// Phase gamma of plans/code-analyzer-discovery-plan-loop.md:
-	// new flow MDs for the cloud-driven discovery loop.
-	| 'discovery-expand'
-	| 'discovery-review'
-	| 'execute-step'
-	| 'prose-review'
-	// Phase 11.B of plans/code-analyzer-hallucination-mitigation.md:
-	// dedicated reviewer that scores each claim's evidence-backing.
-	| 'claim-grounding';
-
-export type PatchKind = 'fix' | 'add';
+export type PromptFlow = 'review';
 
 export type PromptVars = Record<string, string>;
-
-/**
- * Tier slug used in per-tier section file dispatch
- * (`{{section:coverage-angles/{{TIER}}}}`). The ScopeSize classifier
- * emits S / M / L / XL / XXL / XXXL / XXXXL; the per-tier MD files
- * collapse XL+ tiers to a single `xl` namespace (see plans/
- * code-analyzer-scope-tier-prompts.md: XL+ checklist serves XL,
- * XXL, XXXL, XXXXL).
- *
- * Accepts any ScopeSize-string-shape input to avoid importing the
- * ScopeSize type and creating a circular dep across loader -> classify.
- */
-export function normalizeTier(tier: string): 'xl' | 'l' | 'm' | 's' {
-	const u = tier.toUpperCase();
-	if (u === 'XL' || u === 'XXL' || u === 'XXXL' || u === 'XXXXL') return 'xl';
-	if (u === 'L') return 'l';
-	if (u === 'M') return 'm';
-	if (u === 'S') return 's';
-	// Unknown tier -> default to 'm'. Callers should classify first;
-	// this is a graceful fallback rather than a hard fail because the
-	// orchestrator defaults tier to 'M' for pre-classification runs
-	// (CodeAnalysisState.tier default).
-	return 'm';
-}
 
 /**
  * Compose a flow-level system prompt. Reads `flow/<flow>/system.md`,
@@ -98,18 +65,6 @@ export function normalizeTier(tier: string): 'xl' | 'l' | 'm' | 's' {
  */
 export function loadFlowPrompt(flow: PromptFlow, vars: PromptVars): string {
 	return loadPromptFile(`flow/${flow}/system.md`, vars);
-}
-
-/**
- * Patch-flow specialization. The patch loop dispatches by kind
- * (fix / add) -- each kind has its own composition file under
- * `flow/patch/<kind>/system.md` that swaps the role + output sections
- * while sharing everything else. (`enhance` was folded into `fix`
- * during the scope-tier work -- see plans/code-analyzer-scope-tier-
- * prompts.md.)
- */
-export function loadPatchPrompt(kind: PatchKind, vars: PromptVars): string {
-	return loadPromptFile(`flow/patch/${kind}/system.md`, vars);
 }
 
 /**

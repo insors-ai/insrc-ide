@@ -228,11 +228,23 @@ Phase numbering aligns with the agentic-skills doc's migration plan; concrete de
 - User assertions land via the substrate's classifier (D6); subsequent runs see them.
 - Measure: improvement on questions touching previously-corrected concepts.
 
-**Phase 6 — Replace writer + grounding-review pingpong with L2 self-grounding.**
-- Migrate `code.answer-question` from strawman to live.
-- Sections come from L2 skills, not the writer + grounding loop.
-- meta-narrative-detector becomes a sanity check inside L2 self-grounding rather than a separate pass.
-- claim-grounding-reviewer becomes belt-and-suspenders.
+**Phase 6 — Replace writer + grounding-review pingpong with L2 self-grounding (CLEAN CUTOVER).**
+
+- `code.answer-question` L2 skill shipped in P9 (2026-06-01).
+- This phase wires it into the IDE chat surface and deletes the legacy pipeline. **No feature flag.** The L2 path becomes the only path; the legacy writer + grounding-review code is removed in the same commit.
+- Concretely:
+  - `runDiscoveryFlow` (the per-section orchestrator entry) is rewritten to call `runL2Skill('code.answer-question', ...)` and stitch its `sections[]` into the section markdown. The cycle / retain-step / prose-redraft machinery is dropped.
+  - **Deleted** (no longer reachable, no feature-flag fallback):
+    - `agent/tasks/code-analyzer/write-from-evidence.ts` (the writer)
+    - `agent/tasks/code-analyzer/claim-grounding-reviewer.ts` (review pingpong)
+    - `agent/tasks/code-analyzer/meta-narrative-detector.ts` (folded into L2 grounding)
+    - The cycle loop + redraft branches inside `discovery-flow.ts` (the file itself becomes a thin adapter or is deleted in favour of a direct call from the orchestrator).
+    - Associated tests + prompt templates (`prompts/code-analyzer/claim-grounding.*`, `prompts/code-analyzer/meta-narrative.*`, etc.).
+  - **Folded into the L2 skill** before deletion:
+    - meta-narrative regex → optional sanity check inside `code.answer-question`'s grounding step (drop sections whose body matches the patterns AND have only weak ledger anchors). If A1 grounding already covers the failure modes, the meta-narrative check stays deleted.
+    - claim-grounding-reviewer's responsibility is fully replaced by the L2 runtime's `validateGrounding` (A1).
+- Live integration test for the new orchestrator path on a fixture repo (structural assertions per A6).
+- Risk acknowledgement: the discovery-plan-loop's multi-cycle gather-then-write is not reproduced in the L2 skill v1. The first cut is single-pass classify → select → dispatch → draft → ground. Multi-cycle reflect is a follow-up if section quality regresses materially on large modules.
 
 **Phase 7 — Cross-domain L2.**
 - Build `data.entity.match-to-class` — the L2 skill we missed during the GRN run. Calls both `data.*` L1 skills and `code.*` L1 skills internally.
