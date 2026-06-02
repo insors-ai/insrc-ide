@@ -20,7 +20,7 @@ import {
 	_buildCatalogForTest as buildCatalog,
 	_matchesRepoCapabilityForTest as matchesRepoCapability,
 } from '../built-ins/code.meta.classify-question.js';
-import type { LLMMessage, LLMResponse } from '../../../shared/types.js';
+import type { CompletionOpts, LLMMessage, LLMResponse } from '../../../shared/types.js';
 
 const CLASSIFY = 'code.meta.classify-question';
 const SELECT   = 'code.meta.select-scope';
@@ -34,13 +34,42 @@ function setup(): void {
 	assert.ok(getSkill(SELECT),   `${SELECT} must be in the registry`);
 }
 
+/**
+ * Returns canned JSON texts wrapped as `tool_use` responses so the
+ * meta-skills' tool-call protocol parses them as if a real cloud
+ * provider had emitted the structured payload. Picks the tool name
+ * from the caller's `opts.toolChoice` (set per skill: classify-
+ * question uses `submit_classification`; select-scope uses
+ * `submit_scope`), so the same helper serves both skills in this
+ * file. If a staged text isn't valid JSON (legacy "garbage in,
+ * garbage out" tests), falls back to a text-only end_turn response
+ * which the skill treats as "no tool_use payload" -> validation
+ * failure -> retry path.
+ */
 function fakeProviderReturning(...texts: readonly string[]): FakeProvider {
 	let i = 0;
 	return {
-		async complete(): Promise<LLMResponse> {
+		async complete(_msgs: LLMMessage[], opts?: CompletionOpts): Promise<LLMResponse> {
 			const text = texts[Math.min(i, texts.length - 1)] ?? '';
 			i++;
-			return { text, stopReason: 'end_turn' };
+			const toolName = opts?.toolChoice !== undefined
+				&& typeof opts.toolChoice === 'object'
+				&& 'name' in opts.toolChoice
+				? (opts.toolChoice as { name: string }).name
+				: 'submit_classification';
+			const unwrapped = text.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '');
+			try {
+				const parsed = JSON.parse(unwrapped);
+				return {
+					text:       '',
+					stopReason: 'tool_use',
+					toolCalls:  [{ id: `tc-${i}`, name: toolName, input: parsed }],
+				};
+			} catch {
+				// Not JSON -- emit plain text so the skill's parser sees
+				// "no tool_use payload" and exercises the rejection path.
+				return { text, stopReason: 'end_turn' };
+			}
 		},
 	};
 }
@@ -431,9 +460,23 @@ function captureProvider(text: string): {
 	let captured: LLMMessage[] = [];
 	return {
 		provider: {
-			async complete(messages): Promise<LLMResponse> {
+			async complete(messages, opts?: CompletionOpts): Promise<LLMResponse> {
 				captured = messages;
-				return { text, stopReason: 'end_turn' };
+				const toolName = opts?.toolChoice !== undefined
+					&& typeof opts.toolChoice === 'object'
+					&& 'name' in opts.toolChoice
+					? (opts.toolChoice as { name: string }).name
+					: 'submit_scope';
+				try {
+					const parsed = JSON.parse(text);
+					return {
+						text:       '',
+						stopReason: 'tool_use',
+						toolCalls:  [{ id: 'tc-capture', name: toolName, input: parsed }],
+					};
+				} catch {
+					return { text, stopReason: 'end_turn' };
+				}
 			},
 		},
 		getCapturedMessages: () => captured,

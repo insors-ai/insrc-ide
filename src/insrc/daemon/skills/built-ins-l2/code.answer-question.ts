@@ -367,6 +367,19 @@ async function draftViaLlm(
 			'5. The first section should directly address the question; later sections add',
 			'   supporting detail (call sites, related entities, quality observations, etc.).',
 			'6. NEVER invent file paths, entity ids, or claims that aren\'t in the evidence.',
+			'',
+			'Scope discipline (do NOT violate -- the orchestrator stitches per-section drafts):',
+			'7. REPO-WIDE TOTALS (file counts, entity counts, language breakdowns, module lists)',
+			'   come from `code.source.repo.describe` and describe the WHOLE repository, not',
+			'   your section topic. NEVER reframe them as "in the X package" / "across the Y',
+			'   subsystem" / "in the Z module" -- those phrasings require module/file-scoped',
+			'   evidence (e.g. from `code.source.module.describe` or `code.source.file.describe`).',
+			'   If the evidence ledger doesn\'t carry section-scoped counts, OMIT them rather',
+			'   than misattributing the repo-wide numbers.',
+			'8. Do NOT emit a "Repository Context", "Codebase Scale", "Repository Scope",',
+			'   "Repository Overview", or similar tail sub-section that just restates repo-wide',
+			'   totals. The orchestrator already has a report-level header. Per-section drafts',
+			'   that pad with a repo-summary recap are noise -- omit them outright.',
 		].join('\n'),
 	};
 
@@ -465,12 +478,21 @@ function renderEvidence(
 	}
 
 	// Each ledger entry inline. Truncate large payloads so the prompt
-	// stays bounded.
+	// stays bounded. Special-case repo-wide describes: render as a
+	// compact one-line summary instead of the full JSON, so the LLM
+	// is less tempted to lift those numbers into a section-scoped
+	// claim (the misattribution failure mode from the 2026-06-02 run).
 	for (let i = 0; i < ledger.length; i++) {
 		const entry = ledger[i]!;
 		if (entry.source.kind !== 'sub-call') { continue; }
 		const skillId = entry.source.skillId;
 		const payload = entry.payload;
+		if (skillId === 'code.source.repo.describe') {
+			lines.push(`### ref=\`${entry.ref}\` from \`code.source.repo.describe\` (REPO-WIDE -- do NOT attribute to a section topic)`);
+			lines.push(renderRepoDescribeCompact(payload));
+			lines.push('');
+			continue;
+		}
 		const rendered = renderPayload(payload, 1500);
 		lines.push(`### ref=\`${entry.ref}\` from \`${skillId}\``);
 		lines.push(rendered);
@@ -482,6 +504,43 @@ function renderEvidence(
 	}
 
 	return lines.join('\n');
+}
+
+/**
+ * Render the `code.source.repo.describe` payload as ONE short line
+ * instead of a multi-KB JSON blob. The LLM still gets the load-bearing
+ * facts (file/entity counts + languages) but the reduced surface area
+ * lowers the temptation to recite repo-wide totals as if they were
+ * section-scoped. The full skill result remains accessible to the
+ * runtime + downstream consumers; only the prompt rendering is
+ * compressed.
+ */
+function renderRepoDescribeCompact(payload: unknown): string {
+	if (typeof payload !== 'object' || payload === null) {
+		return '(repo describe payload unavailable)';
+	}
+	const top = payload as Record<string, unknown>;
+	// SkillResult shape: { value, confidence, ... }. Drill to value.
+	const value = (top['value'] ?? top) as Record<string, unknown>;
+	const fileCount   = typeof value['fileCount']   === 'number' ? value['fileCount']   : undefined;
+	const entityCount = typeof value['entityCount'] === 'number' ? value['entityCount'] : undefined;
+	const langs       = value['languages'];
+	const langPart    = Array.isArray(langs)
+		? langs
+			.filter((l): l is Record<string, unknown> => typeof l === 'object' && l !== null)
+			.slice(0, 4)
+			.map(l => {
+				const name = typeof l['language'] === 'string' ? l['language'] : '?';
+				const fc   = typeof l['fileCount'] === 'number' ? l['fileCount'] : 0;
+				return `${name}=${fc}`;
+			})
+			.join(', ')
+		: '';
+	const parts: string[] = ['Repo-wide totals (NOT section-scoped):'];
+	if (fileCount   !== undefined) parts.push(`files=${fileCount}`);
+	if (entityCount !== undefined) parts.push(`entities=${entityCount}`);
+	if (langPart.length > 0)       parts.push(`top languages by file-count: ${langPart}`);
+	return parts.join(' ');
 }
 
 function deriveTitle(body: string): string {

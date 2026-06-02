@@ -123,13 +123,23 @@ function fakeSession(): Session {
  * `tools` / `responseFormat` options to decide which staged response
  * to use:
  *
- *   - `submit_answer` in tools  -> the staged `draft` tool_use
- *                                  (toolCalls populated).
- *   - otherwise                 -> consume the next item from
- *                                  `textResponses` in order. This
- *                                  matches how classify-question +
- *                                  select-scope call the LLM (text
- *                                  with responseFormat: { schema }).
+ *   - `submit_answer` in tools          -> the staged `draft` tool_use
+ *                                          (toolCalls populated, or
+ *                                          end_turn if `draft` is
+ *                                          'no-tool-call').
+ *   - `submit_classification` in tools  -> consume next textResponse
+ *                                          (a JSON string), wrap as
+ *                                          a `submit_classification`
+ *                                          tool_use. Matches the
+ *                                          post-2026-06-02 tool-call
+ *                                          protocol upgrade for the
+ *                                          code-side meta-skills.
+ *   - `submit_scope` in tools           -> same, wrapped as
+ *                                          `submit_scope`.
+ *   - otherwise (legacy text path)      -> return raw text as
+ *                                          end_turn. Kept so any
+ *                                          remaining text-based skill
+ *                                          contract still works.
  */
 interface ProviderScript {
 	readonly textResponses: readonly string[];
@@ -138,9 +148,24 @@ interface ProviderScript {
 
 function makeProvider(script: ProviderScript): LLMProvider {
 	let textIndex = 0;
+	const wrapAsToolCall = (raw: string, toolName: string): LLMResponse => {
+		const unwrapped = raw.replace(/^\s*```(?:json)?\s*/, '').replace(/\s*```\s*$/, '');
+		try {
+			const parsed = JSON.parse(unwrapped);
+			return {
+				text:       '',
+				stopReason: 'tool_use' as const,
+				toolCalls:  [{ id: `tc-${textIndex}`, name: toolName, input: parsed }],
+				usage:      { inputTokens: 100, outputTokens: 200 },
+			};
+		} catch {
+			return { text: raw, stopReason: 'end_turn' as const };
+		}
+	};
 	return {
 		complete: async (_messages: LLMMessage[], opts?: CompletionOpts): Promise<LLMResponse> => {
-			const wantsAnswerTool = (opts?.tools ?? []).some(t => t.name === 'submit_answer');
+			const tools = opts?.tools ?? [];
+			const wantsAnswerTool = tools.some(t => t.name === 'submit_answer');
 			if (wantsAnswerTool) {
 				if (script.draft === undefined || script.draft === 'no-tool-call') {
 					return { text: '', stopReason: 'end_turn' as const };
@@ -156,6 +181,12 @@ function makeProvider(script: ProviderScript): LLMProvider {
 				throw new Error(`fake provider exhausted: textIndex=${textIndex}, available=${script.textResponses.length}`);
 			}
 			const text = script.textResponses[textIndex++]!;
+			// Wrap as tool_use whenever the call sets a structured-output
+			// tool (classify-question / select-scope post-migration).
+			const submitTool = tools.find(t => t.name === 'submit_classification' || t.name === 'submit_scope');
+			if (submitTool !== undefined) {
+				return wrapAsToolCall(text, submitTool.name);
+			}
 			return { text, stopReason: 'end_turn' as const };
 		},
 		stream: async function* () { yield ''; },
@@ -571,7 +602,10 @@ test('answer-question: grounded section keeps when citationRefs include a real l
 						usage: { inputTokens: 100, outputTokens: 200 },
 					};
 				}
-				// classify or select-scope: serve canned text.
+				// classify or select-scope: post-tool-call-migration, the
+				// caller sets `tools: [submit_classification]` or
+				// `tools: [submit_scope]`. Wrap the canned JSON text as
+				// the matching tool_use payload.
 				const callSeq = (provider as unknown as { _seq?: number })._seq ?? 0;
 				(provider as unknown as { _seq?: number })._seq = callSeq + 1;
 				const responses = [
@@ -592,7 +626,17 @@ test('answer-question: grounded section keeps when citationRefs include a real l
 				if (callSeq >= responses.length) {
 					throw new Error(`fake provider exhausted: callSeq=${callSeq}`);
 				}
-				return { text: responses[callSeq]!, stopReason: 'end_turn' as const };
+				const submitTool = (opts?.tools ?? []).find(t => t.name === 'submit_classification' || t.name === 'submit_scope');
+				const raw = responses[callSeq]!;
+				if (submitTool === undefined) {
+					return { text: raw, stopReason: 'end_turn' as const };
+				}
+				return {
+					text:       '',
+					stopReason: 'tool_use' as const,
+					toolCalls:  [{ id: `tc-${callSeq}`, name: submitTool.name, input: JSON.parse(raw) }],
+					usage:      { inputTokens: 100, outputTokens: 200 },
+				};
 			},
 			stream: async function* () { yield ''; },
 			embed:  async () => [],

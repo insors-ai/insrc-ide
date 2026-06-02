@@ -36,8 +36,7 @@ import { getLogger } from '../../../shared/logger.js';
 import { registerSkill, getSkill } from '../registry.js';
 import { validate as validateJsonSchema } from '../json-schema.js';
 import type { Skill, SkillResult } from '../types.js';
-import type { LLMMessage, LLMProvider } from '../../../shared/types.js';
-import { stripJsonFences } from '../../../shared/json-fences.js';
+import type { LLMMessage, LLMProvider, ToolDefinition } from '../../../shared/types.js';
 import type {
 	BootstrapTriggerKind,
 	NamespaceSpec,
@@ -329,7 +328,8 @@ function buildSystemPrompt(): string {
 		'of the args; the goal tells you the CONTENT. The `rationale` is',
 		'informational only -- do not rely on it as a routing signal.',
 		'',
-		'Output STRICT JSON matching this schema:',
+		`Emit ONE tool_use block calling \`${SUBMIT_TOOL_NAME}\` whose \`input\``,
+		'matches this schema:',
 		'',
 		'```json',
 		JSON.stringify(OUTPUT_SCHEMA, null, 2),
@@ -368,7 +368,8 @@ function buildSystemPrompt(): string {
 		'   matches, treat the reference as cold per rule 6 -- DO NOT',
 		'   invent a fact-shaped identifier.',
 		'',
-		'Output ONLY the JSON object; no preamble, no fenced block.',
+		`Respond by calling the \`${SUBMIT_TOOL_NAME}\` tool exactly once. Do NOT`,
+		'emit prose, fenced JSON, or any reply outside the tool call.',
 	].join('\n');
 }
 
@@ -423,7 +424,7 @@ function buildUserMessage(input: SelectScopeInput, manifests: readonly Candidate
 		`Candidates (${input.candidates.length}):`,
 		candidateBlocks.length > 0 ? candidateBlocks.join('\n\n') : '(empty)',
 		'',
-		'Return ONLY the JSON object matching the schema; no preamble.',
+		`Respond by calling the \`${SUBMIT_TOOL_NAME}\` tool exactly once with the structured payload.`,
 	);
 	return sections.join('\n');
 }
@@ -479,19 +480,19 @@ type ParseResult =
 	| { readonly ok: false; readonly failure: ParseFailure };
 
 function parseAndValidate(
-	raw: string,
+	parsed: unknown,
 	candidates: readonly CandidateIn[],
 	repo: RepoContext,
 ): ParseResult {
-	const text = stripJsonFences(raw);
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch (err) {
-		return { ok: false, failure: { message: `JSON parse failed: ${(err as Error).message}` } };
+	// Tool-call payload arrives pre-parsed via the provider wire
+	// protocol. The truncation-mid-string failure mode (legacy text +
+	// responseFormat path) is gone -- providers serialize JSON after
+	// token selection, not before.
+	if (parsed === undefined || parsed === null) {
+		return { ok: false, failure: { message: 'no tool_use payload returned by provider' } };
 	}
-	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-		return { ok: false, failure: { message: 'output must be a JSON object' } };
+	if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+		return { ok: false, failure: { message: 'tool_use payload must be a JSON object' } };
 	}
 	const obj = parsed as Record<string, unknown>;
 
@@ -562,24 +563,45 @@ function parseAndValidate(
 
 
 // ---------------------------------------------------------------------------
-// LLM call
+// LLM call (tool-call protocol)
 // ---------------------------------------------------------------------------
+
+const SUBMIT_TOOL_NAME = 'submit_scope';
+
+/**
+ * Submission tool. Mirrors `data.meta.select-scope`'s upgrade: the
+ * model emits one tool_use whose `input` carries the scoped-invocation
+ * payload, so truncation mid-string can't break parsing. The legacy
+ * text + responseFormat path routinely truncated on XL-tier sections
+ * with 4 candidates × full {args, resolvedScope} per candidate.
+ */
+const SUBMIT_TOOL: ToolDefinition = {
+	name:        SUBMIT_TOOL_NAME,
+	description: 'Submit the select-scope output: a list of scoped invocations (skillId + args + resolvedScope per candidate) plus optional notes.',
+	inputSchema: OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+};
 
 async function callLLM(
 	provider: LLMProvider,
 	systemPrompt: string,
 	userMessage: string,
-): Promise<string> {
+): Promise<unknown | undefined> {
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: systemPrompt },
 		{ role: 'user',   content: userMessage },
 	];
 	const response = await provider.complete(messages, {
-		maxTokens: 1024,
+		// 8192-token cloud cap. Legacy 1024 was a local-LLM hangover
+		// and produced max_tokens truncation on every XL-tier section
+		// (6/12 dead sections on the 2026-06-02 Hadoop run). Tool-call
+		// protocol prevents the *parse* failure mode entirely.
+		maxTokens:   8192,
 		temperature: 0.2,
-		responseFormat: { schema: OUTPUT_SCHEMA as Record<string, unknown> },
+		tools:       [SUBMIT_TOOL],
+		toolChoice:  { name: SUBMIT_TOOL_NAME },
 	});
-	return response.text;
+	const toolCall = response.toolCalls?.find(tc => tc.name === SUBMIT_TOOL_NAME);
+	return toolCall?.input;
 }
 
 // ---------------------------------------------------------------------------
@@ -632,9 +654,9 @@ const skill: Skill<SelectScopeInput, SelectScopeOutput> = {
 		const sys      = buildSystemPrompt();
 		const user     = buildUserMessage(input, resolved);
 
-		let raw: string;
+		let rawPayload: unknown;
 		try {
-			raw = await callLLM(provider, sys, user);
+			rawPayload = await callLLM(provider, sys, user);
 		} catch (err) {
 			log.warn({ err: (err as Error).message }, 'select-scope LLM call failed');
 			return {
@@ -645,13 +667,13 @@ const skill: Skill<SelectScopeInput, SelectScopeOutput> = {
 			};
 		}
 
-		let parsed = parseAndValidate(raw, input.candidates, input.repo);
+		let parsed = parseAndValidate(rawPayload, input.candidates, input.repo);
 		if (parsed.ok !== true) {
 			log.info({ message: parsed.failure.message }, 'select-scope first-pass rejected; retrying');
-			const retryUser = `${user}\n\nThe previous attempt was rejected: ${parsed.failure.message}\nReturn ONLY a JSON object matching the schema; no other text.`;
-			let retryRaw: string;
+			const retryUser = `${user}\n\nThe previous attempt was rejected: ${parsed.failure.message}\nRe-emit a corrected \`${SUBMIT_TOOL_NAME}\` tool call.`;
+			let retryPayload: unknown;
 			try {
-				retryRaw = await callLLM(provider, sys, retryUser);
+				retryPayload = await callLLM(provider, sys, retryUser);
 			} catch (err) {
 				return {
 					value: emptyOutput(),
@@ -660,13 +682,13 @@ const skill: Skill<SelectScopeInput, SelectScopeOutput> = {
 					toolCalls: [],
 				};
 			}
-			parsed = parseAndValidate(retryRaw, input.candidates, input.repo);
+			parsed = parseAndValidate(retryPayload, input.candidates, input.repo);
 			if (parsed.ok !== true) {
 				log.warn({ message: parsed.failure.message }, 'select-scope retry rejected; surfacing low confidence');
 				return {
 					value: emptyOutput(),
 					confidence: 'low',
-					notes: [`LLM output failed validation twice: ${parsed.failure.message}`],
+					notes: [`tool_use payload failed validation twice: ${parsed.failure.message}`],
 					toolCalls: [],
 				};
 			}

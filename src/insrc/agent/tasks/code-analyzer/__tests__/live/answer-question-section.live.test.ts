@@ -230,5 +230,28 @@ test('LIVE: runAnswerQuestionSection produces a grounded section for a fixture f
 		//    should mention "Widget" (or the function name "render").
 		assert.match(result.markdown, /Widget|render/i,
 			`expected markdown to mention Widget or render; got: ${result.markdown.slice(0, 200)}`);
+
+		// 7. P11 regression guard: no padding "Repository Context" /
+		//    "Codebase Scale" / "Repository Scope" / "Repository Overview"
+		//    sub-section. Pre-P11 runs filled the last slot with a
+		//    repo-summary recap pulled from the in-prompt repo.describe
+		//    ledger entry, producing noisy duplication across every
+		//    section. The compact rendering + explicit prompt rule should
+		//    keep this stub out of the per-section drafts.
+		assert.doesNotMatch(result.markdown,
+			/^#{2,4}\s+(Repository\s+(Context|Scope|Overview)|Codebase\s+Scale|Repo(sitory)?\s+Summary)\b/im,
+			`P11 regression: stitched markdown contains a padding repo-summary sub-section. ` +
+			`First 400 chars: ${result.markdown.slice(0, 400)}`);
+
+		// 8. P11 regression guard: no repo-wide misattribution. The pre-P11
+		//    draft prompt let the LLM lift the 4-5 digit repo totals
+		//    ("126,327 methods" / "12,848 files") from the in-prompt
+		//    repo.describe entry and re-state them as if they were
+		//    scoped to a module / package / subsystem. The new compact
+		//    rendering + scope-discipline rules should suppress that.
+		assert.doesNotMatch(result.markdown,
+			/\b\d{4,}\s+(files|entities|methods|classes|interfaces|variables|functions)\s+(across|in|within)\s+(the\s+)?(entire\s+)?(\w[\w-]*\s+){0,3}(package|subsystem|module|layer|component|namespace)\b/i,
+			`P11 regression: stitched markdown reframes a repo-wide total as a section-scoped count. ` +
+			`First 400 chars: ${result.markdown.slice(0, 400)}`);
 	} finally { await fx.dispose(); }
 });
