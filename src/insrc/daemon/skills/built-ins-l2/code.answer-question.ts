@@ -221,6 +221,10 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 		}
 
 		// 2. SCOPE: callL1 select-scope.
+		// NOTE: select-scope's input schema is additionalProperties: false
+		// and does NOT declare `scopeTier` -- the tier hint stays inside
+		// this L2 skill (used for sub-skill selection, not propagated to
+		// select-scope, which reads `candidates[i].mustHaveScope` instead).
 		let scopeResult: { value: SelectScopeShape; confidence: 'high' | 'medium' | 'low' };
 		try {
 			scopeResult = await deps.callL1<unknown, SelectScopeShape>(
@@ -229,7 +233,6 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 					question: input.question,
 					candidates,
 					repo: repoCtx,
-					...(input.scopeTier !== undefined ? { scopeTier: input.scopeTier } : {}),
 				},
 			);
 		} catch (err) {
