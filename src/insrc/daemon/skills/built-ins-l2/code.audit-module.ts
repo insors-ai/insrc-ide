@@ -32,7 +32,6 @@ import type {
 import type {
 	Evidence,
 	L2Deps,
-	L2Invocation,
 	L2Skill,
 	SkillBudget,
 	SkillOutput,
