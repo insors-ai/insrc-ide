@@ -333,6 +333,84 @@ test('answer-question: happy path with classify -> select -> dispatch -> draft -
 	} finally { await fx.dispose(); }
 });
 
+test('answer-question: scopeTier=XL does not leak into select-scope payload', async () => {
+	// REGRESSION GUARD (2026-06-02). Prior to this test, the L2 skill
+	// passed `scopeTier` through to `code.meta.select-scope` whose
+	// inputSchema is `additionalProperties: false`. Every section in a
+	// production code-analyze run got rejected at select-scope input
+	// validation, the dispatch loop hit the no-scoped shortcut, and
+	// every section returned 0 sub-sections / confidence=low.
+	//
+	// The earlier happy-path test did NOT pass `scopeTier`, so the
+	// optional spread short-circuited and the bug was invisible. This
+	// test exercises the `scopeTier='XL'` branch end-to-end through
+	// the REAL classify-question + select-scope L1 skills (their input
+	// validation is what trips the leak). If scopeTier slips into the
+	// select-scope payload, runSkill rejects with `invalid-input` and
+	// `dispatched.length` falls to 0 -- this test fails loudly.
+	const fx = await setupFixture();
+	try {
+		await upsertEntities(null, [
+			ent({ kind: 'file', name: FILE, file: FILE }),
+		]);
+
+		const skill = getL2Skill('code.answer-question');
+		assert.ok(skill);
+
+		const result = await runL2Skill(skill,
+			{ input: {
+				question:       'What entities does Widget.ts declare?',
+				activeRepoPath: REPO,
+				scopeTier:      'XL',   // the previously-bug-triggering value
+			  }, invocationContext: {} },
+			{ session: fakeSession(),
+			  resolveProvider: () => makeProvider({
+				textResponses: [
+					classifyOutput({
+						candidates: [{
+							skillId: 'code.source.file.describe',
+							goal: 'Enumerate the entities defined in Widget.ts plus its imports.',
+						}],
+					}),
+					scopeOutput({
+						scoped: [{
+							skillId:       'code.source.file.describe',
+							args:          { file: FILE, repoPath: REPO },
+							resolvedScope: { repoPath: REPO, file: FILE },
+						}],
+					}),
+				],
+				draft: {
+					sections: [
+						{ title: 'surface', body: 'Widget.ts has no entities.',
+						  citationRefs: ['__WILDCARD__'] },
+					],
+				},
+			  }) },
+		);
+
+		assert.equal(result.rejected, undefined, `runtime rejected: ${JSON.stringify(result.rejected)}`);
+		const v = result.output.value as { dispatched: unknown[]; sections: unknown[] };
+
+		// If scopeTier had leaked into select-scope's payload, runSkill
+		// would have rejected with `<root>: unexpected property 'scopeTier'`,
+		// callL1 would have returned a low-confidence empty value, scoped
+		// would have been [], the no-scoped shortcut would have fired, and
+		// dispatched.length would be 0.
+		assert.equal(v.dispatched.length, 1,
+			'select-scope must accept the L2 payload when scopeTier is set; ' +
+			'a length of 0 means scopeTier (or some other field) leaked into ' +
+			'the select-scope call and tripped its inputSchema');
+
+		// The notes MUST NOT mention select-scope input-validation.
+		const notes = result.output.notes ?? [];
+		for (const n of notes) {
+			assert.doesNotMatch(n, /select-scope.*invalid-input|unexpected property.*scopeTier/,
+				`notes should not flag select-scope input-validation; got: ${n}`);
+		}
+	} finally { await fx.dispose(); }
+});
+
 test('answer-question: phantom citationRefs are dropped and confidence drops', async () => {
 	const fx = await setupFixture();
 	try {
