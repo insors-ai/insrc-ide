@@ -23,7 +23,7 @@
  * fresh connections trip the universal access gate UI.
  */
 
-import { runDataDiscoveryPipeline } from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
+import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
 import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
 import { registerTool } from '../tools/registry.js';
 import {
@@ -217,7 +217,7 @@ export const dataAnalyzeTool: Tool = {
 				continue;
 			}
 			try {
-				const outcome = await runDataDiscoveryPipeline({
+				const outcome = await runAnswerQuestionTask({
 					session: deps.session,
 					task,
 					connections,

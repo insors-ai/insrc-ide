@@ -30,7 +30,7 @@
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { runDataDiscoveryPipeline } from '../../agent/tasks/data-analyzer/discovery-pipeline.js';
+import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
 import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
 import {
   buildReviewPrompt,
@@ -710,13 +710,14 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       return this.runNextAnalyzerTask(state);
     }
 
-    // Phase F of plans/analyzers/data-analyzer-parity.md: the
-    // discovery-pipeline (Phase A-F work) is the only analyzing
-    // path. The legacy `runDataAnalyzer` per-task runner and its
-    // env-var feature flag were removed once the discovery flow
-    // accumulated enough live miles.
-    log.info({ itemId: next.itemId, tier: this._tier }, 'analyzing: routing through discovery-flow pipeline');
-    const outcome = await runDataDiscoveryPipeline({
+    // Data-side mirror of code-analyzer's Phase 6 cutover: the legacy
+    // discovery-pipeline (writer + claim-grounding-reviewer pingpong)
+    // was replaced by the L2 `data.answer-question` skill in P12+P13.
+    // The orchestrator calls a thin adapter that internally drives the
+    // L2 self-grounding flow and adapts back to DataAnalyzerResult so
+    // the review loop downstream sees an unchanged shape.
+    log.info({ itemId: next.itemId, tier: this._tier }, 'analyzing: routing through data.answer-question L2 skill');
+    const outcome = await runAnswerQuestionTask({
       session:     this.deps.session,
       task:        next,
       connections: this._connections,

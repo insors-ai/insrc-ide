@@ -134,6 +134,7 @@ import { registerDataAnomalyChangePointRdbmsSkill } from './built-ins/data.anoma
 // L2 pilot skills.
 import { registerCodeAuditModuleSkill } from './built-ins-l2/code.audit-module.js';
 import { registerCodeAnswerQuestionSkill } from './built-ins-l2/code.answer-question.js';
+import { registerDataAnswerQuestionSkill } from './built-ins-l2/data.answer-question.js';
 
 const log = getLogger('skills-bootstrap');
 
@@ -346,6 +347,13 @@ export function registerAllSkills(): void {
   // answer, self-grounds. Replaces the legacy writer + grounding-
   // review pingpong per migration plan Phase 6.
   registerCodeAnswerQuestionSkill();
+  // Data-side mirror of code.answer-question (P12+P13 port). Drives
+  // /data-analyze section drafting through the same L2 self-grounding
+  // architecture; replaces the data-side legacy writer + grounding-
+  // review pingpong (discovery-pipeline + write-from-evidence +
+  // claim-grounding-reviewer + execute-step) once the orchestrator
+  // cutover lands.
+  registerDataAnswerQuestionSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
