@@ -136,7 +136,14 @@ const SUBMIT_TOOL_SCHEMA: Record<string, unknown> = {
 
 const DEFAULT_BUDGET: SkillBudget = {
 	maxTokens:      80_000,
-	maxSubCalls:    16,
+	// 32 sub-calls. Bumped from 16 after the 2026-06-02 Hadoop run: §11
+	// (Performance Monitoring / JMX) dispatched 14 scoped invocations
+	// + 1 classify + 1 select-scope + 1 retry-related re-dispatch and
+	// tripped the cap mid-section, dropping confidence to medium with
+	// "sub-call budget exceeded: used 17 > limit 16". XL-tier sections
+	// commonly have 4 classify-candidates expanding to 8-14 scoped L1
+	// calls; 32 gives headroom + still bounds runaway loops.
+	maxSubCalls:    32,
 	maxWallclockMs: 300_000,
 	maxDepth:       3,
 };
