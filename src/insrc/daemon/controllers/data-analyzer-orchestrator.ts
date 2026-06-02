@@ -31,6 +31,7 @@
 
 import { getLogger } from '../../shared/logger.js';
 import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
+import { runAnswerQuestionAction } from '../../agent/tasks/data-analyzer/answer-question-action.js';
 import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
 import {
   buildReviewPrompt,
@@ -43,7 +44,6 @@ import {
 } from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
 import { generateMultiPass } from '../../agent/content-gen/index.js';
 import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
-import { expandThenReview } from '../../agent/content-gen/review-action.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import {
   buildConnectionFingerprint,
@@ -1019,36 +1019,39 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     );
     this.emitLiveStep(planStep, '', true);
 
-    // ----- Stage 2+3: per-action [skills pipeline + expand + review] ----
+    // ----- Stage 2+3: per-action L2 self-grounding draft -----------------
+    // P14 cutover: the legacy `runPerStepSkillsPipelineDA` (evidence
+    // pre-gather) + `expandThenReview` (writer/reviewer pingpong)
+    // collapse into a single `runAnswerQuestionAction` call. The L2
+    // skill does its own classify + select-scope + dispatch + draft +
+    // ground (A1 self-grounding); section quality matches what the
+    // code-side L2 cutover produces.
     const sections: { id: string; title: string; markdown: string }[] = [];
     for (const action of actions) {
-      // Per-step skills pipeline scoped to this section's objective.
-      const evidence = await this.runPerStepSkillsPipelineDA(action.objective);
-
       const stepId = `synthesise (${action.id})`;
       this.emitLiveStep(stepId, '');
-      this.emitLiveStep(stepId, `[data-analyzer] expanding "${action.title}" (${evidence.length} skill execution${evidence.length === 1 ? '' : 's'})...\n`);
+      this.emitLiveStep(stepId, `[data-analyzer] drafting "${action.title}" via data.answer-question...\n`);
 
-      const out = await expandThenReview(
-        {
-          action,
-          evidence,
-          request,
-          analyzerLabel: 'data-analyzer',
-          onProgress: (phase, payload) => {
-            const tag = phase === 'final'
-              ? `done (verdict=${payload.kind === 'final' ? payload.verdict : '?'}, rounds=${payload.kind === 'final' ? payload.rounds : '?'})`
-              : phase;
-            this.emitLiveStep(stepId, `[data-analyzer] ${action.id}: ${tag}\n`);
-          },
-        },
-        local,
-        reviewer,
-      );
+      const out = await runAnswerQuestionAction({
+        session,
+        action,
+        request,
+        connections:   this._connections,
+        cloudProvider: reviewer,
+        analyzerLabel: 'data-analyzer',
+        onProgress: (msg) => this.emitLiveStep(stepId, `[data-analyzer] ${msg}\n`),
+      });
 
+      this.emitLiveStep(stepId,
+        `[data-analyzer] ${action.id}: ${out.sectionCount} sub-section${out.sectionCount === 1 ? '' : 's'}; ` +
+        `${out.dispatched.length} skill${out.dispatched.length === 1 ? '' : 's'} dispatched; confidence=${out.confidence}` +
+        (out.droppedCount > 0 ? ` (${out.droppedCount} dropped)` : '') + '\n');
       this.emitLiveStep(stepId, '', true);
       sections.push({ id: action.id, title: action.title, markdown: out.markdown });
     }
+    // `local` was used by the legacy expandThenReview path; now
+    // unused since the L2 runtime drives provider resolution itself.
+    void local;
 
     // ----- Stage 4: stitch -----------------------------------------------
     return stitchPlanSectionsDA(plan.intentBrief, actions, sections);
@@ -1122,37 +1125,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
    * one plan step's objective; returns the executions for the
    * expander. Errors degrade to empty evidence.
    */
-  private async runPerStepSkillsPipelineDA(objective: string): Promise<readonly PlanExecution[]> {
-    if (this.deps === undefined) return [];
-    const session = this.deps.session;
-    try {
-      const result = await runSkillsPipeline(
-        {
-          question:    objective,
-          connections: this._connections,
-        },
-        {
-          session,
-          resolveProvider: (affinity) => {
-            if (affinity === 'local') return session.ollamaProvider;
-            if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
-            return session.resolver.resolve('data-analyzer', 'meta');
-          },
-          ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-        },
-      );
-      return result.executions.map(e => ({
-        skillId:    e.skillId,
-        value:      e.value,
-        confidence: e.confidence,
-        notes:      e.notes,
-      }));
-    } catch (err) {
-      log.warn({ objective, err: (err as Error).message }, 'runPerStepSkillsPipelineDA: failed; expander will see no evidence');
-      return [];
-    }
-  }
-
   private async afterSynthesise(_completed: TaskResult, _state: TaskStateStore): Promise<Task[] | null> {
     // Synthesise runs inline in queueSynthesise via generateMultiPass;
     // there's no LLM-task completion to react to here. Reserved for
