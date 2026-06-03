@@ -18,14 +18,18 @@
 import { readFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
 import { getLogger } from '../../shared/logger.js';
-import type { PlannedAction } from '../../agent/content-gen/plan-actions.js';
-import { planActionsInteractive } from '../../agent/content-gen/plan-actions-interactive.js';
-import { verifyPlannedActions } from '../../agent/content-gen/verify-planned-actions.js';
+// P6.b of plans/planner-skill-tree.md -- code analyzer cuts over to the
+// tree planner + executor. planActions / planActionsInteractive /
+// verifyPlannedActions are gone; the tree's per-leaf skill-execution
+// model substitutes for both flat planning + anchor verification.
+import { planTree, type CatalogSkill } from '../../agent/content-gen/plan-tree-runner.js';
 import {
-  runCategoryMaterializers,
-  type MaterializerOutcome,
-  type CategoryResource,
-} from '../../agent/content-gen/category-materializer.js';
+  buildCatalogFromRegistry,
+  buildCodeAnalyzerFallbackTree,
+  renderTreeReport,
+} from '../../agent/content-gen/plan-tree-helpers.js';
+import { countLeaves as countLeavesQuick } from '../../agent/content-gen/plan-tree.js';
+import { executeTree, type TreeExecutionEvent } from '../skills/tree/executor.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
@@ -729,234 +733,124 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
           : cloudProviderHere;
       }
     };
-    const plan = await planActionsInteractive(
+    // ----- P6.b: tree-based planning + execution ------------------------
+    // The flat planActionsInteractive + per-section runAnswerQuestionSection
+    // loop is replaced by planTree + executeTree. The planner LLM emits a
+    // typed skill tree; the executor walks it, calling skills via runSkill
+    // and resolving wires from the context bag. The L2 code.answer-question
+    // is retained as a per-leaf fallback (the planner reaches for it on
+    // genuinely open-ended sub-questions).
+    //
+    // Trade-offs vs the flat planner:
+    //   + cross-domain composition (shared.compare.fields-vs-shape, etc.)
+    //   + deterministic dispatch ordering -- no LLM-driven mid-run picks
+    //   + per-skill confidence surfaces structurally; no separate
+    //     verifyPlannedActions anchor probe needed
+    //   - tool-call discovery during planning is gone; the planner's
+    //     repo summary (formatRepoSizeSummary in buildSummaryContext)
+    //     already exposes module/subsystem names so section titles
+    //     stay specific; if quality drops, P6.b follow-up: pre-run
+    //     code.source.repo.describe to enrich summaryContext further.
+    //   - per-section TodoList integration dropped; the executor's
+    //     onEvent stream still surfaces per-node progress. TodoList
+    //     can be re-attached as a follow-up if the UX gap matters.
+    void resolveProvider;       // tree executor uses the cloud provider directly
+    void accepted;              // legacy plan-actions fallback input -- gone
+    void analysisTaskToSkillPlan; // unused after the cutover
+
+    // Catalog: skills the code-side planner may compose. Includes
+    // shared composition skills and data-analyzer cross-domain skills.
+    const catalog: readonly CatalogSkill[] = buildCatalogFromRegistry({
+      owners:            ['code-analyzer', 'data-analyzer', 'shared'],
+      includeL2Fallback: true,
+    });
+
+    const fallbackTree = buildCodeAnalyzerFallbackTree({
+      request,
+      activeRepoPath: session.repoPath,
+      scopeTier:      clampTierForFallback(tier),
+    });
+
+    const planResult = await planTree(
       {
-        intent:         'code-analysis',
+        intent:        'code-analysis',
         request,
-        repoPath:       session.repoPath,
-        tier,
-        subtype:        'review',
-        session,
-        resolveProvider,
-        analyzerLabel:  'code-analyzer',
-        // Cross-category catalog: what OTHER skill owners exist beyond
-        // code-analyzer. The planner tags actions with
-        // `requiredCategories` drawn from this list when a section needs
-        // capabilities its own category can't satisfy. See
-        // plans/planner-cross-category-skills.md P2.
-        availableCategories: [
-          {
-            category:       'data-analyzer',
-            capabilityHint: 'read CSV / JSON / Parquet / JSONL files; sample rows and shape; profile data quality (completeness, uniqueness, conformity); detect PII and outliers',
-          },
-        ],
+        summaryContext,
+        catalog,
+        fallback:      fallbackTree,
+        analyzerLabel: 'code-analyzer',
       },
       cloud,
     );
 
-    const plannedActions: readonly PlannedAction[] = plan.degraded || plan.actions.length === 0
-      ? [synthesiseFallbackAction(ca, accepted)]
-      : plan.actions;
-
-    // Phase 10.B of plans/code-analyzer-hallucination-mitigation.md:
-    // pre-flight probe -- light NER extracts candidate entity names
-    // from each planned action's title + objective and probes the
-    // index. Sections whose anchor entities don't exist (e.g.
-    // "Caching Layer" for a system with no real cache) are dropped
-    // here, before any per-section discovery cost is incurred. Loose
-    // titles with no extracted anchor pass through untouched.
-    // Skipped on the fallback path (single synthesised action).
-    let actions: readonly PlannedAction[] = plannedActions;
-    if (!plan.degraded && plannedActions.length > 0) {
-      try {
-        const repoPath = this.deps.session.repoPath;
-        const verifyResult = await verifyPlannedActions(plannedActions, {
-          ...(repoPath !== undefined && repoPath.length > 0 ? { repoPath } : {}),
-        });
-        if (verifyResult.dropped.length > 0) {
-          log.warn(
-            {
-              kept:           verifyResult.kept.length,
-              dropped:        verifyResult.dropped.length,
-              droppedTitles:  verifyResult.dropped.map(d => d.action.title),
-            },
-            'verifyPlannedActions: dropped sections with no anchor entity',
-          );
-          // Only commit the trimmed list if at least one action
-          // survived. If everything was dropped (unlikely but
-          // possible on a malformed plan), fall back to the original
-          // list so we always have something to render.
-          if (verifyResult.kept.length > 0) {
-            actions = verifyResult.kept;
-          }
-        }
-      } catch (err) {
-        // Probe error is non-fatal -- ship the unverified list.
-        log.warn(
-          { err: (err as Error).message },
-          'verifyPlannedActions: probe error; shipping unverified action list',
-        );
-      }
-    }
-
+    const leafCount = countLeavesQuick(planResult.tree);
     this.emitMilestone(
       synthBubble,
-      `planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}`,
+      `planned ${leafCount} leaf${leafCount === 1 ? '' : 'es'}` +
+      (planResult.degraded ? ' (fallback tree)' : '') +
+      (planResult.shortlist !== undefined ? `; shortlist=${planResult.shortlist.length}` : ''),
     );
-
-    // Phase F: create the workbench TodoList from the PLANNER's
-    // sections (one item per planned action). Previously the
-    // bootstrap routing pipeline created items per skill execution
-    // -- that pipeline is gone, so TodoList sourcing moved here.
-    // Items start pending, transition to in-progress as each
-    // section's tool loop fires, and complete when its draft
-    // returns from the reviewer.
-    const todoItemIds: (string | undefined)[] = new Array(actions.length).fill(undefined);
-    if (this.deps.todos !== undefined && ca !== undefined) {
-      try {
-        const list = await this.deps.todos.createList({
-          sessionId: this.deps.session.id,
-          title:     `Code Analysis: ${truncateTitle(ca.request)}`,
-          description: ca.request,
-          ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
-        });
-        for (let i = 0; i < actions.length; i++) {
-          const a = actions[i]!;
-          const item = await this.deps.todos.addItem(list.id, {
-            title:       a.title,
-            description: a.objective,
-            meta:        { kind: 'plan-action', origin: 'planner', retryCount: 0 },
-          });
-          todoItemIds[i] = item.id;
-        }
-        // Surface listId via state so finalizeSynthesisedReport can
-        // stamp the rendered report onto the TodoList body when
-        // synthesis completes.
-        state.set(K_LIST_ID, list.id);
-        if (ca !== undefined) state.set(K_STATE, { ...ca, listId: list.id });
-      } catch (err) {
-        log.warn({ err: (err as Error).message }, 'TodoList creation failed (sections will still ship)');
-      }
+    if (planResult.note !== undefined) {
+      this.emitLiveStep(synthBubble, this.formatProgress(planResult.note) + '\n');
     }
 
-    // ----- Stage 2+3: per-action tool-loop draft + cloud review ---------
-    //
-    // Phase F of plans/intent-funnel-followups.md. The LOCAL LLM
-    // drives a tool-calling loop with `skill_invoke` per section --
-    // it picks skills + args itself, iterating until it has enough
-    // evidence to satisfy the review criteria. The cloud reviewer
-    // then judges + may polish the draft.
-    //
-    // The previous "classify-question -> select-scope -> pre-fetch
-    // evidence -> expand-action" cloud-orchestrated pipeline was
-    // removed (2026-05-11) along with the env-var gate that fenced
-    // it off. The failure mode the live test surfaced: select-scope
-    // ignored the section title's module path and defaulted to
-    // `<repo>/src` against repos that don't follow that layout,
-    // producing "no-files-in-module" evidence for indexed modules
-    // and forcing the writer to hedge ("appears to lack indexed
-    // files"). The tool loop avoids that by giving the writer the
-    // section title + tool catalog directly.
-    log.info({ sections: actions.length }, 'starting per-action discovery flow');
+    // ----- Tree execution -----------------------------------------------
+    this.emitMilestone(synthBubble, `executing tree (${leafCount} leaf${leafCount === 1 ? '' : 'es'})...`);
 
-    const sections: { id: string; title: string; markdown: string }[] = [];
-    // Per-run materializer cache (P3 of plans/planner-cross-category-skills.md):
-    // resolving the same category across actions reuses the first run.
-    const materializerCache = new Map<import('../skills/types.js').SkillOwner, MaterializerOutcome>();
-    for (let i = 0; i < actions.length; i++) {
-      const action = actions[i]!;
-      const itemId = todoItemIds[i];
-
-      // Transition the TodoList item to in-progress so the
-      // workbench shows a spinner / live indicator for the section
-      // we're currently working on.
-      if (itemId !== undefined && this.deps.todos !== undefined) {
-        try { await this.deps.todos.markInProgress(itemId); }
-        catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markInProgress failed (best-effort)'); }
-      }
-
-      this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via code.answer-question...`);
-
-      // P3 hook (plans/planner-cross-category-skills.md): when the
-      // planner tagged this action with cross-category requirements,
-      // resolve the matching resources. The resolved categories +
-      // resources are threaded into the L2 invocationContext (P4) so
-      // the skill can widen its candidate pool (P5).
-      let crossCategoryResources: readonly CategoryResource[] = [];
-      let effectiveCategories: readonly import('../skills/types.js').SkillOwner[] = [];
-      if (action.requiredCategories.length > 0) {
-        const mat = await runCategoryMaterializers({
-          action,
-          ownCategory: 'code-analyzer',
-          request,
-          session,
-          emitNote: (line) => this.emitLiveStep(synthBubble, this.formatProgress(line) + '\n'),
-        }, materializerCache);
-        crossCategoryResources = mat.resources;
-        effectiveCategories    = mat.effectiveCategories;
-      }
-
-      // Phase 6 of plans/code-analyzer-migration.md: the per-section
-      // synthesis is now driven by the `code.answer-question` L2 skill
-      // (P9). The skill plans its own discovery (classify-question +
-      // select-scope), dispatches L1 sub-calls, drafts a section-shaped
-      // answer, and self-grounds every citation against its working-
-      // state ledger (A1). The legacy discovery-flow + writer + claim-
-      // grounding-reviewer + meta-narrative-detector pipeline was
-      // removed in the same commit -- no feature flag, no fallback.
-      const { runAnswerQuestionSection } = await import('../../agent/tasks/code-analyzer/answer-question-section.js');
-      const repoRoot = this._repoSummary?.rootPath ?? '';
-      if (repoRoot.length === 0) {
-        log.warn({ actionId: action.id }, 'code-analyzer: no active repo root; skipping section');
-        sections.push({ id: action.id, title: action.title, markdown: `*No active repo path; cannot run code.answer-question for "${action.title}".*` });
-        continue;
-      }
-      const sectionResult = await runAnswerQuestionSection({
-        localProvider: local,
-        cloudProvider: cloud,
+    const executionResult = await executeTree(planResult.tree, {
+      question:       request,
+      sessionContext: {
+        sessionId:    session.id,
+        codeRepoPath: session.repoPath,
+      },
+      runnerDeps: {
         session,
-        action,
-        request,
-        tier,
-        ...(summaryContext !== undefined && summaryContext.length > 0 ? { repoSummary: summaryContext } : {}),
-        repoPath: repoRoot,
-        analyzerLabel: 'code-analyzer',
-        onProgress: (msg: string) => {
-          this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
-        },
-        ...(effectiveCategories.length    > 0 ? { requiredCategories:    effectiveCategories    } : {}),
-        ...(crossCategoryResources.length > 0 ? { crossCategoryResources: crossCategoryResources } : {}),
-      });
-      log.info(
-        {
-          actionId:        action.id,
-          flow:            'code.answer-question',
-          sectionCount:    sectionResult.sectionCount,
-          groundedCount:   sectionResult.groundedCount,
-          droppedCount:    sectionResult.droppedCount,
-          dispatchedCount: sectionResult.dispatched.length,
-          confidence:      sectionResult.confidence,
-        },
-        'section drafting complete (code.answer-question)',
-      );
-      this.emitMilestone(
-        synthBubble,
-        `[${i + 1}/${actions.length}] "${action.title}" -- ${sectionResult.sectionCount} sub-section${sectionResult.sectionCount === 1 ? '' : 's'}; ${sectionResult.dispatched.length} skill${sectionResult.dispatched.length === 1 ? '' : 's'} dispatched; confidence=${sectionResult.confidence}${sectionResult.droppedCount > 0 ? ` (${sectionResult.droppedCount} dropped)` : ''}`,
-      );
-      sections.push({ id: action.id, title: action.title, markdown: sectionResult.markdown });
-      if (itemId !== undefined && this.deps.todos !== undefined) {
-        try { await this.deps.todos.markComplete(itemId); }
-        catch (err) { log.debug({ err: (err as Error).message, itemId }, 'todos.markComplete failed (best-effort)'); }
-      }
+        resolveProvider: () => cloud,
+      },
+      onEvent: (e: TreeExecutionEvent) => {
+        switch (e.kind) {
+          case 'node-start':
+            this.emitLiveStep(synthBubble, this.formatProgress(
+              `start  ${e.nodeId}` + (e.skillId !== undefined ? ` (${e.skillId})` : ''),
+            ) + '\n');
+            break;
+          case 'node-complete':
+            this.emitLiveStep(synthBubble, this.formatProgress(
+              `done   ${e.nodeId}` +
+              (e.skillId    !== undefined ? ` (${e.skillId})` : '') +
+              (e.confidence !== undefined ? ` confidence=${e.confidence}` : '') +
+              ` (${e.durationMs}ms)`,
+            ) + '\n');
+            break;
+          case 'node-failed':
+            this.emitLiveStep(synthBubble, this.formatProgress(
+              `FAIL   ${e.nodeId}` +
+              (e.skillId !== undefined ? ` (${e.skillId})` : '') +
+              `: ${e.reason}`,
+            ) + '\n');
+            break;
+          default:
+            break;
+        }
+      },
+    });
 
-    }
+    this.emitMilestone(synthBubble,
+      `tree executed: ${executionResult.executedLeaves} ok / ${executionResult.failedLeaves} failed (${executionResult.durationMs}ms)`);
 
-    this.emitMilestone(synthBubble, 'stitching final report...');
+    // `local` was used by the legacy per-section answer-question call;
+    // the tree executor handles provider routing per-skill.
+    void local;
 
-    // ----- Stage 4: stitch (no further LLM work) ------------------------
-    const md = stitchPlanSections(plan.intentBrief, actions, sections, this._parentListId);
+    // ----- Render --------------------------------------------------------
+    const md = renderTreeReport({
+      tree:    planResult.tree,
+      result:  executionResult,
+      headline: planResult.tree.intentBrief,
+      drillDownNote: '_The planner did not propose drill-down bullets for this run. Open the todos pane to launch a follow-up._',
+    });
 
-    this.emitLiveStep(synthBubble, this.formatProgress(`report ready (${sections.length} section${sections.length === 1 ? '' : 's'})`) + '\n');
+    this.emitLiveStep(synthBubble, this.formatProgress(`report ready (${executionResult.executedLeaves} leaf${executionResult.executedLeaves === 1 ? '' : 'es'})`) + '\n');
     this.emitLiveStep(synthBubble, '', true);
 
     return md;
@@ -1272,84 +1166,22 @@ export const _readPriorFactsTagForTest = readPriorFactsTag;
  * pipeline against the user's request directly so the report still
  * produces something useful.
  */
-function synthesiseFallbackAction(
-  ca: CodeAnalysisState | undefined,
-  accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[],
-): PlannedAction {
-  const requestSnippet = (ca?.request ?? 'analysis request').slice(0, 80);
-  return {
-    id:        'fallback-summary',
-    title:     `Summary: ${requestSnippet}`,
-    objective: `Address the user request "${ca?.request ?? '(unknown)'}" by running whatever code-analysis skills best fit it and summarising the findings.`,
-    maxBudgetTokens: 2000,
-    reviewCriteria: [
-      'Addresses the user request directly',
-      'Cites the skills the local model invoked',
-      `Notes that the planner did not propose a structured plan (${accepted.length} prior task${accepted.length === 1 ? '' : 's'} accepted)`,
-    ],
-    requiredCategories: [],
-  };
-}
-
-
 /**
- * Stitch the planner's intent brief + per-action sections into the
- * final markdown. No further LLM work happens here -- per the spec
- * the cloud reviewer's per-action verdict is the final quality
- * gate, NOT a global review pass.
- *
- * The drill-down footer (Report Pane parser depends on it) is
- * appended verbatim. It is not a planned action.
+ * Clamp the closure ScopeSize down to the four-tier set the L2 fallback
+ * leaf accepts (`S` / `M` / `L` / `XL`). XXL+ collapse to `XL`.
  */
-function stitchPlanSections(
-  intentBrief: string,
-  actions: readonly PlannedAction[],
-  sections: readonly { id: string; title: string; markdown: string }[],
-  parentListId: string | undefined,
-): string {
-  const lines: string[] = [];
-  if (intentBrief.trim().length > 0) {
-    lines.push(intentBrief.trim());
-    lines.push('');
+function clampTierForFallback(tier: ScopeSize): 'S' | 'M' | 'L' | 'XL' {
+  switch (tier) {
+    case 'S': return 'S';
+    case 'M': return 'M';
+    case 'L': return 'L';
+    default:  return 'XL';
   }
-
-  // Maintain the planner's order even if expandThenReview returned
-  // sections in a different sequence (it doesn't today, but defend).
-  // Empty sections (writer produced no usable content) get a degraded
-  // placeholder so the stitched report's section count matches what
-  // the milestones promised the user.
-  const byId = new Map(sections.map(s => [s.id, s]));
-  for (const action of actions) {
-    const s = byId.get(action.id);
-    lines.push(`## ${action.title}`);
-    lines.push('');
-    if (s === undefined || s.markdown.trim().length === 0) {
-      lines.push('_Section unavailable -- the writer produced no usable content. See the TodoList item for the writer\'s trace and the reviewer\'s hint._');
-      lines.push('');
-      continue;
-    }
-    lines.push(s.markdown.trim());
-    lines.push('');
-  }
-
-  // Drill-down footer -- the Report Pane parser looks for a `## Drill
-  // down` heading to surface "run sub-analysis" actions. Skip on
-  // drill-down child runs (parentListId set) since they're already
-  // children. The planner is encouraged but not required to produce
-  // its own bullets; if it didn't include them, this footer is the
-  // minimal anchor the pane needs to render the empty-state.
-  if (parentListId === undefined) {
-    const haveDrillDown = sections.some(s => /^##\s+Drill\s+down/im.test(s.markdown));
-    if (!haveDrillDown) {
-      lines.push('## Drill down');
-      lines.push('');
-      lines.push('_The planner did not propose drill-down bullets for this run. Click an action in the Report Pane footer or open the todos pane to launch a follow-up._');
-      lines.push('');
-    }
-  }
-
-  return lines.join('\n').trimEnd() + '\n';
 }
+
+// synthesiseFallbackAction + stitchPlanSections (flat plan-actions
+// stitcher) deleted at P6.b cutover; replaced by buildCodeAnalyzerFallbackTree
+// + renderTreeReport in agent/content-gen/plan-tree-helpers.ts.
 
 // ---------------------------------------------------------------------------
 // Skill-execution → AnalyzerResult adapters (re-run path)

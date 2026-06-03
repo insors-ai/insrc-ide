@@ -42,10 +42,18 @@ import {
   DRILL_DOWN_FALLBACK_SECTION,
 } from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
 import { generateMultiPass } from '../../agent/content-gen/index.js';
-// `PlanExecution` is still used to type the raw-executions state slot.
-// `planActions` + `PlannedAction` are gone -- replaced by the tree
-// planner + executor below (P6 of plans/planner-skill-tree.md).
-import type { PlanExecution } from '../../agent/content-gen/plan-actions.js';
+/**
+ * Per-skill execution record stored in the K_RAW_EXECUTIONS state
+ * slot during the per-DataAnalysisTask path. Previously imported from
+ * `agent/content-gen/plan-actions.ts`; inlined at P6.b after the
+ * planActions module was deleted.
+ */
+interface PlanExecution {
+  readonly skillId:    string;
+  readonly value:      unknown;
+  readonly confidence: 'high' | 'medium' | 'low';
+  readonly notes:      readonly string[];
+}
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import {
   buildConnectionFingerprint,
