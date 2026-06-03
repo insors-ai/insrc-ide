@@ -172,6 +172,80 @@ test('validatePlan: maxBudgetTokens clamps to [400, 3000]', () => {
 	assert.equal(r.actions[2]!.maxBudgetTokens, 1500);
 });
 
+// ---------------------------------------------------------------------------
+// requiredCategories (plans/planner-cross-category-skills.md P1)
+// ---------------------------------------------------------------------------
+
+test('validatePlan: requiredCategories absent -> defaults to []', () => {
+	const r = validatePlan({
+		intentBrief: 'x',
+		actions: [{ id: 'a', title: 't', objective: 'o', reviewCriteria: ['c'] }],
+	});
+	assert.notEqual(typeof r, 'string');
+	if (typeof r === 'string') return;
+	assert.deepEqual(r.actions[0]!.requiredCategories, []);
+});
+
+test('validatePlan: requiredCategories round-trips strings', () => {
+	const r = validatePlan({
+		intentBrief: 'x',
+		actions: [{
+			id: 'a', title: 't', objective: 'o', reviewCriteria: ['c'],
+			requiredCategories: ['code-analyzer', 'data-analyzer'],
+		}],
+	});
+	assert.notEqual(typeof r, 'string');
+	if (typeof r === 'string') return;
+	assert.deepEqual(r.actions[0]!.requiredCategories, ['code-analyzer', 'data-analyzer']);
+});
+
+test('validatePlan: requiredCategories drops non-strings and empty entries silently', () => {
+	const r = validatePlan({
+		intentBrief: 'x',
+		actions: [{
+			id: 'a', title: 't', objective: 'o', reviewCriteria: ['c'],
+			requiredCategories: ['code-analyzer', '', '   ', 42, null, 'data-analyzer'],
+		}],
+	});
+	assert.notEqual(typeof r, 'string');
+	if (typeof r === 'string') return;
+	assert.deepEqual(r.actions[0]!.requiredCategories, ['code-analyzer', 'data-analyzer']);
+});
+
+test('validatePlan: requiredCategories not-an-array -> defaults to []', () => {
+	const r = validatePlan({
+		intentBrief: 'x',
+		actions: [{
+			id: 'a', title: 't', objective: 'o', reviewCriteria: ['c'],
+			requiredCategories: 'code-analyzer', // wrong shape
+		}],
+	});
+	assert.notEqual(typeof r, 'string');
+	if (typeof r === 'string') return;
+	assert.deepEqual(r.actions[0]!.requiredCategories, []);
+});
+
+test('buildPlanMessages: availableCategories omitted -> no catalog block, no rule 8', () => {
+	const { messages, userText } = buildPlanMessages({ ...FIXTURE_INPUT }, 4);
+	assert.equal(userText.includes('## Available cross-category capabilities'), false);
+	const sys = messages[0]!.content as string;
+	assert.equal(sys.includes('requiredCategories'), false);
+});
+
+test('buildPlanMessages: availableCategories present -> catalog rendered + per-action field documented + rule 8 included', () => {
+	const { messages, userText } = buildPlanMessages({
+		...FIXTURE_INPUT,
+		availableCategories: [
+			{ category: 'data-analyzer', capabilityHint: 'read CSV/JSON/Parquet files; profile data quality' },
+		],
+	}, 4);
+	assert.match(userText, /## Available cross-category capabilities/);
+	assert.match(userText, /- data-analyzer: read CSV\/JSON\/Parquet files/);
+	const sys = messages[0]!.content as string;
+	assert.match(sys, /requiredCategories\s+optional list of OTHER skill categories/);
+	assert.match(sys, /8\. `requiredCategories` defaults to \[\]/);
+});
+
 test('validatePlan: extra `evidence` field is ignored (back-compat with pre-rewrite plans)', () => {
 	// The schema no longer has evidence; old planner outputs that
 	// included it should still parse cleanly (we just ignore it).

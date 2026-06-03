@@ -52,14 +52,20 @@ export const OUTLINE_SCHEMA = {
  * schema here is the absolute ceiling.
  *
  * Each action carries:
- *   - `id`              stable section key (kebab-case, deduped)
- *   - `title`           user-facing heading
- *   - `objective`       one-sentence GOAL the local model expands against
- *                       (the local model picks tools / skills itself; the
- *                       objective MUST NOT name skills, files, or modules)
- *   - `maxBudgetTokens` cap for the local expander's draft (clamped at
- *                       send time to the global per-action ceiling)
- *   - `reviewCriteria`  3-5 bullets the reviewer scores against
+ *   - `id`                  stable section key (kebab-case, deduped)
+ *   - `title`               user-facing heading
+ *   - `objective`           one-sentence GOAL the local model expands against
+ *                           (the local model picks tools / skills itself; the
+ *                           objective MUST NOT name skills, files, or modules)
+ *   - `maxBudgetTokens`     cap for the local expander's draft (clamped at
+ *                           send time to the global per-action ceiling)
+ *   - `reviewCriteria`      3-5 bullets the reviewer scores against
+ *   - `requiredCategories`  optional list of OTHER skill-owner categories
+ *                           this section needs beyond the planner's own.
+ *                           Empty / absent means same-category only. Caller
+ *                           materializes resources for these and widens
+ *                           L2 dispatch's owner filter accordingly. See
+ *                           plans/planner-cross-category-skills.md.
  *
  * NOTE: there is no `evidence` field. The cloud planner does not see
  * skill executions; the local model picks evidence at expand time.
@@ -83,6 +89,10 @@ export const PLAN_ACTIONS_SCHEMA = {
 						type: 'array',
 						minItems: 1,
 						maxItems: 8,
+						items: { type: 'string', minLength: 1 },
+					},
+					requiredCategories: {
+						type: 'array',
 						items: { type: 'string', minLength: 1 },
 					},
 				},

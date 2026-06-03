@@ -30,8 +30,9 @@ import { getL2Skill } from '../../../daemon/skills/l2/registry.js';
 
 import type { Session } from '../../session.js';
 import type { LLMProvider } from '../../../shared/types.js';
-import type { ProviderAffinity } from '../../../daemon/skills/types.js';
+import type { ProviderAffinity, SkillOwner } from '../../../daemon/skills/types.js';
 import type { PlannedAction } from '../../content-gen/plan-actions.js';
+import type { CategoryResource } from '../../content-gen/category-materializer.js';
 import type { ConnectionSummary } from './types.js';
 
 const log = getLogger('data-analyzer:answer-question-action');
@@ -48,6 +49,21 @@ export interface AnswerQuestionActionInput {
 	readonly cloudProvider:   LLMProvider;
 	readonly analyzerLabel?:  string | undefined;
 	readonly onProgress?:     ((msg: string) => void) | undefined;
+	/**
+	 * Cross-category capabilities the planner tagged onto this action
+	 * (excluding self). Threaded into the L2 skill's invocationContext
+	 * so it can widen the classify-question / select-scope candidate
+	 * pool to include code-owned skills. Empty means single-category.
+	 * See plans/planner-cross-category-skills.md P4.
+	 */
+	readonly requiredCategories?:    readonly SkillOwner[] | undefined;
+	/**
+	 * Concrete resource handles (repoPaths / connections) for each
+	 * `requiredCategories` entry, produced by the orchestrator's
+	 * materializer hook (P3). The L2 skill reads these to populate
+	 * cross-owner skill inputs at dispatch time (P5).
+	 */
+	readonly crossCategoryResources?: readonly CategoryResource[] | undefined;
 }
 
 export interface AnswerQuestionActionResult {
@@ -191,6 +207,15 @@ export async function runAnswerQuestionAction(input: AnswerQuestionActionInput):
 				origin:        'data-analyzer-orchestrator',
 				sectionId:     input.action.id,
 				analyzerLabel: input.analyzerLabel ?? 'data-analyzer',
+				// Cross-category fields (P4): the L2 skill reads these
+				// to widen its candidate pool (P5) and to populate
+				// cross-owner skill inputs at dispatch time.
+				...(input.requiredCategories !== undefined && input.requiredCategories.length > 0
+					? { requiredCategories: input.requiredCategories }
+					: {}),
+				...(input.crossCategoryResources !== undefined && input.crossCategoryResources.length > 0
+					? { crossCategoryResources: input.crossCategoryResources }
+					: {}),
 			},
 		},
 		{

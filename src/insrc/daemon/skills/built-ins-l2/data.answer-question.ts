@@ -237,6 +237,18 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 	async run(invocation, deps): Promise<SkillOutput<AnswerOutput>> {
 		const { input } = invocation;
 
+		// Cross-category invocation context (P4 read; P5 wired through to
+		// the meta skills). The orchestrator's materializer stashes
+		// `requiredCategories` here; we compute the union with this skill's
+		// own owner and pass it to both classify-question and select-scope
+		// (the meta-skill schemas accept `allowedOwners` as of P5).
+		const ctx = invocation.invocationContext;
+		const requiredCategories = Array.isArray(ctx['requiredCategories'])
+			? (ctx['requiredCategories'] as readonly string[])
+			: [];
+		const allowedOwners = ['data-analyzer', ...requiredCategories];
+		const hasCrossCategory = requiredCategories.length > 0;
+
 		deps.emit({
 			kind:        'plan-step',
 			description: `data.answer-question: classify -> select-scope -> dispatch -> draft -> ground (question="${input.question.slice(0, 80)}")`,
@@ -250,6 +262,9 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 		};
 		if (input.priorContext !== undefined) {
 			classifyInput['priorContext'] = input.priorContext;
+		}
+		if (hasCrossCategory) {
+			classifyInput['allowedOwners'] = allowedOwners;
 		}
 
 		let classifyResult: { value: ClassifyShape; confidence: 'high' | 'medium' | 'low' };
@@ -283,13 +298,17 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 		// the section will degrade to the no-scoped shortcut.
 		let scopeResult: { value: SelectScopeShape; confidence: 'high' | 'medium' | 'low' };
 		try {
+			const scopeInput: Record<string, unknown> = {
+				question:    input.question,
+				candidates,
+				connections: input.connections,
+			};
+			if (hasCrossCategory) {
+				scopeInput['allowedOwners'] = allowedOwners;
+			}
 			scopeResult = await deps.callL1<unknown, SelectScopeShape>(
 				'data.meta.select-scope',
-				{
-					question:    input.question,
-					candidates,
-					connections: input.connections,
-				},
+				scopeInput,
 			);
 		} catch (err) {
 			return shortcut(input,

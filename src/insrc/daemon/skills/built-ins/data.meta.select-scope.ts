@@ -178,6 +178,17 @@ const INPUT_SCHEMA = {
     question:    { type: 'string', minLength: 1, maxLength: 4000 },
     candidates:  { type: 'array', items: CANDIDATE_IN_SCHEMA, minItems: 0, maxItems: 8 },
     connections: { type: 'array', items: CONNECTION_INFO_SCHEMA, minItems: 0, maxItems: 64 },
+    /**
+     * Accept-only mirror of `data.meta.classify-question.allowedOwners`.
+     * select-scope has no owner-based filtering of its own (it works on
+     * the already-filtered candidate list); reserved for future use.
+     * See plans/planner-cross-category-skills.md P5.
+     */
+    allowedOwners: {
+      type:     'array',
+      items:    { type: 'string', minLength: 1 },
+      maxItems: 8,
+    },
   },
   required: ['question', 'candidates', 'connections'],
   additionalProperties: false,

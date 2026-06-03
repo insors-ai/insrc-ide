@@ -25,6 +25,7 @@
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
 import type { ScopeSize } from '../../shared/classify.js';
+import type { SkillOwner } from '../../daemon/skills/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { PLAN_ACTIONS_SCHEMA } from './schema.js';
 
@@ -59,6 +60,25 @@ export interface PlannedAction {
 	readonly objective:       string;
 	readonly maxBudgetTokens: number;
 	readonly reviewCriteria:  readonly string[];
+	/**
+	 * Other skill-owner categories this action needs beyond the planner's
+	 * own. Empty / absent means same-category only. The orchestrator's
+	 * pre-action hook materializes the listed categories' resources and
+	 * widens the L2 dispatch's `allowedOwners` filter. See
+	 * plans/planner-cross-category-skills.md.
+	 */
+	readonly requiredCategories: readonly SkillOwner[];
+}
+
+/**
+ * Caller-injected catalog of cross-category capabilities the planner may
+ * request via each action's `requiredCategories`. The orchestrator supplies
+ * categories OTHER than its own (e.g. the data-analyzer orchestrator passes
+ * `[{ category: 'code-analyzer', capabilityHint: 'read source files; ...' }]`).
+ */
+export interface AvailableCategory {
+	readonly category:       SkillOwner;
+	readonly capabilityHint: string;
 }
 
 export interface PlanActionsInput {
@@ -98,6 +118,17 @@ export interface PlanActionsInput {
 	 * the planner emits its prior generic prompt.
 	 */
 	readonly tierContext?: string | undefined;
+	/**
+	 * Cross-category capabilities the orchestrator advertises to the
+	 * planner. The planner may then tag any action with
+	 * `requiredCategories` drawn from this list. The orchestrator's own
+	 * category is implicit (it's always allowed); only OTHER categories
+	 * are listed here. Undefined / empty disables cross-category
+	 * planning (planner emits `requiredCategories: []` for every action).
+	 *
+	 * See plans/planner-cross-category-skills.md.
+	 */
+	readonly availableCategories?: readonly AvailableCategory[] | undefined;
 }
 
 export interface PlanActionsResult {
@@ -189,7 +220,11 @@ export async function planActions(
 // Prompt assembly
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(intent: string, tierContext: string | undefined): string {
+function buildSystemPrompt(
+	intent: string,
+	tierContext: string | undefined,
+	availableCategories: readonly AvailableCategory[] | undefined,
+): string {
 	const parts: string[] = [
 		`You plan a ${intent} report for a coding assistant.`,
 		'',
@@ -218,6 +253,21 @@ function buildSystemPrompt(intent: string, tierContext: string | undefined): str
 		'  - maxBudgetTokens cap for the local expander\'s draft',
 		'                    (default 1500; clamp 400-3000)',
 		'  - reviewCriteria  3-5 short bullets the reviewer scores against',
+	);
+	// Per plans/planner-cross-category-skills.md P1.3: when the caller
+	// advertises cross-category capabilities, the planner may tag actions
+	// with `requiredCategories` so the orchestrator widens the per-action
+	// skill pool. When no categories are advertised, this field is omitted
+	// and the planner stays in single-category mode.
+	const haveCategories = availableCategories !== undefined && availableCategories.length > 0;
+	if (haveCategories) {
+		parts.push(
+			'  - requiredCategories  optional list of OTHER skill categories',
+			'                        this section needs (see "Available',
+			'                        cross-category capabilities" below)',
+		);
+	}
+	parts.push(
 		'',
 		'Plan-stage rules:',
 		'  1. A safety ceiling is supplied per call -- never exceed it. The',
@@ -249,6 +299,20 @@ function buildSystemPrompt(intent: string, tierContext: string | undefined): str
 		'  7. Review criteria are concrete checkable statements (e.g. "names',
 		'     each top-level module by path", "covers cyclic dependencies if',
 		'     any are present"), NOT generic style notes.',
+	);
+	if (haveCategories) {
+		parts.push(
+			'  8. `requiredCategories` defaults to []. Add a category only when',
+			'     the section\'s objective INHERENTLY requires that capability',
+			'     -- e.g. a section that compares data shapes to a pydantic',
+			'     class definition needs the `code-analyzer` category; a',
+			'     section that maps a Java class\'s outputs to downstream CSVs',
+			'     needs the `data-analyzer` category. Decorative cross-',
+			'     references do not count; only sections that cannot be',
+			'     answered from your own category alone.',
+		);
+	}
+	parts.push(
 		'',
 		'Output strict JSON ONLY (no markdown fences, no prose, no preamble).',
 	);
@@ -282,10 +346,25 @@ function buildPlanMessagesWithDebug(input: PlanActionsInput, maxActions: number)
 	lines.push('driven by the request\'s structural shape (files / features /');
 	lines.push('subsystems named), NOT by the scope tier.');
 
+	// Cross-category catalog rendered at the tail of the user message
+	// (trailing structural reference -- recency-weighted attention rule).
+	// Per plans/planner-cross-category-skills.md P1.3.
+	if (input.availableCategories !== undefined && input.availableCategories.length > 0) {
+		lines.push('');
+		lines.push('## Available cross-category capabilities');
+		lines.push('Tag actions with `requiredCategories: ["<category>", ...]`');
+		lines.push('drawn from the list below WHEN the section cannot be');
+		lines.push('answered from your own category alone:');
+		lines.push('');
+		for (const cat of input.availableCategories) {
+			lines.push(`  - ${cat.category}: ${cat.capabilityHint}`);
+		}
+	}
+
 	const userText = lines.join('\n');
 	return {
 		messages: [
-			{ role: 'system', content: buildSystemPrompt(input.intent, input.tierContext) },
+			{ role: 'system', content: buildSystemPrompt(input.intent, input.tierContext, input.availableCategories) },
 			{ role: 'user',   content: userText },
 		],
 		userText,
@@ -399,10 +478,31 @@ function validatePlan(parsed: unknown): { intentBrief: string; actions: PlannedA
 			? Math.max(400, Math.min(3000, Math.floor(budgetRaw)))
 			: 1500;
 
-		actions.push({ id, title, objective, maxBudgetTokens, reviewCriteria });
+		// requiredCategories: optional (default []). Each entry must be a
+		// non-empty string; the orchestrator validates against the actually-
+		// available category list before materializing. Unknown / unsupported
+		// values are logged and dropped at materialization time (not here).
+		const requiredCategories = extractRequiredCategories(a['requiredCategories']);
+
+		actions.push({ id, title, objective, maxBudgetTokens, reviewCriteria, requiredCategories });
 	}
 
 	return { intentBrief, actions };
+}
+
+function extractRequiredCategories(raw: unknown): readonly SkillOwner[] {
+	if (raw === undefined || raw === null) return [];
+	if (!Array.isArray(raw)) return [];
+	const out: SkillOwner[] = [];
+	for (const item of raw) {
+		if (typeof item !== 'string') continue;
+		const trimmed = item.trim();
+		if (trimmed.length === 0) continue;
+		// Cast through SkillOwner -- the planner may emit an arbitrary
+		// string; the orchestrator drops unknowns at materialize time.
+		out.push(trimmed as SkillOwner);
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -30,8 +30,9 @@ import { getL2Skill } from '../../../daemon/skills/l2/registry.js';
 import type { Session } from '../../session.js';
 import type { LLMProvider } from '../../../shared/types.js';
 import type { ScopeSize } from '../../../shared/classify.js';
-import type { ProviderAffinity } from '../../../daemon/skills/types.js';
+import type { ProviderAffinity, SkillOwner } from '../../../daemon/skills/types.js';
 import type { PlannedAction } from '../../content-gen/plan-actions.js';
+import type { CategoryResource } from '../../content-gen/category-materializer.js';
 
 const log = getLogger('code-analyzer:answer-question-section');
 
@@ -52,6 +53,21 @@ export interface AnswerQuestionSectionInput {
 	readonly onProgress?:      ((msg: string) => void) | undefined;
 	/** Active indexed-repo root. Required -- the L2 skill needs it. */
 	readonly repoPath:         string;
+	/**
+	 * Cross-category capabilities the planner tagged onto this action
+	 * (excluding self). Threaded into the L2 skill's invocationContext
+	 * so it can widen the classify-question / select-scope candidate
+	 * pool to include data-owned skills. Empty means single-category.
+	 * See plans/planner-cross-category-skills.md P4.
+	 */
+	readonly requiredCategories?:    readonly SkillOwner[] | undefined;
+	/**
+	 * Concrete resource handles (connections / repoPaths) for each
+	 * `requiredCategories` entry, produced by the orchestrator's
+	 * materializer hook (P3). The L2 skill reads these to populate
+	 * cross-owner skill inputs at dispatch time (P5).
+	 */
+	readonly crossCategoryResources?: readonly CategoryResource[] | undefined;
 }
 
 export interface AnswerQuestionSectionResult {
@@ -179,6 +195,15 @@ export async function runAnswerQuestionSection(input: AnswerQuestionSectionInput
 				origin:        'code-analyzer-orchestrator',
 				sectionId:     input.action.id,
 				analyzerLabel: input.analyzerLabel ?? 'code-analyzer',
+				// Cross-category fields (P4): the L2 skill reads these
+				// to widen its candidate pool (P5) and to populate
+				// cross-owner skill inputs at dispatch time.
+				...(input.requiredCategories !== undefined && input.requiredCategories.length > 0
+					? { requiredCategories: input.requiredCategories }
+					: {}),
+				...(input.crossCategoryResources !== undefined && input.crossCategoryResources.length > 0
+					? { crossCategoryResources: input.crossCategoryResources }
+					: {}),
 			},
 		},
 		{

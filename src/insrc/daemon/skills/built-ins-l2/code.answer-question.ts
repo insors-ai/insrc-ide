@@ -187,6 +187,15 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 	async run(invocation, deps): Promise<SkillOutput<AnswerOutput>> {
 		const { input } = invocation;
 
+		// Cross-category invocation context (P4 read; P5 wired through to
+		// the meta skills). See sibling notes in data.answer-question.ts.
+		const ctx = invocation.invocationContext;
+		const requiredCategories = Array.isArray(ctx['requiredCategories'])
+			? (ctx['requiredCategories'] as readonly string[])
+			: [];
+		const allowedOwners = ['code-analyzer', ...requiredCategories];
+		const hasCrossCategory = requiredCategories.length > 0;
+
 		deps.emit({
 			kind:        'plan-step',
 			description: `answer-question: classify -> select-scope -> dispatch -> draft -> ground (question="${input.question.slice(0, 80)}")`,
@@ -207,9 +216,13 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 
 		let classifyResult: { value: ClassifyShape; confidence: 'high' | 'medium' | 'low' };
 		try {
+			const classifyInput: Record<string, unknown> = { question: input.question, repo: repoCtx };
+			if (hasCrossCategory) {
+				classifyInput['allowedOwners'] = allowedOwners;
+			}
 			classifyResult = await deps.callL1<unknown, ClassifyShape>(
 				'code.meta.classify-question',
-				{ question: input.question, repo: repoCtx },
+				classifyInput,
 			);
 		} catch (err) {
 			return shortcut(input,
@@ -234,13 +247,17 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 		// select-scope, which reads `candidates[i].mustHaveScope` instead).
 		let scopeResult: { value: SelectScopeShape; confidence: 'high' | 'medium' | 'low' };
 		try {
+			const scopeInput: Record<string, unknown> = {
+				question: input.question,
+				candidates,
+				repo: repoCtx,
+			};
+			if (hasCrossCategory) {
+				scopeInput['allowedOwners'] = allowedOwners;
+			}
 			scopeResult = await deps.callL1<unknown, SelectScopeShape>(
 				'code.meta.select-scope',
-				{
-					question: input.question,
-					candidates,
-					repo: repoCtx,
-				},
+				scopeInput,
 			);
 		} catch (err) {
 			return shortcut(input,

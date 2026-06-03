@@ -43,6 +43,7 @@ import { getLogger } from '../../shared/logger.js';
 import { PLAN_ACTIONS_SCHEMA } from './schema.js';
 import {
 	DEFAULT_MAX_ACTIONS,
+	type AvailableCategory,
 	type PlanActionsResult,
 	type PlannedAction,
 	_validatePlanForTest as validatePlan,
@@ -88,6 +89,15 @@ export interface PlanActionsInteractiveInput {
 	readonly maxTurns?:      number | undefined;
 	readonly maxTokens?:     number | undefined;
 	readonly analyzerLabel?: string | undefined;
+	/**
+	 * Cross-category capabilities the orchestrator advertises to the
+	 * planner. The planner may then tag any action with
+	 * `requiredCategories` drawn from this list. The orchestrator's own
+	 * category is implicit (always allowed); only OTHER categories are
+	 * listed here. Undefined / empty disables cross-category planning.
+	 * See plans/planner-cross-category-skills.md.
+	 */
+	readonly availableCategories?: readonly AvailableCategory[] | undefined;
 }
 
 /**
@@ -127,6 +137,7 @@ export async function planActionsInteractive(
 		tier:      input.tier,
 		subtype,
 		tools,
+		availableCategories: input.availableCategories,
 	});
 
 	// Dispatcher: route each tool-call to the actual skill via runSkill.
@@ -333,9 +344,11 @@ interface BuildSeedInput {
 	readonly tier:     ScopeSize;
 	readonly subtype:  AnalysisSubtype;
 	readonly tools:    readonly ToolDefinition[];
+	readonly availableCategories?: readonly AvailableCategory[] | undefined;
 }
 
 function buildSeedMessages(input: BuildSeedInput): LLMMessage[] {
+	const haveCategories = input.availableCategories !== undefined && input.availableCategories.length > 0;
 	const systemLines: string[] = [
 		`You plan a ${input.intent} report for a coding assistant.`,
 		'',
@@ -386,10 +399,29 @@ function buildSeedMessages(input: BuildSeedInput): LLMMessage[] {
 		'                         "names the persistence client(s) used and',
 		'                         the table layout"), preferably referencing',
 		'                         class names / file paths you observed.',
+	];
+	// Per plans/planner-cross-category-skills.md P2: surface the optional
+	// per-action `requiredCategories` field and its decision rule WHEN the
+	// caller advertises cross-category capabilities. Otherwise stay silent
+	// so the planner doesn't waste tokens on a field it cannot use.
+	if (haveCategories) {
+		systemLines.push(
+			'  - `requiredCategories` -- OPTIONAL list of OTHER skill categories',
+			'                            this section needs. Default to omitting',
+			'                            this field. Add a category only when the',
+			'                            section\'s objective INHERENTLY requires',
+			'                            that capability (e.g. comparing data',
+			'                            shapes to a pydantic class definition',
+			'                            needs `code-analyzer`; mapping a Java',
+			'                            class\'s outputs to downstream CSVs needs',
+			'                            `data-analyzer`). See the catalog below.',
+		);
+	}
+	systemLines.push(
 		'',
 		`## Subtype bias (${input.subtype})`,
 		SUBTYPE_HINTS[input.subtype],
-	];
+	);
 
 	const userLines: string[] = [
 		'## Intent',
@@ -403,10 +435,25 @@ function buildSeedMessages(input: BuildSeedInput): LLMMessage[] {
 		'',
 		'## Scope tier',
 		input.tier,
+	];
+	// Trailing structural reference -- recency-weighted attention rule
+	// (memory: prompt-structure feedback).
+	if (haveCategories) {
+		userLines.push(
+			'',
+			'## Available cross-category capabilities',
+			'Tag actions with `requiredCategories: ["<category>", ...]` drawn',
+			'from the list below WHEN the section cannot be answered from',
+			'your own category alone:',
+			'',
+			...input.availableCategories!.map(c => `  - ${c.category}: ${c.capabilityHint}`),
+		);
+	}
+	userLines.push(
 		'',
 		'Begin your discovery now. Use the skills above; commit via',
 		'`submit_plan` when the plan is ready.',
-	];
+	);
 
 	return [
 		{ role: 'system', content: systemLines.join('\n') },

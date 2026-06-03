@@ -85,8 +85,9 @@ interface RepoContext {
 }
 
 interface ClassifyInput {
-	readonly question: string;
-	readonly repo:     RepoContext;
+	readonly question:       string;
+	readonly repo:           RepoContext;
+	readonly allowedOwners?: readonly string[] | undefined;
 }
 
 interface Candidate {
@@ -137,6 +138,19 @@ const INPUT_SCHEMA = {
 	properties: {
 		question: { type: 'string', minLength: 1, maxLength: 4000 },
 		repo:     REPO_CONTEXT_SCHEMA,
+		/**
+		 * Owners whose skills survive the catalog prefilter. When omitted,
+		 * defaults to `['code-analyzer']` (this skill's own owner) --
+		 * preserves the historical single-category behavior. The L2 caller
+		 * (`code.answer-question`) passes a widened set when the planner
+		 * tagged the action with cross-category requirements. See
+		 * plans/planner-cross-category-skills.md P5.
+		 */
+		allowedOwners: {
+			type:     'array',
+			items:    { type: 'string', minLength: 1 },
+			maxItems: 8,
+		},
 	},
 	required: ['question', 'repo'],
 	additionalProperties: false,
@@ -186,29 +200,42 @@ const OUTPUT_SCHEMA = {
 
 interface CatalogEntry {
 	readonly id:      string;
+	readonly owner:   string;
 	readonly family:  string;
 	readonly summary: string;
 }
 
 const CATALOG_SUMMARY_MAX = 120;
 
+const DEFAULT_ALLOWED_OWNERS: readonly string[] = ['code-analyzer'];
+
 function buildCatalog(input: ClassifyInput, _ctx: SkillContext): readonly CatalogEntry[] {
 	const detectedOrms   = input.repo.detectedOrms   ?? [];
 	const migrationTool  = input.repo.migrationTool;
+	// P5: catalog prefilter respects the caller's `allowedOwners` set.
+	// Default = ['code-analyzer'] preserves the pre-P5 single-category
+	// behavior; widened sets (e.g. ['code-analyzer', 'data-analyzer'])
+	// admit cross-owner skills the planner asked for.
+	const owners = new Set(input.allowedOwners ?? DEFAULT_ALLOWED_OWNERS);
 	const out: CatalogEntry[] = [];
 	for (const skill of listSkills()) {
-		if (skill.owner !== 'code-analyzer') continue;
-		if (skill.family === 'meta')         continue;
-		if (skill.family === 'synthesis')    continue;
+		if (!owners.has(skill.owner))     continue;
+		if (skill.family === 'meta')      continue;
+		if (skill.family === 'synthesis') continue;
 		if (!matchesRepoCapability(skill, detectedOrms, migrationTool)) continue;
 		out.push({
 			id:      skill.id,
+			owner:   skill.owner,
 			family:  skill.family,
 			summary: truncate(skill.description, CATALOG_SUMMARY_MAX),
 		});
 	}
 	out.sort((a, b) =>
-		a.family !== b.family ? a.family.localeCompare(b.family) : a.id.localeCompare(b.id),
+		a.owner !== b.owner
+			? a.owner.localeCompare(b.owner)
+			: a.family !== b.family
+				? a.family.localeCompare(b.family)
+				: a.id.localeCompare(b.id),
 	);
 	return out;
 }
@@ -425,7 +452,17 @@ function buildSystemPrompt(): string {
 }
 
 function buildUserMessage(input: ClassifyInput, catalog: readonly CatalogEntry[]): string {
-	const catalogLines = catalog.map(e => `- \`${e.id}\` [${e.family}] -- ${e.summary}`);
+	// P5: when the catalog spans multiple owners (cross-category dispatch),
+	// surface the owner so the LLM can see which side each candidate belongs
+	// to. Single-owner catalogs keep the original `[family]` shape so the
+	// non-widened path is byte-identical.
+	const distinctOwners = new Set(catalog.map(e => e.owner));
+	const crossOwner = distinctOwners.size > 1;
+	const catalogLines = catalog.map(e =>
+		crossOwner
+			? `- \`${e.id}\` [${e.owner} / ${e.family}] -- ${e.summary}`
+			: `- \`${e.id}\` [${e.family}] -- ${e.summary}`,
+	);
 	const repoLines: string[] = [`- path=\`${input.repo.path}\``];
 	if (input.repo.primaryLanguages !== undefined && input.repo.primaryLanguages.length > 0) {
 		repoLines.push(`- primaryLanguages=[${input.repo.primaryLanguages.join(', ')}]`);

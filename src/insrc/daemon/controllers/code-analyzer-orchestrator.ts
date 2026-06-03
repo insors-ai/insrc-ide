@@ -21,6 +21,11 @@ import { getLogger } from '../../shared/logger.js';
 import type { PlannedAction } from '../../agent/content-gen/plan-actions.js';
 import { planActionsInteractive } from '../../agent/content-gen/plan-actions-interactive.js';
 import { verifyPlannedActions } from '../../agent/content-gen/verify-planned-actions.js';
+import {
+  runCategoryMaterializers,
+  type MaterializerOutcome,
+  type CategoryResource,
+} from '../../agent/content-gen/category-materializer.js';
 import { formatRepoSizeSummary } from '../repo-summary.js';
 import { analysisTaskToSkillPlan } from '../../agent/tasks/code-analyzer/legacy-shim.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
@@ -734,6 +739,17 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         session,
         resolveProvider,
         analyzerLabel:  'code-analyzer',
+        // Cross-category catalog: what OTHER skill owners exist beyond
+        // code-analyzer. The planner tags actions with
+        // `requiredCategories` drawn from this list when a section needs
+        // capabilities its own category can't satisfy. See
+        // plans/planner-cross-category-skills.md P2.
+        availableCategories: [
+          {
+            category:       'data-analyzer',
+            capabilityHint: 'read CSV / JSON / Parquet / JSONL files; sample rows and shape; profile data quality (completeness, uniqueness, conformity); detect PII and outliers',
+          },
+        ],
       },
       cloud,
     );
@@ -844,6 +860,9 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     log.info({ sections: actions.length }, 'starting per-action discovery flow');
 
     const sections: { id: string; title: string; markdown: string }[] = [];
+    // Per-run materializer cache (P3 of plans/planner-cross-category-skills.md):
+    // resolving the same category across actions reuses the first run.
+    const materializerCache = new Map<import('../skills/types.js').SkillOwner, MaterializerOutcome>();
     for (let i = 0; i < actions.length; i++) {
       const action = actions[i]!;
       const itemId = todoItemIds[i];
@@ -857,6 +876,25 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
       }
 
       this.emitMilestone(synthBubble, `[${i + 1}/${actions.length}] drafting "${action.title}" via code.answer-question...`);
+
+      // P3 hook (plans/planner-cross-category-skills.md): when the
+      // planner tagged this action with cross-category requirements,
+      // resolve the matching resources. The resolved categories +
+      // resources are threaded into the L2 invocationContext (P4) so
+      // the skill can widen its candidate pool (P5).
+      let crossCategoryResources: readonly CategoryResource[] = [];
+      let effectiveCategories: readonly import('../skills/types.js').SkillOwner[] = [];
+      if (action.requiredCategories.length > 0) {
+        const mat = await runCategoryMaterializers({
+          action,
+          ownCategory: 'code-analyzer',
+          request,
+          session,
+          emitNote: (line) => this.emitLiveStep(synthBubble, this.formatProgress(line) + '\n'),
+        }, materializerCache);
+        crossCategoryResources = mat.resources;
+        effectiveCategories    = mat.effectiveCategories;
+      }
 
       // Phase 6 of plans/code-analyzer-migration.md: the per-section
       // synthesis is now driven by the `code.answer-question` L2 skill
@@ -886,6 +924,8 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
         onProgress: (msg: string) => {
           this.emitLiveStep(synthBubble, this.formatProgress(msg) + '\n');
         },
+        ...(effectiveCategories.length    > 0 ? { requiredCategories:    effectiveCategories    } : {}),
+        ...(crossCategoryResources.length > 0 ? { crossCategoryResources: crossCategoryResources } : {}),
       });
       log.info(
         {
@@ -1247,6 +1287,7 @@ function synthesiseFallbackAction(
       'Cites the skills the local model invoked',
       `Notes that the planner did not propose a structured plan (${accepted.length} prior task${accepted.length === 1 ? '' : 's'} accepted)`,
     ],
+    requiredCategories: [],
   };
 }
 

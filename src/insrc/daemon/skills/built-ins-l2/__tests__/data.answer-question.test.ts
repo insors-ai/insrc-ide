@@ -348,6 +348,63 @@ test('data.answer-question: happy path with classify -> select -> dispatch -> dr
 	} finally { await fx.dispose(); }
 });
 
+test('data.answer-question: invocationContext.requiredCategories does not break dispatch (P4 stage-only)', async () => {
+	// P4 of plans/planner-cross-category-skills.md: the L2 skill reads
+	// `requiredCategories` from invocationContext and computes
+	// `allowedOwners` locally. Until P5 lands the meta-skill schema
+	// widening, the value is NOT passed to classify/select-scope -- so
+	// the dispatch must complete with the same result it would without
+	// the field present.
+	const fx = await setupFixture();
+	try {
+		const skill = getL2Skill('data.answer-question');
+		assert.ok(skill);
+
+		const result = await runL2Skill(skill,
+			{ input: {
+				question:    'List unreachable code entities.',
+				connections: CONNECTIONS,
+			  }, invocationContext: {
+				// Wire the field that P3->P4 threads via the orchestrator.
+				// The L2 skill reads it; the value is staged locally and
+				// not propagated to meta skills (would trip their
+				// additionalProperties:false schema until P5).
+				requiredCategories: ['code-analyzer'],
+			  } },
+			{ session: fakeSession(),
+			  resolveProvider: () => makeProvider({
+				textResponses: [
+					classifyOutput({
+						candidates: [{
+							skillId: DISPATCH_SKILL,
+							goal: DISPATCH_GOAL,
+							mustHaveScope: 'connection',
+						}],
+					}),
+					scopeOutput({
+						scoped: [{
+							skillId:       DISPATCH_SKILL,
+							args:          DISPATCH_ARGS,
+							resolvedScope: { connectionId: 'file-1' },
+						}],
+					}),
+				],
+				draft: {
+					sections: [
+						{ title: 'surface', body: 'Empty result.', citationRefs: ['__WILDCARD__'] },
+					],
+				},
+			  }) },
+		);
+
+		assert.equal(result.rejected, undefined, `runtime rejected: ${JSON.stringify(result.rejected)}`);
+		const v = result.output.value as { dispatched: unknown[] };
+		assert.equal(v.dispatched.length, 1,
+			'requiredCategories must NOT leak into meta-skill payloads in P4; ' +
+			'a length of 0 means the value propagated and tripped select-scope input validation');
+	} finally { await fx.dispose(); }
+});
+
 test('data.answer-question: extra fields do not leak into select-scope payload', async () => {
 	// REGRESSION GUARD (mirrors the 2026-06-02 code-side scopeTier=XL
 	// regression). data.meta.select-scope's inputSchema is

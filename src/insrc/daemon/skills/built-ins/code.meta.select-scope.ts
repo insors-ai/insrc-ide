@@ -234,6 +234,20 @@ const INPUT_SCHEMA = {
 		candidates: { type: 'array', items: CANDIDATE_IN_SCHEMA, minItems: 0, maxItems: 8 },
 		repo:       REPO_CONTEXT_SCHEMA,
 		priorFacts: PRIOR_FACTS_SCHEMA,
+		/**
+		 * Accept-only mirror of `code.meta.classify-question.allowedOwners`
+		 * so the L2 caller can thread the same field through without
+		 * tripping `additionalProperties: false`. Select-scope has no
+		 * owner-based filtering of its own (it operates on the already-
+		 * filtered candidate list) so this field is currently inert.
+		 * Reserved for future use when select-scope grows cross-owner
+		 * arg synthesis. See plans/planner-cross-category-skills.md P5.
+		 */
+		allowedOwners: {
+			type:     'array',
+			items:    { type: 'string', minLength: 1 },
+			maxItems: 8,
+		},
 	},
 	required: ['question', 'candidates', 'repo'],
 	additionalProperties: false,

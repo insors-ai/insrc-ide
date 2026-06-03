@@ -93,6 +93,12 @@ import { stripFences } from '../../agent/tasks/_shared/json-extract.js';
 import { executeTool } from '../../agent/tools/executor.js';
 import { detectFilePaths } from '../../agent/tasks/data-analyzer/file-detect.js';
 import { acquirePool } from '../db/pool-cache.js';
+import {
+  runCategoryMaterializers,
+  type MaterializerOutcome,
+  type CategoryResource,
+} from '../../agent/content-gen/category-materializer.js';
+import type { SkillOwner } from '../skills/types.js';
 
 const log = getLogger('data-analyzer:orchestrator');
 
@@ -1005,6 +1011,18 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         summaryContext,
         tier: this._tier,
         analyzerLabel: 'data-analyzer',
+        // Cross-category catalog: what OTHER skill owners exist beyond
+        // data-analyzer. The planner tags actions with
+        // `requiredCategories` drawn from this list when a section needs
+        // capabilities its own category can't satisfy (e.g. reading a
+        // pydantic class definition from source). See
+        // plans/planner-cross-category-skills.md P2.
+        availableCategories: [
+          {
+            category:       'code-analyzer',
+            capabilityHint: 'read source files; resolve class / function / module definitions; find callers and callees; summarize code entities and their relationships',
+          },
+        ],
       },
       cloud,
     );
@@ -1027,10 +1045,33 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     // ground (A1 self-grounding); section quality matches what the
     // code-side L2 cutover produces.
     const sections: { id: string; title: string; markdown: string }[] = [];
+    // Per-run materializer cache: resolving the same category twice across
+    // actions (e.g. two sections both needing `code-analyzer`) reuses the
+    // first run's resource. Per plans/planner-cross-category-skills.md P3.
+    const materializerCache = new Map<SkillOwner, MaterializerOutcome>();
     for (const action of actions) {
       const stepId = `synthesise (${action.id})`;
       this.emitLiveStep(stepId, '');
       this.emitLiveStep(stepId, `[data-analyzer] drafting "${action.title}" via data.answer-question...\n`);
+
+      // P3 hook: resolve any cross-category resources this action
+      // declared. Notes (resolution / ambiguity / not-found) stream to
+      // the IDE. The resolved categories + resources are threaded into
+      // the L2 invocationContext (P4) so the skill can widen its
+      // candidate pool and populate cross-owner inputs (P5).
+      let crossCategoryResources: readonly CategoryResource[] = [];
+      let effectiveCategories: readonly SkillOwner[] = [];
+      if (action.requiredCategories.length > 0) {
+        const mat = await runCategoryMaterializers({
+          action,
+          ownCategory: 'data-analyzer',
+          request,
+          session,
+          emitNote: (line) => this.emitLiveStep(stepId, `[data-analyzer] ${line}\n`),
+        }, materializerCache);
+        crossCategoryResources = mat.resources;
+        effectiveCategories    = mat.effectiveCategories;
+      }
 
       const out = await runAnswerQuestionAction({
         session,
@@ -1040,6 +1081,8 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         cloudProvider: reviewer,
         analyzerLabel: 'data-analyzer',
         onProgress: (msg) => this.emitLiveStep(stepId, `[data-analyzer] ${msg}\n`),
+        ...(effectiveCategories.length    > 0 ? { requiredCategories:    effectiveCategories    } : {}),
+        ...(crossCategoryResources.length > 0 ? { crossCategoryResources: crossCategoryResources } : {}),
       });
 
       this.emitLiveStep(stepId,
@@ -1568,6 +1611,7 @@ function synthesiseFallbackActionDA(
       'Cites the skills the local model invoked',
       `Notes that the planner did not propose a structured plan (${accepted.length} prior task${accepted.length === 1 ? '' : 's'} accepted)`,
     ],
+    requiredCategories: [],
   };
 }
 

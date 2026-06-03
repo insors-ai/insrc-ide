@@ -93,9 +93,10 @@ interface PriorContext {
 }
 
 interface ClassifyInput {
-  readonly question:      string;
-  readonly connections:   readonly ConnectionInfo[];
-  readonly priorContext?: PriorContext;
+  readonly question:       string;
+  readonly connections:    readonly ConnectionInfo[];
+  readonly priorContext?:  PriorContext;
+  readonly allowedOwners?: readonly string[] | undefined;
 }
 
 interface Candidate {
@@ -163,6 +164,18 @@ const INPUT_SCHEMA = {
       },
       additionalProperties: false,
     },
+    /**
+     * Owners whose skills survive the catalog prefilter. When omitted,
+     * defaults to `['data-analyzer']`. The L2 caller
+     * (`data.answer-question`) passes a widened set when the planner
+     * tagged the action with cross-category requirements. See
+     * plans/planner-cross-category-skills.md P5.
+     */
+    allowedOwners: {
+      type:     'array',
+      items:    { type: 'string', minLength: 1 },
+      maxItems: 8,
+    },
   },
   required: ['question', 'connections'],
   additionalProperties: false,
@@ -210,11 +223,14 @@ const OUTPUT_SCHEMA = {
 
 interface CatalogEntry {
   readonly id:      string;
+  readonly owner:   string;
   readonly family:  string;
   readonly summary: string;
 }
 
 const CATALOG_SUMMARY_MAX = 120;
+
+const DEFAULT_ALLOWED_OWNERS: readonly string[] = ['data-analyzer'];
 
 /**
  * Walk the skill registry and emit only the skills classify-question
@@ -243,21 +259,33 @@ function buildCatalog(
   _ctx: SkillContext,
 ): readonly CatalogEntry[] {
   const rosterFamilies = new Set(input.connections.map(c => c.family));
+  // P5: catalog prefilter respects the caller's `allowedOwners` set.
+  // Default = ['data-analyzer'] preserves the pre-P5 single-category
+  // behavior. The connection-family precondition still applies -- code-
+  // owned skills typically have no connection-family precondition and
+  // pass freely; data-owned skills only survive if some connection in
+  // the roster matches one of their declared families.
+  const owners = new Set(input.allowedOwners ?? DEFAULT_ALLOWED_OWNERS);
   const out: CatalogEntry[] = [];
   for (const skill of listSkills()) {
-    if (skill.owner !== 'data-analyzer')   continue;
-    if (skill.family === 'meta')           continue;
-    if (skill.family === 'synthesis')      continue;
+    if (!owners.has(skill.owner))       continue;
+    if (skill.family === 'meta')        continue;
+    if (skill.family === 'synthesis')   continue;
     if (!matchesConnectionFamily(skill, rosterFamilies)) continue;
 
     out.push({
       id:      skill.id,
+      owner:   skill.owner,
       family:  skill.family,
       summary: truncate(skill.description, CATALOG_SUMMARY_MAX),
     });
   }
   out.sort((a, b) =>
-    a.family !== b.family ? a.family.localeCompare(b.family) : a.id.localeCompare(b.id),
+    a.owner !== b.owner
+      ? a.owner.localeCompare(b.owner)
+      : a.family !== b.family
+        ? a.family.localeCompare(b.family)
+        : a.id.localeCompare(b.id),
   );
   return out;
 }
@@ -472,7 +500,17 @@ function buildUserMessage(
   input: ClassifyInput,
   catalog: readonly CatalogEntry[],
 ): string {
-  const catalogLines = catalog.map(e => `- \`${e.id}\` [${e.family}] -- ${e.summary}`);
+  // P5: when the catalog spans multiple owners (cross-category dispatch),
+  // surface the owner so the LLM can see which side each candidate belongs
+  // to. Single-owner catalogs keep the original `[family]` shape so the
+  // non-widened path is byte-identical.
+  const distinctOwners = new Set(catalog.map(e => e.owner));
+  const crossOwner = distinctOwners.size > 1;
+  const catalogLines = catalog.map(e =>
+    crossOwner
+      ? `- \`${e.id}\` [${e.owner} / ${e.family}] -- ${e.summary}`
+      : `- \`${e.id}\` [${e.family}] -- ${e.summary}`,
+  );
   const connLines    = input.connections.map(c => {
     const parts = [`- \`${c.id}\` family=${c.family}`];
     if (c.kind  !== undefined) parts.push(`kind=${c.kind}`);
@@ -803,3 +841,9 @@ const skillWithSubstrate = { ...skill, ...substrateExtension };
 export function registerDataMetaClassifyQuestionSkill(): void {
   registerSkill(skillWithSubstrate as unknown as Skill);
 }
+
+// ---------------------------------------------------------------------------
+// Test-only exports
+// ---------------------------------------------------------------------------
+
+export const _buildCatalogForTest = buildCatalog;
