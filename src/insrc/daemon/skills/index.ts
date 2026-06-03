@@ -136,6 +136,9 @@ import { registerCodeAuditModuleSkill } from './built-ins-l2/code.audit-module.j
 import { registerCodeAnswerQuestionSkill } from './built-ins-l2/code.answer-question.js';
 import { registerDataAnswerQuestionSkill } from './built-ins-l2/data.answer-question.js';
 
+// Shared composition skills (P5 of plans/planner-skill-tree.md).
+import { registerSharedCompareFieldsVsShapeSkill } from './built-ins/shared.compare.fields-vs-shape.js';
+
 const log = getLogger('skills-bootstrap');
 
 export function registerAllSkills(): void {
@@ -354,6 +357,13 @@ export function registerAllSkills(): void {
   // claim-grounding-reviewer + execute-step) once the orchestrator
   // cutover lands.
   registerDataAnswerQuestionSkill();
+
+  // Shared composition skill (P5 of plans/planner-skill-tree.md). The
+  // canonical "compute the alignment in code, not in the drafter's
+  // prose" primitive. Consumes the outputs of code.class.extract-fields
+  // and data.source.file.{describe,sample-shape} and emits a structured
+  // alignment table the report cites verbatim.
+  registerSharedCompareFieldsVsShapeSkill();
 
   log.info({ registered: listSkills().length }, 'skill registry populated');
 }
