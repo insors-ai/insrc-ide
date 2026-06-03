@@ -248,6 +248,23 @@ export const PLANNED_TREE_SCHEMA = {
 export type ValidationError = string;
 
 /**
+ * Optional caller-supplied lookups that turn structural validation into
+ * strict plan-time validation (Q1 of plans/planner-skill-tree.md).
+ *
+ * When provided, the validator additionally enforces:
+ *   - Every leaf node's `skill` resolves to a registered skill.
+ *   - Every `inputs.<arg>` with `source: 'node'` has a `path` that
+ *     exists in the source skill's `outputPaths` registry entry.
+ *
+ * Omitting these (P1 / unit-test mode) preserves the structural-only
+ * validation contract so plan-tree tests don't need a skill registry.
+ */
+export interface ValidationLookups {
+	readonly skillExists?:        (skillId: string) => boolean;
+	readonly skillOutputPaths?:   (skillId: string) => readonly string[];
+}
+
+/**
  * Validate a parsed-from-JSON candidate tree. Returns the strongly-typed
  * `PlannedTree` on success, or an error string suitable for the LLM
  * retry path. Run after JSON-schema validation has already accepted the
@@ -260,8 +277,11 @@ export type ValidationError = string;
  *     exists in the tree, is not the wiring node itself, and is reachable
  *     via the dispatch order (ancestor or already-resolved earlier sibling).
  *   - Leaf count <= MAX_LEAVES, depth <= MAX_DEPTH, branching <= MAX_BRANCHING.
+ *
+ * When `lookups` is provided, additionally enforces strict skill-id and
+ * wire-path validation (P2 of plans/planner-skill-tree.md).
  */
-export function validatePlannedTree(parsed: unknown): PlannedTree | ValidationError {
+export function validatePlannedTree(parsed: unknown, lookups?: ValidationLookups): PlannedTree | ValidationError {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return 'tree root is not a JSON object';
 	}
@@ -275,13 +295,16 @@ export function validatePlannedTree(parsed: unknown): PlannedTree | ValidationEr
 
 	const ids       = new Set<string>();
 	const leafCount = { count: 0 };
+	const nodeIdToSkill = new Map<string, string>();
 
 	const rootResult = validateNode(rootRaw, {
 		ids,
 		leafCount,
 		depth:           0,
 		visibleNodeIds:  new Set(),
+		nodeIdToSkill,
 		idToVisibilityList: [],
+		lookups,
 	});
 	if (typeof rootResult === 'string') return rootResult;
 
@@ -311,11 +334,20 @@ interface ValidationCtx {
 	 */
 	readonly visibleNodeIds:     Set<string>;
 	/**
+	 * Map of node id -> skill id for every leaf node validated so far.
+	 * Composition nodes are deliberately absent: wires to compositions
+	 * are rejected under strict lookups because a composition has no
+	 * structured output value to path-address.
+	 */
+	readonly nodeIdToSkill:      Map<string, string>;
+	/**
 	 * Stack of (compositionId -> ordered list of already-visible child
 	 * ids). Used to grow `visibleNodeIds` as siblings finish validating.
 	 * Empty stack = root context.
 	 */
 	readonly idToVisibilityList: readonly string[];
+	/** Caller-supplied strict-lookup hooks; undefined => structural-only. */
+	readonly lookups?:           ValidationLookups | undefined;
 }
 
 function validateNode(rawNode: unknown, ctx: ValidationCtx): PlannedNode | ValidationError {
@@ -357,7 +389,7 @@ function validateNode(rawNode: unknown, ctx: ValidationCtx): PlannedNode | Valid
 	const inputsObj = rawInputs as Record<string, unknown>;
 	const inputs: Record<string, InputBinding> = {};
 	for (const [arg, binding] of Object.entries(inputsObj)) {
-		const wireResult = validateBinding(binding, ctx.visibleNodeIds, id, arg);
+		const wireResult = validateBinding(binding, ctx, id, arg);
 		if (typeof wireResult === 'string') return `node "${id}".inputs.${arg}: ${wireResult}`;
 		inputs[arg] = wireResult;
 	}
@@ -367,7 +399,14 @@ function validateNode(rawNode: unknown, ctx: ValidationCtx): PlannedNode | Valid
 		if (n['composition'] !== undefined) return `leaf node "${id}" must not declare composition`;
 		const skill = typeof n['skill'] === 'string' ? n['skill'].trim() : '';
 		if (skill.length === 0) return `leaf node "${id}" missing skill`;
+		// Strict lookup: skill must be a registered id. Reserved for the
+		// orchestrator's plan-time check; structural-only validation
+		// (e.g. unit tests) skips this.
+		if (ctx.lookups?.skillExists !== undefined && !ctx.lookups.skillExists(skill)) {
+			return `leaf node "${id}" references unregistered skill "${skill}"`;
+		}
 		ctx.leafCount.count += 1;
+		ctx.nodeIdToSkill.set(id, skill);
 
 		const render = parseRender(n['render'], id);
 		if (typeof render === 'string') return render;
@@ -409,7 +448,9 @@ function validateNode(rawNode: unknown, ctx: ValidationCtx): PlannedNode | Valid
 			leafCount:          ctx.leafCount,
 			depth:              ctx.depth + 1,
 			visibleNodeIds:     childVisibility,
+			nodeIdToSkill:      ctx.nodeIdToSkill,
 			idToVisibilityList: ctx.idToVisibilityList,
+			...(ctx.lookups !== undefined ? { lookups: ctx.lookups } : {}),
 		});
 		if (typeof childResult === 'string') return `composition "${id}".children[${i}]: ${childResult}`;
 		childNodes.push(childResult);
@@ -431,7 +472,7 @@ function validateNode(rawNode: unknown, ctx: ValidationCtx): PlannedNode | Valid
 
 function validateBinding(
 	raw: unknown,
-	visibleNodeIds: ReadonlySet<string>,
+	ctx: ValidationCtx,
 	wiringNodeId: string,
 	argName: string,
 ): InputBinding | ValidationError {
@@ -445,12 +486,29 @@ function validateBinding(
 			const nodeId = typeof b['nodeId'] === 'string' ? b['nodeId'].trim() : '';
 			if (nodeId.length === 0) return 'source=node requires `nodeId`';
 			if (nodeId === wiringNodeId) return `source=node nodeId "${nodeId}" refers to the wiring node itself`;
-			if (!visibleNodeIds.has(nodeId)) {
+			if (!ctx.visibleNodeIds.has(nodeId)) {
 				return `source=node nodeId "${nodeId}" is not an ancestor or earlier sibling (forward refs disallowed)`;
 			}
 			const path = typeof b['path'] === 'string' ? b['path'].trim() : '';
 			if (path.length === 0) return 'source=node requires `path`';
-			void argName;   // reserved for P2 (path-against-outputPaths validation)
+			// Strict path validation (P2): only runs when lookups supplied.
+			// Wires to composition nodes are rejected because compositions
+			// have no structured output to path-address; if the planner
+			// needs a value from "inside" a composition, it should wire
+			// directly to the leaf that produced it.
+			if (ctx.lookups?.skillOutputPaths !== undefined) {
+				const sourceSkill = ctx.nodeIdToSkill.get(nodeId);
+				if (sourceSkill === undefined) {
+					return `source=node nodeId "${nodeId}" is a composition; wires must target leaf nodes`;
+				}
+				const paths = ctx.lookups.skillOutputPaths(sourceSkill);
+				if (!paths.includes(path)) {
+					const preview = paths.slice(0, 12).join(', ');
+					return `source=node path "${path}" is not in "${sourceSkill}" outputPaths` +
+						(paths.length > 0 ? ` (valid: ${preview}${paths.length > 12 ? ', ...' : ''})` : ' (skill has no addressable outputs)');
+				}
+			}
+			void argName;   // reserved for future per-arg path-shape checks
 			return { source: 'node', nodeId, path };
 		}
 		case 'literal': {

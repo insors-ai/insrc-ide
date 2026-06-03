@@ -479,3 +479,139 @@ test('PlannedNode type: leaf shape compiles correctly', () => {
 	};
 	void _n;
 });
+
+// ---------------------------------------------------------------------------
+// Strict lookups (P2 of plans/planner-skill-tree.md)
+// ---------------------------------------------------------------------------
+
+const LOOKUPS_STRICT = {
+	skillExists: (id: string) => ['data.source.file.describe', 'code.class.extract-fields', 'data.source.file.sample-shape', 'shared.compare.fields-vs-shape'].includes(id),
+	skillOutputPaths: (id: string): readonly string[] => {
+		switch (id) {
+			case 'data.source.file.describe':       return ['columns', 'columns[*]', 'columns[*].name', 'rowCount'];
+			case 'code.class.extract-fields':       return ['found', 'fields', 'fields[*]', 'fields[*].name', 'fields[*].type'];
+			case 'data.source.file.sample-shape':   return ['columns', 'columns[*]', 'columns[*].type'];
+			case 'shared.compare.fields-vs-shape':  return ['alignment', 'alignment[*]', 'alignment[*].jsonKey', 'alignment[*].classField', 'alignment[*].match'];
+			default: return [];
+		}
+	},
+} as const;
+
+test('strict lookups: accepts a tree wired against real outputPaths', () => {
+	const r = validatePlannedTree({
+		intentBrief: 'INGRN comparison',
+		root: {
+			id: 'root', title: 't', objective: 'o',
+			kind: 'composition', composition: 'parallel', inputs: {}, emit: 'discard',
+			children: [
+				{
+					id: 'class-def', title: 't', objective: 'o',
+					kind: 'leaf', skill: 'code.class.extract-fields', emit: 'intermediate',
+					inputs: {
+						className: { source: 'question', extract: 'INGRN' },
+						language:  { source: 'literal',  value: 'python' },
+					},
+				},
+				{
+					id: 'data-shape', title: 't', objective: 'o',
+					kind: 'leaf', skill: 'data.source.file.sample-shape', emit: 'intermediate',
+					inputs: {
+						connectionId: { source: 'context', key: 'primaryConnection' },
+					},
+				},
+				{
+					id: 'align', title: 't', objective: 'o',
+					kind: 'leaf', skill: 'shared.compare.fields-vs-shape', emit: 'section',
+					inputs: {
+						classFields: { source: 'node', nodeId: 'class-def',  path: 'fields' },
+						dataShape:   { source: 'node', nodeId: 'data-shape', path: 'columns' },
+					},
+				},
+			],
+		},
+	}, LOOKUPS_STRICT);
+	assert.notEqual(typeof r, 'string', r as string);
+});
+
+test('strict lookups: rejects unregistered skill on a leaf', () => {
+	const r = validatePlannedTree({
+		intentBrief: 'x',
+		root: {
+			id: 'r', title: 't', objective: 'o',
+			kind: 'leaf', skill: 'foo.does-not-exist', emit: 'section', inputs: {},
+		},
+	}, LOOKUPS_STRICT);
+	assert.match(r as string, /unregistered skill "foo.does-not-exist"/);
+});
+
+test('strict lookups: rejects wire path that is not in the source skill outputPaths', () => {
+	const r = validatePlannedTree({
+		intentBrief: 'x',
+		root: {
+			id: 'root', title: 't', objective: 'o',
+			kind: 'composition', inputs: {}, emit: 'discard',
+			children: [
+				{ id: 'a', title: 't', objective: 'o',
+				  kind: 'leaf', skill: 'code.class.extract-fields', emit: 'intermediate', inputs: {} },
+				{ id: 'b', title: 't', objective: 'o',
+				  kind: 'leaf', skill: 'shared.compare.fields-vs-shape', emit: 'section',
+				  inputs: {
+					classFields: { source: 'node', nodeId: 'a', path: 'fields[*].DOES_NOT_EXIST' },
+					dataShape:   { source: 'literal', value: [] },
+				  } },
+			],
+		},
+	}, LOOKUPS_STRICT);
+	assert.match(r as string, /path "fields\[\*\]\.DOES_NOT_EXIST" is not in "code.class.extract-fields" outputPaths/);
+	assert.match(r as string, /valid: /);
+});
+
+test('strict lookups: rejects wire to a composition node (no structured output)', () => {
+	const r = validatePlannedTree({
+		intentBrief: 'x',
+		root: {
+			id: 'parent', title: 't', objective: 'o',
+			kind: 'composition', inputs: {}, emit: 'discard',
+			children: [
+				{ id: 'inner', title: 't', objective: 'o',
+				  kind: 'composition', inputs: {}, emit: 'intermediate',
+				  children: [
+					{ id: 'leaf-x', title: 't', objective: 'o',
+					  kind: 'leaf', skill: 'code.class.extract-fields', emit: 'intermediate', inputs: {} },
+				  ],
+				},
+				{ id: 'consumer', title: 't', objective: 'o',
+				  kind: 'leaf', skill: 'shared.compare.fields-vs-shape', emit: 'section',
+				  // Wires to the composition node "inner" instead of the leaf "leaf-x".
+				  inputs: {
+					classFields: { source: 'node', nodeId: 'inner', path: 'fields' },
+					dataShape:   { source: 'literal', value: [] },
+				  } },
+			],
+		},
+	}, LOOKUPS_STRICT);
+	assert.match(r as string, /"inner" is a composition; wires must target leaf nodes/);
+});
+
+test('strict lookups omitted: skill ids and paths NOT validated (P1 behavior preserved)', () => {
+	// Same tree as the "rejects wire path" test above, but WITHOUT strict
+	// lookups. The structural validator should still accept it.
+	const r = validatePlannedTree({
+		intentBrief: 'x',
+		root: {
+			id: 'root', title: 't', objective: 'o',
+			kind: 'composition', inputs: {}, emit: 'discard',
+			children: [
+				{ id: 'a', title: 't', objective: 'o',
+				  kind: 'leaf', skill: 'foo.even-unregistered', emit: 'intermediate', inputs: {} },
+				{ id: 'b', title: 't', objective: 'o',
+				  kind: 'leaf', skill: 'shared.compare.fields-vs-shape', emit: 'section',
+				  inputs: {
+					classFields: { source: 'node', nodeId: 'a', path: 'made.up.path.no.lookup' },
+					dataShape:   { source: 'literal', value: [] },
+				  } },
+			],
+		},
+	}); // <-- no lookups param
+	assert.notEqual(typeof r, 'string', r as string);
+});

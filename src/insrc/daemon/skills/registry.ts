@@ -13,6 +13,7 @@
 
 import { getLogger } from '../../shared/logger.js';
 import { ALL_SKILL_FAMILIES } from './families.js';
+import { extractOutputPaths } from './output-paths.js';
 import type { Skill, SkillFamily, SkillOwner } from './types.js';
 
 const log = getLogger('skills-registry');
@@ -29,6 +30,15 @@ const byIdAndVersion = new Map<string, Skill>();
 const byFamily = new Map<SkillFamily, Skill[]>();
 /** owner -> list of latest-version skills. Rebuilt on each register. */
 const byOwner = new Map<SkillOwner, Skill[]>();
+/**
+ * skill id -> precomputed wire-addressable output paths.
+ * Populated at registerSkill() time from the skill's outputs schema via
+ * extractOutputPaths(). Consumed by validatePlannedTree (P2 of
+ * plans/planner-skill-tree.md) to reject wires whose `path` doesn't
+ * exist on the source skill's output. Keyed by latest version only --
+ * version-pinned consumers are rare and can recompute.
+ */
+const outputPathsById = new Map<string, readonly string[]>();
 
 // ---------------------------------------------------------------------------
 // Naming validator
@@ -133,6 +143,10 @@ export function registerSkill(skill: Skill): void {
   const existing = byId.get(skill.id);
   if (existing === undefined || existing.version < skill.version) {
     byId.set(skill.id, skill);
+    // Precompute the wire-addressable output paths for the planner's
+    // strict plan-time wire validator. Bounded (extractOutputPaths caps
+    // recursion + total path count) so this stays O(1)-ish per skill.
+    outputPathsById.set(skill.id, extractOutputPaths(skill.outputs));
     rebuildIndices();
   }
 
@@ -210,6 +224,16 @@ export function listSkills(): Skill[] {
   return [...byId.values()];
 }
 
+/**
+ * Wire-addressable output paths for a skill, computed once at
+ * registration from `skill.outputs`. Returns an empty array for
+ * unknown ids (caller is expected to reject such wires upstream).
+ * P2 of plans/planner-skill-tree.md.
+ */
+export function getSkillOutputPaths(skillId: string): readonly string[] {
+  return outputPathsById.get(skillId) ?? [];
+}
+
 // ---------------------------------------------------------------------------
 // Test reset
 // ---------------------------------------------------------------------------
@@ -219,4 +243,5 @@ export function _resetSkillRegistryForTests(): void {
   byIdAndVersion.clear();
   byFamily.clear();
   byOwner.clear();
+  outputPathsById.clear();
 }
