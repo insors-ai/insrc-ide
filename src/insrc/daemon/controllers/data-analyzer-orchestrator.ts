@@ -31,7 +31,6 @@
 
 import { getLogger } from '../../shared/logger.js';
 import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
-import { runAnswerQuestionAction } from '../../agent/tasks/data-analyzer/answer-question-action.js';
 import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
 import {
   buildReviewPrompt,
@@ -43,7 +42,10 @@ import {
   DRILL_DOWN_FALLBACK_SECTION,
 } from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
 import { generateMultiPass } from '../../agent/content-gen/index.js';
-import { planActions, type PlannedAction, type PlanExecution } from '../../agent/content-gen/plan-actions.js';
+// `PlanExecution` is still used to type the raw-executions state slot.
+// `planActions` + `PlannedAction` are gone -- replaced by the tree
+// planner + executor below (P6 of plans/planner-skill-tree.md).
+import type { PlanExecution } from '../../agent/content-gen/plan-actions.js';
 import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
 import {
   buildConnectionFingerprint,
@@ -93,12 +95,20 @@ import { stripFences } from '../../agent/tasks/_shared/json-extract.js';
 import { executeTool } from '../../agent/tools/executor.js';
 import { detectFilePaths } from '../../agent/tasks/data-analyzer/file-detect.js';
 import { acquirePool } from '../db/pool-cache.js';
-import {
-  runCategoryMaterializers,
-  type MaterializerOutcome,
-  type CategoryResource,
-} from '../../agent/content-gen/category-materializer.js';
+// category-materializer kept alive ONLY for the code-side orchestrator
+// (P6 cut over data side first; code side still uses the legacy flat
+// per-action loop). When code-side migrates, this whole module +
+// import can be deleted -- see plans/planner-skill-tree.md P6.b.
 import type { SkillOwner } from '../skills/types.js';
+// P6 of plans/planner-skill-tree.md -- tree planner + executor.
+import { planTree, type CatalogSkill } from '../../agent/content-gen/plan-tree-runner.js';
+import {
+  buildCatalogFromRegistry,
+  buildDataAnalyzerFallbackTree,
+  renderTreeReport,
+} from '../../agent/content-gen/plan-tree-helpers.js';
+import { countLeaves as countLeavesQuick } from '../../agent/content-gen/plan-tree.js';
+import { executeTree, type TreeExecutionEvent } from '../skills/tree/executor.js';
 
 const log = getLogger('data-analyzer:orchestrator');
 
@@ -999,105 +1009,136 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     // Lean summary context: repo descriptor + memory line.
     const summaryContext = this.buildSummaryContext();
 
-    // ----- Stage 1: plan (cloud, lean input) ----------------------------
+    // ----- P6 of plans/planner-skill-tree.md: tree-based planning -------
+    // Replaces the flat `planActions` + per-action L2 loop. The cloud
+    // planner emits a typed skill tree composed of L1 leaves wired
+    // together via the typed wiring DSL; the executor walks the tree,
+    // calls each skill via `runSkill`, and the section stitcher renders
+    // the result. Cross-domain alignment (the INGRN class-vs-JSON case)
+    // is computed in code by `shared.compare.fields-vs-shape` instead
+    // of invented by a drafter LLM.
+    //
+    // L2 `data.answer-question` survives as a per-leaf fallback: when
+    // the planner can't decompose a sub-question into a structured
+    // skill chain it emits an L2 leaf, preserving today's drafting
+    // behavior for genuinely open-ended sections.
     const planStep = 'synthesise (plan)';
     this.emitLiveStep(planStep, '');
-    this.emitLiveStep(planStep, `[data-analyzer | tier=${this._tier}] planning report sections...\n`);
+    this.emitLiveStep(planStep, `[data-analyzer | tier=${this._tier}] planning report sections (tree)...\n`);
 
-    const plan = await planActions(
+    // Catalog: every skill the data-side planner may compose. Includes
+    // shared/code-analyzer skills for cross-domain wiring. Filtered by
+    // the active connection roster's families so the planner doesn't
+    // see, e.g., rdbms-family skills when only file connections exist.
+    const rosterFamilies = new Set(this._connections.map(c => c.family));
+    const catalog: readonly CatalogSkill[] = buildCatalogFromRegistry({
+      owners:           ['data-analyzer', 'code-analyzer', 'shared'],
+      includeL2Fallback: true,
+      rosterFamilies,
+    });
+
+    const fallbackTree = buildDataAnalyzerFallbackTree({
+      request,
+      connections: connectionsForL2(this._connections),
+    });
+
+    const planResult = await planTree(
       {
-        intent:         'data-analysis',
+        intent:        'data-analysis',
         request,
         summaryContext,
-        tier: this._tier,
+        catalog,
+        fallback:      fallbackTree,
         analyzerLabel: 'data-analyzer',
-        // Cross-category catalog: what OTHER skill owners exist beyond
-        // data-analyzer. The planner tags actions with
-        // `requiredCategories` drawn from this list when a section needs
-        // capabilities its own category can't satisfy (e.g. reading a
-        // pydantic class definition from source). See
-        // plans/planner-cross-category-skills.md P2.
-        availableCategories: [
-          {
-            category:       'code-analyzer',
-            capabilityHint: 'read source files; resolve class / function / module definitions; find callers and callees; summarize code entities and their relationships',
-          },
-        ],
       },
       cloud,
     );
 
-    const actions = plan.degraded || plan.actions.length === 0
-      ? [synthesiseFallbackActionDA(request, accepted)]
-      : plan.actions;
-
+    const leafCount = countLeavesQuick(planResult.tree);
     this.emitLiveStep(
       planStep,
-      `[data-analyzer | tier=${this._tier}] planned ${actions.length} section${actions.length === 1 ? '' : 's'}${plan.degraded ? ' (fallback)' : ''}\n`,
+      `[data-analyzer | tier=${this._tier}] planned ${leafCount} leaf${leafCount === 1 ? '' : 'es'}` +
+      (planResult.degraded ? ' (fallback tree)' : '') +
+      (planResult.shortlist !== undefined ? `; shortlist=${planResult.shortlist.length}` : '') + '\n',
     );
+    if (planResult.note !== undefined) {
+      this.emitLiveStep(planStep, `[data-analyzer] ${planResult.note}\n`);
+    }
     this.emitLiveStep(planStep, '', true);
 
-    // ----- Stage 2+3: per-action L2 self-grounding draft -----------------
-    // P14 cutover: the legacy `runPerStepSkillsPipelineDA` (evidence
-    // pre-gather) + `expandThenReview` (writer/reviewer pingpong)
-    // collapse into a single `runAnswerQuestionAction` call. The L2
-    // skill does its own classify + select-scope + dispatch + draft +
-    // ground (A1 self-grounding); section quality matches what the
-    // code-side L2 cutover produces.
-    const sections: { id: string; title: string; markdown: string }[] = [];
-    // Per-run materializer cache: resolving the same category twice across
-    // actions (e.g. two sections both needing `code-analyzer`) reuses the
-    // first run's resource. Per plans/planner-cross-category-skills.md P3.
-    const materializerCache = new Map<SkillOwner, MaterializerOutcome>();
-    for (const action of actions) {
-      const stepId = `synthesise (${action.id})`;
-      this.emitLiveStep(stepId, '');
-      this.emitLiveStep(stepId, `[data-analyzer] drafting "${action.title}" via data.answer-question...\n`);
+    // ----- Tree execution ------------------------------------------------
+    const runStep = 'synthesise (execute)';
+    this.emitLiveStep(runStep, '');
+    this.emitLiveStep(runStep, `[data-analyzer] executing tree (${leafCount} leaf${leafCount === 1 ? '' : 'es'})...\n`);
 
-      // P3 hook: resolve any cross-category resources this action
-      // declared. Notes (resolution / ambiguity / not-found) stream to
-      // the IDE. The resolved categories + resources are threaded into
-      // the L2 invocationContext (P4) so the skill can widen its
-      // candidate pool and populate cross-owner inputs (P5).
-      let crossCategoryResources: readonly CategoryResource[] = [];
-      let effectiveCategories: readonly SkillOwner[] = [];
-      if (action.requiredCategories.length > 0) {
-        const mat = await runCategoryMaterializers({
-          action,
-          ownCategory: 'data-analyzer',
-          request,
-          session,
-          emitNote: (line) => this.emitLiveStep(stepId, `[data-analyzer] ${line}\n`),
-        }, materializerCache);
-        crossCategoryResources = mat.resources;
-        effectiveCategories    = mat.effectiveCategories;
-      }
-
-      const out = await runAnswerQuestionAction({
+    const executionResult = await executeTree(planResult.tree, {
+      question:       request,
+      sessionContext: this.buildSessionContextForTree(),
+      runnerDeps: {
         session,
-        action,
-        request,
-        connections:   this._connections,
-        cloudProvider: reviewer,
-        analyzerLabel: 'data-analyzer',
-        onProgress: (msg) => this.emitLiveStep(stepId, `[data-analyzer] ${msg}\n`),
-        ...(effectiveCategories.length    > 0 ? { requiredCategories:    effectiveCategories    } : {}),
-        ...(crossCategoryResources.length > 0 ? { crossCategoryResources: crossCategoryResources } : {}),
-      });
+        resolveProvider: () => reviewer,
+      },
+      onEvent: (e: TreeExecutionEvent) => {
+        switch (e.kind) {
+          case 'node-start':
+            this.emitLiveStep(runStep,
+              `[data-analyzer]   start  ${e.nodeId}` + (e.skillId !== undefined ? ` (${e.skillId})` : '') + '\n');
+            break;
+          case 'node-complete':
+            this.emitLiveStep(runStep,
+              `[data-analyzer]   done   ${e.nodeId}` +
+              (e.skillId    !== undefined ? ` (${e.skillId})` : '') +
+              (e.confidence !== undefined ? ` confidence=${e.confidence}` : '') +
+              ` (${e.durationMs}ms)\n`);
+            break;
+          case 'node-failed':
+            this.emitLiveStep(runStep,
+              `[data-analyzer]   FAIL   ${e.nodeId}` +
+              (e.skillId !== undefined ? ` (${e.skillId})` : '') +
+              `: ${e.reason}\n`);
+            break;
+          default:
+            break;
+        }
+      },
+    });
 
-      this.emitLiveStep(stepId,
-        `[data-analyzer] ${action.id}: ${out.sectionCount} sub-section${out.sectionCount === 1 ? '' : 's'}; ` +
-        `${out.dispatched.length} skill${out.dispatched.length === 1 ? '' : 's'} dispatched; confidence=${out.confidence}` +
-        (out.droppedCount > 0 ? ` (${out.droppedCount} dropped)` : '') + '\n');
-      this.emitLiveStep(stepId, '', true);
-      sections.push({ id: action.id, title: action.title, markdown: out.markdown });
-    }
-    // `local` was used by the legacy expandThenReview path; now
-    // unused since the L2 runtime drives provider resolution itself.
+    this.emitLiveStep(runStep,
+      `[data-analyzer] executed=${executionResult.executedLeaves} failed=${executionResult.failedLeaves} ` +
+      `(${executionResult.durationMs}ms)\n`);
+    this.emitLiveStep(runStep, '', true);
+
+    // `local` + `accepted` were used by the legacy flat-plan path;
+    // the tree planner handles dispatch via the executor + context-bag
+    // resolution.
     void local;
+    void accepted;
 
-    // ----- Stage 4: stitch -----------------------------------------------
-    return stitchPlanSectionsDA(plan.intentBrief, actions, sections);
+    // ----- Render --------------------------------------------------------
+    return renderTreeReport({
+      tree:    planResult.tree,
+      result:  executionResult,
+      headline: planResult.tree.intentBrief,
+      drillDownNote: '_The planner did not propose drill-down bullets for this run. Open the todos pane to launch a follow-up._',
+    }) + '\n';
+  }
+
+  /**
+   * Build the session-derived context bag the tree executor exposes
+   * via `source: 'context'` bindings. The keys here are the
+   * documented reserved set (see plan-tree.ts InputBinding doc).
+   */
+  private buildSessionContextForTree(): Readonly<Record<string, unknown>> {
+    if (this.deps === undefined) return {};
+    const session = this.deps.session;
+    return {
+      sessionId:         session.id,
+      codeRepoPath:      session.repoPath,
+      primaryConnection: this._connections[0]?.id ?? '',
+      // The full connection roster is also exposed so a leaf wiring
+      // `connections` directly can avoid re-deriving it.
+      connections:       connectionsForL2(this._connections),
+    };
   }
 
   /** Emit a brainstorm-style `liveStep` event (mirrors the code-
@@ -1596,25 +1637,6 @@ function parseReviewerDecision(rawText: string): ReviewerDecision {
 // content-gen module isn't worth the coupling.
 // ---------------------------------------------------------------------------
 
-function synthesiseFallbackActionDA(
-  request: string,
-  accepted: readonly AcceptedTask[],
-): PlannedAction {
-  const requestSnippet = request.length > 0 ? request.slice(0, 80) : 'data analysis request';
-  return {
-    id:        'fallback-summary',
-    title:     `Summary: ${requestSnippet}`,
-    objective: `Address the user request "${request || '(unknown)'}" by running whatever data-analysis skills best fit it and summarising the findings.`,
-    maxBudgetTokens: 2000,
-    reviewCriteria: [
-      'Addresses the user request directly',
-      'Cites the skills the local model invoked',
-      `Notes that the planner did not propose a structured plan (${accepted.length} prior task${accepted.length === 1 ? '' : 's'} accepted)`,
-    ],
-    requiredCategories: [],
-  };
-}
-
 function deriveExecutionsFromAcceptedDA(
   accepted: readonly AcceptedTask[],
 ): readonly PlanExecution[] {
@@ -1626,34 +1648,22 @@ function deriveExecutionsFromAcceptedDA(
   }));
 }
 
-function stitchPlanSectionsDA(
-  intentBrief: string,
-  actions: readonly PlannedAction[],
-  sections: readonly { id: string; title: string; markdown: string }[],
-): string {
-  const lines: string[] = [];
-  if (intentBrief.trim().length > 0) {
-    lines.push(intentBrief.trim());
-    lines.push('');
-  }
-  const byId = new Map(sections.map(s => [s.id, s]));
-  for (const action of actions) {
-    const s = byId.get(action.id);
-    if (s === undefined || s.markdown.trim().length === 0) continue;
-    lines.push(`## ${action.title}`);
-    lines.push('');
-    lines.push(s.markdown.trim());
-    lines.push('');
-  }
-
-  // Drill-down footer (Report Pane parser anchor).
-  const haveDrillDown = sections.some(s => /^##\s+Drill\s+down/im.test(s.markdown));
-  if (!haveDrillDown) {
-    lines.push('## Drill down');
-    lines.push('');
-    lines.push('_The planner did not propose drill-down bullets for this run. Open the todos pane to launch a follow-up._');
-    lines.push('');
-  }
-
-  return lines.join('\n').trimEnd() + '\n';
+/**
+ * Convert the data orchestrator's `ConnectionSummary[]` into the shape
+ * the L2 `data.answer-question` skill expects (used by the fallback
+ * tree's literal `connections` binding, and by the session-context bag
+ * for trees that want the raw roster). Mirrors `connectionsToL2Input`
+ * in the legacy `answer-question-action.ts` adapter.
+ */
+function connectionsForL2(connections: readonly ConnectionSummary[]): Array<Record<string, unknown>> {
+  return connections.map(c => {
+    const out: Record<string, unknown> = { id: c.id, family: c.family };
+    if (c.kind  !== undefined) out['kind']  = c.kind;
+    if (c.label !== undefined) out['label'] = c.label;
+    return out;
+  });
 }
+
+// `stitchPlanSectionsDA` + `synthesiseFallbackActionDA` were the
+// stitcher + fallback for the flat plan-actions path; P6 replaced
+// them with `renderTreeReport` + `buildDataAnalyzerFallbackTree`.
