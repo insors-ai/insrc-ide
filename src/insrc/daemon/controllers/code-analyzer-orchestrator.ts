@@ -650,30 +650,31 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
   }
 
   /**
-   * Phase F synthesis driver. Cloud plans the sections (planActions);
-   * local drafts each one inside a `skill_invoke` tool loop
-   * (writeSectionWithTools); cloud reviews the draft (reviewAction);
-   * we stitch with no overall review. TodoList items track sections
-   * 1:1 -- pending while waiting, in-progress while drafting,
-   * complete on review accept.
+   * Synthesis driver (P6 of plans/planner-skill-tree.md). The cloud
+   * planner emits a typed skill tree (planTree); the executor walks it,
+   * calling skills via runSkill and resolving wires from the context
+   * bag (executeTree); the renderer stitches sections into the final
+   * markdown (renderTreeReport).
    *
-   * No legacy fallbacks: if planActions returns empty actions we
-   * fall through to `synthesiseFallbackAction` (one generic
-   * section); any other error bubbles up to `queueSynthesise` which
-   * emits an aborted-run placeholder.
+   * Legacy flat-plan path (planActions + writeSectionWithTools +
+   * reviewAction + stitchPlanSections) was deleted in P6.b.
+   *
+   * On planner failure, planTree returns the fallback tree (a single
+   * L2 `code.answer-question` leaf with the full question) so the
+   * orchestrator always has a tree to execute.
    */
   private async runPlanExpandReviewSynthesise(
-    ca: CodeAnalysisState | undefined,
-    tier: ScopeSize,
-    state: TaskStateStore,
+    ca:    CodeAnalysisState | undefined,
+    tier:  ScopeSize,
+    // `state` is no longer used by this driver after the P6.b cutover
+    // (per-section TodoList integration is a follow-up). Caller still
+    // passes it for parity with the data-side signature and to leave
+    // the surface stable when TodoList re-attachment lands.
+    _state: TaskStateStore,
   ): Promise<string> {
     if (this.deps === undefined) {
       throw new Error('runPlanExpandReviewSynthesise: deps not attached');
     }
-    // accepted is empty under Phase F (no bootstrap pipeline) but the
-    // fallback helper accepts it for type-compat with the legacy
-    // shape.
-    const accepted: readonly { task: AnalysisTask; result: AnalyzerResult }[] = [];
     const session = this.deps.session;
     const cloud = session.resolver.resolve('code-analyzer', 'plan');
     // Provider routing for sites that historically asked for the
@@ -695,14 +696,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     // Embeddings remain local-only regardless of this flag --
     // `provider.embed` is bound to the local Ollama embedding model
     // by design and is invoked via a different path.
-    const useLocal = session.config.analyzer?.useLocal === true;
-    const local = useLocal ? session.ollamaProvider : cloud;
-    if (!useLocal) {
-      log.info(
-        { provider: 'cloud-as-local' },
-        'code-analyzer: "local" LLM sites in this run route through the cloud provider (Haiku); set `analyzer.useLocal: true` in config.json to revert to Ollama',
-      );
-    }
     const request = ca?.request ?? '';
 
     // Lean summary context: repo descriptor + memory line.
@@ -711,28 +704,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     const synthBubble = 'synthesise';
     this.emitLiveStep(synthBubble, '');
 
-    // ----- Stage 1: plan (cloud, lean input) ----------------------------
-    this.emitMilestone(synthBubble, 'planning report sections...');
-
-    // TODO(plan-3-thread-subtype): subtype is hard-coded to 'review'
-    // here. Plan 3 (scope-classifier-subtype-extension) wires the
-    // classifier's subtype through to chat-handler; a follow-up
-    // commit will thread it from chat-handler -> orchestrator
-    // (likely on `this._tier` or a sibling field).
-    // Planner-discovery skill dispatcher uses the same default-
-    // cloud-for-local routing as buildSkillRunnerDeps. Embeddings
-    // remain local regardless (different code path).
-    const useLocalHere = session.config.analyzer?.useLocal === true;
-    const cloudProviderHere = session.claudeProvider ?? session.ollamaProvider;
-    const resolveProvider = (affinity: ProviderAffinity): LLMProvider => {
-      switch (affinity) {
-        case 'local': return useLocalHere ? session.ollamaProvider : cloudProviderHere;
-        case 'cloud': return cloudProviderHere;
-        case 'auto':  return useLocalHere
-          ? session.resolver.resolve('skill', 'default')
-          : cloudProviderHere;
-      }
-    };
     // ----- P6.b: tree-based planning + execution ------------------------
     // The flat planActionsInteractive + per-section runAnswerQuestionSection
     // loop is replaced by planTree + executeTree. The planner LLM emits a
@@ -754,9 +725,7 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
     //   - per-section TodoList integration dropped; the executor's
     //     onEvent stream still surfaces per-node progress. TodoList
     //     can be re-attached as a follow-up if the UX gap matters.
-    void resolveProvider;       // tree executor uses the cloud provider directly
-    void accepted;              // legacy plan-actions fallback input -- gone
-    void analysisTaskToSkillPlan; // unused after the cutover
+    this.emitMilestone(synthBubble, 'planning report sections...');
 
     // Catalog: skills the code-side planner may compose. Includes
     // shared composition skills and data-analyzer cross-domain skills.
@@ -837,10 +806,6 @@ export class CodeAnalyzerOrchestratorController implements TaskController {
 
     this.emitMilestone(synthBubble,
       `tree executed: ${executionResult.executedLeaves} ok / ${executionResult.failedLeaves} failed (${executionResult.durationMs}ms)`);
-
-    // `local` was used by the legacy per-section answer-question call;
-    // the tree executor handles provider routing per-skill.
-    void local;
 
     // ----- Render --------------------------------------------------------
     const md = renderTreeReport({

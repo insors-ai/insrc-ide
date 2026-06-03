@@ -103,11 +103,6 @@ import { stripFences } from '../../agent/tasks/_shared/json-extract.js';
 import { executeTool } from '../../agent/tools/executor.js';
 import { detectFilePaths } from '../../agent/tasks/data-analyzer/file-detect.js';
 import { acquirePool } from '../db/pool-cache.js';
-// category-materializer kept alive ONLY for the code-side orchestrator
-// (P6 cut over data side first; code side still uses the legacy flat
-// per-action loop). When code-side migrates, this whole module +
-// import can be deleted -- see plans/planner-skill-tree.md P6.b.
-import type { SkillOwner } from '../skills/types.js';
 // P6 of plans/planner-skill-tree.md -- tree planner + executor.
 import { planTree, type CatalogSkill } from '../../agent/content-gen/plan-tree-runner.js';
 import {
@@ -1002,7 +997,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
    * step ids and the analyzerLabel.
    */
   private async runPlanExpandReviewSynthesise(
-    accepted: readonly AcceptedTask[],
+    _accepted:   readonly AcceptedTask[],
     _executions: readonly PlanExecution[],
   ): Promise<string> {
     if (this.deps === undefined) {
@@ -1010,7 +1005,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     }
     const session = this.deps.session;
     const cloud = session.resolver.resolve('data-analyzer', 'plan');
-    const local = session.ollamaProvider;
     const reviewer = session.resolver.resolve('data-analyzer', 'review');
     const request = this._request ?? '';
 
@@ -1115,12 +1109,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       `[data-analyzer] executed=${executionResult.executedLeaves} failed=${executionResult.failedLeaves} ` +
       `(${executionResult.durationMs}ms)\n`);
     this.emitLiveStep(runStep, '', true);
-
-    // `local` + `accepted` were used by the legacy flat-plan path;
-    // the tree planner handles dispatch via the executor + context-bag
-    // resolution.
-    void local;
-    void accepted;
 
     // ----- Render --------------------------------------------------------
     return renderTreeReport({
