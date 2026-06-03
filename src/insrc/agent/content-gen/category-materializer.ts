@@ -21,7 +21,6 @@
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { listRepos } from '../../db/repos.js';
 import { findEntitiesByName } from '../../db/entities.js';
 import { detectFilePaths } from '../tasks/data-analyzer/file-detect.js';
 import { acquirePool } from '../../daemon/db/pool-cache.js';
