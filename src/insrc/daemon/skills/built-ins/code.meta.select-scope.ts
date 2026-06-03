@@ -95,6 +95,24 @@ interface SelectScopeInput {
 	 * conversation-flow-refinement.md Phase 4.
 	 */
 	readonly priorFacts?: PriorFacts;
+	/**
+	 * Materialized cross-category resources the L2 caller resolved
+	 * before dispatch. P6 of plans/planner-cross-category-skills.md.
+	 * Symmetric to the data-side select-scope: the LLM uses these to
+	 * fill `connectionId` / `path` / `absPath` slots on cross-owner
+	 * candidate skills whose required args can't be derived from
+	 * `repo` alone (typically data-owned skills dispatched from the
+	 * code side).
+	 */
+	readonly crossCategoryResources?: readonly CrossCategoryResource[];
+}
+
+interface CrossCategoryResource {
+	readonly category:      string;
+	readonly repoPath?:     string;
+	readonly connectionId?: string;
+	readonly absPath?:      string;
+	readonly label?:        string;
 }
 
 interface PriorFacts {
@@ -227,6 +245,19 @@ const PRIOR_FACTS_SCHEMA = {
 	additionalProperties: false,
 } as const;
 
+const CROSS_CATEGORY_RESOURCE_SCHEMA = {
+	type: 'object',
+	properties: {
+		category:     { type: 'string', minLength: 1 },
+		repoPath:     { type: 'string' },
+		connectionId: { type: 'string' },
+		absPath:      { type: 'string' },
+		label:        { type: 'string' },
+	},
+	required: ['category'],
+	additionalProperties: false,
+} as const;
+
 const INPUT_SCHEMA = {
 	type: 'object',
 	properties: {
@@ -246,6 +277,18 @@ const INPUT_SCHEMA = {
 		allowedOwners: {
 			type:     'array',
 			items:    { type: 'string', minLength: 1 },
+			maxItems: 8,
+		},
+		/**
+		 * Materialized cross-category resources -- P6 of
+		 * plans/planner-cross-category-skills.md. Symmetric to the
+		 * data-side select-scope; rendered in the user prompt so the
+		 * LLM can fill cross-owner candidate args from the resolved
+		 * resource.
+		 */
+		crossCategoryResources: {
+			type:     'array',
+			items:    CROSS_CATEGORY_RESOURCE_SCHEMA,
 			maxItems: 8,
 		},
 	},
@@ -432,6 +475,30 @@ function buildUserMessage(input: SelectScopeInput, manifests: readonly Candidate
 		sections.push('Prior facts (from prior turns -- prefer these for label->identifier resolution):');
 		sections.push(...factLines);
 		sections.push('');
+	}
+
+	// P6: render cross-category resources so the LLM can fill
+	// `connectionId` / `path` / `absPath` on cross-owner candidate
+	// skills whose required args aren't satisfied by the active repo.
+	const resources = input.crossCategoryResources ?? [];
+	if (resources.length > 0) {
+		const resourceLines = resources.map(r => {
+			const parts = [`- category=${r.category}`];
+			if (r.label    !== undefined && r.label.length    > 0) parts.push(`label="${r.label}"`);
+			if (r.repoPath !== undefined && r.repoPath.length > 0) parts.push(`repoPath=${r.repoPath}`);
+			if (r.absPath  !== undefined && r.absPath.length  > 0) parts.push(`absPath=${r.absPath}`);
+			if (r.connectionId !== undefined && r.connectionId.length > 0) parts.push(`connectionId=${r.connectionId}`);
+			return parts.join(' ');
+		});
+		sections.push(
+			`Cross-category resources (${resourceLines.length}) -- use these to`,
+			'fill `connectionId`, `path`, `absPath`, or `repoPath` slots on',
+			'cross-owner candidate skills whose required args are NOT satisfied',
+			'by the active repo above. Match by `category` (candidate skill id',
+			'prefix names the category: `code.*` -> `code-analyzer`, `data.*` -> `data-analyzer`):',
+			...resourceLines,
+			'',
+		);
 	}
 
 	sections.push(

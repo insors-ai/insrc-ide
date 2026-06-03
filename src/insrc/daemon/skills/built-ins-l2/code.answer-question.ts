@@ -187,11 +187,16 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 	async run(invocation, deps): Promise<SkillOutput<AnswerOutput>> {
 		const { input } = invocation;
 
-		// Cross-category invocation context (P4 read; P5 wired through to
-		// the meta skills). See sibling notes in data.answer-question.ts.
+		// Cross-category invocation context. See sibling notes in
+		// data.answer-question.ts. P6: crossCategoryResources is also
+		// threaded into select-scope so cross-owner skill args can be
+		// filled from the materialized resource.
 		const ctx = invocation.invocationContext;
 		const requiredCategories = Array.isArray(ctx['requiredCategories'])
 			? (ctx['requiredCategories'] as readonly string[])
+			: [];
+		const crossCategoryResources = Array.isArray(ctx['crossCategoryResources'])
+			? (ctx['crossCategoryResources'] as ReadonlyArray<Record<string, unknown>>)
 			: [];
 		const allowedOwners = ['code-analyzer', ...requiredCategories];
 		const hasCrossCategory = requiredCategories.length > 0;
@@ -254,6 +259,9 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 			};
 			if (hasCrossCategory) {
 				scopeInput['allowedOwners'] = allowedOwners;
+				if (crossCategoryResources.length > 0) {
+					scopeInput['crossCategoryResources'] = crossCategoryResources;
+				}
 			}
 			scopeResult = await deps.callL1<unknown, SelectScopeShape>(
 				'code.meta.select-scope',

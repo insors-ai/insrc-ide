@@ -237,14 +237,19 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 	async run(invocation, deps): Promise<SkillOutput<AnswerOutput>> {
 		const { input } = invocation;
 
-		// Cross-category invocation context (P4 read; P5 wired through to
-		// the meta skills). The orchestrator's materializer stashes
-		// `requiredCategories` here; we compute the union with this skill's
-		// own owner and pass it to both classify-question and select-scope
-		// (the meta-skill schemas accept `allowedOwners` as of P5).
+		// Cross-category invocation context. P4 read; P5 wired through
+		// to classify-question; P6 also threads crossCategoryResources
+		// into select-scope so cross-owner candidate skills can have
+		// their `path` / `repoPath` / `connectionId` args filled from
+		// the orchestrator's materialized resources (otherwise the LLM
+		// emits "<UNKNOWN>" placeholders and code.source.* dispatches
+		// return empty).
 		const ctx = invocation.invocationContext;
 		const requiredCategories = Array.isArray(ctx['requiredCategories'])
 			? (ctx['requiredCategories'] as readonly string[])
+			: [];
+		const crossCategoryResources = Array.isArray(ctx['crossCategoryResources'])
+			? (ctx['crossCategoryResources'] as ReadonlyArray<Record<string, unknown>>)
 			: [];
 		const allowedOwners = ['data-analyzer', ...requiredCategories];
 		const hasCrossCategory = requiredCategories.length > 0;
@@ -305,6 +310,9 @@ const skill: L2Skill<AnswerQuestionInput, AnswerOutput> = {
 			};
 			if (hasCrossCategory) {
 				scopeInput['allowedOwners'] = allowedOwners;
+				if (crossCategoryResources.length > 0) {
+					scopeInput['crossCategoryResources'] = crossCategoryResources;
+				}
 			}
 			scopeResult = await deps.callL1<unknown, SelectScopeShape>(
 				'data.meta.select-scope',

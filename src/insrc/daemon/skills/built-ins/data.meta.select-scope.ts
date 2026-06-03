@@ -105,10 +105,27 @@ interface ConnectionInfo {
   readonly path?:  string;
 }
 
+/**
+ * One cross-category resource handle threaded through from the L2
+ * caller's invocationContext. Shape mirrors `CategoryResource` from
+ * `agent/content-gen/category-materializer.ts` but only the fields
+ * select-scope actually needs to fill args. The LLM uses these to
+ * populate `path` / `repoPath` / `connectionId` slots on cross-owner
+ * candidate skills that the connection roster alone can't satisfy.
+ */
+interface CrossCategoryResource {
+  readonly category:      string;             // 'code-analyzer' | 'data-analyzer' | ...
+  readonly repoPath?:     string;             // present for code-analyzer
+  readonly connectionId?: string;             // present for data-analyzer
+  readonly absPath?:      string;             // present for data-analyzer (file family)
+  readonly label?:        string;
+}
+
 interface SelectScopeInput {
-  readonly question:    string;
-  readonly candidates:  readonly CandidateIn[];
-  readonly connections: readonly ConnectionInfo[];
+  readonly question:                string;
+  readonly candidates:              readonly CandidateIn[];
+  readonly connections:             readonly ConnectionInfo[];
+  readonly crossCategoryResources?: readonly CrossCategoryResource[];
 }
 
 interface ResolvedScope {
@@ -172,6 +189,19 @@ const CANDIDATE_IN_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const CROSS_CATEGORY_RESOURCE_SCHEMA = {
+  type: 'object',
+  properties: {
+    category:     { type: 'string', minLength: 1 },
+    repoPath:     { type: 'string' },
+    connectionId: { type: 'string' },
+    absPath:      { type: 'string' },
+    label:        { type: 'string' },
+  },
+  required: ['category'],
+  additionalProperties: false,
+} as const;
+
 const INPUT_SCHEMA = {
   type: 'object',
   properties: {
@@ -187,6 +217,20 @@ const INPUT_SCHEMA = {
     allowedOwners: {
       type:     'array',
       items:    { type: 'string', minLength: 1 },
+      maxItems: 8,
+    },
+    /**
+     * Materialized cross-category resources (repoPath / connection /
+     * absPath) the L2 caller resolved before dispatch. The prompt
+     * renders these so the LLM can fill `path`, `repoPath`, etc. on
+     * cross-owner candidate skills whose required args can't be
+     * derived from `connections` alone. Fixes the "<UNKNOWN>" arg
+     * symptom on `code.source.*` skills dispatched from the data
+     * side. P6 of plans/planner-cross-category-skills.md.
+     */
+    crossCategoryResources: {
+      type:     'array',
+      items:    CROSS_CATEGORY_RESOURCE_SCHEMA,
       maxItems: 8,
     },
   },
@@ -328,6 +372,19 @@ function buildUserMessage(
     if (c.path  !== undefined && c.path.length > 0)  parts.push(`path=${c.path}`);
     return parts.join(' ');
   });
+  // P6: render cross-category resources so the LLM can fill
+  // `path` / `repoPath` / `connectionId` on candidate skills whose
+  // required args aren't satisfied by the data connection roster
+  // (typically code-owned skills dispatched from the data side).
+  const resources = input.crossCategoryResources ?? [];
+  const resourceLines = resources.map(r => {
+    const parts = [`- category=${r.category}`];
+    if (r.label    !== undefined && r.label.length    > 0) parts.push(`label="${r.label}"`);
+    if (r.repoPath !== undefined && r.repoPath.length > 0) parts.push(`repoPath=${r.repoPath}`);
+    if (r.absPath  !== undefined && r.absPath.length  > 0) parts.push(`absPath=${r.absPath}`);
+    if (r.connectionId !== undefined && r.connectionId.length > 0) parts.push(`connectionId=${r.connectionId}`);
+    return parts.join(' ');
+  });
   const candidateBlocks = input.candidates.map((c, i) => {
     const manifest = manifests.find(m => m.skillId === c.skillId);
     if (manifest === undefined) {
@@ -354,12 +411,26 @@ function buildUserMessage(
   // most-violated part of the contract on smaller / local models
   // when the schemas are buried mid-prompt and the action
   // instruction is the most-recent token.
-  return [
+  const lines: string[] = [
     `Question:`,
     input.question,
     '',
     `Available connections (${input.connections.length}):`,
     connLines.length > 0 ? connLines.join('\n') : '(none)',
+  ];
+  if (resourceLines.length > 0) {
+    lines.push(
+      '',
+      `Cross-category resources (${resourceLines.length}) -- use these to`,
+      'fill `path`, `repoPath`, `absPath`, or `connectionId` slots on',
+      'cross-owner candidate skills whose required args are NOT satisfied',
+      'by the connection roster above. Match the resource to the candidate',
+      'by `category` (the candidate\'s skill id prefix names the category:',
+      '`code.*` -> `code-analyzer`, `data.*` -> `data-analyzer`):',
+      resourceLines.join('\n'),
+    );
+  }
+  lines.push(
     '',
     'For each candidate below, emit one entry in `scoped` whose `args`',
     'satisfies the candidate\'s inputSchema. Every required property',
@@ -367,7 +438,8 @@ function buildUserMessage(
     '',
     `Candidates (${input.candidates.length}):`,
     candidateBlocks.length > 0 ? candidateBlocks.join('\n\n') : '(empty)',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
