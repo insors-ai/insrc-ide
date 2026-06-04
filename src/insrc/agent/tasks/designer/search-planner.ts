@@ -38,7 +38,7 @@ export async function planSearches(
 
   try {
     const response = await localProvider.complete(messages, {
-      maxTokens: 512,
+      maxTokens: 1024,
       temperature: 0.1,
     });
 

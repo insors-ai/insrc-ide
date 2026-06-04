@@ -216,7 +216,7 @@ export async function decompose(
 
     const response = await provider.complete(
       messages,
-      { maxTokens: 800, temperature: 0 },
+      { maxTokens: 1024, temperature: 0 },
     );
 
     // Try new primary/attached format first

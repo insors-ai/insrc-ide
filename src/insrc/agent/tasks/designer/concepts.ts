@@ -97,7 +97,7 @@ export async function classifyConcepts(
 
   try {
     const response = await provider.complete(messages, {
-      maxTokens: 300,
+      maxTokens: 1024,
       temperature: 0.1,
     });
 
@@ -301,7 +301,7 @@ export async function planConceptSearches(
 
   try {
     const response = await provider.complete(messages, {
-      maxTokens: 400,
+      maxTokens: 1024,
       temperature: 0.1,
     });
 
@@ -380,7 +380,7 @@ export async function runConceptExploration(
   let findings = '';
   try {
     const response = await provider.complete(analysisMessages, {
-      maxTokens: 800,
+      maxTokens: 1024,
       temperature: 0.2,
     });
     findings = response.text.trim();

@@ -1188,7 +1188,7 @@ async function resolveCommand(
   ];
 
   const response = await session.ollamaProvider.complete(messages, {
-    maxTokens: 200,
+    maxTokens: 1024,
     temperature: 0,
   });
 

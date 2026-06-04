@@ -72,7 +72,7 @@ Assess whether the goal has been met.`;
       const response = await ctx.providers.resolve('research', 'evaluate').complete([
         { role: 'system', content: EVAL_SYSTEM },
         { role: 'user', content: evalPrompt },
-      ], { maxTokens: 800, temperature: 0 });
+      ], { maxTokens: 1024, temperature: 0 });
 
       const text = response.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       evalResult = JSON.parse(text) as EvaluationResult;

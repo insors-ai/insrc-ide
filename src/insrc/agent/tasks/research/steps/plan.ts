@@ -80,7 +80,7 @@ export const planStep: AgentStep<ResearchState> = {
     const response = await ctx.providers.resolve('research', 'plan').complete([
       { role: 'system', content: PLAN_SYSTEM },
       { role: 'user', content: context },
-    ], { maxTokens: 1000, temperature: 0 });
+    ], { maxTokens: 1024, temperature: 0 });
 
     let plan: ResearchPlan;
     try {

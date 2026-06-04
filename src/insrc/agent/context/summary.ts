@@ -54,7 +54,7 @@ export async function evictToSummary(
 
   try {
     const response = await provider.complete(messages, {
-      maxTokens: 400,
+      maxTokens: 1024,
       temperature: 0,
     });
     return response.text.trim();

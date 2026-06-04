@@ -88,7 +88,7 @@ export async function recordFeedback(opts: RecordFeedbackFullOpts): Promise<void
     const response = await provider.complete([
       { role: 'system', content: prompt },
       { role: 'user', content: 'Generalize the feedback above.' },
-    ], { maxTokens: 256, temperature: 0.3 });
+    ], { maxTokens: 1024, temperature: 0.3 });
     generalized = response.text.trim();
   } catch (err) {
     log.warn({ err: String(err) }, 'LLM generalization failed, using raw feedback');

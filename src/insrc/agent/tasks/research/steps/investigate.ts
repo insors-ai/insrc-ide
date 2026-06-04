@@ -212,7 +212,7 @@ async function extractFindings(
     const response = await ctx.providers.resolve('research', 'investigate').complete([
       { role: 'system', content: EXTRACT_SYSTEM },
       { role: 'user', content: `Research goal: ${goal}\n\nTool result:\n${toolResult}` },
-    ], { maxTokens: 1000, temperature: 0 });
+    ], { maxTokens: 1024, temperature: 0 });
 
     const text = response.text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
     const parsed = JSON.parse(text) as { findings: Array<{ content: string; relevance: string }> };

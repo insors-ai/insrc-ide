@@ -239,7 +239,7 @@ async function runWebResearch(
   ];
 
   const queryResponse = await synthesisProvider.complete(queryMessages, {
-    maxTokens: 200,
+    maxTokens: 1024,
     temperature: 0.3,
   });
 

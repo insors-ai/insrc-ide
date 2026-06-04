@@ -145,7 +145,7 @@ function makePlanTask(userQuestion: string): Task {
     userMessage: userQuestion,
     searchHint: userQuestion,
     temperature: 0,
-    maxTokens: 1000,
+    maxTokens: 1024,
   };
 }
 
@@ -191,7 +191,7 @@ function makeEvaluateTask(index: number, userQuestion: string): Task {
     userMessage: `Goal: ${userQuestion}`,
     searchHint: userQuestion,
     temperature: 0,
-    maxTokens: 800,
+    maxTokens: 1024,
   };
 }
 

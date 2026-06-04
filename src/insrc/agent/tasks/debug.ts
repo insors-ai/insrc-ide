@@ -238,7 +238,7 @@ export async function runDebugPipeline(
       ];
 
       const summaryResponse = await localProvider.complete(summaryMessages, {
-        maxTokens: 300,
+        maxTokens: 1024,
         temperature: 0.1,
       });
 
@@ -253,7 +253,7 @@ export async function runDebugPipeline(
       ];
 
       const escalationResponse = await claudeProvider.complete(escalationMessages, {
-        maxTokens: 500,
+        maxTokens: 1024,
         temperature: 0.1,
       });
 

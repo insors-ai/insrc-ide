@@ -51,7 +51,7 @@ export const analyzeRequestStep: AgentStep<PlannerState> = {
     ];
 
     const response = await ctx.providers.resolve('planner', 'analyze').complete(messages, {
-      maxTokens: 1000,
+      maxTokens: 1024,
       temperature: 0.3,
     });
 
@@ -95,7 +95,7 @@ export const gatherContextStep: AgentStep<PlannerState> = {
         { role: 'user', content: state.input.message },
       ];
       const planResponse = await ctx.providers.resolve('planner', 'search').complete(planMessages, {
-        maxTokens: 800,
+        maxTokens: 1024,
         temperature: 0.2,
       });
       const parsed = JSON.parse(extractJson(planResponse.text)) as unknown;

@@ -48,7 +48,7 @@ export async function classifyFailure(opts: ClassifyOpts): Promise<FailureClassi
 
   try {
     const response = await provider.complete(messages, {
-      maxTokens: 500,
+      maxTokens: 1024,
       temperature: 0.1,
     });
 

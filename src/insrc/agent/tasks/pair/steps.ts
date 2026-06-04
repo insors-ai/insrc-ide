@@ -498,7 +498,7 @@ export const summarizeStep: AgentStep<PairState> = {
     ];
 
     const response = await provider.complete(messages, {
-      maxTokens: 1000,
+      maxTokens: 1024,
       temperature: 0.2,
     });
 

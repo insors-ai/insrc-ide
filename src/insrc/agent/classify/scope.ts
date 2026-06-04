@@ -87,7 +87,7 @@ export async function classifyScope(
 	let rawText: string;
 	try {
 		const response = await provider.complete(messages, {
-			maxTokens: 120,
+			maxTokens: 1024,
 			temperature: 0,
 		});
 		rawText = response.text;

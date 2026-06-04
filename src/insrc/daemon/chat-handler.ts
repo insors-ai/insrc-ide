@@ -2450,7 +2450,7 @@ async function tryLLMCommandExtraction(
     const commandProvider = session.resolver.resolve('classifier', 'command-extract');
     const response = await commandProvider.complete(
       messages,
-      { maxTokens: 256, temperature: 0.1 },
+      { maxTokens: 1024, temperature: 0.1 },
     );
 
     // Parse command from LLM response
@@ -2634,7 +2634,7 @@ async function executeWithRetry(
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `Command: ${currentCmd}\n\nError output:\n${result.output}\n\nExit code: ${result.exitCode}` },
         ],
-        { maxTokens: 256, temperature: 0.1 },
+        { maxTokens: 1024, temperature: 0.1 },
       );
 
       const fixText = fixResponse.text.trim();

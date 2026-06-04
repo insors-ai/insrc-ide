@@ -104,7 +104,7 @@ export async function validateWithClaude(
 
   try {
     const response = await validator.complete(prompt, {
-      maxTokens: 64,
+      maxTokens: 1024,
       temperature: 0,
     });
 
