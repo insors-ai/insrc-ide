@@ -39,6 +39,18 @@ export const PATHS = {
    * up on session close.
    */
   sessionTmp:  (sessionId: string): string => join(INSRC_DIR, 'tmp', sessionId),
+  /**
+   * Returns the per-report-run working-memory directory under the
+   * session's tmp dir. The orchestrator (planner-section-task-
+   * separation P3) writes one entry file per completed TODO here;
+   * the shape-the-memory step (P1.c) reads them back as the
+   * accumulating working-memory file. Lifetime per Q1: ephemeral by
+   * default, persisted only if the report completes successfully.
+   * Crash recovery (Q9): per-TODO atomic; mid-iteration crash loses
+   * only the in-flight TODO.
+   */
+  workingMemoryRun: (sessionId: string, runId: string): string =>
+    join(INSRC_DIR, 'tmp', sessionId, 'working-memory', runId),
   // Cache root for the Code Analyzer's multipass synthesis section
   // builder (Phase 5.C / content-gen). Per-section disk LRU; cache
   // key salts on the run's repoSnapshotId so a new commit
