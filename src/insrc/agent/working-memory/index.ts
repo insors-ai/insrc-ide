@@ -49,4 +49,11 @@ export {
 	type IncrementalUpdateTrace,
 	type ColdRebuildInput,
 	type LayerName,
+	type BulletCache,
+	type BulletCacheHit,
 } from './updater.js';
+
+export {
+	extractBullets,
+	type ExtractBulletsOpts,
+} from './bullet-extractor.js';

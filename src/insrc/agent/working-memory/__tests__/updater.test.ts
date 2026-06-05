@@ -36,8 +36,11 @@ import {
 	_renderFindingsForTest as renderFindings,
 	_enforceBudgetForTest as enforceBudget,
 	_tryParseSingleFieldForTest as tryParseSingleField,
+	_formatBulletsAsSemanticForTest as formatBulletsAsSemantic,
 	RECENT_ENTRY_WINDOW_VALUE,
 	COLD_REBUILD_GROWTH_MULTIPLIER_VALUE,
+	type BulletCache,
+	type BulletCacheHit,
 } from '../updater.js';
 import { createBudget } from '../../context/budget.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
@@ -53,13 +56,15 @@ interface RecordedCall {
 	readonly opts:     CompletionOpts;
 }
 
-function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
+function scriptedProvider(responses: readonly string[], opts: { embedVec?: number[] } = {}): { provider: LLMProvider; calls: RecordedCall[]; embedCalls: number } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
+	let embedCalls = 0;
+	const embedVec = opts.embedVec ?? [];
 	const provider = {
 		supportsTools: true,
-		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+		async complete(messages: LLMMessage[], optsArg: CompletionOpts = {}): Promise<LLMResponse> {
+			calls.push({ messages, opts: optsArg });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
@@ -68,9 +73,27 @@ function scriptedProvider(responses: readonly string[]): { provider: LLMProvider
 			return { text, stopReason: 'end_turn' };
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
-		async embed(): Promise<number[]> { return []; },
+		async embed(): Promise<number[]> {
+			embedCalls++;
+			return embedVec;
+		},
 	} as unknown as LLMProvider;
-	return { provider, calls };
+	return {
+		provider,
+		calls,
+		get embedCalls() { return embedCalls; },
+	};
+}
+
+function fakeBulletCache(hits: readonly BulletCacheHit[]): { cache: BulletCache; calls: Array<{ vec: number[]; topK: number }> } {
+	const calls: Array<{ vec: number[]; topK: number }> = [];
+	const cache: BulletCache = {
+		async query(vec: number[], topK: number): Promise<readonly BulletCacheHit[]> {
+			calls.push({ vec, topK });
+			return hits;
+		},
+	};
+	return { cache, calls };
 }
 
 function makeBundle(overrides: Partial<MemoryShapeBundle> = {}): MemoryShapeBundle {
@@ -445,4 +468,131 @@ test('incrementalUpdate: layer caps enforced -- overlong values get truncated', 
 	assert.ok(result.bundle.summary.length  <= budget.summary  * 3);
 	assert.ok(result.bundle.recent.length   <= budget.recent   * 3);
 	assert.ok(result.bundle.semantic.length <= budget.semantic * 3);
+});
+
+// ---------------------------------------------------------------------------
+// formatBulletsAsSemantic
+// ---------------------------------------------------------------------------
+
+test('formatBulletsAsSemantic: renders bullets with todoId prefix in order', () => {
+	const hits: BulletCacheHit[] = [
+		{ todoId: 't1', todoIndex: 0, bullet: 'fact A', score: 0.1 },
+		{ todoId: 't2', todoIndex: 1, bullet: 'fact B', score: 0.2 },
+		{ todoId: 't3', todoIndex: 2, bullet: 'fact C', score: 0.3 },
+	];
+	const out = formatBulletsAsSemantic(hits, 1000);
+	assert.equal(out, '- [t1] fact A\n- [t2] fact B\n- [t3] fact C');
+});
+
+test('formatBulletsAsSemantic: dedupes by exact bullet text, preserves first hit', () => {
+	const hits: BulletCacheHit[] = [
+		{ todoId: 't1', todoIndex: 0, bullet: 'fact A', score: 0.1 },
+		{ todoId: 't2', todoIndex: 1, bullet: 'fact A', score: 0.4 },   // dup
+		{ todoId: 't3', todoIndex: 2, bullet: 'fact B', score: 0.5 },
+	];
+	const out = formatBulletsAsSemantic(hits, 1000);
+	assert.equal(out, '- [t1] fact A\n- [t3] fact B');
+});
+
+test('formatBulletsAsSemantic: empty hits -> empty string', () => {
+	assert.equal(formatBulletsAsSemantic([], 1000), '');
+});
+
+test('formatBulletsAsSemantic: enforces budget cap on rendered output', () => {
+	const hits: BulletCacheHit[] = Array.from({ length: 20 }, (_, i) => ({
+		todoId:    `t${i}`,
+		todoIndex: i,
+		bullet:    'x'.repeat(50),
+		score:     i * 0.01,
+	}));
+	const out = formatBulletsAsSemantic(hits, 50);   // 50 tokens * 3 = 150 chars
+	assert.ok(out.length <= 150);
+});
+
+// ---------------------------------------------------------------------------
+// Bullet-cache integration in incrementalUpdate
+// ---------------------------------------------------------------------------
+
+test('incrementalUpdate: bulletCache provided + non-empty embedding -> semantic skips LLM', async () => {
+	const { provider, calls } = scriptedProvider([
+		layerResponse('summary', 'fresh summary'),
+		layerResponse('recent',  '- recent X'),
+		// NO semantic response -- cache supplies it.
+	], { embedVec: [0.1, 0.2, 0.3] });
+	const { cache, calls: cacheCalls } = fakeBulletCache([
+		{ todoId: 't-prior', todoIndex: 0, bullet: 'NameNode FSImage persists inode tree', score: 0.05 },
+		{ todoId: 't-prior', todoIndex: 0, bullet: 'BlockManager owns BlocksMap',          score: 0.07 },
+	]);
+	const result = await incrementalUpdate(provider, {
+		priorBundle:   makeBundle(),
+		priorEntries:  [],
+		newEntry:      makeEntry(),
+		nextObjective: 'next thing',
+		budget:        createBudget(16_384),
+	}, { bulletCache: { cache, topK: 5 } });
+
+	assert.equal(calls.length, 2);            // summary + recent only
+	assert.equal(result.trace.llmCallsCount, 2);
+	assert.equal(cacheCalls.length, 1);
+	assert.equal(cacheCalls[0]!.topK, 5);
+	assert.match(result.bundle.semantic, /NameNode FSImage persists inode tree/);
+	assert.match(result.bundle.semantic, /BlockManager owns BlocksMap/);
+});
+
+test('incrementalUpdate: bulletCache provided BUT provider.embed returns [] -> falls back to LLM semantic', async () => {
+	const { provider, calls } = scriptedProvider([
+		layerResponse('summary',  's'),
+		layerResponse('recent',   'r'),
+		layerResponse('semantic', 'llm-based semantic'),   // LLM fallback still called
+	], { embedVec: [] });
+	const { cache, calls: cacheCalls } = fakeBulletCache([
+		{ todoId: 't', todoIndex: 0, bullet: 'should not appear', score: 0.1 },
+	]);
+	const result = await incrementalUpdate(provider, {
+		priorBundle:   makeBundle(),
+		priorEntries:  [],
+		newEntry:      makeEntry(),
+		nextObjective: 'next',
+		budget:        createBudget(16_384),
+	}, { bulletCache: { cache } });
+
+	assert.equal(calls.length, 3);            // fallback ran the LLM call
+	assert.equal(result.trace.llmCallsCount, 3);
+	assert.equal(cacheCalls.length, 0);       // cache never queried
+	assert.equal(result.bundle.semantic, 'llm-based semantic');
+});
+
+test('incrementalUpdate: bulletCache provided + topK omitted -> defaults to 10', async () => {
+	const { provider } = scriptedProvider([
+		layerResponse('summary', 's'),
+		layerResponse('recent',  'r'),
+	], { embedVec: [0.5] });
+	const { cache, calls: cacheCalls } = fakeBulletCache([]);
+	await incrementalUpdate(provider, {
+		priorBundle:   makeBundle(),
+		priorEntries:  [],
+		newEntry:      makeEntry(),
+		nextObjective: 'next',
+		budget:        createBudget(16_384),
+	}, { bulletCache: { cache } });
+	assert.equal(cacheCalls.length, 1);
+	assert.equal(cacheCalls[0]!.topK, 10);
+});
+
+test('incrementalUpdate: bulletCache provided + zero hits -> semantic is empty (no LLM fallback)', async () => {
+	const { provider, calls } = scriptedProvider([
+		layerResponse('summary', 's'),
+		layerResponse('recent',  'r'),
+		// No semantic call -- a 0-hit cache result is honored as "nothing relevant", not as an error.
+	], { embedVec: [0.5] });
+	const { cache } = fakeBulletCache([]);
+	const result = await incrementalUpdate(provider, {
+		priorBundle:   makeBundle(),
+		priorEntries:  [],
+		newEntry:      makeEntry(),
+		nextObjective: 'next',
+		budget:        createBudget(16_384),
+	}, { bulletCache: { cache } });
+	assert.equal(calls.length, 2);
+	assert.equal(result.bundle.semantic, '');
 });

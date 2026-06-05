@@ -114,6 +114,37 @@ export interface IncrementalUpdateOpts {
 	 * call is the bottleneck on small reports.
 	 */
 	readonly skipRecentPolish?: boolean;
+	/**
+	 * If set, the `semantic` layer is filled from the bullet cache
+	 * (P1.e) instead of the LLM-based incremental call. The updater
+	 * embeds `nextObjective` via `provider.embed()` and queries the
+	 * cache for top-K relevant bullets. If `provider.embed()` returns
+	 * an empty vector (cloud provider; embeddings are local-only --
+	 * see CLAUDE.md), the updater falls back to the LLM path silently.
+	 *
+	 * `topK` defaults to 10 (matching the per-TODO bullet ceiling).
+	 */
+	readonly bulletCache?: {
+		readonly cache: BulletCache;
+		readonly topK?: number | undefined;
+	} | undefined;
+}
+
+/**
+ * Minimal cache interface the updater needs. The Lance-backed
+ * implementation lives in `db/lance/working-memory-bullets.ts`; tests
+ * can inject a hand-rolled mock without spinning up LanceDB.
+ */
+export interface BulletCache {
+	query(queryEmbedding: number[], topK: number): Promise<readonly BulletCacheHit[]>;
+}
+
+export interface BulletCacheHit {
+	readonly todoId:    string;
+	readonly todoIndex: number;
+	readonly bullet:    string;
+	/** ANN distance (lower = more relevant). Caller may use for tie-breaking. */
+	readonly score:     number;
 }
 
 export type LayerName = 'system' | 'summary' | 'recent' | 'semantic' | 'code';
@@ -359,7 +390,7 @@ async function updateRecent(
 	return { value: polished, llmCalled: true };
 }
 
-async function updateSemantic(
+async function updateSemanticViaLLM(
 	provider: LLMProvider,
 	prior: string,
 	newEntry: WorkingMemoryEntry,
@@ -387,6 +418,61 @@ async function updateSemantic(
 		'Emit the JSON object with the updated `semantic` bullet list now.',
 	].join('\n');
 	return callSingleLayerUpdate(provider, { system, user, layerName: 'semantic', budgetTokens });
+}
+
+/**
+ * Resolve the `semantic` layer: prefer the bullet cache (cheap ANN
+ * lookup) when available, fall back to the LLM-based incremental
+ * update otherwise. Returns the resolved string + whether an LLM call
+ * was used (for the trace's llmCallsCount accounting).
+ */
+async function updateSemantic(
+	provider: LLMProvider,
+	prior: string,
+	newEntry: WorkingMemoryEntry,
+	nextObjective: string,
+	budgetTokens: number,
+	cacheOpts: IncrementalUpdateOpts['bulletCache'],
+): Promise<{ value: string; usedCache: boolean; llmCalled: boolean }> {
+	if (cacheOpts !== undefined) {
+		const queryVec = await provider.embed(nextObjective);
+		if (queryVec.length > 0) {
+			const topK = Math.max(1, cacheOpts.topK ?? 10);
+			const hits = await cacheOpts.cache.query(queryVec, topK);
+			const formatted = formatBulletsAsSemantic(hits, budgetTokens);
+			return { value: formatted, usedCache: true, llmCalled: false };
+		}
+		log.warn('updateSemantic: provider.embed returned empty vector; falling back to LLM-based semantic update');
+	}
+	const llmValue = await updateSemanticViaLLM(provider, prior, newEntry, nextObjective, budgetTokens);
+	return { value: llmValue, usedCache: false, llmCalled: true };
+}
+
+/**
+ * Render a deterministic semantic layer from the bullet-cache hits.
+ * Dedupes by exact bullet text (the model occasionally emits
+ * near-duplicates across TODOs), preserves order by ANN distance,
+ * tags each bullet with its source TODO so the downstream planner can
+ * see when the same fact appeared in multiple investigations.
+ */
+function formatBulletsAsSemantic(
+	hits: readonly BulletCacheHit[],
+	budgetTokens: number,
+): string {
+	if (hits.length === 0) {
+		return '';
+	}
+	const seen = new Set<string>();
+	const lines: string[] = [];
+	for (const hit of hits) {
+		const key = hit.bullet.trim();
+		if (seen.has(key)) {
+			continue;
+		}
+		seen.add(key);
+		lines.push(`- [${hit.todoId}] ${key}`);
+	}
+	return enforceBudget(lines.join('\n'), budgetTokens);
 }
 
 function updateCode(prior: string, newEntry: WorkingMemoryEntry, budgetTokens: number): string {
@@ -445,14 +531,17 @@ export async function incrementalUpdate(
 	}
 	layersUpdated.push('recent');
 
-	const semanticValue = await updateSemantic(
+	const semanticResult = await updateSemantic(
 		provider,
 		input.priorBundle.semantic,
 		input.newEntry,
 		input.nextObjective,
 		input.budget.semantic,
+		opts.bulletCache,
 	);
-	llmCallsCount += 1;
+	if (semanticResult.llmCalled) {
+		llmCallsCount += 1;
+	}
 	layersUpdated.push('semantic');
 
 	const codeValue = updateCode(
@@ -468,7 +557,7 @@ export async function incrementalUpdate(
 		system:   systemValue,
 		summary:  summaryValue,
 		recent:   recentResult.value,
-		semantic: semanticValue,
+		semantic: semanticResult.value,
 		code:     codeValue,
 	};
 
@@ -538,3 +627,7 @@ export const RECENT_ENTRY_WINDOW_VALUE   = RECENT_ENTRY_WINDOW;
 export const COLD_REBUILD_GROWTH_MULTIPLIER_VALUE = COLD_REBUILD_GROWTH_MULTIPLIER;
 
 export const _countTokensForTest = countTokens;
+
+// Surfaces the bullet-formatter so tests can pin its dedupe + budget
+// behavior without going through the full incrementalUpdate path.
+export const _formatBulletsAsSemanticForTest = formatBulletsAsSemantic;

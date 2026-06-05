@@ -1113,16 +1113,21 @@ operational rollback.
   `qwen3_6_needs_think_false`), un-gated from tool presence.
   Memory-shape calls pass `disableThinking: true`.
 
-**Deferred to P1.e (separate commit):**
+**Delivered in P1.e:**
 - Per-TODO semantic-bullet cache (LanceDB table
-  `working_memory_bullets`, 5-10 prompt-agnostic facts per
-  completed TODO, ANN-retrieved at the next shaping step). The
-  bullet cache is the major cost mitigation for Hadoop-sized
-  semantic layer rebuilds, but it is independent of the
-  incremental update structure. Splitting it off keeps each
-  commit reviewable and lets the orchestrator (P3-P5) integrate
-  against the cheaper semantic path first; the cache slots in
-  as a drop-in replacement for `updateSemantic`.
+  `working_memory_bullets`). 5-10 prompt-agnostic facts per
+  completed TODO, embedded via the local Ollama embedding model,
+  ANN-retrieved at the next shaping step. Cache scope is per-
+  report-run; orchestrator owns lifecycle (delete on run
+  completion / failure).
+- `extractBullets()` LLM call (prompt-agnostic key facts
+  extraction; clamped 5-10 bullets per TODO; degrades to []
+  on parse failure rather than failing the TODO transition).
+- `BulletCache` interface on `IncrementalUpdateOpts`. When set
+  AND `provider.embed()` returns a non-empty vector, the
+  updater queries the cache instead of running the LLM-based
+  `updateSemantic`. Cloud providers (which return [] from
+  `embed()` per CLAUDE.md) fall back to the LLM path silently.
 
 **Acceptance:**
 - Unit tests for chunked path on a Hadoop-sized fixture (parity
