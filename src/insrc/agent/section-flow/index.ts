@@ -1,8 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Copyright (c) Procix Software India. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 /**
  * Section-flow orchestrator module (planner-section-task-separation
  * P2-P5). P2 lands Step 1 (Scope) + Step 2 (Investigation Plan);

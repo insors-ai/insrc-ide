@@ -127,6 +127,7 @@ export default tseslint.config(
 		files: [
 			'src/vs/workbench/contrib/insrc/**/*.ts',
 			'src/vs/platform/insrc/**/*.ts',
+			'scripts/**/*.ts',
 		],
 		rules: {
 			'header/header': [
