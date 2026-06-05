@@ -88,3 +88,11 @@ export {
 	type RunSectionFlowTrace,
 	type ProgressEvent,
 } from './run-section-flow.js';
+
+export {
+	buildSkillExecutor,
+	resolveLeafInputs,
+	applyPath,
+	stringifySkillValue,
+	type LeafExecutorDeps,
+} from './leaf-executor.js';

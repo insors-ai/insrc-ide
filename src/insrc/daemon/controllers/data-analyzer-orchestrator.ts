@@ -112,6 +112,15 @@ import {
 } from '../../agent/content-gen/plan-tree-helpers.js';
 import { countLeaves as countLeavesQuick } from '../../agent/content-gen/plan-tree.js';
 import { executeTree, type TreeExecutionEvent } from '../skills/tree/executor.js';
+// planner-section-task-separation P5.b.1 cutover: section-flow pipeline.
+import {
+  runSectionFlow,
+  buildSkillExecutor,
+  type RunSectionFlowResult,
+  type L2Fallback,
+} from '../../agent/section-flow/index.js';
+import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
+import { PATHS } from '../../shared/paths.js';
 
 const log = getLogger('data-analyzer:orchestrator');
 
@@ -540,123 +549,148 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       return null;
     }
 
+    // ----- planner-section-task-separation P5.b.1 cutover ------------------
+    //
+    // Replaces the meta-skills pipeline body with `runSectionFlow`. The new
+    // pipeline runs Scope (Step 1) -> Investigation Plan (Step 2) ->
+    // per-TODO orchestrator (P3) -> final report (P4) end-to-end and
+    // returns the assembled markdown. Per-TODO skill execution flows
+    // through `buildSkillExecutor`, which resolves `inputs.{node, literal,
+    // question, context}` bindings against prior outputs and invokes
+    // `runSkill(leaf.skill, resolvedInput, runnerDeps)`. The L2 fallback
+    // (Q10) calls `data.answer-question` when a TODO's section tree
+    // cannot produce a coherent result.
+    //
+    // Legacy paths kept as unreachable code in this commit so revert is
+    // one click; P5.b.2 deletes them.
     const ca = state.get<DataAnalysisState>(K_STATE)!;
-    log.info(
-      { connections: this._connections.length, tier: this._tier },
-      'afterSkillsRoutingBootstrap: running meta-skills pipeline',
-    );
-
     const session = this.deps.session;
-    const pipelineResult = await runSkillsPipeline(
-      { question: this._request, connections: this._connections },
-      {
-        session,
-        resolveProvider: (affinity) => {
-          // Skills-plan §7.1: cloud affinity → active cloud
-          // provider's small/fast tier. The session resolver
-          // ('skill', 'meta') returns whatever the user has bound
-          // for the meta step; falls back to the active provider's
-          // default. For local affinity we reach into ollamaProvider
-          // directly since the resolver doesn't gate on local.
-          if (affinity === 'local') return session.ollamaProvider;
-          if (affinity === 'cloud') return session.claudeProvider ?? session.ollamaProvider;
-          return session.resolver.resolve('data-analyzer', 'meta');
-        },
-        ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+    const runId = `dr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const workingMemoryDir = PATHS.workingMemoryRun(session.id, runId);
+
+    const resolveProvider = (affinity: 'local' | 'cloud' | 'auto') => {
+      if (affinity === 'local') { return session.ollamaProvider; }
+      if (affinity === 'cloud') { return session.claudeProvider ?? session.ollamaProvider; }
+      return session.resolver.resolve('data-analyzer', 'meta');
+    };
+
+    const runnerDeps: SkillRunnerDeps = {
+      session,
+      resolveProvider,
+      ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
+    };
+
+    const executeLeaf = buildSkillExecutor({
+      runnerDeps,
+      userQuestion: this._request,
+      contextBag: {
+        sessionId:    session.id,
+        codeRepoPath: session.repoPath ?? '',
+        primaryConnection: this._connections[0]?.id ?? '',
       },
-    );
+    });
 
-    log.info(
-      {
-        aborted: pipelineResult.aborted,
-        executions: pipelineResult.executions.length,
-        finalConfidence: pipelineResult.finalConfidence,
-        notes: pipelineResult.notes.slice(0, 3),
-      },
-      'afterSkillsRoutingBootstrap: pipeline complete',
-    );
+    const l2Fallback: L2Fallback = async ({ todo, memory, reason }) => {
+      try {
+        const result = await runSkill<unknown, { answer?: string }>(
+          'data.answer-question',
+          {
+            question: todo.objective,
+            context: [
+              memory.system, memory.summary, memory.recent, memory.semantic, memory.code,
+            ].filter(s => s.length > 0).join('\n\n'),
+          },
+          runnerDeps,
+        );
+        const value = result.value as { answer?: string } | undefined;
+        const answer = typeof value?.answer === 'string' ? value.answer.trim() : '';
+        return answer.length > 0
+          ? answer
+          : `_(L2 fallback returned no content for "${todo.objective}"; reason: ${reason})_`;
+      } catch (err) {
+        log.warn({ err: (err as Error).message, todoId: todo.id }, 'L2 fallback failed');
+        return `_(L2 fallback failed for "${todo.objective}": ${(err as Error).message})_`;
+      }
+    };
 
-    // Aborted run → mark cancelled + finalise. The pipeline's notes
-    // surface in the report's empty-state body via the synthesise
-    // step (which still runs, producing a minimal report explaining
-    // why the pipeline aborted).
-    if (pipelineResult.aborted) {
-      state.set(K_STATE, { ...ca, cancelled: false });    // not user-cancelled; pipeline declined to proceed
-      state.set(K_PLAN_TASKS, []);
-      state.set(K_ACCEPTED, [] as AcceptedTask[]);
-      state.set(K_HISTORY, [] as DataAnalyzerResult[]);
-      // Stash pipeline notes as the synthesise step's input so the
-      // report body explains the abort reason instead of being
-      // silently empty.
-      state.set('skills-pipeline-notes' as string as never, pipelineResult.notes);
-      return this.queueSynthesise(state);
-    }
+    // Section-flow's planner / shape / review calls use the highest-
+    // quality provider available. Defaults to the active cloud provider
+    // when one is configured (matches the prior synthesise step's
+    // resolver choice); falls back to local Ollama otherwise.
+    const sectionFlowProvider = session.claudeProvider ?? session.ollamaProvider;
 
-    // Adapt pipeline → legacy shapes the synthesise step consumes.
-    const itemPrefix = `dr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const accepted = pipelineResultToAcceptedTasks(pipelineResult, itemPrefix);
-    const planned: DataAnalysisTask[] = accepted.map(a => a.task);
-    const history: DataAnalyzerResult[] = accepted.map(a => a.result);
-
-    state.set(K_PLAN_TASKS, planned);
-    state.set(K_ACCEPTED, accepted);
-    state.set(K_HISTORY, history);
-
-    // Persist the raw PerSkillExecution[] for the plan-actions
-    // synthesis (Phase 5 of plans/analyzers/cloud-plan-local-expand-
-    // cloud-review.md). Same lossy-conversion concern as the code-
-    // analyzer side: pipelineResultToAcceptedTasks turns each
-    // structured value into an `answer` string.
-    state.set(K_RAW_EXECUTIONS, pipelineResult.executions);
-
-    // Create the TodoList + items so the user sees the per-skill
-    // runs in the chat panel. `_persistTaskList` walks `planned`,
-    // calls addItem per task, and stamps the resulting framework-
-    // assigned ids back onto K_PLAN_TASKS. After it returns we
-    // re-stamp the matching `AcceptedTask` records so synthesise
-    // sees consistent itemIds.
-    await this._persistTaskList(planned, state);
-    const stampedPlan = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? planned;
-    const stampedAccepted: AcceptedTask[] = stampedPlan.map((task, i) => ({
-      task,
-      result: { ...accepted[i]!.result, itemId: task.itemId },
-    }));
-    state.set(K_ACCEPTED, stampedAccepted);
-    state.set(K_HISTORY, stampedAccepted.map(a => a.result));
-
-    // Stamp per-skill metadata onto each TodoItem so the pane row
-    // renderer + drill-down footer have something to show. Mark
-    // each item complete since the skill already ran.
-    if (this.deps.todos !== undefined) {
-      for (const a of stampedAccepted) {
-        try {
-          await this.deps.todos.updateItemMeta(a.task.itemId, {
-            kind: a.task.kind,
-            ...(a.task.scope !== undefined ? { scope: a.task.scope } : {}),
-            origin: a.task.origin,
-            retryCount: 0,
-            answer:    a.result.answer,
-            findings:  a.result.findings,
-            citations: a.result.citations,
-            confidence: a.result.confidence,
-            toolCalls:  a.result.toolCalls,
-            ...(a.result.truncated      ? { truncated: true } : {}),
-            ...(a.result.blockedReason !== undefined ? { blockedReason: a.result.blockedReason } : {}),
-          });
-          // Item state machine requires pending -> in_progress -> completed.
-          // markComplete() on pending throws.
-          await this.deps.todos.markInProgress(a.task.itemId);
-          await this.deps.todos.markComplete(a.task.itemId);
-        } catch (err) {
-          log.warn({ err, itemId: a.task.itemId }, 'skills-routing: updateItemMeta / markComplete failed');
-        }
+    // Create the workbench TodoList up front so `updateListBody` has
+    // somewhere to write the final report. Items per TODO (Q8 two-level
+    // visibility) are added in P6; v1 ships with just the list-level
+    // body write.
+    if (this.deps.todos !== undefined && this._listId === undefined) {
+      try {
+        const list = await this.deps.todos.createList({
+          sessionId:   session.id,
+          title:       `Data Analysis: ${this._request.slice(0, 60)}`,
+          description: this._request,
+          ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
+        });
+        this._listId = list.id;
+        state.set(K_STATE, { ...ca, listId: list.id });
+      } catch (err) {
+        log.warn({ err }, 'afterSkillsRoutingBootstrap: createList failed; proceeding without workbench list');
       }
     }
 
-    // Skills-routing skips the legacy review step (per-task review
-    // prompt assumes an LLM-generated analyzer output; skill results
-    // come pre-calibrated). Jump straight to synthesise.
-    return this.queueSynthesise(state);
+    this.emitLiveStep('section-flow', `[data-analyzer | tier=${this._tier}] running section-flow pipeline...\n`);
+
+    let result: RunSectionFlowResult;
+    try {
+      result = await runSectionFlow({
+        question:         this._request,
+        provider:         sectionFlowProvider,
+        executeLeaf,
+        l2Fallback,
+        runId,
+        workingMemoryDir,
+        onProgress: (event) => {
+          this.emitLiveStep('section-flow', `[${event.phase}] ${event.message}\n`);
+        },
+      });
+    } catch (err) {
+      const errMsg = (err as Error).message;
+      log.error({ err: errMsg }, 'runSectionFlow threw; emitting error report');
+      const fallbackMd = `# Data Analysis Report\n\n_Section-flow pipeline failed: ${errMsg}_\n\nSee the chat trace for details.`;
+      state.set(K_SYNTH_RESULT, fallbackMd);
+      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+      if (this.deps.todos !== undefined && this._listId !== undefined) {
+        try { await this.deps.todos.updateListBody(this._listId, fallbackMd); } catch { /* swallow */ }
+      }
+      this.emitLiveStep('section-flow', '', true);
+      return null;
+    }
+
+    log.info(
+      {
+        entryCount:           result.entries.length,
+        l2FallbackUsed:       result.trace.perTodo.some(t => t.l2FallbackUsed),
+        reportExhausted:      result.trace.reportReview.exhausted,
+        structuralReviseUsed: result.trace.reportReview.structuralReviseUsed,
+        addedScopeGapTodos:   result.trace.reportReview.addedScopeGapTodos.length,
+      },
+      'section-flow run complete',
+    );
+
+    state.set(K_SYNTH_RESULT, result.finalReport);
+    state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+    state.set(K_PLAN_TASKS, [] as DataAnalysisTask[]);
+
+    if (this.deps.todos !== undefined && this._listId !== undefined) {
+      try {
+        await this.deps.todos.updateListBody(this._listId, result.finalReport);
+      } catch (err) {
+        log.warn({ err }, 'afterSkillsRoutingBootstrap: updateListBody failed');
+      }
+    }
+
+    this.emitLiveStep('section-flow', '', true);
+    return null;
   }
 
   // -- analyze + review ----------------------------------------------------
@@ -1232,6 +1266,24 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     // sessions. On resume the new Session has an empty AccessStore;
     // the analyzer's first call against any connection will re-fire
     // the universal access gate (Phase 4 of plans/access-gate.md).
+
+    // planner-section-task-separation P5.b.1 resume shim (Q10
+    // migration note). Phases that the legacy per-task state machine
+    // produced are unreachable after the cutover -- if a session was
+    // mid-orchestration when the rollout happened, treat it as
+    // cancelled with a partial-report annotation. The user sees their
+    // prior body via finalize(); the new run won't try to drive the
+    // dead state machine into a phase that no longer exists.
+    const phase = state.get<DataAnalyzerPhase>(K_PHASE);
+    if (phase === 'planning' || phase === 'plan-approval' || phase === 'analyzing' || phase === 'reviewing' || phase === 'synthesising') {
+      log.warn({ phase }, 'restoreState: legacy phase encountered; marking as done with partial-report annotation');
+      const prior = state.get<string>(K_SYNTH_RESULT) ?? '';
+      const annotated = prior.length > 0
+        ? `${prior}\n\n<!-- section-flow: resumed-from-legacy-phase=${phase}; pipeline pre-cutover -->\n`
+        : `# Data Analysis Report\n\n_(Resumed from a pre-cutover phase ("${phase}"); the legacy per-task state machine no longer drives. Re-run the request to get a section-flow report.)_\n`;
+      state.set(K_SYNTH_RESULT, annotated);
+      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
+    }
   }
 
   buildResumeTask(state: TaskStateStore): Task {
