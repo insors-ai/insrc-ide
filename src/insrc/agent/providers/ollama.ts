@@ -85,6 +85,31 @@ function modelQuirks(model: string): ModelQuirks {
   }
 }
 
+/**
+ * Decide whether to suppress thinking on this call. Centralised so the
+ * `/no_think` prompt-prefix path and the structured `think: false` request
+ * field stay in lockstep.
+ *
+ * Fires when the family quirk applies AND either:
+ *   (a) tools are present (tool-loop calls don't benefit from thinking,
+ *       and the per-turn latency hit is material), OR
+ *   (b) the caller explicitly set `disableThinking: true` (tool-less
+ *       structured-JSON callers like memory shaping; qwen3.6 emits
+ *       empty bodies otherwise).
+ */
+function shouldDisableThinking(
+  quirks: ModelQuirks,
+  hasTools: boolean,
+  disableThinkingOpt: boolean | undefined,
+): boolean {
+  return quirks.noThinkOnTools && (hasTools || disableThinkingOpt === true);
+}
+
+// Test-only re-export. Underscore-prefixed per the existing convention
+// (see _buildSystemParamForTest in anthropic.ts, _extractUsageForTest, etc.).
+export const _shouldDisableThinkingForTest = shouldDisableThinking;
+export const _modelQuirksForTest = modelQuirks;
+
 export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
   private readonly client: Ollama;
@@ -136,7 +161,17 @@ export class OllamaProvider implements LLMProvider {
     // back via the structured wire format. Other families ignore it
     // (or, for Mistral-family, would just see literal /no_think as
     // dead text -- skip it).
-    if (this.quirks.noThinkOnTools && tools && tools.length > 0 && ollamaMessages.length > 0 && ollamaMessages[0]!.role === 'system') {
+    //
+    // Fires when EITHER:
+    //   (a) the family quirk applies AND tools are present (tool-loop
+    //       calls don't benefit from thinking), OR
+    //   (b) the caller explicitly set `disableThinking: true` (tool-
+    //       less structured-JSON callers like memory shaping; the
+    //       /no_think prefix is a no-op on qwen3.6+ models -- the
+    //       structured `think: false` field below is what those need
+    //       -- but prefix is harmless and helps qwen3-coder).
+    const wantNoThink = shouldDisableThinking(this.quirks, tools !== undefined && tools.length > 0, opts.disableThinking);
+    if (wantNoThink && ollamaMessages.length > 0 && ollamaMessages[0]!.role === 'system') {
       const sys = ollamaMessages[0]!;
       if (!sys.content.startsWith('/no_think')) {
         sys.content = `/no_think\n${sys.content}`;
@@ -222,7 +257,12 @@ export class OllamaProvider implements LLMProvider {
     // above; sending the field is harmless for non-thinking models. Tool-loop
     // calls (the model is just picking the next tool) don't benefit from
     // thinking and the latency hit per turn is material.
-    const disableThinking = this.quirks.noThinkOnTools && tools !== undefined && tools.length > 0;
+    //
+    // Same dual-trigger as the prefix path above: family quirk + tools, OR
+    // the caller explicitly set `disableThinking: true`. qwen3.6 specifically
+    // needs the structured `think: false` field -- the prompt prefix is a
+    // no-op on that family. See shouldDisableThinking().
+    const disableThinking = shouldDisableThinking(this.quirks, tools !== undefined && tools.length > 0, opts.disableThinking);
     // Prompt caching: Ollama caches KV state when consecutive calls
     // share a prompt prefix AND the model is still loaded. `keep_alive`
     // controls how long the daemon keeps the model in memory after a

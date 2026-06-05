@@ -155,6 +155,23 @@ export interface CompletionOpts {
    * client-side retry path for the residual non-compliance.
    */
   toolChoice?: 'auto' | 'required' | 'none' | { readonly name: string } | undefined;
+  /**
+   * Force the Ollama provider to send `think: false` on the request,
+   * suppressing thinking-mode emission on qwen3.x and other
+   * thinking-capable models even when no tools are present.
+   *
+   * Why: the provider's default behavior gates `think: false` on
+   * `tools.length > 0` (tool-loop calls don't benefit from thinking
+   * and the per-turn latency hit is material). Tool-less structured
+   * JSON callers (e.g. memory-shape extraction) need the same gate
+   * un-set, otherwise qwen3.6 burns its output budget on hidden
+   * `<think>...</think>` tokens and emits an empty body.
+   *
+   * Silent no-op on non-Ollama providers and on Ollama models whose
+   * family doesn't honor `think` (e.g. mistral). Set explicitly per-
+   * call; do not enable globally.
+   */
+  disableThinking?: boolean | undefined;
 }
 
 export interface LLMProvider {
