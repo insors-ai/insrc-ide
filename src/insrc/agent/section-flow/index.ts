@@ -43,3 +43,15 @@ export {
 	type LeafExecutionInput,
 	type ExecuteLeaf,
 } from './step-root-execution.js';
+
+export {
+	assembleSection,
+	type SectionAssemblyInput,
+	type SectionAssemblyResult,
+} from './step-section-assembly.js';
+
+export {
+	reviewSection,
+	type SectionReviewInput,
+	type SectionReviewResult,
+} from './step-section-review.js';
