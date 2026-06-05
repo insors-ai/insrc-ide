@@ -80,3 +80,11 @@ export {
 	type SectionContradictionResolver,
 	type ScopeGapResolver,
 } from './step-report-review.js';
+
+export {
+	runSectionFlow,
+	type RunSectionFlowInput,
+	type RunSectionFlowResult,
+	type RunSectionFlowTrace,
+	type ProgressEvent,
+} from './run-section-flow.js';

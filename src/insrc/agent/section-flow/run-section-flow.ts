@@ -1,0 +1,488 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/**
+ * Top-level section-flow orchestrator (planner-section-task-separation
+ * P5.a). One async function that wires P1 (working memory) + P2
+ * (Scope + Investigation Plan) + P3 (per-TODO body) + P4 (report
+ * assembler + review) into a single entrypoint the daemon controller
+ * invokes.
+ *
+ * Lifecycle:
+ *
+ *   1. Step 1 -- Scope.
+ *      `runScopeStep` produces { scope, subtype, contextRefs[],
+ *      isTrivial }. Repo signals threaded through when provided.
+ *
+ *   2. Step 2 -- Investigation Plan.
+ *      `runInvestigationPlan` produces the flat TODO list. Fast-path
+ *      (scope.isTrivial -> single-TODO plan) handled inside.
+ *
+ *   3. Working-memory init.
+ *      A WorkingMemoryStore is opened at the per-report-run
+ *      directory. Bullet cache (P1.e) is bound to the same runId.
+ *
+ *   4. Per-TODO loop.
+ *      For each TODO:
+ *        a. Decide cold-rebuild vs incremental memory shape
+ *           (shouldColdRebuild on the running memory-tokens count).
+ *        b. Run shape (single-call/chunked) OR incremental update.
+ *        c. Run the TODO orchestrator (P3.d): planner + per-root
+ *           execution + assembly + section review + L2 fallback.
+ *        d. Write the resulting WorkingMemoryEntry to the store.
+ *        e. Extract bullets and persist to the LanceDB cache.
+ *
+ *   5. Step 4 -- Final report.
+ *      `runReportReview` runs the assemble + review loop (Q7).
+ *      Resolvers for structural-revise (section-contradiction +
+ *      scope-gap) are bound here -- scope-gap delegates to a fresh
+ *      `runTodoOrchestrator` per appended TODO.
+ *
+ *   6. Cleanup.
+ *      Bullet cache entries for the run are dropped via
+ *      `deleteBulletsForRun(runId)`. The working-memory directory is
+ *      kept by default (Q1 lifetime; caller decides whether to wipe).
+ */
+
+import type { LLMProvider } from '../../shared/types.js';
+import {
+	openWorkingMemoryStore,
+	shapeMemory,
+	incrementalUpdate,
+	shouldColdRebuild,
+	extractBullets,
+	type MemoryShapeBundle,
+	type WorkingMemoryStore,
+	type BulletCache,
+	type BulletCacheHit,
+} from '../working-memory/index.js';
+import {
+	writeBullets,
+	searchBullets,
+	deleteBulletsForRun,
+} from '../../db/lance/working-memory-bullets.js';
+import type { WorkingMemoryEntry } from '../working-memory/types.js';
+import { createBudget, countTokens, type TokenBudget } from '../context/budget.js';
+import { runScopeStep } from './step-scope.js';
+import { runInvestigationPlan } from './step-investigation-plan.js';
+import {
+	runTodoOrchestrator,
+	type L2Fallback,
+	type TodoOrchestratorTrace,
+} from './todo-orchestrator.js';
+import type { ExecuteLeaf } from './step-root-execution.js';
+import type { ScopeStepResult, InvestigationPlanResult } from './types.js';
+import { reviewSection } from './step-section-review.js';
+import { assembleSection } from './step-section-assembly.js';
+import {
+	runReportReview,
+	type ReportReviewResult,
+	type SectionContradictionResolver,
+	type ScopeGapResolver,
+} from './step-report-review.js';
+import type { TodoSpec } from './types.js';
+import { getLogger } from '../../shared/logger.js';
+
+const log = getLogger('section-flow:run');
+
+// ---------------------------------------------------------------------------
+// Public input / output
+// ---------------------------------------------------------------------------
+
+export interface RunSectionFlowInput {
+	readonly question: string;
+	readonly provider: LLMProvider;
+	readonly executeLeaf: ExecuteLeaf;
+	readonly l2Fallback:  L2Fallback;
+	/** Per-report-run identifier. Used for the bullet-cache scope and the working-memory dir. */
+	readonly runId:       string;
+	/** Absolute path to the per-run working-memory directory (PATHS.workingMemoryRun). */
+	readonly workingMemoryDir: string;
+	/** Repo signals threaded into Step 1's scope classifier (optional). */
+	readonly repoSignals?: {
+		readonly fileCount?:        number;
+		readonly primaryLanguages?: readonly string[];
+		readonly topModules?:       readonly string[];
+	} | undefined;
+	/** Override the token budget; default 32k matches the offline-validated baseline. */
+	readonly budget?: TokenBudget | undefined;
+	/** numCtx threaded into shape decisions; default matches `budget.total`. */
+	readonly numCtx?:  number | undefined;
+	/** Skill-catalog hint string surfaced into the section planner. Empty string allowed. */
+	readonly catalogHint?: string | undefined;
+	/**
+	 * Optional progress callback the daemon controller wires to chat-
+	 * stream events. Called at each section-flow phase transition.
+	 * Best-effort -- failures here do not abort the run.
+	 */
+	readonly onProgress?: (event: ProgressEvent) => void;
+}
+
+export interface ProgressEvent {
+	readonly phase:   'scope' | 'plan' | 'todo-start' | 'todo-complete' | 'report-assemble' | 'report-review' | 'cleanup';
+	readonly message: string;
+	readonly meta?:   Record<string, unknown>;
+}
+
+export interface RunSectionFlowResult {
+	readonly finalReport: string;
+	readonly entries:     readonly WorkingMemoryEntry[];
+	readonly trace:       RunSectionFlowTrace;
+}
+
+export interface RunSectionFlowTrace {
+	readonly scope:             ScopeStepResult;
+	readonly investigationPlan: InvestigationPlanResult;
+	readonly perTodo:           readonly TodoOrchestratorTrace[];
+	readonly reportReview: {
+		readonly cyclesConsumed:       number;
+		readonly exhausted:            boolean;
+		readonly structuralReviseUsed: boolean;
+		readonly addedScopeGapTodos:   readonly TodoSpec[];
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSectionFlowResult> {
+	const budget = input.budget ?? createBudget(32_768);
+	const numCtx = input.numCtx ?? budget.total;
+	const store  = openWorkingMemoryStore(input.workingMemoryDir);
+	const cache  = makeBulletCache(input.runId);
+
+	const progress = (event: ProgressEvent): void => {
+		try {
+			input.onProgress?.(event);
+		} catch {
+			/* ignore progress callback errors */
+		}
+	};
+
+	// 1. Step 1 -- Scope.
+	progress({ phase: 'scope', message: 'classifying scope' });
+	const scopeArgs: Parameters<typeof runScopeStep>[0] = {
+		question: input.question,
+		provider: input.provider,
+	};
+	if (input.repoSignals !== undefined) {
+		(scopeArgs as { repoSignals?: NonNullable<RunSectionFlowInput['repoSignals']> }).repoSignals = input.repoSignals;
+	}
+	const scope = await runScopeStep(scopeArgs);
+	log.info({ scope: scope.scope, subtype: scope.subtype, isTrivial: scope.isTrivial }, 'scope step complete');
+
+	// 2. Step 2 -- Investigation plan.
+	progress({ phase: 'plan', message: 'building investigation plan' });
+	const investigationPlan = await runInvestigationPlan({
+		question: input.question,
+		scope,
+		provider: input.provider,
+	});
+	log.info({ todoCount: investigationPlan.todos.length, fastPath: investigationPlan.isFastPath }, 'investigation plan landed');
+
+	// 3. Per-TODO loop.
+	let priorBundle: MemoryShapeBundle | undefined;
+	let lastColdRebuildMemoryTokens = 0;
+	const perTodoTraces: TodoOrchestratorTrace[] = [];
+
+	// Caller passed `runId` via `input.runId`; carry to per-TODO loop.
+	for (let i = 0; i < investigationPlan.todos.length; i++) {
+		const todo = investigationPlan.todos[i]!;
+		progress({ phase: 'todo-start', message: `TODO ${i + 1}/${investigationPlan.todos.length}: ${todo.objective}`, meta: { todoId: todo.id, index: i } });
+
+		const memory = await prepareMemoryFor(todo, {
+			store,
+			cache,
+			priorBundle,
+			priorEntriesForRecent: await store.listEntries(),
+			lastColdRebuildMemoryTokens,
+			budget,
+			numCtx,
+			provider: input.provider,
+		});
+
+		const todoResult = await runTodoOrchestrator({
+			todo,
+			memory:      memory.bundle,
+			provider:    input.provider,
+			executeLeaf: input.executeLeaf,
+			l2Fallback:  input.l2Fallback,
+			...(input.catalogHint !== undefined ? { catalogHint: input.catalogHint } : {}),
+		});
+		perTodoTraces.push(todoResult.trace);
+		priorBundle = memory.bundle;
+
+		await store.write(i, todoResult.entry);
+
+		// Refresh the cold-rebuild baseline AFTER the new entry is on
+		// disk so the next iteration's growth comparison sees the
+		// post-write token count, not the pre-write 0.
+		if (memory.wasColdRebuild) {
+			const accumulatedText = await store.accumulatedMemoryText();
+			lastColdRebuildMemoryTokens = countTokens(accumulatedText);
+		}
+
+		// Bullets for the cache (best-effort; extraction failures are
+		// non-fatal -- the next TODO's semantic update falls back to the
+		// LLM path).
+		await persistBullets(todoResult.entry, input.runId, i, input.provider);
+
+		progress({
+			phase:   'todo-complete',
+			message: `TODO ${i + 1}/${investigationPlan.todos.length} complete${todoResult.trace.l2FallbackUsed ? ' (L2 fallback)' : ''}`,
+			meta:    { todoId: todo.id, l2: todoResult.trace.l2FallbackUsed, replans: todoResult.trace.replansConsumed },
+		});
+	}
+
+	// 4. Step 4 -- Final report assembly + review.
+	progress({ phase: 'report-assemble', message: 'assembling final report' });
+	const entriesForReport = (await store.listEntries()).map(e => e.entry);
+
+	const sectionResolver: SectionContradictionResolver = async ({ sectionIds, entries }) => {
+		// For each named section, re-run the section review against
+		// its existing markdown. If the reviewer accepts (which is the
+		// common case after the report-level reviewer's clarification),
+		// the entry stays; otherwise we record the new markdown.
+		const byId = new Map(entries.map(e => [e.todoId, e]));
+		const updated: WorkingMemoryEntry[] = [...entries];
+		for (let i = 0; i < updated.length; i++) {
+			const e = updated[i]!;
+			if (!sectionIds.includes(e.todoId)) { continue; }
+			const assembly = assembleSection({
+				todo:     { id: e.todoId, objective: e.objective, origin: e.origin },
+				tree:     { intentBrief: e.objective, root: { id: e.todoId, title: e.objective, objective: e.objective, kind: 'leaf', skill: 'shared.write-section', inputs: {}, emit: 'section' } },
+				findings: e.findings,
+			});
+			const sectionReview = await reviewSection({
+				todo:      { id: e.todoId, objective: e.objective, origin: e.origin },
+				memory:    priorBundle ?? { system: '', summary: '', recent: '', semantic: '', code: '' },
+				candidate: assembly.markdown.length > 0 ? assembly.markdown : e.detail,
+				findings:  e.findings,
+				provider:  input.provider,
+			});
+			if (sectionReview.finalMarkdown.length > 0 && sectionReview.finalMarkdown !== e.detail) {
+				updated[i] = { ...e, detail: sectionReview.finalMarkdown };
+				// Replace the on-disk entry too so resume sees the corrected version.
+				const idx = entries.findIndex(x => x.todoId === e.todoId);
+				if (idx >= 0) {
+					await store.write(idx, updated[i]!);
+				}
+			}
+		}
+		// Keep `byId` referenced for downstream type-check; it's a no-op
+		// hash table that we may swap in later when we add ordering
+		// guarantees.
+		void byId;
+		return updated;
+	};
+
+	const scopeGapResolver: ScopeGapResolver = async ({ proposedTodos }) => {
+		const newEntries: WorkingMemoryEntry[] = [];
+		for (let j = 0; j < proposedTodos.length; j++) {
+			const todo = proposedTodos[j]!;
+			const memory = await prepareMemoryFor(todo, {
+				store,
+				cache,
+				priorBundle,
+				priorEntriesForRecent: await store.listEntries(),
+				lastColdRebuildMemoryTokens,
+				budget,
+				numCtx,
+				provider: input.provider,
+			});
+			const todoResult = await runTodoOrchestrator({
+				todo,
+				memory:      memory.bundle,
+				provider:    input.provider,
+				executeLeaf: input.executeLeaf,
+				l2Fallback:  input.l2Fallback,
+				...(input.catalogHint !== undefined ? { catalogHint: input.catalogHint } : {}),
+			});
+			const newIndex = (await store.listEntries()).length;
+			await store.write(newIndex, todoResult.entry);
+			await persistBullets(todoResult.entry, input.runId, newIndex, input.provider);
+			newEntries.push(todoResult.entry);
+		}
+		return newEntries;
+	};
+
+	progress({ phase: 'report-review', message: 'reviewing final report' });
+	const reportResult: ReportReviewResult = await runReportReview({
+		question: input.question,
+		entries:  entriesForReport,
+		provider: input.provider,
+		resolveSectionContradiction: sectionResolver,
+		resolveScopeGap:             scopeGapResolver,
+	});
+
+	// 5. Cleanup. The bullet cache is per-report-run; drop it now that
+	// the report has shipped.
+	progress({ phase: 'cleanup', message: 'cleaning up bullet cache' });
+	try {
+		await deleteBulletsForRun(input.runId);
+	} catch (err) {
+		log.warn({ err: (err as Error).message, runId: input.runId }, 'bullet-cache cleanup failed; ignoring');
+	}
+
+	return {
+		finalReport: reportResult.finalReport,
+		entries:     reportResult.entries,
+		trace: {
+			scope,
+			investigationPlan,
+			perTodo: perTodoTraces,
+			reportReview: {
+				cyclesConsumed:       reportResult.cyclesConsumed,
+				exhausted:            reportResult.exhausted,
+				structuralReviseUsed: reportResult.structuralReviseUsed,
+				addedScopeGapTodos:   reportResult.addedScopeGapTodos,
+			},
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Memory preparation: cold rebuild vs incremental update
+// ---------------------------------------------------------------------------
+
+interface PrepareMemoryInput {
+	readonly store:                 WorkingMemoryStore;
+	readonly cache:                 BulletCache;
+	readonly priorBundle:           MemoryShapeBundle | undefined;
+	readonly priorEntriesForRecent: ReadonlyArray<{ readonly index: number; readonly entry: WorkingMemoryEntry }>;
+	readonly lastColdRebuildMemoryTokens: number;
+	readonly budget:                TokenBudget;
+	readonly numCtx:                number;
+	readonly provider:              LLMProvider;
+}
+
+interface PrepareMemoryResult {
+	readonly bundle:           MemoryShapeBundle;
+	readonly wasColdRebuild:   boolean;
+}
+
+/**
+ * Decide cold rebuild vs incremental update, then return the L1-L5
+ * bundle for this TODO iteration. First TODO of the run always
+ * cold-rebuilds (Q1.1: `lastColdRebuildMemoryTokens === 0` triggers).
+ */
+async function prepareMemoryFor(
+	todo: TodoSpec,
+	input: PrepareMemoryInput,
+): Promise<PrepareMemoryResult> {
+	const accumulatedText = await input.store.accumulatedMemoryText();
+	const currentMemoryTokens = countTokens(accumulatedText);
+
+	const coldRebuild = shouldColdRebuild({
+		lastColdRebuildMemoryTokens: input.lastColdRebuildMemoryTokens,
+		currentMemoryTokens,
+	});
+
+	if (coldRebuild || input.priorBundle === undefined) {
+		const turns = input.priorEntriesForRecent.map(({ entry }) => ({
+			name:    entry.todoId,
+			content: entry.detail,
+		}));
+		const shapeArgs: Parameters<typeof shapeMemory>[1] = {
+			memoryText: accumulatedText,
+			objective:  todo.objective,
+			budget:     input.budget,
+			numCtx:     input.numCtx,
+		};
+		if (turns.length > 0) {
+			(shapeArgs as { entries?: ReadonlyArray<{ name: string; content: string }> }).entries = turns;
+		}
+		const shaped = await shapeMemory(input.provider, shapeArgs);
+		return { bundle: shaped.bundle, wasColdRebuild: true };
+	}
+
+	// Incremental: prior bundle + the most-recently-completed entry.
+	const last = input.priorEntriesForRecent[input.priorEntriesForRecent.length - 1];
+	if (last === undefined) {
+		// No entries yet but priorBundle isn't undefined? Defensive: cold rebuild.
+		const shaped = await shapeMemory(input.provider, {
+			memoryText: '',
+			objective:  todo.objective,
+			budget:     input.budget,
+			numCtx:     input.numCtx,
+		});
+		return { bundle: shaped.bundle, wasColdRebuild: true };
+	}
+	const updated = await incrementalUpdate(input.provider, {
+		priorBundle:   input.priorBundle,
+		priorEntries:  input.priorEntriesForRecent.slice(0, -1).map(e => e.entry),
+		newEntry:      last.entry,
+		nextObjective: todo.objective,
+		budget:        input.budget,
+	}, {
+		bulletCache: { cache: input.cache, topK: 10 },
+	});
+	return { bundle: updated.bundle, wasColdRebuild: false };
+}
+
+// ---------------------------------------------------------------------------
+// Bullet cache integration
+// ---------------------------------------------------------------------------
+
+function makeBulletCache(runId: string): BulletCache {
+	return {
+		async query(queryEmbedding: number[], topK: number): Promise<readonly BulletCacheHit[]> {
+			if (queryEmbedding.length === 0) { return []; }
+			const hits = await searchBullets(queryEmbedding, { runId, limit: topK });
+			return hits.map(h => ({
+				todoId:    h.todoId,
+				todoIndex: h.todoIndex,
+				bullet:    h.bullet,
+				score:     h.distance,
+			}));
+		},
+	};
+}
+
+async function persistBullets(
+	entry: WorkingMemoryEntry,
+	runId: string,
+	todoIndex: number,
+	provider: LLMProvider,
+): Promise<void> {
+	let bullets: string[];
+	try {
+		bullets = await extractBullets(provider, entry);
+	} catch (err) {
+		log.warn({ err: (err as Error).message, todoId: entry.todoId }, 'bullet extraction failed; skipping cache write');
+		return;
+	}
+	if (bullets.length === 0) { return; }
+
+	// Embed each bullet sequentially (no parallel LLM calls rule).
+	type BulletRowParam = Parameters<typeof writeBullets>[0] extends ReadonlyArray<infer R> ? R : never;
+	const rows: BulletRowParam[] = [];
+	for (let i = 0; i < bullets.length; i++) {
+		const bullet = bullets[i]!;
+		const embedding = await provider.embed(bullet);
+		if (embedding.length === 0) {
+			// Cloud provider; embeddings are local-only. Stop -- we
+			// cannot populate the cache, but the LLM-fallback path in
+			// updater.ts will still produce a semantic layer.
+			log.warn({ todoId: entry.todoId }, 'provider.embed returned empty vector; bullet cache write skipped');
+			return;
+		}
+		rows.push({
+			id:        `${runId}:${entry.todoId}:${i}`,
+			embedding,
+			runId,
+			todoId:    entry.todoId,
+			todoIndex,
+			bullet,
+			createdAt: Date.now(),
+		});
+	}
+	try {
+		await writeBullets(rows);
+	} catch (err) {
+		log.warn({ err: (err as Error).message, runId, todoId: entry.todoId }, 'bullet cache write failed; ignoring');
+	}
+}
