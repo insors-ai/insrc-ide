@@ -29,3 +29,9 @@ export {
 	runInvestigationPlan,
 	type InvestigationPlanInput,
 } from './step-investigation-plan.js';
+
+export {
+	runSectionPlanner,
+	type SectionPlannerInput,
+	type SectionPlannerResult,
+} from './step-section-planner.js';

@@ -587,6 +587,70 @@ export function maxDepth(tree: PlannedTree): number {
  * prefix (`code.* -> code-analyzer`, `data.* -> data-analyzer`,
  * `shared.* -> shared`).
  */
+// ---------------------------------------------------------------------------
+// Degenerate-shape detector (Q2 / P3.a)
+// ---------------------------------------------------------------------------
+
+export interface DegenerateShapeOpts {
+	/**
+	 * Minimum number of direct children the top-level composition must
+	 * have (the "reviewable roots" of Q3's Option B). Defaults to 2 --
+	 * the section orchestrator wants at least discover + synthesize.
+	 */
+	readonly minTopLevelChildren?: number;
+	/** Minimum total leaves across the whole tree. Default 2. */
+	readonly minLeaves?: number;
+}
+
+/**
+ * Detect degenerate tree shapes the live-test failure mode produces
+ * (one linear chain `root -> A -> B -> C`, single emit:section leaf,
+ * losing all narrative sections). Returns a human-readable reason
+ * string when degenerate, or `null` when the tree shape is acceptable.
+ *
+ * Run AFTER `validatePlannedTree` succeeds. The orchestrator routes
+ * a non-null result into one corrective LLM retry with the reason
+ * surfaced verbatim (Q2's backstop validator rule).
+ *
+ * Fast-path single-TODO trees (P3.d trivial branch) are constructed
+ * directly without invoking the section planner, so they never
+ * encounter this check.
+ */
+export function isDegenerateShape(
+	tree: PlannedTree,
+	opts: DegenerateShapeOpts = {},
+): string | null {
+	const minTopChildren = opts.minTopLevelChildren ?? 2;
+	const minLeaves      = opts.minLeaves ?? 2;
+
+	if (tree.root.kind === 'leaf') {
+		return `degenerate: top-level node is a leaf ("${tree.root.id}"); expected a composition with >=${minTopChildren} reviewable-root children`;
+	}
+
+	const topChildren = tree.root.children?.length ?? 0;
+	if (topChildren < minTopChildren) {
+		return `degenerate: top-level composition has ${topChildren} child(ren); expected >=${minTopChildren} reviewable roots (discover / analyze / synthesize phases)`;
+	}
+
+	const leaves = countLeaves(tree);
+	if (leaves < minLeaves) {
+		return `degenerate: tree has ${leaves} leaf(s); expected >=${minLeaves}`;
+	}
+
+	// Thin-chain rule: a multi-level tree with fewer leaves than its
+	// depth is the live-test failure mode (deep chain, no breadth).
+	const depth = maxDepth(tree);
+	if (depth > 2 && leaves < depth) {
+		return `degenerate: depth ${depth} with only ${leaves} leaf(s); chain-shaped tree, prefer breadth over depth`;
+	}
+
+	return null;
+}
+
+// ---------------------------------------------------------------------------
+// Category inference (legacy helper kept for the stage-1 pre-filter)
+// ---------------------------------------------------------------------------
+
 export function inferCategoriesFromTree(tree: PlannedTree): readonly SkillOwner[] {
 	const out = new Set<SkillOwner>();
 	for (const n of walkTree(tree)) {
