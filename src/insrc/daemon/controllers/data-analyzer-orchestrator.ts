@@ -2,87 +2,46 @@
  * DataAnalyzerOrchestratorController -- the Data Analyzer family's
  * task-controller entry point.
  *
- * Phase 1.E of plans/analyzers/data-analyzer.md. State machine:
+ * Post-cutover (planner-section-task-separation P5.b). State machine:
  *
- *   planning            -> [skills-routing bootstrap pass-through]
- *                          The bootstrap task fires `runSkillsPipeline`
- *                          (classify-question -> select-scope -> per-skill
- *                          runSkill -> calibrate-confidence) inline; the
- *                          legacy plan LLM task has been removed.
- *   plan-approval       -> [plan-size gate]   (only when |tasks| > softCap)
- *   analyzing           -> runDataAnalyzer() (inline in next()) +
- *                          [review LLM task]
- *   reviewing           -> apply decision; loop or jump to synthesise
- *   synthesising        -> generateMultiPass() (inline in next())
- *   present             -> [present gate]
- *   done                  (writes list.body)
+ *   planning  -> [bootstrap pass-through]
+ *                The bootstrap task fires `runSectionFlow`
+ *                (Scope -> Investigation Plan -> per-TODO orchestrator
+ *                -> report assembler + review) inline. The final
+ *                markdown lands in K_SYNTH_RESULT.
+ *   present   -> [present gate; reserved]
+ *   done      (writes list.body)
  *
- * Cloud LLM defaults: review. Local LLM defaults: analyzer tool loop +
- * synthesise. Per-step rebind via the Model Providers pane (see
- * plans/analyzers/data-analyzer.md "LLM routing" section).
+ * The legacy phases (`plan-approval` / `analyzing` / `reviewing` /
+ * `synthesising`) remain in the `DataAnalyzerPhase` enum but are
+ * unreachable; the `restoreState` shim normalises any persisted
+ * legacy phase to `done` with a partial-report annotation per Q10's
+ * migration note.
  *
- * Resume: restoreState + buildResumeTask + afterResumeBootstrap mirror
- * the code-analyzer's slice-C pattern. Connection approvals are NOT
- * persisted -- they re-prompt on resume per design §14.
+ * Per-TODO skill execution: `buildSkillExecutor` resolves
+ * `inputs.{node, literal, question, context}` bindings and invokes
+ * `runSkill(leaf.skill, resolvedInput, runnerDeps)`. The L2 fallback
+ * (Q10) calls `data.answer-question` when a TODO's section tree
+ * cannot produce a coherent result.
  *
- * Phase 1 deliberately omits per-task on-disk caching (Phase 2.4),
- * drill-down (Phase 5), and re-run (Phase 5).
+ * Resume: restoreState + buildResumeTask + afterResumeBootstrap drive
+ * the rehydration path. Connection approvals are NOT persisted --
+ * they re-prompt on resume per design §14.
  */
 
 import { getLogger } from '../../shared/logger.js';
-import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
 import { loadActiveConnections } from '../../agent/tasks/data-analyzer/load-connections.js';
-import {
-  buildReviewPrompt,
-  REVIEW_SYSTEM,
-} from '../../agent/tasks/data-analyzer/prompts/review.js';
-import {
-  buildMultipassOutlineInput,
-  makeSectionBuilder,
-  DRILL_DOWN_FALLBACK_SECTION,
-} from '../../agent/tasks/data-analyzer/prompts/synthesise-multipass.js';
-import { generateMultiPass } from '../../agent/content-gen/index.js';
-/**
- * Per-skill execution record stored in the K_RAW_EXECUTIONS state
- * slot during the per-DataAnalysisTask path. Previously imported from
- * `agent/content-gen/plan-actions.ts`; inlined at P6.b after the
- * planActions module was deleted.
- */
-interface PlanExecution {
-  readonly skillId:    string;
-  readonly value:      unknown;
-  readonly confidence: 'high' | 'medium' | 'low';
-  readonly notes:      readonly string[];
-}
-import { PRIOR_CONTEXT_TAG_CURRENT, summarizePriorContext } from '../../agent/intent/retriever.js';
-import {
-  buildConnectionFingerprint,
-  readCachedResult,
-  writeCachedResult,
-  type CacheKeyInput,
-} from '../../agent/tasks/data-analyzer/cache.js';
 import {
   K_STATE,
   K_PHASE,
-  K_RETRIES,
-  K_FOLLOWUP_COUNT,
   K_PLAN_RESULT,
   K_PLAN_TASKS,
-  K_REVIEW_RESULT,
   K_SYNTH_RESULT,
-  K_ACCEPTED,
-  K_HISTORY,
-  K_RAW_EXECUTIONS,
   RESUME_BOOTSTRAP_MARKER,
   SKILLS_ROUTING_BOOTSTRAP_MARKER,
   type DataAnalysisState,
   type DataAnalyzerPhase,
-  type AcceptedTask,
 } from '../../agent/tasks/data-analyzer/state.js';
-import {
-  pipelineResultToAcceptedTasks,
-  runSkillsPipeline,
-} from '../../agent/tasks/data-analyzer/skills-pipeline.js';
 import type {
   ConnectionSummary,
   DataAnalysisTask,
@@ -123,42 +82,6 @@ import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import { PATHS } from '../../shared/paths.js';
 
 const log = getLogger('data-analyzer:orchestrator');
-
-// ---------------------------------------------------------------------------
-// Per-tier task caps (slice 1.10.c)
-// ---------------------------------------------------------------------------
-
-interface TierCaps {
-  /** Soft cap: above this, the plan-size approval gate fires. */
-  readonly softTaskCap: number;
-  /** Hard cap: planner output is silently trimmed to this length. */
-  readonly hardTaskCap: number;
-}
-
-const TIER_CAPS: Readonly<Record<ScopeSize, TierCaps>> = {
-  S:     { softTaskCap: 2,  hardTaskCap: 4  },
-  M:     { softTaskCap: 4,  hardTaskCap: 6  },
-  L:     { softTaskCap: 6,  hardTaskCap: 10 },
-  XL:    { softTaskCap: 8,  hardTaskCap: 12 },
-  XXL:   { softTaskCap: 8,  hardTaskCap: 12 },
-  XXXL:  { softTaskCap: 8,  hardTaskCap: 12 },
-  XXXXL: { softTaskCap: 8,  hardTaskCap: 12 },
-};
-
-function capsForTier(tier: ScopeSize | undefined): TierCaps {
-  return TIER_CAPS[tier ?? 'M'];
-}
-
-const MAX_FOLLOWUPS = 6;
-
-/**
- * Sentinel that buildInitialTasks emits when `rerunFromListId` is
- * set (Phase 5.1 of plans/analyzers/data-analyzer.md). The
- * `afterRerunBootstrap` handler detects the sentinel and
- * reconstructs DataAnalysisTask[] from the prior list's items.
- */
-const RERUN_BOOTSTRAP_MARKER = '__rerun-bootstrap__';
-const MAX_RETRIES_PER_TASK = 2;
 
 // ---------------------------------------------------------------------------
 // Controller
@@ -215,37 +138,23 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     log.info(
       {
         tier:        this._tier,
-        caps:        capsForTier(this._tier),
         connections: this._connections.length,
       },
       'data-analyzer scope tier captured',
     );
 
-    // Phase 5.1 of plans/analyzers/data-analyzer.md: re-run path
-    // skips the plan LLM call entirely and reconstructs the task
-    // list from the prior list's items in afterRerunBootstrap.
-    if (this._rerunFromListId !== undefined) {
-      return [{
-        index: 0,
-        description: `Data Analyzer: re-running from prior list ${this._rerunFromListId.slice(0, 8)}...`,
-        kind: 'transform',
-        intent: 'data-analysis',
-        passThrough: true,
-        userMessage: RERUN_BOOTSTRAP_MARKER,
-        outputFormat: 'text',
-        stateKey: K_PLAN_RESULT,
-        persisted: true,
-      }];
-    }
-
-    // data-analyzer-skills.md step 4b: skills-routing is the only
-    // path. Emit a bootstrap pass-through task; the orchestrator's
-    // `next()` detects the marker and runs the skills pipeline
-    // (classify -> select -> runSkill per scoped -> calibrate) inline,
-    // then queues the legacy synthesise step.
+    // planner-section-task-separation P5.b.2: emit the bootstrap
+    // pass-through; the orchestrator's `next()` detects the marker
+    // and runs the section-flow pipeline. The pre-cutover rerun
+    // branch (afterRerunBootstrap + reconstruct prior task list) was
+    // deleted -- rerun semantics no longer apply now that per-task
+    // items don't exist; users re-issue the request to get a fresh
+    // section-flow report (parentListId is still threaded via
+    // `_parentListId` so the workbench can thread the new list under
+    // the prior one).
     return [{
       index: 0,
-      description: 'Data Analyzer: routing question through skills pipeline...',
+      description: 'Data Analyzer: starting section-flow pipeline...',
       kind: 'transform',
       intent: 'data-analysis',
       passThrough: true,
@@ -337,10 +246,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     };
     state.set(K_STATE, initial);
     state.set(K_PHASE, 'planning' as DataAnalyzerPhase);
-    state.set(K_RETRIES, {} as Record<string, number>);
-    state.set(K_FOLLOWUP_COUNT, 0);
-    state.set(K_ACCEPTED, [] as AcceptedTask[]);
-    state.set(K_HISTORY, [] as DataAnalyzerResult[]);
   }
 
   // -- main router ---------------------------------------------------------
@@ -360,184 +265,39 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       return this.afterResumeBootstrap(state, phase);
     }
 
-    // Phase 5.1: re-run path. buildInitialTasks queued a transform
-    // task carrying RERUN_BOOTSTRAP_MARKER instead of the plan LLM
-    // task; reconstruct the DataAnalysisTask[] from the prior list's
-    // items and skip straight to beginAnalysis.
-    if (this._rerunFromListId !== undefined && completed.output.trim() === RERUN_BOOTSTRAP_MARKER) {
-      return this.afterRerunBootstrap(state);
-    }
-
-    // data-analyzer-skills.md step 4b: skills-routing path.
-    // buildInitialTasks emitted SKILLS_ROUTING_BOOTSTRAP_MARKER;
-    // run the meta-skills pipeline inline + queue synthesise.
-    // This is the only entry into `planning` -- the legacy plan-LLM
-    // task and its `afterPlan` dispatch were removed when skills-
-    // routing became the only path.
+    // Post-cutover bootstrap. buildInitialTasks emits a single
+    // pass-through transform carrying SKILLS_ROUTING_BOOTSTRAP_MARKER;
+    // we detect the marker and invoke `afterSkillsRoutingBootstrap`
+    // which runs the new section-flow pipeline end-to-end.
     if (completed.output.trim() === SKILLS_ROUTING_BOOTSTRAP_MARKER) {
       return this.afterSkillsRoutingBootstrap(state);
     }
 
+    // Post-cutover (P5.b.2): the only live dispatch is 'planning' ->
+    // afterSkillsRoutingBootstrap (which runs the new section-flow
+    // pipeline). Legacy phases ('plan-approval' / 'analyzing' /
+    // 'reviewing' / 'synthesising') are normalised to 'done' by the
+    // restoreState shim, so they should never reach this switch.
     switch (phase) {
       case 'planning':       return this.afterSkillsRoutingBootstrap(state);
-      case 'plan-approval':  return this.afterPlanApprovalGate(gateReply, state);
-      case 'analyzing':      return this.runNextAnalyzerTask(state);
-      case 'reviewing':      return this.afterReview(completed, state);
-      case 'synthesising':   return this.afterSynthesise(completed, state);
       case 'present':        return null;
       case 'done':           return null;
+      default:               return null;
     }
   }
 
-  // -- plan-approval -------------------------------------------------------
-
-  private async afterPlanApprovalGate(
-    gateReply: GateReply | undefined,
-    state: TaskStateStore,
-  ): Promise<Task[] | null> {
-    const action = gateReply?.action ?? 'cancel';
-    const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    if (action === 'cancel') {
-      const ca = state.get<DataAnalysisState>(K_STATE)!;
-      state.set(K_STATE, { ...ca, cancelled: true });
-      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
-      return null;
-    }
-    if (action === 'trim-to-soft') {
-      const trimmed = planned.slice(0, capsForTier(this._tier).softTaskCap);
-      state.set(K_PLAN_TASKS, trimmed);
-      return this.beginAnalysis(trimmed, state);
-    }
-    // approve
-    return this.beginAnalysis(planned, state);
-  }
+  // -- section-flow entrypoint (planner-section-task-separation P5.b) -----
 
   /**
-   * Create the TodoList + addItem rows for a planned task list and
-   * stamp the framework-assigned item ids back onto K_PLAN_TASKS.
-   * Shared between afterSkillsRoutingBootstrap (skills-pipeline driven)
-   * and afterRerunBootstrap (Phase 5.1, prior-list-driven).
-   * Best-effort: a failure here just means the run proceeds without
-   * the persisted list (degraded UX but the analyzer still does its job).
-   */
-  private async _persistTaskList(
-    planned: DataAnalysisTask[],
-    state: TaskStateStore,
-  ): Promise<void> {
-    if (this.deps?.todos === undefined) return;
-    try {
-      const list = await this.deps.todos.createList({
-        sessionId:   this.deps.session.id,
-        title:       `Data Analysis: ${this._request?.slice(0, 60) ?? '(no request)'}`,
-        description: this._request ?? '',
-        // Phase 5.3: stamp parent edge for drill-down runs so the
-        // todos pane + Report Pane can thread the new list under
-        // the prior one.
-        ...(this._parentListId !== undefined ? { parentListId: this._parentListId } : {}),
-      });
-      this._listId = list.id;
-      const ca = state.get<DataAnalysisState>(K_STATE)!;
-      state.set(K_STATE, { ...ca, listId: list.id });
-      const withIds: DataAnalysisTask[] = [];
-      for (const t of planned) {
-        const item = await this.deps.todos.addItem(list.id, {
-          title: shortTitleFor(t),
-          description: t.question,
-          meta: {
-            kind: t.kind,
-            ...(t.scope !== undefined ? { scope: t.scope } : {}),
-            origin: t.origin,
-            retryCount: 0,
-          },
-        });
-        withIds.push({ ...t, itemId: item.id });
-      }
-      state.set(K_PLAN_TASKS, withIds);
-    } catch (err) {
-      log.warn({ err }, '_persistTaskList: createList / addItem failed');
-    }
-  }
-
-  /**
-   * Re-run path bootstrap (Phase 5.1 of plans/analyzers/data-analyzer.md).
-   * The pass-through transform in buildInitialTasks emitted
-   * RERUN_BOOTSTRAP_MARKER instead of running the planner; here we
-   * walk the prior list's items, reconstruct DataAnalysisTask[] from
-   * their `description` + `meta`, then proceed straight into
-   * `beginAnalysis` (which creates a fresh TodoList stamped with
-   * `parentListId = priorListId` so the new run threads under it).
+   * Section-flow path. The bootstrap pass-through emitted by
+   * `buildInitialTasks` lands here; we run `runSectionFlow`
+   * (Scope -> Investigation Plan -> per-TODO orchestrator ->
+   * report assembly + review) end-to-end and stash the final
+   * markdown in K_SYNTH_RESULT for `finalize()` to surface.
    *
-   * Defensive paths: if the prior list is gone or yields no
-   * parseable items, fall back to a single free-form task carrying
-   * the original request -- the user still gets SOMETHING to compare
-   * against.
-   */
-  private async afterRerunBootstrap(state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps?.todos === undefined || this._rerunFromListId === undefined) {
-      log.error('afterRerunBootstrap: deps.todos or rerunFromListId missing');
-      const ca = state.get<DataAnalysisState>(K_STATE);
-      if (ca !== undefined) state.set(K_STATE, { ...ca, cancelled: true });
-      state.set(K_PHASE, 'done' as DataAnalyzerPhase);
-      return null;
-    }
-    const priorListId = this._rerunFromListId;
-    const priorList = await this.deps.todos.getList(priorListId);
-    if (priorList === null) {
-      log.warn({ priorListId }, 'afterRerunBootstrap: prior list not found; falling back to single-task plan');
-      return this._beginRerunWith(buildFallbackTaskFromRequest(this._request ?? ''), priorListId, state);
-    }
-
-    const reconstructed: DataAnalysisTask[] = [];
-    for (const item of priorList.items ?? []) {
-      const task = reconstructTaskFromItem(item);
-      if (task !== null) reconstructed.push(task);
-    }
-    log.info(
-      { priorListId, priorItemCount: priorList.items?.length ?? 0, reconstructed: reconstructed.length },
-      'afterRerunBootstrap: reconstructed task list',
-    );
-    if (reconstructed.length === 0) {
-      log.warn({ priorListId }, 'afterRerunBootstrap: no parseable items; falling back to single-task plan');
-      return this._beginRerunWith(buildFallbackTaskFromRequest(this._request ?? ''), priorListId, state);
-    }
-    return this._beginRerunWith(reconstructed, priorListId, state);
-  }
-
-  /**
-   * Helper for afterRerunBootstrap that persists the reconstructed
-   * task list and starts the analysis. Stamps `parentListId` to the
-   * prior list when the caller hasn't already supplied a different
-   * one (drill-down + re-run could combine in theory).
-   */
-  private async _beginRerunWith(
-    reconstructed: DataAnalysisTask[],
-    priorListId: string,
-    state: TaskStateStore,
-  ): Promise<Task[] | null> {
-    if (this._parentListId === undefined) {
-      this._parentListId = priorListId;
-    }
-    state.set(K_PLAN_TASKS, reconstructed);
-    await this._persistTaskList(reconstructed, state);
-    return this.beginAnalysis(reconstructed, state);
-  }
-
-  // -- skills-routing bootstrap (data-analyzer-skills.md step 4b) ----------
-
-  /**
-   * Skills-routing path. The bootstrap pass-through emitted by
-   * `buildInitialTasks` lands here; we run `runSkillsPipeline`
-   * inline (classify-question → select-scope → runSkill per scoped
-   * → calibrate-confidence), adapt the result to the legacy
-   * `AcceptedTask[]` + `DataAnalyzerResult[]` shape via
-   * `pipelineResultToAcceptedTasks`, persist the TodoList, and
-   * queue the legacy synthesise step.
-   *
-   * The legacy plan + per-task analyzer runner are bypassed
-   * entirely. Review is also skipped: the per-task review prompt
-   * expects an LLM-generated DataAnalyzerResult shape; skill-derived
-   * results carry their own confidence + notes that calibrate-
-   * confidence already rolled into a final verdict.
+   * The method name is preserved post-cutover for state-machine
+   * dispatch compatibility (case 'planning' -> this method); the
+   * body is the new pipeline, not the legacy meta-skills route.
    */
   private async afterSkillsRoutingBootstrap(state: TaskStateStore): Promise<Task[] | null> {
     if (this.deps === undefined) {
@@ -693,488 +453,10 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     return null;
   }
 
-  // -- analyze + review ----------------------------------------------------
-
-  private async beginAnalysis(
-    planned: DataAnalysisTask[],
-    state: TaskStateStore,
-  ): Promise<Task[] | null> {
-    state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
-    if (planned.length === 0) {
-      // Nothing to analyse -- jump to synthesise (will produce an empty-state report).
-      return this.queueSynthesise(state);
-    }
-    return this.runNextAnalyzerTask(state);
-  }
-
-  private async runNextAnalyzerTask(state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps === undefined) return null;
-    const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
-    const history = state.get<DataAnalyzerResult[]>(K_HISTORY) ?? [];
-    const acceptedIds = new Set(accepted.map(a => a.task.itemId));
-    const next = planned.find(t => !acceptedIds.has(t.itemId));
-
-    if (next === undefined) {
-      // All planned tasks accepted -> synthesise.
-      return this.queueSynthesise(state);
-    }
-
-    if (this.deps.todos !== undefined) {
-      try { await this.deps.todos.markInProgress(next.itemId); } catch { /* keep going */ }
-    }
-
-    // Phase 2.4: cache lookup before we burn any LLM tokens. Cache
-    // key includes the connection-roster fingerprint so a registry
-    // change (added / removed / re-registered connection) invalidates
-    // every entry that touched the affected connection. Note: schema
-    // drift on an unchanged connection is NOT detected -- callers
-    // wanting fresh introspection clear the cache via
-    // `insrc.dataAnalyzer.clearCache`.
-    const cacheKeyInput = this._buildCacheKeyInput(next);
-    const cachedResult = await readCachedResult(cacheKeyInput);
-    if (cachedResult !== null) {
-      // Stamp the cached result into K_ACCEPTED + K_HISTORY and mark
-      // the todo complete; skip the analyzer + reviewer pair entirely.
-      accepted.push({ task: next, result: cachedResult });
-      history.push(cachedResult);
-      state.set(K_ACCEPTED, accepted);
-      state.set(K_HISTORY, history);
-      if (this.deps.todos !== undefined) {
-        try {
-          await this.deps.todos.updateItemMeta(next.itemId, {
-            kind: next.kind,
-            ...(next.scope !== undefined ? { scope: next.scope } : {}),
-            origin: next.origin,
-            retryCount: 0,
-            answer: cachedResult.answer,
-            findings: cachedResult.findings,
-            citations: cachedResult.citations,
-            confidence: cachedResult.confidence,
-            toolCalls: cachedResult.toolCalls,
-            cacheHit: true,
-            ...(cachedResult.truncated ? { truncated: true } : {}),
-          });
-          await this.deps.todos.markComplete(next.itemId);
-        } catch (err) {
-          log.warn({ err, itemId: next.itemId }, 'cache-hit todo update failed (continuing)');
-        }
-      }
-      return this.runNextAnalyzerTask(state);
-    }
-
-    // Data-side mirror of code-analyzer's Phase 6 cutover: the legacy
-    // discovery-pipeline (writer + claim-grounding-reviewer pingpong)
-    // was replaced by the L2 `data.answer-question` skill in P12+P13.
-    // The orchestrator calls a thin adapter that internally drives the
-    // L2 self-grounding flow and adapts back to DataAnalyzerResult so
-    // the review loop downstream sees an unchanged shape.
-    log.info({ itemId: next.itemId, tier: this._tier }, 'analyzing: routing through data.answer-question L2 skill');
-    const outcome = await runAnswerQuestionTask({
-      session:     this.deps.session,
-      task:        next,
-      connections: this._connections,
-      ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
-    });
-    const result: DataAnalyzerResult = outcome.result;
-
-    if (this.deps.todos !== undefined) {
-      try {
-        await this.deps.todos.updateItemMeta(next.itemId, {
-          kind: next.kind,
-          ...(next.scope !== undefined ? { scope: next.scope } : {}),
-          origin: next.origin,
-          retryCount: 0,
-          answer: result.answer,
-          findings: result.findings,
-          citations: result.citations,
-          confidence: result.confidence,
-          toolCalls: result.toolCalls,
-          ...(result.truncated ? { truncated: true } : {}),
-          ...(result.blockedReason !== undefined ? { blockedReason: result.blockedReason } : {}),
-        });
-      } catch (err) {
-        log.warn({ err, itemId: next.itemId }, 'updateItemMeta failed (continuing)');
-      }
-    }
-
-    // Gate-blocked tasks auto-accept and bypass review.
-    if (result.blockedReason !== undefined) {
-      accepted.push({ task: next, result });
-      history.push(result);
-      state.set(K_ACCEPTED, accepted);
-      state.set(K_HISTORY, history);
-      if (this.deps.todos !== undefined) {
-        try { await this.deps.todos.markBlocked(next.itemId, result.blockedReason); } catch { /* keep going */ }
-      }
-      return this.runNextAnalyzerTask(state);
-    }
-
-    // Queue the review LLM task.
-    state.set(K_PHASE, 'reviewing' as DataAnalyzerPhase);
-    state.set('lastResult', result);
-    state.set('lastTask', next);
-    const reviewMessages = buildReviewPrompt(next, result, history);
-    const userMessage = reviewMessages
-      .filter(m => m.role === 'user')
-      .map(m => typeof m.content === 'string' ? m.content : '[complex content]')
-      .join('\n\n');
-    return [{
-      index: 100,
-      description: `Data Analyzer: reviewing task "${shortTitleFor(next)}"...`,
-      kind: 'llm',
-      intent: 'data-analysis',
-      systemPrompt: REVIEW_SYSTEM,
-      userMessage,
-      resolverAgent: 'data-analyzer',
-      resolverStep: 'review',
-      providerHint: 'claude',
-      temperature: 0,
-      maxTokens: 1200,
-      stateKey: K_REVIEW_RESULT,
-      persisted: true,
-    }];
-  }
-
-  private async afterReview(completed: TaskResult, state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps === undefined) return null;
-    const lastTask = state.get<DataAnalysisTask>('lastTask');
-    const lastResult = state.get<DataAnalyzerResult>('lastResult');
-    if (lastTask === undefined || lastResult === undefined) {
-      log.error('afterReview: missing lastTask or lastResult; skipping');
-      return this.runNextAnalyzerTask(state);
-    }
-    const decision = parseReviewerDecision(completed.output);
-    const retries = state.get<Record<string, number>>(K_RETRIES) ?? {};
-    const followups = state.get<number>(K_FOLLOWUP_COUNT) ?? 0;
-    const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
-    const history = state.get<DataAnalyzerResult[]>(K_HISTORY) ?? [];
-
-    if (decision.kind === 'accept' || decision.kind === 'done') {
-      accepted.push({ task: lastTask, result: lastResult });
-      history.push(lastResult);
-      state.set(K_ACCEPTED, accepted);
-      state.set(K_HISTORY, history);
-      if (this.deps.todos !== undefined) {
-        try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
-      }
-      // Phase 2.4: persist the reviewer-accepted result to cache so a
-      // re-run against the same task with the same connection roster
-      // skips the analyzer + reviewer pair entirely. Best-effort --
-      // a write failure shouldn't bubble up.
-      void writeCachedResult(this._buildCacheKeyInput(lastTask), lastResult).catch(err => {
-        log.warn({ err: (err as Error).message, itemId: lastTask.itemId }, 'cache write failed (non-fatal)');
-      });
-      if (decision.kind === 'done') {
-        return this.queueSynthesise(state);
-      }
-      state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
-      return this.runNextAnalyzerTask(state);
-    }
-
-    if (decision.kind === 'retry') {
-      const count = retries[lastTask.itemId] ?? 0;
-      if (count >= MAX_RETRIES_PER_TASK) {
-        // Retry cap hit -- accept with downgraded confidence.
-        accepted.push({ task: lastTask, result: { ...lastResult, confidence: 'low' } });
-        history.push(lastResult);
-        state.set(K_ACCEPTED, accepted);
-        state.set(K_HISTORY, history);
-        if (this.deps.todos !== undefined) {
-          try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
-        }
-        state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
-        return this.runNextAnalyzerTask(state);
-      }
-      retries[lastTask.itemId] = count + 1;
-      state.set(K_RETRIES, retries);
-      // Re-queue the SAME task with the reviewer's hint applied.
-      const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-      const idx = planned.findIndex(t => t.itemId === lastTask.itemId);
-      if (idx >= 0) {
-        planned[idx] = {
-          ...lastTask,
-          ...(decision.retryHint !== undefined ? { hint: decision.retryHint } : {}),
-        };
-        state.set(K_PLAN_TASKS, planned);
-      }
-      state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
-      return this.runNextAnalyzerTask(state);
-    }
-
-    // add-follow-up
-    if (decision.kind === 'follow-up') {
-      // Accept the original task too.
-      accepted.push({ task: lastTask, result: lastResult });
-      history.push(lastResult);
-      state.set(K_ACCEPTED, accepted);
-      state.set(K_HISTORY, history);
-      if (this.deps.todos !== undefined) {
-        try { await this.deps.todos.markComplete(lastTask.itemId); } catch { /* keep going */ }
-      }
-      const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-      let added = 0;
-      for (const fu of decision.followUps.slice(0, 2)) {
-        if (followups + added >= MAX_FOLLOWUPS) break;
-        // Need the framework-assigned item.id BEFORE the task lands
-        // in K_PLAN_TASKS so downstream consumers see one canonical id.
-        let itemId: string | undefined;
-        if (this.deps.todos !== undefined && this._listId !== undefined) {
-          try {
-            const item = await this.deps.todos.addItem(this._listId, {
-              title: shortTitleFor({ ...fu, itemId: '', origin: 'follow-up' } as DataAnalysisTask),
-              description: fu.question,
-              meta: { kind: fu.kind, ...(fu.scope !== undefined ? { scope: fu.scope } : {}), origin: 'follow-up', retryCount: 0 },
-            });
-            itemId = item.id;
-          } catch { /* keep going */ }
-        }
-        const task: DataAnalysisTask = {
-          itemId: itemId ?? `pending-${added}-${Date.now()}`,
-          kind: fu.kind,
-          question: fu.question,
-          ...(fu.scope !== undefined ? { scope: fu.scope } : {}),
-          origin: 'follow-up',
-        };
-        planned.push(task);
-        added++;
-      }
-      state.set(K_PLAN_TASKS, planned);
-      state.set(K_FOLLOWUP_COUNT, followups + added);
-      state.set(K_PHASE, 'analyzing' as DataAnalyzerPhase);
-      return this.runNextAnalyzerTask(state);
-    }
-
-    return null;
-  }
-
-  // -- synthesise ----------------------------------------------------------
-
-  private async queueSynthesise(state: TaskStateStore): Promise<Task[] | null> {
-    if (this.deps === undefined) return null;
-    state.set(K_PHASE, 'synthesising' as DataAnalyzerPhase);
-
-    const accepted = state.get<AcceptedTask[]>(K_ACCEPTED) ?? [];
-    const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-    const rawExecutions = state.get<readonly PlanExecution[]>(K_RAW_EXECUTIONS);
-
-    let markdown = '';
-    try {
-      markdown = await this.runPlanExpandReviewSynthesise(
-        accepted,
-        rawExecutions ?? deriveExecutionsFromAcceptedDA(accepted),
-      );
-    } catch (err) {
-      log.warn(
-        { err: (err as Error).message },
-        'queueSynthesise: plan/expand/review failed; falling back to legacy multipass',
-      );
-      try {
-        const provider = this.deps.session.resolver.resolve('data-analyzer', 'synthesise');
-        const outline = buildMultipassOutlineInput(this._request ?? '', accepted, planned, this._tier);
-        const sectionBuild = makeSectionBuilder(this._request ?? '', accepted, this._tier);
-        const result = await generateMultiPass(
-          {
-            outline: { system: outline.system, user: outline.user, maxSections: outline.maxSections, maxTokens: outline.maxTokens },
-            section: { build: sectionBuild },
-            ...(this.deps.abortController?.signal !== undefined ? { signal: this.deps.abortController.signal } : {}),
-          },
-          provider,
-        );
-        markdown = result.markdown;
-        const hasDrillDown = result.outline.sections.some(
-          s => s.id === DRILL_DOWN_FALLBACK_SECTION.id ||
-               /drill[-\s]?down/i.test(s.title),
-        );
-        if (!hasDrillDown) {
-          markdown += `\n\n## ${DRILL_DOWN_FALLBACK_SECTION.title}\n\n_(no drill-down candidates emitted by the synthesise pass)_\n`;
-        }
-      } catch (err2) {
-        log.error({ err: (err2 as Error).message }, 'queueSynthesise: legacy multipass also failed');
-        markdown = `# Data Analysis Report\n\n_Synthesis failed: ${(err2 as Error).message}_\n\nSee accepted findings in the todos pane.`;
-      }
-    }
-
-    // Phase 3.3: ER artifact integration. For every `kind: 'er'`
-    // task in the accepted set, generate an ER diagram via the
-    // shipped artifact_er tool. Each artifact persists as a TodoItem
-    // (visible in the artifacts pane) and lands a one-line reference
-    // in the report so readers know which diagrams cover the run.
-    // Best-effort: failures append an inline warning rather than
-    // bubbling up.
-    markdown = await this._appendErArtifactSection(markdown, accepted);
-
-    state.set(K_SYNTH_RESULT, markdown);
-
-    // Persist body on the list so the (future Phase 2) report pane
-    // sees it. The TodosApi has no list-level "complete" state -- the
-    // workbench-side flow contribution opens the report when the
-    // body lands; the list itself stays `active` until the user
-    // archives it.
-    if (this.deps.todos !== undefined && this._listId !== undefined) {
-      try {
-        await this.deps.todos.updateListBody(this._listId, markdown);
-      } catch (err) {
-        log.warn({ err }, 'queueSynthesise: updateListBody failed');
-      }
-    }
-
-    state.set(K_PHASE, 'done' as DataAnalyzerPhase);
-    return null;
-  }
-
-  /**
-   * Plan / expand / review synthesis driver (Phase 5 of
-   * plans/analyzers/cloud-plan-local-expand-cloud-review.md). Mirrors
-   * the code-analyzer's runPlanExpandReviewSynthesise; the helpers
-   * are analyzer-agnostic so the only differences are the resolver
-   * step ids and the analyzerLabel.
-   */
-  private async runPlanExpandReviewSynthesise(
-    _accepted:   readonly AcceptedTask[],
-    _executions: readonly PlanExecution[],
-  ): Promise<string> {
-    if (this.deps === undefined) {
-      throw new Error('runPlanExpandReviewSynthesise: deps not attached');
-    }
-    const session = this.deps.session;
-    const cloud = session.resolver.resolve('data-analyzer', 'plan');
-    const reviewer = session.resolver.resolve('data-analyzer', 'review');
-    const request = this._request ?? '';
-
-    // Lean summary context: repo descriptor + memory line.
-    const summaryContext = this.buildSummaryContext();
-
-    // ----- P6 of plans/planner-skill-tree.md: tree-based planning -------
-    // Replaces the flat `planActions` + per-action L2 loop. The cloud
-    // planner emits a typed skill tree composed of L1 leaves wired
-    // together via the typed wiring DSL; the executor walks the tree,
-    // calls each skill via `runSkill`, and the section stitcher renders
-    // the result. Cross-domain alignment (the INGRN class-vs-JSON case)
-    // is computed in code by `shared.compare.fields-vs-shape` instead
-    // of invented by a drafter LLM.
-    //
-    // L2 `data.answer-question` survives as a per-leaf fallback: when
-    // the planner can't decompose a sub-question into a structured
-    // skill chain it emits an L2 leaf, preserving today's drafting
-    // behavior for genuinely open-ended sections.
-    const planStep = 'synthesise (plan)';
-    this.emitLiveStep(planStep, '');
-    this.emitLiveStep(planStep, `[data-analyzer | tier=${this._tier}] planning report sections (tree)...\n`);
-
-    // Catalog: every skill the data-side planner may compose. Includes
-    // shared/code-analyzer skills for cross-domain wiring. Filtered by
-    // the active connection roster's families so the planner doesn't
-    // see, e.g., rdbms-family skills when only file connections exist.
-    const rosterFamilies = new Set(this._connections.map(c => c.family));
-    const catalog: readonly CatalogSkill[] = buildCatalogFromRegistry({
-      owners:           ['data-analyzer', 'code-analyzer', 'shared'],
-      includeL2Fallback: true,
-      rosterFamilies,
-    });
-
-    const fallbackTree = buildDataAnalyzerFallbackTree({
-      request,
-      connections: connectionsForL2(this._connections),
-    });
-
-    const planResult = await planTree(
-      {
-        intent:        'data-analysis',
-        request,
-        summaryContext,
-        catalog,
-        fallback:      fallbackTree,
-        analyzerLabel: 'data-analyzer',
-      },
-      cloud,
-    );
-
-    const leafCount = countLeavesQuick(planResult.tree);
-    this.emitLiveStep(
-      planStep,
-      `[data-analyzer | tier=${this._tier}] planned ${leafCount} leaf${leafCount === 1 ? '' : 'es'}` +
-      (planResult.degraded ? ' (fallback tree)' : '') +
-      (planResult.shortlist !== undefined ? `; shortlist=${planResult.shortlist.length}` : '') + '\n',
-    );
-    if (planResult.note !== undefined) {
-      this.emitLiveStep(planStep, `[data-analyzer] ${planResult.note}\n`);
-    }
-    this.emitLiveStep(planStep, '', true);
-
-    // ----- Tree execution ------------------------------------------------
-    const runStep = 'synthesise (execute)';
-    this.emitLiveStep(runStep, '');
-    this.emitLiveStep(runStep, `[data-analyzer] executing tree (${leafCount} leaf${leafCount === 1 ? '' : 'es'})...\n`);
-
-    const executionResult = await executeTree(planResult.tree, {
-      question:       request,
-      sessionContext: this.buildSessionContextForTree(),
-      runnerDeps: {
-        session,
-        resolveProvider: () => reviewer,
-      },
-      onEvent: (e: TreeExecutionEvent) => {
-        switch (e.kind) {
-          case 'node-start':
-            this.emitLiveStep(runStep,
-              `[data-analyzer]   start  ${e.nodeId}` + (e.skillId !== undefined ? ` (${e.skillId})` : '') + '\n');
-            break;
-          case 'node-complete':
-            this.emitLiveStep(runStep,
-              `[data-analyzer]   done   ${e.nodeId}` +
-              (e.skillId    !== undefined ? ` (${e.skillId})` : '') +
-              (e.confidence !== undefined ? ` confidence=${e.confidence}` : '') +
-              ` (${e.durationMs}ms)\n`);
-            break;
-          case 'node-failed':
-            this.emitLiveStep(runStep,
-              `[data-analyzer]   FAIL   ${e.nodeId}` +
-              (e.skillId !== undefined ? ` (${e.skillId})` : '') +
-              `: ${e.reason}\n`);
-            break;
-          default:
-            break;
-        }
-      },
-    });
-
-    this.emitLiveStep(runStep,
-      `[data-analyzer] executed=${executionResult.executedLeaves} failed=${executionResult.failedLeaves} ` +
-      `(${executionResult.durationMs}ms)\n`);
-    this.emitLiveStep(runStep, '', true);
-
-    // ----- Render --------------------------------------------------------
-    return renderTreeReport({
-      tree:    planResult.tree,
-      result:  executionResult,
-      headline: planResult.tree.intentBrief,
-      drillDownNote: '_The planner did not propose drill-down bullets for this run. Open the todos pane to launch a follow-up._',
-    }) + '\n';
-  }
-
-  /**
-   * Build the session-derived context bag the tree executor exposes
-   * via `source: 'context'` bindings. The keys here are the
-   * documented reserved set (see plan-tree.ts InputBinding doc).
-   */
-  private buildSessionContextForTree(): Readonly<Record<string, unknown>> {
-    if (this.deps === undefined) return {};
-    const session = this.deps.session;
-    return {
-      sessionId:         session.id,
-      codeRepoPath:      session.repoPath,
-      primaryConnection: this._connections[0]?.id ?? '',
-      // The full connection roster is also exposed so a leaf wiring
-      // `connections` directly can avoid re-deriving it.
-      connections:       connectionsForL2(this._connections),
-    };
-  }
-
-  /** Emit a brainstorm-style `liveStep` event (mirrors the code-
-   *  analyzer's emitter; data-analyzer didn't have one before). */
+  /** Emit a brainstorm-style `liveStep` event. Mirrors the
+   *  code-analyzer's emitter. */
   private emitLiveStep(step: string, text: string, done = false): void {
-    if (this.deps === undefined) return;
+    if (this.deps === undefined) { return; }
     try {
       this.deps.send({
         id: this.deps.requestId,
@@ -1189,61 +471,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     } catch (err) {
       log.debug({ err: (err as Error).message }, 'emitLiveStep: send failed (swallowed)');
     }
-  }
-
-  /**
-   * Build the lean summary context the cloud planner sees:
-   *   line 1: active repo / closure descriptor + scope tier
-   *   line 2 (optional): memory of what prior turns covered
-   */
-  private buildSummaryContext(): string {
-    const session = this.deps?.session;
-    const lines: string[] = [];
-
-    const path = session?.repoPath ?? '';
-    const closure = session?.closureRepos.length ?? 0;
-    const repoLine = path.length > 0
-      ? `${path} -- closure size: ${closure}`
-      : `(no active repo) -- closure size: ${closure}`;
-    lines.push(`Active repo: ${repoLine} -- scope tier: ${this._tier}.`);
-
-    if (session !== undefined) {
-      try {
-        const raw = session.contextManager.getTag(PRIOR_CONTEXT_TAG_CURRENT);
-        if (raw.length > 0) {
-          const parsed = JSON.parse(raw) as {
-            currentIntent?: string;
-            intentChanged?: boolean;
-            previousIntent?: string;
-            facts?: import('../../agent/intent/retriever.js').PriorFacts;
-          };
-          const memory = summarizePriorContext({
-            currentIntent: parsed.currentIntent ?? 'data-analysis',
-            intentChanged: parsed.intentChanged ?? false,
-            ...(parsed.previousIntent !== undefined ? { previousIntent: parsed.previousIntent } : {}),
-            artifacts:     [],
-            facts:         parsed.facts ?? {},
-          });
-          if (memory.length > 0) lines.push(memory);
-        }
-      } catch (err) {
-        log.debug({ err: (err as Error).message }, 'buildSummaryContext: priorContext read failed');
-      }
-    }
-
-    return lines.join(' ');
-  }
-
-  /**
-   * Per-step skills pipeline. Picks tools / skills appropriate for
-   * one plan step's objective; returns the executions for the
-   * expander. Errors degrade to empty evidence.
-   */
-  private async afterSynthesise(_completed: TaskResult, _state: TaskStateStore): Promise<Task[] | null> {
-    // Synthesise runs inline in queueSynthesise via generateMultiPass;
-    // there's no LLM-task completion to react to here. Reserved for
-    // future Phase 2 (present gate). For Phase 1 we just close out.
-    return null;
   }
 
   // -- finalize ------------------------------------------------------------
@@ -1301,63 +528,33 @@ export class DataAnalyzerOrchestratorController implements TaskController {
   }
 
   private async afterResumeBootstrap(
-    state: TaskStateStore,
+    _state: TaskStateStore,
     phase: DataAnalyzerPhase,
   ): Promise<Task[] | null> {
     log.info({ phase, listId: this._listId }, 'data-analyzer resume entry');
-    switch (phase) {
-      case 'planning':
-        // Re-fire the skills-routing bootstrap. With the legacy plan
-        // LLM path removed, resuming from `planning` just re-runs the
-        // meta-skills pipeline against the persisted request.
-        if (this._request === undefined) return null;
-        return [{
-          index: 0,
-          description: `Data Analyzer: re-routing through skills pipeline (resume; tier ${this._tier})...`,
-          kind: 'transform',
-          intent: 'data-analysis',
-          passThrough: true,
-          userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
-          outputFormat: 'text',
-          stateKey: K_PLAN_RESULT,
-          persisted: true,
-        }];
-      case 'plan-approval': {
-        const planned = state.get<DataAnalysisTask[]>(K_PLAN_TASKS) ?? [];
-        const caps = capsForTier(this._tier);
-        return [{
-          index: 1,
-          description: `Plan has ${planned.length} tasks (resume; tier ${this._tier}). Approve, trim, or cancel?`,
-          kind: 'transform',
-          intent: 'data-analysis',
-          passThrough: true,
-          userMessage: renderPlanSummary(planned, caps),
-          outputFormat: 'markdown',
-          requiresGate: true,
-          gateTitle: `Data Analyzer plan size approval (tier ${this._tier})`,
-          gateActions: [
-            { name: 'approve', label: 'Approve all' },
-            { name: 'trim-to-soft', label: `Trim to first ${caps.softTaskCap}` },
-            { name: 'cancel', label: 'Cancel run' },
-          ],
-          persisted: true,
-        }];
-      }
-      case 'analyzing':
-      case 'reviewing':
-        // Items left in 'in_progress' at crash time will re-run
-        // naturally: runNextAnalyzerTask picks the first task that
-        // isn't in K_ACCEPTED, and an in-progress-but-not-accepted
-        // item matches that filter. The status badge will read
-        // "in_progress" briefly until markComplete fires after the
-        // re-execute.
-        return this.runNextAnalyzerTask(state);
-      case 'synthesising':
-        return this.queueSynthesise(state);
-      case 'present':
-      case 'done':
-        return null;
+    if (this._request === undefined) {
+      return null;
     }
+    // Post-cutover (P5.b.2): the restoreState shim normalises every
+    // legacy phase ('plan-approval' / 'analyzing' / 'reviewing' /
+    // 'synthesising') to 'done' with a partial-report annotation.
+    // Resume from 'done' / 'present' is a no-op; resume from 'planning'
+    // re-runs the bootstrap. Any other value is treated as 'planning'
+    // for forward-compat.
+    if (phase === 'done' || phase === 'present') {
+      return null;
+    }
+    return [{
+      index: 0,
+      description: `Data Analyzer: resuming section-flow pipeline (tier ${this._tier})...`,
+      kind: 'transform',
+      intent: 'data-analysis',
+      passThrough: true,
+      userMessage: SKILLS_ROUTING_BOOTSTRAP_MARKER,
+      outputFormat: 'text',
+      stateKey: K_PLAN_RESULT,
+      persisted: true,
+    }];
   }
 
   // Connection-approval gating moved to the universal access
@@ -1383,121 +580,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
    * through to the artifact's prisma / graph fallback (no `connection`
    * arg) -- the tool itself decides the source priority.
    */
-  private async _appendErArtifactSection(
-    markdown: string,
-    accepted: readonly AcceptedTask[],
-  ): Promise<string> {
-    if (this.deps === undefined) return markdown;
-    const erTasks = accepted.filter(a => a.task.kind === 'er');
-    if (erTasks.length === 0) return markdown;
-
-    const generated: { title: string; id: string; provenance: string }[] = [];
-    const failures: string[] = [];
-
-    for (const { task } of erTasks) {
-      const groups = groupTablesByConnection(task);
-      // No scope at all -- fall through to artifact_er's free-text
-      // / prisma / graph source chain with just the question.
-      if (groups.length === 0) {
-        groups.push({ connection: undefined, tables: [] });
-      }
-      for (const group of groups) {
-        const result = await this._runErArtifact(task.question, group);
-        if ('error' in result) {
-          failures.push(`${group.connection ?? '<no connection>'}: ${result.error}`);
-        } else {
-          generated.push(result);
-        }
-      }
-    }
-
-    if (generated.length === 0 && failures.length === 0) return markdown;
-
-    const lines: string[] = ['', '## ER Diagrams', ''];
-    if (generated.length > 0) {
-      lines.push(`Generated ${generated.length} ER artifact${generated.length === 1 ? '' : 's'} (open via the Artifacts pane):`);
-      lines.push('');
-      for (const g of generated) {
-        lines.push(`- **${g.title}** -- \`${g.id}\` _(${g.provenance})_`);
-      }
-    }
-    if (failures.length > 0) {
-      lines.push('');
-      lines.push('_ER generation skipped for the following:_');
-      for (const f of failures) {
-        lines.push(`- ${f}`);
-      }
-    }
-    return markdown + lines.join('\n');
-  }
-
-  /**
-   * Invoke `artifact_er` via the unified tool executor. Wraps the
-   * call result so the caller gets either a structured success
-   * payload or a single-line error string.
-   */
-  private async _runErArtifact(
-    description: string,
-    group: { connection: string | undefined; tables: readonly string[] },
-  ): Promise<
-    | { title: string; id: string; provenance: string }
-    | { error: string }
-  > {
-    if (this.deps === undefined) return { error: 'orchestrator deps missing' };
-    const input: Record<string, unknown> = { description };
-    if (group.connection !== undefined) { input['connection'] = group.connection; }
-    if (group.tables.length > 0)        { input['tables'] = [...group.tables]; }
-
-    const r = await executeTool(
-      { id: `er-${Date.now()}-${Math.floor(Math.random() * 1000)}`, name: 'artifact_er', input },
-      {
-        session: this.deps.session,
-        send: this.deps.send,
-        channel: this.deps.channel,
-        requestId: this.deps.requestId,
-      },
-    );
-    if (r.isError) {
-      return { error: r.content.slice(0, 200) };
-    }
-    // executeTool returns ToolResult; the structured payload from the
-    // tool's data field isn't propagated, so parse the summary line
-    // for id / title.
-    const idMatch = /id=([^,]+)/.exec(r.content);
-    const titleMatch = /title="([^"]+)"/.exec(r.content);
-    return {
-      id: idMatch?.[1] ?? '<unknown>',
-      title: titleMatch?.[1] ?? 'ER diagram',
-      provenance: group.connection !== undefined
-        ? `connection=${group.connection}, ${group.tables.length} table${group.tables.length === 1 ? '' : 's'}`
-        : 'prisma / graph fallback',
-    };
-  }
-
-  /**
-   * Build the cache-key input for a task (Phase 2.4). The
-   * connection fingerprint combines the task's explicit scope with
-   * the active session's full connection roster -- so cache hits
-   * stay valid only as long as both inputs are stable. Schema drift
-   * on an unchanged connection is not yet detected; see cache.ts for
-   * the trade-off and follow-up note.
-   */
-  private _buildCacheKeyInput(task: DataAnalysisTask): CacheKeyInput {
-    const fingerprint = buildConnectionFingerprint({
-      taskScope: task.scope,
-      registeredConnections: this._connections.map(c => ({
-        id: c.id,
-        kind: c.kind,
-        family: c.family,
-      })),
-    });
-    return {
-      question: task.question,
-      scope: task.scope,
-      tier: this._tier,
-      connectionFingerprint: fingerprint,
-    };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,203 +597,3 @@ function clampToDataAltitude(tier: ScopeSize): ScopeSize {
   }
 }
 
-function shortTitleFor(t: DataAnalysisTask): string {
-  const head = t.question.split(/\s+/).slice(0, 8).join(' ');
-  return head.length > 60 ? head.slice(0, 57) + '...' : head;
-}
-
-const VALID_DATA_ANALYSIS_KINDS: ReadonlySet<DataAnalysisTask['kind']> = new Set([
-  'inspect-schema',
-  'sample-data',
-  'sample-shape',
-  'lineage',
-  'schema-drift',
-  'er',
-  'free-form',
-]);
-
-function isDataAnalysisKind(v: unknown): v is DataAnalysisTask['kind'] {
-  return typeof v === 'string' && VALID_DATA_ANALYSIS_KINDS.has(v as DataAnalysisTask['kind']);
-}
-
-/**
- * Phase 5.1 helper. Convert a persisted TodoItem from a prior
- * data-analysis run back into a DataAnalysisTask the orchestrator
- * can hand to `beginAnalysis`. Returns null when the item lacks
- * either a usable description (the planner-supplied question) or
- * a recognisable `meta.kind` -- those items get skipped and the
- * caller falls back to its single-task default if nothing parses.
- */
-function reconstructTaskFromItem(item: {
-  readonly id: string;
-  readonly description?: string | undefined;
-  readonly meta?: Readonly<Record<string, unknown>> | undefined;
-}): DataAnalysisTask | null {
-  const question = (item.description ?? '').trim();
-  if (question.length === 0) return null;
-  const meta = item.meta ?? {};
-  const kindRaw = meta['kind'];
-  if (!isDataAnalysisKind(kindRaw)) return null;
-  const scopeRaw = meta['scope'];
-  const hintRaw = meta['hint'];
-  const task: DataAnalysisTask = {
-    itemId: '', // assigned at addItem time in _persistTaskList
-    kind: kindRaw,
-    question,
-    origin: 'plan',
-    ...(scopeRaw !== null && typeof scopeRaw === 'object' && !Array.isArray(scopeRaw)
-      ? { scope: parseScopeForRerun(scopeRaw as Record<string, unknown>) }
-      : {}),
-    ...(typeof hintRaw === 'string' && hintRaw.length > 0 ? { hint: hintRaw } : {}),
-  };
-  return task;
-}
-
-function parseScopeForRerun(raw: Record<string, unknown>): DataAnalysisTask['scope'] {
-  const out: { connections?: string[]; targets?: string[] } = {};
-  if (Array.isArray(raw['connections'])) {
-    const conns = raw['connections'].filter((s): s is string => typeof s === 'string');
-    if (conns.length > 0) out.connections = conns;
-  }
-  if (Array.isArray(raw['targets'])) {
-    const targets = raw['targets'].filter((s): s is string => typeof s === 'string');
-    if (targets.length > 0) out.targets = targets;
-  }
-  return out;
-}
-
-/**
- * Last-resort fallback when the prior list is gone or has no
- * parseable items. Produces a single free-form task carrying the
- * original request as the question, so the user still gets some
- * analysis they can compare against.
- */
-function buildFallbackTaskFromRequest(request: string): DataAnalysisTask[] {
-  const trimmed = request.trim();
-  if (trimmed.length === 0) return [];
-  return [{
-    itemId: '',
-    kind: 'free-form',
-    question: trimmed,
-    origin: 'plan',
-  }];
-}
-
-/**
- * Phase 3.3 helper. Walk a task's scope and produce one
- * (connection, tables[]) group per referenced connection.
- *
- * - When `scope.connections` is set, build one group per connection
- *   id, with `scope.targets` (or [] if absent) repeated. We don't
- *   try to infer which targets belong to which connection -- the
- *   planner is responsible for that pairing in tier-aware scope.
- * - When `scope.connections` is unset OR empty, return [] so the
- *   caller can decide whether to fall back to free-text.
- */
-function groupTablesByConnection(t: DataAnalysisTask): Array<{ connection: string | undefined; tables: readonly string[] }> {
-  const conns = t.scope?.connections ?? [];
-  const tables = t.scope?.targets ?? [];
-  if (conns.length === 0) return [];
-  return conns.map(c => ({ connection: c, tables }));
-}
-
-function renderPlanSummary(planned: readonly DataAnalysisTask[], caps: TierCaps): string {
-  const lines: string[] = [
-    `Planner emitted **${planned.length} tasks** (soft cap: ${caps.softTaskCap}, hard cap: ${caps.hardTaskCap}).`,
-    '',
-  ];
-  for (let i = 0; i < planned.length; i++) {
-    const t = planned[i]!;
-    lines.push(`${i + 1}. **[${t.kind}]** ${t.question}`);
-  }
-  return lines.join('\n');
-}
-
-interface ReviewerDecision {
-  readonly kind: 'accept' | 'retry' | 'follow-up' | 'done';
-  readonly retryHint?: string;
-  readonly followUps: readonly { kind: DataAnalysisTask['kind']; question: string; scope?: DataAnalysisTask['scope'] }[];
-}
-
-function parseReviewerDecision(rawText: string): ReviewerDecision {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(stripFences(rawText));
-  } catch {
-    return { kind: 'accept', followUps: [] };
-  }
-  const decision = typeof parsed['decision'] === 'string' ? parsed['decision'] : 'accept';
-  if (decision === 'retry-with-hint') {
-    return {
-      kind: 'retry',
-      ...(typeof parsed['retryHint'] === 'string' ? { retryHint: parsed['retryHint'] } : {}),
-      followUps: [],
-    };
-  }
-  if (decision === 'add-follow-up') {
-    const fus = Array.isArray(parsed['followUps']) ? parsed['followUps'] : [];
-    const followUps: { kind: DataAnalysisTask['kind']; question: string; scope?: DataAnalysisTask['scope'] }[] = [];
-    for (const raw of fus) {
-      if (typeof raw !== 'object' || raw === null) continue;
-      const r = raw as Record<string, unknown>;
-      const kind = (typeof r['kind'] === 'string' ? r['kind'] : 'free-form') as DataAnalysisTask['kind'];
-      const question = typeof r['question'] === 'string' ? r['question'] : '';
-      if (question.length === 0) continue;
-      const scopeRaw = (r['scope'] ?? {}) as Record<string, unknown>;
-      const scope: DataAnalysisTask['scope'] = {
-        ...(Array.isArray(scopeRaw['connections']) ? { connections: scopeRaw['connections'].filter((s): s is string => typeof s === 'string') } : {}),
-        ...(Array.isArray(scopeRaw['targets']) ? { targets: scopeRaw['targets'].filter((s): s is string => typeof s === 'string') } : {}),
-      };
-      followUps.push({
-        kind,
-        question,
-        ...(scope.connections !== undefined || scope.targets !== undefined ? { scope } : {}),
-      });
-    }
-    return { kind: 'follow-up', followUps };
-  }
-  if (decision === 'done') {
-    return { kind: 'done', followUps: [] };
-  }
-  return { kind: 'accept', followUps: [] };
-}
-
-
-// ---------------------------------------------------------------------------
-// Plan / expand / review synthesis helpers (Phase 5 of
-// plans/analyzers/cloud-plan-local-expand-cloud-review.md). Mirrors
-// the code-analyzer helpers; kept analyzer-local instead of shared
-// because the AcceptedTask shapes differ enough that lifting to the
-// content-gen module isn't worth the coupling.
-// ---------------------------------------------------------------------------
-
-function deriveExecutionsFromAcceptedDA(
-  accepted: readonly AcceptedTask[],
-): readonly PlanExecution[] {
-  return accepted.map(a => ({
-    skillId:    a.task.kind,
-    value:      a.result.answer,
-    confidence: a.result.confidence,
-    notes:      [],
-  }));
-}
-
-/**
- * Convert the data orchestrator's `ConnectionSummary[]` into the shape
- * the L2 `data.answer-question` skill expects (used by the fallback
- * tree's literal `connections` binding, and by the session-context bag
- * for trees that want the raw roster). Mirrors `connectionsToL2Input`
- * in the legacy `answer-question-action.ts` adapter.
- */
-function connectionsForL2(connections: readonly ConnectionSummary[]): Array<Record<string, unknown>> {
-  return connections.map(c => {
-    const out: Record<string, unknown> = { id: c.id, family: c.family };
-    if (c.kind  !== undefined) out['kind']  = c.kind;
-    if (c.label !== undefined) out['label'] = c.label;
-    return out;
-  });
-}
-
-// `stitchPlanSectionsDA` + `synthesiseFallbackActionDA` were the
-// stitcher + fallback for the flat plan-actions path; P6 replaced
-// them with `renderTreeReport` + `buildDataAnalyzerFallbackTree`.

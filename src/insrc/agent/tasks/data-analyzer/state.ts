@@ -53,15 +53,9 @@ export interface DataAnalysisState {
 
 export const K_STATE          = 'state';            // DataAnalysisState
 export const K_PHASE          = 'phase';            // DataAnalyzerPhase
-export const K_RETRIES        = 'retries';          // Record<itemId, number>
-export const K_FOLLOWUP_COUNT = 'followup-count';   // total follow-ups added
-export const K_PLAN_RESULT    = 'plan-result';      // raw plan LLM output
+export const K_PLAN_RESULT    = 'plan-result';      // bootstrap-task output (transform pass-through)
 export const K_PLAN_TASKS     = 'plan-tasks';       // parsed DataAnalysisTask[]
-export const K_REVIEW_RESULT  = 'review-result';    // raw review output
-export const K_SYNTH_RESULT   = 'synth-result';     // raw synthesise output
-export const K_ACCEPTED       = 'accepted';         // Array<{task, result}>
-export const K_HISTORY        = 'history';          // DataAnalyzerResult[]
-export const K_RAW_EXECUTIONS = 'rawExecutions';    // PerSkillExecution[] from skills pipeline (for plan-actions synthesis)
+export const K_SYNTH_RESULT   = 'synth-result';     // final report markdown
 
 /**
  * Sentinel emitted by `buildResumeTask` and detected in the
@@ -79,11 +73,3 @@ export const RESUME_BOOTSTRAP_MARKER = '__data_analyzer_resume_bootstrap__';
  */
 export const SKILLS_ROUTING_BOOTSTRAP_MARKER = '__data_analyzer_skills_routing_bootstrap__';
 
-// ---------------------------------------------------------------------------
-// Accepted-task pair (stashed in K_ACCEPTED for the synthesise step)
-// ---------------------------------------------------------------------------
-
-export interface AcceptedTask {
-  readonly task: DataAnalysisTask;
-  readonly result: DataAnalyzerResult;
-}
