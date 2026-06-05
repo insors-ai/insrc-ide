@@ -63,3 +63,20 @@ export {
 	type L2Fallback,
 	type L2FallbackInput,
 } from './todo-orchestrator.js';
+
+export {
+	assembleReport,
+	type ReportAssembleInput,
+	type ReportAssembleResult,
+} from './step-report-assemble.js';
+
+export {
+	runReportReview,
+	type ReportReviewInput,
+	type ReportReviewResult,
+	type StructuralRevise,
+	type StructuralReviseSectionContradiction,
+	type StructuralReviseScopeGap,
+	type SectionContradictionResolver,
+	type ScopeGapResolver,
+} from './step-report-review.js';
