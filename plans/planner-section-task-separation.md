@@ -1102,17 +1102,27 @@ operational rollback.
   (map-reduce) paths per Q1's `numCtx - response - 1500`
   threshold and turn/entry-boundary chunking.
 - Incremental update path per Q1.1: per-layer strategy (`system`
-  cached; `summary` incremental; `recent` deterministic slice;
-  `semantic` rebuilt OR cache-hit; `code` appended). Cold-rebuild
-  triggers wired (memory growth >50%, review-flagged
-  inconsistency).
-- Per-TODO semantic-bullet cache: LanceDB table
-  `working_memory_bullets` (5-10 prompt-agnostic facts per
-  completed TODO, ANN-retrieved at the next shaping step).
-- Provider plumbing decision: extend `OllamaProvider`
-  CompletionOpts with `disableThinking?: boolean` (per
-  auto-memory `qwen3_6_needs_think_false`), un-gated from
-  tool presence. Memory-shape calls pass `disableThinking: true`.
+  evergreen pass-through; `summary` incremental LLM call;
+  `recent` deterministic slice + light LLM polish (skippable);
+  `semantic` incremental LLM call against prior+new+next
+  objective; `code` deterministic concat + cap-truncate).
+  Cold-rebuild triggers wired (memory growth >= 50%, user
+  request, orchestrator-flagged inconsistency, first-TODO).
+- Provider plumbing: extend `OllamaProvider` CompletionOpts with
+  `disableThinking?: boolean` (per auto-memory
+  `qwen3_6_needs_think_false`), un-gated from tool presence.
+  Memory-shape calls pass `disableThinking: true`.
+
+**Deferred to P1.e (separate commit):**
+- Per-TODO semantic-bullet cache (LanceDB table
+  `working_memory_bullets`, 5-10 prompt-agnostic facts per
+  completed TODO, ANN-retrieved at the next shaping step). The
+  bullet cache is the major cost mitigation for Hadoop-sized
+  semantic layer rebuilds, but it is independent of the
+  incremental update structure. Splitting it off keeps each
+  commit reviewable and lets the orchestrator (P3-P5) integrate
+  against the cheaper semantic path first; the cache slots in
+  as a drop-in replacement for `updateSemantic`.
 
 **Acceptance:**
 - Unit tests for chunked path on a Hadoop-sized fixture (parity

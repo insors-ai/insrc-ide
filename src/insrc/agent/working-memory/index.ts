@@ -39,3 +39,14 @@ export {
 	type MemoryShapeTrace,
 	type MemoryChunkHint,
 } from './shaper.js';
+
+export {
+	incrementalUpdate,
+	shouldColdRebuild,
+	type IncrementalUpdateInput,
+	type IncrementalUpdateOpts,
+	type IncrementalUpdateResult,
+	type IncrementalUpdateTrace,
+	type ColdRebuildInput,
+	type LayerName,
+} from './updater.js';
