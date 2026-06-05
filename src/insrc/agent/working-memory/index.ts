@@ -28,3 +28,14 @@ export {
 	ensureRunDir,
 	type ListedEntry,
 } from './store.js';
+
+export {
+	shapeMemory,
+	chunkMemory,
+	type MemoryShapeBundle,
+	type MemoryShapeInput,
+	type MemoryShapeOpts,
+	type MemoryShapeResult,
+	type MemoryShapeTrace,
+	type MemoryChunkHint,
+} from './shaper.js';
