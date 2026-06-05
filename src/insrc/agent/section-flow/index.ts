@@ -35,3 +35,11 @@ export {
 	type SectionPlannerInput,
 	type SectionPlannerResult,
 } from './step-section-planner.js';
+
+export {
+	executeReviewableRoots,
+	type PerRootExecutorInput,
+	type PerRootExecutorResult,
+	type LeafExecutionInput,
+	type ExecuteLeaf,
+} from './step-root-execution.js';

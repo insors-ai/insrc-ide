@@ -335,17 +335,24 @@ consumed by two parents is impossible).
 section-level planning; treat the live-test single-branch failure
 as the prompt/example problem it actually is.**
 
-**Rationale.** `PlannedNode.inputs` already supports
-`{ source: 'node', nodeId, path }` -- any node can read any other
-node's output by id. So data-flow DAG is already expressible
-inside the tree topology; what tree-vs-DAG actually constrains is
-execution order (depth-first parent-then-children) and the
-structural rule "one parent per node." Promoting to a full DAG
-buys almost nothing the `node`-binding doesn't already provide,
-while it costs: cycle detection at plan time, topo-sort executor,
-a harder-to-author recursive schema for the LLM (DAG schemas trip
-up structured-output guards), and a more complex "root-node
-review" rule (no clean roots in a DAG).
+**Rationale.** `PlannedNode.inputs` supports
+`{ source: 'node', nodeId, path }` for cross-node data flow. The
+visibility rule (enforced by the existing `validatePlannedTree`)
+is "ancestors + earlier siblings in the same composition" -- so a
+leaf in reviewable-root #2 cannot read directly from a leaf
+nested inside reviewable-root #1, but it CAN read from the
+reviewable-root composition itself (which aggregates its
+children's outputs). Cross-root data flow is therefore expressed
+at the composition-boundary level, not leaf-to-leaf. Promoting to
+a full DAG would let leaves anywhere reference leaves anywhere
+else, but at the cost of: cycle detection at plan time, topo-sort
+executor, a harder-to-author recursive schema for the LLM (DAG
+schemas trip up structured-output guards), and a more complex
+"root-node review" rule (no clean roots in a DAG). The
+composition-boundary pattern is a tighter contract for the
+section orchestrator anyway -- it makes per-root review semantics
+clean (a reviewable root's output IS the aggregate handed to
+downstream roots).
 
 Crucially, the orchestrator's review pattern -- "for each root
 node in the graph once all the branches have been executed,
@@ -358,8 +365,11 @@ well-defined roots, which trees give you and DAGs don't.
   `PlannedTree` per TODO. The tree has multi-root structure via
   the existing root-composition node (the LLM emits a top-level
   `composition` node with multiple `children`).
-- Cross-branch reads stay on `inputs.{nodeId, path}`. Don't
-  introduce a separate `reads:` field.
+- Cross-branch reads stay on `inputs.{nodeId, path}`, scoped
+  to ancestor + earlier-sibling visibility. A leaf in reviewable
+  root #N+1 references reviewable root #N as the composition id
+  (it reads the AGGREGATE output), not the deeper leaves inside
+  root #N. Don't introduce a separate `reads:` field.
 - Add validator rule: reject "degenerate" plans -- single-chain
   with zero siblings AND depth > 2 AND fewer than N total leaves
   (catch the live-test failure mode at plan time, route to one
