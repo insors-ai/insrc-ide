@@ -114,14 +114,23 @@ export interface RunSectionFlowInput {
 	readonly catalogHint?: string | undefined;
 	/**
 	 * Optional progress callback the daemon controller wires to chat-
-	 * stream events. Called at each section-flow phase transition.
-	 * Best-effort -- failures here do not abort the run.
+	 * stream events AND the TodoList workbench API (Q8). Awaited
+	 * serially so the controller can persist TodoItems before the next
+	 * phase starts; failures are logged and swallowed.
 	 */
-	readonly onProgress?: (event: ProgressEvent) => void;
+	readonly onProgress?: (event: ProgressEvent) => void | Promise<void>;
 }
 
 export interface ProgressEvent {
-	readonly phase:   'scope' | 'plan' | 'todo-start' | 'todo-complete' | 'report-assemble' | 'report-review' | 'cleanup';
+	readonly phase:
+		| 'scope'
+		| 'plan'
+		| 'todo-start'
+		| 'todo-complete'
+		| 'scope-gap-todo-added'
+		| 'report-assemble'
+		| 'report-review'
+		| 'cleanup';
 	readonly message: string;
 	readonly meta?:   Record<string, unknown>;
 }
@@ -154,16 +163,17 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 	const store  = openWorkingMemoryStore(input.workingMemoryDir);
 	const cache  = makeBulletCache(input.runId);
 
-	const progress = (event: ProgressEvent): void => {
+	const progress = async (event: ProgressEvent): Promise<void> => {
+		if (input.onProgress === undefined) { return; }
 		try {
-			input.onProgress?.(event);
-		} catch {
-			/* ignore progress callback errors */
+			await input.onProgress(event);
+		} catch (err) {
+			log.warn({ err: (err as Error).message, phase: event.phase }, 'onProgress callback threw; swallowing');
 		}
 	};
 
 	// 1. Step 1 -- Scope.
-	progress({ phase: 'scope', message: 'classifying scope' });
+	await progress({ phase: 'scope', message: 'classifying scope' });
 	const scopeArgs: Parameters<typeof runScopeStep>[0] = {
 		question: input.question,
 		provider: input.provider,
@@ -175,13 +185,25 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 	log.info({ scope: scope.scope, subtype: scope.subtype, isTrivial: scope.isTrivial }, 'scope step complete');
 
 	// 2. Step 2 -- Investigation plan.
-	progress({ phase: 'plan', message: 'building investigation plan' });
 	const investigationPlan = await runInvestigationPlan({
 		question: input.question,
 		scope,
 		provider: input.provider,
 	});
 	log.info({ todoCount: investigationPlan.todos.length, fastPath: investigationPlan.isFastPath }, 'investigation plan landed');
+	// Emit plan AFTER the call so meta.todos is populated; the
+	// controller wires this to addItem-per-TODO on the workbench
+	// list (Q8). `todos` carries the full investigation plan in
+	// execution order; `isFastPath` lets the workbench skip
+	// per-TODO progress polish on single-shot runs.
+	await progress({
+		phase:   'plan',
+		message: `investigation plan: ${investigationPlan.todos.length} TODO(s)`,
+		meta: {
+			todos: investigationPlan.todos.map(t => ({ id: t.id, objective: t.objective, origin: t.origin })),
+			isFastPath: investigationPlan.isFastPath,
+		},
+	});
 
 	// 3. Per-TODO loop.
 	let priorBundle: MemoryShapeBundle | undefined;
@@ -191,7 +213,16 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 	// Caller passed `runId` via `input.runId`; carry to per-TODO loop.
 	for (let i = 0; i < investigationPlan.todos.length; i++) {
 		const todo = investigationPlan.todos[i]!;
-		progress({ phase: 'todo-start', message: `TODO ${i + 1}/${investigationPlan.todos.length}: ${todo.objective}`, meta: { todoId: todo.id, index: i } });
+		await progress({
+			phase:   'todo-start',
+			message: `TODO ${i + 1}/${investigationPlan.todos.length}: ${todo.objective}`,
+			meta: {
+				todoId:    todo.id,
+				index:     i,
+				objective: todo.objective,
+				origin:    todo.origin,
+			},
+		});
 
 		const memory = await prepareMemoryFor(todo, {
 			store,
@@ -230,15 +261,33 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 		// LLM path).
 		await persistBullets(todoResult.entry, input.runId, i, input.provider);
 
-		progress({
+		await progress({
 			phase:   'todo-complete',
 			message: `TODO ${i + 1}/${investigationPlan.todos.length} complete${todoResult.trace.l2FallbackUsed ? ' (L2 fallback)' : ''}`,
-			meta:    { todoId: todo.id, l2: todoResult.trace.l2FallbackUsed, replans: todoResult.trace.replansConsumed },
+			meta: {
+				todoId:    todo.id,
+				index:     i,
+				l2:        todoResult.trace.l2FallbackUsed,
+				replans:   todoResult.trace.replansConsumed,
+				fallback:  todoResult.entry.findings.fallback,
+				// Reviewable-root sub-items rendered post-hoc (Q8). One
+				// entry per perRoot finding; sub-item status text
+				// surfaces followup cycles and exhausted bits so the
+				// workbench renderer can show "followup cycle 2/3" etc.
+				subItems: todoResult.entry.findings.perRoot.map(r => ({
+					id:        r.rootId,
+					title:     r.rootId,
+					status:    'complete' as const,
+					statusText: r.cyclesConsumed > 0
+						? `${r.verdict}; ${r.cyclesConsumed} followup cycle${r.cyclesConsumed === 1 ? '' : 's'}${r.exhausted ? ' (exhausted)' : ''}`
+						: r.verdict,
+				})),
+			},
 		});
 	}
 
 	// 4. Step 4 -- Final report assembly + review.
-	progress({ phase: 'report-assemble', message: 'assembling final report' });
+	await progress({ phase: 'report-assemble', message: 'assembling final report' });
 	const entriesForReport = (await store.listEntries()).map(e => e.entry);
 
 	const sectionResolver: SectionContradictionResolver = async ({ sectionIds, entries }) => {
@@ -283,6 +332,20 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 		const newEntries: WorkingMemoryEntry[] = [];
 		for (let j = 0; j < proposedTodos.length; j++) {
 			const todo = proposedTodos[j]!;
+			// Q8: emit a TodoList event so the workbench creates a new
+			// item flagged with origin='report-review-escalation'
+			// BEFORE the per-TODO orchestrator runs. The renderer can
+			// then show the item appearing mid-run.
+			await progress({
+				phase:   'scope-gap-todo-added',
+				message: `scope-gap TODO appended: ${todo.objective}`,
+				meta: {
+					todoId:    todo.id,
+					objective: todo.objective,
+					origin:    todo.origin,
+				},
+			});
+
 			const memory = await prepareMemoryFor(todo, {
 				store,
 				cache,
@@ -305,11 +368,31 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			await store.write(newIndex, todoResult.entry);
 			await persistBullets(todoResult.entry, input.runId, newIndex, input.provider);
 			newEntries.push(todoResult.entry);
+
+			await progress({
+				phase:   'todo-complete',
+				message: `scope-gap TODO complete${todoResult.trace.l2FallbackUsed ? ' (L2 fallback)' : ''}: ${todo.objective}`,
+				meta: {
+					todoId:    todo.id,
+					index:     newIndex,
+					l2:        todoResult.trace.l2FallbackUsed,
+					replans:   todoResult.trace.replansConsumed,
+					fallback:  todoResult.entry.findings.fallback,
+					subItems: todoResult.entry.findings.perRoot.map(r => ({
+						id:        r.rootId,
+						title:     r.rootId,
+						status:    'complete' as const,
+						statusText: r.cyclesConsumed > 0
+							? `${r.verdict}; ${r.cyclesConsumed} followup cycle${r.cyclesConsumed === 1 ? '' : 's'}${r.exhausted ? ' (exhausted)' : ''}`
+							: r.verdict,
+					})),
+				},
+			});
 		}
 		return newEntries;
 	};
 
-	progress({ phase: 'report-review', message: 'reviewing final report' });
+	await progress({ phase: 'report-review', message: 'reviewing final report' });
 	const reportResult: ReportReviewResult = await runReportReview({
 		question: input.question,
 		entries:  entriesForReport,
@@ -320,7 +403,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 
 	// 5. Cleanup. The bullet cache is per-report-run; drop it now that
 	// the report has shipped.
-	progress({ phase: 'cleanup', message: 'cleaning up bullet cache' });
+	await progress({ phase: 'cleanup', message: 'cleaning up bullet cache' });
 	try {
 		await deleteBulletsForRun(input.runId);
 	} catch (err) {

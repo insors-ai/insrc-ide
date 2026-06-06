@@ -400,6 +400,28 @@ export class DataAnalyzerOrchestratorController implements TaskController {
 
     this.emitLiveStep('section-flow', `[data-analyzer | tier=${this._tier}] running section-flow pipeline...\n`);
 
+    // Q8 TodoList wiring: as section-flow emits progress events, we
+    // mirror them to the workbench list -- one TodoItem per TODO,
+    // with reviewable-root sub-items + status text living in
+    // meta.sectionFlow.* (the framework treats meta as agent-opaque,
+    // so we own the shape).
+    const todosApi = this.deps.todos;
+    const listId   = this._listId;
+    const todoIdToItemId = new Map<string, string>();
+
+    const onProgress = async (event: { readonly phase: string; readonly message: string; readonly meta?: Record<string, unknown> }) => {
+      // Chat-stream mirror (existing behavior).
+      this.emitLiveStep('section-flow', `[${event.phase}] ${event.message}\n`);
+      if (todosApi === undefined || listId === undefined) {
+        return;
+      }
+      try {
+        await this._wireProgressToTodos(todosApi, listId, todoIdToItemId, event);
+      } catch (err) {
+        log.warn({ err: (err as Error).message, phase: event.phase }, 'onProgress: TodoList wiring failed (swallowed)');
+      }
+    };
+
     let result: RunSectionFlowResult;
     try {
       result = await runSectionFlow({
@@ -409,9 +431,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         l2Fallback,
         runId,
         workingMemoryDir,
-        onProgress: (event) => {
-          this.emitLiveStep('section-flow', `[${event.phase}] ${event.message}\n`);
-        },
+        onProgress,
       });
     } catch (err) {
       const errMsg = (err as Error).message;
@@ -451,6 +471,99 @@ export class DataAnalyzerOrchestratorController implements TaskController {
 
     this.emitLiveStep('section-flow', '', true);
     return null;
+  }
+
+  /**
+   * Q8 wire-up. Routes a section-flow ProgressEvent to the TodosApi:
+   *   - 'plan'                : addItem per TODO; populate
+   *                             todoIdToItemId map.
+   *   - 'todo-start'          : markInProgress.
+   *   - 'todo-complete'       : updateItemMeta with sub-items + the
+   *                             L2 / exhausted bits; markComplete.
+   *   - 'scope-gap-todo-added': addItem with origin badge in meta.
+   *   - other phases          : no-op (chat-stream mirror in caller
+   *                             already covers them).
+   */
+  private async _wireProgressToTodos(
+    todos:           NonNullable<TaskOrchestratorDeps['todos']>,
+    listId:          string,
+    todoIdToItemId:  Map<string, string>,
+    event:           { readonly phase: string; readonly message: string; readonly meta?: Record<string, unknown> },
+  ): Promise<void> {
+    const meta = event.meta ?? {};
+    switch (event.phase) {
+      case 'plan': {
+        const todos_ = meta['todos'];
+        if (!Array.isArray(todos_)) {
+          return;
+        }
+        for (const t of todos_) {
+          if (t === null || typeof t !== 'object' || Array.isArray(t)) { continue; }
+          const todoSpec = t as Record<string, unknown>;
+          const todoId    = typeof todoSpec['id']        === 'string' ? todoSpec['id']        : '';
+          const objective = typeof todoSpec['objective'] === 'string' ? todoSpec['objective'] : '';
+          const origin    = typeof todoSpec['origin']    === 'string' ? todoSpec['origin']    : 'initial';
+          if (todoId === '' || objective === '') { continue; }
+          const item = await todos.addItem(listId, {
+            title:       objective.length > 80 ? `${objective.slice(0, 77)}...` : objective,
+            description: objective,
+            meta: {
+              sectionFlow: {
+                todoId,
+                origin,
+                subItems: [] as readonly unknown[],
+              },
+            },
+          });
+          todoIdToItemId.set(todoId, item.id);
+        }
+        return;
+      }
+      case 'todo-start': {
+        const todoId = typeof meta['todoId'] === 'string' ? meta['todoId'] : '';
+        const itemId = todoIdToItemId.get(todoId);
+        if (itemId === undefined) { return; }
+        try { await todos.markInProgress(itemId); } catch { /* state machine may reject; swallow */ }
+        return;
+      }
+      case 'todo-complete': {
+        const todoId = typeof meta['todoId'] === 'string' ? meta['todoId'] : '';
+        const itemId = todoIdToItemId.get(todoId);
+        if (itemId === undefined) { return; }
+        await todos.updateItemMeta(itemId, {
+          sectionFlow: {
+            todoId,
+            l2:        meta['l2']       ?? false,
+            replans:   meta['replans']  ?? 0,
+            fallback:  meta['fallback'],
+            subItems:  meta['subItems'] ?? [],
+          },
+        });
+        try { await todos.markComplete(itemId); } catch { /* swallow */ }
+        return;
+      }
+      case 'scope-gap-todo-added': {
+        const todoId    = typeof meta['todoId']    === 'string' ? meta['todoId']    : '';
+        const objective = typeof meta['objective'] === 'string' ? meta['objective'] : '';
+        if (todoId === '' || objective === '') { return; }
+        const item = await todos.addItem(listId, {
+          title:       `+ scope gap: ${objective.length > 60 ? objective.slice(0, 57) + '...' : objective}`,
+          description: objective,
+          meta: {
+            sectionFlow: {
+              todoId,
+              origin: 'report-review-escalation',
+              subItems: [] as readonly unknown[],
+            },
+          },
+        });
+        todoIdToItemId.set(todoId, item.id);
+        try { await todos.markInProgress(item.id); } catch { /* swallow */ }
+        return;
+      }
+      default:
+        return;
+    }
   }
 
   /** Emit a brainstorm-style `liveStep` event. Mirrors the
