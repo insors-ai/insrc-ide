@@ -45,7 +45,6 @@ import {
 import type {
   ConnectionSummary,
   DataAnalysisTask,
-  DataAnalyzerResult,
 } from '../../agent/tasks/data-analyzer/types.js';
 import type { ScopeSize } from '../../shared/classify.js';
 import type {
@@ -58,19 +57,8 @@ import type {
   TaskResult,
   TaskStateStore,
 } from '../task.js';
-import { stripFences } from '../../agent/tasks/_shared/json-extract.js';
-import { executeTool } from '../../agent/tools/executor.js';
 import { detectFilePaths } from '../../agent/tasks/data-analyzer/file-detect.js';
 import { acquirePool } from '../db/pool-cache.js';
-// P6 of plans/planner-skill-tree.md -- tree planner + executor.
-import { planTree, type CatalogSkill } from '../../agent/content-gen/plan-tree-runner.js';
-import {
-  buildCatalogFromRegistry,
-  buildDataAnalyzerFallbackTree,
-  renderTreeReport,
-} from '../../agent/content-gen/plan-tree-helpers.js';
-import { countLeaves as countLeavesQuick } from '../../agent/content-gen/plan-tree.js';
-import { executeTree, type TreeExecutionEvent } from '../skills/tree/executor.js';
 // planner-section-task-separation P5.b.1 cutover: section-flow pipeline.
 import {
   runSectionFlow,
@@ -105,11 +93,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
    * render the parent edge.
    */
   private _parentListId: string | undefined = undefined;
-  /**
-   * Re-run mode (Phase 5.1). Reserved -- wired through but not yet
-   * acted on; the re-run command will land alongside this slice.
-   */
-  private _rerunFromListId: string | undefined = undefined;
 
   attachDeps(deps: TaskOrchestratorDeps): void {
     this.deps = deps;
@@ -121,7 +104,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     this._request = input.message;
     this._tier = clampToDataAltitude(input.classification?.scope ?? 'M');
     this._parentListId = input.parentListId;
-    this._rerunFromListId = input.rerunFromListId;
 
     // Phase 1.H: register ephemeral connections for any local file
     // paths the user typed in their prompt (e.g.

@@ -12,11 +12,7 @@
  */
 
 import type { ScopeSize } from '../../../shared/classify.js';
-import type {
-  ConnectionSummary,
-  DataAnalysisTask,
-  DataAnalyzerResult,
-} from './types.js';
+import type { ConnectionSummary } from './types.js';
 
 /**
  * Phase the orchestrator is currently in. Persisted in K_PHASE so
