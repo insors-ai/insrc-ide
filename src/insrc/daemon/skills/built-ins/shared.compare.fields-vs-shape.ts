@@ -389,11 +389,95 @@ const compareSkill: Skill<FieldsVsShapeInput, FieldsVsShapeOutput> = {
 	providerAffinity: 'auto',
 	async execute(input: FieldsVsShapeInput, _deps: SkillDeps): Promise<SkillResult<FieldsVsShapeOutput>> {
 		void _deps;
+		const fabricationProblem = detectFabricatedClassFields(input);
+		if (fabricationProblem !== null) {
+			// The classFields payload looks like JSON-shape data echoed back as
+			// "class fields" rather than real class-side type annotations (e.g.
+			// `classType: "number"` -- a JSON token -- instead of `int`/`float`
+			// from a Python/Java annotation). Producing an alignment from this
+			// input yields tautological-but-flagged-as-mismatched output and
+			// poisons downstream sections. Refuse instead so the leaf executor
+			// surfaces an empty + the orchestrator can route accordingly.
+			return {
+				value: emptyOutput(input),
+				confidence: 'low',
+				toolCalls:  [],
+				rejectionReason: 'invalid-input',
+				notes: [fabricationProblem],
+			} as SkillResult<FieldsVsShapeOutput>;
+		}
 		const value = alignFieldsAndShape(input);
 		return { value, confidence: 'high', toolCalls: [] };
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Fabrication guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect the case where `classFields` was synthesised by copying from
+ * `dataShape` (the upstream LLM shape-resolver's most common failure
+ * mode when no real class data is in prior outputs). Returns a
+ * human-readable reason string when the input looks fabricated, or
+ * null when the input looks legitimately like class-side annotations.
+ *
+ * Heuristics (both must hold):
+ *   1. classFields is non-empty (a real "I have no class data" caller
+ *      should pass `classFields: []` and get only data-only entries).
+ *   2. A majority of classFields carry JSON-ish type tokens
+ *      (`number`, `string`, `object`, `boolean`, `array`, `null`) --
+ *      Python/Java/TS annotations never use these tokens; class types
+ *      are `int`/`float`/`str`/`bool`/`List[X]`/`Optional[X]`/Capitalized
+ *      model names.
+ */
+const JSON_SHAPE_TYPE_TOKENS: ReadonlySet<string> = new Set([
+	'number', 'string', 'object', 'boolean', 'array', 'null', 'integer',
+]);
+
+function detectFabricatedClassFields(input: FieldsVsShapeInput): string | null {
+	if (input.classFields.length === 0) { return null; }
+	let jsonishCount  = 0;
+	let typedCount    = 0;
+	for (const cf of input.classFields) {
+		if (cf.type === undefined || cf.type.trim().length === 0) { continue; }
+		typedCount += 1;
+		if (JSON_SHAPE_TYPE_TOKENS.has(cf.type.toLowerCase().trim())) {
+			jsonishCount += 1;
+		}
+	}
+	if (typedCount === 0) { return null; }       // no typed fields -> nothing to suspect
+	if (jsonishCount * 2 >= typedCount) {
+		const sample = input.classFields.slice(0, 3).map(f => `${f.name}:${f.type ?? '?'}`).join(', ');
+		return `classFields appears to be JSON-shape data echoed back as class fields ` +
+			`(${jsonishCount}/${typedCount} typed entries use JSON-ish type tokens like ` +
+			`'number'/'string'/'object' which are not valid class-side annotations; sample: ${sample}). ` +
+			`Pass real class field annotations from code.class.extract-fields or leave classFields empty.`;
+	}
+	return null;
+}
+
+function emptyOutput(input: FieldsVsShapeInput): FieldsVsShapeOutput {
+	return {
+		...(input.className !== undefined ? { className: input.className } : {}),
+		...(input.dataLabel !== undefined ? { dataLabel: input.dataLabel } : {}),
+		alignment: [],
+		summary: {
+			classFieldCount: 0,
+			dataColumnCount: 0,
+			exact:           0,
+			nameOnly:        0,
+			renames:         0,
+			classOnly:       0,
+			dataOnly:        0,
+		},
+		headline: 'alignment skipped: classFields input rejected as fabricated (see notes)',
+	};
+}
+
 export function registerSharedCompareFieldsVsShapeSkill(): void {
 	registerSkill(compareSkill as unknown as Skill);
 }
+
+// Test-only export so the guard can be unit-tested without the skill machinery.
+export const _detectFabricatedClassFieldsForTest = detectFabricatedClassFields;

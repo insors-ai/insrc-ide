@@ -267,7 +267,11 @@ test('validatePlannedTree: rejects forward node refs (sibling later in the same 
 			],
 		},
 	});
-	assert.match(r as string, /not an ancestor or earlier sibling/);
+	// Error message lists visible nodes + distinguishes "doesn't exist yet"
+	// (forward sibling, not yet validated) from "exists in another branch".
+	assert.match(r as string, /was not defined before this wiring point/);
+	assert.match(r as string, /Visible nodes you CAN wire from/);
+	assert.match(r as string, /reorder the tree/);
 });
 
 test('validatePlannedTree: rejects self-ref on a wire', () => {

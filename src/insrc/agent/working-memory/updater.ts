@@ -217,6 +217,19 @@ const COMMON_SYSTEM_HEADER = [
 	'object with EXACTLY ONE string field. No prose, no markdown fences.',
 ].join('\n');
 
+const L2_FALLBACK_RULE = [
+	'',
+	'## L2-FALLBACK HANDLING (critical)',
+	'If a TODO carries an `!! L2 FALLBACK !!` marker in its findings, it',
+	'produced NO concrete investigation data -- only a stub from the L2',
+	'dispatcher. You MUST explicitly note the gap so the next TODO\'s',
+	'planner knows not to rely on that TODO\'s output. Use phrasing like:',
+	'"TODO X (objective: ...) routed to L2 fallback; the question of {...}',
+	'remains unanswered." Do NOT paraphrase L2-stub content as if it were',
+	'real evidence. Do NOT carry forward any specific claims sourced',
+	'solely from an L2-fallback\'d TODO.',
+].join('\n');
+
 const SUMMARY_ROLE = [
 	COMMON_SYSTEM_HEADER,
 	'',
@@ -225,6 +238,7 @@ const SUMMARY_ROLE = [
 	'TL;DR that captures the essentials of the accumulated memory so far.',
 	'Do NOT cite section titles. Do NOT duplicate the recent or semantic',
 	'layers (those are filled separately).',
+	L2_FALLBACK_RULE,
 ].join('\n');
 
 const RECENT_ROLE = [
@@ -234,6 +248,7 @@ const RECENT_ROLE = [
 	'last 2-3 entries\' findings + the NEXT TODO\'s objective. Emit a',
 	'bullet list of the salient findings from those entries, biased toward',
 	'items the next TODO will need. Cite section/finding sources by name.',
+	L2_FALLBACK_RULE,
 ].join('\n');
 
 const SEMANTIC_ROLE = [
@@ -244,7 +259,12 @@ const SEMANTIC_ROLE = [
 	'Emit a bullet list of items from across the accumulated memory that',
 	'bear specifically on the NEXT objective. Cite section/finding sources.',
 	'Keep prior items only if they are still relevant; add items from the',
-	'new entry if they bear on the next objective.',
+	'new entry if they bear on the next objective. CRITICAL: Before keeping',
+	'a prior item, verify the new entry does not contradict or reframe it;',
+	'if the new entry overrides the prior, REPLACE the item with one',
+	'derived from the new entry. Do NOT preserve prior items by changing',
+	'their label.',
+	L2_FALLBACK_RULE,
 ].join('\n');
 
 function buildLayerSchema(layerName: LayerName, budgetTokens: number): string {
@@ -362,6 +382,12 @@ async function updateRecent(
 	skipPolish: boolean,
 ): Promise<{ value: string; llmCalled: boolean }> {
 	const deterministicBullets = window.map(e => {
+		if (e.findings.fallback === 'L2') {
+			// Surface L2-fallback'd entries prominently so the recent layer
+			// doesn't carry forward their stub content as substantive
+			// findings for the next TODO.
+			return `- ${e.todoId} (objective: ${truncate(e.objective, 120)}):\n  [L2-fallback -- no concrete findings; do NOT cite as evidence]`;
+		}
 		const findings = e.findings.perRoot
 			.map(r => `  - ${r.rootId}: ${truncate(r.content, 200)}`)
 			.join('\n');
@@ -586,6 +612,24 @@ function buildRecentWindow(
 }
 
 function renderFindings(entry: WorkingMemoryEntry): string {
+	if (entry.findings.fallback === 'L2') {
+		// Make the L2 marker prominent so downstream layers (summary /
+		// recent / semantic) and the next TODO's planner see a clear gap
+		// rather than treating an L2-stub entry as authoritative data.
+		// Without this, the next TODO's planner has historically relied on
+		// fabricated content from the L2 dispatcher's degenerate output.
+		const reason = entry.findings.perRoot.find(r => r.verdict === 'L2-fallback')?.content ?? '(no reason recorded)';
+		return [
+			'### !! L2 FALLBACK -- NO CONCRETE FINDINGS PRODUCED !!',
+			'This TODO routed to the L2 single-skill dispatcher because the',
+			'section planner or per-root execution could not complete. The',
+			'detail markdown above is the L2 dispatcher\'s stub output, NOT',
+			'authoritative investigation data. Downstream TODOs MUST NOT',
+			'cite this entry as evidence for class definitions, field',
+			'mappings, type signatures, or any other concrete fact.',
+			`Reason: ${truncate(reason, 400)}`,
+		].join('\n');
+	}
 	if (entry.findings.perRoot.length === 0) {
 		return '(no findings)';
 	}
@@ -593,9 +637,6 @@ function renderFindings(entry: WorkingMemoryEntry): string {
 	for (const root of entry.findings.perRoot) {
 		parts.push(`- ${root.rootId} (verdict: ${root.verdict}, cycles: ${root.cyclesConsumed}${root.exhausted ? ', exhausted' : ''}):`);
 		parts.push(`  ${truncate(root.content, 600)}`);
-	}
-	if (entry.findings.fallback === 'L2') {
-		parts.push('- fallback: L2 single-skill invocation took over');
 	}
 	return parts.join('\n');
 }

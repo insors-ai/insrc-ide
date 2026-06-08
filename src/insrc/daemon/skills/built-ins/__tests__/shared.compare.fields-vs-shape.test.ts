@@ -374,3 +374,78 @@ test('executeTree: tree wires stub producers -> compare -> stitches a real align
 		assert.match(alignSection!.markdown, /"class-only"/);
 	} finally { await fx.dispose(); }
 });
+
+// ---------------------------------------------------------------------------
+// Fabrication-guard tests (refuse JSON-shape-as-classFields)
+// ---------------------------------------------------------------------------
+
+import { _detectFabricatedClassFieldsForTest as detectFabricatedClassFields } from "../shared.compare.fields-vs-shape.js";
+
+test("guard: JSON-shape echoed as classFields -> rejected", () => {
+	// The exact pattern observed in the live IDE run: shape-resolver
+	// fabricated classFields by copying dataShape with JSON type tokens.
+	const reason = detectFabricatedClassFields({
+		classFields: [
+			{ name: "grn_number",     type: "string" },
+			{ name: "grn_amount",     type: "number" },
+			{ name: "grn_date",       type: "object" },
+			{ name: "grn_status",     type: "number" },
+			{ name: "invoice_number", type: "string" },
+		],
+		dataShape: [],
+	});
+	assert.ok(reason !== null, "fabricated classFields should be detected");
+	assert.match(reason!, /JSON-shape data echoed back/);
+	assert.match(reason!, /5\/5/);
+});
+
+test("guard: real Python class annotations -> accepted", () => {
+	const reason = detectFabricatedClassFields({
+		classFields: [
+			{ name: "grn_number", type: "str" },
+			{ name: "vendor",     type: "INPartyDetails" },
+			{ name: "items",      type: "Optional[List[INGRNItem]]" },
+			{ name: "amount",     type: "float" },
+		],
+		dataShape: [],
+	});
+	assert.equal(reason, null);
+});
+
+test("guard: empty classFields -> accepted (caller signalling no class data)", () => {
+	assert.equal(detectFabricatedClassFields({ classFields: [], dataShape: [] }), null);
+});
+
+test("guard: classFields without types -> accepted (no signal to act on)", () => {
+	const reason = detectFabricatedClassFields({
+		classFields: [{ name: "foo" }, { name: "bar" }, { name: "baz" }],
+		dataShape: [],
+	});
+	assert.equal(reason, null);
+});
+
+test("guard: mixed jsonish and real -> rejected when jsonish >= half", () => {
+	const reason = detectFabricatedClassFields({
+		classFields: [
+			{ name: "foo", type: "string" },   // jsonish
+			{ name: "bar", type: "int" },       // real
+			{ name: "baz", type: "number" },    // jsonish
+			{ name: "qux", type: "Optional[str]" }, // real
+		],
+		dataShape: [],
+	});
+	assert.ok(reason !== null);
+});
+
+test("guard: minority jsonish -> accepted (probably annotation drift, not fabrication)", () => {
+	const reason = detectFabricatedClassFields({
+		classFields: [
+			{ name: "foo", type: "str" },
+			{ name: "bar", type: "int" },
+			{ name: "baz", type: "float" },
+			{ name: "qux", type: "string" },   // single jsonish out of 4 real
+		],
+		dataShape: [],
+	});
+	assert.equal(reason, null);
+});

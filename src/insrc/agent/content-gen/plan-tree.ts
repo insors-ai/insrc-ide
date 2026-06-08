@@ -487,7 +487,29 @@ function validateBinding(
 			if (nodeId.length === 0) return 'source=node requires `nodeId`';
 			if (nodeId === wiringNodeId) return `source=node nodeId "${nodeId}" refers to the wiring node itself`;
 			if (!ctx.visibleNodeIds.has(nodeId)) {
-				return `source=node nodeId "${nodeId}" is not an ancestor or earlier sibling (forward refs disallowed)`;
+				// Distinguish two cases for a more actionable retry hint:
+				//   (a) `nodeId` exists elsewhere in the tree (seen on a
+				//       previous branch) but is not visible here -> the
+				//       caller put it in the wrong order or wrong sibling
+				//       group. Tell them to move it earlier.
+				//   (b) `nodeId` doesn't exist at all -> typo / wrong id.
+				// `ctx.ids` accumulates EVERY id validated so far across
+				// the whole tree (added top-down DFS); a forward ref to a
+				// later sibling we haven't reached yet is genuinely absent
+				// from `ctx.ids` at this moment. So an id present in
+				// `ctx.ids` but not in `visibleNodeIds` means case (a) on a
+				// non-ancestor branch; absence means either case (a) on a
+				// later sibling OR case (b). Sample the visible set so the
+				// retry can correct against the actual choice.
+				const exists  = ctx.ids.has(nodeId);
+				const visible = [...ctx.visibleNodeIds];
+				const visibleList = visible.length === 0
+					? '(none -- this wiring node is the first leaf to run)'
+					: visible.slice(0, 12).join(', ') + (visible.length > 12 ? `, ...(+${visible.length - 12} more)` : '');
+				const cause = exists
+					? `node "${nodeId}" exists in another branch but is not an ancestor or earlier sibling here`
+					: `node "${nodeId}" was not defined before this wiring point (either a typo or a node that comes later in execution order)`;
+				return `source=node ${cause}. Visible nodes you CAN wire from: [${visibleList}]. Fix: either correct the nodeId to one of these, OR reorder the tree so the wired-from node appears earlier in execution (ancestor of, or earlier child than, this node).`;
 			}
 			const path = typeof b['path'] === 'string' ? b['path'].trim() : '';
 			if (path.length === 0) return 'source=node requires `path`';

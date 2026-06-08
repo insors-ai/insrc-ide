@@ -260,21 +260,36 @@ test('extractCodeBlocks: no fenced blocks -> []', () => {
 	assert.deepEqual(extractCodeBlocks('just prose\nno code\n'), []);
 });
 
-test('renderFindings: per-root content + verdict + cycles + exhausted bits', () => {
+test('renderFindings: per-root content + verdict + cycles + exhausted bits (no L2)', () => {
 	const entry = makeEntry({
 		findings: {
 			perRoot: [
 				{ rootId: 'discover',  verdict: 'force-accept', cyclesConsumed: 3, exhausted: true,  content: 'forced after cap' },
-				{ rootId: 'synthesize', verdict: 'L2-fallback', cyclesConsumed: 0, exhausted: false, content: 'L2 took over' },
+				{ rootId: 'synthesize', verdict: 'accept',      cyclesConsumed: 0, exhausted: false, content: 'shipped' },
 			],
-			fallback: 'L2',
 		},
 	});
 	const rendered = renderFindings(entry);
 	assert.match(rendered, /discover.*verdict: force-accept.*cycles: 3.*exhausted/s);
 	assert.match(rendered, /forced after cap/);
-	assert.match(rendered, /synthesize.*verdict: L2-fallback/s);
-	assert.match(rendered, /fallback: L2/);
+	assert.match(rendered, /synthesize.*verdict: accept/s);
+});
+
+test('renderFindings: L2 fallback -> prominent "no concrete findings" marker (gap signal for next TODO)', () => {
+	const entry = makeEntry({
+		findings: {
+			perRoot: [
+				{ rootId: 'synthesize', verdict: 'L2-fallback', cyclesConsumed: 0, exhausted: false, content: 'L2 took over: planner exhausted' },
+			],
+			fallback: 'L2',
+		},
+	});
+	const rendered = renderFindings(entry);
+	// The marker must scream so the next TODO's planner cannot mistake
+	// an L2 stub for substantive evidence.
+	assert.match(rendered, /!! L2 FALLBACK -- NO CONCRETE FINDINGS PRODUCED !!/);
+	assert.match(rendered, /MUST NOT[\s\S]*cite this entry as evidence/);
+	assert.match(rendered, /Reason: L2 took over/);
 });
 
 test('renderFindings: empty perRoot -> "(no findings)"', () => {
