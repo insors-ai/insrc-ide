@@ -39,7 +39,7 @@
 
 import type { Citation, DiscoveryStep, PlannedSkillCall, StepOutput } from '../content-gen/discovery-plan.js';
 import type { PlannedNode } from '../content-gen/plan-tree.js';
-import type { ExecuteLeaf } from './step-root-execution.js';
+import type { ExecuteLeaf } from './leaf-executor.js';
 import type { LLMProvider } from '../../shared/types.js';
 import type { RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';

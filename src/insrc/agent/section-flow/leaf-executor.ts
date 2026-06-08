@@ -25,9 +25,29 @@ import type { PlannedNode } from '../content-gen/plan-tree.js';
 import { runSkill, type SkillRunnerDeps } from '../../daemon/skills/invoke.js';
 import type { SkillResult } from '../../daemon/skills/types.js';
 import type { LLMProvider } from '../../shared/types.js';
-import type { ExecuteLeaf, LeafExecutionInput } from './step-root-execution.js';
 import { resolveSkillShape } from './shape-resolve.js';
 import { getLogger } from '../../shared/logger.js';
+
+// ---------------------------------------------------------------------------
+// ExecuteLeaf contract (relocated here from the now-deleted
+// `step-root-execution.ts` during the Phase epsilon cutover of
+// plans/section-flow-fact-gap-loop.md; the new task-flow has no
+// reviewable-roots concept, so the types live with their last
+// surviving consumer.)
+// ---------------------------------------------------------------------------
+
+export interface LeafExecutionInput {
+	readonly leaf: PlannedNode;
+	/**
+	 * Outputs of nodes the leaf's inputs reference. Keys match
+	 * `leaf.inputs[<argName>].nodeId`. Values are whatever the prior
+	 * leaf execution produced. The orchestrator resolves these per
+	 * the visibility rules; this module doesn't.
+	 */
+	readonly priorOutputs: Readonly<Record<string, string>>;
+}
+
+export type ExecuteLeaf = (input: LeafExecutionInput) => Promise<string>;
 
 const log = getLogger('section-flow:leaf-executor');
 

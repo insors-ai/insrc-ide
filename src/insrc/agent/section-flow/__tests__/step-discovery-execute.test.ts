@@ -32,7 +32,7 @@ import {
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
 import type { TodoSpec } from '../types.js';
 import type { DiscoveryStep, PlannedSkillCall } from '../../content-gen/discovery-plan.js';
-import type { ExecuteLeaf, LeafExecutionInput } from '../step-root-execution.js';
+import type { ExecuteLeaf, LeafExecutionInput } from '../leaf-executor.js';
 import type { RequiredFact } from '../fact-gap-types.js';
 
 // ---------------------------------------------------------------------------

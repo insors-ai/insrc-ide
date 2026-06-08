@@ -3,11 +3,20 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 /**
- * Section-flow orchestrator module (planner-section-task-separation
- * P2-P5). P2 lands Step 1 (Scope) + Step 2 (Investigation Plan);
- * P3-P5 land the per-TODO section orchestrator + final report
- * assembler + cutover. All exports are dormant until the cutover
- * commit wires them into the data-analyzer orchestrator entrypoint.
+ * Section-flow orchestrator module.
+ *
+ * Per-TODO task flow runs the fact-gap-driven discovery loop (see
+ * plans/section-flow-fact-gap-loop.md). The Phase epsilon cutover
+ * (2026-06-09) deleted the linear `step-section-planner` /
+ * `step-root-execution` / `step-section-assembly` modules; their
+ * roles are now Stages 0-6 of the new flow.
+ *
+ * Surviving pieces from the prior architecture:
+ *   - step-scope + step-investigation-plan        : plan flow (unchanged)
+ *   - leaf-executor + shape-resolve               : per-leaf invocation
+ *   - step-section-review                         : Stage 7 (Q5 verdicts)
+ *   - step-report-assemble + step-report-review   : final report layer
+ *   - run-section-flow                            : top-level driver
  */
 
 export type {
@@ -28,26 +37,6 @@ export {
 	runInvestigationPlan,
 	type InvestigationPlanInput,
 } from './step-investigation-plan.js';
-
-export {
-	runSectionPlanner,
-	type SectionPlannerInput,
-	type SectionPlannerResult,
-} from './step-section-planner.js';
-
-export {
-	executeReviewableRoots,
-	type PerRootExecutorInput,
-	type PerRootExecutorResult,
-	type LeafExecutionInput,
-	type ExecuteLeaf,
-} from './step-root-execution.js';
-
-export {
-	assembleSection,
-	type SectionAssemblyInput,
-	type SectionAssemblyResult,
-} from './step-section-assembly.js';
 
 export {
 	reviewSection,
@@ -95,6 +84,8 @@ export {
 	applyPath,
 	stringifySkillValue,
 	type LeafExecutorDeps,
+	type LeafExecutionInput,
+	type ExecuteLeaf,
 } from './leaf-executor.js';
 
 export {
@@ -104,7 +95,7 @@ export {
 } from './shape-resolve.js';
 
 // ---------------------------------------------------------------------------
-// Fact-gap-driven task loop (Phase alpha of section-flow-fact-gap-loop.md)
+// Fact-gap-driven task loop (plans/section-flow-fact-gap-loop.md)
 // ---------------------------------------------------------------------------
 
 export {
@@ -146,10 +137,14 @@ export {
 	type ExecuteDiscoveryStepResult,
 } from './step-discovery-execute.js';
 
+export {
+	synthesizeSectionFromLedger,
+	type SynthesisInput,
+	type SynthesisResult,
+} from './step-synthesis-from-ledger.js';
+
 // Re-export the discovery-plan types so callers don't have to reach
-// across modules. These were originally designed for the code-analyzer's
-// per-section loop; the fact-gap-loop resurrects them for the per-TODO
-// task flow.
+// across modules.
 export {
 	emptyCycleMemory,
 	DISCOVERY_PLAN_SCHEMA,

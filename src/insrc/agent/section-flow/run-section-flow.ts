@@ -72,11 +72,10 @@ import {
 	type L2Fallback,
 	type TodoOrchestratorTrace,
 } from './todo-orchestrator.js';
-import type { ExecuteLeaf } from './step-root-execution.js';
+import type { ExecuteLeaf } from './leaf-executor.js';
 import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { ScopeStepResult, InvestigationPlanResult } from './types.js';
 import { reviewSection } from './step-section-review.js';
-import { assembleSection } from './step-section-assembly.js';
 import {
 	runReportReview,
 	type ReportReviewResult,
@@ -248,7 +247,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			provider:    input.provider,
 			executeLeaf: input.executeLeaf,
 			l2Fallback:  input.l2Fallback,
-			...(input.catalog !== undefined ? { catalog: input.catalog } : {}),
+			catalog:     input.catalog ?? [],
 		});
 		perTodoTraces.push(todoResult.trace);
 		priorBundle = memory.bundle;
@@ -275,7 +274,8 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				todoId:    todo.id,
 				index:     i,
 				l2:        todoResult.trace.l2FallbackUsed,
-				replans:   todoResult.trace.replansConsumed,
+				cyclesRun: todoResult.trace.cyclesRun,
+				recycles:  todoResult.trace.recyclesConsumed,
 				fallback:  todoResult.entry.findings.fallback,
 				// Reviewable-root sub-items rendered post-hoc (Q8). One
 				// entry per perRoot finding; sub-item status text
@@ -299,23 +299,20 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 
 	const sectionResolver: SectionContradictionResolver = async ({ sectionIds, entries }) => {
 		// For each named section, re-run the section review against
-		// its existing markdown. If the reviewer accepts (which is the
-		// common case after the report-level reviewer's clarification),
-		// the entry stays; otherwise we record the new markdown.
-		const byId = new Map(entries.map(e => [e.todoId, e]));
+		// the entry's existing detail markdown. If the reviewer accepts
+		// (which is the common case after the report-level reviewer's
+		// clarification), the entry stays; otherwise we record the new
+		// markdown. The new fact-gap loop produces the entry.detail
+		// directly via synthesis (no separate per-tree assembly stage),
+		// so the candidate is just e.detail.
 		const updated: WorkingMemoryEntry[] = [...entries];
 		for (let i = 0; i < updated.length; i++) {
 			const e = updated[i]!;
 			if (!sectionIds.includes(e.todoId)) { continue; }
-			const assembly = assembleSection({
-				todo:     { id: e.todoId, objective: e.objective, origin: e.origin },
-				tree:     { intentBrief: e.objective, root: { id: e.todoId, title: e.objective, objective: e.objective, kind: 'leaf', skill: 'shared.write-section', inputs: {}, emit: 'section' } },
-				findings: e.findings,
-			});
 			const sectionReview = await reviewSection({
 				todo:      { id: e.todoId, objective: e.objective, origin: e.origin },
 				memory:    priorBundle ?? { system: '', summary: '', recent: '', semantic: '', code: '' },
-				candidate: assembly.markdown.length > 0 ? assembly.markdown : e.detail,
+				candidate: e.detail,
 				findings:  e.findings,
 				provider:  input.provider,
 			});
@@ -328,10 +325,6 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				}
 			}
 		}
-		// Keep `byId` referenced for downstream type-check; it's a no-op
-		// hash table that we may swap in later when we add ordering
-		// guarantees.
-		void byId;
 		return updated;
 	};
 
@@ -369,7 +362,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				provider:    input.provider,
 				executeLeaf: input.executeLeaf,
 				l2Fallback:  input.l2Fallback,
-				...(input.catalog !== undefined ? { catalog: input.catalog } : {}),
+				catalog:     input.catalog ?? [],
 			});
 			const newIndex = (await store.listEntries()).length;
 			await store.write(newIndex, todoResult.entry);
@@ -383,7 +376,8 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 					todoId:    todo.id,
 					index:     newIndex,
 					l2:        todoResult.trace.l2FallbackUsed,
-					replans:   todoResult.trace.replansConsumed,
+					cyclesRun: todoResult.trace.cyclesRun,
+				recycles:  todoResult.trace.recyclesConsumed,
 					fallback:  todoResult.entry.findings.fallback,
 					subItems: todoResult.entry.findings.perRoot.map(r => ({
 						id:        r.rootId,

@@ -2,62 +2,47 @@
  *  Copyright (c) Procix Software India. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+
 /**
- * Tests for the TODO orchestrator (P3.d).
+ * Phase epsilon tests for runTodoOrchestrator (fact-gap loop cutover).
  *
- * Provider scripting note: each TODO run consumes provider calls in
- * this fixed order:
- *   1. Section planner (1 call when first-attempt validates).
- *   2. Per-root review (1 per reviewable root, on the happy path).
- *   3. Section review (1 on initial accept; more on revise-edits).
- *   4. (If replan fires) -- another planner call + the chain repeats.
+ * Each test scripts the provider with one response per LLM call in
+ * stage order:
  *
- * The fixtures below build the expected response sequence by hand so
- * each test pins exactly which path the orchestrator took.
+ *   Stage 0 fact-gap analysis
+ *   Stage 1 discovery-plan expansion (per cycle)
+ *   Stage 2 summarizer (one call per non-empty leaf output)
+ *   Stage 3 cycle review (per cycle)
+ *   Stage 6 synthesis (free-form markdown, not JSON)
+ *   Stage 7 section review (JSON)
  *
- * Covered:
- * - Happy path: planner + 3 root reviews + section review accept ->
- *   entry has 3 perRoot findings, no annotations, l2FallbackUsed=false.
- * - Section review exhausted (cap-3 revise-edits): entry detail
- *   carries `section-review-exhausted` annotation, exhausted=true,
- *   no replan, no L2.
- * - Per-root revise-major within budget: replan, second attempt
- *   accepts -> replansConsumed=1, no L2.
- * - Per-root revise-major beyond budget: L2 fallback;
- *   findings.fallback === 'L2'; single 'L2-fallback' finding.
- * - Section review revise-major within budget: replan, second
- *   attempt clears -> no L2.
- * - Section planner throws: skip replans, go straight to L2.
- * - Planner retried (first attempt rejected) annotation surfaces.
- * - Assembly fallback annotation surfaces.
- * - maxReplans = 0: ANY revise-major goes directly to L2.
+ * Covers:
+ *   - Trivial fast-path: Stage 0 returns all-present -> skip cycle loop
+ *   - 1-cycle termination: Stage 3 emits new_steps=[] -> stop
+ *   - L2 fallback path A: Stage 0 throws twice (both attempts fail)
+ *   - L2 fallback path B: cycle loop exits with empty retained ledger
+ *   - Entry shape: WorkingMemoryEntry.findings is built from ledger;
+ *     on L2 path, entry.findings.fallback === 'L2'
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-	runTodoOrchestrator,
-	_buildSuccessEntryForTest as buildSuccessEntry,
-	_buildL2EntryForTest as buildL2Entry,
-	_appendAnnotationsForTest as appendAnnotations,
-	DEFAULT_MAX_REPLANS_VALUE,
-	type L2Fallback,
-} from '../todo-orchestrator.js';
+import { runTodoOrchestrator, type L2Fallback } from '../todo-orchestrator.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
-import type { MemoryShapeBundle } from '../../working-memory/index.js';
 import type { TodoSpec } from '../types.js';
-import type { ExecuteLeaf, LeafExecutionInput } from '../step-root-execution.js';
+import type { MemoryShapeBundle } from '../../working-memory/index.js';
+import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
+import type { ExecuteLeaf } from '../leaf-executor.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const todo: TodoSpec = { id: 'todo-x', objective: 'Investigate X', origin: 'initial' };
-const memory: MemoryShapeBundle = { system: '', summary: '', recent: '', semantic: '', code: '' };
+interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; }
 
-function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: { messages: LLMMessage[]; opts: CompletionOpts }[] } {
-	const calls: { messages: LLMMessage[]; opts: CompletionOpts }[] = [];
+function scriptedProvider(responses: readonly (string | Error)[]): { provider: LLMProvider; calls: RecordedCall[] } {
+	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
@@ -66,9 +51,10 @@ function scriptedProvider(responses: readonly string[]): { provider: LLMProvider
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
-			const text = responses[cursor]!;
+			const next = responses[cursor]!;
 			cursor++;
-			return { text, stopReason: 'end_turn' };
+			if (next instanceof Error) { throw next; }
+			return { text: next, stopReason: 'end_turn' };
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -76,327 +62,185 @@ function scriptedProvider(responses: readonly string[]): { provider: LLMProvider
 	return { provider, calls };
 }
 
-function leafExecutor(outputsByLeafId: Record<string, string>): { execute: ExecuteLeaf; calls: LeafExecutionInput[] } {
-	const calls: LeafExecutionInput[] = [];
-	const execute: ExecuteLeaf = async (input) => {
-		calls.push(input);
-		return outputsByLeafId[input.leaf.id] ?? `<output:${input.leaf.id}>`;
-	};
-	return { execute, calls };
+function makeTodo(): TodoSpec {
+	return { id: 'todo-x', objective: 'map GRN JSON to INGRN class', origin: 'initial' };
 }
-
-function l2Mock(markdown: string): { fn: L2Fallback; called: { todo: TodoSpec; reason: string }[] } {
-	const called: { todo: TodoSpec; reason: string }[] = [];
-	const fn: L2Fallback = async (input) => {
-		called.push({ todo: input.todo, reason: input.reason });
-		return markdown;
-	};
-	return { fn, called };
+function makeMemory(): MemoryShapeBundle {
+	return { system: '', summary: 'INGRN at insors/.../grn.py', recent: '', semantic: '', code: '' };
 }
-
-// Healthy 3-root tree the section planner emits on the happy path.
-const HEALTHY_TREE_JSON = JSON.stringify({
-	intentBrief: 'test',
-	root: {
-		id: 'root', title: 'root', objective: 'r', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'intermediate',
-		children: [
-			{
-				id: 'discover', title: 'd', objective: 'd', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'intermediate',
-				children: [{ id: 'd1', title: 'd1', objective: 'd1', kind: 'leaf', skill: 'shared.x', inputs: {}, emit: 'intermediate' }],
-			},
-			{
-				id: 'analyze', title: 'a', objective: 'a', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'intermediate',
-				children: [{ id: 'a1', title: 'a1', objective: 'a1', kind: 'leaf', skill: 'shared.y', inputs: { discoveries: { source: 'node', nodeId: 'discover', path: '$' } }, emit: 'intermediate' }],
-			},
-			{
-				id: 'synthesize', title: 's', objective: 's', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'section',
-				children: [{ id: 's1', title: 's1', objective: 's1', kind: 'leaf', skill: 'shared.write', inputs: { analysis: { source: 'node', nodeId: 'analyze', path: '$' } }, emit: 'section' }],
-			},
-		],
-	},
-});
-
-const acceptVerdict = (extras: Record<string, unknown> = {}): string =>
-	JSON.stringify({ verdict: 'accept', ...extras });
-const reviseEditsVerdict = (edits: string): string =>
-	JSON.stringify({ verdict: 'revise-edits', edits, reasoning: 'fix' });
-const reviseMajorVerdict = (reasoning: string): string =>
-	JSON.stringify({ verdict: 'revise-major', reasoning });
-
-// ---------------------------------------------------------------------------
-// Pure helpers
-// ---------------------------------------------------------------------------
-
-test('DEFAULT_MAX_REPLANS_VALUE: 1', () => {
-	assert.equal(DEFAULT_MAX_REPLANS_VALUE, 1);
-});
-
-test('appendAnnotations: no flags -> unchanged', () => {
-	assert.equal(
-		appendAnnotations('body', { sectionExhausted: false, plannerRetried: false, assemblyFallback: false }),
-		'body',
-	);
-});
-
-test('appendAnnotations: flags surface in HTML comment', () => {
-	const out = appendAnnotations('body', { sectionExhausted: true, plannerRetried: true, assemblyFallback: false });
-	assert.match(out, /<!-- section-flow: section-review-exhausted, planner-corrected -->/);
-});
-
-test('buildSuccessEntry: detail + objective + findings carry through', () => {
-	const entry = buildSuccessEntry({
-		todo,
-		detail:           'final markdown',
-		findings:         { perRoot: [{ rootId: 'r1', verdict: 'accept', cyclesConsumed: 0, exhausted: false, content: 'c' }] },
-		sectionExhausted: false,
-		plannerRetried:   false,
-		assemblyFallback: false,
-	});
-	assert.equal(entry.todoId, 'todo-x');
-	assert.equal(entry.objective, 'Investigate X');
-	assert.equal(entry.detail, 'final markdown');
-	assert.equal(entry.findings.perRoot.length, 1);
-	assert.equal(entry.findings.fallback, undefined);
-});
-
-test('buildL2Entry: findings.fallback=L2 + synthetic L2-fallback perRoot', () => {
-	const entry = buildL2Entry({ todo, detail: 'L2 markdown', l2Reason: 'because' });
-	assert.equal(entry.findings.fallback, 'L2');
-	assert.equal(entry.findings.perRoot.length, 1);
-	assert.equal(entry.findings.perRoot[0]!.verdict, 'L2-fallback');
-	assert.match(entry.findings.perRoot[0]!.content, /because/);
-});
-
-// ---------------------------------------------------------------------------
-// Happy path
-// ---------------------------------------------------------------------------
-
-test('happy path: planner accepts, 3 roots accept, section review accept -> success entry', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: '# Section\n\nbody' });
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,             // planner
-		acceptVerdict(),               // discover review
-		acceptVerdict(),               // analyze review
-		acceptVerdict(),               // synthesize review
-		acceptVerdict(),               // section review
-	]);
-	const { fn: l2, called } = l2Mock('SHOULD NOT BE CALLED');
-
-	const result = await runTodoOrchestrator({
-		todo, memory, provider, executeLeaf: execute, l2Fallback: l2,
-	});
-
-	assert.equal(result.trace.l2FallbackUsed, false);
-	assert.equal(result.trace.replansConsumed, 0);
-	assert.equal(called.length, 0);
-	assert.equal(result.entry.findings.perRoot.length, 3);
-	assert.equal(result.entry.findings.fallback, undefined);
-	assert.match(result.entry.detail, /# Section/);
-	// No annotations -> no HTML comment.
-	assert.ok(!result.entry.detail.includes('<!-- section-flow'));
-});
-
-// ---------------------------------------------------------------------------
-// Annotations
-// ---------------------------------------------------------------------------
-
-test('planner retried -> entry detail carries planner-corrected annotation', async () => {
-	// Planner emits a degenerate first attempt; retry succeeds.
-	const degenerate = JSON.stringify({
-		intentBrief: 't',
-		root: { id: 'r', title: 'r', objective: 'r', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'intermediate',
-			children: [{ id: 'only', title: 'only', objective: 'o', kind: 'leaf', skill: 'shared.x', inputs: {}, emit: 'section' }],
-		},
-	});
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUTPUT' });
-	const { provider } = scriptedProvider([
-		degenerate,                    // planner 1st: degenerate
-		HEALTHY_TREE_JSON,             // planner 2nd: ok
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),    // 3 root reviews
-		acceptVerdict(),                                       // section review
-	]);
-	const { fn: l2 } = l2Mock('UNUSED');
-	const result = await runTodoOrchestrator({ todo, memory, provider, executeLeaf: execute, l2Fallback: l2 });
-	assert.match(result.entry.detail, /planner-corrected/);
-});
-
-test('section review exhausted -> section-review-exhausted annotation, no replan, no L2', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
-	// SECTION_REVIEW_CYCLE_CAP=3. We need: 1 review (revise-edits) +
-	// 3 cycles each (revise + review). Final review is revise-edits ->
-	// force-accept.
-	const reviewSequence = [
-		reviseEditsVerdict('e0'),
-		'# Rev 1',
-		reviseEditsVerdict('e1'),
-		'# Rev 2',
-		reviseEditsVerdict('e2'),
-		'# Rev 3',
-		reviseEditsVerdict('e3'),    // CAP HIT
+function makeCatalog(): readonly CatalogSkill[] {
+	return [
+		{ id: 'code.class.extract-fields',     description: 'extract',   family: 'class',  owner: 'code-analyzer', inputs: {}, outputPaths: [] },
+		{ id: 'data.source.file.sample-shape', description: 'sample',    family: 'source', owner: 'data-analyzer', inputs: {}, outputPaths: [] },
 	];
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),
-		...reviewSequence,
-	]);
-	const { fn: l2 } = l2Mock('UNUSED');
-	const result = await runTodoOrchestrator({ todo, memory, provider, executeLeaf: execute, l2Fallback: l2 });
+}
 
-	assert.equal(result.trace.l2FallbackUsed, false);
-	assert.equal(result.trace.replansConsumed, 0);
-	assert.match(result.entry.detail, /section-review-exhausted/);
+const ALL_PRESENT_GAP_ANALYSIS = JSON.stringify({
+	reasoning: 'Memory has everything.',
+	requiredFacts: [
+		{ id: 'a', fact: 'fact A', why: 'because', status: 'present',
+		  sourceRef: { kind: 'memory-layer', layer: 'summary', excerpt: 'INGRN at ...' } },
+	],
 });
 
-// ---------------------------------------------------------------------------
-// Per-root revise-major
-// ---------------------------------------------------------------------------
-
-test('per-root revise-major within budget -> replan, 2nd attempt accepts, no L2', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,              // planner 1
-		reviseMajorVerdict('rewrong'),  // discover review -> escalate
-		HEALTHY_TREE_JSON,              // planner 2 (replan)
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),
-		acceptVerdict(),
-	]);
-	const { fn: l2, called } = l2Mock('UNUSED');
-	const result = await runTodoOrchestrator({ todo, memory, provider, executeLeaf: execute, l2Fallback: l2 });
-
-	assert.equal(result.trace.l2FallbackUsed, false);
-	assert.equal(result.trace.replansConsumed, 1);
-	assert.equal(called.length, 0);
-	assert.match(result.trace.failureChain[0] ?? '', /rewrong/);
+const MIXED_GAP_ANALYSIS = JSON.stringify({
+	reasoning: 'Need INGRN fields + JSON shape.',
+	requiredFacts: [
+		{ id: 'ingrn-fields', fact: 'INGRN class field list', why: 'baseline', status: 'absent',
+		  suggestedSkills: ['code.class.extract-fields'] },
+		{ id: 'json-shape',   fact: 'GRN JSON shape', why: 'data side', status: 'absent',
+		  suggestedSkills: ['data.source.file.sample-shape'] },
+	],
 });
 
-test('per-root revise-major beyond budget (maxReplans=0) -> L2 fallback', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,
-		reviseMajorVerdict('cant fix this'),
-	]);
-	const { fn: l2, called } = l2Mock('# L2 SECTION\n\nL2 produced this.');
-
-	const result = await runTodoOrchestrator({
-		todo, memory, provider, executeLeaf: execute, l2Fallback: l2, maxReplans: 0,
-	});
-
-	assert.equal(result.trace.l2FallbackUsed, true);
-	assert.equal(called.length, 1);
-	assert.match(called[0]!.reason, /cant fix this/);
-	assert.equal(result.entry.findings.fallback, 'L2');
-	assert.equal(result.entry.findings.perRoot[0]!.verdict, 'L2-fallback');
-	assert.match(result.entry.detail, /# L2 SECTION/);
+const HEALTHY_PLAN = JSON.stringify({
+	steps: [
+		{ id: 'step-1', intent: 'extract INGRN fields',
+		  skills: [{ id: 's1.a', skillId: 'code.class.extract-fields', context: 'class=INGRN' }],
+		  targetsCriteria: [0] },
+		{ id: 'step-2', intent: 'sample GRN JSON shape',
+		  skills: [{ id: 's2.a', skillId: 'data.source.file.sample-shape', context: 'path=grn.json' }],
+		  targetsCriteria: [1] },
+	],
 });
 
-// ---------------------------------------------------------------------------
-// Section review revise-major
-// ---------------------------------------------------------------------------
+const SUMMARIZER_GOOD = JSON.stringify({ facts: ['fact A'], citations: [], confidence: 'high' });
 
-test('section review revise-major within budget -> replan, 2nd attempt clean', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),
-		reviseMajorVerdict('investigation gap'),     // section review escalates
-		HEALTHY_TREE_JSON,                            // replan
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),
-		acceptVerdict(),
-	]);
-	const { fn: l2, called } = l2Mock('UNUSED');
-	const result = await runTodoOrchestrator({ todo, memory, provider, executeLeaf: execute, l2Fallback: l2 });
+const REVIEW_TERMINATE = JSON.stringify({ keep: ['step-1', 'step-2'], new_steps: [] });
 
-	assert.equal(result.trace.l2FallbackUsed, false);
-	assert.equal(result.trace.replansConsumed, 1);
-	assert.equal(called.length, 0);
-	assert.match(result.trace.failureChain[0] ?? '', /investigation gap/);
-});
+const SECTION_REVIEW_ACCEPT = JSON.stringify({ verdict: 'accept', reasoning: 'looks good' });
 
-test('section review revise-major beyond budget -> L2 fallback', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),
-		reviseMajorVerdict('still broken'),
-	]);
-	const { fn: l2 } = l2Mock('L2 OUTPUT');
-	const result = await runTodoOrchestrator({
-		todo, memory, provider, executeLeaf: execute, l2Fallback: l2, maxReplans: 0,
-	});
-	assert.equal(result.trace.l2FallbackUsed, true);
-	assert.equal(result.entry.findings.fallback, 'L2');
-});
+const SYNTH_MARKDOWN = '# GRN Mapping\n\nReal section content here.';
+
+function mockExecuteLeaf(returnsBySkill: Readonly<Record<string, string>>): ExecuteLeaf {
+	return async ({ leaf }) => {
+		const skill = leaf.skill ?? '';
+		return returnsBySkill[skill] ?? '';
+	};
+}
+
+// L2 stub that records invocation
+function mockL2(returns = 'L2 stub markdown'): { l2: L2Fallback; calls: { reason: string }[] } {
+	const calls: { reason: string }[] = [];
+	const l2: L2Fallback = async ({ reason }) => {
+		calls.push({ reason });
+		return returns;
+	};
+	return { l2, calls };
+}
 
 // ---------------------------------------------------------------------------
-// Section planner throws -> L2 directly
+// Tests
 // ---------------------------------------------------------------------------
 
-test('section planner throws -> skip replans, go straight to L2', async () => {
-	const { execute } = leafExecutor({});
-	const degenerate = JSON.stringify({
-		intentBrief: 't',
-		root: { id: 'r', title: 'r', objective: 'r', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'intermediate',
-			children: [{ id: 'only', title: 'only', objective: 'o', kind: 'leaf', skill: 'shared.x', inputs: {}, emit: 'section' }],
-		},
-	});
-	// Both planner attempts return the same degenerate tree -> throws.
-	const { provider } = scriptedProvider([degenerate, degenerate]);
-	const { fn: l2, called } = l2Mock('L2 RESULT');
-	const result = await runTodoOrchestrator({
-		todo, memory, provider, executeLeaf: execute, l2Fallback: l2,
-	});
-	assert.equal(result.trace.l2FallbackUsed, true);
-	assert.equal(result.trace.replansConsumed, 0);
-	assert.equal(called.length, 1);
-	assert.match(called[0]!.reason, /section planner failed/);
-});
-
-// ---------------------------------------------------------------------------
-// Catalog
-// ---------------------------------------------------------------------------
-
-test('catalog threaded into the planner prompt as a rendered list', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
+test('runTodoOrchestrator: trivial fast-path (all facts present) -> Stage 6 + 7 only, no cycle loop', async () => {
 	const { provider, calls } = scriptedProvider([
-		HEALTHY_TREE_JSON,
-		acceptVerdict(), acceptVerdict(), acceptVerdict(),
-		acceptVerdict(),
+		ALL_PRESENT_GAP_ANALYSIS,    // Stage 0
+		SYNTH_MARKDOWN,              // Stage 6 (free-form markdown)
+		SECTION_REVIEW_ACCEPT,       // Stage 7
 	]);
-	const { fn: l2 } = l2Mock('UNUSED');
-	await runTodoOrchestrator({
-		todo, memory, provider, executeLeaf: execute, l2Fallback: l2,
-		catalog: [
-			// Match the ids HEALTHY_TREE_JSON uses so the validator accepts the plan.
-			{ id: 'data.profile-shape',                description: 'profile a dataset',  family: 'profile', owner: 'data-analyzer', inputs: {}, outputPaths: [] },
-			{ id: 'code.list-class-fields',            description: 'list pydantic class fields', family: 'class', owner: 'code-analyzer', inputs: {}, outputPaths: [] },
-			{ id: 'shared.compare-fields-vs-shape',    description: 'diff two field sets', family: 'compare', owner: 'shared', inputs: {}, outputPaths: [] },
-			{ id: 'shared.write-section',              description: 'render the section',  family: 'synth',   owner: 'shared', inputs: {}, outputPaths: [] },
-		],
+	const { l2, calls: l2Calls } = mockL2();
+	const result = await runTodoOrchestrator({
+		todo: makeTodo(), memory: makeMemory(), provider,
+		executeLeaf: mockExecuteLeaf({}), l2Fallback: l2, catalog: makeCatalog(),
 	});
-	const plannerUser = calls[0]!.messages[1]!.content;
-	assert.match(plannerUser, /SKILL CATALOG \(4 skills available/);
-	assert.match(plannerUser, /data\.profile-shape/);
+	assert.equal(calls.length, 3);
+	assert.equal(l2Calls.length, 0);
+	assert.equal(result.trace.l2FallbackUsed, false);
+	assert.equal(result.trace.cyclesRun, 0);
+	assert.equal(result.entry.findings.fallback, undefined);
+	assert.match(result.entry.detail, /Real section content/);
 });
 
-// ---------------------------------------------------------------------------
-// Default maxReplans = 1
-// ---------------------------------------------------------------------------
-
-test('default maxReplans=1: one revise-major triggers replan, two trigger L2', async () => {
-	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
-	const { provider } = scriptedProvider([
-		HEALTHY_TREE_JSON,
-		reviseMajorVerdict('first escalation'),    // discover escalates
-		HEALTHY_TREE_JSON,                          // replan 1
-		reviseMajorVerdict('second escalation'),    // discover escalates again
-		// budget exhausted -> L2
+test('runTodoOrchestrator: 1-cycle termination (Stage 3 emits new_steps=[])', async () => {
+	const { provider, calls } = scriptedProvider([
+		MIXED_GAP_ANALYSIS,          // Stage 0
+		HEALTHY_PLAN,                // Stage 1 (cycle 1)
+		SUMMARIZER_GOOD,             // Stage 2 step-1 summarizer
+		SUMMARIZER_GOOD,             // Stage 2 step-2 summarizer
+		REVIEW_TERMINATE,            // Stage 3 cycle 1 -> terminate
+		SYNTH_MARKDOWN,              // Stage 6
+		SECTION_REVIEW_ACCEPT,       // Stage 7
 	]);
-	const { fn: l2, called } = l2Mock('L2');
+	const { l2, calls: l2Calls } = mockL2();
 	const result = await runTodoOrchestrator({
-		todo, memory, provider, executeLeaf: execute, l2Fallback: l2,
+		todo: makeTodo(), memory: makeMemory(), provider,
+		executeLeaf: mockExecuteLeaf({
+			'code.class.extract-fields':      'INGRN has 21 fields: vendor, buyer, items, ...',
+			'data.source.file.sample-shape':  'JSON has grn_number, grn_date, vendor_details, ...',
+		}),
+		l2Fallback: l2, catalog: makeCatalog(),
 	});
-	assert.equal(result.trace.replansConsumed, 1);
+	assert.equal(l2Calls.length, 0);
+	assert.equal(result.trace.l2FallbackUsed, false);
+	assert.equal(result.trace.cyclesRun, 1);
+	assert.equal(result.trace.retainedStepCount, 2);
+	assert.equal(result.trace.perCycleSummary.length, 1);
+	assert.deepEqual([...result.trace.perCycleSummary[0]!.keptIds].sort(), ['step-1', 'step-2']);
+	assert.equal(calls.length, 7);
+	assert.match(result.entry.detail, /Real section content/);
+});
+
+test('runTodoOrchestrator: Stage 0 throws twice -> L2 fallback', async () => {
+	// Stage 0 attempts to retry once on validation failure; both
+	// scripted responses are malformed -> runFactGapAnalysis throws.
+	const { provider } = scriptedProvider([
+		'not valid json at all',
+		'still not valid json',
+	]);
+	const { l2, calls: l2Calls } = mockL2('L2 stub');
+	const result = await runTodoOrchestrator({
+		todo: makeTodo(), memory: makeMemory(), provider,
+		executeLeaf: mockExecuteLeaf({}), l2Fallback: l2, catalog: makeCatalog(),
+	});
+	assert.equal(l2Calls.length, 1);
+	assert.match(l2Calls[0]!.reason, /fact-gap analysis failed/);
 	assert.equal(result.trace.l2FallbackUsed, true);
-	assert.equal(called.length, 1);
-	assert.equal(result.trace.failureChain.length, 2);
+	assert.equal(result.entry.findings.fallback, 'L2');
+	assert.equal(result.entry.detail, 'L2 stub');
+});
+
+test('runTodoOrchestrator: cycle loop produces empty ledger -> L2 fallback', async () => {
+	// Mixed gap analysis + a planned 1-step that returns empty from
+	// executeLeaf -> StepOutput.status=failed -> reviewer keeps nothing.
+	const REVIEW_KEEP_NONE = JSON.stringify({ keep: [], new_steps: [] });
+	const { provider } = scriptedProvider([
+		MIXED_GAP_ANALYSIS,          // Stage 0
+		HEALTHY_PLAN,                // Stage 1 cycle 1
+		// No summarizer calls (both leaves return empty)
+		REVIEW_KEEP_NONE,            // Stage 3 cycle 1 -> 0 keep, 0 new_steps
+	]);
+	const { l2, calls: l2Calls } = mockL2();
+	const result = await runTodoOrchestrator({
+		todo: makeTodo(), memory: makeMemory(), provider,
+		executeLeaf: mockExecuteLeaf({}),   // returns '' for every skill
+		l2Fallback: l2, catalog: makeCatalog(),
+	});
+	assert.equal(l2Calls.length, 1);
+	assert.match(l2Calls[0]!.reason, /no retained facts/);
+	assert.equal(result.trace.l2FallbackUsed, true);
+	assert.equal(result.entry.findings.fallback, 'L2');
+});
+
+test('runTodoOrchestrator: cycle loop with full coverage -> 2 perRoot findings on successful entry', async () => {
+	const { provider } = scriptedProvider([
+		MIXED_GAP_ANALYSIS, HEALTHY_PLAN,
+		SUMMARIZER_GOOD, SUMMARIZER_GOOD,
+		REVIEW_TERMINATE, SYNTH_MARKDOWN, SECTION_REVIEW_ACCEPT,
+	]);
+	const { l2 } = mockL2();
+	const result = await runTodoOrchestrator({
+		todo: makeTodo(), memory: makeMemory(), provider,
+		executeLeaf: mockExecuteLeaf({
+			'code.class.extract-fields':     'real INGRN fields',
+			'data.source.file.sample-shape': 'real JSON shape',
+		}),
+		l2Fallback: l2, catalog: makeCatalog(),
+	});
+	assert.equal(result.entry.findings.perRoot.length, 2);
+	// Both verdicts should be 'accept' (status=ok)
+	for (const f of result.entry.findings.perRoot) {
+		assert.equal(f.verdict, 'accept');
+	}
+	assert.equal(result.entry.findings.fallback, undefined);
 });
