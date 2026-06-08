@@ -102,3 +102,38 @@ export {
 	type ShapeResolveInput,
 	type ShapeResolveResult,
 } from './shape-resolve.js';
+
+// ---------------------------------------------------------------------------
+// Fact-gap-driven task loop (Phase alpha of section-flow-fact-gap-loop.md)
+// ---------------------------------------------------------------------------
+
+export {
+	summarizeCycleMemory,
+	computeCoverage,
+} from './cycle-memory.js';
+
+export {
+	gapFacts,
+	isTrivialFastPath,
+	FACT_GAP_ANALYSIS_SCHEMA,
+	type RequiredFact,
+	type FactGapAnalysis,
+	type FactSourceRef,
+} from './fact-gap-types.js';
+
+// Re-export the discovery-plan types so callers don't have to reach
+// across modules. These were originally designed for the code-analyzer's
+// per-section loop; the fact-gap-loop resurrects them for the per-TODO
+// task flow.
+export {
+	emptyCycleMemory,
+	DISCOVERY_PLAN_SCHEMA,
+	CYCLE_REVIEW_RESPONSE_SCHEMA,
+	type DiscoveryStep,
+	type DiscoveryPlan,
+	type PlannedSkillCall,
+	type StepOutput,
+	type Citation,
+	type CycleReviewResponse,
+	type CycleMemory,
+} from '../content-gen/discovery-plan.js';
