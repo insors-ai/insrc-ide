@@ -323,6 +323,12 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
     };
 
+    // Section-flow's planner / shape / review calls use the highest-
+    // quality provider available. Defaults to the active cloud provider
+    // when one is configured (matches the prior synthesise step's
+    // resolver choice); falls back to local Ollama otherwise.
+    const sectionFlowProvider = session.claudeProvider ?? session.ollamaProvider;
+
     const executeLeaf = buildSkillExecutor({
       runnerDeps,
       userQuestion: this._request,
@@ -331,6 +337,13 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         codeRepoPath: session.repoPath ?? '',
         primaryConnection: this._connections[0]?.id ?? '',
       },
+      // Wire the section-flow provider into the leaf executor so it
+      // runs the 2-step pattern (shape-resolve LLM call -> runSkill)
+      // restored from the deleted execute-step.ts. Without this the
+      // executor would fall back to the deterministic binding path,
+      // which the planner cannot populate correctly without seeing
+      // skill schemas.
+      provider: sectionFlowProvider,
     });
 
     const l2Fallback: L2Fallback = async ({ todo, memory, reason }) => {
@@ -355,12 +368,6 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         return `_(L2 fallback failed for "${todo.objective}": ${(err as Error).message})_`;
       }
     };
-
-    // Section-flow's planner / shape / review calls use the highest-
-    // quality provider available. Defaults to the active cloud provider
-    // when one is configured (matches the prior synthesise step's
-    // resolver choice); falls back to local Ollama otherwise.
-    const sectionFlowProvider = session.claudeProvider ?? session.ollamaProvider;
 
     // Create the workbench TodoList up front so `updateListBody` has
     // somewhere to write the final report. Items per TODO (Q8 two-level

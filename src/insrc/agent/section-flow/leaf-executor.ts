@@ -24,7 +24,9 @@
 import type { PlannedNode } from '../content-gen/plan-tree.js';
 import { runSkill, type SkillRunnerDeps } from '../../daemon/skills/invoke.js';
 import type { SkillResult } from '../../daemon/skills/types.js';
+import type { LLMProvider } from '../../shared/types.js';
 import type { ExecuteLeaf, LeafExecutionInput } from './step-root-execution.js';
+import { resolveSkillShape } from './shape-resolve.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:leaf-executor');
@@ -35,10 +37,21 @@ const log = getLogger('section-flow:leaf-executor');
 
 export interface LeafExecutorDeps {
 	readonly runnerDeps:   SkillRunnerDeps;
-	/** The user's original question; binds the `'question'` source. */
+	/** The user's original question; binds the `'question'` source AND fed to shape-resolve. */
 	readonly userQuestion: string;
-	/** Caller-supplied context bag; binds the `'context'` source. Keys per plan-tree.ts. */
+	/** Caller-supplied context bag; binds the `'context'` source AND fed to shape-resolve. Keys per plan-tree.ts. */
 	readonly contextBag:   Readonly<Record<string, unknown>>;
+	/**
+	 * LLM provider for the 2-step executor's first stage (per-leaf shape
+	 * resolution -- see `shape-resolve.ts`). When set, the executor calls
+	 * the resolver to map the leaf's free-text objective + skill schema
+	 * + prior outputs into a validated args dict, then invokes the skill.
+	 * When undefined, the executor falls back to the legacy deterministic
+	 * path that resolves `leaf.inputs` bindings directly -- intended only
+	 * for unit tests using scripted runSkill overrides. Production wiring
+	 * MUST pass a provider.
+	 */
+	readonly provider?:    LLMProvider | undefined;
 	/**
 	 * Test-only override of `runSkill`. When provided, the executor
 	 * routes every leaf invocation through this function instead of
@@ -59,8 +72,36 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			return '';
 		}
 
-		const resolvedInput = resolveLeafInputs(leaf, call.priorOutputs, deps.userQuestion, deps.contextBag);
+		// Stage 1: resolve the skill's args.
+		//   - When a provider is wired, defer to the LLM-driven shape
+		//     resolver (the 2-step executor's first stage -- restored
+		//     from the deleted execute-step.ts pattern). The planner's
+		//     `leaf.inputs` bindings are not load-bearing here; the
+		//     resolver works from skill schema + prior outputs + the
+		//     leaf objective directly.
+		//   - When no provider is supplied (legacy unit-test path),
+		//     fall back to deterministic binding resolution against
+		//     `leaf.inputs`. Production wiring MUST pass a provider.
+		let resolvedInput: Record<string, unknown>;
+		if (deps.provider !== undefined) {
+			const shape = await resolveSkillShape({
+				skillId:      leaf.skill,
+				objective:    leaf.objective ?? leaf.title ?? leaf.id,
+				priorOutputs: call.priorOutputs,
+				userQuestion: deps.userQuestion,
+				contextBag:   deps.contextBag,
+				provider:     deps.provider,
+			});
+			if (shape.kind === 'failed') {
+				log.warn({ leafId: leaf.id, skill: leaf.skill, reason: shape.reason, retried: shape.retried }, 'shape-resolve failed; returning empty leaf output');
+				return '';
+			}
+			resolvedInput = shape.args;
+		} else {
+			resolvedInput = resolveLeafInputs(leaf, call.priorOutputs, deps.userQuestion, deps.contextBag);
+		}
 
+		// Stage 2: invoke the skill.
 		let result: SkillResult<unknown>;
 		try {
 			if (deps.runSkillOverride !== undefined) {

@@ -96,3 +96,9 @@ export {
 	stringifySkillValue,
 	type LeafExecutorDeps,
 } from './leaf-executor.js';
+
+export {
+	resolveSkillShape,
+	type ShapeResolveInput,
+	type ShapeResolveResult,
+} from './shape-resolve.js';
