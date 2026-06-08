@@ -415,12 +415,20 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     // Skill catalog the section planner composes from. Without this the
     // planner has no ground-truth signal about which skill ids exist and
     // pattern-matches on the worked example's placeholder ids (root cause
-    // of the P7 live-test failure). Owners chosen to match the data flow:
-    // `data-analyzer` for primary skills, `shared` for cross-domain
-    // synthesis helpers. `includeL2Fallback: true` keeps the L2 dispatch
-    // skill visible to the planner if it chooses to lean on it directly.
+    // of the P7 live-test failure). Owners:
+    //   - `data-analyzer` for primary data skills (profile / sample / etc.)
+    //   - `code-analyzer` for code-side skills the planner needs when the
+    //     question crosses domains (e.g. mapping JSON test data against a
+    //     Pydantic class definition needs both `data.*` profiling AND
+    //     `code.class.extract-fields` to read the actual class source --
+    //     omitting code-side made the planner default to data-only skills
+    //     and infer the "class" from JSON shape, giving tautological 1:1
+    //     mappings that don't actually reflect the class definition)
+    //   - `shared` for cross-domain synthesis helpers
+    // `includeL2Fallback: true` keeps the L2 dispatch skill visible to
+    // the planner if it chooses to lean on it directly.
     const sectionFlowCatalog = buildCatalogFromRegistry({
-      owners:            ['data-analyzer', 'shared'],
+      owners:            ['data-analyzer', 'code-analyzer', 'shared'],
       includeL2Fallback: true,
     });
     log.info({ catalogSize: sectionFlowCatalog.length }, 'section-flow catalog assembled');
