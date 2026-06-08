@@ -93,7 +93,7 @@ async function main(): Promise<void> {
 					summary: `${summary}; verdict=${verdict}, cycles=${cycles}, exhausted=${result.exhausted}`,
 					durationMs: dur,
 					details: args.verbose ? {
-						finalMarkdownPreview: result.finalMarkdown.slice(0, 200),
+						finalMarkdown: result.finalMarkdown,
 					} : undefined,
 				};
 			} catch (err) {

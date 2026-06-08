@@ -85,6 +85,28 @@ async function main(): Promise<void> {
 				const skillsUsed = collectSkillIds(result.tree.root);
 				const allInCatalog = skillsUsed.every(s => catalog.some(c => c.id === s));
 
+				// NOTE on input bindings: prior to the 2-step executor fix the
+				// planner's `leaf.inputs` field was authoritative -- mismatches
+				// here meant `invalid-input` at exec time. With shape-resolve
+				// wired (see scripts/live-section-flow/10-shape-resolve.ts),
+				// the planner's bindings are advisory and the executor's
+				// shape-resolve stage maps prior outputs + context -> args at
+				// run time. We still surface the mismatch count for telemetry
+				// but no longer treat it as a hard signal here.
+				const leafInputs = collectLeafInputs(result.tree.root);
+				const inputMismatches: string[] = [];
+				for (const leaf of leafInputs) {
+					const catEntry = catalog.find(c => c.id === leaf.skill);
+					if (catEntry === undefined) { continue; }
+					const required = extractRequired(catEntry.inputs);
+					const provided = Object.keys(leaf.inputs);
+					const missing = required.filter(r => !provided.includes(r));
+					const extra   = provided.filter(p => !Object.keys(extractProperties(catEntry.inputs)).includes(p));
+					if (missing.length > 0 || extra.length > 0) {
+						inputMismatches.push(`${leaf.id}[${leaf.skill}] missing=[${missing.join(',')}] extra=[${extra.join(',')}]`);
+					}
+				}
+
 				const treeText = JSON.stringify(result.tree);
 				const checks = [
 					checkContainsAny(treeText, SEED_TERMS, 'tree-content'),
@@ -95,14 +117,16 @@ async function main(): Promise<void> {
 				const { outcome, summary } = combineChecks(checks);
 				return {
 					outcome,
-					summary: `${summary}; ${reviewableRoots} roots, ${leafCount} leaves, retried=${result.retried}`,
+					summary: `${summary}; ${reviewableRoots} roots, ${leafCount} leaves, retried=${result.retried}, planner-input-mismatches=${inputMismatches.length}/${leafInputs.length} (advisory: shape-resolve handles at exec time)`,
 					durationMs: dur,
 					details: args.verbose ? {
 						intentBrief: result.tree.intentBrief,
 						skillsUsed,
+						leafInputs: leafInputs.map(l => `${l.id}[${l.skill}]: provided=[${Object.keys(l.inputs).join(',')}]`),
+						inputMismatchesAdvisory: inputMismatches,
 						retried: result.retried,
 						firstFailureReason: result.firstFailureReason ?? '(none)',
-					} : { skillsUsed: skillsUsed.join(', ') },
+					} : { skillsUsed: skillsUsed.join(', '), plannerMismatches: inputMismatches.length },
 				};
 			} catch (err) {
 				const msg = (err as Error).message;
@@ -138,6 +162,39 @@ function collectSkillIds(node: { kind: string; skill?: string; children?: readon
 	const ids: string[] = [];
 	for (const c of children) { ids.push(...collectSkillIds(c)); }
 	return ids;
+}
+
+interface LeafSnapshot {
+	readonly id:     string;
+	readonly skill:  string;
+	readonly inputs: Readonly<Record<string, unknown>>;
+}
+
+function collectLeafInputs(node: { kind: string; id?: string; skill?: string; inputs?: Readonly<Record<string, unknown>>; children?: readonly unknown[] }): LeafSnapshot[] {
+	if (node.kind === 'leaf') {
+		return [{
+			id:     node.id ?? '<no-id>',
+			skill:  node.skill ?? '<no-skill>',
+			inputs: node.inputs ?? {},
+		}];
+	}
+	const children = (node.children ?? []) as { kind: string; id?: string; skill?: string; inputs?: Readonly<Record<string, unknown>>; children?: readonly unknown[] }[];
+	const out: LeafSnapshot[] = [];
+	for (const c of children) { out.push(...collectLeafInputs(c)); }
+	return out;
+}
+
+// Pull the `required` array from a JSON Schema object (root-level only).
+function extractRequired(schema: Readonly<Record<string, unknown>>): string[] {
+	const req = schema['required'];
+	if (!Array.isArray(req)) { return []; }
+	return req.filter((r): r is string => typeof r === 'string');
+}
+
+function extractProperties(schema: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+	const props = schema['properties'];
+	if (props === null || typeof props !== 'object' || Array.isArray(props)) { return {}; }
+	return props as Readonly<Record<string, unknown>>;
 }
 
 void main();

@@ -66,7 +66,9 @@ async function main(): Promise<void> {
 					durationMs: dur,
 					details: args.verbose ? {
 						addedScopeGapTodos: result.addedScopeGapTodos.map(t => `${t.id}: ${t.objective}`),
-						preview: result.finalReport.slice(0, 400),
+						structuralReasoning: structural !== undefined && 'reasoning' in structural ? (structural as { reasoning: string }).reasoning : '(none)',
+						proposedTodos: structural?.kind === 'scope-gap' ? structural.proposedTodos.map(t => `${t.id}: ${t.objective}`) : undefined,
+						finalReport: result.finalReport,
 					} : undefined,
 				};
 			} catch (err) {

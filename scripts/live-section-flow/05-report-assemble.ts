@@ -87,7 +87,7 @@ async function main(): Promise<void> {
 					summary: `${summary}; ${report.length} chars, fallback=${result.usedFallback}`,
 					durationMs: dur,
 					details: args.verbose ? {
-						preview: report.slice(0, 400),
+						fullReport: report,
 					} : undefined,
 				};
 			} catch (err) {
