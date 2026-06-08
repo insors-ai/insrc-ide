@@ -63,7 +63,12 @@ export interface FactGapAnalysisResult {
 	readonly firstFailureReason?: string | undefined;
 }
 
-const MAX_ANALYSIS_TOKENS = 2048;
+// Bumped from 2048 to 4096 after the first live IDE run on the
+// epsilon cutover hit truncation at ~7400 chars on the warmest TODO.
+// The schema's caps (12 facts * (200 fact + 300 why + 6 suggestions * 80 chars))
+// can hit ~12k chars in the pathological case; 4096 tokens leaves
+// ~10-12k chars at 3 chars/token, which fits even the warmest TODO.
+const MAX_ANALYSIS_TOKENS = 4096;
 
 export async function runFactGapAnalysis(
 	input: FactGapAnalysisInput,
@@ -249,10 +254,14 @@ function validate(raw: string, catalogIds: ReadonlySet<string>): ValidationResul
 	}
 	const obj = parsed as Record<string, unknown>;
 
-	const reasoning = typeof obj['reasoning'] === 'string' ? obj['reasoning'].trim() : '';
-	if (reasoning.length === 0) {
-		return { ok: false, reason: '`reasoning` missing or empty' };
-	}
+	// `reasoning` is telemetry only -- the orchestrator never reads it.
+	// qwen3.6 (and other local models) routinely drop the field even
+	// when the prompt asks for it explicitly. Don't fail the analysis
+	// over a missing field that nothing downstream consumes; default to
+	// a placeholder and let validation continue.
+	const reasoning = typeof obj['reasoning'] === 'string' && obj['reasoning'].trim().length > 0
+		? obj['reasoning'].trim()
+		: '(no reasoning emitted)';
 
 	const factsRaw = obj['requiredFacts'];
 	if (!Array.isArray(factsRaw)) {

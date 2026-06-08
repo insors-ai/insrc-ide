@@ -113,11 +113,18 @@ const ALL_PRESENT_JSON = JSON.stringify({
 	],
 });
 
+// Missing reasoning is now ACCEPTED (treated as telemetry-only after
+// the post-cutover relaxation -- qwen3.6 drops the field consistently
+// and nothing downstream consumes it). Kept here for the
+// reasoning-is-optional retry test below.
 const MISSING_REASONING_JSON = JSON.stringify({
 	requiredFacts: [
 		{ id: 'a', fact: 'x', why: 'y', status: 'absent', suggestedSkills: ['code.class.extract-fields'] },
 	],
 });
+
+// First-attempt failure that DOES trigger retry: malformed JSON.
+const MALFORMED_JSON = '{ "requiredFacts": [ malformed garbage';
 
 const EMPTY_FACTS_JSON = JSON.stringify({
 	reasoning: 'no facts identified',
@@ -172,20 +179,30 @@ test('runFactGapAnalysis: trivial fast-path -> isTrivialFastPath true', async ()
 	assert.equal(isTrivialFastPath(result.analysis), true);
 });
 
-test('runFactGapAnalysis: retry path -> first attempt missing reasoning, retry passes', async () => {
-	const { provider, calls } = scriptedProvider([MISSING_REASONING_JSON, HEALTHY_ANALYSIS_JSON]);
+test('runFactGapAnalysis: retry path -> first attempt malformed JSON, retry passes', async () => {
+	const { provider, calls } = scriptedProvider([MALFORMED_JSON, HEALTHY_ANALYSIS_JSON]);
 	const result = await runFactGapAnalysis({
 		todo: makeTodo(), memory: makeMemory(), catalog: makeCatalog(), provider,
 	});
 	assert.equal(calls.length, 2);
 	assert.equal(result.retried, true);
-	assert.match(result.firstFailureReason ?? '', /reasoning.*missing/);
+	assert.match(result.firstFailureReason ?? '', /JSON parse failed/);
 	// Retry message carries the corrective hint.
 	assert.match(calls[1]!.messages[1]!.content, /RETRY CORRECTION/);
 });
 
+test('runFactGapAnalysis: missing reasoning is now accepted (telemetry-only field; post-cutover relaxation)', async () => {
+	const { provider, calls } = scriptedProvider([MISSING_REASONING_JSON]);
+	const result = await runFactGapAnalysis({
+		todo: makeTodo(), memory: makeMemory(), catalog: makeCatalog(), provider,
+	});
+	assert.equal(calls.length, 1);
+	assert.equal(result.retried, false);
+	assert.equal(result.analysis.reasoning, '(no reasoning emitted)');
+});
+
 test('runFactGapAnalysis: both attempts fail -> throws with reason', async () => {
-	const { provider } = scriptedProvider([MISSING_REASONING_JSON, MISSING_REASONING_JSON]);
+	const { provider } = scriptedProvider([MALFORMED_JSON, MALFORMED_JSON]);
 	await assert.rejects(
 		() => runFactGapAnalysis({ todo: makeTodo(), memory: makeMemory(), catalog: makeCatalog(), provider }),
 		/fact-gap analysis validation failed after retry/,
