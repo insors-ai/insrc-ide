@@ -127,6 +127,18 @@ export {
 	type FactGapAnalysisResult,
 } from './step-fact-gap-analysis.js';
 
+export {
+	runDiscoveryPlanExpansion,
+	type DiscoveryPlanExpansionInput,
+	type DiscoveryPlanExpansionResult,
+} from './step-discovery-plan-expansion.js';
+
+export {
+	runCycleReview,
+	type CycleReviewInput,
+	type CycleReviewResult,
+} from './step-cycle-review.js';
+
 // Re-export the discovery-plan types so callers don't have to reach
 // across modules. These were originally designed for the code-analyzer's
 // per-section loop; the fact-gap-loop resurrects them for the per-TODO
