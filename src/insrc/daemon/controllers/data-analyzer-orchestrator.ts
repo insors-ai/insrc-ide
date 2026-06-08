@@ -66,6 +66,7 @@ import {
   type RunSectionFlowResult,
   type L2Fallback,
 } from '../../agent/section-flow/index.js';
+import { buildCatalogFromRegistry } from '../../agent/content-gen/plan-tree-helpers.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
 import { PATHS } from '../../shared/paths.js';
 
@@ -404,6 +405,19 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       }
     };
 
+    // Skill catalog the section planner composes from. Without this the
+    // planner has no ground-truth signal about which skill ids exist and
+    // pattern-matches on the worked example's placeholder ids (root cause
+    // of the P7 live-test failure). Owners chosen to match the data flow:
+    // `data-analyzer` for primary skills, `shared` for cross-domain
+    // synthesis helpers. `includeL2Fallback: true` keeps the L2 dispatch
+    // skill visible to the planner if it chooses to lean on it directly.
+    const sectionFlowCatalog = buildCatalogFromRegistry({
+      owners:            ['data-analyzer', 'shared'],
+      includeL2Fallback: true,
+    });
+    log.info({ catalogSize: sectionFlowCatalog.length }, 'section-flow catalog assembled');
+
     let result: RunSectionFlowResult;
     try {
       result = await runSectionFlow({
@@ -413,6 +427,7 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         l2Fallback,
         runId,
         workingMemoryDir,
+        catalog:          sectionFlowCatalog,
         onProgress,
       });
     } catch (err) {

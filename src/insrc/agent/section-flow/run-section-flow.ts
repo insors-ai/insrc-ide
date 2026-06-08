@@ -73,6 +73,7 @@ import {
 	type TodoOrchestratorTrace,
 } from './todo-orchestrator.js';
 import type { ExecuteLeaf } from './step-root-execution.js';
+import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { ScopeStepResult, InvestigationPlanResult } from './types.js';
 import { reviewSection } from './step-section-review.js';
 import { assembleSection } from './step-section-assembly.js';
@@ -110,8 +111,14 @@ export interface RunSectionFlowInput {
 	readonly budget?: TokenBudget | undefined;
 	/** numCtx threaded into shape decisions; default matches `budget.total`. */
 	readonly numCtx?:  number | undefined;
-	/** Skill-catalog hint string surfaced into the section planner. Empty string allowed. */
-	readonly catalogHint?: string | undefined;
+	/**
+	 * Skill catalog surfaced into the section planner. The planner renders
+	 * it trailing in its prompt and rejects emitted plans whose `leaf.skill`
+	 * is not in the catalog. Pass via `buildCatalogFromRegistry({...})` from
+	 * `agent/content-gen/plan-tree-helpers`. Omit for unit tests using
+	 * scripted providers; production callers MUST pass a real catalog.
+	 */
+	readonly catalog?: readonly CatalogSkill[] | undefined;
 	/**
 	 * Optional progress callback the daemon controller wires to chat-
 	 * stream events AND the TodoList workbench API (Q8). Awaited
@@ -241,7 +248,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			provider:    input.provider,
 			executeLeaf: input.executeLeaf,
 			l2Fallback:  input.l2Fallback,
-			...(input.catalogHint !== undefined ? { catalogHint: input.catalogHint } : {}),
+			...(input.catalog !== undefined ? { catalog: input.catalog } : {}),
 		});
 		perTodoTraces.push(todoResult.trace);
 		priorBundle = memory.bundle;
@@ -362,7 +369,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				provider:    input.provider,
 				executeLeaf: input.executeLeaf,
 				l2Fallback:  input.l2Fallback,
-				...(input.catalogHint !== undefined ? { catalogHint: input.catalogHint } : {}),
+				...(input.catalog !== undefined ? { catalog: input.catalog } : {}),
 			});
 			const newIndex = (await store.listEntries()).length;
 			await store.write(newIndex, todoResult.entry);

@@ -44,6 +44,7 @@ import type {
 } from '../working-memory/types.js';
 import type { TodoSpec } from './types.js';
 import type { ExecuteLeaf } from './step-root-execution.js';
+import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import { runSectionPlanner } from './step-section-planner.js';
 import { executeReviewableRoots } from './step-root-execution.js';
 import { assembleSection } from './step-section-assembly.js';
@@ -83,7 +84,8 @@ export interface TodoOrchestratorInput {
 	readonly provider:    LLMProvider;
 	readonly executeLeaf: ExecuteLeaf;
 	readonly l2Fallback:  L2Fallback;
-	readonly catalogHint?: string | undefined;
+	/** Skill catalog the section planner composes from (see `step-section-planner`). */
+	readonly catalog?:    readonly CatalogSkill[] | undefined;
 	/** Max revise-major-triggered replans before L2 fallback. Default 1. */
 	readonly maxReplans?: number | undefined;
 }
@@ -124,8 +126,8 @@ export async function runTodoOrchestrator(
 				memory:   input.memory,
 				provider: input.provider,
 			};
-			if (input.catalogHint !== undefined) {
-				(plannerInput as { catalogHint?: string }).catalogHint = input.catalogHint;
+			if (input.catalog !== undefined) {
+				(plannerInput as { catalog?: readonly CatalogSkill[] }).catalog = input.catalog;
 			}
 			plan = await runSectionPlanner(plannerInput);
 		} catch (err) {
@@ -143,6 +145,7 @@ export async function runTodoOrchestrator(
 			memory:      input.memory,
 			executeLeaf: input.executeLeaf,
 			provider:    input.provider,
+			...(input.catalog !== undefined ? { catalog: input.catalog } : {}),
 		});
 
 		if (execResult.reopenRequested) {

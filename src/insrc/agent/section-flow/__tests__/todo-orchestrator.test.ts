@@ -352,10 +352,10 @@ test('section planner throws -> skip replans, go straight to L2', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Catalog hint
+// Catalog
 // ---------------------------------------------------------------------------
 
-test('catalogHint threaded into the planner prompt', async () => {
+test('catalog threaded into the planner prompt as a rendered list', async () => {
 	const { execute } = leafExecutor({ d1: 'D', a1: 'A', s1: 'OUT' });
 	const { provider, calls } = scriptedProvider([
 		HEALTHY_TREE_JSON,
@@ -365,10 +365,17 @@ test('catalogHint threaded into the planner prompt', async () => {
 	const { fn: l2 } = l2Mock('UNUSED');
 	await runTodoOrchestrator({
 		todo, memory, provider, executeLeaf: execute, l2Fallback: l2,
-		catalogHint: 'CUSTOM HINT TEXT',
+		catalog: [
+			// Match the ids HEALTHY_TREE_JSON uses so the validator accepts the plan.
+			{ id: 'data.profile-shape',                description: 'profile a dataset',  family: 'profile', owner: 'data-analyzer', inputs: {}, outputPaths: [] },
+			{ id: 'code.list-class-fields',            description: 'list pydantic class fields', family: 'class', owner: 'code-analyzer', inputs: {}, outputPaths: [] },
+			{ id: 'shared.compare-fields-vs-shape',    description: 'diff two field sets', family: 'compare', owner: 'shared', inputs: {}, outputPaths: [] },
+			{ id: 'shared.write-section',              description: 'render the section',  family: 'synth',   owner: 'shared', inputs: {}, outputPaths: [] },
+		],
 	});
-	// First call is the planner; user prompt carries the catalog hint.
-	assert.match(calls[0]!.messages[1]!.content, /CUSTOM HINT TEXT/);
+	const plannerUser = calls[0]!.messages[1]!.content;
+	assert.match(plannerUser, /SKILL CATALOG \(4 skills available/);
+	assert.match(plannerUser, /data\.profile-shape/);
 });
 
 // ---------------------------------------------------------------------------

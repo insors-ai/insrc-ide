@@ -38,6 +38,7 @@
 
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { PlannedNode, PlannedTree } from '../content-gen/plan-tree.js';
+import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { PerRootFinding, RootVerdict, WorkingMemoryFindings } from '../working-memory/types.js';
 import type { MemoryShapeBundle } from '../working-memory/index.js';
 import type { TodoSpec } from './types.js';
@@ -86,6 +87,14 @@ export interface PerRootExecutorInput {
 	readonly memory:     MemoryShapeBundle;
 	readonly executeLeaf: ExecuteLeaf;
 	readonly provider:    LLMProvider;
+	/**
+	 * Skill catalog used to validate reviewer-emitted `suggested_leaves`.
+	 * Leaves whose `skill` is not in the catalog are dropped (logged warn).
+	 * Optional for test ergonomics; production wires this through from
+	 * `runSectionFlow` so the reviewer can't smuggle unregistered ids into
+	 * the followup execution path (mirror of the section-planner GAP A fix).
+	 */
+	readonly catalog?:    readonly CatalogSkill[] | undefined;
 }
 
 export interface PerRootExecutorResult {
@@ -119,6 +128,10 @@ export async function executeReviewableRoots(
 	const reviewableRoots = root.children;
 	const perRoot: PerRootFinding[] = [];
 	const compositionOutputs: Record<string, string> = {};
+	const catalogIds: ReadonlySet<string> | undefined =
+		input.catalog !== undefined && input.catalog.length > 0
+			? new Set(input.catalog.map(c => c.id))
+			: undefined;
 
 	for (const reviewableRoot of reviewableRoots) {
 		const result = await executeOneReviewableRoot({
@@ -128,6 +141,7 @@ export async function executeReviewableRoots(
 			compositionOutputs,
 			executeLeaf:  input.executeLeaf,
 			provider:     input.provider,
+			catalogIds,
 		});
 
 		if (result.escalate !== undefined) {
@@ -160,6 +174,7 @@ interface OneRootInput {
 	readonly compositionOutputs: Readonly<Record<string, string>>;
 	readonly executeLeaf: ExecuteLeaf;
 	readonly provider:    LLMProvider;
+	readonly catalogIds?: ReadonlySet<string> | undefined;
 }
 
 interface OneRootResult {
@@ -186,6 +201,7 @@ async function executeOneReviewableRoot(input: OneRootInput): Promise<OneRootRes
 		cyclesConsumed:   0,
 		priorHints:       [],
 		provider:         input.provider,
+		catalogIds:       input.catalogIds,
 	});
 	let cyclesConsumed = 0;
 	let lastHints: string[] = [];
@@ -224,6 +240,7 @@ async function executeOneReviewableRoot(input: OneRootInput): Promise<OneRootRes
 			cyclesConsumed,
 			priorHints:     lastHints,
 			provider:       input.provider,
+			catalogIds:     input.catalogIds,
 		});
 	}
 
@@ -349,6 +366,7 @@ interface ReviewInput {
 	readonly cyclesConsumed:  number;
 	readonly priorHints:      readonly string[];
 	readonly provider:        LLMProvider;
+	readonly catalogIds?:     ReadonlySet<string> | undefined;
 }
 
 interface ReviewParsed {
@@ -389,7 +407,7 @@ async function reviewRoot(input: ReviewInput): Promise<ReviewParsed> {
 		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return parseReview(response.text);
+	return parseReview(response.text, input.catalogIds);
 }
 
 function buildReviewUser(input: ReviewInput): string {
@@ -397,7 +415,7 @@ function buildReviewUser(input: ReviewInput): string {
 		? '(none; this is the initial review)'
 		: input.priorHints.map((h, i) => `  cycle ${i + 1}: ${h}`).join('\n');
 
-	return [
+	const lines: string[] = [
 		'## TODO OBJECTIVE',
 		input.todo.objective,
 		'',
@@ -427,13 +445,24 @@ function buildReviewUser(input: ReviewInput): string {
 		`  - "followup.suggested_leaves" hard cap: ${MAX_FOLLOWUP_LEAVES} leaves; each MUST be {id, title, objective, kind: "leaf", skill, inputs, emit: "intermediate"}.`,
 		'  - Use "revise-major" ONLY when section regeneration alone can\'t fix the issue (e.g. wrong investigation direction, contradiction with another root).',
 		'  - Hint mutation allowed across cycles -- a later cycle may correct an earlier hint.',
-		'',
-		'## TASK',
-		'Emit the JSON verdict now. Begin with "{" and end with "}".',
-	].join('\n');
+	];
+	if (input.catalogIds !== undefined && input.catalogIds.size > 0) {
+		lines.push('  - Every `suggested_leaves[].skill` MUST be an id from the SKILL CATALOG section below. Leaves with unknown ids are silently dropped.');
+	}
+	if (input.catalogIds !== undefined && input.catalogIds.size > 0) {
+		lines.push('');
+		lines.push(`## SKILL CATALOG (${input.catalogIds.size} skills available)`);
+		for (const id of input.catalogIds) {
+			lines.push(`- \`${id}\``);
+		}
+	}
+	lines.push('');
+	lines.push('## TASK');
+	lines.push('Emit the JSON verdict now. Begin with "{" and end with "}".');
+	return lines.join('\n');
 }
 
-function parseReview(raw: string): ReviewParsed {
+function parseReview(raw: string, catalogIds?: ReadonlySet<string> | undefined): ReviewParsed {
 	let text = raw.trim();
 	if (text.startsWith('```')) {
 		text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
@@ -466,7 +495,7 @@ function parseReview(raw: string): ReviewParsed {
 		if (Array.isArray(sl)) {
 			followupLeaves = sl
 				.filter((node): node is Record<string, unknown> => node !== null && typeof node === 'object' && !Array.isArray(node))
-				.map(node => coerceLeaf(node))
+				.map(node => coerceLeaf(node, catalogIds))
 				.filter((node): node is PlannedNode => node !== null);
 		}
 	}
@@ -485,7 +514,7 @@ function parseReview(raw: string): ReviewParsed {
  * per Q6 sub-Q6a, and we already cap them at 3 leaves. Returns null on
  * shape mismatch.
  */
-function coerceLeaf(raw: Record<string, unknown>): PlannedNode | null {
+function coerceLeaf(raw: Record<string, unknown>, catalogIds?: ReadonlySet<string> | undefined): PlannedNode | null {
 	if (raw['kind'] !== 'leaf') {
 		return null;
 	}
@@ -494,6 +523,14 @@ function coerceLeaf(raw: Record<string, unknown>): PlannedNode | null {
 	const objective = typeof raw['objective'] === 'string' ? (raw['objective'] as string).trim() : '';
 	const skill     = typeof raw['skill']     === 'string' ? (raw['skill']     as string).trim() : '';
 	if (id === '' || title === '' || objective === '' || skill === '') {
+		return null;
+	}
+	// GAP B fix: drop reviewer-suggested followup leaves whose `skill` is
+	// not in the catalog. Mirror of the section-planner enforcement; here
+	// we drop silently (logged warn) rather than reject the whole verdict,
+	// because the orchestrator can still proceed without the dropped leaf.
+	if (catalogIds !== undefined && catalogIds.size > 0 && !catalogIds.has(skill)) {
+		log.warn({ leafId: id, skill }, 'root review: dropping suggested_leaf with unknown skill id');
 		return null;
 	}
 	const inputsRaw = raw['inputs'];

@@ -32,8 +32,10 @@ import {
 	validatePlannedTree,
 	isDegenerateShape,
 	type PlannedTree,
+	type PlannedNode,
 	type DegenerateShapeOpts,
 } from '../content-gen/plan-tree.js';
+import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { TodoSpec } from './types.js';
 import type { MemoryShapeBundle } from '../working-memory/index.js';
@@ -50,8 +52,15 @@ export interface SectionPlannerInput {
 	readonly todo: TodoSpec;
 	/** L1-L5 memory bundle for this TODO iteration (P1.c shapeMemory / P1.d incrementalUpdate output). */
 	readonly memory: MemoryShapeBundle;
-	/** Free-form skill catalog hint passed verbatim into the prompt. Empty string is fine. */
-	readonly catalogHint?: string | undefined;
+	/**
+	 * Skill catalog the planner may compose leaves from. When non-empty,
+	 * every emitted `leaf.skill` is validated against this set; unknown
+	 * ids trigger the corrective retry with the catalog reiterated in the
+	 * rejection reason. When undefined / empty, no id validation runs --
+	 * suitable for unit tests using scripted providers; production callers
+	 * must always pass a real catalog (see `data-analyzer-orchestrator`).
+	 */
+	readonly catalog?: readonly CatalogSkill[] | undefined;
 	readonly provider: LLMProvider;
 	/** Override the degenerate-shape thresholds. Default opts apply when omitted. */
 	readonly degenerateOpts?: DegenerateShapeOpts | undefined;
@@ -68,8 +77,9 @@ export interface SectionPlannerResult {
 export async function runSectionPlanner(
 	input: SectionPlannerInput,
 ): Promise<SectionPlannerResult> {
+	const catalogIds = buildCatalogIdSet(input.catalog);
 	const firstAttempt = await callPlanner(input, false, undefined);
-	const firstValidation = validateAll(firstAttempt.raw, input.degenerateOpts);
+	const firstValidation = validateAll(firstAttempt.raw, input.degenerateOpts, catalogIds);
 	if (firstValidation.ok) {
 		log.info({ todoId: input.todo.id, reviewableRoots: firstValidation.tree.root.children?.length ?? 0 }, 'section planner: first-attempt validated');
 		return { tree: firstValidation.tree, retried: false };
@@ -78,7 +88,7 @@ export async function runSectionPlanner(
 	log.warn({ todoId: input.todo.id, reason: firstValidation.reason }, 'section planner: first-attempt rejected; retrying with corrective hint');
 
 	const retry = await callPlanner(input, true, firstValidation.reason);
-	const retryValidation = validateAll(retry.raw, input.degenerateOpts);
+	const retryValidation = validateAll(retry.raw, input.degenerateOpts, catalogIds);
 	if (!retryValidation.ok) {
 		throw new Error(`section planner validation failed after retry: ${retryValidation.reason}`);
 	}
@@ -88,6 +98,11 @@ export async function runSectionPlanner(
 		retried: true,
 		firstFailureReason: firstValidation.reason,
 	};
+}
+
+function buildCatalogIdSet(catalog: readonly CatalogSkill[] | undefined): ReadonlySet<string> | undefined {
+	if (catalog === undefined || catalog.length === 0) { return undefined; }
+	return new Set(catalog.map(c => c.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +148,9 @@ function buildPlannerUser(
 	priorFailureReason: string | undefined,
 ): string {
 	const memoryBlock = renderMemory(input.memory);
-	const catalogBlock = (input.catalogHint ?? '').trim().length > 0
-		? `## SKILL CATALOG HINT\n${input.catalogHint!.trim()}\n`
+	const catalogBlock = renderCatalog(input.catalog);
+	const catalogRule = catalogBlock.length > 0
+		? '  - Every `leaf.skill` MUST be an id listed in the SKILL CATALOG section below. Ids not in the catalog will be rejected.'
 		: '';
 	const retryAddendum = isRetry
 		? [
@@ -142,19 +158,29 @@ function buildPlannerUser(
 			'## RETRY CORRECTION',
 			`Your previous tree was rejected with reason:`,
 			`  ${priorFailureReason ?? 'unknown'}`,
-			'Emit a new tree that satisfies every constraint below.',
+			'',
+			'Fix ONLY the issue cited above. Keep the rest of your previous',
+			'emission IDENTICAL -- same composition structure, same ids, same',
+			'titles, same objectives, same `inputs` bindings (each binding is',
+			'an OBJECT like `{"source":"node","nodeId":"...","path":"..."}` --',
+			'do NOT replace it with a string and do NOT confuse it with',
+			'`leaf.skill`), same `emit` values. Re-emit the full tree with',
+			'just the cited fix applied.',
 			'',
 		].join('\n')
 		: '';
 
-	return [
+	const workedExampleHeader = catalogBlock.length > 0
+		? '## WORKED EXAMPLE (illustrative SHAPE only; the `skill` ids shown\n## below are PLACEHOLDERS. You MUST replace them with ids from the\n## skill catalog section further down.)'
+		: '## WORKED EXAMPLE (a TODO about "Analyze GRN field mappings")';
+
+	const lines: string[] = [
 		'## TODO OBJECTIVE',
 		input.todo.objective,
 		'',
 		'## WORKING MEMORY (L1-L5 bundle)',
 		memoryBlock,
 		'',
-		catalogBlock,
 		'## REVIEWABLE-ROOT CONTRACT (Q3 Option B)',
 		'The top-level node MUST be a composition (`kind: "composition"`),',
 		'`composition: "sequence"` by default. Each direct child of the',
@@ -172,7 +198,7 @@ function buildPlannerUser(
 		'OTHER reviewable roots are not directly addressable (read the',
 		'composition\'s aggregate output instead).',
 		'',
-		'## WORKED EXAMPLE (a TODO about "Analyze GRN field mappings")',
+		workedExampleHeader,
 		WORKED_EXAMPLE_JSON,
 		'',
 		'## OUTPUT RULES',
@@ -183,11 +209,27 @@ function buildPlannerUser(
 		'  - `emit: "section"` allowed ONLY on the final reviewable root.',
 		'  - Prefer BREADTH (multiple roots) over DEPTH (linear chains).',
 		'  - All ids are kebab-case strings, unique within the tree.',
-		retryAddendum,
-		'',
-		'## TASK',
-		'Emit the PlannedTree JSON object now. Begin with "{" and end with "}".',
-	].join('\n');
+	];
+	if (catalogRule.length > 0) { lines.push(catalogRule); }
+	lines.push(retryAddendum);
+	if (catalogBlock.length > 0) {
+		lines.push('');
+		lines.push(catalogBlock);
+	}
+	lines.push('');
+	lines.push('## TASK');
+	lines.push('Emit the PlannedTree JSON object now. Begin with "{" and end with "}".');
+	return lines.join('\n');
+}
+
+function renderCatalog(catalog: readonly CatalogSkill[] | undefined): string {
+	if (catalog === undefined || catalog.length === 0) { return ''; }
+	const lines: string[] = [`## SKILL CATALOG (${catalog.length} skills available; use these ids verbatim in \`leaf.skill\`)`];
+	for (const s of catalog) {
+		const desc = s.description.replace(/\s+/g, ' ').trim().slice(0, 160);
+		lines.push(`- \`${s.id}\` [${s.owner}/${s.family}] -- ${desc}`);
+	}
+	return lines.join('\n');
 }
 
 function renderMemory(memory: MemoryShapeBundle): string {
@@ -309,7 +351,11 @@ interface ValidationErr {
 
 type ValidationResult = ValidationOk | ValidationErr;
 
-function validateAll(raw: string, degenerateOpts: DegenerateShapeOpts | undefined): ValidationResult {
+function validateAll(
+	raw: string,
+	degenerateOpts: DegenerateShapeOpts | undefined,
+	catalogIds: ReadonlySet<string> | undefined,
+): ValidationResult {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(stripFences(raw));
@@ -329,7 +375,36 @@ function validateAll(raw: string, degenerateOpts: DegenerateShapeOpts | undefine
 		return { ok: false, reason: degenerate };
 	}
 
+	// Catalog-membership check (GAP A fix). Only runs when the caller
+	// supplied a catalog. Listing the unknown ids verbatim is what gives
+	// the corrective retry a concrete hint to act on.
+	if (catalogIds !== undefined) {
+		const unknown = collectUnknownSkillIds(structural, catalogIds);
+		if (unknown.length > 0) {
+			const list = unknown.map(u => `'${u}'`).join(', ');
+			return {
+				ok: false,
+				reason: `unknown skill id(s) in plan: ${list}. Every \`leaf.skill\` MUST be an id from the SKILL CATALOG section.`,
+			};
+		}
+	}
+
 	return { ok: true, tree: structural };
+}
+
+function collectUnknownSkillIds(tree: PlannedTree, catalog: ReadonlySet<string>): readonly string[] {
+	const unknown = new Set<string>();
+	const visit = (node: PlannedNode): void => {
+		if (node.kind === 'leaf') {
+			if (typeof node.skill === 'string' && node.skill.length > 0 && !catalog.has(node.skill)) {
+				unknown.add(node.skill);
+			}
+			return;
+		}
+		for (const child of node.children ?? []) { visit(child); }
+	};
+	visit(tree.root);
+	return [...unknown];
 }
 
 function stripFences(text: string): string {
@@ -346,5 +421,6 @@ function stripFences(text: string): string {
 
 export const _validateAllForTest        = validateAll;
 export const _renderMemoryForTest       = renderMemory;
+export const _renderCatalogForTest      = renderCatalog;
 export const _stripFencesForTest        = stripFences;
 export const WORKED_EXAMPLE_JSON_VALUE  = WORKED_EXAMPLE_JSON;

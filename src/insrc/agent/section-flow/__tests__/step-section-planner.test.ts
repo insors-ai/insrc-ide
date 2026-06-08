@@ -356,24 +356,57 @@ test('runSectionPlanner: user prompt carries TODO objective + memory + worked ex
 	assert.match(user, /Top-level node MUST be a composition/);
 });
 
-test('runSectionPlanner: catalogHint surfaces in the user prompt when set', async () => {
+test('runSectionPlanner: catalog surfaces in the user prompt trailing the contract', async () => {
 	const { provider, calls } = scriptedProvider([HEALTHY_TREE_JSON]);
 	await runSectionPlanner({
-		todo:        makeTodo(),
-		memory:      makeMemory(),
-		catalogHint: '- shared.compare-fields-vs-shape -- diff two field sets',
+		todo:    makeTodo(),
+		memory:  makeMemory(),
+		// Catalog must include the 4 skill ids HEALTHY_TREE_JSON (the worked
+		// example) references; otherwise validation rejects and the planner
+		// retries -- the test would need a second scripted response.
+		catalog: [
+			{ id: 'data.profile-shape',             description: 'profile a dataset',          family: 'profile', owner: 'data-analyzer', inputs: {}, outputPaths: [] },
+			{ id: 'code.list-class-fields',         description: 'list pydantic class fields', family: 'class',   owner: 'code-analyzer', inputs: {}, outputPaths: [] },
+			{ id: 'shared.compare-fields-vs-shape', description: 'diff two field sets',        family: 'compare', owner: 'shared',        inputs: {}, outputPaths: [] },
+			{ id: 'shared.write-section',           description: 'render the section',         family: 'synth',   owner: 'shared',        inputs: {}, outputPaths: [] },
+		],
 		provider,
 	});
 	const user = calls[0]!.messages[1]!.content;
-	assert.match(user, /SKILL CATALOG HINT/);
+	assert.match(user, /SKILL CATALOG \(4 skills available/);
 	assert.match(user, /shared\.compare-fields-vs-shape/);
+	assert.match(user, /Every `leaf\.skill` MUST be an id listed in the SKILL CATALOG/);
+	// Trailing position: catalog should appear AFTER the OUTPUT RULES block
+	// (and the SKILL CATALOG header should come BEFORE the TASK footer).
+	const ruleIdx    = user.indexOf('## OUTPUT RULES');
+	const catalogIdx = user.indexOf('## SKILL CATALOG');
+	const taskIdx    = user.indexOf('## TASK');
+	assert.ok(ruleIdx < catalogIdx, 'catalog should appear AFTER OUTPUT RULES');
+	assert.ok(catalogIdx < taskIdx,  'catalog should appear BEFORE TASK footer');
 });
 
-test('runSectionPlanner: no catalogHint -> SKILL CATALOG HINT section omitted', async () => {
+test('runSectionPlanner: no catalog -> SKILL CATALOG section omitted', async () => {
 	const { provider, calls } = scriptedProvider([HEALTHY_TREE_JSON]);
 	await runSectionPlanner({ todo: makeTodo(), memory: makeMemory(), provider });
 	const user = calls[0]!.messages[1]!.content;
-	assert.ok(!user.includes('SKILL CATALOG HINT'));
+	assert.ok(!user.includes('SKILL CATALOG'));
+});
+
+test('runSectionPlanner: unknown skill id in plan -> first attempt rejected with catalog hint', async () => {
+	// HEALTHY_TREE_JSON references skill ids that AREN'T in this tiny catalog.
+	// We script the same response twice so the retry also fails -> throw.
+	const { provider, calls } = scriptedProvider([HEALTHY_TREE_JSON, HEALTHY_TREE_JSON]);
+	await assert.rejects(
+		() => runSectionPlanner({
+			todo:    makeTodo(),
+			memory:  makeMemory(),
+			catalog: [{ id: 'shared.write-section', description: '', family: 'synth', owner: 'shared', inputs: {}, outputPaths: [] }],
+			provider,
+		}),
+		/unknown skill id/,
+	);
+	// Retry message carries the corrective hint listing the unknown ids.
+	assert.match(calls[1]!.messages[1]!.content, /unknown skill id/);
 });
 
 test('runSectionPlanner: respects degenerateOpts override (looser bound)', async () => {
