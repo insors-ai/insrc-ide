@@ -459,6 +459,17 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         // per CLAUDE.md and burn quota on what are supposed to be
         // cheap local-tier ops.
         localProvider:    session.ollamaProvider,
+        // `shapeMemory`'s single-call vs chunked-map-reduce decision
+        // is gated by `numCtx`. Without this pin the orchestrator
+        // defaults to `budget.total` (32k), but the local Ollama
+        // provider is typically configured for 16k -- the resulting
+        // overestimate keeps shapeMemory in the single-call regime
+        // past the real context window, the prompt silently
+        // truncates on the Ollama side, and the model emits
+        // malformed JSON that fails schema validation twice and
+        // throws. Wire the local provider's actual numCtx so
+        // section-flow picks the chunked path at the right boundary.
+        numCtx:           session.ollamaProvider.numCtx,
         executeLeaf,
         l2Fallback,
         runId,

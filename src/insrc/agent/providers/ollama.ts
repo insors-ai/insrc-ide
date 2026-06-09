@@ -114,7 +114,16 @@ export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
   private readonly client: Ollama;
   private readonly model: string;
-  private readonly numCtx: number;
+  /**
+   * Effective Ollama `num_ctx` for this provider. Callers that decide
+   * single-call vs chunked-map-reduce layouts (e.g. section-flow's
+   * `shapeMemory`) need this to set their threshold correctly --
+   * defaulting to the section-flow budget (32k) when the provider is
+   * actually 16k causes silent input truncation and broken JSON
+   * downstream. Public-readonly + lowercased to match the LLMProvider
+   * surface convention.
+   */
+  readonly numCtx: number;
   private readonly embeddingModel: string;
   private readonly quirks: ModelQuirks;
 
