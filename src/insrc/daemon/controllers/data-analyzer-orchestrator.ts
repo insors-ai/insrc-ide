@@ -447,11 +447,14 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       result = await runSectionFlow({
         question:         this._request,
         provider:         sectionFlowProvider,
-        // Local-only embedder. Cloud providers return [] from embed()
-        // per CLAUDE.md, so the bullet-cache write + semantic-layer
-        // ANN both silently degrade when this is omitted on a
-        // session with an active cloud provider. Wire Ollama explicitly.
-        embedProvider:    session.ollamaProvider,
+        // Local-tier provider: working-memory ops (shape /
+        // incremental / bullets) + embeddings (bullet cache +
+        // semantic ANN). The memory prompts declare themselves
+        // "LOCAL CONTEXT-ASSEMBLY model"; this is the wiring that
+        // makes that real. Cloud providers return [] from embed()
+        // per CLAUDE.md and burn quota on what are supposed to be
+        // cheap local-tier ops.
+        localProvider:    session.ollamaProvider,
         executeLeaf,
         l2Fallback,
         runId,
