@@ -9,6 +9,7 @@ import type {
   ContentBlock,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import { withCloudRetry } from './cloud-retry.js';
 
 const log = getLogger('claude');
 
@@ -136,14 +137,17 @@ export class AnthropicProvider implements LLMProvider {
         };
       }
 
-      const response = await this.client.messages.create({
-        model:      this.model,
-        max_tokens: opts.maxTokens ?? 8_192,
-        ...(system ? { system } : {}),
-        ...(tools && tools.length > 0 ? { tools } : {}),
-        ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
-        messages:   apiMessages,
-      });
+      const response = await withCloudRetry(
+        () => this.client.messages.create({
+          model:      this.model,
+          max_tokens: opts.maxTokens ?? 8_192,
+          ...(system ? { system } : {}),
+          ...(tools && tools.length > 0 ? { tools } : {}),
+          ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
+          messages:   apiMessages,
+        }),
+        { label: 'anthropic.complete', log },
+      );
 
       const text = response.content
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
@@ -199,18 +203,21 @@ export class AnthropicProvider implements LLMProvider {
     log.info({ query, maxResults }, 'claude web search');
 
     try {
-      const response = await this.client.messages.create({
-        model: 'claude-haiku-4-5',
-        max_tokens: 2048,
-        tools: [{
-          type: 'web_search_20250305' as unknown as 'custom',
-          name: 'web_search',
-        } as unknown as Anthropic.Tool],
-        messages: [{
-          role: 'user',
-          content: `Search the web for: "${query}". Return the ${maxResults} most relevant results with URLs, titles, and brief summaries.`,
-        }],
-      });
+      const response = await withCloudRetry(
+        () => this.client.messages.create({
+          model: 'claude-haiku-4-5',
+          max_tokens: 2048,
+          tools: [{
+            type: 'web_search_20250305' as unknown as 'custom',
+            name: 'web_search',
+          } as unknown as Anthropic.Tool],
+          messages: [{
+            role: 'user',
+            content: `Search the web for: "${query}". Return the ${maxResults} most relevant results with URLs, titles, and brief summaries.`,
+          }],
+        }),
+        { label: 'anthropic.webSearch', log },
+      );
 
       // Extract text and any search result blocks
       const results: WebSearchResult['results'] = [];

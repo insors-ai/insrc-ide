@@ -67,7 +67,7 @@ import {
   type L2Fallback,
 } from '../../agent/section-flow/index.js';
 import { buildCatalogFromRegistry } from '../../agent/content-gen/plan-tree-helpers.js';
-import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
+import type { SkillRunnerDeps } from '../skills/invoke.js';
 import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
 import { PATHS } from '../../shared/paths.js';
 

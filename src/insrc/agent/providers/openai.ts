@@ -16,6 +16,7 @@ import type {
   ToolDefinition,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import { withCloudRetry } from './cloud-retry.js';
 
 const log = getLogger('openai');
 
@@ -51,8 +52,11 @@ export class OpenAIProvider implements LLMProvider {
     if (toolChoice !== undefined)        params['tool_choice'] = toolChoice;
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response = await this.client.chat.completions.create(params as any);
+      const response = await withCloudRetry(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        () => this.client.chat.completions.create(params as any),
+        { label: 'openai.complete', log },
+      );
       return fromOpenAIResponse(response);
     } catch (err) {
       log.error({ err: String(err), model: this.model }, 'openai complete failed');

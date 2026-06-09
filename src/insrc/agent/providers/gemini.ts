@@ -15,6 +15,7 @@ import type {
   ToolDefinition,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import { withCloudRetry } from './cloud-retry.js';
 
 const log = getLogger('gemini');
 
@@ -48,11 +49,14 @@ export class GeminiProvider implements LLMProvider {
     if (toolConfig !== undefined)        genConfig['toolConfig'] = toolConfig;
 
     try {
-      const response = await this.client.models.generateContent({
-        model: this.model,
-        contents,
-        ...(Object.keys(genConfig).length > 0 ? { config: genConfig } : {}),
-      });
+      const response = await withCloudRetry(
+        () => this.client.models.generateContent({
+          model: this.model,
+          contents,
+          ...(Object.keys(genConfig).length > 0 ? { config: genConfig } : {}),
+        }),
+        { label: 'gemini.complete', log },
+      );
       return fromGeminiResponse(response);
     } catch (err) {
       log.error({ err: String(err), model: this.model }, 'gemini complete failed');

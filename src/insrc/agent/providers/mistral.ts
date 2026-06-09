@@ -14,6 +14,7 @@ import type {
   ToolDefinition,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import { withCloudRetry } from './cloud-retry.js';
 
 const log = getLogger('mistral');
 
@@ -49,8 +50,11 @@ export class MistralProvider implements LLMProvider {
     if (toolChoice !== undefined)       request['toolChoice'] = toolChoice;
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const response = await this.client.chat.complete(request as any);
+      const response = await withCloudRetry(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        () => this.client.chat.complete(request as any),
+        { label: 'mistral.complete', log },
+      );
       return fromMistralResponse(response);
     } catch (err) {
       log.error({ err: String(err), model: this.model }, 'mistral complete failed');
