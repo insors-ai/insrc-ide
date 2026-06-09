@@ -68,6 +68,7 @@ import {
 } from '../../agent/section-flow/index.js';
 import { buildCatalogFromRegistry } from '../../agent/content-gen/plan-tree-helpers.js';
 import { runSkill, type SkillRunnerDeps } from '../skills/invoke.js';
+import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
 import { PATHS } from '../../shared/paths.js';
 
 const log = getLogger('data-analyzer:orchestrator');
@@ -346,20 +347,28 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       provider: sectionFlowProvider,
     });
 
-    const l2Fallback: L2Fallback = async ({ todo, memory, reason }) => {
+    const l2Fallback: L2Fallback = async ({ todo, reason }) => {
+      // Route through `runAnswerQuestionTask`, which wraps the L2
+      // `data.answer-question` skill with the right input shape
+      // (`question` + `connections` + `priorContext`) and runs it via
+      // `runL2Skill`. The previous implementation used `runSkill`,
+      // which only sees the L1 registry -- `data.answer-question` is
+      // L2-only, so every fallback bounced with `unknown-skill`.
       try {
-        const result = await runSkill<unknown, { answer?: string }>(
-          'data.answer-question',
-          {
+        const outcome = await runAnswerQuestionTask({
+          session,
+          task: {
+            itemId:   todo.id,
+            kind:     'free-form',
             question: todo.objective,
-            context: [
-              memory.system, memory.summary, memory.recent, memory.semantic, memory.code,
-            ].filter(s => s.length > 0).join('\n\n'),
+            origin:   'plan',
           },
-          runnerDeps,
-        );
-        const value = result.value as { answer?: string } | undefined;
-        const answer = typeof value?.answer === 'string' ? value.answer.trim() : '';
+          connections: this._connections,
+          ...(this.deps?.abortController?.signal !== undefined
+            ? { signal: this.deps.abortController.signal }
+            : {}),
+        });
+        const answer = outcome.result.answer.trim();
         return answer.length > 0
           ? answer
           : `_(L2 fallback returned no content for "${todo.objective}"; reason: ${reason})_`;
@@ -438,6 +447,11 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       result = await runSectionFlow({
         question:         this._request,
         provider:         sectionFlowProvider,
+        // Local-only embedder. Cloud providers return [] from embed()
+        // per CLAUDE.md, so the bullet-cache write + semantic-layer
+        // ANN both silently degrade when this is omitted on a
+        // session with an active cloud provider. Wire Ollama explicitly.
+        embedProvider:    session.ollamaProvider,
         executeLeaf,
         l2Fallback,
         runId,

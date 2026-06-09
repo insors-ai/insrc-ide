@@ -94,6 +94,14 @@ const log = getLogger('section-flow:run');
 export interface RunSectionFlowInput {
 	readonly question: string;
 	readonly provider: LLMProvider;
+	/**
+	 * Local-only embedder for bullet-cache writes + semantic-layer lookup.
+	 * When omitted, falls back to `provider`, which silently routes every
+	 * embed through the LLM-fallback path on any session with an active
+	 * cloud provider (cloud providers return `[]` for `embed()` per
+	 * CLAUDE.md). Production callers MUST pass `session.ollamaProvider`.
+	 */
+	readonly embedProvider?: LLMProvider | undefined;
 	readonly executeLeaf: ExecuteLeaf;
 	readonly l2Fallback:  L2Fallback;
 	/** Per-report-run identifier. Used for the bullet-cache scope and the working-memory dir. */
@@ -168,6 +176,10 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 	const numCtx = input.numCtx ?? budget.total;
 	const store  = openWorkingMemoryStore(input.workingMemoryDir);
 	const cache  = makeBulletCache(input.runId);
+	// Local-only embedder: bullet-cache writes + semantic-layer ANN.
+	// Falls back to `provider` for legacy callers (tests with a
+	// scripted provider). Production callers wire `session.ollamaProvider`.
+	const embedProvider = input.embedProvider ?? input.provider;
 
 	const progress = async (event: ProgressEvent): Promise<void> => {
 		if (input.onProgress === undefined) { return; }
@@ -239,6 +251,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			budget,
 			numCtx,
 			provider: input.provider,
+			...(input.embedProvider !== undefined ? { embedProvider: input.embedProvider } : {}),
 		});
 
 		const todoResult = await runTodoOrchestrator({
@@ -265,7 +278,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 		// Bullets for the cache (best-effort; extraction failures are
 		// non-fatal -- the next TODO's semantic update falls back to the
 		// LLM path).
-		await persistBullets(todoResult.entry, input.runId, i, input.provider);
+		await persistBullets(todoResult.entry, input.runId, i, input.provider, embedProvider);
 
 		await progress({
 			phase:   'todo-complete',
@@ -355,6 +368,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				budget,
 				numCtx,
 				provider: input.provider,
+				...(input.embedProvider !== undefined ? { embedProvider: input.embedProvider } : {}),
 			});
 			const todoResult = await runTodoOrchestrator({
 				todo,
@@ -366,7 +380,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			});
 			const newIndex = (await store.listEntries()).length;
 			await store.write(newIndex, todoResult.entry);
-			await persistBullets(todoResult.entry, input.runId, newIndex, input.provider);
+			await persistBullets(todoResult.entry, input.runId, newIndex, input.provider, embedProvider);
 			newEntries.push(todoResult.entry);
 
 			await progress({
@@ -441,6 +455,7 @@ interface PrepareMemoryInput {
 	readonly budget:                TokenBudget;
 	readonly numCtx:                number;
 	readonly provider:              LLMProvider;
+	readonly embedProvider?:        LLMProvider | undefined;
 }
 
 interface PrepareMemoryResult {
@@ -502,7 +517,7 @@ async function prepareMemoryFor(
 		nextObjective: todo.objective,
 		budget:        input.budget,
 	}, {
-		bulletCache: { cache: input.cache, topK: 10 },
+		bulletCache: { cache: input.cache, topK: 10, embedProvider: input.embedProvider },
 	});
 	return { bundle: updated.bundle, wasColdRebuild: false };
 }
@@ -531,7 +546,22 @@ async function persistBullets(
 	runId: string,
 	todoIndex: number,
 	provider: LLMProvider,
+	embedProvider: LLMProvider,
 ): Promise<void> {
+	// L2-fallback entries are excluded from the bullet cache. The L2
+	// path produces either (a) a real `data.answer-question` markdown
+	// answer or (b) a `_(L2 fallback failed: ...)_` sentinel wrapper.
+	// Case (a) is already represented in the next-TODO context via
+	// `entry.detail`; re-extracting bullets would duplicate it without
+	// the citation lineage downstream consumers expect. Case (b)
+	// contains framework-flavor verbiage that, when extracted as
+	// "facts", leaks into subsequent TODOs' semantic-layer and biases
+	// the model away from the user's actual question -- exactly the
+	// regression captured in the post-Phase-epsilon run.
+	if (entry.findings.fallback === 'L2') {
+		log.info({ todoId: entry.todoId }, 'persistBullets: skipping cache write for L2-fallback entry');
+		return;
+	}
 	let bullets: string[];
 	try {
 		bullets = await extractBullets(provider, entry);
@@ -546,12 +576,13 @@ async function persistBullets(
 	const rows: BulletRowParam[] = [];
 	for (let i = 0; i < bullets.length; i++) {
 		const bullet = bullets[i]!;
-		const embedding = await provider.embed(bullet);
+		const embedding = await embedProvider.embed(bullet);
 		if (embedding.length === 0) {
-			// Cloud provider; embeddings are local-only. Stop -- we
-			// cannot populate the cache, but the LLM-fallback path in
-			// updater.ts will still produce a semantic layer.
-			log.warn({ todoId: entry.todoId }, 'provider.embed returned empty vector; bullet cache write skipped');
+			// Embedder returned no vector. With a properly wired local
+			// Ollama embedder this only happens on an outage; with the
+			// legacy fallback (when embedProvider was the active cloud
+			// provider) it happened every time. Log + stop.
+			log.warn({ todoId: entry.todoId }, 'embedProvider.embed returned empty vector; bullet cache write skipped');
 			return;
 		}
 		rows.push({

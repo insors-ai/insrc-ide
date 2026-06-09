@@ -116,16 +116,22 @@ export interface IncrementalUpdateOpts {
 	/**
 	 * If set, the `semantic` layer is filled from the bullet cache
 	 * (P1.e) instead of the LLM-based incremental call. The updater
-	 * embeds `nextObjective` via `provider.embed()` and queries the
-	 * cache for top-K relevant bullets. If `provider.embed()` returns
-	 * an empty vector (cloud provider; embeddings are local-only --
-	 * see CLAUDE.md), the updater falls back to the LLM path silently.
+	 * embeds `nextObjective` via `embedProvider.embed()` and queries
+	 * the cache for top-K relevant bullets.
+	 *
+	 * `embedProvider` is OPTIONAL. When omitted, the main `provider`
+	 * is used -- correct for local-only setups, but a regression on
+	 * any session with an active cloud provider (cloud providers
+	 * return `[]` for `embed()` per CLAUDE.md, which silently routes
+	 * every call to the LLM-fallback path). Production callers
+	 * should pass the local Ollama provider here.
 	 *
 	 * `topK` defaults to 10 (matching the per-TODO bullet ceiling).
 	 */
 	readonly bulletCache?: {
 		readonly cache: BulletCache;
 		readonly topK?: number | undefined;
+		readonly embedProvider?: LLMProvider | undefined;
 	} | undefined;
 }
 
@@ -460,14 +466,15 @@ async function updateSemantic(
 	cacheOpts: IncrementalUpdateOpts['bulletCache'],
 ): Promise<{ value: string; usedCache: boolean; llmCalled: boolean }> {
 	if (cacheOpts !== undefined) {
-		const queryVec = await provider.embed(nextObjective);
+		const embedProvider = cacheOpts.embedProvider ?? provider;
+		const queryVec = await embedProvider.embed(nextObjective);
 		if (queryVec.length > 0) {
 			const topK = Math.max(1, cacheOpts.topK ?? 10);
 			const hits = await cacheOpts.cache.query(queryVec, topK);
 			const formatted = formatBulletsAsSemantic(hits, budgetTokens);
 			return { value: formatted, usedCache: true, llmCalled: false };
 		}
-		log.warn('updateSemantic: provider.embed returned empty vector; falling back to LLM-based semantic update');
+		log.warn('updateSemantic: embed returned empty vector; falling back to LLM-based semantic update');
 	}
 	const llmValue = await updateSemanticViaLLM(provider, prior, newEntry, nextObjective, budgetTokens);
 	return { value: llmValue, usedCache: false, llmCalled: true };
