@@ -338,13 +338,17 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         codeRepoPath: session.repoPath ?? '',
         primaryConnection: this._connections[0]?.id ?? '',
       },
-      // Wire the section-flow provider into the leaf executor so it
-      // runs the 2-step pattern (shape-resolve LLM call -> runSkill)
-      // restored from the deleted execute-step.ts. Without this the
-      // executor would fall back to the deterministic binding path,
-      // which the planner cannot populate correctly without seeing
-      // skill schemas.
-      provider: sectionFlowProvider,
+      // Per-leaf shape resolution (Stage 2a of the 2-step executor)
+      // takes the leaf objective + skill schema + prior outputs and
+      // emits a validated args dict. That is a small structured-
+      // output role -- well-suited to the local Ollama tier, same
+      // family as the LOCAL CONTEXT-ASSEMBLY memory ops. Routing it
+      // here saves the cloud quota for actual reasoning work
+      // (planner / reviewer / synthesis). Skill body execution still
+      // honours each skill's declared `providerAffinity` via
+      // `runnerDeps.resolveProvider` -- this field only controls
+      // shape-resolve.
+      provider: session.ollamaProvider,
     });
 
     const l2Fallback: L2Fallback = async ({ todo, reason }) => {
