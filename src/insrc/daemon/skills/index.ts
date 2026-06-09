@@ -25,6 +25,8 @@ import { registerCodeSourceFileDescribeSkill } from './built-ins/code.source.fil
 import { registerCodeSourceModuleDescribeSkill } from './built-ins/code.source.module.describe.js';
 import { registerCodeSourceRepoDescribeSkill } from './built-ins/code.source.repo.describe.js';
 import { registerCodeSourceGrepSkill } from './built-ins/code.source.grep.js';
+import { registerSharedFsListFilesSkill } from './built-ins/shared.fs.list-files.js';
+import { registerSharedFsPeekSkill }      from './built-ins/shared.fs.peek.js';
 import { registerCodeRepoGitStatusSkill } from './built-ins/code.repo.git-status.js';
 import { registerCodeRepoGitRecentSkill } from './built-ins/code.repo.git-recent.js';
 import { registerCodeEntityLocateByNameSkill } from './built-ins/code.entity.locate-by-name.js';
@@ -181,6 +183,12 @@ export function registerAllSkills(): void {
   registerCodeSourceGrepSkill();
   registerCodeRepoGitStatusSkill();
   registerCodeRepoGitRecentSkill();
+  // plans/shared-fs-skills-and-namespace-cleanup.md Phase 1 -- general
+  // filesystem skills that work on ANY directory (code repos AND data
+  // fixture dirs). Closes the L2-fallback gap that hit every "list JSON
+  // files" / "peek at one fixture" TODO across runs 5-7.
+  registerSharedFsListFilesSkill();
+  registerSharedFsPeekSkill();
   // code-analyzer-skills.md Phase 2 -- entity-lookup skills.
   // Owner-facing typed wrappers over the shipped graph helpers.
   registerCodeEntityLocateByNameSkill();
