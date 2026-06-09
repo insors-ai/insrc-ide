@@ -257,13 +257,13 @@ test('runCycleReview: cycle outputs render facts + status into prompt', async ()
 // ---------------------------------------------------------------------------
 
 test('validate: new_steps not an array -> rejected at top level', () => {
-	const r = validate(JSON.stringify({ keep: [], new_steps: 'nope' }), new Set(), new Set(), 0);
+	const r = validate(JSON.stringify({ keep: [], new_steps: 'nope' }), new Set(), new Set(), 0, new Map());
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /must be an array/); }
 });
 
 test('validate: keep entry not a string -> rejected', () => {
-	const r = validate(JSON.stringify({ keep: [42], new_steps: [] }), new Set(['step-1']), new Set(), 0);
+	const r = validate(JSON.stringify({ keep: [42], new_steps: [] }), new Set(['step-1']), new Set(), 0, new Map());
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /not a non-empty string/); }
 });
@@ -273,9 +273,9 @@ test('coerceNewStep: missing dependsOn target -> error', () => {
 		id: 'step-3', intent: 'extract with bad dep',
 		skills: [{ id: 's3.a', skillId: 'code.class.extract-fields', context: 'foo', dependsOn: 's9.x' }],
 		targetsCriteria: [0],
-	}, 0, new Set(['code.class.extract-fields']), 0, new Set());
+	}, 0, new Set(['code.class.extract-fields']), 0, new Set(), new Map());
 	assert.equal(typeof r, 'string');
-	if (typeof r === 'string') { assert.match(r, /dependsOn.*must reference an earlier skill id/); }
+	if (typeof r === 'string') { assert.match(r, /dependsOn.*"s9\.x"/); }
 });
 
 // ---------------------------------------------------------------------------

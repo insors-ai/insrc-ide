@@ -49,6 +49,7 @@ import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
 import { summarizeCycleMemory } from './cycle-memory.js';
+import { validateDependsOn } from './step-discovery-plan-expansion.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:cycle-review');
@@ -85,9 +86,16 @@ export async function runCycleReview(input: CycleReviewInput): Promise<CycleRevi
 	const catalogIds   = new Set(input.catalog.map(c => c.id));
 	const validStepIds = new Set(input.stepsThisCycle.map(s => s.id));
 	const maxFactIdx   = Math.max(0, input.gapFacts.length - 1);
+	// new_steps proposed by the reviewer can declare cross-step
+	// `dependsOn` pointing at THIS cycle's outputs (raw skill outputs
+	// the orchestrator has cached). Build the earlier-step skill index
+	// from stepsThisCycle so the validator can verify the reference.
+	const earlierStepSkills = new Map<string, ReadonlySet<string>>(
+		input.stepsThisCycle.map(s => [s.id, new Set(s.skills.map(sk => sk.id))]),
+	);
 
 	const firstAttempt = await callReview(input, false, undefined);
-	const firstValidation = validate(firstAttempt.raw, validStepIds, catalogIds, maxFactIdx);
+	const firstValidation = validate(firstAttempt.raw, validStepIds, catalogIds, maxFactIdx, earlierStepSkills);
 	if (firstValidation.ok) {
 		log.info({
 			todoId:        input.todo.id,
@@ -106,7 +114,7 @@ export async function runCycleReview(input: CycleReviewInput): Promise<CycleRevi
 	log.warn({ todoId: input.todo.id, cycle: input.cycle, reason: firstValidation.reason }, 'cycle review: first-attempt rejected; retrying with corrective hint');
 
 	const retry = await callReview(input, true, firstValidation.reason);
-	const retryValidation = validate(retry.raw, validStepIds, catalogIds, maxFactIdx);
+	const retryValidation = validate(retry.raw, validStepIds, catalogIds, maxFactIdx, earlierStepSkills);
 	if (!retryValidation.ok) {
 		throw new Error(`cycle review validation failed after retry: ${retryValidation.reason}`);
 	}
@@ -303,10 +311,11 @@ interface ValidationErr {
 type ValidationResult = ValidationOk | ValidationErr;
 
 function validate(
-	raw:          string,
-	validStepIds: ReadonlySet<string>,
-	catalogIds:   ReadonlySet<string>,
-	maxFactIdx:   number,
+	raw:                string,
+	validStepIds:       ReadonlySet<string>,
+	catalogIds:         ReadonlySet<string>,
+	maxFactIdx:         number,
+	earlierStepSkills:  ReadonlyMap<string, ReadonlySet<string>>,
 ): ValidationResult {
 	let parsed: unknown;
 	try {
@@ -359,7 +368,7 @@ function validate(
 			droppedStepIds.push(`<idx-${i}>`);
 			continue;
 		}
-		const coerced = coerceNewStep(sRaw as Record<string, unknown>, i, catalogIds, maxFactIdx, seenNewStepIds);
+		const coerced = coerceNewStep(sRaw as Record<string, unknown>, i, catalogIds, maxFactIdx, seenNewStepIds, earlierStepSkills);
 		if (typeof coerced === 'string') {
 			log.warn({ idx: i, reason: coerced }, 'cycle review: dropping new_steps entry');
 			const rawId = (sRaw as Record<string, unknown>)['id'];
@@ -386,11 +395,12 @@ function validate(
 }
 
 function coerceNewStep(
-	raw:            Record<string, unknown>,
-	idx:            number,
-	catalogIds:     ReadonlySet<string>,
-	maxFactIdx:     number,
-	seenStepIds:    ReadonlySet<string>,
+	raw:                Record<string, unknown>,
+	idx:                number,
+	catalogIds:         ReadonlySet<string>,
+	maxFactIdx:         number,
+	seenStepIds:        ReadonlySet<string>,
+	earlierStepSkills:  ReadonlyMap<string, ReadonlySet<string>>,
 ): DiscoveryStep | string {
 	const id = typeof raw['id'] === 'string' ? raw['id'].trim() : '';
 	if (id.length === 0) { return `new_steps[${idx}].id missing or empty`; }
@@ -429,8 +439,11 @@ function coerceNewStep(
 		const dependsOn = typeof dependsOnRaw === 'string' && dependsOnRaw.trim().length > 0
 			? dependsOnRaw.trim()
 			: undefined;
-		if (dependsOn !== undefined && !seenSkillIds.has(dependsOn) && dependsOn !== skId) {
-			return `new_steps[${idx}].skills[${j}].dependsOn "${dependsOn}" must reference an earlier skill id within the same step`;
+		if (dependsOn !== undefined) {
+			const depCheck = validateDependsOn(dependsOn, skId, seenSkillIds, earlierStepSkills);
+			if (depCheck !== undefined) {
+				return `new_steps[${idx}].skills[${j}].dependsOn ${depCheck}`;
+			}
 		}
 		skills.push({
 			id: skId, skillId, context,

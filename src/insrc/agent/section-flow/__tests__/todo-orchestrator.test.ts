@@ -28,7 +28,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runTodoOrchestrator, type L2Fallback } from '../todo-orchestrator.js';
+import {
+	runTodoOrchestrator,
+	_collectCrossStepPriorsForTest as collectCrossStepPriors,
+	type L2Fallback,
+} from '../todo-orchestrator.js';
+import type { DiscoveryStep } from '../../content-gen/discovery-plan.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
 import type { TodoSpec } from '../types.js';
 import type { MemoryShapeBundle } from '../../working-memory/index.js';
@@ -243,4 +248,72 @@ test('runTodoOrchestrator: cycle loop with full coverage -> 2 perRoot findings o
 		assert.equal(f.verdict, 'accept');
 	}
 	assert.equal(result.entry.findings.fallback, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// collectCrossStepPriors — selective forwarding for cross-step deps
+// ---------------------------------------------------------------------------
+
+function makeStep(id: string, skills: Array<{ id: string; skillId: string; dependsOn?: string }>): DiscoveryStep {
+	return {
+		id,
+		intent: `intent for ${id}`,
+		skills: skills.map(s => ({
+			id: s.id,
+			skillId: s.skillId,
+			context: 'ctx',
+			...(s.dependsOn !== undefined ? { dependsOn: s.dependsOn } : {}),
+		})),
+		targetsCriteria: [0],
+	};
+}
+
+test('collectCrossStepPriors: pulls only declared cross-step deps; intra-step deps untouched', () => {
+	const cache = {
+		'step-1.s1.a': 'INGRN entityId b2097ef0ba38110e005d437d6b0c8442',
+		'step-1.s1.b': 'INGRN fields list',
+		'step-2.s2.a': 'unrelated output',
+	};
+	const step = makeStep('step-3', [
+		// Intra-step dep -- bare skill id, must NOT be forwarded by collectCrossStepPriors.
+		{ id: 's3.a', skillId: 'code.entity.locate-by-name' },
+		{ id: 's3.b', skillId: 'code.entity.summary', dependsOn: 's3.a' },
+		// Cross-step dep -- pulls one specific cached entry.
+		{ id: 's3.c', skillId: 'code.entity.summary', dependsOn: 'step-1.s1.a' },
+	]);
+	const priors = collectCrossStepPriors(step, cache);
+	assert.deepEqual(priors, { 'step-1.s1.a': 'INGRN entityId b2097ef0ba38110e005d437d6b0c8442' });
+});
+
+test('collectCrossStepPriors: no cross-step deps -> empty map', () => {
+	const cache = { 'step-1.s1.a': 'cached output' };
+	const step = makeStep('step-2', [
+		{ id: 's2.a', skillId: 'code.class.extract-fields' },
+	]);
+	assert.deepEqual(collectCrossStepPriors(step, cache), {});
+});
+
+test('collectCrossStepPriors: cross-step dep with no cache hit -> entry omitted', () => {
+	const cache = { 'step-1.s1.a': 'cached output' };
+	const step = makeStep('step-2', [
+		{ id: 's2.a', skillId: 'code.entity.summary', dependsOn: 'step-9.s9.x' },
+	]);
+	assert.deepEqual(collectCrossStepPriors(step, cache), {});
+});
+
+test('collectCrossStepPriors: multiple cross-step deps -> all forwarded', () => {
+	const cache = {
+		'step-1.s1.a': 'A',
+		'step-1.s1.b': 'B',
+		'step-2.s2.a': 'C',
+	};
+	const step = makeStep('step-3', [
+		{ id: 's3.a', skillId: 'x', dependsOn: 'step-1.s1.a' },
+		{ id: 's3.b', skillId: 'y', dependsOn: 'step-2.s2.a' },
+		// Intra-step ref should be skipped here -- handled by within-step
+		// merge in executeDiscoveryStep, not this helper.
+		{ id: 's3.c', skillId: 'z', dependsOn: 's3.a' },
+	]);
+	const priors = collectCrossStepPriors(step, cache);
+	assert.deepEqual(priors, { 'step-1.s1.a': 'A', 'step-2.s2.a': 'C' });
 });

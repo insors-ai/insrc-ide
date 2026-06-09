@@ -214,7 +214,15 @@ function buildExpansionUser(
 	lines.push('  - Each `targetsCriteria` is a non-empty array of indices into GAP FACTS.');
 	lines.push('  - `intent` is a concrete sentence naming the specific fact being acquired (and, on cycle 2+, what the prior attempt missed).');
 	lines.push('  - `context` for each skill call carries the literal args the skill needs -- pulled from prior outputs / memory / gap-fact suggestedSkills.');
-	lines.push('  - `dependsOn` is set whenever a call chains off another\'s output (e.g. `extract-fields` depends on `locate-by-name`).');
+	lines.push('  - `dependsOn` is set whenever a call chains off another\'s output. Two forms:');
+	lines.push('      * INTRA-STEP (same step): bare skill id of an earlier skill in this step.');
+	lines.push('        Example: step-1 has skills `s1.a` (locate-by-name) and `s1.b` (extract-fields with `dependsOn: "s1.a"`).');
+	lines.push('        Within a step, raw skill outputs flow forward unconditionally -- use intra-step for tightly coupled chains.');
+	lines.push('      * CROSS-STEP (different steps): `"<stepId>.<skillId>"` of an EARLIER step\'s skill.');
+	lines.push('        Example: step-1 has `s1.a` (locate-by-name); step-2 has `s2.a` (entity.summary) with `dependsOn: "step-1.s1.a"`.');
+	lines.push('        Only DECLARED cross-step deps are forwarded into the next step\'s priorOutputs; this is how you carry a hex entityId, file path, or other lookup-derived value across step boundaries without losing it to summarisation.');
+	lines.push('      * Prefer the intra-step form when a tight chain fits in one step (cap = 6 skills). Use cross-step when the chain spans logically separate steps OR when the same prior output feeds two downstream steps.');
+	lines.push('      * The dep value MUST point at an earlier-declared skill. Never invent a step or skill id that hasn\'t been declared above.');
 	if (input.cycle > 1) {
 		lines.push('  - Cycle 2+: DO NOT re-emit a step whose (skillId, context) pair matches an already-attempted step in PRIOR CYCLE CONTEXT with failed / open coverage. Try a different angle.');
 	}
@@ -301,13 +309,17 @@ function validate(raw: string, catalogIds: ReadonlySet<string>, maxFactIdx: numb
 	}
 
 	const seenStepIds = new Set<string>();
+	// Earlier-step skill-id index, used to validate cross-step `dependsOn`
+	// (the "stepId.skillId" form). Built as we coerce each step so step N
+	// can declare a dep on any (step 0..N-1)'s skills.
+	const earlierStepSkills = new Map<string, ReadonlySet<string>>();
 	const steps: DiscoveryStep[] = [];
 	for (let i = 0; i < stepsRaw.length; i++) {
 		const sRaw = stepsRaw[i];
 		if (sRaw === null || typeof sRaw !== 'object' || Array.isArray(sRaw)) {
 			return { ok: false, reason: `steps[${i}] is not an object` };
 		}
-		const coerced = coerceStep(sRaw as Record<string, unknown>, i, catalogIds, maxFactIdx);
+		const coerced = coerceStep(sRaw as Record<string, unknown>, i, catalogIds, maxFactIdx, earlierStepSkills);
 		if (typeof coerced === 'string') {
 			return { ok: false, reason: coerced };
 		}
@@ -315,16 +327,18 @@ function validate(raw: string, catalogIds: ReadonlySet<string>, maxFactIdx: numb
 			return { ok: false, reason: `steps[${i}].id "${coerced.id}" duplicates an earlier step` };
 		}
 		seenStepIds.add(coerced.id);
+		earlierStepSkills.set(coerced.id, new Set(coerced.skills.map(s => s.id)));
 		steps.push(coerced);
 	}
 	return { ok: true, steps };
 }
 
 function coerceStep(
-	raw:        Record<string, unknown>,
-	idx:        number,
-	catalogIds: ReadonlySet<string>,
-	maxFactIdx: number,
+	raw:                Record<string, unknown>,
+	idx:                number,
+	catalogIds:         ReadonlySet<string>,
+	maxFactIdx:         number,
+	earlierStepSkills:  ReadonlyMap<string, ReadonlySet<string>>,
 ): DiscoveryStep | string {
 	const id = typeof raw['id'] === 'string' ? raw['id'].trim() : '';
 	if (id.length === 0) {
@@ -372,8 +386,11 @@ function coerceStep(
 		const dependsOn = typeof dependsOnRaw === 'string' && dependsOnRaw.trim().length > 0
 			? dependsOnRaw.trim()
 			: undefined;
-		if (dependsOn !== undefined && !seenSkillIds.has(dependsOn) && dependsOn !== skId) {
-			return `steps[${idx}].skills[${j}].dependsOn "${dependsOn}" must reference an earlier skill id within the same step`;
+		if (dependsOn !== undefined) {
+			const depCheck = validateDependsOn(dependsOn, skId, seenSkillIds, earlierStepSkills);
+			if (depCheck !== undefined) {
+				return `steps[${idx}].skills[${j}].dependsOn ${depCheck}`;
+			}
 		}
 		skills.push({
 			id: skId, skillId, context,
@@ -400,6 +417,61 @@ function coerceStep(
 	return { id, intent, skills, targetsCriteria };
 }
 
+/**
+ * Validate a `dependsOn` value. Two forms are accepted:
+ *
+ *   1. Intra-step: bare skill id of an earlier skill in THIS step
+ *      (e.g. `"s1.a"` referenced from `s1.b`). Today's behaviour --
+ *      the orchestrator pulls the within-step skillOutput.
+ *
+ *   2. Cross-step: `"stepId.skillId"` where `stepId` is an earlier
+ *      step in the plan AND `skillId` is one of that step's skills
+ *      (e.g. `"step-1.s1.b"` referenced from a skill in step-2).
+ *      The orchestrator forwards the matching raw skill output from
+ *      the per-TODO `crossStepRawOutputs` cache into the dependent
+ *      step's priorOutputs.
+ *
+ * Returns `undefined` when valid, or a short error suffix that the
+ * caller wraps with the location prefix.
+ */
+export function validateDependsOn(
+	dependsOn:          string,
+	currentSkillId:     string,
+	seenSkillIdsInStep: ReadonlySet<string>,
+	earlierStepSkills:  ReadonlyMap<string, ReadonlySet<string>>,
+): string | undefined {
+	if (dependsOn === currentSkillId) {
+		return `"${dependsOn}" must not reference itself`;
+	}
+	// Intra-step match wins. Our intra-step convention uses ids like
+	// `"s1.a"` which themselves contain dots, so we MUST try the
+	// full-string match against the current step's seen ids before
+	// any cross-step parsing.
+	if (seenSkillIdsInStep.has(dependsOn)) {
+		return undefined;
+	}
+	// Cross-step form: "<stepId>.<skillId>". Split on the FIRST dot.
+	// skillId may itself contain dots (e.g. `"step-1.s1.a"` ->
+	// stepId="step-1", skillId="s1.a").
+	const dotIdx = dependsOn.indexOf('.');
+	if (dotIdx === -1) {
+		return `"${dependsOn}" must reference an earlier skill id in the same step OR use the "stepId.skillId" cross-step form`;
+	}
+	const stepId  = dependsOn.slice(0, dotIdx);
+	const skillId = dependsOn.slice(dotIdx + 1);
+	if (stepId.length === 0 || skillId.length === 0) {
+		return `"${dependsOn}" is not a valid "stepId.skillId" reference`;
+	}
+	const earlierSkills = earlierStepSkills.get(stepId);
+	if (earlierSkills === undefined) {
+		return `"${dependsOn}" references step "${stepId}" which is not an earlier step in this plan (or is the current step)`;
+	}
+	if (!earlierSkills.has(skillId)) {
+		return `"${dependsOn}" references skill "${skillId}" which is not in step "${stepId}"`;
+	}
+	return undefined;
+}
+
 function stripFences(text: string): string {
 	let out = text.trim();
 	if (out.startsWith('```')) {
@@ -417,3 +489,4 @@ export const _coerceStepForTest           = coerceStep;
 export const _renderGapFactsForTest       = renderGapFacts;
 export const _renderCatalogSummaryForTest = renderCatalogSummary;
 export const _stripFencesForTest          = stripFences;
+export const _validateDependsOnForTest    = validateDependsOn;

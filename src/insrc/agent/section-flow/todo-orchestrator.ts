@@ -233,6 +233,14 @@ export async function runTodoOrchestrator(
 		perCycleSummary = [];
 		cyclesRun = 0;
 		let priorStepOutputs: Record<string, string> = {};
+		// Per-TODO cache of raw skill outputs keyed by "stepId.skillId".
+		// Accumulates across all steps in all cycles of this TODO. Forwarded
+		// SELECTIVELY into the next step's priorOutputs based on what that
+		// step's skills declared in their cross-step `dependsOn` field
+		// (the "stepId.skillId" form). Bounded growth: only entries that
+		// some downstream step has explicitly asked for ever appear in any
+		// prior-outputs block. Discarded when the TODO finishes.
+		const crossStepRawOutputs: Record<string, string> = {};
 		let stepsToRun: readonly DiscoveryStep[] = [];
 		let priorCycleKeepCount = -1;   // -1 sentinel = no prior cycle yet
 		let cycleLoopFailureReason: string | undefined;
@@ -257,9 +265,15 @@ export async function runTodoOrchestrator(
 			// Stage 2: execute each step.
 			const cycleOutputs: StepOutput[] = [];
 			for (const step of stepsToRun) {
+				// Selectively forward raw cross-step outputs the step's skills
+				// declared as deps. Only entries whose key matches one of this
+				// step's cross-step `dependsOn` values are pulled from the
+				// per-TODO cache. Everything else stays out of priorOutputs
+				// so the shape-resolver's prior-outputs block stays bounded.
+				const crossStepPriors = collectCrossStepPriors(step, crossStepRawOutputs);
 				const execRes = await executeDiscoveryStep({
 					step,
-					priorOutputs: priorStepOutputs,
+					priorOutputs: { ...priorStepOutputs, ...crossStepPriors },
 					deps: {
 						todo: input.todo, gapFacts: gaps,
 						executeLeaf:       input.executeLeaf,
@@ -273,6 +287,15 @@ export async function runTodoOrchestrator(
 					...priorStepOutputs,
 					[step.id]: stringifyStepOutput(execRes.output),
 				};
+				// Cache raw per-skill outputs keyed by "stepId.skillId" so
+				// later steps (this cycle or next) can declare them via
+				// cross-step dependsOn and get the literal text -- not the
+				// summarized facts the retained ledger keeps.
+				for (const [callId, raw] of Object.entries(execRes.skillOutputs)) {
+					if (raw.length > 0) {
+						crossStepRawOutputs[`${step.id}.${callId}`] = raw;
+					}
+				}
 			}
 
 			// Stage 3: cycle review.
@@ -433,6 +456,38 @@ export async function runTodoOrchestrator(
 // Adapters
 // ---------------------------------------------------------------------------
 
+/**
+ * Build the selective cross-step priors block for a step about to execute.
+ *
+ * A skill call's `dependsOn` field can be:
+ *   - intra-step: a bare skill id (e.g. `"s1.a"`) -- handled inside
+ *     executeDiscoveryStep by the within-step skillOutputs merge.
+ *   - cross-step: "stepId.skillId" -- handled here. We pull the matching
+ *     raw output from the per-TODO `crossStepRawOutputs` cache so the
+ *     dependent step's shape-resolver sees the literal entityId / hash /
+ *     other lookup-derived value, not the summarized ledger paraphrase.
+ *
+ * Only declared deps cross the boundary. Unselected entries stay out of
+ * the prior-outputs block so it doesn't balloon as the cycle progresses.
+ */
+function collectCrossStepPriors(
+	step:               DiscoveryStep,
+	crossStepRawOutputs: Readonly<Record<string, string>>,
+): Record<string, string> {
+	const wanted: Record<string, string> = {};
+	for (const sk of step.skills) {
+		const dep = sk.dependsOn;
+		if (typeof dep !== 'string' || !dep.includes('.')) {
+			continue;   // intra-step dep -- handled by executeDiscoveryStep
+		}
+		const raw = crossStepRawOutputs[dep];
+		if (raw !== undefined) {
+			wanted[dep] = raw;
+		}
+	}
+	return wanted;
+}
+
 function stringifyStepOutput(out: StepOutput): string {
 	if (out.facts.length === 0) {
 		return `(step ${out.stepId} returned no facts; status=${out.status})`;
@@ -569,10 +624,11 @@ function appendAnnotations(detail: string, a: Annotations): string {
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-export const _buildSuccessEntryForTest   = buildSuccessEntry;
-export const _buildL2EntryForTest        = buildL2Entry;
-export const _appendAnnotationsForTest   = appendAnnotations;
-export const _ledgerToFindingsForTest    = ledgerToFindings;
-export const _stringifyStepOutputForTest = stringifyStepOutput;
-export const DEFAULT_MAX_CYCLES_VALUE    = DEFAULT_MAX_CYCLES;
-export const DEFAULT_MAX_RECYCLES_VALUE  = DEFAULT_MAX_RECYCLES;
+export const _buildSuccessEntryForTest      = buildSuccessEntry;
+export const _buildL2EntryForTest           = buildL2Entry;
+export const _appendAnnotationsForTest      = appendAnnotations;
+export const _ledgerToFindingsForTest       = ledgerToFindings;
+export const _stringifyStepOutputForTest    = stringifyStepOutput;
+export const _collectCrossStepPriorsForTest = collectCrossStepPriors;
+export const DEFAULT_MAX_CYCLES_VALUE       = DEFAULT_MAX_CYCLES;
+export const DEFAULT_MAX_RECYCLES_VALUE     = DEFAULT_MAX_RECYCLES;

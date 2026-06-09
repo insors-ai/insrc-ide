@@ -26,6 +26,7 @@ import {
 	_validateForTest             as validate,
 	_coerceStepForTest           as coerceStep,
 	_renderGapFactsForTest       as renderGapFacts,
+	_validateDependsOnForTest    as validateDependsOn,
 } from '../step-discovery-plan-expansion.js';
 import { emptyCycleMemory } from '../../content-gen/discovery-plan.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
@@ -131,6 +132,27 @@ test('runDiscoveryPlanExpansion: cycle 1 happy path -> validated, 2 steps', asyn
 	assert.equal(r.steps.length, 2);
 	assert.deepEqual(r.steps[0]!.targetsCriteria, [0]);
 	assert.deepEqual(r.steps[1]!.targetsCriteria, [1]);
+});
+
+// Regression guard: the prompt MUST teach the model about the two
+// `dependsOn` forms (intra-step bare id vs cross-step "stepId.skillId").
+// If this assertion stops matching, the planner will stop emitting the
+// cross-step form and we lose the orchestrator's cross-step priorOutputs
+// forwarding path -- which is the whole reason the per-TODO raw cache
+// exists. See plans/section-flow-cross-step-deps.md (if written).
+test('runDiscoveryPlanExpansion: prompt teaches both intra-step + cross-step dependsOn forms', async () => {
+	const { provider, calls } = scriptedProvider([HEALTHY_PLAN_JSON]);
+	await runDiscoveryPlanExpansion({
+		todo: makeTodo(), gapFacts: makeGapFacts(), memory: makeMemory(),
+		catalog: makeCatalog(), cycle: 1, cycleMemory: emptyCycleMemory(['ingrn-fields', 'json-shape']),
+		provider,
+	});
+	const user = calls[0]!.messages[1]!.content;
+	assert.match(user, /INTRA-STEP/);
+	assert.match(user, /CROSS-STEP/);
+	assert.match(user, /step-1\.s1\.a/);
+	// The "do NOT invent" guard belongs at the end of the dependsOn block.
+	assert.match(user, /Never invent a step or skill id that hasn't been declared/);
 });
 
 test('runDiscoveryPlanExpansion: cycle 2 renders cycleMemory into prompt', async () => {
@@ -252,9 +274,9 @@ test('coerceStep: dependsOn referencing a non-existent skill id -> error', () =>
 			{ id: 's1.a', skillId: 'code.class.extract-fields', context: 'foo', dependsOn: 's9.x' },
 		],
 		targetsCriteria: [0],
-	}, 0, new Set(['code.class.extract-fields']), 0);
+	}, 0, new Set(['code.class.extract-fields']), 0, new Map());
 	assert.equal(typeof r, 'string');
-	if (typeof r === 'string') { assert.match(r, /dependsOn.*must reference an earlier skill id/); }
+	if (typeof r === 'string') { assert.match(r, /dependsOn.*"s9\.x"/); }
 });
 
 test('coerceStep: dependsOn referencing earlier sibling -> accepted', () => {
@@ -265,12 +287,67 @@ test('coerceStep: dependsOn referencing earlier sibling -> accepted', () => {
 			{ id: 's1.b', skillId: 'code.class.extract-fields', context: 'use s1.a result', dependsOn: 's1.a' },
 		],
 		targetsCriteria: [0],
-	}, 0, new Set(['code.entity.locate-by-name', 'code.class.extract-fields']), 0);
+	}, 0, new Set(['code.entity.locate-by-name', 'code.class.extract-fields']), 0, new Map());
 	assert.notEqual(typeof r, 'string');
 	if (typeof r !== 'string') {
 		assert.equal(r.skills.length, 2);
 		assert.equal(r.skills[1]!.dependsOn, 's1.a');
 	}
+});
+
+// ---------------------------------------------------------------------------
+// validateDependsOn — cross-step `stepId.skillId` form
+// ---------------------------------------------------------------------------
+
+test('validateDependsOn: bare id matching an earlier same-step skill -> ok', () => {
+	const r = validateDependsOn('s1.a', 's1.b', new Set(['s1.a']), new Map());
+	assert.equal(r, undefined);
+});
+
+test('validateDependsOn: self-reference -> error', () => {
+	const r = validateDependsOn('s1.a', 's1.a', new Set(['s1.a']), new Map());
+	assert.match(r ?? '', /must not reference itself/);
+});
+
+test('validateDependsOn: cross-step ref to earlier step + valid skill -> ok', () => {
+	// Plan: step-1 has skills s1.a + s1.b; step-2 declares dep on step-1.s1.a.
+	const earlier = new Map<string, ReadonlySet<string>>([
+		['step-1', new Set(['s1.a', 's1.b'])],
+	]);
+	const r = validateDependsOn('step-1.s1.a', 's2.a', new Set(), earlier);
+	assert.equal(r, undefined);
+});
+
+test('validateDependsOn: cross-step ref to non-existent step -> error', () => {
+	const earlier = new Map<string, ReadonlySet<string>>([
+		['step-1', new Set(['s1.a'])],
+	]);
+	const r = validateDependsOn('step-9.s9.a', 's2.a', new Set(), earlier);
+	assert.match(r ?? '', /step "step-9" which is not an earlier step/);
+});
+
+test('validateDependsOn: cross-step ref to existing step but unknown skill -> error', () => {
+	const earlier = new Map<string, ReadonlySet<string>>([
+		['step-1', new Set(['s1.a'])],
+	]);
+	const r = validateDependsOn('step-1.s9.x', 's2.a', new Set(), earlier);
+	assert.match(r ?? '', /skill "s9\.x" which is not in step "step-1"/);
+});
+
+test('validateDependsOn: intra-step skill id `s1.a` (with dot) matches before falling back to cross-step parse', () => {
+	// Skill ids contain dots themselves. The full-string intra-step match
+	// MUST be tried before any cross-step parse, otherwise `s1.a` from
+	// `s1.b` in the same step would be treated as stepId="s1" / skillId="a".
+	const earlier = new Map<string, ReadonlySet<string>>([
+		['step-1', new Set(['s1.a'])],   // an unrelated earlier step
+	]);
+	const r = validateDependsOn('s1.a', 's1.b', new Set(['s1.a']), earlier);
+	assert.equal(r, undefined);
+});
+
+test('validateDependsOn: bare id with no intra-step match and no dot -> error explaining both forms', () => {
+	const r = validateDependsOn('orphan', 's1.a', new Set(['s1.a']), new Map());
+	assert.match(r ?? '', /same step OR use the "stepId\.skillId" cross-step form/);
 });
 
 // ---------------------------------------------------------------------------
