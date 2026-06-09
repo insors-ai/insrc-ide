@@ -291,3 +291,45 @@ test('buildMessages: system message exists + user message carries the structured
 	assert.match(user, /## TASK/);
 	assert.match(user, /submit_skill_args/);
 });
+
+// The anti-fabrication block was added after the 5th live run showed
+// qwen3.6 inventing entityIds (`INGRN` as id, `00...01` placeholders) and
+// fabricating `classFields` from JSON shape keys. Each `assert.match`
+// here pins one specific failure mode -- removing any of these checks
+// invites the matching regression.
+test('SYSTEM_PROMPT: pins anti-fabrication rules + worked examples (regression guard)', () => {
+	registerTestSkill();
+	const input = baseInput(scriptedProvider([]).provider);
+	const sys = buildMessages(input, 'desc')[0]!.content as string;
+
+	// Top-level anti-fabrication section header.
+	assert.match(sys, /ANTI-FABRICATION RULES/);
+
+	// Never-invent rule covers the actual hex / class-name patterns we saw.
+	assert.match(sys, /NEVER invent identifier values/);
+	assert.match(sys, /32-char hex entityId/);
+
+	// Locate-first guidance.
+	assert.match(sys, /Locate-first dependency/);
+	assert.match(sys, /OMIT the unfillable arg/);
+
+	// Omit means absent, not empty placeholder.
+	assert.match(sys, /"Omit" means the key is ABSENT/);
+
+	// Structured-array anti-pattern explicitly forbidden.
+	assert.match(sys, /Structured array args/);
+	assert.match(sys, /cannot use\s+\S+\s+as `classFields`/i);
+
+	// Worked examples at the END so qwen3.6 recency-attention catches them.
+	assert.match(sys, /WORKED EXAMPLES/);
+	assert.match(sys, /Example A -- entityId IS in a prior output/);
+	assert.match(sys, /Example B -- entityId is NOT in any prior output/);
+	assert.match(sys, /Example C -- classFields with no extract-fields prior output/);
+
+	// And the examples must appear AFTER the anti-fabrication rules
+	// (recency-weighted attention only helps if the examples are last).
+	assert.ok(
+		sys.indexOf('WORKED EXAMPLES') > sys.indexOf('ANTI-FABRICATION RULES'),
+		'WORKED EXAMPLES must appear after the rules block so qwen3.6 sees them last',
+	);
+});
