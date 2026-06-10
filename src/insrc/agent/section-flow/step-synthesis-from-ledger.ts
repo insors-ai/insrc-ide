@@ -37,12 +37,12 @@
 
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { MemoryShapeBundle } from '../working-memory/index.js';
-import type { CycleMemory, StepOutput } from '../content-gen/discovery-plan.js';
+import type { StepOutput } from '../content-gen/discovery-plan.js';
 import type { FactGapAnalysis, RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
 import { getLogger } from '../../shared/logger.js';
 import { getPromptRegistry } from '../prompts/registry.js';
-import type { SectionSynthWriterInput } from '../prompts/writers/section-synth.js';
+import type { PriorAttempt, SectionSynthWriterInput } from '../prompts/writers/section-synth.js';
 
 const log = getLogger('section-flow:synthesis');
 
@@ -62,9 +62,14 @@ export interface SynthesisInput {
 	 * Stage 6 + Stage 7 don't double-fetch).
 	 */
 	readonly summariesByStep: ReadonlyMap<string, string>;
-	/** Final cycleMemory after the cycle loop -- carries priorAsks so the synthesis
-	 *  prompt can render concrete "what was tried" details for unmet gaps. */
-	readonly cycleMemory:     CycleMemory;
+	/**
+	 * Flat list of every step that executed for this TODO -- the
+	 * synthesizer reads these to render the "what was tried" block
+	 * for each unmet gap. Phase 4 batch 4.2 replaced the old
+	 * `cycleMemory.priorAsks` (cycle-scoped) with this simpler
+	 * dynamic-loop history.
+	 */
+	readonly priorAttempts:   readonly PriorAttempt[];
 	readonly provider:        LLMProvider;
 }
 
@@ -100,7 +105,7 @@ export async function synthesizeSectionFromLedger(
 		todo:            input.todo,
 		retainedLedger:  input.retainedLedger,
 		summariesByStep: input.summariesByStep,
-		cycleMemory:     input.cycleMemory,
+		priorAttempts:   input.priorAttempts,
 		unmetGaps,
 	})];
 	const response = await input.provider.complete(messages, {

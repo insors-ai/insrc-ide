@@ -112,23 +112,47 @@ const MIXED_GAP_ANALYSIS = JSON.stringify({
 	],
 });
 
-const HEALTHY_PLAN = JSON.stringify({
+// Phase 4 batch 4.2: the cycle loop is gone. The orchestrator now
+// runs Stage 0 (fact-gap) + Stage 1 (sketch) + a dynamic decide-next-step
+// loop + Stage 6 (synth) + Stage 7 (section review). Per-iteration cloud
+// calls are: 1 decide-next-step per iteration; the very last iteration
+// requests `terminate` and ALSO emits the prior step's summary.
+
+const SKETCH_TWO_STEPS = JSON.stringify({
 	steps: [
-		{ id: 'step-1', intent: 'extract INGRN fields',
+		{ id: 'step-1', intent: 'extract INGRN fields by name',
 		  skills: [{ id: 's1.a', skillId: 'code.class.extract-fields', context: 'class=INGRN' }],
 		  targetsCriteria: [0] },
-		{ id: 'step-2', intent: 'sample GRN JSON shape',
+		{ id: 'step-2', intent: 'sample the GRN JSON top-level shape',
 		  skills: [{ id: 's2.a', skillId: 'data.source.file.sample-shape', context: 'path=grn.json' }],
 		  targetsCriteria: [1] },
 	],
 });
 
-// summarizeResult was deleted in Phase 1 batch 3b; the legacy
-// `EvidenceEntry { facts, citations }` fixture goes with it. The
-// reviewer's `stepSummaries` field is exercised under
-// `step-cycle-review.test.ts` directly.
+function decideExecute(stepNum: 1 | 2, lastSummaries: Record<string, string> = {}): string {
+	const stepN = stepNum === 1
+		? { id: 'step-1', intent: 'extract INGRN fields by name',
+		    skills: [{ id: 's1.a', skillId: 'code.class.extract-fields', context: 'class=INGRN' }],
+		    targetsCriteria: [0] }
+		: { id: 'step-2', intent: 'sample the GRN JSON top-level shape',
+		    skills: [{ id: 's2.a', skillId: 'data.source.file.sample-shape', context: 'path=grn.json' }],
+		    targetsCriteria: [1] };
+	return JSON.stringify({
+		action:                  'execute-step',
+		reasoning:               `following the sketch -- step ${stepNum}`,
+		lastStepArtifactSummary: lastSummaries,
+		step:                    stepN,
+	});
+}
 
-const REVIEW_TERMINATE = JSON.stringify({ keep: ['step-1', 'step-2'], new_steps: [] });
+function decideTerminate(verdict: 'covered' | 'unrecoverable', lastSummaries: Record<string, string> = {}): string {
+	return JSON.stringify({
+		action:                  'terminate',
+		verdict,
+		reasoning:               `terminate -- ${verdict}`,
+		lastStepArtifactSummary: lastSummaries,
+	});
+}
 
 const SECTION_REVIEW_ACCEPT = JSON.stringify({ verdict: 'accept', reasoning: 'looks good' });
 
@@ -155,7 +179,7 @@ function mockL2(returns = 'L2 stub markdown'): { l2: L2Fallback; calls: { reason
 // Tests
 // ---------------------------------------------------------------------------
 
-test('runTodoOrchestrator: trivial fast-path (all facts present) -> Stage 6 + 7 only, no cycle loop', async () => {
+test('runTodoOrchestrator: trivial fast-path (all facts present) -> Stage 0 + synth + review only', async () => {
 	const { provider, calls } = scriptedProvider([
 		ALL_PRESENT_GAP_ANALYSIS,    // Stage 0
 		SYNTH_MARKDOWN,              // Stage 6 (free-form markdown)
@@ -169,38 +193,42 @@ test('runTodoOrchestrator: trivial fast-path (all facts present) -> Stage 6 + 7 
 	assert.equal(calls.length, 3);
 	assert.equal(l2Calls.length, 0);
 	assert.equal(result.trace.l2FallbackUsed, false);
-	assert.equal(result.trace.cyclesRun, 0);
+	assert.equal(result.trace.stepsRun, 0);
+	assert.equal(result.trace.terminationVerdict, 'reviewer-accept');
 	assert.equal(result.entry.findings.fallback, undefined);
 	assert.match(result.entry.detail, /Real section content/);
 });
 
-test('runTodoOrchestrator: 1-cycle termination (Stage 3 emits new_steps=[])', async () => {
-	// Phase 1 batch 3b: summarizeResult is gone; the cycle reviewer
-	// emits stepSummaries in its own turn. Cloud calls per cycle:
-	// gap-analysis + plan-expansion + cycle-review + synth + section-review = 5.
+test('runTodoOrchestrator: 2-step dynamic loop -> terminate covered after both gaps closed', async () => {
+	// Cloud call sequence: gap-analysis (1) + sketch (1) + decide#1=execute step-1
+	// (1) + decide#2=execute step-2 with summaries for step-1 (1) + decide#3=
+	// terminate covered with summaries for step-2 (1) + synth (1) + section-review (1)
+	// = 7 calls.
 	const { provider, calls } = scriptedProvider([
-		MIXED_GAP_ANALYSIS,          // Stage 0
-		HEALTHY_PLAN,                // Stage 1 (cycle 1)
-		REVIEW_TERMINATE,            // Stage 3 cycle 1 -> terminate
-		SYNTH_MARKDOWN,              // Stage 6
-		SECTION_REVIEW_ACCEPT,       // Stage 7
+		MIXED_GAP_ANALYSIS,
+		SKETCH_TWO_STEPS,
+		decideExecute(1),
+		decideExecute(2, { 's1.a': 'INGRN has 21 fields. CLOSES ingrn-fields fully' }),
+		decideTerminate('covered', { 's2.a': 'sampled JSON shape. CLOSES json-shape fully' }),
+		SYNTH_MARKDOWN,
+		SECTION_REVIEW_ACCEPT,
 	]);
 	const { l2, calls: l2Calls } = mockL2();
 	const result = await runTodoOrchestrator({
 		todo: makeTodo(), memory: makeMemory(), provider,
 		executeLeaf: mockExecuteLeaf({
-			'code.class.extract-fields':      'INGRN has 21 fields: vendor, buyer, items, ...',
-			'data.source.file.sample-shape':  'JSON has grn_number, grn_date, vendor_details, ...',
+			'code.class.extract-fields':     'INGRN has 21 fields: vendor, buyer, items, ...',
+			'data.source.file.sample-shape': 'JSON has grn_number, grn_date, vendor_details, ...',
 		}),
 		l2Fallback: l2, catalog: makeCatalog(),
 	});
 	assert.equal(l2Calls.length, 0);
 	assert.equal(result.trace.l2FallbackUsed, false);
-	assert.equal(result.trace.cyclesRun, 1);
+	assert.equal(result.trace.stepsRun, 2);
 	assert.equal(result.trace.retainedStepCount, 2);
-	assert.equal(result.trace.perCycleSummary.length, 1);
-	assert.deepEqual([...result.trace.perCycleSummary[0]!.keptIds].sort(), ['step-1', 'step-2']);
-	assert.equal(calls.length, 5);
+	// Both steps should be present in perStepTrace.
+	assert.deepEqual(result.trace.perStepTrace.map(t => t.stepId), ['step-1', 'step-2']);
+	assert.equal(calls.length, 7);
 	assert.match(result.entry.detail, /Real section content/);
 });
 
@@ -219,36 +247,40 @@ test('runTodoOrchestrator: Stage 0 throws twice -> L2 fallback', async () => {
 	assert.equal(l2Calls.length, 1);
 	assert.match(l2Calls[0]!.reason, /fact-gap analysis failed/);
 	assert.equal(result.trace.l2FallbackUsed, true);
+	assert.equal(result.trace.terminationVerdict, 'l2');
 	assert.equal(result.entry.findings.fallback, 'L2');
 	assert.equal(result.entry.detail, 'L2 stub');
 });
 
-test('runTodoOrchestrator: cycle loop produces empty ledger -> L2 fallback', async () => {
-	// Mixed gap analysis + a planned 1-step that returns empty from
-	// executeLeaf -> StepOutput.status=failed -> reviewer keeps nothing.
-	const REVIEW_KEEP_NONE = JSON.stringify({ keep: [], new_steps: [] });
+test('runTodoOrchestrator: first decide-turn terminates with no executed step -> L2 fallback', async () => {
+	// gap (1) + sketch (1) + decide#1=terminate unrecoverable (1)
+	// = retainedLedger.length === 0 -> L2.
 	const { provider } = scriptedProvider([
-		MIXED_GAP_ANALYSIS,          // Stage 0
-		HEALTHY_PLAN,                // Stage 1 cycle 1
-		// No summarizer calls (both leaves return empty)
-		REVIEW_KEEP_NONE,            // Stage 3 cycle 1 -> 0 keep, 0 new_steps
+		MIXED_GAP_ANALYSIS,
+		SKETCH_TWO_STEPS,
+		decideTerminate('unrecoverable'),
 	]);
 	const { l2, calls: l2Calls } = mockL2();
 	const result = await runTodoOrchestrator({
 		todo: makeTodo(), memory: makeMemory(), provider,
-		executeLeaf: mockExecuteLeaf({}),   // returns '' for every skill
-		l2Fallback: l2, catalog: makeCatalog(),
+		executeLeaf: mockExecuteLeaf({}), l2Fallback: l2, catalog: makeCatalog(),
 	});
 	assert.equal(l2Calls.length, 1);
 	assert.match(l2Calls[0]!.reason, /no retained facts/);
 	assert.equal(result.trace.l2FallbackUsed, true);
+	assert.equal(result.trace.terminationVerdict, 'l2');
 	assert.equal(result.entry.findings.fallback, 'L2');
 });
 
-test('runTodoOrchestrator: cycle loop with full coverage -> 2 perRoot findings on successful entry', async () => {
+test('runTodoOrchestrator: 2-step dynamic loop -> findings.perRoot has both step ids on successful entry', async () => {
 	const { provider } = scriptedProvider([
-		MIXED_GAP_ANALYSIS, HEALTHY_PLAN,
-		REVIEW_TERMINATE, SYNTH_MARKDOWN, SECTION_REVIEW_ACCEPT,
+		MIXED_GAP_ANALYSIS,
+		SKETCH_TWO_STEPS,
+		decideExecute(1),
+		decideExecute(2, { 's1.a': 'CLOSES ingrn-fields fully' }),
+		decideTerminate('covered', { 's2.a': 'CLOSES json-shape fully' }),
+		SYNTH_MARKDOWN,
+		SECTION_REVIEW_ACCEPT,
 	]);
 	const { l2 } = mockL2();
 	const result = await runTodoOrchestrator({
@@ -260,7 +292,7 @@ test('runTodoOrchestrator: cycle loop with full coverage -> 2 perRoot findings o
 		l2Fallback: l2, catalog: makeCatalog(),
 	});
 	assert.equal(result.entry.findings.perRoot.length, 2);
-	// Both verdicts should be 'accept' (status=ok)
+	assert.deepEqual(result.entry.findings.perRoot.map(f => f.rootId), ['step-1', 'step-2']);
 	for (const f of result.entry.findings.perRoot) {
 		assert.equal(f.verdict, 'accept');
 	}

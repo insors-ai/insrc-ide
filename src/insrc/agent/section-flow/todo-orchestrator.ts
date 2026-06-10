@@ -4,35 +4,44 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * TODO orchestrator -- Phase epsilon cutover of
- * plans/section-flow-fact-gap-loop.md.
+ * TODO orchestrator -- Phase 4 batch 4.2 of
+ * plans/section-flow-architecture-redesign.md.
  *
- * Drives one TODO through the fact-gap-driven task loop:
+ * Drives one TODO through the DYNAMIC decide-next-step loop. The
+ * cycle loop (`runDiscoveryPlanExpansion` -> N steps -> cycle review
+ * -> ... over <=3 cycles) is gone. Each iteration runs one cloud
+ * `decide-next-step` turn that emits an action + the goal-aware
+ * summary for the previous iteration's step in one round-trip.
  *
- *   Stage 0  runFactGapAnalysis(todo, memory, catalog)
- *            -> FactGapAnalysis (required facts + present/partial/absent)
+ * Flow per TODO:
  *
- *   Trivial fast-path: every fact present -> straight to Stage 6.
+ *   Stage 0  runFactGapAnalysis(...)              -- unchanged
+ *   Fast-path: all facts present -> straight to Stage 6 with an
+ *              empty ledger.
+ *   Stage 1  runSketch(...)                        -- emits a 3-5 step
+ *              default trajectory (cloud).
+ *   Stage 2  Dynamic loop:
+ *     a. buildToc + renderToc(sessionId)
+ *     b. runDecideNextStep(... lastStep ...)
+ *     c. persist lastStep's summaries onto artifact_vec
+ *     d. update closure markers + convergence accounting
+ *        - allClosed -> terminate `covered`
+ *        - N consecutive no-progress steps -> terminate `unrecoverable`
+ *     e. honor decision:
+ *        - terminate -> break out
+ *        - replan-sketch -> regenerate sketch, continue
+ *        - execute-step -> executeDiscoveryStep + push to ledger
+ *     f. safety ceiling backstop (default 50 steps per TODO) -- only
+ *        fires when the convergence signals fail; log loudly.
+ *   Stage 6  synthesizeSectionFromLedger(...)      -- now takes
+ *              priorAttempts instead of cycleMemory.
+ *   Stage 7  reviewSection(...)                    -- unchanged.
+ *              revise-major triggers one re-run of the whole TODO.
  *
- *   Cycle loop (max 3 cycles):
- *     Stage 1  runDiscoveryPlanExpansion(...) -> DiscoveryStep[]
- *     Stage 2  executeDiscoveryStep(step) per step -> StepOutput
- *     Stage 3  runCycleReview(...) -> { keep, new_steps, scratchpad }
- *     Stage 4  ledger update + cycleMemory recompute (mechanical)
- *     Stage 5  termination check (new_steps empty | cycle cap |
- *              two consecutive zero-keep cycles)
- *
- *   Stage 6  synthesizeSectionFromLedger(retainedLedger, unmet gaps)
- *            -> section markdown (unmet gaps render as structured
- *               handoff blocks per Decision #14)
- *   Stage 7  reviewSection(...) -- existing Q5 reviewer; verdicts
- *            unchanged. revise-major triggers one re-cycle (Stage 0
- *            again with the reviewer's complaint as memory hint).
- *
- * L2 fallback paths (Q10 floor): any Stage throw, OR cycle loop
- * terminates with empty retained ledger AND all facts unmet, OR
- * the section-review revise-major re-cycle also fails -- the
- * orchestrator invokes the caller-supplied L2 fallback.
+ * L2 fallback paths (Q10 floor): any Stage throws, OR the dynamic
+ * loop terminates with empty retainedLedger, OR the section-review
+ * revise-major recycle also fails -- the orchestrator invokes the
+ * caller-supplied L2 fallback.
  *
  * Output: a fully-formed `WorkingMemoryEntry`. On the L2 path,
  * `entry.findings.fallback === 'L2'` and `perRoot` carries a
@@ -51,29 +60,32 @@ import type {
 	WorkingMemoryFindings,
 } from '../working-memory/types.js';
 import type { TodoSpec } from './types.js';
-import type { ExecuteLeaf } from './leaf-executor.js';
+import type { ExecuteLeaf, LeafBuildContext } from './leaf-executor.js';
 import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
-import type {
-	CycleMemory,
-	DiscoveryStep,
-	StepOutput,
-} from '../content-gen/discovery-plan.js';
-import { emptyCycleMemory } from '../content-gen/discovery-plan.js';
+import type { DiscoveryStep, StepOutput } from '../content-gen/discovery-plan.js';
 import { runFactGapAnalysis } from './step-fact-gap-analysis.js';
-import { runDiscoveryPlanExpansion } from './step-discovery-plan-expansion.js';
 import { executeDiscoveryStep } from './step-discovery-execute.js';
-import { runCycleReview } from './step-cycle-review.js';
+import { runSketch } from './step-sketch.js';
+import { runDecideNextStep, type DecideNextStepResult } from './step-decide-next-step.js';
+import type { DecideLastStepRawOutputs } from '../prompts/writers/decide-next-step.js';
 import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
+import type { PriorAttempt } from '../prompts/writers/section-synth.js';
 import { reviewSection } from './step-section-review.js';
-import { computeCoverage } from './cycle-memory.js';
+import {
+	DEFAULT_NO_PROGRESS_BUDGET,
+	DEFAULT_SAFETY_CEILING,
+	computeCoverage,
+	scanAllClosureMarkers,
+	stepContributedEvidence,
+	type ClosureClaim,
+} from './convergence.js';
 import { gapFacts, isTrivialFastPath, type RequiredFact } from './fact-gap-types.js';
 import { getArtifactById, updateArtifactSummary } from '../../db/lance/artifact-vec.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:todo-orchestrator');
 
-const DEFAULT_MAX_CYCLES = 3;
-/** Cap on revise-major-triggered re-runs of Stage 0 + the cycle loop. */
+/** Cap on section-review revise-major re-runs of the whole TODO. */
 const DEFAULT_MAX_RECYCLES = 1;
 
 // ---------------------------------------------------------------------------
@@ -87,12 +99,6 @@ export interface L2FallbackInput {
 	readonly reason:  string;
 }
 
-/**
- * Caller (run-section-flow) supplies this when wiring the TODO
- * orchestrator. Returns the section markdown the L2 skill produced.
- * Implementations are expected to invoke whichever
- * `<owner>.answer-question` skill matches the pipeline.
- */
 export type L2Fallback = (input: L2FallbackInput) => Promise<string>;
 
 // ---------------------------------------------------------------------------
@@ -106,48 +112,47 @@ export interface TodoOrchestratorInput {
 	readonly executeLeaf: ExecuteLeaf;
 	readonly l2Fallback:  L2Fallback;
 	/**
-	 * Skill catalog the discovery loop composes from. Required for
-	 * production (Stage 0 / 1 / 3 validate against it). Empty catalog
-	 * forces the orchestrator to L2 immediately -- there's no way to
-	 * close any gap without skills.
+	 * Skill catalog the dynamic loop composes from. Required for
+	 * production. Empty catalog forces the orchestrator to L2
+	 * immediately -- there's no way to close any gap without skills.
 	 */
 	readonly catalog:     readonly CatalogSkill[];
 	/**
-	 * Optional session id for the build-context sub-step (Phase 3 of
-	 * plans/section-flow-architecture-redesign.md). When supplied,
-	 * the orchestrator builds the artifact TOC from `artifact_vec`
-	 * before each step's execution and threads it through the leaf-
-	 * executor so the local LLM can declare which artifact ids to
-	 * fetch. When undefined, build-context is skipped entirely
-	 * (legacy path; still exercised by every existing unit test).
+	 * Optional session id for the build-context sub-step (Phase 3) +
+	 * the per-step TOC (Phase 4). When supplied, the orchestrator
+	 * builds the artifact TOC from `artifact_vec` before each
+	 * `decide-next-step` turn AND before each leaf execution. When
+	 * undefined, both stages run with an empty TOC -- a unit-test
+	 * convenience; production wiring MUST supply `session.id`.
 	 */
 	readonly sessionId?:  string | undefined;
-	/**
-	 * Optional local-tier memory view rendered alongside the TOC for
-	 * the build-context turn. Only the `system` / `currentTodo` /
-	 * `recentSteps` fields are read; `toc` is replaced by the
-	 * orchestrator-built per-step TOC.
-	 */
+	/** Optional local-tier memory view for the build-context turn. */
 	readonly localMemory?: LocalMemoryView | undefined;
-	/** Cycle cap (default 3, matching the canonical discovery-plan-loop design). */
-	readonly maxCycles?:  number | undefined;
-	/** Cap on revise-major-triggered recycles. Default 1. */
+	/** Hard cap on steps per TODO. Default DEFAULT_SAFETY_CEILING (50). */
+	readonly safetyCeiling?: number | undefined;
+	/** Consecutive no-progress steps that trigger termination. Default DEFAULT_NO_PROGRESS_BUDGET (3). */
+	readonly noProgressBudget?: number | undefined;
+	/** Cap on section-review revise-major restarts. Default 1. */
 	readonly maxRecycles?: number | undefined;
 }
 
+export interface PerStepTrace {
+	readonly stepId:               string;
+	readonly intent:                string;
+	readonly status:                'ok' | 'partial' | 'failed';
+	readonly contributedEvidence:   boolean;
+}
+
 export interface TodoOrchestratorTrace {
-	readonly cyclesRun:           number;
-	readonly recyclesConsumed:    number;
-	readonly l2FallbackUsed:      boolean;
-	readonly retainedStepCount:   number;
-	readonly unmetGapCount:       number;
-	readonly failureChain:        readonly string[];
-	readonly perCycleSummary:     readonly {
-		readonly cycle:        1 | 2 | 3;
-		readonly stepsRun:     number;
-		readonly keptIds:      readonly string[];
-		readonly newStepsAsk:  number;
-	}[];
+	readonly stepsRun:              number;
+	readonly recyclesConsumed:      number;
+	readonly l2FallbackUsed:        boolean;
+	readonly retainedStepCount:     number;
+	readonly unmetGapCount:         number;
+	readonly failureChain:          readonly string[];
+	readonly perStepTrace:          readonly PerStepTrace[];
+	readonly sketchReplans:         number;
+	readonly terminationVerdict?:   'covered' | 'unrecoverable' | 'safety-ceiling' | 'reviewer-accept' | 'l2' | undefined;
 }
 
 export interface TodoOrchestratorResult {
@@ -156,27 +161,29 @@ export interface TodoOrchestratorResult {
 }
 
 // ---------------------------------------------------------------------------
-// Orchestrator
+// Orchestrator (dynamic loop)
 // ---------------------------------------------------------------------------
 
 export async function runTodoOrchestrator(
 	input: TodoOrchestratorInput,
 ): Promise<TodoOrchestratorResult> {
-	const maxCycles   = input.maxCycles   ?? DEFAULT_MAX_CYCLES;
-	const maxRecycles = input.maxRecycles ?? DEFAULT_MAX_RECYCLES;
+	const safetyCeiling    = input.safetyCeiling    ?? DEFAULT_SAFETY_CEILING;
+	const noProgressBudget = input.noProgressBudget ?? DEFAULT_NO_PROGRESS_BUDGET;
+	const maxRecycles      = input.maxRecycles      ?? DEFAULT_MAX_RECYCLES;
 	const failureChain: string[] = [];
-	let perCycleSummary: { cycle: 1 | 2 | 3; stepsRun: number; keptIds: readonly string[]; newStepsAsk: number }[] = [];
-	let cyclesRun = 0;
 	let recyclesConsumed = 0;
 	let l2Reason = 'unknown';
 
 	let retainedLedger: readonly StepOutput[] = [];
 	let unmetGaps: readonly RequiredFact[] = [];
 
-	// Outer recycle loop -- revise-major from Stage 7 re-runs the whole
-	// thing (Stage 0 + cycle loop) once.
+	let perStepTrace: PerStepTrace[] = [];
+	let stepsRun = 0;
+	let sketchReplans = 0;
+	let terminationVerdict: TodoOrchestratorTrace['terminationVerdict'];
+
 	while (true) {
-		// Stage 0: fact-gap analysis.
+		// Stage 0: fact-gap analysis (unchanged from prior orchestrator).
 		let analysis;
 		try {
 			analysis = await runFactGapAnalysis({
@@ -187,23 +194,24 @@ export async function runTodoOrchestrator(
 			failureChain.push(reason);
 			log.warn({ todoId: input.todo.id, reason }, 'fact-gap analysis exhausted -> L2 fallback');
 			l2Reason = reason;
+			terminationVerdict = 'l2';
 			break;
 		}
 
 		// Trivial fast-path: every required fact already present -> skip
-		// Stages 1-5, go straight to Stage 6 with an empty ledger.
+		// the dynamic loop entirely, go straight to Stage 6 with an
+		// empty ledger.
 		if (isTrivialFastPath(analysis.analysis)) {
 			log.info({ todoId: input.todo.id, factCount: analysis.analysis.requiredFacts.length }, 'TODO orchestrator: trivial fast-path (all facts present)');
 			retainedLedger = [];
 			unmetGaps = [];
-			// Fast-path: empty retained ledger -> no artifact lookups needed.
 			const fastPathSummaries = new Map<string, string>();
-			// Memory carries everything; synthesize directly.
+			const fastPathPriorAttempts: PriorAttempt[] = [];
 			const synth = await synthesizeSectionFromLedger({
 				todo: input.todo, memory: input.memory, gapAnalysis: analysis.analysis,
 				retainedLedger:  [],
 				summariesByStep: fastPathSummaries,
-				cycleMemory:     emptyCycleMemory(analysis.analysis.requiredFacts.map(f => f.fact)),
+				priorAttempts:   fastPathPriorAttempts,
 				provider:        input.provider,
 			});
 			const reviewResult = await reviewSection({
@@ -221,6 +229,7 @@ export async function runTodoOrchestrator(
 			if (reviewResult.reopenRequested) {
 				l2Reason = `fast-path section review revise-major (recycle budget exhausted): ${reviewResult.reopenReason ?? ''}`;
 				failureChain.push(l2Reason);
+				terminationVerdict = 'l2';
 				break;
 			}
 			const entry = buildSuccessEntry({
@@ -232,82 +241,156 @@ export async function runTodoOrchestrator(
 				factGapRetried:     analysis.retried,
 				sectionExhausted:   reviewResult.exhausted,
 				synthFallback:      synth.usedFallback,
-				cyclesRun:          0,
-				recyclesConsumed,
 			});
 			return {
 				entry,
 				trace: {
-					cyclesRun: 0,
+					stepsRun: 0,
 					recyclesConsumed,
-					l2FallbackUsed:   false,
+					l2FallbackUsed:    false,
 					retainedStepCount: 0,
-					unmetGapCount:    0,
+					unmetGapCount:     0,
 					failureChain,
-					perCycleSummary:  [],
+					perStepTrace:      [],
+					sketchReplans:     0,
+					terminationVerdict: 'reviewer-accept',
 				},
 			};
 		}
 
-		// Normal path: cycle loop.
+		// Normal path: dynamic loop.
 		const gaps = gapFacts(analysis.analysis);
-		let cycleMemory: CycleMemory = emptyCycleMemory(gaps.map(f => f.fact));
-		const stepsById = new Map<string, DiscoveryStep>();
-		const retained: StepOutput[] = [];
-		perCycleSummary = [];
-		cyclesRun = 0;
-		let priorStepOutputs: Record<string, string> = {};
-		// Per-TODO cache of raw skill outputs keyed by "stepId.skillId".
-		// Accumulates across all steps in all cycles of this TODO. Forwarded
-		// SELECTIVELY into the next step's priorOutputs based on what that
-		// step's skills declared in their cross-step `dependsOn` field
-		// (the "stepId.skillId" form). Bounded growth: only entries that
-		// some downstream step has explicitly asked for ever appear in any
-		// prior-outputs block. Discarded when the TODO finishes.
-		const crossStepRawOutputs: Record<string, string> = {};
-		let stepsToRun: readonly DiscoveryStep[] = [];
-		let priorCycleKeepCount = -1;   // -1 sentinel = no prior cycle yet
-		let cycleLoopFailureReason: string | undefined;
+		const gapIdSet = new Set(gaps.map(g => g.id));
+		const gapIdList = gaps.map(g => g.id);
 
-		for (let cycle = 1 as 1 | 2 | 3; cycle <= maxCycles; cycle = (cycle + 1) as 1 | 2 | 3) {
-			// Stage 1 (cycle 1) or use prior cycle's new_steps (cycle 2+).
-			if (cycle === 1) {
-				try {
-					const expansion = await runDiscoveryPlanExpansion({
-						todo: input.todo, gapFacts: gaps, memory: input.memory, catalog: input.catalog,
-						cycle, cycleMemory, provider: input.provider,
-					});
-					stepsToRun = expansion.steps;
-				} catch (err) {
-					cycleLoopFailureReason = `discovery-plan expansion (cycle 1) failed: ${(err as Error).message}`;
-					failureChain.push(cycleLoopFailureReason);
-					break;
+		// Stage 1: sketch.
+		let sketch: readonly DiscoveryStep[];
+		try {
+			const sketchResult = await runSketch({
+				todo: input.todo, gapFacts: gaps, catalog: input.catalog, provider: input.provider,
+			});
+			sketch = sketchResult.steps;
+		} catch (err) {
+			l2Reason = `sketch failed: ${(err as Error).message}`;
+			failureChain.push(l2Reason);
+			terminationVerdict = 'l2';
+			break;
+		}
+
+		// Per-TODO ledger + bookkeeping.
+		retainedLedger = [];
+		perStepTrace = [];
+		stepsRun = 0;
+		sketchReplans = 0;
+		const priorAttempts: PriorAttempt[] = [];
+		const closureClaims: ClosureClaim[] = [];
+		const allArtifactIds: Record<string, Record<string, string>> = {};
+		const crossStepRawOutputs: Record<string, string> = {};
+		let priorStepOutputs: Record<string, string> = {};
+		let lastStep: DecideLastStepRawOutputs | undefined;
+		let noProgressCount = 0;
+		let loopFailureReason: string | undefined;
+
+		while (stepsRun < safetyCeiling) {
+			// 2a. Build the TOC for THIS decide turn.
+			const tocText = await safeRenderToc(input.sessionId);
+
+			// 2b. Cloud decide-next-step.
+			let decision: DecideNextStepResult;
+			try {
+				decision = await runDecideNextStep({
+					todo: input.todo, gapFacts: gaps, sketch, catalog: input.catalog,
+					toc: tocText, lastStep,
+					provider: input.provider,
+				});
+			} catch (err) {
+				loopFailureReason = `decide-next-step failed at step ${stepsRun + 1}: ${(err as Error).message}`;
+				log.warn({ todoId: input.todo.id, reason: loopFailureReason }, 'TODO orchestrator: decide-next-step threw');
+				break;
+			}
+
+			// 2c. Persist the prior step's summaries the decider just emitted.
+			//     The decide turn READ lastStep and produced summaries for it;
+			//     we write them to artifact_vec rows now so the TOC + downstream
+			//     stages see the goal-aware claims.
+			if (lastStep !== undefined && Object.keys(decision.lastStepSummaries).length > 0) {
+				const priorIds = allArtifactIds[lastStep.stepId];
+				if (priorIds !== undefined) {
+					await persistStepSummaries(
+						{ [lastStep.stepId]: decision.lastStepSummaries },
+						{ [lastStep.stepId]: priorIds },
+					);
+				}
+				// Convergence accounting against the PRIOR step's summary set.
+				const newClaims = scanAllClosureMarkers(
+					{ [lastStep.stepId]: decision.lastStepSummaries },
+					gapIdSet,
+				);
+				for (const c of newClaims) { closureClaims.push(c); }
+				const contributed = stepContributedEvidence(newClaims);
+				const traceIdx = perStepTrace.findIndex(t => t.stepId === lastStep!.stepId);
+				if (traceIdx >= 0) {
+					perStepTrace[traceIdx] = { ...perStepTrace[traceIdx]!, contributedEvidence: contributed };
+				}
+				if (contributed) {
+					noProgressCount = 0;
+				} else {
+					noProgressCount += 1;
+					if (noProgressCount >= noProgressBudget) {
+						terminationVerdict = 'unrecoverable';
+						loopFailureReason = `${noProgressBudget} consecutive no-progress steps`;
+						log.warn({ todoId: input.todo.id, noProgressCount }, 'TODO orchestrator: no-progress budget exhausted -> terminate unrecoverable');
+						break;
+					}
 				}
 			}
-			for (const s of stepsToRun) { stepsById.set(s.id, s); }
 
-			// Stage 2: execute each step.
-			const cycleOutputs: StepOutput[] = [];
-			// Per-cycle mapping `stepId -> { callId -> spillId }`. Populated
-			// from each step's `execRes.skillArtifactIds` as the cycle runs;
-			// consumed AFTER cycle-review so the reviewer's per-call goal-
-			// aware summaries land on the right `artifact_vec` row.
-			const cycleArtifactIds: Record<string, Record<string, string>> = {};
-			for (const step of stepsToRun) {
-				// Selectively forward raw cross-step outputs the step's skills
-				// declared as deps. Only entries whose key matches one of this
-				// step's cross-step `dependsOn` values are pulled from the
-				// per-TODO cache. Everything else stays out of priorOutputs
-				// so the shape-resolver's prior-outputs block stays bounded.
-				const crossStepPriors = collectCrossStepPriors(step, crossStepRawOutputs);
-				// Phase 3 of plans/section-flow-architecture-redesign.md:
-				// when a sessionId is wired, build the per-step TOC + supply
-				// the build-context payload so the leaf-executor's local
-				// build-context turn can decide which artifacts to fetch.
-				// TOC is rebuilt PER STEP so artifacts spilled by earlier
-				// steps in the same cycle are visible to later ones.
-				const buildContext = await maybeBuildContext(input, step);
-				const execRes = await executeDiscoveryStep({
+			// 2d. Structural convergence check (signal 1). Pure scan over
+			//     accepted closure claims; no LLM call.
+			const coverage = computeCoverage(gapIdList, closureClaims);
+			if (coverage.allClosed) {
+				terminationVerdict = 'covered';
+				log.info({ todoId: input.todo.id, stepsRun }, 'TODO orchestrator: TOC coverage closes every gap -> terminate covered');
+				break;
+			}
+
+			// 2e. Honor the LLM's decision.
+			if (decision.action === 'terminate') {
+				terminationVerdict = decision.verdict;
+				log.info({
+					todoId: input.todo.id, stepsRun,
+					verdict: decision.verdict, reasoning: decision.reasoning.slice(0, 200),
+				}, 'TODO orchestrator: decide-next-step requested terminate');
+				break;
+			}
+
+			if (decision.action === 'replan-sketch') {
+				sketchReplans += 1;
+				log.info({ todoId: input.todo.id, sketchReplans, reasoning: decision.reasoning.slice(0, 200) }, 'TODO orchestrator: regenerating sketch');
+				try {
+					const sketchResult = await runSketch({
+						todo: input.todo, gapFacts: gaps, catalog: input.catalog, provider: input.provider,
+					});
+					sketch = sketchResult.steps;
+				} catch (err) {
+					loopFailureReason = `sketch replan failed: ${(err as Error).message}`;
+					terminationVerdict = 'unrecoverable';
+					break;
+				}
+				// Next decide turn sees no last step -- the replan is a hard
+				// reset; the previous trajectory is discarded.
+				lastStep = undefined;
+				continue;
+			}
+
+			// decision.action === 'execute-step'
+			const step = decision.step;
+			priorAttempts.push({ stepId: step.id, intent: step.intent });
+			const crossStepPriors = collectCrossStepPriors(step, crossStepRawOutputs);
+			const buildContext = await maybeBuildContext(input, step);
+			let execRes;
+			try {
+				execRes = await executeDiscoveryStep({
 					step,
 					priorOutputs: { ...priorStepOutputs, ...crossStepPriors },
 					deps: {
@@ -316,112 +399,72 @@ export async function runTodoOrchestrator(
 						...(buildContext !== undefined ? { buildContext } : {}),
 					},
 				});
-				cycleOutputs.push(execRes.output);
-				// Append this step's aggregate (stringified) so subsequent
-				// steps in the SAME cycle can read it via priorOutputs[stepId].
-				priorStepOutputs = {
-					...priorStepOutputs,
-					[step.id]: stringifyStepOutput(execRes.output),
-				};
-				// Cache raw per-skill outputs keyed by "stepId.skillId" so
-				// later steps (this cycle or next) can declare them via
-				// cross-step dependsOn and get the literal text -- not the
-				// summarized facts the retained ledger keeps.
-				for (const [callId, raw] of Object.entries(execRes.skillOutputs)) {
-					if (raw.length > 0) {
-						crossStepRawOutputs[`${step.id}.${callId}`] = raw;
-					}
-				}
-				// Remember the per-call artifact ids so the cycle-review
-				// summaries can be written back to the right Lance row.
-				const ids = execRes.skillArtifactIds;
-				if (Object.keys(ids).length > 0) {
-					cycleArtifactIds[step.id] = { ...ids };
-				}
-			}
-
-			// Stage 3: cycle review.
-			let review;
-			try {
-				review = await runCycleReview({
-					todo: input.todo, gapFacts: gaps,
-					stepsThisCycle: stepsToRun, cycleOutputs,
-					cycleMemory, cycle, catalog: input.catalog,
-					provider: input.provider,
-				});
 			} catch (err) {
-				cycleLoopFailureReason = `cycle review (cycle ${cycle}) failed: ${(err as Error).message}`;
-				failureChain.push(cycleLoopFailureReason);
+				loopFailureReason = `executeDiscoveryStep failed at step ${step.id}: ${(err as Error).message}`;
+				terminationVerdict = 'unrecoverable';
 				break;
 			}
-
-			// Persist reviewer-emitted goal-aware summaries onto the
-			// `artifact_vec` rows so downstream stages (TOC builder, future
-			// Phase 3 build-context retriever) read the claim-shaped text
-			// instead of the noisy preview. Best-effort: a write failure
-			// for one artifact doesn't abort the cycle.
-			await persistStepSummaries(review.stepSummaries, cycleArtifactIds);
-
-			// Stage 4: ledger update + cycleMemory recompute.
-			const keepSet = new Set(review.response.keep);
-			const keptThisCycle = cycleOutputs.filter(o => keepSet.has(o.stepId));
-			retained.push(...keptThisCycle);
-			cycleMemory = {
-				priorAsks: [
-					...cycleMemory.priorAsks,
-					{ cycle, steps: stepsToRun.map(s => ({ id: s.id, intent: s.intent })) },
-				],
-				criteriaCoverage: computeCoverage(retained, gaps.map(f => f.fact), stepsById),
-				scratchpad:       review.response.scratchpad ?? cycleMemory.scratchpad,
+			retainedLedger = [...retainedLedger, execRes.output];
+			priorStepOutputs = {
+				...priorStepOutputs,
+				[step.id]: stringifyStepOutput(execRes.output),
 			};
-			perCycleSummary.push({
-				cycle,
-				stepsRun:     stepsToRun.length,
-				keptIds:      keptThisCycle.map(o => o.stepId),
-				newStepsAsk:  review.response.new_steps.length,
-			});
-			cyclesRun = cycle;
-			log.info({
-				todoId: input.todo.id, cycle, stepsRun: stepsToRun.length,
-				keptCount: keptThisCycle.length, newStepsAsk: review.response.new_steps.length,
-				retainedTotal: retained.length,
-			}, 'TODO orchestrator: cycle complete');
-
-			// Stage 5: termination.
-			if (review.response.new_steps.length === 0) { break; }
-			if (cycle === maxCycles) { break; }
-			// No-progress: this cycle kept zero AND prior cycle kept zero too.
-			if (keptThisCycle.length === 0 && priorCycleKeepCount === 0) {
-				log.warn({ todoId: input.todo.id, cycle }, 'TODO orchestrator: no-progress safety net -> terminating cycle loop');
-				break;
+			for (const [callId, raw] of Object.entries(execRes.skillOutputs)) {
+				if (raw.length > 0) {
+					crossStepRawOutputs[`${step.id}.${callId}`] = raw;
+				}
 			}
-			priorCycleKeepCount = keptThisCycle.length;
-			stepsToRun = review.response.new_steps;
+			if (Object.keys(execRes.skillArtifactIds).length > 0) {
+				allArtifactIds[step.id] = { ...execRes.skillArtifactIds };
+			}
+			perStepTrace.push({
+				stepId:               step.id,
+				intent:                step.intent,
+				status:                execRes.output.status,
+				contributedEvidence:   false,   // updated by the NEXT decide turn's summaries
+			});
+			lastStep = {
+				stepId:     step.id,
+				stepIntent: step.intent,
+				skills:     step.skills.map(sk => ({
+					callId:  sk.id,
+					skillId: sk.skillId,
+					context: sk.context,
+					rawText: execRes.output.rawOutputs[sk.id] ?? '',
+				})),
+			};
+			stepsRun += 1;
 		}
 
-		retainedLedger = retained;
-
-		// Hard catastrophic failure: cycle loop never produced any cycle
-		// summary (Stage 1 cycle-1 threw) -> L2 immediately.
-		if (cycleLoopFailureReason !== undefined && perCycleSummary.length === 0) {
-			l2Reason = cycleLoopFailureReason;
-			break;
+		// Safety ceiling backstop. If we get here without a verdict, the
+		// while-condition was the exit -- log loudly per the plan.
+		if (terminationVerdict === undefined) {
+			if (stepsRun >= safetyCeiling) {
+				terminationVerdict = 'safety-ceiling';
+				loopFailureReason = `safety ceiling (${safetyCeiling}) reached without convergence -- THIS IS A BUG`;
+				log.error({ todoId: input.todo.id, stepsRun }, '!!! TODO orchestrator hit safety ceiling -- check convergence signals');
+			} else if (loopFailureReason !== undefined) {
+				// A loop iteration broke out without a verdict (e.g. decide
+				// threw, sketch replan threw). Convert to terminal verdict.
+				if (terminationVerdict === undefined) {
+					terminationVerdict = 'unrecoverable';
+				}
+			}
 		}
 
-		// Cycle loop produced no retained facts at all -> L2 (the
-		// orchestrator has no material for synthesis).
+		if (loopFailureReason !== undefined) {
+			failureChain.push(loopFailureReason);
+		}
+
+		// Empty ledger -> nothing for synthesis to work with.
 		if (retainedLedger.length === 0) {
-			l2Reason = `cycle loop produced no retained facts (${cyclesRun} cycles attempted)`;
+			l2Reason = loopFailureReason ?? `dynamic loop produced no retained facts (verdict=${terminationVerdict ?? 'unknown'})`;
 			failureChain.push(l2Reason);
+			terminationVerdict = 'l2';
 			break;
 		}
 
-		// Resolve reviewer-emitted summaries off `artifact_vec` once for
-		// the retained ledger so Stage 6 (synthesis) and Stage 7 (section
-		// review) both see the goal-aware claim-shaped text. Falls back
-		// to a digest of the raw output when the row's summary never
-		// landed -- forward progress is never blocked on summary
-		// correctness.
+		// Resolve summaries from artifact_vec (Phase 1 batch 3b).
 		const summariesByStep = await resolveStepSummaries(retainedLedger);
 
 		// Stage 6: synthesis.
@@ -429,17 +472,18 @@ export async function runTodoOrchestrator(
 		try {
 			synth = await synthesizeSectionFromLedger({
 				todo: input.todo, memory: input.memory, gapAnalysis: analysis.analysis,
-				retainedLedger, summariesByStep,
-				cycleMemory, provider: input.provider,
+				retainedLedger, summariesByStep, priorAttempts,
+				provider: input.provider,
 			});
 		} catch (err) {
 			l2Reason = `synthesis failed: ${(err as Error).message}`;
 			failureChain.push(l2Reason);
+			terminationVerdict = 'l2';
 			break;
 		}
 		unmetGaps = synth.unmetGaps;
 
-		// Stage 7: section review (Q5 verdicts -- existing reviewer).
+		// Stage 7: section review.
 		const reviewResult = await reviewSection({
 			todo: input.todo, memory: input.memory,
 			candidate: synth.markdown,
@@ -448,13 +492,15 @@ export async function runTodoOrchestrator(
 		});
 		if (reviewResult.reopenRequested && recyclesConsumed < maxRecycles) {
 			recyclesConsumed += 1;
-			failureChain.push(`section review revise-major (cycle path): ${reviewResult.reopenReason ?? ''}`);
-			log.info({ todoId: input.todo.id, recyclesConsumed }, 'section review revise-major -> recycling (re-run Stage 0 + cycle loop)');
+			failureChain.push(`section review revise-major (dynamic loop): ${reviewResult.reopenReason ?? ''}`);
+			log.info({ todoId: input.todo.id, recyclesConsumed }, 'section review revise-major -> re-running the whole TODO');
+			terminationVerdict = undefined;   // will be re-derived in the next outer-loop iteration
 			continue;
 		}
 		if (reviewResult.reopenRequested) {
 			l2Reason = `section review revise-major (recycle budget exhausted): ${reviewResult.reopenReason ?? ''}`;
 			failureChain.push(l2Reason);
+			terminationVerdict = 'l2';
 			break;
 		}
 
@@ -468,24 +514,25 @@ export async function runTodoOrchestrator(
 			factGapRetried:   analysis.retried,
 			sectionExhausted: reviewResult.exhausted,
 			synthFallback:    synth.usedFallback,
-			cyclesRun,
-			recyclesConsumed,
 		});
 		log.info({
-			todoId: input.todo.id, cyclesRun, recyclesConsumed,
+			todoId: input.todo.id, stepsRun, recyclesConsumed,
 			retainedStepCount: retainedLedger.length, unmetGapCount: unmetGaps.length,
 			sectionExhausted: reviewResult.exhausted,
+			terminationVerdict,
 		}, 'TODO orchestrator success');
 		return {
 			entry,
 			trace: {
-				cyclesRun,
+				stepsRun,
 				recyclesConsumed,
-				l2FallbackUsed:     false,
-				retainedStepCount:  retainedLedger.length,
-				unmetGapCount:      unmetGaps.length,
+				l2FallbackUsed:    false,
+				retainedStepCount: retainedLedger.length,
+				unmetGapCount:     unmetGaps.length,
 				failureChain,
-				perCycleSummary,
+				perStepTrace,
+				sketchReplans,
+				terminationVerdict: terminationVerdict ?? 'reviewer-accept',
 			},
 		};
 	}
@@ -500,13 +547,15 @@ export async function runTodoOrchestrator(
 	return {
 		entry,
 		trace: {
-			cyclesRun,
+			stepsRun,
 			recyclesConsumed,
-			l2FallbackUsed:     true,
-			retainedStepCount:  retainedLedger.length,
-			unmetGapCount:      unmetGaps.length,
+			l2FallbackUsed:    true,
+			retainedStepCount: retainedLedger.length,
+			unmetGapCount:     unmetGaps.length,
 			failureChain,
-			perCycleSummary,
+			perStepTrace,
+			sketchReplans,
+			terminationVerdict: 'l2',
 		},
 	};
 }
@@ -525,9 +574,6 @@ export async function runTodoOrchestrator(
  *     raw output from the per-TODO `crossStepRawOutputs` cache so the
  *     dependent step's shape-resolver sees the literal entityId / hash /
  *     other lookup-derived value, not the summarized ledger paraphrase.
- *
- * Only declared deps cross the boundary. Unselected entries stay out of
- * the prior-outputs block so it doesn't balloon as the cycle progresses.
  */
 function collectCrossStepPriors(
 	step:               DiscoveryStep,
@@ -554,26 +600,21 @@ function collectCrossStepPriors(
  * them via the existing TOC composer, and packs the result + the
  * caller-supplied LocalMemoryView into a payload the leaf-executor
  * threads into `runBuildContext`. Returns `undefined` when no
- * sessionId is set -- which keeps the legacy path alive for every
- * existing unit test that doesn't wire artifact storage.
- *
- * TOC build is best-effort: a Lance read failure logs + returns
- * undefined so the step still runs (shape-resolver against bare
- * priorOutputs).
+ * sessionId is set.
  */
 async function maybeBuildContext(
 	input: TodoOrchestratorInput,
 	step:  DiscoveryStep,
-): Promise<import('./leaf-executor.js').LeafBuildContext | undefined> {
+): Promise<LeafBuildContext | undefined> {
 	if (input.sessionId === undefined || input.sessionId.length === 0) {
 		return undefined;
 	}
-	void step;   // step is in scope for future per-step TOC narrowing (e.g. filter by skillIdPrefix)
+	void step;
 	try {
 		const toc = await buildToc({ sessionId: input.sessionId });
 		const rendered = renderToc(toc);
 		const tocIds = new Set(toc.entries.map(e => e.id));
-		const payload: import('./leaf-executor.js').LeafBuildContext = {
+		const payload: LeafBuildContext = {
 			todoObjective: input.todo.objective,
 			toc:           rendered,
 			tocIds,
@@ -590,20 +631,37 @@ async function maybeBuildContext(
 }
 
 /**
+ * Render the TOC for the decide-next-step turn. Returns an empty-TOC
+ * placeholder when no sessionId is wired OR when the Lance read fails
+ * -- the decider still runs (it'll emit a step from the sketch).
+ */
+async function safeRenderToc(sessionId: string | undefined): Promise<string> {
+	if (sessionId === undefined || sessionId.length === 0) {
+		return '## TABLE OF CONTENTS\n(no artifacts persisted yet)';
+	}
+	try {
+		const toc = await buildToc({ sessionId });
+		return renderToc(toc);
+	} catch (err) {
+		log.warn({ sessionId, err: (err as Error).message }, 'todo-orchestrator: TOC render failed; using empty placeholder');
+		return '## TABLE OF CONTENTS\n(toc render failed)';
+	}
+}
+
+/**
  * Walk `stepSummaries[stepId][callId]` and write each summary back to
  * the matching `artifact_vec` row via `updateArtifactSummary`. Quiet
  * skip when:
  *
- *   - The reviewer summarised a (stepId, callId) tuple that didn't
- *     produce an artifact (e.g. the call returned empty -- no spill
- *     happened; `cycleArtifactIds[stepId][callId]` is undefined).
+ *   - The decider emitted a summary for a (stepId, callId) tuple that
+ *     didn't produce an artifact (e.g. the call returned empty -- no
+ *     spill happened).
  *   - The artifact id doesn't exist on disk anymore (purged session
  *     -- `updateArtifactSummary` itself soft-fails).
  *
- * Phase 1 of plans/section-flow-architecture-redesign.md. This
- * replaces the standalone `summarizeResult` write that previously
- * lived in `step-discovery-execute.ts` -- the cloud LLM now folds
- * the summary into its review response in one call.
+ * Phase 4 batch 4.2 reuses the helper from Phase 1: the dynamic loop's
+ * decide-next-step emits summaries with the same shape the cycle-
+ * review v2 writer used to produce.
  */
 async function persistStepSummaries(
 	stepSummaries:    Readonly<Record<string, Readonly<Record<string, string>>>>,
@@ -636,11 +694,9 @@ async function persistStepSummaries(
 const RAW_OUTPUT_DIGEST_CHARS = 400;
 
 /**
- * Build the per-step digest the orchestrator threads into the NEXT
- * step's shape-resolver via `priorStepOutputs[stepId]`. Phase 1
- * batch 3b: no more `summarizeResult`-derived facts; emit a digest
- * of the actual stringified skill outputs instead. Each call gets
- * a single line: `<callId> (<truncated raw text>)`.
+ * Per-step digest the orchestrator threads into the NEXT step's
+ * shape-resolver via `priorStepOutputs[stepId]`. Each call gets a
+ * single line: `<callId> (<truncated raw text>)`.
  */
 function stringifyStepOutput(out: StepOutput): string {
 	const callIds = Object.keys(out.rawOutputs);
@@ -662,21 +718,12 @@ function stringifyStepOutput(out: StepOutput): string {
 }
 
 /**
- * Pre-resolve the reviewer-emitted goal-aware summary for each
- * retained step from `artifact_vec`. The cycle loop has already
- * written summaries via `persistStepSummaries` before this runs.
- *
- * For each step, builds one string aggregating per-call summaries:
- *
- *     - <callId>: <reviewer summary>
- *     - <callId>: <reviewer summary>
- *
- * Calls whose artifact summary is missing (the reviewer omitted the
- * entry, the row's summary never landed, etc.) fall back to a
- * digest of the raw output -- the section-review/synthesis prompt
+ * Pre-resolve the decider-emitted goal-aware summary for each step in
+ * the retained ledger by reading `artifact_vec.summary`. Falls back to
+ * a digest of the raw output when the row's summary never landed
+ * (e.g. the loop terminated before the next decide turn that would
+ * have summarised that step) -- the section-review/synthesis prompt
  * always has SOMETHING, never "(no facts)".
- *
- * Phase 1 batch 3b of plans/section-flow-architecture-redesign.md.
  */
 async function resolveStepSummaries(
 	retainedLedger: readonly StepOutput[],
@@ -684,9 +731,6 @@ async function resolveStepSummaries(
 	const out = new Map<string, string>();
 	for (const stepOutput of retainedLedger) {
 		const parts: string[] = [];
-		// Iterate rawOutputs (not artifactIds) so calls that didn't
-		// spill still produce a line in the aggregate. Order matches
-		// declaration order.
 		for (const callId of Object.keys(stepOutput.rawOutputs)) {
 			const artifactId = stepOutput.artifactIds[callId];
 			let summary: string | undefined;
@@ -734,11 +778,6 @@ function ledgerToFindings(
 ): WorkingMemoryFindings {
 	const perRoot: PerRootFinding[] = retainedLedger.map(o => ({
 		rootId:         o.stepId,
-		// Status -> RootVerdict mapping. RootVerdict only allows
-		// 'accept' | 'force-accept' | 'L2-fallback'; status `ok`/`partial`
-		// both indicate the step contributed evidence, `failed` indicates
-		// the step ran but returned empty (kept as `force-accept` so the
-		// reviewer sees the attempt without treating it as L2 fallback).
 		verdict:        o.status === 'failed' ? 'force-accept' as const : 'accept' as const,
 		cyclesConsumed: 0,
 		exhausted:      o.status === 'failed',
@@ -755,14 +794,11 @@ interface BuildSuccessEntryInput {
 	readonly todo:             TodoSpec;
 	readonly detail:           string;
 	readonly retainedLedger:   readonly StepOutput[];
-	/** Pre-resolved per-step summaries (artifact_vec.summary + raw-digest fallback). */
 	readonly summariesByStep:  ReadonlyMap<string, string>;
 	readonly unmetGaps:        readonly RequiredFact[];
 	readonly factGapRetried:   boolean;
 	readonly sectionExhausted: boolean;
 	readonly synthFallback:    boolean;
-	readonly cyclesRun:        number;
-	readonly recyclesConsumed: number;
 }
 
 function buildSuccessEntry(input: BuildSuccessEntryInput): WorkingMemoryEntry {
@@ -772,18 +808,8 @@ function buildSuccessEntry(input: BuildSuccessEntryInput): WorkingMemoryEntry {
 		synthFallback:    input.synthFallback,
 		unmetGapCount:    input.unmetGaps.length,
 	});
-	// Synthesize per-root findings from the retained ledger so the
-	// existing WorkingMemoryEntry.findings shape stays satisfied; the
-	// memory updater + report-review read this downstream. Content
-	// sourced from the pre-resolved per-step summary map (Phase 1
-	// batch 3b of plans/section-flow-architecture-redesign.md).
 	const perRoot: PerRootFinding[] = input.retainedLedger.map(o => ({
 		rootId:         o.stepId,
-		// Status -> RootVerdict mapping. RootVerdict only allows
-		// 'accept' | 'force-accept' | 'L2-fallback'; status `ok`/`partial`
-		// both indicate the step contributed evidence, `failed` indicates
-		// the step ran but returned empty (kept as `force-accept` so the
-		// reviewer sees the attempt without treating it as L2 fallback).
 		verdict:        o.status === 'failed' ? 'force-accept' as const : 'accept' as const,
 		cyclesConsumed: 0,
 		exhausted:      o.status === 'failed',
@@ -852,5 +878,4 @@ export const _stringifyStepOutputForTest    = stringifyStepOutput;
 export const _collectCrossStepPriorsForTest = collectCrossStepPriors;
 export const _persistStepSummariesForTest   = persistStepSummaries;
 export const _resolveStepSummariesForTest   = resolveStepSummaries;
-export const DEFAULT_MAX_CYCLES_VALUE       = DEFAULT_MAX_CYCLES;
 export const DEFAULT_MAX_RECYCLES_VALUE     = DEFAULT_MAX_RECYCLES;

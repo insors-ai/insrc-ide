@@ -95,13 +95,9 @@ export {
 } from './shape-resolve.js';
 
 // ---------------------------------------------------------------------------
-// Fact-gap-driven task loop (plans/section-flow-fact-gap-loop.md)
+// Dynamic decide-next-step loop
+// (plans/section-flow-architecture-redesign.md, Phase 4)
 // ---------------------------------------------------------------------------
-
-export {
-	summarizeCycleMemory,
-	computeCoverage,
-} from './cycle-memory.js';
 
 export {
 	gapFacts,
@@ -119,16 +115,19 @@ export {
 } from './step-fact-gap-analysis.js';
 
 export {
-	runDiscoveryPlanExpansion,
-	type DiscoveryPlanExpansionInput,
-	type DiscoveryPlanExpansionResult,
-} from './step-discovery-plan-expansion.js';
+	runSketch,
+	type SketchInput,
+	type SketchResult,
+} from './step-sketch.js';
 
 export {
-	runCycleReview,
-	type CycleReviewInput,
-	type CycleReviewResult,
-} from './step-cycle-review.js';
+	runDecideNextStep,
+	type DecideNextStepInput,
+	type DecideNextStepResult,
+	type DecidedAction,
+	type DecideAction,
+	type TerminateVerdict,
+} from './step-decide-next-step.js';
 
 export {
 	executeDiscoveryStep,
@@ -143,17 +142,32 @@ export {
 	type SynthesisResult,
 } from './step-synthesis-from-ledger.js';
 
+export {
+	coerceStep,
+	validateDependsOn,
+} from './step-validators.js';
+
+export {
+	DEFAULT_NO_PROGRESS_BUDGET,
+	DEFAULT_SAFETY_CEILING,
+	computeCoverage,
+	scanClosureMarkers,
+	scanAllClosureMarkers,
+	stepContributedEvidence,
+	type ClosureClaim,
+	type ClosureVerdict,
+	type CoverageReport,
+	type CoverageStatus,
+	type GapCoverage,
+} from './convergence.js';
+
 // Re-export the discovery-plan types so callers don't have to reach
 // across modules.
 export {
-	emptyCycleMemory,
 	DISCOVERY_PLAN_SCHEMA,
-	CYCLE_REVIEW_RESPONSE_SCHEMA,
 	type DiscoveryStep,
 	type DiscoveryPlan,
 	type PlannedSkillCall,
 	type StepOutput,
 	type Citation,
-	type CycleReviewResponse,
-	type CycleMemory,
 } from '../content-gen/discovery-plan.js';

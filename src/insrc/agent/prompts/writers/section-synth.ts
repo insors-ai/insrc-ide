@@ -15,20 +15,29 @@
  */
 
 import type { LLMMessage } from '../../../shared/types.js';
-import type {
-	CycleMemory,
-	StepOutput,
-} from '../../content-gen/discovery-plan.js';
+import type { StepOutput } from '../../content-gen/discovery-plan.js';
 import type { RequiredFact } from '../../section-flow/fact-gap-types.js';
 import type { TodoSpec } from '../../section-flow/types.js';
 import type { PromptWriter } from '../types.js';
+
+/**
+ * One prior step that has executed during the TODO. The synthesizer
+ * reads these to render the "what was tried" block for each unmet
+ * gap. Phase 4 batch 4.2 replaces the old `CycleMemory.priorAsks`
+ * (which existed only because the cycle loop did) with this simpler
+ * shape -- the dynamic loop's history is just a flat list of steps.
+ */
+export interface PriorAttempt {
+	readonly stepId: string;
+	readonly intent: string;
+}
 
 export interface SectionSynthWriterInput {
 	readonly todo:            TodoSpec;
 	readonly retainedLedger:  readonly StepOutput[];
 	/** Pre-resolved per-step summaries (from `artifact_vec.summary` + raw fallback). */
 	readonly summariesByStep: ReadonlyMap<string, string>;
-	readonly cycleMemory:     CycleMemory;
+	readonly priorAttempts:   readonly PriorAttempt[];
 	readonly unmetGaps:       readonly RequiredFact[];
 }
 
@@ -81,14 +90,12 @@ function renderLedger(
 	return lines.join('\n').trimEnd();
 }
 
-function renderUnmetGapInput(gap: RequiredFact, cycleMemory: CycleMemory): string {
+function renderUnmetGapInput(gap: RequiredFact, priorAttempts: readonly PriorAttempt[]): string {
 	const attempts: string[] = [];
-	for (const ask of cycleMemory.priorAsks) {
-		for (const s of ask.steps) {
-			if (s.intent.toLowerCase().includes(gap.id.toLowerCase()) ||
-			    s.intent.toLowerCase().includes(gap.fact.toLowerCase().slice(0, 32))) {
-				attempts.push(`  - cycle ${ask.cycle} step \`${s.id}\`: ${s.intent}`);
-			}
+	for (const a of priorAttempts) {
+		if (a.intent.toLowerCase().includes(gap.id.toLowerCase()) ||
+		    a.intent.toLowerCase().includes(gap.fact.toLowerCase().slice(0, 32))) {
+			attempts.push(`  - step \`${a.stepId}\`: ${a.intent}`);
 		}
 	}
 	const suggested = gap.suggestedSkills !== undefined && gap.suggestedSkills.length > 0
@@ -119,7 +126,7 @@ function buildSynthUser(input: SectionSynthWriterInput): string {
 		lines.push('## UNMET GAPS (render each as a structured handoff block)');
 		lines.push('');
 		for (const gap of input.unmetGaps) {
-			lines.push(renderUnmetGapInput(gap, input.cycleMemory));
+			lines.push(renderUnmetGapInput(gap, input.priorAttempts));
 			lines.push('');
 		}
 	}

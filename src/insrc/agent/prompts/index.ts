@@ -38,9 +38,7 @@ export { renderToc }                  from './composers/toc.js';
 import { getPromptRegistry } from './registry.js';
 import { shapeResolverWriterV1 }            from './writers/shape-resolver.js';
 import { factGapAnalysisWriterV1 }          from './writers/fact-gap-analysis.js';
-import { discoveryPlanExpansionWriterV1 }   from './writers/discovery-plan-expansion.js';
-import { cycleReviewWriterV2 } from './writers/cycle-review.js';
-import { buildContextWriterV1 }            from './writers/build-context.js';
+import { buildContextWriterV1 }             from './writers/build-context.js';
 import { sketchWriterV1 }                   from './writers/sketch.js';
 import { decideNextStepWriterV1 }           from './writers/decide-next-step.js';
 import {
@@ -69,8 +67,6 @@ export function registerAllPromptWriters(): void {
 	const r = getPromptRegistry();
 	r.register(shapeResolverWriterV1);
 	r.register(factGapAnalysisWriterV1);
-	r.register(discoveryPlanExpansionWriterV1);
-	r.register(cycleReviewWriterV2);
 	r.register(buildContextWriterV1);
 	r.register(sketchWriterV1);
 	r.register(decideNextStepWriterV1);
@@ -82,10 +78,12 @@ export function registerAllPromptWriters(): void {
 	r.register(memoryShapeReduceWriterV1);
 	r.register(memoryUpdateWriterV1);
 	r.register(bulletExtractorWriterV1);
-	// Phase 0 migration: the remaining section-flow prompts
-	// (step-investigation-plan, step-report-assemble, step-report-review)
-	// are lower-priority because they sit outside the core per-TODO
-	// loop (whole-report-level orchestration). Migrating them is a
-	// follow-up; not blocking Phase 1 since they're not on the
-	// dynamic-flow critical path.
+	// Phase 4 batch 4.2 deleted the cycle-review-v2 + discovery-plan-
+	// expansion writers along with the cycle loop they served; the
+	// dynamic decide-next-step loop replaces them.
+	// The remaining section-flow prompts (step-investigation-plan,
+	// step-report-assemble, step-report-review) sit outside the core
+	// per-TODO loop (whole-report-level orchestration). Migrating
+	// them is a follow-up; not blocking Phase 4 since they're not on
+	// the dynamic-flow critical path.
 }

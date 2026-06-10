@@ -123,76 +123,16 @@ export interface StepOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Cycle review (cloud's per-cycle verdict)
-// ---------------------------------------------------------------------------
-
-export interface CycleReviewResponse {
-	/** stepIds of THIS cycle's outputs the cloud judged on-topic + useful.
-	 *  Outputs whose stepId is in `keep` are promoted to the retained
-	 *  ledger; others are dropped. */
-	readonly keep:        readonly string[];
-	/** Steps the cloud wants run next cycle. Empty array = terminate. */
-	readonly new_steps:   readonly DiscoveryStep[];
-	/** Cloud's free-form note carried into the next cycle's CycleMemory.
-	 *  ~300 chars; for qualitative judgments the mechanical
-	 *  coverage map can't capture. */
-	readonly scratchpad?: string | undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Cycle memory (orchestrator-held, summarised into the cloud's prompt)
-// ---------------------------------------------------------------------------
-
-/**
- * Per-section state carried across cycles. Lives on the orchestrator;
- * never persisted, never round-trips the kept ledger raw to the cloud
- * (per the architectural decision: kept items are not relayed back).
- *
- * Renders into prompt text via `summarizeCycleMemory` (defined in
- * `agent/tasks/code-analyzer/cycle-memory.ts`).
- *
- * Three pieces:
- *   - priorAsks       -- what the cloud asked for in each prior cycle
- *                         (steps it emitted in new_steps). Lets the
- *                         cloud reason about gaps it already
- *                         identified.
- *   - criteriaCoverage -- mechanical map criterion → status →
- *                          contributing stepIds. Built by
- *                          `computeCoverage` from the retained ledger
- *                          + each step's `targetsCriteria`.
- *   - scratchpad      -- cloud-emitted free-form note from the last
- *                         review (or empty initially). Overwritten
- *                         each cycle.
- */
-export interface CycleMemory {
-	readonly priorAsks: readonly {
-		readonly cycle:  1 | 2 | 3;
-		readonly steps:  readonly { readonly id: string; readonly intent: string }[];
-	}[];
-	readonly criteriaCoverage: readonly {
-		readonly criterion:             string;
-		readonly status:                'covered' | 'partial' | 'open';
-		readonly contributingStepIds:   readonly string[];
-	}[];
-	readonly scratchpad: string;
-}
-
-/** Initial empty CycleMemory for cycle 1 (before any cloud asks). */
-export function emptyCycleMemory(reviewCriteria: readonly string[]): CycleMemory {
-	return {
-		priorAsks: [],
-		criteriaCoverage: reviewCriteria.map(criterion => ({
-			criterion,
-			status:               'open' as const,
-			contributingStepIds:  [],
-		})),
-		scratchpad: '',
-	};
-}
-
-// ---------------------------------------------------------------------------
 // JSON Schemas (used as `responseFormat.schema` on cloud LLM calls)
 // ---------------------------------------------------------------------------
+//
+// Phase 4 batch 4.2 deleted `CycleMemory`, `CycleReviewResponse`,
+// `emptyCycleMemory`, and the matching `CYCLE_REVIEW_RESPONSE_SCHEMA`
+// along with the cycle loop they served (cycle-review +
+// discovery-plan-expansion writers). The dynamic decide-next-step
+// loop replaces both. Convergence state lives on the orchestrator as
+// per-step bookkeeping (`PerStepTrace` + the `convergence.ts`
+// closure-marker scanner), not in a separate type.
 
 /**
  * Shared sub-schema for a DiscoveryStep. Used inside both
@@ -258,31 +198,6 @@ export const DISCOVERY_PLAN_SCHEMA: Record<string, unknown> = {
 			items: DISCOVERY_STEP_SCHEMA,
 		},
 		cycle: { type: 'integer', minimum: 1, maximum: 3 },
-	},
-};
-
-/**
- * Schema for the cloud's Stage 5 emission (reviewCycle).
- *   - keep: ids of step outputs from THIS cycle to promote to ledger
- *   - new_steps: more discovery for next cycle (empty array = done)
- *   - scratchpad: optional free-form note carried forward
- */
-export const CYCLE_REVIEW_RESPONSE_SCHEMA: Record<string, unknown> = {
-	type: 'object',
-	required: ['keep', 'new_steps'],
-	additionalProperties: false,
-	properties: {
-		keep: {
-			type: 'array',
-			items: { type: 'string', minLength: 1, maxLength: 32 },
-			uniqueItems: true,
-		},
-		new_steps: {
-			type: 'array',
-			maxItems: 12,
-			items: DISCOVERY_STEP_SCHEMA,
-		},
-		scratchpad: { type: 'string', maxLength: 500 },
 	},
 };
 

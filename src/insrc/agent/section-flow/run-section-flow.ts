@@ -312,7 +312,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				todoId:    todo.id,
 				index:     i,
 				l2:        todoResult.trace.l2FallbackUsed,
-				cyclesRun: todoResult.trace.cyclesRun,
+				stepsRun:  todoResult.trace.stepsRun,
 				recycles:  todoResult.trace.recyclesConsumed,
 				fallback:  todoResult.entry.findings.fallback,
 				// Reviewable-root sub-items rendered post-hoc (Q8). One
@@ -415,7 +415,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 					todoId:    todo.id,
 					index:     newIndex,
 					l2:        todoResult.trace.l2FallbackUsed,
-					cyclesRun: todoResult.trace.cyclesRun,
+					stepsRun:  todoResult.trace.stepsRun,
 				recycles:  todoResult.trace.recyclesConsumed,
 					fallback:  todoResult.entry.findings.fallback,
 					subItems: todoResult.entry.findings.perRoot.map(r => ({

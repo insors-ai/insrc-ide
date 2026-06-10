@@ -33,7 +33,7 @@ import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { CloudMemoryView } from '../working-memory/index.js';
 import type { RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
-import { coerceStep } from './step-discovery-plan-expansion.js';
+import { coerceStep } from './step-validators.js';
 import type { SketchWriterInput } from '../prompts/writers/sketch.js';
 import { getPromptRegistry } from '../prompts/registry.js';
 import { getLogger } from '../../shared/logger.js';
