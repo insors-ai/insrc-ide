@@ -229,6 +229,90 @@ export async function getArtifactById(id: string): Promise<ArtifactVecHit | null
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic listing
+// ---------------------------------------------------------------------------
+
+export interface ListArtifactsForSessionOpts {
+	readonly sessionId:       string;
+	/** Optional `skill_id` prefix filter (e.g. `"code."` -> only code-* skills). */
+	readonly skillIdPrefix?:  string | undefined;
+	/** Optional lower bound on `timestamp` (exclusive). Used to build a TOC scoped to "this TODO" or "this cycle". */
+	readonly afterTimestamp?: bigint | undefined;
+	/** Cap on returned rows. Default 200, max 2000. */
+	readonly limit?:          number | undefined;
+}
+
+const DEFAULT_LIST_LIMIT = 200;
+const MAX_LIST_LIMIT     = 2000;
+
+/**
+ * Deterministic newest-first listing of `artifact_vec` rows for a
+ * session. Used by the section-flow TOC builder (Phase 1 of
+ * `plans/section-flow-architecture-redesign.md`) to render the
+ * LLM-facing artifact index without going through ANN semantic
+ * search.
+ *
+ * Filtering options:
+ *   - `skillIdPrefix`: keep only rows whose `skill_id` starts with
+ *     the prefix. Useful for narrowing a TOC to (say) data-source
+ *     calls.
+ *   - `afterTimestamp`: keep only rows with `timestamp > bound`. The
+ *     TOC builder uses this to scope a TOC to "since the current
+ *     TODO started" or "since cycle N began".
+ *
+ * Sorted by `timestamp DESC` (newest first); ties broken by `id`.
+ */
+export async function listArtifactsForSession(
+	opts: ListArtifactsForSessionOpts,
+): Promise<ArtifactVecHit[]> {
+	if (opts.sessionId === '') return [];
+	const limit = clampListLimit(opts.limit);
+	const table = await getArtifactVecTable();
+
+	const conditions: string[] = [
+		`session_id = '${escapeLanceString(opts.sessionId)}'`,
+		"id != '_seed_artifact_vec'",
+	];
+	if (opts.skillIdPrefix !== undefined && opts.skillIdPrefix.length > 0) {
+		// Lance SQL supports `LIKE` with `%` wildcards.
+		conditions.push(`skill_id LIKE '${escapeLanceString(opts.skillIdPrefix)}%'`);
+	}
+	if (opts.afterTimestamp !== undefined && opts.afterTimestamp > BigInt(0)) {
+		conditions.push(`timestamp > ${opts.afterTimestamp.toString()}`);
+	}
+
+	const rows = await table.query()
+		.where(conditions.join(' AND '))
+		.limit(limit)
+		.toArray();
+
+	const hits: ArtifactVecHit[] = rows.map(r => ({
+		id:         r['id']         as string,
+		session_id: r['session_id'] as string,
+		intent:     r['intent']     as string,
+		skill_id:   r['skill_id']   as string,
+		timestamp:  toBigInt(r['timestamp']),
+		path:       r['path']       as string,
+		preview:    r['preview']    as string,
+		summary:    (r['summary'] as string | undefined) ?? '',
+		distance:   0,
+	}));
+	// Newest first, ties broken by id for stable ordering.
+	hits.sort((a, b) => {
+		if (a.timestamp === b.timestamp) return a.id.localeCompare(b.id);
+		return a.timestamp > b.timestamp ? -1 : 1;
+	});
+	return hits;
+}
+
+function clampListLimit(requested: number | undefined): number {
+	if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+		return DEFAULT_LIST_LIMIT;
+	}
+	return Math.min(Math.floor(requested), MAX_LIST_LIMIT);
+}
+
+// ---------------------------------------------------------------------------
 // Delete
 // ---------------------------------------------------------------------------
 

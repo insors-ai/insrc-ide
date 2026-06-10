@@ -19,6 +19,7 @@ import {
 	getArtifactById,
 	deleteArtifactsForSession,
 	updateArtifactSummary,
+	listArtifactsForSession,
 	_resetArtifactVecCache,
 } from '../artifact-vec.js';
 import { loadConfig } from '../../../agent/config.js';
@@ -205,6 +206,77 @@ test('updateArtifactSummary returns false for unknown id (soft-fail)', async () 
 test('updateArtifactSummary refuses empty id + the seed sentinel', async () => {
 	assert.equal(await updateArtifactSummary('',                    'x'), false);
 	assert.equal(await updateArtifactSummary('_seed_artifact_vec',  'x'), false);
+});
+
+// ---------------------------------------------------------------------------
+// listArtifactsForSession (Phase 1 batch 2 -- TOC builder source)
+// ---------------------------------------------------------------------------
+
+test('listArtifactsForSession returns rows newest-first', async () => {
+	await upsertArtifactVecBatch([
+		{ id: 's1:100:older', embedding: vec(1), session_id: 's1', intent: 'i', skill_id: 'a', timestamp: BigInt(100), path: '/p1', preview: 'a', summary: 'sA' },
+		{ id: 's1:300:newer', embedding: vec(2), session_id: 's1', intent: 'i', skill_id: 'b', timestamp: BigInt(300), path: '/p2', preview: 'b', summary: 'sB' },
+		{ id: 's1:200:mid',   embedding: vec(3), session_id: 's1', intent: 'i', skill_id: 'c', timestamp: BigInt(200), path: '/p3', preview: 'c', summary: 'sC' },
+	]);
+	const rows = await listArtifactsForSession({ sessionId: 's1' });
+	assert.deepEqual(rows.map(r => r.id), [
+		's1:300:newer',
+		's1:200:mid',
+		's1:100:older',
+	]);
+});
+
+test('listArtifactsForSession scopes by session and excludes seed', async () => {
+	await upsertArtifactVecBatch([
+		{ id: 's1:1:a', embedding: vec(1), session_id: 's1', intent: 'i', skill_id: 'a', timestamp: BigInt(1), path: '/p1', preview: 'p1' },
+		{ id: 's2:1:a', embedding: vec(1), session_id: 's2', intent: 'i', skill_id: 'a', timestamp: BigInt(1), path: '/p2', preview: 'p2' },
+	]);
+	const rows = await listArtifactsForSession({ sessionId: 's1' });
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0]!.session_id, 's1');
+});
+
+test('listArtifactsForSession honours skillIdPrefix filter', async () => {
+	await upsertArtifactVecBatch([
+		{ id: 's1:1:code',  embedding: vec(1), session_id: 's1', intent: 'i', skill_id: 'code.class.extract-fields', timestamp: BigInt(1), path: '/p1', preview: 'p1' },
+		{ id: 's1:2:data',  embedding: vec(2), session_id: 's1', intent: 'i', skill_id: 'data.source.file.sample-shape', timestamp: BigInt(2), path: '/p2', preview: 'p2' },
+		{ id: 's1:3:code2', embedding: vec(3), session_id: 's1', intent: 'i', skill_id: 'code.source.grep', timestamp: BigInt(3), path: '/p3', preview: 'p3' },
+	]);
+	const codeOnly = await listArtifactsForSession({ sessionId: 's1', skillIdPrefix: 'code.' });
+	assert.equal(codeOnly.length, 2);
+	assert.ok(codeOnly.every(r => r.skill_id.startsWith('code.')));
+});
+
+test('listArtifactsForSession honours afterTimestamp lower bound (exclusive)', async () => {
+	await upsertArtifactVecBatch([
+		{ id: 's1:100:a', embedding: vec(1), session_id: 's1', intent: 'i', skill_id: 'a', timestamp: BigInt(100), path: '/p', preview: 'p' },
+		{ id: 's1:200:b', embedding: vec(2), session_id: 's1', intent: 'i', skill_id: 'b', timestamp: BigInt(200), path: '/p', preview: 'p' },
+		{ id: 's1:300:c', embedding: vec(3), session_id: 's1', intent: 'i', skill_id: 'c', timestamp: BigInt(300), path: '/p', preview: 'p' },
+	]);
+	const recent = await listArtifactsForSession({ sessionId: 's1', afterTimestamp: BigInt(150) });
+	assert.equal(recent.length, 2);
+	assert.ok(recent.every(r => r.timestamp > BigInt(150)));
+});
+
+test('listArtifactsForSession returns [] for empty sessionId', async () => {
+	assert.deepEqual(await listArtifactsForSession({ sessionId: '' }), []);
+});
+
+test('listArtifactsForSession defaults summary to empty string for rows without one', async () => {
+	await upsertArtifactVec({
+		id:         's1:1:no-summary',
+		embedding:  vec(1),
+		session_id: 's1',
+		intent:     'i',
+		skill_id:   'shared.fs.list-files',
+		timestamp:  BigInt(1),
+		path:       '/p',
+		preview:    'preview',
+		// summary omitted on purpose
+	});
+	const rows = await listArtifactsForSession({ sessionId: 's1' });
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0]!.summary, '');
 });
 
 test('queryArtifactVec results carry the summary field', async () => {
