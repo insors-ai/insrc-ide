@@ -73,7 +73,7 @@ const sharedFsPeekSkill: Skill<PeekInput, PeekOutput> = {
 		'READMEs, CSV headers, log snippets. NOT for code source -- the entity ' +
 		'graph has typed views on top of source files.',
 	family: 'source-introspection',
-	owner: 'code-analyzer',
+	owner: 'shared',
 	version: 1,
 	inputs: {
 		type: 'object',

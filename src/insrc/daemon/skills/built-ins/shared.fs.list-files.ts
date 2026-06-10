@@ -91,7 +91,7 @@ const sharedFsListFilesSkill: Skill<ListFilesInput, ListFilesOutput> = {
 		'.git / build dirs by default. Use this when the question is ' +
 		'"what files exist in directory X" -- e.g. enumerating JSON test fixtures.',
 	family: 'source-introspection',
-	owner: 'code-analyzer',
+	owner: 'shared',
 	version: 1,
 	inputs: {
 		type: 'object',
