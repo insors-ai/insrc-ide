@@ -40,6 +40,24 @@ export interface ArtifactVecRow {
 	timestamp:  bigint;
 	path:       string;
 	preview:    string;
+	/**
+	 * Goal-aware claim-shaped summary (Phase 1 of
+	 * `plans/section-flow-architecture-redesign.md`). Authored by the
+	 * cycle-review / decide-next-step cloud turn AFTER the artifact
+	 * was spilled -- so spill-time callers leave this empty (default
+	 * `''`) and a later `updateArtifactSummary(id, summary)` call
+	 * writes the reviewer-emitted value.
+	 *
+	 * When non-empty, contains the 128-token claim-shape PLUS zero
+	 * or more closure markers from the fixed vocabulary:
+	 *   `CLOSES gap-<id> fully`
+	 *   `PARTIALLY supports gap-<id>`
+	 * Phase 5's convergence detector scans the markers mechanically.
+	 *
+	 * Optional on the type so existing call-sites (spill-writer) stay
+	 * unchanged; defaults to `''` when omitted.
+	 */
+	summary?:   string;
 }
 
 export interface ArtifactVecHit {
@@ -50,6 +68,8 @@ export interface ArtifactVecHit {
 	timestamp:  bigint;
 	path:       string;
 	preview:    string;
+	/** Goal-aware summary; empty string when no reviewer summary has been emitted yet. */
+	summary:    string;
 	distance:   number;
 }
 
@@ -67,6 +87,7 @@ async function getArtifactVecTable(): Promise<lancedb.Table> {
 		timestamp:  BigInt(0),
 		path:       '',
 		preview:    '',
+		summary:    '',
 	};
 	_tableCache = await openOrCreateTable(conn, TABLE, () => [seed]);
 	return _tableCache;
@@ -99,7 +120,36 @@ export async function upsertArtifactVecBatch(rows: readonly ArtifactVecRow[]): P
 			timestamp:  r.timestamp,
 			path:       r.path,
 			preview:    r.preview,
+			summary:    r.summary ?? '',
 		})));
+}
+
+/**
+ * Update ONLY the `summary` column on an existing artifact_vec row.
+ *
+ * Phase 1 of `plans/section-flow-architecture-redesign.md`: the
+ * goal-aware summary is reviewer-authored AFTER the spill happens,
+ * so callers (today: the cycle-review consumer in the section-flow
+ * orchestrator) need a separate UPDATE path that doesn't disturb
+ * the embedding / preview / timestamp the spill-writer wrote
+ * earlier.
+ *
+ * Soft-fails when the id doesn't exist (returns false). The
+ * orchestrator's structural-fallback path handles that case by
+ * keeping the artifact reachable without a summary.
+ */
+export async function updateArtifactSummary(id: string, summary: string): Promise<boolean> {
+	if (id === '' || id === '_seed_artifact_vec') return false;
+	const existing = await getArtifactById(id);
+	if (existing === null) return false;
+	const table = await getArtifactVecTable();
+	// Lance's update API takes a where clause + a values map. The other
+	// columns stay untouched -- only `summary` is set.
+	await table.update({
+		where: `id = '${escapeLanceString(id)}'`,
+		values: { summary },
+	});
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +195,7 @@ export async function queryArtifactVec(
 		timestamp:  toBigInt(r['timestamp']),
 		path:       r['path']       as string,
 		preview:    r['preview']    as string,
+		summary:    (r['summary'] as string | undefined) ?? '',
 		distance:   Number(r['_distance']),
 	}));
 }
@@ -172,6 +223,7 @@ export async function getArtifactById(id: string): Promise<ArtifactVecHit | null
 		timestamp:  toBigInt(r['timestamp']),
 		path:       r['path']       as string,
 		preview:    r['preview']    as string,
+		summary:    (r['summary'] as string | undefined) ?? '',
 		distance:   0,
 	};
 }

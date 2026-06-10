@@ -18,6 +18,7 @@ import {
 	queryArtifactVec,
 	getArtifactById,
 	deleteArtifactsForSession,
+	updateArtifactSummary,
 	_resetArtifactVecCache,
 } from '../artifact-vec.js';
 import { loadConfig } from '../../../agent/config.js';
@@ -131,4 +132,94 @@ test('returns [] for empty query / empty session / k=0', async () => {
 test('deleteArtifactsForSession on empty session returns 0 cleanly', async () => {
 	const removed = await deleteArtifactsForSession('never-existed');
 	assert.equal(removed, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1 of plans/section-flow-architecture-redesign.md:
+// goal-aware summary column + updateArtifactSummary writer
+// ---------------------------------------------------------------------------
+
+test('default summary on a freshly-spilled row is empty string', async () => {
+	await upsertArtifactVec({
+		id:         's1:1:fresh',
+		embedding:  vec(1),
+		session_id: 's1',
+		intent:     'data-analysis',
+		skill_id:   'data.source.file.sample-shape',
+		timestamp:  BigInt(1),
+		path:       '/tmp/p',
+		preview:    'preview text',
+		// `summary` intentionally omitted so the default kicks in.
+	});
+	const row = await getArtifactById('s1:1:fresh');
+	assert.notEqual(row, null);
+	assert.equal(row!.summary, '');
+});
+
+test('upsertArtifactVec persists explicit summary verbatim', async () => {
+	await upsertArtifactVec({
+		id:         's1:2:with-summary',
+		embedding:  vec(2),
+		session_id: 's1',
+		intent:     'data-analysis',
+		skill_id:   'shared.fs.list-files',
+		timestamp:  BigInt(2),
+		path:       '/tmp/p2',
+		preview:    'preview',
+		summary:    '25 JSON file paths under test/integration/data/BB/GRN; CLOSES gap "enumerate-grn-json-fixtures" fully',
+	});
+	const row = await getArtifactById('s1:2:with-summary');
+	assert.match(row!.summary, /CLOSES gap "enumerate-grn-json-fixtures" fully/);
+});
+
+test('updateArtifactSummary overwrites only the summary column', async () => {
+	await upsertArtifactVec({
+		id:         's1:3:to-update',
+		embedding:  vec(3),
+		session_id: 's1',
+		intent:     'data-analysis',
+		skill_id:   'code.class.extract-fields',
+		timestamp:  BigInt(3),
+		path:       '/tmp/p3',
+		preview:    'preview-original',
+	});
+	const ok = await updateArtifactSummary(
+		's1:3:to-update',
+		'INGRN class at .../grn.py:40-207; 21 fields; CLOSES "ingrn-fields" fully',
+	);
+	assert.equal(ok, true);
+	const row = await getArtifactById('s1:3:to-update');
+	assert.match(row!.summary, /21 fields; CLOSES "ingrn-fields" fully/);
+	// Other columns must be untouched.
+	assert.equal(row!.preview,   'preview-original');
+	assert.equal(row!.path,      '/tmp/p3');
+	assert.equal(row!.timestamp, BigInt(3));
+	assert.equal(row!.skill_id,  'code.class.extract-fields');
+});
+
+test('updateArtifactSummary returns false for unknown id (soft-fail)', async () => {
+	const ok = await updateArtifactSummary('does-not-exist', 'whatever');
+	assert.equal(ok, false);
+});
+
+test('updateArtifactSummary refuses empty id + the seed sentinel', async () => {
+	assert.equal(await updateArtifactSummary('',                    'x'), false);
+	assert.equal(await updateArtifactSummary('_seed_artifact_vec',  'x'), false);
+});
+
+test('queryArtifactVec results carry the summary field', async () => {
+	await upsertArtifactVec({
+		id:         's1:4:queryable',
+		embedding:  vec(4),
+		session_id: 's1',
+		intent:     'data-analysis',
+		skill_id:   'shared.fs.peek',
+		timestamp:  BigInt(4),
+		path:       '/tmp/p4',
+		preview:    'preview',
+		summary:    'PARTIALLY supports "fixture-shape" gap',
+	});
+	const hits = await queryArtifactVec(Array.from(vec(4)), { sessionId: 's1', k: 5 });
+	assert.equal(hits.length, 1);
+	assert.equal(hits[0]!.summary, 'PARTIALLY supports "fixture-shape" gap');
 });
