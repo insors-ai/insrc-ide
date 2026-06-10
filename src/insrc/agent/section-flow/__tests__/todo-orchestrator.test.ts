@@ -40,7 +40,8 @@ import {
 import type { DiscoveryStep } from '../../content-gen/discovery-plan.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
 import type { TodoSpec } from '../types.js';
-import type { MemoryShapeBundle } from '../../working-memory/index.js';
+import type { CloudMemoryView } from '../../working-memory/index.js';
+import { legacyBundleToCloudView } from '../../working-memory/index.js';
 import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
 import type { ExecuteLeaf } from '../leaf-executor.js';
 
@@ -84,8 +85,10 @@ function scriptedProvider(responses: readonly (string | Error)[]): { provider: L
 function makeTodo(): TodoSpec {
 	return { id: 'todo-x', objective: 'map GRN JSON to INGRN class', origin: 'initial' };
 }
-function makeMemory(): MemoryShapeBundle {
-	return { system: '', summary: 'INGRN at insors/.../grn.py', recent: '', semantic: '', code: '' };
+function makeMemory(): CloudMemoryView {
+	return legacyBundleToCloudView({
+		system: '', summary: 'INGRN at insors/.../grn.py', recent: '', semantic: '', code: '',
+	});
 }
 function makeCatalog(): readonly CatalogSkill[] {
 	return [

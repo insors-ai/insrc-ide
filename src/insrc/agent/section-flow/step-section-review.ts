@@ -31,7 +31,7 @@
  */
 
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
-import type { MemoryShapeBundle } from '../working-memory/index.js';
+import type { CloudMemoryView } from '../working-memory/index.js';
 import type { WorkingMemoryFindings } from '../working-memory/types.js';
 import type { TodoSpec } from './types.js';
 import { getLogger } from '../../shared/logger.js';
@@ -61,7 +61,7 @@ const MAX_REVISE_TOKENS  = 6144;
 
 export interface SectionReviewInput {
 	readonly todo:        TodoSpec;
-	readonly memory:      MemoryShapeBundle;
+	readonly memory:      CloudMemoryView;
 	/** Candidate section markdown (assembly step's output). */
 	readonly candidate:   string;
 	readonly findings:    WorkingMemoryFindings;

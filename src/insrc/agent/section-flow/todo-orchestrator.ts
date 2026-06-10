@@ -50,7 +50,8 @@
  */
 
 import type { LLMProvider } from '../../shared/types.js';
-import type { LocalMemoryView, MemoryShapeBundle } from '../working-memory/index.js';
+import type { CloudMemoryView, LocalMemoryView } from '../working-memory/index.js';
+import { renderFactGaps } from '../prompts/composers/fact-gaps.js';
 import { renderToc } from '../prompts/composers/toc.js';
 import { buildToc } from '../artifacts/toc-builder.js';
 import type {
@@ -94,7 +95,7 @@ const DEFAULT_MAX_RECYCLES = 1;
 
 export interface L2FallbackInput {
 	readonly todo:    TodoSpec;
-	readonly memory:  MemoryShapeBundle;
+	readonly memory:  CloudMemoryView;
 	/** Why the orchestrator fell back; useful as L2 prompt context. */
 	readonly reason:  string;
 }
@@ -107,7 +108,20 @@ export type L2Fallback = (input: L2FallbackInput) => Promise<string>;
 
 export interface TodoOrchestratorInput {
 	readonly todo:        TodoSpec;
-	readonly memory:      MemoryShapeBundle;
+	/**
+	 * Cloud-tier memory view (Phase 2 batch 2b + Phase 6 batch 6.1).
+	 * The orchestrator threads this through every cloud-tier prompt
+	 * (fact-gap, sketch, decide-next-step, synth, section-review).
+	 * Each prompt renders only what it needs; the unused fields cost
+	 * nothing.
+	 *
+	 * Callers wrap their legacy `MemoryShapeBundle` via
+	 * `legacyBundleToCloudView(bundle)` -- which leaves `toc` /
+	 * `factLedger` empty. The orchestrator fills `factLedger` (from
+	 * the just-completed fact-gap analysis) into the views threaded
+	 * to sketch + decide-next-step + synth.
+	 */
+	readonly memory:      CloudMemoryView;
 	readonly provider:    LLMProvider;
 	readonly executeLeaf: ExecuteLeaf;
 	readonly l2Fallback:  L2Fallback;
@@ -263,11 +277,23 @@ export async function runTodoOrchestrator(
 		const gapIdSet = new Set(gaps.map(g => g.id));
 		const gapIdList = gaps.map(g => g.id);
 
+		// Cloud-tier memory view threaded into post-fact-gap stages. Phase 6
+		// batch 6.1: `factLedger` carries the just-rendered gap-facts block
+		// so sketch / decide-next-step / synth all see the SAME coverage
+		// picture the gap-analysis emitted. TOC stays empty here -- each
+		// decide-next-step iteration builds its own TOC at the boundary.
+		const memoryWithLedger: CloudMemoryView = {
+			...input.memory,
+			factLedger: renderFactGaps(gaps),
+		};
+
 		// Stage 1: sketch.
 		let sketch: readonly DiscoveryStep[];
 		try {
 			const sketchResult = await runSketch({
-				todo: input.todo, gapFacts: gaps, catalog: input.catalog, provider: input.provider,
+				todo: input.todo, gapFacts: gaps, catalog: input.catalog,
+				memory: memoryWithLedger,
+				provider: input.provider,
 			});
 			sketch = sketchResult.steps;
 		} catch (err) {
@@ -295,12 +321,16 @@ export async function runTodoOrchestrator(
 			// 2a. Build the TOC for THIS decide turn.
 			const tocText = await safeRenderToc(input.sessionId);
 
-			// 2b. Cloud decide-next-step.
+			// 2b. Cloud decide-next-step. The cloud view is rebuilt each
+			//     iteration with the freshly-rendered TOC so the prompt
+			//     sees the SAME artifact index the decide-next-step
+			//     writer renders directly below.
 			let decision: DecideNextStepResult;
 			try {
 				decision = await runDecideNextStep({
 					todo: input.todo, gapFacts: gaps, sketch, catalog: input.catalog,
 					toc: tocText, lastStep,
+					memory: { ...memoryWithLedger, toc: tocText },
 					provider: input.provider,
 				});
 			} catch (err) {
@@ -471,7 +501,7 @@ export async function runTodoOrchestrator(
 		let synth;
 		try {
 			synth = await synthesizeSectionFromLedger({
-				todo: input.todo, memory: input.memory, gapAnalysis: analysis.analysis,
+				todo: input.todo, memory: memoryWithLedger, gapAnalysis: analysis.analysis,
 				retainedLedger, summariesByStep, priorAttempts,
 				provider: input.provider,
 			});
@@ -485,7 +515,7 @@ export async function runTodoOrchestrator(
 
 		// Stage 7: section review.
 		const reviewResult = await reviewSection({
-			todo: input.todo, memory: input.memory,
+			todo: input.todo, memory: memoryWithLedger,
 			candidate: synth.markdown,
 			findings:  ledgerToFindings(retainedLedger, summariesByStep),
 			provider:  input.provider,

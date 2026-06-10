@@ -27,12 +27,12 @@ import {
 	runFactGapAnalysis,
 	_validateForTest               as validate,
 	_coerceRequiredFactForTest     as coerceRequiredFact,
-	_renderCatalogSummaryForTest   as renderCatalogSummary,
 } from '../step-fact-gap-analysis.js';
 import { isTrivialFastPath } from '../fact-gap-types.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
 import type { TodoSpec } from '../types.js';
-import type { MemoryShapeBundle } from '../../working-memory/index.js';
+import type { CloudMemoryView } from '../../working-memory/index.js';
+import { legacyBundleToCloudView } from '../../working-memory/index.js';
 import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
 
@@ -81,14 +81,14 @@ function makeTodo(overrides: Partial<TodoSpec> = {}): TodoSpec {
 	};
 }
 
-function makeMemory(overrides: Partial<MemoryShapeBundle> = {}): MemoryShapeBundle {
-	return {
+function makeMemory(overrides: Partial<CloudMemoryView> = {}): CloudMemoryView {
+	return legacyBundleToCloudView({
 		system:   overrides.system   ?? 'You analyze data structures against schema definitions.',
 		summary:  overrides.summary  ?? 'Investigation comparing JSON fixtures to INGRN class.',
 		recent:   overrides.recent   ?? '- prior todo found INGRN file at insors/.../grn.py',
 		semantic: overrides.semantic ?? '',
 		code:     overrides.code     ?? '',
-	};
+	});
 }
 
 function makeCatalog(): readonly CatalogSkill[] {
@@ -326,21 +326,8 @@ test('coerceRequiredFact: filters unknown suggested skills, keeps known when at 
 	}
 });
 
-// ---------------------------------------------------------------------------
-// renderCatalogSummary
-// ---------------------------------------------------------------------------
-
-test('renderCatalogSummary: empty catalog -> placeholder header', () => {
-	assert.match(renderCatalogSummary([]), /SKILL CATALOG \(empty\)/);
-});
-
-test('renderCatalogSummary: lists skills with truncated descriptions', () => {
-	const longDesc = 'x'.repeat(200);
-	const out = renderCatalogSummary([
-		{ id: 'a.b', description: longDesc, family: 'f', owner: 'o', inputs: {}, outputPaths: [] },
-	]);
-	assert.match(out, /^## SKILL CATALOG \(1 skills available\)/);
-	assert.match(out, /`a\.b`/);
-	// Description truncated to 120 chars.
-	assert.ok(out.length < 200);
-});
+// renderCatalogSummary moved to `agent/prompts/writers/fact-gap-analysis.ts`
+// during Phase 6 batch 6.1 (the caller's Phase 0 cruft was deleted along
+// with the CloudMemoryView migration). Catalog rendering is exercised
+// transitively via the runFactGapAnalysis tests above and the writer-side
+// snapshot test in `prompts/__tests__/`.

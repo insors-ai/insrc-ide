@@ -36,7 +36,7 @@
  */
 
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
-import type { MemoryShapeBundle } from '../working-memory/index.js';
+import type { CloudMemoryView } from '../working-memory/index.js';
 import type { StepOutput } from '../content-gen/discovery-plan.js';
 import type { FactGapAnalysis, RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
@@ -52,7 +52,7 @@ const log = getLogger('section-flow:synthesis');
 
 export interface SynthesisInput {
 	readonly todo:            TodoSpec;
-	readonly memory:          MemoryShapeBundle;
+	readonly memory:          CloudMemoryView;
 	readonly gapAnalysis:     FactGapAnalysis;
 	readonly retainedLedger:  readonly StepOutput[];
 	/**

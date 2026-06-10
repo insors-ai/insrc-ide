@@ -53,6 +53,7 @@ import {
 	incrementalUpdate,
 	shouldColdRebuild,
 	extractBullets,
+	legacyBundleToCloudView,
 	type MemoryShapeBundle,
 	type WorkingMemoryStore,
 	type BulletCache,
@@ -280,7 +281,12 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 
 		const todoResult = await runTodoOrchestrator({
 			todo,
-			memory:      memory.bundle,
+			// Phase 6 batch 6.1: wrap the legacy 5-field bundle into a
+			// CloudMemoryView with empty toc + factLedger. The
+			// orchestrator fills `factLedger` from the just-completed
+			// fact-gap analysis before threading to sketch + decide +
+			// synth.
+			memory:      legacyBundleToCloudView(memory.bundle),
 			provider:    input.provider,
 			executeLeaf: input.executeLeaf,
 			l2Fallback:  input.l2Fallback,
@@ -349,7 +355,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			if (!sectionIds.includes(e.todoId)) { continue; }
 			const sectionReview = await reviewSection({
 				todo:      { id: e.todoId, objective: e.objective, origin: e.origin },
-				memory:    priorBundle ?? { system: '', summary: '', recent: '', semantic: '', code: '' },
+				memory:    legacyBundleToCloudView(priorBundle ?? { system: '', summary: '', recent: '', semantic: '', code: '' }),
 				candidate: e.detail,
 				findings:  e.findings,
 				provider:  input.provider,
@@ -396,7 +402,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			});
 			const todoResult = await runTodoOrchestrator({
 				todo,
-				memory:      memory.bundle,
+				memory:      legacyBundleToCloudView(memory.bundle),
 				provider:    input.provider,
 				executeLeaf: input.executeLeaf,
 				l2Fallback:  input.l2Fallback,

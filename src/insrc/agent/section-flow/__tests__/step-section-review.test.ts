@@ -32,7 +32,8 @@ import {
 	SECTION_REVIEW_CYCLE_CAP_VALUE,
 } from '../step-section-review.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
-import type { MemoryShapeBundle } from '../../working-memory/index.js';
+import type { CloudMemoryView } from '../../working-memory/index.js';
+import { legacyBundleToCloudView } from '../../working-memory/index.js';
 import type { WorkingMemoryFindings } from '../../working-memory/types.js';
 import type { TodoSpec } from '../types.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
@@ -72,7 +73,7 @@ function scriptedProvider(responses: readonly string[]): { provider: LLMProvider
 }
 
 const todo: TodoSpec = { id: 'todo-x', objective: 'Investigate X', origin: 'initial' };
-const memory: MemoryShapeBundle = { system: '', summary: '', recent: '', semantic: '', code: '' };
+const memory: CloudMemoryView = legacyBundleToCloudView({ system: '', summary: '', recent: '', semantic: '', code: '' });
 const findings: WorkingMemoryFindings = {
 	perRoot: [
 		{ rootId: 'discover', verdict: 'accept', cyclesConsumed: 0, exhausted: false, content: 'discover findings' },

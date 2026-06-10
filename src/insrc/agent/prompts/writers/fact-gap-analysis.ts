@@ -12,13 +12,23 @@
 
 import type { LLMMessage } from '../../../shared/types.js';
 import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
-import type { MemoryShapeBundle } from '../../working-memory/index.js';
+import type { CloudMemoryView } from '../../working-memory/index.js';
 import type { TodoSpec } from '../../section-flow/types.js';
 import type { PromptWriter } from '../types.js';
 
 export interface FactGapAnalysisWriterInput {
 	readonly todo:               TodoSpec;
-	readonly memory:             MemoryShapeBundle;
+	/**
+	 * Cloud-tier memory view. The renderer reads the five legacy
+	 * fields (system / summary / recent / semantic / code) verbatim
+	 * AND -- when present -- a closing `FACT LEDGER` block sourced
+	 * from `view.factLedger`. The artifact TOC is intentionally NOT
+	 * rendered here: fact-gap analysis runs BEFORE any step has
+	 * executed for this TODO, so the TOC is either empty or carries
+	 * only cross-TODO artifacts the analyzer can't reason about
+	 * without distracting noise.
+	 */
+	readonly memory:             CloudMemoryView;
 	readonly catalog:            readonly CatalogSkill[];
 	readonly isRetry:            boolean;
 	readonly priorFailureReason: string | undefined;
@@ -129,13 +139,14 @@ function buildAnalyzerUser(input: FactGapAnalysisWriterInput): string {
 	].join('\n');
 }
 
-function renderMemory(memory: MemoryShapeBundle): string {
+function renderMemory(memory: CloudMemoryView): string {
 	const lines: string[] = [];
-	if (memory.system.length > 0)   { lines.push('### system\n' + memory.system); }
-	if (memory.summary.length > 0)  { lines.push('### summary\n' + memory.summary); }
-	if (memory.recent.length > 0)   { lines.push('### recent\n' + memory.recent); }
-	if (memory.semantic.length > 0) { lines.push('### semantic\n' + memory.semantic); }
-	if (memory.code.length > 0)     { lines.push('### code\n' + memory.code); }
+	if (memory.system.length > 0)     { lines.push('### system\n' + memory.system); }
+	if (memory.summary.length > 0)    { lines.push('### summary\n' + memory.summary); }
+	if (memory.recent.length > 0)     { lines.push('### recent\n' + memory.recent); }
+	if (memory.semantic.length > 0)   { lines.push('### semantic\n' + memory.semantic); }
+	if (memory.code.length > 0)       { lines.push('### code\n' + memory.code); }
+	if (memory.factLedger.length > 0) { lines.push('### factLedger\n' + memory.factLedger); }
 	return lines.length > 0 ? lines.join('\n\n') : '(empty -- this is the first TODO of the report)';
 }
 
