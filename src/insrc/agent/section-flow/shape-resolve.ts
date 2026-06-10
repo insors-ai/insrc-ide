@@ -34,6 +34,8 @@
 import type { LLMMessage, LLMProvider, ToolDefinition } from '../../shared/types.js';
 import { getSkill } from '../../daemon/skills/index.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type { ShapeResolverWriterInput } from '../prompts/writers/shape-resolver.js';
 
 const log = getLogger('section-flow:shape-resolve');
 
@@ -153,135 +155,25 @@ function withCorrection(base: LLMMessage[], hint: string): LLMMessage[] {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt builders
+// Prompt builders -- delegated to PromptWriter
+// (see `agent/prompts/writers/shape-resolver.ts`).
+// The legacy SYSTEM_PROMPT block + buildMessages helper lived here
+// through commit e4f8ca7e41b; Phase 0 of
+// `plans/section-flow-architecture-redesign.md` lifted them into the
+// registered writer. The actual rendering is the writer's responsibility.
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = [
-	'You are the SHAPE RESOLVER for one skill invocation in a section-flow',
-	'investigation. The orchestrator has already chosen the skill; your',
-	'job is to emit a SINGLE `submit_skill_args` tool_use block whose',
-	'`input` matches the skill\'s declared input schema.',
-	'',
-	'Rules:',
-	'  - Emit EXACTLY ONE `submit_skill_args` tool_use block. No prose.',
-	'  - The `input` MUST be a JSON object satisfying the schema below.',
-	'  - Consult the schema\'s `required` array; every required key MUST',
-	'    be populated IF you can ground it (see anti-fabrication rules).',
-	'  - Pull wire data from the AVAILABLE PRIOR OUTPUTS section -- those',
-	'    are stringified results from earlier leaves in the same section.',
-	'    Reference them by id and quote the relevant fields literally.',
-	'  - When a prior output contains JSON, parse it mentally and use the',
-	'    field values directly. When it is markdown, extract the relevant',
-	'    facts as best you can.',
-	'',
-	'## ANTI-FABRICATION RULES (CRITICAL)',
-	'',
-	'  - NEVER invent identifier values. `entityId`, content hashes, file',
-	'    paths, repo roots, line numbers, and exact class / field names',
-	'    MUST appear verbatim in the AVAILABLE PRIOR OUTPUTS section.',
-	'    Do not synthesize plausible-looking hex strings. Do not use a',
-	'    class name (e.g. "INGRN") where the schema asks for a 32-char',
-	'    hex entityId. Do not invent placeholder ids like `000...001`',
-	'    or fresh hex from nowhere.',
-	'',
-	'  - Locate-first dependency: when an arg requires an entityId or any',
-	'    other lookup-derived value and no prior output supplied it, you',
-	'    are looking at a missing prerequisite, NOT an opportunity to',
-	'    guess. The right move is to OMIT the unfillable arg from your',
-	'    `input` (yes, even if it is in `required`). The orchestrator',
-	'    will detect the gap, surface a leaf failure, and re-plan to',
-	'    insert the missing locate-by-name / extract step. A hallucinated',
-	'    value contaminates the investigation more than a missing one.',
-	'',
-	'  - "Omit" means the key is ABSENT from the JSON object. Do NOT emit',
-	'    an empty string `""`, an empty array `[]`, null, "unknown",',
-	'    "TBD", or any placeholder value to satisfy the type. The',
-	'    downstream schema validator distinguishes "key missing" from',
-	'    "key present with empty value" and only the former triggers the',
-	'    correct re-plan behaviour.',
-	'',
-	'  - Structured array args (e.g. `classFields`, `dataShape`, `columns`)',
-	'    must be lifted whole from ONE prior output that ACTUALLY PRODUCED',
-	'    THAT EXACT KIND OF DATA. Critical anti-pattern: when the only',
-	'    available prior output is a JSON data shape (from',
-	'    `data.source.file.sample-shape` / `.describe`), you CANNOT use',
-	'    it as `classFields`. Class fields come from',
-	'    `code.class.extract-fields` calls; data shape comes from data',
-	'    source calls. They describe different objects. Copying a data',
-	'    shape into `classFields` -- even with matching `{name, type,',
-	'    nullable}` keys -- is the canonical fabrication bug. The JSON',
-	'    keys `grn_number`, `vendor_details`, `sku_details` are NOT',
-	'    Pydantic field names; if a `code.class.extract-fields` prior',
-	'    output is absent, OMIT `classFields`.',
-	'',
-	'  - On a RETRY CORRECTION asking for missing keys, populate them ONLY',
-	'    from literal prior-output values. The instruction to "populate',
-	'    every required key" never overrides the anti-fabrication rules.',
-	'',
-	'  - Empty `args: {}` is almost always wrong, BUT it is correct when',
-	'    every required key requires fabrication -- omission beats',
-	'    invention every time.',
-	'',
-	'## WORKED EXAMPLES (read carefully)',
-	'',
-	'Example A -- entityId IS in a prior output:',
-	'  Prior output `locate`: `{"entityId":"b2097ef0ba38110e005d437d6b0c8442","name":"INGRN"}`',
-	'  Schema requires `entityId` (32-hex), `scope` (optional).',
-	'  CORRECT input: `{"entityId":"b2097ef0ba38110e005d437d6b0c8442"}`',
-	'',
-	'Example B -- entityId is NOT in any prior output:',
-	'  Prior outputs contain only the class NAME "INGRN" and a file path,',
-	'  no 32-char hex entityId anywhere.',
-	'  Schema requires `entityId` (32-hex), `scope` (optional).',
-	'  CORRECT input: `{}` -- the entityId key is ABSENT.',
-	'  WRONG: `{"entityId":""}`     (empty string is still a value)',
-	'  WRONG: `{"entityId":"INGRN"}` (class name is not a hex id)',
-	'  WRONG: `{"entityId":"00000000000000000000000000000042"}` (placeholder hex)',
-	'  WRONG: `{"entityId":"deadbeefdeadbeefdeadbeefdeadbeef"}` (fresh-from-nowhere hex)',
-	'  The orchestrator will detect the missing entityId, surface a leaf',
-	'  failure, and insert a `code.entity.locate-by-name` step on re-plan.',
-	'',
-	'Example C -- classFields with no extract-fields prior output:',
-	'  Prior output `sample-shape` (from data.source.file.sample-shape):',
-	'  `[{"path":"grn_number","type":"string"}, {"path":"vendor_details","type":"object"}]`',
-	'  Schema requires `className`, `classFields`, `dataShape`.',
-	'  CORRECT input: `{"className":"INGRN","dataShape":[...lift verbatim...]}`',
-	'    -- `classFields` key is ABSENT because no code.class.extract-fields',
-	'    output exists.',
-	'  WRONG: `{"className":"INGRN","classFields":[{"name":"grn_number",...}],...}`',
-	'    -- those are JSON keys masquerading as Pydantic class fields.',
-	'  WRONG: `{"className":"INGRN","classFields":[],...}`',
-	'    -- empty array is not omission.',
-].join('\n');
-
 function buildMessages(input: ShapeResolveInput, skillDescription: string): LLMMessage[] {
-	const priorBlock = formatPriorOutputs(input.priorOutputs);
-	const contextBlock = formatContextBag(input.contextBag);
-
-	const user = [
-		'## USER QUESTION',
-		input.userQuestion.trim(),
-		'',
-		'## LEAF OBJECTIVE (what this skill invocation must accomplish)',
-		input.objective.trim(),
-		'',
-		`## SKILL TO INVOKE: \`${input.skillId}\``,
-		`Description: ${skillDescription}`,
-		'',
-		'## AVAILABLE PRIOR OUTPUTS',
-		priorBlock,
-		'',
-		'## SESSION CONTEXT',
-		contextBlock,
-		'',
-		'## TASK',
-		`Emit one \`${SUBMIT_ARGS_TOOL}\` tool_use block now. The \`input\` object MUST satisfy the skill schema (the tool definition above carries it verbatim). Pull wire data from the prior outputs as needed.`,
-	].join('\n');
-
-	return [
-		{ role: 'system', content: SYSTEM_PROMPT },
-		{ role: 'user',   content: user },
-	];
+	const writer = getPromptRegistry().get<ShapeResolverWriterInput, readonly LLMMessage[]>('shape-resolver');
+	const messages = writer.build({
+		skillId:          input.skillId,
+		skillDescription,
+		objective:        input.objective,
+		userQuestion:     input.userQuestion,
+		priorOutputs:     input.priorOutputs,
+		contextBag:       input.contextBag,
+	});
+	return [...messages];
 }
 
 const PRIOR_OUTPUT_PREVIEW_CHARS = 1500;

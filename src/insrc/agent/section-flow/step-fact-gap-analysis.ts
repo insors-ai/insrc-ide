@@ -36,6 +36,8 @@ import type { TodoSpec } from './types.js';
 import type { FactGapAnalysis, RequiredFact } from './fact-gap-types.js';
 import { FACT_GAP_ANALYSIS_SCHEMA } from './fact-gap-types.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type { FactGapAnalysisWriterInput } from '../prompts/writers/fact-gap-analysis.js';
 
 const log = getLogger('section-flow:fact-gap-analysis');
 
@@ -116,10 +118,14 @@ async function callAnalyzer(
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
 ): Promise<AnalyzerRaw> {
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: ANALYZER_ROLE },
-		{ role: 'user',   content: buildAnalyzerUser(input, isRetry, priorFailureReason) },
-	];
+	const writer = getPromptRegistry().get<FactGapAnalysisWriterInput, readonly LLMMessage[]>('fact-gap-analysis');
+	const messages = [...writer.build({
+		todo:               input.todo,
+		memory:             input.memory,
+		catalog:            input.catalog,
+		isRetry,
+		priorFailureReason,
+	})];
 	const response = await input.provider.complete(messages, {
 		maxTokens:       MAX_ANALYSIS_TOKENS,
 		temperature:     0,

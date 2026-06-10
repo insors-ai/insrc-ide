@@ -36,6 +36,16 @@ import {
 import { registerSkill, _resetSkillRegistryForTests } from '../../../daemon/skills/registry.js';
 import type { Skill } from '../../../daemon/skills/types.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse, ToolCall } from '../../../shared/types.js';
+import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
+
+// Phase 0 of plans/section-flow-architecture-redesign.md: shape-resolver
+// now resolves through the PromptRegistry. Tests reset the registry +
+// register all writers in their setup so isolated test runs work the
+// same as the daemon's boot path.
+test.beforeEach(() => {
+	_resetPromptRegistryForTest();
+	registerAllPromptWriters();
+});
 
 // ---------------------------------------------------------------------------
 // Test fixtures

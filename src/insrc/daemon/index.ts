@@ -260,6 +260,14 @@ async function main(): Promise<void> {
 	const { registerAllSkills } = await import('./skills/index.js');
 	registerAllSkills();
 
+	// Phase 0 of plans/section-flow-architecture-redesign.md: every
+	// section-flow LLM prompt is built by a registered PromptWriter.
+	// Registration mirrors the skill-catalog pattern -- one entrypoint,
+	// called once at daemon boot, idempotent only across fresh
+	// registries (tests reset between cases).
+	const { registerAllPromptWriters } = await import('../agent/prompts/index.js');
+	registerAllPromptWriters();
+
 	// Shared session-purge pipeline. Used by `agent.discard`,
 	// `session.delete`, and `session.deleteBulk` so they don't drift.
 	// plans/session-delete.md Phase B.

@@ -34,6 +34,15 @@ import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../..
 import type { TodoSpec } from '../types.js';
 import type { MemoryShapeBundle } from '../../working-memory/index.js';
 import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
+import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
+
+// Phase 0 of plans/section-flow-architecture-redesign.md: fact-gap-analysis
+// now resolves through the PromptRegistry. Mirror the daemon boot's
+// registration in test setup.
+test.beforeEach(() => {
+	_resetPromptRegistryForTest();
+	registerAllPromptWriters();
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
