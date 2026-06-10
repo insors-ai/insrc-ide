@@ -25,10 +25,10 @@ import {
 	runCycleReview,
 	_validateForTest             as validate,
 	_coerceNewStepForTest        as coerceNewStep,
-	_renderCycleOutputsForTest   as renderCycleOutputs,
 	_extractStepSummariesForTest as extractStepSummaries,
 	_scanClosureClaimsForTest    as scanClosureClaims,
 } from '../step-cycle-review.js';
+import { _renderCycleOutputsForTest as renderCycleOutputs } from '../../prompts/writers/cycle-review.js';
 import { emptyCycleMemory } from '../../content-gen/discovery-plan.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
 import type { TodoSpec } from '../types.js';
@@ -90,13 +90,13 @@ const STEP_2: DiscoveryStep = {
 	targetsCriteria: [1],
 };
 
-function output(stepId: string, status: 'ok' | 'partial' | 'failed' = 'ok'): StepOutput {
-	return {
-		stepId, status,
-		facts: ['a real fact'],
-		citations: [{ path: '/repo/foo.ts', startLine: 1, endLine: 20 }],
-		durationMs: 100,
-	};
+function output(
+	stepId:   string,
+	status:   'ok' | 'partial' | 'failed' = 'ok',
+	rawOutputs: Readonly<Record<string, string>> = { 's1.a': 'a real raw skill output line' },
+	artifactIds: Readonly<Record<string, string>> = {},
+): StepOutput {
+	return { stepId, status, rawOutputs, artifactIds, durationMs: 100 };
 }
 
 const KEEP_ONLY_TERMINATE_JSON = JSON.stringify({
@@ -241,23 +241,23 @@ test('runCycleReview: cycle-2 prompt renders cycleMemory + dedupe rule', async (
 	assert.match(user, /DO NOT re-emit/);
 });
 
-test('runCycleReview: cycle outputs render facts + status into prompt', async () => {
+test('runCycleReview: cycle outputs render raw skill outputs + status into prompt', async () => {
 	const { provider, calls } = scriptedProvider([KEEP_ONLY_TERMINATE_JSON]);
 	await runCycleReview({
 		todo: TODO, gapFacts: GAP_FACTS,
 		stepsThisCycle: [STEP_1, STEP_2],
 		cycleOutputs: [
-			{ stepId: 'step-1', status: 'ok',     facts: ['real fact A'], citations: [], durationMs: 100 },
-			{ stepId: 'step-2', status: 'failed', facts: [],              citations: [], durationMs: 50  },
+			{ stepId: 'step-1', status: 'ok',     rawOutputs: { 's1.a': 'raw text proving INGRN exists' }, artifactIds: {}, durationMs: 100 },
+			{ stepId: 'step-2', status: 'failed', rawOutputs: { 's2.a': '' },                             artifactIds: {}, durationMs: 50  },
 		],
 		cycleMemory: emptyCycleMemory(['INGRN field list', 'JSON shape']),
 		cycle: 1, catalog: CATALOG, provider,
 	});
 	const user = calls[0]!.messages[1]!.content;
 	assert.match(user, /### step-1 \(status: ok\) -- locate INGRN/);
-	assert.match(user, /real fact A/);
+	assert.match(user, /raw text proving INGRN exists/);
 	assert.match(user, /### step-2 \(status: failed\)/);
-	assert.match(user, /facts: \(none\)/);
+	assert.match(user, /\(empty\)/);
 });
 
 // ---------------------------------------------------------------------------
@@ -294,12 +294,21 @@ test('renderCycleOutputs: empty -> placeholder', () => {
 	assert.match(renderCycleOutputs([], []), /no outputs/);
 });
 
-test('renderCycleOutputs: includes citations count when present', () => {
+test('renderCycleOutputs: per-call raw output rendered under each step', () => {
 	const out = renderCycleOutputs(
-		[{ stepId: 'step-1', status: 'ok', facts: ['f'], citations: [{ path: 'a' }, { path: 'b' }], durationMs: 10 }],
+		[{ stepId: 'step-1', status: 'ok', rawOutputs: { 's1.a': '{"located": true}' }, artifactIds: {}, durationMs: 10 }],
 		[STEP_1],
 	);
-	assert.match(out, /citations: 2/);
+	assert.match(out, /s1\.a \(`code\.entity\.locate-by-name`\)/);
+	assert.match(out, /\{"located": true\}/);
+});
+
+test('renderCycleOutputs: empty raw output renders as `(empty)`', () => {
+	const out = renderCycleOutputs(
+		[{ stepId: 'step-1', status: 'failed', rawOutputs: { 's1.a': '' }, artifactIds: {}, durationMs: 10 }],
+		[STEP_1],
+	);
+	assert.match(out, /\(empty\)/);
 });
 
 // ---------------------------------------------------------------------------
@@ -482,9 +491,9 @@ test('runCycleReview: v2 prompt teaches stepSummaries shape + closure vocabulary
 	assert.match(user, /PARTIALLY supports/);
 	assert.match(user, /OFF-TOPIC/);
 	// Per-call breakdown so the LLM knows valid (stepId, callId) tuples
-	assert.match(user, /skill calls:/);
-	assert.match(user, /s1\.a/);
-	assert.match(user, /s2\.a/);
+	assert.match(user, /THIS CYCLE'S RAW SKILL OUTPUTS/);
+	assert.match(user, /- s1\.a/);
+	assert.match(user, /- s2\.a/);
 });
 
 test('runCycleReview: v2 response -> stepSummaries + closureClaims surfaced on result', async () => {

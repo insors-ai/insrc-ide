@@ -65,7 +65,7 @@ import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
 import { reviewSection } from './step-section-review.js';
 import { computeCoverage } from './cycle-memory.js';
 import { gapFacts, isTrivialFastPath, type RequiredFact } from './fact-gap-types.js';
-import { updateArtifactSummary } from '../../db/lance/artifact-vec.js';
+import { getArtifactById, updateArtifactSummary } from '../../db/lance/artifact-vec.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:todo-orchestrator');
@@ -177,17 +177,20 @@ export async function runTodoOrchestrator(
 			log.info({ todoId: input.todo.id, factCount: analysis.analysis.requiredFacts.length }, 'TODO orchestrator: trivial fast-path (all facts present)');
 			retainedLedger = [];
 			unmetGaps = [];
+			// Fast-path: empty retained ledger -> no artifact lookups needed.
+			const fastPathSummaries = new Map<string, string>();
 			// Memory carries everything; synthesize directly.
 			const synth = await synthesizeSectionFromLedger({
 				todo: input.todo, memory: input.memory, gapAnalysis: analysis.analysis,
 				retainedLedger:  [],
+				summariesByStep: fastPathSummaries,
 				cycleMemory:     emptyCycleMemory(analysis.analysis.requiredFacts.map(f => f.fact)),
 				provider:        input.provider,
 			});
 			const reviewResult = await reviewSection({
 				todo: input.todo, memory: input.memory,
 				candidate: synth.markdown,
-				findings:  ledgerToFindings([], []),
+				findings:  ledgerToFindings([], fastPathSummaries),
 				provider:  input.provider,
 			});
 			if (reviewResult.reopenRequested && recyclesConsumed < maxRecycles) {
@@ -205,6 +208,7 @@ export async function runTodoOrchestrator(
 				todo:               input.todo,
 				detail:             reviewResult.finalMarkdown,
 				retainedLedger:     [],
+				summariesByStep:    fastPathSummaries,
 				unmetGaps:          [],
 				factGapRetried:     analysis.retried,
 				sectionExhausted:   reviewResult.exhausted,
@@ -282,8 +286,7 @@ export async function runTodoOrchestrator(
 					priorOutputs: { ...priorStepOutputs, ...crossStepPriors },
 					deps: {
 						todo: input.todo, gapFacts: gaps,
-						executeLeaf:       input.executeLeaf,
-						summarizeProvider: input.provider,
+						executeLeaf: input.executeLeaf,
 					},
 				});
 				cycleOutputs.push(execRes.output);
@@ -386,12 +389,21 @@ export async function runTodoOrchestrator(
 			break;
 		}
 
+		// Resolve reviewer-emitted summaries off `artifact_vec` once for
+		// the retained ledger so Stage 6 (synthesis) and Stage 7 (section
+		// review) both see the goal-aware claim-shaped text. Falls back
+		// to a digest of the raw output when the row's summary never
+		// landed -- forward progress is never blocked on summary
+		// correctness.
+		const summariesByStep = await resolveStepSummaries(retainedLedger);
+
 		// Stage 6: synthesis.
 		let synth;
 		try {
 			synth = await synthesizeSectionFromLedger({
 				todo: input.todo, memory: input.memory, gapAnalysis: analysis.analysis,
-				retainedLedger, cycleMemory, provider: input.provider,
+				retainedLedger, summariesByStep,
+				cycleMemory, provider: input.provider,
 			});
 		} catch (err) {
 			l2Reason = `synthesis failed: ${(err as Error).message}`;
@@ -404,7 +416,7 @@ export async function runTodoOrchestrator(
 		const reviewResult = await reviewSection({
 			todo: input.todo, memory: input.memory,
 			candidate: synth.markdown,
-			findings:  ledgerToFindings(retainedLedger, stepsById ? [...stepsById.values()] : []),
+			findings:  ledgerToFindings(retainedLedger, summariesByStep),
 			provider:  input.provider,
 		});
 		if (reviewResult.reopenRequested && recyclesConsumed < maxRecycles) {
@@ -424,6 +436,7 @@ export async function runTodoOrchestrator(
 			todo:             input.todo,
 			detail:           reviewResult.finalMarkdown,
 			retainedLedger,
+			summariesByStep,
 			unmetGaps,
 			factGapRetried:   analysis.retried,
 			sectionExhausted: reviewResult.exhausted,
@@ -545,34 +558,111 @@ async function persistStepSummaries(
 	}
 }
 
+/**
+ * Cap on raw-output rendering inside the prompt-bound digest. The
+ * full payload is on disk + indexed in `artifact_vec`; the digest
+ * is just enough for the next leaf's shape-resolver to recognise
+ * what happened.
+ */
+const RAW_OUTPUT_DIGEST_CHARS = 400;
+
+/**
+ * Build the per-step digest the orchestrator threads into the NEXT
+ * step's shape-resolver via `priorStepOutputs[stepId]`. Phase 1
+ * batch 3b: no more `summarizeResult`-derived facts; emit a digest
+ * of the actual stringified skill outputs instead. Each call gets
+ * a single line: `<callId> (<truncated raw text>)`.
+ */
 function stringifyStepOutput(out: StepOutput): string {
-	if (out.facts.length === 0) {
-		return `(step ${out.stepId} returned no facts; status=${out.status})`;
+	const callIds = Object.keys(out.rawOutputs);
+	if (callIds.length === 0) {
+		return `(step ${out.stepId} ran no skill calls; status=${out.status})`;
 	}
-	const lines = [`status: ${out.status}`, ...out.facts.map(f => `- ${f}`)];
-	if (out.citations.length > 0) {
-		lines.push('citations:');
-		for (const c of out.citations) {
-			const range = c.startLine !== undefined && c.endLine !== undefined
-				? `#L${c.startLine}-L${c.endLine}`
-				: (c.startLine !== undefined ? `#L${c.startLine}` : '');
-			lines.push(`- ${c.path}${range}`);
+	const lines = [`status: ${out.status}`];
+	for (const callId of callIds) {
+		const raw = (out.rawOutputs[callId] ?? '').trim().replace(/\s+/g, ' ');
+		if (raw.length === 0) {
+			lines.push(`- ${callId}: (empty)`);
+			continue;
 		}
+		const head = raw.slice(0, RAW_OUTPUT_DIGEST_CHARS);
+		const tail = raw.length > RAW_OUTPUT_DIGEST_CHARS ? '...' : '';
+		lines.push(`- ${callId}: ${head}${tail}`);
 	}
 	return lines.join('\n');
+}
+
+/**
+ * Pre-resolve the reviewer-emitted goal-aware summary for each
+ * retained step from `artifact_vec`. The cycle loop has already
+ * written summaries via `persistStepSummaries` before this runs.
+ *
+ * For each step, builds one string aggregating per-call summaries:
+ *
+ *     - <callId>: <reviewer summary>
+ *     - <callId>: <reviewer summary>
+ *
+ * Calls whose artifact summary is missing (the reviewer omitted the
+ * entry, the row's summary never landed, etc.) fall back to a
+ * digest of the raw output -- the section-review/synthesis prompt
+ * always has SOMETHING, never "(no facts)".
+ *
+ * Phase 1 batch 3b of plans/section-flow-architecture-redesign.md.
+ */
+async function resolveStepSummaries(
+	retainedLedger: readonly StepOutput[],
+): Promise<Map<string, string>> {
+	const out = new Map<string, string>();
+	for (const stepOutput of retainedLedger) {
+		const parts: string[] = [];
+		// Iterate rawOutputs (not artifactIds) so calls that didn't
+		// spill still produce a line in the aggregate. Order matches
+		// declaration order.
+		for (const callId of Object.keys(stepOutput.rawOutputs)) {
+			const artifactId = stepOutput.artifactIds[callId];
+			let summary: string | undefined;
+			if (artifactId !== undefined) {
+				try {
+					const row = await getArtifactById(artifactId);
+					const fromRow = row?.summary?.trim();
+					if (fromRow !== undefined && fromRow.length > 0) {
+						summary = fromRow;
+					}
+				} catch (err) {
+					log.warn({
+						stepId: stepOutput.stepId, callId, artifactId,
+						err: (err as Error).message,
+					}, 'resolveStepSummaries: getArtifactById threw; falling back to raw digest');
+				}
+			}
+			if (summary === undefined) {
+				const raw = (stepOutput.rawOutputs[callId] ?? '').trim().replace(/\s+/g, ' ');
+				if (raw.length === 0) {
+					summary = '(empty)';
+				} else {
+					const head = raw.slice(0, RAW_OUTPUT_DIGEST_CHARS);
+					const tail = raw.length > RAW_OUTPUT_DIGEST_CHARS ? '...' : '';
+					summary = `${head}${tail}`;
+				}
+			}
+			parts.push(`- ${callId}: ${summary}`);
+		}
+		out.set(stepOutput.stepId, parts.length > 0 ? parts.join('\n') : '(no calls)');
+	}
+	return out;
 }
 
 /**
  * Convert the retained ledger into the legacy `WorkingMemoryFindings`
  * shape so the existing `step-section-review` reviewer can read it
  * unchanged. Each StepOutput becomes a synthetic `PerRootFinding`
- * with verdict mapped from status.
+ * with verdict mapped from status and content sourced from the
+ * pre-resolved per-step summary map.
  */
 function ledgerToFindings(
-	retainedLedger: readonly StepOutput[],
-	_steps:         readonly DiscoveryStep[],
+	retainedLedger:    readonly StepOutput[],
+	summariesByStep:   ReadonlyMap<string, string>,
 ): WorkingMemoryFindings {
-	void _steps;
 	const perRoot: PerRootFinding[] = retainedLedger.map(o => ({
 		rootId:         o.stepId,
 		// Status -> RootVerdict mapping. RootVerdict only allows
@@ -583,7 +673,7 @@ function ledgerToFindings(
 		verdict:        o.status === 'failed' ? 'force-accept' as const : 'accept' as const,
 		cyclesConsumed: 0,
 		exhausted:      o.status === 'failed',
-		content:        o.facts.length > 0 ? o.facts.join('\n') : '(no facts)',
+		content:        summariesByStep.get(o.stepId) ?? '(no summary)',
 	}));
 	return { perRoot };
 }
@@ -596,6 +686,8 @@ interface BuildSuccessEntryInput {
 	readonly todo:             TodoSpec;
 	readonly detail:           string;
 	readonly retainedLedger:   readonly StepOutput[];
+	/** Pre-resolved per-step summaries (artifact_vec.summary + raw-digest fallback). */
+	readonly summariesByStep:  ReadonlyMap<string, string>;
 	readonly unmetGaps:        readonly RequiredFact[];
 	readonly factGapRetried:   boolean;
 	readonly sectionExhausted: boolean;
@@ -613,7 +705,9 @@ function buildSuccessEntry(input: BuildSuccessEntryInput): WorkingMemoryEntry {
 	});
 	// Synthesize per-root findings from the retained ledger so the
 	// existing WorkingMemoryEntry.findings shape stays satisfied; the
-	// memory updater + report-review read this downstream.
+	// memory updater + report-review read this downstream. Content
+	// sourced from the pre-resolved per-step summary map (Phase 1
+	// batch 3b of plans/section-flow-architecture-redesign.md).
 	const perRoot: PerRootFinding[] = input.retainedLedger.map(o => ({
 		rootId:         o.stepId,
 		// Status -> RootVerdict mapping. RootVerdict only allows
@@ -624,7 +718,7 @@ function buildSuccessEntry(input: BuildSuccessEntryInput): WorkingMemoryEntry {
 		verdict:        o.status === 'failed' ? 'force-accept' as const : 'accept' as const,
 		cyclesConsumed: 0,
 		exhausted:      o.status === 'failed',
-		content:        o.facts.length > 0 ? o.facts.join('\n') : '(no facts)',
+		content:        input.summariesByStep.get(o.stepId) ?? '(no summary)',
 	}));
 	return {
 		todoId:      input.todo.id,
@@ -688,5 +782,6 @@ export const _ledgerToFindingsForTest       = ledgerToFindings;
 export const _stringifyStepOutputForTest    = stringifyStepOutput;
 export const _collectCrossStepPriorsForTest = collectCrossStepPriors;
 export const _persistStepSummariesForTest   = persistStepSummaries;
+export const _resolveStepSummariesForTest   = resolveStepSummaries;
 export const DEFAULT_MAX_CYCLES_VALUE       = DEFAULT_MAX_CYCLES;
 export const DEFAULT_MAX_RECYCLES_VALUE     = DEFAULT_MAX_RECYCLES;

@@ -48,7 +48,6 @@ import type {
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
-import { summarizeCycleMemory } from './cycle-memory.js';
 import { validateDependsOn } from './step-discovery-plan-expansion.js';
 import { getLogger } from '../../shared/logger.js';
 import { getPromptRegistry } from '../prompts/registry.js';
@@ -216,145 +215,10 @@ async function callReview(
 	return { raw: response.text };
 }
 
-const REVIEW_ROLE = [
-	'You are the CYCLE REVIEWER for one cycle of one TODO of an',
-	'investigation report. You see the gap-facts list the cycle is',
-	'targeting + the outputs this cycle produced + prior-cycle context,',
-	'and you decide three things:',
-	'',
-	'  - WHICH of this cycle\'s outputs are on-topic + useful (promote to',
-	'    the retained ledger via `keep`).',
-	'  - WHAT remains uncovered (emit `new_steps` for the next cycle to',
-	'    acquire; empty array means we\'re done).',
-	'  - OPTIONALLY a brief carry-forward note (`scratchpad`).',
-	'',
-	'You emit a SINGLE JSON object: { "keep": [...], "new_steps": [...],',
-	'"scratchpad"?: "..." }. No prose, no markdown fences, no preamble.',
-].join('\n');
-
-function buildReviewUser(
-	input:              CycleReviewInput,
-	isRetry:            boolean,
-	priorFailureReason: string | undefined,
-): string {
-	const factsBlock     = renderGapFacts(input.gapFacts);
-	const outputsBlock   = renderCycleOutputs(input.cycleOutputs, input.stepsThisCycle);
-	const cycleMemBlock  = summarizeCycleMemory(input.cycleMemory);
-	const catalogBlock   = renderCatalogSummary(input.catalog);
-	const retryAddendum  = isRetry
-		? [
-			'',
-			'## RETRY CORRECTION',
-			`Your previous response was rejected: ${priorFailureReason ?? 'unknown'}`,
-			'Emit a new JSON object that satisfies every rule below.',
-			'',
-		].join('\n')
-		: '';
-
-	const lines: string[] = [
-		'## TODO OBJECTIVE',
-		input.todo.objective,
-		'',
-		'## GAP FACTS (coverage targets; indices are stable for targetsCriteria)',
-		factsBlock,
-		'',
-		`## CYCLE: ${input.cycle}`,
-		'',
-		'## THIS CYCLE\'S STEP OUTPUTS',
-		outputsBlock,
-	];
-	if (cycleMemBlock.length > 0) {
-		lines.push('');
-		lines.push('## PRIOR CYCLE CONTEXT');
-		lines.push('');
-		lines.push(cycleMemBlock);
-	}
-	lines.push('');
-	lines.push('## OUTPUT SHAPE');
-	lines.push('');
-	lines.push('{');
-	lines.push('  "keep": ["step-1", "step-3"],                  // ids from THIS CYCLE\'S step outputs');
-	lines.push('  "new_steps": [                                 // empty array = terminate');
-	lines.push('    {');
-	lines.push('      "id": "step-N",');
-	lines.push('      "intent": "concrete sentence -- which gap fact + why prior attempt missed",');
-	lines.push('      "skills": [');
-	lines.push('        { "id": "sN.a", "skillId": "<catalog id>", "context": "literal args" }');
-	lines.push('      ],');
-	lines.push('      "targetsCriteria": [0, 1]                   // indices into GAP FACTS');
-	lines.push('    }');
-	lines.push('  ],');
-	lines.push('  "scratchpad": "optional <=300 char carry-forward note"');
-	lines.push('}');
-	lines.push('');
-	lines.push('## RULES');
-	lines.push('  - `keep` ids MUST be from THIS CYCLE\'S step outputs only (see above).');
-	lines.push('  - `new_steps` items follow the discovery-plan-expansion rules:');
-	lines.push('      * each step has a concrete intent sentence');
-	lines.push('      * each PlannedSkillCall.skillId MUST be in the SKILL CATALOG');
-	lines.push('      * each step.targetsCriteria is a non-empty array of valid fact indices (0..' + String(Math.max(0, input.gapFacts.length - 1)) + ')');
-	lines.push('      * context for each skill call carries the literal args (file path / class name / connection id / etc.)');
-	lines.push('  - Emit `new_steps: []` to terminate the cycle loop when every gap fact is now covered (or the remaining gaps are unrecoverable with available skills).');
-	if (input.cycle > 1) {
-		lines.push('  - DO NOT re-emit a step whose (skillId, context) matches an already-attempted step in PRIOR CYCLE CONTEXT with failed/open coverage. Try a different angle (different args, different skill, decomposed sub-fact).');
-	}
-	lines.push('  - `scratchpad` is optional. Use it for qualitative judgements the mechanical coverage map can\'t capture (e.g. "the class file uses non-standard import paths -- flag for writer").');
-	lines.push(retryAddendum);
-	lines.push('');
-	lines.push(catalogBlock);
-	lines.push('');
-	lines.push('## TASK');
-	lines.push('Emit the JSON object now. Begin with "{" and end with "}".');
-	return lines.join('\n');
-}
-
-function renderGapFacts(gapFactList: readonly RequiredFact[]): string {
-	if (gapFactList.length === 0) { return '(no gap facts)'; }
-	const lines: string[] = [];
-	for (let i = 0; i < gapFactList.length; i++) {
-		const f = gapFactList[i]!;
-		lines.push(`[${i}] ${f.id} (${f.status})`);
-		lines.push(`    fact: ${f.fact}`);
-		lines.push(`    why:  ${f.why}`);
-	}
-	return lines.join('\n');
-}
-
-function renderCycleOutputs(
-	outputs:        readonly StepOutput[],
-	stepsThisCycle: readonly DiscoveryStep[],
-): string {
-	if (outputs.length === 0) { return '(no outputs)'; }
-	const stepsById = new Map(stepsThisCycle.map(s => [s.id, s] as const));
-	const lines: string[] = [];
-	for (const out of outputs) {
-		const step = stepsById.get(out.stepId);
-		const intent = step !== undefined ? step.intent : '(no step definition)';
-		lines.push(`### ${out.stepId} (status: ${out.status}) -- ${intent}`);
-		if (out.facts.length === 0) {
-			lines.push('  facts: (none)');
-		} else {
-			for (const f of out.facts) {
-				lines.push(`  - ${f}`);
-			}
-		}
-		if (out.citations.length > 0) {
-			lines.push(`  citations: ${out.citations.length}`);
-		}
-		lines.push('');
-	}
-	return lines.join('\n').trimEnd();
-}
-
-function renderCatalogSummary(catalog: readonly CatalogSkill[]): string {
-	if (catalog.length === 0) { return '## SKILL CATALOG (empty)'; }
-	const lines: string[] = [`## SKILL CATALOG (${catalog.length} skills available)`];
-	for (const s of catalog) {
-		const desc = s.description.replace(/\s+/g, ' ').trim().slice(0, 120);
-		lines.push(`- \`${s.id}\` -- ${desc}`);
-	}
-	return lines.join('\n');
-}
+// The inline REVIEW_ROLE + buildReviewUser + render* helpers that used to
+// live here were Phase 0 cruft -- the prompt now lives in
+// `agent/prompts/writers/cycle-review.ts` and is fetched through the
+// PromptRegistry. Phase 1 batch 3b deleted the leftover bodies.
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -691,8 +555,6 @@ function countSummaries(
 
 export const _validateForTest             = validate;
 export const _coerceNewStepForTest        = coerceNewStep;
-export const _renderCycleOutputsForTest   = renderCycleOutputs;
-export const _renderGapFactsForTest       = renderGapFacts;
 export const _stripFencesForTest          = stripFences;
 export const _extractStepSummariesForTest = extractStepSummaries;
 export const _scanClosureClaimsForTest    = scanClosureClaims;

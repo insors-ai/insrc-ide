@@ -1,46 +1,39 @@
 /**
- * cycle-review writer -- Stage 3 of the section-flow per-TODO loop.
+ * cycle-review writer v2 -- Stage 3 of the section-flow per-TODO loop.
  *
- * v1 (Phase 0 migration) preserved the legacy contract: { keep,
- *     new_steps, scratchpad }.
+ * Phase 1 batch 3b of plans/section-flow-architecture-redesign.md
+ * unregistered + deleted the v1 writer (the only remaining consumer
+ * had migrated). The reviewer now sees RAW per-skill-call outputs
+ * (truncated) instead of the pre-summarised `EvidenceEntry { facts,
+ * citations }` block the deleted `summarizeResult` cloud call used
+ * to emit, AND it emits the goal-aware summaries itself in
+ * `stepSummaries` -- one cloud round-trip per cycle instead of
+ * N + 1.
  *
- * v2 (Phase 1 of plans/section-flow-architecture-redesign.md) adds
- *     a fourth required field, `stepSummaries`, mapping each step
- *     this cycle ran to a per-skill-call goal-aware summary. The
- *     orchestrator writes those summaries back onto the matching
- *     `artifact_vec` row via `updateArtifactSummary`, replacing the
- *     standalone `summarizeResult` cloud call.
+ * Output schema (top-level keys exactly four):
  *
- *     `stepSummaries[stepId][callId]` is a short claim-shaped
- *     sentence in the form
+ *   {
+ *     "keep":           ["step-1", ...],   // ids from THIS cycle
+ *     "new_steps":      [...],             // empty array = terminate
+ *     "scratchpad":     "...",             // optional <=300 chars
+ *     "stepSummaries":  {
+ *       "<stepId>": {
+ *         "<callId>": "<claim>. <closure marker>"
+ *       }
+ *     }
+ *   }
  *
- *         "<concrete observation>. <closure marker>"
+ * Closure marker vocabulary (taught in the prompt + extracted
+ * mechanically via regex in `step-cycle-review.ts`):
  *
- *     where `<closure marker>` is drawn from a fixed vocabulary so
- *     the orchestrator can scan for it mechanically:
+ *     CLOSES <gap-id> fully
+ *     PARTIALLY supports <gap-id>
+ *     OFF-TOPIC
  *
- *       - `CLOSES <gap-id> fully`         -- this call's result on
- *                                            its own settles the gap.
- *       - `PARTIALLY supports <gap-id>`   -- contributes evidence but
- *                                            other steps still needed.
- *       - `OFF-TOPIC`                      -- relevant to no current gap
- *                                            (orchestrator may still
- *                                            persist for future TODOs).
- *
- *     A summary may chain multiple markers (one CLOSES + one
- *     PARTIALLY are both expected when a call covers >1 gap). The
- *     regex scan in `step-cycle-review.ts` is lenient: an unrecognised
- *     marker is logged + dropped, the summary itself still lands on
- *     the artifact row.
- *
- * Both versions stay registered. The orchestrator pins version 2
- * explicitly; v1 stays callable so older diagnostics that capture
- * the legacy prompt continue to reproduce byte-for-byte.
- *
- * Behaviour-preserving fields shared by both versions:
- *   - `keep`         : stepIds the cloud judged on-topic + useful
- *   - `new_steps`    : discovery steps for the next cycle (empty = done)
- *   - `scratchpad`?  : optional <=300 char carry-forward note
+ * `<gap-id>` is the literal `id` field of a gap fact (NOT the
+ * numeric index). A summary may chain markers separated by `;` when
+ * a call touches more than one gap. Empty / failed calls get a
+ * sentence describing the attempt + `OFF-TOPIC`.
  */
 
 import type { LLMMessage } from '../../../shared/types.js';
@@ -67,24 +60,49 @@ export interface CycleReviewWriterInput {
 	readonly priorFailureReason: string | undefined;
 }
 
-// ---------------------------------------------------------------------------
-// v1 (legacy)
-// ---------------------------------------------------------------------------
+/**
+ * Cap on per-call raw-output rendering in the prompt. The reviewer
+ * doesn't need the full structured payload (that's on disk for the
+ * `requestArtifactIds` enhancer flow); it needs enough context to
+ * judge relevance + write a 1-2 sentence claim. ~1 KB per call gives
+ * the model a paragraph of working text, keeps the cycle-prompt
+ * bounded even when N=6 calls per step happens.
+ */
+const RAW_OUTPUT_CHARS_PER_CALL = 1024;
 
-const REVIEW_ROLE_V1 = [
+const REVIEW_ROLE = [
 	'You are the CYCLE REVIEWER for one cycle of one TODO of an',
 	'investigation report. You see the gap-facts list the cycle is',
-	'targeting + the outputs this cycle produced + prior-cycle context,',
-	'and you decide three things:',
+	'targeting, the per-skill-call RAW outputs this cycle produced, and',
+	'prior-cycle context. You decide four things:',
 	'',
-	'  - WHICH of this cycle\'s outputs are on-topic + useful (promote to',
-	'    the retained ledger via `keep`).',
-	'  - WHAT remains uncovered (emit `new_steps` for the next cycle to',
-	'    acquire; empty array means we\'re done).',
-	'  - OPTIONALLY a brief carry-forward note (`scratchpad`).',
+	'  - `keep`            -- WHICH of this cycle\'s outputs are on-topic',
+	'                         + useful (promote to the retained ledger).',
+	'  - `new_steps`       -- WHAT remains uncovered (empty array = done).',
+	'  - `scratchpad`?     -- OPTIONAL <=300 char carry-forward note.',
+	'  - `stepSummaries`   -- PER-SKILL-CALL goal-aware summary that the',
+	'                         orchestrator persists on the artifact so',
+	'                         downstream stages read a short claim instead',
+	'                         of the raw bytes.',
 	'',
-	'You emit a SINGLE JSON object: { "keep": [...], "new_steps": [...],',
-	'"scratchpad"?: "..." }. No prose, no markdown fences, no preamble.',
+	'Each summary is a SHORT (1-2 sentence) claim grounded in the actual',
+	'call output, ending with a closure marker drawn from this fixed',
+	'vocabulary so the orchestrator can scan it mechanically:',
+	'',
+	'    CLOSES <gap-id> fully',
+	'    PARTIALLY supports <gap-id>',
+	'    OFF-TOPIC',
+	'',
+	'`<gap-id>` is the literal `id` of one of the gap facts shown below',
+	'(NOT the numeric index, NOT a paraphrase). A call may chain multiple',
+	'markers separated by `;` if it touches more than one gap. Skill calls',
+	'that returned empty / failed get a single sentence describing what',
+	'was attempted and the marker `OFF-TOPIC`.',
+	'',
+	'You emit a SINGLE JSON object with EXACTLY these top-level keys:',
+	'{ "keep": [...], "new_steps": [...], "scratchpad"?: "...",',
+	'  "stepSummaries": { "<stepId>": { "<callId>": "<summary>" } } }.',
+	'No prose, no markdown fences, no preamble.',
 ].join('\n');
 
 function renderGapFacts(gapFactList: readonly RequiredFact[]): string {
@@ -99,7 +117,14 @@ function renderGapFacts(gapFactList: readonly RequiredFact[]): string {
 	return lines.join('\n');
 }
 
-function renderCycleOutputsV1(
+function renderRawOutput(raw: string): string {
+	const trimmed = raw.trim();
+	if (trimmed.length === 0) { return '(empty)'; }
+	if (trimmed.length <= RAW_OUTPUT_CHARS_PER_CALL) { return trimmed; }
+	return `${trimmed.slice(0, RAW_OUTPUT_CHARS_PER_CALL)}...[truncated ${trimmed.length - RAW_OUTPUT_CHARS_PER_CALL} chars]`;
+}
+
+function renderCycleOutputs(
 	outputs:        readonly StepOutput[],
 	stepsThisCycle: readonly DiscoveryStep[],
 ): string {
@@ -110,15 +135,24 @@ function renderCycleOutputsV1(
 		const step = stepsById.get(out.stepId);
 		const intent = step !== undefined ? step.intent : '(no step definition)';
 		lines.push(`### ${out.stepId} (status: ${out.status}) -- ${intent}`);
-		if (out.facts.length === 0) {
-			lines.push('  facts: (none)');
-		} else {
-			for (const f of out.facts) {
-				lines.push(`  - ${f}`);
-			}
+		if (step === undefined || step.skills.length === 0) {
+			lines.push('  skill calls: (none)');
+			lines.push('');
+			continue;
 		}
-		if (out.citations.length > 0) {
-			lines.push(`  citations: ${out.citations.length}`);
+		// Render each declared skill call inline so the LLM sees the
+		// canonical (callId, skillId, context) tuple and the raw output
+		// together. The (stepId, callId) tuples teach the model the
+		// valid keys for the `stepSummaries` field.
+		for (const sk of step.skills) {
+			const ctx = sk.context.replace(/\s+/g, ' ').trim().slice(0, 100);
+			const raw = out.rawOutputs[sk.id] ?? '';
+			lines.push(`  - ${sk.id} (\`${sk.skillId}\`) -- ${ctx}`);
+			lines.push('    output:');
+			const rendered = renderRawOutput(raw);
+			for (const ln of rendered.split('\n')) {
+				lines.push(`      ${ln}`);
+			}
 		}
 		lines.push('');
 	}
@@ -135,9 +169,9 @@ function renderCatalogSummary(catalog: readonly CatalogSkill[]): string {
 	return lines.join('\n');
 }
 
-function buildReviewUserV1(input: CycleReviewWriterInput): string {
+function buildReviewUser(input: CycleReviewWriterInput): string {
 	const factsBlock     = renderGapFacts(input.gapFacts);
-	const outputsBlock   = renderCycleOutputsV1(input.cycleOutputs, input.stepsThisCycle);
+	const outputsBlock   = renderCycleOutputs(input.cycleOutputs, input.stepsThisCycle);
 	const cycleMemBlock  = summarizeCycleMemory(input.cycleMemory);
 	const catalogBlock   = renderCatalogSummary(input.catalog);
 	const retryAddendum  = input.isRetry
@@ -150,169 +184,7 @@ function buildReviewUserV1(input: CycleReviewWriterInput): string {
 		].join('\n')
 		: '';
 
-	const lines: string[] = [
-		'## TODO OBJECTIVE',
-		input.todo.objective,
-		'',
-		'## GAP FACTS (coverage targets; indices are stable for targetsCriteria)',
-		factsBlock,
-		'',
-		`## CYCLE: ${input.cycle}`,
-		'',
-		'## THIS CYCLE\'S STEP OUTPUTS',
-		outputsBlock,
-	];
-	if (cycleMemBlock.length > 0) {
-		lines.push('');
-		lines.push('## PRIOR CYCLE CONTEXT');
-		lines.push('');
-		lines.push(cycleMemBlock);
-	}
-	lines.push('');
-	lines.push('## OUTPUT SHAPE');
-	lines.push('');
-	lines.push('{');
-	lines.push('  "keep": ["step-1", "step-3"],                  // ids from THIS CYCLE\'S step outputs');
-	lines.push('  "new_steps": [                                 // empty array = terminate');
-	lines.push('    {');
-	lines.push('      "id": "step-N",');
-	lines.push('      "intent": "concrete sentence -- which gap fact + why prior attempt missed",');
-	lines.push('      "skills": [');
-	lines.push('        { "id": "sN.a", "skillId": "<catalog id>", "context": "literal args" }');
-	lines.push('      ],');
-	lines.push('      "targetsCriteria": [0, 1]                   // indices into GAP FACTS');
-	lines.push('    }');
-	lines.push('  ],');
-	lines.push('  "scratchpad": "optional <=300 char carry-forward note"');
-	lines.push('}');
-	lines.push('');
-	lines.push('## RULES');
-	lines.push('  - `keep` ids MUST be from THIS CYCLE\'S step outputs only (see above).');
-	lines.push('  - `new_steps` items follow the discovery-plan-expansion rules:');
-	lines.push('      * each step has a concrete intent sentence');
-	lines.push('      * each PlannedSkillCall.skillId MUST be in the SKILL CATALOG');
-	lines.push('      * each step.targetsCriteria is a non-empty array of valid fact indices (0..' + String(Math.max(0, input.gapFacts.length - 1)) + ')');
-	lines.push('      * context for each skill call carries the literal args (file path / class name / connection id / etc.)');
-	lines.push('  - Emit `new_steps: []` to terminate the cycle loop when every gap fact is now covered (or the remaining gaps are unrecoverable with available skills).');
-	if (input.cycle > 1) {
-		lines.push('  - DO NOT re-emit a step whose (skillId, context) matches an already-attempted step in PRIOR CYCLE CONTEXT with failed/open coverage. Try a different angle (different args, different skill, decomposed sub-fact).');
-	}
-	lines.push('  - `scratchpad` is optional. Use it for qualitative judgements the mechanical coverage map can\'t capture (e.g. "the class file uses non-standard import paths -- flag for writer").');
-	lines.push(retryAddendum);
-	lines.push('');
-	lines.push(catalogBlock);
-	lines.push('');
-	lines.push('## TASK');
-	lines.push('Emit the JSON object now. Begin with "{" and end with "}".');
-	return lines.join('\n');
-}
-
-export const cycleReviewWriterV1: PromptWriter<CycleReviewWriterInput, readonly LLMMessage[]> = {
-	id:      'cycle-review',
-	version: 1,
-	tier:    'cloud',
-	summary: 'Stage 3: judge this cycle\'s outputs (keep / new_steps / scratchpad).',
-
-	build(input: CycleReviewWriterInput): readonly LLMMessage[] {
-		return [
-			{ role: 'system', content: REVIEW_ROLE_V1 },
-			{ role: 'user',   content: buildReviewUserV1(input) },
-		];
-	},
-};
-
-// ---------------------------------------------------------------------------
-// v2 (Phase 1 of section-flow architecture redesign)
-// ---------------------------------------------------------------------------
-
-const REVIEW_ROLE_V2 = [
-	'You are the CYCLE REVIEWER for one cycle of one TODO of an',
-	'investigation report. You see the gap-facts list the cycle is',
-	'targeting, the per-skill-call outputs this cycle produced, and',
-	'prior-cycle context. You decide four things:',
-	'',
-	'  - `keep`            -- WHICH of this cycle\'s outputs are on-topic',
-	'                         + useful (promote to the retained ledger).',
-	'  - `new_steps`       -- WHAT remains uncovered (empty array = done).',
-	'  - `scratchpad`?     -- OPTIONAL <=300 char carry-forward note.',
-	'  - `stepSummaries`   -- PER-SKILL-CALL goal-aware summary that',
-	'                         the orchestrator persists on the artifact',
-	'                         so downstream stages can read a short',
-	'                         claim instead of the raw bytes.',
-	'',
-	'Each summary is a SHORT (1-2 sentence) claim. It must (a) state a',
-	'concrete observation grounded in the actual call output and (b) end',
-	'with a closure marker drawn from this fixed vocabulary so the',
-	'orchestrator can scan it mechanically:',
-	'',
-	'    CLOSES <gap-id> fully',
-	'    PARTIALLY supports <gap-id>',
-	'    OFF-TOPIC',
-	'',
-	'`<gap-id>` is the literal `id` of one of the gap facts shown below',
-	'(NOT the numeric index, NOT a paraphrase). A call may chain multiple',
-	'markers separated by `;` if it touches more than one gap. Skill',
-	'calls that returned empty / failed get a single sentence describing',
-	'what was attempted and the marker `OFF-TOPIC`.',
-	'',
-	'You emit a SINGLE JSON object with EXACTLY these top-level keys:',
-	'{ "keep": [...], "new_steps": [...], "scratchpad"?: "...",',
-	'  "stepSummaries": { "<stepId>": { "<callId>": "<summary>" } } }.',
-	'No prose, no markdown fences, no preamble.',
-].join('\n');
-
-function renderCycleOutputsV2(
-	outputs:        readonly StepOutput[],
-	stepsThisCycle: readonly DiscoveryStep[],
-): string {
-	if (outputs.length === 0) { return '(no outputs)'; }
-	const stepsById = new Map(stepsThisCycle.map(s => [s.id, s] as const));
-	const lines: string[] = [];
-	for (const out of outputs) {
-		const step = stepsById.get(out.stepId);
-		const intent = step !== undefined ? step.intent : '(no step definition)';
-		lines.push(`### ${out.stepId} (status: ${out.status}) -- ${intent}`);
-		// Per-skill-call breakdown so the LLM knows which (stepId, callId)
-		// tuples are valid keys for stepSummaries.
-		if (step !== undefined && step.skills.length > 0) {
-			lines.push('  skill calls:');
-			for (const sk of step.skills) {
-				const ctx = sk.context.replace(/\s+/g, ' ').trim().slice(0, 100);
-				lines.push(`  - ${sk.id} (\`${sk.skillId}\`) -- ${ctx}`);
-			}
-		}
-		if (out.facts.length === 0) {
-			lines.push('  facts: (none)');
-		} else {
-			lines.push('  facts (legacy summariser output, may be empty):');
-			for (const f of out.facts) {
-				lines.push(`  - ${f}`);
-			}
-		}
-		if (out.citations.length > 0) {
-			lines.push(`  citations: ${out.citations.length}`);
-		}
-		lines.push('');
-	}
-	return lines.join('\n').trimEnd();
-}
-
-function buildReviewUserV2(input: CycleReviewWriterInput): string {
-	const factsBlock     = renderGapFacts(input.gapFacts);
-	const outputsBlock   = renderCycleOutputsV2(input.cycleOutputs, input.stepsThisCycle);
-	const cycleMemBlock  = summarizeCycleMemory(input.cycleMemory);
-	const catalogBlock   = renderCatalogSummary(input.catalog);
-	const retryAddendum  = input.isRetry
-		? [
-			'',
-			'## RETRY CORRECTION',
-			`Your previous response was rejected: ${input.priorFailureReason ?? 'unknown'}`,
-			'Emit a new JSON object that satisfies every rule below.',
-			'',
-		].join('\n')
-		: '';
-
-	// Example (stepId, callId) pair drawn from THIS cycle so the LLM
+	// Example (stepId, callId, gapId) drawn from THIS cycle so the LLM
 	// sees a concrete tuple in the shape block, not a generic placeholder.
 	const exampleStep = input.stepsThisCycle[0];
 	const exampleCall = exampleStep?.skills[0];
@@ -329,7 +201,7 @@ function buildReviewUserV2(input: CycleReviewWriterInput): string {
 		'',
 		`## CYCLE: ${input.cycle}`,
 		'',
-		'## THIS CYCLE\'S STEP OUTPUTS',
+		'## THIS CYCLE\'S RAW SKILL OUTPUTS',
 		outputsBlock,
 	];
 	if (cycleMemBlock.length > 0) {
@@ -413,12 +285,20 @@ export const cycleReviewWriterV2: PromptWriter<CycleReviewWriterInput, readonly 
 	id:      'cycle-review',
 	version: 2,
 	tier:    'cloud',
-	summary: 'Stage 3 v2: judge outputs + emit per-skill-call goal-aware summaries with closure markers.',
+	summary: 'Stage 3: judge raw outputs + emit per-skill-call goal-aware summaries with closure markers.',
 
 	build(input: CycleReviewWriterInput): readonly LLMMessage[] {
 		return [
-			{ role: 'system', content: REVIEW_ROLE_V2 },
-			{ role: 'user',   content: buildReviewUserV2(input) },
+			{ role: 'system', content: REVIEW_ROLE },
+			{ role: 'user',   content: buildReviewUser(input) },
 		];
 	},
 };
+
+// ---------------------------------------------------------------------------
+// Test-only exports
+// ---------------------------------------------------------------------------
+
+export const _renderCycleOutputsForTest = renderCycleOutputs;
+export const _renderGapFactsForTest     = renderGapFacts;
+export const _renderRawOutputForTest    = renderRawOutput;

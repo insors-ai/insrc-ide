@@ -86,12 +86,38 @@ export interface Citation {
 	readonly repoPath?:  string | undefined;   // workspace root, for multi-repo runs
 }
 
-/** Output of executing one DiscoveryStep. */
+/**
+ * Output of executing one DiscoveryStep.
+ *
+ * Phase 1 batch 3b of plans/section-flow-architecture-redesign.md
+ * replaced the pre-summarised `facts: string[]` + `citations: Citation[]`
+ * fields (sourced from the deleted `summarizeResult` cloud call) with
+ * two fields that come straight from the leaf executor:
+ *
+ *   - `rawOutputs`  : stringified `SkillResult.value` per skill call.
+ *                     Cycle-review v2 renders these (truncated) so the
+ *                     reviewer reasons over what the skill literally
+ *                     produced, not a paraphrase.
+ *   - `artifactIds` : the spill-writer's `<sessionId>:<ts>:<skillId>`
+ *                     id per skill call. Downstream consumers
+ *                     (section-synth, ledger-to-findings) read the
+ *                     reviewer-emitted goal-aware summary from
+ *                     `artifact_vec.summary` via `getArtifactById`
+ *                     against these ids.
+ *
+ * Calls that returned empty are present in `rawOutputs` with value
+ * `''`. Calls that didn't spill (typically the same set, plus any
+ * runner-side spill-writer failures) are absent from `artifactIds`.
+ *
+ * `Citation` stays exported -- the working-memory writer reads
+ * citations directly from `WorkingMemoryEntry`, which derives them
+ * from the artifact summaries downstream.
+ */
 export interface StepOutput {
 	readonly stepId:               string;
 	readonly status:               'ok' | 'partial' | 'failed';   // partial = some skills empty; failed = the step couldn't run
-	readonly facts:                readonly string[];
-	readonly citations:            readonly Citation[];
+	readonly rawOutputs:           Readonly<Record<string, string>>;
+	readonly artifactIds:          Readonly<Record<string, string>>;
 	readonly extraSkillsCalled?:   readonly string[] | undefined;  // skills the local LLM added beyond the plan
 	readonly durationMs:           number;
 }

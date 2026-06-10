@@ -123,7 +123,10 @@ const HEALTHY_PLAN = JSON.stringify({
 	],
 });
 
-const SUMMARIZER_GOOD = JSON.stringify({ facts: ['fact A'], citations: [], confidence: 'high' });
+// summarizeResult was deleted in Phase 1 batch 3b; the legacy
+// `EvidenceEntry { facts, citations }` fixture goes with it. The
+// reviewer's `stepSummaries` field is exercised under
+// `step-cycle-review.test.ts` directly.
 
 const REVIEW_TERMINATE = JSON.stringify({ keep: ['step-1', 'step-2'], new_steps: [] });
 
@@ -172,11 +175,12 @@ test('runTodoOrchestrator: trivial fast-path (all facts present) -> Stage 6 + 7 
 });
 
 test('runTodoOrchestrator: 1-cycle termination (Stage 3 emits new_steps=[])', async () => {
+	// Phase 1 batch 3b: summarizeResult is gone; the cycle reviewer
+	// emits stepSummaries in its own turn. Cloud calls per cycle:
+	// gap-analysis + plan-expansion + cycle-review + synth + section-review = 5.
 	const { provider, calls } = scriptedProvider([
 		MIXED_GAP_ANALYSIS,          // Stage 0
 		HEALTHY_PLAN,                // Stage 1 (cycle 1)
-		SUMMARIZER_GOOD,             // Stage 2 step-1 summarizer
-		SUMMARIZER_GOOD,             // Stage 2 step-2 summarizer
 		REVIEW_TERMINATE,            // Stage 3 cycle 1 -> terminate
 		SYNTH_MARKDOWN,              // Stage 6
 		SECTION_REVIEW_ACCEPT,       // Stage 7
@@ -196,7 +200,7 @@ test('runTodoOrchestrator: 1-cycle termination (Stage 3 emits new_steps=[])', as
 	assert.equal(result.trace.retainedStepCount, 2);
 	assert.equal(result.trace.perCycleSummary.length, 1);
 	assert.deepEqual([...result.trace.perCycleSummary[0]!.keptIds].sort(), ['step-1', 'step-2']);
-	assert.equal(calls.length, 7);
+	assert.equal(calls.length, 5);
 	assert.match(result.entry.detail, /Real section content/);
 });
 
@@ -244,7 +248,6 @@ test('runTodoOrchestrator: cycle loop produces empty ledger -> L2 fallback', asy
 test('runTodoOrchestrator: cycle loop with full coverage -> 2 perRoot findings on successful entry', async () => {
 	const { provider } = scriptedProvider([
 		MIXED_GAP_ANALYSIS, HEALTHY_PLAN,
-		SUMMARIZER_GOOD, SUMMARIZER_GOOD,
 		REVIEW_TERMINATE, SYNTH_MARKDOWN, SECTION_REVIEW_ACCEPT,
 	]);
 	const { l2 } = mockL2();

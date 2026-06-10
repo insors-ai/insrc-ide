@@ -1,11 +1,17 @@
 /**
- * section-synth writer v1 -- Stage 6 of the section-flow per-TODO loop.
- * Cloud LLM synthesises the section markdown from the retained ledger
- * + the unmet-gap list.
+ * section-synth writer v2 -- Stage 6 of the section-flow per-TODO loop.
  *
- * Migrated from `agent/section-flow/step-synthesis-from-ledger.ts`'s
- * inline SYNTH_ROLE + buildSynthUser as part of Phase 0 of
- * `plans/section-flow-architecture-redesign.md`. Behaviour-preserving.
+ * Phase 0 migration v1 rendered `StepOutput.facts` + `.citations`
+ * (sourced from the now-deleted `summarizeResult` cloud call). Phase
+ * 1 batch 3b of plans/section-flow-architecture-redesign.md drops
+ * v1 and renders the reviewer-emitted per-step summaries instead --
+ * the synthesizer sees claim-shaped text with closure markers
+ * (`CLOSES <gap-id> fully`, `PARTIALLY supports <gap-id>`, etc.)
+ * rather than a pre-summarised fact list.
+ *
+ * The caller (step-synthesis-from-ledger.ts) pre-resolves the
+ * per-step summary text once via `resolveStepSummaries` and passes
+ * a `summariesByStep` map. This module just renders.
  */
 
 import type { LLMMessage } from '../../../shared/types.js';
@@ -18,54 +24,56 @@ import type { TodoSpec } from '../../section-flow/types.js';
 import type { PromptWriter } from '../types.js';
 
 export interface SectionSynthWriterInput {
-	readonly todo:           TodoSpec;
-	readonly retainedLedger: readonly StepOutput[];
-	readonly cycleMemory:    CycleMemory;
-	readonly unmetGaps:      readonly RequiredFact[];
+	readonly todo:            TodoSpec;
+	readonly retainedLedger:  readonly StepOutput[];
+	/** Pre-resolved per-step summaries (from `artifact_vec.summary` + raw fallback). */
+	readonly summariesByStep: ReadonlyMap<string, string>;
+	readonly cycleMemory:     CycleMemory;
+	readonly unmetGaps:       readonly RequiredFact[];
 }
 
 const SYNTH_ROLE = [
 	'You are the SECTION SYNTHESIZER. You receive a TODO objective + a',
-	'retained ledger of facts the discovery loop acquired + a list of',
-	'unmet gaps the loop could not close. You emit the section markdown.',
+	'retained ledger of per-step CLAIM-SHAPED summaries (each ending in',
+	'a closure marker: `CLOSES <gap-id> fully` / `PARTIALLY supports',
+	'<gap-id>` / `OFF-TOPIC`) + a list of unmet gaps the loop could not',
+	'close. You emit the section markdown.',
 	'',
 	'Rules:',
-	'  1. Use ONLY facts present in the RETAINED LEDGER. Do NOT invent',
-	'     field names, types, classes, file paths, line numbers, or',
-	'     examples not present.',
+	'  1. Use ONLY claims present in the RETAINED LEDGER summaries. Do',
+	'     NOT invent field names, types, classes, file paths, line',
+	'     numbers, or examples not present.',
 	'  2. For each UNMET GAP, emit a structured handoff block with the',
 	'     fact name, why it was needed, what was attempted (with cycle +',
 	'     stepId + outcome), and a concrete next-step suggestion. Use',
 	'     the exact format shown in UNMET GAPS below.',
-	'  3. Cite facts via inline markdown links from the ledger\'s',
-	'     citation entries when present.',
+	'  3. The closure markers are advisory -- a summary marked `CLOSES',
+	'     <gap-id> fully` is the strongest signal that gap is covered;',
+	'     `PARTIALLY supports` means some evidence; `OFF-TOPIC` means',
+	'     the call returned nothing useful for the active gap list.',
 	'  4. Structure: short intro paragraph naming the objective + what',
 	'     was acquired vs. what remains unresolved; the main section',
-	'     content from the ledger facts; the unmet-gap handoff blocks',
+	'     content drawn from the summaries; the unmet-gap handoff blocks',
 	'     at the bottom (or inline where they break a sub-section).',
 	'',
 	'Emit the FULL section markdown. No JSON envelope, no preamble,',
 	'no "Here is the section" commentary.',
 ].join('\n');
 
-function renderLedger(ledger: readonly StepOutput[]): string {
+function renderLedger(
+	ledger:          readonly StepOutput[],
+	summariesByStep: ReadonlyMap<string, string>,
+): string {
 	if (ledger.length === 0) { return '(empty)'; }
 	const lines: string[] = [];
 	for (const o of ledger) {
 		lines.push(`### ${o.stepId} (status: ${o.status})`);
-		if (o.facts.length === 0) {
-			lines.push('  facts: (none)');
+		const summary = summariesByStep.get(o.stepId);
+		if (summary === undefined || summary.trim().length === 0) {
+			lines.push('  (no summary available)');
 		} else {
-			for (const f of o.facts) { lines.push(`  - ${f}`); }
-		}
-		if (o.citations.length > 0) {
-			lines.push('  citations:');
-			for (const c of o.citations) {
-				const range = c.startLine !== undefined && c.endLine !== undefined
-					? `#L${c.startLine}-L${c.endLine}`
-					: (c.startLine !== undefined ? `#L${c.startLine}` : '');
-				const label = c.label ?? c.path.split('/').pop() ?? c.path;
-				lines.push(`    - [${label}](${c.path}${range})`);
+			for (const ln of summary.split('\n')) {
+				lines.push(`  ${ln}`);
 			}
 		}
 		lines.push('');
@@ -103,8 +111,8 @@ function buildSynthUser(input: SectionSynthWriterInput): string {
 		'## TODO OBJECTIVE',
 		input.todo.objective,
 		'',
-		'## RETAINED LEDGER',
-		renderLedger(input.retainedLedger),
+		'## RETAINED LEDGER (per-step goal-aware summaries)',
+		renderLedger(input.retainedLedger, input.summariesByStep),
 		'',
 	];
 	if (input.unmetGaps.length > 0) {
@@ -120,11 +128,11 @@ function buildSynthUser(input: SectionSynthWriterInput): string {
 	return lines.join('\n');
 }
 
-export const sectionSynthWriterV1: PromptWriter<SectionSynthWriterInput, readonly LLMMessage[]> = {
+export const sectionSynthWriterV2: PromptWriter<SectionSynthWriterInput, readonly LLMMessage[]> = {
 	id:      'section-synth',
-	version: 1,
+	version: 2,
 	tier:    'cloud',
-	summary: 'Stage 6: synthesise the section markdown from the retained ledger + unmet-gap list.',
+	summary: 'Stage 6: synthesise the section markdown from reviewer-emitted per-step summaries + unmet-gap list.',
 
 	build(input: SectionSynthWriterInput): readonly LLMMessage[] {
 		return [
@@ -133,3 +141,11 @@ export const sectionSynthWriterV1: PromptWriter<SectionSynthWriterInput, readonl
 		];
 	},
 };
+
+// ---------------------------------------------------------------------------
+// Test-only exports
+// ---------------------------------------------------------------------------
+
+export const _renderLedgerForTest        = renderLedger;
+export const _renderUnmetGapInputForTest = renderUnmetGapInput;
+export const _buildSynthUserForTest      = buildSynthUser;
