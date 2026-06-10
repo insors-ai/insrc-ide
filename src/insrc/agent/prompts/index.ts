@@ -45,6 +45,13 @@ import {
 	sectionReviseWriterV1,
 } from './writers/section-review.js';
 import { sectionSynthWriterV1 }             from './writers/section-synth.js';
+import {
+	memoryShapeWriterV1,
+	memoryShapeMapWriterV1,
+	memoryShapeReduceWriterV1,
+} from './writers/memory-shape.js';
+import { memoryUpdateWriterV1 }             from './writers/memory-update.js';
+import { bulletExtractorWriterV1 }          from './writers/bullet-extractor.js';
 
 /**
  * Register every PromptWriter that ships with the codebase. Mirrors
@@ -64,8 +71,15 @@ export function registerAllPromptWriters(): void {
 	r.register(sectionReviewWriterV1);
 	r.register(sectionReviseWriterV1);
 	r.register(sectionSynthWriterV1);
-	// Phase 0 migration still pending for the working-memory writers
-	// (memory-shape single + map + reduce; memory-update summary +
-	// recent + semantic; bullet-extractor). 7 more behaviour-preserving
-	// extractions; landing in the next commit.
+	r.register(memoryShapeWriterV1);
+	r.register(memoryShapeMapWriterV1);
+	r.register(memoryShapeReduceWriterV1);
+	r.register(memoryUpdateWriterV1);
+	r.register(bulletExtractorWriterV1);
+	// Phase 0 migration: the remaining section-flow prompts
+	// (step-investigation-plan, step-report-assemble, step-report-review)
+	// are lower-priority because they sit outside the core per-TODO
+	// loop (whole-report-level orchestration). Migrating them is a
+	// follow-up; not blocking Phase 1 since they're not on the
+	// dynamic-flow critical path.
 }

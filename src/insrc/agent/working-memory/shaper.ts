@@ -40,6 +40,12 @@ import { countTokens } from '../context/budget.js';
 import { splitDocument } from '../../daemon/doc-splitter.js';
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type {
+	MemoryShapeSingleWriterInput,
+	MemoryShapeMapWriterInput,
+	MemoryShapeReduceWriterInput,
+} from '../prompts/writers/memory-shape.js';
 
 const log = getLogger('working-memory-shape');
 
@@ -176,19 +182,9 @@ function buildShapingSchema(budget: TokenBudget): string {
 }
 
 function buildShapingPrompt(memory: string, objective: string, budget: TokenBudget): { system: string; user: string } {
-	const user = [
-		'## INPUT PROMPT',
-		objective,
-		'',
-		'## WORKING MEMORY',
-		memory,
-		'',
-		buildShapingSchema(budget),
-		'',
-		'## TASK',
-		'Emit the JSON object now. Begin with "{" and end with "}".',
-	].join('\n');
-	return { system: SHAPING_ROLE, user };
+	const writer = getPromptRegistry().get<MemoryShapeSingleWriterInput, readonly LLMMessage[]>('memory-shape.single');
+	const messages = writer.build({ memory, objective, budget });
+	return extractSystemUser(messages);
 }
 
 const MAP_ROLE = [
@@ -227,19 +223,10 @@ function buildMapSchema(): string {
 }
 
 function buildMapPrompt(chunkContent: string, chunkIndex: number, total: number, objective: string): { system: string; user: string } {
-	const user = [
-		'## INPUT PROMPT',
-		objective,
-		'',
-		`## CHUNK ${chunkIndex + 1}/${total}`,
-		chunkContent,
-		'',
-		buildMapSchema(),
-		'',
-		'## TASK',
-		`Emit the JSON object for chunk ${chunkIndex + 1}/${total} now. Begin with "{" and end with "}".`,
-	].join('\n');
-	return { system: MAP_ROLE, user };
+	const perFieldCharCap = Math.floor(MAP_OUTPUT_TOKENS / 4) * 3;
+	const writer = getPromptRegistry().get<MemoryShapeMapWriterInput, readonly LLMMessage[]>('memory-shape.map');
+	const messages = writer.build({ chunkContent, chunkIndex, total, objective, perFieldCharCap });
+	return extractSystemUser(messages);
 }
 
 const REDUCE_ROLE = [
@@ -301,27 +288,19 @@ interface ChunkPartial {
 }
 
 function buildReducePrompt(partials: readonly ChunkPartial[], objective: string, budget: TokenBudget): { system: string; user: string } {
-	const partialsBlock = partials.map((p, i) => [
-		`--- chunk ${i + 1}/${partials.length} ---`,
-		`summary:  ${p.summary}`,
-		`recent:   ${p.recent}`,
-		`semantic: ${p.semantic}`,
-		`code:     ${p.code}`,
-	].join('\n')).join('\n\n');
+	const writer = getPromptRegistry().get<MemoryShapeReduceWriterInput, readonly LLMMessage[]>('memory-shape.reduce');
+	const messages = writer.build({ partials, objective, budget });
+	return extractSystemUser(messages);
+}
 
-	const user = [
-		'## INPUT PROMPT',
-		objective,
-		'',
-		'## PER-CHUNK DISTILLATIONS',
-		partialsBlock,
-		'',
-		buildReduceSchema(budget, partials.length),
-		'',
-		'## TASK',
-		'Emit the consolidated JSON object now. Begin with "{" and end with "}".',
-	].join('\n');
-	return { system: REDUCE_ROLE, user };
+function extractSystemUser(messages: readonly LLMMessage[]): { system: string; user: string } {
+	let system = '';
+	let user = '';
+	for (const m of messages) {
+		if (m.role === 'system' && typeof m.content === 'string') { system = m.content; }
+		if (m.role === 'user'   && typeof m.content === 'string') { user   = m.content; }
+	}
+	return { system, user };
 }
 
 // ---------------------------------------------------------------------------

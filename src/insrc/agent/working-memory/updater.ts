@@ -52,6 +52,28 @@ import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { MemoryShapeBundle } from './shaper.js';
 import type { WorkingMemoryEntry } from './types.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type {
+	MemoryUpdateLayer,
+	MemoryUpdateWriterInput,
+} from '../prompts/writers/memory-update.js';
+
+/**
+ * Pull the role/system content out of the memory-update writer for one
+ * layer. The writer expects { layer, userBody } but we use an empty
+ * placeholder here because the per-call user body construction in
+ * each updater function stays inline (it's call-site-specific). This
+ * helper just gives the updaters a single source of truth for the
+ * per-layer system role.
+ */
+function memoryUpdateSystemFor(layer: MemoryUpdateLayer): string {
+	const writer = getPromptRegistry().get<MemoryUpdateWriterInput, readonly LLMMessage[]>('memory-update');
+	const messages = writer.build({ layer, userBody: '' });
+	for (const m of messages) {
+		if (m.role === 'system' && typeof m.content === 'string') { return m.content; }
+	}
+	return '';
+}
 
 const log = getLogger('working-memory-updater');
 
@@ -357,7 +379,7 @@ async function updateSummary(
 	newEntry: WorkingMemoryEntry,
 	budgetTokens: number,
 ): Promise<string> {
-	const system = SUMMARY_ROLE;
+	const system = memoryUpdateSystemFor('summary');
 	const findingsText = renderFindings(newEntry);
 	const user = [
 		'## PRIOR SUMMARY',
@@ -404,7 +426,7 @@ async function updateRecent(
 		return { value: enforceBudget(deterministicBullets, budgetTokens), llmCalled: false };
 	}
 
-	const system = RECENT_ROLE;
+	const system = memoryUpdateSystemFor('recent');
 	const user = [
 		'## NEXT OBJECTIVE',
 		nextObjective,
@@ -428,7 +450,7 @@ async function updateSemanticViaLLM(
 	nextObjective: string,
 	budgetTokens: number,
 ): Promise<string> {
-	const system = SEMANTIC_ROLE;
+	const system = memoryUpdateSystemFor('semantic');
 	const findingsText = renderFindings(newEntry);
 	const user = [
 		'## NEXT OBJECTIVE',

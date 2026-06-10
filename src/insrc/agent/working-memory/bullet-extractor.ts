@@ -26,6 +26,8 @@
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { WorkingMemoryEntry } from './types.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type { BulletExtractorWriterInput } from '../prompts/writers/bullet-extractor.js';
 
 const log = getLogger('working-memory-bullets');
 
@@ -109,11 +111,8 @@ export async function extractBullets(
 ): Promise<string[]> {
 	const min = Math.max(1, opts.minCount ?? 5);
 	const max = Math.min(MAX_BULLETS_PER_TODO, Math.max(min, opts.maxCount ?? 10));
-	const { system, user } = buildExtractorPrompt(entry, { min, max });
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: system },
-		{ role: 'user',   content: user   },
-	];
+	const writer = getPromptRegistry().get<BulletExtractorWriterInput, readonly LLMMessage[]>('bullet-extractor');
+	const messages = [...writer.build({ entry, count: { min, max } })];
 	const response = await provider.complete(messages, {
 		maxTokens:       MAX_EXTRACT_TOKENS,
 		temperature:     0,

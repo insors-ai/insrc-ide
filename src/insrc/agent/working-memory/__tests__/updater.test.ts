@@ -45,6 +45,12 @@ import { createBudget } from '../../context/budget.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
 import type { MemoryShapeBundle } from '../shaper.js';
 import type { WorkingMemoryEntry } from '../types.js';
+import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
+
+test.beforeEach(() => {
+	_resetPromptRegistryForTest();
+	registerAllPromptWriters();
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
