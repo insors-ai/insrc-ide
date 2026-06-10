@@ -46,7 +46,7 @@
 
 import type { DiscoveryStep, PlannedSkillCall, StepOutput } from '../content-gen/discovery-plan.js';
 import type { PlannedNode } from '../content-gen/plan-tree.js';
-import type { ExecuteLeaf } from './leaf-executor.js';
+import type { ExecuteLeaf, LeafBuildContext } from './leaf-executor.js';
 import type { RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
 import { getLogger } from '../../shared/logger.js';
@@ -68,6 +68,16 @@ export interface DiscoveryExecuteDeps {
 	readonly gapFacts:           readonly RequiredFact[];
 	/** Leaf-executor closure (built by the orchestrator via `buildSkillExecutor`). */
 	readonly executeLeaf:        ExecuteLeaf;
+	/**
+	 * Optional per-step build-context payload (Phase 3 of
+	 * plans/section-flow-architecture-redesign.md). When supplied, the
+	 * leaf executor runs a local-tier build-context turn BEFORE
+	 * shape-resolve, fetches the named artifacts from `artifact_vec`
+	 * (full body from disk), and merges them into `priorOutputs` keyed
+	 * by artifact id. Omit to skip build-context entirely (legacy
+	 * path; still exercised by unit tests).
+	 */
+	readonly buildContext?:      LeafBuildContext | undefined;
 }
 
 export interface ExecuteDiscoveryStepInput {
@@ -120,10 +130,12 @@ export async function executeDiscoveryStep(
 		let resultText = '';
 		let resultSpillId: string | undefined;
 		try {
-			const leafResult = await input.deps.executeLeaf({
+			const leafCall: Parameters<typeof input.deps.executeLeaf>[0] = {
 				leaf:         syntheticLeaf,
 				priorOutputs: mergedPriors,
-			});
+				...(input.deps.buildContext !== undefined ? { buildContext: input.deps.buildContext } : {}),
+			};
+			const leafResult = await input.deps.executeLeaf(leafCall);
 			resultText    = leafResult.text;
 			resultSpillId = leafResult.spillId;
 		} catch (err) {

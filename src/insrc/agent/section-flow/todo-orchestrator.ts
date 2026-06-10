@@ -41,7 +41,9 @@
  */
 
 import type { LLMProvider } from '../../shared/types.js';
-import type { MemoryShapeBundle } from '../working-memory/index.js';
+import type { LocalMemoryView, MemoryShapeBundle } from '../working-memory/index.js';
+import { renderToc } from '../prompts/composers/toc.js';
+import { buildToc } from '../artifacts/toc-builder.js';
 import type {
 	PerRootFinding,
 	TodoOrigin,
@@ -110,6 +112,23 @@ export interface TodoOrchestratorInput {
 	 * close any gap without skills.
 	 */
 	readonly catalog:     readonly CatalogSkill[];
+	/**
+	 * Optional session id for the build-context sub-step (Phase 3 of
+	 * plans/section-flow-architecture-redesign.md). When supplied,
+	 * the orchestrator builds the artifact TOC from `artifact_vec`
+	 * before each step's execution and threads it through the leaf-
+	 * executor so the local LLM can declare which artifact ids to
+	 * fetch. When undefined, build-context is skipped entirely
+	 * (legacy path; still exercised by every existing unit test).
+	 */
+	readonly sessionId?:  string | undefined;
+	/**
+	 * Optional local-tier memory view rendered alongside the TOC for
+	 * the build-context turn. Only the `system` / `currentTodo` /
+	 * `recentSteps` fields are read; `toc` is replaced by the
+	 * orchestrator-built per-step TOC.
+	 */
+	readonly localMemory?: LocalMemoryView | undefined;
 	/** Cycle cap (default 3, matching the canonical discovery-plan-loop design). */
 	readonly maxCycles?:  number | undefined;
 	/** Cap on revise-major-triggered recycles. Default 1. */
@@ -281,12 +300,20 @@ export async function runTodoOrchestrator(
 				// per-TODO cache. Everything else stays out of priorOutputs
 				// so the shape-resolver's prior-outputs block stays bounded.
 				const crossStepPriors = collectCrossStepPriors(step, crossStepRawOutputs);
+				// Phase 3 of plans/section-flow-architecture-redesign.md:
+				// when a sessionId is wired, build the per-step TOC + supply
+				// the build-context payload so the leaf-executor's local
+				// build-context turn can decide which artifacts to fetch.
+				// TOC is rebuilt PER STEP so artifacts spilled by earlier
+				// steps in the same cycle are visible to later ones.
+				const buildContext = await maybeBuildContext(input, step);
 				const execRes = await executeDiscoveryStep({
 					step,
 					priorOutputs: { ...priorStepOutputs, ...crossStepPriors },
 					deps: {
 						todo: input.todo, gapFacts: gaps,
 						executeLeaf: input.executeLeaf,
+						...(buildContext !== undefined ? { buildContext } : {}),
 					},
 				});
 				cycleOutputs.push(execRes.output);
@@ -518,6 +545,48 @@ function collectCrossStepPriors(
 		}
 	}
 	return wanted;
+}
+
+/**
+ * Build the per-step `LeafBuildContext` payload when the orchestrator
+ * has a sessionId wired (Phase 3 of plans/section-flow-architecture-
+ * redesign.md). Pulls the artifact_vec rows for the session, renders
+ * them via the existing TOC composer, and packs the result + the
+ * caller-supplied LocalMemoryView into a payload the leaf-executor
+ * threads into `runBuildContext`. Returns `undefined` when no
+ * sessionId is set -- which keeps the legacy path alive for every
+ * existing unit test that doesn't wire artifact storage.
+ *
+ * TOC build is best-effort: a Lance read failure logs + returns
+ * undefined so the step still runs (shape-resolver against bare
+ * priorOutputs).
+ */
+async function maybeBuildContext(
+	input: TodoOrchestratorInput,
+	step:  DiscoveryStep,
+): Promise<import('./leaf-executor.js').LeafBuildContext | undefined> {
+	if (input.sessionId === undefined || input.sessionId.length === 0) {
+		return undefined;
+	}
+	void step;   // step is in scope for future per-step TOC narrowing (e.g. filter by skillIdPrefix)
+	try {
+		const toc = await buildToc({ sessionId: input.sessionId });
+		const rendered = renderToc(toc);
+		const tocIds = new Set(toc.entries.map(e => e.id));
+		const payload: import('./leaf-executor.js').LeafBuildContext = {
+			todoObjective: input.todo.objective,
+			toc:           rendered,
+			tocIds,
+			...(input.localMemory !== undefined ? { memory: input.localMemory } : {}),
+		};
+		return payload;
+	} catch (err) {
+		log.warn({
+			todoId: input.todo.id, stepId: step.id,
+			err: (err as Error).message,
+		}, 'todo-orchestrator: TOC build failed; skipping build-context for this step');
+		return undefined;
+	}
 }
 
 /**

@@ -486,6 +486,13 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         runId,
         workingMemoryDir,
         catalog:          sectionFlowCatalog,
+        // Phase 3 of plans/section-flow-architecture-redesign.md:
+        // wire the session id so the per-TODO orchestrator builds the
+        // artifact TOC before each step and feeds it to the local
+        // build-context turn. Without this the leaf-executor skips
+        // build-context (the legacy path) and shape-resolver runs
+        // against bare priorOutputs.
+        sessionId:        session.id,
         onProgress,
       });
     } catch (err) {

@@ -140,6 +140,17 @@ export interface RunSectionFlowInput {
 	 */
 	readonly catalog?: readonly CatalogSkill[] | undefined;
 	/**
+	 * Optional session id for the Phase 3 build-context sub-step
+	 * (plans/section-flow-architecture-redesign.md). When supplied,
+	 * `runTodoOrchestrator` builds a per-step artifact TOC from the
+	 * session's `artifact_vec` rows so the leaf-executor's local
+	 * build-context turn can decide which artifacts to fetch into
+	 * the shape-resolver's priorOutputs. Omit to skip build-context
+	 * entirely (legacy path; still exercised by every existing unit
+	 * test). Production callers pass `session.id`.
+	 */
+	readonly sessionId?: string | undefined;
+	/**
 	 * Optional progress callback the daemon controller wires to chat-
 	 * stream events AND the TodoList workbench API (Q8). Awaited
 	 * serially so the controller can persist TodoItems before the next
@@ -274,6 +285,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			executeLeaf: input.executeLeaf,
 			l2Fallback:  input.l2Fallback,
 			catalog:     input.catalog ?? [],
+			...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
 		});
 		perTodoTraces.push(todoResult.trace);
 		priorBundle = memory.bundle;
@@ -389,6 +401,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 				executeLeaf: input.executeLeaf,
 				l2Fallback:  input.l2Fallback,
 				catalog:     input.catalog ?? [],
+				...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
 			});
 			const newIndex = (await store.listEntries()).length;
 			await store.write(newIndex, todoResult.entry);

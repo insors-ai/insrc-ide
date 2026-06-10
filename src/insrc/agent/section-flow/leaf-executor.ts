@@ -21,11 +21,16 @@
  * circuit the daemon's skill registry.
  */
 
+import { promises as fs } from 'node:fs';
 import type { PlannedNode } from '../content-gen/plan-tree.js';
 import { runSkill, type SkillRunnerDeps } from '../../daemon/skills/invoke.js';
 import type { SkillResult } from '../../daemon/skills/types.js';
 import type { LLMProvider } from '../../shared/types.js';
+import type { LocalMemoryView } from '../working-memory/index.js';
+import { getSkill } from '../../daemon/skills/index.js';
+import { getArtifactById } from '../../db/lance/artifact-vec.js';
 import { resolveSkillShape } from './shape-resolve.js';
+import { runBuildContext } from './step-build-context.js';
 import { getLogger } from '../../shared/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -36,6 +41,26 @@ import { getLogger } from '../../shared/logger.js';
 // surviving consumer.)
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-step input for the build-context sub-step (Phase 3 of
+ * plans/section-flow-architecture-redesign.md). When all four
+ * fields are supplied, the leaf executor runs `runBuildContext`
+ * before the shape-resolver and merges each fetched artifact's
+ * full body into `priorOutputs` keyed by its artifact id. When
+ * the field is `undefined`, build-context is skipped and the
+ * shape-resolver runs against the bare priorOutputs (legacy path,
+ * still exercised by tests).
+ */
+export interface LeafBuildContext {
+	readonly todoObjective: string;
+	/** Pre-rendered TOC text (from `renderToc(buildToc(sessionId))`). */
+	readonly toc:           string;
+	/** Valid artifact ids drawn from the same TOC entries. */
+	readonly tocIds:        ReadonlySet<string>;
+	/** Optional LocalMemoryView block for system + currentTodo + recentSteps. */
+	readonly memory?:       LocalMemoryView | undefined;
+}
+
 export interface LeafExecutionInput {
 	readonly leaf: PlannedNode;
 	/**
@@ -45,6 +70,13 @@ export interface LeafExecutionInput {
 	 * the visibility rules; this module doesn't.
 	 */
 	readonly priorOutputs: Readonly<Record<string, string>>;
+	/**
+	 * When present, the executor runs a local-tier build-context turn
+	 * BEFORE shape-resolver. The turn picks which artifact ids the
+	 * shape-resolver needs in its priorOutputs; each fetched artifact's
+	 * full body is read from disk and merged in. See `LeafBuildContext`.
+	 */
+	readonly buildContext?: LeafBuildContext | undefined;
 }
 
 /**
@@ -113,6 +145,41 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			return { text: '', spillId: undefined };
 		}
 
+		// Stage 0 (Phase 3 of section-flow-architecture-redesign.md):
+		// when the caller wired build-context, run a local-tier turn that
+		// decides which artifact ids the shape-resolver needs in its
+		// priorOutputs. Each fetched artifact's full body is loaded from
+		// disk and merged into `priorOutputs` keyed by the artifact id.
+		// Skips silently when build-context isn't supplied OR no provider
+		// is wired (legacy unit-test path).
+		let effectivePriors: Readonly<Record<string, string>> = call.priorOutputs;
+		if (call.buildContext !== undefined && deps.provider !== undefined) {
+			const skill = getSkill(leaf.skill);
+			if (skill !== undefined) {
+				try {
+					const bc = await runBuildContext({
+						stepIntent:       leaf.objective ?? leaf.title ?? leaf.id,
+						skillId:          leaf.skill,
+						skillDescription: skill.description,
+						skillSchema:      JSON.stringify(skill.inputs),
+						todoObjective:    call.buildContext.todoObjective,
+						toc:              call.buildContext.toc,
+						tocIds:           call.buildContext.tocIds,
+						memory:           call.buildContext.memory,
+						provider:         deps.provider,
+					});
+					effectivePriors = await mergeArtifactBodies(effectivePriors, bc.fetchIds, leaf.id, leaf.skill);
+				} catch (err) {
+					log.warn({
+						leafId: leaf.id, skill: leaf.skill,
+						err: (err as Error).message,
+					}, 'leaf-executor: build-context threw; proceeding with bare priorOutputs');
+				}
+			} else {
+				log.warn({ leafId: leaf.id, skill: leaf.skill }, 'leaf-executor: skill not in registry; skipping build-context');
+			}
+		}
+
 		// Stage 1: resolve the skill's args.
 		//   - When a provider is wired, defer to the LLM-driven shape
 		//     resolver (the 2-step executor's first stage -- restored
@@ -128,7 +195,7 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			const shape = await resolveSkillShape({
 				skillId:      leaf.skill,
 				objective:    leaf.objective ?? leaf.title ?? leaf.id,
-				priorOutputs: call.priorOutputs,
+				priorOutputs: effectivePriors,
 				userQuestion: deps.userQuestion,
 				contextBag:   deps.contextBag,
 				provider:     deps.provider,
@@ -139,7 +206,7 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			}
 			resolvedInput = shape.args;
 		} else {
-			resolvedInput = resolveLeafInputs(leaf, call.priorOutputs, deps.userQuestion, deps.contextBag);
+			resolvedInput = resolveLeafInputs(leaf, effectivePriors, deps.userQuestion, deps.contextBag);
 		}
 
 		// Stage 2: invoke the skill.
@@ -335,8 +402,57 @@ export function stringifySkillValue(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 3 helper: artifact-body merge for build-context fetches.
+// ---------------------------------------------------------------------------
+
+/**
+ * For each id named by build-context, look the row up via
+ * `getArtifactById` and read the full body off disk at the row's
+ * `path`. Successful reads land in `priorOutputs[id]` so the shape-
+ * resolver can quote raw values (hex entityIds, field names, etc.)
+ * verbatim instead of paraphrasing the summary.
+ *
+ * Failure modes are non-fatal and logged once: an unknown id, a
+ * deleted disk file, a JSON-too-large to read -- each just leaves
+ * that entry out of `priorOutputs`. The shape-resolver still runs.
+ */
+async function mergeArtifactBodies(
+	base:     Readonly<Record<string, string>>,
+	fetchIds: readonly string[],
+	leafId:   string,
+	skillId:  string,
+): Promise<Readonly<Record<string, string>>> {
+	if (fetchIds.length === 0) { return base; }
+	const enriched: Record<string, string> = { ...base };
+	for (const id of fetchIds) {
+		let row;
+		try {
+			row = await getArtifactById(id);
+		} catch (err) {
+			log.warn({ leafId, skillId, id, err: (err as Error).message }, 'leaf-executor: getArtifactById threw; skipping');
+			continue;
+		}
+		if (row === null || row.path.length === 0) {
+			log.warn({ leafId, skillId, id }, 'leaf-executor: artifact has no on-disk path; skipping');
+			continue;
+		}
+		try {
+			const body = await fs.readFile(row.path, 'utf8');
+			enriched[id] = body;
+		} catch (err) {
+			log.warn({
+				leafId, skillId, id, path: row.path,
+				err: (err as Error).message,
+			}, 'leaf-executor: failed to read artifact body; skipping');
+		}
+	}
+	return enriched;
+}
+
+// ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-export const _resolveOneForTest      = resolveOne;
-export const _tryParseJsonForTest    = tryParseJson;
+export const _resolveOneForTest         = resolveOne;
+export const _tryParseJsonForTest       = tryParseJson;
+export const _mergeArtifactBodiesForTest = mergeArtifactBodies;
