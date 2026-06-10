@@ -342,7 +342,7 @@ function validate(raw: string, catalogIds: ReadonlySet<string>, maxFactIdx: numb
 	return { ok: true, steps };
 }
 
-function coerceStep(
+export function coerceStep(
 	raw:                Record<string, unknown>,
 	idx:                number,
 	catalogIds:         ReadonlySet<string>,

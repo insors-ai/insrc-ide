@@ -41,6 +41,7 @@ import { factGapAnalysisWriterV1 }          from './writers/fact-gap-analysis.js
 import { discoveryPlanExpansionWriterV1 }   from './writers/discovery-plan-expansion.js';
 import { cycleReviewWriterV2 } from './writers/cycle-review.js';
 import { buildContextWriterV1 }            from './writers/build-context.js';
+import { sketchWriterV1 }                   from './writers/sketch.js';
 import {
 	sectionReviewWriterV1,
 	sectionReviseWriterV1,
@@ -70,6 +71,7 @@ export function registerAllPromptWriters(): void {
 	r.register(discoveryPlanExpansionWriterV1);
 	r.register(cycleReviewWriterV2);
 	r.register(buildContextWriterV1);
+	r.register(sketchWriterV1);
 	r.register(sectionReviewWriterV1);
 	r.register(sectionReviseWriterV1);
 	r.register(sectionSynthWriterV2);
