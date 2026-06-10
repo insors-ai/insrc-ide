@@ -42,6 +42,7 @@ import { discoveryPlanExpansionWriterV1 }   from './writers/discovery-plan-expan
 import { cycleReviewWriterV2 } from './writers/cycle-review.js';
 import { buildContextWriterV1 }            from './writers/build-context.js';
 import { sketchWriterV1 }                   from './writers/sketch.js';
+import { decideNextStepWriterV1 }           from './writers/decide-next-step.js';
 import {
 	sectionReviewWriterV1,
 	sectionReviseWriterV1,
@@ -72,6 +73,7 @@ export function registerAllPromptWriters(): void {
 	r.register(cycleReviewWriterV2);
 	r.register(buildContextWriterV1);
 	r.register(sketchWriterV1);
+	r.register(decideNextStepWriterV1);
 	r.register(sectionReviewWriterV1);
 	r.register(sectionReviseWriterV1);
 	r.register(sectionSynthWriterV2);
