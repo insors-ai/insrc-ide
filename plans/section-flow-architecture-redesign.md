@@ -205,13 +205,15 @@ tags to flag which tier each test belongs to.
 
 ## Phases
 
-Seven phases, each independently shippable behind a feature flag
-(`INSRC_SECTION_FLOW_MODE` env: `static` keeps today's behaviour,
-`dynamic` opts into the new architecture). Phase 0 is the foundation
-the rest builds on (PromptWriter abstraction). Phases 1-3 are
-preconditions for Phase 4 (the orchestrator rewrite). Phase 5
-finishes the convergence story. Phase 6 is continuous prompt work,
-made tractable by Phase 0.
+Seven phases. Each phase REPLACES the prior code path; no feature
+flags, no parallel "static / dynamic" code, no env-var gates. Each
+commit deletes the predecessor implementation in the same commit (or
+the immediately-following one). Phase 0 is the foundation the rest
+builds on (PromptWriter abstraction). Phases 1-3 are preconditions
+for Phase 4 (the orchestrator rewrite). Phase 5 finishes the
+convergence story. Phase 6 is continuous prompt work, made tractable
+by Phase 0. If a phase needs partial-rollout safety, the recourse is
+revert-commit + redeploy -- not a flag.
 
 ### Phase 0: PromptWriter abstraction
 
@@ -779,7 +781,7 @@ cycle reviewer's third question -- "have we made enough progress?"
   emitted sketch is 3-5 steps, all skillIds are catalog-valid, no
   intra-sketch dependency cycles.
 
-**Validation gate:** rerun the GRN analysis in dynamic mode.
+**Validation gate:** rerun the GRN analysis against the rewritten orchestrator.
 Acceptance: TODO 2 (`locate-ingrn-pydantic-class`) and TODO 4
 (`extract-ingrn-fields`) -- both of which L2-fallback'd in runs 5/6
 and got partial-acceptance in run 7 -- MUST produce sections backed
@@ -888,10 +890,11 @@ between versions are first-class.
 - **Bullet extraction** (local): unchanged for now; bullets become
   one of several artifact types in the store.
 
-Each prompt change ships as a new PromptWriter version behind the
-same `INSRC_SECTION_FLOW_MODE` flag so static-mode prompts (which
-just pin to v1 of every writer) stay frozen during the dynamic-mode
-rollout.
+Each prompt change ships as a new PromptWriter version (v2, v3, ...).
+The new version BECOMES the registered writer; the orchestrator pins
+to the latest by default. Old versions stay in the registry only so
+rollback is config-pin, not a parallel code path -- and they get
+deleted once the new version has validated.
 
 ## Out of scope (intentional)
 
@@ -918,8 +921,11 @@ rollout.
 ## Risk
 
 - **Phase 4 is large.** Rewriting todo-orchestrator is a multi-file
-  change. Mitigation: feature flag, parallel old code path, validate
-  in dynamic mode without disturbing static mode users.
+  change, and the old cycle-loop implementation gets DELETED in the
+  same commit (no parallel code path; no feature flag). Mitigation:
+  rigorous unit-test coverage of the new orchestrator before commit;
+  if a regression surfaces in live runs, the recourse is revert-
+  commit + redeploy, not a flag flip.
 
 - **Decide-next-step prompt is load-bearing.** The cloud's ability
   to pick the right next step on incomplete information is the
@@ -989,9 +995,12 @@ rollout.
 7. **Phase 6** (prompt rework) -- continuous after Phase 0, formalised
    here. Each prompt iteration is a version bump.
 
-Each phase commits behind a feature flag, ships to release/1.96, and
-gets validated against the GRN data analysis before the next phase
-starts. No "big bang" merge.
+Each phase ships as a direct replacement of the prior code path --
+no feature flags, no parallel implementations. Phase N's commit (or
+the immediately-following one) DELETES Phase N-1's superseded code.
+Validation against the GRN data analysis happens before the next
+phase starts; if a regression surfaces, the recourse is revert-
+commit + redeploy.
 
 ## Tracking
 
