@@ -266,7 +266,8 @@ test('buildSkillExecutor: happy path -- runSkill called with resolved input; res
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]!.skillId, 'shared.x');
 	assert.deepEqual(calls[0]!.input, { ctx: '/r' });
-	assert.equal(out, '{\n  "fields": [\n    "x",\n    "y"\n  ]\n}');
+	assert.equal(out.text, '{\n  "fields": [\n    "x",\n    "y"\n  ]\n}');
+	assert.equal(out.spillId, undefined);
 });
 
 test('buildSkillExecutor: non-leaf node -> empty output, runSkill NOT called', async () => {
@@ -279,7 +280,8 @@ test('buildSkillExecutor: non-leaf node -> empty output, runSkill NOT called', a
 	});
 	const composition: PlannedNode = { id: 'c', title: 'c', objective: 'c', kind: 'composition', composition: 'sequence', inputs: {}, emit: 'intermediate', children: [] };
 	const out = await exec({ leaf: composition, priorOutputs: {} });
-	assert.equal(out, '');
+	assert.equal(out.text, '');
+	assert.equal(out.spillId, undefined);
 	assert.equal(called, 0);
 });
 
@@ -294,7 +296,8 @@ test('buildSkillExecutor: leaf with empty skill id -> empty output, runSkill NOT
 	// PlannedNode requires skill on leaves; force an empty by hand for the defensive guard.
 	const l: PlannedNode = { id: 'no-skill', title: 'n', objective: 'n', kind: 'leaf', skill: '', inputs: {}, emit: 'intermediate' };
 	const out = await exec({ leaf: l, priorOutputs: {} });
-	assert.equal(out, '');
+	assert.equal(out.text, '');
+	assert.equal(out.spillId, undefined);
 	assert.equal(called, 0);
 });
 
@@ -307,7 +310,8 @@ test('buildSkillExecutor: runSkill throws -> empty output (no propagation)', asy
 	});
 	const l = leaf('x', {});
 	const out = await exec({ leaf: l, priorOutputs: {} });
-	assert.equal(out, '');
+	assert.equal(out.text, '');
+	assert.equal(out.spillId, undefined);
 });
 
 test('buildSkillExecutor: node binding resolves against prior outputs across calls', async () => {
@@ -322,7 +326,26 @@ test('buildSkillExecutor: node binding resolves against prior outputs across cal
 	const out1 = await exec({ leaf: l1, priorOutputs: {} });
 	// Second call: read the field list out of the first output via path.
 	const l2 = leaf('second', { fields: { source: 'node', nodeId: 'first', path: 'lit.fields' } });
-	const out2 = await exec({ leaf: l2, priorOutputs: { first: out1 } });
-	assert.match(out2, /"fields":/);
-	assert.match(out2, /"a"/);
+	const out2 = await exec({ leaf: l2, priorOutputs: { first: out1.text } });
+	assert.match(out2.text, /"fields":/);
+	assert.match(out2.text, /"a"/);
+});
+
+test('buildSkillExecutor: surfaces spillRecord.spillId from runSkill result', async () => {
+	const exec = buildSkillExecutor({
+		runnerDeps:   fakeRunnerDeps,
+		userQuestion: 'q',
+		contextBag:   {},
+		runSkillOverride: async () => ({
+			...fakeResult({ ok: true }),
+			spillRecord: {
+				spillId: 'sess-1:123:code.class.extract-fields',
+				path:    '/tmp/x.json',
+				bytes:   42,
+			},
+		}),
+	});
+	const out = await exec({ leaf: leaf('x', {}), priorOutputs: {} });
+	assert.match(out.text, /"ok"/);
+	assert.equal(out.spillId, 'sess-1:123:code.class.extract-fields');
 });

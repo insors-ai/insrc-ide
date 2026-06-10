@@ -65,6 +65,7 @@ import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
 import { reviewSection } from './step-section-review.js';
 import { computeCoverage } from './cycle-memory.js';
 import { gapFacts, isTrivialFastPath, type RequiredFact } from './fact-gap-types.js';
+import { updateArtifactSummary } from '../../db/lance/artifact-vec.js';
 import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:todo-orchestrator');
@@ -264,6 +265,11 @@ export async function runTodoOrchestrator(
 
 			// Stage 2: execute each step.
 			const cycleOutputs: StepOutput[] = [];
+			// Per-cycle mapping `stepId -> { callId -> spillId }`. Populated
+			// from each step's `execRes.skillArtifactIds` as the cycle runs;
+			// consumed AFTER cycle-review so the reviewer's per-call goal-
+			// aware summaries land on the right `artifact_vec` row.
+			const cycleArtifactIds: Record<string, Record<string, string>> = {};
 			for (const step of stepsToRun) {
 				// Selectively forward raw cross-step outputs the step's skills
 				// declared as deps. Only entries whose key matches one of this
@@ -296,6 +302,12 @@ export async function runTodoOrchestrator(
 						crossStepRawOutputs[`${step.id}.${callId}`] = raw;
 					}
 				}
+				// Remember the per-call artifact ids so the cycle-review
+				// summaries can be written back to the right Lance row.
+				const ids = execRes.skillArtifactIds;
+				if (Object.keys(ids).length > 0) {
+					cycleArtifactIds[step.id] = { ...ids };
+				}
 			}
 
 			// Stage 3: cycle review.
@@ -312,6 +324,13 @@ export async function runTodoOrchestrator(
 				failureChain.push(cycleLoopFailureReason);
 				break;
 			}
+
+			// Persist reviewer-emitted goal-aware summaries onto the
+			// `artifact_vec` rows so downstream stages (TOC builder, future
+			// Phase 3 build-context retriever) read the claim-shaped text
+			// instead of the noisy preview. Best-effort: a write failure
+			// for one artifact doesn't abort the cycle.
+			await persistStepSummaries(review.stepSummaries, cycleArtifactIds);
 
 			// Stage 4: ledger update + cycleMemory recompute.
 			const keepSet = new Set(review.response.keep);
@@ -488,6 +507,44 @@ function collectCrossStepPriors(
 	return wanted;
 }
 
+/**
+ * Walk `stepSummaries[stepId][callId]` and write each summary back to
+ * the matching `artifact_vec` row via `updateArtifactSummary`. Quiet
+ * skip when:
+ *
+ *   - The reviewer summarised a (stepId, callId) tuple that didn't
+ *     produce an artifact (e.g. the call returned empty -- no spill
+ *     happened; `cycleArtifactIds[stepId][callId]` is undefined).
+ *   - The artifact id doesn't exist on disk anymore (purged session
+ *     -- `updateArtifactSummary` itself soft-fails).
+ *
+ * Phase 1 of plans/section-flow-architecture-redesign.md. This
+ * replaces the standalone `summarizeResult` write that previously
+ * lived in `step-discovery-execute.ts` -- the cloud LLM now folds
+ * the summary into its review response in one call.
+ */
+async function persistStepSummaries(
+	stepSummaries:    Readonly<Record<string, Readonly<Record<string, string>>>>,
+	cycleArtifactIds: Readonly<Record<string, Readonly<Record<string, string>>>>,
+): Promise<void> {
+	for (const [stepId, callMap] of Object.entries(stepSummaries)) {
+		const stepArtifactIds = cycleArtifactIds[stepId];
+		if (stepArtifactIds === undefined) { continue; }
+		for (const [callId, summary] of Object.entries(callMap)) {
+			const artifactId = stepArtifactIds[callId];
+			if (artifactId === undefined) { continue; }
+			try {
+				await updateArtifactSummary(artifactId, summary);
+			} catch (err) {
+				log.warn({
+					stepId, callId, artifactId,
+					err: (err as Error).message,
+				}, 'persistStepSummaries: updateArtifactSummary threw; continuing');
+			}
+		}
+	}
+}
+
 function stringifyStepOutput(out: StepOutput): string {
 	if (out.facts.length === 0) {
 		return `(step ${out.stepId} returned no facts; status=${out.status})`;
@@ -630,5 +687,6 @@ export const _appendAnnotationsForTest      = appendAnnotations;
 export const _ledgerToFindingsForTest       = ledgerToFindings;
 export const _stringifyStepOutputForTest    = stringifyStepOutput;
 export const _collectCrossStepPriorsForTest = collectCrossStepPriors;
+export const _persistStepSummariesForTest   = persistStepSummaries;
 export const DEFAULT_MAX_CYCLES_VALUE       = DEFAULT_MAX_CYCLES;
 export const DEFAULT_MAX_RECYCLES_VALUE     = DEFAULT_MAX_RECYCLES;

@@ -46,12 +46,15 @@ interface LeafRecord {
 	readonly priorOutputs: Readonly<Record<string, string>>;
 }
 
-function mockLeafExecutor(returnsByLeafId: Readonly<Record<string, string | Error>>): {
+function mockLeafExecutor(
+	returnsByLeafId: Readonly<Record<string, string | Error>>,
+	spillIdsByLeafId: Readonly<Record<string, string>> = {},
+): {
 	executeLeaf: ExecuteLeaf;
 	calls: LeafRecord[];
 } {
 	const calls: LeafRecord[] = [];
-	const executeLeaf: ExecuteLeaf = async (input: LeafExecutionInput): Promise<string> => {
+	const executeLeaf: ExecuteLeaf = async (input: LeafExecutionInput) => {
 		const rec: LeafRecord = {
 			leafId:       input.leaf.id,
 			skill:        input.leaf.skill ?? '',
@@ -61,7 +64,7 @@ function mockLeafExecutor(returnsByLeafId: Readonly<Record<string, string | Erro
 		calls.push(rec);
 		const ret = returnsByLeafId[input.leaf.id];
 		if (ret instanceof Error) { throw ret; }
-		return ret ?? '';
+		return { text: ret ?? '', spillId: spillIdsByLeafId[input.leaf.id] };
 	};
 	return { executeLeaf, calls };
 }

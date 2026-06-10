@@ -560,7 +560,40 @@ end-to-end from the artifact_vec table, and the cycle-review v2
 writer emits `stepSummaries` that the orchestrator successfully
 writes back via `updateArtifactSummary`. The summarizeResult call
 at [step-discovery-execute.ts:139](../src/insrc/agent/section-flow/step-discovery-execute.ts#L139)
-is DELETED in the same commit. No new skill ids are introduced.
+is DELETED before Phase 2 begins. No new skill ids are introduced.
+
+**Phase 1 ships across four commits for reviewability** (no feature
+flags, no parallel-implementation gates; each commit replaces the
+prior code path or is strictly additive on a new path):
+
+  - **Batch 1**: `artifact_vec` `summary` column +
+    `updateArtifactSummary` + getArtifactById/listArtifactsForSession
+    extension. Strictly additive.
+  - **Batch 2**: TOC builder (`agent/artifacts/toc-builder.ts`) over
+    `listArtifactsForSession`. Strictly additive.
+  - **Batch 3a** (this batch): cycle-review writer v2 ADDS
+    `stepSummaries`; caller validation + closure-marker regex scan;
+    orchestrator threads spill-ids per skill call and writes back via
+    `updateArtifactSummary`; spill-writer wired onto the data-analyzer
+    orchestrator's runner deps so artifact rows exist when the summary
+    write happens. summarizeResult call AND v1 cycle-review prompt
+    path stay alive in this batch -- they consume `StepOutput.facts`
+    which still flows through. The reviewer-emitted summaries land on
+    `artifact_vec.summary` independently; no downstream consumer
+    reads that column yet (Phase 2+ adds the readers).
+  - **Batch 3b**: deletion cascade. Cycle-review v2 prompt rendering
+    switches to RAW skill outputs (truncated); StepOutput drops `facts`
+    + `citations` and grows `rawOutputs` + `artifactIds`;
+    `stringifyStepOutput` uses raw outputs; `ledgerToFindings.content`
+    sources from artifact summaries via `getArtifactById`;
+    section-synth reads from artifact_vec summaries; summarizeResult
+    call + its prompt module are deleted; cycle-review v1 writer is
+    unregistered + deleted. Same commit, no flags.
+
+The batch 3a/3b split is operational, not a feature gate: the cascade
+is large enough to deserve its own diff review, and isolating it from
+the additive plumbing makes both halves easier to validate. Both ship
+before Phase 2 starts.
 
 ### Phase 2: Tier-split memory layout
 

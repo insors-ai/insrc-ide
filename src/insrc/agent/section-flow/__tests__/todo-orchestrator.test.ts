@@ -29,6 +29,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	registerAllPromptWriters,
+	_resetPromptRegistryForTest,
+} from '../../prompts/index.js';
+import {
 	runTodoOrchestrator,
 	_collectCrossStepPriorsForTest as collectCrossStepPriors,
 	type L2Fallback,
@@ -39,6 +43,16 @@ import type { TodoSpec } from '../types.js';
 import type { MemoryShapeBundle } from '../../working-memory/index.js';
 import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
 import type { ExecuteLeaf } from '../leaf-executor.js';
+
+// Prompt registry must be initialized before any orchestrator stage
+// (fact-gap analysis, discovery-plan expansion, cycle review,
+// synthesis, section review) -- every stage resolves its prompt via
+// `getPromptRegistry().get(...)`. Reset between tests so registering
+// twice doesn't throw.
+test.beforeEach(() => {
+	_resetPromptRegistryForTest();
+	registerAllPromptWriters();
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -120,7 +134,7 @@ const SYNTH_MARKDOWN = '# GRN Mapping\n\nReal section content here.';
 function mockExecuteLeaf(returnsBySkill: Readonly<Record<string, string>>): ExecuteLeaf {
 	return async ({ leaf }) => {
 		const skill = leaf.skill ?? '';
-		return returnsBySkill[skill] ?? '';
+		return { text: returnsBySkill[skill] ?? '', spillId: undefined };
 	};
 }
 

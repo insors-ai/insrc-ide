@@ -75,11 +75,45 @@ export interface CycleReviewInput {
 	readonly provider:       LLMProvider;
 }
 
+/**
+ * One reviewer-emitted closure claim extracted from `stepSummaries`.
+ * The orchestrator reads this list directly to decide convergence
+ * signals (Phase 5) without re-parsing the raw summary text.
+ *
+ * Phase 1 of plans/section-flow-architecture-redesign.md.
+ */
+export interface ClosureClaim {
+	readonly stepId:  string;
+	readonly callId:  string;
+	/** Gap-fact id the marker referenced. `null` when verdict is `off-topic`. */
+	readonly gapId:   string | null;
+	readonly verdict: 'closes-fully' | 'partial' | 'off-topic';
+}
+
 export interface CycleReviewResult {
 	readonly response:           CycleReviewResponse;
 	readonly retried:            boolean;
 	readonly droppedStepIds:     readonly string[];
 	readonly firstFailureReason?: string | undefined;
+	/**
+	 * Reviewer-emitted per-skill-call goal-aware summary
+	 * (`stepSummaries[stepId][callId] = "<claim>. <closure marker>"`).
+	 * Empty when the reviewer omitted the field or returned an
+	 * unparseable shape -- never raises. The orchestrator writes each
+	 * summary back to the matching `artifact_vec` row via
+	 * `updateArtifactSummary`.
+	 *
+	 * Phase 1 of plans/section-flow-architecture-redesign.md (v2
+	 * writer).
+	 */
+	readonly stepSummaries:      Readonly<Record<string, Readonly<Record<string, string>>>>;
+	/**
+	 * Closure markers extracted from `stepSummaries` via regex scan.
+	 * Each entry is one matched marker (a single summary may produce
+	 * 0, 1, or many entries). Drives the convergence signal in
+	 * Phase 5.
+	 */
+	readonly closureClaims:      readonly ClosureClaim[];
 }
 
 const MAX_REVIEW_TOKENS = 3072;
@@ -95,21 +129,31 @@ export async function runCycleReview(input: CycleReviewInput): Promise<CycleRevi
 	const earlierStepSkills = new Map<string, ReadonlySet<string>>(
 		input.stepsThisCycle.map(s => [s.id, new Set(s.skills.map(sk => sk.id))]),
 	);
+	const validCallIdsByStep = new Map<string, ReadonlySet<string>>(
+		input.stepsThisCycle.map(s => [s.id, new Set(s.skills.map(sk => sk.id))]),
+	);
+	const gapIds = new Set(input.gapFacts.map(g => g.id));
 
 	const firstAttempt = await callReview(input, false, undefined);
 	const firstValidation = validate(firstAttempt.raw, validStepIds, catalogIds, maxFactIdx, earlierStepSkills);
 	if (firstValidation.ok) {
+		const summaries = extractStepSummaries(firstAttempt.raw, validCallIdsByStep);
+		const closureClaims = scanClosureClaims(summaries, gapIds);
 		log.info({
 			todoId:        input.todo.id,
 			cycle:         input.cycle,
 			keepCount:     firstValidation.response.keep.length,
 			newStepCount:  firstValidation.response.new_steps.length,
 			droppedSteps:  firstValidation.droppedStepIds.length,
+			summaryCount:  countSummaries(summaries),
+			closureCount:  closureClaims.length,
 		}, 'cycle review: first-attempt validated');
 		return {
 			response:        firstValidation.response,
 			retried:         false,
 			droppedStepIds:  firstValidation.droppedStepIds,
+			stepSummaries:   summaries,
+			closureClaims,
 		};
 	}
 
@@ -120,12 +164,21 @@ export async function runCycleReview(input: CycleReviewInput): Promise<CycleRevi
 	if (!retryValidation.ok) {
 		throw new Error(`cycle review validation failed after retry: ${retryValidation.reason}`);
 	}
-	log.info({ todoId: input.todo.id, cycle: input.cycle, keepCount: retryValidation.response.keep.length }, 'cycle review: retry validated');
+	const retrySummaries = extractStepSummaries(retry.raw, validCallIdsByStep);
+	const retryClosure = scanClosureClaims(retrySummaries, gapIds);
+	log.info({
+		todoId: input.todo.id, cycle: input.cycle,
+		keepCount:    retryValidation.response.keep.length,
+		summaryCount: countSummaries(retrySummaries),
+		closureCount: retryClosure.length,
+	}, 'cycle review: retry validated');
 	return {
 		response:           retryValidation.response,
 		retried:            true,
 		droppedStepIds:     retryValidation.droppedStepIds,
 		firstFailureReason: firstValidation.reason,
+		stepSummaries:      retrySummaries,
+		closureClaims:      retryClosure,
 	};
 }
 
@@ -489,11 +542,157 @@ function stripFences(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// stepSummaries extraction (lenient -- never throws; Phase 1 v2 writer)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull `stepSummaries: { [stepId]: { [callId]: string } }` from the
+ * raw response. Lenient on every axis:
+ *
+ *   - missing / non-object `stepSummaries` -> `{}` (logged once)
+ *   - inner non-object -> dropped (logged)
+ *   - inner key not in the cycle's declared (stepId, callId) tuples
+ *     -> dropped (logged)
+ *   - empty / non-string value -> dropped silently
+ *
+ * Never fails the review. Each accepted entry lands on the artifact
+ * row via `updateArtifactSummary`. The closure marker scan runs over
+ * the accepted summaries only.
+ */
+export function extractStepSummaries(
+	raw:                 string,
+	validCallIdsByStep:  ReadonlyMap<string, ReadonlySet<string>>,
+): Readonly<Record<string, Readonly<Record<string, string>>>> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stripFences(raw));
+	} catch {
+		return {};
+	}
+	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		return {};
+	}
+	const ssRaw = (parsed as Record<string, unknown>)['stepSummaries'];
+	if (ssRaw === undefined) {
+		return {};
+	}
+	if (ssRaw === null || typeof ssRaw !== 'object' || Array.isArray(ssRaw)) {
+		log.warn({}, 'cycle review: stepSummaries is not a JSON object; ignoring');
+		return {};
+	}
+	const out: Record<string, Record<string, string>> = {};
+	for (const [stepId, callMapRaw] of Object.entries(ssRaw as Record<string, unknown>)) {
+		const validCalls = validCallIdsByStep.get(stepId);
+		if (validCalls === undefined) {
+			log.warn({ stepId }, 'cycle review: stepSummaries stepId not declared this cycle; dropping');
+			continue;
+		}
+		if (callMapRaw === null || typeof callMapRaw !== 'object' || Array.isArray(callMapRaw)) {
+			log.warn({ stepId }, 'cycle review: stepSummaries[stepId] is not an object; dropping');
+			continue;
+		}
+		const innerOut: Record<string, string> = {};
+		for (const [callId, valueRaw] of Object.entries(callMapRaw as Record<string, unknown>)) {
+			if (!validCalls.has(callId)) {
+				log.warn({ stepId, callId }, 'cycle review: stepSummaries callId not declared in this step; dropping');
+				continue;
+			}
+			if (typeof valueRaw !== 'string') {
+				continue;
+			}
+			const trimmed = valueRaw.trim();
+			if (trimmed.length === 0) {
+				continue;
+			}
+			innerOut[callId] = trimmed;
+		}
+		if (Object.keys(innerOut).length > 0) {
+			out[stepId] = innerOut;
+		}
+	}
+	return out;
+}
+
+/**
+ * Scan accepted stepSummaries for closure markers. The vocabulary
+ * is fixed (taught in the writer prompt):
+ *
+ *   - `CLOSES <gap-id> fully`           -> verdict `closes-fully`
+ *   - `PARTIALLY supports <gap-id>`     -> verdict `partial`
+ *   - `OFF-TOPIC` (or `OFF TOPIC`)      -> verdict `off-topic`, gapId null
+ *
+ * Multiple markers per summary are allowed (chained with `;`). A
+ * marker whose `<gap-id>` isn't in the cycle's gap-fact set is
+ * dropped with a log warn -- prevents fabricated coverage claims
+ * from reaching the convergence logic.
+ *
+ * Match is case-insensitive on the keyword; the captured `<gap-id>`
+ * is preserved verbatim and compared case-sensitively against the
+ * gap-fact id set (matching how the rest of the codebase treats
+ * ids).
+ */
+export function scanClosureClaims(
+	summaries: Readonly<Record<string, Readonly<Record<string, string>>>>,
+	gapIds:    ReadonlySet<string>,
+): readonly ClosureClaim[] {
+	const out: ClosureClaim[] = [];
+	const reCloses    = /CLOSES\s+([A-Za-z0-9_.-]+)\s+fully/gi;
+	const rePartial   = /PARTIALLY\s+supports\s+([A-Za-z0-9_.-]+)/gi;
+	const reOffTopic  = /OFF[\s-]TOPIC/gi;
+	for (const [stepId, callMap] of Object.entries(summaries)) {
+		for (const [callId, summary] of Object.entries(callMap)) {
+			let touched = false;
+			reCloses.lastIndex = 0;
+			rePartial.lastIndex = 0;
+			reOffTopic.lastIndex = 0;
+			for (let m: RegExpExecArray | null = reCloses.exec(summary); m !== null; m = reCloses.exec(summary)) {
+				const gapId = m[1] ?? '';
+				if (!gapIds.has(gapId)) {
+					log.warn({ stepId, callId, gapId }, 'cycle review: CLOSES marker references unknown gap-id; dropping');
+					continue;
+				}
+				out.push({ stepId, callId, gapId, verdict: 'closes-fully' });
+				touched = true;
+			}
+			for (let m: RegExpExecArray | null = rePartial.exec(summary); m !== null; m = rePartial.exec(summary)) {
+				const gapId = m[1] ?? '';
+				if (!gapIds.has(gapId)) {
+					log.warn({ stepId, callId, gapId }, 'cycle review: PARTIALLY marker references unknown gap-id; dropping');
+					continue;
+				}
+				out.push({ stepId, callId, gapId, verdict: 'partial' });
+				touched = true;
+			}
+			if (reOffTopic.test(summary)) {
+				out.push({ stepId, callId, gapId: null, verdict: 'off-topic' });
+				touched = true;
+			}
+			if (!touched) {
+				log.warn({ stepId, callId, summary: summary.slice(0, 80) }, 'cycle review: stepSummaries entry has no recognised closure marker');
+			}
+		}
+	}
+	return out;
+}
+
+function countSummaries(
+	summaries: Readonly<Record<string, Readonly<Record<string, string>>>>,
+): number {
+	let n = 0;
+	for (const inner of Object.values(summaries)) {
+		n += Object.keys(inner).length;
+	}
+	return n;
+}
+
+// ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-export const _validateForTest         = validate;
-export const _coerceNewStepForTest    = coerceNewStep;
-export const _renderCycleOutputsForTest = renderCycleOutputs;
-export const _renderGapFactsForTest   = renderGapFacts;
-export const _stripFencesForTest      = stripFences;
+export const _validateForTest             = validate;
+export const _coerceNewStepForTest        = coerceNewStep;
+export const _renderCycleOutputsForTest   = renderCycleOutputs;
+export const _renderGapFactsForTest       = renderGapFacts;
+export const _stripFencesForTest          = stripFences;
+export const _extractStepSummariesForTest = extractStepSummaries;
+export const _scanClosureClaimsForTest    = scanClosureClaims;

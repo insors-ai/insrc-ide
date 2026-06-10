@@ -68,6 +68,7 @@ import {
 } from '../../agent/section-flow/index.js';
 import { buildCatalogFromRegistry } from '../../agent/content-gen/plan-tree-helpers.js';
 import type { SkillRunnerDeps } from '../skills/invoke.js';
+import { makeSpillHandler } from '../../agent/artifacts/spill-writer.js';
 import { runAnswerQuestionTask } from '../../agent/tasks/data-analyzer/answer-question-section.js';
 import { PATHS } from '../../shared/paths.js';
 
@@ -321,6 +322,16 @@ export class DataAnalyzerOrchestratorController implements TaskController {
     const runnerDeps: SkillRunnerDeps = {
       session,
       resolveProvider,
+      // Phase 1 of plans/section-flow-architecture-redesign.md:
+      // every skill the section-flow runs spills its full structured
+      // payload to disk + indexes a preview into `artifact_vec`.
+      // `runSkill` surfaces the resulting `spillId` back through
+      // `SkillResult.spillRecord` so the leaf-executor can return it
+      // alongside the stringified value; the per-TODO cycle-review
+      // then writes a goal-aware claim onto the row via
+      // `updateArtifactSummary`. Without this wiring the row never
+      // exists and the summary write is a no-op.
+      onSkillEnd: makeSpillHandler(session),
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
     };
 

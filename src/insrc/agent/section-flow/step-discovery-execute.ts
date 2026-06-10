@@ -91,6 +91,17 @@ export interface ExecuteDiscoveryStepResult {
 	 * is the canonical contract for downstream stages.
 	 */
 	readonly skillOutputs:  Readonly<Record<string, string>>;
+	/**
+	 * Per-call mapping `callId -> spillId` where `spillId` is the
+	 * `<sessionId>:<timestamp>:<skillId>` key the spill-writer stamped
+	 * on `artifact_vec`. Calls that didn't spill (or spilled but the
+	 * id couldn't be recovered) are absent. Used by the orchestrator
+	 * to write reviewer-emitted goal-aware summaries back via
+	 * `updateArtifactSummary` after cycle-review.
+	 *
+	 * Phase 1 of plans/section-flow-architecture-redesign.md.
+	 */
+	readonly skillArtifactIds: Readonly<Record<string, string>>;
 }
 
 export async function executeDiscoveryStep(
@@ -98,6 +109,7 @@ export async function executeDiscoveryStep(
 ): Promise<ExecuteDiscoveryStepResult> {
 	const t0 = Date.now();
 	const skillOutputs: Record<string, string> = {};
+	const skillArtifactIds: Record<string, string> = {};
 	const facts: string[] = [];
 	const citations: Citation[] = [];
 	let executedCount = 0;
@@ -114,11 +126,14 @@ export async function executeDiscoveryStep(
 		const syntheticLeaf = makeSyntheticLeaf(call);
 
 		let resultText = '';
+		let resultSpillId: string | undefined;
 		try {
-			resultText = await input.deps.executeLeaf({
+			const leafResult = await input.deps.executeLeaf({
 				leaf:         syntheticLeaf,
 				priorOutputs: mergedPriors,
 			});
+			resultText    = leafResult.text;
+			resultSpillId = leafResult.spillId;
 		} catch (err) {
 			log.warn({
 				stepId: input.step.id, callId: call.id, skillId: call.skillId,
@@ -127,6 +142,9 @@ export async function executeDiscoveryStep(
 		}
 
 		skillOutputs[call.id] = resultText;
+		if (resultSpillId !== undefined) {
+			skillArtifactIds[call.id] = resultSpillId;
+		}
 		executedCount += 1;
 		if (resultText.trim().length === 0) {
 			emptyCount += 1;
@@ -169,6 +187,7 @@ export async function executeDiscoveryStep(
 			durationMs: Date.now() - t0,
 		},
 		skillOutputs,
+		skillArtifactIds,
 	};
 }
 

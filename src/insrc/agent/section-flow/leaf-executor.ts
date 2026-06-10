@@ -47,7 +47,28 @@ export interface LeafExecutionInput {
 	readonly priorOutputs: Readonly<Record<string, string>>;
 }
 
-export type ExecuteLeaf = (input: LeafExecutionInput) => Promise<string>;
+/**
+ * Result of one leaf invocation. `text` is the stringified SkillResult
+ * value (the contract every existing caller already relies on).
+ * `spillId` is the `<sessionId>:<timestamp>:<skillId>` key under which
+ * the spill-writer persisted the full structured payload + the
+ * `artifact_vec` Lance row. `undefined` when:
+ *   - the skill didn't spill (e.g. test override that doesn't populate
+ *     `result.spillRecord`)
+ *   - the spill-writer failed (logged + swallowed by the runner)
+ *   - the leaf threw before the runner returned
+ *
+ * Phase 1 of plans/section-flow-architecture-redesign.md: the
+ * orchestrator threads this id through cycle-review so the reviewer-
+ * emitted goal-aware summary can be written back to the artifact row
+ * via `updateArtifactSummary`.
+ */
+export interface LeafExecutionResult {
+	readonly text:    string;
+	readonly spillId: string | undefined;
+}
+
+export type ExecuteLeaf = (input: LeafExecutionInput) => Promise<LeafExecutionResult>;
 
 const log = getLogger('section-flow:leaf-executor');
 
@@ -81,15 +102,15 @@ export interface LeafExecutorDeps {
 }
 
 export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
-	return async (call: LeafExecutionInput): Promise<string> => {
+	return async (call: LeafExecutionInput): Promise<LeafExecutionResult> => {
 		const leaf = call.leaf;
 		if (leaf.kind !== 'leaf') {
 			log.warn({ leafId: leaf.id, kind: leaf.kind }, 'buildSkillExecutor invoked for non-leaf node; returning empty');
-			return '';
+			return { text: '', spillId: undefined };
 		}
 		if (leaf.skill === undefined || leaf.skill.length === 0) {
 			log.warn({ leafId: leaf.id }, 'leaf has no skill id; returning empty');
-			return '';
+			return { text: '', spillId: undefined };
 		}
 
 		// Stage 1: resolve the skill's args.
@@ -114,7 +135,7 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			});
 			if (shape.kind === 'failed') {
 				log.warn({ leafId: leaf.id, skill: leaf.skill, reason: shape.reason, retried: shape.retried }, 'shape-resolve failed; returning empty leaf output');
-				return '';
+				return { text: '', spillId: undefined };
 			}
 			resolvedInput = shape.args;
 		} else {
@@ -131,13 +152,16 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			}
 		} catch (err) {
 			log.warn({ leafId: leaf.id, skill: leaf.skill, err: (err as Error).message }, 'runSkill threw; returning empty leaf output');
-			return '';
+			return { text: '', spillId: undefined };
 		}
 
 		// Stringify the SkillResult.value so downstream node-bindings
 		// can JSON.parse + path-resolve. Skill values are typed
 		// (object/array/scalar); we encode uniformly as JSON.
-		return stringifySkillValue(result.value);
+		return {
+			text:    stringifySkillValue(result.value),
+			spillId: result.spillRecord?.spillId,
+		};
 	};
 }
 

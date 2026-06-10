@@ -23,9 +23,11 @@ import assert from 'node:assert/strict';
 
 import {
 	runCycleReview,
-	_validateForTest         as validate,
-	_coerceNewStepForTest    as coerceNewStep,
-	_renderCycleOutputsForTest as renderCycleOutputs,
+	_validateForTest             as validate,
+	_coerceNewStepForTest        as coerceNewStep,
+	_renderCycleOutputsForTest   as renderCycleOutputs,
+	_extractStepSummariesForTest as extractStepSummaries,
+	_scanClosureClaimsForTest    as scanClosureClaims,
 } from '../step-cycle-review.js';
 import { emptyCycleMemory } from '../../content-gen/discovery-plan.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
@@ -298,4 +300,223 @@ test('renderCycleOutputs: includes citations count when present', () => {
 		[STEP_1],
 	);
 	assert.match(out, /citations: 2/);
+});
+
+// ---------------------------------------------------------------------------
+// v2: stepSummaries extraction (lenient -- never throws)
+// ---------------------------------------------------------------------------
+
+const VALID_CALL_IDS = new Map<string, ReadonlySet<string>>([
+	['step-1', new Set(['s1.a'])],
+	['step-2', new Set(['s2.a'])],
+]);
+
+test('extractStepSummaries: well-formed response is passed through verbatim', () => {
+	const raw = JSON.stringify({
+		keep: [], new_steps: [],
+		stepSummaries: {
+			'step-1': { 's1.a': 'INGRN has 21 fields. CLOSES ingrn-fields fully' },
+			'step-2': { 's2.a': 'sampled 1 row. PARTIALLY supports json-shape' },
+		},
+	});
+	const out = extractStepSummaries(raw, VALID_CALL_IDS);
+	assert.equal(out['step-1']!['s1.a'], 'INGRN has 21 fields. CLOSES ingrn-fields fully');
+	assert.equal(out['step-2']!['s2.a'], 'sampled 1 row. PARTIALLY supports json-shape');
+});
+
+test('extractStepSummaries: missing field -> empty object (no throw)', () => {
+	const raw = JSON.stringify({ keep: [], new_steps: [] });
+	assert.deepEqual(extractStepSummaries(raw, VALID_CALL_IDS), {});
+});
+
+test('extractStepSummaries: top-level non-JSON -> empty object', () => {
+	assert.deepEqual(extractStepSummaries('not json', VALID_CALL_IDS), {});
+	assert.deepEqual(extractStepSummaries('[]', VALID_CALL_IDS), {});
+});
+
+test('extractStepSummaries: unknown stepId / callId entries dropped, valid ones kept', () => {
+	const raw = JSON.stringify({
+		keep: [], new_steps: [],
+		stepSummaries: {
+			'step-1': {
+				's1.a':       'valid call. CLOSES ingrn-fields fully',
+				's1.unknown': 'invented call. OFF-TOPIC',     // unknown call id
+			},
+			'step-99': { 's9.a': 'invented step. OFF-TOPIC' },   // unknown step
+		},
+	});
+	const out = extractStepSummaries(raw, VALID_CALL_IDS);
+	assert.deepEqual(Object.keys(out).sort(), ['step-1']);
+	assert.deepEqual(Object.keys(out['step-1']!).sort(), ['s1.a']);
+});
+
+test('extractStepSummaries: non-object inner / empty string values dropped silently', () => {
+	const raw = JSON.stringify({
+		keep: [], new_steps: [],
+		stepSummaries: {
+			'step-1': { 's1.a': '' },              // empty -> drop
+			'step-2': 'not-an-object',             // non-object -> drop
+		},
+	});
+	const out = extractStepSummaries(raw, VALID_CALL_IDS);
+	assert.deepEqual(out, {});
+});
+
+test('extractStepSummaries: tolerates markdown fences around the JSON', () => {
+	const fenced = '```json\n' + JSON.stringify({
+		keep: [], new_steps: [],
+		stepSummaries: { 'step-1': { 's1.a': 'observed. CLOSES ingrn-fields fully' } },
+	}) + '\n```';
+	const out = extractStepSummaries(fenced, VALID_CALL_IDS);
+	assert.equal(out['step-1']!['s1.a'], 'observed. CLOSES ingrn-fields fully');
+});
+
+// ---------------------------------------------------------------------------
+// v2: closure marker scan
+// ---------------------------------------------------------------------------
+
+const GAP_ID_SET = new Set(['ingrn-fields', 'json-shape']);
+
+test('scanClosureClaims: CLOSES marker -> closes-fully verdict', () => {
+	const claims = scanClosureClaims(
+		{ 'step-1': { 's1.a': 'INGRN has 21 fields. CLOSES ingrn-fields fully' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 1);
+	assert.deepEqual(claims[0], { stepId: 'step-1', callId: 's1.a', gapId: 'ingrn-fields', verdict: 'closes-fully' });
+});
+
+test('scanClosureClaims: PARTIALLY marker -> partial verdict', () => {
+	const claims = scanClosureClaims(
+		{ 'step-2': { 's2.a': 'sampled one row. PARTIALLY supports json-shape' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 1);
+	assert.deepEqual(claims[0], { stepId: 'step-2', callId: 's2.a', gapId: 'json-shape', verdict: 'partial' });
+});
+
+test('scanClosureClaims: OFF-TOPIC marker -> off-topic verdict with gapId null', () => {
+	const claims = scanClosureClaims(
+		{ 'step-1': { 's1.a': 'extract-fields returned empty. OFF-TOPIC' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 1);
+	assert.deepEqual(claims[0], { stepId: 'step-1', callId: 's1.a', gapId: null, verdict: 'off-topic' });
+});
+
+test('scanClosureClaims: chained markers in one summary -> multiple claims', () => {
+	const claims = scanClosureClaims(
+		{
+			'step-1': {
+				's1.a': 'INGRN imports GRNItem. PARTIALLY supports ingrn-fields; PARTIALLY supports json-shape',
+			},
+		},
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 2);
+	const gapIds = claims.map(c => c.gapId).sort();
+	assert.deepEqual(gapIds, ['ingrn-fields', 'json-shape']);
+	for (const c of claims) { assert.equal(c.verdict, 'partial'); }
+});
+
+test('scanClosureClaims: unknown gap-id dropped (no fabricated coverage)', () => {
+	const claims = scanClosureClaims(
+		{ 'step-1': { 's1.a': 'CLOSES not-a-real-gap fully' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 0);
+});
+
+test('scanClosureClaims: summary with no recognised marker -> no claims (logged + dropped)', () => {
+	const claims = scanClosureClaims(
+		{ 'step-1': { 's1.a': 'just a sentence without any marker keyword' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 0);
+});
+
+test('scanClosureClaims: case-insensitive on marker keyword', () => {
+	const claims = scanClosureClaims(
+		{ 'step-1': { 's1.a': 'observed. closes ingrn-fields fully' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 1);
+	assert.equal(claims[0]!.verdict, 'closes-fully');
+});
+
+test('scanClosureClaims: OFF TOPIC (space variant) also matches', () => {
+	const claims = scanClosureClaims(
+		{ 'step-1': { 's1.a': 'attempted nothing useful. OFF TOPIC' } },
+		GAP_ID_SET,
+	);
+	assert.equal(claims.length, 1);
+	assert.equal(claims[0]!.verdict, 'off-topic');
+});
+
+// ---------------------------------------------------------------------------
+// v2: end-to-end via runCycleReview (writer + caller + extractor)
+// ---------------------------------------------------------------------------
+
+const REVIEW_V2_TERMINATE = JSON.stringify({
+	keep: ['step-1', 'step-2'],
+	new_steps: [],
+	stepSummaries: {
+		'step-1': { 's1.a': 'located INGRN at insors/grn.py:40. PARTIALLY supports ingrn-fields' },
+		'step-2': { 's2.a': 'sampled 1 row. CLOSES json-shape fully' },
+	},
+});
+
+test('runCycleReview: v2 prompt teaches stepSummaries shape + closure vocabulary', async () => {
+	const { provider, calls } = scriptedProvider([REVIEW_V2_TERMINATE]);
+	await runCycleReview({
+		todo: TODO, gapFacts: GAP_FACTS,
+		stepsThisCycle: [STEP_1, STEP_2],
+		cycleOutputs: [output('step-1'), output('step-2')],
+		cycleMemory: emptyCycleMemory(['INGRN field list', 'JSON shape']),
+		cycle: 1, catalog: CATALOG, provider,
+	});
+	const user = calls[0]!.messages[1]!.content;
+	// New schema bits
+	assert.match(user, /stepSummaries/);
+	assert.match(user, /CLOSES.*fully/);
+	assert.match(user, /PARTIALLY supports/);
+	assert.match(user, /OFF-TOPIC/);
+	// Per-call breakdown so the LLM knows valid (stepId, callId) tuples
+	assert.match(user, /skill calls:/);
+	assert.match(user, /s1\.a/);
+	assert.match(user, /s2\.a/);
+});
+
+test('runCycleReview: v2 response -> stepSummaries + closureClaims surfaced on result', async () => {
+	const { provider } = scriptedProvider([REVIEW_V2_TERMINATE]);
+	const r = await runCycleReview({
+		todo: TODO, gapFacts: GAP_FACTS,
+		stepsThisCycle: [STEP_1, STEP_2],
+		cycleOutputs: [output('step-1'), output('step-2')],
+		cycleMemory: emptyCycleMemory(['INGRN field list', 'JSON shape']),
+		cycle: 1, catalog: CATALOG, provider,
+	});
+	assert.equal(r.stepSummaries['step-1']?.['s1.a'], 'located INGRN at insors/grn.py:40. PARTIALLY supports ingrn-fields');
+	assert.equal(r.stepSummaries['step-2']?.['s2.a'], 'sampled 1 row. CLOSES json-shape fully');
+	assert.equal(r.closureClaims.length, 2);
+	const byCall = new Map(r.closureClaims.map(c => [c.callId, c]));
+	assert.equal(byCall.get('s1.a')!.verdict, 'partial');
+	assert.equal(byCall.get('s1.a')!.gapId,   'ingrn-fields');
+	assert.equal(byCall.get('s2.a')!.verdict, 'closes-fully');
+	assert.equal(byCall.get('s2.a')!.gapId,   'json-shape');
+});
+
+test('runCycleReview: v1-shaped response (no stepSummaries) -> empty stepSummaries + claims, no throw', async () => {
+	const { provider } = scriptedProvider([KEEP_ONLY_TERMINATE_JSON]);
+	const r = await runCycleReview({
+		todo: TODO, gapFacts: GAP_FACTS,
+		stepsThisCycle: [STEP_1, STEP_2],
+		cycleOutputs: [output('step-1'), output('step-2')],
+		cycleMemory: emptyCycleMemory(['INGRN field list', 'JSON shape']),
+		cycle: 1, catalog: CATALOG, provider,
+	});
+	assert.deepEqual(r.stepSummaries, {});
+	assert.deepEqual(r.closureClaims, []);
+	// The keep/new_steps contract still holds, so the orchestrator keeps working.
+	assert.deepEqual([...r.response.keep].sort(), ['step-1', 'step-2']);
 });
