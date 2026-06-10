@@ -346,39 +346,87 @@ in small, individually-testable rendering functions.
 using migrated PromptWriters and produces a report indistinguishable
 from before the migration. Same prompts, just better plumbed.
 
-### Phase 1: Physical artifact store + TOC
+### Phase 1: Goal-aware summaries + TOC over the existing spill infrastructure
 
-The first and load-bearing change. Every skill output gets persisted
-to disk and exposed to LLMs through a 128-token summary in the
-Table-of-Contents block, NOT inline in priorOutputs.
+**Important context that the first draft of this plan missed:** the
+"physical memory" layer already exists. The codebase ships:
 
-**Disk layout:**
+  - **[agent/artifacts/spill-writer.ts](../src/insrc/agent/artifacts/spill-writer.ts)** -- auto-persists every skill
+    output as a JSON envelope to `~/.insrc/tmp/<session_id>/<ts>-<skill_id>.json`,
+    wired into the skill-runner's `onSkillEnd` hook. Fail-tolerant; no
+    on-disk cap (full payload kept byte-for-byte). The envelope carries
+    `{ session_id, timestamp, intent, skill_id, skill_input, value,
+    confidence, notes, durationMs }`.
+  - **[db/lance/artifact-vec.ts](../src/insrc/db/lance/artifact-vec.ts)** -- per-skill-output Lance table for
+    semantic retrieval. Row shape:
+    `{ id, embedding, session_id, intent, skill_id, timestamp, path, preview }`.
+    `id` format is `<session_id>:<timestamp>:<skill_id>`. `preview`
+    is the first 2 KB of the stringified value.
+  - **`skill_load_page` meta-tool** -- pages through spilled values
+    when the LLM needs more than the inline preview.
+  - **`requestArtifactIds` enhancer flow** (in
+    [agent/intent/enhancer.ts](../src/insrc/agent/intent/enhancer.ts)) -- structured-output field the LLM
+    populates with up to 3 artifact ids it wants re-fetched; the
+    orchestrator inlines those full bodies in a second pass.
+  - **[agent/intent/retriever.ts](../src/insrc/agent/intent/retriever.ts)** -- semantic retrieval over the Lance
+    table.
 
-```
-~/.insrc/tmp/<sessionUuid>/artifacts/
-  <runId>/
-    <todoSlug>/
-      <stepId>/
-        <skillCallId>.payload.json   # raw skill output, full
-        <skillCallId>.meta.json      # metadata + summary
-```
+What Phase 1 ADDS (the gap between today's infrastructure and the
+redesign's promise):
 
-**Artifact record:**
+  A. A **claim-shaped goal-aware summary** alongside the existing
+     `preview`. Today's preview is a raw 2 KB byte-slice; the
+     summary is reviewer-authored, ~128 tokens, with the closure
+     markers described below. Stored as a new `summary` column on
+     the `artifact_vec` row.
+  B. A **TOC concept**: a deterministic LLM-facing block listing
+     artifact ids + their goal-aware summaries, scoped to the
+     current run / TODO. Different from the Lance retriever (which
+     is ANN-search-based) -- the TOC is a scan-and-pick list the
+     LLM reads top-down.
+  C. **Reviewer-emitted summary integration** wired into cycle-review
+     (Phase 1 batch 2). Today's standalone `summarizeResult` cloud
+     call gets DELETED in the same commit; the reviewer that already
+     runs at end-of-cycle emits per-step claim-shaped summaries as a
+     new `stepSummaries` field in its response. The orchestrator
+     reads that field and `updateSummary(id, summary)` on the matching
+     artifact_vec rows.
 
-```ts
-interface Artifact {
-  readonly id:             string;     // "art-<8-char-hex>", short for prompts
-  readonly summary:        string;     // 128 tokens, claim-shaped (see below)
-  readonly mimeType:       'application/json' | 'text/plain' | 'text/markdown';
-  readonly sizeBytes:      number;
-  readonly createdAt:      number;
-  readonly todoId:         string;
-  readonly stepId:         string;
-  readonly skillCallId:    string;
-  readonly skillId:        string;
-  readonly payloadPath:    string;
-}
-```
+What Phase 1 explicitly does NOT do:
+
+  - Add a parallel artifact store. The spill-writer is the
+    persistence layer; the artifact_vec is the indexed metadata
+    record. We extend them; we don't duplicate them.
+  - Add a new `shared.memory.get-artifact` skill. The existing
+    `requestArtifactIds` enhancer flow + `skill_load_page` meta-tool
+    already cover the "load me this artifact's full body" use case.
+    A thin wrapper may eventually emerge if section-flow callers find
+    the enhancer surface awkward, but that's a follow-up.
+  - Change the spill-writer's persistence layout. The disk path,
+    the JSON envelope shape, and the Lance row schema all stay; we
+    only add fields.
+
+**Extensions in detail:**
+
+  1. `artifact_vec` schema: add `summary: string` column. Default
+     empty string; backfilled when the reviewer/decider emits the
+     goal-aware summary for the artifact. Existing rows without a
+     summary continue to read fine (Lance is schemaless-friendly).
+  2. `spill-writer.ts` `SpillRecord` and `spillOne` signatures
+     unchanged; the summary lands AFTER spill via a separate
+     `updateArtifactSummary(id, summary)` function exported from
+     `db/lance/artifact-vec.ts`. The asymmetry is intentional --
+     spills are immediate (skill-runner side effect) while summaries
+     come from the next cloud turn.
+  3. Per-TODO TOC builder (new module
+     `agent/artifacts/toc-builder.ts`): given a `sessionId`,
+     `todoId`, and an optional cycle bound, returns an ordered
+     `TocEntry[]` ready for the [composer at agent/prompts/composers/toc.ts](../src/insrc/agent/prompts/composers/toc.ts).
+     Reads from `artifact_vec` (already indexed); falls back to a
+     direct directory scan when the Lance row's embedding was
+     written empty. Newest-first ordering; truncation when total
+     summary bytes exceed the configured budget (default ~6 KB ≈
+     2 K tokens for the local tier, ~18 KB for cloud).
 
 **Claim-shaped, goal-aware summary -- the load-bearing detail.**
 
@@ -440,29 +488,38 @@ chars of raw payload>"`) for the affected artifacts. The TOC still
 gets entries; only the closure markers are missing for those rows.
 Forward progress is never blocked on summary correctness.
 
-**Retrieval primitive:**
+**Retrieval primitive (reuses existing infrastructure):**
 
-A new skill, `shared.memory.get-artifact({id})`, returns the full
-payload as text. The orchestrator MAY also pre-fetch artifacts when a
-step's `dependsOn` declares them -- same selective forwarding pattern
-as the cross-step priors work but now pulling from disk instead of
-in-memory cache.
+When the LLM wants an artifact's full body, it uses the existing
+`requestArtifactIds` enhancer field (max 3 ids per request, one
+re-fetch round) -- same surface the enhancer flow already supports.
+Phase 4's decide-next-step writer adopts the same field name in its
+response schema so the orchestrator's wiring stays uniform.
 
-**Why the orchestrator MAY pre-fetch but not MUST:** the LLM-driven
-"decide next step" turn (Phase 4) sees the TOC and can request the
-fetch explicitly. The pre-fetch shortcut is for declared, deterministic
-dependencies; the explicit-request path covers everything else.
+The `skill_load_page` meta-tool covers paging through artifacts
+larger than the per-call inline budget. No new skill required for
+Phase 1.
+
+The orchestrator MAY also pre-fetch artifacts when a step's
+`dependsOn` declares them (Phase 3's build-context surface uses
+this) -- same selective forwarding pattern as the cross-step priors
+work, but now resolving artifact ids to disk-spilled JSON envelopes
+rather than the in-memory cache.
 
 **TOC block in the LLM context:**
 
 ```
-## TABLE OF CONTENTS (artifacts available; call shared.memory.get-artifact({id}) to fetch)
+## TABLE OF CONTENTS (artifacts available; populate `requestArtifactIds` to fetch up to 3)
 
-art-3a2f1b: 25 JSON file paths under test/integration/data/BB/GRN; first 3: 176050.json, ...
-art-8c4d29: INGRN class at insors/core/model/invoice/regions/IN/grn.py:40-207; entityId b2097ef0...
-art-7b1e88: Sample shape of 25 GRN JSON files: 10 top-level fields (grn_number VARCHAR, ...)
+<sessionId>:<ts>:code.entity.locate-by-name: 25 JSON file paths under test/integration/data/BB/GRN; first 3: 176050.json, ...
+<sessionId>:<ts>:code.class.extract-fields: INGRN class at insors/core/model/invoice/regions/IN/grn.py:40-207; entityId b2097ef0...
+<sessionId>:<ts>:data.source.file.sample-shape: Sample shape of 25 GRN JSON files: 10 top-level fields (grn_number VARCHAR, ...)
 ...
 ```
+
+Ids follow the existing `<sessionId>:<timestamp>:<skillId>` shape
+(no new short-id schema -- consistency with the spill / Lance row
+ids the rest of the codebase already uses).
 
 **Bounded by design:** the TOC grows linearly with steps run, but
 each entry is 128 tokens (40-60 words). 50 steps × 128 tokens = 6.4k
@@ -471,18 +528,21 @@ with selective payload fetches.
 
 **Tests:**
 
-- (unit) Round-trip: persist artifact, list TOC, fetch by id, content
-  matches.
-- (unit) Summary failure path: degraded structural summary written
-  when the review/decide turn omits the `stepSummaries` entry for
-  a step.
-- (unit) TOC truncation: when total summary tokens exceed budget,
-  oldest artifacts roll out of the TOC but remain on disk and
-  reachable by id (the LLM can still ask for them; just doesn't see
-  them by default).
-- (unit) Disk GC: artifacts older than session age cleaned by a
-  maintenance pass; cross-session retention is out of scope (see
-  below).
+- (unit) `updateArtifactSummary(id, summary)` round-trip: spill an
+  artifact via the existing spill-writer path, call the new updater,
+  re-read the artifact_vec row, confirm the summary lands.
+- (unit) Summary failure path: when the orchestrator's `stepSummaries`
+  consumer encounters a missing or malformed entry for a known
+  spilled artifact, it falls back to a structural summary
+  (`"<skillId> output: <first 80 chars of value>"`) and logs once.
+  The artifact remains fetchable; only the closure marker is missing.
+- (unit) TOC builder: given a `(sessionId, todoId)` pair with N
+  spilled artifacts, return entries in newest-first order, budget
+  respected, truncation footer present when the total exceeds the
+  per-tier cap.
+- (unit) TOC budget: oversize summaries trigger oldest-first
+  truncation; truncated ids remain reachable via `requestArtifactIds`
+  even when omitted from the rendered block.
 - (integration) The goal-aware summary contract: feed real Ollama
   the consolidated review-with-summaries prompt against a fixture
   that has a known-relevant artifact (e.g., a `list-files` output
@@ -494,11 +554,13 @@ with selective payload fetches.
   is genuinely irrelevant to any active gap. Assert the summary
   carries NO closure markers, not a fabricated `PARTIALLY supports`.
 
-**Validation gate:** a controlled run where every skill output is
-persisted, the TOC is computed end-to-end, and a synthetic "fetch
-artifact X" query through the retrieval skill returns the exact
-bytes. This is purely a plumbing check; the existing flow ignores
-the artifact store until Phase 4.
+**Validation gate:** a controlled run where every section-flow
+skill output is spilled (already happens), the TOC is computed
+end-to-end from the artifact_vec table, and the cycle-review v2
+writer emits `stepSummaries` that the orchestrator successfully
+writes back via `updateArtifactSummary`. The summarizeResult call
+at [step-discovery-execute.ts:139](../src/insrc/agent/section-flow/step-discovery-execute.ts#L139)
+is DELETED in the same commit. No new skill ids are introduced.
 
 ### Phase 2: Tier-split memory layout
 
@@ -880,8 +942,9 @@ between versions are first-class.
   already shipped (commit `e4f8ca7e41b`) carries forward; minor
   adjustments to reference TOC artifacts as the canonical source of
   prior-output data. Becomes shape-resolver v2.
-- **Section synthesis** (cloud): adjusted to read the artifact
-  store as the source of evidence, not a retained ledger of
+- **Section synthesis** (cloud): adjusted to read the spill /
+  artifact_vec records as the source of evidence (via the existing
+  `requestArtifactIds` re-fetch path), not a retained ledger of
   summarised facts. New version.
 - **Working-memory shape** (local map + cloud reduce): tier-split
   per Phase 2; local prompt drops the semantic + code sections.
@@ -898,11 +961,24 @@ deleted once the new version has validated.
 
 ## Out of scope (intentional)
 
-- **Cross-session artifact retention.** Each session's artifacts live
-  under `~/.insrc/tmp/<sessionUuid>/`. GC at session end. Sharing
-  artifacts across sessions is a separate problem (bullet cache and
-  Lance ANN already cover the semantic-recall case for prompts
-  across sessions).
+- **Cross-session artifact retention.** Artifacts live under
+  `~/.insrc/tmp/<session_id>/` per the spill-writer convention.
+  Lifetime + purge are controlled by the existing
+  `purgeSession*` paths in spill-writer.ts -- Phase 1 does not
+  change them. Sharing artifacts across sessions is a separate
+  problem the bullet cache + Lance ANN already cover.
+
+- **Changing the spill-writer's persistence layout.** The disk
+  path, the JSON envelope shape, the file naming, and the
+  `onSkillEnd` wiring all stay. Phase 1 only adds a `summary`
+  column to `artifact_vec` and a new updater; the spill itself is
+  untouched.
+
+- **Adding a new artifact-retrieval skill.** The existing
+  `requestArtifactIds` enhancer field + `skill_load_page` meta-
+  tool cover the retrieval use case. Phase 4's decide-next-step
+  writer adopts the same field name in its response schema --
+  no new skill id is introduced.
 
 - **Multi-TODO parallelism.** TODOs still run sequentially. The
   dynamic flow is per-TODO; running multiple TODOs concurrently is a
