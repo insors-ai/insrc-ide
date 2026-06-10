@@ -56,3 +56,13 @@ export {
 	extractBullets,
 	type ExtractBulletsOpts,
 } from './bullet-extractor.js';
+
+export {
+	buildMemoryBundle,
+	cloudViewToLegacyBundle,
+	legacyBundleToCloudView,
+	type LocalMemoryView,
+	type CloudMemoryView,
+	type MemoryBundle,
+	type BuildMemoryBundleInput,
+} from './tier-bundle.js';

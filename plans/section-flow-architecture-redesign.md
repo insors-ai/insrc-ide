@@ -665,6 +665,29 @@ the `local` or `cloud` view. Token-count metric collected per prompt
 type and compared to today; local prompts MUST drop materially (the
 whole point); cloud prompts MAY grow slightly (TOC added).
 
+**Phase 2 ships in two batches** (no feature flags):
+
+  - **Batch 2a** (foundation): types + builder + compat adapters +
+    unit tests. `LocalMemoryView` / `CloudMemoryView` / `MemoryBundle`
+    + `buildMemoryBundle` exposed from `agent/working-memory/index.ts`.
+    `cloudViewToLegacyBundle` and `legacyBundleToCloudView` so callers
+    can migrate independently without touching the runtime shape.
+    No prompt consumers wired yet -- they all keep reading the legacy
+    `MemoryShapeBundle`.
+  - **Batch 2b** (consumer migration): folded into Phase 6's prompt v2
+    rework. The cloud-tier prompts (fact-gap-analysis, discovery-plan-
+    expansion, cycle-review, section-synth, section-review) grow
+    optional `toc` + `factLedger` sections and switch their input
+    shapes from `MemoryShapeBundle` to `CloudMemoryView`. The orchestrator
+    builds the bundle once per cycle (TOC from `buildToc` + factLedger
+    from `renderFactGaps(gapAnalysis.requiredFacts)`). The local view
+    gets its first consumer in Phase 3 (build-context sub-step) -- no
+    cloud-tier wiring needed in this phase.
+
+The split is operational, not gated: no parallel code paths.
+Batch 2a is reviewable on its own; batch 2b lands as part of the
+prompt v2 rework where the input shapes change anyway.
+
 ### Phase 3: Build-context sub-step
 
 Before today's shape-resolver runs, a new local-tier turn decides
