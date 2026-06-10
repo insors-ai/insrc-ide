@@ -35,6 +35,12 @@ import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../..
 import type { MemoryShapeBundle } from '../../working-memory/index.js';
 import type { WorkingMemoryFindings } from '../../working-memory/types.js';
 import type { TodoSpec } from '../types.js';
+import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
+
+test.beforeEach(() => {
+	_resetPromptRegistryForTest();
+	registerAllPromptWriters();
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures

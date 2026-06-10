@@ -40,6 +40,8 @@ import type { CycleMemory, StepOutput } from '../content-gen/discovery-plan.js';
 import type { FactGapAnalysis, RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type { SectionSynthWriterInput } from '../prompts/writers/section-synth.js';
 
 const log = getLogger('section-flow:synthesis');
 
@@ -85,10 +87,13 @@ export async function synthesizeSectionFromLedger(
 		};
 	}
 
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: SYNTH_ROLE },
-		{ role: 'user',   content: buildSynthUser(input, unmetGaps) },
-	];
+	const writer = getPromptRegistry().get<SectionSynthWriterInput, readonly LLMMessage[]>('section-synth');
+	const messages = [...writer.build({
+		todo:           input.todo,
+		retainedLedger: input.retainedLedger,
+		cycleMemory:    input.cycleMemory,
+		unmetGaps,
+	})];
 	const response = await input.provider.complete(messages, {
 		maxTokens:       MAX_SYNTHESIS_TOKENS,
 		temperature:     0,

@@ -51,6 +51,8 @@ import type { TodoSpec } from './types.js';
 import { summarizeCycleMemory } from './cycle-memory.js';
 import { validateDependsOn } from './step-discovery-plan-expansion.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type { CycleReviewWriterInput } from '../prompts/writers/cycle-review.js';
 
 const log = getLogger('section-flow:cycle-review');
 
@@ -140,10 +142,18 @@ async function callReview(
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
 ): Promise<ReviewRaw> {
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: REVIEW_ROLE },
-		{ role: 'user',   content: buildReviewUser(input, isRetry, priorFailureReason) },
-	];
+	const writer = getPromptRegistry().get<CycleReviewWriterInput, readonly LLMMessage[]>('cycle-review');
+	const messages = [...writer.build({
+		todo:               input.todo,
+		gapFacts:           input.gapFacts,
+		stepsThisCycle:     input.stepsThisCycle,
+		cycleOutputs:       input.cycleOutputs,
+		cycleMemory:        input.cycleMemory,
+		cycle:              input.cycle,
+		catalog:            input.catalog,
+		isRetry,
+		priorFailureReason,
+	})];
 	const response = await input.provider.complete(messages, {
 		maxTokens:       MAX_REVIEW_TOKENS,
 		temperature:     0,

@@ -35,6 +35,11 @@ import type { MemoryShapeBundle } from '../working-memory/index.js';
 import type { WorkingMemoryFindings } from '../working-memory/types.js';
 import type { TodoSpec } from './types.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type {
+	SectionReviewWriterInput,
+	SectionReviseWriterInput,
+} from '../prompts/writers/section-review.js';
 
 const log = getLogger('section-flow:section-review');
 
@@ -146,10 +151,13 @@ const REVIEW_ROLE = [
 ].join('\n');
 
 async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesConsumed: number): Promise<ReviewParsed> {
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: REVIEW_ROLE },
-		{ role: 'user',   content: buildReviewUser(input, candidate, cyclesConsumed) },
-	];
+	const writer = getPromptRegistry().get<SectionReviewWriterInput, readonly LLMMessage[]>('section-review');
+	const messages = [...writer.build({
+		todo:           input.todo,
+		findings:       input.findings,
+		candidate,
+		cyclesConsumed,
+	})];
 	const response = await input.provider.complete(messages, {
 		maxTokens:       MAX_REVIEW_TOKENS,
 		temperature:     0,
@@ -230,10 +238,12 @@ const REVISE_ROLE = [
 ].join('\n');
 
 async function reviseSection(input: SectionReviewInput, current: string, edits: string): Promise<string> {
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: REVISE_ROLE },
-		{ role: 'user',   content: buildReviseUser(input.todo, current, edits) },
-	];
+	const writer = getPromptRegistry().get<SectionReviseWriterInput, readonly LLMMessage[]>('section-revise');
+	const messages = [...writer.build({
+		todo:    input.todo,
+		current,
+		edits,
+	})];
 	const response = await input.provider.complete(messages, {
 		maxTokens:       MAX_REVISE_TOKENS,
 		temperature:     0,

@@ -36,8 +36,15 @@ export { renderFactGaps }             from './composers/fact-gaps.js';
 export { renderToc }                  from './composers/toc.js';
 
 import { getPromptRegistry } from './registry.js';
-import { shapeResolverWriterV1 }    from './writers/shape-resolver.js';
-import { factGapAnalysisWriterV1 }  from './writers/fact-gap-analysis.js';
+import { shapeResolverWriterV1 }            from './writers/shape-resolver.js';
+import { factGapAnalysisWriterV1 }          from './writers/fact-gap-analysis.js';
+import { discoveryPlanExpansionWriterV1 }   from './writers/discovery-plan-expansion.js';
+import { cycleReviewWriterV1 }              from './writers/cycle-review.js';
+import {
+	sectionReviewWriterV1,
+	sectionReviseWriterV1,
+} from './writers/section-review.js';
+import { sectionSynthWriterV1 }             from './writers/section-synth.js';
 
 /**
  * Register every PromptWriter that ships with the codebase. Mirrors
@@ -52,23 +59,13 @@ export function registerAllPromptWriters(): void {
 	const r = getPromptRegistry();
 	r.register(shapeResolverWriterV1);
 	r.register(factGapAnalysisWriterV1);
-	// Phase 0 migration in progress -- the following writers ship in
-	// subsequent commits. Each is a behaviour-preserving extraction
-	// from its current inline `buildMessages` (or equivalent) helper
-	// in the section-flow / working-memory modules:
-	//
-	//   - discoveryPlanExpansionWriterV1
-	//   - cycleReviewWriterV1
-	//   - sectionReviewWriterV1
-	//   - sectionSynthWriterV1
-	//   - memoryShapeWriterV1
-	//   - memoryUpdateWriterV1
-	//   - bulletExtractorWriterV1
-	//   - investigationPlanWriterV1
-	//   - reportAssembleWriterV1
-	//   - reportReviewWriterV1
-	//
-	// Until then, those step modules keep their inline prompts; the
-	// PromptWriter interface is forward-compatible because each
-	// migration is independent.
+	r.register(discoveryPlanExpansionWriterV1);
+	r.register(cycleReviewWriterV1);
+	r.register(sectionReviewWriterV1);
+	r.register(sectionReviseWriterV1);
+	r.register(sectionSynthWriterV1);
+	// Phase 0 migration still pending for the working-memory writers
+	// (memory-shape single + map + reduce; memory-update summary +
+	// recent + semantic; bullet-extractor). 7 more behaviour-preserving
+	// extractions; landing in the next commit.
 }

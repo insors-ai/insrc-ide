@@ -41,6 +41,8 @@ import type { RequiredFact } from './fact-gap-types.js';
 import type { TodoSpec } from './types.js';
 import { summarizeCycleMemory } from './cycle-memory.js';
 import { getLogger } from '../../shared/logger.js';
+import { getPromptRegistry } from '../prompts/registry.js';
+import type { DiscoveryPlanExpansionWriterInput } from '../prompts/writers/discovery-plan-expansion.js';
 
 const log = getLogger('section-flow:discovery-plan-expansion');
 
@@ -121,10 +123,17 @@ async function callExpansion(
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
 ): Promise<ExpansionRaw> {
-	const messages: LLMMessage[] = [
-		{ role: 'system', content: EXPANSION_ROLE },
-		{ role: 'user',   content: buildExpansionUser(input, isRetry, priorFailureReason) },
-	];
+	const writer = getPromptRegistry().get<DiscoveryPlanExpansionWriterInput, readonly LLMMessage[]>('discovery-plan-expansion');
+	const messages = [...writer.build({
+		todo:               input.todo,
+		gapFacts:           input.gapFacts,
+		memory:             input.memory,
+		catalog:            input.catalog,
+		cycle:              input.cycle,
+		cycleMemory:        input.cycleMemory,
+		isRetry,
+		priorFailureReason,
+	})];
 	const response = await input.provider.complete(messages, {
 		maxTokens:       MAX_EXPANSION_TOKENS,
 		temperature:     0,

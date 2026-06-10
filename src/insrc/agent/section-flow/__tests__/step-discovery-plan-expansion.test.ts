@@ -33,6 +33,12 @@ import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../..
 import type { TodoSpec } from '../types.js';
 import type { MemoryShapeBundle } from '../../working-memory/index.js';
 import type { CatalogSkill } from '../../content-gen/plan-tree-runner.js';
+import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
+
+test.beforeEach(() => {
+	_resetPromptRegistryForTest();
+	registerAllPromptWriters();
+});
 import type { RequiredFact } from '../fact-gap-types.js';
 import type { CycleMemory } from '../../content-gen/discovery-plan.js';
 
