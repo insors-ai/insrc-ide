@@ -71,22 +71,15 @@ export interface DecideNextStepInput {
 }
 
 /**
- * Reviewer-emitted summary for each call in the last step.
- * Empty when there was no last step (first iteration) OR the LLM
- * skipped the field. Keys are the last step's declared call ids;
- * unknown keys are dropped during parse.
- */
-export type LastStepSummaries = Readonly<Record<string, string>>;
-
-/**
  * The decided action + its action-specific payload, before the
- * retry/telemetry metadata gets folded in. Phase 4 of
- * plans/section-flow-architecture-redesign.md.
+ * retry/telemetry metadata gets folded in. Decide-next-step v2 no
+ * longer authors summaries -- the local-tier `summarize-step` writer
+ * (citation contract) does. The cloud just picks the next move.
  */
 export type DecidedAction =
-	| { readonly action: 'execute-step';  readonly step: DiscoveryStep; readonly reasoning: string; readonly lastStepSummaries: LastStepSummaries }
-	| { readonly action: 'replan-sketch'; readonly reasoning: string; readonly lastStepSummaries: LastStepSummaries }
-	| { readonly action: 'terminate';     readonly verdict: TerminateVerdict; readonly reasoning: string; readonly lastStepSummaries: LastStepSummaries };
+	| { readonly action: 'execute-step';  readonly step: DiscoveryStep; readonly reasoning: string }
+	| { readonly action: 'replan-sketch'; readonly reasoning: string }
+	| { readonly action: 'terminate';     readonly verdict: TerminateVerdict; readonly reasoning: string };
 
 export type DecideNextStepResult = DecidedAction & {
 	readonly retried:             boolean;
@@ -98,16 +91,12 @@ const MAX_TOKENS = 3072;
 export async function runDecideNextStep(input: DecideNextStepInput): Promise<DecideNextStepResult> {
 	const catalogIds = new Set(input.catalog.map(c => c.id));
 	const maxFactIdx = Math.max(0, input.gapFacts.length - 1);
-	const lastStepCallIds = input.lastStep === undefined
-		? new Set<string>()
-		: new Set(input.lastStep.skills.map(s => s.callId));
 
 	const first = await callDecider(input, false, undefined);
-	const firstResult = parse(first, catalogIds, maxFactIdx, lastStepCallIds);
+	const firstResult = parse(first, catalogIds, maxFactIdx);
 	if (firstResult.ok) {
 		log.info({
 			todoId: input.todo.id, action: firstResult.value.action,
-			summaryCount: Object.keys(firstResult.value.lastStepSummaries).length,
 		}, 'decide-next-step: first-attempt validated');
 		return { ...firstResult.value, retried: false };
 	}
@@ -115,7 +104,7 @@ export async function runDecideNextStep(input: DecideNextStepInput): Promise<Dec
 	log.warn({ todoId: input.todo.id, reason: firstResult.reason }, 'decide-next-step: first-attempt rejected; retrying with corrective hint');
 
 	const retry = await callDecider(input, true, firstResult.reason);
-	const retryResult = parse(retry, catalogIds, maxFactIdx, lastStepCallIds);
+	const retryResult = parse(retry, catalogIds, maxFactIdx);
 	if (!retryResult.ok) {
 		throw new Error(`decide-next-step validation failed after retry: ${retryResult.reason}`);
 	}
@@ -169,10 +158,9 @@ interface ParseErr {
 type ParseResult = ParseOk | ParseErr;
 
 export function parse(
-	raw:              string,
-	catalogIds:       ReadonlySet<string>,
-	maxFactIdx:       number,
-	lastStepCallIds:  ReadonlySet<string>,
+	raw:        string,
+	catalogIds: ReadonlySet<string>,
+	maxFactIdx: number,
 ): ParseResult {
 	let parsed: unknown;
 	try {
@@ -199,39 +187,20 @@ export function parse(
 		return { ok: false, reason: '`reasoning` must be a non-empty string' };
 	}
 
-	const lastStepSummaries = extractLastStepSummaries(obj['lastStepArtifactSummary'], lastStepCallIds);
-
 	if (action === 'execute-step') {
 		const stepRaw = obj['step'];
 		if (stepRaw === null || typeof stepRaw !== 'object' || Array.isArray(stepRaw)) {
 			return { ok: false, reason: '`step` must be an object when action="execute-step"' };
 		}
-		// Empty earlier-step map -- decide-next-step's emitted step is
-		// the next one to run, not a multi-step dependency target.
 		const coerced = coerceStep(stepRaw as Record<string, unknown>, 0, catalogIds, maxFactIdx, new Map());
 		if (typeof coerced === 'string') {
 			return { ok: false, reason: `\`step\` failed validation: ${coerced}` };
 		}
-		return {
-			ok: true,
-			value: {
-				action: 'execute-step',
-				step:   coerced,
-				reasoning,
-				lastStepSummaries,
-			},
-		};
+		return { ok: true, value: { action: 'execute-step', step: coerced, reasoning } };
 	}
 
 	if (action === 'replan-sketch') {
-		return {
-			ok: true,
-			value: {
-				action: 'replan-sketch',
-				reasoning,
-				lastStepSummaries,
-			},
-		};
+		return { ok: true, value: { action: 'replan-sketch', reasoning } };
 	}
 
 	// action === 'terminate'
@@ -243,45 +212,7 @@ export function parse(
 	if (verdict !== 'covered' && verdict !== 'unrecoverable') {
 		return { ok: false, reason: `\`verdict\` "${verdict}" is not "covered" or "unrecoverable"` };
 	}
-	return {
-		ok: true,
-		value: {
-			action: 'terminate',
-			verdict: verdict as TerminateVerdict,
-			reasoning,
-			lastStepSummaries,
-		},
-	};
-}
-
-/**
- * Pull `lastStepArtifactSummary` from the raw response. Lenient on
- * every axis: missing / non-object / unknown-callId / non-string
- * values are silently dropped (or returned as empty), so the
- * iteration never aborts on summary issues. Phase 1 of
- * plans/section-flow-architecture-redesign.md.
- */
-export function extractLastStepSummaries(
-	raw:             unknown,
-	lastStepCallIds: ReadonlySet<string>,
-): LastStepSummaries {
-	if (raw === undefined || raw === null) { return {}; }
-	if (typeof raw !== 'object' || Array.isArray(raw)) {
-		log.warn({}, 'decide-next-step: lastStepArtifactSummary is not a JSON object; ignoring');
-		return {};
-	}
-	const out: Record<string, string> = {};
-	for (const [callId, valueRaw] of Object.entries(raw as Record<string, unknown>)) {
-		if (lastStepCallIds.size > 0 && !lastStepCallIds.has(callId)) {
-			log.warn({ callId }, 'decide-next-step: lastStepArtifactSummary callId not declared in the last step; dropping');
-			continue;
-		}
-		if (typeof valueRaw !== 'string') { continue; }
-		const trimmed = valueRaw.trim();
-		if (trimmed.length === 0) { continue; }
-		out[callId] = trimmed;
-	}
-	return out;
+	return { ok: true, value: { action: 'terminate', verdict: verdict as TerminateVerdict, reasoning } };
 }
 
 function stripFences(text: string): string {
@@ -296,6 +227,5 @@ function stripFences(text: string): string {
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-export const _parseForTest                    = parse;
-export const _stripFencesForTest              = stripFences;
-export const _extractLastStepSummariesForTest = extractLastStepSummaries;
+export const _parseForTest       = parse;
+export const _stripFencesForTest = stripFences;

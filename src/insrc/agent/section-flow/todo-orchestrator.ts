@@ -73,6 +73,9 @@ import type {
 	DecideLastStepRawOutputs,
 	DecidePriorAttempt,
 } from '../prompts/writers/decide-next-step.js';
+import { runSummarizeStep, type SummarizeStepCall } from './step-summarize-step.js';
+import { citedSummariesToClosureClaims } from './citation-to-closure.js';
+import type { CitedStepSummary } from './citation-types.js';
 import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
 import type { PriorAttempt } from '../prompts/writers/section-synth.js';
 import { reviewSection } from './step-section-review.js';
@@ -80,7 +83,6 @@ import {
 	DEFAULT_NO_PROGRESS_BUDGET,
 	DEFAULT_SAFETY_CEILING,
 	computeCoverage,
-	scanAllClosureMarkers,
 	stepContributedEvidence,
 	type ClosureClaim,
 } from './convergence.js';
@@ -278,7 +280,6 @@ export async function runTodoOrchestrator(
 
 		// Normal path: dynamic loop.
 		const gaps = gapFacts(analysis.analysis);
-		const gapIdSet = new Set(gaps.map(g => g.id));
 		const gapIdList = gaps.map(g => g.id);
 
 		// Cloud-tier memory view threaded into post-fact-gap stages. Phase 6
@@ -345,41 +346,9 @@ export async function runTodoOrchestrator(
 				break;
 			}
 
-			// 2c. Persist the prior step's summaries the decider just emitted.
-			//     The decide turn READ lastStep and produced summaries for it;
-			//     we write them to artifact_vec rows now so the TOC + downstream
-			//     stages see the goal-aware claims.
-			if (lastStep !== undefined && Object.keys(decision.lastStepSummaries).length > 0) {
-				const priorIds = allArtifactIds[lastStep.stepId];
-				if (priorIds !== undefined) {
-					await persistStepSummaries(
-						{ [lastStep.stepId]: decision.lastStepSummaries },
-						{ [lastStep.stepId]: priorIds },
-					);
-				}
-				// Convergence accounting against the PRIOR step's summary set.
-				const newClaims = scanAllClosureMarkers(
-					{ [lastStep.stepId]: decision.lastStepSummaries },
-					gapIdSet,
-				);
-				for (const c of newClaims) { closureClaims.push(c); }
-				const contributed = stepContributedEvidence(newClaims);
-				const traceIdx = perStepTrace.findIndex(t => t.stepId === lastStep!.stepId);
-				if (traceIdx >= 0) {
-					perStepTrace[traceIdx] = { ...perStepTrace[traceIdx]!, contributedEvidence: contributed };
-				}
-				if (contributed) {
-					noProgressCount = 0;
-				} else {
-					noProgressCount += 1;
-					if (noProgressCount >= noProgressBudget) {
-						terminationVerdict = 'unrecoverable';
-						loopFailureReason = `${noProgressBudget} consecutive no-progress steps`;
-						log.warn({ todoId: input.todo.id, noProgressCount }, 'TODO orchestrator: no-progress budget exhausted -> terminate unrecoverable');
-						break;
-					}
-				}
-			}
+			// 2c. (Cited summaries for the prior step are now persisted
+			//      immediately after executeDiscoveryStep returns -- see 2e.
+			//      below. The decide-next-step turn no longer authors them.)
 
 			// 2d. Structural convergence check (signal 1). Pure scan over
 			//     accepted closure claims; no LLM call.
@@ -459,12 +428,74 @@ export async function runTodoOrchestrator(
 			if (Object.keys(execRes.skillArtifactIds).length > 0) {
 				allArtifactIds[step.id] = { ...execRes.skillArtifactIds };
 			}
+
+			// 2e. Local-tier cited summaries (citation contract). Runs
+			//     IMMEDIATELY after step execution -- before the next decide
+			//     turn -- so the artifact_vec summary column is populated
+			//     with cited claims and the gap-closure verdicts feed
+			//     convergence accounting RIGHT NOW (not on the next iteration).
+			let stepClosureClaims: readonly ClosureClaim[] = [];
+			try {
+				const summarizerCalls: SummarizeStepCall[] = step.skills.map(sk => ({
+					callId:     sk.id,
+					skillId:    sk.skillId,
+					context:    sk.context,
+					artifactId: execRes.skillArtifactIds[sk.id] ?? '',
+					rawText:    execRes.output.rawOutputs[sk.id] ?? '',
+				}));
+				const summaryRes = await runSummarizeStep({
+					todoObjective: input.todo.objective,
+					stepIntent:    step.intent,
+					stepStatus:    execRes.output.status,
+					calls:         summarizerCalls,
+					gapFacts:      gaps,
+					provider:      input.provider,
+				});
+				// Stamp skillId onto each summary (the LLM doesn't know it).
+				const summariesWithSkill: CitedStepSummary[] = summaryRes.summaries.map(s => {
+					const call = summarizerCalls.find(c => c.callId === s.callId);
+					return { ...s, skillId: call?.skillId ?? s.skillId };
+				});
+				// Persist cited summaries to artifact_vec (JSON-encoded).
+				for (const s of summariesWithSkill) {
+					if (s.artifactId.length === 0) { continue; }
+					try {
+						await updateArtifactSummary(s.artifactId, JSON.stringify(s));
+					} catch (err) {
+						log.warn({
+							stepId: step.id, callId: s.callId, artifactId: s.artifactId,
+							err: (err as Error).message,
+						}, 'TODO orchestrator: updateArtifactSummary threw; continuing');
+					}
+				}
+				stepClosureClaims = citedSummariesToClosureClaims(step.id, summariesWithSkill);
+			} catch (err) {
+				log.warn({
+					todoId: input.todo.id, stepId: step.id,
+					err: (err as Error).message,
+				}, 'TODO orchestrator: summarize-step threw; continuing without cited summaries');
+			}
+			for (const c of stepClosureClaims) { closureClaims.push(c); }
+			const contributed = stepContributedEvidence(stepClosureClaims);
 			perStepTrace.push({
 				stepId:               step.id,
 				intent:                step.intent,
 				status:                execRes.output.status,
-				contributedEvidence:   false,   // updated by the NEXT decide turn's summaries
+				contributedEvidence:   contributed,
 			});
+			if (contributed) {
+				noProgressCount = 0;
+			} else {
+				noProgressCount += 1;
+				if (noProgressCount >= noProgressBudget) {
+					terminationVerdict = 'unrecoverable';
+					loopFailureReason = `${noProgressBudget} consecutive no-progress steps`;
+					log.warn({ todoId: input.todo.id, noProgressCount }, 'TODO orchestrator: no-progress budget exhausted -> terminate unrecoverable');
+					stepsRun += 1;
+					break;
+				}
+			}
+
 			lastStep = {
 				stepId:     step.id,
 				stepIntent: step.intent,
@@ -732,43 +763,6 @@ async function safeRenderToc(sessionId: string | undefined): Promise<string> {
 }
 
 /**
- * Walk `stepSummaries[stepId][callId]` and write each summary back to
- * the matching `artifact_vec` row via `updateArtifactSummary`. Quiet
- * skip when:
- *
- *   - The decider emitted a summary for a (stepId, callId) tuple that
- *     didn't produce an artifact (e.g. the call returned empty -- no
- *     spill happened).
- *   - The artifact id doesn't exist on disk anymore (purged session
- *     -- `updateArtifactSummary` itself soft-fails).
- *
- * Phase 4 batch 4.2 reuses the helper from Phase 1: the dynamic loop's
- * decide-next-step emits summaries with the same shape the cycle-
- * review v2 writer used to produce.
- */
-async function persistStepSummaries(
-	stepSummaries:    Readonly<Record<string, Readonly<Record<string, string>>>>,
-	cycleArtifactIds: Readonly<Record<string, Readonly<Record<string, string>>>>,
-): Promise<void> {
-	for (const [stepId, callMap] of Object.entries(stepSummaries)) {
-		const stepArtifactIds = cycleArtifactIds[stepId];
-		if (stepArtifactIds === undefined) { continue; }
-		for (const [callId, summary] of Object.entries(callMap)) {
-			const artifactId = stepArtifactIds[callId];
-			if (artifactId === undefined) { continue; }
-			try {
-				await updateArtifactSummary(artifactId, summary);
-			} catch (err) {
-				log.warn({
-					stepId, callId, artifactId,
-					err: (err as Error).message,
-				}, 'persistStepSummaries: updateArtifactSummary threw; continuing');
-			}
-		}
-	}
-}
-
-/**
  * Cap on raw-output rendering inside the prompt-bound digest. The
  * full payload is on disk + indexed in `artifact_vec`; the digest
  * is just enough for the next leaf's shape-resolver to recognise
@@ -959,6 +953,5 @@ export const _appendAnnotationsForTest      = appendAnnotations;
 export const _ledgerToFindingsForTest       = ledgerToFindings;
 export const _stringifyStepOutputForTest    = stringifyStepOutput;
 export const _collectCrossStepPriorsForTest = collectCrossStepPriors;
-export const _persistStepSummariesForTest   = persistStepSummaries;
 export const _resolveStepSummariesForTest   = resolveStepSummaries;
 export const DEFAULT_MAX_RECYCLES_VALUE     = DEFAULT_MAX_RECYCLES;

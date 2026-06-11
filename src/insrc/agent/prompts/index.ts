@@ -41,6 +41,7 @@ import { factGapAnalysisWriterV1 }          from './writers/fact-gap-analysis.js
 import { buildContextWriterV1 }             from './writers/build-context.js';
 import { sketchWriterV1 }                   from './writers/sketch.js';
 import { decideNextStepWriterV1 }           from './writers/decide-next-step.js';
+import { summarizeStepWriterV1 }            from './writers/summarize-step.js';
 import {
 	sectionReviewWriterV1,
 	sectionReviseWriterV1,
@@ -70,6 +71,7 @@ export function registerAllPromptWriters(): void {
 	r.register(buildContextWriterV1);
 	r.register(sketchWriterV1);
 	r.register(decideNextStepWriterV1);
+	r.register(summarizeStepWriterV1);
 	r.register(sectionReviewWriterV1);
 	r.register(sectionReviseWriterV1);
 	r.register(sectionSynthWriterV2);

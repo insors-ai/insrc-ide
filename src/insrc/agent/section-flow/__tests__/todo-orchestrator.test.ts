@@ -132,7 +132,7 @@ const SKETCH_TWO_STEPS = JSON.stringify({
 	],
 });
 
-function decideExecute(stepNum: 1 | 2, lastSummaries: Record<string, string> = {}): string {
+function decideExecute(stepNum: 1 | 2): string {
 	const stepN = stepNum === 1
 		? { id: 'step-1', intent: 'extract INGRN fields by name',
 		    skills: [{ id: 's1.a', skillId: 'code.class.extract-fields', context: 'class=INGRN' }],
@@ -141,21 +141,24 @@ function decideExecute(stepNum: 1 | 2, lastSummaries: Record<string, string> = {
 		    skills: [{ id: 's2.a', skillId: 'data.source.file.sample-shape', context: 'path=grn.json' }],
 		    targetsCriteria: [1] };
 	return JSON.stringify({
-		action:                  'execute-step',
-		reasoning:               `following the sketch -- step ${stepNum}`,
-		lastStepArtifactSummary: lastSummaries,
-		step:                    stepN,
+		action:    'execute-step',
+		reasoning: `following the sketch -- step ${stepNum}`,
+		step:      stepN,
 	});
 }
 
-function decideTerminate(verdict: 'covered' | 'unrecoverable', lastSummaries: Record<string, string> = {}): string {
+function decideTerminate(verdict: 'covered' | 'unrecoverable'): string {
 	return JSON.stringify({
-		action:                  'terminate',
+		action:    'terminate',
 		verdict,
-		reasoning:               `terminate -- ${verdict}`,
-		lastStepArtifactSummary: lastSummaries,
+		reasoning: `terminate -- ${verdict}`,
 	});
 }
+
+// summarize-step (citation contract) -- empty no-op summary that parses
+// cleanly and triggers no verifier failures. Tests don't exercise the
+// closure-marker side of the citation pipeline.
+const SUMMARIZE_NOOP = JSON.stringify({ summaries: [] });
 
 const SECTION_REVIEW_ACCEPT = JSON.stringify({ verdict: 'accept', reasoning: 'looks good' });
 
@@ -203,16 +206,18 @@ test('runTodoOrchestrator: trivial fast-path (all facts present) -> Stage 0 + sy
 });
 
 test('runTodoOrchestrator: 2-step dynamic loop -> terminate covered after both gaps closed', async () => {
-	// Cloud call sequence: gap-analysis (1) + sketch (1) + decide#1=execute step-1
-	// (1) + decide#2=execute step-2 with summaries for step-1 (1) + decide#3=
-	// terminate covered with summaries for step-2 (1) + synth (1) + section-review (1)
-	// = 7 calls.
+	// Call sequence (citation contract): gap (1) + sketch (1) + decide#1
+	// execute step-1 (1) + summarize step-1 (1) + decide#2 execute step-2
+	// (1) + summarize step-2 (1) + decide#3 terminate covered (1) + synth (1)
+	// + review (1) = 9 calls.
 	const { provider, calls } = scriptedProvider([
 		MIXED_GAP_ANALYSIS,
 		SKETCH_TWO_STEPS,
 		decideExecute(1),
-		decideExecute(2, { 's1.a': 'INGRN has 21 fields. CLOSES ingrn-fields fully' }),
-		decideTerminate('covered', { 's2.a': 'sampled JSON shape. CLOSES json-shape fully' }),
+		SUMMARIZE_NOOP,
+		decideExecute(2),
+		SUMMARIZE_NOOP,
+		decideTerminate('covered'),
 		SYNTH_MARKDOWN,
 		SECTION_REVIEW_ACCEPT,
 	]);
@@ -231,7 +236,7 @@ test('runTodoOrchestrator: 2-step dynamic loop -> terminate covered after both g
 	assert.equal(result.trace.retainedStepCount, 2);
 	// Both steps should be present in perStepTrace.
 	assert.deepEqual(result.trace.perStepTrace.map(t => t.stepId), ['step-1', 'step-2']);
-	assert.equal(calls.length, 7);
+	assert.equal(calls.length, 9);
 	assert.match(result.entry.detail, /Real section content/);
 });
 
@@ -280,8 +285,10 @@ test('runTodoOrchestrator: 2-step dynamic loop -> findings.perRoot has both step
 		MIXED_GAP_ANALYSIS,
 		SKETCH_TWO_STEPS,
 		decideExecute(1),
-		decideExecute(2, { 's1.a': 'CLOSES ingrn-fields fully' }),
-		decideTerminate('covered', { 's2.a': 'CLOSES json-shape fully' }),
+		SUMMARIZE_NOOP,
+		decideExecute(2),
+		SUMMARIZE_NOOP,
+		decideTerminate('covered'),
 		SYNTH_MARKDOWN,
 		SECTION_REVIEW_ACCEPT,
 	]);

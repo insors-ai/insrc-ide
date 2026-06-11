@@ -99,13 +99,6 @@ ollamaTest(test, 'decide-next-step: real qwen3.6 terminates=covered when every g
 	if (r.action === 'terminate') {
 		assert.equal(r.verdict, 'covered', `expected verdict=covered; got "${r.verdict}" reasoning="${r.reasoning}"`);
 	}
-
-	// The model MUST emit a parseable last-step summary for s3.a -- it
-	// has a raw output and the prompt rules require one per callId.
-	assert.ok(
-		(r.lastStepSummaries['s3.a'] ?? '').length > 0,
-		`expected lastStepArtifactSummary[s3.a]; got ${JSON.stringify(r.lastStepSummaries)}`,
-	);
 });
 
 ollamaTest(test, 'decide-next-step: first turn picks the sketch\'s first step (execute-step)', async () => {
@@ -127,6 +120,4 @@ ollamaTest(test, 'decide-next-step: first turn picks the sketch\'s first step (e
 			`expected first step to follow the sketch (locate-by-name); got ${r.step.skills[0]!.skillId}`,
 		);
 	}
-	// No lastStep -> no summaries.
-	assert.deepEqual(r.lastStepSummaries, {});
 });

@@ -1,56 +1,37 @@
 /**
- * decide-next-step writer v1 -- Phase 4 of
- * plans/section-flow-architecture-redesign.md.
+ * decide-next-step writer v2 -- Phase 4 (citation-contract update).
  *
  * The cloud-tier turn at the heart of the dynamic orchestrator loop.
  * Runs ONCE per iteration. Sees:
  *
  *   - The TODO objective + remaining gap facts.
  *   - The original sketch (default trajectory; not a hard contract).
- *   - The artifact TOC (every prior artifact's claim-shaped summary).
- *   - The raw output of the most-recently-executed step (awaiting
- *     its summary).
+ *   - The artifact TOC (entries authored by the local-tier summarise-
+ *     step writer; every TOC entry's claims have been substring-
+ *     verified by the citation verifier).
+ *   - The raw output of the most-recently-executed step (for ground-
+ *     truth visibility; the cited summary is also visible via TOC).
  *
- * Emits a structured decision AND the summary for the most-recent
- * step (consolidating today's separate `stepSummaries` from cycle-
- * review v2):
+ * Emits a structured decision ONLY -- the cloud no longer authors
+ * summaries. Summary authoring moved to the local-tier `summarize-step`
+ * writer (citation contract).
  *
  *   {
- *     "action":                 "execute-step" | "replan-sketch" | "terminate",
- *     "reasoning":              "<concise justification>",
- *     "lastStepArtifactSummary": {
- *        "<callId>": "<claim-shaped summary>. <closure marker>"
- *     },
+ *     "action":     "execute-step" | "replan-sketch" | "terminate",
+ *     "reasoning":  "<concise justification>",
  *     // action: 'execute-step'
- *     "step":      { id, intent, skills, targetsCriteria },
+ *     "step":       { id, intent, skills, targetsCriteria },
  *     // action: 'terminate'
- *     "verdict":   "covered" | "unrecoverable"
+ *     "verdict":    "covered" | "unrecoverable"
  *   }
  *
- * `lastStepArtifactSummary` is REQUIRED on every turn except the very
- * first (when there's no prior step to summarise). The orchestrator
- * writes each entry into the prior artifact's metadata via
- * `updateArtifactSummary` -- same path Phase 1 batch 3a established.
- * Missing-or-malformed summaries degrade to the structural fallback.
- *
- * Closure marker vocabulary in each `lastStepArtifactSummary` value
- * matches Phase 1 batch 3a:
- *
- *     CLOSES <gap-id> fully
- *     PARTIALLY supports <gap-id>
- *     OFF-TOPIC
- *
- * `<gap-id>` MUST be the literal `id` field of a gap fact (NOT the
- * numeric index). Chain markers with `;` when a call touches more
- * than one gap.
- *
- * Why we keep one prompt for both decision + summary: a separate
- * summariser turn was the failure mode the redesign explicitly
- * targets -- per-step round-trips that drove cost without improving
- * correctness because the summariser had less context than the
- * decider it was feeding. Folding them lets the same LLM read the
- * raw output ONCE and emit (a) the decision (b) the summary (c) the
- * justification in one structured response.
+ * Why this changed: live runs showed the cloud labelling sample-shape
+ * output as "the class definition" because it was optimising the
+ * summary for the TODO goal. Moving summary authoring to a narrow
+ * local-tier turn that MUST cite verbatim spans -- and a deterministic
+ * verifier that substring-checks each claim -- eliminates motivated-
+ * reasoning at the summary layer. The cloud's job shrinks to strategic
+ * planning; grounded extraction is the local tier's job.
  */
 
 import type { LLMMessage } from '../../../shared/types.js';
@@ -140,13 +121,14 @@ const ROLE = [
 	'You are the DECIDE-NEXT-STEP orchestrator for one TODO of an',
 	'investigation report. You see the TODO objective, the remaining gap',
 	'facts, the original sketch (a default trajectory), the artifact TOC',
-	'(every persisted artifact\'s claim-shaped summary), and -- when not',
-	'the first turn -- the RAW output of the most-recently-executed step',
-	'awaiting its summary.',
+	'(every persisted artifact\'s claim-shaped summary -- already cited',
+	'and verified by a separate local-tier turn), and -- when not the',
+	'first turn -- the RAW output of the most-recently-executed step',
+	'(for ground-truth visibility into what the last step produced).',
 	'',
-	'You decide ONE of three things, and ALSO emit the summary for the',
-	'most-recent step so the orchestrator can persist it into the',
-	'artifact metadata:',
+	'You decide ONE of three things. You do NOT author summaries -- the',
+	'summarise-step writer authors cited summaries for each artifact,',
+	'and the verifier substring-matches them against the raw output.',
 	'',
 	'You emit a SINGLE JSON object with EXACTLY these top-level keys',
 	'(extras are rejected):',
@@ -154,7 +136,6 @@ const ROLE = [
 	'  {',
 	'    "action":                  "execute-step" | "replan-sketch" | "terminate",',
 	'    "reasoning":               "<one or two sentences>",',
-	'    "lastStepArtifactSummary": { "<callId>": "<summary>. <closure marker>" },',
 	'    // when action="execute-step":',
 	'    "step": {',
 	'      "id":              "step-N",',
@@ -188,32 +169,16 @@ const ROLE = [
 	'      * `terminate`      : every gap fact has at least one CLOSES',
 	'                            marker in the TOC, OR coverage is',
 	'                            unrecoverable with available skills.',
-	'  - `lastStepArtifactSummary` is REQUIRED whenever a `last step`',
-	'    block is shown. Outer keys are the callIds from that block.',
-	'    Each value is a 1-2 sentence claim ending in a closure marker.',
-	'    Closure marker vocabulary (case-insensitive, anywhere in the',
-	'    sentence):',
-	'',
-	'        CLOSES <gap-id> fully',
-	'        PARTIALLY supports <gap-id>',
-	'        OFF-TOPIC',
-	'',
-	'    `<gap-id>` MUST be the literal `id` field of a gap fact',
-	'    (NOT the numeric index). Chain markers with `;` if a call',
-	'    covers >1 gap. Empty / failed calls get a sentence describing',
-	'    the attempt + `OFF-TOPIC`.',
 	'  - `step` (when action=execute-step) follows the discovery-plan',
 	'    rules: concrete intent (>=5 chars), unique id, every skillId in',
 	'    the SKILL CATALOG, targetsCriteria a non-empty array of valid',
 	'    gap-fact indices.',
 	'  - `verdict` (when action=terminate) is `covered` ONLY when every',
 	'    gap fact has at least one `CLOSES ... fully` marker against it',
-	'    in the TOC. Otherwise `unrecoverable`.',
-	'  - On the FIRST turn (no last step block) emit',
-	'    `lastStepArtifactSummary: {}` and pick the sketch\'s first step.',
-	'  - DO NOT invent gap ids. DO NOT paraphrase the marker keyword',
-	'    (`CLOSES` / `PARTIALLY supports` / `OFF-TOPIC`). DO NOT add',
-	'    fields beyond those documented above.',
+	'    in the TOC (the TOC entries you see were already cited and',
+	'    verified -- you can trust their closure verdicts). Otherwise',
+	'    `unrecoverable`.',
+	'  - DO NOT add fields beyond those documented above.',
 ].join('\n');
 
 // ---------------------------------------------------------------------------
