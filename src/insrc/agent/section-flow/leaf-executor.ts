@@ -157,6 +157,13 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 			const skill = getSkill(leaf.skill);
 			if (skill !== undefined) {
 				try {
+					// Workspace root from the orchestrator's contextBag --
+					// surfaced to the build-context prompt so the LLM
+					// constructs full absolute paths for fs.list-files /
+					// fs.peek instead of guessing suffixes (live-run fix).
+					const workspaceRoot = typeof deps.contextBag['codeRepoPath'] === 'string'
+						? (deps.contextBag['codeRepoPath'] as string)
+						: undefined;
 					const bc = await runBuildContext({
 						stepIntent:       leaf.objective ?? leaf.title ?? leaf.id,
 						skillId:          leaf.skill,
@@ -166,6 +173,7 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 						toc:              call.buildContext.toc,
 						tocIds:           call.buildContext.tocIds,
 						memory:           call.buildContext.memory,
+						workspaceRoot,
 						provider:         deps.provider,
 						// Phase 3 of plans/section-flow-architecture-redesign.md:
 						// thread the skill runner so the build-context LLM gets

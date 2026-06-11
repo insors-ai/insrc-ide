@@ -69,7 +69,10 @@ import { runFactGapAnalysis } from './step-fact-gap-analysis.js';
 import { executeDiscoveryStep } from './step-discovery-execute.js';
 import { runSketch } from './step-sketch.js';
 import { runDecideNextStep, type DecideNextStepResult } from './step-decide-next-step.js';
-import type { DecideLastStepRawOutputs } from '../prompts/writers/decide-next-step.js';
+import type {
+	DecideLastStepRawOutputs,
+	DecidePriorAttempt,
+} from '../prompts/writers/decide-next-step.js';
 import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
 import type { PriorAttempt } from '../prompts/writers/section-synth.js';
 import { reviewSection } from './step-section-review.js';
@@ -310,6 +313,7 @@ export async function runTodoOrchestrator(
 		stepsRun = 0;
 		sketchReplans = 0;
 		const priorAttempts: PriorAttempt[] = [];
+		const decidePriorAttempts: DecidePriorAttempt[] = [];
 		const closureClaims: ClosureClaim[] = [];
 		const allArtifactIds: Record<string, Record<string, string>> = {};
 		const crossStepRawOutputs: Record<string, string> = {};
@@ -331,6 +335,7 @@ export async function runTodoOrchestrator(
 				decision = await runDecideNextStep({
 					todo: input.todo, gapFacts: gaps, sketch, catalog: input.catalog,
 					toc: tocText, lastStep,
+					priorAttempts: decidePriorAttempts,
 					memory: { ...memoryWithLedger, toc: tocText },
 					provider: input.provider,
 				});
@@ -436,6 +441,12 @@ export async function runTodoOrchestrator(
 				break;
 			}
 			retainedLedger = [...retainedLedger, execRes.output];
+			decidePriorAttempts.push({
+				stepId:   step.id,
+				intent:   step.intent,
+				skillIds: step.skills.map(s => s.skillId),
+				status:   execRes.output.status,
+			});
 			priorStepOutputs = {
 				...priorStepOutputs,
 				[step.id]: stringifyStepOutput(execRes.output),

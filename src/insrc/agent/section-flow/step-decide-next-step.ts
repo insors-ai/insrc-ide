@@ -37,6 +37,7 @@ import { coerceStep } from './step-validators.js';
 import type {
 	DecideLastStepRawOutputs,
 	DecideNextStepWriterInput,
+	DecidePriorAttempt,
 } from '../prompts/writers/decide-next-step.js';
 import { getPromptRegistry } from '../prompts/registry.js';
 import { getLogger } from '../../shared/logger.js';
@@ -57,6 +58,14 @@ export interface DecideNextStepInput {
 	readonly catalog:  readonly CatalogSkill[];
 	readonly toc:      string;
 	readonly lastStep: DecideLastStepRawOutputs | undefined;
+	/**
+	 * Every step executed for this TODO so far, with skill ids + step-
+	 * level status. Surfaced in the writer's PRIOR ATTEMPTS block so
+	 * the model can see "we already tried this skill and it returned
+	 * empty" without inferring from `lastStep` alone. Empty / undefined
+	 * on the first turn.
+	 */
+	readonly priorAttempts?: readonly DecidePriorAttempt[] | undefined;
 	readonly memory?:  CloudMemoryView | undefined;
 	readonly provider: LLMProvider;
 }
@@ -131,6 +140,7 @@ async function callDecider(
 		catalog:            input.catalog,
 		toc:                input.toc,
 		lastStep:           input.lastStep,
+		priorAttempts:      input.priorAttempts,
 		memory:             input.memory,
 		isRetry,
 		priorFailureReason,

@@ -64,6 +64,12 @@ export interface BuildContextInput {
 	 */
 	readonly tocIds:           ReadonlySet<string>;
 	readonly memory?:          LocalMemoryView | undefined;
+	/**
+	 * Absolute path to the workspace root (typically `session.repoPath`).
+	 * Surfaced verbatim in the prompt so the LLM constructs full
+	 * absolute paths instead of guessing suffixes (live-run fix).
+	 */
+	readonly workspaceRoot?:   string | undefined;
 	/** Local-tier LLM provider (Ollama). */
 	readonly provider:         LLMProvider;
 	/**
@@ -183,6 +189,7 @@ async function callBuildContext(
 		skillSchema:        input.skillSchema,
 		todoObjective:      input.todoObjective,
 		toc:                input.toc,
+		workspaceRoot:      input.workspaceRoot,
 		memory:             input.memory,
 		isRetry,
 		priorFailureReason,

@@ -99,7 +99,7 @@ export function scanClosureMarkers(
 	const reOffTopic = /OFF[\s-]TOPIC/gi;
 	let touched = false;
 	for (let m: RegExpExecArray | null = reCloses.exec(summary); m !== null; m = reCloses.exec(summary)) {
-		const gapId = m[1] ?? '';
+		const gapId = normaliseGapId(m[1] ?? '');
 		if (!gapIds.has(gapId)) {
 			log.warn({ stepId, callId, gapId }, 'convergence: CLOSES marker references unknown gap-id; dropping');
 			continue;
@@ -108,7 +108,7 @@ export function scanClosureMarkers(
 		touched = true;
 	}
 	for (let m: RegExpExecArray | null = rePartial.exec(summary); m !== null; m = rePartial.exec(summary)) {
-		const gapId = m[1] ?? '';
+		const gapId = normaliseGapId(m[1] ?? '');
 		if (!gapIds.has(gapId)) {
 			log.warn({ stepId, callId, gapId }, 'convergence: PARTIALLY marker references unknown gap-id; dropping');
 			continue;
@@ -124,6 +124,21 @@ export function scanClosureMarkers(
 		log.warn({ stepId, callId, summary: summary.slice(0, 80) }, 'convergence: summary entry has no recognised closure marker');
 	}
 	return out;
+}
+
+/**
+ * Strip trailing sentence-ending punctuation from a captured gap-id.
+ * The regex `[A-Za-z0-9_.-]+` includes `.` because some gap-ids
+ * legitimately contain dots (e.g. `foo.bar`), but greedy capture
+ * swallows the sentence-ending period when the marker sits at the end
+ * of a clause: `"PARTIALLY supports my-gap."` captures `my-gap.` and
+ * the validator drops it as unknown.
+ *
+ * Live test caught this firing dozens of times across one run. The
+ * fix is to trim trailing `.`, `,`, `;`, `:`, `!`, `?` after capture.
+ */
+function normaliseGapId(raw: string): string {
+	return raw.replace(/[.,;:!?]+$/, '');
 }
 
 /**

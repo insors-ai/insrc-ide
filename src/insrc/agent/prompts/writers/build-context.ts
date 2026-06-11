@@ -58,6 +58,17 @@ export interface BuildContextWriterInput {
 	/** Pre-rendered TOC text from `renderToc(buildToc(sessionId))`. */
 	readonly toc:              string;
 	/**
+	 * Absolute path to the workspace root the daemon is analysing
+	 * (typically `session.repoPath`). Surfaced explicitly in the
+	 * prompt so the LLM doesn't have to guess paths when calling
+	 * `shared.fs.list-files` / `shared.fs.peek`. Live test caught the
+	 * model guessing `/grn` instead of the full workspace-relative
+	 * path; making the root explicit lets the model construct
+	 * absolute paths up-front. Optional -- when undefined, the
+	 * filesystem-discovery block in the prompt is omitted.
+	 */
+	readonly workspaceRoot?:   string | undefined;
+	/**
 	 * Optional local-tier memory view. When supplied, the system / currentTodo
 	 * / recentSteps blocks render above the step + skill blocks so the model
 	 * has the broader investigation state. The TOC inside the view is
@@ -106,6 +117,31 @@ const ROLE = [
 	'    spam the artifact store with low-signal entries.',
 	'  - When the TOC already has what you need, skip tool calls and',
 	'    emit the JSON answer directly.',
+	'',
+	'Path-discovery rules (CRITICAL -- live runs surfaced agents guessing',
+	'wrong suffixes and giving up):',
+	'  - When you call `shared.fs.list-files` or `shared.fs.peek`, use',
+	'    the FULL absolute path. The WORKSPACE ROOT shown below is the',
+	'    repo the daemon is analysing; combine it with the workspace-',
+	'    relative path the TODO names. Example:',
+	'      workspace root: /Users/x/proj',
+	'      TODO references: `test/integration/data/BB/GRN`',
+	'      tool input path: `/Users/x/proj/test/integration/data/BB/GRN`',
+	'  - NEVER pass a leading-slash relative path (e.g. `/grn`) -- it',
+	'    is parsed as an absolute path on the host and almost always',
+	'    misses. If you only have a leaf directory name, prepend the',
+	'    full workspace root.',
+	'  - If your first `list-files` call on the expected path returns',
+	'    an EMPTY file list (`files: []` and `truncated: false`), do',
+	'    NOT immediately guess a different suffix. Instead, call',
+	'    `list-files` on the PARENT directory (or the workspace root',
+	'    itself) to discover what is actually there. The parent may',
+	'    reveal the directory is named differently (e.g. `grn` vs',
+	'    `GRN`, or one level deeper than you assumed).',
+	'  - Only after the parent listing should you call `list-files` on',
+	'    the corrected path. If the corrected path is still empty after',
+	'    this two-step discovery, accept that the data is genuinely',
+	'    absent and emit `fetch: []` with a `notes` value that says so.',
 	'',
 	'When you are done (with or without tool calls), you MUST emit a',
 	'SINGLE JSON object with EXACTLY two keys:',
@@ -162,6 +198,14 @@ function buildUser(input: BuildContextWriterInput): string {
 		}
 	}
 
+	if (input.workspaceRoot !== undefined && input.workspaceRoot.trim().length > 0) {
+		lines.push('## WORKSPACE ROOT');
+		lines.push(input.workspaceRoot);
+		lines.push('');
+		lines.push('When constructing paths for `shared.fs.list-files` / `shared.fs.peek`,');
+		lines.push('prepend this absolute path to any workspace-relative path the TODO names.');
+		lines.push('');
+	}
 	lines.push('## STEP TO EXECUTE');
 	lines.push(input.stepIntent);
 	lines.push('');

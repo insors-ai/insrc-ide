@@ -97,9 +97,39 @@ export interface DecideNextStepWriterInput {
 	 * `skills`.
 	 */
 	readonly lastStep:  DecideLastStepRawOutputs | undefined;
+	/**
+	 * Flat record of EVERY step that has executed so far for this TODO
+	 * (across replan-sketches too) -- skillIds + outcome. Surfaced in
+	 * the prompt as PRIOR ATTEMPTS so the model can see "we already
+	 * tried `shared.compare.fields-vs-shape` twice and both returned
+	 * empty" without having to infer it from `lastStep` alone. Live
+	 * test caught the model re-picking the same failing skill 5+
+	 * times because each decide turn only saw the most-recent step's
+	 * raw output. Empty / undefined when no step has run yet.
+	 */
+	readonly priorAttempts?: readonly DecidePriorAttempt[] | undefined;
 	readonly memory?:   CloudMemoryView | undefined;
 	readonly isRetry:   boolean;
 	readonly priorFailureReason: string | undefined;
+}
+
+/**
+ * One executed step's summary for the PRIOR ATTEMPTS block of the
+ * decide-next-step prompt. Renders one line per step listing its
+ * skill ids and outcome -- enough for the model to see "we already
+ * tried this and got nothing" without bloating the prompt.
+ */
+export interface DecidePriorAttempt {
+	readonly stepId:   string;
+	readonly intent:   string;
+	readonly skillIds: readonly string[];
+	/**
+	 * Step-level status from `StepOutput.status`:
+	 *   - `ok`      : every skill call produced non-empty output
+	 *   - `partial` : at least one call non-empty, at least one empty
+	 *   - `failed`  : every call returned empty
+	 */
+	readonly status:   'ok' | 'partial' | 'failed';
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +220,16 @@ const ROLE = [
 // User prompt
 // ---------------------------------------------------------------------------
 
-const LAST_STEP_RAW_CHARS_PER_CALL = 1024;
+// Live test surfaced this cap as too tight: an INGRN class with 21
+// fields + types + validators easily exceeds 1024 chars, so the
+// decide-next-step LLM saw a truncated `extract-fields` output and
+// emitted "CLOSES ingrn-fields fully" against an incomplete picture.
+// Section-review correctly caught it via revise-major but at the cost
+// of a recycle + L2. 4096 is enough for the per-call output of every
+// skill in the current catalog without bloating the prompt budget --
+// each iteration's lastStep contains at most 1-2 calls, so the worst-
+// case bump is ~8KB on the cloud-tier prompt.
+const LAST_STEP_RAW_CHARS_PER_CALL = 4096;
 
 function renderSketch(sketch: readonly DiscoveryStep[]): string {
 	if (sketch.length === 0) { return '(no sketch)'; }
@@ -202,6 +241,43 @@ function renderSketch(sketch: readonly DiscoveryStep[]): string {
 		}
 		lines.push(`    targetsCriteria: ${JSON.stringify(s.targetsCriteria)}`);
 	}
+	return lines.join('\n');
+}
+
+/**
+ * Render the PRIOR ATTEMPTS block -- one line per executed step
+ * listing its skill ids and step-level status. Empty (and the block
+ * is omitted entirely) when no step has run yet.
+ *
+ * The renderer collapses repeated skill ids so a single skill that
+ * failed N times shows as `<skillId> x N (all failed)` rather than
+ * N separate lines. Lets the model see "this skill is a dead end"
+ * at a glance without the prompt ballooning when the loop is stuck
+ * on an alternating-progress pattern.
+ */
+function renderPriorAttempts(attempts: readonly DecidePriorAttempt[]): string {
+	if (attempts.length === 0) { return ''; }
+	const lines: string[] = [
+		'## PRIOR ATTEMPTS (steps already executed for this TODO; use this to AVOID re-picking skills that already returned empty)',
+	];
+	for (const a of attempts) {
+		const skillTally = new Map<string, number>();
+		for (const id of a.skillIds) {
+			skillTally.set(id, (skillTally.get(id) ?? 0) + 1);
+		}
+		const skillSummary = [...skillTally.entries()]
+			.map(([id, n]) => n > 1 ? `\`${id}\` x ${n}` : `\`${id}\``)
+			.join(', ');
+		lines.push(`- ${a.stepId} [${a.status}] -- ${a.intent.slice(0, 100)}`);
+		lines.push(`    skills: ${skillSummary}`);
+	}
+	lines.push('');
+	lines.push('Rules drawn from PRIOR ATTEMPTS:');
+	lines.push('  - If a skill failed at status `failed` in 2+ prior steps, do NOT pick it again');
+	lines.push('    unless you can supply MATERIALLY different context (new args, new file path,');
+	lines.push('    new entityId). Repeating a failing skill with the same context will fail again.');
+	lines.push('  - If every plausible skill in the catalog has already been tried and failed,');
+	lines.push('    emit `terminate verdict=unrecoverable` with reasoning that names the dead-end.');
 	return lines.join('\n');
 }
 
@@ -266,6 +342,10 @@ function buildUser(input: DecideNextStepWriterInput): string {
 	lines.push('');
 	lines.push(input.toc);
 	lines.push('');
+	if (input.priorAttempts !== undefined && input.priorAttempts.length > 0) {
+		lines.push(renderPriorAttempts(input.priorAttempts));
+		lines.push('');
+	}
 	if (input.lastStep !== undefined) {
 		lines.push(renderLastStep(input.lastStep));
 		lines.push('');
@@ -306,5 +386,6 @@ export const decideNextStepWriterV1: PromptWriter<DecideNextStepWriterInput, rea
 // ---------------------------------------------------------------------------
 
 export const _renderSketchForTest    = renderSketch;
-export const _renderLastStepForTest  = renderLastStep;
+export const _renderLastStepForTest      = renderLastStep;
+export const _renderPriorAttemptsForTest = renderPriorAttempts;
 export const _buildUserForTest       = buildUser;
