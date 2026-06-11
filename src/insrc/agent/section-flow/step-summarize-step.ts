@@ -47,7 +47,12 @@ import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:summarize-step');
 
-const MAX_TOKENS = 3072;
+// Live run with citations caught 3072 truncating on field-extract,
+// peek-of-JSON, and sample-shape outputs -- the cited-claims JSON
+// envelope is large when the raw output is rich (27+ field-extract
+// citations, multi-line schema descriptions). 8192 covers the
+// realistic upper bound for current skill outputs.
+const MAX_TOKENS = 8192;
 
 // ---------------------------------------------------------------------------
 // Public API

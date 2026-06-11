@@ -127,11 +127,25 @@ const ROLE = [
 	'    pass the substring check vacuously and is a useless citation.',
 	'',
 	'Evidence type:',
-	'  - `cited` -- the normal case. >=1 citation, each substring-matches.',
-	'  - `confirmed-null` -- ONLY when the claim asserts ABSENCE. Use when',
-	'    the call\'s raw text is empty (or all-whitespace) AND the claim',
-	'    is "no matches", "directory empty", "no fields found", etc.',
-	'    Exactly ONE citation, pointing to the empty artifact.',
+	'  - `cited` -- the normal case. The claim is grounded in a verbatim',
+	'    span. Use this EVEN FOR ABSENCE CLAIMS when the raw output is',
+	'    NOT empty -- the structural-empty marker IS the evidence. For',
+	'    example, raw is `{"files": [], "truncated": false}`:',
+	'',
+	'        {',
+	'          "claim":     "directory contains no JSON files",',
+	'          "evidence":  "cited",',
+	'          "citations": [{ "callId": "s1.a", "span": "\\"files\\": []" }]',
+	'        }',
+	'',
+	'    The span `"files": []` IS a verbatim substring of the raw',
+	'    output and proves the absence. DO NOT use `confirmed-null` here',
+	'    -- the artifact is not blank, it has structure.',
+	'  - `confirmed-null` -- ONLY when raw text is TRULY blank (0 chars',
+	'    after trim -- no structure at all). Exactly ONE citation with',
+	'    EMPTY span pointing at the blank artifact. Rare -- most',
+	'    "absence" cases are structural-empty (handled above) not truly',
+	'    blank.',
 	'',
 	'Count claims (CRITICAL):',
 	'  - When a claim names a number ("class has 27 fields", "directory',
@@ -219,8 +233,34 @@ function buildUser(input: SummarizeStepWriterInput): string {
 
 	if (input.isRetry) {
 		lines.push('## RETRY CORRECTION');
-		lines.push(`Your previous response had bad citations: ${input.priorFailureReason ?? 'unknown'}`);
-		lines.push('Re-emit a fixed JSON object. Every citation span MUST be a verbatim substring of the raw output for its callId above.');
+		lines.push('Your previous response had specific bad citations listed below.');
+		lines.push('Each entry shows the FAILING CLAIM TEXT and the EXACT REASON the verifier rejected it:');
+		lines.push('');
+		lines.push(input.priorFailureReason ?? '(no detail)');
+		lines.push('');
+		lines.push('Re-emit the JSON object. Apply ONLY these targeted edits:');
+		lines.push('');
+		lines.push('  1. KEEP all claims, gap-closures, and citations from your previous');
+		lines.push('     response UNCHANGED if they are NOT listed above. Do NOT re-derive');
+		lines.push('     them. Do NOT introduce new bad citations into previously-good claims.');
+		lines.push('');
+		lines.push('  2. For each FAILING claim above, do ONE of:');
+		lines.push('     (a) Replace its bad span with a different verbatim substring you ARE');
+		lines.push('         CERTAIN appears in the raw output for the cited callId. Copy');
+		lines.push('         character-for-character including whitespace.');
+		lines.push('     (b) Drop the claim entirely if no verifiable span exists.');
+		lines.push('     (c) Switch evidence type if appropriate -- e.g. for an absence');
+		lines.push('         claim against a structural-empty artifact, use `evidence: "cited"`');
+		lines.push('         with span pointing at the structural-empty marker like `"files": []`');
+		lines.push('         (per the EVIDENCE TYPE rules above).');
+		lines.push('');
+		lines.push('  3. Count claims: if a claim has `countAssertion: N`, the citations list');
+		lines.push('     MUST have exactly N entries. If you do not have N verifiable spans,');
+		lines.push('     drop the `countAssertion` field and re-phrase the claim as');
+		lines.push('     "includes spans X, Y, Z" rather than naming a count.');
+		lines.push('');
+		lines.push('  4. The verifier will substring-check every span again. Inventing');
+		lines.push('     plausible-looking spans will fail the check.');
 		lines.push('');
 	}
 

@@ -105,7 +105,11 @@ export interface BuildContextResult {
 	readonly firstFailureReason?: string | undefined;
 }
 
-const MAX_TOKENS = 1024;
+// Bumped from 1024 -- live run caught unterminated-JSON truncations on
+// build-context when the model emitted a wide `fetch[]` against a long
+// TOC. 2048 covers the realistic upper bound: build-context emits a
+// small JSON object (`fetch[]` + `notes`) even when the TOC is long.
+const MAX_TOKENS = 2048;
 /**
  * Hard cap on accepted `fetch` length. The LLM's tendency on retries is
  * to fetch everything in the TOC -- the cap forces selectivity. Eight
