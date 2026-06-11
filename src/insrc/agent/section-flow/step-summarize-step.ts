@@ -47,12 +47,14 @@ import { getLogger } from '../../shared/logger.js';
 
 const log = getLogger('section-flow:summarize-step');
 
-// Live run with citations caught 3072 truncating on field-extract,
-// peek-of-JSON, and sample-shape outputs -- the cited-claims JSON
-// envelope is large when the raw output is rich (27+ field-extract
-// citations, multi-line schema descriptions). 8192 covers the
-// realistic upper bound for current skill outputs.
-const MAX_TOKENS = 8192;
+// Live run #3 caught 8192 still truncating on JSON-sample steps where
+// the model wants to cite both INGRN class + multiple JSON records in
+// one call (response hit ~27.5KB of JSON before content-encoding
+// failure / unterminated input). 16384 covers the worst-case dense
+// citation density; combined with the new "prefer aggregate
+// countAssertion over per-item claims" prompt rule, most calls stay
+// well under this ceiling.
+const MAX_TOKENS = 16384;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -445,13 +447,19 @@ async function verifyAll(
 }
 
 function renderBadClaims(bads: readonly BadClaim[]): string {
+	// Cap at 3 most representative -- live run #3 showed the model
+	// overwhelmed by long lists (10+ corrections) and re-deriving
+	// fresh, introducing NEW bad citations into previously-good
+	// claims. With just 3 specific corrections + the "preserve other
+	// claims" rule, the model has a focused, actionable hint instead
+	// of a comprehensive but uncopiable list.
 	const lines: string[] = [];
-	for (let i = 0; i < bads.length && i < 8; i++) {
+	for (let i = 0; i < bads.length && i < 3; i++) {
 		const b = bads[i]!;
 		const gapTag = b.gapId !== undefined ? ` [gap=${b.gapId}]` : '';
 		lines.push(`  - "${b.claimText.slice(0, 100)}"${gapTag}: ${b.reason}`);
 	}
-	if (bads.length > 8) { lines.push(`  ...and ${bads.length - 8} more`); }
+	if (bads.length > 3) { lines.push(`  ...and ${bads.length - 3} more (apply the same kind of fix to each)`); }
 	return lines.join('\n');
 }
 
