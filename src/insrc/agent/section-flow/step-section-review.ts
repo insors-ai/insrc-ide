@@ -128,27 +128,9 @@ interface ReviewParsed {
 	readonly edits?:     string | undefined;
 }
 
-const REVIEW_ROLE = [
-	'You are the SECTION REVIEWER. You read the assembled section markdown,',
-	'the TODO objective, the per-root findings the section was built from,',
-	'and the working-memory bundle. You decide one of three verdicts:',
-	'',
-	'  accept       -- ship the section as-is. The markdown reads well,',
-	'                  covers the TODO objective, and cites findings',
-	'                  correctly.',
-	'  revise-edits -- presentation/coherence fixes (intro, transitions,',
-	'                  conclusion, finding citations). You return an',
-	'                  `edits` string describing what to change. The',
-	'                  orchestrator runs ONE rewrite and re-reviews.',
-	'                  Counts toward the per-section cap (3 revise',
-	'                  cycles max).',
-	'  revise-major -- the per-root findings themselves are insufficient',
-	'                  or contradictory. Section regeneration cannot fix',
-	'                  this. ESCALATES to the TODO orchestrator which',
-	'                  re-opens the section task tree. Use sparingly.',
-	'',
-	'You emit a SINGLE JSON object. No prose, no markdown fences.',
-].join('\n');
+// The inline REVIEW_ROLE here used to be load-bearing; the prompt now
+// lives in `agent/prompts/writers/section-review.ts` and is fetched via
+// the PromptRegistry. The leftover constant was Phase 0 cruft.
 
 async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesConsumed: number): Promise<ReviewParsed> {
 	const writer = getPromptRegistry().get<SectionReviewWriterInput, readonly LLMMessage[]>('section-review');
@@ -229,13 +211,8 @@ function parseReview(raw: string): ReviewParsed {
 // Revise LLM call
 // ---------------------------------------------------------------------------
 
-const REVISE_ROLE = [
-	'You are the SECTION REVISER. You receive the current section',
-	'markdown plus a natural-language `edits` description from the',
-	'section reviewer. You emit the FULL revised section markdown --',
-	'no JSON envelope, no preamble, no commentary. Preserve the',
-	'parts the edits do not call out.',
-].join('\n');
+// Same Phase 0 cleanup: the inline REVISE_ROLE moved to
+// `agent/prompts/writers/section-review.ts` (`section-revise` writer).
 
 async function reviseSection(input: SectionReviewInput, current: string, edits: string): Promise<string> {
 	const writer = getPromptRegistry().get<SectionReviseWriterInput, readonly LLMMessage[]>('section-revise');

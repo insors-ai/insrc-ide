@@ -133,53 +133,15 @@ export interface MemoryShapeResult {
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
-
-const SHAPING_ROLE = [
-	'You are the LOCAL CONTEXT-ASSEMBLY model for an agentic reporting system.',
-	'Given a WORKING MEMORY file (chronological prior-turn outputs) and an',
-	'INPUT PROMPT, you produce a SINGLE JSON object that packs the memory',
-	'into 5 layered context slots for a downstream planner. You always emit',
-	'exactly the schema you are given, with no prose, no markdown fences.',
-].join('\n');
-
-function buildShapingSchema(budget: TokenBudget): string {
-	return [
-		'## OUTPUT SHAPE (emit EXACTLY this object, NO other keys)',
-		'',
-		'{',
-		`  "system":   <string, max ${budget.system} tokens>,`,
-		`  "summary":  <string, max ${budget.summary} tokens>,`,
-		`  "recent":   <string, max ${budget.recent} tokens>,`,
-		`  "semantic": <string, max ${budget.semantic} tokens>,`,
-		`  "code":     <string, max ${budget.code} tokens>`,
-		'}',
-		'',
-		'## FIELD CONTRACT (every field MUST be filled when source content exists)',
-		'',
-		'  system    Fixed evergreen context: project name, primary subject, file',
-		'            kinds the memory refers to. Stable across iterations.',
-		'',
-		'  summary   Rolling 1-2 paragraph TL;DR of what the accumulated memory',
-		'            says so far. The bullet-point essentials. No citations.',
-		'',
-		'  recent    REQUIRED if memory has more than one turn. Bullet list of',
-		'            salient findings from the LAST 2-3 sections/turns. Cite',
-		'            section titles by name. DO NOT leave empty.',
-		'',
-		'  semantic  REQUIRED if any memory content relates to the INPUT PROMPT.',
-		'            Bullet list of items from ANY turn (not just recent) that bear',
-		'            on the INPUT PROMPT. Cite section titles. DO NOT leave empty.',
-		'',
-		'  code      Code / data shapes / schemas / field tables found in memory.',
-		'            Verbatim quotes or tight summaries.',
-		'',
-		'## RULES',
-		'  - Token caps are HARD. ~3 chars ~= 1 token. Stay under each cap.',
-		'  - Empty string "" ONLY when the source truly has nothing for that field.',
-		'  - Do not duplicate content across layers.',
-		'  - Do not invent content not in the memory.',
-	].join('\n');
-}
+//
+// The inline SHAPING_ROLE / MAP_ROLE / REDUCE_ROLE constants + their
+// schema builders (`buildShapingSchema`, `buildMapSchema`,
+// `buildReduceSchema`) used to live here as Phase 0 cruft. The prompts
+// now live in `agent/prompts/writers/memory-shape.ts`
+// (`memory-shape.single` / `memory-shape.map` / `memory-shape.reduce`)
+// and are fetched through the PromptRegistry. The inline copies were
+// deleted in the redesign follow-up cleanup; only the registry-fetch
+// helpers remain.
 
 function buildShapingPrompt(memory: string, objective: string, budget: TokenBudget): { system: string; user: string } {
 	const writer = getPromptRegistry().get<MemoryShapeSingleWriterInput, readonly LLMMessage[]>('memory-shape.single');
@@ -187,97 +149,11 @@ function buildShapingPrompt(memory: string, objective: string, budget: TokenBudg
 	return extractSystemUser(messages);
 }
 
-const MAP_ROLE = [
-	'You are distilling ONE slice of a larger working-memory document.',
-	'Given one CHUNK plus the INPUT PROMPT that the orchestrator is planning',
-	'against, you emit a SINGLE JSON object with four distilled fields. You',
-	'output exactly the schema given, with no prose, no markdown fences.',
-].join('\n');
-
-function buildMapSchema(): string {
-	const perFieldCharCap = Math.floor(MAP_OUTPUT_TOKENS / 4) * 3;
-	return [
-		'## OUTPUT SHAPE (emit EXACTLY this object, NO other keys)',
-		'',
-		'{',
-		`  "summary":  <string, ~${perFieldCharCap} chars>,`,
-		`  "recent":   <string, ~${perFieldCharCap} chars>,`,
-		`  "semantic": <string, ~${perFieldCharCap} chars>,`,
-		`  "code":     <string, ~${perFieldCharCap} chars>`,
-		'}',
-		'',
-		'## FIELD CONTRACT (fill every field that has source content)',
-		'',
-		'  summary   1-2 sentence TL;DR of THIS chunk.',
-		'  recent    Bullet list of salient findings from this chunk. Cite',
-		'            section/heading names. REQUIRED unless chunk is empty.',
-		'  semantic  Bullet list of items in this chunk relevant to the INPUT',
-		'            PROMPT. REQUIRED if anything in the chunk relates to it.',
-		'  code      Code / data shapes / schemas / field tables in this chunk.',
-		'',
-		'## RULES',
-		'  - Use empty string "" ONLY when the chunk truly has nothing for that field.',
-		'  - Do not invent content not in the chunk.',
-		'  - This is one of many chunks; do not speculate about content you have not seen.',
-	].join('\n');
-}
-
 function buildMapPrompt(chunkContent: string, chunkIndex: number, total: number, objective: string): { system: string; user: string } {
 	const perFieldCharCap = Math.floor(MAP_OUTPUT_TOKENS / 4) * 3;
 	const writer = getPromptRegistry().get<MemoryShapeMapWriterInput, readonly LLMMessage[]>('memory-shape.map');
 	const messages = writer.build({ chunkContent, chunkIndex, total, objective, perFieldCharCap });
 	return extractSystemUser(messages);
-}
-
-const REDUCE_ROLE = [
-	'You are the LOCAL CONTEXT-ASSEMBLY model.',
-	'Given a list of PER-CHUNK DISTILLATIONS and the INPUT PROMPT the',
-	'orchestrator is planning against, you consolidate them into a SINGLE',
-	'JSON object packing 5 layered context slots for a downstream planner.',
-	'You always emit exactly the schema you are given, with no prose, no',
-	'markdown fences.',
-].join('\n');
-
-function buildReduceSchema(budget: TokenBudget, chunkCount: number): string {
-	return [
-		'## OUTPUT SHAPE (emit EXACTLY this object, NO other keys)',
-		'',
-		'{',
-		`  "system":   <string, max ${budget.system} tokens>,`,
-		`  "summary":  <string, max ${budget.summary} tokens>,`,
-		`  "recent":   <string, max ${budget.recent} tokens>,`,
-		`  "semantic": <string, max ${budget.semantic} tokens>,`,
-		`  "code":     <string, max ${budget.code} tokens>`,
-		'}',
-		'',
-		'## FIELD CONTRACT (every field MUST be filled when source content exists)',
-		'',
-		'  system    Fixed evergreen context: project name, primary subject, file',
-		'            kinds. Infer from distillations. Stable across iterations.',
-		'',
-		'  summary   Rolling TL;DR. Merge the per-chunk `summary` fields into a',
-		'            coherent 1-2 paragraph overview.',
-		'',
-		`  recent    REQUIRED. Bullet list. Pull the per-chunk \`recent\` entries`,
-		`            from the LAST ~3 of ${chunkCount} chunk(s) (the most recent`,
-		'            turns). DO NOT leave empty if any later chunk had `recent`',
-		'            content. This is the single most important field for the',
-		'            downstream planner.',
-		'',
-		'  semantic  REQUIRED. Bullet list. Pull per-chunk `semantic` entries',
-		'            from ANY chunk -- these are items relevant to the INPUT',
-		'            PROMPT regardless of chunk position. DO NOT leave empty if',
-		'            any chunk had `semantic` content.',
-		'',
-		'  code      Code / schemas / field tables from any chunk\'s `code`',
-		'            field. Verbatim or tight summary.',
-		'',
-		'## RULES',
-		'  - Token caps are HARD. ~3 chars ~= 1 token. Stay under each cap.',
-		'  - Empty string "" ONLY when NO chunk has content for that field.',
-		'  - Do not duplicate content across layers.',
-		'  - Do not invent content beyond what the distillations contain.',
-	].join('\n');
 }
 
 interface ChunkPartial {

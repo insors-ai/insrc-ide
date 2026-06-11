@@ -195,18 +195,11 @@ function formatPriorOutputs(priorOutputs: Readonly<Record<string, string>>): str
 	return lines.join('\n');
 }
 
-function formatContextBag(contextBag: Readonly<Record<string, unknown>>): string {
-	const keys = Object.keys(contextBag);
-	if (keys.length === 0) { return '(no session context surfaced)'; }
-	const lines: string[] = [];
-	for (const k of keys) {
-		const v = contextBag[k];
-		const s = typeof v === 'string' ? v : JSON.stringify(v);
-		const preview = s.length > 200 ? s.slice(0, 200) + '...' : s;
-		lines.push(`- ${k}: ${preview}`);
-	}
-	return lines.join('\n');
-}
+// `formatContextBag` used to render the session-context bag for the
+// shape-resolver's inline user prompt. The composer at
+// `agent/prompts/composers/skill-schema.ts` + the
+// `agent/prompts/writers/shape-resolver.ts` writer own that rendering
+// now; the inline helper here was Phase 0 cruft.
 
 // ---------------------------------------------------------------------------
 // Schema check
