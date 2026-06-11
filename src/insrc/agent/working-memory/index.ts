@@ -61,6 +61,8 @@ export {
 	buildMemoryBundle,
 	cloudViewToLegacyBundle,
 	legacyBundleToCloudView,
+	enforceLocalViewBudget,
+	DEFAULT_LOCAL_VIEW_TOKEN_BUDGET,
 	type LocalMemoryView,
 	type CloudMemoryView,
 	type MemoryBundle,

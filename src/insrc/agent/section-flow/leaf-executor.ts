@@ -167,6 +167,13 @@ export function buildSkillExecutor(deps: LeafExecutorDeps): ExecuteLeaf {
 						tocIds:           call.buildContext.tocIds,
 						memory:           call.buildContext.memory,
 						provider:         deps.provider,
+						// Phase 3 of plans/section-flow-architecture-redesign.md:
+						// thread the skill runner so the build-context LLM gets
+						// read-only `shared.fs.list-files` + `shared.fs.peek`
+						// access. The runner's onSkillEnd is the spill-writer,
+						// so each tool call's output lands as a new artifact_vec
+						// row + becomes reusable downstream.
+						runnerDeps:       deps.runnerDeps,
 					});
 					effectivePriors = await mergeArtifactBodies(effectivePriors, bc.fetchIds, leaf.id, leaf.skill);
 				} catch (err) {

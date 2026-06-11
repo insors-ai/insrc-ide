@@ -23,7 +23,10 @@ import {
 	buildMemoryBundle,
 	cloudViewToLegacyBundle,
 	legacyBundleToCloudView,
+	enforceLocalViewBudget,
+	DEFAULT_LOCAL_VIEW_TOKEN_BUDGET,
 } from '../tier-bundle.js';
+import type { LocalMemoryView } from '../tier-bundle.js';
 import type { MemoryShapeBundle } from '../shaper.js';
 
 const SHAPE: MemoryShapeBundle = {
@@ -150,4 +153,73 @@ test('legacyBundleToCloudView + cloudViewToLegacyBundle: round-trip is identity 
 	const lifted = legacyBundleToCloudView(SHAPE);
 	const back   = cloudViewToLegacyBundle(lifted);
 	assert.deepEqual(back, SHAPE);
+});
+
+// ---------------------------------------------------------------------------
+// enforceLocalViewBudget
+// ---------------------------------------------------------------------------
+
+const SMALL_LOCAL: LocalMemoryView = {
+	system:      'project: insrc; subject: data analysis',
+	currentTodo: 'Active TODO: map GRN JSON to INGRN class',
+	toc:         '## TOC (no artifacts persisted yet)',
+	recentSteps: '- step-1 (ok): s1.a=located INGRN at insors/grn.py',
+};
+
+test('enforceLocalViewBudget: under budget -> reference-equal return', () => {
+	const out = enforceLocalViewBudget(SMALL_LOCAL);
+	assert.equal(out, SMALL_LOCAL, 'no truncation should produce reference-equal output');
+});
+
+test('enforceLocalViewBudget: oversize recentSteps -> oldest lines dropped', () => {
+	// Build a recentSteps block large enough to exceed the default 6k-
+	// token budget (~18k chars). 100 lines x ~500 chars = ~50k chars.
+	const longLines: string[] = [];
+	for (let i = 0; i < 100; i++) {
+		longLines.push(`- step-${i} (ok): ${'x'.repeat(500)}`);
+	}
+	const view: LocalMemoryView = {
+		system:      SMALL_LOCAL.system,
+		currentTodo: SMALL_LOCAL.currentTodo,
+		toc:         SMALL_LOCAL.toc,
+		recentSteps: longLines.join('\n'),
+	};
+	const out = enforceLocalViewBudget(view);
+	assert.notEqual(out, view, 'truncation should return a new object');
+	// Newest line MUST be retained; oldest MUST be dropped.
+	assert.match(out.recentSteps, /step-99 \(ok\):/);
+	assert.ok(!out.recentSteps.includes('step-0 (ok):'), 'oldest line should have been dropped');
+	// The other fields are protected.
+	assert.equal(out.system,      view.system);
+	assert.equal(out.currentTodo, view.currentTodo);
+	assert.equal(out.toc,         view.toc);
+});
+
+test('enforceLocalViewBudget: protected fields alone exceed budget -> recentSteps emptied', () => {
+	const huge = 'x'.repeat(DEFAULT_LOCAL_VIEW_TOKEN_BUDGET * 3 + 100);
+	const view: LocalMemoryView = {
+		system:      'sys',
+		currentTodo: huge,                 // exceeds the whole budget on its own
+		toc:         '',
+		recentSteps: 'should disappear',
+	};
+	const out = enforceLocalViewBudget(view);
+	assert.equal(out.recentSteps, '');
+	// currentTodo stays verbatim (protected, plan: "truncation kicks
+	// in oldest-first on recentSteps, not on system or currentTodo").
+	assert.equal(out.currentTodo, huge);
+});
+
+test('enforceLocalViewBudget: custom budget -> applies', () => {
+	const view: LocalMemoryView = {
+		system:      '',
+		currentTodo: '',
+		toc:         '',
+		recentSteps: '- old\n- newer\n- newest',
+	};
+	// 18 chars total / 3 = 6 tokens. Set budget = 3 tokens -> drop
+	// oldest until <=9 chars survive.
+	const out = enforceLocalViewBudget(view, 3);
+	assert.ok(!out.recentSteps.includes('- old'), 'oldest line should have been dropped');
+	assert.match(out.recentSteps, /newest/);
 });

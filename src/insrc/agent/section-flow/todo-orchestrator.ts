@@ -51,6 +51,7 @@
 
 import type { LLMProvider } from '../../shared/types.js';
 import type { CloudMemoryView, LocalMemoryView } from '../working-memory/index.js';
+import { enforceLocalViewBudget } from '../working-memory/index.js';
 import { renderFactGaps } from '../prompts/composers/fact-gaps.js';
 import { renderToc } from '../prompts/composers/toc.js';
 import { buildToc } from '../artifacts/toc-builder.js';
@@ -417,7 +418,7 @@ export async function runTodoOrchestrator(
 			const step = decision.step;
 			priorAttempts.push({ stepId: step.id, intent: step.intent });
 			const crossStepPriors = collectCrossStepPriors(step, crossStepRawOutputs);
-			const buildContext = await maybeBuildContext(input, step);
+			const buildContext = await maybeBuildContext(input, step, retainedLedger);
 			let execRes;
 			try {
 				execRes = await executeDiscoveryStep({
@@ -633,8 +634,9 @@ function collectCrossStepPriors(
  * sessionId is set.
  */
 async function maybeBuildContext(
-	input: TodoOrchestratorInput,
-	step:  DiscoveryStep,
+	input:          TodoOrchestratorInput,
+	step:           DiscoveryStep,
+	retainedLedger: readonly StepOutput[],
 ): Promise<LeafBuildContext | undefined> {
 	if (input.sessionId === undefined || input.sessionId.length === 0) {
 		return undefined;
@@ -644,11 +646,24 @@ async function maybeBuildContext(
 		const toc = await buildToc({ sessionId: input.sessionId });
 		const rendered = renderToc(toc);
 		const tocIds = new Set(toc.entries.map(e => e.id));
+		// Fold the latest 2 retained steps into LocalMemoryView.recentSteps
+		// so the build-context turn sees what just happened. This is the
+		// piece that makes the local view actually informative -- without
+		// it the field stays empty for the whole TODO. The whole view
+		// then passes through `enforceLocalViewBudget` so a pathological
+		// recentSteps render can't blow the local context budget.
+		const memory = input.localMemory !== undefined
+			? enforceLocalViewBudget({
+				...input.localMemory,
+				toc: rendered,
+				recentSteps: renderRecentSteps(retainedLedger),
+			})
+			: undefined;
 		const payload: LeafBuildContext = {
 			todoObjective: input.todo.objective,
 			toc:           rendered,
 			tocIds,
-			...(input.localMemory !== undefined ? { memory: input.localMemory } : {}),
+			...(memory !== undefined ? { memory } : {}),
 		};
 		return payload;
 	} catch (err) {
@@ -658,6 +673,33 @@ async function maybeBuildContext(
 		}, 'todo-orchestrator: TOC build failed; skipping build-context for this step');
 		return undefined;
 	}
+}
+
+/**
+ * Render the last 2 retained steps as a compact `recentSteps` block
+ * for the LocalMemoryView. Each step gets one line: `<stepId>
+ * (<status>): <truncated rawOutput digest>`. Empty when the ledger
+ * has no entries yet (first decide turn, replan-sketch reset, etc.).
+ */
+function renderRecentSteps(retainedLedger: readonly StepOutput[]): string {
+	if (retainedLedger.length === 0) { return ''; }
+	const last = retainedLedger.slice(-2);
+	const lines: string[] = [];
+	for (const out of last) {
+		const callDigests: string[] = [];
+		for (const [callId, raw] of Object.entries(out.rawOutputs)) {
+			const clean = raw.trim().replace(/\s+/g, ' ');
+			if (clean.length === 0) {
+				callDigests.push(`${callId}=(empty)`);
+				continue;
+			}
+			const head = clean.slice(0, 120);
+			const tail = clean.length > 120 ? '...' : '';
+			callDigests.push(`${callId}=${head}${tail}`);
+		}
+		lines.push(`- ${out.stepId} (${out.status}): ${callDigests.join('; ')}`);
+	}
+	return lines.join('\n');
 }
 
 /**

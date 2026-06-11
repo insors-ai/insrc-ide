@@ -29,7 +29,12 @@ import {
 	_MAX_FETCH          as MAX_FETCH,
 } from '../step-build-context.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
-import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
+import { _resetSkillRegistryForTests } from '../../../daemon/skills/registry.js';
+import { registerAllSkills } from '../../../daemon/skills/index.js';
+import type {
+	CompletionOpts, LLMMessage, LLMProvider, LLMResponse, ToolCall,
+} from '../../../shared/types.js';
+import type { SkillRunnerDeps } from '../../../daemon/skills/invoke.js';
 
 test.beforeEach(() => {
 	_resetPromptRegistryForTest();
@@ -60,6 +65,38 @@ function scriptedProvider(responses: readonly string[]): { provider: LLMProvider
 		async embed(): Promise<number[]> { return []; },
 	} as unknown as LLMProvider;
 	return { provider, calls };
+}
+
+/**
+ * Scripted provider that supports tool-call turns. Each script entry
+ * is either `{ text }` (final emission, stopReason: 'end_turn') or
+ * `{ toolCalls }` (mid-loop tool-use turn, stopReason: 'tool_use').
+ */
+type ScriptTurn =
+	| { readonly kind: 'text'; readonly text: string }
+	| { readonly kind: 'toolCalls'; readonly calls: readonly ToolCall[] };
+
+function scriptedProviderWithTools(turns: readonly ScriptTurn[]): { provider: LLMProvider; calls: RecordedCall[] } {
+	const recorded: RecordedCall[] = [];
+	let cursor = 0;
+	const provider = {
+		supportsTools: true,
+		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
+			recorded.push({ messages, opts });
+			if (cursor >= turns.length) {
+				throw new Error(`scriptedProviderWithTools: ran out at call ${cursor + 1}`);
+			}
+			const turn = turns[cursor]!;
+			cursor++;
+			if (turn.kind === 'text') {
+				return { text: turn.text, stopReason: 'end_turn' };
+			}
+			return { text: '', toolCalls: [...turn.calls], stopReason: 'tool_use' };
+		},
+		async *stream(): AsyncIterable<string> { yield ''; },
+		async embed(): Promise<number[]> { return []; },
+	} as unknown as LLMProvider;
+	return { provider, calls: recorded };
 }
 
 const TOC_IDS = new Set([
@@ -245,4 +282,107 @@ test('stripFences: ```json ... ``` -> body', () => {
 
 test('stripFences: no fences -> trimmed body', () => {
 	assert.equal(stripFences('  {}  '), '{}');
+});
+
+// ---------------------------------------------------------------------------
+// Tool-loop path (Phase 3 plan: shared.fs.list-files + shared.fs.peek)
+// ---------------------------------------------------------------------------
+
+const fakeRunnerDeps: SkillRunnerDeps = {
+	session:         { id: 'test-session' } as unknown as SkillRunnerDeps['session'],
+	resolveProvider: () => ({} as unknown as LLMProvider),
+};
+
+test('runBuildContext: tools omitted when runnerDeps undefined', async () => {
+	_resetSkillRegistryForTests();
+	registerAllSkills();
+	const { provider, calls } = scriptedProvider([
+		JSON.stringify({ fetch: [], notes: 'noop' }),
+	]);
+	await runBuildContext({ ...baseInput(provider), tocIds: new Set<string>(), toc: '## TOC\n(no artifacts persisted yet)' });
+	assert.equal(calls.length, 1);
+	// No tools in opts when runnerDeps is undefined.
+	assert.equal(calls[0]!.opts.tools, undefined);
+});
+
+test('runBuildContext: runnerDeps supplied -> tools surfaced to provider', async () => {
+	_resetSkillRegistryForTests();
+	registerAllSkills();
+	const { provider, calls } = scriptedProviderWithTools([
+		{ kind: 'text', text: JSON.stringify({ fetch: [], notes: 'no tool needed' }) },
+	]);
+	await runBuildContext({
+		...baseInput(provider),
+		tocIds:     new Set<string>(),
+		toc:        '## TOC\n(no artifacts persisted yet)',
+		runnerDeps: fakeRunnerDeps,
+	});
+	assert.equal(calls.length, 1);
+	const toolNames = (calls[0]!.opts.tools ?? []).map(t => t.name).sort();
+	assert.deepEqual(toolNames, ['shared.fs.list-files', 'shared.fs.peek']);
+});
+
+test('runBuildContext: model emits a tool call -> runner invoked, second turn produces JSON', async () => {
+	_resetSkillRegistryForTests();
+	registerAllSkills();
+	const { provider, calls } = scriptedProviderWithTools([
+		{ kind: 'toolCalls', calls: [{
+			id:    'tc-1',
+			name:  'shared.fs.list-files',
+			input: { path: '/tmp/insors-build-context-test-nonexistent', recursive: false },
+		}] },
+		{ kind: 'text', text: JSON.stringify({ fetch: [], notes: 'no useful files; bare priors are fine' }) },
+	]);
+	const r = await runBuildContext({
+		...baseInput(provider),
+		tocIds:     new Set<string>(),
+		toc:        '## TOC\n(no artifacts persisted yet)',
+		runnerDeps: fakeRunnerDeps,
+	});
+	// 2 provider calls: the tool-use turn + the final-JSON turn.
+	assert.equal(calls.length, 2);
+	// The second turn's messages must include the assistant's tool_use
+	// block + the user's tool_result block from the runner.
+	const secondMessages = calls[1]!.messages;
+	const lastAssistant = secondMessages.find(m => m.role === 'assistant');
+	const lastUser = secondMessages[secondMessages.length - 1]!;
+	assert.ok(lastAssistant !== undefined, 'second turn should carry the assistant tool_use turn');
+	assert.equal(lastUser.role, 'user');
+	assert.ok(Array.isArray(lastUser.content), 'last user message should be a content-block array (tool_result)');
+	const blocks = lastUser.content;
+	assert.ok(blocks.some(b => b.type === 'tool_result' && b.tool_use_id === 'tc-1'), 'tool_result block missing');
+	// Final answer surfaces.
+	assert.equal(r.gracefulDegrade, false);
+	assert.deepEqual(r.fetchIds, []);
+	assert.match(r.notes, /bare priors/);
+});
+
+test('runBuildContext: tool-iteration cap respected (no infinite loop)', async () => {
+	_resetSkillRegistryForTests();
+	registerAllSkills();
+	// Script emits tool-call turns indefinitely; the cap forces the
+	// caller to give up after 2 iterations and parse whatever text the
+	// 3rd turn produced (a tool-call turn here, so .text is empty ->
+	// validate() will fail and trigger the retry path).
+	const turns: ScriptTurn[] = [];
+	for (let i = 0; i < 10; i++) {
+		turns.push({ kind: 'toolCalls', calls: [{
+			id:    `tc-${i}`,
+			name:  'shared.fs.list-files',
+			input: { path: '/tmp/insors-build-context-test-nonexistent' },
+		}] });
+	}
+	const { provider, calls } = scriptedProviderWithTools(turns);
+	const r = await runBuildContext({
+		...baseInput(provider),
+		tocIds:     new Set<string>(),
+		toc:        '## TOC\n(no artifacts persisted yet)',
+		runnerDeps: fakeRunnerDeps,
+	});
+	// First attempt: 3 turns (2 tool iters + 1 cap-exit) -> empty text -> retry
+	// Retry: another 3 turns -> empty text -> graceful degrade.
+	// Total: 6 provider calls.
+	assert.equal(calls.length, 6);
+	assert.equal(r.gracefulDegrade, true);
+	assert.deepEqual(r.fetchIds, []);
 });

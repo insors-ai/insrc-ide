@@ -188,3 +188,68 @@ export function legacyBundleToCloudView(bundle: MemoryShapeBundle): CloudMemoryV
 		factLedger: '',
 	};
 }
+
+// ---------------------------------------------------------------------------
+// Local-view token budget enforcement (Phase 2 follow-up)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default soft token budget for the local-tier view (Phase 2 plan
+ * line: "Local view bounded under a configurable token budget
+ * (default 6k); truncation kicks in oldest-first on `recentSteps`,
+ * not on `system` or `currentTodo`").
+ *
+ * The estimate uses the same `chars/3` ratio the rest of the
+ * codebase relies on for token counts.
+ */
+export const DEFAULT_LOCAL_VIEW_TOKEN_BUDGET = 6_000;
+
+const CHARS_PER_TOKEN = 3;
+function estimateTokens(s: string): number {
+	return Math.ceil(s.length / CHARS_PER_TOKEN);
+}
+
+/**
+ * Apply the local-view token budget. `system` and `currentTodo` are
+ * PROTECTED -- they're tiny, stable, and load-bearing for build-
+ * context's framing. `toc` is built externally with its own budget
+ * and isn't truncated here. `recentSteps` is the only field that
+ * grows unboundedly, so when the total exceeds the budget we drop
+ * OLDEST lines (top of `recentSteps`) until the view fits.
+ *
+ * Returns the SAME view object when no truncation is needed
+ * (reference equality short-circuit). Otherwise returns a new view
+ * with a truncated `recentSteps`.
+ *
+ * Phase 2 of plans/section-flow-architecture-redesign.md.
+ */
+export function enforceLocalViewBudget(
+	view:   LocalMemoryView,
+	budget: number = DEFAULT_LOCAL_VIEW_TOKEN_BUDGET,
+): LocalMemoryView {
+	const total = estimateTokens(view.system)
+		+ estimateTokens(view.currentTodo)
+		+ estimateTokens(view.toc)
+		+ estimateTokens(view.recentSteps);
+	if (total <= budget) {
+		return view;
+	}
+	const protectedTokens = estimateTokens(view.system)
+		+ estimateTokens(view.currentTodo)
+		+ estimateTokens(view.toc);
+	const recentBudget = Math.max(0, budget - protectedTokens);
+	const recentBudgetChars = recentBudget * CHARS_PER_TOKEN;
+	if (recentBudgetChars === 0) {
+		return { ...view, recentSteps: '' };
+	}
+
+	// recentSteps is a `\n`-separated list of lines, OLDEST FIRST
+	// (the orchestrator appends new steps to the end). Drop from
+	// the TOP until the joined block fits.
+	const lines = view.recentSteps.split('\n');
+	let kept = lines.slice();
+	while (kept.length > 0 && kept.join('\n').length > recentBudgetChars) {
+		kept.shift();
+	}
+	return { ...view, recentSteps: kept.join('\n') };
+}

@@ -40,21 +40,23 @@ export function renderToc(toc: Toc, opts?: RenderTocOpts): string {
 	const maxChars = opts?.maxChars ?? DEFAULT_MAX_CHARS;
 	const lines: string[] = [HEADER, ''];
 
-	// Render NEWEST first so the model sees the most-relevant artifacts
-	// up top. When the budget hits, oldest entries (at the end) get
-	// dropped first; new ones stay.
-	const entries = [...toc.entries].reverse();
+	// `toc.entries` is already newest-first (see
+	// `agent/artifacts/toc-builder.ts` -- `listArtifactsForSession`
+	// sorts by timestamp DESC). Iterate as-is: the model sees the
+	// most-recent artifacts up top, and when the budget hits we stop
+	// adding lines, dropping OLDEST entries (which sit at the end).
 	let chars = lines.join('\n').length;
-	let truncatedCount = 0;
-	for (const e of entries) {
+	let renderedCount = 0;
+	for (const e of toc.entries) {
 		const line = `${e.id}: ${e.summary}`;
 		if (chars + line.length + 1 > maxChars) {
-			truncatedCount = entries.length - lines.length + 1;
 			break;
 		}
 		lines.push(line);
 		chars += line.length + 1;
+		renderedCount += 1;
 	}
+	const truncatedCount = toc.entries.length - renderedCount;
 	if (truncatedCount > 0) {
 		lines.push('');
 		lines.push(`(${truncatedCount} older artifacts omitted from TOC; still fetchable by id via shared.memory.get-artifact)`);

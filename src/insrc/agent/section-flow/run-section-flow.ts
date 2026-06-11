@@ -54,6 +54,7 @@ import {
 	shouldColdRebuild,
 	extractBullets,
 	legacyBundleToCloudView,
+	type LocalMemoryView,
 	type MemoryShapeBundle,
 	type WorkingMemoryStore,
 	type BulletCache,
@@ -287,6 +288,12 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			// fact-gap analysis before threading to sketch + decide +
 			// synth.
 			memory:      legacyBundleToCloudView(memory.bundle),
+			// Build-context (Phase 3) gets the local-tier view. The
+			// orchestrator's `maybeBuildContext` rebuilds `toc` per
+			// step and overwrites `recentSteps` with the last 2
+			// retained step summaries; this baseline carries only
+			// the stable parts.
+			localMemory: buildBaselineLocalMemoryView(memory.bundle, todo),
 			provider:    input.provider,
 			executeLeaf: input.executeLeaf,
 			l2Fallback:  input.l2Fallback,
@@ -403,6 +410,7 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			const todoResult = await runTodoOrchestrator({
 				todo,
 				memory:      legacyBundleToCloudView(memory.bundle),
+				localMemory: buildBaselineLocalMemoryView(memory.bundle, todo),
 				provider:    input.provider,
 				executeLeaf: input.executeLeaf,
 				l2Fallback:  input.l2Fallback,
@@ -557,6 +565,36 @@ async function prepareMemoryFor(
 		bulletCache: { cache: input.cache, topK: 10, embedProvider: input.localProvider },
 	});
 	return { bundle: updated.bundle, wasColdRebuild: false };
+}
+
+// ---------------------------------------------------------------------------
+// LocalMemoryView baseline
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the per-TODO baseline `LocalMemoryView` for the build-context
+ * sub-step (Phase 3 of plans/section-flow-architecture-redesign.md).
+ *
+ * Carries only the stable per-TODO parts:
+ *   - `system`      : reused from the shaped memory bundle
+ *   - `currentTodo` : one-line objective + origin marker so the local
+ *                     LLM can frame its artifact pick against the
+ *                     active TODO without re-deriving it
+ *   - `toc`         : empty; the orchestrator's `maybeBuildContext`
+ *                     rebuilds this per step from `artifact_vec`
+ *   - `recentSteps` : empty here; the orchestrator overwrites with the
+ *                     last 2 retained step summaries as the loop runs.
+ */
+function buildBaselineLocalMemoryView(
+	bundle: MemoryShapeBundle,
+	todo:   TodoSpec,
+): LocalMemoryView {
+	return {
+		system:      bundle.system,
+		currentTodo: `Active TODO: ${todo.objective} (origin: ${todo.origin})`,
+		toc:         '',
+		recentSteps: '',
+	};
 }
 
 // ---------------------------------------------------------------------------
