@@ -75,6 +75,7 @@ import type {
 } from '../prompts/writers/decide-next-step.js';
 import { runSummarizeStep, type SummarizeStepCall } from './step-summarize-step.js';
 import { citedSummariesToClosureClaims } from './citation-to-closure.js';
+import { tryParseCitedSummary, renderCitedSummaryForPrompt } from './citation-render.js';
 import type { CitedStepSummary } from './citation-types.js';
 import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
 import type { PriorAttempt } from '../prompts/writers/section-synth.js';
@@ -816,7 +817,13 @@ async function resolveStepSummaries(
 					const row = await getArtifactById(artifactId);
 					const fromRow = row?.summary?.trim();
 					if (fromRow !== undefined && fromRow.length > 0) {
-						summary = fromRow;
+						// Citation contract: the row may be JSON-encoded
+						// CitedStepSummary. Render structured. Fall back to
+						// plain text for legacy / unparseable rows.
+						const cited = tryParseCitedSummary(fromRow);
+						summary = cited !== undefined
+							? renderCitedSummaryForPrompt(cited)
+							: fromRow;
 					}
 				} catch (err) {
 					log.warn({
