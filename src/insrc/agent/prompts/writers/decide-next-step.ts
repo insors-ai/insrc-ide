@@ -172,7 +172,14 @@ const ROLE = [
 	'  - `step` (when action=execute-step) follows the discovery-plan',
 	'    rules: concrete intent (>=5 chars), unique id, every skillId in',
 	'    the SKILL CATALOG, targetsCriteria a non-empty array of valid',
-	'    gap-fact indices.',
+	'    gap-fact indices. A step is either a LEAF (has `skills`) or a',
+	'    BRANCH (has `children` -- each child a step in the same shape).',
+	'    Use a BRANCH when the natural intent is COMPOUND (3+ sub-',
+	'    objectives, "and"/"plus"/"including"); the orchestrator runs one',
+	'    summarize-step pass per LEAF so each gets a narrow citation',
+	'    surface. Bundling 4 sub-objectives into one leaf step (the',
+	'    legacy shape) has empirically caused citation-invent failures',
+	'    that the verifier rejects. When in doubt, decompose.',
 	'  - `verdict` (when action=terminate) is `covered` ONLY when every',
 	'    gap fact has at least one `CLOSES ... fully` marker against it',
 	'    in the TOC (the TOC entries you see were already cited and',
@@ -200,13 +207,26 @@ function renderSketch(sketch: readonly DiscoveryStep[]): string {
 	if (sketch.length === 0) { return '(no sketch)'; }
 	const lines: string[] = [`## SKETCH (default trajectory; reference only -- not a hard contract)`];
 	for (const s of sketch) {
-		lines.push(`- ${s.id}: ${s.intent}`);
-		for (const sk of s.skills) {
-			lines.push(`    - ${sk.id} (\`${sk.skillId}\`) -- ${sk.context}`);
-		}
-		lines.push(`    targetsCriteria: ${JSON.stringify(s.targetsCriteria)}`);
+		renderSketchStep(s, 0, lines);
 	}
 	return lines.join('\n');
+}
+
+function renderSketchStep(s: DiscoveryStep, depth: number, lines: string[]): void {
+	const pad = '  '.repeat(depth);
+	lines.push(`${pad}- ${s.id}: ${s.intent}`);
+	if (s.children !== undefined && s.children.length > 0) {
+		// BRANCH: walk children
+		for (const child of s.children) {
+			renderSketchStep(child, depth + 1, lines);
+		}
+		lines.push(`${pad}    targetsCriteria: ${JSON.stringify(s.targetsCriteria)} (branch)`);
+		return;
+	}
+	for (const sk of s.skills ?? []) {
+		lines.push(`${pad}    - ${sk.id} (\`${sk.skillId}\`) -- ${sk.context}`);
+	}
+	lines.push(`${pad}    targetsCriteria: ${JSON.stringify(s.targetsCriteria)}`);
 }
 
 /**

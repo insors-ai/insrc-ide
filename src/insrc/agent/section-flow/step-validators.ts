@@ -87,12 +87,24 @@ export function validateDependsOn(
  * the caller logs and drops. Used by both the sketch and the
  * decide-next-step callers.
  *
- * Constraints applied:
+ * Two shapes accepted (mutually exclusive at the same level):
+ *
+ *   LEAF -- legacy + new shape:
+ *     - `skills` is a 1-6 entry array (skill ids in catalog, contexts
+ *       non-empty, `dependsOn` valid).
+ *     - `children` absent or empty.
+ *     - Executes skills directly + runs one summarize-step pass.
+ *
+ *   BRANCH -- new in step-nesting:
+ *     - `children` is a 2-6 entry array; each child recursively
+ *       coerced (children may be leaves or further branches).
+ *     - `skills` absent or empty.
+ *     - No skill execution at this level. The branch's `intent` is
+ *       compound + descriptive; sub-objectives live on the children.
+ *
+ * Constraints applied to BOTH:
  *
  *   - `id`, `intent` are non-empty strings; `intent` >= 5 chars.
- *   - `skills` is a 1-6 entry array; each `skillId` is in the catalog;
- *     each `context` is a non-empty string.
- *   - `dependsOn`, when present, validates via `validateDependsOn`.
  *   - `targetsCriteria` is a non-empty array of integers in
  *     `[0, maxFactIdx]`; duplicates silently deduped.
  *
@@ -100,6 +112,8 @@ export function validateDependsOn(
  * (`steps[<idx>].something`). Pass `0` when validating a single step
  * outside a list.
  */
+const MAX_CHILDREN_PER_BRANCH = 6;
+
 export function coerceStep(
 	raw:                Record<string, unknown>,
 	idx:                number,
@@ -115,17 +129,83 @@ export function coerceStep(
 	if (intent.length < 5) {
 		return `steps[${idx}].intent must be a concrete sentence (min 5 chars; got ${intent.length})`;
 	}
-	const skillsRaw = raw['skills'];
-	if (!Array.isArray(skillsRaw) || skillsRaw.length === 0) {
-		return `steps[${idx}].skills must be a non-empty array`;
+
+	const skillsRaw   = raw['skills'];
+	const childrenRaw = raw['children'];
+	const hasSkills   = Array.isArray(skillsRaw)   && skillsRaw.length   > 0;
+	const hasChildren = Array.isArray(childrenRaw) && childrenRaw.length > 0;
+
+	if (hasSkills && hasChildren) {
+		return `steps[${idx}] has BOTH \`skills\` and \`children\`; a step is either a leaf (skills) OR a branch (children)`;
 	}
-	if (skillsRaw.length > 6) {
-		return `steps[${idx}].skills has ${skillsRaw.length} entries; cap is 6`;
+	if (!hasSkills && !hasChildren) {
+		return `steps[${idx}].skills must be a non-empty array (leaf) OR steps[${idx}].children must be a non-empty array (branch)`;
+	}
+
+	// Shared: targetsCriteria
+	const tcRaw = raw['targetsCriteria'];
+	if (!Array.isArray(tcRaw) || tcRaw.length === 0) {
+		return `steps[${idx}].targetsCriteria must be a non-empty array of fact indices`;
+	}
+	const targetsCriteria: number[] = [];
+	const seenTC = new Set<number>();
+	for (let k = 0; k < tcRaw.length; k++) {
+		const v = tcRaw[k];
+		if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > maxFactIdx) {
+			return `steps[${idx}].targetsCriteria[${k}] = ${String(v)} is not a valid fact index (0..${maxFactIdx})`;
+		}
+		if (seenTC.has(v)) { continue; }
+		seenTC.add(v);
+		targetsCriteria.push(v);
+	}
+
+	if (hasChildren) {
+		// BRANCH path
+		const childrenArr = childrenRaw as unknown[];
+		if (childrenArr.length < 2) {
+			return `steps[${idx}].children must have at least 2 entries (single-child branch is pointless; emit a leaf instead)`;
+		}
+		if (childrenArr.length > MAX_CHILDREN_PER_BRANCH) {
+			return `steps[${idx}].children has ${childrenArr.length} entries; cap is ${MAX_CHILDREN_PER_BRANCH}`;
+		}
+		const seenChildIds = new Set<string>();
+		const children: DiscoveryStep[] = [];
+		for (let j = 0; j < childrenArr.length; j++) {
+			const childRaw = childrenArr[j];
+			if (childRaw === null || typeof childRaw !== 'object' || Array.isArray(childRaw)) {
+				return `steps[${idx}].children[${j}] is not an object`;
+			}
+			// Recurse. Earlier-step-skills passes through unchanged so
+			// children can still depend on prior sibling-step skills
+			// across the broader plan.
+			const coercedChild = coerceStep(
+				childRaw as Record<string, unknown>,
+				j,
+				catalogIds,
+				maxFactIdx,
+				earlierStepSkills,
+			);
+			if (typeof coercedChild === 'string') {
+				return `steps[${idx}].children[${j}]: ${coercedChild}`;
+			}
+			if (seenChildIds.has(coercedChild.id)) {
+				return `steps[${idx}].children[${j}].id "${coercedChild.id}" duplicates an earlier child in the same branch`;
+			}
+			seenChildIds.add(coercedChild.id);
+			children.push(coercedChild);
+		}
+		return { id, intent, children, targetsCriteria };
+	}
+
+	// LEAF path
+	const skillsArr = skillsRaw as unknown[];
+	if (skillsArr.length > 6) {
+		return `steps[${idx}].skills has ${skillsArr.length} entries; cap is 6`;
 	}
 	const seenSkillIds = new Set<string>();
 	const skills: PlannedSkillCall[] = [];
-	for (let j = 0; j < skillsRaw.length; j++) {
-		const skRaw = skillsRaw[j];
+	for (let j = 0; j < skillsArr.length; j++) {
+		const skRaw = skillsArr[j];
 		if (skRaw === null || typeof skRaw !== 'object' || Array.isArray(skRaw)) {
 			return `steps[${idx}].skills[${j}] is not an object`;
 		}
@@ -163,22 +243,6 @@ export function coerceStep(
 			id: skId, skillId, context,
 			...(dependsOn !== undefined ? { dependsOn } : {}),
 		});
-	}
-
-	const tcRaw = raw['targetsCriteria'];
-	if (!Array.isArray(tcRaw) || tcRaw.length === 0) {
-		return `steps[${idx}].targetsCriteria must be a non-empty array of fact indices`;
-	}
-	const targetsCriteria: number[] = [];
-	const seenTC = new Set<number>();
-	for (let k = 0; k < tcRaw.length; k++) {
-		const v = tcRaw[k];
-		if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > maxFactIdx) {
-			return `steps[${idx}].targetsCriteria[${k}] = ${String(v)} is not a valid fact index (0..${maxFactIdx})`;
-		}
-		if (seenTC.has(v)) { continue; }   // silently dedupe
-		seenTC.add(v);
-		targetsCriteria.push(v);
 	}
 
 	return { id, intent, skills, targetsCriteria };

@@ -45,20 +45,86 @@ export interface PlannedSkillCall {
 }
 
 /**
- * One discovery step -- a multi-skill investigation with one purpose.
- * The cloud emits an ordered list of these per cycle; the orchestrator
- * iterates and calls the local LLM once per step.
+ * One discovery step -- either a LEAF (executes skills directly with
+ * one atomic intent) or a BRANCH (decomposes into child sub-steps
+ * each with a narrower atomic intent).
+ *
+ * Nesting solves the citation-discipline issue surfaced by live runs:
+ * compound objectives like "extract A + B + C + D in one step" produce
+ * raw outputs the summarize-step must cite for 4 sub-claims at once,
+ * exploding the invent surface. With nesting the planner can write the
+ * compound objective at the BRANCH level and decompose into atomic
+ * LEAVES; the orchestrator walks leaves and runs ONE narrow
+ * summarize-step per leaf instead of one compound pass for everything.
+ *
+ * `skills` and `children` are mutually exclusive at the same level:
+ *   - LEAF: `skills.length >= 1`, `children` omitted.
+ *   - BRANCH: `children.length >= 2`, `skills` omitted.
  *
  * `targetsCriteria` is the index list (into the section's
- * `reviewCriteria` array) the step claims to address. Used mechanically
- * by `computeCoverage` to keep `CycleMemory.criteriaCoverage` in sync
- * without an LLM judgment.
+ * `reviewCriteria` array) the step claims to address. On a BRANCH it
+ * is the UNION of all leaves under it; declaring it at the branch
+ * level is a planner convenience and the orchestrator's coverage
+ * accounting reads only LEAF entries.
+ *
+ * Backward-compat: the legacy flat shape (`skills[]`, no `children`)
+ * remains valid -- every existing test fixture continues to parse as
+ * a leaf step.
  */
 export interface DiscoveryStep {
-	readonly id:               string;       // "step-1", "step-2", ...
-	readonly intent:           string;       // one-sentence purpose
-	readonly skills:           readonly PlannedSkillCall[];
-	readonly targetsCriteria:  readonly number[];   // indices into section.reviewCriteria
+	readonly id:               string;       // "step-1", "step-1.1", ...
+	readonly intent:           string;       // one-sentence purpose (atomic at leaf, compound allowed at branch)
+	readonly skills?:          readonly PlannedSkillCall[];
+	readonly children?:        readonly DiscoveryStep[];
+	readonly targetsCriteria:  readonly number[];
+}
+
+/**
+ * Type guard for leaf steps (skills present, children absent).
+ */
+export function isLeafStep(step: DiscoveryStep): step is DiscoveryStep & { skills: readonly PlannedSkillCall[] } {
+	return step.skills !== undefined && step.skills.length > 0
+		&& (step.children === undefined || step.children.length === 0);
+}
+
+/**
+ * Type guard for branch steps (children present, skills absent).
+ */
+export function isBranchStep(step: DiscoveryStep): step is DiscoveryStep & { children: readonly DiscoveryStep[] } {
+	return step.children !== undefined && step.children.length > 0
+		&& (step.skills === undefined || step.skills.length === 0);
+}
+
+/**
+ * Walk a step tree in execution order (pre-order DFS) and yield every
+ * leaf. Used by the orchestrator to drive per-leaf skill execution +
+ * summarize-step passes.
+ */
+export function* walkLeaves(step: DiscoveryStep): Generator<DiscoveryStep & { skills: readonly PlannedSkillCall[] }> {
+	if (isLeafStep(step)) {
+		yield step;
+		return;
+	}
+	if (isBranchStep(step)) {
+		for (const child of step.children) {
+			yield* walkLeaves(child);
+		}
+	}
+}
+
+/**
+ * Count the number of leaves under a step (1 for a leaf, sum of
+ * descendants for a branch). Used for logging + the priorAttempts
+ * accounting.
+ */
+export function countLeaves(step: DiscoveryStep): number {
+	if (isLeafStep(step)) { return 1; }
+	if (isBranchStep(step)) {
+		let n = 0;
+		for (const child of step.children) { n += countLeaves(child); }
+		return n;
+	}
+	return 0;
 }
 
 export interface DiscoveryPlan {

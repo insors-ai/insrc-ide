@@ -117,7 +117,15 @@ export async function executeDiscoveryStep(
 	let executedCount = 0;
 	let emptyCount    = 0;
 
-	for (const call of input.step.skills) {
+	// Branch steps are walked into leaves by the orchestrator before
+	// reaching this function -- executeDiscoveryStep only handles
+	// LEAF steps. Defensive check; the caller's contract is that
+	// `step.skills` is populated.
+	const skills = input.step.skills ?? [];
+	if (skills.length === 0) {
+		throw new Error(`executeDiscoveryStep: step "${input.step.id}" is a branch (no skills); orchestrator must walk leaves first`);
+	}
+	for (const call of skills) {
 		// Merge priorOutputs (step-level, from retained ledger) with the
 		// in-step skill outputs gathered so far. Skill call ids win on
 		// collision (within-step wiring is the more specific signal).

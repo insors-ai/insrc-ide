@@ -29,6 +29,7 @@
 
 import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { DiscoveryStep } from '../content-gen/discovery-plan.js';
+import { walkLeaves } from '../content-gen/discovery-plan.js';
 import type { LLMMessage, LLMProvider } from '../../shared/types.js';
 import type { CloudMemoryView } from '../working-memory/index.js';
 import type { RequiredFact } from './fact-gap-types.js';
@@ -196,7 +197,15 @@ function parseAndCoerce(
 			continue;
 		}
 		seenIds.add(coerced.id);
-		earlierStepSkills.set(coerced.id, new Set(coerced.skills.map(sk => sk.id)));
+		// Track skill ids across the whole step tree so cross-step
+		// `dependsOn` validation in later sketch entries (and in
+		// decide-next-step) can resolve references to skills declared
+		// inside a branch's leaves.
+		const allSkillIds = new Set<string>();
+		for (const leaf of walkLeaves(coerced)) {
+			for (const sk of leaf.skills) { allSkillIds.add(sk.id); }
+		}
+		earlierStepSkills.set(coerced.id, allSkillIds);
 		steps.push(coerced);
 	}
 	if (steps.length === 0) {

@@ -65,6 +65,7 @@ import type { TodoSpec } from './types.js';
 import type { ExecuteLeaf, LeafBuildContext } from './leaf-executor.js';
 import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { DiscoveryStep, StepOutput } from '../content-gen/discovery-plan.js';
+import { walkLeaves } from '../content-gen/discovery-plan.js';
 import { runFactGapAnalysis } from './step-fact-gap-analysis.js';
 import { executeDiscoveryStep } from './step-discovery-execute.js';
 import { runSketch } from './step-sketch.js';
@@ -390,124 +391,132 @@ export async function runTodoOrchestrator(
 			}
 
 			// decision.action === 'execute-step'
-			const step = decision.step;
-			priorAttempts.push({ stepId: step.id, intent: step.intent });
-			const crossStepPriors = collectCrossStepPriors(step, crossStepRawOutputs);
-			const buildContext = await maybeBuildContext(input, step, retainedLedger);
-			let execRes;
-			try {
-				execRes = await executeDiscoveryStep({
-					step,
-					priorOutputs: { ...priorStepOutputs, ...crossStepPriors },
-					deps: {
-						todo: input.todo, gapFacts: gaps,
-						executeLeaf: input.executeLeaf,
-						...(buildContext !== undefined ? { buildContext } : {}),
-					},
-				});
-			} catch (err) {
-				loopFailureReason = `executeDiscoveryStep failed at step ${step.id}: ${(err as Error).message}`;
-				terminationVerdict = 'unrecoverable';
-				break;
-			}
-			retainedLedger = [...retainedLedger, execRes.output];
-			decidePriorAttempts.push({
-				stepId:   step.id,
-				intent:   step.intent,
-				skillIds: step.skills.map(s => s.skillId),
-				status:   execRes.output.status,
-			});
-			priorStepOutputs = {
-				...priorStepOutputs,
-				[step.id]: stringifyStepOutput(execRes.output),
-			};
-			for (const [callId, raw] of Object.entries(execRes.skillOutputs)) {
-				if (raw.length > 0) {
-					crossStepRawOutputs[`${step.id}.${callId}`] = raw;
-				}
-			}
-			if (Object.keys(execRes.skillArtifactIds).length > 0) {
-				allArtifactIds[step.id] = { ...execRes.skillArtifactIds };
-			}
-
-			// 2e. Local-tier cited summaries (citation contract). Runs
-			//     IMMEDIATELY after step execution -- before the next decide
-			//     turn -- so the artifact_vec summary column is populated
-			//     with cited claims and the gap-closure verdicts feed
-			//     convergence accounting RIGHT NOW (not on the next iteration).
-			let stepClosureClaims: readonly ClosureClaim[] = [];
-			try {
-				const summarizerCalls: SummarizeStepCall[] = step.skills.map(sk => ({
-					callId:     sk.id,
-					skillId:    sk.skillId,
-					context:    sk.context,
-					artifactId: execRes.skillArtifactIds[sk.id] ?? '',
-					rawText:    execRes.output.rawOutputs[sk.id] ?? '',
-				}));
-				const summaryRes = await runSummarizeStep({
-					todoObjective: input.todo.objective,
-					stepIntent:    step.intent,
-					stepStatus:    execRes.output.status,
-					calls:         summarizerCalls,
-					gapFacts:      gaps,
-					provider:      input.provider,
-				});
-				// Stamp skillId onto each summary (the LLM doesn't know it).
-				const summariesWithSkill: CitedStepSummary[] = summaryRes.summaries.map(s => {
-					const call = summarizerCalls.find(c => c.callId === s.callId);
-					return { ...s, skillId: call?.skillId ?? s.skillId };
-				});
-				// Persist cited summaries to artifact_vec (JSON-encoded).
-				for (const s of summariesWithSkill) {
-					if (s.artifactId.length === 0) { continue; }
-					try {
-						await updateArtifactSummary(s.artifactId, JSON.stringify(s));
-					} catch (err) {
-						log.warn({
-							stepId: step.id, callId: s.callId, artifactId: s.artifactId,
-							err: (err as Error).message,
-						}, 'TODO orchestrator: updateArtifactSummary threw; continuing');
-					}
-				}
-				stepClosureClaims = citedSummariesToClosureClaims(step.id, summariesWithSkill);
-			} catch (err) {
-				log.warn({
-					todoId: input.todo.id, stepId: step.id,
-					err: (err as Error).message,
-				}, 'TODO orchestrator: summarize-step threw; continuing without cited summaries');
-			}
-			for (const c of stepClosureClaims) { closureClaims.push(c); }
-			const contributed = stepContributedEvidence(stepClosureClaims);
-			perStepTrace.push({
-				stepId:               step.id,
-				intent:                step.intent,
-				status:                execRes.output.status,
-				contributedEvidence:   contributed,
-			});
-			if (contributed) {
-				noProgressCount = 0;
-			} else {
-				noProgressCount += 1;
-				if (noProgressCount >= noProgressBudget) {
+			// The cloud may emit a BRANCH (compound objective decomposed
+			// into atomic leaves) -- walk its leaves and run the full
+			// execute + summarize + closure-accounting cycle per LEAF.
+			// Each leaf increments stepsRun, contributes its own
+			// priorAttempts entry, and gets its own narrow summarize-step
+			// pass. lastStep at the end of the outer iteration reflects
+			// the FINAL leaf so the next decide-next-step turn sees the
+			// most-recently-executed leaf's raw output.
+			const decisionStep = decision.step;
+			let outerBreak = false;
+			for (const leaf of walkLeaves(decisionStep)) {
+				priorAttempts.push({ stepId: leaf.id, intent: leaf.intent });
+				const crossStepPriors = collectCrossStepPriors(leaf, crossStepRawOutputs);
+				const buildContext = await maybeBuildContext(input, leaf, retainedLedger);
+				let execRes;
+				try {
+					execRes = await executeDiscoveryStep({
+						step:         leaf,
+						priorOutputs: { ...priorStepOutputs, ...crossStepPriors },
+						deps: {
+							todo: input.todo, gapFacts: gaps,
+							executeLeaf: input.executeLeaf,
+							...(buildContext !== undefined ? { buildContext } : {}),
+						},
+					});
+				} catch (err) {
+					loopFailureReason = `executeDiscoveryStep failed at step ${leaf.id}: ${(err as Error).message}`;
 					terminationVerdict = 'unrecoverable';
-					loopFailureReason = `${noProgressBudget} consecutive no-progress steps`;
-					log.warn({ todoId: input.todo.id, noProgressCount }, 'TODO orchestrator: no-progress budget exhausted -> terminate unrecoverable');
-					stepsRun += 1;
+					outerBreak = true;
 					break;
 				}
-			}
+				retainedLedger = [...retainedLedger, execRes.output];
+				decidePriorAttempts.push({
+					stepId:   leaf.id,
+					intent:   leaf.intent,
+					skillIds: leaf.skills.map(s => s.skillId),
+					status:   execRes.output.status,
+				});
+				priorStepOutputs = {
+					...priorStepOutputs,
+					[leaf.id]: stringifyStepOutput(execRes.output),
+				};
+				for (const [callId, raw] of Object.entries(execRes.skillOutputs)) {
+					if (raw.length > 0) {
+						crossStepRawOutputs[`${leaf.id}.${callId}`] = raw;
+					}
+				}
+				if (Object.keys(execRes.skillArtifactIds).length > 0) {
+					allArtifactIds[leaf.id] = { ...execRes.skillArtifactIds };
+				}
 
-			lastStep = {
-				stepId:     step.id,
-				stepIntent: step.intent,
-				skills:     step.skills.map(sk => ({
-					callId:  sk.id,
-					skillId: sk.skillId,
-					context: sk.context,
-					rawText: execRes.output.rawOutputs[sk.id] ?? '',
-				})),
-			};
-			stepsRun += 1;
+				// 2e. Local-tier cited summaries (citation contract) -- per LEAF
+				let leafClosureClaims: readonly ClosureClaim[] = [];
+				try {
+					const summarizerCalls: SummarizeStepCall[] = leaf.skills.map(sk => ({
+						callId:     sk.id,
+						skillId:    sk.skillId,
+						context:    sk.context,
+						artifactId: execRes.skillArtifactIds[sk.id] ?? '',
+						rawText:    execRes.output.rawOutputs[sk.id] ?? '',
+					}));
+					const summaryRes = await runSummarizeStep({
+						todoObjective: input.todo.objective,
+						stepIntent:    leaf.intent,
+						stepStatus:    execRes.output.status,
+						calls:         summarizerCalls,
+						gapFacts:      gaps,
+						provider:      input.provider,
+					});
+					const summariesWithSkill: CitedStepSummary[] = summaryRes.summaries.map(s => {
+						const call = summarizerCalls.find(c => c.callId === s.callId);
+						return { ...s, skillId: call?.skillId ?? s.skillId };
+					});
+					for (const s of summariesWithSkill) {
+						if (s.artifactId.length === 0) { continue; }
+						try {
+							await updateArtifactSummary(s.artifactId, JSON.stringify(s));
+						} catch (err) {
+							log.warn({
+								stepId: leaf.id, callId: s.callId, artifactId: s.artifactId,
+								err: (err as Error).message,
+							}, 'TODO orchestrator: updateArtifactSummary threw; continuing');
+						}
+					}
+					leafClosureClaims = citedSummariesToClosureClaims(leaf.id, summariesWithSkill);
+				} catch (err) {
+					log.warn({
+						todoId: input.todo.id, stepId: leaf.id,
+						err: (err as Error).message,
+					}, 'TODO orchestrator: summarize-step threw; continuing without cited summaries');
+				}
+				for (const c of leafClosureClaims) { closureClaims.push(c); }
+				const contributed = stepContributedEvidence(leafClosureClaims);
+				perStepTrace.push({
+					stepId:               leaf.id,
+					intent:                leaf.intent,
+					status:                execRes.output.status,
+					contributedEvidence:   contributed,
+				});
+				if (contributed) {
+					noProgressCount = 0;
+				} else {
+					noProgressCount += 1;
+					if (noProgressCount >= noProgressBudget) {
+						terminationVerdict = 'unrecoverable';
+						loopFailureReason = `${noProgressBudget} consecutive no-progress steps`;
+						log.warn({ todoId: input.todo.id, noProgressCount }, 'TODO orchestrator: no-progress budget exhausted -> terminate unrecoverable');
+						stepsRun += 1;
+						outerBreak = true;
+						break;
+					}
+				}
+
+				lastStep = {
+					stepId:     leaf.id,
+					stepIntent: leaf.intent,
+					skills:     leaf.skills.map(sk => ({
+						callId:  sk.id,
+						skillId: sk.skillId,
+						context: sk.context,
+						rawText: execRes.output.rawOutputs[sk.id] ?? '',
+					})),
+				};
+				stepsRun += 1;
+			}
+			if (outerBreak) { break; }
 		}
 
 		// Safety ceiling backstop. If we get here without a verdict, the
@@ -654,7 +663,10 @@ function collectCrossStepPriors(
 	crossStepRawOutputs: Readonly<Record<string, string>>,
 ): Record<string, string> {
 	const wanted: Record<string, string> = {};
-	for (const sk of step.skills) {
+	// Branches don't carry their own skills -- caller walks leaves and
+	// invokes this per leaf. Defensive nil-check for callers that pass
+	// a branch by accident.
+	for (const sk of step.skills ?? []) {
 		const dep = sk.dependsOn;
 		if (typeof dep !== 'string' || !dep.includes('.')) {
 			continue;   // intra-step dep -- handled by executeDiscoveryStep
