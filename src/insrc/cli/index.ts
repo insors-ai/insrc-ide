@@ -9,6 +9,7 @@ import { registerTestCommands } from './commands/test.js';
 import { registerKeysCommands } from './commands/keys.js';
 import { registerQueryCommands } from './commands/query.js';
 import { registerMcpSetupCommands } from './commands/mcp-setup.js';
+import { registerHandoffCommands } from './commands/handoff.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('cli');
@@ -87,6 +88,7 @@ registerTestCommands(program);
 registerKeysCommands(program);
 registerQueryCommands(program);
 registerMcpSetupCommands(program);
+registerHandoffCommands(program);
 
 // Setup / system detection
 program

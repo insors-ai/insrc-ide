@@ -1,0 +1,182 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/**
+ * Handoff top-level orchestrator: `runHandoff`.
+ *
+ * One call composes everything Days 1-4 built:
+ *
+ *   1. assembleSpec  -- scope + memory + intent -> AssembledSpec
+ *   2. createWorktree -- git worktree off HEAD of the source repo
+ *   3. spawn agent    -- claude-code (Day 3) by default; scripted-agent
+ *                        in tests + CLI dry-run
+ *   4. auditDeliverable -- parser + machine-checks + judge ->
+ *                        AuditResult
+ *   5. diffWorktreeAgainstHead -- the actual file changes the agent
+ *                        produced, ready for Day 5 CLI to render
+ *
+ * The orchestrator does NOT decide what to do with the verdict --
+ * callers (CLI command, Phase 2b VS Code extension) route on it.
+ * `accept`-on-success commits the diff; `revise-*` re-spawns or kicks
+ * back to the user.
+ */
+
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+import { assembleSpec, type SpecAssemblerInput } from './spec-assembler.js';
+import { createWorktree, diffWorktreeAgainstHead, removeWorktree } from './worktree.js';
+import { spawnClaudeCode } from './spawn/claude-code.js';
+import type { AgentSpawnResult } from './spawn/base.js';
+import { auditDeliverable, type AuditResult } from './audit/judge.js';
+import { getTemplate } from './templates/registry.js';
+import type { AssembledSpec, MemoryRef, ScopePayload, TemplateId } from './types.js';
+import { getLogger } from '../shared/logger.js';
+
+const log = getLogger('handoff:run');
+
+export type AgentChoice = 'claude-code' | 'codex' | 'scripted-agent';
+
+/**
+ * Scripted-agent function for tests + CLI dry-run. Receives the
+ * assembled spec markdown and returns a synthetic AgentSpawnResult --
+ * useful for exercising the audit pipeline without spawning a real
+ * agent.
+ */
+export type ScriptedAgentFn = (spec: string) => Promise<AgentSpawnResult> | AgentSpawnResult;
+
+export interface RunHandoffOpts {
+	readonly templateId:      TemplateId;
+	readonly intent:          string;
+	readonly scope:           ScopePayload;
+	readonly memoryRefs:      readonly MemoryRef[];
+	readonly templateExtras?: Record<string, unknown> | undefined;
+	readonly agent:           AgentChoice;
+	/**
+	 * MCP server path written into the worktree's .mcp.json (so the
+	 * spawned agent auto-discovers insrc's tools). Same path the user
+	 * fed to `insrc mcp-setup`.
+	 */
+	readonly mcpServerPath?:  string | undefined;
+	/** Where to root the per-session handoff dir. Default ~/.insrc/handoffs. */
+	readonly persistRoot?:    string | undefined;
+	readonly sessionId:       string;
+	readonly specIdOverride?: string | undefined;
+	readonly timeoutMs?:      number | undefined;
+	/** Required when `agent === 'scripted-agent'`. */
+	readonly scriptedAgent?:  ScriptedAgentFn | undefined;
+	/** Test seam: override the claude binary lookup. */
+	readonly claudeBinPath?:  string | undefined;
+	/** Don't delete the worktree on completion. Default: keep on accept, keep on revise so the user can inspect. */
+	readonly keepWorktree?:   boolean | undefined;
+	/** Cleanup the worktree even on failure (tests). */
+	readonly forceCleanup?:   boolean | undefined;
+}
+
+export interface RunHandoffResult {
+	readonly spec:        AssembledSpec;
+	readonly spawnResult: AgentSpawnResult;
+	readonly audit:       AuditResult;
+	readonly diff:        string;
+	readonly worktreePath: string;
+}
+
+const DEFAULT_PERSIST_ROOT = join(homedir(), '.insrc', 'handoffs');
+
+export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult> {
+	const persistRoot  = opts.persistRoot ?? DEFAULT_PERSIST_ROOT;
+	const worktreePath = join(persistRoot, opts.sessionId, 'worktree');
+
+	// 1. Assemble the spec.
+	const template = getTemplate(opts.templateId);
+	const assemblerInput: SpecAssemblerInput = {
+		templateId:     opts.templateId,
+		intent:         opts.intent,
+		scope:          opts.scope,
+		memoryRefs:     opts.memoryRefs,
+		worktreePath,
+		timeBudgetSec:  600,
+		persistRoot,
+		sessionId:      opts.sessionId,
+		...(opts.specIdOverride !== undefined ? { specIdOverride: opts.specIdOverride } : {}),
+		...(opts.templateExtras !== undefined ? { templateExtras: opts.templateExtras } : {}),
+	};
+	const spec = assembleSpec(assemblerInput);
+	log.info({ specId: spec.specId, templateId: opts.templateId }, 'handoff: spec assembled');
+
+	// 2. Create the worktree off HEAD of the source repo.
+	await createWorktree({
+		repoPath:     opts.scope.repoPath,
+		worktreePath,
+	});
+
+	let spawnResult: AgentSpawnResult;
+	try {
+		// 3. Spawn the agent.
+		spawnResult = await dispatchSpawn(opts, spec.specMd, worktreePath, spec.specId);
+		log.info({ specId: spec.specId, exitCode: spawnResult.exitCode, durationMs: spawnResult.durationMs },
+			'handoff: agent returned');
+
+		// 4. Audit the deliverable.
+		const audit = await auditDeliverable({
+			deliverable:        spawnResult.stdout,
+			requiredSections:   template.requiredDeliverableSections,
+			acceptanceCriteria: spec.meta.acceptanceCriteria,
+			cwd:                worktreePath,
+		});
+		log.info({ specId: spec.specId, verdict: audit.verdict }, 'handoff: audit verdict');
+
+		// 5. Compute the diff against HEAD for the caller to display / apply.
+		const diff = await diffWorktreeAgainstHead({
+			repoPath:     opts.scope.repoPath,
+			worktreePath,
+		});
+
+		return { spec, spawnResult, audit, diff, worktreePath };
+	} finally {
+		if (opts.forceCleanup === true) {
+			await removeWorktree({ repoPath: opts.scope.repoPath, worktreePath });
+		}
+	}
+}
+
+async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: string, specId: string): Promise<AgentSpawnResult> {
+	if (opts.agent === 'scripted-agent') {
+		if (opts.scriptedAgent === undefined) {
+			throw new Error("runHandoff: agent='scripted-agent' requires scriptedAgent fn");
+		}
+		const start = Date.now();
+		const partial = await opts.scriptedAgent(spec);
+		return {
+			stdout:     partial.stdout,
+			stderr:     partial.stderr,
+			exitCode:   partial.exitCode,
+			durationMs: partial.durationMs > 0 ? partial.durationMs : Date.now() - start,
+		};
+	}
+	if (opts.agent === 'codex') {
+		const { spawnCodex } = await import('./spawn/codex.js');
+		const codexOpts: Parameters<typeof spawnCodex>[0] = {
+			worktreePath,
+			spec,
+			sessionId:     opts.sessionId,
+			specId,
+			mcpServerPath: opts.mcpServerPath ?? '/abs/path/insrc-mcp-server.js',
+		};
+		if (opts.timeoutMs !== undefined) (codexOpts as { timeoutMs?: number }).timeoutMs = opts.timeoutMs;
+		return spawnCodex(codexOpts);
+	}
+	// claude-code path
+	const claudeOpts: Parameters<typeof spawnClaudeCode>[0] = {
+		worktreePath,
+		spec,
+		sessionId:     opts.sessionId,
+		specId,
+		mcpServerPath: opts.mcpServerPath ?? '/abs/path/insrc-mcp-server.js',
+	};
+	if (opts.timeoutMs !== undefined)    (claudeOpts as { timeoutMs?: number }).timeoutMs    = opts.timeoutMs;
+	if (opts.claudeBinPath !== undefined) (claudeOpts as { claudeBinPath?: string }).claudeBinPath = opts.claudeBinPath;
+	return spawnClaudeCode(claudeOpts);
+}
