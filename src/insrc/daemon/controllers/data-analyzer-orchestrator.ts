@@ -335,20 +335,11 @@ export class DataAnalyzerOrchestratorController implements TaskController {
       ...(this.deps.abortController?.signal ? { signal: this.deps.abortController.signal } : {}),
     };
 
-    // Section-flow runs entirely on the cloud provider for now -- live
-    // runs surfaced citation-discipline issues from the local LLM
-    // (qwen3.6) that the cloud LLM does not exhibit. The Ollama fallback
-    // is intentionally removed: if no cloud provider is configured the
-    // request fails loud rather than silently degrading. Once the local
-    // LLM's citation-format compliance is addressed (separate workstream)
-    // the orchestrator can switch back to a mixed-tier setup.
-    if (session.claudeProvider === null) {
-      throw new Error(
-        'data-analyzer requires a cloud LLM provider (Anthropic) for citation-grounded section-flow. '
-        + 'Configure an Anthropic API key in the Model Providers pane and retry.',
-      );
-    }
-    const sectionFlowProvider = session.claudeProvider;
+    // Section-flow's planner / shape / review calls use the highest-
+    // quality provider available. Defaults to the active cloud provider
+    // when one is configured (matches the prior synthesise step's
+    // resolver choice); falls back to local Ollama otherwise.
+    const sectionFlowProvider = session.claudeProvider ?? session.ollamaProvider;
 
     const executeLeaf = buildSkillExecutor({
       runnerDeps,
@@ -358,16 +349,17 @@ export class DataAnalyzerOrchestratorController implements TaskController {
         codeRepoPath: session.repoPath ?? '',
         primaryConnection: this._connections[0]?.id ?? '',
       },
-      // Leaf-executor provider controls two LLM turns: build-context
-      // (Phase 3 citation-grounded fetch picker) and shape-resolve
-      // (per-leaf args resolver). Both used to route to local Ollama
-      // for cost reasons, but live runs showed the local LLM emitting
-      // invented spans and broken arg schemas. Force cloud for these
-      // too, same workstream as the sectionFlowProvider switch above.
-      // Skill body execution still honours each skill's declared
-      // `providerAffinity` via `runnerDeps.resolveProvider` -- this
-      // field only controls build-context + shape-resolve.
-      provider: sectionFlowProvider,
+      // Per-leaf shape resolution (Stage 2a of the 2-step executor)
+      // takes the leaf objective + skill schema + prior outputs and
+      // emits a validated args dict. That is a small structured-
+      // output role -- well-suited to the local Ollama tier, same
+      // family as the LOCAL CONTEXT-ASSEMBLY memory ops. Routing it
+      // here saves the cloud quota for actual reasoning work
+      // (planner / reviewer / synthesis). Skill body execution still
+      // honours each skill's declared `providerAffinity` via
+      // `runnerDeps.resolveProvider` -- this field only controls
+      // shape-resolve.
+      provider: session.ollamaProvider,
     });
 
     const l2Fallback: L2Fallback = async ({ todo, reason }) => {
