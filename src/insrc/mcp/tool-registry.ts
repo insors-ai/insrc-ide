@@ -16,7 +16,8 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ToolDefinition, ToolHandlerContext } from './types.js';
+import type { RpcFn } from './daemon-rpc.js';
+import type { ToolCallResult, ToolDefinition, ToolHandlerContext } from './types.js';
 import { validateSessionToken } from './session-token.js';
 import { daemonRpc } from './daemon-rpc.js';
 import { ENTITY_TOOLS }   from './tools/entity.js';
@@ -54,13 +55,71 @@ function assertToolInvariants(tools: readonly ToolDefinition[]): void {
 	}
 }
 
+export interface InvokeToolOpts {
+	/** Token presented by the caller (env var on MCP, --session-token on CLI). */
+	readonly sessionToken?: string | undefined;
+	/** RPC client; tests inject stubs. Defaults to the production daemon-rpc. */
+	readonly rpc?:          RpcFn | undefined;
+}
+
+/**
+ * Invoke one tool by definition. Handles session-token gating, ctx
+ * construction, and structured error mapping.
+ *
+ * Shared between the MCP server adapter (registerAllTools below) and
+ * the CLI `insrc query --tool` path so the two surfaces stay
+ * behaviour-identical.
+ */
+export async function invokeTool(
+	tool: ToolDefinition,
+	args: unknown,
+	opts: InvokeToolOpts = {},
+): Promise<ToolCallResult> {
+	const sessionToken = opts.sessionToken;
+	const rpc          = opts.rpc ?? daemonRpc;
+
+	let resolvedSessionId: string | undefined;
+	if (tool.scope === 'session') {
+		resolvedSessionId = validateSessionToken(sessionToken);
+		if (resolvedSessionId === undefined) {
+			return {
+				content: [{ type: 'text', text: `Tool '${tool.name}' requires a valid session token; INSRC_SESSION_TOKEN is missing or expired.` }],
+				isError: true,
+			};
+		}
+	}
+
+	const ctx: ToolHandlerContext = {
+		sessionToken,
+		sessionId: resolvedSessionId,
+		rpc,
+	};
+
+	try {
+		return await tool.handler(args as Record<string, never>, ctx);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		log.warn({ tool: tool.name, err: msg }, 'tool handler threw');
+		return {
+			content: [{ type: 'text', text: msg }],
+			isError: true,
+		};
+	}
+}
+
+/**
+ * Look up a tool by name. Returns undefined if no match (caller decides
+ * how to surface the miss).
+ */
+export function findToolByName(name: string): ToolDefinition | undefined {
+	return ALL_TOOLS.find(t => t.name === name);
+}
+
 /**
  * Register every tool in `ALL_TOOLS` with the given MCP server.
  *
- * The handler closure wraps each tool's handler with:
- *   - Session-token validation for `scope: 'session'` tools.
- *   - Error mapping: handler exceptions are surfaced as MCP errors
- *     with `isError: true` and the message as content.
+ * The handler closure delegates to `invokeTool` so MCP and CLI share
+ * one source of truth for gating + error mapping.
  */
 export function registerAllTools(server: McpServer): void {
 	assertToolInvariants(ALL_TOOLS);
@@ -74,34 +133,7 @@ export function registerAllTools(server: McpServer): void {
 				description: tool.description,
 				inputSchema: tool.inputSchema,
 			},
-			async (args: unknown) => {
-				let resolvedSessionId: string | undefined;
-				if (tool.scope === 'session') {
-					resolvedSessionId = validateSessionToken(sessionTokenFromEnv);
-					if (resolvedSessionId === undefined) {
-						return {
-							content: [{ type: 'text', text: `Tool '${tool.name}' requires a valid session token; INSRC_SESSION_TOKEN is missing or expired.` }],
-							isError: true,
-						};
-					}
-				}
-				const ctx: ToolHandlerContext = {
-					sessionToken: sessionTokenFromEnv,
-					sessionId:    resolvedSessionId,
-					rpc:          daemonRpc,
-				};
-				try {
-					const result = await tool.handler(args as Record<string, never>, ctx);
-					return result;
-				} catch (err) {
-					const msg = err instanceof Error ? err.message : String(err);
-					log.warn({ tool: tool.name, err: msg }, 'tool handler threw');
-					return {
-						content: [{ type: 'text', text: msg }],
-						isError: true,
-					};
-				}
-			},
+			async (args: unknown) => invokeTool(tool, args, { sessionToken: sessionTokenFromEnv }),
 		);
 	}
 

@@ -7,6 +7,8 @@ import { registerConfigCommands } from './commands/config.js';
 import { registerConversationCommands } from './commands/conversation.js';
 import { registerTestCommands } from './commands/test.js';
 import { registerKeysCommands } from './commands/keys.js';
+import { registerQueryCommands } from './commands/query.js';
+import { registerMcpSetupCommands } from './commands/mcp-setup.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('cli');
@@ -83,6 +85,8 @@ registerConfigCommands(program);
 registerConversationCommands(program);
 registerTestCommands(program);
 registerKeysCommands(program);
+registerQueryCommands(program);
+registerMcpSetupCommands(program);
 
 // Setup / system detection
 program
