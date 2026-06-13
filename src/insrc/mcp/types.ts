@@ -76,6 +76,16 @@ export interface ToolHandlerContext {
 	 */
 	readonly sessionToken: string | undefined;
 	/**
+	 * The session id the token resolved to. Populated by the registry
+	 * after `scope: 'session'` validation passes; always undefined for
+	 * `scope: 'global'` tools (they don't need it).
+	 *
+	 * Session-scoped tools (`insrc_artifact_*`, `insrc_spec_*`) read
+	 * this directly rather than re-validating the token themselves --
+	 * the registry already gated.
+	 */
+	readonly sessionId: string | undefined;
+	/**
 	 * Daemon JSON-RPC client. Tool handlers call this to reach the
 	 * underlying entity / graph / memory functions, which live in the
 	 * daemon process (the MCP server is a separate subprocess and

@@ -75,19 +75,21 @@ export function registerAllTools(server: McpServer): void {
 				inputSchema: tool.inputSchema,
 			},
 			async (args: unknown) => {
-				const ctx: ToolHandlerContext = {
-					sessionToken: sessionTokenFromEnv,
-					rpc:          daemonRpc,
-				};
+				let resolvedSessionId: string | undefined;
 				if (tool.scope === 'session') {
-					const sessionId = validateSessionToken(ctx.sessionToken);
-					if (sessionId === undefined) {
+					resolvedSessionId = validateSessionToken(sessionTokenFromEnv);
+					if (resolvedSessionId === undefined) {
 						return {
 							content: [{ type: 'text', text: `Tool '${tool.name}' requires a valid session token; INSRC_SESSION_TOKEN is missing or expired.` }],
 							isError: true,
 						};
 					}
 				}
+				const ctx: ToolHandlerContext = {
+					sessionToken: sessionTokenFromEnv,
+					sessionId:    resolvedSessionId,
+					rpc:          daemonRpc,
+				};
 				try {
 					const result = await tool.handler(args as Record<string, never>, ctx);
 					return result;

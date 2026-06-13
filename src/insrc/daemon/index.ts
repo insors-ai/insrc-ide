@@ -86,6 +86,8 @@ import {
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
+import { getArtifactById, queryArtifactVec } from '../db/lance/artifact-vec.js';
+import { readFile as fsReadFile } from 'node:fs/promises';
 import {
 	saveTurn, closeSession, saveSession, seedFromPrior, deleteSessionsForRepo, deleteTurnsForRepo, pruneConversations,
 	searchTurnsByRepo, getConversationStats, listSessions, getAllTurns,
@@ -806,6 +808,71 @@ async function main(): Promise<void> {
 				candidateKinds as readonly ('repo'|'file'|'module'|'function'|'method'|'class'|'interface'|'type')[],
 				opts,
 			) as Promise<Entity[]>;
+		},
+
+		// ----- artifact.* IPCs (MCP server's `insrc_artifact_*` tools) -----
+		// Read prior skill-call outputs by id (with raw spill body) or via
+		// per-session ANN search.  Session-scoping is enforced by the MCP
+		// server's session-token check before these IPCs are reached;
+		// the daemon trusts the sessionId in params.
+
+		'artifact.get': async (params) => {
+			const { artifactId } = params as { artifactId: string };
+			const hit = await getArtifactById(artifactId);
+			if (hit === null) return null;
+			let raw: string | null = null;
+			try {
+				raw = await fsReadFile(hit.path, 'utf8');
+			} catch (err) {
+				log.warn({ artifactId, path: hit.path, err: (err as Error).message },
+					'artifact.get: spill body unreadable; returning metadata only');
+			}
+			return { ...hit, raw };
+		},
+
+		'artifact.search': async (params) => {
+			const { query, sessionId, limit, intent } = params as {
+				query:     string;
+				sessionId: string;
+				limit?:    number;
+				intent?:   string;
+			};
+			const queryVec = await embedQuery(query);
+			const opts: { sessionId: string; k: number; intent?: string } = {
+				sessionId,
+				k: limit ?? 10,
+			};
+			if (intent !== undefined) opts.intent = intent;
+			return queryArtifactVec(queryVec, opts);
+		},
+
+		// ----- repo.* IPCs (MCP server's `insrc_repo_*` tools) -----
+		// Richer cross-repo helpers than the existing search.closure
+		// (which returns bare repo paths). The MCP layer needs name +
+		// transitive flag, and a cross-repo ANN search.
+
+		'repo.depends_on': async (params) => {
+			const { repoId } = params as { repoId: string };
+			const closurePaths = await resolveClosure(db, repoId);
+			const allRepos = await listRepos(db);
+			const byPath = new Map(allRepos.map(r => [r.path, r.name] as const));
+			return closurePaths.map(path => ({
+				repoId:     path,
+				name:       byPath.get(path) ?? path,
+				path,
+				transitive: path !== repoId,
+			}));
+		},
+
+		'repo.search_cross_repo': async (params) => {
+			const { query, repoId, limit } = params as {
+				query:  string;
+				repoId: string;
+				limit?: number;
+			};
+			const closurePaths = await resolveClosure(db, repoId);
+			const queryVec     = await embedQuery(query);
+			return searchEntities(db, queryVec, closurePaths, limit ?? 10, 'code') as Promise<Entity[]>;
 		},
 
 		// ----- Graph context helpers (Phase 7) -----
