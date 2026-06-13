@@ -32,8 +32,10 @@ import { spawnClaudeCode } from './spawn/claude-code.js';
 import type { AgentSpawnResult } from './spawn/base.js';
 import { auditDeliverable, type AuditResult } from './audit/judge.js';
 import { getTemplate } from './templates/registry.js';
-import type { AssembledSpec, MemoryRef, ScopePayload, TemplateId } from './types.js';
+import type { AssembledSpec, HandoffEvent, MemoryRef, ScopePayload, TemplateId } from './types.js';
 import { getLogger } from '../shared/logger.js';
+
+export type HandoffEventListener = (event: HandoffEvent) => void;
 
 const log = getLogger('handoff:run');
 
@@ -73,6 +75,17 @@ export interface RunHandoffOpts {
 	readonly keepWorktree?:   boolean | undefined;
 	/** Cleanup the worktree even on failure (tests). */
 	readonly forceCleanup?:   boolean | undefined;
+	/**
+	 * Stage-transition event callback. Invoked synchronously at each
+	 * pipeline boundary with a typed `HandoffEvent`. The daemon's
+	 * `handoff.run` stream IPC forwards these into IpcStreamMessages;
+	 * CLI callers can pass an inline listener for live progress;
+	 * tests assert call order + payload shapes.
+	 *
+	 * The callback MUST NOT throw -- errors are swallowed via try/catch
+	 * around each invocation to avoid breaking the pipeline.
+	 */
+	readonly onEvent?:        HandoffEventListener | undefined;
 }
 
 export interface RunHandoffResult {
@@ -89,7 +102,15 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	const persistRoot  = opts.persistRoot ?? DEFAULT_PERSIST_ROOT;
 	const worktreePath = join(persistRoot, opts.sessionId, 'worktree');
 
+	const emit = (event: HandoffEvent): void => {
+		if (opts.onEvent === undefined) return;
+		try { opts.onEvent(event); } catch (err) {
+			log.warn({ err: (err as Error).message }, 'handoff onEvent listener threw; swallowing');
+		}
+	};
+
 	// 1. Assemble the spec.
+	emit({ kind: 'spec-assembling', intent: opts.intent, templateId: opts.templateId });
 	const template = getTemplate(opts.templateId);
 	const assemblerInput: SpecAssemblerInput = {
 		templateId:     opts.templateId,
@@ -103,36 +124,76 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 		...(opts.specIdOverride !== undefined ? { specIdOverride: opts.specIdOverride } : {}),
 		...(opts.templateExtras !== undefined ? { templateExtras: opts.templateExtras } : {}),
 	};
-	const spec = assembleSpec(assemblerInput);
+	let spec: AssembledSpec;
+	try {
+		spec = assembleSpec(assemblerInput);
+	} catch (err) {
+		emit({ kind: 'handoff-error', stage: 'spec-assemble', message: (err as Error).message });
+		throw err;
+	}
 	log.info({ specId: spec.specId, templateId: opts.templateId }, 'handoff: spec assembled');
+	emit({ kind: 'spec-ready', specId: spec.specId, templateId: opts.templateId, preview: spec.specMd.slice(0, 200) });
 
 	// 2. Create the worktree off HEAD of the source repo.
-	await createWorktree({
-		repoPath:     opts.scope.repoPath,
-		worktreePath,
-	});
+	let createResult: Awaited<ReturnType<typeof createWorktree>>;
+	try {
+		createResult = await createWorktree({ repoPath: opts.scope.repoPath, worktreePath });
+	} catch (err) {
+		emit({ kind: 'handoff-error', stage: 'worktree', message: (err as Error).message });
+		throw err;
+	}
+	emit({ kind: 'worktree-created', specId: spec.specId, worktreePath: createResult.worktreePath, ref: createResult.ref });
 
 	let spawnResult: AgentSpawnResult;
 	try {
 		// 3. Spawn the agent.
-		spawnResult = await dispatchSpawn(opts, spec.specMd, worktreePath, spec.specId);
+		emit({ kind: 'spawned', specId: spec.specId, agent: opts.agent });
+		try {
+			spawnResult = await dispatchSpawn(opts, spec.specMd, worktreePath, spec.specId);
+		} catch (err) {
+			emit({ kind: 'handoff-error', stage: 'spawn', message: (err as Error).message });
+			throw err;
+		}
 		log.info({ specId: spec.specId, exitCode: spawnResult.exitCode, durationMs: spawnResult.durationMs },
 			'handoff: agent returned');
+		emit({
+			kind: 'agent-completed', specId: spec.specId,
+			exitCode: spawnResult.exitCode, durationMs: spawnResult.durationMs,
+			stdoutLen: spawnResult.stdout.length,
+		});
 
 		// 4. Audit the deliverable.
-		const audit = await auditDeliverable({
-			deliverable:        spawnResult.stdout,
-			requiredSections:   template.requiredDeliverableSections,
-			acceptanceCriteria: spec.meta.acceptanceCriteria,
-			cwd:                worktreePath,
-		});
+		emit({ kind: 'auditing', specId: spec.specId });
+		let audit: AuditResult;
+		try {
+			audit = await auditDeliverable({
+				deliverable:        spawnResult.stdout,
+				requiredSections:   template.requiredDeliverableSections,
+				acceptanceCriteria: spec.meta.acceptanceCriteria,
+				cwd:                worktreePath,
+			});
+		} catch (err) {
+			emit({ kind: 'handoff-error', stage: 'audit', message: (err as Error).message });
+			throw err;
+		}
 		log.info({ specId: spec.specId, verdict: audit.verdict }, 'handoff: audit verdict');
 
 		// 5. Compute the diff against HEAD for the caller to display / apply.
-		const diff = await diffWorktreeAgainstHead({
-			repoPath:     opts.scope.repoPath,
-			worktreePath,
+		let diff: string;
+		try {
+			diff = await diffWorktreeAgainstHead({ repoPath: opts.scope.repoPath, worktreePath });
+		} catch (err) {
+			emit({ kind: 'handoff-error', stage: 'diff', message: (err as Error).message });
+			throw err;
+		}
+		emit({
+			kind: 'audit-ready', specId: spec.specId,
+			verdict: audit.verdict, reason: audit.reason,
+			editHintCount:     audit.editHints.length,
+			machineCheckCount: audit.machineResults.length,
+			diffBytes:         diff.length,
 		});
+		emit({ kind: 'handoff-final', specId: spec.specId, verdict: audit.verdict, diff, worktreePath });
 
 		return { spec, spawnResult, audit, diff, worktreePath };
 	} finally {

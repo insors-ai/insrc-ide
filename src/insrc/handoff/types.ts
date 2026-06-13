@@ -147,3 +147,39 @@ export interface SpecMeta {
 	readonly worktreePath:         string;
 	readonly timeBudgetSec:        number;
 }
+
+/**
+ * Stage-transition events runHandoff emits during execution. Used by
+ * the `handoff.run` streaming IPC (daemon/index.ts) to surface
+ * progress to subscribers (CLI, VS Code extension, future UIs) so
+ * they can render the pipeline without polling.
+ *
+ * Discriminated union -- subscribers route on `kind`. Each variant
+ * is intentionally compact (~1 KB serialised) so the stream stays
+ * cheap; the heavy payload (diff, spec markdown) lands on the final
+ * `handoff-final` and on dedicated reads.
+ */
+export type HandoffEvent =
+	| { readonly kind: 'spec-assembling'; readonly intent: string; readonly templateId: TemplateId }
+	| { readonly kind: 'spec-ready';      readonly specId: string;  readonly templateId: TemplateId;
+	    /** First ~200 chars of the spec markdown for a UI preview. */
+	    readonly preview: string }
+	| { readonly kind: 'worktree-created'; readonly specId: string; readonly worktreePath: string; readonly ref: string }
+	| { readonly kind: 'spawned';          readonly specId: string; readonly agent: 'claude-code' | 'codex' | 'scripted-agent' }
+	| { readonly kind: 'agent-completed';  readonly specId: string; readonly exitCode: number; readonly durationMs: number;
+	    /** Length of the raw stdout deliverable; useful for size telemetry. */
+	    readonly stdoutLen: number }
+	| { readonly kind: 'auditing';         readonly specId: string }
+	| { readonly kind: 'audit-ready';      readonly specId: string;
+	    readonly verdict: 'accept' | 'revise-edits' | 'revise-major';
+	    readonly reason:  string;
+	    readonly editHintCount: number;
+	    readonly machineCheckCount: number;
+	    /** Diff size in bytes; the diff itself lands on `handoff-final`. */
+	    readonly diffBytes: number }
+	| { readonly kind: 'handoff-final';    readonly specId: string;
+	    readonly verdict: 'accept' | 'revise-edits' | 'revise-major';
+	    readonly diff:   string;
+	    readonly worktreePath: string }
+	| { readonly kind: 'handoff-error';    readonly stage: 'spec-assemble' | 'worktree' | 'spawn' | 'audit' | 'diff';
+	    readonly message: string };

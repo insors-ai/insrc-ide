@@ -83,6 +83,7 @@ import {
 	chatStart, chatReply, chatCancel, chatInject, chatRedirect, chatClose, chatList, chatStatus, chatRestore, brainstormAddIdea,
 	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
 } from './chat-handler.js';
+import { handoffRunStream } from './handoff-stream.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
@@ -1531,6 +1532,7 @@ async function main(): Promise<void> {
 		},
 	}, {
 		// Streaming handlers
+		'handoff.run': handoffRunStream,
 		'chat.send': chatSend,
 		'chat.resume': chatResume,
 		'chat.resumeFromCheckpoint': chatResumeFromCheckpoint,
