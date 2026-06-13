@@ -1,3 +1,24 @@
+// ============================================================================
+// DEPRECATED — slated for removal in Phase M.3 of the external-agent migration.
+//
+// This single-turn `refactor` pipeline (local gen → cloud validate → retry,
+// followed by in-process file edits) is being replaced by the handoff flow
+// described in `plans/external-agent-integration.md`. Under the new model,
+// `refactor` intent assembles a SPEC.md (cited evidence + acceptance
+// criteria) and hands execution off to Claude Code / Codex; insrc no longer
+// edits files in-process.
+//
+// Migration tracker:  plans/external-agent-integration.md (Cross-cutting:
+//                     Pair / Delegate migration, sub-phase M.3).
+// Active during:      Phase 0 through Phase 4 (transitional opt-in via
+//                     `insrc.coding.useExternalAgent`).
+// Retired in:         Phase M.3 once handoff routing is the default for
+//                     `refactor` intent.
+//
+// DO NOT extend this file. New features go through the handoff pipeline.
+// Bug fixes are fine until M.3.
+// ============================================================================
+
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
 import { getLogger, toLogFn } from '../../shared/logger.js';
 import {
