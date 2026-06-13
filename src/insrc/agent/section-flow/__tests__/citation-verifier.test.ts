@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { verifyCitedSummary, type ArtifactRawTextLookup } from '../citation-verifier.js';
+import { verifyCitedSummary, type ArtifactRawTextLookup } from '../audit/citation-verifier.js';
 import type { CitedStepSummary } from '../citation-types.js';
 
 function lookup(artifacts: Record<string, string>): ArtifactRawTextLookup {

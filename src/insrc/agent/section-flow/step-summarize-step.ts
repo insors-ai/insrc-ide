@@ -41,7 +41,7 @@ import {
 	verifyCitedSummary,
 	type ArtifactRawTextLookup,
 	type BadClaim,
-} from './citation-verifier.js';
+} from './audit/citation-verifier.js';
 import { getPromptRegistry } from '../prompts/registry.js';
 import { getLogger } from '../../shared/logger.js';
 
@@ -98,7 +98,7 @@ export async function runSummarizeStep(input: SummarizeStepInput): Promise<Summa
 	const gapIdSet = new Set(input.gapFacts.map(g => g.id));
 
 	const lookup: ArtifactRawTextLookup = input.artifactLookup
-		?? (await import('./citation-verifier.js')).defaultArtifactRawTextLookup;
+		?? (await import('./audit/citation-verifier.js')).defaultArtifactRawTextLookup;
 
 	const first = await callSummariser(input, false, undefined);
 	const firstParsed = parse(first, validCallIds, gapIdSet);

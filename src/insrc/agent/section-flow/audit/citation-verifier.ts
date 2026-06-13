@@ -7,6 +7,10 @@
  * Citation verifier -- deterministic substring + count checks against
  * the artifacts named by each `CitedClaim.citations[]`.
  *
+ * Originally section-flow internal; now part of `audit/` so it can also
+ * be invoked on external-agent deliverables -- see
+ * `plans/external-agent-integration.md` Phase 0 and Phase 6.
+ *
  * No LLM judgment. Every check is a string operation:
  *   - `evidence: 'cited'`    -> every citation's `span` must be a
  *                                substring of its `artifactId`'s raw
@@ -33,9 +37,9 @@ import type {
 	CitedClaim,
 	CitedStepSummary,
 	GapClosureClaim,
-} from './citation-types.js';
-import { getArtifactById } from '../../db/lance/artifact-vec.js';
-import { getLogger } from '../../shared/logger.js';
+} from '../citation-types.js';
+import { getArtifactById } from '../../../db/lance/artifact-vec.js';
+import { getLogger } from '../../../shared/logger.js';
 
 const log = getLogger('section-flow:citation-verifier');
 
