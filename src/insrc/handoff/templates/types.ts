@@ -66,6 +66,14 @@ export interface TemplateDefinition<Input extends RenderSpecInput = RenderSpecIn
 	/** Documents the deliverable shape; rendered into the spec's tail. */
 	readonly renderDeliverableStub: () => string;
 	/**
+	 * Section titles the agent's deliverable MUST contain (case-
+	 * insensitive substring match against `## <title>` headers). The
+	 * audit parser (Phase 2a Day 4) uses this to flag missing sections.
+	 * Order matters: titles in this list are reported in document
+	 * order against the deliverable's actual section sequence.
+	 */
+	readonly requiredDeliverableSections: readonly string[];
+	/**
 	 * Default acceptance criteria for this template. Caller can extend
 	 * with extras; this is the floor.
 	 */

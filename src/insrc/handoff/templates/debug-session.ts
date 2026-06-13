@@ -199,12 +199,21 @@ function formatList(items: readonly string[]): string {
 	return items.map(s => `\`${s}\``).join(', ');
 }
 
+export const DEBUG_SESSION_REQUIRED_SECTIONS = [
+	'Reproduce',
+	'Localize',
+	'Hypothesize',
+	'Test',
+	'Conclude',
+] as const;
+
 export const debugSessionTemplate: TemplateDefinition<DebugSessionInput> = {
-	id:                    'DEBUG-SESSION',
-	version:               TEMPLATE_VERSION,
-	defaultRisk:           'low',
+	id:                          'DEBUG-SESSION',
+	version:                     TEMPLATE_VERSION,
+	defaultRisk:                 'low',
 	renderSpec,
 	renderDeliverableStub,
+	requiredDeliverableSections: DEBUG_SESSION_REQUIRED_SECTIONS,
 	defaultAcceptance,
 };
 
