@@ -18,6 +18,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolHandlerContext } from './types.js';
 import { validateSessionToken } from './session-token.js';
+import { daemonRpc } from './daemon-rpc.js';
 import { ENTITY_TOOLS }   from './tools/entity.js';
 import { ARTIFACT_TOOLS } from './tools/artifact.js';
 import { MEMORY_TOOLS }   from './tools/memory.js';
@@ -74,7 +75,10 @@ export function registerAllTools(server: McpServer): void {
 				inputSchema: tool.inputSchema,
 			},
 			async (args: unknown) => {
-				const ctx: ToolHandlerContext = { sessionToken: sessionTokenFromEnv };
+				const ctx: ToolHandlerContext = {
+					sessionToken: sessionTokenFromEnv,
+					rpc:          daemonRpc,
+				};
 				if (tool.scope === 'session') {
 					const sessionId = validateSessionToken(ctx.sessionToken);
 					if (sessionId === undefined) {

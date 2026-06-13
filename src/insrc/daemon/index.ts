@@ -72,7 +72,7 @@ import {
 	listRepos, addRepo, removeRepo,
 	InvalidRepoPathError, validateRepoPath,
 } from '../db/repos.js';
-import { deleteEntitiesForRepo, findEntitiesByFile } from '../db/entities.js';
+import { deleteEntitiesForRepo, findEntitiesByFile, getEntity } from '../db/entities.js';
 import { deleteUnresolvedForRepo } from '../db/relations.js';
 import { Watcher } from '../indexer/watcher.js';
 import { IndexQueue } from './queue.js';
@@ -84,7 +84,7 @@ import {
 	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
 } from './chat-handler.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
-import { resolveClosure, searchEntities, findCallers, findCallees } from '../db/search.js';
+import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
 import {
 	saveTurn, closeSession, saveSession, seedFromPrior, deleteSessionsForRepo, deleteTurnsForRepo, pruneConversations,
@@ -759,6 +759,53 @@ async function main(): Promise<void> {
 		'search.callees': async (params) => {
 			const { entityId } = params as { entityId: string };
 			return findCallees(db, entityId) as Promise<Entity[]>;
+		},
+
+		// ----- entity.* IPCs (added for the MCP server's `insrc_entity_*` tools) -----
+		// These wrap existing db/search.ts and db/entities.ts functions so the
+		// out-of-process MCP server subprocess can reach the same data without
+		// re-implementing the graph layer. See plans/external-agent-integration.md
+		// Phase 1 Day 2.
+
+		'entity.summary': async (params) => {
+			const { entityId } = params as { entityId: string };
+			return getEntity(db, entityId);
+		},
+
+		'entity.closure': async (params) => {
+			const { rootIds, edgeKind, direction, maxDepth } = params as {
+				rootIds:    readonly string[];
+				edgeKind?:  string;
+				direction?: 'in' | 'out';
+				maxDepth?:  number;
+			};
+			const opts: { kindFilter?: ['DEFINES'|'IMPORTS'|'CALLS'|'INHERITS'|'IMPLEMENTS'|'DEPENDS_ON'|'EXPORTS'|'REFERENCES']; direction?: 'in'|'out'; maxDepth?: number } = {};
+			if (edgeKind !== undefined) {
+				opts.kindFilter = [edgeKind as 'DEFINES'|'IMPORTS'|'CALLS'|'INHERITS'|'IMPLEMENTS'|'DEPENDS_ON'|'EXPORTS'|'REFERENCES'];
+			}
+			if (direction !== undefined) opts.direction = direction;
+			if (maxDepth !== undefined)  opts.maxDepth  = maxDepth;
+			return closureEntities(db, rootIds, opts) as Promise<Entity[]>;
+		},
+
+		'entity.unreachable': async (params) => {
+			const { rootIds, candidateKinds, edgeKind, maxDepth } = params as {
+				rootIds:         readonly string[];
+				candidateKinds:  readonly string[];
+				edgeKind?:       string;
+				maxDepth?:       number;
+			};
+			const opts: { kindFilter?: ['DEFINES'|'IMPORTS'|'CALLS'|'INHERITS'|'IMPLEMENTS'|'DEPENDS_ON'|'EXPORTS'|'REFERENCES']; maxDepth?: number } = {};
+			if (edgeKind !== undefined) {
+				opts.kindFilter = [edgeKind as 'DEFINES'|'IMPORTS'|'CALLS'|'INHERITS'|'IMPLEMENTS'|'DEPENDS_ON'|'EXPORTS'|'REFERENCES'];
+			}
+			if (maxDepth !== undefined) opts.maxDepth = maxDepth;
+			return unreachableEntities(
+				db,
+				rootIds,
+				candidateKinds as readonly ('repo'|'file'|'module'|'function'|'method'|'class'|'interface'|'type')[],
+				opts,
+			) as Promise<Entity[]>;
 		},
 
 		// ----- Graph context helpers (Phase 7) -----

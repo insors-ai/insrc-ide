@@ -19,6 +19,7 @@
  */
 
 import type { z, ZodRawShape } from 'zod';
+import type { RpcFn } from './daemon-rpc.js';
 
 /**
  * Whether the tool requires a valid `INSRC_SESSION_TOKEN` to invoke.
@@ -74,6 +75,17 @@ export interface ToolHandlerContext {
 	 * unauthenticated process.
 	 */
 	readonly sessionToken: string | undefined;
+	/**
+	 * Daemon JSON-RPC client. Tool handlers call this to reach the
+	 * underlying entity / graph / memory functions, which live in the
+	 * daemon process (the MCP server is a separate subprocess and
+	 * never opens LMDB / Lance directly).
+	 *
+	 * Injected from the registry; tests can pass a stub via
+	 * `{ ...ctx, rpc: stubRpc }` to verify call shapes without
+	 * standing up a real daemon.
+	 */
+	readonly rpc: RpcFn;
 }
 
 /**

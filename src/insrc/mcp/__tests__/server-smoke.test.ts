@@ -82,13 +82,22 @@ test('mcp/server: tools/list returns all 14 stubbed tools with correct names', a
 	}
 });
 
-test('mcp/server: handler stub returns isError for a global tool', async () => {
-	// Sanity: a global-scope tool with no session token must reach the
-	// handler (no auth short-circuit) and throw NotImplementedError, which
-	// the registry maps to a structured isError response.
+test('mcp/server: global tool reaches the daemon and surfaces DaemonUnreachable when it is down', async () => {
+	// Day 2 (Phase 1): tool handlers wire through to the daemon. With
+	// no daemon running, the registry's error-mapping path should
+	// surface a structured isError with a clear daemon-unreachable
+	// message -- not crash the subprocess. Point INSRC_HOME at a
+	// non-existent dir so the rpc client looks for a socket that
+	// cannot exist, regardless of what daemon may be running on the
+	// host where the test runs.
 	const transport = new StdioClientTransport({
 		command: TSX_BIN,
 		args:    [SERVER_TS],
+		// Override HOME so homedir() resolves to a path where no daemon
+		// can possibly be running. PATHS computes sockFile relative to
+		// homedir(), so this guarantees the rpc client points at a
+		// non-existent socket regardless of the developer's real daemon.
+		env: { ...(process.env as Record<string, string>), HOME: '/tmp/insrc-mcp-smoke-no-daemon' },
 	});
 
 	const client = new Client({ name: 'insrc-mcp-smoke', version: '0.0.1' });
@@ -104,7 +113,7 @@ test('mcp/server: handler stub returns isError for a global tool', async () => {
 		assert.equal(res.isError, true);
 		const content = res.content as { type: string; text: string }[] | undefined;
 		assert.ok(Array.isArray(content) && content.length > 0);
-		assert.match(content[0]!.text, /Phase 1 scaffold|not yet wired|NotImplemented/);
+		assert.match(content[0]!.text, /daemon|not reachable|ECONNREFUSED|ENOENT/i);
 	} finally {
 		try { await client.close(); } catch { /* swallow */ }
 	}
