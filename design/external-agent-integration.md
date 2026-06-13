@@ -38,15 +38,19 @@
 │                       INSRC AGENT LOOP                          │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  Local LLM (orchestrator)                                 │  │
-│  │  - intent classification                                  │  │
+│  │  - intent classification + memory recall                  │  │
 │  │  - template selection                                     │  │
-│  │  - section-flow loop (TODO / sketch / cite)               │  │
-│  │  - context assembly into structured spec                  │  │
-│  │  - acceptance-criteria emission                           │  │
+│  │  - section-flow loop (TODO decomposition / scope / cite)  │  │
+│  │  - spec assembly: scope + acceptance criteria             │  │
+│  │  - audit-time review of returned deliverables             │  │
+│  │  NOT in scope: source-code or data discovery via          │  │
+│  │  insrc_entity_* / insrc_repo_* / insrc_search_* tools —   │  │
+│  │  those are delegated to the external agent (§4.0).        │  │
 │  └───────────────────────────────┬───────────────────────────┘  │
 │                                  │                              │
-│                                  │  (calls SDLC skills,         │
-│                                  │   queries graph + memory)    │
+│                                  │  (queries session memory:    │
+│                                  │   turn_vec, response_segment │
+│                                  │   _vec; appends to session)  │
 │                                  ▼                              │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  Deterministic code (everything verifiable, no LLM)       │  │
@@ -94,11 +98,11 @@
 
 **Key roles**:
 
-- **insrc local LLM**: orchestrator. Cheap, runs on Ollama. Handles context assembly, template filling, intent classification.
+- **insrc local LLM**: orchestrator. Cheap, runs on Ollama. Handles intent classification, memory recall, template selection, scope definition, acceptance-criteria emission, and audit-time review of returned deliverables. Owns the conversation — not the code. **Does NOT do source-code or data discovery** (that's the external agent's job via `insrc_entity_*`, `insrc_repo_*`, native Read/Grep/Glob). The local LLM's tool surface is the internal IPC set in §4.5, not the MCP surface in §4.1-4.4.
 - **insrc deterministic code**: everything verifiable — citation substring/count checks, spec schema validation, state-machine transitions, machine-checkable acceptance criteria. No LLM required.
-- **External coding agent**: executor + substantial reasoner. Runs Claude Code / Codex / future. Edits files, runs commands, produces deliverables. THIS is where the bulk of "intelligence" lives — insrc deliberately doesn't try to compete here.
+- **External coding agent**: executor + substantial reasoner. Runs Claude Code / Codex / future. Performs all code/data discovery (calls `insrc_entity_search`, `insrc_entity_callers`, etc.), edits files, runs commands, produces deliverables. Owns the work — not the conversation. THIS is where the bulk of "intelligence" lives — insrc deliberately doesn't try to compete here, and deliberately doesn't pre-fetch context the external agent can fetch itself with better judgment.
 - **insrc cloud LLM (optional)**: single-shot judgment shim. Used only when local + deterministic can't answer AND the decision is too small to warrant a full external-agent session. Examples: a final accept/revise verdict on a deliverable, a "did this spec capture user intent?" sanity check. Skippable; the user can run insrc in fully-local + external-agent mode and lose almost nothing.
-- **insrc daemon**: state. Owns LMDB graph + LanceDB vectors + spill files + session history. Exposes them as MCP tools.
+- **insrc daemon**: state. Owns LMDB graph + LanceDB vectors + spill files + session history. Exposes them as MCP tools to the external agent; exposes a narrower set of IPCs (memory recall, session writes, handoff spawn, review) to the local LLM.
 
 ---
 
@@ -155,7 +159,16 @@ For users who want to manually feed insrc's output to their preferred tool.
 
 ## 4. Tool Surface
 
-The tool surface is **deliberately small** (~12 tools across 4 families). Each tool is something the external agent cannot reach natively — semantic graph queries, cross-session memory, cross-repo awareness, or active spec context. Filesystem and lexical-grep tools that external agents have natively are explicitly excluded.
+### 4.0 Two surfaces, two audiences
+
+There are **two distinct tool surfaces** in this design, and conflating them is the easiest mistake to make:
+
+- **MCP surface (§4.1-§4.4)** — exposed to the **external agent** (Claude Code, Codex) via MCP/HTTP/CLI. ~12 tools across 4 families: knowledge graph, session memory + artifacts, cross-repo closure, active spec context. The external agent calls these directly during execution to drill into code/data when its spec is incomplete.
+- **Local LLM IPC surface (§4.5)** — exposed to **insrc's own orchestrator LLM** via internal IPC against the daemon. ~5 IPCs: memory recall (ANN over `turn_vec` / `response_segment_vec`), session writes, handoff spawn/return, intent resolution, review/verify. The local LLM never sees the MCP surface and never invokes `insrc_entity_*` / `insrc_repo_*` / `insrc_search_*` — discovery of source code or data is delegated entirely to the external agent.
+
+This split matters because it determines who pre-fetches context. **Answer: nobody.** The local LLM doesn't pre-fetch entity-level context because the external agent has better judgment about what to fetch and can self-correct if the local LLM's intent classification was off. The external agent pulls what it needs, when it needs it.
+
+The MCP surface (below) is **deliberately small** (~12 tools across 4 families). Each tool is something the external agent cannot reach natively — semantic graph queries, cross-session memory, cross-repo awareness, or active spec context. Filesystem and lexical-grep tools that external agents have natively are explicitly excluded.
 
 **Naming convention**: all tools are named `insrc_<family>_<verb>` in snake_case, no dots. Rationale:
 
@@ -199,7 +212,31 @@ These tools are only meaningful during an active handoff — they let the extern
 | `insrc_spec_acceptance_criteria` | Structured acceptance criteria for the active spec | `specId: string` | `{ criteria: [{ id, description, citedEvidence: [artifactId] }] }` |
 | `insrc_spec_context` | Drill into a section of the spec by topic | `specId: string`, `topic: string` | `{ section, citedEvidence: [artifactId], pre-rendered: string }` |
 
-**Schema versioning**: every tool name embeds an implicit version 1. Breaking changes ship as `insrc_entity_search_v2`, with v1 maintained until v2 has settled. Schemas registered with the MCP server / HTTP gateway carry an explicit `version` field.
+### 4.5 Local LLM IPC surface (internal-only)
+
+The local LLM (Ollama orchestrator) consumes a separate, narrower set of IPCs against the daemon. These are **not** MCP tools — they're internal calls bound by `INSRC_DAEMON_SOCKET` and only callable from inside the insrc process tree. They are not exposed to the external agent.
+
+| IPC | Purpose | Inputs | Output |
+|---|---|---|---|
+| `internal.intent.resolve` | Single-funnel intent classification (existing `resolveIntent`) | `sessionId`, `message`, optional `slashForced` | `{ intent, relationship, citations, slashForced }` |
+| `internal.memory.recall` | ANN bundle over `turn_vec` + `response_segment_vec` for cold-classify and template scope-emission | `query: string`, `limit?: int`, `since?: timestamp` | `{ turns: [...], segments: [...] }` |
+| `internal.session.append-turn` | Persist a turn + emit `turn_vec` row | `sessionId`, `turnRecord` | `{ turnId }` |
+| `internal.handoff.spawn` | Spawn the external agent subprocess with spec, allowed-tools, hook config, env vars | `specId`, `agentName`, `worktreePath`, `permissions` | `{ handoffId, pid, ttyHandle? }` |
+| `internal.handoff.return` | Receive deliverable + trace from a completed handoff | `handoffId` | `{ deliverable, trace, exitCode }` |
+| `internal.review.citation-verify` | Deterministic citation verifier (existing) | `deliverable`, `citedArtifactIds` | `{ verdict, unsupported: [...], unverified: [...] }` |
+| `internal.review.section-review` | Compose-time review of a deliverable section (existing section-review LLM step, but now applied to external-agent output) | `sectionMarkdown`, `citedFindings` | `{ verdict, edits?: string, reason?: string }` |
+| `internal.gating.evaluate` | Apply permission policy + risk ratchet rules to a draft spec | `draftSpec` | `{ permissions, riskTag, deniedPaths }` |
+
+**What's deliberately NOT in this surface**:
+
+- `insrc_entity_*` — local LLM never calls these. If it had to, the right move is to widen the handoff's scope (let the external agent investigate) or pull a memory excerpt (existing `internal.memory.recall`).
+- `insrc_repo_*` — same. Cross-repo discovery is the external agent's job.
+- `insrc_search_*` — same.
+- File I/O / Bash / Edit — local LLM never touches the filesystem. Handoff spawn does, via the deterministic spawn IPC.
+
+This narrow surface is what makes the role split enforceable: there's no way for the local LLM to start pre-fetching entity context because no IPC exposes it. If a future template demands tighter context-fitting, the right answer is a new template variant or a richer scope payload — not widening the local LLM's reach.
+
+**Schema versioning**: every tool name embeds an implicit version 1. Breaking changes ship as `insrc_entity_search_v2`, with v1 maintained until v2 has settled. Schemas registered with the MCP server / HTTP gateway carry an explicit `version` field. Internal IPCs in §4.5 version alongside the daemon's protocol surface (§13.3).
 
 ---
 
@@ -232,17 +269,27 @@ The SDLC artifacts insrc produces are **versioned templates**. Each template def
 ## Objective
 {One paragraph from user intent + classifier output}
 
-## Context (cited)
-- [artifact-id-1]: {one-line summary insrc emitted}
-- [artifact-id-2]: ...
+## Scope
+- Repo: {repoId} at {path}
+- Entry points (optional, only when known from prior conversation): {entityIds or names}
+- In-scope paths/globs: {paths}
+- Out-of-scope (do not modify): {paths}
+- Dependency closure: {repoIds the external agent may also read}
+
+## Memory excerpts (when relevant)
+- [turn-id-1]: {one-line summary of a prior turn the resolver flagged as related}
+- [artifact-id-2]: {one-line summary of a prior turn's deliverable, when applicable}
+  (These are ONLY references to prior turn artifacts surfaced by `internal.memory.recall`.
+   They are NEVER freshly pre-fetched entity content — discover those yourself.)
 
 ## Body (template-specific sections)
 {e.g. for DEBUG-SESSION: "Reproduce", "Localize", "Hypothesize", "Test", "Conclude"}
 {e.g. for SPEC: "Files to change", "Behaviour change", "Test additions"}
+(External agent fills these in; insrc does not pre-populate.)
 
-## Acceptance Criteria (machine-readable, cited)
+## Acceptance Criteria (machine-readable)
 - [ ] criterion-1: {description}
-       Cites: [artifact-id-1, artifact-id-3]
+       Verifier: {machine-check command OR "soft: see audit-time review"}
 - [ ] criterion-2: ...
 
 ## Constraints
@@ -250,12 +297,22 @@ The SDLC artifacts insrc produces are **versioned templates**. Each template def
 - Sandbox: {git-worktree-path or "in-place"}
 - Time budget: {seconds}
 
-## Tooling hints
-- Use `insrc_entity_callers(X)` to confirm impact scope
-- Use `insrc_memory_recall("prior work on Y")` if context is incomplete
+## Discovery guidance
+- Start with `insrc_entity_search("<topic>", repo=<repoId>)` to locate the relevant entities.
+- Use `insrc_entity_callers(<id>)` / `insrc_entity_callees(<id>)` for impact analysis.
+- Use `insrc_memory_recall("<query>")` if you need context on prior decisions in this session.
+- Use native Read/Grep/Glob for everything else — those are faster than calling MCP.
+- Don't assume the spec lists every file you'll need; insrc deliberately scoped this lightly.
 ```
 
 Templates ship as TypeScript modules in the repo, versioned, with unit tests that pin the output structure. Adding a new template is a deliberate engineering act, not a runtime LLM decision.
+
+**Why so light on context**: insrc could pre-fetch entity summaries, call graphs, and prior reference excerpts and stuff them into the `Body` section. We deliberately don't. Two reasons:
+
+1. **Better judgment**: the external agent has fresher signal about what it needs as it starts working. Pre-fetching freezes the context plan at spec-assembly time, which is exactly when we know least.
+2. **Less anchoring**: a pre-discovered entity list nudges the agent to treat that list as exhaustive. Letting the agent discover gives it room to find the right thing when the local LLM's intent classification was slightly off.
+
+The price: more MCP calls per handoff and slightly slower first-tool-use. The trace will tell us if any template chronically burns 50+ drill-down calls — that's the signal to enrich the scope payload for that template specifically, not to widen what every handoff carries.
 
 ---
 
@@ -270,12 +327,14 @@ The complete flow from user prompt to validated deliverable.
 3. insrc: template registry maps family → `DEBUG-SESSION.md` template.
 4. insrc: fact-gap analysis — what's missing for the template (test history, recent changes, related entities)?
 
-### 6.2 Phase 2 — Context Assembly (insrc, section-flow loop)
+### 6.2 Phase 2 — Scope assembly (insrc, section-flow loop)
 
-5. insrc: section-flow runs as today — TODO / sketch / decide-next-step / per-leaf summarize-step / closure markers.
-6. Each leaf produces cited artifacts: log spans, entity summaries, call graphs, prior decisions from memory.
-7. The local LLM at each leaf assembles narrow cited claims into `artifact_vec.summary`.
-8. After enough TODOs close, insrc has accumulated the cited evidence the template needs.
+5. insrc: section-flow runs — TODO / sketch / decide-next-step / closure markers — but its **output shape changes** under this framework. Instead of populating a report section with extracted entity content, each TODO produces a *scope decision*: "this objective maps to template T with scope S and risk R."
+6. Each leaf produces **scope artifacts**, not extracted-content artifacts: repo bindings, in-scope path globs, optional entry-point hints (only when the user's prior conversation makes the entry point obvious), out-of-scope guards, dependency-closure flags, prior-turn references from `internal.memory.recall`.
+7. The local LLM at each leaf cites only **memory** (prior turns, prior deliverables) and **session state** (repo registry, intent metadata). It does NOT call `insrc_entity_*` / `insrc_repo_*` / `insrc_search_*` — those tools are reserved for the external agent (§4.0).
+8. After enough TODOs close, insrc has a scope payload + acceptance criteria the template needs. Source-code discovery for the body of the work happens at Phase 5 (external agent), not here.
+
+**What about `/data-analyze` and other report intents?** Direct-report intents (§11.1) still run section-flow with content extraction inside the local LLM today, until they migrate to a `DATA-ANALYZE` handoff template that routes extraction to the external agent. Until that migration, those paths keep their current behaviour; the role-split rule above applies strictly to *handoff intents* (implement, refactor, debug, test).
 
 ### 6.3 Phase 3 — Spec Assembly + Acceptance Criteria (insrc local, fast)
 
@@ -300,11 +359,13 @@ The complete flow from user prompt to validated deliverable.
 
 ### 6.5 Phase 5 — External Agent Execution (external, autonomous)
 
-17. External agent: reads the spec. Most context is pre-rendered.
-18. External agent: when it needs more, calls insrc MCP tools (`insrc_entity_callers`, `insrc_memory_recall`, `insrc_artifact_get`).
+17. External agent: reads the spec. The spec is **scope + criteria, not pre-fetched content** — discovery starts here.
+18. External agent: calls insrc MCP tools to find what it needs — `insrc_entity_search` for the relevant code, `insrc_entity_callers` / `insrc_entity_callees` for impact analysis, `insrc_repo_depends_on` / `insrc_repo_search_cross_repo` for cross-repo investigation, `insrc_memory_recall` / `insrc_artifact_get` for prior-decision context.
 19. External agent: any sensitive action (Bash command, Edit outside writable_roots, etc.) triggers a PreToolUse hook → insrc-permission-hook → daemon → IDE → user. See §8 for the gating modes.
 20. External agent: executes its native loop — Edit, Write, Bash — to produce the deliverable.
 21. External agent: writes the deliverable to a structured location (`spec-deliverable.md` plus diff/files).
+
+**Why discovery happens here, not in Phase 2**: see §5.2 "Why so light on context." The agent has fresher signal about what it needs, and not freezing the discovery plan at spec-assembly time gives the agent room to correct for an off-by-a-bit intent classification. The cost is more MCP calls per handoff; the trace records each call so we can spot templates that chronically over-fetch and enrich their scope payload specifically.
 
 ### 6.6 Phase 6 — Audit + Decision (insrc, mostly deterministic)
 
@@ -890,7 +951,7 @@ Backward compatibility commitment: support N-1 of every schema version for at le
 
 | Phase | Scope | Effort | Dependency |
 |---|---|---|---|
-| 0 | Strengthen current SDLC core: revert force-cloud, retest with local + nesting, ship method-local-var rule. Deferred: swap cloud default model (no longer strategic if cloud is rarely invoked from insrc itself). | 2-3 days | — |
+| 0 | **Harden the audit infrastructure** that becomes Phase 6's audit loop: citation verifier, section-review, compose-time review. These already work on local-LLM output and will be reused unchanged on external-agent deliverables. **Explicitly NOT in scope**: further prompt-patches against local-LLM extraction failures (method-local-vars, DuckDB-shape leakage). The Phase 0 retest confirmed those failure modes live inside steps that disappear when discovery moves to the external agent. Patching them now is sunk cost on a retiring code path. | 2-3 days | — |
 | 1 | MCP server (stdio) over existing daemon. Expose initial 12 tools with `insrc_*` snake-case naming. CLI subprocess mode (`insrc query`). `insrc setup claude-code` / `insrc setup codex` registration commands. | 4-6 days | Phase 0 |
 | 2a | Daemon side: spec assembly + handoff via `claude --print` with stdio MCP. Watch worktree for changes. CLI-callable from outside VS Code for testing. First template (`DEBUG-SESSION.md`) end-to-end. Mode C audit on deliverable. | 4-5 days | Phase 1 |
 | 2b | VS Code extension: headless UX (status bar + progress + diff view). Mode B modal pipeline. Workspace trust handling. | 3-4 days | Phase 2a |
@@ -922,13 +983,21 @@ End-to-end CLI integration with one template + one agent at Phase 2a (~1 week). 
 
 7. **Cross-agent compatibility tests**: every template + agent pair is a separate integration. Do we maintain a per-pair test matrix, or define a contract test all agents must pass? The contract approach scales better but requires upfront definition.
 
+8. **Direct-report intent migration**: `/data-analyze`, `/code-analysis`, `/research`, `/review`, `/document` currently run section-flow's local-LLM extraction path end-to-end and emit a markdown report. The role-split rule (§4.0) only strictly applies to handoff intents today. Question: do we migrate the direct-report intents to a `DATA-ANALYZE` / `CODE-ANALYZE` handoff template too (Claude/Codex does extraction, returns content, local LLM composes the report), or do these stay as local-LLM-driven flows indefinitely on the bet that the safety nets are good enough? Phase 0 retest data argues for migration; cost/latency arguments are TBD. Decision needed before Phase 7's template rollout.
+
 ---
 
 ## Summary
 
-This design positions insrc as the **higher-level SDLC orchestrator + context engine** for external coding agents. Three transport layers (MCP, HTTP, CLI) cover Claude Code, Codex, and future agents with the same backend. The tool surface is deliberately small (~12 tools) and additive — semantic graph, cross-session memory, cross-repo awareness, active spec context — explicitly excluding capabilities the external agent already has. Templates are versioned first-class artifacts; specs are persisted; audit at the planning and execution boundaries catches hallucination through deterministic citation verification plus machine-checkable acceptance criteria.
+This design positions insrc as the **higher-level SDLC orchestrator + audit layer** for external coding agents. Three transport layers (MCP, HTTP, CLI) cover Claude Code, Codex, and future agents with the same backend.
 
-The pivot is real: insrc stops trying to do the agent's job and instead does what only it can — assemble structured, cited context and validate that the agent's output stays grounded in it. Almost all reasoning happens in the external agent; insrc's own LLM use is local-tier orchestration plus optional single-shot cloud judgment shims. The pieces from the citation contract, recycle loop, and section-review pattern carry forward — they were always for this kind of work, just initially aimed at data-analyzer instead of coding-agent handoff.
+**Two tool surfaces, two audiences** (§4.0):
+- **MCP surface (~12 tools)** is exposed to the external agent — semantic graph, cross-session memory, cross-repo awareness, active spec context. Discovery happens HERE, at execution time.
+- **Local LLM IPC surface (~8 IPCs)** is internal to insrc — memory recall, session writes, handoff spawn, review, gating. The local LLM owns the conversation, never the code.
+
+Templates are versioned first-class artifacts; specs are persisted; audit at the planning and execution boundaries catches hallucination through deterministic citation verification plus machine-checkable acceptance criteria.
+
+The pivot is real: insrc stops trying to do the agent's job and instead does what only it can — own the session, classify intent, decide scope, run the audit. Almost all reasoning *and all discovery* happens in the external agent; insrc's own LLM use is local-tier orchestration (scope + criteria + memory) plus optional single-shot cloud judgment shims. The pieces from the citation contract, recycle loop, and section-review pattern carry forward unchanged — they were always for this kind of work, just initially aimed at data-analyzer instead of coding-agent handoff.
 
 **Auth surface implication**: with insrc cloud LLM reduced to an optional shim, the user can plausibly run insrc with NO cloud-provider API key of its own — local Ollama for orchestration, deterministic code for verification, the external agent uses the user's existing Claude Code / Codex credentials. This sharpens insrc's value proposition: insrc adds the context engine + audit loop on top of a cloud-coding-agent subscription the user already has, without doubling their LLM bill.
 

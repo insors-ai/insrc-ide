@@ -17,18 +17,20 @@ Pre-implementation. Triggered by run #6 audit (2026-06-12) showing that even wit
 
 ## Goals
 
-1. Ship an MCP server exposing 12 insrc tools so external agents (Claude Code, Codex) can query the knowledge graph + memory + cross-repo closure + active spec context.
-2. Ship the handoff pipeline: section-flow assembles a templated spec → daemon spawns external agent → audit pass on deliverable → user accepts diff.
+1. Ship an MCP server exposing ~12 insrc tools so external agents (Claude Code, Codex) can query the knowledge graph + memory + cross-repo closure + active spec context **at execution time**. Discovery is the agent's responsibility, not insrc's. See design §4.0 — the MCP surface is for the external agent, not for insrc's own local LLM.
+2. Ship the handoff pipeline: section-flow assembles a **scope-and-criteria spec** (not pre-fetched content) → daemon spawns external agent → agent discovers what it needs via MCP → audit pass on deliverable → user accepts diff.
 3. Ship three gating modes (pre-flight permissions, in-flight PreToolUse hooks, audit-time diff review) wired into VS Code's native UI.
 4. Make insrc-the-VS-Code-extension a thin frontend; daemon owns subprocess lifecycle so VS Code crashes don't lose in-flight handoffs.
-5. Migrate Pair / Delegate agents from in-process execution to spec-assembly-then-handoff, with a transitional opt-in setting so existing users aren't broken.
+5. Migrate Pair / Delegate agents from in-process execution to scope-assembly-then-handoff, with a transitional opt-in setting so existing users aren't broken. Their step machines stay; the in-process `apply` loop retires.
 6. End-to-end CLI-testable in ~1 week (Phase 2a), VS Code-integrated in ~2 weeks (Phase 2c), both agents + full gating in ~1 month (Phase 4).
 
 ## Non-goals
 
 - A new orchestration loop. Reuse section-flow.
-- Replacing insrc's local LLM tier — it stays for context assembly, narrow citation, template filling.
+- Replacing insrc's local LLM tier — it stays for intent classification, memory recall, scope/template selection, acceptance-criteria emission, and audit-time review. It does **not** do source-code or data discovery (the new role split, design §4.0).
 - Embedding a coding agent inside insrc. External agents do the coding work; insrc orchestrates.
+- Pre-fetching entity/file content into the spec. The agent fetches what it needs at execution time via the MCP surface (design §4.0 "two surfaces, two audiences").
+- Exposing `insrc_entity_*` / `insrc_repo_*` / `insrc_search_*` to the local LLM. Those live on the external-agent-only MCP surface; the local LLM's internal IPC surface is strictly narrower (design §4.5).
 - Cross-language support beyond what tree-sitter parsers + skill catalog already cover.
 - Persistent agent processes — one external-agent subprocess per handoff, period (see design §6.4).
 - Real-time collaborative editing UX. Handoff is a fire-and-review cycle, not a co-editing session.
@@ -49,31 +51,45 @@ insrc daemon (persistent state + orchestration + MCP server registry)
 
 Persistent state in daemon (LMDB graph + LanceDB vectors + spill + session history + cited artifacts + MCP tool registry). Ephemeral per handoff (subprocess, MCP server, worktree, session token, hook configs).
 
-Tool surface deliberately small (~12 tools across 4 families, all `insrc_*` snake-case for cross-agent compat) — semantic graph, cross-session memory, cross-repo closure, active spec context. Tools the agent has natively (filesystem, lexical grep) are deliberately excluded.
+**Two tool surfaces, two audiences** (design §4.0):
+- **MCP surface** (`insrc_*` snake-case, ~12 tools across 4 families: entity, artifact+memory, repo, spec) — exposed to the external agent via stdio MCP / HTTP / CLI. Tools the agent has natively (filesystem, lexical grep) are excluded.
+- **Local LLM internal IPC surface** (~8 IPCs: intent resolve, memory recall, session writes, handoff spawn/return, citation verify, section-review, gating evaluate) — internal to insrc's process tree, NOT exposed via MCP. The local LLM never calls `insrc_entity_*` / `insrc_repo_*` / `insrc_search_*` — discovery is the external agent's job.
+
+This split is enforceable structurally: there's no IPC the local LLM can call to invoke entity/repo/search tools, and the MCP server doesn't honor calls from inside the daemon's own session.
 
 Three gating modes layered by spec risk tag: pre-flight permission block (Mode A) → PreToolUse hook callbacks (Mode B) → audit-time sandbox-to-tree diff review (Mode C).
 
-## Phase 0: SDLC core hardening (prerequisite)
+## Phase 0: Safety-net audit infrastructure hardening (prerequisite)
 
-**Goal**: stabilise current section-flow + citation pipeline before building on top.
+**Goal**: harden the citation verifier, section-review, and compose-time review pipeline. These are the components that become Phase 6's audit loop for external-agent deliverables. They already work on local-LLM output and will be reused unchanged on handoff returns.
 
-**Scope**:
-- Revert force-cloud commit (`feb05771...`-era) — section-flow runs with whatever provider is active, no override.
-- Retest run #6 patterns with nesting still enabled but cloud forcing off. Confirm verification rate doesn't regress badly (was ~50-60% on cloud; expect ~40-50% on local with nesting).
-- Ship method-local-variable rule in summarize-step prompt (companion to Pydantic kwargs rule already shipped in `b4b8c6e7...`).
-- Validate `summarize-step` writer's existing tests cover both rules.
+**Background**: the 2026-06-13 retest (Phase 0 of this plan, original framing) confirmed that further prompt-patching against local-LLM extraction failures (method-local-vars, DuckDB-shape leakage, compound JSON-sampling steps) is sunk cost. Those failure modes live inside steps that disappear once discovery moves to the external agent. **The Pydantic Field-kwargs rule already shipped (`b4b8c6e7...`) stays in place** — it doubles as guidance for any future template-builder that asks the local LLM to summarize Pydantic models for the spec — but no further prompt-patches.
+
+**Scope** (audit-infrastructure work, not LLM-prompt work):
+
+- **Decouple section-review from section-flow's TODO loop**: today section-review is invoked twice (per-TODO and compose-time). Refactor so it can also be invoked as a standalone library function `reviewSection({markdown, citedArtifacts}) → Verdict`. Phase 6 calls this on external-agent deliverables.
+- **Citation verifier as standalone library**: same. Extract `verifyCitations({deliverable, allowedArtifacts}) → {verdict, unsupported, unverified}`. Phase 6 reuses unchanged.
+- **Add compose-time review test coverage**: the Phase 0 retest showed the compose-time pass rejecting 5 of 9 TODO sections for L2-fallback contamination and elision. Pin those cases as regression fixtures so the audit behaviour can't silently regress.
+- **Make `replan-sketch` observable**: the retest showed cloud orchestrator firing `replan-sketch` when a leaf skill was unfit. Wire this into the structured trace (Phase 5 observability) so we can measure how often handoff-spec assembly needs to replan.
+- **Revert force-cloud commit** (`feb05771...`-era) is still in scope — it landed in the Phase 0 retest already. Confirm it stays reverted.
+
+**Explicitly NOT in scope**:
+- Method-local-variable rule for summarize-step. Source-code field extraction moves to the external agent; the rule is moot under the new design.
+- DuckDB-shape-vs-JSON-shape rule. Same reason — data-shape inference moves to the external agent.
+- Cloud default model swap. No longer strategic if cloud is rarely invoked from insrc itself.
 
 **Deliverables**:
-- 1 revert commit
-- 1 prompt-fix commit in `agent/prompts/writers/summarize-step.ts`
-- 1 retest run with monitor and audit
-- No new files
+- 1-2 commits extracting `reviewSection` and `verifyCitations` into reusable libraries
+- 1 commit adding regression fixtures for compose-time review
+- 1 commit wiring `replan-sketch` events into the structured trace
+- No new files; refactoring existing `agent/section-flow/` modules
 
 **Effort**: 2-3 days.
 
 **Acceptance**:
-- Section-flow runs on local LLM with at-most-2× the cloud-LLM verification-failure rate.
-- Method-local-variable hallucination (the `issues, warnings` case from the run #6 report) no longer surfaces in audit.
+- `reviewSection` and `verifyCitations` can be called from a unit test with a fixture deliverable and produce a verdict matching the existing in-section-flow behaviour on the same input.
+- Compose-time review regression fixtures pin the 5 contamination cases from the Phase 0 retest.
+- Structured trace includes `replan-sketch` events with reason + retained-step count.
 
 ## Phase 1: MCP server foundation
 
@@ -82,13 +98,13 @@ Three gating modes layered by spec risk tag: pre-flight permission block (Mode A
 ### 1.1 New files
 
 ```
-src/insrc/mcp/
+src/insrc/mcp/                  # EXTERNAL-AGENT-FACING MCP surface (design §4.1-§4.4)
   server.ts                     # MCP stdio server entry point
   tool-registry.ts              # maps insrc_* tool names to skill calls
   tools/
     entity.ts                   # 6 insrc_entity_* tools
     artifact.ts                 # 2 insrc_artifact_* tools
-    memory.ts                   # 2 insrc_memory_* tools
+    memory.ts                   # 2 insrc_memory_* tools (READS only; writes via internal IPC)
     repo.ts                     # 2 insrc_repo_* tools
     spec.ts                     # 2 insrc_spec_* tools (Phase 2a wires them; Phase 1 stubs)
   transport/
@@ -98,11 +114,24 @@ src/insrc/mcp/
     server.test.ts
     tool-registry.test.ts
     tools/*.test.ts
+src/insrc/internal-ipc/         # LOCAL-LLM-FACING internal IPC surface (design §4.5)
+  registry.ts                   # maps internal.* IPCs to handlers
+  handlers/
+    intent.ts                   # internal.intent.resolve (wraps existing resolveIntent)
+    memory.ts                   # internal.memory.recall, internal.session.append-turn
+    handoff.ts                  # internal.handoff.spawn, internal.handoff.return (Phase 2a wires)
+    review.ts                   # internal.review.citation-verify, internal.review.section-review
+    gating.ts                   # internal.gating.evaluate (Phase 3 wires)
+  __tests__/
+    registry.test.ts
+    handlers/*.test.ts
 src/insrc/cli/commands/
-  query.ts                      # insrc query subcommand
+  query.ts                      # insrc query subcommand (MCP surface only)
 src/insrc/cli/setup-external-agent.ts  # insrc setup claude-code / insrc setup codex
 bin/insrc-mcp-server            # subprocess entry (delegates to src/insrc/mcp/server.ts)
 ```
+
+**Critical separation**: `src/insrc/mcp/` is the external-agent surface; `src/insrc/internal-ipc/` is the local-LLM surface. The two never cross. A CI check (Phase 0 deliverable or carried as a Phase 1 check) asserts no file under `src/insrc/internal-ipc/` imports from `src/insrc/db/graph/`, `src/insrc/db/lance/entity-vec`, `src/insrc/db/entities`, or `src/insrc/db/relations` — those are the entity/repo/search backing stores and the local LLM has no business touching them through any path.
 
 ### 1.2 Tool implementation
 
@@ -163,11 +192,45 @@ insrc setup codex
 - Unit tests per tool covering input validation + happy/error paths.
 - Integration test: spawn insrc-mcp-server stdio subprocess, send `tools/list` and a `tools/call`, verify response.
 - E2E test: spawn Claude Code in headless mode against a real daemon, call `insrc_entity_search`, assert results.
+- **Surface-isolation test**: assert no file under `src/insrc/internal-ipc/` imports entity/repo/search modules (CI grep + AST check). This is the structural enforcement of design §4.0.
+
+### 1.6 Internal IPC surface (local-LLM-only)
+
+Eight IPCs the local LLM calls during section-flow scope assembly + audit-time review. None are MCP-exposed.
+
+```ts
+// src/insrc/internal-ipc/handlers/intent.ts
+export const intent_resolve: InternalIpc = {
+  name: 'internal.intent.resolve',
+  async invoke({sessionId, message, slashForced}, ctx) {
+    return resolveIntent(ctx.sessionForId(sessionId), message, {slashForced});
+  }
+};
+
+// src/insrc/internal-ipc/handlers/memory.ts
+export const memory_recall: InternalIpc = {
+  name: 'internal.memory.recall',
+  async invoke({query, limit, since}) {
+    const turns = await annSearchTurnVec(query, {limit, since});
+    const segments = await annSearchResponseSegmentVec(query, {limit});
+    return {turns, segments};
+  }
+};
+
+// (handoff.spawn, handoff.return, review.citation-verify, review.section-review,
+//  gating.evaluate are stubbed in Phase 1 and wired in Phases 2a / 3)
+```
+
+Each handler returns typed JSON. The local LLM's section-flow caller routes through this registry; the registry knows nothing about the MCP server or its tools.
+
+**Phase 1 ships**: handler stubs + the registry + the intent/memory handlers (real implementations, wrapping existing modules). Handoff and gating handlers stub through and throw `NotImplementedError` until Phase 2a / Phase 3.
 
 **Effort**: 4-6 days.
 
 **Acceptance**:
-- All 12 tools callable from CLI and MCP, returning structured JSON matching their schemas.
+- All ~12 MCP tools callable from CLI and MCP, returning structured JSON matching their schemas.
+- All 8 internal IPCs registered; the two implemented in Phase 1 (intent.resolve, memory.recall) pass round-trip tests; the others stub through cleanly.
+- Surface-isolation CI check passes.
 - `insrc setup claude-code` produces a working settings.json that Claude Code consumes without error.
 - `insrc setup codex` same for Codex.
 - E2E test: Claude Code can `insrc_entity_search` against a real LanceDB.
@@ -211,18 +274,36 @@ src/insrc/cli/commands/
 
 ### 2a.2 Spec assembler
 
-Takes section-flow's `WorkingMemoryEntry` (cited artifacts, retained ledger, unmet gaps), a template id, and the user's intent string. Produces:
+Takes a **scope payload** (not a content-full WorkingMemoryEntry), a template id, the user's intent, and prior-turn memory excerpts. Produces:
 
-- `spec.md` (rendered template with cited evidence)
-- `spec.meta.json` (template version, acceptance criteria, cited artifact ids, risk tag)
+- `spec.md` (rendered template — scope + criteria + discovery guidance, NOT pre-fetched entity content)
+- `spec.meta.json` (template version, acceptance criteria, prior-turn references, risk tag, permissions block)
 
 ```ts
 interface SpecAssemblerInput {
   templateId: TemplateId;
   intent: string;
-  sessionMemory: WorkingMemoryEntry;
+  scope: ScopePayload;          // emitted by section-flow's TODO-decomposition step
+  memoryExcerpts: MemoryRef[];   // ONLY prior-turn ids + 1-line summaries; NO freshly pre-fetched entity content
   workspaceRoot: string;
 }
+
+interface ScopePayload {
+  repoId: string;
+  repoPath: string;
+  inScopeGlobs: string[];
+  outOfScopePaths: string[];
+  entryPointHints?: EntityRef[];  // ONLY when the user's prior conversation makes the entry point obvious
+  dependencyClosureRepos?: string[];
+  riskHints: 'low' | 'medium' | 'high';
+}
+
+interface MemoryRef {
+  kind: 'turn' | 'artifact';
+  id: string;
+  oneLineSummary: string;
+}
+
 interface SpecAssemblerOutput {
   specId: string;
   specMd: string;
@@ -230,13 +311,25 @@ interface SpecAssemblerOutput {
 }
 ```
 
-Uses **local LLM** for the template-filling step. No cloud calls.
+Uses **local LLM** for the template-filling step (fills in Objective, Scope, Memory excerpts, Acceptance Criteria sections). The local LLM does NOT call `insrc_entity_*` / `insrc_repo_*` — those are off-surface for it (Phase 1.6). If section-flow's TODO-decomposition step couldn't determine an `entryPointHint`, the spec ships without one and the external agent discovers it via `insrc_entity_search` at execution time.
+
+No cloud calls during assembly.
 
 Risk classifier (deterministic) runs alongside LLM-assigned risk and ratchets up per template rules (see design §11.4).
 
+**What the spec assembler does NOT do**:
+- Call `searchEntities(...)` to pre-find code referenced by user intent.
+- Call `findCallers(...)` / `findCallees(...)` to pre-build impact analysis.
+- Read source files to extract field definitions, function signatures, log spans, stack traces.
+- Read JSON / Parquet / CSV files to pre-extract data shapes.
+
+All of the above happen in Phase 5 (external agent), not Phase 3.
+
 ### 2a.3 Templates
 
-Phase 2a ships ONE template: `DEBUG-SESSION.md`. Structure:
+Phase 2a ships ONE template: `DEBUG-SESSION.md`. Each template has **two shapes**: the SPEC (what insrc emits, light on content) and the DELIVERABLE (what the agent returns, the actual investigation + fix). Tests pin both.
+
+#### Spec shape (insrc emits)
 
 ```markdown
 # Debug Session: {intent}
@@ -244,42 +337,63 @@ Phase 2a ships ONE template: `DEBUG-SESSION.md`. Structure:
 ## Objective
 {user intent + classifier output}
 
-## Context
-{cited memory excerpts, recent commits, related entities}
+## Scope
+- Repo: {repoId} at {repoPath}
+- In-scope paths: {inScopeGlobs}
+- Out-of-scope (do not modify): {outOfScopePaths}
+- Entry point hint (optional): {entryPointHints, if known from prior turns}
+- Dependency closure: {dependencyClosureRepos}
+
+## Memory excerpts (when relevant)
+{prior-turn refs and 1-line summaries; NO freshly pre-fetched content}
+
+## Acceptance Criteria
+- [ ] machine: test {targetTest} passes {runCount}/{runCount} runs ({command})
+- [ ] machine: no new flakiness introduced ({command})
+- [ ] soft: fix targets the root cause identified in Conclude (LLM judgment)
+
+## Constraints
+- Sandbox: {worktree path}
+- Risk: {risk}
+- Time budget: {seconds}s
+- May not edit: {outOfScopePaths}
+
+## Discovery guidance
+- Start with `insrc_entity_search("<failing test name>", repo="<repoId>")` to locate the test and likely impl files.
+- Use `insrc_entity_callers(<id>)` / `insrc_entity_callees(<id>)` for impact analysis.
+- Use `insrc_memory_recall("<prior fix attempts>")` if you suspect this issue has come up before.
+- Use native Read/Grep/Glob for everything else.
+- Don't assume the spec lists every file you'll need; scope is deliberately light.
+
+## Deliverable structure
+Write your investigation into `spec-deliverable.md` with these sections:
+Reproduce, Localize, Hypothesize, Test, Conclude (one per stage of your investigation).
+```
+
+#### Deliverable shape (external agent emits)
+
+```markdown
+# Debug Session Deliverable: {intent}
 
 ## Reproduce
-{cited steps + commands}
+{steps + commands the agent ran to reproduce}
 
 ## Localize
-{cited evidence — log spans, stack traces, file:line refs}
+{evidence the agent gathered — log spans, stack traces, file:line refs}
 
 ## Hypothesize
 {ranked candidate causes with cited evidence}
 
 ## Test
-{cited skill outputs that test each hypothesis}
+{outputs from tests the agent ran on each hypothesis}
 
 ## Conclude
-{the determined cause + the proposed fix description}
-
-## Acceptance Criteria
-- [ ] machine: test foo.test.ts passes 50/50 runs (npm test -- --grep foo)
-- [ ] machine: no new flakiness introduced (npm test -- --runInBand)
-- [ ] soft: fix targets the root cause identified in Conclude (LLM judgment)
-       Cites: [artifact-id-1, artifact-id-3]
-
-## Constraints
-- Sandbox: {worktree path}
-- Risk: low
-- Time budget: 600s
-- May not edit: package.json, /infra/**
-
-## Tooling Hints
-- Use `insrc_entity_callers(...)` to verify scope of impact
-- Use `insrc_memory_recall(...)` if context is incomplete
+{determined cause + the applied fix description}
 ```
 
-Tests pin the structure.
+The audit phase (§2a.5) validates the deliverable shape, not the spec shape. The spec shape is validated at assembly time before spawn.
+
+Tests pin both shapes independently.
 
 ### 2a.4 Spawn + worktree
 
@@ -845,7 +959,8 @@ Remove Pair's `apply` step and the retry-on-validation loop. Pair becomes purely
 |---|---|
 | External agent CLI changes break our spawn integration | Pin tested versions; cross-agent contract tests; nightly compat run. |
 | Codex's hook system evolves (it's newer than Claude Code's) | Document tested Codex version; integration test gated on env var. |
-| Local LLM still struggles with spec-assembly (the local citation issues we saw in runs #1-6) | Phase 2a's spec assembler tests cover the failure modes we cataloged; if it can't produce valid specs locally, fall back to cloud assembly (single call, cheap). |
+| Local LLM still struggles with spec-assembly | Substantially reduced under the new role split — spec assembly is now scope + criteria + memory excerpts, with NO source-code or data-shape extraction. The dominant failure modes from runs #1-6 (method-local vars, DuckDB shape leakage, compound JSON-sample steps) all live in extraction steps that don't exist in spec-assembly anymore. Residual risk is scope-decision errors (wrong repo, wrong glob); the external agent's discovery loop self-corrects for these. If scope errors persist, fall back is widening scope (let the agent investigate more) — NOT pre-fetching more content in the spec. |
+| Local LLM accidentally calls entity/repo MCP tools | Structurally prevented: surface-isolation CI check (Phase 1.5) asserts `src/insrc/internal-ipc/` cannot import entity/repo modules; the IPC registry has no handler for them. The local LLM's only graph-adjacent capability is `internal.memory.recall` over turn/segment vectors. |
 | Daemon-VS-Code IPC overhead becomes user-visible | Stream events; batch UI updates; the daemon was already designed for streaming. |
 | User confusion about which agent does what work | UX clearly labels: "Spec by insrc (local) → executed by Claude Code". Trace + cost records make the boundary auditable. |
 | Hook script trust prompts annoying users | Sign the hook binary; document the trust step in `insrc setup ...`; provide `--dangerously-bypass-hook-trust` only for the user's own (signed) hook. |
@@ -935,5 +1050,7 @@ src/insrc-ide/extension/package.json  # new settings + commands (Phase 2b, 2c)
 3. **Template registry mutability**: are templates compiled into the daemon, or user-pluggable via a `~/.insrc/templates/` directory? Compiled is simpler for v1; pluggable is more powerful long-term.
 4. **Auto-trigger from pivot intents**: should `/design` → "make it so" auto-trigger a handoff, or always require an explicit `/implement`? UX choice; affects Phase 2a's intent classifier changes.
 5. **Hook script distribution**: shipped with insrc daemon binary, or a separate npm package the user installs? Simpler shipped; more flexible separate.
+
+6. **Direct-report intent migration timing** (`/data-analyze`, `/code-analysis`, `/research`, `/review`, `/document`): the new role split (design §4.0) strictly applies to handoff intents (implement/refactor/debug/test). Direct-report intents currently run section-flow's local-LLM extraction path end-to-end. Phase 0 retest data argues for migrating them to a `DATA-ANALYZE` / `CODE-ANALYZE` handoff template too (external agent extracts, local LLM composes report). Decision: do we migrate before Phase 7 template rollout (cleaner contract, more refactor up-front), or after (ship the wedge first, migrate when failure-mode pressure justifies)? My current lean is *after* — Phase 0 retest showed the safety nets catching contamination at the audit layer, so direct-report intents are unlikely to ship visibly broken results in the meantime. Re-evaluate after Phase 6.
 
 These don't block Phase 0; resolve during Phase 1 design review.
