@@ -3,15 +3,11 @@
  * section-flow per-TODO loop.
  *
  * Two writers because they're independent prompts that the
- * step-section-review orchestrator runs at different points:
+ * audit/section-review orchestrator runs at different points:
  *   - section-review (cloud): judges the section markdown,
  *     emits { verdict, reasoning, edits? }.
  *   - section-revise (cloud): rewrites the section markdown
  *     applying the reviewer's edits.
- *
- * Migrated from `agent/section-flow/step-section-review.ts`'s inline
- * REVIEW_ROLE + REVISE_ROLE + their build functions. Behaviour-
- * preserving.
  */
 
 import type { LLMMessage } from '../../../shared/types.js';

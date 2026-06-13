@@ -3,26 +3,29 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 /**
- * Section review loop (planner-section-task-separation P3.c part 2,
- * Q5).
+ * Section review loop (originally section-flow Stage 7; now extracted as
+ * a standalone audit library so it can also be invoked on external-agent
+ * deliverables -- see `plans/external-agent-integration.md` Phase 0 and
+ * Phase 6).
  *
- * Three-verdict structured output (distinct from the per-root review
- * in P3.b; this layer reviews the ASSEMBLED section for
- * presentation/coherence, while per-root review covered
- * investigation completeness):
+ * Three-verdict structured output:
  *
  *   accept       -- ship the section as-is.
  *   revise-edits -- small fixes; LLM rewrites the whole section, we
  *                   re-review. Counts toward the per-section cap.
  *   revise-major -- structural failure (per-root findings are
  *                   insufficient or contradictory). ESCALATE to the
- *                   TODO orchestrator (P3.d) which re-opens the
- *                   section task tree. Does NOT consume a cycle.
+ *                   caller; in section-flow this triggers a TODO recycle.
+ *                   Does NOT consume a cycle.
  *
- * Cap is 3 revise-and-re-review cycles after the initial review
- * (Q5's "cap 3"). After cap, force-accept with `exhausted: true`;
- * orchestrator surfaces a `section-review-exhausted` annotation so
- * the final report review (Q7) can flag under-evidenced sections.
+ * Default cap is 3 revise-and-re-review cycles after the initial review.
+ * Callers can override via `cycleCapOpt`. After cap, force-accept with
+ * `exhausted: true`.
+ *
+ * Pure in terms of side effects: only LLM calls + module-level logging.
+ * No working-memory mutation, ledger writes, DB access, or session reads.
+ * Callers are responsible for ensuring the prompt registry is initialised
+ * (via `registerAllPromptWriters()` or equivalent).
  *
  * Cost ceiling per section:
  *   - Typical: 1 review (accept)                            = 1 call
@@ -30,20 +33,19 @@
  *   - Worst case (cap 3): 1 + 3*(revise+review)             = 7 calls
  */
 
-import type { LLMMessage, LLMProvider } from '../../shared/types.js';
-import type { CloudMemoryView } from '../working-memory/index.js';
-import type { WorkingMemoryFindings } from '../working-memory/types.js';
-import type { TodoSpec } from './types.js';
-import { getLogger } from '../../shared/logger.js';
-import { getPromptRegistry } from '../prompts/registry.js';
+import type { LLMMessage, LLMProvider } from '../../../shared/types.js';
+import type { WorkingMemoryFindings } from '../../working-memory/types.js';
+import type { TodoSpec } from '../types.js';
+import { getLogger } from '../../../shared/logger.js';
+import { getPromptRegistry } from '../../prompts/registry.js';
 import type {
 	SectionReviewWriterInput,
 	SectionReviseWriterInput,
-} from '../prompts/writers/section-review.js';
+} from '../../prompts/writers/section-review.js';
 
 const log = getLogger('section-flow:section-review');
 
-/** Q5 cap: up to 3 revise-and-re-review cycles after the initial review. */
+/** Default cap: up to 3 revise-and-re-review cycles after the initial review. */
 const SECTION_REVIEW_CYCLE_CAP = 3;
 
 const MAX_REVIEW_TOKENS  = 1024;
@@ -61,11 +63,12 @@ const MAX_REVISE_TOKENS  = 6144;
 
 export interface SectionReviewInput {
 	readonly todo:        TodoSpec;
-	readonly memory:      CloudMemoryView;
-	/** Candidate section markdown (assembly step's output). */
+	/** Candidate section markdown (assembly step's output, or external-agent deliverable). */
 	readonly candidate:   string;
 	readonly findings:    WorkingMemoryFindings;
 	readonly provider:    LLMProvider;
+	/** Optional per-call override of the default cycle cap (3). */
+	readonly cycleCapOpt?: number | undefined;
 }
 
 export interface SectionReviewResult {
@@ -79,16 +82,17 @@ export interface SectionReviewResult {
 }
 
 export async function reviewSection(input: SectionReviewInput): Promise<SectionReviewResult> {
+	const cap = input.cycleCapOpt ?? SECTION_REVIEW_CYCLE_CAP;
 	let current = input.candidate;
 	let cyclesConsumed = 0;
-	let review = await reviewOnce(input, current, cyclesConsumed);
+	let review = await reviewOnce(input, current, cyclesConsumed, cap);
 
-	while (review.verdict === 'revise-edits' && cyclesConsumed < SECTION_REVIEW_CYCLE_CAP) {
+	while (review.verdict === 'revise-edits' && cyclesConsumed < cap) {
 		const edits = review.edits ?? '(no specific edits provided)';
 		log.info({ todoId: input.todo.id, cycle: cyclesConsumed + 1, edits: edits.slice(0, 120) }, 'section review: revise-edits, rewriting');
 		current = await reviseSection(input, current, edits);
 		cyclesConsumed += 1;
-		review = await reviewOnce(input, current, cyclesConsumed);
+		review = await reviewOnce(input, current, cyclesConsumed, cap);
 	}
 
 	if (review.verdict === 'revise-major') {
@@ -128,11 +132,7 @@ interface ReviewParsed {
 	readonly edits?:     string | undefined;
 }
 
-// The inline REVIEW_ROLE here used to be load-bearing; the prompt now
-// lives in `agent/prompts/writers/section-review.ts` and is fetched via
-// the PromptRegistry. The leftover constant was Phase 0 cruft.
-
-async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesConsumed: number): Promise<ReviewParsed> {
+async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesConsumed: number, _cap: number): Promise<ReviewParsed> {
 	const writer = getPromptRegistry().get<SectionReviewWriterInput, readonly LLMMessage[]>('section-review');
 	const messages = [...writer.build({
 		todo:           input.todo,
@@ -150,6 +150,7 @@ async function reviewOnce(input: SectionReviewInput, candidate: string, cyclesCo
 }
 
 function buildReviewUser(input: SectionReviewInput, candidate: string, cyclesConsumed: number): string {
+	const cap = input.cycleCapOpt ?? SECTION_REVIEW_CYCLE_CAP;
 	const findingsBlock = input.findings.perRoot.length === 0
 		? '(no per-root findings)'
 		: input.findings.perRoot.map(f => `- ${f.rootId} (verdict: ${f.verdict}${f.exhausted ? ', exhausted' : ''}):\n  ${f.content.slice(0, 400)}`).join('\n');
@@ -161,7 +162,7 @@ function buildReviewUser(input: SectionReviewInput, candidate: string, cyclesCon
 		'## PER-ROOT FINDINGS',
 		findingsBlock,
 		'',
-		`## CYCLES CONSUMED: ${cyclesConsumed} / ${SECTION_REVIEW_CYCLE_CAP}`,
+		`## CYCLES CONSUMED: ${cyclesConsumed} / ${cap}`,
 		'',
 		'## CANDIDATE SECTION MARKDOWN',
 		candidate,
@@ -210,9 +211,6 @@ function parseReview(raw: string): ReviewParsed {
 // ---------------------------------------------------------------------------
 // Revise LLM call
 // ---------------------------------------------------------------------------
-
-// Same Phase 0 cleanup: the inline REVISE_ROLE moved to
-// `agent/prompts/writers/section-review.ts` (`section-revise` writer).
 
 async function reviseSection(input: SectionReviewInput, current: string, edits: string): Promise<string> {
 	const writer = getPromptRegistry().get<SectionReviseWriterInput, readonly LLMMessage[]>('section-revise');

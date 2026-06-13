@@ -14,7 +14,7 @@
  * Surviving pieces from the prior architecture:
  *   - step-scope + step-investigation-plan        : plan flow (unchanged)
  *   - leaf-executor + shape-resolve               : per-leaf invocation
- *   - step-section-review                         : Stage 7 (Q5 verdicts)
+ *   - audit/section-review                        : Stage 7 (Q5 verdicts)
  *   - step-report-assemble + step-report-review   : final report layer
  *   - run-section-flow                            : top-level driver
  */
@@ -42,7 +42,7 @@ export {
 	reviewSection,
 	type SectionReviewInput,
 	type SectionReviewResult,
-} from './step-section-review.js';
+} from './audit/section-review.js';
 
 export {
 	runTodoOrchestrator,

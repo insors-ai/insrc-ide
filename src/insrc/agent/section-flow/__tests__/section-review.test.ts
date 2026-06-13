@@ -30,10 +30,8 @@ import {
 	_buildReviewUserForTest as buildReviewUser,
 	_buildReviseUserForTest as buildReviseUser,
 	SECTION_REVIEW_CYCLE_CAP_VALUE,
-} from '../step-section-review.js';
+} from '../audit/section-review.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
-import type { CloudMemoryView } from '../../working-memory/index.js';
-import { legacyBundleToCloudView } from '../../working-memory/index.js';
 import type { WorkingMemoryFindings } from '../../working-memory/types.js';
 import type { TodoSpec } from '../types.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
@@ -73,7 +71,6 @@ function scriptedProvider(responses: readonly string[]): { provider: LLMProvider
 }
 
 const todo: TodoSpec = { id: 'todo-x', objective: 'Investigate X', origin: 'initial' };
-const memory: CloudMemoryView = legacyBundleToCloudView({ system: '', summary: '', recent: '', semantic: '', code: '' });
 const findings: WorkingMemoryFindings = {
 	perRoot: [
 		{ rootId: 'discover', verdict: 'accept', cyclesConsumed: 0, exhausted: false, content: 'discover findings' },
@@ -121,7 +118,7 @@ test('parseReview: markdown-fenced JSON unwraps', () => {
 // ---------------------------------------------------------------------------
 
 test('buildReviewUser: surfaces objective + findings + cycle counter', () => {
-	const text = buildReviewUser({ todo, memory, candidate: 'section text', findings, provider: {} as LLMProvider }, 'section text', 1);
+	const text = buildReviewUser({ todo, candidate: 'section text', findings, provider: {} as LLMProvider }, 'section text', 1);
 	assert.match(text, /Investigate X/);
 	assert.match(text, /discover/);
 	assert.match(text, /CYCLES CONSUMED: 1/);
@@ -141,7 +138,7 @@ test('buildReviseUser: surfaces objective + current section + edits', () => {
 
 test('initial accept -> 1 call, cyclesConsumed=0, accept verdict', async () => {
 	const { provider, calls } = scriptedProvider([verdict('accept', { reasoning: 'reads well' })]);
-	const result = await reviewSection({ todo, memory, candidate: 'candidate md', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'candidate md', findings, provider });
 	assert.equal(calls.length, 1);
 	assert.equal(result.cyclesConsumed, 0);
 	assert.equal(result.exhausted, false);
@@ -160,7 +157,7 @@ test('revise-edits -> rewrite -> accept: cyclesConsumed=1, accept verdict', asyn
 		'# Section\n\nRevised intro and body.\n',     // revise call returns markdown directly (trimmed by the call site)
 		verdict('accept'),
 	]);
-	const result = await reviewSection({ todo, memory, candidate: 'original markdown', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'original markdown', findings, provider });
 	assert.equal(calls.length, 3);    // review -> revise -> review
 	assert.equal(result.cyclesConsumed, 1);
 	assert.equal(result.exhausted, false);
@@ -181,7 +178,7 @@ test('revise-edits cap hit -> force-accept + exhausted=true', async () => {
 		}
 	}
 	const { provider, calls: recorded } = scriptedProvider(calls);
-	const result = await reviewSection({ todo, memory, candidate: 'orig', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'orig', findings, provider });
 
 	assert.equal(result.cyclesConsumed, SECTION_REVIEW_CYCLE_CAP_VALUE);
 	assert.equal(result.exhausted, true);
@@ -201,7 +198,7 @@ test('initial revise-major -> reopenRequested=true, no revise call, no subsequen
 	const { provider, calls } = scriptedProvider([
 		verdict('revise-major', { reasoning: 'findings missed key subsystem' }),
 	]);
-	const result = await reviewSection({ todo, memory, candidate: 'whatever', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'whatever', findings, provider });
 	assert.equal(calls.length, 1);
 	assert.equal(result.cyclesConsumed, 0);
 	assert.equal(result.reopenRequested, true);
@@ -216,7 +213,7 @@ test('revise-major after a revise-edits cycle: escalates with current revised ma
 		'# Cycle 1 revision\n',
 		verdict('revise-major', { reasoning: 'investigation has a gap' }),
 	]);
-	const result = await reviewSection({ todo, memory, candidate: 'orig', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'orig', findings, provider });
 	assert.equal(result.cyclesConsumed, 1);
 	assert.equal(result.reopenRequested, true);
 	assert.equal(result.finalVerdict, 'revise-major');
@@ -229,7 +226,7 @@ test('revise-major after a revise-edits cycle: escalates with current revised ma
 
 test('LLM contract: review calls send responseFormat=json + disableThinking + temp=0', async () => {
 	const { provider, calls } = scriptedProvider([verdict('accept')]);
-	await reviewSection({ todo, memory, candidate: 'x', findings, provider });
+	await reviewSection({ todo, candidate: 'x', findings, provider });
 	assert.equal(calls[0]!.opts.responseFormat, 'json');
 	assert.equal(calls[0]!.opts.disableThinking, true);
 	assert.equal(calls[0]!.opts.temperature, 0);
@@ -241,7 +238,7 @@ test('LLM contract: revise call does NOT send responseFormat=json (output is mar
 		'# Revised\n',
 		verdict('accept'),
 	]);
-	await reviewSection({ todo, memory, candidate: 'x', findings, provider });
+	await reviewSection({ todo, candidate: 'x', findings, provider });
 	// Calls: 0 = review, 1 = revise, 2 = review.
 	assert.equal(calls[1]!.opts.responseFormat, undefined);
 	assert.equal(calls[1]!.opts.disableThinking, true);
@@ -258,7 +255,7 @@ test('revise returns empty -> current section preserved, cycle still counted, ne
 		'   ',                                  // empty after trim
 		verdict('accept'),
 	]);
-	const result = await reviewSection({ todo, memory, candidate: 'original', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'original', findings, provider });
 	assert.equal(result.cyclesConsumed, 1);
 	assert.equal(result.finalMarkdown, 'original');
 });
@@ -273,7 +270,7 @@ test('revise-edits without edits string -> revise still runs with placeholder', 
 		'# Cycle 1\n',
 		verdict('accept'),
 	]);
-	const result = await reviewSection({ todo, memory, candidate: 'orig', findings, provider });
+	const result = await reviewSection({ todo, candidate: 'orig', findings, provider });
 	assert.equal(result.cyclesConsumed, 1);
 	assert.match(calls[1]!.messages[1]!.content, /no specific edits/);
 });

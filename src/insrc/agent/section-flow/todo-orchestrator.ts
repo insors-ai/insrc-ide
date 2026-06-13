@@ -80,7 +80,7 @@ import { tryParseCitedSummary, renderCitedSummaryForPrompt } from './citation-re
 import type { CitedStepSummary } from './citation-types.js';
 import { synthesizeSectionFromLedger } from './step-synthesis-from-ledger.js';
 import type { PriorAttempt } from '../prompts/writers/section-synth.js';
-import { reviewSection } from './step-section-review.js';
+import { reviewSection } from './audit/section-review.js';
 import {
 	DEFAULT_NO_PROGRESS_BUDGET,
 	DEFAULT_SAFETY_CEILING,
@@ -237,7 +237,7 @@ export async function runTodoOrchestrator(
 				provider:        input.provider,
 			});
 			const reviewResult = await reviewSection({
-				todo: input.todo, memory: input.memory,
+				todo: input.todo,
 				candidate: synth.markdown,
 				findings:  ledgerToFindings([], fastPathSummaries),
 				provider:  input.provider,
@@ -568,7 +568,7 @@ export async function runTodoOrchestrator(
 
 		// Stage 7: section review.
 		const reviewResult = await reviewSection({
-			todo: input.todo, memory: memoryWithLedger,
+			todo: input.todo,
 			candidate: synth.markdown,
 			findings:  ledgerToFindings(retainedLedger, summariesByStep),
 			provider:  input.provider,
@@ -863,7 +863,7 @@ async function resolveStepSummaries(
 
 /**
  * Convert the retained ledger into the legacy `WorkingMemoryFindings`
- * shape so the existing `step-section-review` reviewer can read it
+ * shape so the existing `audit/section-review` reviewer can read it
  * unchanged. Each StepOutput becomes a synthetic `PerRootFinding`
  * with verdict mapped from status and content sourced from the
  * pre-resolved per-step summary map.

@@ -77,7 +77,7 @@ import {
 import type { ExecuteLeaf } from './leaf-executor.js';
 import type { CatalogSkill } from '../content-gen/plan-tree-runner.js';
 import type { ScopeStepResult, InvestigationPlanResult } from './types.js';
-import { reviewSection } from './step-section-review.js';
+import { reviewSection } from './audit/section-review.js';
 import {
 	runReportReview,
 	type ReportReviewResult,
@@ -362,7 +362,6 @@ export async function runSectionFlow(input: RunSectionFlowInput): Promise<RunSec
 			if (!sectionIds.includes(e.todoId)) { continue; }
 			const sectionReview = await reviewSection({
 				todo:      { id: e.todoId, objective: e.objective, origin: e.origin },
-				memory:    legacyBundleToCloudView(priorBundle ?? { system: '', summary: '', recent: '', semantic: '', code: '' }),
 				candidate: e.detail,
 				findings:  e.findings,
 				provider:  input.provider,
