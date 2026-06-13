@@ -70,8 +70,10 @@ Three gating modes layered by spec risk tag: pre-flight permission block (Mode A
 - **Decouple section-review from section-flow's TODO loop**: today section-review is invoked twice (per-TODO and compose-time). Refactor so it can also be invoked as a standalone library function `reviewSection({markdown, citedArtifacts}) → Verdict`. Phase 6 calls this on external-agent deliverables.
 - **Citation verifier as standalone library**: same. Extract `verifyCitations({deliverable, allowedArtifacts}) → {verdict, unsupported, unverified}`. Phase 6 reuses unchanged.
 - **Add compose-time review test coverage**: the Phase 0 retest showed the compose-time pass rejecting 5 of 9 TODO sections for L2-fallback contamination and elision. Pin those cases as regression fixtures so the audit behaviour can't silently regress.
-- **Make `replan-sketch` observable**: the retest showed cloud orchestrator firing `replan-sketch` when a leaf skill was unfit. Wire this into the structured trace (Phase 5 observability) so we can measure how often handoff-spec assembly needs to replan.
 - **Revert force-cloud commit** (`feb05771...`-era) is still in scope — it landed in the Phase 0 retest already. Confirm it stays reverted.
+
+**Deferred to Phase 5** (originally Phase 0, deferred because the underlying infra doesn't exist yet):
+- **Make `replan-sketch` observable**: the Phase 0 retest showed the cloud orchestrator firing `replan-sketch` when a leaf skill was unfit. Wire this into the structured trace so we can measure how often handoff-spec assembly needs to replan. This requires the `handoff/observability/trace-writer.ts` infrastructure to exist; that's a Phase 5 deliverable. Doing it ad-hoc in Phase 0 and again in Phase 5 is churn — defer cleanly. **Tracked in §5.2.**
 
 **Explicitly NOT in scope**:
 - Method-local-variable rule for summarize-step. Source-code field extraction moves to the external agent; the rule is moot under the new design.
@@ -79,17 +81,16 @@ Three gating modes layered by spec risk tag: pre-flight permission block (Mode A
 - Cloud default model swap. No longer strategic if cloud is rarely invoked from insrc itself.
 
 **Deliverables**:
-- 1-2 commits extracting `reviewSection` and `verifyCitations` into reusable libraries
+- 1-2 commits extracting `reviewSection` and `verifyCitations` into reusable libraries (under `agent/section-flow/audit/`)
 - 1 commit adding regression fixtures for compose-time review
-- 1 commit wiring `replan-sketch` events into the structured trace
-- No new files; refactoring existing `agent/section-flow/` modules
+- No new files outside `agent/section-flow/audit/`; refactoring existing modules
 
-**Effort**: 2-3 days.
+**Effort**: 1-2 days (reduced from 2-3 after `replan-sketch` was deferred to Phase 5).
 
 **Acceptance**:
-- `reviewSection` and `verifyCitations` can be called from a unit test with a fixture deliverable and produce a verdict matching the existing in-section-flow behaviour on the same input.
+- `reviewSection` and `verifyCitations` live under `agent/section-flow/audit/` and can be called from a unit test with a fixture deliverable + injected lookup, producing a verdict matching the existing in-section-flow behaviour on the same input.
 - Compose-time review regression fixtures pin the 5 contamination cases from the Phase 0 retest.
-- Structured trace includes `replan-sketch` events with reason + retained-step count.
+- (`replan-sketch` observability acceptance criterion moved to §5.2.)
 
 ## Phase 1: MCP server foundation
 
@@ -859,6 +860,8 @@ src/insrc/handoff/observability/
 ```
 
 Per-handoff trace records all tool calls, gate decisions, audit results, token counts. Stored under `sessions/{sid}/spec/{specId}.trace.jsonl`.
+
+**Carried from Phase 0**: emit `replan-sketch` events into the same trace. Section-flow's TODO orchestrator fires `replan-sketch` when a leaf skill proves unfit for the current TODO; the Phase 0 retest confirmed this happens in practice (live event captured 2026-06-13 around `1781341972332`, run id `6f863ed9526d641110e7a653c8800042`). Each event carries `{ todoId, reason, sketchReplans, retainedStepCount }`. Wire alongside the rest of the trace events so we can compute "% of spec assemblies needing a replan" as a signal for handoff-template quality and prompt drift. **Acceptance**: structured trace contains `replan-sketch` events with reason + retained-step count.
 
 ### 5.3 Tests
 
