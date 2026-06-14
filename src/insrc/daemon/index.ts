@@ -84,6 +84,7 @@ import {
 	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
 } from './chat-handler.js';
 import { handoffRunStream } from './handoff-stream.js';
+import { gateRequestPermissionStream, gateResolveRpc } from './gate-handlers.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
@@ -1530,9 +1531,16 @@ async function main(): Promise<void> {
 			const mod = await import('./code-analyzer-diff.js');
 			return mod.diffRunsRpc(params as { priorListId?: unknown; currentListId?: unknown });
 		},
+
+		// Phase 3 Day 2: Mode B gate. The IDE calls this when the user clicks
+		// Allow / Deny in the permission modal. The handler looks up the
+		// gateId in the pending registry and forwards the verdict to the
+		// waiting `gate.request-permission` stream.
+		'gate.resolve': gateResolveRpc,
 	}, {
 		// Streaming handlers
-		'handoff.run': handoffRunStream,
+		'handoff.run':              handoffRunStream,
+		'gate.request-permission':  gateRequestPermissionStream,
 		'chat.send': chatSend,
 		'chat.resume': chatResume,
 		'chat.resumeFromCheckpoint': chatResumeFromCheckpoint,
