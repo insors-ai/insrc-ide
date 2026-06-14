@@ -19,8 +19,10 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
+import { IInsrcHandoffService } from '../../common/handoffService.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
+import { ChatHandoffWidget } from './chatHandoffWidget.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
@@ -170,6 +172,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@ICommandService private readonly commandService: ICommandService,
 		@IInsrcBrainstormSessionService private readonly brainstormSession: IInsrcBrainstormSessionService,
 		@IInsrcTodosService private readonly _todosService: IInsrcTodosService,
+		@IInsrcHandoffService private readonly _handoffService: IInsrcHandoffService,
 		@IEditorService private readonly _editorService: IEditorService,
 		@ILogService private readonly _logService: ILogService,
 	) {
@@ -260,6 +263,15 @@ export class InsrcChatViewPane extends ViewPane {
 		// the main event handler.
 		const todosWidget = this._register(new ChatTodosWidget(this._todosService, this._editorService, this._logService));
 		todosWidget.mount(this._messageList);
+
+		// Inline handoff widget (plans/external-agent-integration.md Phase 2b).
+		// Renders one card per external-agent handoff session that the
+		// daemon emitted events for on the active chat stream. Subscribes
+		// to IInsrcHandoffService directly; chatView forwards the raw
+		// `{type:'handoff'}` stream messages via the dedicated dispatch
+		// path inside chatServiceImpl.
+		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService));
+		handoffWidget.mount(this._messageList);
 
 		// Inline artifact widget (plans/artifact-tasks.md section 1.6). Renders
 		// artifact items (Mermaid diagrams, wireframe SVG) into sandboxed

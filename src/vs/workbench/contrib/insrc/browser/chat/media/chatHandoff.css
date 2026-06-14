@@ -1,0 +1,125 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Procix Software India. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/* External-agent handoff card (plans/external-agent-integration.md Phase 2b).
+ * One card per in-flight or recently-finished handoff. Compact, similar
+ * shape to the todos card but with stage-driven status instead of a
+ * collapsible item list. */
+
+.insrc-chat-handoff {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.insrc-chat-handoff-card {
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 4px;
+	background-color: var(--vscode-editorWidget-background);
+	padding: 10px 12px;
+}
+
+.insrc-chat-handoff-card.stage-error {
+	border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+	background-color: var(--vscode-inputValidation-errorBackground, var(--vscode-editorWidget-background));
+}
+
+.insrc-chat-handoff-card.stage-final.verdict-accept {
+	border-color: var(--vscode-charts-green, var(--vscode-widget-border));
+}
+
+.insrc-chat-handoff-card.stage-final.verdict-revise-edits,
+.insrc-chat-handoff-card.stage-final.verdict-revise-major {
+	border-color: var(--vscode-charts-orange, var(--vscode-widget-border));
+}
+
+.insrc-chat-handoff-card-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.insrc-chat-handoff-template {
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	padding: 2px 6px;
+	border-radius: 3px;
+	background-color: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
+.insrc-chat-handoff-intent {
+	flex: 1;
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.insrc-chat-handoff-stage {
+	font-size: 11px;
+	opacity: 0.85;
+}
+
+.insrc-chat-handoff-dismiss {
+	border: none;
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	padding: 2px 4px;
+	font-size: 11px;
+	opacity: 0.6;
+}
+
+.insrc-chat-handoff-dismiss:hover {
+	opacity: 1;
+}
+
+.insrc-chat-handoff-body {
+	margin-top: 6px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 12px;
+}
+
+.insrc-chat-handoff-row {
+	display: flex;
+	gap: 6px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.insrc-chat-handoff-row-label {
+	min-width: 76px;
+	opacity: 0.75;
+}
+
+.insrc-chat-handoff-row-value {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--monaco-monospace-font, monospace);
+}
+
+.insrc-chat-handoff-preview {
+	margin-top: 4px;
+	max-height: 80px;
+	overflow: hidden;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	white-space: pre-wrap;
+	color: var(--vscode-descriptionForeground);
+	border-left: 2px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	padding-left: 8px;
+}
+
+.insrc-chat-handoff-error {
+	margin-top: 4px;
+	color: var(--vscode-errorForeground);
+	font-size: 12px;
+	white-space: pre-wrap;
+}
