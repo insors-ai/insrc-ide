@@ -95,11 +95,19 @@ export async function invokeTool(
 		rpc,
 	};
 
+	const start = Date.now();
 	try {
-		return await tool.handler(args as Record<string, never>, ctx);
+		const result = await tool.handler(args as Record<string, never>, ctx);
+		const durationMs = Date.now() - start;
+		log.info(
+			{ tool: tool.name, scope: tool.scope, durationMs, isError: result.isError === true },
+			'tool invoked',
+		);
+		return result;
 	} catch (err) {
+		const durationMs = Date.now() - start;
 		const msg = err instanceof Error ? err.message : String(err);
-		log.warn({ tool: tool.name, err: msg }, 'tool handler threw');
+		log.warn({ tool: tool.name, scope: tool.scope, durationMs, err: msg }, 'tool handler threw');
 		return {
 			content: [{ type: 'text', text: msg }],
 			isError: true,

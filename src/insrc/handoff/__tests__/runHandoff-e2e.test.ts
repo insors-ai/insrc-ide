@@ -263,3 +263,68 @@ test('runHandoff: scripted-agent without scriptedAgent fn throws', async () => {
 		);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Deliverable sink precedence: file > stdout
+// ---------------------------------------------------------------------------
+
+test('runHandoff: <worktree>/spec-deliverable.md takes precedence over stdout (real-agent simulation)', async () => {
+	await withRepo(async (repoPath, persistRoot) => {
+		const sessionId    = 'sess-file-wins';
+		const worktreePath = join(persistRoot, sessionId, 'worktree');
+
+		// Scripted agent that returns USELESS stdout but writes the
+		// real deliverable to the worktree (mimicking what claude-code
+		// actually does -- the spec template tells the agent to write
+		// to spec-deliverable.md).
+		const scriptedSplit: ScriptedAgentFn = async () => {
+			writeFileSync(join(worktreePath, 'spec-deliverable.md'), FILLED_DELIVERABLE);
+			return { stdout: 'BOGUS STDOUT WITHOUT SECTIONS', stderr: '', exitCode: 0, durationMs: 10 };
+		};
+
+		const result = await runHandoff({
+			templateId:    'DEBUG-SESSION',
+			intent:        'fix',
+			scope:         makeScope(repoPath),
+			memoryRefs:    MEM,
+			agent:         'scripted-agent',
+			scriptedAgent: scriptedSplit,
+			persistRoot,
+			sessionId,
+			specIdOverride: 'spec-file-1',
+		});
+		// File wins -> the 5 sections in the file drive the audit to accept.
+		assert.equal(result.audit.verdict, 'accept',
+			`expected accept (file deliverable found); got ${result.audit.verdict} reason=${result.audit.reason}`);
+	});
+});
+
+test('runHandoff: persists <specId>.deliverable.md + <specId>.audit.json after the run', async () => {
+	await withRepo(async (repoPath, persistRoot) => {
+		const result = await runHandoff({
+			templateId:    'DEBUG-SESSION',
+			intent:        'fix',
+			scope:         makeScope(repoPath),
+			memoryRefs:    MEM,
+			agent:         'scripted-agent',
+			scriptedAgent: scripted(FILLED_DELIVERABLE),
+			persistRoot,
+			sessionId:     'sess-persist',
+			specIdOverride: 'spec-persist-1',
+		});
+
+		const dir       = join(persistRoot, 'sess-persist');
+		const delivPath = join(dir, 'spec-persist-1.deliverable.md');
+		const auditPath = join(dir, 'spec-persist-1.audit.json');
+		assert.equal(existsSync(delivPath), true, 'deliverable.md must be persisted');
+		assert.equal(existsSync(auditPath), true, 'audit.json must be persisted');
+
+		const written = readFileSync(delivPath, 'utf8');
+		assert.equal(written, FILLED_DELIVERABLE);
+
+		const audit = JSON.parse(readFileSync(auditPath, 'utf8')) as { verdict: string; spawn: { exitCode: number; durationMs: number; stdoutLen: number; stderrLen: number } };
+		assert.equal(audit.verdict,           result.audit.verdict);
+		assert.equal(audit.spawn.exitCode,    0);
+		assert.equal(audit.spawn.stdoutLen,   FILLED_DELIVERABLE.length);
+	});
+});

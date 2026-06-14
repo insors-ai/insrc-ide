@@ -23,6 +23,7 @@
  * back to the user.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -172,12 +173,19 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 			stdoutLen: spawnResult.stdout.length,
 		});
 
-		// 4. Audit the deliverable.
+		// 4. Resolve the deliverable: prefer the in-worktree
+		//    `spec-deliverable.md` the agent was instructed to write
+		//    (real claude/codex follow this); fall back to spawnResult
+		//    .stdout for the scripted-agent path where the deliverable
+		//    IS the stdout.
+		const deliverable = resolveDeliverable(worktreePath, spawnResult.stdout);
+
+		// 4b. Audit the deliverable.
 		emit({ kind: 'auditing', specId: spec.specId });
 		let audit: AuditResult;
 		try {
 			audit = await auditDeliverable({
-				deliverable:        spawnResult.stdout,
+				deliverable,
 				requiredSections:   template.requiredDeliverableSections,
 				acceptanceCriteria: spec.meta.acceptanceCriteria,
 				cwd:                worktreePath,
@@ -187,6 +195,18 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 			throw err;
 		}
 		log.info({ specId: spec.specId, verdict: audit.verdict }, 'handoff: audit verdict');
+
+		// 4c. Persist deliverable + audit result (design §7.1):
+		//     <persistRoot>/<sessionId>/<specId>.deliverable.md
+		//     <persistRoot>/<sessionId>/<specId>.audit.json
+		persistRunArtifacts({
+			persistRoot,
+			sessionId: opts.sessionId,
+			specId:    spec.specId,
+			deliverable,
+			audit,
+			spawnResult,
+		});
 
 		// 5. Compute the diff against HEAD for the caller to display / apply.
 		let diff: string;
@@ -253,4 +273,72 @@ async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: s
 	if (opts.claudeBinPath !== undefined) (claudeOpts as { claudeBinPath?: string }).claudeBinPath = opts.claudeBinPath;
 	if (opts.hookBinPath !== undefined)  (claudeOpts as { hookBinPath?: string }).hookBinPath  = opts.hookBinPath;
 	return spawnClaudeCode(claudeOpts);
+}
+
+/**
+ * Resolve the deliverable text the audit pipeline parses.
+ *
+ * Precedence:
+ *   1. `<worktreePath>/spec-deliverable.md` -- the file the spec
+ *      template instructs the agent to write. Real claude-code and
+ *      codex follow this.
+ *   2. spawnResult.stdout -- the scripted-agent test path passes the
+ *      deliverable through stdout because there's no real subprocess
+ *      to write a file.
+ *
+ * Important: if BOTH exist (a real claude run also prints a summary
+ * to stdout AND writes the file), the file wins. The audit treats
+ * the file as the canonical deliverable; stdout is a fallback only.
+ */
+function resolveDeliverable(worktreePath: string, stdoutDeliverable: string): string {
+	const filePath = join(worktreePath, 'spec-deliverable.md');
+	if (existsSync(filePath)) {
+		try {
+			return readFileSync(filePath, 'utf8');
+		} catch (err) {
+			log.warn({ filePath, err: (err as Error).message },
+				'handoff: spec-deliverable.md exists but unreadable; falling back to spawnResult.stdout');
+		}
+	}
+	return stdoutDeliverable;
+}
+
+interface PersistRunArtifactsArgs {
+	readonly persistRoot: string;
+	readonly sessionId:   string;
+	readonly specId:      string;
+	readonly deliverable: string;
+	readonly audit:       AuditResult;
+	readonly spawnResult: AgentSpawnResult;
+}
+
+/**
+ * Persist `<specId>.deliverable.md` + `<specId>.audit.json` under
+ * `<persistRoot>/<sessionId>/` per design §7.1. Best-effort; failures
+ * log a warning but never abort the handoff (the in-memory result is
+ * still returned to the caller).
+ */
+function persistRunArtifacts(args: PersistRunArtifactsArgs): void {
+	const dir = join(args.persistRoot, args.sessionId);
+	try {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, `${args.specId}.deliverable.md`), args.deliverable);
+		const auditBlob = {
+			verdict:        args.audit.verdict,
+			reason:         args.audit.reason,
+			editHints:      args.audit.editHints,
+			parse:          args.audit.parse,
+			machineResults: args.audit.machineResults,
+			spawn: {
+				exitCode:   args.spawnResult.exitCode,
+				durationMs: args.spawnResult.durationMs,
+				stdoutLen:  args.spawnResult.stdout.length,
+				stderrLen:  args.spawnResult.stderr.length,
+			},
+		};
+		writeFileSync(join(dir, `${args.specId}.audit.json`), JSON.stringify(auditBlob, null, 2));
+	} catch (err) {
+		log.warn({ err: (err as Error).message, dir, specId: args.specId },
+			'handoff: failed to persist deliverable/audit; in-memory result unaffected');
+	}
 }
