@@ -9,6 +9,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInsrcDaemonService, type IInsrcStreamHandle, type DaemonStreamMessage } from '../common/daemonService.js';
 import { IInsrcChatService, type ChatMessage, type ChatEvent, type CodeAnnotation, type GateInfo, type ProgressInfo, type DeleteSessionResult, type DeleteSessionsBulkResult } from '../common/chatService.js';
+import { IInsrcHandoffService, type HandoffEvent } from '../common/handoffService.js';
 
 const STORAGE_KEY_REPO = 'insrc.chat.activeRepo';
 const STORAGE_KEY_SESSION = 'insrc.chat.activeSessionId';
@@ -50,6 +51,7 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@ILogService private readonly logService: ILogService,
 		@IStorageService private readonly storageService: IStorageService,
+		@IInsrcHandoffService private readonly handoffService: IInsrcHandoffService,
 	) {
 		super();
 
@@ -651,10 +653,23 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 				});
 				break;
 			}
+			case 'handoff': {
+				// External-agent handoff event (plans/external-agent-integration.md
+				// Phase 2b). Forward to the dedicated handoff service which
+				// aggregates events by specId; the chat widget reads its
+				// state map to render handoff cards. dispatch() validates
+				// the wire shape -- malformed events are dropped silently.
+				const handoffEvent = msg.event as HandoffEvent;
+				if (handoffEvent !== null && typeof handoffEvent === 'object' && typeof handoffEvent.kind === 'string') {
+					this.handoffService.dispatch(handoffEvent);
+				}
+				break;
+			}
 			case 'context.set':
 			case 'context.clear':
 			case 'checkpoint':
-				// Internal events, not shown in chat
+			case 'todos':
+				// Internal events / handled by dedicated services
 				break;
 		}
 	}

@@ -18,6 +18,8 @@ import { IInsrcBrainstormSessionService } from '../common/brainstormSessionServi
 import { InsrcBrainstormSessionServiceImpl } from '../browser/brainstorm/brainstormSessionServiceImpl.js';
 import { IInsrcTodosService } from '../common/todosService.js';
 import { InsrcTodosServiceImpl } from '../browser/todos/todosServiceImpl.js';
+import { IInsrcHandoffService } from '../common/handoffService.js';
+import { InsrcHandoffServiceImpl } from '../browser/handoff/handoffServiceImpl.js';
 import { IInsrcArtifactsService } from '../common/artifactsService.js';
 import { InsrcArtifactsServiceImpl } from '../browser/artifacts/insrcArtifactsServiceImpl.js';
 import { IInsrcDbConnectionsService } from '../common/dbConnectionsService.js';
@@ -50,6 +52,7 @@ registerSingleton(IInsrcKeychainService, InsrcKeychainServiceImpl, Instantiation
 registerSingleton(IInsrcLSPToolService, InsrcLSPToolServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcBrainstormSessionService, InsrcBrainstormSessionServiceImpl, InstantiationType.Eager);
 registerSingleton(IInsrcTodosService, InsrcTodosServiceImpl, InstantiationType.Eager);
+registerSingleton(IInsrcHandoffService, InsrcHandoffServiceImpl, InstantiationType.Eager);
 registerSingleton(IInsrcArtifactsService, InsrcArtifactsServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcDbConnectionsService, InsrcDbConnectionsServiceImpl, InstantiationType.Delayed);
 registerSingleton(IInsrcAccessService, InsrcAccessServiceImpl, InstantiationType.Delayed);
