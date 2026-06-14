@@ -136,7 +136,7 @@ test('spawnClaudeCode: piping the spec to stdin -- child receives the markdown b
 	assert.equal(result.stdout, '# Debug Session\nfix the flake');
 });
 
-test('spawnClaudeCode: passes --print and allowedTools/disallowedTools flags by default', async () => {
+test('spawnClaudeCode: default args include --print, --dangerously-skip-permissions, allowed/disallowed tools', async () => {
 	const wt = makeWorktree();
 	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
 	const result = await spawnClaudeCode({
@@ -151,12 +151,13 @@ test('spawnClaudeCode: passes --print and allowedTools/disallowedTools flags by 
 	const args = result.stdout.split('\n').filter(s => s.length > 0);
 	assert.deepEqual(args, [
 		'--print',
+		'--dangerously-skip-permissions',
 		'--allowedTools',    'Read,Grep,Bash,Edit,Write',
 		'--disallowedTools', 'WebFetch,WebSearch',
 	]);
 });
 
-test('spawnClaudeCode: custom allowedTools / disallowedTools propagate', async () => {
+test('spawnClaudeCode: custom allowedTools / disallowedTools propagate (with the default permission bypass)', async () => {
 	const wt = makeWorktree();
 	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
 	const result = await spawnClaudeCode({
@@ -173,8 +174,30 @@ test('spawnClaudeCode: custom allowedTools / disallowedTools propagate', async (
 	const args = result.stdout.split('\n').filter(s => s.length > 0);
 	assert.deepEqual(args, [
 		'--print',
+		'--dangerously-skip-permissions',
 		'--allowedTools',    'Read,Grep',
 		'--disallowedTools', 'WebFetch',
+	]);
+});
+
+test('spawnClaudeCode: skipClaudePermissions=false -> omit --dangerously-skip-permissions (caller opt-out)', async () => {
+	const wt = makeWorktree();
+	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
+	const result = await spawnClaudeCode({
+		worktreePath:           wt,
+		spec:                   'unused',
+		sessionId:              'sess-1',
+		specId:                 'spec-1',
+		mcpServerPath:          FAKE_MCP_SERVER,
+		claudeBinPath:          bin,
+		issueToken:             tokenStub,
+		skipClaudePermissions:  false,
+	});
+	const args = result.stdout.split('\n').filter(s => s.length > 0);
+	assert.deepEqual(args, [
+		'--print',
+		'--allowedTools',    'Read,Grep,Bash,Edit,Write',
+		'--disallowedTools', 'WebFetch,WebSearch',
 	]);
 });
 

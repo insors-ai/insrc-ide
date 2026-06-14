@@ -57,6 +57,28 @@ export interface SpawnClaudeCodeOpts {
 	 */
 	readonly issueToken?:     ((sessionId: string) => string) | undefined;
 	/**
+	 * When true (the default), the spawn passes
+	 * `--dangerously-skip-permissions` to Claude Code so MCP tool calls
+	 * + bash + edit operations don't prompt mid-run.
+	 *
+	 * Why bypass Claude's permission system by default in a handoff:
+	 *   - Worktree sandbox: edits are isolated to <handoffsRoot>/<sid>/
+	 *     /worktree, the real tree is untouched until Mode C audit
+	 *     accepts the diff.
+	 *   - Mode A allowedTools / disallowedTools constrain the tool
+	 *     surface BEFORE spawn (passed below).
+	 *   - Mode B hook (Phase 3) -- when enabled via hookBinPath --
+	 *     replaces Claude's prompt with insrc's own permission policy.
+	 *   - Mode C audit reviews the diff after the run.
+	 * Claude's own prompts are redundant inside this stack and have no
+	 * place to land in `--print` (one-shot, non-interactive) mode --
+	 * Claude bails after a few retries.
+	 *
+	 * Set to `false` only when you want Claude's prompts to land
+	 * somewhere (e.g. interactive REPL mode, never in the handoff CLI).
+	 */
+	readonly skipClaudePermissions?: boolean | undefined;
+	/**
 	 * Absolute path to the compiled insrc-permission-hook binary
 	 * (out/insrc/bin/permission-hook.js). When set, the spawn writes
 	 * a `.claude/settings.json` with PreToolUse hook entries pointing
@@ -95,11 +117,19 @@ export async function spawnClaudeCode(opts: SpawnClaudeCodeOpts): Promise<AgentS
 	const disallowed = (opts.disallowedTools ?? DEFAULT_DISALLOWED).join(',');
 
 	const command = opts.claudeBinPath ?? 'claude';
-	const args    = [
-		'--print',
-		'--allowedTools',    allowed,
-		'--disallowedTools', disallowed,
-	];
+	const skipPermissions = opts.skipClaudePermissions ?? true;
+	const args = skipPermissions
+		? [
+			'--print',
+			'--dangerously-skip-permissions',
+			'--allowedTools',    allowed,
+			'--disallowedTools', disallowed,
+		]
+		: [
+			'--print',
+			'--allowedTools',    allowed,
+			'--disallowedTools', disallowed,
+		];
 
 	// 4. Compose env -- inherit, then layer the handoff-scoped quartet.
 	//    INSRC_SESSION_ID is consumed by the permission-hook (Phase 3
