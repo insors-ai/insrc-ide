@@ -858,12 +858,18 @@ async function main(): Promise<void> {
 			const closurePaths = await resolveClosure(db, repoId);
 			const allRepos = await listRepos(db);
 			const byPath = new Map(allRepos.map(r => [r.path, r.name] as const));
-			return closurePaths.map(path => ({
-				repoId:     path,
-				name:       byPath.get(path) ?? path,
-				path,
-				transitive: path !== repoId,
-			}));
+			// resolveClosure's documented fallback returns [repoPath] even
+			// when the root isn't in the graph (e.g. unregistered repo);
+			// don't leak that into the MCP surface -- an honest answer for
+			// a non-existent repo is the empty closure.
+			return closurePaths
+				.filter(path => byPath.has(path))
+				.map(path => ({
+					repoId:     path,
+					name:       byPath.get(path)!,
+					path,
+					transitive: path !== repoId,
+				}));
 		},
 
 		'repo.search_cross_repo': async (params) => {
