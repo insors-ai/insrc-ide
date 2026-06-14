@@ -185,3 +185,62 @@ test('assembleSpec: unknown template id throws via getTemplate', () => {
 		/Unknown handoff template id 'SPEC'/,
 	);
 });
+
+// ---------------------------------------------------------------------------
+// Risk ratchet integration (Phase 3 Day 4)
+// ---------------------------------------------------------------------------
+
+test('assembleSpec: high-risk path in permissions ratchets the recorded riskTag from low to high', () => {
+	const perms: PermissionsBlock = {
+		allow:  [{ tool: 'Edit', paths: ['migrations/**'] }],
+		prompt: [],
+		deny:   [],
+	};
+	const out = assembleSpec(baseInput({ permissions: perms, riskTag: 'low' }));
+	assert.equal(out.meta.riskTag, 'high');
+});
+
+test('assembleSpec: high-risk Bash command (git push) ratchets even when bucketed under prompt', () => {
+	const perms: PermissionsBlock = {
+		allow:  [],
+		prompt: [{ tool: 'Bash', commands: ['git push'] }],
+		deny:   [],
+	};
+	const out = assembleSpec(baseInput({ permissions: perms, riskTag: 'low' }));
+	assert.equal(out.meta.riskTag, 'high');
+});
+
+test('assembleSpec: medium-risk command (npm install) ratchets low -> medium (not high)', () => {
+	const perms: PermissionsBlock = {
+		allow:  [{ tool: 'Bash', commands: ['npm install'] }],
+		prompt: [],
+		deny:   [],
+	};
+	const out = assembleSpec(baseInput({ permissions: perms, riskTag: 'low' }));
+	assert.equal(out.meta.riskTag, 'medium');
+});
+
+test('assembleSpec: empty permissions never ratchet -- recorded risk == proposed risk', () => {
+	for (const r of ['low', 'medium', 'high'] as const) {
+		const out = assembleSpec(baseInput({ riskTag: r }));
+		assert.equal(out.meta.riskTag, r);
+	}
+});
+
+test('assembleSpec: LLM proposing low does NOT bypass a high-risk path -- effective risk still records as high', () => {
+	const perms: PermissionsBlock = {
+		allow:  [{ tool: 'Edit', paths: ['infra/aws/**'] }],
+		prompt: [], deny: [],
+	};
+	const out = assembleSpec(baseInput({ permissions: perms, riskTag: 'low' }));
+	assert.equal(out.meta.riskTag, 'high');
+});
+
+test('assembleSpec: LLM-proposed risk above ratchet result is preserved (LLM can voluntarily set higher)', () => {
+	const perms: PermissionsBlock = {
+		allow:  [{ tool: 'Bash', commands: ['npm install'] }], // medium-risk trigger
+		prompt: [], deny: [],
+	};
+	const out = assembleSpec(baseInput({ permissions: perms, riskTag: 'high' }));
+	assert.equal(out.meta.riskTag, 'high');
+});

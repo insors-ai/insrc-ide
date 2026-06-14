@@ -27,7 +27,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runAgentSubprocess, writeMcpConfig } from '../spawn/base.js';
+import { runAgentSubprocess, writeClaudeHooksConfig, writeMcpConfig } from '../spawn/base.js';
 import { spawnClaudeCode } from '../spawn/claude-code.js';
 
 const FAKE_MCP_SERVER = '/abs/path/to/insrc-mcp-server.js';
@@ -227,4 +227,71 @@ test('spawnClaudeCode: timeout forwarded to the subprocess', async () => {
 		issueToken:    tokenStub,
 	});
 	assert.equal(result.exitCode, -9);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 Day 4: hook config writer + INSRC_SESSION_ID env
+// ---------------------------------------------------------------------------
+
+test('writeClaudeHooksConfig: writes .claude/settings.json with PreToolUse pointing at the hook bin', () => {
+	const wt = makeWorktree();
+	const file = writeClaudeHooksConfig(wt, '/abs/path/insrc-permission-hook.js');
+	assert.equal(file, join(wt, '.claude', 'settings.json'));
+	const block = JSON.parse(readFileSync(file, 'utf8')) as {
+		hooks: { PreToolUse: { matcher: { type: string }; command: string }[] };
+	};
+	assert.equal(block.hooks.PreToolUse.length, 1);
+	assert.equal(block.hooks.PreToolUse[0]!.command,       '/abs/path/insrc-permission-hook.js');
+	assert.equal(block.hooks.PreToolUse[0]!.matcher.type,  'all');
+});
+
+test('spawnClaudeCode: hookBinPath set -> .claude/settings.json written before spawn', async () => {
+	const wt = makeWorktree();
+	const bin = writeStub(wt, 'noop.sh', 'cat - >/dev/null; exit 0\n');
+	await spawnClaudeCode({
+		worktreePath:  wt,
+		spec:          '',
+		sessionId:     'sess-1',
+		specId:        'spec-1',
+		mcpServerPath: FAKE_MCP_SERVER,
+		claudeBinPath: bin,
+		hookBinPath:   '/abs/path/insrc-permission-hook.js',
+		issueToken:    tokenStub,
+	});
+	assert.equal(existsSync(join(wt, '.claude', 'settings.json')), true);
+});
+
+test('spawnClaudeCode: hookBinPath undefined -> NO .claude/settings.json written (Mode B opt-in)', async () => {
+	const wt = makeWorktree();
+	const bin = writeStub(wt, 'noop.sh', 'cat - >/dev/null; exit 0\n');
+	await spawnClaudeCode({
+		worktreePath:  wt,
+		spec:          '',
+		sessionId:     'sess-1',
+		specId:        'spec-1',
+		mcpServerPath: FAKE_MCP_SERVER,
+		claudeBinPath: bin,
+		// hookBinPath: undefined
+		issueToken:    tokenStub,
+	});
+	assert.equal(existsSync(join(wt, '.claude', 'settings.json')), false);
+});
+
+test('spawnClaudeCode: INSRC_SESSION_ID env var is always set, regardless of hookBinPath', async () => {
+	const wt = makeWorktree();
+	const bin = writeStub(wt, 'dump-env.sh',
+		'echo "I:$INSRC_SESSION_ID"\necho "T:$INSRC_SESSION_TOKEN"\n');
+	const result = await spawnClaudeCode({
+		worktreePath:  wt,
+		spec:          '',
+		sessionId:     'sess-42',
+		specId:        'spec-42',
+		mcpServerPath: FAKE_MCP_SERVER,
+		claudeBinPath: bin,
+		issueToken:    () => 'tok-xyz',
+	});
+	assert.equal(result.exitCode, 0);
+	const lines = result.stdout.split('\n');
+	assert.equal(lines[0], 'I:sess-42');
+	assert.equal(lines[1], 'T:tok-xyz');
 });

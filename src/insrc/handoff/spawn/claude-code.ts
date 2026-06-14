@@ -23,7 +23,7 @@
 
 import { issueSessionToken } from '../../mcp/session-token.js';
 import { PATHS } from '../../shared/paths.js';
-import { runAgentSubprocess, writeMcpConfig, type AgentSpawnResult } from './base.js';
+import { runAgentSubprocess, writeClaudeHooksConfig, writeMcpConfig, type AgentSpawnResult } from './base.js';
 
 export type ClaudeAllowedTool    = 'Read' | 'Grep' | 'Bash' | 'Edit' | 'Write';
 export type ClaudeDisallowedTool = 'WebFetch' | 'WebSearch';
@@ -56,6 +56,16 @@ export interface SpawnClaudeCodeOpts {
 	 * inject a deterministic token without touching the real store).
 	 */
 	readonly issueToken?:     ((sessionId: string) => string) | undefined;
+	/**
+	 * Absolute path to the compiled insrc-permission-hook binary
+	 * (out/insrc/bin/permission-hook.js). When set, the spawn writes
+	 * a `.claude/settings.json` with PreToolUse hook entries pointing
+	 * at this path, enabling Mode B gating (Phase 3 Day 3 hook script
+	 * +daemon gate IPC) for this handoff. When undefined, the agent
+	 * runs without Mode B; allowed-tools and the audit-time Mode C
+	 * sandbox review still apply.
+	 */
+	readonly hookBinPath?:    string | undefined;
 }
 
 const DEFAULT_ALLOWED:    ClaudeAllowedTool[]    = ['Read', 'Grep', 'Bash', 'Edit', 'Write'];
@@ -65,6 +75,14 @@ export async function spawnClaudeCode(opts: SpawnClaudeCodeOpts): Promise<AgentS
 	// 1. Write the worktree-local `.mcp.json` so Claude auto-discovers
 	//    insrc's MCP server in the spawn cwd.
 	writeMcpConfig(opts.worktreePath, opts.mcpServerPath);
+
+	// 1b. If a permission-hook binary is configured, register it as a
+	//     PreToolUse hook in `.claude/settings.json`. Mode B gating
+	//     activates only when this is set; otherwise the agent runs
+	//     with allowed-tools enforcement + Mode C audit only.
+	if (opts.hookBinPath !== undefined) {
+		writeClaudeHooksConfig(opts.worktreePath, opts.hookBinPath);
+	}
 
 	// 2. Issue a session-scoped token for this handoff. Will flow into
 	//    the child subprocess via env so the MCP server can validate
@@ -83,10 +101,15 @@ export async function spawnClaudeCode(opts: SpawnClaudeCodeOpts): Promise<AgentS
 		'--disallowedTools', disallowed,
 	];
 
-	// 4. Compose env -- inherit, then layer the handoff-scoped trio.
+	// 4. Compose env -- inherit, then layer the handoff-scoped quartet.
+	//    INSRC_SESSION_ID is consumed by the permission-hook (Phase 3
+	//    Day 3) so it knows which session's spec to look up. Always
+	//    injected so the hook works whether or not opts.hookBinPath is
+	//    set (forward-compatible).
 	const env: Record<string, string> = {
 		...(process.env as Record<string, string>),
 		INSRC_SESSION_TOKEN: sessionToken,
+		INSRC_SESSION_ID:    opts.sessionId,
 		INSRC_DAEMON_SOCKET: PATHS.sockFile,
 		INSRC_SPEC_ID:       opts.specId,
 	};

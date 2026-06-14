@@ -38,6 +38,7 @@ import type {
 	SpecMeta,
 	TemplateId,
 } from './types.js';
+import { applyRiskRatchet } from '../gating/risk-ratchet.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('handoff:spec-assembler');
@@ -98,8 +99,20 @@ export function assembleSpec(input: SpecAssemblerInput): AssembledSpec {
 		return template.defaultAcceptance(seed as never);
 	})();
 
-	const riskTag      = input.riskTag      ?? template.defaultRisk;
-	const permissions  = input.permissions  ?? EMPTY_PERMISSIONS;
+	const proposedRiskTag = input.riskTag      ?? template.defaultRisk;
+	const permissions     = input.permissions  ?? EMPTY_PERMISSIONS;
+
+	// Phase 3 Day 4: deterministic ratchet may RAISE the risk above
+	// what the LLM (or template default) proposed. LLMs can never
+	// lower risk below what gating/risk-ratchet.ts requires. The
+	// ratchet's reason is logged for audit; the spec records the
+	// effective risk only.
+	const ratchet = applyRiskRatchet({ draftPermissions: permissions, llmProposedRisk: proposedRiskTag });
+	if (ratchet.ratchetReason !== undefined) {
+		log.info({ specId, proposed: proposedRiskTag, effective: ratchet.effectiveRisk, reason: ratchet.ratchetReason },
+			'spec-assembler: risk ratcheted');
+	}
+	const riskTag = ratchet.effectiveRisk;
 
 	const renderInput = buildRenderInput(input, acceptance, riskTag, permissions);
 	const specMd      = template.renderSpec(renderInput as never);

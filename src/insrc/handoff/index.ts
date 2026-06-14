@@ -71,6 +71,14 @@ export interface RunHandoffOpts {
 	readonly scriptedAgent?:  ScriptedAgentFn | undefined;
 	/** Test seam: override the claude binary lookup. */
 	readonly claudeBinPath?:  string | undefined;
+	/**
+	 * Absolute path to insrc-permission-hook binary
+	 * (out/insrc/bin/permission-hook.js). When set on claude-code
+	 * spawn, Mode B PreToolUse gating activates for this handoff.
+	 * Undefined -> no Mode B hook (Mode A allowed-tools + Mode C
+	 * audit still apply).
+	 */
+	readonly hookBinPath?:    string | undefined;
 	/** Don't delete the worktree on completion. Default: keep on accept, keep on revise so the user can inspect. */
 	readonly keepWorktree?:   boolean | undefined;
 	/** Cleanup the worktree even on failure (tests). */
@@ -239,5 +247,6 @@ async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: s
 	};
 	if (opts.timeoutMs !== undefined)    (claudeOpts as { timeoutMs?: number }).timeoutMs    = opts.timeoutMs;
 	if (opts.claudeBinPath !== undefined) (claudeOpts as { claudeBinPath?: string }).claudeBinPath = opts.claudeBinPath;
+	if (opts.hookBinPath !== undefined)  (claudeOpts as { hookBinPath?: string }).hookBinPath  = opts.hookBinPath;
 	return spawnClaudeCode(claudeOpts);
 }

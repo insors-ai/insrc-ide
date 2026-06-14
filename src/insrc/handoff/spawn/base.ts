@@ -125,3 +125,34 @@ export function writeMcpConfig(worktreePath: string, serverPath: string): string
 	writeFileSync(file, JSON.stringify(block, null, 2));
 	return file;
 }
+
+/**
+ * Write the worktree-local Claude Code settings.json that registers
+ * the `insrc-permission-hook` binary as a PreToolUse hook. The hook
+ * fires before every tool call the agent makes and asks the daemon
+ * for a verdict (Phase 3 Day 3 binary).
+ *
+ * Format per Claude Code's hook contract (design §9.2): a top-level
+ * `hooks.PreToolUse` array, each entry with a matcher and a command.
+ * The matcher `{type: 'all'}` fires on every tool; the hook script
+ * itself short-circuits by tool name + spec policy.
+ *
+ * Returns the path to the file actually written.
+ */
+export function writeClaudeHooksConfig(worktreePath: string, hookBinPath: string): string {
+	const dir  = join(worktreePath, '.claude');
+	const file = join(dir, 'settings.json');
+	const block = {
+		hooks: {
+			PreToolUse: [
+				{
+					matcher: { type: 'all' },
+					command: hookBinPath,
+				},
+			],
+		},
+	};
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(file, JSON.stringify(block, null, 2));
+	return file;
+}
