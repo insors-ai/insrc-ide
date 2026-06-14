@@ -53,6 +53,8 @@ export interface HandoffCliOpts {
 	readonly failingTest?:           string;
 	readonly forceCleanup?:          boolean;
 	readonly claudeBinPath?:         string;
+	readonly codexBinPath?:          string;
+	readonly hookBinPath?:           string;
 }
 
 export interface CliIo {
@@ -120,6 +122,8 @@ export async function runHandoffCli(opts: HandoffCliOpts, io: CliIo): Promise<nu
 			...(opts.persistRoot   !== undefined ? { persistRoot:   opts.persistRoot   } : {}),
 			sessionId,
 			...(opts.claudeBinPath !== undefined ? { claudeBinPath: opts.claudeBinPath } : {}),
+			...(opts.codexBinPath  !== undefined ? { codexBinPath:  opts.codexBinPath  } : {}),
+			...(opts.hookBinPath   !== undefined ? { hookBinPath:   opts.hookBinPath   } : {}),
 			...(opts.forceCleanup  === true      ? { forceCleanup:  true            } : {}),
 			...(scriptedAgent      !== undefined ? { scriptedAgent }                : {}),
 		});
@@ -173,6 +177,8 @@ export function registerHandoffCommands(program: Command): void {
 		.option('--out-of-scope <paths>',                  'comma-separated paths the agent MUST NOT modify')
 		.option('--failing-test <name>',                   'optional DEBUG-SESSION extras: the failing test name')
 		.option('--claude-bin-path <path>',                'test seam: override the claude binary path')
+		.option('--codex-bin-path <path>',                 'test seam: override the codex binary path')
+		.option('--hook-bin-path <path>',                  'absolute path to the insrc-permission-hook binary (enables Mode B PreToolUse gating; pointless without an IDE modal pipeline)')
 		.option('--force-cleanup',                         'remove the worktree on completion (default: keep)')
 		.action(async (opts: HandoffCliOpts) => {
 			const code = await runHandoffCli(opts, {

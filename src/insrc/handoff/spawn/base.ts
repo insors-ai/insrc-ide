@@ -156,3 +156,51 @@ export function writeClaudeHooksConfig(worktreePath: string, hookBinPath: string
 	writeFileSync(file, JSON.stringify(block, null, 2));
 	return file;
 }
+
+/**
+ * Write the worktree-local Codex config.toml that registers the
+ * insrc MCP server (`[mcp_servers.insrc]` block) so Codex
+ * auto-discovers it on launch. Same shape `insrc mcp-setup codex`
+ * writes globally, but scoped per-handoff so each spawn gets its
+ * own session-scoped env-var forwarding.
+ *
+ * TOML is generated inline (no library dependency, per the Day-2.5
+ * scoping-report decision). The block is small and stable; if
+ * Codex's schema grows we can swap in `@iarna/toml` then.
+ */
+export function writeCodexMcpConfig(worktreePath: string, serverPath: string): string {
+	const dir  = join(worktreePath, '.codex');
+	const file = join(dir, 'config.toml');
+	const escaped = serverPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	const body = [
+		'[mcp_servers.insrc]',
+		'command = "node"',
+		`args = ["${escaped}"]`,
+		'env_vars = ["INSRC_SESSION_TOKEN", "INSRC_SESSION_ID", "INSRC_DAEMON_SOCKET", "INSRC_SPEC_ID"]',
+		'',
+	].join('\n');
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(file, body);
+	return file;
+}
+
+/**
+ * Write the worktree-local Codex hooks.json registering the
+ * insrc-permission-hook for both PreToolUse and PermissionRequest
+ * events. Codex's hook system exposes the latter as a distinct
+ * event from PreToolUse (design §9.2 last paragraph); we wire both
+ * to the same binary so the verdict path is identical.
+ *
+ * Format: an array of `{event, matcher, command}` entries.
+ */
+export function writeCodexHooksConfig(worktreePath: string, hookBinPath: string): string {
+	const dir  = join(worktreePath, '.codex');
+	const file = join(dir, 'hooks.json');
+	const block = [
+		{ event: 'PreToolUse',        matcher: { tool: '*' }, command: hookBinPath },
+		{ event: 'PermissionRequest', matcher: { tool: '*' }, command: hookBinPath },
+	];
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(file, JSON.stringify(block, null, 2));
+	return file;
+}

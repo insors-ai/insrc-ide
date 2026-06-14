@@ -71,6 +71,8 @@ export interface RunHandoffOpts {
 	readonly scriptedAgent?:  ScriptedAgentFn | undefined;
 	/** Test seam: override the claude binary lookup. */
 	readonly claudeBinPath?:  string | undefined;
+	/** Test seam: override the codex binary lookup. */
+	readonly codexBinPath?:   string | undefined;
 	/**
 	 * Absolute path to insrc-permission-hook binary
 	 * (out/insrc/bin/permission-hook.js). When set on claude-code
@@ -234,7 +236,9 @@ async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: s
 			specId,
 			mcpServerPath: opts.mcpServerPath ?? '/abs/path/insrc-mcp-server.js',
 		};
-		if (opts.timeoutMs !== undefined) (codexOpts as { timeoutMs?: number }).timeoutMs = opts.timeoutMs;
+		if (opts.timeoutMs !== undefined)   (codexOpts as { timeoutMs?: number }).timeoutMs    = opts.timeoutMs;
+		if (opts.hookBinPath !== undefined) (codexOpts as { hookBinPath?: string }).hookBinPath = opts.hookBinPath;
+		if (opts.codexBinPath !== undefined) (codexOpts as { codexBinPath?: string }).codexBinPath = opts.codexBinPath;
 		return spawnCodex(codexOpts);
 	}
 	// claude-code path
