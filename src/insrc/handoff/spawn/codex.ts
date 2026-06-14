@@ -55,6 +55,7 @@ import {
 	writeCodexHooksConfig,
 	writeCodexMcpConfig,
 	type AgentSpawnResult,
+	type SpawnChunkListener,
 } from './base.js';
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -105,6 +106,11 @@ export interface SpawnCodexOpts {
 	 * when you want them to land somewhere (e.g. attended dev runs).
 	 */
 	readonly skipApprovalsAndSandbox?: boolean | undefined;
+	/**
+	 * Optional live stdout/stderr chunk listener (Phase 2c). Same
+	 * semantics as `SpawnClaudeCodeOpts.onChunk`.
+	 */
+	readonly onChunk?:        SpawnChunkListener | undefined;
 }
 
 const DEFAULT_SANDBOX_MODE: CodexSandboxMode = 'workspace-write';
@@ -160,6 +166,9 @@ export async function spawnCodex(opts: SpawnCodexOpts): Promise<AgentSpawnResult
 	};
 	if (opts.timeoutMs !== undefined) {
 		(subprocessOpts as { timeoutMs?: number }).timeoutMs = opts.timeoutMs;
+	}
+	if (opts.onChunk !== undefined) {
+		(subprocessOpts as { onChunk?: SpawnChunkListener }).onChunk = opts.onChunk;
 	}
 	return runAgentSubprocess(subprocessOpts);
 }

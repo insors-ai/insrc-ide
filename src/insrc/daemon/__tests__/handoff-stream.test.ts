@@ -65,7 +65,7 @@ function collect(): { recorded: IpcStreamMessage[]; send: (m: IpcStreamMessage) 
 // Happy path: streams handoff events + done
 // ---------------------------------------------------------------------------
 
-test("handoff.run: scripted-agent run emits the 8 progress events then a 'done'", async () => {
+test("handoff.run: scripted-agent run emits the pipeline events then a 'done'", async () => {
 	await withRepo(async (repo, persistRoot) => {
 		const { recorded, send } = collect();
 		const controller = new AbortController();
@@ -81,16 +81,19 @@ test("handoff.run: scripted-agent run emits the 8 progress events then a 'done'"
 			persistRoot,
 		}, send, controller.signal);
 
-		// 8 handoff + 1 done = 9 messages.
-		assert.equal(recorded.length, 9);
 		const last = recorded[recorded.length - 1]!;
 		assert.equal(last.stream, 'done');
 
 		const progressEvents = recorded.slice(0, -1);
 		for (const m of progressEvents) assert.equal(m.stream, 'handoff');
 
+		// Phase 2c: scripted-agent stdout/stderr now replay through the
+		// chunk listener too. The pipeline-stage events stay in the
+		// same canonical order; chunk events fan in between `spawned`
+		// and `agent-completed`.
 		const kinds = progressEvents.map(m => (m.data as HandoffEvent).kind);
-		assert.deepEqual(kinds, [
+		const stageKinds = kinds.filter(k => k !== 'agent-stdout-chunk' && k !== 'agent-stderr-chunk');
+		assert.deepEqual(stageKinds, [
 			'spec-assembling',
 			'spec-ready',
 			'worktree-created',
@@ -100,6 +103,22 @@ test("handoff.run: scripted-agent run emits the 8 progress events then a 'done'"
 			'audit-ready',
 			'handoff-final',
 		]);
+
+		// At minimum one stdout chunk fired (the scripted deliverable).
+		const chunkEvents = kinds.filter(k => k === 'agent-stdout-chunk' || k === 'agent-stderr-chunk');
+		assert.ok(chunkEvents.length >= 1,
+			`expected at least one chunk event, got ${chunkEvents.length}`);
+
+		// Chunk events land between `spawned` and `agent-completed`.
+		const spawnedAt = kinds.indexOf('spawned');
+		const completedAt = kinds.indexOf('agent-completed');
+		for (let i = 0; i < kinds.length; i++) {
+			const k = kinds[i]!;
+			if (k === 'agent-stdout-chunk' || k === 'agent-stderr-chunk') {
+				assert.ok(i > spawnedAt && i < completedAt,
+					`chunk event at index ${i} (kind=${k}) outside [${spawnedAt}, ${completedAt}]`);
+			}
+		}
 	});
 });
 

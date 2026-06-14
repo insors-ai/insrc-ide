@@ -166,6 +166,16 @@ export type HandoffEvent =
 	    readonly preview: string }
 	| { readonly kind: 'worktree-created'; readonly specId: string; readonly worktreePath: string; readonly ref: string }
 	| { readonly kind: 'spawned';          readonly specId: string; readonly agent: 'claude-code' | 'codex' | 'scripted-agent' }
+	/**
+	 * Live stdout chunk from the running agent subprocess. Emitted
+	 * verbatim as Node's child-process data events arrive (one
+	 * `agent-stdout-chunk` per `child.stdout.on('data')` callback).
+	 * Subscribers in terminal-UX mode (Phase 2c) pipe these into a
+	 * Pseudoterminal; headless-UX subscribers drop them.
+	 */
+	| { readonly kind: 'agent-stdout-chunk'; readonly specId: string; readonly chunk: string }
+	/** Live stderr chunk; see `agent-stdout-chunk` for shape. */
+	| { readonly kind: 'agent-stderr-chunk'; readonly specId: string; readonly chunk: string }
 	| { readonly kind: 'agent-completed';  readonly specId: string; readonly exitCode: number; readonly durationMs: number;
 	    /** Length of the raw stdout deliverable; useful for size telemetry. */
 	    readonly stdoutLen: number }

@@ -23,7 +23,7 @@
 
 import { issueSessionToken } from '../../mcp/session-token.js';
 import { PATHS } from '../../shared/paths.js';
-import { runAgentSubprocess, writeClaudeHooksConfig, writeMcpConfig, type AgentSpawnResult } from './base.js';
+import { runAgentSubprocess, writeClaudeHooksConfig, writeMcpConfig, type AgentSpawnResult, type SpawnChunkListener } from './base.js';
 
 export type ClaudeAllowedTool    = 'Read' | 'Grep' | 'Bash' | 'Edit' | 'Write';
 export type ClaudeDisallowedTool = 'WebFetch' | 'WebSearch';
@@ -88,6 +88,13 @@ export interface SpawnClaudeCodeOpts {
 	 * sandbox review still apply.
 	 */
 	readonly hookBinPath?:    string | undefined;
+	/**
+	 * Optional live stdout/stderr chunk listener (Phase 2c).
+	 * Forwarded into `runAgentSubprocess`. When wired, terminal-UX
+	 * subscribers receive every chunk as it arrives from the agent
+	 * subprocess; headless mode leaves this undefined.
+	 */
+	readonly onChunk?:        SpawnChunkListener | undefined;
 }
 
 const DEFAULT_ALLOWED:    ClaudeAllowedTool[]    = ['Read', 'Grep', 'Bash', 'Edit', 'Write'];
@@ -153,6 +160,9 @@ export async function spawnClaudeCode(opts: SpawnClaudeCodeOpts): Promise<AgentS
 	};
 	if (opts.timeoutMs !== undefined) {
 		(subprocessOpts as { timeoutMs?: number }).timeoutMs = opts.timeoutMs;
+	}
+	if (opts.onChunk !== undefined) {
+		(subprocessOpts as { onChunk?: SpawnChunkListener }).onChunk = opts.onChunk;
 	}
 	return runAgentSubprocess(subprocessOpts);
 }

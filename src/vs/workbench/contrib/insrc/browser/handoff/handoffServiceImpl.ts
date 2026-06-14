@@ -9,6 +9,7 @@ import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../common/chatService.js';
 import {
 	IInsrcHandoffService,
+	type HandoffChunk,
 	type HandoffEvent,
 	type HandoffSessionState,
 	type HandoffStage,
@@ -52,6 +53,9 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 
 	private readonly _onDidRemoveSession = this._register(new Emitter<string>());
 	readonly onDidRemoveSession: Event<string> = this._onDidRemoveSession.event;
+
+	private readonly _onChunk = this._register(new Emitter<HandoffChunk>());
+	readonly onChunk: Event<HandoffChunk> = this._onChunk.event;
 
 	/**
 	 * The current chat session id. We don't subscribe to handoff
@@ -158,6 +162,19 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 				};
 				this._sessions.set(event.specId, state);
 				this._emitChange(state);
+				return true;
+			}
+
+			case 'agent-stdout-chunk':
+			case 'agent-stderr-chunk': {
+				// Live chunks don't change session state; fan out to the
+				// dedicated chunk subscriber (Phase 2c terminal UX) and
+				// return early so we don't trip the stage/terminal guard.
+				this._onChunk.fire({
+					specId: event.specId,
+					stream: event.kind === 'agent-stdout-chunk' ? 'stdout' : 'stderr',
+					chunk: event.chunk,
+				});
 				return true;
 			}
 

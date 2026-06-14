@@ -35,6 +35,15 @@ export interface AgentSpawnResult {
 	readonly durationMs: number;
 }
 
+/**
+ * Live stdout / stderr chunk callback. Fires once per Node
+ * child-process `data` event with the raw decoded chunk. Used by
+ * the handoff orchestrator (Phase 2c) to forward live agent
+ * output to terminal-UX subscribers. Headless-UX callers leave
+ * this undefined.
+ */
+export type SpawnChunkListener = (stream: 'stdout' | 'stderr', chunk: string) => void;
+
 export interface SpawnAgentOpts {
 	readonly command:  string;
 	readonly args:     readonly string[];
@@ -44,6 +53,14 @@ export interface SpawnAgentOpts {
 	readonly spec:     string;
 	/** Hard timeout. If exceeded, kill the subprocess and resolve with exitCode = -9. */
 	readonly timeoutMs?: number | undefined;
+	/**
+	 * Optional live chunk forwarder. When provided, fires once per
+	 * raw stdout / stderr data chunk in arrival order; chunks are
+	 * still aggregated into the final `stdout` / `stderr` result.
+	 * Errors thrown from the listener are swallowed so the
+	 * subprocess pipeline can't be wedged by a misbehaving listener.
+	 */
+	readonly onChunk?: SpawnChunkListener | undefined;
 }
 
 /**
@@ -74,8 +91,22 @@ export function runAgentSubprocess(opts: SpawnAgentOpts): Promise<AgentSpawnResu
 			}, opts.timeoutMs);
 		}
 
-		child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-		child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+		const safeForward = (stream: 'stdout' | 'stderr', s: string): void => {
+			if (opts.onChunk === undefined) return;
+			try { opts.onChunk(stream, s); } catch (err) {
+				log.warn({ stream, err: (err as Error).message }, 'spawn onChunk listener threw; swallowing');
+			}
+		};
+		child.stdout.on('data', (chunk: Buffer) => {
+			const s = chunk.toString();
+			stdout += s;
+			safeForward('stdout', s);
+		});
+		child.stderr.on('data', (chunk: Buffer) => {
+			const s = chunk.toString();
+			stderr += s;
+			safeForward('stderr', s);
+		});
 
 		child.on('error', err => {
 			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);

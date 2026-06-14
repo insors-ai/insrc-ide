@@ -30,7 +30,7 @@ import { join } from 'node:path';
 import { assembleSpec, type SpecAssemblerInput } from './spec-assembler.js';
 import { createWorktree, diffWorktreeAgainstHead, removeWorktree } from './worktree.js';
 import { spawnClaudeCode } from './spawn/claude-code.js';
-import type { AgentSpawnResult } from './spawn/base.js';
+import type { AgentSpawnResult, SpawnChunkListener } from './spawn/base.js';
 import { auditDeliverable, type AuditResult } from './audit/judge.js';
 import { getTemplate } from './templates/registry.js';
 import type { AssembledSpec, HandoffEvent, MemoryRef, ScopePayload, TemplateId } from './types.js';
@@ -159,8 +159,20 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	try {
 		// 3. Spawn the agent.
 		emit({ kind: 'spawned', specId: spec.specId, agent: opts.agent });
+		// Per-chunk forwarder: turns raw stdout/stderr from the agent
+		// subprocess into `agent-stdout-chunk` / `agent-stderr-chunk`
+		// HandoffEvents so terminal-UX subscribers (Phase 2c) can
+		// pipe live output into a Pseudoterminal. Headless-UX
+		// consumers simply drop these on the floor.
+		const onSpawnChunk: SpawnChunkListener = (stream, chunk) => {
+			emit({
+				kind: stream === 'stdout' ? 'agent-stdout-chunk' : 'agent-stderr-chunk',
+				specId: spec.specId,
+				chunk,
+			});
+		};
 		try {
-			spawnResult = await dispatchSpawn(opts, spec.specMd, worktreePath, spec.specId);
+			spawnResult = await dispatchSpawn(opts, spec.specMd, worktreePath, spec.specId, onSpawnChunk);
 		} catch (err) {
 			emit({ kind: 'handoff-error', stage: 'spawn', message: (err as Error).message });
 			throw err;
@@ -233,13 +245,25 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	}
 }
 
-async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: string, specId: string): Promise<AgentSpawnResult> {
+async function dispatchSpawn(
+	opts: RunHandoffOpts,
+	spec: string,
+	worktreePath: string,
+	specId: string,
+	onChunk: SpawnChunkListener,
+): Promise<AgentSpawnResult> {
 	if (opts.agent === 'scripted-agent') {
 		if (opts.scriptedAgent === undefined) {
 			throw new Error("runHandoff: agent='scripted-agent' requires scriptedAgent fn");
 		}
 		const start = Date.now();
 		const partial = await opts.scriptedAgent(spec);
+		// Scripted agents synthesize stdout in one shot; replay the
+		// full payload through the chunk listener so terminal-UX
+		// subscribers see *something* (even if there's no live
+		// subprocess to stream from).
+		if (partial.stdout.length > 0) onChunk('stdout', partial.stdout);
+		if (partial.stderr.length > 0) onChunk('stderr', partial.stderr);
 		return {
 			stdout:     partial.stdout,
 			stderr:     partial.stderr,
@@ -255,6 +279,7 @@ async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: s
 			sessionId:     opts.sessionId,
 			specId,
 			mcpServerPath: opts.mcpServerPath ?? '/abs/path/insrc-mcp-server.js',
+			onChunk,
 		};
 		if (opts.timeoutMs !== undefined)   (codexOpts as { timeoutMs?: number }).timeoutMs    = opts.timeoutMs;
 		if (opts.hookBinPath !== undefined) (codexOpts as { hookBinPath?: string }).hookBinPath = opts.hookBinPath;
@@ -268,6 +293,7 @@ async function dispatchSpawn(opts: RunHandoffOpts, spec: string, worktreePath: s
 		sessionId:     opts.sessionId,
 		specId,
 		mcpServerPath: opts.mcpServerPath ?? '/abs/path/insrc-mcp-server.js',
+		onChunk,
 	};
 	if (opts.timeoutMs !== undefined)    (claudeOpts as { timeoutMs?: number }).timeoutMs    = opts.timeoutMs;
 	if (opts.claudeBinPath !== undefined) (claudeOpts as { claudeBinPath?: string }).claudeBinPath = opts.claudeBinPath;

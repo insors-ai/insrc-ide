@@ -85,6 +85,24 @@ export type HandoffEvent =
 		readonly specId: string;
 		readonly agent: HandoffAgentChoice;
 	}
+	/**
+	 * Live stdout chunk from the running agent subprocess (Phase 2c).
+	 * Emitted once per raw `child.stdout.on('data')` chunk. Does not
+	 * update the per-specId session state -- the terminal-mode
+	 * subscriber consumes these directly via
+	 * `IInsrcHandoffService.onChunk`.
+	 */
+	| {
+		readonly kind: 'agent-stdout-chunk';
+		readonly specId: string;
+		readonly chunk: string;
+	}
+	/** Live stderr chunk; see `agent-stdout-chunk`. */
+	| {
+		readonly kind: 'agent-stderr-chunk';
+		readonly specId: string;
+		readonly chunk: string;
+	}
 	| {
 		readonly kind: 'agent-completed';
 		readonly specId: string;
@@ -189,6 +207,18 @@ export interface HandoffSessionState {
 export const IInsrcHandoffService =
 	createDecorator<IInsrcHandoffService>('insrcHandoffService');
 
+/**
+ * Live stdout/stderr chunk payload (Phase 2c). Surfaced via the
+ * service's `onChunk` event so a terminal-UX subscriber (the
+ * Pseudoterminal) can pipe agent output into a VS Code terminal
+ * panel as it arrives. Headless-UX consumers simply don't subscribe.
+ */
+export interface HandoffChunk {
+	readonly specId: string;
+	readonly stream: 'stdout' | 'stderr';
+	readonly chunk: string;
+}
+
 export interface IInsrcHandoffService {
 	readonly _serviceBrand: undefined;
 
@@ -223,6 +253,13 @@ export interface IInsrcHandoffService {
 	 * Subscribers should release any keyed cache they hold.
 	 */
 	readonly onDidRemoveSession: Event<string>;
+
+	/**
+	 * Fires for every live stdout/stderr chunk the daemon forwards
+	 * from a running agent subprocess. Phase 2c's terminal-UX mode
+	 * subscribes to this; headless-UX leaves it alone.
+	 */
+	readonly onChunk: Event<HandoffChunk>;
 
 	/**
 	 * Dispatch a single daemon-emitted HandoffEvent. Called by
