@@ -144,15 +144,22 @@ function renderDiscoveryGuidance(input: DebugSessionInput): string {
 
 function renderDeliverableStructureReference(): string {
 	const lines: string[] = ['## Deliverable structure'];
-	lines.push('Write your investigation into `spec-deliverable.md` with these');
-	lines.push('sections (one per investigation stage):');
+	lines.push('Write your investigation into `spec-deliverable.md` using EXACTLY');
+	lines.push('these five level-2 (`## `) section headers, in this order. Header');
+	lines.push('level matters: the audit pipeline matches `^## <Name>` exactly; `#`');
+	lines.push("or `###` headers are treated as missing and force `revise-major`.");
 	lines.push('');
-	lines.push('- **Reproduce** -- steps + commands you ran to reproduce the bug.');
-	lines.push('- **Localize** -- evidence you gathered: log spans, stack traces,');
-	lines.push('  file:line refs.');
-	lines.push('- **Hypothesize** -- ranked candidate causes with cited evidence.');
-	lines.push('- **Test** -- outputs from tests you ran on each hypothesis.');
-	lines.push('- **Conclude** -- determined cause + the applied fix description.');
+	lines.push('Required section headers (literal markdown):');
+	lines.push('');
+	lines.push('- `## Reproduce`   -- steps + commands you ran to reproduce the bug.');
+	lines.push('- `## Localize`    -- evidence you gathered: log spans, stack traces,');
+	lines.push('                      file:line refs.');
+	lines.push('- `## Hypothesize` -- ranked candidate causes with cited evidence.');
+	lines.push('- `## Test`        -- outputs from tests you ran on each hypothesis.');
+	lines.push('- `## Conclude`    -- determined cause + the applied fix description.');
+	lines.push('');
+	lines.push('You may put a single `# <one-line title>` line at the top, but the');
+	lines.push("five required section headers above MUST use `## ` -- not `# ` or `### `.");
 	lines.push('');
 	return lines.join('\n');
 }
