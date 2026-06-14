@@ -69,6 +69,23 @@ export type DaemonStreamMessage =
 		readonly type: 'todos';
 		readonly kind: TodoStreamEventKind;
 		readonly list: unknown;  // TodoList -- typed loosely to avoid coupling boundaries
+	}
+	/**
+	 * External-agent handoff stream event (plans/external-agent-integration.md
+	 * Phase 2b). Emitted by the daemon's `handoff.run` streaming IPC at every
+	 * pipeline stage transition. The browser-side `IInsrcHandoffService`
+	 * (Phase 2b Day 2) subscribes to the same stream and dispatches the
+	 * 9-variant `HandoffEvent` union onward to the chat widget.
+	 *
+	 * The wire shape mirrors the daemon's `HandoffEvent` in
+	 * `src/insrc/handoff/types.ts`. Variants are carried opaquely as
+	 * `event: unknown` here -- the workbench-side discriminated union lives
+	 * in `common/handoffService.ts` so it can be exhaustively typed there
+	 * without coupling daemonService.ts to handoff-specific shapes.
+	 */
+	| {
+		readonly type: 'handoff';
+		readonly event: unknown;
 	};
 
 /** Kinds emitted on the todos stream. Mirrors daemon-side TodoStreamEventKind. */

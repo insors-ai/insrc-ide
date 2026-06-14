@@ -73,7 +73,13 @@ export const handoffRunStream: StreamHandler = async (params, send, signal) => {
 
 	const emit = (event: HandoffEvent): void => {
 		if (aborted) return;
-		wrappedSend({ stream: 'progress', data: event });
+		// Workbench-side `IInsrcHandoffService` dispatches the typed
+		// discriminated union (9 variants) -- daemon only needs to
+		// carry the event opaquely over the wire under a dedicated
+		// stream kind so workbench subscribers can route without
+		// colliding with the existing 'progress' stream's
+		// {step, status} shape.
+		wrappedSend({ stream: 'handoff', data: event });
 	};
 
 	let scriptedAgent: ScriptedAgentFn | undefined;

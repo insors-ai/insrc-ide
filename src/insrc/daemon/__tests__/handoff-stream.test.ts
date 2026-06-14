@@ -62,7 +62,7 @@ function collect(): { recorded: IpcStreamMessage[]; send: (m: IpcStreamMessage) 
 }
 
 // ---------------------------------------------------------------------------
-// Happy path: streams progress events + done
+// Happy path: streams handoff events + done
 // ---------------------------------------------------------------------------
 
 test("handoff.run: scripted-agent run emits the 8 progress events then a 'done'", async () => {
@@ -81,13 +81,13 @@ test("handoff.run: scripted-agent run emits the 8 progress events then a 'done'"
 			persistRoot,
 		}, send, controller.signal);
 
-		// 8 progress + 1 done = 9 messages.
+		// 8 handoff + 1 done = 9 messages.
 		assert.equal(recorded.length, 9);
 		const last = recorded[recorded.length - 1]!;
 		assert.equal(last.stream, 'done');
 
 		const progressEvents = recorded.slice(0, -1);
-		for (const m of progressEvents) assert.equal(m.stream, 'progress');
+		for (const m of progressEvents) assert.equal(m.stream, 'handoff');
 
 		const kinds = progressEvents.map(m => (m.data as HandoffEvent).kind);
 		assert.deepEqual(kinds, [
@@ -156,7 +156,7 @@ test("handoff.run: orchestration error (non-git repo) surfaces as stream 'error'
 		const data = errorMsg.data as { error: string };
 		assert.match(data.error, /worktree add failed/);
 		// runHandoff still emitted spec-assembling + spec-ready before failing.
-		assert.equal(recorded[0]!.stream, 'progress');
+		assert.equal(recorded[0]!.stream, 'handoff');
 	} finally {
 		rmSync(nonGit,      { recursive: true, force: true });
 		rmSync(persistRoot, { recursive: true, force: true });
@@ -167,7 +167,7 @@ test("handoff.run: orchestration error (non-git repo) surfaces as stream 'error'
 // Abort after start: events stop firing once signal aborts mid-pipeline
 // ---------------------------------------------------------------------------
 
-test('handoff.run: aborting the signal mid-stream prevents subsequent progress messages', async () => {
+test('handoff.run: aborting the signal mid-stream prevents subsequent handoff messages', async () => {
 	await withRepo(async (repo, persistRoot) => {
 		const recorded: IpcStreamMessage[] = [];
 		const controller = new AbortController();
@@ -192,7 +192,7 @@ test('handoff.run: aborting the signal mid-stream prevents subsequent progress m
 		// Only the first emit landed; everything after the abort was
 		// dropped. The handler still resolved cleanly (no throw).
 		assert.equal(recorded.length, 1);
-		assert.equal(recorded[0]!.stream, 'progress');
+		assert.equal(recorded[0]!.stream, 'handoff');
 	});
 });
 

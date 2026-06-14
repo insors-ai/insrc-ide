@@ -204,6 +204,13 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 						return undefined;
 				}
 			}
+			case 'handoff':
+				// External-agent handoff event (plans/external-agent-integration.md
+				// Phase 2b). The daemon's `handoff.run` IPC carries a 9-variant
+				// HandoffEvent on `msg.data`; the typed discriminated union lives
+				// in common/handoffService.ts, so we carry the payload opaquely
+				// here and the workbench-side handoff service dispatches on it.
+				return { type: 'handoff', event: data };
 			default:
 				return undefined;
 		}
