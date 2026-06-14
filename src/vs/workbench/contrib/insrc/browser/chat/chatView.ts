@@ -19,7 +19,7 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
-import { IInsrcHandoffService } from '../../common/handoffService.js';
+import { IInsrcHandoffService, type HandoffSessionState } from '../../common/handoffService.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
@@ -180,6 +180,14 @@ export class InsrcChatViewPane extends ViewPane {
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleChatEvent(e)));
 		this._register(this.chatService.onDidChangeSession(() => this._onSessionChanged()));
+		// External-agent handoff: when a handoff reaches `final` with a
+		// non-empty diff body, open the diff view so the user can review
+		// the changes the external agent proposed. Accept/reject is
+		// driven by the existing diffCodeLensProvider; the daemon-side
+		// `handoff.accept` / `handoff.reject` IPCs land in a later phase.
+		this._register(this._handoffService.onDidFinalize(state => {
+			void this._openDiffFromHandoff(state);
+		}));
 		this._register(this.daemonService.onDidChangeState(() => {
 			this._updateHeader();
 			this._updateState();
@@ -1100,6 +1108,68 @@ export class InsrcChatViewPane extends ViewPane {
 			await this.diffService.showDiffs(fileDiffs, gate.gateId);
 		} catch {
 			// Non-fatal: gate card still shows actions
+		}
+	}
+
+	/**
+	 * Open the diff view for a finalized external-agent handoff.
+	 *
+	 * The daemon emits the unified diff body on `handoff-final`; we
+	 * parse it, resolve paths against the active repo, and route into
+	 * the existing IInsrcDiffService.showDiffs surface so accept/reject
+	 * runs through the same codelens pipeline as agent-authored diffs.
+	 *
+	 * The `gateId` we use is a synthetic `handoff:<specId>` token --
+	 * accept/reject actions show up on `diffService.onDidAction` with
+	 * that tag. The daemon-side `handoff.accept` / `handoff.reject`
+	 * IPC wiring lands in a follow-up phase; today the actions are
+	 * logged and the user can manually apply changes.
+	 */
+	private async _openDiffFromHandoff(state: HandoffSessionState): Promise<void> {
+		if (state.diff === undefined || state.diff.length === 0) {
+			return;
+		}
+		// Failed handoffs don't carry a usable diff -- show nothing.
+		if (state.verdict !== 'accept' && state.verdict !== 'revise-edits') {
+			return;
+		}
+		try {
+			const parsedFiles = parseDiff(state.diff);
+			if (parsedFiles.length === 0) {
+				return;
+			}
+
+			const repos = this.repoService.repos;
+			const basePath = repos.length > 0 ? repos[0]!.path : '';
+
+			const fileDiffs: Array<{ filePath: string; originalContent: string; proposedContent: string; diffText: string; isNew: boolean }> = [];
+
+			for (const fd of parsedFiles) {
+				const relPath = fd.isNew ? fd.newPath : fd.oldPath;
+				const filePath = relPath.startsWith('/') ? relPath : `${basePath}/${relPath}`;
+
+				let originalContent = '';
+				if (!fd.isNew) {
+					try {
+						const content = await this.fileService.readFile(URI.file(filePath));
+						originalContent = content.value.toString();
+					} catch {
+						originalContent = '';
+					}
+				}
+
+				const proposedContent = fd.isNew
+					? fd.hunks.flatMap(h => h.lines.filter(l => l.startsWith('+')).map(l => l.slice(1))).join('\n')
+					: applyHunks(originalContent, fd.hunks);
+
+				fileDiffs.push({ filePath, originalContent, proposedContent, diffText: state.diff!, isNew: fd.isNew });
+			}
+
+			const gateId = `handoff:${state.specId}`;
+			this._logService.info(`[insrc-chat] opening handoff diff specId=${state.specId} files=${fileDiffs.length} verdict=${state.verdict}`);
+			await this.diffService.showDiffs(fileDiffs, gateId);
+		} catch (err) {
+			this._logService.warn(`[insrc-chat] _openDiffFromHandoff failed: ${(err as Error).message}`);
 		}
 	}
 
