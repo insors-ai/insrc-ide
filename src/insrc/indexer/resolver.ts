@@ -20,6 +20,45 @@ import { makeEntityId } from './parser/base.js';
  *   - See plans/cross-file-references.md.
  *
  * Does not touch the database — purely path-based, synchronous.
+ *
+ * KNOWN LIMITATION -- dynamic dispatch creates no CALLS edges.
+ *
+ *   Tree-sitter is a syntactic parser; it does not perform type
+ *   inference. When the receiver of a method call is a union, an
+ *   Optional, or a value reached through a runtime probe
+ *   (`hasattr(obj, 'm') and obj.m()`, `getattr(obj, name)()`,
+ *   `dispatch_table[k](...)`, etc.), the resolver cannot choose
+ *   between candidate `m` methods on the union's members and
+ *   conservatively emits NO edge.
+ *
+ *   Real example (surfaced by an end-to-end smoke test of the
+ *   insrc_entity_callers MCP tool against insors-extraction's v2
+ *   branch, 2026-06-14):
+ *
+ *     # insors/core/model/invoice/regions/regional_grn_factory.py:168-176
+ *     def validate_region_compliance(cls, region: str,
+ *           grn: Union[INGRN, EUGRN, UKGRN, USGRN, GRN]) -> Dict[str, Any]:
+ *         if hasattr(grn, 'validate_receiving_compliance'):
+ *             return grn.validate_receiving_compliance()
+ *         return {"compliant": True, "issues": [], "warnings": []}
+ *
+ *   Effect: `insrc_entity_callers` for any of the four regional
+ *   `validate_receiving_compliance` methods returns [] -- the static
+ *   graph has no CALLS edge from `validate_region_compliance` to any
+ *   of them, even though every real invocation in the codebase
+ *   funnels through this dispatcher.
+ *
+ *   For now this is documented behavior. Future passes could:
+ *     (a) emit heuristic edges to every member of a union type when
+ *         the method name matches a declared member,
+ *     (b) narrow unions through `hasattr` / `isinstance` guards
+ *         using pure-syntactic analysis,
+ *     (c) integrate a real Python type checker (mypy, pyright) for
+ *         full receiver-type resolution.
+ *
+ *   None of these are in scope today; callers of `insrc_entity_callers`
+ *   on dynamically-dispatched targets should expect empty results and
+ *   fall back to grep / file search.
  */
 export function resolveRelations(
   relations: Relation[],
