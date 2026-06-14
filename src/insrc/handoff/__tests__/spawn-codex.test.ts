@@ -144,7 +144,7 @@ test('spawnCodex: spec is piped to codex stdin verbatim', async () => {
 	assert.equal(result.stdout, '# Debug Session\nfix the flake');
 });
 
-test('spawnCodex: default flags == run --workdir <wt> --sandbox-mode workspace-write --writable-roots <wt> --approval-policy on-request', async () => {
+test('spawnCodex: default flags == exec --cd <wt> --add-dir <wt> --sandbox workspace-write --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox', async () => {
 	const wt = makeWorktree();
 	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
 	const result = await spawnCodex({
@@ -158,36 +158,78 @@ test('spawnCodex: default flags == run --workdir <wt> --sandbox-mode workspace-w
 	});
 	const args = result.stdout.split('\n').filter(s => s.length > 0);
 	assert.deepEqual(args, [
-		'run',
-		'--workdir',         wt,
-		'--sandbox-mode',    'workspace-write',
-		'--writable-roots',  wt,
-		'--approval-policy', 'on-request',
+		'exec',
+		'--cd',      wt,
+		'--add-dir', wt,
+		'--sandbox', 'workspace-write',
+		'--skip-git-repo-check',
+		'--dangerously-bypass-approvals-and-sandbox',
 	]);
 });
 
-test('spawnCodex: custom sandboxMode and approvalPolicy propagate', async () => {
+test('spawnCodex: custom sandboxMode propagates (other defaults preserved)', async () => {
 	const wt = makeWorktree();
 	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
 	const result = await spawnCodex({
-		worktreePath:   wt,
-		spec:           'unused',
-		sessionId:      'sess-1',
-		specId:         'spec-1',
-		mcpServerPath:  FAKE_MCP_SERVER,
-		sandboxMode:    'restricted',
-		approvalPolicy: 'never',
-		codexBinPath:   bin,
-		issueToken:     tokenStub,
+		worktreePath:  wt,
+		spec:          'unused',
+		sessionId:     'sess-1',
+		specId:        'spec-1',
+		mcpServerPath: FAKE_MCP_SERVER,
+		sandboxMode:   'read-only',
+		codexBinPath:  bin,
+		issueToken:    tokenStub,
 	});
 	const args = result.stdout.split('\n').filter(s => s.length > 0);
 	assert.deepEqual(args, [
-		'run',
-		'--workdir',         wt,
-		'--sandbox-mode',    'restricted',
-		'--writable-roots',  wt,
-		'--approval-policy', 'never',
+		'exec',
+		'--cd',      wt,
+		'--add-dir', wt,
+		'--sandbox', 'read-only',
+		'--skip-git-repo-check',
+		'--dangerously-bypass-approvals-and-sandbox',
 	]);
+});
+
+test('spawnCodex: skipApprovalsAndSandbox=false omits the bypass flag', async () => {
+	const wt = makeWorktree();
+	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
+	const result = await spawnCodex({
+		worktreePath:           wt,
+		spec:                   'unused',
+		sessionId:              'sess-1',
+		specId:                 'spec-1',
+		mcpServerPath:          FAKE_MCP_SERVER,
+		codexBinPath:           bin,
+		issueToken:             tokenStub,
+		skipApprovalsAndSandbox: false,
+	});
+	const args = result.stdout.split('\n').filter(s => s.length > 0);
+	assert.deepEqual(args, [
+		'exec',
+		'--cd',      wt,
+		'--add-dir', wt,
+		'--sandbox', 'workspace-write',
+		'--skip-git-repo-check',
+	]);
+});
+
+test('spawnCodex: hookBinPath set -> args include --dangerously-bypass-hook-trust', async () => {
+	const wt = makeWorktree();
+	const bin = writeStub(wt, 'echo-args.sh', 'printf "%s\\n" "$@"\n');
+	const result = await spawnCodex({
+		worktreePath:  wt,
+		spec:          'unused',
+		sessionId:     'sess-1',
+		specId:        'spec-1',
+		mcpServerPath: FAKE_MCP_SERVER,
+		hookBinPath:   FAKE_HOOK_BIN,
+		codexBinPath:  bin,
+		issueToken:    tokenStub,
+	});
+	const args = result.stdout.split('\n').filter(s => s.length > 0);
+	assert.ok(args.includes('--dangerously-bypass-hook-trust'),
+		`expected --dangerously-bypass-hook-trust in ${JSON.stringify(args)}`);
 });
 
 test('spawnCodex: env vars INSRC_SESSION_TOKEN, SESSION_ID, DAEMON_SOCKET, SPEC_ID reach the child', async () => {

@@ -4,26 +4,48 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * Codex agent spawn -- Phase 4 Day 1.
+ * Codex agent spawn.
  *
  * Mirrors `spawn/claude-code.ts`'s shape so the CLI dispatch routes
  * agents by name without branching their composition logic. Same
  * test seams (codexBinPath, issueToken), same env quartet, same
  * AgentSpawnResult contract.
  *
- * Per design §6.4 step 16 (Codex branch):
+ * Verified against the real Codex CLI (version installed via
+ * @openai/codex) on 2026-06-14. Invocation:
  *
- *   codex run --workdir <worktree>
- *     --sandbox-mode workspace-write
- *     --writable-roots <worktree>
- *     --approval-policy on-request
+ *   codex exec \
+ *     --cd <worktree> \
+ *     --add-dir <worktree> \
+ *     --sandbox workspace-write \
+ *     --dangerously-bypass-approvals-and-sandbox \
+ *     --skip-git-repo-check \
  *     < spec.md
  *
+ * Notes vs the original design §6.4 step 16 (which used Claude-shaped
+ * flag names; Codex CLI evolved differently):
+ *   - subcommand is `exec` (or `e`), not `run` as the design specced.
+ *   - working dir flag is `-C` / `--cd <DIR>`, not `--workdir`.
+ *   - writable dirs flag is `--add-dir <DIR>`, not `--writable-roots`.
+ *   - sandbox flag is `-s` / `--sandbox <MODE>`, not `--sandbox-mode`.
+ *     Values: `read-only` | `workspace-write` | `danger-full-access`.
+ *   - approval-policy flag doesn't exist on Codex; the equivalent of
+ *     Claude's `--dangerously-skip-permissions` is Codex's
+ *     `--dangerously-bypass-approvals-and-sandbox` (single combined
+ *     flag). Default skip true for the same reasons documented in
+ *     spawn/claude-code.ts.
+ *   - `--skip-git-repo-check` lets Codex run inside a worktree that
+ *     may be detached from origin (git worktree create doesn't add
+ *     a remote ref). Always set.
+ *   - `--dangerously-bypass-hook-trust` is needed to run Mode B
+ *     hooks without persisted trust state per-handoff; only set when
+ *     hookBinPath is provided.
+ *
  * Pre-spawn writes per-handoff configs into the worktree:
- *   - .codex/config.toml    [mcp_servers.insrc] block (Phase 4 Day 1)
+ *   - .codex/config.toml    [mcp_servers.insrc] block (Day 1)
  *   - .codex/hooks.json     PreToolUse + PermissionRequest hooks
  *                           pointing at the insrc-permission-hook
- *                           binary (Phase 4 Day 1; Mode B opt-in).
+ *                           binary (Day 1; Mode B opt-in).
  */
 
 import { issueSessionToken } from '../../mcp/session-token.js';
@@ -35,8 +57,7 @@ import {
 	type AgentSpawnResult,
 } from './base.js';
 
-export type CodexSandboxMode    = 'workspace-write' | 'workspace-read' | 'restricted';
-export type CodexApprovalPolicy = 'never' | 'on-request' | 'always';
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 export interface SpawnCodexOpts {
 	readonly worktreePath:    string;
@@ -51,26 +72,42 @@ export interface SpawnCodexOpts {
 	 * as Claude Code's per-worktree `.mcp.json`).
 	 */
 	readonly mcpServerPath:   string;
-	readonly sandboxMode?:    CodexSandboxMode    | undefined;
-	readonly approvalPolicy?: CodexApprovalPolicy | undefined;
-	readonly timeoutMs?:      number              | undefined;
+	readonly sandboxMode?:    CodexSandboxMode | undefined;
+	readonly timeoutMs?:      number           | undefined;
 	/** Test seam: override the codex binary path. */
-	readonly codexBinPath?:   string              | undefined;
+	readonly codexBinPath?:   string           | undefined;
 	/** Test seam: override the session-token issuer. */
 	readonly issueToken?:     ((sessionId: string) => string) | undefined;
 	/**
 	 * Absolute path to the compiled insrc-permission-hook binary
 	 * (out/insrc/bin/permission-hook.js). When set, the spawn writes
 	 * a `.codex/hooks.json` registering the hook for PreToolUse +
-	 * PermissionRequest. When undefined, Mode B is disabled for this
-	 * handoff and the spawn relies on sandbox-mode + approval-policy
-	 * + audit-time Mode C only.
+	 * PermissionRequest and adds `--dangerously-bypass-hook-trust`
+	 * so the per-handoff hook runs without persisted trust state.
 	 */
-	readonly hookBinPath?:    string              | undefined;
+	readonly hookBinPath?:    string           | undefined;
+	/**
+	 * When true (the default), the spawn passes
+	 * `--dangerously-bypass-approvals-and-sandbox` -- Codex's
+	 * equivalent of `claude --dangerously-skip-permissions`.
+	 *
+	 * Rationale (same stack as Claude):
+	 *   - Worktree sandbox isolates edits to
+	 *     <handoffsRoot>/<sid>/worktree/.
+	 *   - sandbox flag still constrains the surface (workspace-write
+	 *     by default).
+	 *   - Mode B PreToolUse hook (Phase 3) replaces Codex's own
+	 *     prompts with insrc's spec policy when hookBinPath is set.
+	 *   - Mode C audit reviews the diff post-run.
+	 *
+	 * Codex's own approval prompts have nowhere to land in
+	 * `exec` (one-shot, non-interactive) mode. Set this to false only
+	 * when you want them to land somewhere (e.g. attended dev runs).
+	 */
+	readonly skipApprovalsAndSandbox?: boolean | undefined;
 }
 
-const DEFAULT_SANDBOX_MODE:    CodexSandboxMode    = 'workspace-write';
-const DEFAULT_APPROVAL_POLICY: CodexApprovalPolicy = 'on-request';
+const DEFAULT_SANDBOX_MODE: CodexSandboxMode = 'workspace-write';
 
 export async function spawnCodex(opts: SpawnCodexOpts): Promise<AgentSpawnResult> {
 	// 1. Write the worktree-local Codex MCP config so Codex auto-
@@ -87,17 +124,23 @@ export async function spawnCodex(opts: SpawnCodexOpts): Promise<AgentSpawnResult
 	const sessionToken = issue(opts.sessionId);
 
 	// 3. Build the CLI invocation.
-	const sandboxMode    = opts.sandboxMode    ?? DEFAULT_SANDBOX_MODE;
-	const approvalPolicy = opts.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
+	const sandboxMode = opts.sandboxMode ?? DEFAULT_SANDBOX_MODE;
+	const skipApprovals = opts.skipApprovalsAndSandbox ?? true;
 
 	const command = opts.codexBinPath ?? 'codex';
-	const args    = [
-		'run',
-		'--workdir',         opts.worktreePath,
-		'--sandbox-mode',    sandboxMode,
-		'--writable-roots',  opts.worktreePath,
-		'--approval-policy', approvalPolicy,
+	const args: string[] = [
+		'exec',
+		'--cd',      opts.worktreePath,
+		'--add-dir', opts.worktreePath,
+		'--sandbox', sandboxMode,
+		'--skip-git-repo-check',
 	];
+	if (skipApprovals) {
+		args.push('--dangerously-bypass-approvals-and-sandbox');
+	}
+	if (opts.hookBinPath !== undefined) {
+		args.push('--dangerously-bypass-hook-trust');
+	}
 
 	// 4. Compose env -- inherit, then layer the handoff-scoped quartet.
 	const env: Record<string, string> = {
