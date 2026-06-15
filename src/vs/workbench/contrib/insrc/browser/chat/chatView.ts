@@ -23,6 +23,7 @@ import { IInsrcHandoffService, type HandoffSessionState } from '../../common/han
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
+import { ChatHandoffTerminalPanel } from './chatHandoffTerminalPanel.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
@@ -281,7 +282,7 @@ export class InsrcChatViewPane extends ViewPane {
 		// to IInsrcHandoffService directly; chatView forwards the raw
 		// `{type:'handoff'}` stream messages via the dedicated dispatch
 		// path inside chatServiceImpl.
-		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService, this._configurationService));
+		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService));
 		handoffWidget.mount(this._messageList);
 
 		// Inline artifact widget (plans/artifact-tasks.md section 1.6). Renders
@@ -291,6 +292,15 @@ export class InsrcChatViewPane extends ViewPane {
 		// exactly one surface.
 		const artifactWidget = this._register(new ChatArtifactWidget(this._todosService, this.clipboardService, this._logService));
 		artifactWidget.mount(this._messageList);
+
+		// Pinned handoff terminal panel (plans/external-agent-integration.md
+		// Phase 2c v2). Mounts as a sibling of `_messageList`, BELOW it
+		// and ABOVE the gate container, so live agent stdout/stderr stays
+		// visible while the transcript scrolls independently. Only opens
+		// when `insrc.handoff.uxMode = 'terminal'` AND a chunk arrives;
+		// stays hidden in headless mode.
+		const handoffTerminalPanel = this._register(new ChatHandoffTerminalPanel(this._handoffService, this._configurationService, this._logService));
+		handoffTerminalPanel.mount(this._container);
 
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));

@@ -7,36 +7,11 @@ import './media/chatHandoff.css';
 import * as dom from '../../../../../base/browser/dom.js';
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
-import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import {
 	IInsrcHandoffService,
-	type HandoffChunk,
 	type HandoffSessionState,
 	type HandoffStage,
 } from '../../common/handoffService.js';
-
-/**
- * Maximum bytes the inline live-output viewport will retain. Once
- * we exceed this, oldest bytes are dropped (FIFO) so the DOM node
- * doesn't grow unbounded for a long-running agent. The user can
- * read the full transcript from `<persistRoot>/<sessionId>/` after
- * the fact -- the inline viewport is for live feedback only.
- */
-const TERMINAL_VIEWPORT_LIMIT_BYTES = 64 * 1024;
-
-/**
- * Setting key for the handoff UX mode. `headless` (default) renders
- * the standard progress card; `terminal` augments the card body
- * with a scrollable live stdout/stderr viewport.
- *
- * Note on naming: the plan (Phase 2c) calls this "terminal" mode and
- * specs a vscode.Pseudoterminal. The workbench-layer adaptation
- * renders the live output INSIDE the handoff card -- the user-
- * visible UX is unchanged (live agent output is visible during the
- * run), the implementation just doesn't allocate a real terminal
- * panel.
- */
-const SETTING_UX_MODE = 'insrc.handoff.uxMode';
 
 /**
  * Inline chat widget (plans/external-agent-integration.md Phase 2b Day 3).
@@ -50,8 +25,10 @@ const SETTING_UX_MODE = 'insrc.handoff.uxMode';
  *   - `onDidChange()`             -- full reconcile (covers session
  *                                    flips that purge the cache).
  *
- * The Day 3 widget is read-only -- it displays stage / preview / verdict.
- * Day 4 wires the accept/reject buttons + diff view + Mode-A modal.
+ * The card body holds stage / preview / verdict / diff-bytes metadata
+ * ONLY. Live agent stdout/stderr lives in a separate pinned widget
+ * (`ChatHandoffTerminalPanel`) that doesn't scroll with the
+ * transcript -- the card just signals when streaming is active.
  *
  * The widget mounts inside chatView's `_messageList` (same parent as
  * the todos card) so it scrolls with the chat transcript.
@@ -64,19 +41,6 @@ interface HandoffCardHandles {
 	readonly stage: HTMLElement;
 	readonly dismiss: HTMLButtonElement;
 	readonly body: HTMLElement;
-	/**
-	 * Live stdout/stderr viewport. Only present when terminal-mode
-	 * is active (the setting is read at card-create time + on
-	 * config-change). Holds the most recent
-	 * `TERMINAL_VIEWPORT_LIMIT_BYTES` bytes of output.
-	 */
-	terminal: HTMLPreElement | undefined;
-	/**
-	 * In-memory running buffer for the viewport. Append-only; we
-	 * trim oldest bytes when total length exceeds the limit. Kept
-	 * outside the DOM so trims don't force layout reflows.
-	 */
-	terminalBuffer: string;
 }
 
 export class ChatHandoffWidget extends Disposable {
@@ -87,7 +51,6 @@ export class ChatHandoffWidget extends Disposable {
 	constructor(
 		private readonly handoffService: IInsrcHandoffService,
 		private readonly logService: ILogService,
-		private readonly configurationService: IConfigurationService,
 	) {
 		super();
 	}
@@ -102,17 +65,6 @@ export class ChatHandoffWidget extends Disposable {
 		this._register(this.handoffService.onDidChangeSession(state => this._applyState(state)));
 		this._register(this.handoffService.onDidRemoveSession(id => this._removeCard(id)));
 		this._register(this.handoffService.onDidChange(() => this._reconcile()));
-		// Phase 2c: live chunks fan out to a dedicated viewport when
-		// terminal-mode is on. We always subscribe -- the handler is a
-		// no-op when the card has no terminal pane (mode = headless).
-		this._register(this.handoffService.onChunk(chunk => this._handleChunk(chunk)));
-		// Re-evaluate the per-card terminal pane when the setting flips
-		// at runtime so users get the new mode without restarting.
-		this._register(this.configurationService.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration(SETTING_UX_MODE)) {
-				this._reconcileTerminalPanes();
-			}
-		}));
 
 		this._reconcile();
 	}
@@ -168,18 +120,7 @@ export class ChatHandoffWidget extends Disposable {
 			this.handoffService.clear(state.specId);
 		}));
 		const body = dom.append(root, dom.$('.insrc-chat-handoff-body'));
-		return { root, template, intent, stage, dismiss, body, terminal: undefined, terminalBuffer: '' };
-	}
-
-	/**
-	 * `true` when the user has opted into terminal-mode handoff UX.
-	 * Read on every render so a runtime config flip applies on the
-	 * next stage transition; `_reconcileTerminalPanes` walks every
-	 * existing card to mount / unmount the viewport immediately when
-	 * the setting changes.
-	 */
-	private _terminalModeEnabled(): boolean {
-		return this.configurationService.getValue<string>(SETTING_UX_MODE) === 'terminal';
+		return { root, template, intent, stage, dismiss, body };
 	}
 
 	private _renderCard(state: HandoffSessionState, handles: HandoffCardHandles): void {
@@ -231,83 +172,6 @@ export class ChatHandoffWidget extends Disposable {
 		if (state.preview !== undefined && state.preview.length > 0 && state.stage === 'spec-ready') {
 			const preview = dom.append(handles.body, dom.$('div.insrc-chat-handoff-preview'));
 			preview.textContent = state.preview;
-		}
-
-		// Phase 2c: live stdout/stderr viewport. Mounted when terminal
-		// mode is on and the handoff isn't yet in a terminal stage.
-		// (No point allocating a viewport for finalized/errored cards
-		// the user is about to dismiss.) Headless mode leaves it off.
-		if (this._terminalModeEnabled() && !isTerminal) {
-			this._attachTerminalPane(handles);
-			if (handles.terminal !== undefined && handles.terminalBuffer.length > 0) {
-				handles.terminal.textContent = handles.terminalBuffer;
-			}
-		}
-	}
-
-	private _attachTerminalPane(handles: HandoffCardHandles): void {
-		if (handles.terminal !== undefined && handles.terminal.isConnected) {
-			return;
-		}
-		const pane = dom.append(handles.body, dom.$('pre.insrc-chat-handoff-terminal')) as HTMLPreElement;
-		pane.textContent = handles.terminalBuffer;
-		handles.terminal = pane;
-	}
-
-	private _detachTerminalPane(handles: HandoffCardHandles): void {
-		if (handles.terminal === undefined) {
-			return;
-		}
-		handles.terminal.remove();
-		handles.terminal = undefined;
-	}
-
-	/**
-	 * Walk every card and mount/unmount the terminal pane based on the
-	 * current setting + the card's stage. Fired when the user toggles
-	 * `insrc.handoff.uxMode` mid-flight.
-	 */
-	private _reconcileTerminalPanes(): void {
-		const enabled = this._terminalModeEnabled();
-		for (const [specId, handles] of this._cards) {
-			const state = this.handoffService.sessions.get(specId);
-			const isTerminal = state !== undefined && (state.stage === 'final' || state.stage === 'error');
-			if (enabled && !isTerminal) {
-				this._attachTerminalPane(handles);
-				if (handles.terminal !== undefined) {
-					handles.terminal.textContent = handles.terminalBuffer;
-				}
-			} else {
-				this._detachTerminalPane(handles);
-			}
-		}
-	}
-
-	/**
-	 * Append a stdout/stderr chunk to the matching card's viewport.
-	 * Out-of-order chunks (no card yet, or card already finalized) are
-	 * dropped silently -- the persistRoot file is the source of truth
-	 * for full transcripts; the inline viewport is live-feedback only.
-	 */
-	private _handleChunk(chunk: HandoffChunk): void {
-		const handles = this._cards.get(chunk.specId);
-		if (handles === undefined) {
-			return;
-		}
-		// Aggregate into the running buffer regardless of mode -- if
-		// the user flips to terminal mode mid-handoff we want the
-		// history to be there.
-		handles.terminalBuffer = (handles.terminalBuffer + chunk.chunk);
-		if (handles.terminalBuffer.length > TERMINAL_VIEWPORT_LIMIT_BYTES) {
-			handles.terminalBuffer = handles.terminalBuffer.slice(handles.terminalBuffer.length - TERMINAL_VIEWPORT_LIMIT_BYTES);
-		}
-		if (handles.terminal !== undefined && handles.terminal.isConnected) {
-			// Re-set the full text rather than appending so the trim
-			// above takes effect. textContent is much cheaper than
-			// innerHTML and avoids any DOM-injection footgun on agent
-			// output containing arbitrary characters.
-			handles.terminal.textContent = handles.terminalBuffer;
-			handles.terminal.scrollTop = handles.terminal.scrollHeight;
 		}
 	}
 
