@@ -78,6 +78,37 @@
 	opacity: 1;
 }
 
+/* Phase 5 accept/reject buttons on the final card. Match the
+ * existing VS Code button language for the affirmative action
+ * and a neutral muted style for reject. */
+.insrc-chat-handoff-accept,
+.insrc-chat-handoff-reject {
+	border: 1px solid transparent;
+	cursor: pointer;
+	padding: 2px 8px;
+	font-size: 11px;
+	border-radius: 3px;
+}
+
+.insrc-chat-handoff-accept {
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.insrc-chat-handoff-accept:hover {
+	background-color: var(--vscode-button-hoverBackground);
+}
+
+.insrc-chat-handoff-reject {
+	background-color: var(--vscode-button-secondaryBackground, transparent);
+	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+	border-color: var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.insrc-chat-handoff-reject:hover {
+	background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
 .insrc-chat-handoff-body {
 	margin-top: 6px;
 	display: flex;

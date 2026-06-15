@@ -14,6 +14,15 @@ import {
 } from '../../common/handoffService.js';
 
 /**
+ * Resolver supplied by chatView so the widget can fire the
+ * Phase 5 cleanup IPC with the right (sessionId, specId, outcome)
+ * tuple AFTER it's applied / rejected the in-flight diffs in the
+ * editor. The widget doesn't own the diff pipeline -- only the
+ * button surface that triggers it.
+ */
+export type HandoffCleanupHandler = (specId: string, outcome: 'accept' | 'reject' | 'dismissed') => Promise<void>;
+
+/**
  * Inline chat widget (plans/external-agent-integration.md Phase 2b Day 3).
  *
  * Renders one compact card per in-flight or recently-finished external
@@ -39,6 +48,8 @@ interface HandoffCardHandles {
 	readonly template: HTMLElement;
 	readonly intent: HTMLElement;
 	readonly stage: HTMLElement;
+	readonly accept: HTMLButtonElement;
+	readonly reject: HTMLButtonElement;
 	readonly dismiss: HTMLButtonElement;
 	readonly body: HTMLElement;
 }
@@ -51,6 +62,7 @@ export class ChatHandoffWidget extends Disposable {
 	constructor(
 		private readonly handoffService: IInsrcHandoffService,
 		private readonly logService: ILogService,
+		private readonly cleanupHandler: HandoffCleanupHandler,
 	) {
 		super();
 	}
@@ -111,16 +123,50 @@ export class ChatHandoffWidget extends Disposable {
 		const template = dom.append(header, dom.$('span.insrc-chat-handoff-template'));
 		const intent = dom.append(header, dom.$('span.insrc-chat-handoff-intent'));
 		const stage = dom.append(header, dom.$('span.insrc-chat-handoff-stage'));
+		// Phase 5 user-driven cleanup. Accept / Reject buttons fire
+		// on the final card; the cleanup handler chatView injects
+		// applies the diff (or rejects all files) then calls the
+		// daemon's handoff.cleanup IPC to remove the worktree.
+		const accept = dom.append(header, dom.$('button.insrc-chat-handoff-accept')) as HTMLButtonElement;
+		accept.textContent = 'Accept';
+		accept.title = 'Accept the proposed changes';
+		accept.style.display = 'none';
+		this._register(dom.addDisposableListener(accept, 'click', e => {
+			e.stopPropagation();
+			void this._runCleanup(state.specId, 'accept');
+		}));
+		const reject = dom.append(header, dom.$('button.insrc-chat-handoff-reject')) as HTMLButtonElement;
+		reject.textContent = 'Reject';
+		reject.title = 'Reject the proposed changes';
+		reject.style.display = 'none';
+		this._register(dom.addDisposableListener(reject, 'click', e => {
+			e.stopPropagation();
+			void this._runCleanup(state.specId, 'reject');
+		}));
 		const dismiss = dom.append(header, dom.$('button.insrc-chat-handoff-dismiss')) as HTMLButtonElement;
 		dismiss.textContent = 'x';  // close button
 		dismiss.title = 'Dismiss this handoff';
 		dismiss.style.display = 'none';  // shown only on terminal states
 		this._register(dom.addDisposableListener(dismiss, 'click', e => {
 			e.stopPropagation();
-			this.handoffService.clear(state.specId);
+			// Errored handoffs only have a dismiss button; record as
+			// `dismissed` so the daemon still cleans up the (possibly
+			// half-built) worktree.
+			void this._runCleanup(state.specId, 'dismissed');
 		}));
 		const body = dom.append(root, dom.$('.insrc-chat-handoff-body'));
-		return { root, template, intent, stage, dismiss, body };
+		return { root, template, intent, stage, accept, reject, dismiss, body };
+	}
+
+	private async _runCleanup(specId: string, outcome: 'accept' | 'reject' | 'dismissed'): Promise<void> {
+		try {
+			await this.cleanupHandler(specId, outcome);
+		} catch (err) {
+			this.logService.warn(`[insrc-handoff-widget] cleanup(${specId}, ${outcome}) failed: ${(err as Error).message}`);
+		}
+		// Whatever happened on the daemon side, drop the card from the
+		// UI -- the user's already moved on.
+		this.handoffService.clear(specId);
 	}
 
 	private _renderCard(state: HandoffSessionState, handles: HandoffCardHandles): void {
@@ -134,8 +180,14 @@ export class ChatHandoffWidget extends Disposable {
 			handles.root.classList.add(`verdict-${state.verdict}`);
 		}
 
-		const isTerminal = state.stage === 'final' || state.stage === 'error';
-		handles.dismiss.style.display = isTerminal ? '' : 'none';
+		// `final` -> show Accept / Reject (the only meaningful actions).
+		// `error` -> show Dismiss (no diff to act on).
+		// in-flight stages -> nothing (the user can't act yet).
+		const showAcceptReject = state.stage === 'final';
+		const showDismiss = state.stage === 'error';
+		handles.accept.style.display = showAcceptReject ? '' : 'none';
+		handles.reject.style.display = showAcceptReject ? '' : 'none';
+		handles.dismiss.style.display = showDismiss ? '' : 'none';
 
 		dom.clearNode(handles.body);
 

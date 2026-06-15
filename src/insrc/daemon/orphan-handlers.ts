@@ -24,6 +24,7 @@
  * tooling.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { detectOrphans, discardOrphan, type OrphanWorktree } from '../handoff/orphan-cleanup.js';
@@ -71,4 +72,78 @@ export const handoffDiscardOrphanRpc = async (rawParams: unknown): Promise<Disca
 	const worktreePath = join(persistRoot, p.sessionId, 'worktree');
 	const removed = discardOrphan(worktreePath);
 	return { removed };
+};
+
+// ---------------------------------------------------------------------------
+// handoff.cleanup -- user-driven post-audit cleanup (§5.1)
+// ---------------------------------------------------------------------------
+
+interface CleanupParams {
+	readonly sessionId:    string;
+	readonly specId:       string;
+	readonly outcome:      'accept' | 'reject' | 'dismissed';
+	readonly persistRoot?: string | undefined;
+	readonly stopReason?:  string | undefined;
+}
+
+interface CleanupResult {
+	readonly removed: boolean;
+	readonly outcomeRecorded: boolean;
+}
+
+/**
+ * Post-handoff cleanup RPC. Fired from the IDE when the user
+ * acts on a finalized handoff card (accept changes / reject
+ * changes / dismiss). Records the outcome to
+ * `<sid>/<specId>.outcome.json` for observability and removes
+ * the worktree subdir so it doesn't appear on the orphan list
+ * next startup.
+ *
+ * Outcome semantics:
+ *
+ *   - `accept`    -- user accepted the diff (per-file applies
+ *                    have already landed via the codelens flow).
+ *   - `reject`    -- user rejected; no changes applied.
+ *   - `dismissed` -- user closed the card without explicit
+ *                    accept / reject; worktree removed anyway.
+ *
+ * Idempotent: a second call returns `removed: false` because the
+ * worktree is already gone, but still writes the outcome stamp.
+ */
+export const handoffCleanupRpc = async (rawParams: unknown): Promise<CleanupResult> => {
+	const p = rawParams as CleanupParams;
+	if (typeof p?.sessionId !== 'string' || typeof p?.specId !== 'string') {
+		log.warn({ params: rawParams }, 'handoff.cleanup: invalid params; refusing');
+		return { removed: false, outcomeRecorded: false };
+	}
+	if (p.outcome !== 'accept' && p.outcome !== 'reject' && p.outcome !== 'dismissed') {
+		log.warn({ outcome: p.outcome }, 'handoff.cleanup: invalid outcome; refusing');
+		return { removed: false, outcomeRecorded: false };
+	}
+	const persistRoot = p.persistRoot ?? PATHS.handoffs;
+	const sessionDir = join(persistRoot, p.sessionId);
+	const worktreePath = join(sessionDir, 'worktree');
+
+	let outcomeRecorded = false;
+	try {
+		mkdirSync(sessionDir, { recursive: true });
+		const stamp = {
+			outcome:   p.outcome,
+			at:        new Date().toISOString(),
+			...(p.stopReason !== undefined ? { stopReason: p.stopReason } : {}),
+		};
+		writeFileSync(
+			join(sessionDir, `${p.specId}.outcome.json`),
+			JSON.stringify(stamp, null, 2),
+		);
+		outcomeRecorded = true;
+	} catch (err) {
+		log.warn({ err: (err as Error).message, sessionId: p.sessionId, specId: p.specId },
+			'handoff.cleanup: outcome stamp failed');
+	}
+
+	const removed = discardOrphan(worktreePath);
+	log.info({ sessionId: p.sessionId, specId: p.specId, outcome: p.outcome, removed },
+		'handoff.cleanup applied');
+	return { removed, outcomeRecorded };
 };

@@ -349,6 +349,25 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 		}
 	}
 
+	async cleanupHandoff(
+		sessionId: string,
+		specId: string,
+		outcome: 'accept' | 'reject' | 'dismissed',
+		opts: { stopReason?: string } = {},
+	): Promise<{ removed: boolean; outcomeRecorded: boolean }> {
+		const params: Record<string, unknown> = { sessionId, specId, outcome };
+		if (opts.stopReason !== undefined) {
+			params['stopReason'] = opts.stopReason;
+		}
+		try {
+			const result = await this.daemonService.rpc<{ removed: boolean; outcomeRecorded: boolean }>('handoff.cleanup', params);
+			return result;
+		} catch (err) {
+			this.logService.warn(`[insrc-handoff] handoff.cleanup(${sessionId}/${specId}) failed: ${(err as Error).message}`);
+			return { removed: false, outcomeRecorded: false };
+		}
+	}
+
 	async resolveModeAPrompt(
 		gateId: string,
 		verdict: 'allow' | 'deny',

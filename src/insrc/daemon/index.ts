@@ -85,7 +85,7 @@ import {
 } from './chat-handler.js';
 import { handoffRunStream } from './handoff-stream.js';
 import { gateRequestPermissionStream, gateResolveRpc, handoffModeAResolveRpc } from './gate-handlers.js';
-import { handoffListOrphansRpc, handoffDiscardOrphanRpc } from './orphan-handlers.js';
+import { handoffListOrphansRpc, handoffDiscardOrphanRpc, handoffCleanupRpc } from './orphan-handlers.js';
 import { detectOrphans } from '../handoff/orphan-cleanup.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
@@ -1559,6 +1559,10 @@ async function main(): Promise<void> {
 		// run.
 		'handoff.list-orphans':   handoffListOrphansRpc,
 		'handoff.discard-orphan': handoffDiscardOrphanRpc,
+		// Phase 5 user-driven cleanup post-audit. Records the user's
+		// accept / reject / dismissed verdict to disk and removes the
+		// worktree; the IDE fires this from the handoff card.
+		'handoff.cleanup':        handoffCleanupRpc,
 	}, {
 		// Streaming handlers
 		'handoff.run':              handoffRunStream,

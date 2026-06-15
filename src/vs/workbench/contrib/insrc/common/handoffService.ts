@@ -425,6 +425,19 @@ export interface IInsrcHandoffService {
 	): Promise<void>;
 
 	/**
+	 * Cleanup a finalized handoff (Phase 5). Records the user's
+	 * outcome verdict (`accept` / `reject` / `dismissed`) to disk
+	 * and removes the worktree. Called from the handoff card's
+	 * Accept / Reject / dismiss buttons.
+	 */
+	cleanupHandoff(
+		sessionId: string,
+		specId: string,
+		outcome: 'accept' | 'reject' | 'dismissed',
+		opts?: { stopReason?: string },
+	): Promise<{ removed: boolean; outcomeRecorded: boolean }>;
+
+	/**
 	 * Reply to a Mode B prompt. The verdict is forwarded to the
 	 * daemon's `gate.resolve` RPC; on `allow + scope === 'session'`
 	 * the daemon will also remember the allow for the rest of the

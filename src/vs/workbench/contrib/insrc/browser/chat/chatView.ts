@@ -322,7 +322,29 @@ export class InsrcChatViewPane extends ViewPane {
 		// to IInsrcHandoffService directly; chatView forwards the raw
 		// `{type:'handoff'}` stream messages via the dedicated dispatch
 		// path inside chatServiceImpl.
-		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService));
+		const cleanupHandler = async (specId: string, outcome: 'accept' | 'reject' | 'dismissed'): Promise<void> => {
+			// Apply / reject the diffs in the editor before telling the
+			// daemon to discard the worktree. The diff service tagged
+			// every file with `handoff:<specId>` when we opened the
+			// view -- accept-all / reject-all on the matching gate are
+			// the right primitives.
+			try {
+				if (outcome === 'accept') {
+					await this.diffService.acceptAll();
+				} else if (outcome === 'reject') {
+					this.diffService.rejectAll();
+				}
+			} catch (err) {
+				this._logService.warn(`[insrc-chat] diff ${outcome} failed: ${(err as Error).message}`);
+			}
+			const sessionId = this.chatService.activeSessionId ?? '';
+			if (sessionId.length === 0) {
+				this._logService.warn(`[insrc-chat] handoff cleanup: no active session; skipping daemon RPC`);
+				return;
+			}
+			await this._handoffService.cleanupHandoff(sessionId, specId, outcome);
+		};
+		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService, cleanupHandler));
 		handoffWidget.mount(this._messageList);
 
 		// Inline artifact widget (plans/artifact-tasks.md section 1.6). Renders
