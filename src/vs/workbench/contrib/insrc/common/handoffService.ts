@@ -137,6 +137,39 @@ export type HandoffEvent =
 		readonly message: string;
 	}
 	/**
+	 * Mode A pre-flight gate (Phase 3). Fires between `spec-ready`
+	 * and `worktree-created` when the IDE-initiated handoff opts
+	 * into the pre-flight check. The workbench renders an
+	 * "approve this spec?" modal and replies via
+	 * `resolveModeAPrompt`. On `deny` the daemon throws and the
+	 * handoff stops before any worktree is created.
+	 */
+	| {
+		readonly kind: 'mode-a-gate-request';
+		readonly specId: string;
+		readonly gateId: string;
+		readonly templateId: HandoffTemplateId;
+		readonly riskTag: HandoffRiskTag;
+		/**
+		 * Permission counts the modal renders as a one-line summary.
+		 * Allowed / Prompt / Deny rules are passed through opaquely
+		 * for the modal's "show details" view.
+		 */
+		readonly permissions: {
+			readonly allow: readonly unknown[];
+			readonly prompt: readonly unknown[];
+			readonly deny: readonly unknown[];
+		};
+		readonly preview: string;
+	}
+	| {
+		readonly kind: 'mode-a-gate-resolved';
+		readonly specId: string;
+		readonly gateId: string;
+		readonly verdict: 'allow' | 'deny';
+		readonly stopReason?: string | undefined;
+	}
+	/**
 	 * Mode B in-flight permission prompt (Phase 3). The daemon's
 	 * gate.request-permission hook hit a `prompt` verdict; the
 	 * workbench renders a modal and replies via gate.resolve. The
@@ -248,6 +281,32 @@ export interface HandoffChunk {
 }
 
 /**
+ * Pre-flight Mode A approval prompt (Phase 3). The orchestrator
+ * paused after spec-ready awaiting the user's verdict; the
+ * workbench renders an "approve this spec?" modal and replies via
+ * {@link IInsrcHandoffService.resolveModeAPrompt}.
+ */
+export interface HandoffModeAPrompt {
+	readonly specId: string;
+	readonly gateId: string;
+	readonly templateId: HandoffTemplateId;
+	readonly riskTag: HandoffRiskTag;
+	readonly permissions: {
+		readonly allow: readonly unknown[];
+		readonly prompt: readonly unknown[];
+		readonly deny: readonly unknown[];
+	};
+	readonly preview: string;
+}
+
+export interface HandoffModeAResolution {
+	readonly specId: string;
+	readonly gateId: string;
+	readonly verdict: 'allow' | 'deny';
+	readonly stopReason?: string | undefined;
+}
+
+/**
  * In-flight permission prompt waiting on the user's modal response
  * (Phase 3 Mode B). The chat view subscribes to
  * `IInsrcHandoffService.onModeBPrompt` and renders a modal; the user's
@@ -315,6 +374,20 @@ export interface IInsrcHandoffService {
 	readonly onChunk: Event<HandoffChunk>;
 
 	/**
+	 * Fires when the orchestrator emits a Mode A pre-flight gate.
+	 * Subscribers (the chat view) render a modal and reply via
+	 * {@link resolveModeAPrompt}.
+	 */
+	readonly onModeAPrompt: Event<HandoffModeAPrompt>;
+
+	/**
+	 * Fires when an outstanding Mode A gate settles -- either by the
+	 * IDE's reply or by the daemon's default-deny timeout. Modal
+	 * subscribers dismiss any UI keyed to the same `gateId`.
+	 */
+	readonly onModeAResolution: Event<HandoffModeAResolution>;
+
+	/**
 	 * Fires whenever the daemon's PreToolUse hook hits a `prompt`
 	 * verdict and is waiting on a user response (Phase 3 Mode B).
 	 * Subscribers (the chat view) render a modal and reply via
@@ -339,6 +412,17 @@ export interface IInsrcHandoffService {
 	 * false if the event was rejected as malformed.
 	 */
 	dispatch(event: HandoffEvent): boolean;
+
+	/**
+	 * Reply to a Mode A pre-flight prompt. Forwards to the daemon's
+	 * `handoff.mode-a.resolve` RPC. Idempotent on the daemon side
+	 * if the gate is already settled (timeout / cancellation).
+	 */
+	resolveModeAPrompt(
+		gateId: string,
+		verdict: 'allow' | 'deny',
+		opts?: { stopReason?: string },
+	): Promise<void>;
 
 	/**
 	 * Reply to a Mode B prompt. The verdict is forwarded to the

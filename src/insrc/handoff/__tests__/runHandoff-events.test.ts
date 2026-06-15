@@ -82,9 +82,15 @@ test('runHandoff: emits the expected event sequence on a happy-path accept run',
 		});
 
 		// Order is fixed; assert via kind sequence so the test stays
-		// resilient to minor payload changes.
-		const kinds = events.map(e => e.kind);
-		assert.deepEqual(kinds, [
+		// resilient to minor payload changes. Filter out
+		// `agent-stdout-chunk` / `agent-stderr-chunk` (Phase 2c) and
+		// the Mode A / B gate events (Phase 3) -- they're orthogonal
+		// to the pipeline-stage sequence we're pinning here.
+		const stageKinds = events.map(e => e.kind).filter(k =>
+			k !== 'agent-stdout-chunk' && k !== 'agent-stderr-chunk'
+			&& k !== 'mode-a-gate-request' && k !== 'mode-a-gate-resolved'
+			&& k !== 'mode-b-gate-request' && k !== 'mode-b-gate-resolved');
+		assert.deepEqual(stageKinds, [
 			'spec-assembling',
 			'spec-ready',
 			'worktree-created',
@@ -137,8 +143,11 @@ test('runHandoff: revise-major run still emits the full happy-path event sequenc
 			specIdOverride: 'spec-evt-rm',
 			onEvent:       e => events.push(e),
 		});
-		const kinds = events.map(e => e.kind);
-		assert.deepEqual(kinds, [
+		const stageKinds = events.map(e => e.kind).filter(k =>
+			k !== 'agent-stdout-chunk' && k !== 'agent-stderr-chunk'
+			&& k !== 'mode-a-gate-request' && k !== 'mode-a-gate-resolved'
+			&& k !== 'mode-b-gate-request' && k !== 'mode-b-gate-resolved');
+		assert.deepEqual(stageKinds, [
 			'spec-assembling', 'spec-ready', 'worktree-created', 'spawned',
 			'agent-completed', 'auditing', 'audit-ready', 'handoff-final',
 		]);

@@ -194,6 +194,30 @@ export type HandoffEvent =
 	| { readonly kind: 'handoff-error';    readonly stage: 'spec-assemble' | 'worktree' | 'spawn' | 'audit' | 'diff';
 	    readonly message: string }
 	/**
+	 * Mode A pre-flight gate (Phase 3). Fired after `spec-ready`
+	 * and BEFORE worktree creation. Carries the permission block +
+	 * risk tag + a preview so the IDE can render an "approve this
+	 * spec?" modal. runHandoff blocks until the daemon's
+	 * `handoff.mode-a.resolve` RPC settles the matching `gateId`,
+	 * or the default-deny timeout fires.
+	 */
+	| { readonly kind: 'mode-a-gate-request'; readonly specId: string;
+	    readonly gateId: string;
+	    readonly templateId: TemplateId;
+	    readonly riskTag: RiskTag;
+	    readonly permissions: PermissionsBlock;
+	    readonly preview: string }
+	/**
+	 * Resolution of a Mode A gate. Fires once per
+	 * `mode-a-gate-request` -- on user verdict, on timeout, or on
+	 * daemon-side cancel. The IDE dismisses any modal still open
+	 * for the matching `gateId`.
+	 */
+	| { readonly kind: 'mode-a-gate-resolved'; readonly specId: string;
+	    readonly gateId: string;
+	    readonly verdict: 'allow' | 'deny';
+	    readonly stopReason?: string | undefined }
+	/**
 	 * Mode B in-flight permission prompt (Phase 3). Fires while the
 	 * agent subprocess is running -- after `spawned` and before
 	 * `agent-completed` -- when the PreToolUse hook hits a `prompt`

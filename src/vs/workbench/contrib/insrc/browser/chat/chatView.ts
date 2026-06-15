@@ -19,7 +19,7 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
-import { IInsrcHandoffService, type HandoffModeBPrompt, type HandoffSessionState } from '../../common/handoffService.js';
+import { IInsrcHandoffService, type HandoffModeAPrompt, type HandoffModeBPrompt, type HandoffSessionState } from '../../common/handoffService.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
@@ -133,6 +133,11 @@ export class InsrcChatViewPane extends ViewPane {
 	private _modeBPromptChain: Promise<void> = Promise.resolve();
 	private readonly _modeBPromptCancels = new Map<string, () => void>();
 
+	/** Mode A modal cancels (Phase 3). Each in-flight Mode A dialog
+	 *  registers its cancel hook here keyed by gateId so the
+	 *  `onModeAResolution` event (timeout / cancel) can dismiss it. */
+	private readonly _modeAPromptCancels = new Map<string, () => void>();
+
 	private _container!: HTMLElement;
 	private _header!: HTMLElement;
 	private _repoLabel!: HTMLElement;
@@ -205,6 +210,15 @@ export class InsrcChatViewPane extends ViewPane {
 		// `handoff.accept` / `handoff.reject` IPCs land in a later phase.
 		this._register(this._handoffService.onDidFinalize(state => {
 			void this._openDiffFromHandoff(state);
+		}));
+		// Phase 3 Mode A: pre-flight permission gate. Fires once per
+		// handoff before the worktree is created. We block the handoff
+		// until the user approves the spec via a modal.
+		this._register(this._handoffService.onModeAPrompt(prompt => {
+			void this._showModeAPrompt(prompt);
+		}));
+		this._register(this._handoffService.onModeAResolution(res => {
+			this._cancelModeAPromptIfPending(res.gateId);
 		}));
 		// Phase 3 Mode B: PreToolUse hook prompts. Each request opens
 		// a modal asking the user to approve / deny the external agent's
@@ -1210,6 +1224,72 @@ export class InsrcChatViewPane extends ViewPane {
 		} catch (err) {
 			this._logService.warn(`[insrc-chat] _openDiffFromHandoff failed: ${(err as Error).message}`);
 		}
+	}
+
+	/**
+	 * Mode A (Phase 3): show a pre-flight approval modal. Runs OUTSIDE
+	 * the Mode B queue -- pre-flight is one-shot per handoff and
+	 * blocks the orchestrator on the daemon side; we don't want it
+	 * to serialise behind a queue of in-flight tool prompts.
+	 */
+	private async _showModeAPrompt(prompt: HandoffModeAPrompt): Promise<void> {
+		type Verdict = 'allow' | 'deny';
+
+		let cancelled = false;
+		let cancelDialog: (() => void) | undefined;
+		const cancelToken = new Promise<'cancelled'>(resolve => {
+			cancelDialog = () => {
+				cancelled = true;
+				resolve('cancelled');
+			};
+		});
+		this._modeAPromptCancels.set(prompt.gateId, cancelDialog!);
+
+		const detail = this._formatModeAPromptDetail(prompt);
+		const severity = prompt.riskTag === 'high' ? 'warning' : 'info';
+		try {
+			const dialogResult = this.dialogService.prompt<Verdict>({
+				type: severity,
+				message: `Approve handoff: ${prompt.templateId} (risk: ${prompt.riskTag})`,
+				detail,
+				buttons: [
+					{ label: 'Allow', run: () => 'allow' as Verdict },
+				],
+				cancelButton: { label: 'Cancel', run: () => 'deny' as Verdict },
+			});
+
+			const winner = await Promise.race([dialogResult, cancelToken]);
+			if (cancelled || winner === 'cancelled') {
+				return;
+			}
+			const verdict = (winner as { result?: Verdict }).result ?? 'deny';
+			await this._handoffService.resolveModeAPrompt(prompt.gateId, verdict);
+		} catch (err) {
+			this._logService.warn(`[insrc-chat] Mode A prompt failed for gate ${prompt.gateId}: ${(err as Error).message}`);
+		} finally {
+			this._modeAPromptCancels.delete(prompt.gateId);
+		}
+	}
+
+	private _cancelModeAPromptIfPending(gateId: string): void {
+		const cancel = this._modeAPromptCancels.get(gateId);
+		if (cancel !== undefined) {
+			cancel();
+			this._modeAPromptCancels.delete(gateId);
+		}
+	}
+
+	private _formatModeAPromptDetail(prompt: HandoffModeAPrompt): string {
+		const lines: string[] = [];
+		const allow = prompt.permissions.allow.length;
+		const promptC = prompt.permissions.prompt.length;
+		const deny = prompt.permissions.deny.length;
+		lines.push(`Permissions: ${allow} allowed, ${promptC} prompt, ${deny} denied`);
+		lines.push(`Spec: ${prompt.specId}`);
+		lines.push('');
+		lines.push('Preview:');
+		lines.push(prompt.preview.trim());
+		return lines.join('\n');
 	}
 
 	/**

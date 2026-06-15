@@ -32,6 +32,8 @@ import { createWorktree, diffWorktreeAgainstHead, removeWorktree } from './workt
 import { spawnClaudeCode } from './spawn/claude-code.js';
 import type { AgentSpawnResult, SpawnChunkListener } from './spawn/base.js';
 import { subscribePrompts, subscribeResolutions } from '../gating/prompt-dispatch.js';
+import { awaitModeAResolution } from '../gating/mode-a-dispatch.js';
+import { randomBytes } from 'node:crypto';
 import { auditDeliverable, type AuditResult } from './audit/judge.js';
 import { getTemplate } from './templates/registry.js';
 import type { AssembledSpec, HandoffEvent, MemoryRef, ScopePayload, TemplateId } from './types.js';
@@ -98,6 +100,20 @@ export interface RunHandoffOpts {
 	 * around each invocation to avoid breaking the pipeline.
 	 */
 	readonly onEvent?:        HandoffEventListener | undefined;
+	/**
+	 * Enable the Mode A pre-flight gate (Phase 3). When `true`,
+	 * runHandoff emits a `mode-a-gate-request` after `spec-ready`
+	 * and blocks until the daemon's `handoff.mode-a.resolve` RPC
+	 * settles the gate (or the default-deny timeout fires). On
+	 * `deny`, the handoff fails with `handoff-error` stage
+	 * `spec-assemble` and no worktree is created.
+	 *
+	 * Default `false`. CLI and test paths bypass Mode A; the IDE
+	 * always opts in.
+	 */
+	readonly modeAGate?:      boolean | undefined;
+	/** Test seam: shorten the Mode A default-deny timeout. */
+	readonly modeATimeoutMs?: number | undefined;
 }
 
 export interface RunHandoffResult {
@@ -145,6 +161,38 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	}
 	log.info({ specId: spec.specId, templateId: opts.templateId }, 'handoff: spec assembled');
 	emit({ kind: 'spec-ready', specId: spec.specId, templateId: opts.templateId, preview: spec.specMd.slice(0, 200) });
+
+	// 1b. Mode A pre-flight gate (Phase 3). When the caller opts in
+	//     (the IDE always does; CLI / tests default off), block here
+	//     until the user approves the spec or the default-deny timeout
+	//     fires. We emit the gate-request, await resolution, emit the
+	//     resolved event, and throw on deny so the orchestrator's
+	//     finally clauses still tear down anything we registered.
+	if (opts.modeAGate === true) {
+		const modeAGateId = `modea-${randomBytes(8).toString('hex')}`;
+		emit({
+			kind:       'mode-a-gate-request',
+			specId:     spec.specId,
+			gateId:     modeAGateId,
+			templateId: opts.templateId,
+			riskTag:    spec.meta.riskTag,
+			permissions: spec.meta.permissions,
+			preview:    spec.specMd.slice(0, 200),
+		});
+		const resolution = await awaitModeAResolution(modeAGateId, opts.modeATimeoutMs);
+		emit({
+			kind:    'mode-a-gate-resolved',
+			specId:  spec.specId,
+			gateId:  modeAGateId,
+			verdict: resolution.verdict,
+			...(resolution.stopReason !== undefined ? { stopReason: resolution.stopReason } : {}),
+		});
+		if (resolution.verdict === 'deny') {
+			const reason = resolution.stopReason ?? 'Mode A: user denied';
+			emit({ kind: 'handoff-error', stage: 'spec-assemble', message: reason });
+			throw new Error(reason);
+		}
+	}
 
 	// 2. Create the worktree off HEAD of the source repo.
 	let createResult: Awaited<ReturnType<typeof createWorktree>>;

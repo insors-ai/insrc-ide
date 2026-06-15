@@ -12,6 +12,8 @@ import {
 	IInsrcHandoffService,
 	type HandoffChunk,
 	type HandoffEvent,
+	type HandoffModeAPrompt,
+	type HandoffModeAResolution,
 	type HandoffModeBPrompt,
 	type HandoffModeBResolution,
 	type HandoffSessionState,
@@ -59,6 +61,12 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 
 	private readonly _onChunk = this._register(new Emitter<HandoffChunk>());
 	readonly onChunk: Event<HandoffChunk> = this._onChunk.event;
+
+	private readonly _onModeAPrompt = this._register(new Emitter<HandoffModeAPrompt>());
+	readonly onModeAPrompt: Event<HandoffModeAPrompt> = this._onModeAPrompt.event;
+
+	private readonly _onModeAResolution = this._register(new Emitter<HandoffModeAResolution>());
+	readonly onModeAResolution: Event<HandoffModeAResolution> = this._onModeAResolution.event;
 
 	private readonly _onModeBPrompt = this._register(new Emitter<HandoffModeBPrompt>());
 	readonly onModeBPrompt: Event<HandoffModeBPrompt> = this._onModeBPrompt.event;
@@ -185,6 +193,29 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					stream: event.kind === 'agent-stdout-chunk' ? 'stdout' : 'stderr',
 					chunk: event.chunk,
 				});
+				return true;
+			}
+
+			case 'mode-a-gate-request': {
+				this._onModeAPrompt.fire({
+					specId: event.specId,
+					gateId: event.gateId,
+					templateId: event.templateId,
+					riskTag: event.riskTag,
+					permissions: event.permissions,
+					preview: event.preview,
+				});
+				return true;
+			}
+
+			case 'mode-a-gate-resolved': {
+				const resolution: HandoffModeAResolution = {
+					specId: event.specId,
+					gateId: event.gateId,
+					verdict: event.verdict,
+					...(event.stopReason !== undefined ? { stopReason: event.stopReason } : {}),
+				};
+				this._onModeAResolution.fire(resolution);
 				return true;
 			}
 
@@ -315,6 +346,22 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					errorMessage: event.message,
 				}));
 			}
+		}
+	}
+
+	async resolveModeAPrompt(
+		gateId: string,
+		verdict: 'allow' | 'deny',
+		opts: { stopReason?: string } = {},
+	): Promise<void> {
+		const params: Record<string, unknown> = { gateId, verdict };
+		if (opts.stopReason !== undefined) {
+			params['stopReason'] = opts.stopReason;
+		}
+		try {
+			await this.daemonService.rpc<{ resolved: boolean }>('handoff.mode-a.resolve', params);
+		} catch (err) {
+			this.logService.warn(`[insrc-handoff] handoff.mode-a.resolve(${gateId}) failed: ${(err as Error).message}`);
 		}
 	}
 

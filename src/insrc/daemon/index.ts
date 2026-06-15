@@ -84,7 +84,7 @@ import {
 	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
 } from './chat-handler.js';
 import { handoffRunStream } from './handoff-stream.js';
-import { gateRequestPermissionStream, gateResolveRpc } from './gate-handlers.js';
+import { gateRequestPermissionStream, gateResolveRpc, handoffModeAResolveRpc } from './gate-handlers.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
@@ -1543,6 +1543,13 @@ async function main(): Promise<void> {
 		// gateId in the pending registry and forwards the verdict to the
 		// waiting `gate.request-permission` stream.
 		'gate.resolve': gateResolveRpc,
+
+		// Phase 3 Mode A pre-flight gate. The IDE calls this with the
+		// user's verdict on a `mode-a-gate-request` event the handoff
+		// orchestrator emitted between `spec-ready` and worktree
+		// creation. Resolves the pending entry in mode-a-dispatch;
+		// runHandoff resumes (or aborts on deny).
+		'handoff.mode-a.resolve': handoffModeAResolveRpc,
 	}, {
 		// Streaming handlers
 		'handoff.run':              handoffRunStream,

@@ -33,6 +33,7 @@ import {
 	makeGateResolveHandler,
 	type PendingPrompt,
 } from '../gating/hook-server.js';
+import { resolveModeAPrompt, type ModeAVerdict } from '../gating/mode-a-dispatch.js';
 import type { PermissionsBlock, SpecMeta } from '../handoff/types.js';
 import { getLogger } from '../shared/logger.js';
 
@@ -61,6 +62,24 @@ const built = makeRequestPermissionHandler({
 
 export const gateRequestPermissionStream = built.handler;
 export const gateResolveRpc               = makeGateResolveHandler(sharedPending);
+
+/**
+ * `handoff.mode-a.resolve` RPC. The IDE calls this when the user
+ * clicks Allow / Cancel on the Mode A pre-flight modal. The
+ * dispatcher looks up the gateId in the pending registry; if found,
+ * resolves the awaiting `runHandoff` promise.
+ */
+export const handoffModeAResolveRpc = async (rawParams: unknown): Promise<{ readonly resolved: boolean }> => {
+	const p = rawParams as { gateId: string; verdict: ModeAVerdict; stopReason?: string };
+	const resolved = resolveModeAPrompt(p.gateId, {
+		verdict: p.verdict,
+		...(p.stopReason !== undefined ? { stopReason: p.stopReason } : {}),
+	});
+	if (!resolved) {
+		log.warn({ gateId: p.gateId }, 'handoff.mode-a.resolve: no pending entry; ignoring');
+	}
+	return { resolved };
+};
 
 /**
  * Test seam: expose the pending map so tests can inspect it without

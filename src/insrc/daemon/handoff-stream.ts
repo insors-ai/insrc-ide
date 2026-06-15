@@ -50,6 +50,15 @@ interface HandoffRunParams {
 	 */
 	readonly scriptedDeliverable?: string | undefined;
 	readonly forceCleanup?:     boolean | undefined;
+	/**
+	 * Phase 3 Mode A: opt the IDE-initiated handoff into the
+	 * pre-flight permission gate. When `true`, the orchestrator
+	 * emits `mode-a-gate-request` and blocks until the IDE replies
+	 * via `handoff.mode-a.resolve` (or the default-deny timeout).
+	 * CLI / scripted callers leave this off.
+	 */
+	readonly modeAGate?:        boolean | undefined;
+	readonly modeATimeoutMs?:   number | undefined;
 }
 
 /**
@@ -113,6 +122,8 @@ export const handoffRunStream: StreamHandler = async (params, send, signal) => {
 			...(p.specIdOverride !== undefined ? { specIdOverride: p.specIdOverride } : {}),
 			...(p.timeoutMs      !== undefined ? { timeoutMs:      p.timeoutMs      } : {}),
 			...(p.forceCleanup   === true      ? { forceCleanup:   true            } : {}),
+			...(p.modeAGate      === true      ? { modeAGate:      true            } : {}),
+			...(p.modeATimeoutMs !== undefined ? { modeATimeoutMs: p.modeATimeoutMs } : {}),
 			...(scriptedAgent    !== undefined ? { scriptedAgent }                  : {}),
 		});
 		sendIfNotAborted({ stream: 'done', data: {} });
