@@ -355,5 +355,17 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.handoff.uxMode', 'Display mode for external-agent handoffs. `headless` is the default progress card; `terminal` adds live stdout/stderr streaming. (plans/external-agent-integration.md Phase 2c)'),
 			scope: ConfigurationScope.MACHINE,
 		},
+		'insrc.handoff.preferredAgent': {
+			type: 'string',
+			default: 'auto',
+			enum: ['auto', 'claude-code', 'codex'],
+			enumDescriptions: [
+				localize('insrc.handoff.preferredAgent.auto', 'Pick the agent that matches the active cloud provider: `claude-code` for Anthropic, `codex` for everything else.'),
+				localize('insrc.handoff.preferredAgent.claude-code', 'Always use Claude Code for external-agent handoffs.'),
+				localize('insrc.handoff.preferredAgent.codex', 'Always use Codex for external-agent handoffs.'),
+			],
+			description: localize('insrc.handoff.preferredAgent', 'Which external coding agent to spawn for handoffs. The Phase 4 router (`pickAgent`) reads this setting; `auto` defers to the active cloud provider. (plans/external-agent-integration.md Phase 4)'),
+			scope: ConfigurationScope.MACHINE,
+		},
 	},
 });
