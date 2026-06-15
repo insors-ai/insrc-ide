@@ -19,7 +19,7 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
-import { IInsrcHandoffService, type HandoffSessionState } from '../../common/handoffService.js';
+import { IInsrcHandoffService, type HandoffModeBPrompt, type HandoffSessionState } from '../../common/handoffService.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
@@ -119,6 +119,20 @@ export class InsrcChatViewPane extends ViewPane {
 
 	private readonly _configurationService: IConfigurationService;
 
+	/**
+	 * Mode B prompt queue (Phase 3). Per-modal we await the user's
+	 * verdict before showing the next; the daemon serializes prompts
+	 * inside a single agent run but a burst from a concurrent
+	 * background handoff could otherwise stack overlapping dialogs.
+	 *
+	 * The cancel hook for each in-flight modal lives here too so the
+	 * `onModeBResolution` event (timeout / cancel from the daemon
+	 * side) can dismiss the dialog without waiting for the user.
+	 * Each cancel is a one-shot; ignored once the modal has settled.
+	 */
+	private _modeBPromptChain: Promise<void> = Promise.resolve();
+	private readonly _modeBPromptCancels = new Map<string, () => void>();
+
 	private _container!: HTMLElement;
 	private _header!: HTMLElement;
 	private _repoLabel!: HTMLElement;
@@ -191,6 +205,18 @@ export class InsrcChatViewPane extends ViewPane {
 		// `handoff.accept` / `handoff.reject` IPCs land in a later phase.
 		this._register(this._handoffService.onDidFinalize(state => {
 			void this._openDiffFromHandoff(state);
+		}));
+		// Phase 3 Mode B: PreToolUse hook prompts. Each request opens
+		// a modal asking the user to approve / deny the external agent's
+		// tool call. Run sequentially via the per-instance prompt queue
+		// so a burst of prompts doesn't stack overlapping dialogs.
+		this._register(this._handoffService.onModeBPrompt(prompt => {
+			void this._enqueueModeBPrompt(prompt);
+		}));
+		// If the daemon resolves a prompt out-from-under us (default-deny
+		// timeout, session cancel), drop any UI we still have open for it.
+		this._register(this._handoffService.onModeBResolution(res => {
+			this._cancelModeBPromptIfPending(res.gateId);
 		}));
 		this._register(this.daemonService.onDidChangeState(() => {
 			this._updateHeader();
@@ -1184,6 +1210,94 @@ export class InsrcChatViewPane extends ViewPane {
 		} catch (err) {
 			this._logService.warn(`[insrc-chat] _openDiffFromHandoff failed: ${(err as Error).message}`);
 		}
+	}
+
+	/**
+	 * Mode B (Phase 3): show a modal for a single PreToolUse prompt
+	 * and forward the user's verdict to the daemon via
+	 * `gate.resolve`. Promised against the per-instance chain so a
+	 * burst of prompts queues sequentially. If the daemon resolves
+	 * the prompt under us (default-deny timeout, cancel),
+	 * `_cancelModeBPromptIfPending` settles the dialog with a
+	 * synthetic Cancel result so we never RPC a stale verdict back.
+	 */
+	private _enqueueModeBPrompt(prompt: HandoffModeBPrompt): Promise<void> {
+		const next = this._modeBPromptChain.then(() => this._showModeBPrompt(prompt));
+		this._modeBPromptChain = next;
+		return next;
+	}
+
+	private async _showModeBPrompt(prompt: HandoffModeBPrompt): Promise<void> {
+		type Verdict = 'allow-once' | 'allow-session' | 'deny';
+
+		let cancelled = false;
+		let cancelDialog: (() => void) | undefined;
+		const cancelToken = new Promise<'cancelled'>(resolve => {
+			cancelDialog = () => {
+				cancelled = true;
+				resolve('cancelled');
+			};
+		});
+		this._modeBPromptCancels.set(prompt.gateId, cancelDialog!);
+
+		const detail = this._formatModeBPromptDetail(prompt);
+		try {
+			const dialogResult = this.dialogService.prompt<Verdict>({
+				type: 'warning',
+				message: `External agent wants to run \`${prompt.tool}\``,
+				detail,
+				buttons: [
+					{ label: 'Allow', run: () => 'allow-once' as Verdict },
+					{ label: 'Allow this session', run: () => 'allow-session' as Verdict },
+				],
+				cancelButton: { label: 'Deny', run: () => 'deny' as Verdict },
+			});
+
+			const winner = await Promise.race([dialogResult, cancelToken]);
+			if (cancelled || winner === 'cancelled') {
+				// Daemon already settled this prompt -- nothing to RPC back.
+				return;
+			}
+			const verdict = (winner as { result?: Verdict }).result ?? 'deny';
+			if (verdict === 'allow-once') {
+				await this._handoffService.resolveModeBPrompt(prompt.gateId, 'allow', { scope: 'once' });
+			} else if (verdict === 'allow-session') {
+				await this._handoffService.resolveModeBPrompt(prompt.gateId, 'allow', { scope: 'session' });
+			} else {
+				await this._handoffService.resolveModeBPrompt(prompt.gateId, 'deny');
+			}
+		} catch (err) {
+			this._logService.warn(`[insrc-chat] Mode B prompt failed for gate ${prompt.gateId}: ${(err as Error).message}`);
+		} finally {
+			this._modeBPromptCancels.delete(prompt.gateId);
+		}
+	}
+
+	private _cancelModeBPromptIfPending(gateId: string): void {
+		const cancel = this._modeBPromptCancels.get(gateId);
+		if (cancel !== undefined) {
+			cancel();
+			this._modeBPromptCancels.delete(gateId);
+		}
+	}
+
+	private _formatModeBPromptDetail(prompt: HandoffModeBPrompt): string {
+		const lines: string[] = [];
+		lines.push(`Tool: ${prompt.tool}`);
+		lines.push(`Spec: ${prompt.specId}`);
+		const inputJson = (() => {
+			try { return JSON.stringify(prompt.input, null, 2); }
+			catch { return String(prompt.input); }
+		})();
+		// Trim huge inputs so the modal doesn't blow up.
+		const TRUNCATE = 1500;
+		const trimmed = inputJson.length > TRUNCATE
+			? `${inputJson.slice(0, TRUNCATE)}\n...(${inputJson.length - TRUNCATE} more bytes)`
+			: inputJson;
+		lines.push('');
+		lines.push('Input:');
+		lines.push(trimmed);
+		return lines.join('\n');
 	}
 
 	private _renderError(error: string): void {
