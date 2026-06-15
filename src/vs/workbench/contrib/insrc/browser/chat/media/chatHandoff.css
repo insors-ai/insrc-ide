@@ -123,3 +123,21 @@
 	font-size: 12px;
 	white-space: pre-wrap;
 }
+
+/* Live stdout/stderr viewport (Phase 2c terminal mode). Scrollable
+ * monospace pane under the card body; chunk stream is appended as it
+ * arrives, oldest bytes trimmed beyond TERMINAL_VIEWPORT_LIMIT_BYTES. */
+.insrc-chat-handoff-terminal {
+	margin-top: 6px;
+	max-height: 220px;
+	overflow-y: auto;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	line-height: 1.4;
+	white-space: pre-wrap;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 3px;
+	padding: 6px 8px;
+}

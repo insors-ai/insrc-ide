@@ -333,3 +333,27 @@ configurationRegistry.registerConfiguration({
 		},
 	},
 });
+
+// ---------------------------------------------------------------------------
+// Insrc > Handoff (external coding agent integration)
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.handoff',
+	title: localize('insrc.handoff.title', 'Insrc > Handoff'),
+	type: 'object',
+	order: INSRC_ORDER + 13,
+	properties: {
+		'insrc.handoff.uxMode': {
+			type: 'string',
+			default: 'headless',
+			enum: ['headless', 'terminal'],
+			enumDescriptions: [
+				localize('insrc.handoff.uxMode.headless', 'Render handoff progress + final diff inline in the chat panel only.'),
+				localize('insrc.handoff.uxMode.terminal', 'Also stream the external agent\'s live stdout / stderr into a scrollable viewport inside the handoff card.'),
+			],
+			description: localize('insrc.handoff.uxMode', 'Display mode for external-agent handoffs. `headless` is the default progress card; `terminal` adds live stdout/stderr streaming. (plans/external-agent-integration.md Phase 2c)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+	},
+});

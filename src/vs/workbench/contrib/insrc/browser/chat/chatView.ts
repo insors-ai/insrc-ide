@@ -116,6 +116,8 @@ const ttPolicy = createTrustedTypesPolicy('insrcChat', {
 
 export class InsrcChatViewPane extends ViewPane {
 
+	private readonly _configurationService: IConfigurationService;
+
 	private _container!: HTMLElement;
 	private _header!: HTMLElement;
 	private _repoLabel!: HTMLElement;
@@ -177,6 +179,7 @@ export class InsrcChatViewPane extends ViewPane {
 		@ILogService private readonly _logService: ILogService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
+		this._configurationService = configurationService;
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleChatEvent(e)));
 		this._register(this.chatService.onDidChangeSession(() => this._onSessionChanged()));
@@ -278,7 +281,7 @@ export class InsrcChatViewPane extends ViewPane {
 		// to IInsrcHandoffService directly; chatView forwards the raw
 		// `{type:'handoff'}` stream messages via the dedicated dispatch
 		// path inside chatServiceImpl.
-		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService));
+		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService, this._configurationService));
 		handoffWidget.mount(this._messageList);
 
 		// Inline artifact widget (plans/artifact-tasks.md section 1.6). Renders
