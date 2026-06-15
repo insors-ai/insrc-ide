@@ -66,6 +66,12 @@ export const PATHS = {
   // schema changes invalidate per-target rather than per-commit.
   // Cleared via `insrc.dataAnalyzer.clearCache`.
   dataAnalyzerCache: join(INSRC_DIR, 'cache', 'data-analysis'),
+  // Per-session handoff persistRoot (plans/external-agent-integration.md
+  // §7.1). Worktrees + spec / deliverable / audit / cost / trace files
+  // for every external-agent handoff live under
+  // `<handoffs>/<sessionId>/`. The orphan classifier (Phase 5) reads
+  // this on daemon startup to surface interrupted runs.
+  handoffs:    join(INSRC_DIR, 'handoffs'),
   logDir:      LOG_DIR,
   daemonLog:   join(LOG_DIR, 'daemon.log'),
   agentLog:    join(LOG_DIR, 'agent.log'),

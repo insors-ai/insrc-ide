@@ -85,6 +85,8 @@ import {
 } from './chat-handler.js';
 import { handoffRunStream } from './handoff-stream.js';
 import { gateRequestPermissionStream, gateResolveRpc, handoffModeAResolveRpc } from './gate-handlers.js';
+import { handoffListOrphansRpc, handoffDiscardOrphanRpc } from './orphan-handlers.js';
+import { detectOrphans } from '../handoff/orphan-cleanup.js';
 import { writePid, clearPid, isAlreadyRunning, bootstrapEmbeddingModel, getModelState } from './lifecycle.js';
 import { resolveClosure, searchEntities, findCallers, findCallees, closureEntities, unreachableEntities } from '../db/search.js';
 import { embedQuery } from '../indexer/embedder.js';
@@ -1550,6 +1552,13 @@ async function main(): Promise<void> {
 		// creation. Resolves the pending entry in mode-a-dispatch;
 		// runHandoff resumes (or aborts on deny).
 		'handoff.mode-a.resolve': handoffModeAResolveRpc,
+
+		// Phase 5 orphan-worktree IPCs. Surface worktree state on disk
+		// to the IDE; the daemon doesn't garbage-collect on its own
+		// because the user may want to inspect / retry an interrupted
+		// run.
+		'handoff.list-orphans':   handoffListOrphansRpc,
+		'handoff.discard-orphan': handoffDiscardOrphanRpc,
 	}, {
 		// Streaming handlers
 		'handoff.run':              handoffRunStream,
@@ -1584,6 +1593,22 @@ async function main(): Promise<void> {
 
 	await server.listen();
 	log.info('ready');
+
+	// Phase 5 §5.1: scan for orphaned handoff worktrees from prior
+	// daemon runs. We don't auto-discard; the IDE shows them and
+	// lets the user choose Retry or Discard. Surfaced count is
+	// purely advisory at startup -- the `handoff.list-orphans` RPC
+	// is the live source.
+	try {
+		const orphans = detectOrphans({ persistRoot: PATHS.handoffs });
+		if (orphans.length > 0) {
+			const byStatus = { completed: 0, interrupted: 0, pending: 0 };
+			for (const o of orphans) byStatus[o.status]++;
+			log.info({ total: orphans.length, ...byStatus }, 'orphan worktrees detected at startup');
+		}
+	} catch (err) {
+		log.warn({ err: (err as Error).message }, 'orphan-detection at startup failed; continuing');
+	}
 
 	// 8. Nightly pruning job — runs every 24 hours
 	const PRUNE_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
