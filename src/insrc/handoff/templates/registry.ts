@@ -7,19 +7,32 @@
  * Template registry -- single point of truth for "which templates
  * exist in this build".
  *
- * Phase 2a ships ONE template (DEBUG-SESSION). The other seven slots
- * (SPEC, DESIGN, REQUIREMENTS, TEST-PLAN, REVIEW, MIGRATION, AUDIT)
- * are declared in TemplateId but not yet registered; Phase 7 fills
- * those in. The registry's invariant assertion enumerates ONLY what's
- * shipped so adding a new template is a deliberate registry edit.
+ * Phase 7 fills out the remaining seven slots alongside the
+ * Phase-2a DEBUG-SESSION wedge. Each is registered via its module
+ * export below; the registry assertion enumerates the full set so
+ * adding or removing one is a deliberate, reviewable edit.
  */
 
 import type { TemplateId } from '../types.js';
 import type { TemplateDefinition } from './types.js';
 import { debugSessionTemplate } from './debug-session.js';
+import { specTemplate }         from './spec.js';
+import { designTemplate }       from './design.js';
+import { requirementsTemplate } from './requirements.js';
+import { testPlanTemplate }     from './test-plan.js';
+import { reviewTemplate }       from './review.js';
+import { migrationTemplate }    from './migration.js';
+import { auditTemplate }        from './audit.js';
 
 const REGISTERED: Partial<Record<TemplateId, TemplateDefinition>> = {
 	'DEBUG-SESSION': debugSessionTemplate as TemplateDefinition,
+	'SPEC':          specTemplate         as TemplateDefinition,
+	'DESIGN':        designTemplate,
+	'REQUIREMENTS':  requirementsTemplate,
+	'TEST-PLAN':     testPlanTemplate,
+	'REVIEW':        reviewTemplate,
+	'MIGRATION':     migrationTemplate,
+	'AUDIT':         auditTemplate,
 };
 
 /**
@@ -48,18 +61,35 @@ export function registeredTemplates(): readonly TemplateId[] {
 }
 
 /**
- * Phase-2a invariants -- the registry surface is pinned at:
- *   DEBUG-SESSION (Phase 2a wedge)
+ * Phase-7 invariants -- registry surface is now the full set:
  *
- * Phase 7's rollout (SPEC, DESIGN, REQUIREMENTS, TEST-PLAN, REVIEW,
- * MIGRATION, AUDIT) updates this assertion alongside each addition.
+ *   DEBUG-SESSION  (Phase 2a wedge)
+ *   SPEC           (Phase 7)
+ *   DESIGN         (Phase 7)
+ *   REQUIREMENTS   (Phase 7)
+ *   TEST-PLAN      (Phase 7)
+ *   REVIEW         (Phase 7)
+ *   MIGRATION      (Phase 7, default risk=high)
+ *   AUDIT          (Phase 7, default risk=medium)
+ *
+ * Adding or removing a template requires updating this set
+ * deliberately -- the assertion catches accidental drift.
  */
 export function assertTemplateInvariants(): void {
-	const expected = new Set<TemplateId>(['DEBUG-SESSION']);
-	const actual   = new Set(Object.keys(REGISTERED) as TemplateId[]);
+	const expected = new Set<TemplateId>([
+		'DEBUG-SESSION',
+		'SPEC',
+		'DESIGN',
+		'REQUIREMENTS',
+		'TEST-PLAN',
+		'REVIEW',
+		'MIGRATION',
+		'AUDIT',
+	]);
+	const actual = new Set(Object.keys(REGISTERED) as TemplateId[]);
 	for (const id of actual) {
 		if (!expected.has(id)) {
-			throw new Error(`Template '${id}' is registered but not in the Phase-2a expected set. Update assertTemplateInvariants() if intentional.`);
+			throw new Error(`Template '${id}' is registered but not in the Phase-7 expected set. Update assertTemplateInvariants() if intentional.`);
 		}
 		const t = REGISTERED[id]!;
 		if (t.id !== id) {
@@ -68,7 +98,7 @@ export function assertTemplateInvariants(): void {
 	}
 	for (const id of expected) {
 		if (!actual.has(id)) {
-			throw new Error(`Template '${id}' is in the Phase-2a expected set but missing from the registry.`);
+			throw new Error(`Template '${id}' is in the Phase-7 expected set but missing from the registry.`);
 		}
 	}
 }

@@ -181,8 +181,10 @@ test('assembleSpec: without persistRoot -> nothing written to disk; pure return 
 
 test('assembleSpec: unknown template id throws via getTemplate', () => {
 	assert.throws(
-		() => assembleSpec(baseInput({ templateId: 'SPEC' })),
-		/Unknown handoff template id 'SPEC'/,
+		// SPEC is now a registered Phase 7 template -- use an
+		// obviously-bogus id to exercise the "unknown" branch.
+		() => assembleSpec(baseInput({ templateId: 'NOT-A-TEMPLATE' as unknown as Parameters<typeof assembleSpec>[0]['templateId'] })),
+		/Unknown handoff template id/,
 	);
 });
 

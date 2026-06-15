@@ -255,14 +255,15 @@ test('renderSpec: NEVER includes raw code blocks pre-fetched from source files (
 // Registry
 // ---------------------------------------------------------------------------
 
-test('registry: DEBUG-SESSION is the only registered template in Phase 2a', () => {
-	assert.deepEqual(registeredTemplates(), ['DEBUG-SESSION']);
+test('registry: DEBUG-SESSION is part of the registered set (Phase 7 added the others)', () => {
+	assert.ok(registeredTemplates().includes('DEBUG-SESSION'));
 });
 
 test('registry: findTemplate / getTemplate', () => {
 	assert.equal(findTemplate('DEBUG-SESSION')?.id, 'DEBUG-SESSION');
-	assert.equal(findTemplate('SPEC'), undefined);
-	assert.throws(() => getTemplate('SPEC'), /Unknown handoff template/);
+	assert.equal(findTemplate('SPEC')?.id, 'SPEC');
+	assert.throws(() => getTemplate('NOT-A-REAL-TEMPLATE' as unknown as Parameters<typeof getTemplate>[0]),
+		/Unknown handoff template/);
 });
 
 test('registry: assertTemplateInvariants passes on the Phase-2a surface', () => {
