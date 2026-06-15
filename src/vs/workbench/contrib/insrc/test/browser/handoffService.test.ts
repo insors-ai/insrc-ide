@@ -213,6 +213,50 @@ suite('InsrcHandoffServiceImpl', () => {
 		assert.equal(svc.sessions.get('spec-c')?.stage, 'spawned');
 	});
 
+	test('mode-a-gate-request fans out via onModeAPrompt; mode-a-gate-resolved fans out via onModeAResolution; resolveModeAPrompt calls handoff.mode-a.resolve RPC', async () => {
+		const stub = stubChatService('s');
+		testDisposables.add(stub.emitter);
+		const daemonStub = stubDaemonService();
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, daemonStub.daemonService, new NullLogService()));
+
+		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
+		svc.dispatch({ kind: 'spec-ready', specId: 'spec-a', templateId: 'DEBUG-SESSION', preview: 'p' });
+
+		const prompts: Array<{ gateId: string; riskTag: string }> = [];
+		const resolutions: Array<{ gateId: string; verdict: 'allow' | 'deny' }> = [];
+		testDisposables.add(svc.onModeAPrompt(p => prompts.push({ gateId: p.gateId, riskTag: p.riskTag })));
+		testDisposables.add(svc.onModeAResolution(r => resolutions.push({ gateId: r.gateId, verdict: r.verdict })));
+
+		assert.strictEqual(svc.dispatch({
+			kind: 'mode-a-gate-request',
+			specId: 'spec-a',
+			gateId: 'ga-1',
+			templateId: 'DEBUG-SESSION',
+			riskTag: 'medium',
+			permissions: { allow: [{}], prompt: [{}, {}], deny: [] },
+			preview: 'preview body',
+		}), true);
+
+		// Mode A gate events must not advance the session stage.
+		assert.equal(svc.sessions.get('spec-a')?.stage, 'spec-ready');
+		assert.deepStrictEqual(prompts, [{ gateId: 'ga-1', riskTag: 'medium' }]);
+
+		// User clicks Allow -> service forwards via handoff.mode-a.resolve RPC.
+		await svc.resolveModeAPrompt('ga-1', 'allow');
+		assert.equal(daemonStub.rpcCalls.length, 1);
+		assert.equal(daemonStub.rpcCalls[0]!.method, 'handoff.mode-a.resolve');
+		assert.deepStrictEqual(daemonStub.rpcCalls[0]!.params, { gateId: 'ga-1', verdict: 'allow' });
+
+		// Daemon echoes the resolution.
+		assert.strictEqual(svc.dispatch({
+			kind: 'mode-a-gate-resolved',
+			specId: 'spec-a',
+			gateId: 'ga-1',
+			verdict: 'allow',
+		}), true);
+		assert.deepStrictEqual(resolutions, [{ gateId: 'ga-1', verdict: 'allow' }]);
+	});
+
 	test('mode-b-gate-request fans out via onModeBPrompt; mode-b-gate-resolved fans out via onModeBResolution; resolveModeBPrompt calls gate.resolve RPC', async () => {
 		const stub = stubChatService('s');
 		testDisposables.add(stub.emitter);
