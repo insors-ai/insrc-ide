@@ -44,9 +44,26 @@ function userHome(): string {
 
 export type ExternalAgent = 'claude-code' | 'codex';
 
+export type McpSetupTransport = 'stdio' | 'http';
+
 export interface McpSetupOpts {
 	readonly dryRun?:     boolean;
 	readonly serverPath?: string;
+	/**
+	 * Transport to register. Default `stdio` -- the production
+	 * path. Setting `http` writes a URL-based config block that
+	 * targets an already-running insrc-mcp-server HTTP gateway
+	 * (Phase 6 fallback for sandboxed environments).
+	 */
+	readonly transport?:  McpSetupTransport;
+	/**
+	 * Required when `transport === 'http'`. The gateway URL the
+	 * agent should connect to (e.g. `http://127.0.0.1:9876/mcp`).
+	 * We never embed the bearer token in the config; the agent
+	 * sends it via the `INSRC_SESSION_TOKEN` env var the spawn
+	 * pipeline already provides.
+	 */
+	readonly httpUrl?:    string;
 }
 
 export interface McpSetupResult {
@@ -91,8 +108,14 @@ interface ClaudeMcpEntry {
 	readonly args:    string[];
 }
 
+interface ClaudeHttpMcpEntry {
+	readonly type:    'http';
+	readonly url:     string;
+	readonly headers: Record<string, string>;
+}
+
 interface ClaudeSettings {
-	mcpServers?: Record<string, ClaudeMcpEntry>;
+	mcpServers?: Record<string, ClaudeMcpEntry | ClaudeHttpMcpEntry>;
 	[k: string]: unknown;
 }
 
@@ -100,12 +123,19 @@ function claudeSettingsPath(): string {
 	return join(userHome(), '.claude', 'settings.json');
 }
 
-function writeClaudeConfig(serverPath: string, dryRun: boolean): McpSetupResult {
+function writeClaudeConfig(serverPath: string, dryRun: boolean, http: { url: string } | undefined): McpSetupResult {
 	const targetPath = claudeSettingsPath();
-	const insrcEntry: ClaudeMcpEntry = {
-		command: 'node',
-		args:    [serverPath],
-	};
+	const insrcEntry: ClaudeMcpEntry | ClaudeHttpMcpEntry = http
+		? {
+			type: 'http',
+			url:  http.url,
+			// `${VAR}` substitution is Claude Code's documented
+			// pattern for env-vars in headers; the value flows in
+			// at run-time from the spawn pipeline's
+			// `INSRC_SESSION_TOKEN`.
+			headers: { Authorization: 'Bearer ${INSRC_SESSION_TOKEN}' },
+		}
+		: { command: 'node', args: [serverPath] };
 
 	if (dryRun) {
 		const preview = JSON.stringify({ mcpServers: { insrc: insrcEntry } }, null, 2);
@@ -120,9 +150,7 @@ function writeClaudeConfig(serverPath: string, dryRun: boolean): McpSetupResult 
 			const existing = readFileSync(targetPath, 'utf8');
 			settings = JSON.parse(existing) as ClaudeSettings;
 			const prior = settings.mcpServers?.['insrc'];
-			if (prior !== undefined
-				&& prior.command === insrcEntry.command
-				&& JSON.stringify(prior.args) === JSON.stringify(insrcEntry.args)) {
+			if (prior !== undefined && JSON.stringify(prior) === JSON.stringify(insrcEntry)) {
 				return {
 					agent: 'claude-code', configPath: targetPath, serverPath,
 					configBlock: JSON.stringify(prior, null, 2), action: 'unchanged',
@@ -169,9 +197,23 @@ function buildCodexTomlBlock(serverPath: string): string {
 	].join('\n');
 }
 
-function writeCodexConfig(serverPath: string, dryRun: boolean): McpSetupResult {
+function buildCodexHttpTomlBlock(url: string): string {
+	const escapedUrl = url.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+	return [
+		'[mcp_servers.insrc]',
+		`url = "${escapedUrl}"`,
+		// Codex's documented HTTP-MCP auth pattern: pick the bearer
+		// token from this env var on every outgoing request, so the
+		// per-handoff INSRC_SESSION_TOKEN the spawn pipeline
+		// injects (Phase 2a) flows through unchanged.
+		`bearer_token_env_var = "INSRC_SESSION_TOKEN"`,
+		'',
+	].join('\n');
+}
+
+function writeCodexConfig(serverPath: string, dryRun: boolean, http: { url: string } | undefined): McpSetupResult {
 	const targetPath = codexConfigPath();
-	const block      = buildCodexTomlBlock(serverPath);
+	const block      = http ? buildCodexHttpTomlBlock(http.url) : buildCodexTomlBlock(serverPath);
 
 	if (dryRun) {
 		return { agent: 'codex', configPath: targetPath, serverPath, configBlock: block, action: 'dry-run' };
@@ -227,9 +269,24 @@ function writeCodexConfig(serverPath: string, dryRun: boolean): McpSetupResult {
 export function runMcpSetup(agent: ExternalAgent, opts: McpSetupOpts = {}): McpSetupResult {
 	const serverPath = resolveMcpServerPath(opts.serverPath);
 	const dryRun     = opts.dryRun === true;
+	const transport  = opts.transport ?? 'stdio';
+	if (transport === 'http') {
+		if (opts.httpUrl === undefined || opts.httpUrl.length === 0) {
+			throw new Error("mcp-setup: --transport http requires --url <gateway-url> (e.g. http://127.0.0.1:9876/mcp)");
+		}
+		try {
+			const parsed = new URL(opts.httpUrl);
+			if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+				throw new Error(`mcp-setup: --url protocol must be http or https, got '${parsed.protocol}'`);
+			}
+		} catch (err) {
+			throw new Error(`mcp-setup: --url is not a valid URL: ${(err as Error).message}`);
+		}
+	}
+	const http = transport === 'http' ? { url: opts.httpUrl! } : undefined;
 	switch (agent) {
-		case 'claude-code': return writeClaudeConfig(serverPath, dryRun);
-		case 'codex':       return writeCodexConfig(serverPath, dryRun);
+		case 'claude-code': return writeClaudeConfig(serverPath, dryRun, http);
+		case 'codex':       return writeCodexConfig(serverPath, dryRun, http);
 	}
 }
 
@@ -239,16 +296,30 @@ export function registerMcpSetupCommands(program: Command): void {
 		.description('register the insrc MCP server with an external coding agent (claude-code | codex)')
 		.option('--dry-run',          'print the config block that would be written; do not touch the file')
 		.option('--server-path <p>',  'override the inferred absolute path to insrc-mcp-server')
-		.action((agentArg: string, opts: { dryRun?: boolean; serverPath?: string }) => {
+		.option('--transport <t>',    "transport to register: 'stdio' (default; spawn subprocess) or 'http' (Phase 6 gateway)")
+		.option('--url <url>',        "required with --transport http; the gateway URL (e.g. http://127.0.0.1:9876/mcp)")
+		.action((agentArg: string, opts: { dryRun?: boolean; serverPath?: string; transport?: string; url?: string }) => {
 			if (agentArg !== 'claude-code' && agentArg !== 'codex') {
 				process.stderr.write(`error: unknown agent '${agentArg}'. Supported: claude-code, codex.\n`);
+				process.exit(2);
+			}
+			if (opts.transport !== undefined && opts.transport !== 'stdio' && opts.transport !== 'http') {
+				process.stderr.write(`error: --transport must be 'stdio' or 'http', got '${opts.transport}'.\n`);
 				process.exit(2);
 			}
 			const runOpts: McpSetupOpts = {
 				...(opts.dryRun === true ? { dryRun: true } : {}),
 				...(opts.serverPath !== undefined ? { serverPath: opts.serverPath } : {}),
+				...(opts.transport !== undefined ? { transport: opts.transport as McpSetupTransport } : {}),
+				...(opts.url !== undefined ? { httpUrl: opts.url } : {}),
 			};
-			const result = runMcpSetup(agentArg, runOpts);
+			let result: McpSetupResult;
+			try {
+				result = runMcpSetup(agentArg, runOpts);
+			} catch (err) {
+				process.stderr.write(`error: ${(err as Error).message}\n`);
+				process.exit(2);
+			}
 			process.stdout.write(`agent:        ${result.agent}\n`);
 			process.stdout.write(`config path:  ${result.configPath}\n`);
 			process.stdout.write(`server path:  ${result.serverPath}\n`);

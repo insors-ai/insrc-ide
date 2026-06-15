@@ -180,3 +180,80 @@ test('mcp-setup codex: backslashes and quotes in server path are TOML-escaped', 
 		assert.match(result.configBlock, /and\\"quote/);
 	} finally { restore(); }
 });
+
+// ---------------------------------------------------------------------------
+// Phase 6: --transport http
+// ---------------------------------------------------------------------------
+
+test('mcp-setup --transport http requires --url; absent -> throws', () => {
+	const { restore } = withTmpHome();
+	try {
+		assert.throws(
+			() => runMcpSetup('claude-code', { transport: 'http' }),
+			/requires --url/,
+		);
+		assert.throws(
+			() => runMcpSetup('codex', { transport: 'http', httpUrl: '' }),
+			/requires --url/,
+		);
+	} finally { restore(); }
+});
+
+test('mcp-setup --transport http rejects non-http/https URLs', () => {
+	const { restore } = withTmpHome();
+	try {
+		assert.throws(
+			() => runMcpSetup('claude-code', { transport: 'http', httpUrl: 'ftp://example.com/mcp' }),
+			/protocol must be http or https/,
+		);
+	} finally { restore(); }
+});
+
+test('mcp-setup claude-code --transport http: writes HTTP entry with bearer-token header', () => {
+	const { restore } = withTmpHome();
+	try {
+		const result = runMcpSetup('claude-code', {
+			transport: 'http',
+			httpUrl: 'http://127.0.0.1:9876/mcp',
+		});
+		assert.equal(result.agent, 'claude-code');
+		assert.equal(result.action, 'created');
+		const settings = JSON.parse(readFileSync(result.configPath, 'utf8'));
+		const entry = settings.mcpServers.insrc;
+		assert.equal(entry.type, 'http');
+		assert.equal(entry.url, 'http://127.0.0.1:9876/mcp');
+		assert.equal(entry.headers.Authorization, 'Bearer ${INSRC_SESSION_TOKEN}');
+	} finally { restore(); }
+});
+
+test('mcp-setup codex --transport http: writes TOML with url + bearer_token_env_var', () => {
+	const { restore } = withTmpHome();
+	try {
+		const result = runMcpSetup('codex', {
+			transport: 'http',
+			httpUrl: 'http://127.0.0.1:9876/mcp',
+		});
+		assert.equal(result.agent, 'codex');
+		const body = readFileSync(result.configPath, 'utf8');
+		assert.match(body, /\[mcp_servers\.insrc\]/);
+		assert.match(body, /url = "http:\/\/127\.0\.0\.1:9876\/mcp"/);
+		assert.match(body, /bearer_token_env_var = "INSRC_SESSION_TOKEN"/);
+		// The stdio block's `command = "node"` MUST NOT be present
+		// in HTTP mode -- the writer chose the HTTP branch.
+		assert.equal(body.includes('command ='), false);
+	} finally { restore(); }
+});
+
+test('mcp-setup --transport http --dry-run: prints HTTP block, no file written', () => {
+	const { dir, restore } = withTmpHome();
+	try {
+		const result = runMcpSetup('claude-code', {
+			transport: 'http',
+			httpUrl: 'http://127.0.0.1:9876/mcp',
+			dryRun: true,
+		});
+		assert.equal(result.action, 'dry-run');
+		assert.match(result.configBlock, /"type": "http"/);
+		assert.equal(existsSync(join(dir, '.claude', 'settings.json')), false);
+	} finally { restore(); }
+});
