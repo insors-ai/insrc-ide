@@ -8,7 +8,7 @@ import { Emitter, Event } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { InsrcHandoffServiceImpl } from '../../browser/handoff/handoffServiceImpl.js';
-import type { HandoffEvent } from '../../common/handoffService.js';
+import type { HandoffChunk, HandoffEvent } from '../../common/handoffService.js';
 import type { IInsrcChatService } from '../../common/chatService.js';
 
 /**
@@ -162,6 +162,33 @@ suite('InsrcHandoffServiceImpl', () => {
 		svc.clear('spec-x');
 		assert.deepStrictEqual(removed, ['spec-x']);
 		assert.strictEqual(changes, 1);
+	});
+
+	test('agent-stdout-chunk / agent-stderr-chunk fan out via onChunk without mutating session state', () => {
+		const stub = stubChatService('s');
+		testDisposables.add(stub.emitter);
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+
+		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
+		svc.dispatch({ kind: 'spec-ready', specId: 'spec-c', templateId: 'DEBUG-SESSION', preview: 'p' });
+		svc.dispatch({ kind: 'spawned', specId: 'spec-c', agent: 'claude-code' });
+		const stageAtSpawned = svc.sessions.get('spec-c')?.stage;
+		assert.equal(stageAtSpawned, 'spawned');
+
+		const chunks: HandoffChunk[] = [];
+		testDisposables.add(svc.onChunk(c => chunks.push(c)));
+
+		assert.strictEqual(svc.dispatch({ kind: 'agent-stdout-chunk', specId: 'spec-c', chunk: 'hello' }), true);
+		assert.strictEqual(svc.dispatch({ kind: 'agent-stderr-chunk', specId: 'spec-c', chunk: 'world' }), true);
+
+		assert.deepStrictEqual(chunks, [
+			{ specId: 'spec-c', stream: 'stdout', chunk: 'hello' },
+			{ specId: 'spec-c', stream: 'stderr', chunk: 'world' },
+		]);
+
+		// Stage was 'spawned' before the chunks; chunks must not have
+		// advanced it.
+		assert.equal(svc.sessions.get('spec-c')?.stage, 'spawned');
 	});
 
 	test('events for an unknown specId are rejected (no implicit allocation)', () => {

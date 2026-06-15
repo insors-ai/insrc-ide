@@ -101,6 +101,41 @@ test('runAgentSubprocess: spawn error captured as exitCode=-1 with stderr', asyn
 	assert.match(result.stderr, /spawn error|ENOENT/);
 });
 
+test('runAgentSubprocess: onChunk fires once per stdout/stderr data event in order; aggregated result unchanged', async () => {
+	// Multi-step script that emits a known sequence; child.stdout's
+	// 'data' callback may coalesce successive prints into one chunk
+	// but Node guarantees stdout and stderr fire on distinct
+	// listeners, so the stream tag is the contract we assert on.
+	const wt = makeWorktree();
+	const script = writeStub(wt, 'echo-seq.sh',
+		'echo "out-A"\necho "err-X" >&2\necho "out-B"\necho "err-Y" >&2\n');
+	const events: Array<{ stream: 'stdout' | 'stderr'; chunk: string }> = [];
+	const result = await runAgentSubprocess({
+		command: script, args: [], cwd: wt, env: {},
+		spec: '',
+		onChunk: (stream, chunk) => events.push({ stream, chunk }),
+	});
+	assert.equal(result.exitCode, 0);
+	const outConcat = events.filter(e => e.stream === 'stdout').map(e => e.chunk).join('');
+	const errConcat = events.filter(e => e.stream === 'stderr').map(e => e.chunk).join('');
+	assert.equal(outConcat, result.stdout, 'stdout chunks must concatenate to the aggregated stdout');
+	assert.equal(errConcat, result.stderr, 'stderr chunks must concatenate to the aggregated stderr');
+	assert.match(outConcat, /out-A.*out-B/s);
+	assert.match(errConcat, /err-X.*err-Y/s);
+});
+
+test('runAgentSubprocess: onChunk listener that throws does not wedge the pipeline', async () => {
+	const wt = makeWorktree();
+	const script = writeStub(wt, 'echo-out.sh', 'echo hello\n');
+	const result = await runAgentSubprocess({
+		command: script, args: [], cwd: wt, env: {},
+		spec: '',
+		onChunk: () => { throw new Error('listener bomb'); },
+	});
+	assert.equal(result.exitCode, 0);
+	assert.match(result.stdout, /hello/);
+});
+
 // ---------------------------------------------------------------------------
 // spawnClaudeCode (the high-level wrapper)
 // ---------------------------------------------------------------------------
