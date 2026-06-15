@@ -57,6 +57,17 @@ interface HandoffCardHandles {
 export class ChatHandoffWidget extends Disposable {
 
 	private _container: HTMLElement | undefined;
+	/**
+	 * Parent element passed to `mount()`. We remember it so that we
+	 * can re-attach our container if it gets orphaned -- chatView's
+	 * `_onSessionChanged` calls `clearNode(_messageList)` which
+	 * detaches every widget container mounted under it (the chat-
+	 * messages list is the canonical "scrolls with messages" parent
+	 * but it's also the wipe target on session change). Without this
+	 * self-heal the first `/handoff` after a fresh chat would
+	 * silently render into an off-document div.
+	 */
+	private _originalParent: HTMLElement | undefined;
 	private _cards = new Map<string, HandoffCardHandles>();
 
 	constructor(
@@ -67,9 +78,17 @@ export class ChatHandoffWidget extends Disposable {
 		super();
 	}
 
-	/** Mount the widget into `parent`. Subsequent calls are a no-op. */
+	/** Mount the widget into `parent`. Subsequent calls re-attach if needed. */
 	mount(parent: HTMLElement): void {
-		if (this._container !== undefined) {
+		this._originalParent = parent;
+		if (this._container !== undefined && this._container.isConnected) {
+			return;
+		}
+		if (this._container !== undefined && !this._container.isConnected) {
+			// We were mounted but our container got detached (chat
+			// session change wiped _messageList). Re-attach the same
+			// container; child cards come along with it.
+			parent.appendChild(this._container);
 			return;
 		}
 		this._container = dom.append(parent, dom.$('.insrc-chat-handoff'));
@@ -81,9 +100,25 @@ export class ChatHandoffWidget extends Disposable {
 		this._reconcile();
 	}
 
+	/**
+	 * Re-attach the container to its original parent if it got
+	 * detached. Cheap (DOM node-identity check) so it can be called
+	 * at the top of every render path.
+	 */
+	private _ensureMounted(): void {
+		if (this._container === undefined || this._originalParent === undefined) {
+			return;
+		}
+		if (this._container.isConnected) {
+			return;
+		}
+		this._originalParent.appendChild(this._container);
+	}
+
 	// -- Reconcile full state set (session changes + initial paint) ----------
 
 	private _reconcile(): void {
+		this._ensureMounted();
 		if (this._container === undefined) {
 			return;
 		}
@@ -102,6 +137,7 @@ export class ChatHandoffWidget extends Disposable {
 	// -- Card lifecycle ------------------------------------------------------
 
 	private _applyState(state: HandoffSessionState): void {
+		this._ensureMounted();
 		if (this._container === undefined) {
 			return;
 		}

@@ -231,18 +231,20 @@ export class InsrcChatViewPane extends ViewPane {
 			void this._openDiffFromHandoff(state);
 		}));
 		// Phase 3 Mode A: pre-flight permission gate. Fires once per
-		// handoff before the worktree is created. We block the handoff
-		// until the user approves the spec via a modal.
+		// handoff before the worktree is created. Rendered INLINE in
+		// `_gateContainer` (same chat surface regular gates use) so
+		// the approval UX matches the rest of the chat instead of
+		// popping a system modal.
 		this._register(this._handoffService.onModeAPrompt(prompt => {
-			void this._showModeAPrompt(prompt);
+			this._showModeAPrompt(prompt);
 		}));
 		this._register(this._handoffService.onModeAResolution(res => {
 			this._cancelModeAPromptIfPending(res.gateId);
 		}));
-		// Phase 3 Mode B: PreToolUse hook prompts. Each request opens
-		// a modal asking the user to approve / deny the external agent's
-		// tool call. Run sequentially via the per-instance prompt queue
-		// so a burst of prompts doesn't stack overlapping dialogs.
+		// Phase 3 Mode B: PreToolUse hook prompts. Same inline-gate
+		// surface as Mode A; queued via `_modeBPromptChain` so a
+		// burst of prompts renders sequentially in the single gate
+		// slot rather than racing each other.
 		this._register(this._handoffService.onModeBPrompt(prompt => {
 			void this._enqueueModeBPrompt(prompt);
 		}));
@@ -1273,50 +1275,48 @@ export class InsrcChatViewPane extends ViewPane {
 	 * blocks the orchestrator on the daemon side; we don't want it
 	 * to serialise behind a queue of in-flight tool prompts.
 	 */
-	private async _showModeAPrompt(prompt: HandoffModeAPrompt): Promise<void> {
-		type Verdict = 'allow' | 'deny';
-
-		let cancelled = false;
-		let cancelDialog: (() => void) | undefined;
-		const cancelToken = new Promise<'cancelled'>(resolve => {
-			cancelDialog = () => {
-				cancelled = true;
-				resolve('cancelled');
-			};
-		});
-		this._modeAPromptCancels.set(prompt.gateId, cancelDialog!);
-
-		const detail = this._formatModeAPromptDetail(prompt);
-		const severity = prompt.riskTag === 'high' ? 'warning' : 'info';
-		try {
-			const dialogResult = this.dialogService.prompt<Verdict>({
-				type: severity,
-				message: `Approve handoff: ${prompt.templateId} (risk: ${prompt.riskTag})`,
-				detail,
-				buttons: [
-					{ label: 'Allow', run: () => 'allow' as Verdict },
-				],
-				cancelButton: { label: 'Cancel', run: () => 'deny' as Verdict },
-			});
-
-			const winner = await Promise.race([dialogResult, cancelToken]);
-			if (cancelled || winner === 'cancelled') {
-				return;
-			}
-			const verdict = (winner as { result?: Verdict }).result ?? 'deny';
-			await this._handoffService.resolveModeAPrompt(prompt.gateId, verdict);
-		} catch (err) {
-			this._logService.warn(`[insrc-chat] Mode A prompt failed for gate ${prompt.gateId}: ${(err as Error).message}`);
-		} finally {
+	/**
+	 * Mode A pre-flight gate rendered INLINE in `_gateContainer` --
+	 * the same chat surface regular gates use. This follows the
+	 * chat's existing gate-rendering framework instead of opening
+	 * a system modal via dialogService, so the approval UX matches
+	 * the rest of the chat. The cancel hook in `_modeAPromptCancels`
+	 * lets `onModeAResolution` dismiss the gate if the daemon
+	 * settles under us (timeout, cancel).
+	 */
+	private _showModeAPrompt(prompt: HandoffModeAPrompt): void {
+		const dismiss = (): void => {
+			this._dismissHandoffGate(prompt.gateId);
 			this._modeAPromptCancels.delete(prompt.gateId);
-		}
+		};
+		this._modeAPromptCancels.set(prompt.gateId, dismiss);
+
+		this._renderHandoffGate({
+			gateId: prompt.gateId,
+			title: `Approve handoff: ${prompt.templateId} (risk: ${prompt.riskTag})`,
+			bodyText: this._formatModeAPromptDetail(prompt),
+			severity: prompt.riskTag === 'high' ? 'warning' : 'info',
+			buttons: [
+				{
+					label: 'Allow', primary: true, onClick: () => {
+						dismiss();
+						void this._handoffService.resolveModeAPrompt(prompt.gateId, 'allow');
+					},
+				},
+				{
+					label: 'Cancel', onClick: () => {
+						dismiss();
+						void this._handoffService.resolveModeAPrompt(prompt.gateId, 'deny');
+					},
+				},
+			],
+		});
 	}
 
 	private _cancelModeAPromptIfPending(gateId: string): void {
 		const cancel = this._modeAPromptCancels.get(gateId);
 		if (cancel !== undefined) {
 			cancel();
-			this._modeAPromptCancels.delete(gateId);
 		}
 	}
 
@@ -1334,13 +1334,12 @@ export class InsrcChatViewPane extends ViewPane {
 	}
 
 	/**
-	 * Mode B (Phase 3): show a modal for a single PreToolUse prompt
-	 * and forward the user's verdict to the daemon via
-	 * `gate.resolve`. Promised against the per-instance chain so a
-	 * burst of prompts queues sequentially. If the daemon resolves
-	 * the prompt under us (default-deny timeout, cancel),
-	 * `_cancelModeBPromptIfPending` settles the dialog with a
-	 * synthetic Cancel result so we never RPC a stale verdict back.
+	 * Mode B (Phase 3): in-flight tool-call gate rendered inline in
+	 * `_gateContainer`. Sequential via `_modeBPromptChain` so a
+	 * burst of prompts queues rather than stomping the gate
+	 * container. Each gate's promise resolves when the user clicks
+	 * a button OR `onModeBResolution` fires for the same gateId
+	 * (daemon-side timeout / cancel).
 	 */
 	private _enqueueModeBPrompt(prompt: HandoffModeBPrompt): Promise<void> {
 		const next = this._modeBPromptChain.then(() => this._showModeBPrompt(prompt));
@@ -1348,57 +1347,92 @@ export class InsrcChatViewPane extends ViewPane {
 		return next;
 	}
 
-	private async _showModeBPrompt(prompt: HandoffModeBPrompt): Promise<void> {
-		type Verdict = 'allow-once' | 'allow-session' | 'deny';
-
-		let cancelled = false;
-		let cancelDialog: (() => void) | undefined;
-		const cancelToken = new Promise<'cancelled'>(resolve => {
-			cancelDialog = () => {
-				cancelled = true;
-				resolve('cancelled');
+	private _showModeBPrompt(prompt: HandoffModeBPrompt): Promise<void> {
+		return new Promise<void>(resolve => {
+			const finish = (): void => {
+				this._dismissHandoffGate(prompt.gateId);
+				this._modeBPromptCancels.delete(prompt.gateId);
+				resolve();
 			};
-		});
-		this._modeBPromptCancels.set(prompt.gateId, cancelDialog!);
+			this._modeBPromptCancels.set(prompt.gateId, finish);
 
-		const detail = this._formatModeBPromptDetail(prompt);
-		try {
-			const dialogResult = this.dialogService.prompt<Verdict>({
-				type: 'warning',
-				message: `External agent wants to run \`${prompt.tool}\``,
-				detail,
+			const finishWith = (verdict: 'allow' | 'deny', scope?: 'once' | 'session'): void => {
+				finish();
+				const opts = scope !== undefined ? { scope } : {};
+				void this._handoffService.resolveModeBPrompt(prompt.gateId, verdict, opts);
+			};
+
+			this._renderHandoffGate({
+				gateId: prompt.gateId,
+				title: `External agent wants to run \`${prompt.tool}\``,
+				bodyText: this._formatModeBPromptDetail(prompt),
+				severity: 'warning',
 				buttons: [
-					{ label: 'Allow', run: () => 'allow-once' as Verdict },
-					{ label: 'Allow this session', run: () => 'allow-session' as Verdict },
+					{ label: 'Allow', primary: true, onClick: () => finishWith('allow', 'once') },
+					{ label: 'Allow this session', onClick: () => finishWith('allow', 'session') },
+					{ label: 'Deny', onClick: () => finishWith('deny') },
 				],
-				cancelButton: { label: 'Deny', run: () => 'deny' as Verdict },
 			});
-
-			const winner = await Promise.race([dialogResult, cancelToken]);
-			if (cancelled || winner === 'cancelled') {
-				// Daemon already settled this prompt -- nothing to RPC back.
-				return;
-			}
-			const verdict = (winner as { result?: Verdict }).result ?? 'deny';
-			if (verdict === 'allow-once') {
-				await this._handoffService.resolveModeBPrompt(prompt.gateId, 'allow', { scope: 'once' });
-			} else if (verdict === 'allow-session') {
-				await this._handoffService.resolveModeBPrompt(prompt.gateId, 'allow', { scope: 'session' });
-			} else {
-				await this._handoffService.resolveModeBPrompt(prompt.gateId, 'deny');
-			}
-		} catch (err) {
-			this._logService.warn(`[insrc-chat] Mode B prompt failed for gate ${prompt.gateId}: ${(err as Error).message}`);
-		} finally {
-			this._modeBPromptCancels.delete(prompt.gateId);
-		}
+		});
 	}
 
 	private _cancelModeBPromptIfPending(gateId: string): void {
 		const cancel = this._modeBPromptCancels.get(gateId);
 		if (cancel !== undefined) {
 			cancel();
-			this._modeBPromptCancels.delete(gateId);
+		}
+	}
+
+	/**
+	 * Render a handoff gate (Mode A or Mode B) inline in
+	 * `_gateContainer` using the chat's existing gate CSS. Replaces
+	 * any currently-rendered gate. The card is stamped with
+	 * `data-handoff-gate="<gateId>"` so the dismiss path can verify
+	 * the gate is still the active one before clearing -- otherwise
+	 * a delayed resolution could nuke a NEW gate that took over the
+	 * slot.
+	 */
+	private _renderHandoffGate(args: {
+		readonly gateId: string;
+		readonly title: string;
+		readonly bodyText: string;
+		readonly severity: 'info' | 'warning';
+		readonly buttons: ReadonlyArray<{ label: string; primary?: boolean; onClick: () => void }>;
+	}): void {
+		clearNode(this._gateContainer);
+		const card = dom.append(this._gateContainer, dom.$('.insrc-chat-gate')) as HTMLElement;
+		card.setAttribute('data-handoff-gate', args.gateId);
+		if (args.severity === 'warning') {
+			card.classList.add('insrc-chat-gate-warning');
+		}
+		const title = dom.append(card, dom.$('.insrc-chat-gate-title'));
+		title.textContent = args.title;
+		const body = dom.append(card, dom.$('.insrc-chat-gate-body'));
+		body.style.whiteSpace = 'pre-wrap';
+		body.style.fontFamily = 'var(--monaco-monospace-font, monospace)';
+		body.style.fontSize = '11px';
+		body.textContent = args.bodyText;
+		const actions = dom.append(card, dom.$('.insrc-chat-gate-actions'));
+		for (const b of args.buttons) {
+			const btn = dom.append(actions, dom.$('button.insrc-chat-gate-btn')) as HTMLButtonElement;
+			btn.textContent = b.label;
+			if (b.primary === true) {
+				btn.classList.add('primary');
+			}
+			this._register(dom.addDisposableListener(btn, 'click', () => b.onClick()));
+		}
+	}
+
+	/**
+	 * Remove a handoff gate from `_gateContainer` ONLY if it is
+	 * still the active card. We stamp the gate id when rendering;
+	 * resolution paths check it here so a delayed timer can't
+	 * nuke a newer gate that already took the slot.
+	 */
+	private _dismissHandoffGate(gateId: string): void {
+		const card = this._gateContainer.querySelector(`[data-handoff-gate="${CSS.escape(gateId)}"]`);
+		if (card !== null) {
+			clearNode(this._gateContainer);
 		}
 	}
 
