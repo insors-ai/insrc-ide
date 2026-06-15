@@ -33,6 +33,8 @@ import { spawnClaudeCode } from './spawn/claude-code.js';
 import type { AgentSpawnResult, SpawnChunkListener } from './spawn/base.js';
 import { subscribePrompts, subscribeResolutions } from '../gating/prompt-dispatch.js';
 import { awaitModeAResolution } from '../gating/mode-a-dispatch.js';
+import { openTraceWriter, type TraceWriter } from './observability/trace-writer.js';
+import { openCostMeter, type CostMeter } from './observability/cost-meter.js';
 import { randomBytes } from 'node:crypto';
 import { auditDeliverable, type AuditResult } from './audit/judge.js';
 import { getTemplate } from './templates/registry.js';
@@ -130,7 +132,24 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	const persistRoot  = opts.persistRoot ?? DEFAULT_PERSIST_ROOT;
 	const worktreePath = join(persistRoot, opts.sessionId, 'worktree');
 
+	// Phase 5 observability: cost meter starts immediately (so the
+	// wall-time floor includes spec assembly). Trace writer opens
+	// AFTER the spec is assembled because the trace file path
+	// embeds the specId; we buffer the pre-specId events in memory
+	// and flush them once the writer is open.
+	const meter: CostMeter = openCostMeter();
+	let trace: TraceWriter | undefined;
+	const traceBuffer: HandoffEvent[] = [];
+
 	const emit = (event: HandoffEvent): void => {
+		// Always update the meter; it never throws.
+		try { meter.record(event); } catch { /* swallow */ }
+		// Trace: append directly if open, buffer otherwise.
+		if (trace !== undefined) {
+			trace.record(event);
+		} else {
+			traceBuffer.push(event);
+		}
 		if (opts.onEvent === undefined) return;
 		try { opts.onEvent(event); } catch (err) {
 			log.warn({ err: (err as Error).message }, 'handoff onEvent listener threw; swallowing');
@@ -160,6 +179,14 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 		throw err;
 	}
 	log.info({ specId: spec.specId, templateId: opts.templateId }, 'handoff: spec assembled');
+	// Phase 5: open the trace writer now that we know the specId
+	// and flush the pre-specId events buffered above. Cost meter
+	// also gets the assembled spec text so its token estimate has
+	// a full char floor (not just the preview).
+	trace = openTraceWriter({ persistRoot, sessionId: opts.sessionId, specId: spec.specId });
+	for (const buffered of traceBuffer) trace.record(buffered);
+	traceBuffer.length = 0;
+	meter.recordSpec(spec.specMd);
 	emit({ kind: 'spec-ready', specId: spec.specId, templateId: opts.templateId, preview: spec.specMd.slice(0, 200) });
 
 	// 1b. Mode A pre-flight gate (Phase 3). When the caller opts in
@@ -241,6 +268,10 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 		// pipe live output into a Pseudoterminal. Headless-UX
 		// consumers simply drop these on the floor.
 		const onSpawnChunk: SpawnChunkListener = (stream, chunk) => {
+			// Phase 5 cost meter sees raw chars before emit fans
+			// the chunk out (the meter's HandoffEvent path doesn't
+			// otherwise see size signals).
+			try { meter.recordChunk(stream, chunk.length); } catch { /* swallow */ }
 			emit({
 				kind: stream === 'stdout' ? 'agent-stdout-chunk' : 'agent-stderr-chunk',
 				specId: spec.specId,
@@ -317,6 +348,22 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	} finally {
 		promptSub.dispose();
 		resolvedSub.dispose();
+		// Phase 5 observability: close the trace, persist the cost
+		// snapshot. Best-effort; failures logged inside the helpers
+		// and never re-thrown. Cost goes alongside the audit JSON
+		// the orchestrator already writes (design §7.1).
+		try { meter.finalize(); } catch { /* swallow */ }
+		try {
+			persistCostSnapshot({
+				persistRoot,
+				sessionId: opts.sessionId,
+				specId:    spec.specId,
+				snapshot:  meter.snapshot(),
+			});
+		} catch (err) {
+			log.warn({ err: (err as Error).message }, 'handoff: cost snapshot persist failed');
+		}
+		try { trace?.close(); } catch { /* swallow */ }
 		if (opts.forceCleanup === true) {
 			await removeWorktree({ repoPath: opts.scope.repoPath, worktreePath });
 		}
@@ -444,5 +491,29 @@ function persistRunArtifacts(args: PersistRunArtifactsArgs): void {
 	} catch (err) {
 		log.warn({ err: (err as Error).message, dir, specId: args.specId },
 			'handoff: failed to persist deliverable/audit; in-memory result unaffected');
+	}
+}
+
+/**
+ * Persist the Phase 5 cost meter snapshot to
+ * `<persistRoot>/<sessionId>/<specId>.cost.json`. Best-effort;
+ * failures are logged and never re-thrown.
+ */
+function persistCostSnapshot(args: {
+	readonly persistRoot: string;
+	readonly sessionId:   string;
+	readonly specId:      string;
+	readonly snapshot:    object;
+}): void {
+	const dir = join(args.persistRoot, args.sessionId);
+	try {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, `${args.specId}.cost.json`),
+			JSON.stringify(args.snapshot, null, 2),
+		);
+	} catch (err) {
+		log.warn({ err: (err as Error).message, dir, specId: args.specId },
+			'handoff: failed to persist cost snapshot');
 	}
 }
