@@ -86,4 +86,9 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 		description: 'Requirements agent -- capture acceptance criteria from a fuzzy ask.',
 		example: '/requirements the new billing dashboard',
 	},
+	{
+		id: 'handoff',
+		description: 'Run the external-agent handoff pipeline (claude-code / codex) -- test harness for plans/external-agent-integration.md. Auto-classifies into the right template; prefix with `template=<ID>` to force one.',
+		example: '/handoff fix the failing test in payments.test.ts',
+	},
 ];

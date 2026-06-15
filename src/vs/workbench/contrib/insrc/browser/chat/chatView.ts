@@ -20,6 +20,7 @@ import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, typ
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
 import { IInsrcHandoffService, type HandoffModeAPrompt, type HandoffModeBPrompt, type HandoffSessionState } from '../../common/handoffService.js';
+import { InsrcHandoffRunner } from '../handoff/handoffRunner.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
@@ -138,6 +139,23 @@ export class InsrcChatViewPane extends ViewPane {
 	 *  `onModeAResolution` event (timeout / cancel) can dismiss it. */
 	private readonly _modeAPromptCancels = new Map<string, () => void>();
 
+	/**
+	 * Test-harness runner that translates `/handoff <intent>` into a
+	 * daemon `handoff.run` stream and forwards events into the
+	 * existing IInsrcHandoffService dispatch. Built lazily on first
+	 * use so chatView creation cost is unchanged in the normal path.
+	 */
+	private _handoffRunnerInstance: InsrcHandoffRunner | undefined;
+	private get _handoffRunner(): InsrcHandoffRunner {
+		if (this._handoffRunnerInstance === undefined) {
+			this._handoffRunnerInstance = this._register(
+				this._instantiationService.createInstance(InsrcHandoffRunner),
+			);
+		}
+		return this._handoffRunnerInstance;
+	}
+	private readonly _instantiationService: IInstantiationService;
+
 	private _container!: HTMLElement;
 	private _header!: HTMLElement;
 	private _repoLabel!: HTMLElement;
@@ -200,6 +218,7 @@ export class InsrcChatViewPane extends ViewPane {
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
 		this._configurationService = configurationService;
+		this._instantiationService = instantiationService;
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleChatEvent(e)));
 		this._register(this.chatService.onDidChangeSession(() => this._onSessionChanged()));
@@ -1605,6 +1624,26 @@ export class InsrcChatViewPane extends ViewPane {
 				this._renderError(`Failed to start session: ${(err as Error).message}`);
 				return;
 			}
+		}
+
+		// `/handoff` test-harness intercept (plans/external-agent-integration.md).
+		// Routes the chat message through the external-agent pipeline
+		// (classify -> templateId -> handoff.run stream -> existing
+		// progress card / modals / diff view). Skips the normal chat
+		// send so the daemon's intent funnel doesn't double-process
+		// the message. M.2 swaps this for full intent-driven routing.
+		const handoffMatch = /^\s*\/handoff\b\s*(.*)$/s.exec(text);
+		if (handoffMatch !== null) {
+			const intent = (handoffMatch[1] ?? '').trim();
+			this._input.value = '';
+			this._autoResize();
+			try {
+				const summary = await this._handoffRunner.run(intent);
+				this._logService.info(`[insrc-chat] ${summary}`);
+			} catch (err) {
+				this._renderError(`/handoff failed: ${(err as Error).message}`);
+			}
+			return;
 		}
 
 		// Append file paths as absolute references (daemon reads them)
