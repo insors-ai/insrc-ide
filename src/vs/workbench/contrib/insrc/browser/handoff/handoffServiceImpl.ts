@@ -6,7 +6,6 @@
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
-import { IInsrcChatService } from '../../common/chatService.js';
 import { IInsrcDaemonService } from '../../common/daemonService.js';
 import {
 	IInsrcHandoffService,
@@ -75,14 +74,6 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 	readonly onModeBResolution: Event<HandoffModeBResolution> = this._onModeBResolution.event;
 
 	/**
-	 * The current chat session id. We don't subscribe to handoff
-	 * events directly here -- `chatServiceImpl` forwards them via
-	 * `dispatch` -- but we DO clear our cache whenever the chat
-	 * session flips so a new conversation starts with a clean slate.
-	 */
-	private _chatSessionId: string | undefined;
-
-	/**
 	 * Pending-specId hint for `spec-assembling` events. The daemon
 	 * doesn't allocate a specId until `spec-ready`, so we keep one
 	 * "pending" entry per chat-session keyed by intent. When
@@ -92,16 +83,11 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 	private _pendingByIntent = new Map<string, string>();
 
 	constructor(
-		@IInsrcChatService chatService: IInsrcChatService,
 		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
-
-		this._chatSessionId = chatService.activeSessionId;
-		this.logService.info(`[insrc-handoff] init sessionId=${this._chatSessionId ?? '(none)'}`);
-
-		this._register(chatService.onDidChangeSession(id => this._onChatSessionChange(id)));
+		this.logService.info('[insrc-handoff] service constructed');
 	}
 
 	get sessions(): ReadonlyMap<string, HandoffSessionState> {
@@ -425,15 +411,6 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 	}
 
 	// -- Internal -----------------------------------------------------------
-
-	private _onChatSessionChange(id: string | undefined): void {
-		if (this._chatSessionId === id) {
-			return;
-		}
-		this.logService.info(`[insrc-handoff] chat session change ${this._chatSessionId ?? '(none)'} -> ${id ?? '(none)'}`);
-		this._chatSessionId = id;
-		this.clearAll();
-	}
 
 	/**
 	 * Compute a synthetic id for the "pending" state object that holds

@@ -4,20 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
-import { Emitter, Event } from '../../../../../base/common/event.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { InsrcHandoffServiceImpl } from '../../browser/handoff/handoffServiceImpl.js';
 import type { HandoffChunk, HandoffEvent } from '../../common/handoffService.js';
-import type { IInsrcChatService } from '../../common/chatService.js';
 import type { IInsrcDaemonService } from '../../common/daemonService.js';
 
-/**
- * Stub chat service that exposes the two members the handoff impl
- * uses (`activeSessionId`, `onDidChangeSession`). Everything else
- * throws -- if the impl ever starts depending on a new chat
- * surface, the test fails loud rather than silently masking it.
- */
 /**
  * Stub daemon service that captures `gate.resolve` RPC calls. The
  * handoff service uses it only for that one method; every other
@@ -39,43 +31,12 @@ function stubDaemonService(): { daemonService: IInsrcDaemonService; rpcCalls: Ar
 	return { daemonService, rpcCalls };
 }
 
-function stubChatService(initialSessionId: string | undefined): {
-	chatService: IInsrcChatService;
-	flipSession: (id: string | undefined) => void;
-	emitter: Emitter<string | undefined>;
-} {
-	const emitter = new Emitter<string | undefined>();
-	let activeSessionId = initialSessionId;
-	const chatService = new Proxy({}, {
-		get(_target, prop): unknown {
-			if (prop === 'activeSessionId') {
-				return activeSessionId;
-			}
-			if (prop === 'onDidChangeSession') {
-				return emitter.event as Event<string | undefined>;
-			}
-			// Trip the test if the impl reaches for anything else.
-			throw new Error(`stubChatService: unexpected access to '${String(prop)}'`);
-		},
-	}) as IInsrcChatService;
-	return {
-		chatService,
-		emitter,
-		flipSession: (id: string | undefined) => {
-			activeSessionId = id;
-			emitter.fire(id);
-		},
-	};
-}
-
 suite('InsrcHandoffServiceImpl', () => {
 
 	const testDisposables = ensureNoDisposablesAreLeakedInTestSuite();
 
 	test('happy path: spec-assembling -> ... -> handoff-final promotes pending id and aggregates state', () => {
-		const stub = stubChatService('session-1');
-		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stubDaemonService().daemonService, new NullLogService()));
 
 		const events: HandoffEvent[] = [
 			{ kind: 'spec-assembling', intent: 'fix the flaky test', templateId: 'DEBUG-SESSION' },
@@ -122,9 +83,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	});
 
 	test('handoff-error against an in-flight session lands as terminal error stage', () => {
-		const stub = stubChatService('session-1');
-		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-err', templateId: 'DEBUG-SESSION', preview: '...' });
@@ -143,10 +102,14 @@ suite('InsrcHandoffServiceImpl', () => {
 		assert.strictEqual(svc.sessions.get('spec-err')?.stage, 'error');
 	});
 
-	test('chat session flip clears the cache and emits remove events', () => {
-		const stub = stubChatService('session-A');
-		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
+	test('clearAll() drops every session + fires per-id remove events', () => {
+		// Previously this test exercised the chat-session-flip path
+		// (handoff service self-subscribed to chatService.onDidChangeSession).
+		// To break the cyclic dependency `chatService -> handoffService ->
+		// chatService` that wedged workbench startup, the service no longer
+		// subscribes; chatView calls `clearAll()` explicitly on session
+		// change. This test now exercises that same path directly.
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'foo', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-A', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -155,16 +118,14 @@ suite('InsrcHandoffServiceImpl', () => {
 		const removed: string[] = [];
 		testDisposables.add(svc.onDidRemoveSession(id => removed.push(id)));
 
-		stub.flipSession('session-B');
+		svc.clearAll();
 
 		assert.strictEqual(svc.sessions.size, 0);
 		assert.deepStrictEqual(removed, ['spec-A']);
 	});
 
 	test('clear(specId) drops just that entry and fires remove + change', () => {
-		const stub = stubChatService('s');
-		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'a', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-x', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -187,9 +148,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	});
 
 	test('agent-stdout-chunk / agent-stderr-chunk fan out via onChunk without mutating session state', () => {
-		const stub = stubChatService('s');
-		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-c', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -214,10 +173,8 @@ suite('InsrcHandoffServiceImpl', () => {
 	});
 
 	test('mode-a-gate-request fans out via onModeAPrompt; mode-a-gate-resolved fans out via onModeAResolution; resolveModeAPrompt calls handoff.mode-a.resolve RPC', async () => {
-		const stub = stubChatService('s');
-		testDisposables.add(stub.emitter);
 		const daemonStub = stubDaemonService();
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, daemonStub.daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(daemonStub.daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-a', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -258,10 +215,8 @@ suite('InsrcHandoffServiceImpl', () => {
 	});
 
 	test('mode-b-gate-request fans out via onModeBPrompt; mode-b-gate-resolved fans out via onModeBResolution; resolveModeBPrompt calls gate.resolve RPC', async () => {
-		const stub = stubChatService('s');
-		testDisposables.add(stub.emitter);
 		const daemonStub = stubDaemonService();
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, daemonStub.daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(daemonStub.daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-m', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -302,9 +257,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	});
 
 	test('events for an unknown specId are rejected (no implicit allocation)', () => {
-		const stub = stubChatService('s');
-		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stubDaemonService().daemonService, new NullLogService()));
 
 		// No prior spec-assembling / spec-ready -- mid-pipeline event must drop.
 		const ok = svc.dispatch({ kind: 'spawned', specId: 'never-seen', agent: 'codex' });

@@ -1753,6 +1753,12 @@ export class InsrcChatViewPane extends ViewPane {
 	private _onSessionChanged(): void {
 		this._updateHeader();
 		this._lastAnnouncedIntent = undefined;
+		// Clear handoff cards from the prior session. The handoff
+		// service no longer self-subscribes to chat session changes
+		// (would create a cyclic service dependency); we drive the
+		// purge from here, the same place that re-paints the
+		// transcript on session flip.
+		this._handoffService.clearAll();
 
 		if (!this._messageList) {
 			return;
