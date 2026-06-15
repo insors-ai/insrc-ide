@@ -39,6 +39,7 @@ import type { StreamHandler } from '../daemon/server.js';
 import type { IpcStreamMessage } from '../shared/types.js';
 import type { PermissionsBlock } from '../handoff/types.js';
 import { evaluatePermission, type ToolInput, type PermissionVerdict } from './permission-policy.js';
+import { publishPrompt, publishResolution } from './prompt-dispatch.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('gating:hook-server');
@@ -188,6 +189,17 @@ async function waitForUserResolution(
 
 	// Surface the gate to the IDE.
 	send({ stream: 'gate', data: { gateId, tool: params.tool, input: params.input, specId: params.specId, sessionId: params.sessionId } });
+	// Fan the prompt out via the shared prompt-dispatch bus so an
+	// in-flight handoff stream subscriber (the IDE-facing handoff
+	// stream emitter) can surface it as a `mode-b-gate-request`
+	// HandoffEvent on its own stream.
+	publishPrompt({
+		gateId,
+		specId:    params.specId,
+		sessionId: params.sessionId,
+		tool:      params.tool,
+		input:     params.input,
+	});
 
 	const timeoutHandle = setTimeout(() => {
 		if (settled) return;
@@ -205,6 +217,13 @@ async function waitForUserResolution(
 		const resolution = await promise;
 		send({ stream: 'progress', data: { verdict: resolution.verdict, ...(resolution.scope ? { scope: resolution.scope } : {}), ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {}) } });
 		send({ stream: 'done', data: {} });
+		publishResolution({
+			gateId,
+			specId:  params.specId,
+			verdict: resolution.verdict,
+			...(resolution.scope      !== undefined ? { scope:      resolution.scope      } : {}),
+			...(resolution.stopReason !== undefined ? { stopReason: resolution.stopReason } : {}),
+		});
 	} finally {
 		clearTimeout(timeoutHandle);
 		signal.removeEventListener('abort', onAbort);

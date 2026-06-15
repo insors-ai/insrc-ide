@@ -10,6 +10,7 @@ import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { InsrcHandoffServiceImpl } from '../../browser/handoff/handoffServiceImpl.js';
 import type { HandoffChunk, HandoffEvent } from '../../common/handoffService.js';
 import type { IInsrcChatService } from '../../common/chatService.js';
+import type { IInsrcDaemonService } from '../../common/daemonService.js';
 
 /**
  * Stub chat service that exposes the two members the handoff impl
@@ -17,6 +18,27 @@ import type { IInsrcChatService } from '../../common/chatService.js';
  * throws -- if the impl ever starts depending on a new chat
  * surface, the test fails loud rather than silently masking it.
  */
+/**
+ * Stub daemon service that captures `gate.resolve` RPC calls. The
+ * handoff service uses it only for that one method; every other
+ * access throws.
+ */
+function stubDaemonService(): { daemonService: IInsrcDaemonService; rpcCalls: Array<{ method: string; params?: Record<string, unknown> }> } {
+	const rpcCalls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+	const daemonService = new Proxy({}, {
+		get(_target, prop): unknown {
+			if (prop === 'rpc') {
+				return (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+					rpcCalls.push({ method, ...(params !== undefined ? { params } : {}) });
+					return Promise.resolve({ resolved: true });
+				};
+			}
+			throw new Error(`stubDaemonService: unexpected access to '${String(prop)}'`);
+		},
+	}) as IInsrcDaemonService;
+	return { daemonService, rpcCalls };
+}
+
 function stubChatService(initialSessionId: string | undefined): {
 	chatService: IInsrcChatService;
 	flipSession: (id: string | undefined) => void;
@@ -53,7 +75,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	test('happy path: spec-assembling -> ... -> handoff-final promotes pending id and aggregates state', () => {
 		const stub = stubChatService('session-1');
 		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
 
 		const events: HandoffEvent[] = [
 			{ kind: 'spec-assembling', intent: 'fix the flaky test', templateId: 'DEBUG-SESSION' },
@@ -102,7 +124,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	test('handoff-error against an in-flight session lands as terminal error stage', () => {
 		const stub = stubChatService('session-1');
 		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-err', templateId: 'DEBUG-SESSION', preview: '...' });
@@ -124,7 +146,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	test('chat session flip clears the cache and emits remove events', () => {
 		const stub = stubChatService('session-A');
 		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'foo', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-A', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -142,7 +164,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	test('clear(specId) drops just that entry and fires remove + change', () => {
 		const stub = stubChatService('s');
 		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'a', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-x', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -167,7 +189,7 @@ suite('InsrcHandoffServiceImpl', () => {
 	test('agent-stdout-chunk / agent-stderr-chunk fan out via onChunk without mutating session state', () => {
 		const stub = stubChatService('s');
 		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
 
 		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
 		svc.dispatch({ kind: 'spec-ready', specId: 'spec-c', templateId: 'DEBUG-SESSION', preview: 'p' });
@@ -191,10 +213,54 @@ suite('InsrcHandoffServiceImpl', () => {
 		assert.equal(svc.sessions.get('spec-c')?.stage, 'spawned');
 	});
 
+	test('mode-b-gate-request fans out via onModeBPrompt; mode-b-gate-resolved fans out via onModeBResolution; resolveModeBPrompt calls gate.resolve RPC', async () => {
+		const stub = stubChatService('s');
+		testDisposables.add(stub.emitter);
+		const daemonStub = stubDaemonService();
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, daemonStub.daemonService, new NullLogService()));
+
+		svc.dispatch({ kind: 'spec-assembling', intent: 'investigate', templateId: 'DEBUG-SESSION' });
+		svc.dispatch({ kind: 'spec-ready', specId: 'spec-m', templateId: 'DEBUG-SESSION', preview: 'p' });
+
+		const prompts: Array<{ gateId: string; tool: string }> = [];
+		const resolutions: Array<{ gateId: string; verdict: 'allow' | 'deny' }> = [];
+		testDisposables.add(svc.onModeBPrompt(p => prompts.push({ gateId: p.gateId, tool: p.tool })));
+		testDisposables.add(svc.onModeBResolution(r => resolutions.push({ gateId: r.gateId, verdict: r.verdict })));
+
+		assert.strictEqual(svc.dispatch({
+			kind: 'mode-b-gate-request',
+			specId: 'spec-m',
+			gateId: 'g-1',
+			tool: 'Bash',
+			input: { command: 'git push origin main' },
+			sessionId: 'sess-1',
+		}), true);
+
+		// Mode B events must not advance the session stage.
+		assert.equal(svc.sessions.get('spec-m')?.stage, 'spec-ready');
+		assert.deepStrictEqual(prompts, [{ gateId: 'g-1', tool: 'Bash' }]);
+
+		// User clicks Allow in the modal -> service forwards to daemon.
+		await svc.resolveModeBPrompt('g-1', 'allow', { scope: 'once' });
+		assert.equal(daemonStub.rpcCalls.length, 1);
+		assert.equal(daemonStub.rpcCalls[0]!.method, 'gate.resolve');
+		assert.deepStrictEqual(daemonStub.rpcCalls[0]!.params, { gateId: 'g-1', verdict: 'allow', scope: 'once' });
+
+		// Daemon echoes the resolution back on the handoff stream.
+		assert.strictEqual(svc.dispatch({
+			kind: 'mode-b-gate-resolved',
+			specId: 'spec-m',
+			gateId: 'g-1',
+			verdict: 'allow',
+			scope: 'once',
+		}), true);
+		assert.deepStrictEqual(resolutions, [{ gateId: 'g-1', verdict: 'allow' }]);
+	});
+
 	test('events for an unknown specId are rejected (no implicit allocation)', () => {
 		const stub = stubChatService('s');
 		testDisposables.add(stub.emitter);
-		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, new NullLogService()));
+		const svc = testDisposables.add(new InsrcHandoffServiceImpl(stub.chatService, stubDaemonService().daemonService, new NullLogService()));
 
 		// No prior spec-assembling / spec-ready -- mid-pipeline event must drop.
 		const ok = svc.dispatch({ kind: 'spawned', specId: 'never-seen', agent: 'codex' });

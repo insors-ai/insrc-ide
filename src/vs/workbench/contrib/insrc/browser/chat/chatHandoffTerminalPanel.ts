@@ -95,7 +95,7 @@ export class ChatHandoffTerminalPanel extends Disposable {
 	/** Spec currently pinned in the panel. `undefined` => closed. */
 	private _activeSpecId: string | undefined;
 	private _collapsed = false;
-	private _elapsedTimer: ReturnType<typeof mainWindow.setInterval> | undefined;
+	private _elapsedTimer: number | undefined;
 
 	constructor(
 		private readonly handoffService: IInsrcHandoffService,

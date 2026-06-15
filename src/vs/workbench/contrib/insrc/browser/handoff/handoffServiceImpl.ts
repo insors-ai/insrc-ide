@@ -7,10 +7,13 @@ import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcChatService } from '../../common/chatService.js';
+import { IInsrcDaemonService } from '../../common/daemonService.js';
 import {
 	IInsrcHandoffService,
 	type HandoffChunk,
 	type HandoffEvent,
+	type HandoffModeBPrompt,
+	type HandoffModeBResolution,
 	type HandoffSessionState,
 	type HandoffStage,
 } from '../../common/handoffService.js';
@@ -57,6 +60,12 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 	private readonly _onChunk = this._register(new Emitter<HandoffChunk>());
 	readonly onChunk: Event<HandoffChunk> = this._onChunk.event;
 
+	private readonly _onModeBPrompt = this._register(new Emitter<HandoffModeBPrompt>());
+	readonly onModeBPrompt: Event<HandoffModeBPrompt> = this._onModeBPrompt.event;
+
+	private readonly _onModeBResolution = this._register(new Emitter<HandoffModeBResolution>());
+	readonly onModeBResolution: Event<HandoffModeBResolution> = this._onModeBResolution.event;
+
 	/**
 	 * The current chat session id. We don't subscribe to handoff
 	 * events directly here -- `chatServiceImpl` forwards them via
@@ -76,6 +85,7 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 
 	constructor(
 		@IInsrcChatService chatService: IInsrcChatService,
+		@IInsrcDaemonService private readonly daemonService: IInsrcDaemonService,
 		@ILogService private readonly logService: ILogService,
 	) {
 		super();
@@ -175,6 +185,33 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					stream: event.kind === 'agent-stdout-chunk' ? 'stdout' : 'stderr',
 					chunk: event.chunk,
 				});
+				return true;
+			}
+
+			case 'mode-b-gate-request': {
+				// Phase 3 Mode B: PreToolUse hook needs the user's call.
+				// Pass through to subscribers (chatView modal) without
+				// touching session state -- the prompt is orthogonal to
+				// the pipeline stage.
+				this._onModeBPrompt.fire({
+					specId: event.specId,
+					gateId: event.gateId,
+					tool: event.tool,
+					input: event.input,
+					sessionId: event.sessionId,
+				});
+				return true;
+			}
+
+			case 'mode-b-gate-resolved': {
+				const resolution: HandoffModeBResolution = {
+					specId: event.specId,
+					gateId: event.gateId,
+					verdict: event.verdict,
+					...(event.scope !== undefined ? { scope: event.scope } : {}),
+					...(event.stopReason !== undefined ? { stopReason: event.stopReason } : {}),
+				};
+				this._onModeBResolution.fire(resolution);
 				return true;
 			}
 
@@ -278,6 +315,25 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					errorMessage: event.message,
 				}));
 			}
+		}
+	}
+
+	async resolveModeBPrompt(
+		gateId: string,
+		verdict: 'allow' | 'deny',
+		opts: { scope?: 'once' | 'session'; stopReason?: string } = {},
+	): Promise<void> {
+		const params: Record<string, unknown> = { gateId, verdict };
+		if (opts.scope !== undefined) {
+			params['scope'] = opts.scope;
+		}
+		if (opts.stopReason !== undefined) {
+			params['stopReason'] = opts.stopReason;
+		}
+		try {
+			await this.daemonService.rpc<{ resolved: boolean }>('gate.resolve', params);
+		} catch (err) {
+			this.logService.warn(`[insrc-handoff] gate.resolve(${gateId}) failed: ${(err as Error).message}`);
 		}
 	}
 

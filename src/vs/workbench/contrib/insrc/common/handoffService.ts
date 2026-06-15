@@ -135,6 +135,34 @@ export type HandoffEvent =
 		readonly kind: 'handoff-error';
 		readonly stage: HandoffErrorStage;
 		readonly message: string;
+	}
+	/**
+	 * Mode B in-flight permission prompt (Phase 3). The daemon's
+	 * gate.request-permission hook hit a `prompt` verdict; the
+	 * workbench renders a modal and replies via gate.resolve. The
+	 * `gateId` correlates the request with the eventual
+	 * `mode-b-gate-resolved` event.
+	 */
+	| {
+		readonly kind: 'mode-b-gate-request';
+		readonly specId: string;
+		readonly gateId: string;
+		readonly tool: string;
+		readonly input: Record<string, unknown>;
+		readonly sessionId: string;
+	}
+	/**
+	 * Mode B prompt resolved by the user OR by the daemon's
+	 * default-deny (timeout / cancellation). The workbench
+	 * dismisses any open modal for this `gateId`.
+	 */
+	| {
+		readonly kind: 'mode-b-gate-resolved';
+		readonly specId: string;
+		readonly gateId: string;
+		readonly verdict: 'allow' | 'deny';
+		readonly scope?: 'once' | 'session' | undefined;
+		readonly stopReason?: string | undefined;
 	};
 
 // ---------------------------------------------------------------------------
@@ -219,6 +247,31 @@ export interface HandoffChunk {
 	readonly chunk: string;
 }
 
+/**
+ * In-flight permission prompt waiting on the user's modal response
+ * (Phase 3 Mode B). The chat view subscribes to
+ * `IInsrcHandoffService.onModeBPrompt` and renders a modal; the user's
+ * verdict goes back via `IInsrcHandoffService.resolveModeBPrompt`.
+ * Includes a `resolved: Event<HandoffModeBResolution>` so the modal
+ * can dismiss itself if the daemon's default-deny timeout fires before
+ * the user clicks.
+ */
+export interface HandoffModeBPrompt {
+	readonly specId: string;
+	readonly gateId: string;
+	readonly tool: string;
+	readonly input: Record<string, unknown>;
+	readonly sessionId: string;
+}
+
+export interface HandoffModeBResolution {
+	readonly specId: string;
+	readonly gateId: string;
+	readonly verdict: 'allow' | 'deny';
+	readonly scope?: 'once' | 'session' | undefined;
+	readonly stopReason?: string | undefined;
+}
+
 export interface IInsrcHandoffService {
 	readonly _serviceBrand: undefined;
 
@@ -262,6 +315,22 @@ export interface IInsrcHandoffService {
 	readonly onChunk: Event<HandoffChunk>;
 
 	/**
+	 * Fires whenever the daemon's PreToolUse hook hits a `prompt`
+	 * verdict and is waiting on a user response (Phase 3 Mode B).
+	 * Subscribers (the chat view) render a modal and reply via
+	 * {@link resolveModeBPrompt}.
+	 */
+	readonly onModeBPrompt: Event<HandoffModeBPrompt>;
+
+	/**
+	 * Fires when an outstanding Mode B prompt is resolved -- either
+	 * by the IDE's reply or by the daemon's default-deny timeout /
+	 * cancellation. Modal subscribers dismiss any UI keyed to the
+	 * same `gateId`.
+	 */
+	readonly onModeBResolution: Event<HandoffModeBResolution>;
+
+	/**
 	 * Dispatch a single daemon-emitted HandoffEvent. Called by
 	 * `chatServiceImpl._handleStreamMessage` when it sees a
 	 * `{ type: 'handoff' }` message on the active chat stream.
@@ -270,6 +339,19 @@ export interface IInsrcHandoffService {
 	 * false if the event was rejected as malformed.
 	 */
 	dispatch(event: HandoffEvent): boolean;
+
+	/**
+	 * Reply to a Mode B prompt. The verdict is forwarded to the
+	 * daemon's `gate.resolve` RPC; on `allow + scope === 'session'`
+	 * the daemon will also remember the allow for the rest of the
+	 * spec's run. Idempotent: a second call for the same `gateId`
+	 * (e.g. timeout already fired) is a no-op on the daemon side.
+	 */
+	resolveModeBPrompt(
+		gateId: string,
+		verdict: 'allow' | 'deny',
+		opts?: { scope?: 'once' | 'session'; stopReason?: string },
+	): Promise<void>;
 
 	/**
 	 * Drop a session from the cache (e.g. user dismissed the card).

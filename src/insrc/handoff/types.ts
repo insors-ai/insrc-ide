@@ -192,4 +192,30 @@ export type HandoffEvent =
 	    readonly diff:   string;
 	    readonly worktreePath: string }
 	| { readonly kind: 'handoff-error';    readonly stage: 'spec-assemble' | 'worktree' | 'spawn' | 'audit' | 'diff';
-	    readonly message: string };
+	    readonly message: string }
+	/**
+	 * Mode B in-flight permission prompt (Phase 3). Fires while the
+	 * agent subprocess is running -- after `spawned` and before
+	 * `agent-completed` -- when the PreToolUse hook hits a `prompt`
+	 * verdict from the spec's PermissionsBlock. The IDE renders a
+	 * modal and replies via `gate.resolve` RPC. The `gateId`
+	 * correlates the prompt with the eventual
+	 * `mode-b-gate-resolved` event.
+	 */
+	| { readonly kind: 'mode-b-gate-request'; readonly specId: string;
+	    readonly gateId: string;
+	    readonly tool:   string;
+	    /** Tool input -- shape varies; the IDE renders a generic key/value summary. */
+	    readonly input:  Record<string, unknown>;
+	    readonly sessionId: string }
+	/**
+	 * Mode B prompt has been resolved -- either by the IDE's
+	 * `gate.resolve` reply or by the hook-server's default-deny
+	 * (timeout / cancellation). The IDE dismisses any modal still
+	 * open for this `gateId`. Fires once per `mode-b-gate-request`.
+	 */
+	| { readonly kind: 'mode-b-gate-resolved'; readonly specId: string;
+	    readonly gateId: string;
+	    readonly verdict: 'allow' | 'deny';
+	    readonly scope?: 'once' | 'session' | undefined;
+	    readonly stopReason?: string | undefined };

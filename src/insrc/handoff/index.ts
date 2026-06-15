@@ -31,6 +31,7 @@ import { assembleSpec, type SpecAssemblerInput } from './spec-assembler.js';
 import { createWorktree, diffWorktreeAgainstHead, removeWorktree } from './worktree.js';
 import { spawnClaudeCode } from './spawn/claude-code.js';
 import type { AgentSpawnResult, SpawnChunkListener } from './spawn/base.js';
+import { subscribePrompts, subscribeResolutions } from '../gating/prompt-dispatch.js';
 import { auditDeliverable, type AuditResult } from './audit/judge.js';
 import { getTemplate } from './templates/registry.js';
 import type { AssembledSpec, HandoffEvent, MemoryRef, ScopePayload, TemplateId } from './types.js';
@@ -156,6 +157,33 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	emit({ kind: 'worktree-created', specId: spec.specId, worktreePath: createResult.worktreePath, ref: createResult.ref });
 
 	let spawnResult: AgentSpawnResult;
+	// Subscribe to Mode B prompt activity for THIS spec only. Prompts
+	// for other concurrent handoffs (the dispatcher is process-global)
+	// arrive on the same listener and we filter by specId. We tear the
+	// subscriptions down in the finally clause below so we don't leak
+	// listeners across handoff lifetimes.
+	const promptSub = subscribePrompts(p => {
+		if (p.specId !== spec.specId) return;
+		emit({
+			kind:      'mode-b-gate-request',
+			specId:    p.specId,
+			gateId:    p.gateId,
+			tool:      p.tool,
+			input:     p.input as Record<string, unknown>,
+			sessionId: p.sessionId,
+		});
+	});
+	const resolvedSub = subscribeResolutions(r => {
+		if (r.specId !== spec.specId) return;
+		emit({
+			kind:    'mode-b-gate-resolved',
+			specId:  r.specId,
+			gateId:  r.gateId,
+			verdict: r.verdict,
+			...(r.scope      !== undefined ? { scope:      r.scope      } : {}),
+			...(r.stopReason !== undefined ? { stopReason: r.stopReason } : {}),
+		});
+	});
 	try {
 		// 3. Spawn the agent.
 		emit({ kind: 'spawned', specId: spec.specId, agent: opts.agent });
@@ -239,6 +267,8 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 
 		return { spec, spawnResult, audit, diff, worktreePath };
 	} finally {
+		promptSub.dispose();
+		resolvedSub.dispose();
 		if (opts.forceCleanup === true) {
 			await removeWorktree({ repoPath: opts.scope.repoPath, worktreePath });
 		}
