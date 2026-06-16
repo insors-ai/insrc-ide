@@ -94,7 +94,17 @@ export class InsrcHandoffRunner extends Disposable {
 		if (repos.length === 0) {
 			return '/handoff: no repository selected -- add one via the repo dropdown first.';
 		}
-		const repo = repos[0]!;
+		// Prefer the chat session's bound repo over a blind `repos[0]`
+		// pick. With multiple repos in the workspace `repos[0]` is just
+		// "whichever registered first" -- on a workspace with hadoop +
+		// insors-extraction the runner would always target hadoop even
+		// when the user is chatting in an insors-extraction session.
+		// Fall back to the first registered repo only when the session
+		// has no bound repo (e.g. fresh harness invocation pre-bind).
+		const activeRepoPath = this.chatService.activeRepo;
+		const repo = activeRepoPath !== undefined
+			? (repos.find(r => r.path === activeRepoPath) ?? repos[0]!)
+			: repos[0]!;
 		const classification = classifyHandoffIntent(rawIntent);
 		if (classification.intent.length === 0) {
 			return '/handoff: empty intent -- usage `/handoff <what you want done>`.';
