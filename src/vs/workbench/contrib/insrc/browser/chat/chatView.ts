@@ -1671,6 +1671,12 @@ export class InsrcChatViewPane extends ViewPane {
 			const intent = (handoffMatch[1] ?? '').trim();
 			this._input.value = '';
 			this._autoResize();
+			// Reveal the message list (the handoff widget mounts inside
+			// it) and hide the empty-state placeholder so the progress
+			// card is actually visible. Normal chat messages do this in
+			// `_renderMessage`, but /handoff bypasses that path.
+			this._emptyState.style.display = 'none';
+			this._messageList.style.display = '';
 			try {
 				const summary = await this._handoffRunner.run(intent);
 				this._logService.info(`[insrc-chat] ${summary}`);
