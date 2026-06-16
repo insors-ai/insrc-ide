@@ -33,6 +33,7 @@ export type AgentFamily =
   | 'code-analyzer'
   | 'data-analyzer'
   | 'handoff'
+  | 'meta-task'
   | 'system';
 
 export type AgentFamilyCategory =
@@ -146,6 +147,14 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
     icon: 'arrow-swap',
     suppressTodoComments: true,
   },
+  'meta-task': {
+    id: 'meta-task',
+    displayName: 'Meta-task',
+    category: 'meta',
+    description: 'Structured multi-step task orchestrator above /handoff. Decomposes a high-level intent (design / plan / implement / migrate / review) into ordered steps; each step runs a two-phase context-then-task cycle with the cloud LLM declaring sufficiency and the local LLM building context on demand.',
+    icon: 'list-tree',
+    suppressTodoComments: true,
+  },
   system: {
     id: 'system',
     displayName: 'System',
@@ -162,7 +171,7 @@ const _exhaustivenessCheck: Record<AgentFamily, true> = {
   chat: true, implementation: true, brainstorm: true, designer: true,
   planner: true, tester: true, research: true, debugging: true,
   deployment: true, 'code-analyzer': true, 'data-analyzer': true,
-  handoff: true, system: true,
+  handoff: true, 'meta-task': true, system: true,
 };
 void _exhaustivenessCheck;
 
