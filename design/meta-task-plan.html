@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>/plan meta-task &mdash; Template Design</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e4ed;
+      --muted: #8b8fa8;
+      --accent: #7c6af7;
+      --accent2: #4fc3f7;
+      --green: #4caf7d;
+      --yellow: #f5c842;
+      --code-bg: #12151e;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+    body { background: var(--bg); color: var(--text); line-height: 1.7; display: flex; }
+    main { flex: 1; min-width: 0; max-width: 960px; margin: 0 auto; padding: 2rem; }
+    @media (min-width: 1100px) { main { margin-left: 280px; } }
+
+    h1 { font-size: 2rem; color: var(--accent); margin-bottom: 0.25rem; }
+    h2 { font-size: 1.3rem; color: var(--accent2); margin: 2.5rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+    h3 { font-size: 1.05rem; color: var(--yellow); margin: 1.5rem 0 0.5rem; }
+    h4 { font-size: 0.95rem; color: var(--green); margin: 1rem 0 0.4rem; }
+    p { margin: 0.6rem 0; }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; margin: 0.75rem 0; }
+    code { font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace; font-size: 0.88em; }
+    pre code { font-size: inherit; }
+    :not(pre) > code { background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+
+    ul, ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+    li { margin: 0.25rem 0; }
+
+    table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.88rem; }
+    th, td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; vertical-align: top; }
+    th { background: var(--surface); color: var(--accent2); font-weight: 600; }
+    td { background: var(--bg); }
+    tr:nth-child(even) td { background: #13161f; }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+    .callout { border-left: 3px solid var(--accent); background: rgba(124, 106, 247, 0.06); padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+    .callout.warn { border-left-color: var(--yellow); background: rgba(245, 200, 66, 0.06); }
+    .callout.open { border-left-color: var(--accent2); background: rgba(79, 195, 247, 0.06); }
+    .open  { color: var(--accent2); font-size: 0.92em; }
+
+    nav.toc { position: fixed; top: 0; left: 0; width: 260px; height: 100vh; background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 1.2rem 1rem 2rem; z-index: 100; }
+    nav.toc h2 { font-size: 0.85rem; color: var(--accent); margin: 0 0 0.75rem; border: none; padding: 0; text-transform: uppercase; letter-spacing: 0.05em; }
+    nav.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: toc-section; }
+    nav.toc > ol > li { counter-increment: toc-section; margin: 0.2rem 0; }
+    nav.toc > ol > li > a::before { content: counter(toc-section) ". "; color: var(--muted); font-size: 0.75rem; }
+    nav.toc ol ol { padding-left: 1rem; margin: 0.1rem 0 0.25rem; }
+    nav.toc a { color: var(--text); text-decoration: none; font-size: 0.8rem; line-height: 1.5; display: block; padding: 0.1rem 0.4rem; border-radius: 3px; transition: background 0.15s, color 0.15s; }
+    nav.toc a:hover, nav.toc a.active { color: var(--accent2); background: rgba(79, 195, 247, 0.08); }
+    nav.toc ol ol a { color: var(--muted); font-size: 0.75rem; }
+    @media (max-width: 1099px) { nav.toc { position: static; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); max-height: 50vh; } main { margin-left: 0; } }
+  </style>
+</head>
+<body>
+
+  <nav class="toc">
+    <h2>/plan template</h2>
+    <ol>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#scope">Scope &amp; non-goals</a></li>
+      <li><a href="#legacy-extraction">Legacy planner: what we keep, what we drop</a></li>
+      <li><a href="#step-list">Step list</a>
+        <ol>
+          <li><a href="#step-analyze">P1 analyze</a></li>
+          <li><a href="#step-gather">P2 gather</a></li>
+          <li><a href="#step-draft">P3 draft</a></li>
+          <li><a href="#step-validate">P4 validate</a></li>
+          <li><a href="#step-detail">P5 detail</a></li>
+          <li><a href="#step-synth">P6 synth</a></li>
+        </ol>
+      </li>
+      <li><a href="#deliverable">Deliverable contract</a></li>
+      <li><a href="#interop">Consumer interop (Delegate, CLI, chat-handler)</a></li>
+      <li><a href="#revision">Plan revision + user feedback</a></li>
+      <li><a href="#open">Open questions</a></li>
+      <li><a href="#milestones">Implementation milestones</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <h1>/plan meta-task &mdash; template design</h1>
+    <p class="muted">
+      Status: <strong style="color:var(--yellow)">DRAFT</strong> &middot;
+      Scope: design only &mdash; no code &middot;
+      Implements: M4 of <a href="meta-tasks.html">meta-tasks framework</a> &middot;
+      Replaces: <code>src/insrc/agent/planner/</code>
+    </p>
+
+    <div class="callout">
+      <strong>First per-template design doc.</strong> Sets the pattern for
+      <code>/design</code>, <code>/implement</code>, <code>/migrate</code>: each one's doc lives at
+      <code>design/meta-task-&lt;name&gt;.html</code> and covers (a) what the existing path does today,
+      (b) what we keep / reshape / drop, (c) the new step list with phase-1 fetcher needs + phase-2
+      prompts + acceptance, (d) the deliverable contract, (e) consumer interop, (f) open questions.
+    </div>
+
+
+    <h2 id="overview">1. Overview</h2>
+    <p>
+      <code>/plan</code> takes a free-form planning request and produces a structured implementation
+      plan: an ordered list of steps with dependencies, complexity hints, file references, and
+      (optionally) domain-specific data for implementation / test / migration variants. It's the
+      "structured approach instead of free-form prompt" layer the user asked for at the design level
+      (meta-tasks &sect;1).
+    </p>
+    <p>
+      The existing <code>plannerAgent</code> (in <code>src/insrc/agent/planner/</code>, 1860 LOC across
+      ten files) already does this work. Its 8-step pipeline produces a typed <code>Plan&lt;T&gt;</code>
+      object, validates dependencies, enriches with domain data, and serializes to a round-trippable
+      markdown format. The legacy planner's prompts, validators, and markdown serializer are reusable
+      assets that this design preserves.
+    </p>
+    <p>
+      What this design changes is the <em>orchestration shape</em>: the 8 step-machine steps with
+      inline user gates become a 6-step meta-task with phase-1 demand-pull context + phase-2
+      cloud-LLM execution per step. User gates fold into the meta-task framework's plan-revision
+      flow (&sect;7), not as inline per-step pauses.
+    </p>
+
+
+    <h2 id="scope">2. Scope &amp; non-goals</h2>
+    <h3>Scope (M4)</h3>
+    <ul>
+      <li>Ship <code>/plan</code> as a usable meta-task template via the chat slash command and the
+        sub-meta-task primitive.</li>
+      <li>Reuse legacy <code>markdown.toMarkdown</code> + <code>fromMarkdown</code> for round-trippable
+        deliverables &mdash; the meta-task deliverable string IS the canonical plan markdown.</li>
+      <li>Reuse legacy <code>engine.detectCycles</code> + <code>detectBlockedSteps</code> as
+        deterministic validators inside the validate step's phase-2.</li>
+      <li>Port the legacy prompts (<code>ANALYZE_SYSTEM</code>, <code>DRAFT_SYSTEM</code>,
+        <code>ENHANCE_SYSTEM</code>, <code>DETAIL_SYSTEM</code>, <code>SEARCH_PLAN_SYSTEM</code>)
+        verbatim into the new template's phase-2 prompts.</li>
+      <li>Wire the new <code>/plan</code> meta-task to the chat surface (already routed via
+        meta-tasks M2.8 &mdash; <code>/plan</code> is in the slash-command regex).</li>
+    </ul>
+
+    <h3>Non-goals (M4)</h3>
+    <ul>
+      <li>
+        <strong>Do not edit the legacy <code>src/insrc/agent/planner/</code> module.</strong> The new
+        <code>/plan</code> template lives entirely under <code>src/insrc/meta-task/templates/plan.ts</code>
+        and reuses what it can via <em>imports</em>, not edits. Per user direction at design time:
+        "don't try to edit the current planner, extract the design from it and create a new planner
+        module."
+      </li>
+      <li>
+        <strong>Do not migrate Delegate, CLI, or chat-handler dispatch.</strong> Those consumers stay
+        on <code>plannerAgent</code> until they're individually migrated. Both paths coexist briefly
+        during the migration window. See &sect;7 for migration sequencing.
+      </li>
+      <li>
+        Per-step interactive user gates (the legacy <code>validate-plan</code> /
+        <code>validate-details</code> gates). Folded into meta-task &sect;7 plan-revision (M5).
+      </li>
+      <li>
+        Domain-data variants beyond what the legacy planner emits (<code>ImplementationStepData</code>,
+        <code>TestStepData</code>, <code>MigrationStepData</code>). Same shapes; no schema additions.
+      </li>
+    </ul>
+
+
+    <h2 id="legacy-extraction">3. Legacy planner: what we keep, what we drop</h2>
+
+    <table>
+      <thead>
+        <tr><th>Legacy asset</th><th>Decision</th><th>Where it lands in the new template</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>types.ts</code> &mdash; <code>Plan&lt;T&gt;</code>, <code>Step&lt;T&gt;</code>,
+            <code>ImplementationStepData</code>, <code>TestStepData</code>,
+            <code>MigrationStepData</code>, status enums</td>
+          <td>KEEP</td>
+          <td>Re-export from <code>src/insrc/meta-task/templates/plan-types.ts</code>; consumers import
+            from there. Legacy file stays untouched.</td>
+        </tr>
+        <tr>
+          <td><code>markdown.ts</code> &mdash; <code>toMarkdown</code>, <code>fromMarkdown</code>,
+            <code>updateStepInMarkdown</code></td>
+          <td>KEEP, reuse</td>
+          <td>Imported directly. The new template's P6 synth emits markdown via this function;
+            consumers parse it back via <code>fromMarkdown</code>.</td>
+        </tr>
+        <tr>
+          <td><code>engine.ts</code> &mdash; <code>detectCycles</code>,
+            <code>detectBlockedSteps</code>, <code>computePlanStatus</code>,
+            <code>updateStepStatus</code>, <code>validateDependencies</code></td>
+          <td>KEEP, reuse</td>
+          <td>Imported directly. <code>detectCycles</code> + <code>detectBlockedSteps</code> run inside
+            P4 validate's phase-2 (or as deterministic checks in the template's helper code).</td>
+        </tr>
+        <tr>
+          <td><code>prompts.ts</code> &mdash; <code>ANALYZE_SYSTEM</code>,
+            <code>DRAFT_SYSTEM</code>, <code>ENHANCE_SYSTEM</code>, <code>CONDENSED_SYSTEM</code>,
+            <code>DETAIL_SYSTEM</code>, <code>SEARCH_PLAN_SYSTEM</code></td>
+          <td>KEEP, copy &amp; adapt</td>
+          <td>Copied into <code>src/insrc/meta-task/templates/plan-prompts.ts</code>. Adapted: prompts
+            become phase-2 system preludes per step; expected output stays JSON. Legacy file stays for
+            <code>plannerAgent</code>.</td>
+        </tr>
+        <tr>
+          <td><code>progress.ts</code> &mdash; <code>getProgressSummary</code></td>
+          <td>KEEP</td>
+          <td>Re-export. Used by consumers (Delegate, the report pane) to summarize a parsed plan.</td>
+        </tr>
+        <tr>
+          <td><code>utils.ts</code> &mdash; <code>generateId</code>, <code>detectCycle</code> (graph utility)</td>
+          <td>KEEP</td>
+          <td>Re-export.</td>
+        </tr>
+        <tr>
+          <td><code>steps.ts</code> &mdash; the 8 <code>AgentStep</code> implementations</td>
+          <td>DROP &mdash; replaced</td>
+          <td>Replaced by the 6 meta-task steps in &sect;4. The legacy file stays but is no longer
+            referenced by the new template.</td>
+        </tr>
+        <tr>
+          <td><code>agent-state.ts</code>, <code>agent.ts</code></td>
+          <td>DROP &mdash; replaced</td>
+          <td>Meta-task framework supplies the state &amp; runner. Legacy files remain until
+            <code>plannerAgent</code> consumers migrate.</td>
+        </tr>
+        <tr>
+          <td>The 3 inline user gates (<code>validate-plan</code>, <code>validate-details</code>,
+            artifact-save format gate)</td>
+          <td>DROP, replace with meta-task &sect;7 revision flow</td>
+          <td>No per-step gates. User reviews the final deliverable in the report pane (auto-opened
+            by the framework). For changes the user invokes the M5 abort gate
+            ("Adjust plan" / "New plan").</td>
+        </tr>
+        <tr>
+          <td>Legacy <code>writeArtifact</code> + post-completion artifact-save gate
+            (asks user to choose format &amp; location)</td>
+          <td>DROP &mdash; replaced by framework persistence</td>
+          <td>Meta-task framework persists the deliverable at
+            <code>~/.insrc/meta/&lt;id&gt;/synthesis.md</code> automatically. Saving to a user-chosen
+            location is a separate "Save as&hellip;" command outside the template.</td>
+        </tr>
+        <tr>
+          <td><code>recordFeedback</code> (every gate records user feedback to memory)</td>
+          <td>DEFER</td>
+          <td>The meta-task framework doesn't have a feedback-capture hook yet. Open question O4.</td>
+        </tr>
+        <tr>
+          <td>End-of-pipeline <code>todos.createList</code> mirror (one list per plan)</td>
+          <td>DROP &mdash; replaced by framework TodoList</td>
+          <td>Meta-task framework already creates one <code>TodoList</code> per meta-task run with
+            one item per step (M2.5). The legacy planner's separate "mirror for transfer to
+            implementation family" list is redundant.</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <h2 id="step-list">4. Step list</h2>
+    <p>
+      Six steps, each one phase-1 + phase-2 cycle. Where the legacy planner had 8 steps + 3 gates,
+      the new template has 6 steps + 0 gates &mdash; the framework's plan-revision (&sect;7 below)
+      handles user input post-completion. Phase-1 contracts and phase-2 prompts are spelled out per
+      step so the implementation is mechanical.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>#</th><th>Step</th><th>Phase 1 typical request</th><th>Phase 2 prompt source</th><th>Phase 2 output expectations</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>P1</td><td><code>analyze</code></td>
+          <td><code>{ kind: 'sufficient' }</code> &mdash; the intent is in the step's prompt body; no
+            corpus needed</td>
+          <td><code>ANALYZE_SYSTEM</code> (legacy)</td>
+          <td>JSON wrapped in <code>{ kind: 'deliverable', body }</code> where body is the legacy
+            schema: <code>{ planType, goals, constraints, scope }</code></td>
+        </tr>
+        <tr>
+          <td>P2</td><td><code>gather</code></td>
+          <td><code>semantic</code> + <code>entities</code> + <code>memory</code>. Cloud picks
+            terms based on P1's analysis</td>
+          <td><code>SEARCH_PLAN_SYSTEM</code> as phase-1 ask helper; phase-2 prompt synthesizes
+            findings into a "codebase context summary"</td>
+          <td>Markdown body summarizing the matched entities + memory snippets + config context.
+            Used as input to P3.</td>
+        </tr>
+        <tr>
+          <td>P3</td><td><code>draft</code></td>
+          <td><code>deliverable</code> (P1 analysis) + <code>deliverable</code> (P2 gather)</td>
+          <td><code>DRAFT_SYSTEM</code> &mdash; or <code>CONDENSED_SYSTEM</code> when P2's gather
+            yielded little (the template's helper picks based on chunk byte-count)</td>
+          <td>JSON array of raw steps (legacy <code>RawStep[]</code> shape:
+            <code>{ title, description, checkpoint?, complexity?, dependsOnIdx?, fileHint? }</code>),
+            then <em>refined</em> via a second phase-2 call using <code>ENHANCE_SYSTEM</code></td>
+        </tr>
+        <tr>
+          <td>P4</td><td><code>validate</code></td>
+          <td><code>{ kind: 'sufficient' }</code></td>
+          <td>None &mdash; this is a deterministic check, no LLM call</td>
+          <td>Calls <code>engine.detectCycles</code> + <code>detectBlockedSteps</code>. Emits a
+            deliverable with: pass/fail, cycle path if any, blocked-step list if any. On cycle/block
+            issues, emits <code>{ kind: 'abort', resolution: 'plan-revisable' }</code> &mdash; M5's
+            revision flow re-invokes the planner</td>
+        </tr>
+        <tr>
+          <td>P5</td><td><code>detail</code></td>
+          <td><code>deliverable</code> (P3 draft) + <code>semantic</code> (per step description, when
+            scope is medium/large &mdash; cloud decides)</td>
+          <td><code>DETAIL_SYSTEM</code> (legacy)</td>
+          <td>JSON array of <code>{ stepIndex, data }</code> enrichments. For generic plans this step
+            skips (emits <code>{ kind: 'deliverable', body: '(skipped)' }</code>)</td>
+        </tr>
+        <tr>
+          <td>P6</td><td><code>synth</code></td>
+          <td><code>deliverable</code> (P3 draft) + <code>deliverable</code> (P5 detail)</td>
+          <td>None &mdash; deterministic. Helper assembles a <code>Plan</code> object from P1-P5,
+            calls <code>markdown.toMarkdown(plan)</code>, returns the markdown as the deliverable body</td>
+          <td><code>{ kind: 'deliverable', body }</code> where body is the canonical
+            <code>toMarkdown</code> output. This IS the template's deliverable contract</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <h3 id="step-analyze">4.1 P1 analyze</h3>
+    <p>
+      Maps the legacy <code>analyzeRequestStep</code>. Phase 2 calls the cloud with
+      <code>ANALYZE_SYSTEM</code> as the system prelude and the user's intent as the user message.
+      The cloud emits a JSON object the helper validates against the
+      <code>{ planType, goals, constraints, scope }</code> shape; on malformed JSON the meta-task
+      framework's retry-with-feedback path kicks in automatically.
+    </p>
+    <p>
+      Phase 1 is <code>{ kind: 'sufficient' }</code> because the entire planning intent is in the
+      user's message; no corpus lookup is needed at this stage. Templates can override on a per-step
+      basis if they want classification to consider memory; in M4 we keep it stateless.
+    </p>
+
+    <h3 id="step-gather">4.2 P2 gather</h3>
+    <p>
+      Maps the legacy <code>gatherContextStep</code>. This is where the meta-task framework's
+      demand-pull context model earns its keep: the cloud LLM (now informed by P1's analysis) picks
+      its own search terms instead of the legacy planner's hard-coded 2-stage search pipeline.
+    </p>
+    <p>
+      Phase 1: the cloud emits <code>{ kind: 'context-needed', requests: [...] }</code>, typically
+      with 2-4 slot requests:
+    </p>
+<pre><code>{
+  "kind": "context-needed",
+  "requests": [
+    { "kind": "semantic",
+      "query": "user registration endpoint validation",
+      "topK": 10,
+      "over": ["entities"] },
+    { "kind": "entities",
+      "names": ["UserService", "AuthMiddleware"],
+      "repos": ["/Users/.../repo"] },
+    { "kind": "memory",
+      "query": "prior auth refactor decisions" }
+  ],
+  "intent": "find existing entry points + relevant entity definitions"
+}</code></pre>
+
+    <p>
+      Phase 2 then synthesises a free-form "codebase context summary" markdown. This block becomes
+      one of the deliverable inputs P3 pulls via the <code>deliverable</code> slot.
+    </p>
+    <p>
+      Config context (conventions/feedback/templates) is loaded by the template's helper code and
+      injected as additional input to phase 2. Same flow as the legacy planner's
+      <code>loadConfigContext</code>.
+    </p>
+
+    <h3 id="step-draft">4.3 P3 draft</h3>
+    <p>
+      Maps the legacy <code>draftPlanStep</code>'s two-stage pattern (sketch &rarr; refine). Phase 2
+      makes two cloud calls:
+    </p>
+    <ol>
+      <li>Sketch with <code>DRAFT_SYSTEM</code> (or <code>CONDENSED_SYSTEM</code> when phase-1
+        chunks total &lt; 1 KB of useful context).</li>
+      <li>Refine the sketch with <code>ENHANCE_SYSTEM</code>, passing the sketch back as user-message
+        input.</li>
+    </ol>
+    <p>
+      Both stages emit a JSON step array. The framework's per-step phase-2 contract gets one
+      <em>terminal</em> deliverable; the sketch &rarr; refine pattern lives inside the template's
+      helper which makes both calls before returning. This is template-internal detail; from the
+      orchestrator's perspective P3 is one step.
+    </p>
+
+    <h3 id="step-validate">4.4 P4 validate</h3>
+    <p>
+      Deterministic. The template's helper takes the P3 step array, builds a <code>Plan</code>
+      object via the legacy <code>buildPlan</code> helper (which we copy in), runs
+      <code>detectCycles</code> + <code>detectBlockedSteps</code>, and emits one of:
+    </p>
+    <ul>
+      <li>Pass: <code>{ kind: 'deliverable', body: '<validation report markdown>' }</code> with the
+        plan summary + "no dependency issues found". Orchestrator advances to P5.</li>
+      <li>Fail: <code>{ kind: 'abort', resolution: 'plan-revisable', reason: 'cycle detected: ...',
+        hint: 'consider re-ordering steps so X precedes Y' }</code>. The framework's M5 revision
+        flow surfaces this to the user; their feedback drives the re-draft.</li>
+    </ul>
+    <p>
+      Phase 1 is <code>{ kind: 'sufficient' }</code>. No cloud LLM call in phase 2 either &mdash;
+      this is the place the framework lets a "pure helper" step shine. The orchestrator's per-step
+      contract doesn't require an LLM call; phase 2 can be a synchronous function.
+    </p>
+    <p class="muted">
+      <strong>Implementation note:</strong> the meta-task framework's current orchestrator
+      assumes every phase-2 is a cloud-LLM call. P4 will require adding a "no-LLM step" escape
+      where the template's plan-builder can supply a synchronous phase-2 implementation. Tracked
+      as open question O1.
+    </p>
+
+    <h3 id="step-detail">4.5 P5 detail</h3>
+    <p>
+      Maps the legacy <code>detailStepsStep</code>. Phase 1 typically pulls the P3 draft
+      deliverable plus optional per-step semantic searches. Phase 2 uses
+      <code>DETAIL_SYSTEM</code> with the plan type (<code>implementation</code> /
+      <code>test</code> / <code>migration</code> / <code>generic</code>) folded into the prompt.
+      Generic plans skip this step entirely (the template's helper checks
+      <code>planType === 'generic'</code> and emits a sentinel deliverable so P6 knows to skip the
+      detail-merge).
+    </p>
+
+    <h3 id="step-synth">4.6 P6 synth</h3>
+    <p>
+      Deterministic, no LLM call (same caveat as P4). The helper:
+    </p>
+    <ol>
+      <li>Pulls P3 draft &amp; P5 detail deliverables.</li>
+      <li>Merges P5 enrichments into the <code>Plan&lt;T&gt;</code> object.</li>
+      <li>Calls <code>markdown.toMarkdown(plan)</code> (legacy import).</li>
+      <li>Emits <code>{ kind: 'deliverable', body: markdown }</code>.</li>
+    </ol>
+    <p>
+      The framework writes the deliverable to
+      <code>~/.insrc/meta/&lt;id&gt;/step-06-synth.deliverable.md</code> automatically. Because P6 is
+      the last step the same body is mirrored into <code>synthesis.md</code> and into the TodoList
+      body so the report pane auto-opens with the rendered plan.
+    </p>
+
+
+    <h2 id="deliverable">5. Deliverable contract</h2>
+    <p>
+      <strong>The /plan template's deliverable is round-trippable markdown.</strong> Specifically:
+      the synthesis body is produced by <code>markdown.toMarkdown(plan)</code> and can be parsed
+      back into a typed <code>Plan&lt;T&gt;</code> via <code>markdown.fromMarkdown(body)</code>.
+      This is the load-bearing design choice that lets consumers (Delegate, future others) reuse
+      the structured shape without the meta-task framework needing a new "structured deliverable"
+      contract.
+    </p>
+
+    <h3>Why markdown-only (vs. a new structured-deliverable framework feature)</h3>
+    <ul>
+      <li>
+        <strong>The legacy planner already uses markdown as its serialized shape</strong>
+        (<code>toMarkdown</code> + <code>fromMarkdown</code>). Adding a parallel structured-JSON path
+        would duplicate the contract.
+      </li>
+      <li>
+        <strong>Meta-task framework changes stay zero.</strong> The framework's
+        <code>Phase2Out.deliverable</code> is already <code>{ body: string }</code>; no new
+        <code>structured?</code> field is required.
+      </li>
+      <li>
+        <strong>The report pane renders markdown well.</strong> The user sees the plan as a
+        properly-formatted document, not a JSON dump.
+      </li>
+      <li>
+        <strong>Consumers do one round-trip.</strong> Delegate's migration becomes
+        <code>const plan = fromMarkdown(result.deliverables.get(6)!)</code>; that's it.
+      </li>
+    </ul>
+
+
+    <h2 id="interop">6. Consumer interop</h2>
+    <p>
+      Three external call sites today (see plans/meta-tasks.md M4.5). Each migrates independently
+      via a small wrapper that invokes <code>runSubMetaTask({ templateId: 'plan', ... })</code> and
+      parses the markdown result.
+    </p>
+
+    <h3>6.1 Delegate (<code>agent/tasks/delegate/steps.ts:74-82</code>)</h3>
+    <pre><code>// Current
+const result = await runAgent(plannerOpts);
+const rawPlan = result.result['plan'] as Plan | null;
+if (!rawPlan) { ... }
+const delegatePlan = convertPlan(rawPlan);
+
+// After M4 (no other Delegate changes)
+const result = await runSubMetaTask({
+  templateId: 'plan',
+  intent:     state.input.message,
+  scope:      buildScopeFromDelegateInput(state),
+  sessionId:  ctx.sessionId ?? `delegate-${state.input.repoPath}`,
+  emit:       headlessEmitter(ctx),
+  cloud:      ctx.providers.resolve('planner', 'draft'),
+  embed:      ...,
+  parentStore:     ...,
+  parentStepIndex: 1,
+  parentCatalog:   [],
+});
+const synthBody = result.deliverables.get(6);
+const rawPlan = synthBody ? fromMarkdown(synthBody) : null;
+if (!rawPlan) { ... }
+const delegatePlan = convertPlan(rawPlan);</code></pre>
+
+    <p>
+      Risks: Delegate's <code>headlessEmitter</code> doesn't exist yet (M5 work). Until then Delegate
+      stays on <code>plannerAgent</code> &mdash; that's the M4 / M4.5 split.
+    </p>
+
+    <h3>6.2 CLI (<code>agent/cli.ts:414</code>)</h3>
+    <p>
+      The CLI <code>plan</code> subcommand invokes <code>plannerAgent</code> via the framework
+      runner directly. Migration: build a tiny CLI-side runMetaTask wrapper. Drop-in replacement.
+    </p>
+
+    <h3>6.3 Chat-handler (<code>daemon/chat-handler.ts:2185</code>)</h3>
+    <p>
+      Chat-handler dispatches intent &rarr; agent. When intent classifies as <code>plan</code>, it
+      currently runs <code>plannerAgent</code>. After M4: route to the meta-task stream
+      (<code>meta-task.run</code>) with <code>templateId: 'plan'</code>. The chat surface is
+      already prepared (M2.8).
+    </p>
+
+
+    <h2 id="revision">7. Plan revision + user feedback</h2>
+    <p>
+      The legacy planner has three inline user gates with edit-round counters (max 3) and a
+      <code>recordFeedback</code> sink wired into local-LLM-driven memory. The new template drops
+      these in favor of the meta-task framework's M5 revision flow:
+    </p>
+    <ul>
+      <li>
+        <strong>No per-step pause-for-user.</strong> Steps run end-to-end without interactive gates.
+        The user sees the final deliverable in the report pane.
+      </li>
+      <li>
+        <strong>Revision via M5 abort gate.</strong> When P4 detects a cycle, or when the user
+        wants changes post-completion, the framework's "Adjust plan" / "New plan" actions fire.
+        Those re-invoke <code>/plan</code> with the user's feedback injected into the scope.
+      </li>
+      <li>
+        <strong>Edit-round counter retained, semantically.</strong> The framework's
+        <code>maxPlanRevisions: 2</code> cap (meta-tasks &sect;7.2) plays the same role as the
+        legacy <code>MAX_EDIT_ROUNDS = 3</code>.
+      </li>
+      <li>
+        <strong>Feedback capture deferred.</strong> The legacy <code>recordFeedback</code> hook
+        (writes user gate text into a config-store namespace for future search) has no analog in
+        the meta-task framework yet. Open question O4 &mdash; lands as a framework extension if
+        feedback capture proves load-bearing for plan quality.
+      </li>
+    </ul>
+
+    <div class="callout warn">
+      <strong>The legacy planner had a "re-draft with rejection feedback" loop.</strong> When the
+      user rejected a plan at <code>validate-plan</code>, the next iteration's draft prompt got the
+      user's feedback appended. The meta-task framework's M5 flow achieves the same outcome through
+      its plan-revision sub-task invocation (the user's feedback feeds into P1 analyze's prompt).
+      Same semantics, different mechanism.
+    </div>
+
+
+    <h2 id="open">8. Open questions</h2>
+    <ol>
+      <li class="open">
+        <strong>O1: No-LLM phase-2 steps.</strong> P4 validate and P6 synth are deterministic
+        helpers, not cloud LLM calls. The orchestrator today calls
+        <code>cloud.complete(messages, opts)</code> per phase 2 unconditionally. Either: (a) add a
+        per-step opt-out flag on <code>StepDescriptor</code> (<code>synchronous: true</code>), and
+        the template supplies a phase-2 function; or (b) keep going through the LLM but use a
+        thin "no-op" prompt that the cloud trivially completes. (a) is cleaner; (b) is zero
+        framework change. Decide before M4 implementation.
+      </li>
+      <li class="open">
+        <strong>O2: Where does plan-type detection live?</strong> Legacy: emerges from P1 analyze
+        but is also writable via the input. New: only emergent from P1's deliverable. Consumers
+        that want to override (rare) would have to inject into the scope or intent. Worth a
+        decision so the open-ended "what if the user pre-specifies plan type" doesn't bleed
+        through to the prompts.
+      </li>
+      <li class="open">
+        <strong>O3: P3 draft's two-stage cloud calls.</strong> The legacy sketch &rarr; enhance
+        pattern uses two different providers (configurable). The meta-task framework today wires
+        one cloud provider per <code>RunMetaTaskOpts</code>. Either: (a) make P3's helper call the
+        same provider twice; or (b) extend <code>StepDescriptor</code> with provider-binding
+        overrides. (a) is simpler and probably fine &mdash; the prompts themselves give the model
+        the "refine" instruction.
+      </li>
+      <li class="open">
+        <strong>O4: Feedback capture across plan revisions.</strong> Legacy
+        <code>recordFeedback</code> wrote user-supplied edit text into a search-indexed feedback
+        namespace; the next P2 gather could surface it. The new flow has no analog. Worth adding?
+        If yes, it's a framework-level addition (a <code>recordFeedback</code> hook on
+        <code>MetaTaskEmitter</code>), not a /plan-specific one.
+      </li>
+      <li class="open">
+        <strong>O5: TodoList linkage across families.</strong> Legacy planner creates a TodoList
+        owned by <code>planner</code> at the end so the <code>implementation</code> family can pick
+        it up via the standard transfer primitive. Meta-task framework also creates a TodoList per
+        run (owned by <code>meta-task</code>). Do we transfer that list to <code>planner</code> or
+        <code>implementation</code> on completion? Or do we drop the cross-family transfer and let
+        consumers re-derive items from the markdown? Inclined to drop &mdash; the markdown is
+        canonical.
+      </li>
+    </ol>
+
+
+    <h2 id="milestones">9. Implementation milestones</h2>
+    <p>
+      Per <a href="meta-tasks.html">meta-tasks &sect;12</a>, M4 is "planner migration". This doc
+      proposes splitting M4 into M4.a (template) and M4.b (consumer migration) since the
+      consumer side is meaningfully larger work.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Phase</th><th>Deliverable</th><th>Depends on</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>M4.a</strong></td>
+          <td>
+            <strong>/plan template lands.</strong> <code>src/insrc/meta-task/templates/plan.ts</code>
+            + <code>plan-prompts.ts</code> + <code>plan-types.ts</code> (re-export wrapper). Helpers
+            for buildPlan / parseStepsJson / etc. ported into <code>plan-helpers.ts</code>.
+            Framework extension for synchronous phase-2 steps (O1). Tests covering each step's
+            phase-1 + phase-2 contract with a scripted cloud.
+            <p style="margin-top: 0.5rem;">User-facing outcome: <code>/plan &lt;intent&gt;</code> in
+              chat produces a deliverable in the report pane. Legacy planner unchanged.</p>
+          </td>
+          <td>M3</td>
+        </tr>
+        <tr>
+          <td>M4.b</td>
+          <td>
+            Consumer migration: Delegate, CLI, chat-handler intent dispatch. Each becomes a small
+            wrapper around <code>runSubMetaTask({templateId: 'plan'})</code> +
+            <code>fromMarkdown</code>. After all three migrate,
+            <code>src/insrc/agent/planner/</code> deletes; no callers remain. Live planner test
+            (<code>scripts/test-planner-live.ts</code>) deletes too.
+          </td>
+          <td>M4.a, M5 (for Delegate's headlessEmitter)</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <hr />
+    <p class="muted">
+      Refine here as we go. Once O1 is decided, M4.a is mechanical.
+    </p>
+
+  </main>
+
+  <script>
+    const headings = document.querySelectorAll('main h2[id], main h3[id]');
+    const tocLinks = document.querySelectorAll('nav.toc a');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const id = entry.target.id;
+          tocLinks.forEach(l => l.classList.toggle('active', l.getAttribute('href') === `#${id}`));
+        }
+      });
+    }, { rootMargin: '0px 0px -75% 0px' });
+    headings.forEach(h => observer.observe(h));
+  </script>
+
+</body>
+</html>
