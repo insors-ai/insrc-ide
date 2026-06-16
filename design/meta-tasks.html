@@ -225,7 +225,23 @@
   <main>
 
     <h1>Meta-tasks: structured multi-step task orchestration</h1>
-    <p class="muted">Status: <strong style="color:var(--yellow)">DRAFT</strong> &middot; Owner: insrc &middot; Depends on: handoff ▸ section-flow ▸ planner</p>
+    <p class="muted">
+      Status: <strong style="color:var(--yellow)">DRAFT</strong> &middot;
+      Scope: <strong>core framework + a minimal <code>/plan</code> module only</strong> &middot;
+      Owner: insrc &middot; Depends on: handoff &#9656; section-flow &#9656; planner
+    </p>
+
+    <div class="callout">
+      <strong>What this doc is not.</strong> This is the framework spec &mdash; the contract for how any
+      meta-task runs (two-phase context, retry loops, gates, persistence, heartbeats, plan revision). The
+      <code>/plan</code> module covered here is intentionally <em>simplistic</em>: just enough to satisfy
+      M4 (planner migration) and serve as the sub-meta-task that M5's plan revision invokes.
+      <strong>Each substantive meta-task template &mdash; <code>/design</code>, <code>/implement</code>,
+      <code>/migrate</code>, <code>/review</code> &mdash; gets its own design doc.</strong> Those docs spell
+      out the template's step list, per-step acceptance criteria, worktree mode, deliverable schema,
+      and any module-specific gates &mdash; not just a system prompt. M6 explicitly depends on those design
+      docs landing first.
+    </div>
 
     <h2 id="overview">1. Overview</h2>
     <p>
@@ -892,12 +908,20 @@ const STEP_LONG_THRESHOLD_MS    = 10 * 60_000;</code></pre>
         <tr>
           <td>M6</td>
           <td>
-            Full template set: <code>design</code>, <code>implement</code>, <code>migrate</code>,
-            <code>review</code>. (<code>plan</code> already exists from M4.) Each template declares its
-            <code>worktreeMode</code>. Slash invocations: <code>/design</code>, <code>/implement</code>,
-            <code>/migrate</code>, <code>/review</code>.
+            Full template set: <code>/design</code>, <code>/implement</code>, <code>/migrate</code>,
+            <code>/review</code>. (<code>/plan</code> already exists from M4.) Each template declares its
+            <code>worktreeMode</code> and ships its full implementation.
+            <p style="margin-top:0.5rem">
+              <strong>Each template requires its own design doc</strong> &mdash; not just a system prompt.
+              Per-template doc covers: step list with intents + acceptance criteria, per-step worktree
+              behavior, deliverable schema, module-specific gates, audit rules, and any non-default
+              retry/revision overrides. Filed as
+              <code>design/meta-task-&lt;name&gt;.html</code> (e.g.
+              <code>design/meta-task-implement.html</code>). M6 builds against those docs, not against a
+              brief.
+            </p>
           </td>
-          <td>M5</td>
+          <td>M5, per-template design docs</td>
         </tr>
       </tbody>
     </table>
