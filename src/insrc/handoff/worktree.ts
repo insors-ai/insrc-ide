@@ -77,10 +77,19 @@ export async function createWorktree(opts: CreateWorktreeOpts): Promise<CreateWo
 	// and we want to ensure the `<sid>/` directory is present.
 	await ensureDirExists(dirname(opts.worktreePath));
 
+	// Clear stale `.git/worktrees/<name>` metadata for paths whose dirs
+	// were already deleted -- otherwise `git worktree add` to the same
+	// path errors with "<path> already exists" (the "prunable" entry
+	// from `git worktree list` reserves the slot). Safe to run
+	// unconditionally; only removes entries for non-existent paths.
+	await runGit(opts.repoPath, ['worktree', 'prune']);
+
 	const { exitCode, stderr } = await runGit(opts.repoPath, ['worktree', 'add', opts.worktreePath, ref]);
 	if (exitCode !== 0) {
+		const trimmed = stderr.trim();
 		throw new WorktreeError(
-			`git worktree add failed (exit ${exitCode}) for ref '${ref}' at '${opts.worktreePath}'`,
+			`git worktree add failed (exit ${exitCode}) for ref '${ref}' at '${opts.worktreePath}' in repo '${opts.repoPath}'`
+				+ (trimmed.length > 0 ? `: ${trimmed}` : ''),
 			stderr,
 		);
 	}

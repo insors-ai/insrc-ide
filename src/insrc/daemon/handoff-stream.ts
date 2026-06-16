@@ -143,8 +143,13 @@ export const handoffRunStream: StreamHandler = async (params, send, signal) => {
 		});
 		sendIfNotAborted({ stream: 'done', data: {} });
 	} catch (err) {
-		log.warn({ err: (err as Error).message }, 'handoff.run stream: handoff threw');
-		sendIfNotAborted({ stream: 'error', data: { error: (err as Error).message, recoverable: false } });
+		const e = err as Error & { stderr?: string };
+		const stderr = typeof e.stderr === 'string' ? e.stderr.trim() : '';
+		log.warn({ err: e.message, stderr }, 'handoff.run stream: handoff threw');
+		const composed = stderr.length > 0 && !e.message.includes(stderr)
+			? `${e.message}: ${stderr}`
+			: e.message;
+		sendIfNotAborted({ stream: 'error', data: { error: composed, recoverable: false } });
 	} finally {
 		signal.removeEventListener('abort', onAbort);
 	}
