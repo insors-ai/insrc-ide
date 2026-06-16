@@ -72,6 +72,10 @@ export const PATHS = {
   // `<handoffs>/<sessionId>/`. The orphan classifier (Phase 5) reads
   // this on daemon startup to surface interrupted runs.
   handoffs:    join(INSRC_DIR, 'handoffs'),
+  // Per-meta-task persistRoot (design/meta-tasks.html §8). Each
+  // meta-task run owns `<meta>/<metaTaskId>/` with meta.json + plan.json
+  // + per-step deliverables + phase-1/2 JSONL traces + synthesis.
+  meta:        join(INSRC_DIR, 'meta'),
   logDir:      LOG_DIR,
   daemonLog:   join(LOG_DIR, 'daemon.log'),
   agentLog:    join(LOG_DIR, 'agent.log'),

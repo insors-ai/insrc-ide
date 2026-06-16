@@ -84,6 +84,7 @@ import {
 	chatSend, chatResume, chatResumeFromCheckpoint, chatResumeCodeAnalysis, chatResumeDataAnalysis,
 } from './chat-handler.js';
 import { handoffRunStream } from './handoff-stream.js';
+import { metaTaskRunStream } from './meta-task-stream.js';
 import { gateRequestPermissionStream, gateResolveRpc, handoffModeAResolveRpc } from './gate-handlers.js';
 import { handoffListOrphansRpc, handoffDiscardOrphanRpc, handoffCleanupRpc } from './orphan-handlers.js';
 import { detectOrphans } from '../handoff/orphan-cleanup.js';
@@ -1566,6 +1567,7 @@ async function main(): Promise<void> {
 	}, {
 		// Streaming handlers
 		'handoff.run':              handoffRunStream,
+		'meta-task.run':            metaTaskRunStream,
 		'gate.request-permission':  gateRequestPermissionStream,
 		'chat.send': chatSend,
 		'chat.resume': chatResume,

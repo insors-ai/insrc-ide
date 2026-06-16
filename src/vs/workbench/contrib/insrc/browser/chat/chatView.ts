@@ -21,6 +21,7 @@ import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionSe
 import { IInsrcTodosService } from '../../common/todosService.js';
 import { IInsrcHandoffService, type HandoffModeAPrompt, type HandoffModeBPrompt, type HandoffSessionState } from '../../common/handoffService.js';
 import { InsrcHandoffRunner } from '../handoff/handoffRunner.js';
+import { InsrcMetaTaskRunner } from '../meta-task/metaTaskRunner.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
@@ -151,6 +152,16 @@ export class InsrcChatViewPane extends ViewPane {
 			);
 		}
 		return this._handoffRunnerInstance;
+	}
+
+	private _metaTaskRunnerInstance: InsrcMetaTaskRunner | undefined;
+	private get _metaTaskRunner(): InsrcMetaTaskRunner {
+		if (this._metaTaskRunnerInstance === undefined) {
+			this._metaTaskRunnerInstance = this._register(
+				this._instantiationService.createInstance(InsrcMetaTaskRunner),
+			);
+		}
+		return this._metaTaskRunnerInstance;
 	}
 	private readonly _instantiationService: IInstantiationService;
 
@@ -1714,6 +1725,28 @@ export class InsrcChatViewPane extends ViewPane {
 				this._renderError(`Failed to start session: ${(err as Error).message}`);
 				return;
 			}
+		}
+
+		// `/review` (and future meta-task slash commands) intercept.
+		// Routes the chat message through the meta-task orchestrator
+		// (plans/meta-tasks.md M2). The daemon emits the same liveStep /
+		// progress / todos events as code-analyzer, so the existing chat
+		// surfaces light up without any extra wiring.
+		const metaTaskMatch = /^\s*\/(review|design|implement|migrate|plan)\b\s*(.*)$/s.exec(text);
+		if (metaTaskMatch !== null) {
+			const templateId = metaTaskMatch[1]!;
+			const intent = (metaTaskMatch[2] ?? '').trim();
+			this._input.value = '';
+			this._autoResize();
+			this._emptyState.style.display = 'none';
+			this._messageList.style.display = '';
+			try {
+				const summary = await this._metaTaskRunner.run(templateId, intent);
+				this._logService.info(`[insrc-chat] ${summary}`);
+			} catch (err) {
+				this._renderError(`/${templateId} failed: ${(err as Error).message}`);
+			}
+			return;
 		}
 
 		// `/handoff` test-harness intercept (plans/external-agent-integration.md).
