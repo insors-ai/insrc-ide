@@ -75,8 +75,20 @@ export interface PlanHistoryEntry {
 export class MetaTaskStore {
 	readonly root: string;
 
-	constructor(public readonly metaTaskId: string) {
-		this.root = path.join(PATHS.meta, metaTaskId);
+	constructor(public readonly metaTaskId: string, opts: { readonly root?: string | undefined } = {}) {
+		this.root = opts.root ?? path.join(PATHS.meta, metaTaskId);
+	}
+
+	/**
+	 * Build a sub-store rooted inside this store. Used by `runSubMetaTask`
+	 * (design §3) to give every sub-meta-task its own namespace
+	 * `<parent>/sub-<n>-<templateId>/` while keeping the parent's catalog
+	 * visible to the child.
+	 */
+	subStoreFor(parentStepIndex: number, sub: { readonly metaTaskId: string; readonly templateId: string }): MetaTaskStore {
+		const idx  = String(parentStepIndex).padStart(2, '0');
+		const root = path.join(this.root, `sub-${idx}-${sub.templateId}`);
+		return new MetaTaskStore(sub.metaTaskId, { root });
 	}
 
 	private async ensureRoot(): Promise<void> {

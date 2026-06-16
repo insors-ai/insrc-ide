@@ -80,6 +80,17 @@ export interface RunMetaTaskOpts {
 	readonly allocId?:   (() => string) | undefined;
 	/** Override the clock for tests. */
 	readonly now?:       (() => number) | undefined;
+	/**
+	 * Sub-meta-task: when set, the orchestrator persists under this store
+	 * (rooted in the parent's persistRoot) and stamps the parent reference
+	 * in `meta.json`. The parent's deliverable catalog flows in via
+	 * `parentCatalog`. Sub-task TodoList rows + emissions still flow through
+	 * the parent's emitter -- they're labelled with the sub's id so the
+	 * chat panel can distinguish.
+	 */
+	readonly store?:           MetaTaskStore | undefined;
+	readonly parentMetaTaskId?: string | undefined;
+	readonly parentCatalog?:   DeliverableCatalog | undefined;
 }
 
 export interface MetaTaskResult {
@@ -105,23 +116,36 @@ export async function runMetaTask(opts: RunMetaTaskOpts): Promise<MetaTaskResult
 	}
 
 	const metaTaskId = (opts.allocId ?? defaultAllocId)();
-	const store      = new MetaTaskStore(metaTaskId);
+	const store      = opts.store ?? new MetaTaskStore(metaTaskId);
 	const now        = opts.now ?? (() => Date.now());
+	const isSubTask  = opts.parentMetaTaskId !== undefined;
 
-	log.info({ metaTaskId, templateId: opts.templateId, sessionId: opts.sessionId }, 'meta-task starting');
+	log.info({ metaTaskId, templateId: opts.templateId, sessionId: opts.sessionId, parent: opts.parentMetaTaskId }, 'meta-task starting');
 	opts.emit.progress(`meta-task:${template.id}`, 'scope');
 
 	// 1. Persist meta + plan.
 	const plan = template.plan(opts.scope);
-	await store.writeMeta({
-		metaTaskId,
-		templateId:        template.id,
-		intent:            opts.intent,
-		scope:             opts.scope,
-		worktreeMode:      template.worktreeMode,
-		startedAt:         new Date(now()).toISOString(),
-		planRevisionCount: 0,
-	});
+	const metaPayload: import('./types.js').MetaTaskMeta = opts.parentMetaTaskId !== undefined
+		? {
+			metaTaskId,
+			templateId:        template.id,
+			intent:            opts.intent,
+			scope:             opts.scope,
+			worktreeMode:      template.worktreeMode,
+			startedAt:         new Date(now()).toISOString(),
+			parentMetaTaskId:  opts.parentMetaTaskId,
+			planRevisionCount: 0,
+		}
+		: {
+			metaTaskId,
+			templateId:        template.id,
+			intent:            opts.intent,
+			scope:             opts.scope,
+			worktreeMode:      template.worktreeMode,
+			startedAt:         new Date(now()).toISOString(),
+			planRevisionCount: 0,
+		};
+	await store.writeMeta(metaPayload);
 	await store.writePlan(plan, 'initial');
 
 	// 2. Create a TodoList mirroring the plan; one item per step.
@@ -143,9 +167,13 @@ export async function runMetaTask(opts: RunMetaTaskOpts): Promise<MetaTaskResult
 
 	// 4. Execute each step in order.
 	const deliverables = new Map<number, string>();
-	// Mutable working catalog; the orchestrator-internal copy. We hand a
-	// readonly reference to the fetcher (`DeliverableCatalog`).
-	const catalog: import('./types.js').DeliverableCatalogEntry[] = [];
+	// Mutable working catalog; the orchestrator-internal copy. Sub-tasks
+	// inherit a snapshot of the parent's catalog so phase-1 fetchers can
+	// pull upstream deliverables; the child's own deliverables append as
+	// it runs.
+	const catalog: import('./types.js').DeliverableCatalogEntry[] = [
+		...(opts.parentCatalog ?? []),
+	];
 	let aborted = false;
 	let abortReason: string | undefined;
 
@@ -223,12 +251,19 @@ export async function runMetaTask(opts: RunMetaTaskOpts): Promise<MetaTaskResult
 
 	if (aborted) {
 		opts.emit.progress(`meta-task:${template.id}`, 'aborted');
-		opts.emit.done({ metaTaskId, outcome: 'aborted', abortReason });
+		// Sub-tasks don't close the IPC stream -- the parent owns the
+		// stream terminal signal. Sub-task abort is surfaced via the
+		// returned `MetaTaskResult`.
+		if (!isSubTask) {
+			opts.emit.done({ metaTaskId, outcome: 'aborted', abortReason });
+		}
 		return { metaTaskId, plan, outcome: 'aborted', deliverables, abortReason };
 	}
 
 	opts.emit.progress(`meta-task:${template.id}`, 'done');
-	opts.emit.done({ metaTaskId, outcome: 'completed' });
+	if (!isSubTask) {
+		opts.emit.done({ metaTaskId, outcome: 'completed' });
+	}
 	return synthesis !== undefined
 		? { metaTaskId, plan, outcome: 'completed', deliverables, synthesis }
 		: { metaTaskId, plan, outcome: 'completed', deliverables };

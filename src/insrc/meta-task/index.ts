@@ -14,6 +14,9 @@
 export { runMetaTask } from './orchestrator.js';
 export type { RunMetaTaskOpts, MetaTaskResult } from './orchestrator.js';
 
+export { runSubMetaTask } from './sub-meta-task.js';
+export type { RunSubMetaTaskOpts } from './sub-meta-task.js';
+
 export { MetaTaskEmitter } from './event-emitter.js';
 export type { MetaTaskEmitterOpts } from './event-emitter.js';
 
