@@ -46,7 +46,7 @@ suite('InsrcHandoffServiceImpl', () => {
 			{ kind: 'agent-completed', specId: 'spec-1', exitCode: 0, durationMs: 1234, stdoutLen: 500 },
 			{ kind: 'auditing', specId: 'spec-1' },
 			{ kind: 'audit-ready', specId: 'spec-1', verdict: 'accept', reason: 'all checks passed', editHintCount: 0, machineCheckCount: 2, diffBytes: 480 },
-			{ kind: 'handoff-final', specId: 'spec-1', verdict: 'accept', diff: 'diff --git a/x b/x', worktreePath: '/tmp/wt' },
+			{ kind: 'handoff-final', specId: 'spec-1', verdict: 'accept', diff: 'diff --git a/x b/x', worktreePath: '/tmp/wt', deliverable: '' },
 		];
 
 		const finalized: string[] = [];

@@ -130,6 +130,9 @@ export type HandoffEvent =
 		readonly verdict: HandoffVerdict;
 		readonly diff: string;
 		readonly worktreePath: string;
+		/** Agent's deliverable text (the analysis / plan / report it
+		 * produced). Surfaced verbatim in the Handoff Report Pane. */
+		readonly deliverable: string;
 	}
 	| {
 		readonly kind: 'handoff-error';
@@ -253,6 +256,8 @@ export interface HandoffSessionState {
 	readonly diffBytes: number | undefined;
 	/** Full diff body. Populated only on `handoff-final`. */
 	readonly diff: string | undefined;
+	/** Agent's deliverable text. Populated only on `handoff-final`. */
+	readonly deliverable: string | undefined;
 	readonly errorStage: HandoffErrorStage | undefined;
 	readonly errorMessage: string | undefined;
 	/** When this state was first created (ISO-8601). */

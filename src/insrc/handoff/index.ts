@@ -383,7 +383,7 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 			machineCheckCount: audit.machineResults.length,
 			diffBytes:         diff.length,
 		});
-		emit({ kind: 'handoff-final', specId: spec.specId, verdict: audit.verdict, diff, worktreePath });
+		emit({ kind: 'handoff-final', specId: spec.specId, verdict: audit.verdict, diff, worktreePath, deliverable });
 
 		return { spec, spawnResult, audit, diff, worktreePath };
 	} finally {

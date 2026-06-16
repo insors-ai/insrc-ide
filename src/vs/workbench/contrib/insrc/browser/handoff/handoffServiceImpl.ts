@@ -119,6 +119,7 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					machineCheckCount: undefined,
 					diffBytes: undefined,
 					diff: undefined,
+					deliverable: undefined,
 					errorStage: undefined,
 					errorMessage: undefined,
 					startedAt: prev?.startedAt ?? new Date().toISOString(),
@@ -159,6 +160,7 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					machineCheckCount: undefined,
 					diffBytes: undefined,
 					diff: undefined,
+					deliverable: undefined,
 					errorStage: undefined,
 					errorMessage: undefined,
 					startedAt: base?.startedAt ?? new Date().toISOString(),
@@ -279,6 +281,7 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 					worktreePath: event.worktreePath,
 					diff: event.diff,
 					diffBytes: event.diff.length,
+					deliverable: event.deliverable,
 				}));
 				if (applied) {
 					const finalized = this._sessions.get(event.specId);
@@ -316,6 +319,7 @@ export class InsrcHandoffServiceImpl extends Disposable implements IInsrcHandoff
 						machineCheckCount: undefined,
 						diffBytes: undefined,
 						diff: undefined,
+						deliverable: undefined,
 						errorStage: event.stage,
 						errorMessage: event.message,
 						startedAt: now,

@@ -74,7 +74,7 @@ test('detectOrphans: trace ending in handoff-final -> status=completed (waiting 
 			events: [
 				{ kind: 'spec-assembling', intent: 'i', templateId: 'DEBUG-SESSION' },
 				{ kind: 'spec-ready', specId: 'spec-A', templateId: 'DEBUG-SESSION', preview: 'p' },
-				{ kind: 'handoff-final', specId: 'spec-A', verdict: 'accept', diff: 'd', worktreePath: '/wt' },
+				{ kind: 'handoff-final', specId: 'spec-A', verdict: 'accept', diff: 'd', worktreePath: '/wt', deliverable: '' },
 			],
 		});
 		const orphans = detectOrphans({ persistRoot: root });
@@ -162,7 +162,7 @@ test('detectOrphans: most-recently-modified trace.jsonl drives classification wh
 		// Older spec finished; newer spec interrupted.
 		writeFileSync(
 			join(sessionDir, 'spec-old.trace.jsonl'),
-			JSON.stringify({ ts: 1, event: { kind: 'handoff-final', specId: 'spec-old', verdict: 'accept', diff: 'd', worktreePath: '/w' } }) + '\n',
+			JSON.stringify({ ts: 1, event: { kind: 'handoff-final', specId: 'spec-old', verdict: 'accept', diff: 'd', worktreePath: '/w', deliverable: '' } }) + '\n',
 		);
 		// Touch ordering: sleep briefly to ensure mtime differs.
 		const newPath = join(sessionDir, 'spec-new.trace.jsonl');

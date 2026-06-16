@@ -37,7 +37,7 @@ test('cost: handoff-final implicitly finalizes', () => {
 	let t = 500;
 	const m = openCostMeter({ nowMs: () => t });
 	t = 600;
-	m.record({ kind: 'handoff-final', specId: 's', verdict: 'accept', diff: 'd', worktreePath: '/w' });
+	m.record({ kind: 'handoff-final', specId: 's', verdict: 'accept', diff: 'd', worktreePath: '/w', deliverable: '' });
 	const s = m.snapshot();
 	assert.equal(s.endedAt, 600);
 	assert.equal(s.verdict, 'accept');

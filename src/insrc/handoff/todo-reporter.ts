@@ -116,6 +116,7 @@ export async function startTodoListReporter(opts: StartTodoListReporterOpts): Pr
 	let machineChecks:   number | undefined;
 	let diffBytes:       number | undefined;
 	let diffBody         = '';
+	let deliverableBody  = '';
 	let errorStage       = '';
 	let errorMessage     = '';
 
@@ -195,6 +196,13 @@ export async function startTodoListReporter(opts: StartTodoListReporterOpts): Pr
 			lines.push('```');
 			lines.push(specPreview.trim());
 			lines.push('```');
+			lines.push('');
+		}
+
+		if (deliverableBody.length > 0) {
+			lines.push('## Deliverable');
+			lines.push('');
+			lines.push(deliverableBody.trim());
 			lines.push('');
 		}
 
@@ -307,10 +315,11 @@ export async function startTodoListReporter(opts: StartTodoListReporterOpts): Pr
 				await setItemStatus('audit-ready', 'completed');
 				return;
 			case 'handoff-final':
-				auditVerdict = auditVerdict ?? event.verdict;
-				diffBody     = event.diff;
-				diffBytes    = diffBytes ?? event.diff.length;
-				worktreePath = event.worktreePath;
+				auditVerdict    = auditVerdict ?? event.verdict;
+				diffBody        = event.diff;
+				diffBytes       = diffBytes ?? event.diff.length;
+				worktreePath    = event.worktreePath;
+				deliverableBody = event.deliverable;
 				await setItemStatus('final', 'completed');
 				await writeReport();
 				return;

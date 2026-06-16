@@ -39,7 +39,7 @@ function makeFakeWorktree(root: string, sessionId: string, specId?: string): str
 		// Trace file so the classifier marks this as `completed`.
 		writeFileSync(
 			join(sessionDir, `${specId}.trace.jsonl`),
-			JSON.stringify({ ts: 1, event: { kind: 'handoff-final', specId, verdict: 'accept', diff: 'd', worktreePath: '/w' } }) + '\n',
+			JSON.stringify({ ts: 1, event: { kind: 'handoff-final', specId, verdict: 'accept', diff: 'd', worktreePath: '/w', deliverable: '' } }) + '\n',
 		);
 	}
 	return sessionDir;

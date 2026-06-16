@@ -190,7 +190,13 @@ export type HandoffEvent =
 	| { readonly kind: 'handoff-final';    readonly specId: string;
 	    readonly verdict: 'accept' | 'revise-edits' | 'revise-major';
 	    readonly diff:   string;
-	    readonly worktreePath: string }
+	    readonly worktreePath: string;
+	    /** The agent's deliverable text (resolveDeliverable result):
+	     * `<worktree>/spec-deliverable.md` for real claude/codex runs,
+	     * `spawnResult.stdout` for the scripted-agent fallback. The
+	     * reporter surfaces this verbatim in the report body so the
+	     * user sees the analysis, not just the audit verdict. */
+	    readonly deliverable: string }
 	| { readonly kind: 'handoff-error';    readonly stage: 'spec-assemble' | 'worktree' | 'spawn' | 'audit' | 'diff';
 	    readonly message: string }
 	/**

@@ -315,14 +315,15 @@ export class ChatHandoffWidget extends Disposable {
 	// -- Helpers -------------------------------------------------------------
 
 	/**
-	 * At `final` stage the daemon-side TodoList integration (next
-	 * todo) will surface a rich deliverable. For the interim, we
-	 * derive a best-effort preview from whatever's already on the
-	 * HandoffSessionState: the spec preview (always present) plus the
-	 * first chunk of the diff body (if present). The pane will show
-	 * the full version.
+	 * At `final` stage prefer the agent's full deliverable (the
+	 * analysis / plan / report it produced). Falls back to spec
+	 * preview + diff when the deliverable is empty (scripted-agent
+	 * smoke runs, or templates that produce only diffs).
 	 */
 	private _derivePreviewForFinal(state: HandoffSessionState): string {
+		if (state.deliverable !== undefined && state.deliverable.trim().length > 0) {
+			return state.deliverable;
+		}
 		const segments: string[] = [];
 		if (state.preview !== undefined && state.preview.length > 0) {
 			segments.push(state.preview.trim());
