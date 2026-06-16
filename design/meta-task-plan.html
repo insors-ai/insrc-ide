@@ -607,11 +607,19 @@ const delegatePlan = convertPlan(rawPlan);</code></pre>
         the "refine" instruction.
       </li>
       <li class="open">
-        <strong>O4: Feedback capture across plan revisions.</strong> Legacy
-        <code>recordFeedback</code> wrote user-supplied edit text into a search-indexed feedback
-        namespace; the next P2 gather could surface it. The new flow has no analog. Worth adding?
-        If yes, it's a framework-level addition (a <code>recordFeedback</code> hook on
-        <code>MetaTaskEmitter</code>), not a /plan-specific one.
+        <strong>O4 (DEFERRED to backlog): User preference + feedback capture.</strong> Real-world
+        reliability problem &mdash; the framework's <code>memory</code> slot + auto-memory file lose
+        durable user preferences over time. Resolution direction locked during the O4 discussion:
+        local LLM becomes the curator (capture + retrieval) via a new
+        <code>kind: 'preferences'</code> context slot, with YAML-shaped storage at
+        <code>~/.insrc/preferences/</code> scoped by global / repo / template /
+        (template, category). Inline capture during retrieval; explicit channels via
+        <code>/prefs save</code> + a plan-revision-time prompt. Deferred to its own design exercise
+        because it's a framework-level concern (every template benefits, not just /plan) and
+        deserves its own design doc. Tracked in
+        <a href="../plans/TODO.md">plans/TODO.md</a> as the first high-priority backlog item;
+        <code>design/memory-context.html</code> + <code>plans/memory-context.md</code> are
+        prerequisites.
       </li>
       <li class="open">
         <strong>O5: TodoList linkage across families.</strong> Legacy planner creates a TodoList
