@@ -4,9 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 /* External-agent handoff card (plans/external-agent-integration.md Phase 2b).
- * One card per in-flight or recently-finished handoff. Compact, similar
- * shape to the todos card but with stage-driven status instead of a
- * collapsible item list. */
+ * One card per in-flight or recently-finished handoff. The card surfaces
+ * stage progress + streaming agent output during the run, and a deliverable
+ * preview + "Open report" link at final. All user actions are routed
+ * through the chat's standard inline gate framework (rendered in
+ * `_gateContainer`); NO buttons live on the card itself. */
 
 .insrc-chat-handoff {
 	display: flex;
@@ -64,51 +66,6 @@
 	opacity: 0.85;
 }
 
-.insrc-chat-handoff-dismiss {
-	border: none;
-	background: transparent;
-	color: var(--vscode-foreground);
-	cursor: pointer;
-	padding: 2px 4px;
-	font-size: 11px;
-	opacity: 0.6;
-}
-
-.insrc-chat-handoff-dismiss:hover {
-	opacity: 1;
-}
-
-/* Phase 5 accept/reject buttons on the final card. Match the
- * existing VS Code button language for the affirmative action
- * and a neutral muted style for reject. */
-.insrc-chat-handoff-accept,
-.insrc-chat-handoff-reject {
-	border: 1px solid transparent;
-	cursor: pointer;
-	padding: 2px 8px;
-	font-size: 11px;
-	border-radius: 3px;
-}
-
-.insrc-chat-handoff-accept {
-	background-color: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
-}
-
-.insrc-chat-handoff-accept:hover {
-	background-color: var(--vscode-button-hoverBackground);
-}
-
-.insrc-chat-handoff-reject {
-	background-color: var(--vscode-button-secondaryBackground, transparent);
-	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-	border-color: var(--vscode-widget-border, var(--vscode-panel-border));
-}
-
-.insrc-chat-handoff-reject:hover {
-	background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
-}
-
 .insrc-chat-handoff-body {
 	margin-top: 6px;
 	display: flex;
@@ -153,4 +110,79 @@
 	color: var(--vscode-errorForeground);
 	font-size: 12px;
 	white-space: pre-wrap;
+}
+
+/* Deliverable preview at `final` stage. Trimmed to ~500 chars in
+ * the widget; full version lives in the HandoffReportPane. */
+.insrc-chat-handoff-deliverable {
+	margin: 4px 0 0 0;
+	padding: 6px 8px;
+	max-height: 180px;
+	overflow-y: auto;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 3px;
+}
+
+/* "Open report" link sits below the deliverable preview as the
+ * single action surface on the card. */
+.insrc-chat-handoff-actions {
+	margin-top: 6px;
+	display: flex;
+	gap: 12px;
+	align-items: center;
+}
+
+.insrc-chat-handoff-open-report {
+	color: var(--vscode-textLink-foreground);
+	font-size: 12px;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.insrc-chat-handoff-open-report:hover {
+	color: var(--vscode-textLink-activeForeground);
+	text-decoration: underline;
+}
+
+/* Streaming terminal viewport embedded in the card. Always mounted
+ * (chunks may arrive before the first stage event), auto-collapsed
+ * at `final` so the deliverable preview stays the focal point. */
+.insrc-chat-handoff-terminal-wrap {
+	margin-top: 8px;
+	border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	padding-top: 6px;
+}
+
+.insrc-chat-handoff-terminal-summary {
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+	cursor: pointer;
+	user-select: none;
+	padding: 2px 0;
+	outline: none;
+}
+
+.insrc-chat-handoff-terminal-summary:hover {
+	color: var(--vscode-foreground);
+}
+
+.insrc-chat-handoff-terminal {
+	margin: 6px 0 0 0;
+	padding: 6px 10px;
+	max-height: 240px;
+	overflow-y: auto;
+	font-family: var(--monaco-monospace-font, monospace);
+	font-size: 11px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	background-color: var(--vscode-editor-background);
+	color: var(--vscode-editor-foreground);
+	border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	border-radius: 3px;
 }

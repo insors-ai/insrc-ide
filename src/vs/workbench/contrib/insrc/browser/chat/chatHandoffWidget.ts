@@ -9,63 +9,85 @@ import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import {
 	IInsrcHandoffService,
+	type HandoffChunk,
 	type HandoffSessionState,
 	type HandoffStage,
 } from '../../common/handoffService.js';
 
 /**
- * Resolver supplied by chatView so the widget can fire the
- * Phase 5 cleanup IPC with the right (sessionId, specId, outcome)
- * tuple AFTER it's applied / rejected the in-flight diffs in the
- * editor. The widget doesn't own the diff pipeline -- only the
- * button surface that triggers it.
+ * Callback chatView injects so the widget can route an "Open report"
+ * click to the report-pane open command. The pane is the post-final
+ * surface for the full deliverable, diff summary, and re-run actions;
+ * the in-chat card is the in-flight progress view.
  */
-export type HandoffCleanupHandler = (specId: string, outcome: 'accept' | 'reject' | 'dismissed') => Promise<void>;
+export type HandoffOpenReportHandler = (state: HandoffSessionState) => void;
 
 /**
  * Inline chat widget (plans/external-agent-integration.md Phase 2b Day 3).
  *
- * Renders one compact card per in-flight or recently-finished external
- * handoff session that the daemon emitted events for on the active
- * chat stream. Subscribes to `IInsrcHandoffService`:
+ * Renders one card per in-flight / recently-finished handoff. Lives
+ * inside the chat transcript so multiple handoffs in a chained
+ * workflow accumulate as separate cards in scroll order.
  *
+ * Card content evolves with the handoff stage:
+ *
+ *   - In-flight stages: header (template / intent / stage label)
+ *     plus a scrollable monospace terminal viewport that streams
+ *     `handoffService.onChunk` chunks for this specId in real time
+ *     (64 KB rolling buffer, oldest dropped).
+ *
+ *   - `final` stage: terminal viewport collapses into a small
+ *     "Live output" disclosure; main body shows deliverable
+ *     preview (~500 chars) and an "Open report" link that opens
+ *     the dedicated `HandoffReportPane` editor.
+ *
+ *   - `error` stage: terminal viewport stays open (debugging
+ *     context); error stage + message shown above.
+ *
+ * NO action buttons live on the card. All user actions
+ * (Accept / Reject after final, Mode A / Mode B during run) flow
+ * through the chat's standard inline-gate framework rendered in
+ * `_gateContainer`, NOT through buttons baked into the widget.
+ *
+ * Subscribes to `IInsrcHandoffService`:
  *   - `onDidChangeSession(state)` -- (re)paint a single card.
  *   - `onDidRemoveSession(id)`    -- drop a single card.
  *   - `onDidChange()`             -- full reconcile (covers session
  *                                    flips that purge the cache).
- *
- * The card body holds stage / preview / verdict / diff-bytes metadata
- * ONLY. Live agent stdout/stderr lives in a separate pinned widget
- * (`ChatHandoffTerminalPanel`) that doesn't scroll with the
- * transcript -- the card just signals when streaming is active.
+ *   - `onChunk(chunk)`            -- stream into the matching
+ *                                    card's terminal viewport.
  *
  * The widget mounts inside chatView's `_messageList` (same parent as
- * the todos card) so it scrolls with the chat transcript.
+ * todos / artifact cards) so it scrolls with the transcript. Self-
+ * heals if the parent gets `clearNode`-ed on a chat session change.
  */
+
+const TERMINAL_BUFFER_LIMIT_BYTES = 64 * 1024;
+const DELIVERABLE_PREVIEW_LIMIT = 500;
 
 interface HandoffCardHandles {
 	readonly root: HTMLElement;
 	readonly template: HTMLElement;
 	readonly intent: HTMLElement;
 	readonly stage: HTMLElement;
-	readonly accept: HTMLButtonElement;
-	readonly reject: HTMLButtonElement;
-	readonly dismiss: HTMLButtonElement;
 	readonly body: HTMLElement;
+	/** Terminal viewport: monospace, scrollable, max-height capped. */
+	readonly terminal: HTMLPreElement;
+	/** Wrapper around the terminal that we can hide / show + style. */
+	readonly terminalWrap: HTMLDetailsElement;
+	/** In-memory rolling buffer for the terminal viewport. */
+	terminalBuffer: string;
 }
 
 export class ChatHandoffWidget extends Disposable {
 
 	private _container: HTMLElement | undefined;
 	/**
-	 * Parent element passed to `mount()`. We remember it so that we
-	 * can re-attach our container if it gets orphaned -- chatView's
+	 * Parent passed to `mount()`. Stored for self-heal: chatView's
 	 * `_onSessionChanged` calls `clearNode(_messageList)` which
-	 * detaches every widget container mounted under it (the chat-
-	 * messages list is the canonical "scrolls with messages" parent
-	 * but it's also the wipe target on session change). Without this
-	 * self-heal the first `/handoff` after a fresh chat would
-	 * silently render into an off-document div.
+	 * detaches every widget container mounted under it. Without this
+	 * reference the first `/handoff` after a fresh chat would render
+	 * into an off-document div.
 	 */
 	private _originalParent: HTMLElement | undefined;
 	private _cards = new Map<string, HandoffCardHandles>();
@@ -73,7 +95,7 @@ export class ChatHandoffWidget extends Disposable {
 	constructor(
 		private readonly handoffService: IInsrcHandoffService,
 		private readonly logService: ILogService,
-		private readonly cleanupHandler: HandoffCleanupHandler,
+		private readonly openReportHandler: HandoffOpenReportHandler,
 	) {
 		super();
 	}
@@ -85,9 +107,6 @@ export class ChatHandoffWidget extends Disposable {
 			return;
 		}
 		if (this._container !== undefined && !this._container.isConnected) {
-			// We were mounted but our container got detached (chat
-			// session change wiped _messageList). Re-attach the same
-			// container; child cards come along with it.
 			parent.appendChild(this._container);
 			return;
 		}
@@ -96,15 +115,12 @@ export class ChatHandoffWidget extends Disposable {
 		this._register(this.handoffService.onDidChangeSession(state => this._applyState(state)));
 		this._register(this.handoffService.onDidRemoveSession(id => this._removeCard(id)));
 		this._register(this.handoffService.onDidChange(() => this._reconcile()));
+		this._register(this.handoffService.onChunk(chunk => this._handleChunk(chunk)));
 
 		this._reconcile();
 	}
 
-	/**
-	 * Re-attach the container to its original parent if it got
-	 * detached. Cheap (DOM node-identity check) so it can be called
-	 * at the top of every render path.
-	 */
+	/** Re-attach the container if it got orphaned. Cheap; called at every render entrypoint. */
 	private _ensureMounted(): void {
 		if (this._container === undefined || this._originalParent === undefined) {
 			return;
@@ -159,50 +175,21 @@ export class ChatHandoffWidget extends Disposable {
 		const template = dom.append(header, dom.$('span.insrc-chat-handoff-template'));
 		const intent = dom.append(header, dom.$('span.insrc-chat-handoff-intent'));
 		const stage = dom.append(header, dom.$('span.insrc-chat-handoff-stage'));
-		// Phase 5 user-driven cleanup. Accept / Reject buttons fire
-		// on the final card; the cleanup handler chatView injects
-		// applies the diff (or rejects all files) then calls the
-		// daemon's handoff.cleanup IPC to remove the worktree.
-		const accept = dom.append(header, dom.$('button.insrc-chat-handoff-accept')) as HTMLButtonElement;
-		accept.textContent = 'Accept';
-		accept.title = 'Accept the proposed changes';
-		accept.style.display = 'none';
-		this._register(dom.addDisposableListener(accept, 'click', e => {
-			e.stopPropagation();
-			void this._runCleanup(state.specId, 'accept');
-		}));
-		const reject = dom.append(header, dom.$('button.insrc-chat-handoff-reject')) as HTMLButtonElement;
-		reject.textContent = 'Reject';
-		reject.title = 'Reject the proposed changes';
-		reject.style.display = 'none';
-		this._register(dom.addDisposableListener(reject, 'click', e => {
-			e.stopPropagation();
-			void this._runCleanup(state.specId, 'reject');
-		}));
-		const dismiss = dom.append(header, dom.$('button.insrc-chat-handoff-dismiss')) as HTMLButtonElement;
-		dismiss.textContent = 'x';  // close button
-		dismiss.title = 'Dismiss this handoff';
-		dismiss.style.display = 'none';  // shown only on terminal states
-		this._register(dom.addDisposableListener(dismiss, 'click', e => {
-			e.stopPropagation();
-			// Errored handoffs only have a dismiss button; record as
-			// `dismissed` so the daemon still cleans up the (possibly
-			// half-built) worktree.
-			void this._runCleanup(state.specId, 'dismissed');
-		}));
 		const body = dom.append(root, dom.$('.insrc-chat-handoff-body'));
-		return { root, template, intent, stage, accept, reject, dismiss, body };
-	}
 
-	private async _runCleanup(specId: string, outcome: 'accept' | 'reject' | 'dismissed'): Promise<void> {
-		try {
-			await this.cleanupHandler(specId, outcome);
-		} catch (err) {
-			this.logService.warn(`[insrc-handoff-widget] cleanup(${specId}, ${outcome}) failed: ${(err as Error).message}`);
-		}
-		// Whatever happened on the daemon side, drop the card from the
-		// UI -- the user's already moved on.
-		this.handoffService.clear(specId);
+		// Terminal viewport sits at the bottom of the card and stays
+		// mounted throughout the handoff lifecycle (chunks may arrive
+		// before any stage event, e.g. on agent restart). It's wrapped
+		// in <details> so the user can collapse it; we auto-collapse
+		// once the handoff hits `final` to keep the deliverable
+		// preview visible without scrolling.
+		const terminalWrap = dom.append(root, dom.$('details.insrc-chat-handoff-terminal-wrap')) as HTMLDetailsElement;
+		terminalWrap.open = true;
+		const summary = dom.append(terminalWrap, dom.$('summary.insrc-chat-handoff-terminal-summary'));
+		summary.textContent = 'Live output';
+		const terminal = dom.append(terminalWrap, dom.$('pre.insrc-chat-handoff-terminal')) as HTMLPreElement;
+
+		return { root, template, intent, stage, body, terminal, terminalWrap, terminalBuffer: '' };
 	}
 
 	private _renderCard(state: HandoffSessionState, handles: HandoffCardHandles): void {
@@ -216,15 +203,6 @@ export class ChatHandoffWidget extends Disposable {
 			handles.root.classList.add(`verdict-${state.verdict}`);
 		}
 
-		// `final` -> show Accept / Reject (the only meaningful actions).
-		// `error` -> show Dismiss (no diff to act on).
-		// in-flight stages -> nothing (the user can't act yet).
-		const showAcceptReject = state.stage === 'final';
-		const showDismiss = state.stage === 'error';
-		handles.accept.style.display = showAcceptReject ? '' : 'none';
-		handles.reject.style.display = showAcceptReject ? '' : 'none';
-		handles.dismiss.style.display = showDismiss ? '' : 'none';
-
 		dom.clearNode(handles.body);
 
 		if (state.stage === 'error') {
@@ -232,9 +210,11 @@ export class ChatHandoffWidget extends Disposable {
 			err.textContent = state.errorStage !== undefined
 				? `${state.errorStage}: ${state.errorMessage ?? '(no detail)'}`
 				: (state.errorMessage ?? '(unknown error)');
+			handles.terminalWrap.open = true;
 			return;
 		}
 
+		// In-flight metadata rows -- compact + scannable.
 		if (state.worktreePath !== undefined) {
 			this._appendRow(handles.body, 'worktree', state.worktreePath);
 		}
@@ -257,10 +237,102 @@ export class ChatHandoffWidget extends Disposable {
 		if (state.diffBytes !== undefined && state.diffBytes > 0) {
 			this._appendRow(handles.body, 'diff size', formatBytes(state.diffBytes));
 		}
+
+		// Spec-ready preview: short snippet of the assembled spec
+		// markdown so the user can confirm the right scope without
+		// opening the worktree.
 		if (state.preview !== undefined && state.preview.length > 0 && state.stage === 'spec-ready') {
 			const preview = dom.append(handles.body, dom.$('div.insrc-chat-handoff-preview'));
 			preview.textContent = state.preview;
 		}
+
+		// At final stage: show the agent's deliverable preview if it
+		// reached us (via state.diff today; a future TodoList wiring
+		// will populate a richer deliverable field). Then offer an
+		// "Open report" link to the dedicated pane.
+		if (state.stage === 'final') {
+			const previewSrc = this._derivePreviewForFinal(state);
+			if (previewSrc.length > 0) {
+				const previewLabel = dom.append(handles.body, dom.$('div.insrc-chat-handoff-row-label'));
+				previewLabel.textContent = 'output';
+				const previewBlock = dom.append(handles.body, dom.$('pre.insrc-chat-handoff-deliverable'));
+				previewBlock.textContent = previewSrc.length > DELIVERABLE_PREVIEW_LIMIT
+					? `${previewSrc.slice(0, DELIVERABLE_PREVIEW_LIMIT)}\n...`
+					: previewSrc;
+			}
+			const openRow = dom.append(handles.body, dom.$('div.insrc-chat-handoff-actions'));
+			const openLink = dom.append(openRow, dom.$('a.insrc-chat-handoff-open-report')) as HTMLAnchorElement;
+			openLink.textContent = 'Open report';
+			openLink.href = '#';
+			this._register(dom.addDisposableListener(openLink, 'click', e => {
+				e.preventDefault();
+				e.stopPropagation();
+				try {
+					this.openReportHandler(state);
+				} catch (err) {
+					this.logService.warn(`[insrc-handoff-widget] open-report failed: ${(err as Error).message}`);
+				}
+			}));
+
+			// Auto-collapse the live output once the handoff is done.
+			// The user can still expand it to inspect; we just keep
+			// the deliverable preview as the at-a-glance answer.
+			handles.terminalWrap.open = false;
+		} else {
+			handles.terminalWrap.open = true;
+		}
+	}
+
+	// -- Streaming terminal output (Phase 2c) --------------------------------
+
+	/**
+	 * Append a stdout / stderr chunk to the matching card's terminal
+	 * viewport. Out-of-order chunks (no card yet) are dropped --
+	 * `<persistRoot>/<sid>/<specId>.trace.jsonl` is the source of
+	 * truth for full transcripts; the viewport is live-feedback only.
+	 */
+	private _handleChunk(chunk: HandoffChunk): void {
+		const handles = this._cards.get(chunk.specId);
+		if (handles === undefined) {
+			return;
+		}
+		handles.terminalBuffer = handles.terminalBuffer + chunk.chunk;
+		if (handles.terminalBuffer.length > TERMINAL_BUFFER_LIMIT_BYTES) {
+			handles.terminalBuffer = handles.terminalBuffer.slice(handles.terminalBuffer.length - TERMINAL_BUFFER_LIMIT_BYTES);
+		}
+		// textContent (not innerHTML) -- agent output is untrusted
+		// arbitrary bytes; never inject it as HTML.
+		handles.terminal.textContent = handles.terminalBuffer;
+		// Auto-scroll only if the user hasn't manually scrolled away.
+		// (`scrollHeight - clientHeight - scrollTop < 40` -- within
+		// ~2 lines of the bottom we treat as "follow live".)
+		const nearBottom = (handles.terminal.scrollHeight - handles.terminal.clientHeight - handles.terminal.scrollTop) < 40;
+		if (nearBottom) {
+			handles.terminal.scrollTop = handles.terminal.scrollHeight;
+		}
+	}
+
+	// -- Helpers -------------------------------------------------------------
+
+	/**
+	 * At `final` stage the daemon-side TodoList integration (next
+	 * todo) will surface a rich deliverable. For the interim, we
+	 * derive a best-effort preview from whatever's already on the
+	 * HandoffSessionState: the spec preview (always present) plus the
+	 * first chunk of the diff body (if present). The pane will show
+	 * the full version.
+	 */
+	private _derivePreviewForFinal(state: HandoffSessionState): string {
+		const segments: string[] = [];
+		if (state.preview !== undefined && state.preview.length > 0) {
+			segments.push(state.preview.trim());
+		}
+		if (state.diff !== undefined && state.diff.length > 0) {
+			segments.push('');
+			segments.push('--- diff ---');
+			segments.push(state.diff);
+		}
+		return segments.join('\n');
 	}
 
 	private _appendRow(parent: HTMLElement, label: string, value: string): void {

@@ -24,7 +24,6 @@ import { InsrcHandoffRunner } from '../handoff/handoffRunner.js';
 import { ChatTodosWidget } from './chatTodosWidget.js';
 import { ChatArtifactWidget } from './chatArtifactWidget.js';
 import { ChatHandoffWidget } from './chatHandoffWidget.js';
-import { ChatHandoffTerminalPanel } from './chatHandoffTerminalPanel.js';
 import { IEditorService } from '../../../../services/editor/common/editorService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
 import { IInsrcRepoService } from '../../common/repoService.js';
@@ -118,7 +117,6 @@ const ttPolicy = createTrustedTypesPolicy('insrcChat', {
 
 export class InsrcChatViewPane extends ViewPane {
 
-	private readonly _configurationService: IConfigurationService;
 
 	/**
 	 * Mode B prompt queue (Phase 3). Per-modal we await the user's
@@ -217,18 +215,20 @@ export class InsrcChatViewPane extends ViewPane {
 		@ILogService private readonly _logService: ILogService,
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, telemetryService, hoverService);
-		this._configurationService = configurationService;
 		this._instantiationService = instantiationService;
 
 		this._register(this.chatService.onDidReceiveEvent(e => this._handleChatEvent(e)));
 		this._register(this.chatService.onDidChangeSession(() => this._onSessionChanged()));
-		// External-agent handoff: when a handoff reaches `final` with a
-		// non-empty diff body, open the diff view so the user can review
-		// the changes the external agent proposed. Accept/reject is
-		// driven by the existing diffCodeLensProvider; the daemon-side
-		// `handoff.accept` / `handoff.reject` IPCs land in a later phase.
+		// External-agent handoff: when a handoff reaches `final`, open
+		// the diff view (if there are file changes) AND render an
+		// acceptance gate inline in `_gateContainer` via the standard
+		// chat gate framework. The card itself carries no action
+		// buttons -- accept / reject lives in the same gate surface
+		// Mode A / Mode B use, so the user's mental model is uniform
+		// across every handoff decision point.
 		this._register(this._handoffService.onDidFinalize(state => {
 			void this._openDiffFromHandoff(state);
+			this._showHandoffAcceptanceGate(state);
 		}));
 		// Phase 3 Mode A: pre-flight permission gate. Fires once per
 		// handoff before the worktree is created. Rendered INLINE in
@@ -338,34 +338,20 @@ export class InsrcChatViewPane extends ViewPane {
 		todosWidget.mount(this._messageList);
 
 		// Inline handoff widget (plans/external-agent-integration.md Phase 2b).
-		// Renders one card per external-agent handoff session that the
-		// daemon emitted events for on the active chat stream. Subscribes
-		// to IInsrcHandoffService directly; chatView forwards the raw
-		// `{type:'handoff'}` stream messages via the dedicated dispatch
-		// path inside chatServiceImpl.
-		const cleanupHandler = async (specId: string, outcome: 'accept' | 'reject' | 'dismissed'): Promise<void> => {
-			// Apply / reject the diffs in the editor before telling the
-			// daemon to discard the worktree. The diff service tagged
-			// every file with `handoff:<specId>` when we opened the
-			// view -- accept-all / reject-all on the matching gate are
-			// the right primitives.
-			try {
-				if (outcome === 'accept') {
-					await this.diffService.acceptAll();
-				} else if (outcome === 'reject') {
-					this.diffService.rejectAll();
-				}
-			} catch (err) {
-				this._logService.warn(`[insrc-chat] diff ${outcome} failed: ${(err as Error).message}`);
-			}
-			const sessionId = this.chatService.activeSessionId ?? '';
-			if (sessionId.length === 0) {
-				this._logService.warn(`[insrc-chat] handoff cleanup: no active session; skipping daemon RPC`);
-				return;
-			}
-			await this._handoffService.cleanupHandoff(sessionId, specId, outcome);
+		// Renders one card per external-agent handoff session with live
+		// streaming stdout/stderr embedded in the card body. The card
+		// has NO action buttons -- accept/reject runs through the
+		// chat's standard inline gate framework (rendered in
+		// `_gateContainer` when handoff reaches `final`). The "Open
+		// report" link routes to the HandoffReportPane (next phase).
+		const openReportHandler = (state: HandoffSessionState): void => {
+			// TODO(handoff-report-pane): wire to `insrc.handoff.openReport`
+			// command once the pane lands. Logging the click for now
+			// keeps the user-visible affordance correct without
+			// blocking on the pane wiring.
+			this._logService.info(`[insrc-chat] open-report click specId=${state.specId} (pane not wired yet)`);
 		};
-		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService, cleanupHandler));
+		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService, openReportHandler));
 		handoffWidget.mount(this._messageList);
 
 		// Inline artifact widget (plans/artifact-tasks.md section 1.6). Renders
@@ -375,15 +361,6 @@ export class InsrcChatViewPane extends ViewPane {
 		// exactly one surface.
 		const artifactWidget = this._register(new ChatArtifactWidget(this._todosService, this.clipboardService, this._logService));
 		artifactWidget.mount(this._messageList);
-
-		// Pinned handoff terminal panel (plans/external-agent-integration.md
-		// Phase 2c v2). Mounts as a sibling of `_messageList`, BELOW it
-		// and ABOVE the gate container, so live agent stdout/stderr stays
-		// visible while the transcript scrolls independently. Only opens
-		// when `insrc.handoff.uxMode = 'terminal'` AND a chunk arrives;
-		// stays hidden in headless mode.
-		const handoffTerminalPanel = this._register(new ChatHandoffTerminalPanel(this._handoffService, this._configurationService, this._logService));
-		handoffTerminalPanel.mount(this._container);
 
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));
@@ -1434,6 +1411,88 @@ export class InsrcChatViewPane extends ViewPane {
 		if (card !== null) {
 			clearNode(this._gateContainer);
 		}
+	}
+
+	/**
+	 * Acceptance gate rendered when a handoff hits `final`. Uses the
+	 * same chat inline-gate framework as Mode A / Mode B so all
+	 * user-facing handoff decisions land in `_gateContainer` rather
+	 * than as buttons baked into the card widget. Buttons:
+	 *   [Accept]   -- applies the diff (diffService.acceptAll) and
+	 *                 RPCs handoff.cleanup with outcome 'accept'.
+	 *   [Reject]   -- rejects the diff and RPCs with 'reject'.
+	 *
+	 * Failure / error states don't get this gate -- nothing to accept.
+	 * If a subsequent gate (Mode A from a chained handoff, regular
+	 * chat gate) takes the slot, the dismiss helper's id check stops
+	 * us from clearing the newer gate. The `handoff-final:<specId>`
+	 * gateId namespace keeps acceptance gates from colliding with
+	 * Mode A (`modea-<random>`) / Mode B (`gate-<...>`) ids.
+	 */
+	private _showHandoffAcceptanceGate(state: HandoffSessionState): void {
+		// Skip non-acceptance verdicts -- nothing useful for the user
+		// to act on (and no diff has been applied / staged).
+		if (state.verdict !== 'accept' && state.verdict !== 'revise-edits') {
+			return;
+		}
+		const gateId = `handoff-final:${state.specId}`;
+		const finish = (): void => {
+			this._dismissHandoffGate(gateId);
+		};
+		const sessionId = this.chatService.activeSessionId ?? '';
+		const applyAndCleanup = async (outcome: 'accept' | 'reject'): Promise<void> => {
+			try {
+				if (outcome === 'accept') {
+					await this.diffService.acceptAll();
+				} else {
+					this.diffService.rejectAll();
+				}
+			} catch (err) {
+				this._logService.warn(`[insrc-chat] handoff acceptance ${outcome} (diff phase) failed: ${(err as Error).message}`);
+			}
+			if (sessionId.length === 0) {
+				this._logService.warn('[insrc-chat] handoff acceptance: no active session; skipping daemon RPC');
+				return;
+			}
+			await this._handoffService.cleanupHandoff(sessionId, state.specId, outcome);
+		};
+
+		const titleSuffix = state.verdict === 'revise-edits' ? ' (audit suggests revisions)' : '';
+		const bodyLines: string[] = [];
+		bodyLines.push(`Template: ${state.templateId ?? 'HANDOFF'}    Agent: ${state.agent ?? '?'}`);
+		if (state.durationMs !== undefined) {
+			bodyLines.push(`Run time: ${Math.round(state.durationMs / 1000)}s`);
+		}
+		if (state.diffBytes !== undefined && state.diffBytes > 0) {
+			bodyLines.push(`Diff: ${state.diffBytes} bytes`);
+		} else {
+			bodyLines.push('Diff: (empty -- agent produced a report-only handoff)');
+		}
+		if (state.auditReason !== undefined && state.auditReason.length > 0) {
+			bodyLines.push('');
+			bodyLines.push(`Audit: ${state.auditReason}`);
+		}
+
+		this._renderHandoffGate({
+			gateId,
+			title: `Accept handoff: ${state.intent ?? '(spec)'}${titleSuffix}`,
+			bodyText: bodyLines.join('\n'),
+			severity: 'info',
+			buttons: [
+				{
+					label: 'Accept', primary: true, onClick: () => {
+						finish();
+						void applyAndCleanup('accept');
+					},
+				},
+				{
+					label: 'Reject', onClick: () => {
+						finish();
+						void applyAndCleanup('reject');
+					},
+				},
+			],
+		});
 	}
 
 	private _formatModeBPromptDetail(prompt: HandoffModeBPrompt): string {
