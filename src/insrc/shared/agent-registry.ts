@@ -32,6 +32,7 @@ export type AgentFamily =
   | 'deployment'
   | 'code-analyzer'
   | 'data-analyzer'
+  | 'handoff'
   | 'system';
 
 export type AgentFamilyCategory =
@@ -137,6 +138,14 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
     icon: 'database',
     suppressTodoComments: true,
   },
+  handoff: {
+    id: 'handoff',
+    displayName: 'Handoff',
+    category: 'coding',
+    description: 'External coding agent (Claude Code / Codex) handoff pipeline. Spec assembly, worktree spawn, audit, and diff review. Each handoff run owns a TodoList capturing stage progress + the final report.',
+    icon: 'arrow-swap',
+    suppressTodoComments: true,
+  },
   system: {
     id: 'system',
     displayName: 'System',
@@ -152,7 +161,8 @@ export const AGENT_REGISTRY: Readonly<Record<AgentFamily, AgentFamilyMeta>> = {
 const _exhaustivenessCheck: Record<AgentFamily, true> = {
   chat: true, implementation: true, brainstorm: true, designer: true,
   planner: true, tester: true, research: true, debugging: true,
-  deployment: true, 'code-analyzer': true, 'data-analyzer': true, system: true,
+  deployment: true, 'code-analyzer': true, 'data-analyzer': true,
+  handoff: true, system: true,
 };
 void _exhaustivenessCheck;
 

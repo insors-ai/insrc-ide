@@ -26,6 +26,9 @@ import type { StreamHandler } from './server.js';
 import type { IpcStreamMessage } from '../shared/types.js';
 import { runHandoff, type AgentChoice, type ScriptedAgentFn } from '../handoff/index.js';
 import type { HandoffEvent, MemoryRef, ScopePayload, TemplateId } from '../handoff/types.js';
+import { getDb } from '../db/client.js';
+import { makeTodosApi } from './todos-api.js';
+import type { TodosApi } from './todos-api.js';
 import { getLogger } from '../shared/logger.js';
 
 const log = getLogger('handoff:stream-ipc');
@@ -107,6 +110,17 @@ export const handoffRunStream: StreamHandler = async (params, send, signal) => {
 		wrappedSend(msg);
 	};
 
+	// Wire the in-process TodosApi (scoped to the 'handoff' agent
+	// family) so runHandoff creates a TodoList tracking the
+	// pipeline and writes the final report into list.body for the
+	// HandoffReportPane.
+	let todos: TodosApi | undefined;
+	try {
+		todos = makeTodosApi(await getDb(), 'handoff');
+	} catch (err) {
+		log.warn({ err: (err as Error).message }, 'handoff.run stream: TodosApi unavailable; continuing without TodoList integration');
+	}
+
 	try {
 		await runHandoff({
 			templateId:     p.templateId,
@@ -125,6 +139,7 @@ export const handoffRunStream: StreamHandler = async (params, send, signal) => {
 			...(p.modeAGate      === true      ? { modeAGate:      true            } : {}),
 			...(p.modeATimeoutMs !== undefined ? { modeATimeoutMs: p.modeATimeoutMs } : {}),
 			...(scriptedAgent    !== undefined ? { scriptedAgent }                  : {}),
+			...(todos            !== undefined ? { todos }                          : {}),
 		});
 		sendIfNotAborted({ stream: 'done', data: {} });
 	} catch (err) {

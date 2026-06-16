@@ -345,11 +345,8 @@ export class InsrcChatViewPane extends ViewPane {
 		// `_gateContainer` when handoff reaches `final`). The "Open
 		// report" link routes to the HandoffReportPane (next phase).
 		const openReportHandler = (state: HandoffSessionState): void => {
-			// TODO(handoff-report-pane): wire to `insrc.handoff.openReport`
-			// command once the pane lands. Logging the click for now
-			// keeps the user-visible affordance correct without
-			// blocking on the pane wiring.
-			this._logService.info(`[insrc-chat] open-report click specId=${state.specId} (pane not wired yet)`);
+			this._logService.info(`[insrc-chat] open-report click specId=${state.specId}`);
+			void this.commandService.executeCommand('insrc.handoff.openReport', { specId: state.specId });
 		};
 		const handoffWidget = this._register(new ChatHandoffWidget(this._handoffService, this._logService, openReportHandler));
 		handoffWidget.mount(this._messageList);

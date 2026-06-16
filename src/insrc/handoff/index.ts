@@ -35,6 +35,8 @@ import { subscribePrompts, subscribeResolutions } from '../gating/prompt-dispatc
 import { awaitModeAResolution } from '../gating/mode-a-dispatch.js';
 import { openTraceWriter, type TraceWriter } from './observability/trace-writer.js';
 import { openCostMeter, type CostMeter } from './observability/cost-meter.js';
+import { startTodoListReporter, type TodoListReporter } from './todo-reporter.js';
+import type { TodosApi } from '../daemon/todos-api.js';
 import { randomBytes } from 'node:crypto';
 import { auditDeliverable, type AuditResult } from './audit/judge.js';
 import { getTemplate } from './templates/registry.js';
@@ -116,6 +118,19 @@ export interface RunHandoffOpts {
 	readonly modeAGate?:      boolean | undefined;
 	/** Test seam: shorten the Mode A default-deny timeout. */
 	readonly modeATimeoutMs?: number | undefined;
+	/**
+	 * Optional TodosApi wired to the `handoff` agent family. When
+	 * present, runHandoff creates a list at the start of the
+	 * pipeline, advances one item per stage, and writes the
+	 * synthesised report into `list.body` at `handoff-final`. The
+	 * workbench's HandoffFlowContribution watches that list's
+	 * `body` becoming non-empty and auto-opens the
+	 * HandoffReportPane.
+	 *
+	 * When undefined (CLI / tests), no list is created -- runHandoff
+	 * still emits the full HandoffEvent stream.
+	 */
+	readonly todos?:          TodosApi | undefined;
 }
 
 export interface RunHandoffResult {
@@ -141,9 +156,35 @@ export async function runHandoff(opts: RunHandoffOpts): Promise<RunHandoffResult
 	let trace: TraceWriter | undefined;
 	const traceBuffer: HandoffEvent[] = [];
 
+	// TodoList reporter (Phase 7-pane integration): when a TodosApi
+	// is supplied, every stage event also advances a corresponding
+	// TodoItem; at handoff-final the reporter writes a synthesised
+	// report markdown into `list.body` so the workbench's
+	// HandoffFlowContribution auto-opens the report pane.
+	let todoReporter: TodoListReporter | undefined;
+	if (opts.todos !== undefined) {
+		try {
+			todoReporter = await startTodoListReporter({
+				todos:      opts.todos,
+				sessionId:  opts.sessionId,
+				intent:     opts.intent,
+				templateId: opts.templateId,
+				agent:      opts.agent,
+			});
+		} catch (err) {
+			log.warn({ err: (err as Error).message }, 'todo reporter: failed to start; continuing without it');
+		}
+	}
+
 	const emit = (event: HandoffEvent): void => {
 		// Always update the meter; it never throws.
 		try { meter.record(event); } catch { /* swallow */ }
+		// Mirror to the TodoList reporter (item advances, body at final).
+		if (todoReporter !== undefined) {
+			try { todoReporter.handle(event); } catch (err) {
+				log.warn({ err: (err as Error).message }, 'todo reporter: handle threw; swallowing');
+			}
+		}
 		// Trace: append directly if open, buffer otherwise.
 		if (trace !== undefined) {
 			trace.record(event);

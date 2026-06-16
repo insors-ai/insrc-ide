@@ -272,6 +272,19 @@ editorPaneRegistry.registerEditorPane(
 );
 registerWorkbenchContribution2(DataAnalyzerFlowContribution.ID, DataAnalyzerFlowContribution, WorkbenchPhase.AfterRestored);
 
+// Handoff Report Pane (plans/external-agent-integration.md post-MVP).
+// Mirror of the data-analyzer pane shape: ephemeral, auto-opens when
+// a handoff-owned TodoList's body lands.
+import { HandoffReportPane } from './handoff/handoffReportPane.js';
+import { HandoffReportInput } from './handoff/handoffReportInput.js';
+import { HandoffFlowContribution } from './handoff/handoffFlowContribution.js';
+import './handoff/handoffCommands.js';
+editorPaneRegistry.registerEditorPane(
+	EditorPaneDescriptor.create(HandoffReportPane, HandoffReportPane.ID, 'Handoff Report'),
+	[new SyncDescriptor(HandoffReportInput)],
+);
+registerWorkbenchContribution2(HandoffFlowContribution.ID, HandoffFlowContribution, WorkbenchPhase.AfterRestored);
+
 // path: URI opener -- resolves citation links emitted by the synthesise
 // prompt (e.g. `[label](path:src/foo.ts#L42-L58)`) so clicks in the
 // Report Pane and the chat panel actually open the cited file at the
