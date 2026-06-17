@@ -86,6 +86,26 @@ export type DaemonStreamMessage =
 	| {
 		readonly type: 'handoff';
 		readonly event: unknown;
+	}
+	/**
+	 * memory-context M1.6.b stream event. The daemon's chat-handler
+	 * bridges Layer 3 pending-confirm events to this stream so the
+	 * IDE can render the chat-inline toast (M1.6.c). The payload
+	 * mirrors `AssertionConfirmStreamFrame` from
+	 * src/insrc/daemon/prefs-confirm.ts -- key, turnId, subject,
+	 * canonicalText (the LLM's best guess at the user's intent),
+	 * rawSpan (the raw user text), confidence, polarity, scope.
+	 */
+	| {
+		readonly type: 'assertion-confirm';
+		readonly key: string;
+		readonly turnId: string;
+		readonly subject: string;
+		readonly canonicalText: string;
+		readonly rawSpan: string;
+		readonly confidence: number;
+		readonly polarity: string;
+		readonly scope: string;
 	};
 
 /** Kinds emitted on the todos stream. Mirrors daemon-side TodoStreamEventKind. */

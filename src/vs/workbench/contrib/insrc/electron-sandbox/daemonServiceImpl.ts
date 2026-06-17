@@ -211,6 +211,30 @@ class InsrcStreamHandle extends Disposable implements IInsrcStreamHandle {
 				// in common/handoffService.ts, so we carry the payload opaquely
 				// here and the workbench-side handoff service dispatches on it.
 				return { type: 'handoff', event: data };
+			case 'assertion-confirm': {
+				// memory-context M1.6.b. Daemon sends
+				// `{ kind: 'pending', payload: PendingConfirmEvent }`.
+				// Drop frames missing required fields rather than
+				// rendering an empty toast.
+				const payload = data?.['payload'] as Record<string, unknown> | undefined;
+				if (typeof payload?.['key'] !== 'string' ||
+					typeof payload?.['turnId'] !== 'string' ||
+					typeof payload?.['subject'] !== 'string' ||
+					typeof payload?.['canonicalText'] !== 'string') {
+					return undefined;
+				}
+				return {
+					type: 'assertion-confirm',
+					key: payload['key'] as string,
+					turnId: payload['turnId'] as string,
+					subject: payload['subject'] as string,
+					canonicalText: payload['canonicalText'] as string,
+					rawSpan: typeof payload['rawSpan'] === 'string' ? payload['rawSpan'] as string : payload['canonicalText'] as string,
+					confidence: typeof payload['confidence'] === 'number' ? payload['confidence'] as number : 0.6,
+					polarity: typeof payload['polarity'] === 'string' ? payload['polarity'] as string : 'preference',
+					scope: typeof payload['scope'] === 'string' ? payload['scope'] as string : 'workspace',
+				};
+			}
 			default:
 				return undefined;
 		}

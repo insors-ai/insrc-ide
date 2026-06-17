@@ -16,7 +16,8 @@ import { IConfigurationService } from '../../../../../platform/configuration/com
 import { IOpenerService } from '../../../../../platform/opener/common/opener.js';
 import { IViewDescriptorService } from '../../../../common/views.js';
 import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
-import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo } from '../../common/chatService.js';
+import { IInsrcChatService, type ChatEvent, type ChatMessage, type GateInfo, type GateActionDetail, type LiveStepInfo, type AssertionConfirmInfo } from '../../common/chatService.js';
+import { ChatLayer3ConfirmToast } from './chatLayer3ConfirmToast.js';
 import { IInsrcBrainstormSessionService } from '../../common/brainstormSessionService.js';
 import { IInsrcTodosService } from '../../common/todosService.js';
 import { IInsrcHandoffService, type HandoffModeAPrompt, type HandoffModeBPrompt, type HandoffSessionState } from '../../common/handoffService.js';
@@ -177,6 +178,7 @@ export class InsrcChatViewPane extends ViewPane {
 	private _scopeBadge!: HTMLElement;
 	private _messageList!: HTMLElement;
 	private _gateContainer!: HTMLElement;
+	private _assertionConfirmContainer!: HTMLElement;
 	private _attachedFilesEl!: HTMLElement;
 	private _attachedFiles: string[] = [];
 	private _inputArea!: HTMLElement;
@@ -372,6 +374,13 @@ export class InsrcChatViewPane extends ViewPane {
 
 		// Gate container (inline between messages and input)
 		this._gateContainer = dom.append(this._container, dom.$('.insrc-chat-gate-container'));
+
+		// memory-context M1.6.c. Sibling container for Layer 3 confirm
+		// toasts -- distinct from the gate container so a pending
+		// preference doesn't visually replace an active gate. Multiple
+		// toasts may co-exist (one per pending row in the classify pass);
+		// each ChatLayer3ConfirmToast manages its own card lifecycle.
+		this._assertionConfirmContainer = dom.append(this._container, dom.$('.insrc-chat-assertion-confirm-container'));
 
 		// Selection bar (floating bar when messages are selected)
 		this._selectionBar = dom.append(this._container, dom.$('.insrc-chat-selection-bar.hidden'));
@@ -573,6 +582,12 @@ export class InsrcChatViewPane extends ViewPane {
 				// presence during multi-minute agent steps.
 				this._handleLiveStep(event.liveStep);
 				break;
+			case 'assertionConfirm':
+				// memory-context M1.6.c. Layer 3 confirm toast rendered
+				// inline below any active gate -- non-blocking, the
+				// assistant continues to stream around it.
+				this._renderAssertionConfirm(event.confirm);
+				break;
 			case 'streamEnd':
 				this._onStreamEnd();
 				break;
@@ -581,6 +596,22 @@ export class InsrcChatViewPane extends ViewPane {
 				this._onStreamEnd();
 				break;
 		}
+	}
+
+	/**
+	 * memory-context M1.6.c. Mount a confirm toast for a single pending
+	 * preference. The toast owns its own lifecycle (self-disposes on
+	 * persisted / discarded); multiple toasts may co-exist in the
+	 * container if the same classify pass produced several pending
+	 * rows.
+	 */
+	private _renderAssertionConfirm(confirm: AssertionConfirmInfo): void {
+		const toast = this._register(new ChatLayer3ConfirmToast({
+			container: this._assertionConfirmContainer,
+			confirm,
+			chatService: this.chatService,
+		}));
+		void toast;
 	}
 
 	/**

@@ -84,8 +84,27 @@ export type ChatEvent =
 	| { type: 'liveStep'; liveStep: LiveStepInfo }
 	| { type: 'tool'; tool: ToolCallInfo }
 	| { type: 'escalation'; escalation: EscalationInfo }
+	/**
+	 * memory-context M1.6.c. Daemon's chat-handler emits this when the
+	 * Layer 3 staging hook fires for a low-confidence Layer 2 accept;
+	 * the IDE renders an inline toast (chatLayer3ConfirmToast.ts) so
+	 * the user can Save / Customize / Discard the captured preference.
+	 */
+	| { type: 'assertionConfirm'; confirm: AssertionConfirmInfo }
 	| { type: 'streamEnd' }
 	| { type: 'error'; error: string };
+
+/** memory-context M1.6.c. Mirrors the daemon-side AssertionConfirmStreamFrame.payload. */
+export interface AssertionConfirmInfo {
+	readonly key: string;
+	readonly turnId: string;
+	readonly subject: string;
+	readonly canonicalText: string;
+	readonly rawSpan: string;
+	readonly confidence: number;
+	readonly polarity: string;
+	readonly scope: string;
+}
 
 export interface CodeAnnotation {
 	readonly file: string;
@@ -168,6 +187,19 @@ export interface IInsrcChatService {
 		rerunFromListId?: string | undefined,
 	): Promise<void>;
 	replyToGate(gateId: string, action: string, feedback?: string | undefined, prefix?: string | undefined): Promise<void>;
+	/**
+	 * memory-context M1.6.c. Resolve a Layer 3 pending-confirm verdict
+	 * for the user. `key` is the substrate row key from the
+	 * `assertionConfirm` event; `verdict` is 'accept' or 'discard'.
+	 * `canonicalText` optionally overrides the captured wording
+	 * (Customize -> Save flow). Resolves once the daemon has applied
+	 * the verdict; rejects on validation / missing-entry errors.
+	 */
+	resolveAssertionConfirm(
+		key: string,
+		verdict: 'accept' | 'discard',
+		canonicalText?: string | undefined,
+	): Promise<void>;
 	cancelStream(): Promise<void>;
 	/**
 	 * Mid-turn intent correction (Item 6). Cancels the current stream and

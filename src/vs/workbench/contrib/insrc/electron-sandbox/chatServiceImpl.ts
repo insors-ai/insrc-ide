@@ -405,6 +405,23 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 		this.logService.info('[insrc-chat] Gate reply:', gateId, action);
 	}
 
+	async resolveAssertionConfirm(
+		key: string,
+		verdict: 'accept' | 'discard',
+		canonicalText?: string | undefined,
+	): Promise<void> {
+		// memory-context M1.6.c. Bridge to the daemon's
+		// `prefs.confirm.resolve` RPC. No session check -- a pending
+		// preference can outlive its originating session, and the user
+		// may resolve one from a fresh session via /prefs.
+		const params: Record<string, unknown> = { key, verdict };
+		if (canonicalText !== undefined && canonicalText.length > 0) {
+			params['canonicalText'] = canonicalText;
+		}
+		await this.daemonService.rpc('prefs.confirm.resolve', params);
+		this.logService.info('[insrc-chat] assertion-confirm resolve:', key, verdict);
+	}
+
 	async cancelStream(): Promise<void> {
 		if (!this._activeSessionId) {
 			return;
@@ -663,6 +680,27 @@ export class InsrcChatServiceImpl extends Disposable implements IInsrcChatServic
 				if (handoffEvent !== null && typeof handoffEvent === 'object' && typeof handoffEvent.kind === 'string') {
 					this.handoffService.dispatch(handoffEvent);
 				}
+				break;
+			}
+			case 'assertion-confirm': {
+				// memory-context M1.6.c. Layer 3 pending-confirm landed in
+				// the IDE -- fan out as a chat event so the inline toast
+				// (chatView -> chatLayer3ConfirmToast) can render. No
+				// pending-content flush: the toast is non-blocking, the
+				// assistant text continues to stream around it.
+				this._onDidReceiveEvent.fire({
+					type: 'assertionConfirm',
+					confirm: {
+						key: msg.key,
+						turnId: msg.turnId,
+						subject: msg.subject,
+						canonicalText: msg.canonicalText,
+						rawSpan: msg.rawSpan,
+						confidence: msg.confidence,
+						polarity: msg.polarity,
+						scope: msg.scope,
+					},
+				});
 				break;
 			}
 			case 'context.set':

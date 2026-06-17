@@ -730,6 +730,93 @@
 	font-family: inherit;
 }
 
+/* -- Layer 3 confirm toast (memory-context M1.6.c) ---- */
+
+.insrc-chat-assertion-confirm-container {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.insrc-chat-assertion-confirm {
+	margin: 6px 12px;
+	padding: 8px 10px;
+	border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-inputValidation-infoBorder));
+	border-radius: 6px;
+	background: var(--vscode-inputValidation-warningBackground, var(--vscode-inputValidation-infoBackground));
+}
+
+.insrc-chat-assertion-confirm.insrc-chat-assertion-confirm-persisted {
+	border-color: var(--vscode-charts-green, var(--vscode-inputValidation-infoBorder));
+	background: var(--vscode-inputValidation-infoBackground);
+}
+
+.insrc-chat-assertion-confirm.insrc-chat-assertion-confirm-failed {
+	border-color: var(--vscode-inputValidation-errorBorder);
+	background: var(--vscode-inputValidation-errorBackground);
+}
+
+.insrc-chat-assertion-confirm-header {
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--vscode-textLink-foreground);
+	margin-bottom: 4px;
+}
+
+.insrc-chat-assertion-confirm-body {
+	font-size: 12px;
+	color: var(--vscode-foreground);
+	margin: 2px 0 6px;
+	line-height: 1.4;
+}
+
+.insrc-chat-assertion-confirm-text {
+	white-space: pre-wrap;
+}
+
+.insrc-chat-assertion-confirm-editor {
+	width: 100%;
+	font-size: 12px;
+	font-family: inherit;
+	border: 1px solid var(--vscode-input-border);
+	background: var(--vscode-input-background);
+	color: var(--vscode-input-foreground);
+	border-radius: 4px;
+	padding: 4px 6px;
+	resize: vertical;
+	min-height: 48px;
+}
+
+.insrc-chat-assertion-confirm-actions {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.insrc-chat-assertion-confirm-btn {
+	padding: 3px 10px;
+	font-size: 11px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-button-border, transparent);
+	cursor: pointer;
+	background: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+}
+
+.insrc-chat-assertion-confirm-btn:hover {
+	background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.insrc-chat-assertion-confirm-btn.primary {
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.insrc-chat-assertion-confirm-btn.primary:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+
 /* -- Input area -------------------------------------- */
 
 .insrc-chat-input-area {
