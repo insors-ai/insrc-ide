@@ -13,6 +13,7 @@
  */
 
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
+import { getLogger } from '../../shared/logger.js';
 import type { AssembledContext } from './budget.js';
 import { createBudget, type TokenBudget } from './budget.js';
 import { buildSystemContext, type SystemContextOpts } from './system.js';
@@ -21,17 +22,30 @@ import { weightedRecent, weightedRecentTurns, getEvictable, MAX_RECENT_TURNS } f
 import { SemanticHistory, embedText } from './semantic.js';
 import { fetchTaskContext, resetSeenCounts, type DisclosureContext } from './task.js';
 import { fitToBudget, type RawLayers } from './overflow.js';
+import { buildOwnerPreferencesSection, type PreferenceCandidate } from './preferences.js';
 
 export { type AssembledContext } from './budget.js';
 export { type ConversationTurn } from './summary.js';
 export { initSession } from './task.js';
 
+const log = getLogger('agent:context');
+
 export class ContextManager {
   private systemText: string;
+  /**
+   * G9 of design/memory-context.html: active-owner preferences merged into the
+   * L1 system segment. Built lazily on the first assemble after construction
+   * OR after a substrate FeedbackBus mutation. Cached across turns until
+   * invalidated.
+   */
+  private preferencesText = '';
+  private preferencesStale = true;
+  private feedbackUnsubscribe: (() => void) | undefined;
   private summary = '';
   private readonly recentTurns: ConversationTurn[] = [];
   private readonly semanticHistory = new SemanticHistory();
   private readonly closureRepos: string[];
+  private readonly repoPath: string;
   private readonly provider: LLMProvider;
   private readonly budget: TokenBudget;
   /** Entity IDs from the most recent L4 fetch — stored in turn on recordTurn(). */
@@ -46,8 +60,118 @@ export class ContextManager {
   constructor(opts: SystemContextOpts & { closureRepos: string[]; provider: LLMProvider; contextWindowSize?: number | undefined }) {
     this.systemText = buildSystemContext(opts);
     this.closureRepos = opts.closureRepos;
+    this.repoPath = opts.repoPath;
     this.provider = opts.provider;
     this.budget = createBudget(opts.contextWindowSize ?? 32_768);
+
+    // G9: subscribe to the substrate's FeedbackBus for the active owner so
+    // captured preferences invalidate the L1 cache. Skipped when the substrate
+    // runtime isn't available (test paths without `initSubstrateRuntime`).
+    void this.maybeSubscribeToFeedbackBus();
+  }
+
+  /** Tear down the FeedbackBus subscription. Idempotent. */
+  dispose(): void {
+    if (this.feedbackUnsubscribe !== undefined) {
+      try { this.feedbackUnsubscribe(); } catch { /* swallow */ }
+      this.feedbackUnsubscribe = undefined;
+    }
+  }
+
+  private async maybeSubscribeToFeedbackBus(): Promise<void> {
+    try {
+      const mod = await import('../../daemon/substrate/singleton.js');
+      if (!mod.hasSubstrateRuntime()) {
+        log.debug('substrate runtime not initialised; preferences slice disabled');
+        return;
+      }
+      const runtime = mod.getSubstrateRuntime();
+      const sub = runtime.feedbackBus.subscribe(mod.AGENT_CHAT_OWNER, async () => {
+        // Any mutation on agent:chat -> invalidate the preferences cache so the
+        // next assemble rebuilds. Per-event filtering is unnecessary: every
+        // event for this owner means the preferences set may have changed.
+        this.preferencesStale = true;
+      });
+      this.feedbackUnsubscribe = sub.unsubscribe.bind(sub);
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, 'failed to subscribe to substrate FeedbackBus; preferences cache will not auto-invalidate');
+    }
+  }
+
+  /**
+   * Rebuild the preferences slice from the substrate. Called on first assemble
+   * after invalidation. Quietly returns '' when the substrate isn't available.
+   */
+  private async refreshPreferences(userMessage: string): Promise<void> {
+    try {
+      const mod = await import('../../daemon/substrate/singleton.js');
+      if (!mod.hasSubstrateRuntime()) {
+        this.preferencesText = '';
+        this.preferencesStale = false;
+        return;
+      }
+      const runtime = mod.getSubstrateRuntime();
+      const ns = runtime.memory.scope(mod.AGENT_CHAT_OWNER, 'user-assertions');
+      const candidates: PreferenceCandidate[] = [];
+      // Use noise threshold per G7 -- entries with confidence below this are
+      // suppressed at retrieval. Default 0.30 matches the setting default.
+      const noiseThreshold = 0.30;
+      for await (const entry of ns.scan<Record<string, unknown>>('')) {
+        if (entry.kind !== 'constraint') { continue; }
+        if (entry.confidence < noiseThreshold) { continue; }
+        const v = entry.value as Record<string, unknown>;
+        const subject = (typeof v.preferenceSubject === 'string' ? v.preferenceSubject : undefined)
+          ?? (typeof v.subject === 'string' ? v.subject : undefined);
+        const canonicalText = (typeof v.canonicalText === 'string' ? v.canonicalText : undefined)
+          ?? (typeof v.text === 'string' ? v.text : undefined);
+        if (subject === undefined || canonicalText === undefined) { continue; }
+        candidates.push({
+          subject,
+          canonicalText,
+          confidence: entry.confidence,
+          ...(Array.isArray(v.categories) ? { categories: v.categories as string[] } : {}),
+          ...(Array.isArray(v.repoPaths)  ? { repoPaths:  v.repoPaths  as string[] } : {}),
+        });
+      }
+      if (candidates.length === 0) {
+        this.preferencesText = '';
+        this.preferencesStale = false;
+        return;
+      }
+      const topic = this.buildSessionTopic(userMessage);
+      this.preferencesText = await buildOwnerPreferencesSection({
+        candidates,
+        repoPath:      this.repoPath,
+        sessionTopic:  topic,
+        localProvider: this.provider,
+      });
+      this.preferencesStale = false;
+    } catch (err) {
+      log.warn({ err: (err as Error).message }, 'refreshPreferences failed; L1 will omit preferences');
+      this.preferencesText = '';
+      this.preferencesStale = false;
+    }
+  }
+
+  /**
+   * Build a short "session rolling topic" string for the G5-style relevance
+   * curator. Pulls the current user message + the rolling summary + the
+   * single most-recent turn to give the curator enough signal without
+   * dumping the whole conversation.
+   */
+  private buildSessionTopic(userMessage: string): string {
+    const parts: string[] = [];
+    if (userMessage.trim().length > 0) {
+      parts.push(`Current user message: ${userMessage.trim().slice(0, 500)}`);
+    }
+    if (this.summary.length > 0) {
+      parts.push(`Recent summary: ${this.summary.slice(0, 500)}`);
+    }
+    const last = this.recentTurns[0];
+    if (last !== undefined) {
+      parts.push(`Last turn user: ${last.userMessage.slice(0, 200)}`);
+    }
+    return parts.join('\n');
   }
 
   /**
@@ -85,6 +209,14 @@ export class ContextManager {
    * computed once and shared between L3b retrieval and L4 code search.
    */
   async assemble(userMessage: string, queryEmbedding: number[]): Promise<AssembledContext> {
+    // G9: refresh the preferences slice if it's stale. The static system text
+    // is built once in the constructor; preferences are layered on top with
+    // event-driven invalidation. Refresh is synchronous (per accuracy-first)
+    // so the next turn sees the latest preferences.
+    if (this.preferencesStale) {
+      await this.refreshPreferences(userMessage);
+    }
+
     // L3a: Recent turns (recency-weighted)
     const recentBlocks = weightedRecent(this.recentTurns);
 
@@ -109,8 +241,13 @@ export class ContextManager {
     // Clear attachment context after use (single-turn only)
     this.attachmentContext = '';
 
+    // G9: L1 system block = static instructions + active-owner preferences.
+    const composedSystem = this.preferencesText.length > 0
+      ? `${this.systemText}\n\n${this.preferencesText}`
+      : this.systemText;
+
     const raw: RawLayers = {
-      system: this.systemText,
+      system: composedSystem,
       summary: this.summary,
       recent: recentBlocks,
       semantic: semanticBlocks,
