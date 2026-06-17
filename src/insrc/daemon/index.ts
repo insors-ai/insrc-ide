@@ -275,6 +275,21 @@ async function main(): Promise<void> {
 	const { registerAllPromptWriters } = await import('../agent/prompts/index.js');
 	registerAllPromptWriters();
 
+	// memory-context M1.5: daemon-wide substrate runtime + `agent:chat`
+	// owner. Holds the user-assertion classifier (Ollama-backed Layer 2 hook),
+	// the assertion index, and the memory store. Chat-handler invokes
+	// `runtime.classifyAssertion(turn)` per user turn (M1.5 continuation).
+	const { OllamaProvider } = await import('../agent/providers/ollama.js');
+	const localCfg = (await import('../agent/config.js')).loadConfig().models.providers.local;
+	const localProvider = new OllamaProvider(
+		localCfg.coreModel,
+		localCfg.host,
+		localCfg.params[localCfg.coreModel]?.maxInputTokens ?? 16_384,
+	);
+	const { initSubstrateRuntime, registerAgentChatOwner } = await import('./substrate/singleton.js');
+	const substrate = initSubstrateRuntime({ localProvider });
+	registerAgentChatOwner(substrate);
+
 	// Shared session-purge pipeline. Used by `agent.discard`,
 	// `session.delete`, and `session.deleteBulk` so they don't drift.
 	// plans/session-delete.md Phase B.

@@ -28,34 +28,38 @@ import {
 
 // ---------------------------------------------------------------------------
 
-test('always X -> accept; polarity do; subject extracted', async () => {
+// G1 + G3 reframing (memory-context, 2026-06-17): Layer 1 no longer accepts
+// imperative shapes on its own. It defers everything that isn't task-local
+// to Layer 2 (LLM closed-enum classifier). Without an LLM wired, the default
+// classifier's Layer 2 stub returns 'defer', so previously-accepted spans
+// now land in `deferred` instead of `accepted`.
+
+test('always X -> deferred to Layer 2 with heuristic subject + polarity hints', async () => {
 	const c = createDefaultClassifier();
-	// "always use X for Y": the `use X for Y` pattern wins over the
-	// generic `<verb> <token>` pattern so subject is the X-for-Y form.
 	const r = await c.classify({ turnId: 't1', text: 'always use snake_case for python variables.' });
-	assert.equal(r.accepted.length, 1);
-	const a = r.accepted[0]!;
-	// Polarity comes from the leading 'always' marker.
-	assert.equal(a.polarity, 'do');
-	// Subject from the more-specific `use X for Y` extractor.
-	assert.equal(a.subject,  'snake_case-for-python');
-	assert.ok(a.confidence > 0.5);
+	assert.equal(r.accepted.length, 0);
+	assert.equal(r.deferred.length, 1);
+	// Layer 1 still records its heuristic findings in the decisions trace.
+	const layer1Decision = r.decisions.find(d => d.layer === 1);
+	assert.ok(layer1Decision !== undefined);
+	assert.equal(layer1Decision!.decision, 'defer');
+	assert.equal(layer1Decision!.subject, 'snake_case-for-python');
 });
 
-test('never Y -> accept; polarity avoid', async () => {
+test('never Y -> deferred to Layer 2', async () => {
 	const c = createDefaultClassifier();
 	const r = await c.classify({ turnId: 't2', text: 'never use hasattr in production code.' });
-	assert.equal(r.accepted.length, 1);
-	assert.equal(r.accepted[0]!.polarity, 'avoid');
+	assert.equal(r.accepted.length, 0);
+	assert.equal(r.deferred.length, 1);
 });
 
-test('use X for Y -> subject X-for-Y; polarity value-set', async () => {
+test('use X for Y -> deferred to Layer 2 with extracted hints', async () => {
 	const c = createDefaultClassifier();
 	const r = await c.classify({ turnId: 't3', text: 'use ruff for python linting.' });
-	assert.equal(r.accepted.length, 1);
-	const a = r.accepted[0]!;
-	assert.equal(a.polarity, 'value-set');
-	assert.equal(a.subject,  'ruff-for-python');
+	assert.equal(r.accepted.length, 0);
+	assert.equal(r.deferred.length, 1);
+	const layer1Decision = r.decisions.find(d => d.layer === 1);
+	assert.equal(layer1Decision!.subject, 'ruff-for-python');
 });
 
 test('task-local language -> reject', async () => {

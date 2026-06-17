@@ -316,6 +316,14 @@ export interface TurnRow {
 	compactedAt: number;          // 0 if not compacted
 	sourceIds:   string[];
 	format:      TurnFormat;
+	/**
+	 * G6 of design/memory-context.html: substrate memory-entry refs produced
+	 * by the user-assertion classifier when this turn was processed. Optional
+	 * because (a) most turns don't produce assertions, (b) backward-compat with
+	 * existing rows (msgpack decode of an old row yields `assertionRefs:
+	 * undefined`).
+	 */
+	assertionRefs?: string[];
 }
 
 export const encodeTurnRow = (r: TurnRow): Buffer => encode(r);

@@ -293,7 +293,13 @@ interface Layer1Verdict {
 	readonly reason?:    string;
 }
 
-const TASK_LOCAL_PATTERNS = /\b(this (pr|bug|file|function|method|class|task)|for this|in this (file|pr|commit))\b/i;
+// G1 of design/memory-context.html: under accuracy-first the Layer 1 heuristic
+// must NOT reject borderline shapes that look workspace-scoped. The legacy
+// pattern matched any "for this" / "in this" prefix, which incorrectly rejected
+// "for this repo, always include unit tests" -- a perfectly valid workspace-
+// scoped preference. Now we only hard-reject narrow task-local nouns; everything
+// else flows through to Layer 2 LLM.
+const TASK_LOCAL_PATTERNS = /\b(this (pr|bug|file|function|method|class|task)|for this (file|function|method|class|task|change|commit|bug)|in this (file|pr|commit))\b/i;
 const IMPERATIVE_GENERAL  = /^(always|never|remember|use|prefer|avoid|do not|don't|require)\b/i;
 
 function layer1Classify(span: DetectedSpan): Layer1Verdict {
@@ -304,16 +310,23 @@ function layer1Classify(span: DetectedSpan): Layer1Verdict {
 		return { decision: 'reject', confidence: 0.9, reason: 'task-local language' };
 	}
 
-	// Strong accept: imperative form at the start AND no task-local anchors.
+	// G1 + G3 of design/memory-context.html: under accuracy-first, Layer 1 must
+	// NOT short-circuit accept on imperative shape -- the heuristic-extracted
+	// `subject` (e.g. "hasattr") never routes through `AssertionIndex.lookup`,
+	// which is keyed on closed-enum `PreferenceSubject` values. Letting Layer 1
+	// accept here means the entry never persists (no matched owners). Defer
+	// to Layer 2 LLM instead so the closed-enum subject lands. Cost is one
+	// extra LLM call per obvious imperative -- acceptable per the project
+	// principle (CLAUDE.md / AGENTS.md: cost is least priority).
 	if (IMPERATIVE_GENERAL.test(text)) {
 		const subject = extractSubject(text);
 		const polarity = extractPolarity(text);
 		return {
-			decision:   'accept',
-			confidence: 0.8,
+			decision:   'defer',
+			confidence: 0.6,                       // strong shape signal; Layer 2 confirms + assigns enum subject
 			...(subject  !== undefined ? { subject  } : {}),
 			...(polarity !== undefined ? { polarity } : {}),
-			reason:     'imperative + general phrasing',
+			reason:     'imperative + general phrasing; deferring to Layer 2 for closed-enum subject',
 		};
 	}
 

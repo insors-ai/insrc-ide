@@ -64,12 +64,13 @@ function makeTurn(overrides: Partial<TurnRecord> = {}): TurnRecord {
 		entities:  overrides.entities  ?? [],
 		vector:    overrides.vector    ?? [], // Lance not yet wired
 		repo:      overrides.repo      ?? REPO,
-		...(overrides.type        !== undefined ? { type:        overrides.type        } : {}),
-		...(overrides.tier        !== undefined ? { tier:        overrides.tier        } : {}),
-		...(overrides.compactedAt !== undefined ? { compactedAt: overrides.compactedAt } : {}),
-		...(overrides.sourceIds   !== undefined ? { sourceIds:   overrides.sourceIds   } : {}),
-		...(overrides.createdAt   !== undefined ? { createdAt:   overrides.createdAt   } : {}),
-		...(overrides.format      !== undefined ? { format:      overrides.format      } : {}),
+		...(overrides.type           !== undefined ? { type:           overrides.type           } : {}),
+		...(overrides.tier           !== undefined ? { tier:           overrides.tier           } : {}),
+		...(overrides.compactedAt    !== undefined ? { compactedAt:    overrides.compactedAt    } : {}),
+		...(overrides.sourceIds      !== undefined ? { sourceIds:      overrides.sourceIds      } : {}),
+		...(overrides.createdAt      !== undefined ? { createdAt:      overrides.createdAt      } : {}),
+		...(overrides.format         !== undefined ? { format:         overrides.format         } : {}),
+		...(overrides.assertionRefs  !== undefined ? { assertionRefs:  overrides.assertionRefs  } : {}),
 	};
 }
 
@@ -159,6 +160,27 @@ test('getTurnsForSession returns idx-ordered turns only of type "turn"', async (
 	await saveTurn(null, makeTurn({ idx: 1 }));
 	const turns = await getTurnsForSession(null, 'sess-1');
 	assert.deepEqual(turns.map(t => t.idx), [0, 1]);
+});
+
+test('saveTurn round-trips assertionRefs (G6 of memory-context design)', async () => {
+	await saveSession(null, { id: 'sess-1', repo: REPO, summary: '' });
+	await saveTurn(null, makeTurn({
+		idx: 0,
+		user: 'always include unit tests',
+		assistant: 'noted',
+		assertionRefs: ['agent:chat/user-assertions/t1::test-policy'],
+	}));
+	const turns = await getTurnsForSession(null, 'sess-1');
+	assert.equal(turns.length, 1);
+	assert.deepEqual([...turns[0]!.assertionRefs ?? []], ['agent:chat/user-assertions/t1::test-policy']);
+});
+
+test('saveTurn omits assertionRefs when not provided (back-compat)', async () => {
+	await saveSession(null, { id: 'sess-1', repo: REPO, summary: '' });
+	await saveTurn(null, makeTurn({ idx: 0, user: 'hi', assistant: 'hi' }));
+	const turns = await getTurnsForSession(null, 'sess-1');
+	assert.equal(turns.length, 1);
+	assert.equal(turns[0]!.assertionRefs, undefined);
 });
 
 test('saveTurn upsert preserves single row by (sessionId, idx)', async () => {

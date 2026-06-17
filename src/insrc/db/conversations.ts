@@ -87,6 +87,18 @@ export interface TurnRecord {
 	sourceIds?: string[] | undefined;
 	createdAt?: string | undefined;
 	format?: string | undefined;
+	/**
+	 * G6 of design/memory-context.html: memory-entry refs produced by the
+	 * user-assertion classifier when this turn was processed. Undefined for
+	 * turns that didn't produce assertions (the common case). The substrate's
+	 * `source.turnId` back-reference is the substrate -> turn link; this field
+	 * is the turn -> substrate link for cheap reverse lookup.
+	 *
+	 * Immutable once written. When the underlying preference is later revised
+	 * or discarded, the ref stays here; the renderer resolves current state at
+	 * read time per G6.
+	 */
+	assertionRefs?: string[] | undefined;
 }
 
 export interface ConversationStats {
@@ -156,6 +168,7 @@ function rowToTurnRecord(row: TurnRow): TurnRecord {
 		sourceIds:   row.sourceIds,
 		createdAt:   formatTs(row.createdAt),
 		format:      row.format,
+		...(row.assertionRefs !== undefined ? { assertionRefs: row.assertionRefs } : {}),
 	};
 }
 
@@ -236,6 +249,7 @@ export async function saveTurn(_db: DbClient, turn: TurnRecord): Promise<void> {
 			compactedAt: parseTs(turn.compactedAt),
 			sourceIds:   turn.sourceIds ?? [],
 			format:      coerceFormat(turn.format),
+			...(turn.assertionRefs !== undefined ? { assertionRefs: turn.assertionRefs } : {}),
 		};
 		writeTurnInTxn(s, row);
 		bumpSessionActivityInTxn(s, turn.sessionId, now);
@@ -280,6 +294,7 @@ export async function addCompactedTurns(_db: DbClient, turns: TurnRecord[]): Pro
 				compactedAt: now,
 				sourceIds:   t.sourceIds ?? [],
 				format:      coerceFormat(t.format),
+				...(t.assertionRefs !== undefined ? { assertionRefs: t.assertionRefs } : {}),
 			};
 			writeTurnInTxn(s, row);
 			if (t.vector.length > 0 && t.repo !== '') {

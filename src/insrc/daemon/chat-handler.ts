@@ -265,6 +265,25 @@ export const chatRestore: RpcHandler = async (params) => {
 };
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * G1 of design/memory-context.html: gate the user-assertion classifier with a
+ * cheap regex skip for clearly-non-assertion turns. Single-token slash commands
+ * carry no semantic content to classify; everything else falls through to the
+ * Layer 2 LLM (accuracy-first -- regex is NOT used to pre-filter Layer 2; only
+ * to drop turns that obviously can't be assertions).
+ */
+function shouldClassifyForAssertions(message: string): boolean {
+	const trimmed = message.trim();
+	if (trimmed.length === 0) { return false; }
+	// Single slash command with no payload (e.g. "/handoff", "/plan").
+	if (/^\/[a-z][a-z0-9_-]*$/i.test(trimmed)) { return false; }
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // Streaming handlers
 // ---------------------------------------------------------------------------
 
@@ -312,6 +331,36 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   // Attach channel to session pool
   if (!pool.attachChannel(sessionId, channel, abortController)) {
     throw new Error('agent already running on this session');
+  }
+
+  // memory-context M1.5: classify the user turn for assertion-shaped content
+  // BEFORE the chat pipeline starts. Synchronous so any captured preference is
+  // on disk by the time runChatMessage's downstream surfaces (intent resolution,
+  // meta-task dispatch) pull it in. Skipped for clearly-non-assertion turns
+  // (single slash commands like "/plan", "/handoff"); those have no semantic
+  // content to classify.
+  try {
+    if (shouldClassifyForAssertions(message)) {
+      const turnIdForClassify = `${sessionId}:${Date.now()}`;
+      const { hasSubstrateRuntime, getSubstrateRuntime } = await import('./substrate/singleton.js');
+      if (hasSubstrateRuntime()) {
+        const result = await getSubstrateRuntime().classifyAssertion({
+          turnId: turnIdForClassify,
+          text:   message,
+        });
+        if (result.persisted.length > 0) {
+          log.info({
+            sessionId,
+            turnId: turnIdForClassify,
+            persisted: result.persisted.length,
+            accepted:  result.classification.accepted.length,
+          }, 'M1.5: assertion(s) captured from user turn');
+        }
+      }
+    }
+  } catch (err) {
+    // Classification is best-effort; failures must not block the user's chat.
+    log.warn({ sessionId, err: (err as Error).message }, 'M1.5: classifyAssertion threw; chat continues');
   }
 
   try {

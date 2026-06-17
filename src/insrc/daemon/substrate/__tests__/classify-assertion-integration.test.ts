@@ -36,11 +36,46 @@ interface Fx {
 function fx(): Fx {
 	const root = mkdtempSync(join(tmpdir(), 'insrc-substrate-p5int-'));
 	const memory = createMemoryStore({ workspaceId: 'wsP5', rootDir: root });
-	const substrate = createSubstrateRuntime({ memory });
+	// G1+G3 reframing: Layer 1 now defers all plausible assertions to Layer 2.
+	// Provide a scripted Layer 2 hook that pulls the Layer 1-extracted heuristic
+	// subject out of the prompt span so the integration tests' assertion-routing
+	// behaviour remains intact.
+	const llmClassify: import('../classifier/user-assertion.js').LlmClassifyHook = async (span, hints) => {
+		const subj = extractHeuristicSubjectFromSpan(span);
+		if (subj === undefined) {
+			return { kind: 'defer', reason: 'no subject extractable' };
+		}
+		return {
+			kind: 'accept',
+			payload: {
+				text:         span,
+				subject:      subj,
+				polarity:     'preference',
+				scope:        'workspace',
+				targetOwners: [],
+				confidence:   0.9,
+				...(hints.layer1 === 'defer' ? {} : {}),
+			},
+		};
+	};
+	const substrate = createSubstrateRuntime({ memory, classifier: { llmClassify } });
 	return {
 		substrate,
 		dispose: () => rmSync(root, { recursive: true, force: true }),
 	};
+}
+
+/** Layer-1-equivalent subject extraction used by the scripted Layer 2 in tests. */
+function extractHeuristicSubjectFromSpan(span: string): string | undefined {
+	const useFor = span.match(/use\s+([a-z0-9_-]+)\s+for\s+([a-z0-9_-]+)/i);
+	if (useFor !== null) {
+		return `${useFor[1]!.toLowerCase()}-for-${useFor[2]!.toLowerCase()}`;
+	}
+	const verb = span.match(/^(always|never|avoid|do not|don't|prefer|require)\s+([a-z0-9_-]+)/i);
+	if (verb !== null) {
+		return verb[2]!.toLowerCase();
+	}
+	return undefined;
 }
 
 function makeSkill(opts: {
