@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Memory + Context &mdash; consolidation &amp; agent integration</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e2e4ed;
+      --muted: #8b8fa8;
+      --accent: #7c6af7;
+      --accent2: #4fc3f7;
+      --green: #4caf7d;
+      --yellow: #f5c842;
+      --red: #e57373;
+      --code-bg: #12151e;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 15px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+    body { background: var(--bg); color: var(--text); line-height: 1.7; display: flex; }
+    main { flex: 1; min-width: 0; max-width: 960px; margin: 0 auto; padding: 2rem; }
+    @media (min-width: 1100px) { main { margin-left: 280px; } }
+
+    h1 { font-size: 2rem; color: var(--accent); margin-bottom: 0.25rem; }
+    h2 { font-size: 1.3rem; color: var(--accent2); margin: 2.5rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+    h3 { font-size: 1.05rem; color: var(--yellow); margin: 1.5rem 0 0.5rem; }
+    h4 { font-size: 0.95rem; color: var(--green); margin: 1rem 0 0.4rem; }
+    p { margin: 0.6rem 0; }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .open { color: var(--accent2); font-size: 0.92em; }
+    .warn { color: var(--yellow); font-size: 0.92em; }
+
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow-x: auto; font-size: 0.82rem; line-height: 1.6; margin: 0.75rem 0; }
+    code { font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace; font-size: 0.88em; }
+    pre code { font-size: inherit; }
+    :not(pre) > code { background: var(--code-bg); padding: 0.15em 0.4em; border-radius: 3px; }
+
+    ul, ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+    li { margin: 0.25rem 0; }
+
+    table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.88rem; }
+    th, td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; vertical-align: top; }
+    th { background: var(--surface); color: var(--accent2); font-weight: 600; }
+    td { background: var(--bg); }
+    tr:nth-child(even) td { background: #13161f; }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+    .callout { border-left: 3px solid var(--accent); background: rgba(124, 106, 247, 0.06); padding: 0.75rem 1rem; margin: 1rem 0; border-radius: 0 6px 6px 0; }
+    .callout.warn { border-left-color: var(--yellow); background: rgba(245, 200, 66, 0.06); }
+    .callout.open { border-left-color: var(--accent2); background: rgba(79, 195, 247, 0.06); }
+    .callout.error { border-left-color: var(--red); background: rgba(229, 115, 115, 0.06); }
+
+    nav.toc { position: fixed; top: 0; left: 0; width: 260px; height: 100vh; background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 1.2rem 1rem 2rem; z-index: 100; }
+    nav.toc h2 { font-size: 0.85rem; color: var(--accent); margin: 0 0 0.75rem; border: none; padding: 0; text-transform: uppercase; letter-spacing: 0.05em; }
+    nav.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: toc-section; }
+    nav.toc > ol > li { counter-increment: toc-section; margin: 0.2rem 0; }
+    nav.toc > ol > li > a::before { content: counter(toc-section) ". "; color: var(--muted); font-size: 0.75rem; }
+    nav.toc ol ol { padding-left: 1rem; margin: 0.1rem 0 0.25rem; }
+    nav.toc a { color: var(--text); text-decoration: none; font-size: 0.8rem; line-height: 1.5; display: block; padding: 0.1rem 0.4rem; border-radius: 3px; transition: background 0.15s, color 0.15s; }
+    nav.toc a:hover, nav.toc a.active { color: var(--accent2); background: rgba(79, 195, 247, 0.08); }
+    nav.toc ol ol a { color: var(--muted); font-size: 0.75rem; }
+    @media (max-width: 1099px) { nav.toc { position: static; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); max-height: 50vh; } main { margin-left: 0; } }
+  </style>
+</head>
+<body>
+
+  <nav class="toc">
+    <h2>Memory + Context</h2>
+    <ol>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#status-quo">Status quo &mdash; what exists today</a>
+        <ol>
+          <li><a href="#substrate">Substrate</a></li>
+          <li><a href="#context-budget">L1-L5 context budget</a></li>
+          <li><a href="#conversation-store">Conversation store</a></li>
+          <li><a href="#classifier-memory">Classifier memory bundle</a></li>
+          <li><a href="#config-store">Config store (legacy)</a></li>
+        </ol>
+      </li>
+      <li><a href="#user-problem">The user's problem, decomposed</a></li>
+      <li><a href="#strategy">Strategy: consolidate around the substrate</a></li>
+      <li><a href="#integration-points">Integration points (the real questions)</a>
+        <ol>
+          <li><a href="#chat-wiring">Chat &harr; substrate</a></li>
+          <li><a href="#metatask-wiring">Meta-task &harr; substrate</a></li>
+          <li><a href="#config-fate">Config-store fate</a></li>
+        </ol>
+      </li>
+      <li><a href="#worked-example">Worked example end-to-end</a></li>
+      <li><a href="#open">Open questions (gaps to iterate)</a></li>
+      <li><a href="#non-goals">Non-goals</a></li>
+      <li><a href="#milestones">Milestones</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <h1>Memory + Context &mdash; consolidation &amp; agent integration</h1>
+    <p class="muted">
+      Status: <strong style="color:var(--yellow)">DRAFT</strong> &middot;
+      Scope: framework-level memory + context system across daemon, agent, chat, meta-task &middot;
+      Surfaced via: O4 of [<a href="meta-task-plan.html">/plan template design</a>] &middot;
+      Tracks: <a href="../plans/TODO.md">plans/TODO.md</a> item #1
+    </p>
+
+    <div class="callout">
+      <strong>This is a consolidation + integration design, not a from-scratch one.</strong>
+      An audit of the codebase before drafting this doc surfaced an already-implemented memory
+      substrate (<code>src/insrc/daemon/substrate/</code>, ~3,300 LOC, P0&ndash;P10 complete) plus
+      four other partially-overlapping memory subsystems. The substrate covers ~90&#37; of what we
+      sketched for preferences in O4 &mdash; including a user-assertion classifier that's exactly
+      the "preferences from corrective turns" mechanism. The real work isn't building new memory
+      machinery; it's <em>wiring the substrate into the agent / chat / meta-task surfaces and
+      deciding the fate of the legacy <code>config/</code> system.</em>
+    </div>
+
+
+    <h2 id="overview">1. Overview</h2>
+
+    <h3>1.1 The problem (user-reported)</h3>
+    <p>
+      Real-world reliability: the framework's <code>memory</code> slot (chat turn ANN) + the
+      auto-memory file lose durable user preferences over time. Examples the user has been bitten
+      by: "always include unit tests in implementation plans for this repo" gets stated, used
+      for a session, then drifts out of recall when the next /plan invocation happens. Even when
+      forced to write the preference to memory, it gets diluted, paraphrased, or lost.
+    </p>
+
+    <h3>1.2 The shape of the answer</h3>
+    <p>
+      Three things need to be true for durable preferences to actually work:
+    </p>
+    <ol>
+      <li>
+        <strong>Categorized, owner-scoped storage</strong> &mdash; not undifferentiated blob memory.
+        A "prefer unit tests" rule belongs in a specific bucket (template /plan, category
+        implementation, repo X) so retrieval is deterministic, not ANN-pray.
+      </li>
+      <li>
+        <strong>Capture from observed user behavior</strong> &mdash; not just explicit "/remember"
+        commands. The user shouldn't have to manually curate every preference. When they say
+        "always include unit tests" in chat, the system should notice and offer to save it.
+      </li>
+      <li>
+        <strong>Always-include retrieval at the right moments</strong> &mdash; not opt-in via
+        semantic search. When /plan is producing an implementation plan, the preferences for
+        <code>(template: plan, category: implementation, repo: this)</code> must be in the prompt.
+        No "if cloud LLM happens to ask for memory" gating.
+      </li>
+    </ol>
+
+
+    <h2 id="status-quo">2. Status quo &mdash; what exists today</h2>
+
+    <p>
+      Five memory-related subsystems exist. Significantly more than I assumed when sketching O4.
+      Knowing what's already shipped is the whole point of this audit; the design lands on
+      consolidation rather than parallel construction.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Subsystem</th><th>Files</th><th>Purpose</th><th>What it nails</th><th>What it misses for preferences</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><a href="#substrate">Substrate</a></td>
+          <td><code>daemon/substrate/</code> ~3300 LOC<br>P0&ndash;P10 done</td>
+          <td>Owner-scoped typed memory + context assembly for skills</td>
+          <td>Trichotomy (fact/hint/constraint); user-assertion classifier (D6); typed slot retrieval; Lance ANN; feedback bus</td>
+          <td>Not wired to chat / agents / meta-task. Currently consumed by L1+L2 skills only.</td>
+        </tr>
+        <tr>
+          <td><a href="#context-budget">L1-L5 context budget</a></td>
+          <td><code>agent/context/</code> ~1480 LOC</td>
+          <td>Per-turn chat budget assembly</td>
+          <td>System / summary / recent / semantic / task layering; budget enforcement</td>
+          <td>Turn-level only; no notion of cross-session preferences or owner scoping.</td>
+        </tr>
+        <tr>
+          <td><a href="#conversation-store">Conversation store</a></td>
+          <td><code>db/conversations.ts</code>, <code>db/lance/turn-vec.ts</code></td>
+          <td>Chat turn history with multi-tier retention + ANN</td>
+          <td>Hot/warm/cold/archive tiers; per-session and per-repo ANN; durable on disk</td>
+          <td>Free-form turn text; nothing distinguishes "preference assertion" from "chat noise" in storage.</td>
+        </tr>
+        <tr>
+          <td><a href="#classifier-memory">Classifier memory bundle</a></td>
+          <td><code>agent/intent/classifier-memory.ts</code>, IPC + MCP handlers</td>
+          <td>Memory bundle for intent classification (dual ANN)</td>
+          <td>Reuses turn_vec + response_segment_vec; clean retrieval API</td>
+          <td>ANN-only; surfaces what the embedding catches, misses what it doesn't.</td>
+        </tr>
+        <tr>
+          <td><a href="#config-store">Config store (legacy)</a></td>
+          <td><code>config/</code> ~1170 LOC</td>
+          <td>Conventions / feedback / templates store w/ LLM-driven generalization</td>
+          <td>Global vs project scope classification; LLM generalization; file-backed</td>
+          <td>Pre-substrate; parallel to substrate; only used by legacy planner / Delegate / brainstorm / designer.</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <h3 id="substrate">2.1 Substrate (<code>daemon/substrate/</code>)</h3>
+    <p>
+      The most comprehensive prior work and the foundation everything else should compose around.
+      Designed in detail in
+      <a href="../plans/memory-context-substrate.md"><code>plans/memory-context-substrate.md</code></a>
+      (1,342 lines, 15 locked decisions D1&ndash;D15). Implementation tracked in
+      <a href="../plans/skills/substrate-implementation-status.md"><code>plans/skills/substrate-implementation-status.md</code></a>
+      (P0&ndash;P10 all done).
+    </p>
+
+    <p><strong>What it provides:</strong></p>
+    <ul>
+      <li>
+        <strong>Owner-scoped typed memory store</strong> &mdash; namespaces per owner
+        (<code>'skill:code.class.extract-fields'</code>, <code>'agent:pair'</code>,
+        <code>'classifier:intent'</code>, &hellip;). File-backed; atomic temp+rename writes;
+        directory-tree sharded.
+      </li>
+      <li>
+        <strong>Trichotomy</strong>: every entry is <code>fact</code> / <code>hint</code> /
+        <code>constraint</code>. <code>constraint</code> = external authority (usually user);
+        wins conflict resolution; ages only on explicit recontradiction. <em>This is the right
+        kind for user preferences.</em>
+      </li>
+      <li>
+        <strong>Four query modes</strong>: <code>byKey</code>, <code>prefix</code>,
+        <code>byEmbedding</code> (Lance ANN), <code>filter</code>. Single-source slots; no
+        cross-source mixing.
+      </li>
+      <li>
+        <strong>Working state ledger</strong> + <strong>distillation</strong> on successful
+        return. Pinned ledger entries become memory entries.
+      </li>
+      <li>
+        <strong>Feedback bus</strong> (D8) &mdash; fire-and-forget fan-out by target owner.
+      </li>
+      <li>
+        <strong>User-assertion classifier (D6)</strong> at
+        <code>daemon/substrate/classifier/user-assertion.ts</code>. Three-layer pipeline:
+        heuristic detect &rarr; heuristic classify &rarr; LLM classify &rarr; user confirm.
+        Accepted assertions land as <code>kind: 'constraint'</code> with
+        <code>source: { kind: 'user-asserted', turnId }</code> in the targeted owner's
+        <code>user-assertions</code> namespace.
+      </li>
+      <li>
+        <strong>AssertionIndex</strong> &mdash; routes accepted assertions to owners that
+        declared <code>assertionInterests</code> at registration time. <em>This is the routing
+        layer that makes "save preference for /plan implementation category" work without each
+        consumer hand-rolling the routing.</em>
+      </li>
+    </ul>
+
+    <div class="callout warn">
+      <strong>Critical gap that fully explains the user's problem.</strong> The substrate has the
+      machinery. No agent, no chat-handler, no meta-task currently calls
+      <code>runtime.classifyAssertion(turn)</code>. Chat turns flow through the L1-L5 context
+      budget (which doesn't classify) and the intent resolver (which only does intent + relationship
+      classification, not assertion classification). The user-assertion classifier exists but is
+      never invoked on a user turn. That's why "always include unit tests" gets stated and
+      forgotten.
+    </div>
+
+
+    <h3 id="context-budget">2.2 L1-L5 context budget (<code>agent/context/</code>)</h3>
+    <p>
+      Per-turn chat-side context assembler. ContextManager builds:
+    </p>
+    <ul>
+      <li><strong>L1 system</strong> &mdash; static project instructions (built once per session)</li>
+      <li><strong>L2 summary</strong> &mdash; rolling summary; updated on eviction</li>
+      <li><strong>L3a recent</strong> &mdash; recency-weighted recent turns</li>
+      <li><strong>L3b semantic</strong> &mdash; ANN-similarity prior turns</li>
+      <li><strong>L4 task</strong> &mdash; code entities from the graph</li>
+      <li><strong>L5 response</strong> &mdash; output budget</li>
+    </ul>
+    <p>
+      Used by <code>chat-handler.ts</code>, <code>session.ts</code>, <code>task.ts</code>,
+      <code>intent/resolver.ts</code>. Strictly per-turn; no notion of cross-session storage or
+      ownership scoping. Doesn't manage preferences &mdash; it manages tokens. Stays unchanged in
+      the new design except for the addition of a "preferences" layer drawn from the substrate
+      (&sect;5).
+    </p>
+
+
+    <h3 id="conversation-store">2.3 Conversation store</h3>
+    <p>
+      <code>db/conversations.ts</code> + <code>db/lance/turn-vec.ts</code>. Multi-tier retention
+      (hot/warm/cold/archive); per-session turns; per-repo ANN via <code>searchTurnsByRepo</code>.
+      The chat memory backbone &mdash; durable, indexed, but free-form. Nothing distinguishes a
+      preference assertion from chat noise <em>in storage</em>; that's the classifier's job at
+      capture time (&sect;5).
+    </p>
+
+
+    <h3 id="classifier-memory">2.4 Classifier memory bundle</h3>
+    <p>
+      <code>agent/intent/classifier-memory.ts</code> + IPC handler
+      <code>internal-ipc/handlers/memory.ts</code> + MCP tool <code>mcp/tools/memory.ts</code>.
+      Bundles top-K turns + top-K response segments via dual-ANN for the intent classifier
+      (&sect;2.5 of CLAUDE.md). Reusable wrapper around <code>turn_vec</code> +
+      <code>response_segment_vec</code>. Doesn't grow new responsibilities under this design;
+      the substrate's <code>preferences</code> slot composes with it but doesn't replace it.
+    </p>
+
+
+    <h3 id="config-store">2.5 Config store (legacy)</h3>
+    <p>
+      <code>config/</code> &mdash; pre-substrate system. <code>ConfigStore</code> +
+      <code>searchConfig</code> + <code>recordFeedback</code>. LLM-driven generalization (a
+      raw user correction becomes an imperative-form rule), scope classification (global vs
+      project), namespaces under <code>~/.insrc/conventions/</code>,
+      <code>~/.insrc/feedback/</code>, <code>~/.insrc/templates/</code>.
+    </p>
+    <p>
+      Used by the legacy planner, Delegate, brainstorm, designer. Pre-dates the substrate;
+      overlaps heavily in concept (typed scoped storage with LLM-curated entries) but uses a
+      different storage format and a different API. <em>This is the system to migrate / absorb /
+      retire &mdash; we don't want two parallel preferences storages.</em>
+    </p>
+
+
+    <h2 id="user-problem">3. The user's problem, decomposed</h2>
+
+    <p>Mapping the user-reported failure to the existing systems:</p>
+
+    <table>
+      <thead>
+        <tr><th>Symptom</th><th>What goes wrong</th><th>Why existing systems don't fix it</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>"I told the agent X; the agent didn't remember X in the next session"</td>
+          <td>X was never <em>classified</em> at capture time. Lives as a free-form chat turn.</td>
+          <td>L1-L5 doesn't classify. Intent resolver classifies <em>intent</em>, not assertions.
+            Substrate's classifier exists but is never invoked on chat turns.</td>
+        </tr>
+        <tr>
+          <td>"Auto-memory forced to write X eventually loses X"</td>
+          <td>Auto-memory is unstructured; ANN retrieval over many turns dilutes the signal.</td>
+          <td>L3b semantic recall is similarity-based; high-recency or high-similarity wins,
+            not high-authority. A constraint should win, but the constraint kind only exists in
+            the substrate, which the chat doesn't touch.</td>
+        </tr>
+        <tr>
+          <td>"I want this preference to apply to /plan specifically"</td>
+          <td>No mechanism for the user to scope a preference to a template / category.</td>
+          <td>Substrate has <code>assertionInterests</code> + <code>AssertionIndex</code> that
+            would do this routing &mdash; but it's not exposed to chat-side capture.</td>
+        </tr>
+        <tr>
+          <td>"My preferences should auto-load into /plan, not require asking"</td>
+          <td>No always-include retrieval at template execution time.</td>
+          <td>Meta-task framework's <code>memory</code> slot is opt-in via the cloud LLM's
+            phase-1 ask. Substrate has a <code>preferences</code>-shaped equivalent (the typed
+            slot system) but isn't accessible to meta-task templates yet.</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <h2 id="strategy">4. Strategy: consolidate around the substrate</h2>
+
+    <p>
+      The substrate is the canonical memory layer. Everything else either composes with it,
+      delegates to it, or migrates into it.
+    </p>
+
+    <p><strong>Operating principles:</strong></p>
+    <ol>
+      <li>
+        <strong>One memory primitive.</strong> Substrate is it. The <code>config/</code> system
+        becomes a transitional surface, then deletes.
+      </li>
+      <li>
+        <strong>One classifier.</strong> Substrate's <code>UserAssertionClassifier</code> is the
+        only path for "convert a free-form statement into a durable rule." Used by chat capture,
+        explicit slash commands, and meta-task gate handlers alike.
+      </li>
+      <li>
+        <strong>One retrieval contract.</strong> Substrate's typed-slot
+        <code>ContextAssembler</code> is the API every consumer composes against. The meta-task
+        framework's <code>memory</code> slot becomes a thin delegate. The L1-L5 chat assembler
+        adds preferences as a new layer drawn from the substrate.
+      </li>
+      <li>
+        <strong>Owner identity scales</strong> from skills (already done) to agents
+        (<code>'agent:pair'</code>, <code>'agent:meta-task:plan'</code>,
+        <code>'agent:meta-task:plan:implementation'</code>) without new primitives. The existing
+        owner-naming convention handles the scope axes our O4 conversation needed.
+      </li>
+    </ol>
+
+    <p>
+      <strong>What this preserves:</strong> the substrate's locked design (D1&ndash;D15), the
+      implementation already shipped, all skill consumers, all backward-compatible test surfaces.
+      <strong>What this changes:</strong> chat turns get classified; meta-task templates declare
+      owners + assertion-interests; <code>config/</code> deprecates.
+    </p>
+
+
+    <h2 id="integration-points">5. Integration points (the real questions)</h2>
+
+    <p>
+      Three concrete decisions the design has to make. Each one is a wiring exercise + a small
+      framework extension, not a from-scratch subsystem.
+    </p>
+
+
+    <h3 id="chat-wiring">5.1 Chat &harr; substrate</h3>
+
+    <p>
+      Wire chat turns through <code>runtime.classifyAssertion()</code>. Three sub-questions:
+    </p>
+
+    <h4>5.1.1 When does classification run?</h4>
+    <p>
+      Two candidate triggers:
+    </p>
+    <ul>
+      <li>
+        <strong>Per-turn passive scan</strong> &mdash; every user turn flows through
+        classifyAssertion before the intent resolver. Captures everything; risk of noise.
+      </li>
+      <li>
+        <strong>Targeted at correction moments</strong> &mdash; only when the user is rejecting /
+        revising / correcting (M5 plan-revision gates, abort feedback, explicit
+        <code>/remember</code> slash). Cleaner signal; misses standalone preference statements
+        ("by the way, this codebase requires JS not TS").
+      </li>
+    </ul>
+    <p>
+      <strong>My read</strong>: both. Passive scan with a heuristic gate (only enqueue
+      classification when the turn matches assertion-shape regexes &mdash; D6's Layer 1 already
+      does this cheaply). Targeted invocation guaranteed at gate moments. The classifier itself
+      deduplicates against already-stored assertions per D7's last-wins rule, so noise is bounded.
+    </p>
+
+    <h4>5.1.2 What does user-confirm look like?</h4>
+    <p>
+      D6's Layer 3 is "user-confirm" &mdash; when the classifier's confidence is below threshold,
+      ask the user explicitly. The default substrate implementation returns "defer" (no confirm
+      surface). We need to wire this to a chat-side affordance.
+    </p>
+    <p>
+      Candidate UX: inline confirmation bubble in chat
+      ("Save 'always include unit tests' as a preference for /plan implementation? [Save] [No
+      thanks] [Customize&hellip;]"). Same gate framework already used for handoff Mode A and
+      M5 plan-revision &mdash; no new component.
+    </p>
+
+    <h4>5.1.3 Default acceptance threshold</h4>
+    <p>
+      D6 spec: Layer 1 heuristic accept-only for the obviously-shaped patterns ("always X",
+      "never Y", "remember Z", "use A for B", "do not C"). Layer 2 LLM-classify for ambiguous
+      shapes. Layer 3 user-confirm when LLM confidence is below threshold.
+    </p>
+    <p>
+      Open: what's the threshold? Substrate code currently leaves this injectable. Picking a
+      default is a UX call &mdash; high threshold = many confirms (annoying) but high precision;
+      low threshold = few confirms but risk of false-positive preferences locked in.
+    </p>
+
+
+    <h3 id="metatask-wiring">5.2 Meta-task &harr; substrate</h3>
+
+    <p>
+      Make meta-task templates first-class substrate owners. Three pieces:
+    </p>
+
+    <h4>5.2.1 Template-as-owner registration</h4>
+    <p>
+      Each meta-task template declares an owner id + assertion-interests + memory schema:
+    </p>
+
+<pre><code>// In templates/plan.ts:
+export const planTemplate: MetaTaskTemplate = {
+  id: 'plan',
+  // ... existing fields ...
+  ownerId: 'agent:meta-task:plan',
+  assertionInterests: [
+    'plan-policy',
+    'naming-conventions',
+    'test-strategy',
+    'commit-strategy',
+    // ...
+  ],
+  memorySchema: [
+    { namespace: 'user-assertions', kind: 'constraint' },
+  ],
+};</code></pre>
+
+    <p>
+      Owners can be sub-scoped: <code>'agent:meta-task:plan:implementation'</code> for
+      category-specific preferences. The AssertionIndex routes accepted assertions to all
+      owners whose interests match the classified subject.
+    </p>
+
+    <h4>5.2.2 New <code>preferences</code> context slot</h4>
+    <p>
+      Add to meta-task framework's <code>ContextRequest</code>:
+    </p>
+
+<pre><code>type ContextRequestPreferences = {
+  readonly kind: 'preferences';
+  readonly scope?: {
+    readonly templateId?: string | undefined;
+    readonly category?:   string | undefined;
+    readonly repoPath?:   string | undefined;
+  } | undefined;
+};</code></pre>
+
+    <p>
+      Fulfillment translates to a substrate query: open the owner namespace matching the scope,
+      scan <code>user-assertions</code> with the trichotomy ranking (constraint &gt; fact &gt;
+      hint), return as a chunk. Local LLM doesn't synthesize &mdash; the substrate already
+      manages ranking + freshness.
+    </p>
+
+    <h4>5.2.3 Always-include policy</h4>
+    <p>
+      For the user's "preferences should auto-load" requirement: meta-task templates declare
+      preferences as a <strong>required</strong> phase-1 slot. The framework injects a
+      <code>preferences</code> request into every step's phase-1 ask automatically, before the
+      cloud LLM sees the ask. The cloud LLM <em>can</em> additionally request preferences via its
+      own phase-1 ask, but the framework guarantees they're already in the chunk set.
+    </p>
+    <p>
+      This violates the meta-tasks framework's "cloud LLM decides what to ask for" principle
+      slightly &mdash; preferences are framework-mandatory. Worth the violation because the
+      user's problem is exactly that preferences should NOT be cloud-LLM-discretionary.
+    </p>
+
+
+    <h3 id="config-fate">5.3 Config-store fate</h3>
+
+    <p>
+      Three options for the legacy <code>config/</code> system:
+    </p>
+
+    <ul>
+      <li>
+        <strong>A. Migrate fully.</strong> <code>config/</code> deletes; everything moves to
+        substrate. Legacy planner / Delegate / brainstorm / designer call substrate APIs. ~1170
+        LOC removed; ~5 consumers migrate.
+      </li>
+      <li>
+        <strong>B. Keep as a thin facade.</strong> <code>config/</code> survives as a
+        thin wrapper that delegates to substrate. <code>config.searchConfig()</code> becomes
+        a substrate query; <code>config.recordFeedback()</code> becomes a substrate
+        classifier invocation. No consumer migration; substrate is the source of truth.
+      </li>
+      <li>
+        <strong>C. Retire when callers retire.</strong> Legacy planner gets retired in /plan M4.b
+        (per <a href="meta-task-plan.html">/plan template design</a>); Delegate retires when
+        Pair migrates; brainstorm / designer follow. <code>config/</code> deletes when no callers
+        remain.
+      </li>
+    </ul>
+    <p>
+      <strong>My read:</strong> <strong>C</strong>. Lowest risk (no API change to callers in
+      flight); preserves substrate as the new path without forcing a coordinated migration; aligns
+      with the existing per-meta-task retire schedule. Marks <code>config/</code> as deprecated
+      in code comments + adds to <a href="../plans/TODO.md">plans/TODO.md</a> for tracking.
+    </p>
+
+
+    <h2 id="worked-example">6. Worked example end-to-end</h2>
+
+    <p>
+      Trace of the "always include unit tests" preference, from utterance to next-run retrieval.
+    </p>
+
+    <ol>
+      <li>
+        <strong>User says</strong> in chat: <em>"For this repo, always include unit tests in
+        implementation plans."</em>
+      </li>
+      <li>
+        <strong>Chat-handler enqueues a classification.</strong> Layer 1 regex matches "always X
+        in implementation plans" &mdash; high-confidence assertion shape. No LLM needed.
+      </li>
+      <li>
+        <strong>Substrate classifies + routes.</strong> Subject:
+        <code>test-strategy:include-unit-tests</code>. AssertionIndex lookup finds owners that
+        declared <code>assertionInterests</code> matching <code>test-strategy</code>:
+        <code>'agent:meta-task:plan'</code> +
+        <code>'agent:meta-task:plan:implementation'</code> +
+        <code>'agent:meta-task:implement'</code> (when /implement lands).
+      </li>
+      <li>
+        <strong>Substrate persists.</strong> Writes <code>kind: 'constraint'</code> entry to
+        each routed owner's <code>user-assertions</code> namespace with
+        <code>source: { kind: 'user-asserted', turnId }</code>. Scope refinement (repo path) lands
+        in the entry's value, not the namespace, so retrieval can filter.
+      </li>
+      <li>
+        <strong>Substrate fires feedback event.</strong> Each routed owner's
+        <code>applyFeedback</code> handler (if any) sees the new constraint. /plan's handler is
+        a no-op for now &mdash; existing constraints get included in next run via the slot, no
+        cache invalidation needed.
+      </li>
+      <li>
+        <strong>Chat shows confirmation (or doesn't, per &sect;5.1.2).</strong> Layer 1 high
+        confidence: silent acceptance, optional toast. Layer 2 ambiguous: inline confirmation
+        bubble.
+      </li>
+      <li>
+        <strong>Days later, user invokes <code>/plan implement: add a new auth provider</code>.</strong>
+      </li>
+      <li>
+        <strong>P1 analyze runs.</strong> Framework injects
+        <code>{ kind: 'preferences', scope: { templateId: 'plan', repoPath: '/Users/.../repo' } }</code>
+        into the phase-1 fulfillment automatically. Substrate-backed fetcher scans
+        <code>agent:meta-task:plan</code>/<code>user-assertions</code>, filters by scope, returns
+        the matching constraints.
+      </li>
+      <li>
+        <strong>Phase-2 prompt includes</strong>:
+        <em>"Active user preferences for this scope: test-strategy: include-unit-tests
+        (constraint, source: user-asserted 2026-06-10)."</em>
+      </li>
+      <li>
+        <strong>P1 emits category</strong>: <code>implementation/new-feature</code>. P3 draft
+        sees the same preferences. P5 detail's enrichment for the implementation category bakes
+        the unit-test requirement into each step's <code>data</code>.
+      </li>
+      <li>
+        <strong>Resulting plan includes unit-test steps.</strong> No need for the user to
+        re-state the preference.
+      </li>
+    </ol>
+
+
+    <h2 id="open">7. Open questions (gaps to iterate)</h2>
+
+    <p>
+      These are the gaps to resolve before implementation. Numbered for the iteration loop.
+    </p>
+
+    <ol>
+      <li class="open">
+        <strong>G1: Chat-turn classification trigger.</strong> Per-turn passive (with regex
+        gate) + targeted gate-time? Or strict targeted-only? Affects noise vs coverage tradeoff.
+        See &sect;5.1.1.
+      </li>
+      <li class="open">
+        <strong>G2: User-confirm UX threshold.</strong> What classifier confidence triggers
+        inline confirmation? D6 leaves it injectable; design needs a default. See &sect;5.1.3.
+      </li>
+      <li class="open">
+        <strong>G3: Assertion-interest taxonomy.</strong> The AssertionIndex routes by subject
+        string match. Do we define a closed enum of subjects ("test-strategy",
+        "naming-conventions", "commit-strategy", &hellip;) or leave it free-form? Closed enum:
+        consistent routing; misses novel preference kinds. Free-form: flexible; risk of
+        mis-routing similar subjects to different owners.
+      </li>
+      <li class="open">
+        <strong>G4: Preference scope axes serialization.</strong> Substrate stores entries as
+        <code>(owner, namespace, key) &rarr; value</code>. Where do the scope axes (repo path,
+        plan category) live? Two candidates: (a) sub-namespaces
+        (<code>'user-assertions/repo-X/category-implementation'</code>) &mdash; clean
+        retrieval but rigid; (b) entry value carries scope refinement, retrieval filters
+        post-fetch &mdash; flexible but every read scans more entries. Pick before any code.
+      </li>
+      <li class="open">
+        <strong>G5: Framework-mandatory preference injection.</strong> &sect;5.2.3 proposes the
+        framework forces a <code>preferences</code> slot into every meta-task phase-1 ask
+        regardless of what the cloud LLM requests. This violates the framework's
+        "cloud LLM decides what to fetch" principle. Worth violating? Or do we trust the cloud
+        LLM to always ask for preferences (with a strong prompt that says "always ask for
+        preferences at phase 1")?
+      </li>
+      <li class="open">
+        <strong>G6: Cross-session conversation store integration.</strong> When a chat turn is
+        classified as an assertion, we write to the substrate <em>and</em> the turn remains in
+        the conversation store. Do we also tag the conversation turn with a "classified as
+        assertion" marker for future analysis, or is the substrate entry the only durable
+        record? (The substrate's <code>turnId</code> back-reference already links to the
+        original turn, but the reverse isn't indexed.)
+      </li>
+      <li class="open">
+        <strong>G7: Confidence accumulation for re-assertions.</strong> D13 covers observation
+        confidence accumulation (saturating, tiered). What's the rule when the user re-asserts
+        the same preference? Counter increment? Refresh timestamp + leave confidence at
+        ceiling? Substrate has primitives; we need the policy.
+      </li>
+      <li class="open">
+        <strong>G8: Implicit-capture-during-retrieval (from O4).</strong> The original O4
+        conversation proposed the local LLM inline-flagging candidate preferences during
+        retrieval. Substrate's classifier is already the right mechanism &mdash; do we
+        <em>also</em> run a "scan recent unclassified turns at retrieval time" pass, or rely
+        purely on capture-time classification? Implicit-at-retrieval recovers preferences the
+        capture-time classifier missed (e.g., LLM was down at the time); but it's a
+        re-classification pass that costs tokens.
+      </li>
+      <li class="open">
+        <strong>G9: Substrate &harr; L1-L5 budget integration.</strong> Should preferences
+        appear as a new layer in the L1-L5 chat assembler too? Or stay strictly in meta-task
+        phase-1? Strictly meta-task is simpler; adding to L1-L5 means generic chat (non-meta-task)
+        also gets preferences for free.
+      </li>
+      <li class="open">
+        <strong>G10: Migration timing for <code>config/</code>.</strong> &sect;5.3 picks option C
+        (retire when callers retire). When do we put the "deprecated" stamp + announce the
+        delete timeline? On this doc's approval, or after first substrate-backed consumer ships?
+      </li>
+    </ol>
+
+
+    <h2 id="non-goals">8. Non-goals</h2>
+
+    <ul>
+      <li>
+        <strong>Not</strong> redesigning the substrate. Its design is locked (D1&ndash;D15) and
+        implementation is done. We compose with it; we don't rework it.
+      </li>
+      <li>
+        <strong>Not</strong> replacing the L1-L5 chat budget. It does per-turn token budgeting,
+        a different concern. We may add preferences as a new layer; we don't subsume it.
+      </li>
+      <li>
+        <strong>Not</strong> a sync-across-machines or cloud-backed memory. Substrate is
+        workspace-local by D5; user preferences stored under the same constraint.
+      </li>
+      <li>
+        <strong>Not</strong> exporting preferences to external systems (Jira, GitHub). Those are
+        deliverable-side routing; preferences are inputs.
+      </li>
+      <li>
+        <strong>Not</strong> in-memory caching of preferences at the framework level. Substrate's
+        existing caching (LRU per-workspace) suffices; we don't add another tier.
+      </li>
+    </ul>
+
+
+    <h2 id="milestones">9. Milestones</h2>
+
+    <p>
+      Coarse phasing. Concrete after the open questions resolve.
+    </p>
+
+    <table>
+      <thead>
+        <tr><th>Phase</th><th>Deliverable</th><th>Depends on</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>M0</td>
+          <td>
+            Resolve G1&ndash;G10 (this doc's open questions). Lock the substrate-integration
+            contract.
+          </td>
+          <td>this doc</td>
+        </tr>
+        <tr>
+          <td>M1</td>
+          <td>
+            <strong>Chat-side classifier wiring.</strong> Chat-handler invokes
+            <code>runtime.classifyAssertion(turn)</code> per the G1 trigger policy. User-confirm
+            UX bubble lands (per G2). One owner (the chat agent itself,
+            <code>'agent:chat'</code>) declares assertion interests; verifies end-to-end
+            persistence of one preference.
+          </td>
+          <td>M0</td>
+        </tr>
+        <tr>
+          <td>M2</td>
+          <td>
+            <strong>Meta-task <code>preferences</code> slot.</strong> Framework gains the
+            <code>kind: 'preferences'</code> ContextRequest variant + substrate-backed fetcher.
+            <code>/review</code> template adopts it (smoke target).
+          </td>
+          <td>M1</td>
+        </tr>
+        <tr>
+          <td>M3</td>
+          <td>
+            <strong>Owner / assertion-interest declarations on existing meta-task templates.</strong>
+            <code>/plan</code>, <code>/review</code> declare owners + interests. Per-template
+            sub-scoping (e.g., <code>'agent:meta-task:plan:implementation'</code>) for category
+            preferences. End-to-end worked example (&sect;6) green.
+          </td>
+          <td>M2, /plan template implementation</td>
+        </tr>
+        <tr>
+          <td>M4</td>
+          <td>
+            <strong><code>config/</code> deprecation marker.</strong> Code comments + TODO entry
+            for retire schedule (per &sect;5.3 option C). No code change beyond deprecation
+            comments.
+          </td>
+          <td>M3</td>
+        </tr>
+        <tr>
+          <td>M5</td>
+          <td>
+            <strong>Implicit-at-retrieval capture (G8 if accepted).</strong> Substrate gains a
+            "scan recent turns at slot fulfillment" pass. Optional / off by default until
+            evidence justifies the token cost.
+          </td>
+          <td>M3, G8 resolution</td>
+        </tr>
+      </tbody>
+    </table>
+
+
+    <hr />
+    <p class="muted">
+      This doc is the starting point. The 10 open questions are the iteration targets &mdash;
+      walk through each, lock the answer, fold the resolution into the relevant section, and
+      remove from open questions when done. Pattern matches the meta-tasks framework + /plan
+      design docs.
+    </p>
+
+  </main>
+
+  <script>
+    const headings = document.querySelectorAll('main h2[id], main h3[id]');
+    const tocLinks = document.querySelectorAll('nav.toc a');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const id = entry.target.id;
+          tocLinks.forEach(l => l.classList.toggle('active', l.getAttribute('href') === `#${id}`));
+        }
+      });
+    }, { rootMargin: '0px 0px -75% 0px' });
+    headings.forEach(h => observer.observe(h));
+  </script>
+
+</body>
+</html>
