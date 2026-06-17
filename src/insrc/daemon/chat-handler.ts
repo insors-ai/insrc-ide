@@ -1085,6 +1085,19 @@ async function tryFamilyDirectSlash(
     return true;
   }
 
+  // memory-context M1.7. `/prefs` is a thin CRUD surface over the
+  // substrate's `agent:chat/user-assertions/...` namespace -- the
+  // bucket the chat-side classifier writes preferences into. No
+  // orchestrator, no classifier; we just render the IPC handlers'
+  // output as markdown back through the chat stream.
+  const prefsMatch = trimmed.match(/^\/prefs(?:\s+([\s\S]+))?$/);
+  if (prefsMatch) {
+    const args = (prefsMatch[1] ?? '').trim();
+    const { runPrefsSlash } = await import('./prefs-slash.js');
+    await runPrefsSlash(args, requestId, send);
+    return true;
+  }
+
   // Phase 1 of plans/analyzers/data-analyzer.md. Routes /data-analyze
   // through the orchestrator + analyzer loop + scope-tier classifier.
   const dataAnalyzeMatch = trimmed.match(/^\/data-analyze(?:\s+([\s\S]+))?$/);

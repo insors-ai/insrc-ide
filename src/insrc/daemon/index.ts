@@ -1579,6 +1579,22 @@ async function main(): Promise<void> {
 		// accept / reject / dismissed verdict to disk and removes the
 		// worktree; the IDE fires this from the handoff card.
 		'handoff.cleanup':        handoffCleanupRpc,
+
+		// memory-context M1.7. CRUD over the `agent:chat` owner's
+		// `user-assertions` namespace -- backs the `/prefs` slash
+		// command and (future) IDE-side palette commands.
+		'prefs.list': async (params) => {
+			const mod = await import('./prefs-rpc.js');
+			return mod.prefsListRpc(params);
+		},
+		'prefs.edit': async (params) => {
+			const mod = await import('./prefs-rpc.js');
+			return mod.prefsEditRpc(params);
+		},
+		'prefs.discard': async (params) => {
+			const mod = await import('./prefs-rpc.js');
+			return mod.prefsDiscardRpc(params);
+		},
 	}, {
 		// Streaming handlers
 		'handoff.run':              handoffRunStream,

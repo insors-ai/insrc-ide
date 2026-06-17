@@ -94,6 +94,15 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
 		description: 'Requirements agent -- capture acceptance criteria from a fuzzy ask.',
 		example: '/requirements the new billing dashboard',
 	},
+	// User-preferences curation surface (memory-context M1.7). Reads /
+	// edits / discards entries the chat-side classifier wrote into
+	// substrate `agent:chat/user-assertions/...`. Not an agent -- a
+	// CRUD slash dispatcher rendered as markdown.
+	{
+		id: 'prefs',
+		description: 'List, edit, or discard captured user preferences.',
+		example: '/prefs list',
+	},
 ];
 
 /**
