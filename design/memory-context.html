@@ -1264,14 +1264,83 @@ insrc.memory.assertions.noiseThreshold      = 0.30</code></pre>
           milestone (M1) ships.
         </p>
       </li>
-      <li class="open">
-        <strong>G8: Implicit-capture-during-retrieval (from O4).</strong> The original O4
-        conversation proposed the local LLM inline-flagging candidate preferences during
-        retrieval. Substrate's classifier is already the right mechanism &mdash; do we
-        <em>also</em> run a "scan recent unclassified turns at retrieval time" pass, or rely
-        purely on capture-time classification? Implicit-at-retrieval recovers preferences the
-        capture-time classifier missed (e.g., LLM was down at the time); but it's a
-        re-classification pass that costs tokens.
+      <li>
+        <strong>G8: Implicit-capture-during-retrieval. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Keep as a backstop</strong>, not the primary capture path. G1's
+          "Layer 2-classify every user turn" makes capture-time coverage already broad; G8
+          catches the residual gaps:
+        </p>
+        <ul>
+          <li>Layer 2 LLM was unavailable at capture time (transient Ollama outage).</li>
+          <li>Classifier misclassified a turn as <code>reject</code> when it was actually a
+            preference (fresh context at retrieval &mdash; the step's intent &mdash; gives
+            more signal than the turn in isolation).</li>
+          <li>New <code>PreferenceSubject</code> enum additions (G3 extension via code change)
+            mean turns from <em>before</em> the new category existed didn't have a place to
+            route to. Implicit-at-retrieval re-runs against the updated taxonomy.</li>
+        </ul>
+
+        <h4>Cached + incremental, not from-scratch every fulfillment</h4>
+        <p>
+          Per-step from-scratch implicit-capture would mean N local-LLM calls per slot
+          fulfillment per step &mdash; with G5's framework-mandatory injection running on
+          every step, that's pathological. Instead, maintain per-(sessionId, owner) state:
+        </p>
+
+<pre><code>interface ImplicitCaptureState {
+  readonly sessionId:           string;
+  readonly owner:               OwnerId;
+  /** Highest turn idx we've already classified for this owner. */
+  readonly lastScannedTurnIdx:  number;
+  /** Discoveries pending Layer 3 confirm. */
+  readonly candidates: readonly {
+    readonly turnIdx:      number;
+    readonly assertion:    AssertionPayload;
+    readonly relationship: AssertionRelationship;   // G7 discriminator
+  }[];
+  /** Turn idxs the user explicitly dismissed; skipped on future passes. */
+  readonly dismissedTurnIdxs: readonly number[];
+}</code></pre>
+
+        <h4>Fulfillment flow</h4>
+        <ol>
+          <li>Open cached state for <code>(sessionId, owner)</code>.</li>
+          <li>Get turns with <code>idx &gt; lastScannedTurnIdx</code>. If none, skip the
+            implicit pass entirely.</li>
+          <li>For each new turn (excluding <code>dismissedTurnIdxs</code>): run Layer 2
+            classifier. If accepts &rarr; add to <code>candidates</code>; if rejects
+            &rarr; record the idx in <code>dismissedTurnIdxs</code>.</li>
+          <li>Update <code>lastScannedTurnIdx</code> to the highest new idx scanned.</li>
+          <li>Candidates surface <strong>asynchronously</strong> (next chat interaction's
+            confirmation surface), <strong>NOT inline during slot fulfillment</strong>.</li>
+        </ol>
+
+        <h4>Asynchronous surfacing rationale</h4>
+        <p>
+          Surfacing candidates inline during phase-1 fulfillment would interrupt the user
+          mid-meta-task with a confirm modal about a turn from days ago. Wrong moment;
+          attention-cost too high. Instead, candidates queue and surface on the user's next
+          chat interaction (a small "Found N pending preferences from earlier turns &mdash;
+          review?" toast with the standard Layer 3 affordance).
+        </p>
+
+        <h4>What's NOT G8 covering</h4>
+        <ul>
+          <li>Retroactive correction of <em>accepted</em> classifications &mdash; once an
+            assertion is captured at <code>kind: 'constraint'</code>, G8 doesn't second-guess
+            it. Edits go through <code>/prefs</code>.</li>
+          <li>Persistent rescan history &mdash; <code>dismissedTurnIdxs</code> lives per
+            session. Cross-session implicit recall isn't in scope (would require a separate
+            cross-session index).</li>
+        </ul>
+
+        <p class="muted">
+          <strong>Cost</strong> is bounded by incremental scanning + per-session dismissal
+          memory. A user session of 200 turns processes each turn through the classifier
+          exactly once over its lifetime (capture-time + at most one implicit pass).
+        </p>
       </li>
       <li class="open">
         <strong>G9: Substrate &harr; L1-L5 budget integration.</strong> Should preferences
