@@ -703,9 +703,98 @@ export const planTemplate: MetaTaskTemplate = {
           input only.
         </p>
       </li>
-      <li class="open">
-        <strong>G2: User-confirm UX threshold.</strong> What classifier confidence triggers
-        inline confirmation? D6 leaves it injectable; design needs a default. See &sect;5.1.3.
+      <li>
+        <strong>G2: User-confirm UX threshold. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Verdict-driven, not numeric-driven.</strong> Layer 2 classifier emits
+          structured output <code>{ verdict: 'accept' | 'reject' | 'defer', confidence: 0..1,
+          rationale }</code>. The framework routes based on the verdict; the numeric
+          confidence is a tiebreaker within the <code>accept</code> band.
+        </p>
+        <table style="margin-top: 0.5rem;">
+          <thead>
+            <tr><th>Layer 2 output</th><th>Action</th><th>UX</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>accept</code> + confidence &ge; 0.85</td>
+              <td>Auto-persist as <code>kind: 'constraint'</code></td>
+              <td>Toast confirmation in chat</td>
+            </tr>
+            <tr>
+              <td><code>accept</code> + confidence &lt; 0.85</td>
+              <td><strong>Layer 3 confirm</strong></td>
+              <td>Inline toast with Save / Customize&hellip; / Discard</td>
+            </tr>
+            <tr>
+              <td><code>defer</code></td>
+              <td><strong>Layer 3 confirm</strong></td>
+              <td>Same</td>
+            </tr>
+            <tr>
+              <td><code>reject</code></td>
+              <td>Silent discard</td>
+              <td>None</td>
+            </tr>
+            <tr>
+              <td>Subject already stored (dedup hit)</td>
+              <td>Refresh timestamp/confidence per G7</td>
+              <td>None</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          The 0.85 threshold (auto-accept boundary) is broad on purpose &mdash; fewer
+          auto-accepts, more confirms. Under <em>accuracy-first</em> we'd rather pull the user
+          in once than silently capture a wrong rule. <strong>Tracked as an externalizable
+          setting</strong> at
+          <code>insrc.memory.assertionClassifier.autoAcceptThreshold</code> in
+          <a href="../plans/TODO.md">plans/TODO.md</a> for landing in the user-settings
+          framework (<code>insrcConfiguration.ts</code>) when the chat-wiring milestone ships.
+        </p>
+
+        <h4 style="margin-top: 1rem;">Layer 3 UX shape</h4>
+
+<pre><code>─── Capture preference? ───
+"For this repo, always include unit tests in implementation plans."
+
+Scope: meta-task:plan + category=implementation + repo=insrc-ide
+
+[ Save ]    [ Customize&hellip; ]    [ Discard ]</code></pre>
+
+        <ul>
+          <li><strong>Save</strong> &rarr; persist as <code>constraint</code>.</li>
+          <li><strong>Customize&hellip;</strong> &rarr; inline editor: edit the canonical text;
+            widen the scope (dropdown: this repo / all repos; this template / all meta-tasks;
+            this category / all categories). Then Save.</li>
+          <li><strong>Discard</strong> &rarr; silent discard.</li>
+        </ul>
+        <p>
+          Same component, two mount points: chat toast (passive flow) + gate modal inline
+          (targeted flow per G1).
+        </p>
+
+        <h4>No dismissal timeout, no silent loss.</h4>
+        <p>
+          If the user ignores a toast, the substrate persists the candidate as
+          <strong><code>kind: 'hint'</code></strong> with a <code>pendingConfirm: true</code>
+          flag in the source metadata. The preference isn't lost; it's downgraded to advisory
+          until the user reviews it. Future retrieval includes hints ranked below constraints
+          (substrate's existing trichotomy ranking handles this for free). This re-uses the
+          existing kind primitives &mdash; no new "pending" enum value needed.
+        </p>
+
+        <h4>Review surface for pending preferences</h4>
+        <p>
+          <strong>M1: <code>/prefs</code> slash command</strong> &mdash; lists pending +
+          confirmed preferences in chat; actions (confirm / edit / discard) flow through gates.
+          ~few hundred LOC; ships in the same milestone as the chat-side classifier wiring.
+        </p>
+        <p>
+          <strong>Follow-up: dedicated preferences pane</strong> (workbench editor, like the
+          meta-task report pane) lands later if the slash UX gets cumbersome.
+        </p>
       </li>
       <li class="open">
         <strong>G3: Assertion-interest taxonomy.</strong> The AssertionIndex routes by subject
