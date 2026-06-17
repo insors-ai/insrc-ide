@@ -56,6 +56,41 @@ export interface UserAssertionPayload {
 	readonly targetOwners: readonly OwnerId[];
 	readonly confidence:   number;
 	readonly reason?:      string;
+
+	// ------------------------------------------------------------------
+	// G3 / G4 / G7 extensions (memory-context design). All optional --
+	// older callers see these as undefined; the Ollama hook (M1.4) fills
+	// them in. The substrate runtime prefers the structured fields when
+	// present and falls back to the legacy fields otherwise.
+	// ------------------------------------------------------------------
+
+	/**
+	 * G3: closed-enum subject from `taxonomy/preference-subjects.ts`. Drives
+	 * exact-match routing in `AssertionIndex.lookup`. When present, the runtime
+	 * routes by this value rather than the legacy `subject` string.
+	 */
+	readonly preferenceSubject?: import('../taxonomy/preference-subjects.js').PreferenceSubject | undefined;
+
+	/**
+	 * G2: the canonical, user-editable phrasing of the preference. May differ
+	 * from `text` (which is the raw user span). Surfaced in the Layer 3
+	 * "Customize…" editor and in `/prefs` listings.
+	 */
+	readonly canonicalText?: string | undefined;
+
+	/** G4: scope refinement -- categories the preference applies to (omit = all). */
+	readonly categories?: readonly string[] | undefined;
+
+	/** G4: scope refinement -- repos the preference applies to (omit = all). */
+	readonly repoPaths?: readonly string[] | undefined;
+
+	/**
+	 * G7: relationship to an existing same-subject same-owner entry. When the
+	 * substrate runtime processes an accepted payload with `relationship.kind !==
+	 * 'independent'`, it applies the corresponding G7 confidence transformation
+	 * (saturating reinforcement OR supersession with decay).
+	 */
+	readonly relationship?: import('../taxonomy/preference-subjects.js').AssertionRelationship | undefined;
 }
 
 export type ClassifierDecision = 'accept' | 'reject' | 'defer';

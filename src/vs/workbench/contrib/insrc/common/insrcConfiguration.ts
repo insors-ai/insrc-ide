@@ -358,3 +358,65 @@ configurationRegistry.registerConfiguration({
 		},
 	},
 });
+
+// ---------------------------------------------------------------------------
+// Insrc > Memory (user-assertion classifier confidence dynamics)
+//
+// Settings for the memory + context system. See design/memory-context.html
+// and plans/memory-context.md. The user-assertion classifier writes new
+// preferences at `baseScore`; reinforcement saturates toward 1.0; refining /
+// weakening / contradicting assertions decay the prior entry's score; entries
+// below `noiseThreshold` are suppressed at retrieval (but kept in storage as
+// audit trail).
+// ---------------------------------------------------------------------------
+
+configurationRegistry.registerConfiguration({
+	id: 'insrc.memory',
+	title: localize('insrc.memory.title', 'Insrc > Memory'),
+	type: 'object',
+	order: INSRC_ORDER + 14,
+	properties: {
+		'insrc.memory.assertionClassifier.autoAcceptThreshold': {
+			type: 'number',
+			default: 0.85, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertionClassifier.autoAcceptThreshold', 'Layer 2 classifier confidence above which an `accept` verdict auto-persists. Below it the user is asked to confirm. (memory-context G2)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.memory.assertions.baseScore': {
+			type: 'number',
+			default: 0.80, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertions.baseScore', 'Initial confidence assigned to a freshly captured user assertion. (memory-context G7)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.memory.assertions.reinforcementRate': {
+			type: 'number',
+			default: 0.50, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertions.reinforcementRate', 'Saturating bump applied on exact re-assertion: c = c + (1 - c) * rate. (memory-context G7)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.memory.assertions.refinementDecay': {
+			type: 'number',
+			default: 0.15, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertions.refinementDecay', 'Confidence decay applied to the old entry when a refining assertion supersedes it: c = c * (1 - rate). (memory-context G7)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.memory.assertions.weakeningDecay': {
+			type: 'number',
+			default: 0.40, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertions.weakeningDecay', 'Confidence decay applied to the old entry when a weakening assertion supersedes it. (memory-context G7)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.memory.assertions.contradictionDecay': {
+			type: 'number',
+			default: 0.65, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertions.contradictionDecay', 'Confidence decay applied to the old entry when a contradicting assertion supersedes it. (memory-context G7)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+		'insrc.memory.assertions.noiseThreshold': {
+			type: 'number',
+			default: 0.30, minimum: 0, maximum: 1,
+			description: localize('insrc.memory.assertions.noiseThreshold', 'Entries with confidence below this threshold are suppressed at retrieval (but remain in storage). (memory-context G7)'),
+			scope: ConfigurationScope.MACHINE,
+		},
+	},
+});
