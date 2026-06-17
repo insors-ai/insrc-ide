@@ -648,10 +648,60 @@ export const planTemplate: MetaTaskTemplate = {
     </p>
 
     <ol>
-      <li class="open">
-        <strong>G1: Chat-turn classification trigger.</strong> Per-turn passive (with regex
-        gate) + targeted gate-time? Or strict targeted-only? Affects noise vs coverage tradeoff.
-        See &sect;5.1.1.
+      <li>
+        <strong>G1: Chat-turn classification trigger. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          Both passive (every user turn) <strong>and</strong> targeted (gate moments), with
+          split UX semantics. <strong>Every user turn runs Layer 2 LLM classification</strong>
+          &mdash; not regex-gated. Regex remains only as a fast-skip for clearly-non-assertion
+          turns (single-token slash commands like <code>/plan</code> alone). When in doubt
+          &rarr; LLM-classify. Decision pivots on the project principle
+          <em>accuracy primary, cost least priority</em> (CLAUDE.md / AGENTS.md):
+          the regex gate is a cost optimization that loses real preferences phrased outside
+          its patterns.
+        </p>
+        <p>
+          <strong>Passive flow</strong> (per user turn, after intent resolution):
+        </p>
+        <ul>
+          <li>Layer 2 classifier runs <strong>fire-and-forget</strong> &mdash; user turn
+            proceeds without blocking on LLM.</li>
+          <li>Layer 2 accept: persist + small toast in chat
+            (<em>"&check; Saved preference: 'X'"</em>). Non-intrusive but visible.</li>
+          <li>Layer 2 low confidence: <strong>Layer 3 confirm fires</strong> via a non-blocking
+            chat surface (inline toast with <code>[Save]</code> / <code>[No thanks]</code> /
+            <code>[Customize&hellip;]</code> buttons). Earlier "defer in passive" framing was
+            cost-of-attention reasoning; under accuracy-first, missing a real preference is the
+            worse failure mode.</li>
+          <li>Layer 2 reject: log + discard.</li>
+        </ul>
+        <p>
+          <strong>Targeted flow</strong> (M5 plan-revision gates, abort feedback,
+          <code>/remember</code> slash):
+        </p>
+        <ul>
+          <li>Layer 2 runs <strong>synchronously</strong> &mdash; user already in gate wait;
+            adding 1-3s is fine.</li>
+          <li>Layer 3 confirm runs inline in the same gate modal when confidence is low.</li>
+        </ul>
+        <p>
+          <strong>Same-turn application:</strong> when a passive-flow preference is captured,
+          its substrate write completes <em>before</em> the same turn's action invocation
+          dispatches. The user's <code>/plan: add auth and always include unit tests</code>
+          sees the unit-tests preference applied to the same plan. ~2s synchronous wait is the
+          price; degrades to fire-and-forget silently if the LLM is unavailable.
+        </p>
+        <p>
+          <strong>Provider routing:</strong> <code>classifier:user-assertion</code> defaults to
+          the local LLM (Ollama). Sub-second on assertion-shaped prompts; keeps the
+          per-turn cost low without sacrificing accuracy (the classifier task is well within
+          local-tier capability).
+        </p>
+        <p>
+          <strong>Assistant turns are not classified</strong> &mdash; D6 designed for user
+          input only.
+        </p>
       </li>
       <li class="open">
         <strong>G2: User-confirm UX threshold.</strong> What classifier confidence triggers

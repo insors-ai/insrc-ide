@@ -1,5 +1,11 @@
 # AGENTS.md — insrc
 
+## Project principles
+
+These are project-wide governance principles that apply to every design and implementation decision. When in doubt, defer to these.
+
+- **Accuracy is primary; cost is the least priority.** When choosing between an accurate-but-expensive path (more LLM calls, bigger context, slower pipeline) and a cheap-but-lossy one, choose accuracy. The system's value is correctness, not throughput. Cost optimizations are valid only when they preserve accuracy; otherwise the cheap path is the wrong path. This includes both compute cost and user-attention cost — neither outranks accuracy.
+
 ## Project overview
 
 **insrc** is a local-first hybrid coding agent that builds a live Code Knowledge Graph from source code. It runs a background daemon that parses repos via tree-sitter, stores structural relationships in a custom LMDB-backed graph layer and entity embeddings in LanceDB, then exposes an interactive agent REPL that routes tasks between a local LLM (Ollama) and a user-selected cloud provider (OpenAI, Anthropic, Gemini, or Mistral).
