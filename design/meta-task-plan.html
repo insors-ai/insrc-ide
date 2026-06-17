@@ -86,6 +86,16 @@
       <li><a href="#deliverable">Deliverable contract</a></li>
       <li><a href="#interop">Consumer interop (Delegate, CLI, chat-handler)</a></li>
       <li><a href="#revision">Plan revision + user feedback</a></li>
+      <li><a href="#post-approval">Post-approval routing</a>
+        <ol>
+          <li><a href="#approval-action">Approval action</a></li>
+          <li><a href="#plan-document">Plan document output</a></li>
+          <li><a href="#external-surface">External integration surface</a></li>
+          <li><a href="#layering">Framework / template layering</a></li>
+          <li><a href="#jira-github-mapping">Jira / GitHub mapping</a></li>
+          <li><a href="#receipts">Receipts + idempotency</a></li>
+        </ol>
+      </li>
       <li><a href="#open">Open questions</a></li>
       <li><a href="#milestones">Implementation milestones</a></li>
     </ol>
@@ -580,7 +590,177 @@ const delegatePlan = convertPlan(rawPlan);</code></pre>
     </div>
 
 
-    <h2 id="open">8. Open questions</h2>
+    <h2 id="post-approval">8. Post-approval routing</h2>
+
+    <p>
+      Once the user approves a plan, the structured deliverable needs to land in places the user
+      and the team can act on: a canonical plan document (always), and external task trackers like
+      Jira / GitHub Issues (opt-in per invocation, only if configured). The framework provides
+      the integration plumbing; the /plan template supplies the per-system mapping.
+    </p>
+
+    <h3 id="approval-action">8.1 Approval action</h3>
+    <p>
+      M5's user-driven gate (meta-tasks &sect;7.1) is extended with an <strong>Approve</strong>
+      action alongside Adjust plan / New plan / Retry / Abort. On approve:
+    </p>
+    <ol>
+      <li>The meta-task closes with <code>outcome: 'completed'</code>.</li>
+      <li>The framework writes the plan document to disk per user settings (&sect;8.2).</li>
+      <li>The report pane re-renders with a new "Export to&hellip;" section listing every
+        configured external integration. <strong>External pushes are not bundled into the approve
+        modal &mdash; they're a follow-up action.</strong></li>
+    </ol>
+    <p>
+      Why post-approval rather than part-of-approval: the approve modal already carries the
+      revision options; adding integration target selection in the same surface creates decision
+      overload. Separation lets the user review the canonical plan first, then decide whether to
+      push outward.
+    </p>
+
+    <h3 id="plan-document">8.2 Plan document output</h3>
+    <p>
+      Always produced on approve. Two settings drive output:
+    </p>
+
+<pre><code># ~/.insrc/settings.yaml (sketch)
+output:
+  format:           markdown          # markdown | html
+  defaultLocation:  project           # project | ~/Documents/insrc-plans/ | &lt;abs path&gt;
+  filenamePattern:  plan-{intent-slug}-{date}.md</code></pre>
+
+    <p>
+      Default behavior: writes the plan document next to the project root (configurable). Format
+      picks between the existing <code>markdown.toMarkdown</code> output and an HTML renderer
+      (the template adds <code>renderHtml</code> alongside <code>renderMarkdown</code> &mdash;
+      same shape, different output).
+    </p>
+    <p>
+      The plan document is canonical &mdash; even if external pushes are skipped, the file is the
+      record. External targets are downstream replications, not replacements.
+    </p>
+
+    <h3 id="external-surface">8.3 External integration surface</h3>
+    <p>
+      After approval, the report pane shows configured integrations as one-click actions:
+    </p>
+
+<pre><code>─── Plan approved: <title> ───
+File: /Users/.../insrc/plans/plan-add-auth-2026-06-17.md  ✓ saved
+
+Export to:
+  [ Jira: ENG project ]    [ GitHub: insors-ai/insrc ]    [ Linear: ... ]
+                                                            (not yet supported)</code></pre>
+
+    <p>
+      Each button opens a small confirmation showing the target (project / repo / board) +
+      preview of what'll be created (issue count, structure). User confirms; framework runs the
+      adapter; receipts persist (&sect;8.6).
+    </p>
+    <p>
+      A <code>/export-plan &lt;integration&gt;</code> slash command provides the same flow for
+      power users / scripting.
+    </p>
+
+    <h3 id="layering">8.4 Framework / template layering</h3>
+    <p>
+      The framework provides the registry + adapter contract; templates declare per-integration
+      mappings. Adding a new integration (e.g., Linear) requires a framework-side adapter; using
+      that integration with /plan requires the template to provide a mapping function.
+    </p>
+
+<pre><code>// Framework
+interface ExternalIntegration {
+  readonly id:           'jira' | 'github' | 'linear' | string;
+  readonly displayName:  string;
+  readonly isConfigured: () =&gt; boolean;
+  readonly listTargets:  () =&gt; Promise&lt;TargetOption[]&gt;;
+  readonly emit:         (payload: unknown, target: string) =&gt; Promise&lt;EmissionReceipt&gt;;
+}
+
+interface MetaTaskTemplate {
+  // ...
+  exportAdapters?: {
+    readonly file?:    (data: unknown, format: 'markdown' | 'html') =&gt; string;
+    readonly jira?:    (data: unknown) =&gt; JiraPayload;
+    readonly github?:  (data: unknown) =&gt; GithubPayload;
+    // ... one entry per integration the template supports
+  };
+}</code></pre>
+
+    <p>
+      Integration auth + per-instance defaults live in
+      <code>~/.insrc/integrations/&lt;id&gt;.yaml</code>. Tokens / secrets land in the OS
+      keychain via the same mechanism cloud-provider API keys use (Model Providers pane).
+    </p>
+
+    <h3 id="jira-github-mapping">8.5 Jira / GitHub mapping</h3>
+
+    <p><strong>Jira</strong> &mdash; <code>plan.steps[i]</code> &rarr; Jira issue:</p>
+    <ul>
+      <li>Issue type from <code>(category, subCategory)</code>: <code>implementation/bugfix</code>
+        &rarr; Bug; <code>implementation/new-feature</code> &rarr; Story;
+        <code>migration/*</code> &rarr; Task; <code>test/*</code> &rarr; Test.</li>
+      <li>Step dependencies &rarr; <code>blocks</code> / <code>blocked-by</code> links.</li>
+      <li>Step metadata (<code>fileHint</code>, <code>complexity</code>) &rarr; custom fields
+        when present.</li>
+      <li>Sub-steps (<code>step.subSteps</code>) &rarr; Jira sub-tasks under their parent.</li>
+      <li>Plan title &rarr; optional epic (user setting:
+        <code>jira.createEpic: true | false</code>).</li>
+    </ul>
+
+    <p><strong>GitHub Issues</strong> &mdash; <code>plan.steps[i]</code> &rarr; GitHub issue:</p>
+    <ul>
+      <li>Labels from <code>(category, subCategory)</code>: e.g., <code>category:implementation</code>,
+        <code>type:bugfix</code>, <code>complexity:high</code>.</li>
+      <li>Milestone scoped to the Plan: <code>milestone: &lt;plan title&gt;</code>.</li>
+      <li>Cross-issue dependencies via task list / mentions
+        (GitHub's native blocking is project-level).</li>
+      <li>Sub-steps &rarr; nested task list within parent's issue body.</li>
+    </ul>
+
+    <p class="muted">
+      Mapping shapes are template-internal; integrations themselves are reusable. /design would
+      have different adapters mapping design sections to Confluence pages or wiki entries; the
+      framework's ExternalIntegration contract stays unchanged.
+    </p>
+
+    <h3 id="receipts">8.6 Receipts + idempotency</h3>
+    <p>
+      Each external emission returns an <code>EmissionReceipt</code> that the framework appends
+      to <code>~/.insrc/meta/&lt;id&gt;/exports.json</code>:
+    </p>
+
+<pre><code>{
+  "exports": [
+    {
+      "integration": "jira",
+      "target":      "ENG",
+      "emittedAt":   "2026-06-17T19:42:11Z",
+      "items": [
+        { "stepId": "step-001", "externalId": "ENG-1247", "url": "https://insors.atlassian.net/browse/ENG-1247" },
+        { "stepId": "step-002", "externalId": "ENG-1248", "url": "..." },
+        // ...
+      ]
+    }
+  ]
+}</code></pre>
+
+    <p>
+      Three uses for the receipts:
+    </p>
+    <ul>
+      <li><strong>Report pane re-rendering</strong>: shows links back to created tickets
+        alongside the plan steps after export.</li>
+      <li><strong>Idempotency</strong>: re-running export for an already-exported plan is a no-op
+        for steps that already have a receipt; new steps (if the plan was revised after first
+        export) get pushed; existing items get reconciled (state-sync, not re-create).</li>
+      <li><strong>Cleanup</strong>: a future "abandon this plan" flow can revoke / close the
+        created tickets via the receipt list.</li>
+    </ul>
+
+
+    <h2 id="open">9. Open questions</h2>
     <ol>
       <li class="open">
         <strong>O1: No-LLM phase-2 steps.</strong> P4 validate and P6 synth are deterministic
@@ -633,7 +813,7 @@ const delegatePlan = convertPlan(rawPlan);</code></pre>
     </ol>
 
 
-    <h2 id="milestones">9. Implementation milestones</h2>
+    <h2 id="milestones">10. Implementation milestones</h2>
     <p>
       Per <a href="meta-tasks.html">meta-tasks &sect;12</a>, M4 is "planner migration". This doc
       proposes splitting M4 into M4.a (template) and M4.b (consumer migration) since the
