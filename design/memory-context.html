@@ -1342,11 +1342,96 @@ insrc.memory.assertions.noiseThreshold      = 0.30</code></pre>
           exactly once over its lifetime (capture-time + at most one implicit pass).
         </p>
       </li>
-      <li class="open">
-        <strong>G9: Substrate &harr; L1-L5 budget integration.</strong> Should preferences
-        appear as a new layer in the L1-L5 chat assembler too? Or stay strictly in meta-task
-        phase-1? Strictly meta-task is simpler; adding to L1-L5 means generic chat (non-meta-task)
-        also gets preferences for free.
+      <li>
+        <strong>G9: Substrate &harr; L1-L5 budget integration. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Preferences merge into L1 system segment, not a new layer.</strong> User's
+          stronger framing: preferences are foundational guidance (how this LLM behaves), not
+          turn-level context (what this task is about). The system segment is the right home.
+        </p>
+
+        <h4>Owner resolution for chat</h4>
+        <p>
+          Chat is always "on behalf of an owner." Resolution:
+        </p>
+        <ul>
+          <li>Default for free-form chat: <code>'agent:chat'</code>.</li>
+          <li>Active meta-task mid-flight: that meta-task's owner takes precedence
+            (<code>'agent:meta-task:plan'</code>, etc.).</li>
+          <li>Active Pair / Delegate session: that agent's owner
+            (<code>'agent:pair'</code>, <code>'agent:delegate'</code>).</li>
+          <li>Session metadata tracks the current owner; transitions on agent invocation /
+            exit.</li>
+        </ul>
+        <p>
+          Cross-owner consistency is handled by AssertionIndex fan-out at capture time (G4):
+          a <code>test-policy</code> preference reaches every interested owner. When the user
+          transitions chat &rarr; meta-task &rarr; chat, preferences carry naturally because
+          each owner has its own copy. No merge-across-owners logic needed in the L1
+          builder.
+        </p>
+
+        <h4>L1 system composition</h4>
+
+<pre><code>L1 system =
+  static project instructions            (built once per session, existing)
++ active-owner curated preferences       (rebuilt on owner-change or substrate mutation event)</code></pre>
+
+        <p>
+          Static part stays cached per session (existing
+          <code>system.ts</code> behavior). Preferences slice is dynamic but caches on
+          event-driven invalidation, NOT per turn.
+        </p>
+
+        <h4>Cache invalidation flow</h4>
+        <ol>
+          <li>Substrate's <code>FeedbackBus</code> already fires events when preferences
+            mutate (D8 fan-out by target owner).</li>
+          <li>Chat-side L1 builder subscribes for the active owner's events.</li>
+          <li>Invalidates the preferences cache when:
+            <ul>
+              <li>Owner changes (session transitions to a new agent).</li>
+              <li>Substrate emits a mutation event for the active owner
+                (<code>FeedbackEvent.targetOwner === currentOwner</code>).</li>
+            </ul>
+          </li>
+          <li>On next turn after invalidation: pull owner's <code>user-assertions</code> raw,
+            apply G4 hard scope filter (mostly just <code>repoPath</code> for chat &mdash; no
+            <code>category</code> axis), run G5 local-LLM relevance curation against the
+            session's rolling topic, append to L1's static text.</li>
+          <li>Cache the curated subset until next invalidation.</li>
+        </ol>
+
+        <h4>Curation prompt differs from meta-task</h4>
+        <p>
+          G5's meta-task curation uses "step intent" for relevance. For chat L1 there's no
+          step; the equivalent is the session's rolling topic / system-level concern. Curation
+          prompt: "which preferences are relevant to this session's overall work?" &mdash;
+          broader than per-step. Bias toward inclusion stays the same.
+        </p>
+
+        <h4>Budget accounting</h4>
+        <p>
+          Preferences live within L1's existing budget allocation. No new layer / no new
+          budget tier. The system segment grows by the size of the curated set; bounded by
+          the active owner's storage + G5's inclusion-biased curation.
+        </p>
+
+        <h4>Symmetry: substrate &rarr; chat = substrate &rarr; meta-task</h4>
+        <ul>
+          <li><strong>Meta-task</strong>: framework auto-injects preferences slot per step;
+            local LLM curates against step intent. Cache-less &mdash; each step's intent
+            differs.</li>
+          <li><strong>Chat L1</strong>: assembler rebuilds owner preferences on event; local
+            LLM curates against session rolling topic. Cache invalidates on event, not per
+            turn.</li>
+        </ul>
+        <p>
+          Both ultimately follow the same flow (load owner preferences &rarr; G4 hard filter
+          &rarr; G5 curation). Different trigger cadence, same substrate calls, same curation
+          surface, same accuracy guarantee.
+        </p>
       </li>
       <li class="open">
         <strong>G10: Migration timing for <code>config/</code>.</strong> &sect;5.3 picks option C
