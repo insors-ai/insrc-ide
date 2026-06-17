@@ -761,56 +761,134 @@ interface MetaTaskTemplate {
 
 
     <h2 id="open">9. Open questions</h2>
+
+    <p>
+      Originally five questions (O1&ndash;O5). Four resolved through the design conversation;
+      one deferred to a dedicated backlog item.
+    </p>
+
+    <h3>Resolved</h3>
+
     <ol>
-      <li class="open">
-        <strong>O1: No-LLM phase-2 steps.</strong> P4 validate and P6 synth are deterministic
-        helpers, not cloud LLM calls. The orchestrator today calls
-        <code>cloud.complete(messages, opts)</code> per phase 2 unconditionally. Either: (a) add a
-        per-step opt-out flag on <code>StepDescriptor</code> (<code>synchronous: true</code>), and
-        the template supplies a phase-2 function; or (b) keep going through the LLM but use a
-        thin "no-op" prompt that the cloud trivially completes. (a) is cleaner; (b) is zero
-        framework change. Decide before M4 implementation.
+      <li>
+        <strong>O1: No-LLM phase-2 steps. &mdash; <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          Framework adds <code>StepDescriptor.phase2?: Phase2Runner</code> as a step-level escape
+          hatch. When set, the orchestrator runs that function in place of the default cloud call;
+          the function decides whether to call <code>ctx.cloud</code> (0 / 1 / N times). Default
+          behavior unchanged: one cloud call against <code>deliverableSchema</code> with
+          <code>renderMarkdown</code> producing the body.
+        </p>
+        <p>
+          This generalises further than the original framing &mdash; not just "deterministic
+          steps" but any step needing custom phase-2 logic (including the multi-call sketch +
+          enhance pattern from O3). P4 validate + P6 synth use this with zero cloud calls; P3
+          draft uses the default flow with a stronger combined prompt.
+        </p>
+        <p class="muted">
+          See &sect;4.4 + &sect;4.6 for the deterministic shapes. Framework-side cost: ~80 LOC
+          across <code>types.ts</code> + <code>schema.ts</code> + <code>orchestrator.ts</code>.
+        </p>
       </li>
-      <li class="open">
-        <strong>O2: Where does plan-type detection live?</strong> Legacy: emerges from P1 analyze
-        but is also writable via the input. New: only emergent from P1's deliverable. Consumers
-        that want to override (rare) would have to inject into the scope or intent. Worth a
-        decision so the open-ended "what if the user pre-specifies plan type" doesn't bleed
-        through to the prompts.
+
+      <li>
+        <strong>O2: Where does plan-type detection live? &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          Always emergent from P1; no consumer override surface. Two-level typed enum:
+          <code>PlanCategory</code> (hard enum, 6 values:
+          <code>implementation</code> / <code>migration</code> / <code>test</code> /
+          <code>documentation</code> / <code>operational</code> / <code>design</code>) +
+          <code>subCategory</code> (freeform in schema, client-validated against the valid
+          sub-cats for the chosen category). LLM emits both via the deliverable schema; rejected
+          on schema mismatch or invalid sub-category. No <code>other</code> escape hatch &mdash;
+          if classification consistently misfires, we add a 7th category rather than hide it under
+          <code>other</code>.
+        </p>
+        <p>
+          Sub-category lists per top-level (4&ndash;5 each) are documented in the prompt + the
+          template's validator. Same approach as the rest of the framework: schema covers what
+          schema can; template-level validators handle the discriminated bits.
+        </p>
+        <p>
+          Consumers with a strong opinion (rare) bake it into the intent string ("implementation
+          plan for &hellip;"). The cloud LLM reads the intent and classifies accordingly.
+        </p>
       </li>
-      <li class="open">
-        <strong>O3: P3 draft's two-stage cloud calls.</strong> The legacy sketch &rarr; enhance
-        pattern uses two different providers (configurable). The meta-task framework today wires
-        one cloud provider per <code>RunMetaTaskOpts</code>. Either: (a) make P3's helper call the
-        same provider twice; or (b) extend <code>StepDescriptor</code> with provider-binding
-        overrides. (a) is simpler and probably fine &mdash; the prompts themselves give the model
-        the "refine" instruction.
+
+      <li>
+        <strong>O3: P3 draft's two-stage cloud calls. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          Drop two-stage in M4.a. Single phase-2 call merging the legacy <code>DRAFT_SYSTEM</code>
+          + <code>ENHANCE_SYSTEM</code> instructions into one prompt asking the LLM to "produce a
+          refined, production-ready plan in one pass." Modern frontier models do sketch + refine
+          internally; the legacy pattern was load-bearing when models were weaker.
+        </p>
+        <p>
+          Escape hatch is cheap if needed: P3 sets <code>phase2</code> to a helper that calls
+          <code>ctx.cloud.complete()</code> twice with different prompts. Reuses the same
+          framework feature O1 introduces; ~15 lines of template code.
+        </p>
+        <p>
+          Per-step provider binding stays unscoped. Consumers that want a specific provider set
+          it at the top-level via the existing config.
+        </p>
       </li>
-      <li class="open">
-        <strong>O4 (DEFERRED to backlog): User preference + feedback capture.</strong> Real-world
-        reliability problem &mdash; the framework's <code>memory</code> slot + auto-memory file lose
-        durable user preferences over time. Resolution direction locked during the O4 discussion:
-        local LLM becomes the curator (capture + retrieval) via a new
-        <code>kind: 'preferences'</code> context slot, with YAML-shaped storage at
-        <code>~/.insrc/preferences/</code> scoped by global / repo / template /
-        (template, category). Inline capture during retrieval; explicit channels via
-        <code>/prefs save</code> + a plan-revision-time prompt. Deferred to its own design exercise
-        because it's a framework-level concern (every template benefits, not just /plan) and
-        deserves its own design doc. Tracked in
-        <a href="../plans/TODO.md">plans/TODO.md</a> as the first high-priority backlog item;
-        <code>design/memory-context.html</code> + <code>plans/memory-context.md</code> are
-        prerequisites.
+
+      <li>
+        <strong>O4: User preference + feedback capture. &mdash;
+          <span style="color: var(--accent2)">DEFERRED to backlog</span></strong>
+        <p>
+          Real-world reliability problem &mdash; the framework's <code>memory</code> slot +
+          auto-memory file lose durable user preferences over time. Resolution direction locked:
+          local LLM becomes the curator (capture + retrieval) via a new
+          <code>kind: 'preferences'</code> context slot, with YAML-shaped storage at
+          <code>~/.insrc/preferences/</code> scoped by global / repo / template /
+          (template, category). Inline capture during retrieval; explicit channels via
+          <code>/prefs save</code> + a plan-revision-time prompt.
+        </p>
+        <p>
+          Deferred to its own design exercise because it's a framework-level concern (every
+          template benefits, not just /plan). Tracked in
+          <a href="../plans/TODO.md">plans/TODO.md</a> as the first high-priority backlog item;
+          <code>design/memory-context.html</code> + <code>plans/memory-context.md</code> are
+          prerequisites.
+        </p>
       </li>
-      <li class="open">
-        <strong>O5: TodoList linkage across families.</strong> Legacy planner creates a TodoList
-        owned by <code>planner</code> at the end so the <code>implementation</code> family can pick
-        it up via the standard transfer primitive. Meta-task framework also creates a TodoList per
-        run (owned by <code>meta-task</code>). Do we transfer that list to <code>planner</code> or
-        <code>implementation</code> on completion? Or do we drop the cross-family transfer and let
-        consumers re-derive items from the markdown? Inclined to drop &mdash; the markdown is
-        canonical.
+
+      <li>
+        <strong>O5: TodoList linkage across families. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          Drop cross-family transfer entirely. Two TodoLists, two concerns:
+        </p>
+        <ul>
+          <li><strong>Meta-task TodoList</strong> (owner: <code>meta-task</code>): orchestration
+            lifecycle, items P1&hellip;P6, closes when the meta-task ends. The report pane's
+            source of truth.</li>
+          <li><strong>Consumer TodoList</strong> (owner: <code>implementation</code> or whoever):
+            created by the executor (Delegate / future <code>/implement</code>) from the
+            structured <code>Plan&lt;T&gt;</code> data, scoped to its work, lifecycle owned by the
+            executor.</li>
+        </ul>
+        <p>
+          No transfer magic. The legacy planner's mirror code
+          (<code>agent/planner/steps.ts:562-584</code>) stays untouched for legacy
+          <code>plannerAgent</code> consumers; deletes with the rest of
+          <code>agent/planner/</code> in M4.b when those consumers migrate. P6 synth has no
+          post-completion TodoList mirror &mdash; the framework already creates the lifecycle
+          list.
+        </p>
       </li>
     </ol>
+
+    <h3>New (none open)</h3>
+
+    <p class="muted">
+      No remaining open questions blocking M4.a. New ones land here as they surface during
+      implementation.
+    </p>
 
 
     <h2 id="milestones">10. Implementation milestones</h2>
