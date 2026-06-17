@@ -882,13 +882,79 @@ assertionInterests: [
           <code>design/preference-taxonomy.html</code> when needed; not a blocker for code.
         </p>
       </li>
-      <li class="open">
-        <strong>G4: Preference scope axes serialization.</strong> Substrate stores entries as
-        <code>(owner, namespace, key) &rarr; value</code>. Where do the scope axes (repo path,
-        plan category) live? Two candidates: (a) sub-namespaces
-        (<code>'user-assertions/repo-X/category-implementation'</code>) &mdash; clean
-        retrieval but rigid; (b) entry value carries scope refinement, retrieval filters
-        post-fetch &mdash; flexible but every read scans more entries. Pick before any code.
+      <li>
+        <strong>G4: Preference scope axes serialization. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Owner-local isolation as a first-class principle.</strong> Substrate's
+          existing on-disk layout (<code>&lt;rootDir&gt;/&lt;workspaceId&gt;/&lt;owner&gt;/&lt;namespace&gt;/&hellip;</code>)
+          already enforces per-owner subtrees. When the AssertionIndex routes an accepted
+          assertion to N owners, N entries get written, one per owner. After capture, each
+          owner is sovereign &mdash; updates / edits / deletes don't cascade.
+        </p>
+        <p>
+          This is a feature, not a bug: owners may legitimately want different phrasings of
+          "the same" preference (<code>agent:meta-task:plan</code> vs <code>agent:pair</code>
+          may want subtly different framings of "always include unit tests"). Isolation lets
+          them diverge.
+        </p>
+
+        <h4>Scope serialization</h4>
+
+<pre><code>interface PreferenceValue {
+  readonly canonicalText: string;
+  readonly subject:       PreferenceSubject;   // routing (G3)
+  readonly scope: {
+    // Coarse scope = owner identity (storage-enforced); not in this struct.
+    // Fine scope axes filter within an owner's namespace at retrieval.
+    readonly categories?: readonly string[];   // e.g., ['implementation'] within /plan owner
+    readonly repoPaths?:  readonly string[];   // which repos; omit = all repos
+  };
+  readonly source:        EntrySource;          // substrate's existing turnId/classifier refs
+  readonly confidence:    number;
+  readonly createdAt:     string;
+}</code></pre>
+
+        <p>
+          <code>scope.templates</code> is not a field &mdash; owner identity already encodes
+          template (<code>agent:meta-task:plan</code> is plan-only). Sub-owners narrow further:
+          <code>agent:meta-task:plan:implementation</code> exists when an owner wants
+          category-bound preferences distinct from its parent.
+        </p>
+
+        <h4>Retrieval flow</h4>
+        <ol>
+          <li>Open the owner's <code>user-assertions</code> namespace (substrate primitive).</li>
+          <li>Scan all entries (filter mode supported; scale is microseconds for any realistic
+            count).</li>
+          <li>For each entry: skip if <code>scope.categories</code> is set and query's
+            <code>category</code> isn't in it. Same for <code>repoPaths</code>.</li>
+          <li>Return matches ranked per substrate's trichotomy
+            (<code>constraint</code> &gt; <code>fact</code> &gt; <code>hint</code>).</li>
+        </ol>
+
+        <h4>Storage stays at substrate's existing path.</h4>
+        <p>
+          <code>~/.insrc/substrate/&lt;workspace&gt;/&lt;owner&gt;/user-assertions/&lt;key&gt;.json</code>.
+          JSON file format unchanged from substrate convention. Raw file editing supported but
+          not the primary UX; <code>/prefs</code> slash command (M1) + future dedicated pane
+          handle user-facing curation.
+        </p>
+
+        <h4>Future scope-axis extensions</h4>
+        <p>
+          Same policy as G3's taxonomy extension &mdash; code change adds a new field, owner
+          re-registration. Likely future candidates: <code>filePatterns</code>,
+          <code>languages</code>, <code>branches</code>. Start with <code>categories</code> +
+          <code>repoPaths</code>; extend as evidence demands.
+        </p>
+
+        <h4>"Same preference across many owners"</h4>
+        <p>
+          User re-states the rule in chat with broader phrasing; classifier captures with
+          wider routing. <strong>No <code>/prefs copy-to &lt;owner&gt;</code> command</strong>
+          &mdash; adds complexity for a niche flow without enough payoff.
+        </p>
       </li>
       <li class="open">
         <strong>G5: Framework-mandatory preference injection.</strong> &sect;5.2.3 proposes the
