@@ -796,12 +796,91 @@ Scope: meta-task:plan + category=implementation + repo=insrc-ide
           meta-task report pane) lands later if the slash UX gets cumbersome.
         </p>
       </li>
-      <li class="open">
-        <strong>G3: Assertion-interest taxonomy.</strong> The AssertionIndex routes by subject
-        string match. Do we define a closed enum of subjects ("test-strategy",
-        "naming-conventions", "commit-strategy", &hellip;) or leave it free-form? Closed enum:
-        consistent routing; misses novel preference kinds. Free-form: flexible; risk of
-        mis-routing similar subjects to different owners.
+      <li>
+        <strong>G3: Assertion-interest taxonomy. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Closed-enum taxonomy of 12 categories in TypeScript code. Classifier emits
+          one of them, JSON-schema-constrained. No config-side extension &mdash; new categories
+          land via code change.</strong>
+        </p>
+        <p>
+          The substrate's existing routing layer (<code>AssertionIndex.lookup</code>) already
+          does exact-string match on <code>subjectPattern</code> per D14 step 1. G3 just decides
+          that we <em>document and constrain</em> the canonical set rather than leaving the
+          subject space open. Free-form would force fuzzy matching at routing time, trading
+          determinism for flexibility &mdash; the wrong tradeoff under accuracy-first.
+        </p>
+
+<pre><code>// src/insrc/daemon/substrate/taxonomy/preference-subjects.ts
+export type PreferenceSubject =
+  | 'code-style'             // naming, formatting, structural conventions
+  | 'test-policy'            // coverage, test types, fixtures, mocking
+  | 'documentation-policy'   // docstrings, comments, design docs, READMEs
+  | 'commit-policy'          // granularity, messages, signing, branches
+  | 'dependency-policy'      // libraries, versions, vendoring
+  | 'architecture-policy'    // patterns, layering, dep direction
+  | 'tooling-policy'         // build, linter / formatter, CI choices
+  | 'security-policy'        // auth, secrets, validation, audit
+  | 'data-policy'            // schema, migrations, retention
+  | 'workflow-policy'        // PR review, deployment, hotfix procedure
+  | 'communication-policy'   // chat tone, verbosity, format
+  | 'escalation-policy';     // when to ask user vs proceed</code></pre>
+
+        <p>
+          Owners declare typed interest:
+        </p>
+
+<pre><code>// In templates/plan.ts (or any owner):
+assertionInterests: [
+  { subjectPattern: 'test-policy',
+    description: 'Test coverage + style preferences for plans' },
+  { subjectPattern: 'documentation-policy',
+    description: 'Doc requirements for plan steps' },
+  { subjectPattern: 'code-style',
+    description: 'Code conventions to reflect in plan steps' },
+] satisfies readonly AssertionInterest[],</code></pre>
+
+        <p>
+          Classifier's Layer 2 structured output schema constrains the subject field to the
+          <code>PreferenceSubject</code> enum. The LLM must pick one; can't emit free-form. The
+          failure mode is misclassification (LLM picks wrong category), mitigated by G2's wide
+          auto-accept band &mdash; confidence &lt; 0.85 triggers Layer 3 confirm and the user
+          can re-classify via the Customize&hellip; editor.
+        </p>
+
+        <p><strong>Adding a new category:</strong></p>
+        <ul>
+          <li>PR to add the enum value to <code>preference-subjects.ts</code>.</li>
+          <li>PR to update each interested owner's declared interests.</li>
+          <li>Re-registration on daemon restart.</li>
+          <li>Deliberate, surfaced as an explicit code change &mdash; not LLM-discretionary
+            expansion.</li>
+        </ul>
+
+        <p><strong>Sub-categorization happens via scope axes (G4), not via sub-subjects.</strong>
+          A preference like "always include unit tests in implementation plans" is:
+        </p>
+        <ul>
+          <li><code>subject: 'test-policy'</code> &mdash; routing.</li>
+          <li><code>scope: { templateId: 'plan', category: 'implementation', repoPath: '&hellip;' }</code>
+            &mdash; filtering at retrieval, defined in G4.</li>
+          <li><code>payload: { canonicalText: "always include unit tests" }</code></li>
+        </ul>
+        <p>
+          Taxonomy stays flat. We don't introduce
+          <code>test-policy/unit-tests/coverage/lines/80%</code>-style hierarchical subjects.
+        </p>
+
+        <p class="muted">
+          <strong>Cost</strong>: ~50 LOC for the enum + taxonomy file, ~20 LOC for the JSON
+          schema constraint on the classifier's structured output. Negligible.
+        </p>
+        <p class="muted">
+          <strong>Follow-up doc task</strong>: short user-facing description of each
+          category (for the <code>/prefs</code> UX to show "what subjects mean"). Lives at
+          <code>design/preference-taxonomy.html</code> when needed; not a blocker for code.
+        </p>
       </li>
       <li class="open">
         <strong>G4: Preference scope axes serialization.</strong> Substrate stores entries as
