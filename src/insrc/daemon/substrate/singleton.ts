@@ -25,6 +25,7 @@ import { createSubstrateRuntime, type SubstrateRuntime } from './runtime.js';
 import { createOllamaLayer2Hook } from './classifier/ollama-hook.js';
 import { PREFERENCE_SUBJECTS } from './taxonomy/preference-subjects.js';
 import type { OwnerId } from './types.js';
+import type { UserConfirmHook } from './classifier/user-assertion.js';
 
 const log = getLogger('substrate:singleton');
 
@@ -36,6 +37,15 @@ export interface InitSubstrateRuntimeOpts {
 	readonly localProvider: LLMProvider;
 	readonly workspaceId?:  string;
 	readonly rootDir?:      string;
+	/**
+	 * Layer 3 user-confirm hook (memory-context M1.6.a). When omitted the
+	 * substrate's no-op default applies (everything Layer 2 returns with
+	 * low confidence is silently deferred). The daemon wires this to
+	 * `createPendingConfirmHook()` from `daemon/prefs-confirm.ts` so the
+	 * low-confidence path stages into `user-assertions-pending` and
+	 * emits a streaming event for the IDE toast.
+	 */
+	readonly userConfirm?: UserConfirmHook;
 }
 
 /**
@@ -52,7 +62,10 @@ export function initSubstrateRuntime(opts: InitSubstrateRuntimeOpts): SubstrateR
 
 	const runtime = createSubstrateRuntime({
 		memory,
-		classifier: { llmClassify },
+		classifier: {
+			llmClassify,
+			...(opts.userConfirm !== undefined ? { userConfirm: opts.userConfirm } : {}),
+		},
 	});
 
 	instance = runtime;

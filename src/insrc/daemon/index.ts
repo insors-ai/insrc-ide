@@ -287,7 +287,14 @@ async function main(): Promise<void> {
 		localCfg.params[localCfg.coreModel]?.maxInputTokens ?? 16_384,
 	);
 	const { initSubstrateRuntime, registerAgentChatOwner } = await import('./substrate/singleton.js');
-	const substrate = initSubstrateRuntime({ localProvider });
+	// M1.6.a: install the Layer 3 staging hook so low-confidence Layer 2
+	// accepts land in the pending namespace + fire the IDE-bound event
+	// instead of being silently deferred.
+	const { createPendingConfirmHook } = await import('./prefs-confirm.js');
+	const substrate = initSubstrateRuntime({
+		localProvider,
+		userConfirm: createPendingConfirmHook(),
+	});
 	registerAgentChatOwner(substrate);
 
 	// Shared session-purge pipeline. Used by `agent.discard`,
@@ -1594,6 +1601,19 @@ async function main(): Promise<void> {
 		'prefs.discard': async (params) => {
 			const mod = await import('./prefs-rpc.js');
 			return mod.prefsDiscardRpc(params);
+		},
+
+		// memory-context M1.6.a. Layer 3 confirm staging surface --
+		// list pending entries the user hasn't yet acted on, and
+		// resolve one as accept (promotes to constraint) or discard
+		// (marks pending row as user-discarded; audit trail preserved).
+		'prefs.confirm.list': async () => {
+			const mod = await import('./prefs-confirm.js');
+			return { entries: await mod.listPendingConfirms() };
+		},
+		'prefs.confirm.resolve': async (params) => {
+			const mod = await import('./prefs-confirm.js');
+			return mod.resolvePendingConfirm(params as Parameters<typeof mod.resolvePendingConfirm>[0]);
 		},
 	}, {
 		// Streaming handlers

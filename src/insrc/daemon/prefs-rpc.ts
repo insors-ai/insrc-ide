@@ -129,6 +129,12 @@ export async function prefsEditRpc(params: unknown): Promise<PrefsMutationResult
 		updatedValue['confidence'] = p.confidence;
 	}
 
+	// Delete-then-put: substrate's D4 merge policy keeps the prior entry on
+	// same-kind / same-confidence / same-millisecond writes, so an in-place
+	// `put` would silently no-op when the user-visible edit happens fast
+	// enough after the seed/prior put. Deleting first lets the new value
+	// land authoritatively.
+	await ns.delete(resolvedKey);
 	const ref = await ns.put(resolvedKey, updatedValue, {
 		kind:       'constraint',
 		source:     existing.source,
