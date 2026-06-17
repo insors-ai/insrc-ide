@@ -102,3 +102,62 @@ Format: setting key + default + scope + source.
   confirm. Picked as a starting point; tuneable based on early usage.
 - **Implementation status**: not yet wired. Add to `insrcConfiguration.ts`
   when the chat ↔ substrate wiring lands (memory-context M1).
+
+### `insrc.memory.assertions.baseScore`
+
+- **Default**: `0.80`
+- **Type**: number (0..1)
+- **Scope**: machine (daemon-side)
+- **Source**: G7 of [design/memory-context.html](../design/memory-context.html).
+- **Purpose**: Initial confidence for a freshly-captured user assertion.
+  Below 1.0 so we're always open to reconsideration; high enough that the
+  entry isn't suppressed on day one.
+- **Implementation status**: not yet wired.
+
+### `insrc.memory.assertions.reinforcementRate`
+
+- **Default**: `0.50`
+- **Type**: number (0..1)
+- **Scope**: machine (daemon-side)
+- **Source**: G7. Saturating bump on exact re-assertion: `c ← c + (1-c) × k`.
+- **Purpose**: How strongly a re-assertion strengthens an existing preference.
+  Higher k → faster saturation toward 1.0.
+- **Implementation status**: not yet wired.
+
+### `insrc.memory.assertions.refinementDecay`
+
+- **Default**: `0.15`
+- **Type**: number (0..1)
+- **Scope**: machine (daemon-side)
+- **Source**: G7. Decay rate when a refining assertion supersedes an entry:
+  `c ← c × (1 - k)`. Refinements weaken old; new entry gets baseScore.
+- **Implementation status**: not yet wired.
+
+### `insrc.memory.assertions.weakeningDecay`
+
+- **Default**: `0.40`
+- **Type**: number (0..1)
+- **Scope**: machine (daemon-side)
+- **Source**: G7. Decay rate when a weakening assertion supersedes an entry.
+  Larger than refinement; the old entry loses more of its authority.
+- **Implementation status**: not yet wired.
+
+### `insrc.memory.assertions.contradictionDecay`
+
+- **Default**: `0.65`
+- **Type**: number (0..1)
+- **Scope**: machine (daemon-side)
+- **Source**: G7. Decay rate when a contradicting assertion supersedes an entry.
+  Sharpest decay; one contradiction pushes a moderate-confidence entry toward
+  the noise threshold.
+- **Implementation status**: not yet wired.
+
+### `insrc.memory.assertions.noiseThreshold`
+
+- **Default**: `0.30`
+- **Type**: number (0..1)
+- **Scope**: machine (daemon-side)
+- **Source**: G7. Entries with `confidence < threshold` are suppressed at
+  retrieval. They stay in storage (audit trail) but don't surface in any
+  context slot.
+- **Implementation status**: not yet wired.

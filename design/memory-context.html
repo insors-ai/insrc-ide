@@ -1131,11 +1131,138 @@ export interface TurnRecord {
           <code>TurnRecord</code>. Most turns have none (undefined / empty). Negligible.
         </p>
       </li>
-      <li class="open">
-        <strong>G7: Confidence accumulation for re-assertions.</strong> D13 covers observation
-        confidence accumulation (saturating, tiered). What's the rule when the user re-asserts
-        the same preference? Counter increment? Refresh timestamp + leave confidence at
-        ceiling? Substrate has primitives; we need the policy.
+      <li>
+        <strong>G7: Confidence accumulation for re-assertions. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          User-defined numeric model: <strong>assertions start at confidence 0.8;
+          reinforcement saturates toward 1.0; conflicts / dilution decay the score;
+          below-threshold entries are suppressed at retrieval (but kept in storage as
+          audit).</strong>
+        </p>
+
+        <h4>Dynamics</h4>
+
+<pre><code>Initial assertion:        confidence = 0.80
+Exact re-assertion:       confidence &larr; confidence + (1 - confidence) &times; 0.50   // saturating
+Refinement:               old.confidence &larr; old.confidence &times; (1 - 0.15)        // gentle
+                          new entry gets base 0.80 (with supersedes: [old])
+Weakening:                old.confidence &larr; old.confidence &times; (1 - 0.40)        // moderate
+                          new entry gets base 0.80 (with supersedes: [old])
+Contradiction:            old.confidence &larr; old.confidence &times; (1 - 0.65)        // sharp
+                          new entry gets base 0.80 (with supersedes: [old])
+Retrieval filter:         confidence &ge; 0.30 (noise threshold)</code></pre>
+
+        <h4>Worked trajectory (unit-tests example)</h4>
+
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Old entry confidence</th><th>New entry written</th><th>Active in retrieval?</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Day 1: "always include unit tests"</td>
+              <td>&mdash;</td>
+              <td>conf 0.80</td>
+              <td>yes</td>
+            </tr>
+            <tr>
+              <td>Day 3: same wording (exact restatement)</td>
+              <td>0.80 &rarr; <strong>0.90</strong></td>
+              <td>&mdash;</td>
+              <td>yes</td>
+            </tr>
+            <tr>
+              <td>Day 7: same wording again</td>
+              <td>0.90 &rarr; <strong>0.95</strong></td>
+              <td>&mdash;</td>
+              <td>yes</td>
+            </tr>
+            <tr>
+              <td>Day 10: "unit tests not strictly required for trivial helpers" (refinement)</td>
+              <td>0.95 &rarr; <strong>0.808</strong></td>
+              <td>conf 0.80</td>
+              <td>both active</td>
+            </tr>
+            <tr>
+              <td>Day 15: "skip unit tests for now, we're prototyping" (contradiction)</td>
+              <td>0.808 &rarr; <strong>0.283</strong></td>
+              <td>conf 0.80</td>
+              <td><strong>old below 0.3 &mdash; ignored</strong>; new active</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>
+          Durable preferences reach high confidence fast; stale ones fade out fast. Audit trail
+          stays &mdash; below-threshold entries remain in storage, just suppressed at retrieval.
+        </p>
+
+        <h4>Confidence is orthogonal to trichotomy</h4>
+        <p>
+          User-asserted preferences are <code>kind: 'constraint'</code> regardless of
+          confidence. The kind doesn't decay; confidence does. Retrieval applies the noise
+          threshold first, THEN ranks per substrate's existing trichotomy-then-confidence-
+          then-recency policy. A 0.283-confidence constraint is suppressed; a 0.4-confidence
+          constraint still outranks any <code>fact</code> or <code>hint</code>.
+        </p>
+
+        <h4>Layer 3 confirm behavior on re-assertion</h4>
+        <ul>
+          <li><strong>Exact</strong>: no Layer 3 needed; the user already confirmed once.
+            Silent refresh + small acknowledgment toast.</li>
+          <li><strong>Refinement / weakening / contradiction</strong>: Layer 3 confirm fires
+            showing the relationship.
+            <em>"This refines your existing preference 'X'. Save the new version?
+            [Save] [Customize&hellip;] [Discard]"</em></li>
+        </ul>
+
+        <h4>Bias toward exactness</h4>
+        <p>
+          Layer 2 classifier inspects existing same-subject same-owner entries; on borderline
+          cases, prefer "exact" over "refinement" to preserve the original phrasing and avoid
+          unnecessary supersession chains. The user's <code>/prefs</code> UI can re-classify
+          if needed.
+        </p>
+
+        <h4>Schema additions</h4>
+
+<pre><code>// types.ts -- MemoryEntry (additions only)
+export interface MemoryEntry&lt;T = unknown&gt; {
+  // ... existing fields ...
+
+  /**
+   * Timestamps of user re-assertions of THIS entry (exact restatements). The
+   * substrate refreshes writtenAt + confidence on each re-assertion and appends
+   * the new timestamp here. Empty / undefined for entries that have never been
+   * re-asserted.
+   */
+  readonly reassertionHistory?: readonly number[] | undefined;
+}
+
+// classifier output -- assertion relationship
+type AssertionRelationship =
+  | { kind: 'independent' }
+  | { kind: 'exact';         existingRef: string }
+  | { kind: 'refinement';    existingRef: string }
+  | { kind: 'weakening';     existingRef: string }
+  | { kind: 'contradiction'; existingRef: string };</code></pre>
+
+        <h4>Six parameters externalized</h4>
+        <p>
+          All six confidence-math parameters land as user settings (per G2 pattern), tracked
+          in <a href="../plans/TODO.md">plans/TODO.md</a>:
+        </p>
+<pre><code>insrc.memory.assertions.baseScore           = 0.80
+insrc.memory.assertions.reinforcementRate   = 0.50
+insrc.memory.assertions.refinementDecay     = 0.15
+insrc.memory.assertions.weakeningDecay      = 0.40
+insrc.memory.assertions.contradictionDecay  = 0.65
+insrc.memory.assertions.noiseThreshold      = 0.30</code></pre>
+        <p>
+          Starting points; tunable based on real-world usage. Wire when the chat ↔ substrate
+          milestone (M1) ships.
+        </p>
       </li>
       <li class="open">
         <strong>G8: Implicit-capture-during-retrieval (from O4).</strong> The original O4
