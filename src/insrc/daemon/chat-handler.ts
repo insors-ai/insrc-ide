@@ -339,22 +339,34 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   // meta-task dispatch) pull it in. Skipped for clearly-non-assertion turns
   // (single slash commands like "/plan", "/handoff"); those have no semantic
   // content to classify.
+  //
+  // M1.6.b: bridge Layer 3 pending-confirm events through the open chat
+  // stream so the IDE-side toast can render. The subscription lives for
+  // exactly this classify pass; pending events emitted after the bridge
+  // is torn down still persist in substrate (no-silent-loss) and surface
+  // on the next /prefs confirm list call.
   try {
     if (shouldClassifyForAssertions(message)) {
       const turnIdForClassify = `${sessionId}:${Date.now()}`;
       const { hasSubstrateRuntime, getSubstrateRuntime } = await import('./substrate/singleton.js');
       if (hasSubstrateRuntime()) {
-        const result = await getSubstrateRuntime().classifyAssertion({
-          turnId: turnIdForClassify,
-          text:   message,
-        });
-        if (result.persisted.length > 0) {
-          log.info({
-            sessionId,
+        const { bridgePendingConfirmToStream } = await import('./prefs-confirm.js');
+        const unsubscribe = bridgePendingConfirmToStream(requestId, guardedSend, abortController.signal);
+        try {
+          const result = await getSubstrateRuntime().classifyAssertion({
             turnId: turnIdForClassify,
-            persisted: result.persisted.length,
-            accepted:  result.classification.accepted.length,
-          }, 'M1.5: assertion(s) captured from user turn');
+            text:   message,
+          });
+          if (result.persisted.length > 0) {
+            log.info({
+              sessionId,
+              turnId: turnIdForClassify,
+              persisted: result.persisted.length,
+              accepted:  result.classification.accepted.length,
+            }, 'M1.5: assertion(s) captured from user turn');
+          }
+        } finally {
+          unsubscribe();
         }
       }
     }

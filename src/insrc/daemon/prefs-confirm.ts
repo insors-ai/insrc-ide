@@ -42,6 +42,7 @@
 import { EventEmitter } from 'node:events';
 
 import { getLogger } from '../shared/logger.js';
+import type { IpcStreamMessage } from '../shared/types.js';
 import { AGENT_CHAT_OWNER, getSubstrateRuntime, hasSubstrateRuntime } from './substrate/singleton.js';
 import type { FeedbackEvent } from './substrate/types.js';
 import type {
@@ -349,6 +350,45 @@ function guessSubjectFromSpan(span: string): string {
 	const m3 = span.match(/\b(test|deploy|review|release|naming|format|style|security|performance)\b/i);
 	if (m3 !== null) { return m3[1]!.toLowerCase(); }
 	return 'unspecified';
+}
+
+// ---------------------------------------------------------------------------
+// Chat-handler bridge (M1.6.b)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream-shape sent on the `assertion-confirm` IPC channel. Mirrors
+ * `PendingConfirmEvent` plus the IPC framing the IDE needs to render
+ * the Layer 3 toast.
+ */
+export interface AssertionConfirmStreamFrame {
+	readonly kind:    'pending';
+	readonly payload: PendingConfirmEvent;
+}
+
+/**
+ * Subscribe to pending-confirm events for the duration of one chat
+ * turn and forward each as an `IpcStreamMessage` so the IDE toast can
+ * render. Returns the unsubscribe function -- caller must call it once
+ * the turn's classify pass completes (or aborts) to avoid listener
+ * leaks across turns.
+ *
+ * The bridge is a thin forwarder; per-frame filtering belongs in the
+ * IDE-side handler. Aborted signals stop emission immediately (the
+ * guardedSend caller already discards messages after abort, but we
+ * short-circuit here so we don't bother fanning out frames the IDE
+ * will throw away).
+ */
+export function bridgePendingConfirmToStream(
+	requestId: number,
+	send:      (msg: IpcStreamMessage) => void,
+	signal?:   AbortSignal,
+): () => void {
+	return onPendingConfirm((event) => {
+		if (signal?.aborted === true) { return; }
+		const frame: AssertionConfirmStreamFrame = { kind: 'pending', payload: event };
+		send({ id: requestId, stream: 'assertion-confirm', data: frame });
+	});
 }
 
 // Re-export the UserAssertionPayload type so callers don't need a second import path.

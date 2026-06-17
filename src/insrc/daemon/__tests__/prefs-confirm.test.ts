@@ -34,16 +34,18 @@ import {
 } from '../substrate/singleton.js';
 import {
 	_resetPendingConfirmEmitterForTests,
+	bridgePendingConfirmToStream,
 	createPendingConfirmHook,
 	listPendingConfirms,
 	onPendingConfirm,
 	PENDING_NS,
 	CONFIRMED_NS,
 	resolvePendingConfirm,
+	type AssertionConfirmStreamFrame,
 	type PendingConfirmEvent,
 } from '../prefs-confirm.js';
 import { prefsListRpc } from '../prefs-rpc.js';
-import type { LLMMessage, LLMProvider, LLMResponse } from '../../shared/types.js';
+import type { IpcStreamMessage, LLMMessage, LLMProvider, LLMResponse } from '../../shared/types.js';
 import type { FeedbackEvent } from '../substrate/types.js';
 
 
@@ -288,6 +290,68 @@ test('listPendingConfirms: returns empty when substrate not initialised', async 
 	_resetSubstrateRuntimeForTests();
 	const r = await listPendingConfirms();
 	assert.deepEqual(r, []);
+});
+
+
+// ---------------------------------------------------------------------------
+// M1.6.b: chat-handler bridge -> streaming IPC frames
+// ---------------------------------------------------------------------------
+
+test('bridgePendingConfirmToStream: forwards pending events as assertion-confirm frames', async () => {
+	const fx = setup();
+	try {
+		const sent: IpcStreamMessage[] = [];
+		const unsubscribe = bridgePendingConfirmToStream(99, (m) => { sent.push(m); });
+
+		const hook = createPendingConfirmHook();
+		await hook('Always include unit tests',    { turnId: 'turn-7' });
+		await hook('Always run linting too',       { turnId: 'turn-8' });
+		unsubscribe();
+
+		// Both events arrive as assertion-confirm frames keyed to id=99.
+		assert.equal(sent.length, 2);
+		assert.ok(sent.every(m => m.id === 99));
+		assert.ok(sent.every(m => m.stream === 'assertion-confirm'));
+		const frames = sent.map(m => m.data as AssertionConfirmStreamFrame);
+		assert.ok(frames.every(f => f.kind === 'pending'));
+		assert.equal(frames[0]!.payload.turnId, 'turn-7');
+		assert.equal(frames[1]!.payload.turnId, 'turn-8');
+	} finally { teardown(fx); }
+});
+
+test('bridgePendingConfirmToStream: unsubscribing stops further forwarding', async () => {
+	const fx = setup();
+	try {
+		const sent: IpcStreamMessage[] = [];
+		const unsubscribe = bridgePendingConfirmToStream(1, (m) => { sent.push(m); });
+
+		const hook = createPendingConfirmHook();
+		await hook('Always include unit tests', { turnId: 'turn-1' });
+		assert.equal(sent.length, 1);
+
+		unsubscribe();
+
+		await hook('Always run linting', { turnId: 'turn-2' });
+		assert.equal(sent.length, 1, 'no further forwarding after unsubscribe');
+	} finally { teardown(fx); }
+});
+
+test('bridgePendingConfirmToStream: respects AbortSignal -- aborted signal drops emission', async () => {
+	const fx = setup();
+	try {
+		const sent: IpcStreamMessage[] = [];
+		const ac = new AbortController();
+		const unsubscribe = bridgePendingConfirmToStream(1, (m) => { sent.push(m); }, ac.signal);
+
+		const hook = createPendingConfirmHook();
+		await hook('First one fires', { turnId: 'turn-1' });
+		assert.equal(sent.length, 1);
+
+		ac.abort();
+		await hook('After abort -- dropped', { turnId: 'turn-2' });
+		assert.equal(sent.length, 1, 'aborted signal should drop further frames');
+		unsubscribe();
+	} finally { teardown(fx); }
 });
 
 
