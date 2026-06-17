@@ -1433,10 +1433,52 @@ insrc.memory.assertions.noiseThreshold      = 0.30</code></pre>
           surface, same accuracy guarantee.
         </p>
       </li>
-      <li class="open">
-        <strong>G10: Migration timing for <code>config/</code>.</strong> &sect;5.3 picks option C
-        (retire when callers retire). When do we put the "deprecated" stamp + announce the
-        delete timeline? On this doc's approval, or after first substrate-backed consumer ships?
+      <li>
+        <strong>G10: Migration timing for <code>config/</code>. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Deprecation stamp lands NOW (with this doc's approval).
+          Delete cascades with caller retirements.</strong>
+        </p>
+        <ol>
+          <li>
+            File-level <code>@deprecated</code> JSDoc comments added to every public-export
+            file in <code>src/insrc/config/</code> on this commit:
+            <code>index.ts</code> / <code>store.ts</code> / <code>search.ts</code> /
+            <code>feedback.ts</code>. Each points readers at the substrate equivalent and at
+            this design doc.
+          </li>
+          <li>
+            Tracking entry added to <a href="../plans/TODO.md">plans/TODO.md</a> under high
+            priority: "<strong>Retire <code>config/</code></strong>" with the list of N
+            remaining callers. Each consumer migration commit removes one entry. When the
+            list hits zero, <code>config/</code> deletes.
+          </li>
+          <li>
+            <strong>No coordinated big-bang migration.</strong> Per-consumer migration
+            follows each consumer's own retirement schedule:
+            <ul>
+              <li>Legacy <code>plannerAgent</code> (<code>agent/planner/</code>) &mdash;
+                retires with <code>/plan</code> template M4.b
+                (per <a href="meta-task-plan.html">/plan design</a>).</li>
+              <li><code>agent/tasks/delegate/</code> &mdash; retires when Delegate migrates
+                (separate scheduling).</li>
+              <li><code>agent/tasks/brainstorm/</code> &mdash; separate retirement decision.</li>
+              <li><code>agent/tasks/designer/</code> &mdash; separate retirement decision.</li>
+              <li><code>agent/tasks/pair/</code> &mdash; separate retirement decision.</li>
+              <li><code>agent/tasks/tester/</code> &mdash; separate retirement decision.</li>
+            </ul>
+          </li>
+          <li>
+            <strong>No new code on <code>config/</code>.</strong> Feature work that would
+            have landed there lands on the substrate instead.
+          </li>
+        </ol>
+        <p class="muted">
+          The deprecation stamp + plans/TODO.md tracking entry are landed in the same commit
+          that closes G10. No additional ceremony required for the cleanup &mdash; existing
+          consumers continue to function until they're migrated.
+        </p>
       </li>
     </ol>
 

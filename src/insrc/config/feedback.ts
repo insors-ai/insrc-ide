@@ -3,6 +3,11 @@
  *
  * Records agent feedback as config entries, classifies scope (global vs project),
  * generalizes via LLM, deduplicates, and triggers immediate re-indexing.
+ *
+ * @deprecated since 2026-06-17. The memory substrate's user-assertion classifier
+ * (`daemon/substrate/classifier/user-assertion.ts`) is the canonical capture path
+ * for user-asserted preferences. See
+ * [`design/memory-context.html`](../../../design/memory-context.html).
  */
 
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs';

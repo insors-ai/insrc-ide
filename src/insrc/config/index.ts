@@ -1,5 +1,17 @@
 /**
  * Config management module — barrel exports.
+ *
+ * @deprecated since 2026-06-17. The memory substrate (`src/insrc/daemon/substrate/`)
+ * is the canonical memory + preference system. See
+ * [`design/memory-context.html`](../../../design/memory-context.html) for the
+ * consolidation path. This module retires when its remaining consumers migrate:
+ *   - agent/planner/         -> retires with /plan template M4.b
+ *   - agent/tasks/delegate/  -> retires when Delegate migrates
+ *   - agent/tasks/brainstorm/
+ *   - agent/tasks/designer/
+ *   - agent/tasks/pair/
+ *   - agent/tasks/tester/
+ * Tracking in `plans/TODO.md`. **No new code should consume this module.**
  */
 
 // Store

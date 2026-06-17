@@ -8,6 +8,11 @@
  * `db: DbClient` arg; it's kept as vestigial back-compat (the new
  * implementation routes through the LMDB module singleton).
  *
+ * @deprecated since 2026-06-17. The memory substrate's per-owner typed
+ * memory store (`daemon/substrate/memory-store.ts`) is the canonical storage
+ * for preferences and learned facts. See
+ * [`design/memory-context.html`](../../../design/memory-context.html).
+ *
  * Storage:
  *   - `config_entry` sub-DB: utf8 entry_id -> msgpack(ConfigEntryRow)
  *   - `config_by_scope` sub-DB: dupsort secondary index keyed by

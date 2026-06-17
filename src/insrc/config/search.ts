@@ -4,6 +4,11 @@
  *
  * Follows the pattern from src/db/search.ts but operates on
  * ConfigStore instead of the code entity store.
+ *
+ * @deprecated since 2026-06-17. New code reads preferences from the memory
+ * substrate (`daemon/substrate/` via the `kind: 'preferences'` ContextRequest
+ * slot, or directly from the L1 system segment for chat). See
+ * [`design/memory-context.html`](../../../design/memory-context.html).
  */
 
 import type {

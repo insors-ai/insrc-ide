@@ -61,6 +61,39 @@ Affects every meta-task template (not just `/plan`) — `/design`, `/implement`,
 
 ---
 
+### 2. Retire legacy `config/` module
+
+**Status**: deprecation stamped (2026-06-17, G10 of memory-context design).
+Awaiting per-consumer migration.
+
+**Context**: the memory substrate (`src/insrc/daemon/substrate/`) is the
+canonical preference/feedback storage going forward. The pre-existing
+`src/insrc/config/` module (`ConfigStore`, `searchConfig`, `recordFeedback`,
+~1170 LOC) coexists during the migration window and deletes when all callers
+have moved.
+
+**Remaining callers** (decrement as each migrates; delete `config/` when zero):
+
+- [ ] `src/insrc/agent/planner/` — retires with `/plan` template M4.b (per [design/meta-task-plan.html](../design/meta-task-plan.html)).
+- [ ] `src/insrc/agent/tasks/delegate/` — separate scheduling.
+- [ ] `src/insrc/agent/tasks/brainstorm/` — separate scheduling.
+- [ ] `src/insrc/agent/tasks/designer/` — separate scheduling.
+- [ ] `src/insrc/agent/tasks/pair/` — separate scheduling.
+- [ ] `src/insrc/agent/tasks/tester/` — separate scheduling.
+- [ ] `src/insrc/agent/tasks/shared/config-context.ts` — shared helper; deletes when its callers are all gone.
+- [ ] `src/insrc/agent/framework/types.ts` + `helpers.ts` — `searchConfig` surface
+      on the runner `deps`; deletes when no caller passes it.
+- [ ] `src/insrc/daemon/index.ts` — wiring; trims as callers go.
+- [ ] `src/insrc/db/lance/config-vec.ts` — storage substrate; deletes when nothing reads it.
+- [ ] `src/insrc/indexer/index.ts` — re-index hook; deletes when nothing depends on it.
+
+**Rules**:
+- No new code may consume `config/`. New preference/feedback work goes through the substrate.
+- When migrating a consumer, the same PR removes its checkbox above + the consumer's `config/` imports.
+- When the list hits zero, the next PR deletes `src/insrc/config/` + the storage tables.
+
+---
+
 ## Medium priority
 
 (empty)
