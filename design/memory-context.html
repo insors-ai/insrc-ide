@@ -956,13 +956,109 @@ assertionInterests: [
           &mdash; adds complexity for a niche flow without enough payoff.
         </p>
       </li>
-      <li class="open">
-        <strong>G5: Framework-mandatory preference injection.</strong> &sect;5.2.3 proposes the
-        framework forces a <code>preferences</code> slot into every meta-task phase-1 ask
-        regardless of what the cloud LLM requests. This violates the framework's
-        "cloud LLM decides what to fetch" principle. Worth violating? Or do we trust the cloud
-        LLM to always ask for preferences (with a strong prompt that says "always ask for
-        preferences at phase 1")?
+      <li>
+        <strong>G5: Framework-mandatory preference injection. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Framework auto-injects</strong> a <code>kind: 'preferences'</code> request
+          into every meta-task step's phase-1 fulfillment &mdash; preferences are always
+          considered. <strong>The local LLM curates relevance</strong> against the step's
+          intent and returns only applicable preferences. Cloud LLM sees a focused, filtered
+          set in phase 2.
+        </p>
+        <p>
+          This is the meta-tasks framework's local-as-librarian / cloud-as-reasoner pattern
+          applied to preferences specifically. The framework guarantees consideration; the
+          local LLM ensures relevance.
+        </p>
+
+        <h4>Two-stage filter</h4>
+        <ol>
+          <li>
+            <strong>Hard scope filter</strong> (G4): categories / repoPaths must match the
+            query scope. Pure JS predicate; microseconds.
+          </li>
+          <li>
+            <strong>Soft relevance filter</strong> (G5): local LLM gets the scope-passed
+            preferences + the step's intent and picks which ones apply to the step's subject
+            matter. ~sub-second on Ollama.
+          </li>
+        </ol>
+
+<pre><code>// Framework injects automatically per step's phase 1:
+const preferenceRequest: ContextRequestPreferences = {
+  kind: 'preferences',
+  scope: { templateId, category, repoPath },
+  stepIntent: stepDescriptor.intent,        // for local LLM curation
+};
+
+// Local LLM fetcher:
+async function fetchPreferences(req, inputs) {
+  const owner  = `agent:meta-task:${req.scope.templateId}`;
+  const all    = await memory.scope(owner, 'user-assertions').scan();
+  const scoped = all.filter(matchesScope(req.scope));       // G4 hard filter
+  if (scoped.length === 0) {
+    return { request: req, status: 'empty', payload: [] };  // short-circuit
+  }
+  const relevant = await localLLM.curatePreferences({
+    preferences: scoped,
+    stepIntent:  req.stepIntent,
+    bias:        'inclusion',                                // high recall
+  });
+  return { request: req, status: 'ok', payload: relevant };
+}</code></pre>
+
+        <h4>Worked example</h4>
+        <p>
+          /plan generating an <code>implementation</code> plan for "add user auth." Owner
+          <code>agent:meta-task:plan</code> has two stored preferences:
+        </p>
+        <ul>
+          <li>"always include unit tests" &mdash; <code>subject: test-policy</code>, scope:
+            <code>categories: ['implementation']</code></li>
+          <li>"deploys happen Friday only" &mdash; <code>subject: workflow-policy</code>,
+            scope: any</li>
+        </ul>
+        <p>
+          <strong>Stage 1 (scope filter)</strong>: both pass &mdash; test-policy matches
+          <code>category: implementation</code>; workflow-policy has no category restriction.
+        </p>
+        <p>
+          <strong>Stage 2 (relevance curation)</strong>: local LLM sees
+          <code>stepIntent: "draft an implementation plan for adding user auth"</code>.
+          Includes <code>test-policy</code> (clearly relevant to implementation drafting);
+          excludes <code>workflow-policy</code> (deploy timing isn't a planning concern at
+          draft time).
+        </p>
+        <p>
+          <strong>Phase-2 prompt</strong> sees one focused preference, not two with one
+          irrelevant.
+        </p>
+
+        <h4>Bias toward inclusion</h4>
+        <p>
+          The curation prompt is "<em>include if there's any chance this preference might
+          apply</em>" &mdash; high recall over high precision. Cloud LLM can ignore irrelevant
+          chunks in phase 2; recovering from "preference was filtered out" is impossible. Under
+          accuracy-first this is the right asymmetry.
+        </p>
+
+        <h4>Framework principle dilution (documented)</h4>
+        <p>
+          The meta-tasks framework's "cloud LLM declares its own sufficiency" principle is
+          slightly diluted here: when cloud emits <code>kind: 'sufficient'</code>, the
+          framework still runs the local LLM for preferences. Documented exception &mdash;
+          preferences are the one always-on slot. Cloud LLM CAN additionally request
+          preferences via its own phase-1 (e.g., a different subject filter or wider scope);
+          the auto-injection is a baseline, not a cap.
+        </p>
+
+        <h4>Diagnostics</h4>
+        <p>
+          The curation call optionally returns a short "why" per preference picked. Logged to
+          <code>~/.insrc/meta/&lt;id&gt;/step-N-&hellip;phase1.jsonl</code> for debugging; not
+          surfaced in the phase-2 prompt.
+        </p>
       </li>
       <li class="open">
         <strong>G6: Cross-session conversation store integration.</strong> When a chat turn is
