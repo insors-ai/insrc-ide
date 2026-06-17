@@ -1060,13 +1060,76 @@ async function fetchPreferences(req, inputs) {
           surfaced in the phase-2 prompt.
         </p>
       </li>
-      <li class="open">
-        <strong>G6: Cross-session conversation store integration.</strong> When a chat turn is
-        classified as an assertion, we write to the substrate <em>and</em> the turn remains in
-        the conversation store. Do we also tag the conversation turn with a "classified as
-        assertion" marker for future analysis, or is the substrate entry the only durable
-        record? (The substrate's <code>turnId</code> back-reference already links to the
-        original turn, but the reverse isn't indexed.)
+      <li>
+        <strong>G6: Cross-session conversation store tagging. &mdash;
+          <span style="color: var(--green)">RESOLVED</span></strong>
+        <p>
+          <strong>Tag the turn</strong> with the memory-entry refs it produced. Cheap reverse
+          lookup, natural UI affordances, simple audit query path. <strong>No retroactive
+          edits</strong> when the underlying preference is later revised or discarded &mdash;
+          history stays immutable, the renderer resolves current state at read time.
+        </p>
+
+        <h4>Schema addition</h4>
+
+<pre><code>// db/conversations.ts -- TurnRecord (only the new field shown)
+export interface TurnRecord {
+  // ... existing fields ...
+  /**
+   * Memory-entry refs produced by the user-assertion classifier (D6) when this
+   * turn was processed. Empty / undefined for turns that didn't produce
+   * assertions (the common case). The substrate's source.turnId back-reference
+   * provides the substrate -> turn link; this field provides the turn -> substrate
+   * link for cheap reverse lookup.
+   */
+  readonly assertionRefs?: readonly string[] | undefined;
+}</code></pre>
+
+        <h4>What "tag the turn" enables</h4>
+        <ul>
+          <li>
+            <strong>Reverse lookup is one field access.</strong> Loading a chat turn from
+            history and immediately knowing "this captured X preferences" doesn't require
+            scanning a substrate index.
+          </li>
+          <li>
+            <strong>Chat scrollback UI</strong> can render a small badge
+            ("&#128204; captured as test-policy preference") next to turns that produced
+            preferences. Without the tag, computing that requires a substrate scan per turn
+            render.
+          </li>
+          <li>
+            <strong>Audit / curation queries.</strong> "Show me every turn that contributed
+            preferences" becomes a turn-side filter.
+          </li>
+        </ul>
+
+        <h4>Immutable turn history; lazy resolution at read</h4>
+        <p>
+          When a preference is revised (user edits canonical text via <code>/prefs</code>) or
+          discarded (G7 confidence-aging or explicit user discard), the turn keeps its
+          <code>assertionRefs</code> pointing at the now-stale entry. The renderer follows
+          the ref at read time:
+        </p>
+        <ul>
+          <li>Ref resolves to active <code>constraint</code> &rarr; "&#128204; captured as
+            preference: X (active)".</li>
+          <li>Ref resolves to superseded entry &rarr; "&#128204; captured as preference;
+            superseded by [later turn]".</li>
+          <li>Ref resolves to discarded entry &rarr; "&#128204; previously captured as
+            preference (discarded)".</li>
+          <li>Ref dangling (entry deleted entirely) &rarr; "&#128204; captured a preference;
+            no longer tracked".</li>
+        </ul>
+        <p>
+          Turn record never gets mutated retroactively. History stays a faithful record of
+          what happened; current state lives in the substrate.
+        </p>
+
+        <p class="muted">
+          <strong>Cost</strong>: one optional <code>readonly string[]</code> field on
+          <code>TurnRecord</code>. Most turns have none (undefined / empty). Negligible.
+        </p>
       </li>
       <li class="open">
         <strong>G7: Confidence accumulation for re-assertions.</strong> D13 covers observation
