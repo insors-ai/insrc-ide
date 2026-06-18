@@ -358,6 +358,23 @@ export interface AgentConfig {
     confirmIntent?: boolean | undefined;
   } | undefined;
   /**
+   * memory-context M5.6. Mirror of the `insrc.memory.*` workbench
+   * settings that the daemon reads at runtime. Optional everywhere --
+   * absent fields fall back to documented defaults.
+   */
+  memory?: {
+    /**
+     * Implicit-capture-during-retrieval backstop (memory-context G8).
+     * Off by default. When enabled, the daemon's chat-handler scans
+     * recent unclassified turns at preference-slot fulfillment time
+     * and surfaces candidates asynchronously on next interaction via
+     * the Layer 3 confirm toast.
+     */
+    implicitCapture?: {
+      enabled?: boolean | undefined;
+    } | undefined;
+  } | undefined;
+  /**
    * Analyzer routing config. Applies to BOTH the code analyzer
    * (daemon/controllers/code-analyzer-orchestrator.ts) and the data
    * analyzer (agent/tasks/data-analyzer/resolve-provider.ts).

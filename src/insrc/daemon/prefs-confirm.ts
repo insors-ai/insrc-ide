@@ -114,6 +114,17 @@ export function onPendingConfirm(listener: (evt: PendingConfirmEvent) => void): 
 	return () => { emitter.off(EVENT_NAME, listener); };
 }
 
+/**
+ * memory-context M5.5. Emit a `PendingConfirmEvent` from outside the
+ * Layer 3 hook -- used by the implicit-capture pass to notify the
+ * chat-handler-bridge subscribers that an implicitly-staged candidate
+ * is now sitting in the pending namespace. The staging write happens
+ * elsewhere; this only emits the event so the IDE toast can render.
+ */
+export function emitPendingConfirm(evt: PendingConfirmEvent): void {
+	emitter.emit(EVENT_NAME, evt);
+}
+
 /** Test-only: clear all listeners so suites don't leak handlers across runs. */
 export function _resetPendingConfirmEmitterForTests(): void {
 	emitter.removeAllListeners(EVENT_NAME);

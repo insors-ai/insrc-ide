@@ -348,11 +348,69 @@ export const chatSend: StreamHandler = async (params, send, signal) => {
   try {
     if (shouldClassifyForAssertions(message)) {
       const turnIdForClassify = `${sessionId}:${Date.now()}`;
-      const { hasSubstrateRuntime, getSubstrateRuntime } = await import('./substrate/singleton.js');
+      const { hasSubstrateRuntime, getSubstrateRuntime, AGENT_CHAT_OWNER } = await import('./substrate/singleton.js');
       if (hasSubstrateRuntime()) {
         const { bridgePendingConfirmToStream } = await import('./prefs-confirm.js');
         const unsubscribe = bridgePendingConfirmToStream(requestId, guardedSend, abortController.signal);
         try {
+          // memory-context M5.5: implicit-capture-during-retrieval. Off by
+          // default; gated on `insrc.memory.implicitCapture.enabled`. The
+          // pass scans prior unclassified turns for THIS session and
+          // stages accepted candidates into the same pending namespace
+          // the Layer 3 hook writes to, so the IDE toast (M1.6.c) surfaces
+          // them via the bridge we just subscribed. Run BEFORE the
+          // foreground classify so the new candidates land in pending
+          // before the user's current turn writes anything.
+          try {
+            const cfg = (await import('../agent/config.js')).loadConfig();
+            if (cfg.memory?.implicitCapture?.enabled === true) {
+              const { runImplicitPass } = await import('./substrate/implicit-capture.js');
+              const { getTurnsForSession } = await import('../db/conversations.js');
+              const { getDb } = await import('../db/client.js');
+              const db = await getDb();
+              const runtime = getSubstrateRuntime();
+              const { emitPendingConfirm } = await import('./prefs-confirm.js');
+              const result = await runImplicitPass(sessionId, AGENT_CHAT_OWNER, {
+                memory:     runtime.memory,
+                classifier: runtime.classifier,
+                getTurnsForSession: async (sid) => {
+                  const turns = await getTurnsForSession(db, sid);
+                  // Drop the just-submitted turn (the foreground classify
+                  // owns it); implicit pass only revisits prior history.
+                  return turns.map(t => ({ idx: t.idx, text: t.user }));
+                },
+                onCandidateStaged: (e) => {
+                  // Fire the pending-confirm bus so the bridge subscribed
+                  // a few lines up forwards an `assertion-confirm` IPC
+                  // frame to the IDE -- the M1.6.c toast renders for
+                  // each implicit candidate.
+                  emitPendingConfirm({
+                    key:           e.key,
+                    turnId:        `${sessionId}:implicit:${e.turnIdx}`,
+                    subject:       e.subject,
+                    canonicalText: e.canonicalText,
+                    rawSpan:       e.canonicalText,
+                    confidence:    e.confidence,
+                    polarity:      'preference',
+                    scope:         'workspace',
+                  });
+                },
+              });
+              if (result.stagedCount > 0 || result.dismissedCount > 0) {
+                log.info({
+                  sessionId,
+                  scanned: result.scannedTurns,
+                  staged:  result.stagedCount,
+                  dismissed: result.dismissedCount,
+                }, 'M5: implicit pass surfaced backstop candidates');
+              }
+            }
+          } catch (err) {
+            // Implicit pass is purely advisory; failures never block the
+            // foreground classify.
+            log.warn({ sessionId, err: (err as Error).message }, 'M5: implicit pass threw; foreground classify continues');
+          }
+
           const result = await getSubstrateRuntime().classifyAssertion({
             turnId: turnIdForClassify,
             text:   message,

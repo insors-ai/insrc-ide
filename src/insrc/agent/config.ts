@@ -516,9 +516,30 @@ function mergeConfig(raw: Record<string, unknown>): { config: AgentConfig; migra
           },
         }
       : {}),
+    ...(isObject(source['memory'])
+      ? {
+          memory: parseMemorySection(source['memory'] as Record<string, unknown>),
+        }
+      : {}),
   };
 
   return { config, migrated: looksLegacy };
+}
+
+/**
+ * memory-context M5.6. Parse the `memory` config section. Each nested
+ * group is independently optional; absent fields fall back to documented
+ * defaults at the call site.
+ */
+function parseMemorySection(raw: Record<string, unknown>): NonNullable<AgentConfig['memory']> {
+  const out: NonNullable<AgentConfig['memory']> = {};
+  if (isObject(raw['implicitCapture'])) {
+    const ic = raw['implicitCapture'] as Record<string, unknown>;
+    out.implicitCapture = {
+      enabled: ic['enabled'] === true,
+    };
+  }
+  return out;
 }
 
 function detectLegacy(raw: Record<string, unknown>): boolean {

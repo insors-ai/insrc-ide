@@ -418,5 +418,11 @@ configurationRegistry.registerConfiguration({
 			description: localize('insrc.memory.assertions.noiseThreshold', 'Entries with confidence below this threshold are suppressed at retrieval (but remain in storage). (memory-context G7)'),
 			scope: ConfigurationScope.MACHINE,
 		},
+		'insrc.memory.implicitCapture.enabled': {
+			type: 'boolean',
+			default: false,
+			description: localize('insrc.memory.implicitCapture.enabled', 'Enable implicit-capture-during-retrieval: scans recent unclassified turns at preference-slot fulfillment time and surfaces candidates asynchronously on next chat interaction. Off by default. (memory-context G8 / M5)'),
+			scope: ConfigurationScope.MACHINE,
+		},
 	},
 });
