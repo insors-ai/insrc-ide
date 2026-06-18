@@ -18,6 +18,7 @@
 
 import type { MetaTaskTemplate } from './index.js';
 import type { ScopeManifest, Plan } from '../types.js';
+import type { AssertionInterest } from '../../daemon/substrate/types.js';
 
 const REVIEW_PHASE2_PRELUDE = `You are running as a code-review meta-task step.
 
@@ -57,12 +58,31 @@ const planFn = (scope: ScopeManifest): Plan => ({
 	],
 });
 
+/**
+ * memory-context M3.2. Subjects the review template wants preferences routed
+ * to. Narrower than `/plan` -- a code review reflects test policy, code style,
+ * and security policy; doc / commit / workflow rules typically aren't load-bearing
+ * for a review pass.
+ */
+const REVIEW_ASSERTION_INTERESTS: readonly AssertionInterest[] = [
+	{ subjectPattern: 'test-policy',     description: 'Test coverage, types, and style for review findings' },
+	{ subjectPattern: 'code-style',      description: 'Code conventions reflected in review findings' },
+	{ subjectPattern: 'security-policy', description: 'Security policies surfaced as review findings' },
+];
+
 const reviewTemplate: MetaTaskTemplate = {
 	id:           'review',
 	displayName:  'Review',
 	worktreeMode: 'none',
 	plan:         planFn,
 	phase2SystemPrelude: REVIEW_PHASE2_PRELUDE,
+	// memory-context M3 substrate registration.
+	ownerId:            'agent:meta-task:review',
+	schemaVersion:      1,
+	assertionInterests: REVIEW_ASSERTION_INTERESTS,
+	memorySchema: [
+		{ namespace: 'user-assertions', kind: 'constraint' },
+	],
 };
 
 export { reviewTemplate };

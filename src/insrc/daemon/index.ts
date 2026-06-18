@@ -297,6 +297,13 @@ async function main(): Promise<void> {
 	});
 	registerAgentChatOwner(substrate);
 
+	// memory-context M3.3: register meta-task template owners with the
+	// substrate so chat-captured preferences fan out to matching
+	// templates' user-assertions namespaces. Templates that were
+	// imported before the substrate booted get caught up here.
+	const { registerKnownTemplatesWithSubstrate } = await import('../meta-task/templates/index.js');
+	registerKnownTemplatesWithSubstrate();
+
 	// Shared session-purge pipeline. Used by `agent.discard`,
 	// `session.delete`, and `session.deleteBulk` so they don't drift.
 	// plans/session-delete.md Phase B.
