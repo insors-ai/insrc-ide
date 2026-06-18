@@ -42,7 +42,7 @@ export type ValidationResult<T> =
 // ---------------------------------------------------------------------------
 
 const CONTEXT_REQUEST_KINDS = new Set<string>([
-	'entities', 'files', 'deliverable', 'semantic', 'graph', 'git', 'trace', 'memory',
+	'entities', 'files', 'deliverable', 'semantic', 'graph', 'git', 'trace', 'memory', 'preferences',
 ]);
 
 const GRAPH_OPS = new Set<string>(['callers', 'callees', 'imports', 'importers', 'closure']);
@@ -145,6 +145,33 @@ export function validateContextRequest(raw: unknown, path = 'request'): Validati
 			const r = raw as Record<string, unknown>;
 			if (r.query !== undefined && typeof r.query !== 'string') {
 				errors.push(`${path}.query: must be string or omitted`);
+			}
+			break;
+		}
+		case 'preferences': {
+			// memory-context M2.3. All fields optional -- a bare
+			// `{ kind: 'preferences' }` is valid (no scope filter, no
+			// stepIntent => no LLM curation pass, return all candidates
+			// for the active owner).
+			const r = raw as Record<string, unknown>;
+			if (r.scope !== undefined) {
+				if (!isObject(r.scope)) {
+					errors.push(`${path}.scope: must be object or omitted`);
+				} else {
+					const s = r.scope as Record<string, unknown>;
+					if (s.templateId !== undefined && typeof s.templateId !== 'string') {
+						errors.push(`${path}.scope.templateId: must be string or omitted`);
+					}
+					if (s.category !== undefined && typeof s.category !== 'string') {
+						errors.push(`${path}.scope.category: must be string or omitted`);
+					}
+					if (s.repoPath !== undefined && typeof s.repoPath !== 'string') {
+						errors.push(`${path}.scope.repoPath: must be string or omitted`);
+					}
+				}
+			}
+			if (r.stepIntent !== undefined && typeof r.stepIntent !== 'string') {
+				errors.push(`${path}.stepIntent: must be string or omitted`);
 			}
 			break;
 		}

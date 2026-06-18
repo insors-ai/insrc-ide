@@ -26,6 +26,7 @@
  */
 
 import { dispatchFetch, type FetchInputs } from './fetchers.js';
+import type { LLMProvider } from '../shared/types.js';
 import type {
 	ContextChunk,
 	DeliverableCatalog,
@@ -43,6 +44,12 @@ export interface FulfillOpts {
 	/** Embedder for `semantic` / `memory` slots. Caller-provided so the driver
 	 *  stays free of provider plumbing. */
 	readonly embed: (text: string) => Promise<number[]>;
+	/**
+	 * memory-context M2.5. Local LLM provider used by the `preferences` slot
+	 * fetcher for G5 relevance curation. Optional -- the fetcher degrades to
+	 * inclusion-biased return when omitted.
+	 */
+	readonly localProvider?: LLMProvider | undefined;
 	/** Wall-clock source. Override in tests. */
 	readonly now?: (() => number) | undefined;
 }
@@ -68,6 +75,7 @@ export async function fulfill(ask: Phase1Ask, opts: FulfillOpts): Promise<Phase1
 		catalog: opts.catalog,
 		byteCap,
 		embed:   opts.embed,
+		...(opts.localProvider !== undefined ? { localProvider: opts.localProvider } : {}),
 	};
 
 	const t0 = now();

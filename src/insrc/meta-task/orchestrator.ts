@@ -75,6 +75,13 @@ export interface RunMetaTaskOpts {
 	readonly cloud:      LLMProvider;
 	/** Embedder for `semantic` / `memory` slots in the fetcher. */
 	readonly embed:      (text: string) => Promise<number[]>;
+	/**
+	 * memory-context M2.5. Local LLM provider for G5 relevance curation in
+	 * the auto-injected `preferences` slot. Optional -- when omitted the
+	 * fetcher skips curation and returns the scope-filtered preference list
+	 * (matching the inclusion-bias behaviour of `agent/context/preferences.ts`).
+	 */
+	readonly localProvider?: LLMProvider | undefined;
 	readonly signal?:    AbortSignal | undefined;
 	/** Override the random-id allocator for tests. */
 	readonly allocId?:   (() => string) | undefined;
@@ -193,6 +200,7 @@ export async function runMetaTask(opts: RunMetaTaskOpts): Promise<MetaTaskResult
 			catalog,
 			cloud:    opts.cloud,
 			embed:    opts.embed,
+			localProvider: opts.localProvider,
 			emit:     opts.emit,
 			store,
 			template,
@@ -285,6 +293,8 @@ interface RunStepOpts {
 	readonly catalog:   DeliverableCatalog;
 	readonly cloud:     LLMProvider;
 	readonly embed:     (text: string) => Promise<number[]>;
+	/** memory-context M2.5. Local LLM for the `preferences` slot G5 curation. */
+	readonly localProvider: LLMProvider | undefined;
 	readonly emit:      MetaTaskEmitter;
 	readonly store:     MetaTaskStore;
 	readonly template:  MetaTaskTemplate;
@@ -331,7 +341,7 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 				phase2RetryAttempt,
 				maxPhase2Retries: DEFAULT_RETRY_CAPS.maxContextNeededRetries,
 			});
-			const ask = await callForPhase1Ask({
+			const cloudAsk = await callForPhase1Ask({
 				cloud:  opts.cloud,
 				prompt: askPrompt,
 				store:  opts.store,
@@ -339,6 +349,28 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 				slug:   opts.slug,
 				retryAttempt: phase2RetryAttempt,
 			});
+
+			// memory-context M2.5: auto-inject a `preferences` slot regardless
+			// of whether the cloud said sufficient or context-needed. Even on
+			// 'sufficient' we still fetch preferences -- that's the documented
+			// exception per G5. Synthesise an effective ask with the preferences
+			// slot pre-pended (or as the only slot when the cloud said sufficient).
+			const preferencesReq: Phase1Ask & { kind: 'context-needed' } = {
+				kind: 'context-needed',
+				requests: [
+					{
+						kind: 'preferences',
+						scope: {
+							templateId: opts.template.id,
+							repoPath:   opts.scope.repoPath,
+						},
+						stepIntent: opts.stepDesc.intent,
+					},
+					...(cloudAsk.kind === 'context-needed' ? cloudAsk.requests : []),
+				],
+				...(cloudAsk.kind === 'context-needed' && cloudAsk.intent !== undefined ? { intent: cloudAsk.intent } : {}),
+			};
+			const ask: Phase1Ask = preferencesReq;
 
 			let phase1Result: Phase1Result | null = null;
 			if (ask.kind === 'context-needed') {
@@ -359,7 +391,12 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 			const taskPrompt = buildPhase2Prompt({
 				stepDesc:    opts.stepDesc,
 				template:    opts.template,
-				askKind:     ask.kind,
+				// memory-context M2.5: use the CLOUD's original kind for
+				// messaging. The orchestrator may have auto-injected
+				// preferences into the effective ask, but the cloud
+				// shouldn't see the rewritten kind -- it judges based on
+				// what it asked for.
+				askKind:     cloudAsk.kind,
 				phase1Result,
 				phase2RetryAttempt,
 				maxPhase2Retries: DEFAULT_RETRY_CAPS.maxContextNeededRetries,
@@ -428,6 +465,7 @@ async function runNarrowingLoop(input: NarrowingLoopOpts): Promise<Phase1Result 
 			scope:   input.opts.scope,
 			catalog: input.opts.catalog,
 			embed:   input.opts.embed,
+			...(input.opts.localProvider !== undefined ? { localProvider: input.opts.localProvider } : {}),
 		});
 		await input.opts.store.appendStepPhase1(input.opts.stepIndex, input.opts.slug, {
 			ts: input.opts.now(), kind: 'result', result: result!, retryAttempt: attempt,
@@ -764,15 +802,45 @@ function buildPhase2Prompt(opts: BuildPhase2PromptOpts): string {
 		}
 	}
 	lines.push('');
+	// memory-context M2.5: the orchestrator may auto-inject a `preferences`
+	// chunk into phase-1 even when the cloud declared 'sufficient'. Split
+	// the render so the "you declared sufficient" message still appears
+	// (the cloud's own judgment is preserved) but any auto-injected
+	// preferences chunks are surfaced alongside it.
+	const allChunks = opts.phase1Result?.chunks ?? [];
+	// Empty preferences chunks carry no signal -- skip them so the prompt
+	// doesn't show a meaningless "Auto-injected" section when no preferences
+	// are seeded for the owner.
+	const prefChunks = allChunks.filter(c => c.request.kind === 'preferences' && c.status !== 'empty');
+	const otherChunks = allChunks.filter(c => c.request.kind !== 'preferences');
+
 	if (opts.askKind === 'sufficient' || opts.phase1Result === null) {
 		lines.push('You declared sufficiency in phase 1; run the task with what your training has + your tool access.');
+		if (prefChunks.length > 0) {
+			lines.push('');
+			lines.push('Auto-injected: active user preferences (apply when relevant):');
+			for (let i = 0; i < prefChunks.length; i++) {
+				const c = prefChunks[i]!;
+				lines.push(`─── preferences[${i}] -- status=${c.status}${c.note !== undefined ? ` (${c.note})` : ''} ───`);
+				lines.push(JSON.stringify(c.payload, null, 2).slice(0, 8000));
+			}
+		}
 	} else {
 		lines.push('Context (assembled by local LLM from your phase-1 ask):');
-		for (let i = 0; i < opts.phase1Result.chunks.length; i++) {
-			const c = opts.phase1Result.chunks[i]!;
+		for (let i = 0; i < otherChunks.length; i++) {
+			const c = otherChunks[i]!;
 			lines.push('');
 			lines.push(`─── chunk[${i}]: ${c.request.kind} -- status=${c.status}${c.note !== undefined ? ` (${c.note})` : ''} ───`);
 			lines.push(JSON.stringify(c.payload, null, 2).slice(0, 8000));   // cap per-chunk render
+		}
+		if (prefChunks.length > 0) {
+			lines.push('');
+			lines.push('Auto-injected: active user preferences (apply when relevant):');
+			for (let i = 0; i < prefChunks.length; i++) {
+				const c = prefChunks[i]!;
+				lines.push(`─── preferences[${i}] -- status=${c.status}${c.note !== undefined ? ` (${c.note})` : ''} ───`);
+				lines.push(JSON.stringify(c.payload, null, 2).slice(0, 8000));
+			}
 		}
 		lines.push('');
 		lines.push(`Aggregate: ${opts.phase1Result.meta.totalBytes} bytes, ${opts.phase1Result.meta.elapsedMs} ms, ${opts.phase1Result.meta.droppedRequests} dropped requests.`);

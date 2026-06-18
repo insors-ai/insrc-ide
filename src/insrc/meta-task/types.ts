@@ -81,6 +81,26 @@ export type ContextRequestMemory = {
 	readonly query?:  string | undefined;
 };
 
+/**
+ * memory-context M2.3 of plans/memory-context.md. Pulls owner-scoped user
+ * preferences from substrate (`agent:meta-task:<templateId>/user-assertions/...`)
+ * with G4 hard scope filter + G5 LLM-driven relevance curation.
+ *
+ * The orchestrator auto-injects one of these per step (M2.5), so templates
+ * don't need to declare it explicitly. Phase-1 fulfillment includes the
+ * curated subset so phase-2 sees user durable directives.
+ */
+export type ContextRequestPreferences = {
+	readonly kind:        'preferences';
+	readonly scope?:      {
+		readonly templateId?: string | undefined;
+		readonly category?:   string | undefined;
+		readonly repoPath?:   string | undefined;
+	} | undefined;
+	/** Used for G5 relevance curation against this step's intent. */
+	readonly stepIntent?: string | undefined;
+};
+
 export type ContextRequest =
 	| ContextRequestEntities
 	| ContextRequestFiles
@@ -89,7 +109,8 @@ export type ContextRequest =
 	| ContextRequestGraph
 	| ContextRequestGit
 	| ContextRequestTrace
-	| ContextRequestMemory;
+	| ContextRequestMemory
+	| ContextRequestPreferences;
 
 export type ContextRequestKind = ContextRequest['kind'];
 

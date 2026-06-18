@@ -42,6 +42,7 @@ import {
 import { searchTurnsByRepo } from '../db/conversations.js';
 
 import { getLogger } from '../shared/logger.js';
+import type { LLMMessage, LLMProvider } from '../shared/types.js';
 
 import type {
 	ContextChunk,
@@ -52,6 +53,7 @@ import type {
 	ContextRequestGit,
 	ContextRequestGraph,
 	ContextRequestMemory,
+	ContextRequestPreferences,
 	ContextRequestSemantic,
 	ContextRequestTrace,
 	DeliverableCatalog,
@@ -77,6 +79,13 @@ export interface FetchInputs {
 	 * (matching the existing `searchEntities` / `searchTurnsByRepo` behavior).
 	 */
 	readonly embed: (text: string) => Promise<number[]>;
+	/**
+	 * memory-context M2.4. Local LLM used for G5 relevance curation in the
+	 * `preferences` slot fetcher. Optional -- when omitted, the fetcher skips
+	 * curation and returns the full scope-filtered candidate list (matching
+	 * the inclusion-bias behaviour of `agent/context/preferences.ts`).
+	 */
+	readonly localProvider?: LLMProvider | undefined;
 }
 
 function ok(request: ContextRequest, payload: unknown, note?: string): ContextChunk {
@@ -623,6 +632,190 @@ export async function fetchMemory(req: ContextRequestMemory, inputs: FetchInputs
 
 
 // ---------------------------------------------------------------------------
+// preferences (memory-context M2.4)
+//
+// Pulls owner-scoped user-asserted preferences out of substrate, applies the
+// G4 hard scope filter (categories / repoPath), and -- when a local LLM is
+// available -- runs the G5-style relevance curator against the step intent.
+//
+// Owner key is derived from the request scope:
+//   `agent:meta-task:<templateId>` when scope.templateId is set;
+//   `agent:meta-task:__unknown__`   otherwise (typed dead letter, not an error).
+//
+// `agent:chat` is NOT mirrored here. M1.8's L1 system extension reads
+// agent:chat directly; the meta-task path picks up only meta-task-owned
+// preferences. The end-to-end worked example (M3) walks the user's preference
+// from chat capture to meta-task-step retrieval via owner replication, not
+// via this fetcher's scope.
+// ---------------------------------------------------------------------------
+
+interface PreferenceCandidate {
+	readonly subject:        string;
+	readonly canonicalText:  string;
+	readonly confidence:     number;
+	readonly categories?:    readonly string[] | undefined;
+	readonly repoPaths?:     readonly string[] | undefined;
+	readonly capturedAtTurn?: string | undefined;
+}
+
+const PREFERENCES_NOISE_THRESHOLD = 0.30;
+
+const PREFERENCES_CURATION_SYSTEM = `You filter a list of user preferences for relevance to the current step.
+
+You will see:
+  1. A short summary of what the step is about (the "intent").
+  2. A numbered list of preferences (each: subject + canonical text).
+
+Output ONLY a JSON object: { "relevant_indices": [<indices of preferences to include>] }.
+
+Rules:
+  - BIAS TOWARD INCLUSION. When in doubt, include. The cost of including an irrelevant rule is a few tokens; the cost of dropping a relevant rule is silently violating user guidance.
+  - Include a preference if it COULD apply to the step, even loosely.
+  - Drop only preferences that are clearly orthogonal to the step.
+  - Index from 0.
+
+If the intent is empty or unclear, include everything.`;
+
+const PREFERENCES_CURATION_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['relevant_indices'],
+	properties: {
+		relevant_indices: {
+			type:        'array',
+			items:       { type: 'integer', minimum: 0 },
+			uniqueItems: true,
+		},
+	},
+};
+
+function preferencesOwnerForScope(scopeIn: ContextRequestPreferences['scope']): string {
+	const templateId = scopeIn?.templateId ?? '__unknown__';
+	return `agent:meta-task:${templateId}`;
+}
+
+function matchesPreferencesScope(
+	c: PreferenceCandidate,
+	reqScope: ContextRequestPreferences['scope'],
+): boolean {
+	if (reqScope?.repoPath !== undefined && c.repoPaths !== undefined && c.repoPaths.length > 0) {
+		if (!c.repoPaths.includes(reqScope.repoPath)) { return false; }
+	}
+	if (reqScope?.category !== undefined && c.categories !== undefined && c.categories.length > 0) {
+		if (!c.categories.includes(reqScope.category)) { return false; }
+	}
+	return true;
+}
+
+async function curatePreferencesViaLlm(
+	candidates: readonly PreferenceCandidate[],
+	stepIntent: string,
+	provider:   LLMProvider,
+): Promise<readonly PreferenceCandidate[]> {
+	const numbered = candidates.map((c, i) => `${i}. [${c.subject}] ${c.canonicalText}`).join('\n');
+	const messages: LLMMessage[] = [
+		{ role: 'system', content: PREFERENCES_CURATION_SYSTEM },
+		{ role: 'user',   content: `Step intent:\n${stepIntent}\n\nPreferences:\n${numbered}\n\nRespond with the JSON object.` },
+	];
+	const response = await provider.complete(messages, {
+		responseFormat: { schema: PREFERENCES_CURATION_SCHEMA },
+		temperature:    0.1,
+		maxTokens:      512,
+	});
+	try {
+		const raw = JSON.parse(response.text) as { relevant_indices?: unknown };
+		if (!Array.isArray(raw.relevant_indices)) { return candidates; }
+		const include = new Set(raw.relevant_indices.filter((n): n is number => Number.isInteger(n)));
+		return candidates.filter((_c, i) => include.has(i));
+	} catch (err) {
+		log.warn({ err: (err as Error).message, head: response.text.slice(0, 80) }, 'preferences curator returned malformed JSON; including all');
+		return candidates;
+	}
+}
+
+export async function fetchPreferences(req: ContextRequestPreferences, inputs: FetchInputs): Promise<ContextChunk> {
+	try {
+		const { hasSubstrateRuntime, getSubstrateRuntime } = await import('../daemon/substrate/singleton.js');
+		if (!hasSubstrateRuntime()) {
+			return empty(req, 'substrate runtime not initialised');
+		}
+		const runtime = getSubstrateRuntime();
+		const ownerId = preferencesOwnerForScope(req.scope);
+		const ns = runtime.memory.scope(ownerId, 'user-assertions');
+
+		// Stage 1: pull all constraint entries above the noise threshold.
+		const candidates: PreferenceCandidate[] = [];
+		for await (const entry of ns.scan<Record<string, unknown>>('')) {
+			if (entry.kind !== 'constraint') { continue; }
+			if (entry.confidence < PREFERENCES_NOISE_THRESHOLD) { continue; }
+			const v = entry.value as Record<string, unknown>;
+			const subject = (typeof v['preferenceSubject'] === 'string' ? v['preferenceSubject'] as string : undefined)
+				?? (typeof v['subject'] === 'string' ? v['subject'] as string : undefined);
+			const canonicalText = (typeof v['canonicalText'] === 'string' ? v['canonicalText'] as string : undefined)
+				?? (typeof v['text'] === 'string' ? v['text'] as string : undefined);
+			if (subject === undefined || canonicalText === undefined) { continue; }
+			const capturedAtTurn = (typeof entry.source === 'object' && entry.source !== null && 'turnId' in entry.source)
+				? String((entry.source as { turnId: unknown }).turnId)
+				: undefined;
+			candidates.push({
+				subject,
+				canonicalText,
+				confidence: entry.confidence,
+				...(Array.isArray(v['categories']) ? { categories: v['categories'] as string[] } : {}),
+				...(Array.isArray(v['repoPaths'])  ? { repoPaths:  v['repoPaths']  as string[] } : {}),
+				...(capturedAtTurn !== undefined ? { capturedAtTurn } : {}),
+			});
+		}
+
+		// Stage 2: G4 hard scope filter.
+		const scoped = candidates.filter(c => matchesPreferencesScope(c, req.scope));
+		if (scoped.length === 0) {
+			return empty(req, `no preferences for owner '${ownerId}'`);
+		}
+
+		// Stage 3: G5 relevance curation -- skipped when no provider, no stepIntent,
+		// or only a single candidate.
+		let curated: readonly PreferenceCandidate[] = scoped;
+		if (inputs.localProvider !== undefined && req.stepIntent !== undefined && req.stepIntent.length > 0 && scoped.length > 1) {
+			try {
+				curated = await curatePreferencesViaLlm(scoped, req.stepIntent, inputs.localProvider);
+			} catch (err) {
+				log.warn({ err: (err as Error).message }, 'preferences curation failed; using scope-filtered list');
+				curated = scoped;
+			}
+		}
+		// Inclusion bias: an empty curated set degrades to the scope-filtered list.
+		if (curated.length === 0) {
+			log.warn('preferences curator produced empty set; falling back to scope-filtered list');
+			curated = scoped;
+		}
+
+		// Stage 4: byte-cap honouring.
+		const payload = curated.map(c => ({
+			subject:       c.subject,
+			canonicalText: c.canonicalText,
+			confidence:    c.confidence,
+			...(c.categories !== undefined ? { categories: c.categories } : {}),
+			...(c.repoPaths  !== undefined ? { repoPaths:  c.repoPaths  } : {}),
+		}));
+		if (jsonBytes(payload) > inputs.byteCap) {
+			const trimmed: typeof payload = [];
+			let bytes = 0;
+			for (const p of payload) {
+				const cost = jsonBytes(p);
+				if (bytes + cost > inputs.byteCap) { break; }
+				trimmed.push(p); bytes += cost;
+			}
+			return partial(req, trimmed, `byte cap reached at ${trimmed.length}/${payload.length} preferences`);
+		}
+		return ok(req, payload, `owner='${ownerId}', curated ${curated.length}/${scoped.length}`);
+	} catch (err) {
+		log.warn({ err: (err as Error).message }, 'fetchPreferences failed');
+		return error(req, err as Error);
+	}
+}
+
+
+// ---------------------------------------------------------------------------
 // Dispatch -- single entrypoint the orchestrator's driver calls. Routes by
 // kind to the per-slot function. New slot kinds extend this switch + add a
 // fetch function above.
@@ -638,5 +831,6 @@ export async function dispatchFetch(req: ContextRequest, inputs: FetchInputs): P
 		case 'git':         return fetchGit(req, inputs);
 		case 'trace':       return fetchTrace(req, inputs);
 		case 'memory':      return fetchMemory(req, inputs);
+		case 'preferences': return fetchPreferences(req, inputs);
 	}
 }
