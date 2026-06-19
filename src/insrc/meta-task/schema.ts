@@ -22,6 +22,8 @@
  * On failure the caller assembles the errors into a retry-prompt section.
  */
 
+import { Type } from '@sinclair/typebox';
+import type { TSchema } from '@sinclair/typebox';
 import type {
 	ContextChunk,
 	ContextRequest,
@@ -442,3 +444,146 @@ function isObject(x: unknown): x is Record<string, unknown> {
 function isStringArray(x: unknown): x is string[] {
 	return Array.isArray(x) && x.every(s => typeof s === 'string');
 }
+
+
+// ===========================================================================
+// TypeBox schemas (plans/structured-output.md Phase C.1)
+// ===========================================================================
+//
+// The hand-written validators above stay in place -- they emit the
+// retry-prompt-shaped error messages the orchestrator's legacy
+// retry loop uses + cover the "post-LLM" path. The typebox schemas
+// below are the WIRE-LAYER contract handed to provider.completeStructured;
+// the provider's native structured-output API enforces them at the API
+// boundary, and ajv re-validates as a defensive backstop.
+//
+// Two-layer validation is intentional: the typebox schema is structural
+// (kind, types, required fields), the hand-rolled validator above adds
+// rules the schema can't express in JSON Schema (e.g. "empty requests
+// array on context-needed is invalid -- use 'sufficient' instead").
+// Phase C.1+ runs the typebox path first; on schema-level pass it
+// re-runs the hand-rolled validator and surfaces any business-rule
+// violations through the same retry loop.
+
+const SubCategoryEnum = Type.Union([
+	Type.Literal('code-style'),
+	Type.Literal('test-policy'),
+	Type.Literal('documentation-policy'),
+	Type.Literal('commit-policy'),
+	Type.Literal('dependency-policy'),
+	Type.Literal('architecture-policy'),
+	Type.Literal('tooling-policy'),
+	Type.Literal('security-policy'),
+	Type.Literal('data-policy'),
+	Type.Literal('workflow-policy'),
+	Type.Literal('communication-policy'),
+	Type.Literal('escalation-policy'),
+]);
+
+/**
+ * Each ContextRequest variant authored as a discrete typebox object so
+ * the discriminated union maps cleanly into JSON Schema's `anyOf`.
+ */
+const ContextRequestSchema = Type.Union([
+	Type.Object({
+		kind:  Type.Literal('entities'),
+		names: Type.Optional(Type.Array(Type.String())),
+		kinds: Type.Optional(Type.Array(Type.String())),
+		repos: Type.Optional(Type.Array(Type.String())),
+	}),
+	Type.Object({
+		kind:     Type.Literal('files'),
+		globs:    Type.Array(Type.String(), { minItems: 1 }),
+		maxBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+	}),
+	Type.Object({
+		kind:    Type.Literal('deliverable'),
+		specId:  Type.String({ minLength: 1 }),
+		heading: Type.Optional(Type.String()),
+	}),
+	Type.Object({
+		kind:  Type.Literal('semantic'),
+		query: Type.String({ minLength: 1 }),
+		topK:  Type.Optional(Type.Integer({ minimum: 1 })),
+		over:  Type.Optional(Type.Array(Type.Union([
+			Type.Literal('entities'), Type.Literal('deliverables'),
+		]), { minItems: 1 })),
+	}),
+	Type.Object({
+		kind:    Type.Literal('graph'),
+		op:      Type.Union([
+			Type.Literal('callers'), Type.Literal('callees'),
+			Type.Literal('imports'), Type.Literal('importers'),
+			Type.Literal('closure'),
+		]),
+		targets: Type.Array(Type.String(), { minItems: 1 }),
+		depth:   Type.Optional(Type.Integer({ minimum: 0 })),
+	}),
+	Type.Object({
+		kind:       Type.Literal('git'),
+		paths:      Type.Optional(Type.Array(Type.String())),
+		since:      Type.Optional(Type.String()),
+		maxCommits: Type.Optional(Type.Integer({ minimum: 1 })),
+	}),
+	Type.Object({
+		kind:   Type.Literal('trace'),
+		specId: Type.String({ minLength: 1 }),
+	}),
+	Type.Object({
+		kind:  Type.Literal('memory'),
+		query: Type.Optional(Type.String()),
+	}),
+	Type.Object({
+		kind:  Type.Literal('preferences'),
+		scope: Type.Optional(Type.Object({
+			templateId: Type.Optional(Type.String()),
+			category:   Type.Optional(SubCategoryEnum),
+			repoPath:   Type.Optional(Type.String()),
+		})),
+		stepIntent: Type.Optional(Type.String()),
+	}),
+]);
+
+/**
+ * Phase1Ask wire schema. The cloud LLM emits either `sufficient`
+ * (we skip the fetcher) or `context-needed` with a non-empty list of
+ * ContextRequests. The hand-rolled `validatePhase1Ask` below enforces
+ * the non-empty rule (typebox can express it via minItems but the
+ * error wording is friendlier from the hand-rolled validator).
+ */
+export const Phase1AskSchema: TSchema = Type.Union([
+	Type.Object({ kind: Type.Literal('sufficient') }),
+	Type.Object({
+		kind:     Type.Literal('context-needed'),
+		requests: Type.Array(ContextRequestSchema),
+		intent:   Type.Optional(Type.String()),
+	}),
+], { title: 'Phase1Ask' });
+
+/**
+ * Phase2Out wire schema. Three branches: deliverable / context-needed /
+ * abort. Required-field rules per branch (reason on context-needed,
+ * resolution + reason on abort) are enforced both by the typebox schema
+ * AND the hand-rolled `validatePhase2Out` below.
+ */
+export const Phase2OutSchema: TSchema = Type.Union([
+	Type.Object({
+		kind: Type.Literal('deliverable'),
+		body: Type.String(),
+	}),
+	Type.Object({
+		kind:     Type.Literal('context-needed'),
+		requests: Type.Array(ContextRequestSchema),
+		reason:   Type.String({ minLength: 1 }),
+		intent:   Type.Optional(Type.String()),
+	}),
+	Type.Object({
+		kind:       Type.Literal('abort'),
+		reason:     Type.String({ minLength: 1 }),
+		resolution: Type.Union([
+			Type.Literal('user-required'),
+			Type.Literal('plan-revisable'),
+		]),
+		hint:       Type.Optional(Type.String()),
+	}),
+], { title: 'Phase2Out' });

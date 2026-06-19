@@ -64,6 +64,11 @@ function recordingCloud(responses: readonly string[]): RecordingCloud {
 	const calls: RecordedCall[] = [];
 	return {
 		calls,
+		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: unknown, opts: unknown): Promise<LLMResponse> {
 			calls.push({ messages: messages as RecordedCall['messages'], opts });
 			const text = responses[idx++] ?? '';
@@ -71,14 +76,26 @@ function recordingCloud(responses: readonly string[]): RecordingCloud {
 		},
 		stream(): AsyncIterable<string> { return (async function* () { yield ''; })(); },
 		async embed(): Promise<number[]> { return []; },
+		async completeStructured<T>(messages: unknown, _schema: unknown): Promise<T> {
+			calls.push({ messages: messages as RecordedCall['messages'], opts: { structured: true } });
+			const text = responses[idx++] ?? '';
+			try { return JSON.parse(text) as T; }
+			catch { throw new Error(`recordingCloud.completeStructured: response ${idx - 1} not JSON: ${text}`); }
+		},
 	};
 }
 
 function noopProvider(): LLMProvider {
 	return {
+		supportsTools: false,
+		capabilities: {
+			structuredOutput: false, toolCalling: false, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete() { throw new Error('noopProvider.complete: should not be invoked'); },
 		stream() { return (async function* () { yield ''; })(); },
 		async embed() { return []; },
+		async completeStructured() { throw new Error('noopProvider.completeStructured: should not be invoked'); },
 	};
 }
 

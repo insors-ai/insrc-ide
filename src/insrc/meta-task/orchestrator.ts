@@ -41,7 +41,7 @@ import { fulfill } from './context-fetcher.js';
 import { MetaTaskStore, stepSlug } from './persist.js';
 import { Heartbeat, composeStatus } from './heartbeat.js';
 import { MetaTaskEmitter } from './event-emitter.js';
-import { validatePhase1Ask, validatePhase2Out } from './schema.js';
+import { Phase1AskSchema, Phase2OutSchema, validatePhase1Ask, validatePhase2Out } from './schema.js';
 import type { MetaTaskTemplate } from './templates/index.js';
 import { getTemplate } from './templates/index.js';
 
@@ -581,12 +581,22 @@ interface Phase1CallOpts {
 }
 
 async function callForPhase1Ask(opts: Phase1CallOpts): Promise<Phase1Ask> {
+	// plans/structured-output.md Phase C.1. The wire-layer schema is
+	// Phase1AskSchema (TypeBox); the provider's completeStructured
+	// path enforces it natively (Anthropic forced tool, OpenAI
+	// json_schema strict, Gemini responseSchema, Mistral json_schema,
+	// Ollama format). ajv re-validates as a defensive backstop and
+	// retries with feedback (up to maxAttempts) on schema failure.
+	// On schema-level pass the hand-rolled validatePhase1Ask runs
+	// next and surfaces business-rule violations (empty `requests`
+	// on context-needed, etc.) -- those errors flow into the
+	// existing orchestrator-side retry flow above this call.
 	const messages: LLMMessage[] = [
 		{ role: 'system', content:
-			`You are a meta-task orchestrator's context planner. Respond with ONLY a JSON object matching one of these two shapes:\n\n`
-			+ `{ "kind": "sufficient" }\n\n`
+			`You are a meta-task orchestrator's context planner. Emit one of these two shapes:\n\n`
+			+ `{ "kind": "sufficient" }   -- you genuinely need nothing, the orchestrator skips the local LLM and runs you directly.\n\n`
 			+ `OR\n\n`
-			+ `{ "kind": "context-needed", "requests": [ <ContextRequest>... ], "intent": "<optional free-text>" }\n\n`
+			+ `{ "kind": "context-needed", "requests": [ <ContextRequest>... ], "intent": "<optional free-text>" }   -- you need context; requests MUST be non-empty.\n\n`
 			+ `Each <ContextRequest> is one of:\n`
 			+ `  - { "kind": "entities", "names"?: string[], "kinds"?: string[], "repos"?: string[] }  (at least one of names/kinds/repos)\n`
 			+ `  - { "kind": "files", "globs": string[], "maxBytes"?: number }\n`
@@ -595,17 +605,12 @@ async function callForPhase1Ask(opts: Phase1CallOpts): Promise<Phase1Ask> {
 			+ `  - { "kind": "graph", "op": "callers"|"callees"|"imports"|"importers"|"closure", "targets": string[], "depth"?: number }\n`
 			+ `  - { "kind": "git", "paths"?: string[], "since"?: string, "maxCommits"?: number }\n`
 			+ `  - { "kind": "trace", "specId": string }\n`
-			+ `  - { "kind": "memory", "query"?: string }\n\n`
-			+ `Emit { "kind": "sufficient" } only when you genuinely need nothing -- the orchestrator will skip the local LLM and run you directly.`,
+			+ `  - { "kind": "memory", "query"?: string }\n`
+			+ `  - { "kind": "preferences", "scope"?: { templateId?, category?, repoPath? }, "stepIntent"?: string }`,
 		},
 		{ role: 'user', content: opts.prompt },
 	];
-	const raw = await opts.cloud.complete(messages, { responseFormat: 'json' });
-	let parsed: unknown;
-	try { parsed = JSON.parse(raw.text); }
-	catch (err) {
-		throw new Error(`phase-1 ask: cloud LLM did not return parseable JSON: ${(err as Error).message}`);
-	}
+	const parsed = await opts.cloud.completeStructured<unknown>(messages, Phase1AskSchema);
 	const v = validatePhase1Ask(parsed);
 	await opts.store.appendStepPhase1(opts.stepIndex, opts.slug, {
 		ts: Date.now(), kind: 'ask',
@@ -613,22 +618,7 @@ async function callForPhase1Ask(opts: Phase1CallOpts): Promise<Phase1Ask> {
 		retryAttempt: opts.retryAttempt,
 	});
 	if (!v.ok) {
-		// Retry once with the validation error in-prompt. If it fails again
-		// the orchestrator sees an error here and the user-facing error
-		// surface picks it up.
-		const retryPrompt = `${opts.prompt}\n\n─── Previous response rejected by schema ───\n${v.errors.join('\n')}\n\n─── Retry with valid JSON ───`;
-		const retryRaw = await opts.cloud.complete([
-			messages[0]!,
-			{ role: 'user', content: retryPrompt },
-		], { responseFormat: 'json' });
-		let retryParsed: unknown;
-		try { retryParsed = JSON.parse(retryRaw.text); }
-		catch (err) { throw new Error(`phase-1 ask: retry returned unparseable JSON: ${(err as Error).message}`); }
-		const v2 = validatePhase1Ask(retryParsed);
-		if (!v2.ok) {
-			throw new Error(`phase-1 ask: retry failed validation: ${v2.errors.join('; ')}`);
-		}
-		return v2.value;
+		throw new Error(`phase-1 ask: business-rule validation failed: ${v.errors.join('; ')}`);
 	}
 	return v.value;
 }
@@ -646,27 +636,27 @@ interface Phase2CallOpts {
 }
 
 async function callForPhase2(opts: Phase2CallOpts): Promise<Phase2Out> {
+	// plans/structured-output.md Phase C.1. Wire-layer schema is
+	// Phase2OutSchema (TypeBox). Streaming token feedback (onToken /
+	// liveStep) is not currently honoured on the structured-output
+	// surface -- it returns the validated value, not a stream. Per
+	// design this is fine: phase-2 outputs are short JSON envelopes
+	// (deliverable.body is the only large field, and the user sees
+	// the final markdown body, not its incremental construction).
+	// If streaming becomes important later we can extend the
+	// LLMProvider surface; for now the deterministic structured
+	// path is the right tradeoff.
 	const messages: LLMMessage[] = [
 		{ role: 'system', content:
-			`You are a meta-task orchestrator's task runner. Respond with ONLY a JSON object matching one of these three shapes:\n\n`
-			+ `1. { "kind": "deliverable", "body": "<markdown body>" }  -- success.\n`
+			`You are a meta-task orchestrator's task runner. Emit one of these three shapes:\n\n`
+			+ `1. { "kind": "deliverable", "body": "<markdown body>" }  -- success. The user reads body directly.\n`
 			+ `2. { "kind": "context-needed", "requests": [...], "reason": "<why prior context was insufficient>", "intent"?: "..." }  -- you need more context; the orchestrator will fetch and re-call you. REASON IS REQUIRED.\n`
 			+ `3. { "kind": "abort", "reason": "<why you cannot continue>", "resolution": "user-required" | "plan-revisable", "hint"?: "..." }  -- terminate the step. Resolution and reason are REQUIRED.\n\n`
-			+ `For ContextRequest shapes see the planner's contract.\n`
-			+ `The "body" of a deliverable is markdown text -- the user reads it directly.`,
+			+ `For ContextRequest shapes see the orchestrator's phase-1 contract.`,
 		},
 		{ role: 'user', content: opts.prompt },
 	];
-	const tokens: string[] = [];
-	const raw = await opts.cloud.complete(messages, {
-		responseFormat: 'json',
-		onToken: t => { tokens.push(t); opts.emit.liveStep(opts.bubble, t); },
-	});
-	let parsed: unknown;
-	try { parsed = JSON.parse(raw.text); }
-	catch (err) {
-		throw new Error(`phase-2 output: cloud LLM did not return parseable JSON: ${(err as Error).message}`);
-	}
+	const parsed = await opts.cloud.completeStructured<unknown>(messages, Phase2OutSchema);
 	const v = validatePhase2Out(parsed);
 	await opts.store.appendStepPhase2(opts.stepIndex, opts.slug, {
 		ts: Date.now(), kind: 'output',
@@ -674,7 +664,13 @@ async function callForPhase2(opts: Phase2CallOpts): Promise<Phase2Out> {
 		retryAttempt: opts.retryAttempt,
 	});
 	if (!v.ok) {
-		throw new Error(`phase-2 output: validation failed: ${v.errors.join('; ')}`);
+		throw new Error(`phase-2 output: business-rule validation failed: ${v.errors.join('; ')}`);
+	}
+	// Surface the final body via liveStep so the chat panel transitions
+	// from "running" to "done" cleanly, even though no streaming
+	// happened in between.
+	if (v.value.kind === 'deliverable') {
+		opts.emit.liveStep(opts.bubble, v.value.body);
 	}
 	return v.value;
 }

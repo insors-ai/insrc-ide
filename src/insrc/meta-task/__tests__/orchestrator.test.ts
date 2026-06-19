@@ -41,6 +41,15 @@ import '../templates/index.js';
 
 class ScriptedCloud implements LLMProvider {
 	private idx = 0;
+	readonly supportsTools = true;
+	readonly capabilities = {
+		structuredOutput: true,
+		toolCalling:      true,
+		vision:           false,
+		webSearch:        false,
+		streaming:        false,
+		embeddings:       false,
+	} as const;
 	constructor(private readonly responses: readonly string[]) {}
 	async complete(_messages: unknown, opts?: { onToken?: (t: string) => void }): Promise<LLMResponse> {
 		const text = this.responses[this.idx++] ?? '';
@@ -54,6 +63,17 @@ class ScriptedCloud implements LLMProvider {
 		return (async function* () { yield ''; })();
 	}
 	async embed(): Promise<number[]> { return []; }
+	// plans/structured-output.md Phase C.1. Scripted JSON consumed in
+	// the same order as `complete` -- existing test scripts (which were
+	// already JSON strings) work verbatim through this surface.
+	async completeStructured<T>(_messages: unknown, _schema: unknown): Promise<T> {
+		const text = this.responses[this.idx++] ?? '';
+		try {
+			return JSON.parse(text) as T;
+		} catch (err) {
+			throw new Error(`ScriptedCloud.completeStructured: response ${this.idx - 1} not JSON: ${text}`);
+		}
+	}
 }
 
 class FakeTodosApi {
