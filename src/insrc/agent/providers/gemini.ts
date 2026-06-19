@@ -19,7 +19,8 @@ import type {
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
-import { notImplementedStructuredOutput } from './structured-output.js';
+import { validateAgainstSchema, withStructuredRetry } from './structured-output.js';
+import { jsonSchemaToGeminiSchema } from './gemini-schema-adapter.js';
 
 const log = getLogger('gemini');
 
@@ -30,12 +31,14 @@ export interface GeminiProviderConfig {
 
 export class GeminiProvider implements LLMProvider {
   readonly supportsTools = true;
-  // plans/structured-output.md Phase A. Phase B.3 implements
-  // completeStructured via `responseMimeType: 'application/json'` +
-  // `responseSchema` (OpenAPI 3.0 dialect; adapter lives in
-  // gemini-schema-adapter.ts).
+  // plans/structured-output.md Phase B.3. Gemini's native structured
+  // output uses `responseMimeType: 'application/json'` +
+  // `responseSchema` (OpenAPI 3.0 dialect, which differs from JSON
+  // Schema draft 2020-12). The `jsonSchemaToGeminiSchema` adapter
+  // translates lower-case type names to UPPER-case, drops unsupported
+  // keywords, and rewrites const -> enum-of-one + oneOf -> anyOf.
   readonly capabilities: ProviderCapabilities = {
-    structuredOutput: false,
+    structuredOutput: true,
     toolCalling:      true,
     vision:           true,
     webSearch:        true,
@@ -106,16 +109,60 @@ export class GeminiProvider implements LLMProvider {
     return [];
   }
 
-  // plans/structured-output.md Phase A stub. Phase B.3 implements via
-  // Gemini's native `responseMimeType: 'application/json'` +
-  // `responseSchema` after the OpenAPI 3.0 adapter translates the
-  // typebox/JSON-Schema features Gemini doesn't support natively.
+  // plans/structured-output.md Phase B.3. Gemini structured output.
+  //
+  // Strategy: configure generateContent with
+  // `responseMimeType: 'application/json'` + `responseSchema` (the
+  // adapted, OpenAPI 3.0-flavour schema). Gemini's wire layer enforces
+  // the schema; ajv re-validates the original JSON Schema as a
+  // defensive backstop; retries with feedback on validation failure.
   async completeStructured<T>(
-    _messages: LLMMessage[],
-    _schema:   StructuredSchema,
-    _opts?:    StructuredCompletionOpts,
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
   ): Promise<T> {
-    notImplementedStructuredOutput('gemini');
+    const { system, contents } = toGeminiContents(messages);
+    const geminiSchema = jsonSchemaToGeminiSchema(schema);
+
+    const baseGenConfig: Record<string, unknown> = {
+      responseMimeType: 'application/json',
+      responseSchema:   geminiSchema,
+    };
+    if (opts?.maxTokens   !== undefined) baseGenConfig['maxOutputTokens']     = opts.maxTokens;
+    if (opts?.temperature !== undefined) baseGenConfig['temperature']         = opts.temperature;
+    if (system !== undefined)            baseGenConfig['systemInstruction']   = system;
+
+    return withStructuredRetry<T>(
+      async (extraSystemNote) => {
+        const contentsWithNote = extraSystemNote !== undefined
+          ? [...contents, { role: 'user' as const, parts: [{ text: extraSystemNote }] }]
+          : contents;
+        try {
+          const response = await withCloudRetry(
+            () => this.client.models.generateContent({
+              model: this.model,
+              contents: contentsWithNote,
+              config: baseGenConfig,
+            }),
+            { label: 'gemini.completeStructured', log },
+          );
+          const text = extractText(response) ?? '';
+          if (text.length === 0) {
+            throw new Error('gemini.completeStructured: empty response text');
+          }
+          try {
+            return JSON.parse(text);
+          } catch (err) {
+            throw new Error(`gemini.completeStructured: response was not valid JSON: ${(err as Error).message}. Got: ${text.slice(0, 200)}`);
+          }
+        } catch (err) {
+          log.error({ err: String(err), model: this.model }, 'gemini completeStructured failed');
+          throw err;
+        }
+      },
+      (raw) => validateAgainstSchema<T>(schema, raw),
+      opts?.maxAttempts ?? 3,
+    );
   }
 }
 
