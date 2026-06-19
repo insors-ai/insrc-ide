@@ -5,11 +5,15 @@ import type {
   LLMProvider,
   LLMResponse,
   CompletionOpts,
+  ProviderCapabilities,
+  StructuredCompletionOpts,
+  StructuredSchema,
   ToolDefinition,
   ToolCall,
 } from '../../shared/types.js';
 import { loadConfig } from '../config.js';
 import { getLogger } from '../../shared/logger.js';
+import { notImplementedStructuredOutput } from './structured-output.js';
 
 const log = getLogger('ollama');
 
@@ -112,6 +116,19 @@ export const _modelQuirksForTest = modelQuirks;
 
 export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
+  // plans/structured-output.md Phase A. Phase B.5 lifts the existing
+  // `_resolveOllamaFormat` from the `complete` path into
+  // `completeStructured`; until then the capability stays `false` so
+  // capability-gated callsites use the existing
+  // `complete + responseFormat` path.
+  readonly capabilities: ProviderCapabilities = {
+    structuredOutput: false,
+    toolCalling:      true,
+    vision:           false,
+    webSearch:        false,
+    streaming:        true,
+    embeddings:       true,
+  };
   private readonly client: Ollama;
   private readonly model: string;
   /**
@@ -412,6 +429,18 @@ export class OllamaProvider implements LLMProvider {
     } catch (err) {
       throw wrapOllamaError(err);
     }
+  }
+
+  // plans/structured-output.md Phase A stub. Phase B.5 lifts the
+  // existing `_resolveOllamaFormat` from `complete` so structured
+  // output goes through the same path as the cloud providers (uniform
+  // API, ajv backstop, retry-with-feedback loop).
+  async completeStructured<T>(
+    _messages: LLMMessage[],
+    _schema:   StructuredSchema,
+    _opts?:    StructuredCompletionOpts,
+  ): Promise<T> {
+    notImplementedStructuredOutput('ollama');
   }
 }
 

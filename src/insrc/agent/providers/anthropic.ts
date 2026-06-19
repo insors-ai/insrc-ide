@@ -4,12 +4,16 @@ import type {
   LLMProvider,
   LLMResponse,
   CompletionOpts,
+  ProviderCapabilities,
+  StructuredCompletionOpts,
+  StructuredSchema,
   ToolDefinition,
   ToolCall,
   ContentBlock,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
+import { notImplementedStructuredOutput } from './structured-output.js';
 
 const log = getLogger('claude');
 
@@ -45,6 +49,18 @@ export interface WebSearchResult {
 
 export class AnthropicProvider implements LLMProvider {
   readonly supportsTools = true;
+  // plans/structured-output.md Phase A: capability declaration. Phase B.1
+  // implements completeStructured via forced tool + tool_choice; until then
+  // structuredOutput stays `false` so capability-gated callsites fall back
+  // to the existing `complete` + JSON.parse path.
+  readonly capabilities: ProviderCapabilities = {
+    structuredOutput: false,
+    toolCalling:      true,
+    vision:           true,
+    webSearch:        true,
+    streaming:        true,
+    embeddings:       false,
+  };
   private readonly client: Anthropic;
   private readonly model: string;
 
@@ -291,6 +307,18 @@ export class AnthropicProvider implements LLMProvider {
     } catch (err) {
       throw wrapError(err);
     }
+  }
+
+  // plans/structured-output.md Phase A stub. Phase B.1 lands the real
+  // implementation: forced tool with `input_schema = schema` and
+  // `tool_choice: { type: 'tool', name: '_emit' }` so Anthropic's wire
+  // layer guarantees a structured response.
+  async completeStructured<T>(
+    _messages: LLMMessage[],
+    _schema:   StructuredSchema,
+    _opts?:    StructuredCompletionOpts,
+  ): Promise<T> {
+    notImplementedStructuredOutput('anthropic');
   }
 }
 

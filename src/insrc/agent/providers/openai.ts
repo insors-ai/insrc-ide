@@ -12,11 +12,15 @@ import type {
   LLMMessage,
   LLMProvider,
   LLMResponse,
+  ProviderCapabilities,
+  StructuredCompletionOpts,
+  StructuredSchema,
   ToolCall,
   ToolDefinition,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
+import { notImplementedStructuredOutput } from './structured-output.js';
 
 const log = getLogger('openai');
 
@@ -27,6 +31,18 @@ export interface OpenAIProviderConfig {
 
 export class OpenAIProvider implements LLMProvider {
   readonly supportsTools = true;
+  // plans/structured-output.md Phase A capability declaration. Phase B.2
+  // flips structuredOutput -> true and implements via
+  // `response_format: { type: 'json_schema', strict: true }` + the
+  // `processSchemaForOpenAIStrict` preprocessor.
+  readonly capabilities: ProviderCapabilities = {
+    structuredOutput: false,
+    toolCalling:      true,
+    vision:           true,
+    webSearch:        true,
+    streaming:        true,
+    embeddings:       false,
+  };
   private readonly client: OpenAI;
   private readonly model: string;
 
@@ -89,6 +105,17 @@ export class OpenAIProvider implements LLMProvider {
 
   async embed(_text: string): Promise<number[]> {
     return [];
+  }
+
+  // plans/structured-output.md Phase A stub. Phase B.2 implements via
+  // OpenAI's native `response_format: { type: 'json_schema', strict: true }`
+  // after `processSchemaForOpenAIStrict` pre-flights the schema.
+  async completeStructured<T>(
+    _messages: LLMMessage[],
+    _schema:   StructuredSchema,
+    _opts?:    StructuredCompletionOpts,
+  ): Promise<T> {
+    notImplementedStructuredOutput('openai');
   }
 }
 

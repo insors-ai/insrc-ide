@@ -10,11 +10,15 @@ import type {
   LLMMessage,
   LLMProvider,
   LLMResponse,
+  ProviderCapabilities,
+  StructuredCompletionOpts,
+  StructuredSchema,
   ToolCall,
   ToolDefinition,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
+import { notImplementedStructuredOutput } from './structured-output.js';
 
 const log = getLogger('mistral');
 
@@ -25,6 +29,18 @@ export interface MistralProviderConfig {
 
 export class MistralProvider implements LLMProvider {
   readonly supportsTools = true;
+  // plans/structured-output.md Phase A. Phase B.4 implements via
+  // `response_format: { type: 'json_schema', json_schema }` on newer
+  // Mistral models (mistral-large-2407+) with `{ type: 'json_object' }`
+  // as a fallback for older models.
+  readonly capabilities: ProviderCapabilities = {
+    structuredOutput: false,
+    toolCalling:      true,
+    vision:           false,
+    webSearch:        false,
+    streaming:        true,
+    embeddings:       false,
+  };
   private readonly client: Mistral;
   private readonly model: string;
 
@@ -86,6 +102,18 @@ export class MistralProvider implements LLMProvider {
 
   async embed(_text: string): Promise<number[]> {
     return [];
+  }
+
+  // plans/structured-output.md Phase A stub. Phase B.4 implements via
+  // Mistral's `response_format: { type: 'json_schema', json_schema }`
+  // on newer models, falling back to `{ type: 'json_object' }` for older
+  // ones.
+  async completeStructured<T>(
+    _messages: LLMMessage[],
+    _schema:   StructuredSchema,
+    _opts?:    StructuredCompletionOpts,
+  ): Promise<T> {
+    notImplementedStructuredOutput('mistral');
   }
 }
 

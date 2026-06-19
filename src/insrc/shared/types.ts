@@ -180,6 +180,87 @@ export interface LLMProvider {
   /** Embed text into a vector. Returns empty array if not supported. */
   embed(text: string): Promise<number[]>;
   readonly supportsTools: boolean;
+  /**
+   * Schema-enforced structured completion (plans/structured-output.md
+   * Phase A). The provider's wire layer guarantees the response
+   * conforms to `schema`; ajv re-validates as a defensive backstop.
+   * On validation failure the helper re-issues with the errors
+   * appended to the conversation, up to `opts.maxAttempts` (default 3).
+   *
+   * `schema` is a TypeBox schema. The compile-time type `T` is
+   * derived from it via `Static<typeof schema>` at the callsite.
+   *
+   * Implementations:
+   *   - Anthropic: forced single-tool with `input_schema = schema`,
+   *     `tool_choice: { type: 'tool', name: '_emit' }`. Read first
+   *     tool_use block's input.
+   *   - OpenAI:    `response_format: { type: 'json_schema',
+   *                                    json_schema: { schema, strict: true } }`
+   *                after `processSchemaForOpenAIStrict` pre-flight.
+   *   - Gemini:    `responseMimeType: 'application/json'` +
+   *                `responseSchema` (OpenAPI 3.0 dialect; adapter
+   *                lives in `gemini-schema-adapter.ts`).
+   *   - Mistral:   `response_format: { type: 'json_schema', json_schema }`
+   *                on newer models, fall back to `{ type: 'json_object' }`.
+   *   - Ollama:    `format: schema` (already implemented; lifted from
+   *                `_resolveOllamaFormat` into this method).
+   *
+   * Providers without a native structured-output API should set
+   * `capabilities.structuredOutput: false` and throw a clear
+   * "not supported" error; the caller is expected to gate on the
+   * capability flag at config time.
+   *
+   * Phase A ships throwing stubs on every provider. Phases B.1-B.5
+   * implement them one provider at a time.
+   */
+  completeStructured<T>(
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
+  ): Promise<T>;
+  readonly capabilities: ProviderCapabilities;
+}
+
+/**
+ * Capability declaration (plans/structured-output.md Phase A).
+ * Callers check this before invoking the relevant method so a missing
+ * provider feature surfaces as an explicit error, not a malformed
+ * response surfaced downstream.
+ */
+export interface ProviderCapabilities {
+  /** `completeStructured` honours its `schema` argument at the wire layer. */
+  readonly structuredOutput: boolean;
+  /** Tool/function calling in chat completions. */
+  readonly toolCalling:      boolean;
+  /** Image / PDF attachment understanding. */
+  readonly vision:           boolean;
+  /** Native web-search tool (Anthropic + OpenAI + Gemini). */
+  readonly webSearch:        boolean;
+  /** Token streaming via `stream()` or the `onToken` callback in `complete`. */
+  readonly streaming:        boolean;
+  /** Embedding generation (local-only on Ollama today). */
+  readonly embeddings:       boolean;
+}
+
+/**
+ * TypeBox schema container. The provider receives the raw JSON Schema
+ * (typebox schemas ARE JSON Schemas plus a `Static` brand) and the
+ * caller derives the compile-time TS type via `typeof schema` -> Static.
+ *
+ * Carried as a `Record<string, unknown>` here so this file stays free
+ * of a typebox import (no cycle risk in shared/types.ts). Real callsites
+ * import `Type` + `Static` from `@sinclair/typebox` and pass the
+ * result.
+ */
+export type StructuredSchema = Readonly<Record<string, unknown>>;
+
+export interface StructuredCompletionOpts {
+  readonly temperature?: number | undefined;
+  readonly maxTokens?:   number | undefined;
+  /** Default 3. The validation-feedback retry loop's cap. */
+  readonly maxAttempts?: number | undefined;
+  /** Forwarded to the underlying provider call. Provider-specific. */
+  readonly signal?:      AbortSignal | undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,9 @@ import type {
   LLMMessage,
   LLMResponse,
   CompletionOpts,
+  ProviderCapabilities,
+  StructuredCompletionOpts,
+  StructuredSchema,
 } from '../../shared/types.js';
 import type { ContextManager } from './index.js';
 import { getLogger } from '../../shared/logger.js';
@@ -74,6 +77,27 @@ export class ContextAwareProvider implements LLMProvider {
 
   get supportsTools(): boolean {
     return this.base.supportsTools;
+  }
+
+  // plans/structured-output.md Phase A. Capability + completeStructured
+  // both delegate to the wrapped provider -- ContextAwareProvider's job
+  // is L1-L5 context injection, not structured-output translation, so
+  // capability + method passthrough is correct.
+  get capabilities(): ProviderCapabilities {
+    return this.base.capabilities;
+  }
+
+  /** Delegate completeStructured to the wrapped provider. Context injection
+   *  is not auto-applied here because structured callsites typically supply
+   *  fully-formed prompts (e.g. orchestrator phase-1 / phase-2). Callers
+   *  needing context can call `.raw.completeStructured(...)` to be
+   *  explicit, or build their own message list with `this.ctx` first. */
+  async completeStructured<T>(
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
+  ): Promise<T> {
+    return this.base.completeStructured<T>(messages, schema, opts);
   }
 
   async complete(

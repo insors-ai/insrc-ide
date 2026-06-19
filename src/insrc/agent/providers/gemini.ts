@@ -11,11 +11,15 @@ import type {
   LLMMessage,
   LLMProvider,
   LLMResponse,
+  ProviderCapabilities,
+  StructuredCompletionOpts,
+  StructuredSchema,
   ToolCall,
   ToolDefinition,
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
+import { notImplementedStructuredOutput } from './structured-output.js';
 
 const log = getLogger('gemini');
 
@@ -26,6 +30,18 @@ export interface GeminiProviderConfig {
 
 export class GeminiProvider implements LLMProvider {
   readonly supportsTools = true;
+  // plans/structured-output.md Phase A. Phase B.3 implements
+  // completeStructured via `responseMimeType: 'application/json'` +
+  // `responseSchema` (OpenAPI 3.0 dialect; adapter lives in
+  // gemini-schema-adapter.ts).
+  readonly capabilities: ProviderCapabilities = {
+    structuredOutput: false,
+    toolCalling:      true,
+    vision:           true,
+    webSearch:        true,
+    streaming:        true,
+    embeddings:       false,
+  };
   private readonly client: GoogleGenAI;
   private readonly model: string;
 
@@ -88,6 +104,18 @@ export class GeminiProvider implements LLMProvider {
 
   async embed(_text: string): Promise<number[]> {
     return [];
+  }
+
+  // plans/structured-output.md Phase A stub. Phase B.3 implements via
+  // Gemini's native `responseMimeType: 'application/json'` +
+  // `responseSchema` after the OpenAPI 3.0 adapter translates the
+  // typebox/JSON-Schema features Gemini doesn't support natively.
+  async completeStructured<T>(
+    _messages: LLMMessage[],
+    _schema:   StructuredSchema,
+    _opts?:    StructuredCompletionOpts,
+  ): Promise<T> {
+    notImplementedStructuredOutput('gemini');
   }
 }
 
