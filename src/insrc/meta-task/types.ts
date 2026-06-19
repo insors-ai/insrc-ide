@@ -281,6 +281,17 @@ export interface StepDescriptor {
 	/** Optional override of the template's default cloud provider step binding. */
 	readonly providerBinding?: string | undefined;
 	/**
+	 * /plan template M4.a Phase 4. Per-step phase-2 system prelude that
+	 * overrides the template-level `phase2SystemPrelude` for this step
+	 * only. The default phase-2 prompt builder reads this first and falls
+	 * back to the template-level prelude when absent. Templates whose
+	 * steps need different system prompts per step (e.g. /plan's P1, P2,
+	 * P3, P5 each use a distinct legacy prompt) ship one prelude per
+	 * step here; templates with a single prelude (e.g. /review) keep
+	 * using the template-level field.
+	 */
+	readonly phase2SystemPrelude?: string | undefined;
+	/**
 	 * /plan template M4.a Phase 1 (design/meta-task-plan.html O1 resolution).
 	 *
 	 * Escape hatch for steps whose phase-2 isn't a single cloud-LLM call.

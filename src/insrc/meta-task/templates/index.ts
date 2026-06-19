@@ -174,6 +174,7 @@ function ensureBootstrapped(): void {
 // `reviewTemplate` is a pure value (not a self-registration side effect),
 // so the previous "Cannot access REGISTRY before initialization" race is gone.
 import { reviewTemplate } from './review.js';
-const BUILTIN_TEMPLATES: readonly MetaTaskTemplate[] = [reviewTemplate];
+import { planTemplate }   from './plan.js';
+const BUILTIN_TEMPLATES: readonly MetaTaskTemplate[] = [reviewTemplate, planTemplate];
 
 void ensureBootstrappedAsync;   // silence unused-export warning

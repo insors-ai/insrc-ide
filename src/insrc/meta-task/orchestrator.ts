@@ -834,8 +834,13 @@ interface BuildPhase2PromptOpts {
 
 function buildPhase2Prompt(opts: BuildPhase2PromptOpts): string {
 	const lines: string[] = [];
-	if (opts.template.phase2SystemPrelude !== undefined) {
-		lines.push(opts.template.phase2SystemPrelude);
+	// /plan template M4.a Phase 4: step-level prelude wins over template-level.
+	// Templates whose steps each need a distinct system prelude (e.g. /plan's
+	// P1/P2/P3/P5) ship one per step; templates with a single shared prelude
+	// (e.g. /review) keep using the template-level field.
+	const prelude = opts.stepDesc.phase2SystemPrelude ?? opts.template.phase2SystemPrelude;
+	if (prelude !== undefined) {
+		lines.push(prelude);
 		lines.push('');
 	}
 	lines.push(`Step: ${opts.stepDesc.name}`);
