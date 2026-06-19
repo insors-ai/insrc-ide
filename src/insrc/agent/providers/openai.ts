@@ -20,7 +20,11 @@ import type {
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
-import { notImplementedStructuredOutput } from './structured-output.js';
+import {
+  processSchemaForOpenAIStrict,
+  validateAgainstSchema,
+  withStructuredRetry,
+} from './structured-output.js';
 
 const log = getLogger('openai');
 
@@ -31,12 +35,13 @@ export interface OpenAIProviderConfig {
 
 export class OpenAIProvider implements LLMProvider {
   readonly supportsTools = true;
-  // plans/structured-output.md Phase A capability declaration. Phase B.2
-  // flips structuredOutput -> true and implements via
-  // `response_format: { type: 'json_schema', strict: true }` + the
-  // `processSchemaForOpenAIStrict` preprocessor.
+  // plans/structured-output.md Phase B.2. OpenAI's native structured
+  // output uses `response_format: { type: 'json_schema', strict: true }`
+  // after `processSchemaForOpenAIStrict` pre-flights the schema for
+  // strict-mode compliance (additionalProperties:false, full required
+  // arrays, oneOf -> anyOf rewrites).
   readonly capabilities: ProviderCapabilities = {
-    structuredOutput: false,
+    structuredOutput: true,
     toolCalling:      true,
     vision:           true,
     webSearch:        true,
@@ -107,15 +112,76 @@ export class OpenAIProvider implements LLMProvider {
     return [];
   }
 
-  // plans/structured-output.md Phase A stub. Phase B.2 implements via
-  // OpenAI's native `response_format: { type: 'json_schema', strict: true }`
-  // after `processSchemaForOpenAIStrict` pre-flights the schema.
+  // plans/structured-output.md Phase B.2. OpenAI structured output.
+  //
+  // Strategy: `response_format: { type: 'json_schema', json_schema: {
+  // name, schema, strict: true } }`. The schema is pre-flighted via
+  // `processSchemaForOpenAIStrict` which mutates a deep copy of the
+  // input to add `additionalProperties: false` on every object,
+  // populate `required` arrays, and rewrite `oneOf` -> `anyOf`. ajv
+  // re-validates as a defensive backstop; on validation failure the
+  // retry helper appends the errors as a user message.
+  //
+  // Strict mode means the wire layer enforces the schema; ajv only
+  // catches drift in cases the API somehow misses (rare). The shape
+  // arriving at the caller is always the validated typed value.
   async completeStructured<T>(
-    _messages: LLMMessage[],
-    _schema:   StructuredSchema,
-    _opts?:    StructuredCompletionOpts,
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
   ): Promise<T> {
-    notImplementedStructuredOutput('openai');
+    const apiMessages = toOpenAIMessages(messages);
+    // Deep-clone the schema before pre-flight so we don't mutate the
+    // caller's source-of-truth schema constant.
+    const strictSchema = processSchemaForOpenAIStrict(
+      JSON.parse(JSON.stringify(schema)) as StructuredSchema,
+    );
+    const schemaName = (schema as { title?: string }).title ?? '_emit';
+
+    const baseParams: Record<string, unknown> = {
+      model:    this.model,
+      messages: apiMessages,
+      response_format: {
+        type: 'json_schema' as const,
+        json_schema: {
+          name:   schemaName,
+          schema: strictSchema,
+          strict: true,
+        },
+      },
+    };
+    if (opts?.maxTokens   !== undefined) baseParams['max_completion_tokens'] = opts.maxTokens;
+    if (opts?.temperature !== undefined) baseParams['temperature']           = opts.temperature;
+
+    return withStructuredRetry<T>(
+      async (extraSystemNote) => {
+        const msgs = extraSystemNote !== undefined
+          ? [...apiMessages, { role: 'user' as const, content: extraSystemNote }]
+          : apiMessages;
+        try {
+          const response = await withCloudRetry(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            () => this.client.chat.completions.create({ ...baseParams, messages: msgs } as any),
+            { label: 'openai.completeStructured', log },
+          );
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const text = ((response as any).choices?.[0]?.message?.content ?? '') as string;
+          if (text.length === 0) {
+            throw new Error('openai.completeStructured: empty response content');
+          }
+          try {
+            return JSON.parse(text);
+          } catch (err) {
+            throw new Error(`openai.completeStructured: response was not valid JSON: ${(err as Error).message}. Got: ${text.slice(0, 200)}`);
+          }
+        } catch (err) {
+          log.error({ err: String(err), model: this.model }, 'openai completeStructured failed');
+          throw err;
+        }
+      },
+      (raw) => validateAgainstSchema<T>(schema, raw),
+      opts?.maxAttempts ?? 3,
+    );
   }
 }
 
