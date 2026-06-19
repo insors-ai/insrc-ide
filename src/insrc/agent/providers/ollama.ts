@@ -13,7 +13,7 @@ import type {
 } from '../../shared/types.js';
 import { loadConfig } from '../config.js';
 import { getLogger } from '../../shared/logger.js';
-import { notImplementedStructuredOutput } from './structured-output.js';
+import { validateAgainstSchema, withStructuredRetry } from './structured-output.js';
 
 const log = getLogger('ollama');
 
@@ -116,13 +116,14 @@ export const _modelQuirksForTest = modelQuirks;
 
 export class OllamaProvider implements LLMProvider {
   readonly supportsTools = true;
-  // plans/structured-output.md Phase A. Phase B.5 lifts the existing
-  // `_resolveOllamaFormat` from the `complete` path into
-  // `completeStructured`; until then the capability stays `false` so
-  // capability-gated callsites use the existing
-  // `complete + responseFormat` path.
+  // plans/structured-output.md Phase B.5. Ollama's native structured
+  // output is the `format: schema` field on the chat API -- the model
+  // is constrained to produce JSON conforming to the schema. Lifted
+  // from the existing `_resolveOllamaFormat` helper so callers can go
+  // through the uniform LLMProvider.completeStructured surface with
+  // the ajv backstop + retry-with-feedback loop.
   readonly capabilities: ProviderCapabilities = {
-    structuredOutput: false,
+    structuredOutput: true,
     toolCalling:      true,
     vision:           false,
     webSearch:        false,
@@ -431,16 +432,66 @@ export class OllamaProvider implements LLMProvider {
     }
   }
 
-  // plans/structured-output.md Phase A stub. Phase B.5 lifts the
-  // existing `_resolveOllamaFormat` from `complete` so structured
-  // output goes through the same path as the cloud providers (uniform
-  // API, ajv backstop, retry-with-feedback loop).
+  // plans/structured-output.md Phase B.5. Ollama structured output.
+  //
+  // Strategy: pass the schema as the `format` field on the chat API.
+  // Ollama's wire layer constrains the model's output to conform to
+  // the schema (with varying fidelity depending on model family --
+  // qwen3-coder is reliable, older mistral / llama may drift on
+  // complex schemas). ajv re-validates as a defensive backstop; on
+  // failure the retry helper appends the validation errors as a user
+  // message and re-issues.
+  //
+  // Thinking control: shouldDisableThinking(quirks, hasTools=false, ...)
+  // returns the right field for the model family. qwen3-coder gets the
+  // `/no_think` prefix path on tool calls only; for pure JSON
+  // generation we leave thinking enabled (it helps schema conformance).
   async completeStructured<T>(
-    _messages: LLMMessage[],
-    _schema:   StructuredSchema,
-    _opts?:    StructuredCompletionOpts,
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
   ): Promise<T> {
-    notImplementedStructuredOutput('ollama');
+    const apiMessages = toOllamaMessages(messages);
+    const disableThinking = shouldDisableThinking(this.quirks, false, false);
+
+    return withStructuredRetry<T>(
+      async (extraSystemNote) => {
+        const msgs = extraSystemNote !== undefined
+          ? [...apiMessages, { role: 'user' as const, content: extraSystemNote }]
+          : apiMessages;
+        try {
+          const response = await this.client.chat({
+            model:    this.model,
+            messages: msgs,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            format:   schema as any,
+            keep_alive: '24h',
+            options: {
+              num_ctx: this.numCtx,
+              num_predict: opts?.maxTokens ?? 8_192,
+              ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
+            },
+            ...(disableThinking ? { think: false } : {}),
+          });
+          const text = response.message.content ?? '';
+          if (text.length === 0) {
+            throw new Error('ollama.completeStructured: empty response content');
+          }
+          try {
+            return JSON.parse(text);
+          } catch (err) {
+            throw new Error(`ollama.completeStructured: response was not valid JSON: ${(err as Error).message}. Got: ${text.slice(0, 200)}`);
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('ollama.completeStructured:')) {
+            throw err;
+          }
+          throw wrapOllamaError(err);
+        }
+      },
+      (raw) => validateAgainstSchema<T>(schema, raw),
+      opts?.maxAttempts ?? 3,
+    );
   }
 }
 
