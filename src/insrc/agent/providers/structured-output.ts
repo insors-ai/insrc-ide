@@ -136,6 +136,16 @@ export type StructuredValidator<T> = (raw: unknown) => ValidationResult<T>;
  * as a hard error that bubbles up to the orchestrator's existing
  * Phase2Out retry loop (which is the next layer of defence in the
  * meta-task framework).
+ *
+ * Application-level errors thrown by `call` (e.g. "the model returned
+ * text instead of using the forced tool") are treated as retryable
+ * validation failures -- the error message becomes the feedback note
+ * for the next attempt. Network-level transient errors (5xx, rate
+ * limits) should be handled BEFORE reaching this helper, via the
+ * per-provider cloud-retry wrapper. They're rare here because the
+ * provider's `withCloudRetry` already covers them; if they leak
+ * through, we treat them as validation failures and re-issue, which
+ * isn't ideal but degrades gracefully.
  */
 export async function withStructuredRetry<T>(
 	call:         StructuredCall,
@@ -150,7 +160,21 @@ export async function withStructuredRetry<T>(
 		const note = attempt === 1
 			? undefined
 			: `Your previous response failed schema validation:\n  - ${lastErrors.join('\n  - ')}\n\nReturn valid JSON conforming to the schema. The errors above must all be fixed in your next response.`;
-		const raw = await call(note);
+
+		let raw: unknown;
+		try {
+			raw = await call(note);
+		} catch (err) {
+			// Application-level error (model didn't use the tool, parse
+			// error inside the provider's call closure, etc.). Convert to
+			// a validation failure so the next attempt re-issues with the
+			// error message as feedback.
+			const msg = (err as Error).message ?? String(err);
+			lastErrors = [msg];
+			log.warn({ attempt, maxAttempts, error: msg }, 'structured-output: call threw; treating as validation failure for retry');
+			continue;
+		}
+
 		const result = validate(raw);
 		if (result.ok) {
 			if (attempt > 1) {

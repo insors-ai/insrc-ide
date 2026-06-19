@@ -13,7 +13,7 @@ import type {
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
-import { notImplementedStructuredOutput } from './structured-output.js';
+import { validateAgainstSchema, withStructuredRetry } from './structured-output.js';
 
 const log = getLogger('claude');
 
@@ -49,12 +49,13 @@ export interface WebSearchResult {
 
 export class AnthropicProvider implements LLMProvider {
   readonly supportsTools = true;
-  // plans/structured-output.md Phase A: capability declaration. Phase B.1
-  // implements completeStructured via forced tool + tool_choice; until then
-  // structuredOutput stays `false` so capability-gated callsites fall back
-  // to the existing `complete` + JSON.parse path.
+  // plans/structured-output.md Phase B.1. Anthropic's native structured
+  // output is a forced tool with input_schema=schema and
+  // tool_choice: { type: 'tool', name: '_emit' }. The model is required
+  // to emit through the tool; we read the first tool_use block's
+  // `input` field. ajv re-validates as a defensive backstop.
   readonly capabilities: ProviderCapabilities = {
-    structuredOutput: false,
+    structuredOutput: true,
     toolCalling:      true,
     vision:           true,
     webSearch:        true,
@@ -309,18 +310,95 @@ export class AnthropicProvider implements LLMProvider {
     }
   }
 
-  // plans/structured-output.md Phase A stub. Phase B.1 lands the real
-  // implementation: forced tool with `input_schema = schema` and
-  // `tool_choice: { type: 'tool', name: '_emit' }` so Anthropic's wire
-  // layer guarantees a structured response.
+  // plans/structured-output.md Phase B.1. Anthropic structured output.
+  //
+  // Strategy: a single forced tool whose `input_schema` IS the caller's
+  // schema. `tool_choice` is set to force that tool. The model emits
+  // one (and only one) tool_use block whose `input` field matches the
+  // schema; we read it, ajv-validate as a backstop, and retry on
+  // validation failure with the errors appended to the conversation.
+  //
+  // Why this works: Anthropic's wire layer enforces the input_schema
+  // at the API boundary (the model can't emit text outside the tool
+  // shape when tool_choice is forced). Combined with ajv as the
+  // defensive backstop, structural drift is impossible by the time
+  // the typed value reaches the caller.
   async completeStructured<T>(
-    _messages: LLMMessage[],
-    _schema:   StructuredSchema,
-    _opts?:    StructuredCompletionOpts,
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
   ): Promise<T> {
-    notImplementedStructuredOutput('anthropic');
+    const { system, apiMessages } = splitMessages(messages);
+
+    const emitTool: Anthropic.Tool = {
+      name:         STRUCTURED_TOOL_NAME,
+      description:
+        'Emit your response through this tool. The input MUST conform '
+        + 'to the JSON Schema. Do NOT include any text outside this tool call.',
+      input_schema: schema as Anthropic.Tool.InputSchema,
+    };
+    const baseRequest = {
+      model:       this.model,
+      max_tokens:  opts?.maxTokens ?? 8_192,
+      ...(system !== undefined ? { system } : {}),
+      tools:       [emitTool],
+      tool_choice: { type: 'tool' as const, name: STRUCTURED_TOOL_NAME },
+      ...(opts?.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    };
+
+    return withStructuredRetry<T>(
+      async (extraSystemNote) => {
+        const messagesWithNote = extraSystemNote !== undefined
+          ? [...apiMessages, { role: 'user' as const, content: extraSystemNote }]
+          : apiMessages;
+        try {
+          const response = await withCloudRetry(
+            () => this.client.messages.create({
+              ...baseRequest,
+              messages: messagesWithNote,
+            }),
+            { label: 'anthropic.completeStructured', log },
+          );
+          const toolUse = response.content.find(
+            (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use' && b.name === STRUCTURED_TOOL_NAME,
+          );
+          if (toolUse === undefined) {
+            // The model returned text instead of using the forced tool.
+            // Surface a descriptive validation error so the retry loop
+            // gets the right feedback.
+            const text = response.content
+              .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+              .map(b => b.text)
+              .join('\n');
+            throw new Error(
+              `anthropic.completeStructured: response did not use the forced tool '${STRUCTURED_TOOL_NAME}'. `
+              + `Got text instead: ${text.slice(0, 200)}`,
+            );
+          }
+          log.debug({
+            model:           this.model,
+            schemaTitle:     (schema as { title?: string }).title,
+            inputTokens:     response.usage.input_tokens,
+            outputTokens:    response.usage.output_tokens,
+            cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+          }, 'anthropic completeStructured response');
+          return toolUse.input;
+        } catch (err) {
+          throw wrapError(err);
+        }
+      },
+      (raw) => validateAgainstSchema<T>(schema, raw),
+      opts?.maxAttempts ?? 3,
+    );
   }
 }
+
+/**
+ * Fixed name for the forced-emit tool used by `completeStructured`.
+ * Underscore-prefixed so it doesn't collide with a real
+ * caller-supplied tool name in any conceivable scenario.
+ */
+const STRUCTURED_TOOL_NAME = '_emit';
 
 // ---------------------------------------------------------------------------
 // Helpers
