@@ -206,6 +206,7 @@ export async function runMetaTask(opts: RunMetaTaskOpts): Promise<MetaTaskResult
 			template,
 			signal:   opts.signal,
 			now,
+			deliverables,
 		});
 
 		if (outcome.kind === 'deliverable') {
@@ -300,6 +301,13 @@ interface RunStepOpts {
 	readonly template:  MetaTaskTemplate;
 	readonly signal:    AbortSignal | undefined;
 	readonly now:       () => number;
+	/**
+	 * /plan template M4.a Phase 1. Snapshot of the running meta-task's
+	 * prior-step deliverables. Available to `StepDescriptor.phase2`
+	 * runners so deterministic steps can read upstream bodies inline
+	 * (e.g. P4 validate reads P3's draft, P6 synth reads P3 + P5).
+	 */
+	readonly deliverables: ReadonlyMap<number, string>;
 }
 
 type StepOutcome =
@@ -388,30 +396,68 @@ async function runStep(opts: RunStepOpts): Promise<StepOutcome> {
 
 			// PHASE 2 -- run the task with the assembled context.
 			opts.emit.liveStep(`${bubble}: phase-2 task`, '');
-			const taskPrompt = buildPhase2Prompt({
-				stepDesc:    opts.stepDesc,
-				template:    opts.template,
-				// memory-context M2.5: use the CLOUD's original kind for
-				// messaging. The orchestrator may have auto-injected
-				// preferences into the effective ask, but the cloud
-				// shouldn't see the rewritten kind -- it judges based on
-				// what it asked for.
-				askKind:     cloudAsk.kind,
-				phase1Result,
-				phase2RetryAttempt,
-				maxPhase2Retries: DEFAULT_RETRY_CAPS.maxContextNeededRetries,
-				priorPhase2Reason: lastPhase2Reason,
-			});
-			const output = await callForPhase2({
-				cloud:  opts.cloud,
-				prompt: taskPrompt,
-				emit:   opts.emit,
-				bubble,
-				store:  opts.store,
-				stepIndex: opts.stepIndex,
-				slug:   opts.slug,
-				retryAttempt: phase2RetryAttempt,
-			});
+			// /plan template M4.a Phase 1 (O1 resolution): escape hatch.
+			// When the step descriptor supplies a `phase2` runner, the
+			// orchestrator delegates to it instead of the default cloud
+			// path. The runner may call `ctx.cloud.complete()` 0 / 1 / N
+			// times (deterministic helpers + multi-call patterns) and
+			// must return a `Phase2Out`. The standard JSONL persistence
+			// + Phase2Out routing below stays identical.
+			let output: Phase2Out;
+			if (opts.stepDesc.phase2 !== undefined) {
+				try {
+					output = await opts.stepDesc.phase2({
+						stepDesc:         opts.stepDesc,
+						phase1Result,
+						cumulativeChunks: [...cumulativeChunks],
+						cloud:            opts.cloud,
+						catalog:          opts.catalog,
+						deliverables:     opts.deliverables,
+						stepIndex:        opts.stepIndex,
+						retryAttempt:     phase2RetryAttempt,
+						bubble,
+						signal:           opts.signal,
+					});
+				} catch (err) {
+					// Mirror the LLM path's failure shape: any throw becomes
+					// a user-required abort so the meta-task surfaces a
+					// stable error to the consumer rather than crashing
+					// runStep mid-iteration.
+					output = {
+						kind:       'abort',
+						resolution: 'user-required',
+						reason:     `phase2 runner threw: ${(err as Error).message ?? String(err)}`,
+					};
+				}
+				await opts.store.appendStepPhase2(opts.stepIndex, opts.slug, {
+					ts: opts.now(), kind: 'output', output, retryAttempt: phase2RetryAttempt,
+				});
+			} else {
+				const taskPrompt = buildPhase2Prompt({
+					stepDesc:    opts.stepDesc,
+					template:    opts.template,
+					// memory-context M2.5: use the CLOUD's original kind for
+					// messaging. The orchestrator may have auto-injected
+					// preferences into the effective ask, but the cloud
+					// shouldn't see the rewritten kind -- it judges based on
+					// what it asked for.
+					askKind:     cloudAsk.kind,
+					phase1Result,
+					phase2RetryAttempt,
+					maxPhase2Retries: DEFAULT_RETRY_CAPS.maxContextNeededRetries,
+					priorPhase2Reason: lastPhase2Reason,
+				});
+				output = await callForPhase2({
+					cloud:  opts.cloud,
+					prompt: taskPrompt,
+					emit:   opts.emit,
+					bubble,
+					store:  opts.store,
+					stepIndex: opts.stepIndex,
+					slug:   opts.slug,
+					retryAttempt: phase2RetryAttempt,
+				});
+			}
 			opts.emit.liveStep(`${bubble}: phase-2 task`, '', true);
 
 			// ROUTE by Phase2Out kind.

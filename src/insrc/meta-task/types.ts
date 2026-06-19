@@ -280,7 +280,50 @@ export interface StepDescriptor {
 	readonly acceptance: readonly AcceptanceCriterion[];
 	/** Optional override of the template's default cloud provider step binding. */
 	readonly providerBinding?: string | undefined;
+	/**
+	 * /plan template M4.a Phase 1 (design/meta-task-plan.html O1 resolution).
+	 *
+	 * Escape hatch for steps whose phase-2 isn't a single cloud-LLM call.
+	 * When set, the orchestrator invokes this function in place of the
+	 * default `callForPhase2` path. The runner may call `ctx.cloud` 0 / 1 / N
+	 * times (e.g. deterministic helpers, multi-call sketch + refine
+	 * patterns) and returns the same `Phase2Out` discriminated union the
+	 * default path produces.
+	 *
+	 * Default behaviour (runner absent) is unchanged: one cloud call with
+	 * the framework's standard system prompt, response parsed + validated
+	 * against `Phase2Out`.
+	 */
+	readonly phase2?: Phase2Runner | undefined;
 }
+
+/**
+ * /plan template M4.a Phase 1. Context handed to a `StepDescriptor.phase2`
+ * runner. Carries enough state for deterministic helpers (P4 validate,
+ * P6 synth read prior deliverables) and for runners that need to call
+ * the cloud themselves (`ctx.cloud.complete(...)`).
+ *
+ * `deliverables` is keyed by 1-based step index and contains every
+ * prior step's body (current step's slot is absent at the time of the
+ * call). Catalog mirrors what `dispatchFetch` sees for the
+ * `deliverable` slot fetcher; the runner reads `deliverables` when it
+ * needs a body inline and falls back to `catalog` for cross-template
+ * references (parent meta-task, referenced handoffs).
+ */
+export interface Phase2RunnerCtx {
+	readonly stepDesc:         StepDescriptor;
+	readonly phase1Result:     Phase1Result | null;
+	readonly cumulativeChunks: readonly ContextChunk[];
+	readonly cloud:            import('../shared/types.js').LLMProvider;
+	readonly catalog:          DeliverableCatalog;
+	readonly deliverables:     ReadonlyMap<number, string>;
+	readonly stepIndex:        number;
+	readonly retryAttempt:     number;
+	readonly bubble:           string;
+	readonly signal:           AbortSignal | undefined;
+}
+
+export type Phase2Runner = (ctx: Phase2RunnerCtx) => Promise<Phase2Out>;
 
 export interface Plan {
 	readonly steps: readonly StepDescriptor[];
