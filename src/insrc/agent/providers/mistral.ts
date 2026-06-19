@@ -18,7 +18,7 @@ import type {
 } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 import { withCloudRetry } from './cloud-retry.js';
-import { notImplementedStructuredOutput } from './structured-output.js';
+import { validateAgainstSchema, withStructuredRetry } from './structured-output.js';
 
 const log = getLogger('mistral');
 
@@ -29,12 +29,16 @@ export interface MistralProviderConfig {
 
 export class MistralProvider implements LLMProvider {
   readonly supportsTools = true;
-  // plans/structured-output.md Phase A. Phase B.4 implements via
-  // `response_format: { type: 'json_schema', json_schema }` on newer
-  // Mistral models (mistral-large-2407+) with `{ type: 'json_object' }`
-  // as a fallback for older models.
+  // plans/structured-output.md Phase B.4. Mistral structured output
+  // uses `response_format: { type: 'json_schema', json_schema }` on
+  // newer models (`mistral-large-2407+`, `mistral-small-2503+`,
+  // `mistral-large-latest`, `pixtral-large`). For older models we
+  // fall back to `response_format: { type: 'json_object' }` which
+  // guarantees parseable JSON but not schema conformance -- the ajv
+  // backstop catches drift and retries with the validation errors
+  // appended.
   readonly capabilities: ProviderCapabilities = {
-    structuredOutput: false,
+    structuredOutput: true,
     toolCalling:      true,
     vision:           false,
     webSearch:        false,
@@ -104,18 +108,91 @@ export class MistralProvider implements LLMProvider {
     return [];
   }
 
-  // plans/structured-output.md Phase A stub. Phase B.4 implements via
-  // Mistral's `response_format: { type: 'json_schema', json_schema }`
-  // on newer models, falling back to `{ type: 'json_object' }` for older
-  // ones.
+  // plans/structured-output.md Phase B.4. Mistral structured output.
+  //
+  // Strategy: pick the response_format based on whether the model is
+  // known to support the strict `json_schema` flavour. Newer models
+  // get { type: 'json_schema', json_schema: { name, schema, strict } }
+  // (wire-layer enforcement); older models get
+  // { type: 'json_object' } (parseable JSON only). Either way, ajv
+  // re-validates against the original schema; on validation failure
+  // the retry helper appends the errors as a user message.
   async completeStructured<T>(
-    _messages: LLMMessage[],
-    _schema:   StructuredSchema,
-    _opts?:    StructuredCompletionOpts,
+    messages: LLMMessage[],
+    schema:   StructuredSchema,
+    opts?:    StructuredCompletionOpts,
   ): Promise<T> {
-    notImplementedStructuredOutput('mistral');
+    const apiMessages = toMistralMessages(messages);
+    const schemaName = (schema as { title?: string }).title ?? '_emit';
+    const responseFormat = supportsJsonSchema(this.model)
+      ? {
+        type: 'json_schema' as const,
+        jsonSchema: {
+          name:   schemaName,
+          schemaDefinition: schema,
+          strict: true,
+        },
+      }
+      : { type: 'json_object' as const };
+
+    const baseRequest: Record<string, unknown> = {
+      model:    this.model,
+      messages: apiMessages,
+      responseFormat,
+    };
+    if (opts?.maxTokens   !== undefined) baseRequest['maxTokens']   = opts.maxTokens;
+    if (opts?.temperature !== undefined) baseRequest['temperature'] = opts.temperature;
+
+    return withStructuredRetry<T>(
+      async (extraSystemNote) => {
+        const msgs = extraSystemNote !== undefined
+          ? [...apiMessages, { role: 'user' as const, content: extraSystemNote }]
+          : apiMessages;
+        try {
+          const response = await withCloudRetry(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            () => this.client.chat.complete({ ...baseRequest, messages: msgs } as any),
+            { label: 'mistral.completeStructured', log },
+          );
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const text = ((response as any).choices?.[0]?.message?.content ?? '') as string;
+          if (text.length === 0) {
+            throw new Error('mistral.completeStructured: empty response content');
+          }
+          try {
+            return JSON.parse(text);
+          } catch (err) {
+            throw new Error(`mistral.completeStructured: response was not valid JSON: ${(err as Error).message}. Got: ${text.slice(0, 200)}`);
+          }
+        } catch (err) {
+          log.error({ err: String(err), model: this.model }, 'mistral completeStructured failed');
+          throw err;
+        }
+      },
+      (raw) => validateAgainstSchema<T>(schema, raw),
+      opts?.maxAttempts ?? 3,
+    );
   }
 }
+
+/**
+ * Allow-list of Mistral models that support `response_format: { type: 'json_schema' }`.
+ * Per Mistral's structured-outputs docs (mistral.ai/news/jsonmode-update). Older models
+ * and unknown ids fall back to `{ type: 'json_object' }` which still produces parseable
+ * JSON but doesn't enforce the schema at the wire layer; the ajv backstop covers drift.
+ */
+function supportsJsonSchema(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.includes('mistral-large')
+    || m.startsWith('mistral-medium')
+    || m.includes('mistral-small-2503')
+    || m.includes('mistral-small-latest')
+    || m.includes('pixtral-large')
+    || m.includes('codestral');
+}
+
+/** Exported for unit tests. */
+export const _supportsJsonSchemaForTest = supportsJsonSchema;
 
 // ---------------------------------------------------------------------------
 // Translation
