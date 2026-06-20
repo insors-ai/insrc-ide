@@ -63,6 +63,23 @@ export interface SketchResult {
 const MAX_TOKENS = 2048;
 const MAX_STEPS = 5;
 
+// plans/structured-output.md Phase C.5. Coarse JSON Schema for
+// wire-layer enforcement. The fine-grained step shape (skills,
+// dependsOn, targetsCriteria) is enforced by `coerceStep` below.
+const SKETCH_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['steps'],
+	additionalProperties: false,
+	properties: {
+		steps: {
+			type: 'array',
+			minItems: 1,
+			maxItems: MAX_STEPS,
+			items: { type: 'object' },
+		},
+	},
+};
+
 export async function runSketch(input: SketchInput): Promise<SketchResult> {
 	const catalogIds = new Set(input.catalog.map(c => c.id));
 	const maxFactIdx = Math.max(0, input.gapFacts.length - 1);
@@ -112,7 +129,7 @@ async function callSketch(
 	input:              SketchInput,
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
-): Promise<string> {
+): Promise<unknown> {
 	const writer = getPromptRegistry().get<SketchWriterInput, readonly LLMMessage[]>('sketch');
 	const messages = [...writer.build({
 		todo:               input.todo,
@@ -122,13 +139,11 @@ async function callSketch(
 		isRetry,
 		priorFailureReason,
 	})];
-	const response = await input.provider.complete(messages, {
+	return input.provider.completeStructured<unknown>(messages, SKETCH_SCHEMA, {
 		maxTokens:       MAX_TOKENS,
 		temperature:     0,
-		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return response.text;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,16 +162,10 @@ interface ParseErr {
 type ParseResult = ParseOk | ParseErr;
 
 function parseAndCoerce(
-	raw:        string,
+	parsed:     unknown,
 	catalogIds: ReadonlySet<string>,
 	maxFactIdx: number,
 ): ParseResult {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripFences(raw));
-	} catch (err) {
-		return { ok: false, reason: `JSON parse failed: ${(err as Error).message}` };
-	}
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { ok: false, reason: 'response is not a JSON object' };
 	}
@@ -214,18 +223,9 @@ function parseAndCoerce(
 	return { ok: true, steps, droppedStepIds };
 }
 
-function stripFences(text: string): string {
-	let out = text.trim();
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-	}
-	return out.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
 
 export const _parseAndCoerceForTest = parseAndCoerce;
-export const _stripFencesForTest    = stripFences;
 export const _MAX_STEPS              = MAX_STEPS;

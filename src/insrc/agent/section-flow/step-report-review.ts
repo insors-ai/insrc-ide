@@ -281,14 +281,29 @@ async function reviewReportOnce(input: ReportReviewInput, candidate: string, cyc
 		{ role: 'system', content: REVIEW_ROLE },
 		{ role: 'user',   content: buildReviewUser(input, candidate, cyclesConsumed) },
 	];
-	const response = await input.provider.complete(messages, {
+	const parsed = await input.provider.completeStructured<unknown>(messages, REPORT_REVIEW_SCHEMA, {
 		maxTokens:       MAX_REVIEW_TOKENS,
 		temperature:     0,
-		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return parseReview(response.text);
+	return parseReview(parsed);
 }
+
+// plans/structured-output.md Phase C.5. Coarse JSON Schema for the
+// wire-layer enforcement of the report-review response. App-level
+// invariants (structural sub-shape, section-id membership) stay in
+// `parseReview()` / `coerceStructural()`.
+const REPORT_REVIEW_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['verdict'],
+	additionalProperties: false,
+	properties: {
+		verdict:    { type: 'string', enum: ['accept', 'revise-edits', 'revise-structural'] },
+		reasoning:  { type: 'string', maxLength: 2000 },
+		edits:      { type: 'string', maxLength: 4000 },
+		structural: { type: 'object' },
+	},
+};
 
 function buildReviewUser(input: ReportReviewInput, candidate: string, cyclesConsumed: number): string {
 	const sectionBlock = input.entries.map((e, i) =>
@@ -326,18 +341,7 @@ function buildReviewUser(input: ReportReviewInput, candidate: string, cyclesCons
 	].join('\n');
 }
 
-function parseReview(raw: string): ReviewParsed {
-	let text = raw.trim();
-	if (text.startsWith('```')) {
-		text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch {
-		log.warn({ preview: raw.slice(0, 200) }, 'report review: JSON parse failed; defaulting to accept');
-		return { verdict: 'accept', reasoning: 'review parse failure -> accept' };
-	}
+function parseReview(parsed: unknown): ReviewParsed {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { verdict: 'accept', reasoning: 'review shape invalid -> accept' };
 	}

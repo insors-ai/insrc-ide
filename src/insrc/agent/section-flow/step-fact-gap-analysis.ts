@@ -78,7 +78,7 @@ export async function runFactGapAnalysis(
 	const catalogIds = new Set(input.catalog.map(c => c.id));
 
 	const firstAttempt = await callAnalyzer(input, false, undefined);
-	const firstValidation = validate(firstAttempt.raw, catalogIds);
+	const firstValidation = validate(firstAttempt.parsed, catalogIds);
 	if (firstValidation.ok) {
 		log.info({
 			todoId:        input.todo.id,
@@ -93,7 +93,7 @@ export async function runFactGapAnalysis(
 	log.warn({ todoId: input.todo.id, reason: firstValidation.reason }, 'fact-gap analysis: first-attempt rejected; retrying with corrective hint');
 
 	const retry = await callAnalyzer(input, true, firstValidation.reason);
-	const retryValidation = validate(retry.raw, catalogIds);
+	const retryValidation = validate(retry.parsed, catalogIds);
 	if (!retryValidation.ok) {
 		throw new Error(`fact-gap analysis validation failed after retry: ${retryValidation.reason}`);
 	}
@@ -110,7 +110,7 @@ export async function runFactGapAnalysis(
 // ---------------------------------------------------------------------------
 
 interface AnalyzerRaw {
-	readonly raw: string;
+	readonly parsed: unknown;
 }
 
 async function callAnalyzer(
@@ -126,13 +126,16 @@ async function callAnalyzer(
 		isRetry,
 		priorFailureReason,
 	})];
-	const response = await input.provider.complete(messages, {
+	// plans/structured-output.md Phase C.5. The wire layer enforces the
+	// JSON Schema; we receive the already-parsed object and only need
+	// to validate the application-level invariants (cap, duplicates,
+	// status semantics, catalog membership) below.
+	const parsed = await input.provider.completeStructured<unknown>(messages, FACT_GAP_ANALYSIS_SCHEMA, {
 		maxTokens:       MAX_ANALYSIS_TOKENS,
 		temperature:     0,
-		responseFormat:  { schema: FACT_GAP_ANALYSIS_SCHEMA },
 		disableThinking: true,
 	});
-	return { raw: response.text };
+	return { parsed };
 }
 
 // NOTE: the inline ANALYZER_ROLE + buildAnalyzerUser + renderMemory +
@@ -157,13 +160,7 @@ interface ValidationErr {
 
 type ValidationResult = ValidationOk | ValidationErr;
 
-function validate(raw: string, catalogIds: ReadonlySet<string>): ValidationResult {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripFences(raw));
-	} catch (err) {
-		return { ok: false, reason: `JSON parse failed: ${(err as Error).message}` };
-	}
+function validate(parsed: unknown, catalogIds: ReadonlySet<string>): ValidationResult {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { ok: false, reason: 'response is not a JSON object' };
 	}
@@ -294,18 +291,9 @@ function coerceRequiredFact(
 	};
 }
 
-function stripFences(text: string): string {
-	let out = text.trim();
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-	}
-	return out.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
 
 export const _validateForTest               = validate;
 export const _coerceRequiredFactForTest     = coerceRequiredFact;
-export const _stripFencesForTest            = stripFences;

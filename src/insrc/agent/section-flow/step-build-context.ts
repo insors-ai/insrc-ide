@@ -117,6 +117,21 @@ const MAX_TOKENS = 2048;
  */
 const MAX_FETCH = 8;
 
+// plans/structured-output.md Phase C.5. Coarse JSON Schema for the
+// wire-layer enforcement of the non-tool path. The tool-loop variant
+// still goes through `complete` (tool calling + json_schema together is
+// brittle across providers), but the bulk path -- single shot, no
+// runnerDeps -- now flows through provider.completeStructured.
+const BUILD_CONTEXT_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['fetch'],
+	additionalProperties: false,
+	properties: {
+		fetch: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: MAX_FETCH },
+		notes: { type: 'string' },
+	},
+};
+
 export async function runBuildContext(input: BuildContextInput): Promise<BuildContextResult> {
 	const first = await callBuildContext(input, false, undefined);
 	const firstParsed = validate(first, input.tocIds);
@@ -184,7 +199,7 @@ async function callBuildContext(
 	input:              BuildContextInput,
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
-): Promise<string> {
+): Promise<unknown> {
 	const writer = getPromptRegistry().get<BuildContextWriterInput, readonly LLMMessage[]>('build-context');
 	const messages: LLMMessage[] = [...writer.build({
 		stepIntent:         input.stepIntent,
@@ -199,7 +214,20 @@ async function callBuildContext(
 		priorFailureReason,
 	})];
 
-	const tools = input.runnerDeps !== undefined ? buildFsTools() : undefined;
+	// plans/structured-output.md Phase C.5. Single-shot (no tools) path
+	// goes via completeStructured -- the wire layer enforces the JSON
+	// Schema. The tool-loop path stays on `complete` because mixing
+	// tool calling with strict JSON Schema response_format is not
+	// uniformly supported across providers.
+	if (input.runnerDeps === undefined) {
+		return input.provider.completeStructured<unknown>(messages, BUILD_CONTEXT_SCHEMA, {
+			maxTokens:       MAX_TOKENS,
+			temperature:     0,
+			disableThinking: true,
+		});
+	}
+
+	const tools = buildFsTools();
 
 	for (let iter = 0; iter < MAX_TOOL_ITERATIONS + 1; iter++) {
 		const response = await input.provider.complete(messages, {
@@ -207,12 +235,12 @@ async function callBuildContext(
 			temperature:     0,
 			responseFormat:  'json',
 			disableThinking: true,
-			...(tools !== undefined ? { tools } : {}),
+			tools,
 		});
 		const calls = response.toolCalls ?? [];
-		if (calls.length === 0 || tools === undefined) {
+		if (calls.length === 0) {
 			// No tool calls -> final JSON answer.
-			return response.text;
+			return tryParseJson(response.text);
 		}
 		if (iter === MAX_TOOL_ITERATIONS) {
 			log.warn({
@@ -220,7 +248,7 @@ async function callBuildContext(
 				toolIterations: iter,
 				suppressedCallCount: calls.length,
 			}, 'build-context: tool-iteration cap reached; ignoring further calls and treating response as final');
-			return response.text;
+			return tryParseJson(response.text);
 		}
 		// Run each tool call via runSkill. The production runner's
 		// onSkillEnd is the spill-writer -- each output lands as a new
@@ -261,8 +289,17 @@ async function callBuildContext(
 		messages.push({ role: 'user',      content: toolResultBlocks });
 	}
 	// Loop exit without return is impossible (the `iter === MAX` branch
-	// returns response.text); satisfy the type system.
-	return '';
+	// returns above); satisfy the type system.
+	return {};
+}
+
+function tryParseJson(text: string): unknown {
+	let trimmed = text.trim();
+	if (trimmed.startsWith('```')) {
+		trimmed = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+	}
+	try { return JSON.parse(trimmed); }
+	catch { return { __parseError: true, raw: text }; }
 }
 
 /**
@@ -318,12 +355,9 @@ interface ValidationErr {
 
 type ValidationResult = ValidationOk | ValidationErr;
 
-export function validate(raw: string, tocIds: ReadonlySet<string>): ValidationResult {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripFences(raw));
-	} catch (err) {
-		return { ok: false, reason: `JSON parse failed: ${(err as Error).message}` };
+export function validate(parsed: unknown, tocIds: ReadonlySet<string>): ValidationResult {
+	if (parsed !== null && typeof parsed === 'object' && (parsed as Record<string, unknown>)['__parseError'] === true) {
+		return { ok: false, reason: 'JSON parse failed: tool-loop response was not valid JSON' };
 	}
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { ok: false, reason: 'response is not a JSON object' };
@@ -363,18 +397,9 @@ export function validate(raw: string, tocIds: ReadonlySet<string>): ValidationRe
 	return { ok: true, fetchIds, notes };
 }
 
-function stripFences(text: string): string {
-	let out = text.trim();
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-	}
-	return out.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
 
 export const _validateForTest    = validate;
-export const _stripFencesForTest = stripFences;
 export const _MAX_FETCH          = MAX_FETCH;

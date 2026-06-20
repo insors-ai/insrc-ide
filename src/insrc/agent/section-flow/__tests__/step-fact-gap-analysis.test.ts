@@ -51,21 +51,43 @@ test.beforeEach(() => {
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly schema:   unknown;
 }
 
+// plans/structured-output.md Phase C.5. Mock provider now answers via
+// `completeStructured`. The scripted text is JSON.parse'd inside the
+// stub; on parse failure the stub returns `{}` so the application-level
+// retry path (which validates app invariants on the parsed object) is
+// exercised the same way it would be in production after the wire-layer
+// retries succeed but emit a schema-conformant-but-app-invariant-failing
+// object. Production never delivers truly malformed JSON to this layer.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
+			calls.push({ messages, opts, schema: undefined });
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			calls.push({ messages, opts, schema });
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -132,9 +154,6 @@ const MISSING_REASONING_JSON = JSON.stringify({
 	],
 });
 
-// First-attempt failure that DOES trigger retry: malformed JSON.
-const MALFORMED_JSON = '{ "requiredFacts": [ malformed garbage';
-
 const EMPTY_FACTS_JSON = JSON.stringify({
 	reasoning: 'no facts identified',
 	requiredFacts: [],
@@ -188,14 +207,20 @@ test('runFactGapAnalysis: trivial fast-path -> isTrivialFastPath true', async ()
 	assert.equal(isTrivialFastPath(result.analysis), true);
 });
 
-test('runFactGapAnalysis: retry path -> first attempt malformed JSON, retry passes', async () => {
-	const { provider, calls } = scriptedProvider([MALFORMED_JSON, HEALTHY_ANALYSIS_JSON]);
+test('runFactGapAnalysis: retry path -> first attempt fails app invariant, retry passes', async () => {
+	// plans/structured-output.md Phase C.5. The wire layer now enforces JSON
+	// Schema before we see the parsed object, so "malformed JSON" is no longer
+	// a realistic first-attempt failure mode. The application-level retry now
+	// catches schema-conformant-but-app-invariant-violating results (empty
+	// requiredFacts is one such case the schema's minItems > 0 might miss when
+	// the mock bypasses validation).
+	const { provider, calls } = scriptedProvider([EMPTY_FACTS_JSON, HEALTHY_ANALYSIS_JSON]);
 	const result = await runFactGapAnalysis({
 		todo: makeTodo(), memory: makeMemory(), catalog: makeCatalog(), provider,
 	});
 	assert.equal(calls.length, 2);
 	assert.equal(result.retried, true);
-	assert.match(result.firstFailureReason ?? '', /JSON parse failed/);
+	assert.match(result.firstFailureReason ?? '', /at least one entry/);
 	// Retry message carries the corrective hint.
 	assert.match(calls[1]!.messages[1]!.content, /RETRY CORRECTION/);
 });
@@ -211,20 +236,25 @@ test('runFactGapAnalysis: missing reasoning is now accepted (telemetry-only fiel
 });
 
 test('runFactGapAnalysis: both attempts fail -> throws with reason', async () => {
-	const { provider } = scriptedProvider([MALFORMED_JSON, MALFORMED_JSON]);
+	const { provider } = scriptedProvider([EMPTY_FACTS_JSON, EMPTY_FACTS_JSON]);
 	await assert.rejects(
 		() => runFactGapAnalysis({ todo: makeTodo(), memory: makeMemory(), catalog: makeCatalog(), provider }),
 		/fact-gap analysis validation failed after retry/,
 	);
 });
 
-test('runFactGapAnalysis: call opts -- temperature 0, disableThinking, schema-pinned responseFormat', async () => {
+test('runFactGapAnalysis: call opts -- temperature 0, disableThinking, schema passed to completeStructured', async () => {
+	// plans/structured-output.md Phase C.5. The schema is now passed as the
+	// second positional arg to completeStructured (the recorded call's
+	// `schema` field captures it).
 	const { provider, calls } = scriptedProvider([HEALTHY_ANALYSIS_JSON]);
 	await runFactGapAnalysis({ todo: makeTodo(), memory: makeMemory(), catalog: makeCatalog(), provider });
 	assert.equal(calls[0]!.opts.temperature, 0);
 	assert.equal(calls[0]!.opts.disableThinking, true);
-	const rf = calls[0]!.opts.responseFormat;
-	assert.ok(rf !== undefined && typeof rf === 'object' && 'schema' in rf);
+	const schema = calls[0]!.schema;
+	assert.ok(schema !== undefined && typeof schema === 'object');
+	const propsObj = (schema as { properties?: unknown }).properties;
+	assert.ok(propsObj !== undefined && typeof propsObj === 'object' && 'requiredFacts' in (propsObj as object));
 });
 
 test('runFactGapAnalysis: prompt carries TODO objective + memory + catalog summary', async () => {
@@ -250,28 +280,28 @@ test('runFactGapAnalysis: prompt carries TODO objective + memory + catalog summa
 
 test('validate: rejects empty requiredFacts', () => {
 	const ids = new Set(['code.class.extract-fields']);
-	const r = validate(EMPTY_FACTS_JSON, ids);
+	const r = validate(JSON.parse(EMPTY_FACTS_JSON), ids);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /at least one entry/); }
 });
 
 test('validate: rejects duplicate fact ids', () => {
 	const ids = new Set(['code.class.extract-fields']);
-	const r = validate(DUPE_IDS_JSON, ids);
+	const r = validate(JSON.parse(DUPE_IDS_JSON), ids);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /duplicates an earlier fact/); }
 });
 
 test('validate: rejects present/partial fact missing sourceRef', () => {
 	const ids = new Set(['code.class.extract-fields']);
-	const r = validate(PRESENT_NO_SOURCEREF_JSON, ids);
+	const r = validate(JSON.parse(PRESENT_NO_SOURCEREF_JSON), ids);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /requires sourceRef/); }
 });
 
 test('validate: rejects absent fact whose suggestedSkills are all unknown ids', () => {
 	const ids = new Set(['code.class.extract-fields']);
-	const r = validate(UNKNOWN_SKILLS_JSON, ids);
+	const r = validate(JSON.parse(UNKNOWN_SKILLS_JSON), ids);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /none in catalog/); }
 });
@@ -281,8 +311,7 @@ test('validate: rejects more than 12 requiredFacts', () => {
 	for (let i = 0; i < 13; i++) {
 		factsArr.push({ id: `f${i}`, fact: `x${i}`, why: 'y', status: 'absent', suggestedSkills: ['code.class.extract-fields'] });
 	}
-	const json = JSON.stringify({ reasoning: 'r', requiredFacts: factsArr });
-	const r = validate(json, new Set(['code.class.extract-fields']));
+	const r = validate({ reasoning: 'r', requiredFacts: factsArr }, new Set(['code.class.extract-fields']));
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /cap is 12/); }
 });
@@ -291,7 +320,7 @@ test('validate: accepts mixed sourceRef shapes (memory-layer + prior-todo)', () 
 	// Catalog must include every suggested skill in HEALTHY_ANALYSIS_JSON so
 	// the suggestedSkills-membership check passes for the absent facts.
 	const ids = new Set(['code.class.extract-fields', 'data.source.file.sample-shape']);
-	const r = validate(HEALTHY_ANALYSIS_JSON, ids);
+	const r = validate(JSON.parse(HEALTHY_ANALYSIS_JSON), ids);
 	assert.equal(r.ok, true);
 	if (r.ok) {
 		const present = r.analysis.requiredFacts.find(f => f.status === 'present');

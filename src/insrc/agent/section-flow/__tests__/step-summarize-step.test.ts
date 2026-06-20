@@ -14,7 +14,6 @@ import assert from 'node:assert/strict';
 import {
 	_parseForTest             as parse,
 	_substituteCallIdsForTest as substituteCallIds,
-	_stripFencesForTest       as stripFences,
 } from '../step-summarize-step.js';
 
 const VALID_CALL_IDS = new Set(['s1.a', 's1.b']);
@@ -25,15 +24,14 @@ const VALID_GAP_IDS  = new Set(['ingrn-fields', 'json-shape']);
 // ---------------------------------------------------------------------------
 
 test('parse: minimal valid response -> ok', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId:      's1.a',
 			summary:     'class INGRN extracted',
 			claims:      [],
 			gapClosures: [],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, true);
 	if (r.ok) {
 		assert.equal(r.value.length, 1);
@@ -42,7 +40,7 @@ test('parse: minimal valid response -> ok', () => {
 });
 
 test('parse: claims + gapClosures preserved', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId:  's1.a',
 			summary: 'class INGRN extracted',
@@ -59,8 +57,7 @@ test('parse: claims + gapClosures preserved', () => {
 				citations: [{ callId: 's1.a', span: 'vendor: Optional[INPartyDetails]' }],
 			}],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, true);
 	if (r.ok) {
 		assert.equal(r.value[0]!.claims.length, 1);
@@ -70,7 +67,7 @@ test('parse: claims + gapClosures preserved', () => {
 });
 
 test('parse: countAssertion preserved when present', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId:  's1.a',
 			summary: 'class INGRN has 2 fields',
@@ -85,8 +82,7 @@ test('parse: countAssertion preserved when present', () => {
 			}],
 			gapClosures: [],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, true);
 	if (r.ok) { assert.equal(r.value[0]!.claims[0]!.countAssertion, 2); }
 });
@@ -95,48 +91,46 @@ test('parse: countAssertion preserved when present', () => {
 // parse() structural rejections
 // ---------------------------------------------------------------------------
 
-test('parse: non-JSON -> rejected', () => {
+test('parse: non-object -> rejected', () => {
 	const r = parse('not json', VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
-	if (!r.ok) { assert.match(r.reason, /JSON parse failed/); }
+	if (!r.ok) { assert.match(r.reason, /JSON object/); }
 });
 
 test('parse: top-level array -> rejected', () => {
-	const r = parse('[]', VALID_CALL_IDS, VALID_GAP_IDS);
+	const r = parse([], VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /JSON object/); }
 });
 
 test('parse: missing summaries field -> rejected', () => {
-	const r = parse('{}', VALID_CALL_IDS, VALID_GAP_IDS);
+	const r = parse({}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /summaries.*array/); }
 });
 
 test('parse: callId not in valid set -> rejected', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{ callId: 's9.z', summary: 'x', claims: [], gapClosures: [] }],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /not one of the declared callIds/); }
 });
 
 test('parse: claim with bad evidence type -> rejected', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId: 's1.a', summary: 'x',
 			claims: [{ claim: 'x', evidence: 'guess', citations: [] }],
 			gapClosures: [],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /evidence must be/); }
 });
 
 test('parse: citation callId not in valid set -> rejected', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId: 's1.a', summary: 'x',
 			claims: [{
@@ -145,14 +139,13 @@ test('parse: citation callId not in valid set -> rejected', () => {
 			}],
 			gapClosures: [],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /not one of the declared callIds/); }
 });
 
 test('parse: countAssertion non-integer -> rejected', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId: 's1.a', summary: 'x',
 			claims: [{
@@ -161,8 +154,7 @@ test('parse: countAssertion non-integer -> rejected', () => {
 			}],
 			gapClosures: [],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /non-negative integer/); }
 });
@@ -172,7 +164,7 @@ test('parse: countAssertion non-integer -> rejected', () => {
 // ---------------------------------------------------------------------------
 
 test('parse: unknown gapId -> closure silently dropped, summary still parses', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId: 's1.a', summary: 'x',
 			claims: [],
@@ -184,8 +176,7 @@ test('parse: unknown gapId -> closure silently dropped, summary still parses', (
 				citations: [{ callId: 's1.a', span: 'x' }],
 			}],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, true);
 	if (r.ok) {
 		assert.equal(r.value[0]!.gapClosures.length, 0, 'invented gap-id should be dropped');
@@ -193,7 +184,7 @@ test('parse: unknown gapId -> closure silently dropped, summary still parses', (
 });
 
 test('parse: gap closure with bad verdict -> rejected', () => {
-	const raw = JSON.stringify({
+	const r = parse({
 		summaries: [{
 			callId: 's1.a', summary: 'x', claims: [],
 			gapClosures: [{
@@ -202,8 +193,7 @@ test('parse: gap closure with bad verdict -> rejected', () => {
 				citations: [{ callId: 's1.a', span: 'x' }],
 			}],
 		}],
-	});
-	const r = parse(raw, VALID_CALL_IDS, VALID_GAP_IDS);
+	}, VALID_CALL_IDS, VALID_GAP_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /closes.*partially.*off-topic/); }
 });
@@ -237,10 +227,3 @@ test('substituteCallIds: maps citation callIds to artifactIds', () => {
 	assert.equal(out[0]!.claims[0]!.citations[1]!.artifactId, 'art:2:summary');
 });
 
-// ---------------------------------------------------------------------------
-// stripFences
-// ---------------------------------------------------------------------------
-
-test('stripFences: removes ```json wrapper', () => {
-	assert.equal(stripFences('```json\n{"summaries":[]}\n```'), '{"summaries":[]}');
-});

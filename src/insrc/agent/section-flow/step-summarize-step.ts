@@ -56,6 +56,22 @@ const log = getLogger('section-flow:summarize-step');
 // well under this ceiling.
 const MAX_TOKENS = 16384;
 
+// plans/structured-output.md Phase C.5. Coarse JSON Schema for the
+// wire-layer enforcement. Fine-grained app invariants (callId
+// membership, citation verification, gap-id linkage) stay in `parse()`
+// and the citation-verifier downstream.
+const SUMMARIZE_STEP_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['summaries'],
+	additionalProperties: false,
+	properties: {
+		summaries: {
+			type: 'array',
+			items: { type: 'object' },
+		},
+	},
+};
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -177,7 +193,7 @@ async function callSummariser(
 	input:              SummarizeStepInput,
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
-): Promise<string> {
+): Promise<unknown> {
 	const writer = getPromptRegistry().get<SummarizeStepWriterInput, readonly LLMMessage[]>('summarize-step');
 	const writerCalls: SummarizeStepCallInput[] = input.calls.map(c => ({
 		callId:  c.callId,
@@ -194,13 +210,11 @@ async function callSummariser(
 		isRetry,
 		priorFailureReason,
 	})];
-	const response = await input.provider.complete(messages, {
+	return input.provider.completeStructured<unknown>(messages, SUMMARIZE_STEP_SCHEMA, {
 		maxTokens:       MAX_TOKENS,
 		temperature:     0,
-		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return response.text;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,16 +245,10 @@ type ParseResult =
 	| { readonly ok: false; readonly reason: string };
 
 export function parse(
-	raw:          string,
+	parsed:       unknown,
 	validCallIds: ReadonlySet<string>,
 	gapIdSet:     ReadonlySet<string>,
 ): ParseResult {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripFences(raw));
-	} catch (err) {
-		return { ok: false, reason: `JSON parse failed: ${(err as Error).message}` };
-	}
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { ok: false, reason: 'response must be a JSON object' };
 	}
@@ -367,14 +375,6 @@ function coerceGapClosure(
 	return { ...base, gapId, verdict: verdictRaw };
 }
 
-function stripFences(text: string): string {
-	let out = text.trim();
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-	}
-	return out.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Substitute callIds -> artifactIds (model-side -> system-side)
 // ---------------------------------------------------------------------------
@@ -468,6 +468,5 @@ function renderBadClaims(bads: readonly BadClaim[]): string {
 // ---------------------------------------------------------------------------
 
 export const _parseForTest             = parse;
-export const _stripFencesForTest       = stripFences;
 export const _substituteCallIdsForTest = substituteCallIds;
 export const _renderBadClaimsForTest   = renderBadClaims;

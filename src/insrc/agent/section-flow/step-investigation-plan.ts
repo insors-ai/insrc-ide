@@ -38,6 +38,32 @@ const MIN_TODOS_NORMAL  = 1;
 const MAX_TODOS         = 12;
 const MAX_OBJECTIVE_LEN = 240;
 
+// plans/structured-output.md Phase C.5. JSON Schema for the wire-layer
+// enforcement of the planner response. Fine-grained app invariants
+// (fingerprint-based dedupe, id normalisation) stay in `validate()`.
+const INVESTIGATION_PLAN_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['todos'],
+	additionalProperties: false,
+	properties: {
+		todos: {
+			type: 'array',
+			minItems: MIN_TODOS_NORMAL,
+			maxItems: MAX_TODOS,
+			items: {
+				type: 'object',
+				required: ['objective'],
+				additionalProperties: false,
+				properties: {
+					id:        { type: 'string', minLength: 1, maxLength: 60 },
+					objective: { type: 'string', minLength: 1, maxLength: MAX_OBJECTIVE_LEN },
+				},
+			},
+		},
+		reasoning: { type: 'string', maxLength: 2000 },
+	},
+};
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -127,13 +153,12 @@ async function callPlanner(
 		{ role: 'system', content: PLANNER_ROLE },
 		{ role: 'user',   content: buildPlannerUser(question, scope, isRetry, priorFailureReason) },
 	];
-	const response = await provider.complete(messages, {
+	const parsed = await provider.completeStructured<unknown>(messages, INVESTIGATION_PLAN_SCHEMA, {
 		maxTokens:       2048,
 		temperature:     0,
-		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return parseResponse(response.text);
+	return parseResponse(parsed);
 }
 
 const PLANNER_ROLE = [
@@ -201,17 +226,7 @@ function buildPlannerUser(
 	].join('\n');
 }
 
-function parseResponse(raw: string): PlannerResponse {
-	let text = raw.trim();
-	if (text.startsWith('```')) {
-		text = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(text);
-	} catch (err) {
-		throw new Error(`planner response: JSON parse failed: ${(err as Error).message}`);
-	}
+function parseResponse(parsed: unknown): PlannerResponse {
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		throw new Error('planner response: not a JSON object');
 	}

@@ -26,8 +26,7 @@ import assert from 'node:assert/strict';
 
 import {
 	runDecideNextStep,
-	_parseForTest       as parse,
-	_stripFencesForTest as stripFences,
+	_parseForTest as parse,
 } from '../step-decide-next-step.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
 import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../../../shared/types.js';
@@ -46,17 +45,35 @@ test.beforeEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; }
+interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; readonly schema: unknown; }
+// plans/structured-output.md Phase C.5. completeStructured replaces
+// complete; the scripted text is JSON.parse'd inside the stub and
+// returned as the parsed object. On parse failure the stub returns `{}`
+// so the application-level retry exercises the same invariant-failure
+// path it would in production after the wire-layer retries succeed but
+// emit a structurally invalid object.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		name: 'scripted',
+		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, schema: undefined });
 			const text = responses[cursor] ?? responses[responses.length - 1] ?? '';
 			cursor++;
 			return { text, finishReason: 'stop' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			const text = responses[cursor] ?? responses[responses.length - 1] ?? '';
+			cursor++;
+			calls.push({ messages, opts, schema });
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async embed(): Promise<number[]> { return []; },
 	} as unknown as LLMProvider;
@@ -196,7 +213,12 @@ test('runDecideNextStep: first turn (no lastStep) passes through', async () => {
 // Retry path
 // ---------------------------------------------------------------------------
 
-test('runDecideNextStep: malformed first attempt -> retry succeeds, retried=true', async () => {
+test('runDecideNextStep: first attempt fails app invariant -> retry succeeds, retried=true', async () => {
+	// plans/structured-output.md Phase C.5. After migration the wire layer
+	// guarantees clean JSON; the realistic first-attempt failure mode is now
+	// a schema-conformant but app-invariant-failing object (e.g. action
+	// outside the enum, missing reasoning). 'not json' lands in the stub as
+	// `{}`, which fails the "action must be a string" check below.
 	const { provider, calls } = scriptedProvider([
 		'not json',
 		JSON.stringify({
@@ -210,11 +232,11 @@ test('runDecideNextStep: malformed first attempt -> retry succeeds, retried=true
 	});
 	assert.equal(calls.length, 2);
 	assert.equal(r.retried, true);
-	assert.match(r.firstFailureReason ?? '', /JSON parse failed/);
+	assert.match(r.firstFailureReason ?? '', /action.*string/);
 	assert.match(calls[1]!.messages[1]!.content, /RETRY CORRECTION/);
 });
 
-test('runDecideNextStep: both attempts malformed -> throws', async () => {
+test('runDecideNextStep: both attempts fail invariant -> throws', async () => {
 	const { provider } = scriptedProvider(['bad', 'still bad']);
 	await assert.rejects(
 		() => runDecideNextStep({
@@ -230,53 +252,40 @@ test('runDecideNextStep: both attempts malformed -> throws', async () => {
 // ---------------------------------------------------------------------------
 
 test('parse: action not in enum -> rejected', () => {
-	const r = parse(JSON.stringify({ action: 'invent-it', reasoning: 'no' }), CATALOG_IDS, 1);
+	const r = parse({ action: 'invent-it', reasoning: 'no' }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /not one of/); }
 });
 
 test('parse: reasoning missing -> rejected', () => {
-	const r = parse(JSON.stringify({ action: 'terminate', verdict: 'covered' }), CATALOG_IDS, 1);
+	const r = parse({ action: 'terminate', verdict: 'covered' }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /reasoning/); }
 });
 
 test('parse: action=execute-step but step missing -> rejected', () => {
-	const r = parse(JSON.stringify({ action: 'execute-step', reasoning: 'noop' }), CATALOG_IDS, 1);
+	const r = parse({ action: 'execute-step', reasoning: 'noop' }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /step.*object/); }
 });
 
 test('parse: action=execute-step but step fails coerceStep -> rejected', () => {
-	const r = parse(JSON.stringify({
+	const r = parse({
 		action: 'execute-step', reasoning: 'noop',
 		step: { id: 'step-1', intent: 'too short', skills: [{ id: 's1.a', skillId: 'fake.skill', context: 'x' }], targetsCriteria: [0] },
-	}), CATALOG_IDS, 1);
+	}, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /SKILL CATALOG/); }
 });
 
 test('parse: action=terminate but verdict missing -> rejected', () => {
-	const r = parse(JSON.stringify({ action: 'terminate', reasoning: 'no verdict' }), CATALOG_IDS, 1);
+	const r = parse({ action: 'terminate', reasoning: 'no verdict' }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /verdict.*string/); }
 });
 
 test('parse: action=terminate but verdict not in enum -> rejected', () => {
-	const r = parse(JSON.stringify({ action: 'terminate', verdict: 'kinda-covered', reasoning: 'meh' }), CATALOG_IDS, 1);
+	const r = parse({ action: 'terminate', verdict: 'kinda-covered', reasoning: 'meh' }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /covered.*unrecoverable/); }
-});
-
-test('parse: tolerates markdown fences', () => {
-	const fenced = '```json\n' + JSON.stringify({
-		action: 'terminate', verdict: 'covered', reasoning: 'covered',
-	}) + '\n```';
-	const r = parse(fenced, CATALOG_IDS, 1);
-	assert.equal(r.ok, true);
-});
-
-test('stripFences: strips fences correctly', () => {
-	assert.equal(stripFences('```json\n{}\n```'), '{}');
-	assert.equal(stripFences('  {}  '), '{}');
 });

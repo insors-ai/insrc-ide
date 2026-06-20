@@ -59,21 +59,40 @@ import type { WorkingMemoryEntry } from '../../working-memory/types.js';
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly method:   'complete' | 'completeStructured';
 }
 
+// plans/structured-output.md Phase C.5. The review-loop is mixed:
+// assemble + revise emit markdown via `complete`; review calls now go
+// through `completeStructured`. Both methods share the response cursor
+// so the test script order is preserved end-to-end.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, method: 'complete' });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], _schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, method: 'completeStructured' });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -107,18 +126,18 @@ const reviseScopeGap = (proposed: ReadonlyArray<{ id: string; objective: string 
 // ---------------------------------------------------------------------------
 
 test('parseReview: accept', () => {
-	const r = parseReview(accept);
+	const r = parseReview(JSON.parse(accept));
 	assert.equal(r.verdict, 'accept');
 });
 
 test('parseReview: revise-edits surfaces edits', () => {
-	const r = parseReview(reviseEdits('rewrite intro'));
+	const r = parseReview(JSON.parse(reviseEdits('rewrite intro')));
 	assert.equal(r.verdict, 'revise-edits');
 	assert.equal(r.edits, 'rewrite intro');
 });
 
 test('parseReview: revise-structural section-contradiction', () => {
-	const r = parseReview(reviseSectionConflict(['t1', 't2']));
+	const r = parseReview(JSON.parse(reviseSectionConflict(['t1', 't2'])));
 	assert.equal(r.verdict, 'revise-structural');
 	assert.equal(r.structural?.kind, 'section-contradiction');
 	if (r.structural?.kind === 'section-contradiction') {
@@ -127,7 +146,7 @@ test('parseReview: revise-structural section-contradiction', () => {
 });
 
 test('parseReview: revise-structural scope-gap stamps origin', () => {
-	const r = parseReview(reviseScopeGap([{ id: 'new1', objective: 'Audit something' }]));
+	const r = parseReview(JSON.parse(reviseScopeGap([{ id: 'new1', objective: 'Audit something' }])));
 	assert.equal(r.verdict, 'revise-structural');
 	assert.equal(r.structural?.kind, 'scope-gap');
 	if (r.structural?.kind === 'scope-gap') {
@@ -136,13 +155,16 @@ test('parseReview: revise-structural scope-gap stamps origin', () => {
 	}
 });
 
-test('parseReview: malformed JSON -> accept', () => {
+test('parseReview: non-object input -> accept (graceful degrade)', () => {
+	// plans/structured-output.md Phase C.5. parseReview now takes the
+	// already-parsed value from completeStructured; a string lands in
+	// the "shape invalid -> accept" fallback path.
 	const r = parseReview('not json');
 	assert.equal(r.verdict, 'accept');
 });
 
-test('parseReview: markdown-fenced JSON unwraps', () => {
-	const r = parseReview('```json\n' + accept + '\n```');
+test('parseReview: missing verdict field -> accept', () => {
+	const r = parseReview({});
 	assert.equal(r.verdict, 'accept');
 });
 
@@ -389,7 +411,11 @@ test('revise-structural without resolver: entries unchanged, report regenerates 
 // LLM contract
 // ---------------------------------------------------------------------------
 
-test('LLM contract: review calls have responseFormat=json; assemble + revise do NOT', async () => {
+test('LLM contract: review calls go through completeStructured; assemble + revise use complete', async () => {
+	// plans/structured-output.md Phase C.5. Review verdicts now flow
+	// through provider.completeStructured (the wire layer enforces the
+	// JSON Schema). Markdown-emitting calls (assemble + revise) stay on
+	// provider.complete.
 	const { provider, calls } = scriptedProvider([
 		'# Initial\n',
 		reviseEdits('fix'),
@@ -402,10 +428,10 @@ test('LLM contract: review calls have responseFormat=json; assemble + revise do 
 		provider,
 	});
 	// Calls: 0=assemble, 1=review#1, 2=revise, 3=review#2.
-	assert.equal(calls[0]!.opts.responseFormat, undefined);  // assemble (markdown)
-	assert.equal(calls[1]!.opts.responseFormat, 'json');     // review
-	assert.equal(calls[2]!.opts.responseFormat, undefined);  // revise (markdown)
-	assert.equal(calls[3]!.opts.responseFormat, 'json');     // review
+	assert.equal(calls[0]!.method, 'complete');             // assemble (markdown)
+	assert.equal(calls[1]!.method, 'completeStructured');   // review
+	assert.equal(calls[2]!.method, 'complete');             // revise (markdown)
+	assert.equal(calls[3]!.method, 'completeStructured');   // review
 	for (const c of calls) {
 		assert.equal(c.opts.disableThinking, true);
 		assert.equal(c.opts.temperature, 0);

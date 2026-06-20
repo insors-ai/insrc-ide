@@ -261,6 +261,13 @@ export interface StructuredCompletionOpts {
   readonly maxAttempts?: number | undefined;
   /** Forwarded to the underlying provider call. Provider-specific. */
   readonly signal?:      AbortSignal | undefined;
+  /**
+   * Suppress chain-of-thought output. Required for qwen3-coder's
+   * structured-output stability (`/no_think` prefix) and for the
+   * qwen3.6 family's `think: false` field. Honoured by Ollama;
+   * cloud providers ignore the flag.
+   */
+  readonly disableThinking?: boolean | undefined;
 }
 
 // ---------------------------------------------------------------------------

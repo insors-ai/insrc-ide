@@ -59,15 +59,24 @@ test.beforeEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; }
+interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; readonly method: 'complete' | 'completeStructured'; }
 
+// plans/structured-output.md Phase C.5. The orchestrator drives multiple
+// section-flow steps, several of which now flow through
+// provider.completeStructured. The mock advances a shared cursor so the
+// scripted response order is preserved regardless of which method each
+// step calls.
 function scriptedProvider(responses: readonly (string | Error)[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, method: 'complete' });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
@@ -75,6 +84,17 @@ function scriptedProvider(responses: readonly (string | Error)[]): { provider: L
 			cursor++;
 			if (next instanceof Error) { throw next; }
 			return { text: next, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], _schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, method: 'completeStructured' });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const next = responses[cursor]!;
+			cursor++;
+			if (next instanceof Error) { throw next; }
+			try { return JSON.parse(next) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },

@@ -25,7 +25,6 @@ import assert from 'node:assert/strict';
 import {
 	runSketch,
 	_parseAndCoerceForTest as parseAndCoerce,
-	_stripFencesForTest    as stripFences,
 	_MAX_STEPS             as MAX_STEPS,
 } from '../step-sketch.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
@@ -43,20 +42,37 @@ test.beforeEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; }
+interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; readonly schema: unknown; }
+// plans/structured-output.md Phase C.5. The sketch call now flows via
+// provider.completeStructured. Malformed text is replayed as `{}` so
+// the application-level retry path still exercises the same shape.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, schema: undefined });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, schema });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -108,7 +124,12 @@ test('runSketch: 3-step sketch validates; ids + skillIds + targetsCriteria prese
 // Retry path
 // ---------------------------------------------------------------------------
 
-test('runSketch: malformed first attempt -> retry succeeds, retried=true', async () => {
+test('runSketch: first attempt fails app invariant -> retry succeeds, retried=true', async () => {
+	// plans/structured-output.md Phase C.5. The wire layer guarantees JSON
+	// parseability before parseAndCoerce sees the value; the realistic
+	// first-attempt failure is now a schema-conformant-but-app-invariant
+	// failing object. `'not even json'` becomes `{}` in the mock, which
+	// fails the "`steps` must be an array" check.
 	const { provider, calls } = scriptedProvider([
 		'not even json',
 		VALID_SKETCH,
@@ -117,11 +138,11 @@ test('runSketch: malformed first attempt -> retry succeeds, retried=true', async
 	assert.equal(calls.length, 2);
 	assert.equal(r.retried, true);
 	assert.equal(r.steps.length, 3);
-	assert.match(r.firstFailureReason ?? '', /JSON parse failed/);
+	assert.match(r.firstFailureReason ?? '', /must be an array/);
 	assert.match(calls[1]!.messages[1]!.content, /RETRY CORRECTION/);
 });
 
-test('runSketch: both attempts malformed -> throws', async () => {
+test('runSketch: both attempts fail invariant -> throws', async () => {
 	const { provider } = scriptedProvider(['still not json', 'still not json']);
 	await assert.rejects(
 		() => runSketch({ todo: TODO, gapFacts: GAPS, catalog: CATALOG, provider }),
@@ -163,13 +184,13 @@ test('runSketch: drops invalid entries, keeps valid ones, reports droppedStepIds
 const CATALOG_IDS = new Set(CATALOG.map(c => c.id));
 
 test('parseAndCoerce: empty steps array -> rejected', () => {
-	const r = parseAndCoerce(JSON.stringify({ steps: [] }), CATALOG_IDS, 1);
+	const r = parseAndCoerce({ steps: [] }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /empty/); }
 });
 
 test('parseAndCoerce: steps not an array -> rejected', () => {
-	const r = parseAndCoerce(JSON.stringify({ steps: 'one' }), CATALOG_IDS, 1);
+	const r = parseAndCoerce({ steps: 'one' }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /must be an array/); }
 });
@@ -180,13 +201,13 @@ test('parseAndCoerce: exceeds MAX_STEPS -> rejected', () => {
 		skills: [{ id: `s${i}.a`, skillId: 'code.entity.locate-by-name', context: 'name=x' }],
 		targetsCriteria: [0],
 	}));
-	const r = parseAndCoerce(JSON.stringify({ steps: big }), CATALOG_IDS, 1);
+	const r = parseAndCoerce({ steps: big }, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /cap is/); }
 });
 
 test('parseAndCoerce: duplicate step ids -> drops the duplicate', () => {
-	const dup = JSON.stringify({
+	const r = parseAndCoerce({
 		steps: [
 			{ id: 'step-1', intent: 'first one',
 			  skills: [{ id: 's1.a', skillId: 'code.entity.locate-by-name', context: 'name=INGRN' }],
@@ -195,8 +216,7 @@ test('parseAndCoerce: duplicate step ids -> drops the duplicate', () => {
 			  skills: [{ id: 's2.a', skillId: 'code.class.extract-fields', context: 'x' }],
 			  targetsCriteria: [0] },
 		],
-	});
-	const r = parseAndCoerce(dup, CATALOG_IDS, 1);
+	}, CATALOG_IDS, 1);
 	assert.equal(r.ok, true);
 	if (r.ok) {
 		assert.equal(r.steps.length, 1);
@@ -205,23 +225,11 @@ test('parseAndCoerce: duplicate step ids -> drops the duplicate', () => {
 });
 
 test('parseAndCoerce: every entry fails coercion -> rejected', () => {
-	const allBad = JSON.stringify({
+	const r = parseAndCoerce({
 		steps: [
 			{ id: 'step-1', intent: 'unknown', skills: [{ id: 's1.a', skillId: 'fake', context: 'x' }], targetsCriteria: [0] },
 		],
-	});
-	const r = parseAndCoerce(allBad, CATALOG_IDS, 1);
+	}, CATALOG_IDS, 1);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /nothing usable/); }
-});
-
-test('parseAndCoerce: handles markdown fences around the JSON', () => {
-	const fenced = '```json\n' + VALID_SKETCH + '\n```';
-	const r = parseAndCoerce(fenced, CATALOG_IDS, 1);
-	assert.equal(r.ok, true);
-});
-
-test('stripFences: strips ```json ... ``` correctly', () => {
-	assert.equal(stripFences('```json\n{}\n```'), '{}');
-	assert.equal(stripFences('  {}  '), '{}');
 });

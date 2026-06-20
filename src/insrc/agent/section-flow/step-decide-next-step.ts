@@ -88,6 +88,25 @@ export type DecideNextStepResult = DecidedAction & {
 
 const MAX_TOKENS = 3072;
 
+// plans/structured-output.md Phase C.5. Coarse JSON Schema for the
+// wire-layer enforcement. The fine-grained shape (execute-step requires
+// `step`, terminate requires `verdict`, etc.) is enforced by `parse()`
+// below -- expressing the per-action shape via oneOf survives most
+// providers but introduces strict-mode landmines, so we keep the schema
+// permissive and let the app-level validator carry the discriminated
+// union. The wire layer still guarantees we receive a clean JSON object.
+const DECIDE_NEXT_STEP_SCHEMA: Record<string, unknown> = {
+	type: 'object',
+	required: ['action', 'reasoning'],
+	additionalProperties: false,
+	properties: {
+		action:    { type: 'string', enum: ['execute-step', 'replan-sketch', 'terminate'] },
+		reasoning: { type: 'string', minLength: 1, maxLength: 4000 },
+		verdict:   { type: 'string', enum: ['covered', 'unrecoverable'] },
+		step:      { type: 'object' },
+	},
+};
+
 export async function runDecideNextStep(input: DecideNextStepInput): Promise<DecideNextStepResult> {
 	const catalogIds = new Set(input.catalog.map(c => c.id));
 	const maxFactIdx = Math.max(0, input.gapFacts.length - 1);
@@ -120,7 +139,7 @@ async function callDecider(
 	input:              DecideNextStepInput,
 	isRetry:            boolean,
 	priorFailureReason: string | undefined,
-): Promise<string> {
+): Promise<unknown> {
 	const writer = getPromptRegistry().get<DecideNextStepWriterInput, readonly LLMMessage[]>('decide-next-step');
 	const messages = [...writer.build({
 		todo:               input.todo,
@@ -134,13 +153,11 @@ async function callDecider(
 		isRetry,
 		priorFailureReason,
 	})];
-	const response = await input.provider.complete(messages, {
+	return input.provider.completeStructured<unknown>(messages, DECIDE_NEXT_STEP_SCHEMA, {
 		maxTokens:       MAX_TOKENS,
 		temperature:     0,
-		responseFormat:  'json',
 		disableThinking: true,
 	});
-	return response.text;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,16 +175,10 @@ interface ParseErr {
 type ParseResult = ParseOk | ParseErr;
 
 export function parse(
-	raw:        string,
+	parsed:     unknown,
 	catalogIds: ReadonlySet<string>,
 	maxFactIdx: number,
 ): ParseResult {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripFences(raw));
-	} catch (err) {
-		return { ok: false, reason: `JSON parse failed: ${(err as Error).message}` };
-	}
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		return { ok: false, reason: 'response is not a JSON object' };
 	}
@@ -215,17 +226,8 @@ export function parse(
 	return { ok: true, value: { action: 'terminate', verdict: verdict as TerminateVerdict, reasoning } };
 }
 
-function stripFences(text: string): string {
-	let out = text.trim();
-	if (out.startsWith('```')) {
-		out = out.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-	}
-	return out.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Test-only exports
 // ---------------------------------------------------------------------------
 
-export const _parseForTest       = parse;
-export const _stripFencesForTest = stripFences;
+export const _parseForTest = parse;

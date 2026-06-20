@@ -24,9 +24,8 @@ import assert from 'node:assert/strict';
 
 import {
 	runBuildContext,
-	_validateForTest    as validate,
-	_stripFencesForTest as stripFences,
-	_MAX_FETCH          as MAX_FETCH,
+	_validateForTest as validate,
+	_MAX_FETCH       as MAX_FETCH,
 } from '../step-build-context.js';
 import { _resetPromptRegistryForTest, registerAllPromptWriters } from '../../prompts/index.js';
 import { _resetSkillRegistryForTests } from '../../../daemon/skills/registry.js';
@@ -45,21 +44,38 @@ test.beforeEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; }
+interface RecordedCall { readonly messages: LLMMessage[]; readonly opts: CompletionOpts; readonly schema: unknown; }
 
+// plans/structured-output.md Phase C.5. The non-tool path now flows
+// through completeStructured; the tool-loop path stays on `complete`
+// (tool calling + json_schema is brittle across providers).
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, schema: undefined });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, schema });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return { __parseError: true, raw: text } as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -81,8 +97,12 @@ function scriptedProviderWithTools(turns: readonly ScriptTurn[]): { provider: LL
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			recorded.push({ messages, opts });
+			recorded.push({ messages, opts, schema: undefined });
 			if (cursor >= turns.length) {
 				throw new Error(`scriptedProviderWithTools: ran out at call ${cursor + 1}`);
 			}
@@ -92,6 +112,9 @@ function scriptedProviderWithTools(turns: readonly ScriptTurn[]): { provider: LL
 				return { text: turn.text, stopReason: 'end_turn' };
 			}
 			return { text: '', toolCalls: [...turn.calls], stopReason: 'tool_use' };
+		},
+		async completeStructured<T>(): Promise<T> {
+			throw new Error('scriptedProviderWithTools: completeStructured should not be called in the tool-loop path');
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -214,32 +237,36 @@ test('runBuildContext: non-JSON garbage -> retry then graceful degrade', async (
 // validate() unit tests
 // ---------------------------------------------------------------------------
 
-test('validate: non-JSON -> rejected', () => {
-	const r = validate('not json at all', TOC_IDS);
+test('validate: parse-error sentinel -> rejected', () => {
+	// plans/structured-output.md Phase C.5. The tool-loop path wraps a
+	// malformed text response in `{ __parseError: true, raw }` and feeds
+	// it to validate; the validator surfaces a synthetic JSON-parse-failed
+	// reason so the retry/graceful-degrade flow still kicks in.
+	const r = validate({ __parseError: true, raw: 'not json' }, TOC_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /JSON parse failed/); }
 });
 
 test('validate: top-level not an object -> rejected', () => {
-	const r = validate(JSON.stringify(['array', 'not', 'object']), TOC_IDS);
+	const r = validate(['array', 'not', 'object'], TOC_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /not a JSON object/); }
 });
 
 test('validate: fetch not an array -> rejected', () => {
-	const r = validate(JSON.stringify({ fetch: 'single-id', notes: '' }), TOC_IDS);
+	const r = validate({ fetch: 'single-id', notes: '' }, TOC_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /must be an array/); }
 });
 
 test('validate: fetch entry not a string -> rejected', () => {
-	const r = validate(JSON.stringify({ fetch: [42], notes: '' }), TOC_IDS);
+	const r = validate({ fetch: [42], notes: '' }, TOC_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /not a non-empty string/); }
 });
 
 test('validate: fetch id not in TOC -> rejected with helpful sample', () => {
-	const r = validate(JSON.stringify({ fetch: ['sess-1:404:missing'], notes: '' }), TOC_IDS);
+	const r = validate({ fetch: ['sess-1:404:missing'], notes: '' }, TOC_IDS);
 	assert.equal(r.ok, false);
 	if (!r.ok) {
 		assert.match(r.reason, /not in the TOC/);
@@ -249,39 +276,15 @@ test('validate: fetch id not in TOC -> rejected with helpful sample', () => {
 
 test('validate: fetch exceeds MAX_FETCH cap -> rejected', () => {
 	const big = Array.from({ length: MAX_FETCH + 1 }, (_, i) => `sess-1:${i}:x`);
-	const r = validate(JSON.stringify({ fetch: big, notes: '' }), new Set(big));
+	const r = validate({ fetch: big, notes: '' }, new Set(big));
 	assert.equal(r.ok, false);
 	if (!r.ok) { assert.match(r.reason, /cap is/); }
 });
 
-test('validate: handles markdown fences around the JSON body', () => {
-	const fenced = '```json\n' + JSON.stringify({
-		fetch: ['sess-1:100:code.entity.locate-by-name'],
-		notes: 'fenced response, still valid',
-	}) + '\n```';
-	const r = validate(fenced, TOC_IDS);
-	assert.equal(r.ok, true);
-	if (r.ok) {
-		assert.deepEqual(r.fetchIds, ['sess-1:100:code.entity.locate-by-name']);
-	}
-});
-
 test('validate: notes missing or non-string -> still accepted, notes=""', () => {
-	const r = validate(JSON.stringify({ fetch: ['sess-1:100:code.entity.locate-by-name'] }), TOC_IDS);
+	const r = validate({ fetch: ['sess-1:100:code.entity.locate-by-name'] }, TOC_IDS);
 	assert.equal(r.ok, true);
 	if (r.ok) { assert.equal(r.notes, ''); }
-});
-
-// ---------------------------------------------------------------------------
-// stripFences
-// ---------------------------------------------------------------------------
-
-test('stripFences: ```json ... ``` -> body', () => {
-	assert.equal(stripFences('```json\n{}\n```'), '{}');
-});
-
-test('stripFences: no fences -> trimmed body', () => {
-	assert.equal(stripFences('  {}  '), '{}');
 });
 
 // ---------------------------------------------------------------------------

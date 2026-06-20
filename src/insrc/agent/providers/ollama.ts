@@ -452,7 +452,12 @@ export class OllamaProvider implements LLMProvider {
     opts?:    StructuredCompletionOpts,
   ): Promise<T> {
     const apiMessages = toOllamaMessages(messages);
-    const disableThinking = shouldDisableThinking(this.quirks, false, false);
+    // plans/structured-output.md Phase C.5. Honour the caller's
+    // `disableThinking: true` (Ollama specifically -- cloud providers
+    // ignore the flag). qwen3-coder + qwen3.6 require this for JSON
+    // stability; without it the model emits an empty body before the
+    // structured output.
+    const disableThinking = shouldDisableThinking(this.quirks, false, opts?.disableThinking === true);
 
     return withStructuredRetry<T>(
       async (extraSystemNote) => {

@@ -49,21 +49,39 @@ import type { CompletionOpts, LLMMessage, LLMProvider, LLMResponse } from '../..
 interface RecordedCall {
 	readonly messages: LLMMessage[];
 	readonly opts:     CompletionOpts;
+	readonly schema:   unknown;
 }
 
+// plans/structured-output.md Phase C.5. completeStructured replaces
+// complete. Malformed text becomes {} so the application-level retry
+// still exercises the schema-conformant-but-app-invariant-failing path.
 function scriptedProvider(responses: readonly string[]): { provider: LLMProvider; calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	let cursor = 0;
 	const provider = {
 		supportsTools: true,
+		capabilities: {
+			structuredOutput: true, toolCalling: true, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(messages: LLMMessage[], opts: CompletionOpts = {}): Promise<LLMResponse> {
-			calls.push({ messages, opts });
+			calls.push({ messages, opts, schema: undefined });
 			if (cursor >= responses.length) {
 				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
 			}
 			const text = responses[cursor]!;
 			cursor++;
 			return { text, stopReason: 'end_turn' };
+		},
+		async completeStructured<T>(messages: LLMMessage[], schema: unknown, opts: CompletionOpts = {}): Promise<T> {
+			calls.push({ messages, opts, schema });
+			if (cursor >= responses.length) {
+				throw new Error(`scriptedProvider: ran out of responses at call ${cursor + 1}`);
+			}
+			const text = responses[cursor]!;
+			cursor++;
+			try { return JSON.parse(text) as T; }
+			catch { return {} as T; }
 		},
 		async *stream(): AsyncIterable<string> { yield ''; },
 		async embed(): Promise<number[]> { return []; },
@@ -286,7 +304,9 @@ test('retry: both attempts fail validation -> throws', async () => {
 // LLM contract
 // ---------------------------------------------------------------------------
 
-test('LLM call has disableThinking=true + temperature=0 + responseFormat=json', async () => {
+test('LLM call has disableThinking=true + temperature=0 + schema passed to completeStructured', async () => {
+	// plans/structured-output.md Phase C.5. The schema travels as the second
+	// positional arg to provider.completeStructured.
 	const { provider, calls } = scriptedProvider([
 		validPlan([{ id: 't1', objective: 'one' }]),
 	]);
@@ -294,7 +314,10 @@ test('LLM call has disableThinking=true + temperature=0 + responseFormat=json', 
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]!.opts.disableThinking, true);
 	assert.equal(calls[0]!.opts.temperature, 0);
-	assert.equal(calls[0]!.opts.responseFormat, 'json');
+	const schema = calls[0]!.schema;
+	assert.ok(schema !== undefined && typeof schema === 'object');
+	const propsObj = (schema as { properties?: unknown }).properties;
+	assert.ok(propsObj !== undefined && typeof propsObj === 'object' && 'todos' in (propsObj as object));
 });
 
 test('planner user prompt carries scope tier + subtype + context refs', async () => {
@@ -320,22 +343,24 @@ test('planner user prompt carries scope tier + subtype + context refs', async ()
 // parseResponse robustness
 // ---------------------------------------------------------------------------
 
-test('parseResponse: unwraps markdown fences', () => {
-	const fenced = '```json\n' + validPlan([{ id: 't1', objective: 'one' }]) + '\n```';
-	const parsed = parseResponse(fenced);
+test('parseResponse: accepts parsed object directly', () => {
+	// plans/structured-output.md Phase C.5. The fence-strip + JSON.parse
+	// code path is retired; parseResponse now receives the already-parsed
+	// object from provider.completeStructured.
+	const parsed = parseResponse({ todos: [{ id: 't1', objective: 'one' }], reasoning: 'r' });
 	assert.equal(parsed.todos.length, 1);
 });
 
-test('parseResponse: malformed JSON throws', () => {
-	assert.throws(() => parseResponse('not json'), /JSON parse failed/);
+test('parseResponse: non-object input throws', () => {
+	assert.throws(() => parseResponse('not an object'), /not a JSON object/);
 });
 
 test('parseResponse: missing todos array throws', () => {
-	assert.throws(() => parseResponse('{"reasoning":"x"}'), /missing or non-array `todos`/);
+	assert.throws(() => parseResponse({ reasoning: 'x' }), /missing or non-array `todos`/);
 });
 
 test('parseResponse: skips entries without objective', () => {
-	const raw = JSON.stringify({
+	const parsed = parseResponse({
 		todos: [
 			{ id: 't1', objective: 'good' },
 			{ id: 't2' },                          // missing objective
@@ -344,6 +369,5 @@ test('parseResponse: skips entries without objective', () => {
 		],
 		reasoning: '',
 	});
-	const parsed = parseResponse(raw);
 	assert.equal(parsed.todos.length, 2);
 });
