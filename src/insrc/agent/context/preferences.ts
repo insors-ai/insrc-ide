@@ -18,6 +18,7 @@
  * with both: curated subset.
  */
 
+import { Type } from '@sinclair/typebox';
 import type { LLMProvider, LLMMessage } from '../../shared/types.js';
 import { getLogger } from '../../shared/logger.js';
 
@@ -106,17 +107,12 @@ interface CurationResponse {
 	readonly relevant_indices: readonly number[];
 }
 
-const CURATION_SCHEMA: Record<string, unknown> = {
-	type: 'object',
-	required: ['relevant_indices'],
-	properties: {
-		relevant_indices: {
-			type:        'array',
-			items:       { type: 'integer', minimum: 0 },
-			uniqueItems: true,
-		},
-	},
-};
+// plans/structured-output.md Phase C.3. TypeBox schema replaces the
+// hand-rolled JSON Schema map so the wire layer enforces shape via
+// provider.completeStructured.
+const CURATION_SCHEMA = Type.Object({
+	relevant_indices: Type.Array(Type.Integer({ minimum: 0 }), { uniqueItems: true }),
+});
 
 const CURATION_SYSTEM_PROMPT = `You filter a list of user preferences for relevance to the current conversation.
 
@@ -143,24 +139,22 @@ async function curateByRelevance(
 	const numbered = candidates.map((c, i) => `${i}. [${c.subject}] ${c.canonicalText}`).join('\n');
 	const messages: LLMMessage[] = [
 		{ role: 'system', content: CURATION_SYSTEM_PROMPT },
-		{ role: 'user',   content: `Topic:\n${topic}\n\nPreferences:\n${numbered}\n\nRespond with the JSON object.` },
+		{ role: 'user',   content: `Topic:\n${topic}\n\nPreferences:\n${numbered}` },
 	];
 
-	const response = await provider.complete(messages, {
-		responseFormat: { schema: CURATION_SCHEMA },
-		temperature:    0.1,
-		maxTokens:      512,
-	});
-
+	// plans/structured-output.md Phase C.3. provider.completeStructured
+	// guarantees the response conforms to CURATION_SCHEMA. The retry
+	// helper handles transient drift; unrecoverable failure degrades
+	// to inclusion bias (G5 bias from memory-context M-C M1.8).
 	let parsed: CurationResponse;
 	try {
-		const raw = JSON.parse(response.text) as { relevant_indices?: unknown };
-		if (!Array.isArray(raw.relevant_indices)) {
-			throw new Error('relevant_indices is not an array');
-		}
-		parsed = { relevant_indices: raw.relevant_indices.filter((n): n is number => Number.isInteger(n)) };
+		parsed = await provider.completeStructured<CurationResponse>(
+			messages,
+			CURATION_SCHEMA,
+			{ temperature: 0.1, maxTokens: 512 },
+		);
 	} catch (err) {
-		log.warn({ err: (err as Error).message, head: response.text.slice(0, 80) }, 'curator returned malformed JSON; including all');
+		log.warn({ err: (err as Error).message }, 'curator failed; including all (inclusion bias)');
 		return candidates;
 	}
 

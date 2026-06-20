@@ -25,11 +25,26 @@ import {
 
 function scriptedProvider(scriptedText: string): LLMProvider {
 	return {
+		supportsTools: false,
+		capabilities: {
+			structuredOutput: true, toolCalling: false, vision: false,
+			webSearch: false, streaming: false, embeddings: false,
+		},
 		async complete(_messages: LLMMessage[]): Promise<LLMResponse> {
 			return { text: scriptedText, stopReason: 'end_turn' };
 		},
 		stream() { return (async function* () { yield ''; })(); },
 		async embed() { return []; },
+		// plans/structured-output.md Phase C.3 -- replay the scripted
+		// text through JSON.parse so tests authored against the
+		// pre-migration shape (where the curator JSON.parse'd the text)
+		// keep working verbatim.
+		async completeStructured<T>(_messages: LLMMessage[], _schema: unknown): Promise<T> {
+			try { return JSON.parse(scriptedText) as T; }
+			catch (err) {
+				throw new Error(`scriptedProvider.completeStructured: text not JSON: ${scriptedText} (${(err as Error).message})`);
+			}
+		},
 	};
 }
 
